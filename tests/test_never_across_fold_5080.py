@@ -33,7 +33,7 @@ band would otherwise have taken — not that the pair was too dissimilar to fold
 
 DECLARED RESIDUAL.  The vocabularies that decide the dimensions above —
 ``_NEGATION_MARKERS``, ``_CONDITION_MARKERS``/``_CONDITION_PHRASES``,
-``_DATE_WORDS``, ``_SCRIPT_BLOCKS``, ``_CLOCK_UNITS``, the frame list, and the
+``_DATE_WORDS``, ``_CLOCK_UNITS``, the frame list, and the
 polarity/state vocabulary — are FINITE and hand-written.  A marker the list
 does not name reaches no identity dimension, so the pair FOLDS: that is the
 lossy direction (one capture order can still drop the claim), not the safe
@@ -44,12 +44,21 @@ declared and pinned ``so it cannot go silent`` below, and is tracked on
 #5325 (the connective-slot residuals); no list is grown here.  Every tracker a
 pin names is declared once in ``RESIDUAL_TRACKERS`` below, and
 ``TestResidualPinsHaveLiveTrackers`` holds the pins to it.
+
+⚠️ ``_SCRIPT_BLOCKS`` is NO LONGER one of the residuals in that list (#5329):
+a letter in a block the list does not name is an UNKNOWN script and now
+refuses the fold, so the script list's incompleteness costs a refused fold
+rather than a deleted claim.  See
+``test_an_unlisted_script_refuses_the_fold``.  The marker, date and clock lists
+keep their residual: a token there cannot be classified by SHAPE at all, which
+is why that half is still pinned rather than closed.
 """
 from __future__ import annotations
 
 import ast
 import re
 import sys
+import unicodedata
 from pathlib import Path
 
 import pytest
@@ -599,15 +608,129 @@ class TestDistinguishingDifference:
         assert v2.fold_allowed("we'll ship the build", "well ship the build")
         assert v2.fold_allowed("she'll ship the build", "shell ship the build")
 
-    def test_a_script_list_gap_is_a_known_limit(self):
-        """Documented residual, pinned so it cannot go silent (#5329).
+    def test_an_unlisted_script_refuses_the_fold(self):
+        """An unlisted script is CLOSED, not pinned (#5329).
 
-        ``_SCRIPT_BLOCKS`` is finite, so a word in a script it does not name
-        reaches no dimension and is a one-sided broadening.  This is the
-        word-list gap's shape applied to the script list; a whole-claim
-        language change is still refused as a content substitution.
+        ``_SCRIPT_BLOCKS`` is finite, so a letter in a block it does not name
+        (Armenian \u0568, Georgian, Thai, Ethiopic \u2026) used to contribute
+        NOTHING to ``_scripts``: the two claims were never compared for
+        language at all, the word read as a one-sided broadening, and the pair
+        folded — this issue's silent memory loss, in its script form.
+
+        The direction is now the opposite one, and that is the whole fix: a
+        letter in NO known block is an UNKNOWN script, which is an identity
+        difference (``language``) and therefore refuses the fold, so both claims
+        survive.  The list is still finite — it is not completed here — but its
+        incompleteness now costs NOISE (a fold refused, both claims kept)
+        instead of a DELETED CLAIM, which is what makes the boundary independent
+        of a list being complete.
+
+        The four anti-over-refusal legs below are as load-bearing as the closure
+        itself: a sentinel that fires on the wrong character turns a legitimate
+        fold into a duplicate stored forever, and each of them caught a real
+        over-refusal in review.
         """
-        assert v2.fold_allowed("we ship the build", "we ship \u0568 the build")
+        assert v2.distinguishing_difference(
+            "we ship the build", "we ship \u0568 the build") == "language"
+        assert not v2.fold_allowed("we ship the build",
+                                   "we ship \u0568 the build")
+        # Both sides in the SAME unlisted script still fold, and with DIFFERENT
+        # surfaces — the guard refuses a DIFFERENCE in language, never the fact
+        # that a script is unknown.
+        assert v2.fold_allowed("we ship the \u0568 build",
+                               "we ship \u0568")
+        # Letters in a NAMED script are unaffected.  ⚠️ This pair is a JOINT pin,
+        # not the Latin supplement's discriminator: an accented letter is `latin`
+        # through the NFD-BASE STEP alone (`é` → `e`), so it stays `latin` even
+        # with `_LATIN_SUPPLEMENT_BLOCKS` emptied.  The surfaces the table
+        # actually carries are the NFD-STABLE ones (`ª` U+00AA, `µ` U+00B5, `ʃ`
+        # U+0283) and the compatibility-decomposed ones (`ﬁ`, `ａ`, which NFD does
+        # not decompose) — the loop below pins those, and THAT is the leg that
+        # reds when the table is emptied.
+        assert v2.fold_allowed("we study the caf\u00e9 menu",
+                               "we study the cafe menu")
+        # A non-letter outside every block (an emoji, a currency symbol) is not
+        # a script: it stays a one-sided content token, exactly as before.
+        assert v2.fold_allowed("we ship the build \U0001F680",
+                               "we ship the build")
+        # …and NEITHER is a non-letter that sits INSIDE a block.  U+00D7 (`×`)
+        # and U+00F7 (`÷`) are in Latin-1 Supplement but are maths symbols, so
+        # they must not read as latin on a claim in another script — that would
+        # refuse a fold between two claims that merely lost one.
+        assert v2.distinguishing_difference("\u5f97\u308b \u00d7",
+                                           "\u5f97\u308b") is None
+        # The same claim in two spellings must fold: precomposed polytonic
+        # `ἀρχή` against its decomposed spelling (`α` + U+0313).  ⚠️ U+1F00 is
+        # in NO block — it reads `greek` only through the NFD-base step — which
+        # is both why this pair already folds on BASE and why it is NOT the NFC
+        # leg (see the next comment).
+        #
+        # ⚠️ So this is an INVARIANT pin: it still passes with `_fold_unicode`
+        # reverted to the identity, and does not evidence that `_scripts` folds
+        # its input.  An earlier revision claimed the raw reading gave
+        # "DIFFERENT script sets" here — measured against `origin/main`'s module
+        # it does not — and the revision that withdrew it wrongly put U+1F00
+        # "inside the greek block"; both are corrected here.
+        assert v2.fold_allowed("\u1f00\u03c1\u03c7\u03ae",
+                               "\u03b1\u0313\u03c1\u03c7\u03ae")
+        # ⚠️ THE DISCRIMINATING NFC LEG, and the Greek pair above is NOT one:
+        # polytonic Greek is fixed by the NFD-base step alone, so that assertion
+        # passes with the normalisation reverted.  Decomposed HANGUL is the
+        # population the normalisation actually carries — its Jamo (U+1100–
+        # U+11FF) are in no block, so without NFC one side reads `unlisted` and
+        # the other `hangul`, and the same claim refuses to fold with itself.
+        assert v2.fold_allowed(
+            "\ud55c\uad6d\uc5b4", unicodedata.normalize("NFD", "\ud55c\uad6d\uc5b4"))
+        # Latin letters that are NOT in the ASCII range and NOT accented: the
+        # `ª` at the RANGE'S LOWER EDGE (0x00AA), a micro sign (`µ`, the unit in
+        # "5 µm"), an IPA letter, a PDF ligature and a fullwidth letter are all
+        # `latin`, so none of them reads as a LANGUAGE difference.  (They can
+        # still be a content substitution — "µm"/"m" differ on both sides —
+        # which is a different dimension.)
+        for surface in ("\u00aa", "\u00b5", "\u0283", "\ufb01", "\uff41"):
+            assert v2._script_of(surface) == "latin", surface
+            # DIFFERENT surfaces on the two sides: `fold_allowed(x, x)` is
+            # reflexive and would pass whatever the script reading did.
+            # The surface on ONE side only, so the leg discriminates the
+            # widening: with the surface read as `unlisted` the two script sets
+            # differ and the fold is refused.  (`Ａ` uppercase would refuse for
+            # an unrelated reason — a capital reads as a name — so the folding
+            # leg uses the lowercase fullwidth letter.)
+            assert v2.fold_allowed(f"we ship {surface} extra",
+                                   "we ship extra"), surface
+        # `_scripts`, not just `_script_of`, over the SAME surfaces — and NO
+        # ASCII letter anywhere in the string, because `"latin" in …` is
+        # satisfied by the `m` of `µm` whatever the supplement did (review
+        # round 7: emptying `_LATIN_SUPPLEMENT_BLOCKS` left the old form green).
+        assert v2._scripts("5 \u00b5 \u0283 \ufb01 \uff41") == {"latin"}
+        assert v2._script_of("\uff21") == "latin"  # FULLWIDTH capital too
+        # A MODIFIER letter (category Lm, e.g. `\u02b0`) IN NO BLOCK is not
+        # script-bearing on its own, so it contributes nothing — as before this
+        # reading.  An Lm INSIDE a listed block does carry its block (`\u30fc`
+        # is kana), so the residual is specifically Lm-in-an-unlisted script.
+        assert v2._script_of("\u02b0") is None
+        assert v2._script_of("\u30fc") == "kana"
+        # One side carries the modifier letter and the other does not: THIS is
+        # the leg that discriminates the Lm rule.  With Lm read as `unlisted`
+        # the two script sets would differ and the fold would be refused —
+        # which is why `fold_allowed(x, x)` cannot carry it.
+        assert v2.fold_allowed("we ship the \u02b0 build", "we ship the build")
+        # A precomposed letter belongs to its BASE letter's script, searched one
+        # NFD level deeper: polytonic Greek (U+1F00-U+1FFF) is in no block, but
+        # it is GREEK, so dropping its accents still folds.
+        assert v2.fold_allowed("\u1f10\u03bd \u1f00\u03c1\u03c7\u1fc7",
+                               "\u03b5\u03bd \u03b1\u03c1\u03c7\u03b7")
+        # A script-block range carries its NON-letters too, on purpose: Arabic
+        # Indic digits are Arabic.  Reading only letters here turned this pair
+        # from a refused identity difference into a permitted `number`
+        # SUPERSEDE — a destroyed prior claim.
+        assert v2.distinguishing_difference(
+            "we have \u0661\u0662\u0663 pages", "we have 123 pages") == "language"
+        assert not v2.supersede_allowed("we have \u0661\u0662\u0663 pages",
+                                        "we have 123 pages")
+        assert v2.fold_allowed("\u0441\u0435\u0440\u0432\u0435\u0440 \u00f7",
+                               "\u0441\u0435\u0440\u0432\u0435\u0440")
+        # A whole-claim language change is still refused, as it always was.
         assert v2.distinguishing_difference(
             "the final result is correct", "le r\u00e9sultat final est correct") \
             == "substituted_content"

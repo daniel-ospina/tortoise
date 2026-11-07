@@ -20,6 +20,14 @@ import {
 } from "../website/functions/blog/_shared/seo-keywords.ts";
 import { readFileSync } from "node:fs";
 import { rateLimited, __resetRateLimits } from "../website/functions/blog/_shared/agent-auth.ts";
+import {
+  headHtml,
+  htmlPage,
+  DEFAULT_OG_IMAGE,
+  DEFAULT_OG_IMAGE_WIDTH,
+  DEFAULT_OG_IMAGE_HEIGHT,
+  DEFAULT_OG_IMAGE_TYPE,
+} from "../website/functions/blog/_lib.ts";
 import { constraints } from "../website/functions/blog/_shared/seo-constraints.ts";
 import {
   META_TITLE_MAX,
@@ -1791,6 +1799,255 @@ console.log("the tagless prompt SEEDS candidate keywords and honours the model's
     "...and the generated title is left as the model wrote it — no keyword prefix, no rewrite " +
       "(the ` | Tortoise` suffix is the length contract's own, not the repair's)",
   );
+}
+
+// ── The blog's link preview and icon (the §"no preview, no favicon" defect) ─
+//
+// ⛔ THE DEFECT THIS PINS. `headHtml` used to emit `og:image` ONLY when the post
+// had a cover, while `twitter:card` was emitted unconditionally — so /blog and
+// every coverless post advertised a large-image card and shipped no image, and a
+// shared link rendered as a bare title. The shell linked a single SVG icon
+// (`/blog/favicon.svg`, a different mark from the rest of the site — deleted with this
+// change, since the shell no longer links it and a stale public URL drawing a second
+// glyph is exactly the drift the shared trio removes). Both are
+// asserted against the REAL renderer, because the renderer is where the
+// condition lived.
+console.log("");
+console.log("the blog's link preview and icon");
+{
+  const url = "https://tortoise.premiselabs.co/blog";
+  const index = headHtml({ title: "Blog — Tortoise", description: "Memory for agents.", url });
+
+  const ogImage = (h) => (h.match(/<meta property="og:image" content="([^"]*)"/) ?? [])[1] ?? null;
+  const attr = (h, tag, name) =>
+    (h.match(new RegExp(`<meta ${tag}="${name}" content="([^"]*)"`)) ?? [])[1] ?? null;
+
+  assertEq(ogImage(index), DEFAULT_OG_IMAGE, "a surface with no cover falls back to the blog's own card");
+  // A RELATIVE url here would render no card at all: no scraper resolves it. The
+  // static pages' guard checks this per page; the blog's constant is checked here,
+  // because every coverless surface inherits it.
+  assert(
+    /^https:\/\/[^/]+\//.test(DEFAULT_OG_IMAGE),
+    `the fallback card must be an absolute https URL, got ${DEFAULT_OG_IMAGE}`,
+  );
+  assertEq(
+    attr(index, "property", "og:image:width"),
+    String(DEFAULT_OG_IMAGE_WIDTH),
+    "the fallback card declares its real width",
+  );
+  assertEq(
+    attr(index, "property", "og:image:height"),
+    String(DEFAULT_OG_IMAGE_HEIGHT),
+    "...and its real height",
+  );
+  assertEq(
+    attr(index, "name", "twitter:image"),
+    DEFAULT_OG_IMAGE,
+    "twitter:image mirrors og:image — X does not always fall back from the card tag",
+  );
+  assert(
+    (attr(index, "property", "og:image:alt") ?? "").trim().length > 0,
+    "the card carries non-blank alt text (a suppressed image still has to read)",
+  );
+  assertEq(
+    attr(index, "name", "twitter:image:alt"),
+    attr(index, "property", "og:image:alt"),
+    "...and the Twitter alt agrees with it, so one platform cannot describe a different picture",
+  );
+
+  const withCover = headHtml({
+    title: "A post",
+    description: "d",
+    url: `${url}/post`,
+    image: "https://cdn.example.com/cover.png",
+    imageAlt: "A post",
+    type: "article",
+  });
+  assertEq(ogImage(withCover), "https://cdn.example.com/cover.png", "a post with a cover keeps its own image");
+  assertEq(
+    attr(withCover, "property", "og:image:width"),
+    null,
+    "a cover's dimensions are NOT invented — the author's upload is not 1200x630 by construction, " +
+      "and a declared size the bytes do not keep makes scrapers crop the wrong region",
+  );
+  assertEq(
+    attr(withCover, "property", "og:image:alt"),
+    "A post",
+    "the caller's imageAlt wins over the description",
+  );
+
+  const noCover = headHtml({ title: "No cover", description: "d", url: `${url}/b`, type: "article" });
+  assertEq(ogImage(noCover), DEFAULT_OG_IMAGE, "a coverless post gets the fallback card, not nothing");
+
+  // A hostile title must not break out of an attribute.
+  const hostile = headHtml({
+    title: 'A "quoted" & <script>alert(1)</script> title',
+    description: "d",
+    url,
+  });
+  assert(
+    !hostile.includes("<script>alert(1)</script>"),
+    "a title containing markup is escaped, not injected into the card's attributes",
+  );
+
+  const shell = htmlPage({ head: index, body: "" });
+  // ⛔ THE `rel` IS PART OF THE ASSERTION, and an href-only check cannot see it:
+  // `<link rel="preload" href="/favicon.ico">` names the file and gives the tab no
+  // icon at all. `tests/test_website_static.py` was fixed for exactly this and this
+  // file was left behind, so the one surface that once shipped a SECOND, different
+  // glyph still had the false PASS the static fix was written to remove. Each
+  // `<link>` tag is read as a whole and matched on `rel` *and* `href` together.
+  const links = [...shell.matchAll(/<link\b[^>]*>/g)].map((m) => m[0]);
+  const linkAttr = (tag, name) =>
+    (tag.match(new RegExp(`\\b${name}="([^"]*)"`)) ?? [])[1] ?? null;
+  const linkWith = (rel, href) =>
+    links.find((tag) =>
+      (linkAttr(tag, "rel") ?? "").split(/\s+/).includes(rel) && linkAttr(tag, "href") === href);
+
+  assert(
+    links.length > 0,
+    "the blog shell emits <link> tags at all — an empty list would make every check below vacuous",
+  );
+  assert(
+    Boolean(linkWith("icon", "/favicon.ico")),
+    "the blog shell links /favicon.ico as rel=icon — the same ICO as the static pages (rel=preload would name the file and give the tab nothing)",
+  );
+  assert(
+    Boolean(linkWith("icon", "/favicon.png")),
+    "the blog shell links /favicon.png as rel=icon",
+  );
+  assert(
+    Boolean(linkWith("apple-touch-icon", "/apple-touch-icon.png")),
+    "the blog shell links /apple-touch-icon.png as rel=apple-touch-icon — iOS otherwise draws a page screenshot",
+  );
+  assert(
+    !shell.includes("favicon.svg"),
+    "the blog no longer links its own SVG mark, so the tab glyph does not change between / and /blog",
+  );
+
+  // The fallback asset is really on disk, at the size the tags promise, in the
+  // format the tags declare, and with enough in it to BE a card.
+  const card = readFileSync(new URL("../website/assets/og-tortoise.jpg", import.meta.url));
+  assertEq(DEFAULT_OG_IMAGE, "https://tortoise.premiselabs.co/assets/og-tortoise.jpg",
+    "the fallback card is the shared site card served from the site root");
+  assertEq(card.subarray(0, 2).toString("hex"), "ffd8", "the card on disk is a JPEG, as og:image:type says");
+
+  // JPEG frame size: walk the segment chain to the SOF marker.
+  const jpegSize = (buf) => {
+    let i = 2;
+    while (i < buf.length - 9) {
+      if (buf[i] !== 0xff) { i += 1; continue; }
+      const marker = buf[i + 1];
+      if (marker === 0xc0 || marker === 0xc1 || marker === 0xc2) {
+        return { w: buf.readUInt16BE(i + 7), h: buf.readUInt16BE(i + 5) };
+      }
+      if (marker === 0xd8 || marker === 0xd9 || (marker >= 0xd0 && marker <= 0xd7)) { i += 2; continue; }
+      i += 2 + buf.readUInt16BE(i + 2);
+    }
+    throw new Error("no SOF marker in the card");
+  };
+  const { w: cardW, h: cardH } = jpegSize(card);
+  assertEq(`${cardW}x${cardH}`, `${DEFAULT_OG_IMAGE_WIDTH}x${DEFAULT_OG_IMAGE_HEIGHT}`,
+    "the fallback card on disk is exactly the size the tags declare");
+
+  // ⛔ A CARD CAN BE A RECTANGLE, and dimensions cannot tell. `/blog/og-image.png`
+  // was one — 4.6 KB, two colours, 99.2% flat background — and every dimension
+  // assertion passed on it while a link preview rendered an empty dark block.
+  // Measured, not guessed (a 20 KB floor was tried first and a FLAT 1200x630 JPEG
+  // at maximum quality is 22,016 bytes, so it passed the check meant to reject it):
+  //   authored card ........... 94,066 B
+  //   flat one-colour JPEG .... 22,016 B
+  //   the deleted placeholder ... 4,595 B
+  // 40 KB sits 1.82x above a flat one and 2.35x below the real card.
+  const CARD_MIN_BYTES = 40000;
+  const FLAT_CARD_BYTES = 22016;
+  // ⛔ THE SCAN, NOT THE FILE. An earlier cut measured with `lastIndexOf(FF D9)`, which
+  // finds the last EOI in the FILE — and a padded trailer closed with those two bytes is
+  // indistinguishable from an image's end once you are outside any scan (measured: a
+  // 4,723 B flat card + zeros + `FF D9` cleared a 40 KB floor green). Walk the segments
+  // from SOI, then the entropy-coded scan, and stop at the FIRST EOI: that is where a
+  // real card's stream ends, and anything after it is padding, not paint.
+  const encodedJpegLength = (buf) => {
+    const n = buf.length;
+    let i = 2;
+    while (i + 4 <= n) {
+      if (buf[i] !== 0xff) { i += 1; continue; }
+      const marker = buf[i + 1];
+      if (marker === 0xff) { i += 1; continue; }
+      if (marker === 0xd9) return i + 2;
+      if (marker === 0xda) {
+        let j = i + 2 + buf.readUInt16BE(i + 2);
+        while (j + 1 < n) {
+          if (buf[j] === 0xff) {
+            const nxt = buf[j + 1];
+            if (nxt === 0xd9) return j + 2;
+            if (nxt === 0x00 || (nxt >= 0xd0 && nxt <= 0xd7)) { j += 2; continue; }
+          }
+          j += 1;
+        }
+        return n;
+      }
+      i += 2 + buf.readUInt16BE(i + 2);
+    }
+    return n;
+  };
+  const cardFloorViolation = (buf) =>
+    encodedJpegLength(buf) < CARD_MIN_BYTES
+      ? `the card holds only ${encodedJpegLength(buf)} B of encoded image ` +
+        `(${buf.length} B file), under the ${CARD_MIN_BYTES / 1000} KB floor`
+      : null;
+  assertEq(cardFloorViolation(card), null,
+    "the fallback card has something drawn on it (encoded image >= 40 KB)");
+
+  // ⛔ NON-VACUITY, pinned from BOTH sides — the same three assertions the Python
+  // sibling carries. Without them this floor can be lowered or DELETED with the whole
+  // harness green (measured: `>= 40000` → `>= 4000`, and the line removed entirely,
+  // both passed), while the Python twin reds on the identical edit. A guard whose
+  // failure path never runs cannot be told apart from no guard.
+  assert(FLAT_CARD_BYTES < CARD_MIN_BYTES,
+    `the card floor (${CARD_MIN_BYTES} B) sits above the flat 1200x630 JPEG it exists ` +
+    `to reject (${FLAT_CARD_BYTES} B)`);
+  const flatCard = Buffer.alloc(FLAT_CARD_BYTES);
+  flatCard[0] = 0xff; flatCard[1] = 0xd8;
+  flatCard[FLAT_CARD_BYTES - 2] = 0xff; flatCard[FLAT_CARD_BYTES - 1] = 0xd9;
+  assert(cardFloorViolation(flatCard) !== null,
+    "a card the size of a measured flat JPEG is rejected by the floor");
+  // ...and PADDING IS NOT PAINT: the same flat image with trailing bytes past the
+  // floor is still rejected, because the floor reads the encoded image.
+  const paddedFlat = Buffer.concat([flatCard, Buffer.alloc(CARD_MIN_BYTES + 1000 - FLAT_CARD_BYTES)]);
+  assert(paddedFlat.length > CARD_MIN_BYTES, "the padding fixture is past the floor");
+  assert(cardFloorViolation(paddedFlat) !== null,
+    "a flat card PADDED past the floor is still rejected — the floor measures the " +
+    "encoded image, not the file, so trailing bytes are not paint");
+  // ...and a trailer that LOOKS like an EOI must not re-open it, which is exactly what a
+  // `lastIndexOf(FF D9)` measure lets through.
+  const trailingEoi = Buffer.concat([
+    flatCard, Buffer.alloc(CARD_MIN_BYTES + 1000 - FLAT_CARD_BYTES), Buffer.from([0xff, 0xd9]),
+  ]);
+  assert(cardFloorViolation(trailingEoi) !== null,
+    "a flat card padded and CLOSED WITH FF D9 is still rejected — the measure takes " +
+    "the EOI that ends the image, not the last in the file");
+  assertEq(encodedJpegLength(card), card.length,
+    "the shipped card's stream ends at its own EOF, so the floor measures all of it");
+
+  // The type is declared for the authored card and NOT for a post cover — the same
+  // rule as the dimensions, for the same reason: a cover's format is the author's.
+  // ⛔ THE VALUE, NOT THE CONSTANT AGAINST ITSELF. `headHtml` interpolates
+  // `DEFAULT_OG_IMAGE_TYPE` into the tag, so comparing the tag to that same constant
+  // pins PRESENCE and nothing more: patch the constant to `image/png` over a JPEG on
+  // disk and the self-referential form is still green. The card's magic bytes are the
+  // only independent statement about its format, so the constant is held to them and
+  // the emitted tag to the constant — a wrong declared format now reds.
+  const TYPE_BY_MAGIC = { ffd8: "image/jpeg", "8950": "image/png" };
+  const typeFromBytes = TYPE_BY_MAGIC[card.subarray(0, 2).toString("hex")] ?? null;
+  assertEq(typeFromBytes, "image/jpeg",
+    "the card on disk is a JPEG — its magic bytes say so, independently of any constant");
+  assertEq(DEFAULT_OG_IMAGE_TYPE, typeFromBytes,
+    "the default card's declared type agrees with the bytes on disk (not merely with itself)");
+  assertEq(attr(index, "property", "og:image:type"), DEFAULT_OG_IMAGE_TYPE,
+    "the fallback card declares its real format");
+  assertEq(attr(withCover, "property", "og:image:type"), null,
+    "a post cover declares no format, because the author's upload decides it");
 }
 
 console.log("");

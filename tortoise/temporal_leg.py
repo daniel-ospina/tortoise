@@ -55,6 +55,11 @@ from __future__ import annotations
 import re
 
 from .coverage_loop import _calendar_date
+from .retrieval import (
+    DEFAULT_MAX_CHUNKS_PER_SESSION,
+    dedup_pool,
+    is_raw_chunk,
+)
 from .search_engine import rrf_fusion
 
 # ── defaults (documented, knob-exposed by the caller) ────────────────────────
@@ -304,8 +309,11 @@ limit`` (where its picks START), which reaches ``limit − 1`` slots INTO the
 window. That is deliberate and measured for phase 1 (the anchor path is
 measured AS-IS, #2976); the window branch does not rely on it — its own
 :data:`held_buckets` exclusion is what keeps a pick off an id the reader
-already sees. ``head=0`` is the unguarded mode — used by the unit tests to
-exercise the phases in isolation, never by the fused caller for a window ≥ 2.
+already sees. ``head=0`` is the unguarded mode: the unit tests use it to
+exercise the phases in isolation, and ``placement="head"`` reaches it through
+THIS caller (``head_excl = 0 if placement == "head" else ceiling``), which is
+the counterfactual the retention baseline measures at the shipped window. The
+default (``placement="tail"``) never passes ``head=0`` at a window >= 2.
 
 **Budget clamping.** :func:`temporal_leg_fusion_order` clamps the budget
 via :func:`effective_promotion_budget` to ``max(1, min(limit,
@@ -693,6 +701,38 @@ def temporal_leg_fusion_order(
     return [pid for pid in fused if pid in known], picks
 
 
+def _reader_order(
+    candidates: list[dict],
+    order: list[str],
+    *,
+    max_chunks_per_session: int | None,
+) -> list[str]:
+    """The id order a READER actually receives for ``order`` — ``dedup_pool`` applied.
+
+    ⛔ THE HARNESS DEDUPS **AFTER** IT FUSES (``tools/longmem_eval/retrieve.py``:
+    fusion reassigns ``annotated``, and the next statement is ``pool =
+    _dedup_pool(annotated, …)``; ``"hits": pool``). So the fused index space the
+    splice works in is NOT the index space the reader — and therefore
+    ``recall_all@5`` — grades. On a CHUNK-FREE pool the two are identical
+    (``dedup_pool`` is a no-op when no hit is a raw ``session-transcript``
+    chunk, so points/turn points are never capped); on a CHUNK-BEARING pool they
+    are not, and a pick spliced at fused rank 10 can land inside the reader's
+    top 5 once the raw chunks above it are capped.
+
+    Ids the caller's order carries that ``candidates`` does not know are passed
+    through (they carry no ``point_kind``, so they are never capped) — this
+    function must never silently DROP a slot, which would misreport the window.
+    """
+    if max_chunks_per_session is None:
+        return list(order)
+    by_id = {c["id"]: c for c in candidates}
+    hits = [by_id.get(pid, {"id": pid}) for pid in order]
+    if not any(is_raw_chunk(h) for h in hits):
+        return list(order)
+    return [h["id"] for h in
+            dedup_pool(hits, max_chunks_per_session=max_chunks_per_session)]
+
+
 def window_arm_retention(
     candidates: list[dict],
     fused_ids: list[str],
@@ -700,6 +740,7 @@ def window_arm_retention(
     picks: tuple[str, ...] | list[str] = (),
     window: int,
     limit: int = DEFAULT_TEMPORAL_LEG_LIMIT,
+    max_chunks_per_session: int | None = DEFAULT_MAX_CHUNKS_PER_SESSION,
 ) -> dict:
     """Measure what a promotion DID to the reader window — retention, not order.
 
@@ -730,9 +771,29 @@ def window_arm_retention(
     return value (default ``()`` — an inert arm). ``window`` is the reader's
     ``effective_top_k``.
 
+    ⛔ **THE READER'S POOL IS THE DEDUPED ONE, AND THIS FUNCTION MODELS IT**
+    (``max_chunks_per_session``, default the product cap
+    ``tortoise.retrieval.DEFAULT_MAX_CHUNKS_PER_SESSION``). The harness fuses and
+    THEN dedups — ``retrieve.py`` reassigns ``annotated`` to the fused order,
+    then ``pool = _dedup_pool(annotated, …)``, then ``"hits": pool`` — so the
+    fused index space this arm splices into is NOT the index space
+    ``recall_all@5`` grades (``hits[:5]``). ``dedup_pool`` caps RAW
+    ``session-transcript`` chunks per session at that number and never caps
+    point/turn points, so on a **chunk-free** pool the two index spaces are
+    identical and every field below is unchanged; on a **chunk-bearing** pool
+    the cap removes slots ABOVE a pick, which lifts it into (or out of) the
+    graded top 5. Pass ``max_chunks_per_session=None`` to measure the raw splice
+    geometry instead — that is the PRE-reader view and must never be published as
+    what the metric grades.
+
     Returns a JSON-serialisable mapping:
 
-    ``base_ids`` / ``fused_ids``   the two reader windows (``[:window]``)
+    ``base_ids`` / ``fused_ids``   the two reader windows (``[:window]`` of the
+                                   DEDUPED orders — what the reader receives)
+    ``reader_pool_depth`` / ``reader_pool_depth_fused``  how many slots survived
+                                   the chunk cap in each order, so a shift in the
+                                   fields below can be attributed to the cap
+                                   rather than to the arm
     ``base_sessions`` / ``fused_sessions``  DISTINCT real ``session_id`` values
                                    in them. A hit with NO ``session_id`` is not a
                                    session — the same fail-closed rule
@@ -812,49 +873,93 @@ def window_arm_retention(
                                    also reports ``True`` trivially (it displaced
                                    nothing), so pair it with ``pick_ranks`` and
                                    ``evicted_ids`` before reading it as a win.
-    ``pick_ranks``                 each pick's index in the caller's FULL
-                                   ``fused_ids`` — note this is the caller's
-                                   order, not the returned ``fused_ids`` slice
-                                   (which is ``[:window]``); a pick at index
-                                   ``>= window`` is outside the reader window, so
-                                   the two are reported apart
-    ``picks_absent_from_fused``    picks that appear in NO position of
-                                   ``fused_ids``. Reported rather than silently
-                                   dropped: an emptied ``pick_ranks`` would
-                                   otherwise be indistinguishable from an INERT
-                                   arm, i.e. a lost pick would read as no harm.
-                                   Unreachable through the shipped caller (it
-                                   filters to ids it knows), reachable by any
+    ``pick_ranks``                 each pick's index in the caller's FULL fused
+                                   order AFTER the reader's chunk cap — note
+                                   this is the reader's order, not the returned
+                                   ``fused_ids`` slice (which is ``[:window]``);
+                                   a pick at index ``>= window`` is outside the
+                                   reader window, so the two are reported apart
+    ``pick_ranks_before_dedup``    the same picks' indices in the caller's FULL
+                                   ``fused_ids`` — i.e. where the SPLICE put
+                                   them, before the chunk cap. Equal to
+                                   ``pick_ranks`` on a chunk-free pool; when
+                                   they differ, the difference IS the cap's
+                                   work on the graded surface (a pick spliced at
+                                   rank 10 can be graded at rank 3)
+    ``picks_dropped_by_reader_dedup``  picks present in the caller's
+                                   ``fused_ids`` but removed by the chunk cap —
+                                   the promotion paid for a slot the reader never
+                                   receives. Reported apart from
+                                   ``picks_absent_from_fused`` because the two
+                                   are different faults (a lost pick vs. a
+                                   capped one) and an emptied ``pick_ranks``
+                                   cannot tell them apart
+    ``picks_absent_from_fused``    picks that appear in NO position of the
+                                   caller's ``fused_ids``. Reported rather than
+                                   silently dropped: an emptied ``pick_ranks``
+                                   would otherwise be indistinguishable from an
+                                   INERT arm, i.e. a lost pick would read as no
+                                   harm. Unreachable through the shipped caller
+                                   (it filters to ids it knows), reachable by any
                                    direct caller.
     ``ceiling``                    ``max(window - effective_promotion_budget(
                                    window, limit), 0)`` — where a TAIL-placement
-                                   pick STARTS. It is computed from
-                                   ``window``/``limit`` alone (this function has
-                                   no ``placement`` argument), so under
-                                   ``placement='head'`` the picks start at rank 0
-                                   and this is the tail ceiling the budget WOULD
-                                   use, not the head row's pick position — read
-                                   ``pick_ranks`` for that. A pick at rank
-                                   ``>= 5`` can never be graded by
+                                   pick STARTS in the PRE-CAP fused order. It is
+                                   computed from ``window``/``limit`` alone (this
+                                   function has no ``placement`` argument), so
+                                   under ``placement='head'`` the picks start at
+                                   rank 0 and this is the tail ceiling the
+                                   budget WOULD use, not the head row's pick
+                                   position — read ``pick_ranks`` for that. A
+                                   pick at rank ``>= 5`` can never be graded by
                                    ``recall_all@5``. The clamped budget is
                                    recomputed from ``limit``, never from
                                    ``len(picks)``, so an inert arm reports the
-                                   geometry it WOULD have used.
-    ``graded_by_recall_all_at_5``  how many picks land at an index ``< 5``
-                                   AND ``< window`` — the metric grades the
-                                   READER's top 5, so a pick outside the window
-                                   is not graded however high it ranks in the
-                                   caller's order
+                                   geometry it WOULD have used. ⛔ It is the
+                                   SPLICE geometry, not the reader's rank: read
+                                   ``pick_ranks`` (post-cap) for the graded
+                                   position and ``pick_ranks_before_dedup`` to
+                                   see the splice itself.
+    ``graded_by_recall_all_at_5``  how many picks land at a READER index
+                                   ``< 5`` of the DEDUPED pool —
+                                   ``recall_all@5`` grades ``hits[:5]``
+                                   (``retrieve.py``: ``top = hits[:k]``), and
+                                   this field counts ``pick_ranks`` (post-cap)
+                                   ``< 5``. It carries NO ``window`` term: the
+                                   graded surface has no reader-window
+                                   truncation, so a pick the window hides can
+                                   still be graded — visibility is its own
+                                   question, reported by
+                                   ``picks_outside_window``. ⚠️ The surface
+                                   DOES carry a ``top_k`` cut that this field
+                                   does not model: with rerank on, ``hits`` is
+                                   ``pool[:top_k]`` or the selected-only list,
+                                   and on the pool-only arm ``pool =
+                                   pool[:top_k]`` (``retrieve.py`` R6 block),
+                                   so at ``top_k < 5`` a rank-3 pick is not
+                                   gradable. Every number in the receipt is
+                                   measured on the plain path (no rerank, no
+                                   pool override), where ``hits`` IS the
+                                   deduped pool untruncated.
     ``picks_outside_window``       picks whose index is ``>= window`` (invisible
                                    to the reader at all)
     ``base_graded_evicted``        evicted ids that were themselves inside
                                    ``[:5]`` — a direct top-5 loss
     """
     width = max(int(window), 0)
-    rank_of = {pid: i for i, pid in enumerate(fused_ids)}
     session_of = {c["id"]: str(c.get("session_id") or "") for c in candidates}
-    base_ids = [c["id"] for c in candidates[:width]]
-    fused_window = list(fused_ids[:width])
+    # ⛔ TWO INDEX SPACES, KEPT APART ON PURPOSE. The splice works in the caller's
+    # PRE-cap fused order; the reader (and `recall_all@5`) sees the POST-cap one.
+    # `splice_rank_of` is geometry, `rank_of` is what the metric grades.
+    splice_rank_of = {pid: i for i, pid in enumerate(fused_ids)}
+    reader_fused_all = _reader_order(
+        candidates, fused_ids, max_chunks_per_session=max_chunks_per_session)
+    reader_base_all = _reader_order(
+        candidates, [c["id"] for c in candidates],
+        max_chunks_per_session=max_chunks_per_session)
+    rank_of = {pid: i for i, pid in enumerate(reader_fused_all)}
+    base_ids = reader_base_all[:width]
+    fused_window = reader_fused_all[:width]
     fused_set = set(fused_window)
 
     base_sessions = {session_of.get(i, "") for i in base_ids} - {""}
@@ -874,6 +979,8 @@ def window_arm_retention(
     pick_list = [p for p in picks if p in rank_of]
     return {
         "window": width,
+        "reader_pool_depth": len(reader_base_all),
+        "reader_pool_depth_fused": len(reader_fused_all),
         "base_ids": base_ids,
         "fused_ids": fused_window,
         "base_sessions": len(base_sessions),
@@ -890,12 +997,17 @@ def window_arm_retention(
         "evicted_sole_representatives": evicted_sole,
         "additive": not deleted_sessions,
         "pick_ranks": [rank_of[p] for p in pick_list],
-        "picks_absent_from_fused": [p for p in picks if p not in rank_of],
+        "pick_ranks_before_dedup": [splice_rank_of[p] for p in pick_list],
+        "picks_absent_from_fused": [p for p in picks
+                                    if p not in splice_rank_of],
+        "picks_dropped_by_reader_dedup": [p for p in picks
+                                          if p in splice_rank_of
+                                          and p not in rank_of],
         "picks_outside_window": [p for p in pick_list if rank_of[p] >= width],
         "ceiling": max(
             width - effective_promotion_budget(width, int(limit)), 0),
         "graded_by_recall_all_at_5": sum(
-            1 for p in pick_list if rank_of[p] < min(5, width)),
+            1 for p in pick_list if rank_of[p] < 5),
         "base_graded_evicted": [i for i in evicted_ids
                                 if base_ids.index(i) < 5],
     }

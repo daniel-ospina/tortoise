@@ -73,16 +73,58 @@ ONE bounded graph pass:
    within the product every containing Session is a legitimate source
    session, but a seed shared across sessions widens the fetch.
 
-   ⚠️ SEED identity limitation (unchanged by this retarget). The fetch
-   TARGET is product-real; the SEED gate is not, for a turn hit. A product
-   turn Point carries no ``session_id``, so ``session_key_of`` returns the
-   synthetic ``idx:-1`` and :func:`seeded_sessions` drops it as a phantom
-   bucket. In the product the seed is therefore a NON-turn pool hit that
-   carries ``session_id`` (an extracted point — ``capture_session`` links
-   it ``Session-[:CONTAINS]->Point`` and stamps ``session_id``), and the
-   fetch then expands that session's verbatim turns. Letting a turn hit
-   seed itself needs a product-side session identity for turn points; that
-   is a SEED change, out of scope for the fetch retarget.
+   ✅ SEED identity AT THE IDENTITY LAYER — closed by #10540. The fetch
+   TARGET was already product-real; the SEED gate
+   was blind, because the pool key authority
+   (``retrieval.session_key_of``) read the snake ``session_id`` prop ONLY and
+   the product's point fetch POPS that prop from EVERY point hit it returns
+   (turn and extracted alike — ``sdk.tortoise_fts_query`` builds the entry,
+   then ``entry.pop("session_id")``), leaving the camel ``sessionId`` as the
+   hit's only identity. So a product pool hit keyed as the per-hit phantom
+   ``idx:point:{id}`` and :func:`seeded_sessions` dropped it: on the raw
+   search pool the arm could seed nothing at all, and an ASK-lane pool only
+   where ``annotate_ask_hits`` had re-attached a snake id — from the
+   ``:Event``'s ``sessionId`` or from the Point's own prop, since it sets
+   ``"session_id": ev_session or n_session`` (that lane dedups with its own
+   ``ask_session_key``, and the arm is off in the product).
+
+   ``session_key_of`` now also reads the CAMEL wire identity ``sessionId``,
+   which is the spelling the product's own point fetch emits: it resolves the
+   session from ``n.sessionId`` / the snake prop / the ``:Session CONTAINS``
+   edge and then pops the snake key (``sdk.tortoise_fts_query``), i.e. the
+   reader ALREADY saw the identity (``retrieval.hit_session_id`` → ``[session
+   A]``) while the pool one layer below it did not. So a turn hit CAN seed its
+   own session, and :func:`reinjection_merge_order` anchors that session's
+   injected group after its own base ranks.
+
+   ⛔ SCOPE of the closure in this section — it is the IDENTITY, not the ARM.
+   Three facts a reader must not lose: (1) **no caller under ``tortoise/``
+   invokes this module** — every call site is the eval driver
+   (``tools/longmem_eval/retrieve.py``) — so the arm is still OFF in the
+   product, exactly as the ASK-lane sentence above says; (2) every pool
+   the arm consumes today is built by ``_annotate_hits``, which stamps
+   ``session_id`` AND ``lme_session_index`` on EVERY hit
+   (``tools/longmem_eval/retrieve.py``), both of which outrank the camel leg —
+   and it COERCES an absent index into an explicit ``-1``
+   (``p.get("lme_session_index", -1)``), which keys ``idx:-1`` and outranks the
+   camel leg the same way — so on today's only live path the camel branch is
+   not reached at all; and (3) an id OUTSIDE the render allowlist is emitted
+   by the fetch as ``sessionId: ""`` (``_safe_session_tag``, applied at the
+   producer), so the reader calls it UNKNOWN and the pool calls it a phantom —
+   they AGREE, and such a session (a caller-supplied ``"session/2026-11-05
+   10:00"``) is still unseedable. What #10540 changes is what the AUTHORITY
+   answers for a product-shaped hit; it does not wire the arm, it does not
+   widen the allowlist, and it moves no eval-visible key. (The defensive tail
+   is NOT the pre-fix symptom and not a fallback either: a group only exists
+   for a key in ``seed_order``, whose own pool hit always supplies an anchor
+   rank, so an absent group key is DROPPED by the merge rather than tailed —
+   see :func:`source_session_chunk_pass`; pinned by
+   ``tests/test_session_reinjection_rules.py::test_an_unseeded_group_key_is_``
+   ``dropped_never_tailed``.) The GRAPH side is unchanged and that is
+   deliberate: the fetch still scopes by ``(s:Session)-[:CONTAINS]->(p:Point)``
+   and still RETURNs ``coalesce(p.session_id, s.id)``, because the Point
+   property is what a *turn Point* does not have — only the PASSAGE-side hit
+   identity was missing.
 
    **Turn-shape constraint.** ``pointKind``'s vocabulary is open
    (``create_point`` accepts any registered kind), so ``pointKind='event'``
@@ -260,7 +302,8 @@ def _is_real_session_id(key: str) -> bool:
     injected group only for a key present in ``seed_order`` (the seeds'
     own ``session_id``), so an ``idx:N`` bucket key — which names no graph
     session and can never equal that anchor — would spend the fetch budget
-    on a group that could only land in the defensive tail."""
+    on a group the merge then DROPS (see ``source_session_chunk_pass``'s
+    group-key clause: groups are built over ``seed_order`` alone)."""
     return bool(key) and not key.startswith("idx:")
 
 
@@ -367,10 +410,16 @@ def source_session_chunk_pass(
       * The group key returned is ``coalesce(p.session_id, s.id)``: the
         eval's dataset session id when the point carries one (it always
         does), the ``:Session`` id in the product (a product turn carries
-        no ``session_id``). A key absent from the caller's ``seed_order``
-        (reachable only via a Session reached through a shared seed) lands
-        in ``reinjection_merge_order``'s defensive tail rather than after
-        its own base rank.
+        no ``session_id``). ⚠️ A key ABSENT from the caller's ``seed_order``
+        (reachable through a shared seed — one Point contained by several
+        ``:Session`` nodes — or a Point whose own camel ``sessionId`` prop
+        names a different session than the one containing it) is **DROPPED**,
+        not tailed: :func:`reinjection_merge_order` builds its groups by
+        iterating ``seed_order``, so such rows are fetched, charged to the
+        per-session/total budget, and then never spliced. The only signal is
+        ``total`` (which counts them) against what actually reached the
+        merged pool. That function's defensive tail keeps a SEEDED session
+        with no base rank; it does not rescue an unseeded group key.
 
     Default ``chunk_kind`` is :data:`~tortoise.retrieval.TURN_POINT_KIND`,
     the product's verbatim material; passing
@@ -489,6 +538,23 @@ def reinjection_merge_order(
     no genuinely-new id the base pool is returned unchanged (the caller's
     ``new_ids`` gate is mirrored here for defence in depth).
 
+    ⚠️ Pool-additivity is NOT reader-additivity (#10540). The reader
+    consumes a PREFIX (``context_item_cap``, default 40), so an injected
+    item inside that window pushes one base hit past the cut — measured at
+    the shipped budgets: 10 base hits displaced and TWO sessions losing
+    their entire representation. That trade is what
+    :func:`reader_window_displacement` measures. The older wording here
+    ("an injected item can never evict a base item") was true of the pool
+    LIST and false of the reader, which is why the crowding was invisible
+    to the census.
+
+    ⚠️ REBASE UNION (#10632 × #2513): both sides rewrote this
+    paragraph. The folded tree added the ``floor_term`` precision (the arm
+    THAT CAN evict a base item); this PR added the reader-window disclosure
+    (pool-additivity ≠ reader-additivity). They describe different
+    mechanisms and both are true, so both are kept — dropping either would
+    restore a claim the other side measured to be false.
+
     NOTE: ``guard_and_recap_pool``'s C5 re-cap counts only ``is_raw_chunk``
     hits, so injected TURN points (the default kind) are not re-capped —
     the caller's total budget is the volume guard on that path.
@@ -545,3 +611,153 @@ def reinjection_merge_order(
         merged, guard=guard, session_key=key, window=guard_window,
         per_session_cap=per_session_cap, floor_term=floor_term,
         max_chunks_per_session=max_chunks_per_session)
+
+
+def reader_window_displacement(
+        base_pool: list[dict],
+        merged: list[dict], *,
+        window: int,
+        session_key: Callable[[dict], str] | None = None) -> dict:
+    """What the merge took from OTHER sessions in the READER's window (#10540).
+
+    :func:`reinjection_merge_order` is ADDITIVE on the POOL — it never drops
+    a base hit — but the reader consumes a PREFIX of that pool
+    (``context_item_cap``, default 40). An injected item is therefore free
+    in the pool and NOT free in the reader: every injected item inside the
+    window pushes one base hit past the cut, and the sessions whose hits sat
+    at the window's tail can lose their representation ENTIRELY — the exact
+    crowding this arm's outcome forbids.
+
+    Measured on ``63981d152`` (40 base hits over 8 sessions, 5 each, shipped
+    budgets — per-session 3, total 10, guard window 5, per-session cap 2):
+    ``base_displaced=10``, ``sessions_lost=['s6', 's7']`` — the two
+    lowest-ranked sessions lose all five of their hits each while
+    ``injected_merged`` reports a healthy 10. With no injection the same
+    measurement is 0, so the number is attributable to the injection.
+
+    Four residuals, stated so the number is not read as more than it is:
+
+    * ``base_pool`` is the RAW pre-merge list while ``merged`` has been
+      through ``guard_and_recap_pool``, so ``base_displaced`` also counts
+      the C4 guard's OWN window reorder and cannot separate
+      injection-caused crowding from guard-caused moves. Pass the
+      guard-applied counterfactual (``guard_and_recap_pool(base_pool, ...)``)
+      if that distinction matters.
+    * When the base pool FILLS the window, ``base_displaced`` equals
+      ``injected_in_window`` algebraically — one injected item in, one base
+      item out. They are corroborating only in the partial-window case.
+    * The window counted here is the RAW prefix of ``merged``, while
+      ``assemble_context`` admits a SKIP-FILTERED subsequence: a
+      claim-text-less hit spends no item slot and a cap-failing hit is
+      skipped without one (``tortoise/retrieval.py``), and with the
+      evidence-package arm on, the reader gets a reordered, deduplicated
+      list. The count is also taken BEFORE the C2 evidence-mark boost
+      (``_apply_evidence_boost``, which the eval lane applies to the pool
+      AFTER this census and before ``_assemble_context``), so with
+      ``TORTOISE_LME_EVIDENCE_BOOST`` on — the re-validation run's own
+      default — the census window is the PRE-boost order and the reader's
+      is the post-boost one.
+    * ONE LATER POOL MOVER IN THE SAME LANE IS NOT IN THIS COUNT, and it is
+      the re-SELECTION only (``tools/longmem_eval/retrieve.py``). When R6
+      rerank APPLIES it re-SELECTS from the whole pool (``pool = selected``,
+      ``<= top_k``), and C6 ``prefer_latest_order`` reorders the final pool.
+      ``prefer_latest_order`` is membership-preserving, but the reranker's
+      move is a fresh SELECTION over every candidate — a two-stage
+      retrieve→rerank pipeline picks its ``top_n`` from the FULL candidate
+      list, not from a prefix of it (Cohere's Rerank API:
+      ``rerank(documents=<all candidates>, top_n=k)`` returns indices into
+      that whole list), and the lane's own ``rerank_hits`` is called on
+      the entire ``pool``. So on the APPLIED arm the delivered surface may
+      include base hits AND injected items from BELOW this window while
+      excluding ones inside it.
+      ⇒ On the APPLIED arm ``injected_in_window``, ``base_displaced`` and
+      ``sessions_lost`` describe ``merged[:window]`` and are not a bound at
+      all — upper or lower — on what the reader got. ``sessions_lost`` is
+      derived from those SAME two windows, so the reranker can deliver a
+      session ranked below ``merged[:window]`` while this census names it
+      LOST: on that arm the key OVER-reports. (Nor are they a bound with R6
+      OFF, for the reason the bullet below gives.)
+      ⛔ The three TRUNCATING arms are NOT in that class, and an earlier
+      revision of this list wrongly put one of them there: the pool-only
+      arm and the two R6 DEGRADES (load-failure ``scorer is None``,
+      score-failure ``applied: False``) each cut a prefix of the pool, and
+      the caller declares that cut so ``window`` becomes the cut
+      (``min(item_cap, len(pool))`` after it — #10632 review ISSUE 1). No
+      candidate outside the window can reach the reader on those arms, so
+      there the window IS a ceiling. It is still not the DELIVERED set:
+      the skip filter below can only remove items from inside it.
+    * So the count is not a bound on the delivered surface in EITHER
+      direction, and the skip semantics above are why in both: a
+      claim-text-less (or cap-refused) hit INSIDE the window is counted and
+      never delivered, so the number can OVER-state what the reader got —
+      while a skipped hit FREES its slot, so ``assemble_context`` continues
+      PAST the raw prefix and admits later hits up to its item bound, and
+      injected items BELOW the window can therefore be delivered without
+      ever being counted. That under-count is the direction this key exists
+      for. It is a WINDOW CENSUS, not a ceiling and not a floor. This
+      module already states the same residual class for ``seeded_sessions``
+      (*"matches the reader MODULO the budget caps"*); a reuse at a
+      different window, or alongside the packaging, boost or rerank arms,
+      needs the same ``admitted=``/counterfactual treatment before the
+      number is read as delivered evidence.
+
+    ⛔ The TOP-5 is NOT where this happens, and a probe that counts base
+    hits at final rank ``>= 5`` says otherwise: it reports 35 for that shape
+    with 0, 10 or 15 injected items, because 35 of 40 base hits start below
+    rank 5. That figure is invariant to injection and is not a crowding
+    measurement. The guard's session-diverse reorder holds the top-5
+    (measured: 0 base items lost from it in every arm tested).
+
+    ``sessions_lost`` is the load-bearing key on every arm that does not
+    re-SELECT: a session with no hit in the merged window has no evidence the
+    reader can cite, whatever its rank was before. On the APPLIED-rerank arm
+    it is an OVER-report rather than a bound, for the reason the bullet above
+    gives — the reranker selects from the whole candidate list, so a session
+    ranked below this window can be delivered while this census names it
+    lost.
+
+    The synthetic ``idx:*`` namespace is dropped from BOTH sets: it names no
+    graph session (the ``lme_session_index`` bucket, and since #3591 the
+    per-hit ``idx:point:{id}`` bucket of a hit with no session identity), so
+    a phantom must never be reported as a session PRESENT in the window nor
+    as one LOST from it — the falsest possible ``sessions_lost`` entry, since
+    the reader could not have cited it in the first place. This is the same
+    exclusion ``coverage_loop.coverage_gap`` applies to its window census,
+    and ``retrieval.session_key_of`` documents the namespace as phantom. The
+    filter is applied to the resulting SETS, not to the key function: a
+    caller-supplied ``session_key`` cannot drop a bucket, only remap one.
+
+    Returns ``{"window", "injected_in_window", "base_displaced",
+    "sessions_lost", "sessions_before", "sessions_after", "measured"}`` —
+    ``measured`` is ``True`` on every path this function returns, and the
+    CALLER sets it ``False`` (with ``None`` values) when its own call fails,
+    so a consumer can tell an unmeasured question from a zero. Additive and
+    pure — the caller records it; nothing here reorders or drops.
+    """
+    key = session_key if session_key is not None else session_key_of
+    if window < 1:
+        return {"window": 0, "injected_in_window": 0, "base_displaced": 0,
+                "sessions_lost": [], "sessions_before": 0,
+                "sessions_after": 0, "measured": True}
+    base_ids = {h["id"] for h in base_pool}
+    base_window = list(base_pool[:window])
+    merged_window = list(merged[:window])
+    merged_window_ids = {h["id"] for h in merged_window}
+    injected_in_window = sum(1 for h in merged_window
+                             if h["id"] not in base_ids)
+    base_displaced = sum(1 for h in base_window
+                         if h["id"] not in merged_window_ids)
+    before = {k for k in (key(h) for h in base_window)
+              if k and not k.startswith("idx:")}
+    after = {k for k in (key(h) for h in merged_window)
+             if k and not k.startswith("idx:")}
+    return {
+        "window": window,
+        "injected_in_window": injected_in_window,
+        "base_displaced": base_displaced,
+        # sorted: a census key must not depend on pool order
+        "sessions_lost": sorted(before - after),
+        "sessions_before": len(before),
+        "sessions_after": len(after),
+        "measured": True,
+    }

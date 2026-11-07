@@ -51,6 +51,10 @@ _TESTS_ROOT = Path(__file__).resolve().parent
 #   "assertion"        — the test ASSERTS the SDK's namespace→graph mapping
 #                        (test_namespace_uri_mode, test_sdk_legacy_coverage);
 #                        the literal must stay byte-for-byte.
+#   "synthetic-source" — the literal rides a SOURCE STRING handed to
+#                        `ast.parse` (or the explanation around it), never a
+#                        construction; there is nothing to rename and nothing
+#                        for the redirect to resolve.
 # The swept (renamed) sites are the test_-prefixed literals/constants the
 # guard passes on their own — the table documents the residual declarations.
 ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
@@ -137,6 +141,25 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     # test reads. Same `prod-coupled` class as its neighbours above.
     "test_3516_client_captured_at.py": {"registry": "prod-coupled"},
     "test_agent_signup.py": {"registry": "prod-coupled"},
+    # #10046: the two `namespace="registry"` matches in this module are TEXT fed
+    # to `ast.parse`, never a construction. `test_a_literal_namespace_is_not_an
+    # _org_scoped_site` hands the record-tenant scanner a synthetic source
+    # snippet and asserts the round-3 predicate excludes a string-literal
+    # namespace; the other is the same literal quoted in that test's own
+    # docstring. Both are kept byte-for-byte `"registry"` ON PURPOSE — that is
+    # the spelling PROD resolves and the exact shape the doubled-predicate P1
+    # mis-counted — so they are declared here rather than renamed to a `test_*`
+    # namespace, which would make the pin exercise a spelling no prod lane uses
+    # (and the docstring `grep` a literal it no longer explains). The guard greps
+    # file TEXT, so it cannot tell this from a real construction; MEASURED:
+    # without this row it reds on BOTH of those matches — the docstring sample
+    # and the `registry = 'def f():\n    return _make_sdk(namespace="registry")'`
+    # string — → `test-slow (e)` → python-ci-gate, which is how it was found.
+    # ⛔ NO LINE NUMBERS, deliberately (#10723 review F3): an earlier revision
+    # cited them and they were stale by the very next head, because both matches
+    # ride the END of a file that keeps growing. Name the construct, not the
+    # line — the same rule `tortoise/mcp_auth.py`'s anchors now follow.
+    "test_10047_record_every_lane.py": {"registry": "synthetic-source"},
     # #7677: the retry-idempotency tests drive REAL org creation through the
     # registry control plane — `_make_sdk(namespace="registry")._get_registry()`
     # is the same construction the endpoint under test uses, and the behaviour
@@ -161,6 +184,13 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     "test_acl_graph_users.py": {"registry": "prod-coupled"},   # C4 #2113 — team seeding via _make_sdk(namespace="registry")
     "test_delivery_tenancy.py": {"registry": "prod-coupled"},  # C6 #2115 — registry seeding in _spine_env
     "test_tenancy_spine.py": {"registry": "prod-coupled"},   # C5 #2114 — registry seeding in _spine_env
+    # #8906: the new door-level suite mirrors `test_tenancy_spine`'s seeding — the
+    # literal IS the namespace prod's control plane resolves
+    # (`hosted_api._make_sdk(namespace="registry")`), so a `test_*` rename would
+    # seed a graph the auth resolver never reads and every arm would pass over an
+    # empty registry. `db_path` is `tmp_path`-bound, so the shared-graph hazard is
+    # closed by the redirect's per-path derivation, not by a rename.
+    "test_8906_points_gate_counts_write_graph.py": {"registry": "prod-coupled"},
     "test_hosted_volunteer_context.py": {"registry": "prod-coupled"},   # #2103 (W4C) — registry control-plane mint/revoke mirrors test_hosted_auth
     "test_capture_phase_d_dedup.py": {"team-001": "team-identity"},  # #2104 (W5-D) — hosted _make_sdk(namespace="team-001") mirror arm
     "test_capture_loop_responsiveness.py": {"registry": "prod-coupled"},  # #3086 — the capture-writer loop-affinity proof reaches the graph class via _make_sdk(namespace="registry") to record writer-thread affinity
@@ -310,6 +340,20 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     # with the literal restored the file is 25 passed. Same class (and same
     # failure shape) as the `test_quota`/`test_github_connect` entries above.
     "test_9192_tenant_armed_by_request.py": {"registry": "prod-coupled"},
+    # #9567: the allowance resolver reads the org row from the CANONICAL
+    # control-plane namespace PROD code resolves (`hosted_api._make_sdk(
+    # namespace="registry")`, hosted_api.py:1783), and these three fixtures
+    # seed the `:Team` row the resolver then reads back. The literal IS the
+    # namespace the code under test resolves — same `prod-coupled` class as
+    # test_quota / test_metering_period_window / test_github_connect beside it.
+    # A `test_*` rename would seed `test_..._registry_tortoise` while the
+    # resolver reads `registry_tortoise`: the seed would land on a graph
+    # nothing reads, so the fixture would pass over an EMPTY row and the
+    # allowance lookup would silently take its "no record" branch instead of
+    # the seeded one. Renaming here is the vacuous-pass shape, not a fix.
+    "test_agent_ops_pack.py": {"registry": "prod-coupled"},
+    "test_domain_validators.py": {"registry": "prod-coupled"},
+    "test_vocab_gating_callers_5163.py": {"registry": "prod-coupled"},
 }
 
 # ── ROUTED_SELECT_GRAPH_SITES (cycle-6 P2-10) ───────────────────────────────

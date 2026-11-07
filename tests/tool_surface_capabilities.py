@@ -264,13 +264,18 @@ TENANT_SCOPED_LABELS: frozenset[str] = frozenset({":Graph"})
 # cannot host a "missing" arm here.
 NON_SDK_WRITER_TOOLS: frozenset[str] = frozenset({
     "tortoise_session_capture", "tortoise_graph_set_recording",
-    "tortoise_onboarding_demo_create", "tortoise_onboarding_seed",
+    # #4282 Phase 3.2 removed `tortoise_onboarding_demo_create`,
+    # `tortoise_onboarding_seed` and `tortoise_onboarding_github_connect` from the
+    # served registry (the dropped `run_onboarding` container, owner ruling
+    # 2026-09-22), so their empty bindings are no longer unchecked here — the
+    # import-time orphan arm in `tests/test_tool_registry.py` refuses a member
+    # that names no served tool.
     # #3540: RETIRED-but-SERVED. `RETIRED_USE_INSTEAD` hides these two from
     # `list_tools` and redirects the name, but both still resolve and still
     # serve a write, so they belong here for as long as they resolve — dropping
     # them would leave a served writer's empty binding unchecked (#3883).
     "tortoise_onboarding_session_recording",
-    "tortoise_onboarding_github_connect", "tortoise_onboarding_github_index",
+    "tortoise_onboarding_github_index",
     # #3540 ruling B: the consolidated source-management operation — its write
     # happens through hosted_api helpers (index job / onboarding state), so it
     # is an empty-binding writer here. It deliberately does NOT tear the GitHub
@@ -282,8 +287,13 @@ NON_SDK_WRITER_TOOLS: frozenset[str] = frozenset({
     "tortoise_operator_action",
 })
 NON_SDK_READ_TOOLS: frozenset[str] = frozenset({
-    "tortoise_overview", "tortoise_get", "tortoise_onboarding_state",
-    "tortoise_onboarding_github_status",
+    # #4282: the `graph_overview` container. It dispatches per `section` to the doors it
+    # absorbed, so it binds no single SDK method — the same shape `tortoise_overview` had
+    # before it retired into this container.
+    "tortoise_graph_overview",
+    # `tortoise_overview` is RETIRED into the container above, not gone: the #3883 shim
+    # still resolves it, so its empty binding is still checked here.
+    "tortoise_overview", "tortoise_get",
     # #4035: handler-served reads (declaration corrected to sdk_method="")
     "tortoise_packs_list", "tortoise_entity_profile", "tortoise_analyze",
     # #3904: handler-served read (navigation.tortoise_traverse on sdk._get_proj())

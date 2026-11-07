@@ -51,6 +51,9 @@ score    = PARTIAL(24 of 500) — a complete sample of a sample, never presented
 | `points_off_neutral` = `points_moved_off_neutral` | 185 |
 | `points_off_neutral_unread` / `points_moved_off_neutral_unread` | **0 / 0** (same disclosure for the two contribution sums — a partial 185 is not read as a complete one) |
 | `point_coverage` | `2,696 / 27,608 = 0.0977` — a **floor** on claim coverage (see the two limits below), never quoted as claim coverage |
+| `points_substrate` / `belief_eligible_total` | **UNKNOWN** (`null`, `_unread: 24`) — this run predates #10493, so no question measured the eligibility population. Not zero: the run never read it |
+| `belief_eligible_with_ep` / `belief_eligible_unmeasured` | **UNKNOWN** (`null`, `_unread: 24`) — same reason |
+| `belief_eligible_ratio` | **UNKNOWN** (`null`) — withheld, because a ratio over a population nobody read is the fabricated figure the `_unread` companions exist to prevent |
 
 ### Per question type
 
@@ -83,10 +86,29 @@ Two honest limits on that 10%:
 
 1. It is a **floor**, not a claim-coverage figure. `_COUNT_POINTS_TOTAL` counts every non-operator
    `Point`, and the v2 ingest also writes *episodic turn points* and *session-transcript chunks*,
-   which are not claims and can never carry EP state. A claim-only denominator does not exist as a
-   cell today — which is why the probe publishes the ratio as **`point_coverage`**, never
-   `claim_coverage`: a key named for a denominator nobody measured is how 9.77% gets quoted as
-   "claim coverage" one lane later (#10137 review, P2).
+   which are not claims and can never carry EP state. The probe therefore publishes the ratio as
+   **`point_coverage`**, never `claim_coverage`: a key named for a denominator nobody measured is how
+   9.77% gets quoted as "claim coverage" one lane later (#10137 review, P2).
+
+   ⚠️ **ERRATUM (2026-11-03).** This item used to end *"a claim-only denominator does not exist as a
+   cell today"*. That is **no longer true**. It was true when written (2026-10-31, `7adf5cea9` —
+   neither `points_substrate` nor `belief_eligible_*` existed in the tree) and stopped being true
+   ~6 h later, when #10493 (`d2c3b08b1`, merged 2026-11-01) added `points_substrate` /
+   `belief_eligible_total` / `_with_ep` / `_unmeasured` to every per-question manifest
+   (`tools/longmem_eval/ep_activation.py`) and `belief_eligible_ratio` to the posture summary
+   (`tools/longmem_eval/measurement_posture.py`).
+   The belief-eligible denominator exists. What did **not** carry it was this bundle's probe — its
+   `cells` block is an allow-list, and the new cells were never added to it (#10493's own *residual
+   1*, closed 2026-11-03). `census.json` now carries the nine keys as **UNKNOWN**: the five value
+   keys (`points_substrate`, `belief_eligible_total`, `belief_eligible_with_ep`,
+   `belief_eligible_unmeasured`, `belief_eligible_ratio`) are `null`, and the four `_unread`
+   companions are `24` — because the 24-question run predates #10493 and its
+   manifests never measured them — **not zero**,
+   and not obtainable by re-probing this run: the cells are read off the manifests, and these
+   manifests never carried them. The next **post-#10493** run through `probes/census.py` emits the
+   real values per question. The floor beside it is unchanged and still published: the two ratios
+   answer different questions (whole-graph coverage vs coverage of the population that can actually
+   carry a belief).
 2. `factor_edges = 0` while `operators = 1,710`: operators are minted, but none is a **direct
    claim↔claim IMPL/NAND**. Which point pairs the operators do connect is not measured here.
 
@@ -107,6 +129,14 @@ Two honest limits on that 10%:
   `points_off_neutral`, `points_moved_off_neutral`). Indicator (a) is satisfied by publishing the
   ratio **with** those cells — which is what this artifact does.
 
+**Errata discipline.** `census.json` is a run's artifact, so its measured cells are never edited. The
+nine `points_substrate` / `belief_eligible_*` keys were APPENDED on 2026-11-03 with values **derived
+by the repo's own aggregator** (`measurement_posture.summarize_belief_activation`) over this
+artifact's committed `per_question` rows — which is why the value keys read `null` while their
+`_unread` companions read `24`: that run never measured the eligibility population, so neither side
+carries a number. No pre-existing cell was touched,
+and `test_committed_census_rederives_its_own_aggregate` re-derives all 28 from the committed rows.
+
 **Disclosure of what this artifact can and cannot re-derive:** `census.json` carries the run totals
 and the per-question cells but not the per-question graphs, and the corpus cache lives outside the
 repo. The **aggregate `cells` ARE re-derived from the committed `per_question` rows** —
@@ -124,8 +154,11 @@ still needs that re-run. ⚠️ It is registered in the NON-GATING `on_demand` e
 merge.
 
 - The issue's **open owner decision** ("should `activated` additionally require contribution?") gains
-  data: every question here has `questions_off_neutral == 1` and `points_moved_off_neutral > 0`, so
-  on this sample the stricter bar would not change any question's state. It would still be a re-cut
+  data: all 24 questions are themselves counted in `cells.questions_off_neutral` (24, i.e. 4 in each
+  of the six question types) and every one of the 24 rows carries `points_moved_off_neutral > 0`, so
+  on this sample the stricter bar would not change any question's state. The two are different units:
+  `questions_off_neutral` counts QUESTIONS while `points_moved_off_neutral` counts POINTS, so neither
+  can be read as a per-question value of the other. It would still be a re-cut
   of #8486's recorded disclosure bar, so it stays an owner decision — not taken here.
 
 ## Reproduce
@@ -146,19 +179,64 @@ PYTHONPATH=. python docs/evidence/10137-corpus-ep-census/probes/census.py /tmp/1
 
 Measured 2026-10-31 on `main@eac49c0dd9aababd01016325a34a327481dd006c`.
 
+> **⚠️ These cells PREDATE the operator-promotion fix (#10137).** `activate_beliefs`
+> used to promote only operators incident to a Point promoted **in the same pass**
+> ("`c.id IN <draft ids>`"), so a draft operator whose endpoints were *already*
+> live was promoted by nothing and stayed out of the factor graph for ever. That
+> fix landed after this measurement, and these numbers were NOT re-measured.
+>
+> They should nevertheless be unchanged, and the reason is worth stating because
+> it is also the reason this sample could not have found the bug: this run was a
+> **fresh single-pass ingest per question**, so every claim was `draft` before
+> phase 1a promoted it, and every operator the ingest minted was incident to one
+> of those claims. On that shape the two candidate sets coincide. What *would*
+> move the numbers is an operator minted over an **already-live** claim — i.e. a
+> **resumed / partial ingest**, which this pre-registered fresh sample contains
+> none of (`ingest_v2` skips a point it already wrote but still writes the
+> operator over it). Note what the old incident query could NOT reach, because it
+> is narrower than "no `:Point` target": that query matched
+> `(o)-[:IMPL|NAND]->(c:Point)`, and the source is written as an outgoing edge too
+> (`idx:0`), so a promoted draft SOURCE reached it exactly as a target did — but
+> a part/whole (`composedOf`/`decomposesInto`/…) operator has `:Point` endpoints
+> reachable through NO such edge, its edges being `hasPart` (`sdk.py:22396`),
+> so the old query could not reach it in any pass, and the new sweep promotes it
+> (the engine's GATE would admit it too, but the engine has no graph-wide sweep,
+> so here the sweep is the only route). The same goes for an operator whose
+> endpoint is a `:Subject`/`:Object`/`:Event` rather than a `:Point`: the deleted pattern
+> required `(c:Point)` and the new read is label-wide (#7853), so that shape is
+> newly reachable too — though there the sweep can be the ONLY promotion route,
+> since `promote_point` cannot promote a non-`:Point` at all. `ingest_v2` mints
+> none of these — its operator loop keeps `op_type` to `IMPL`/`NAND` and every
+> endpoint is a point it wrote (`ingest_v2.py:401-404`) — so this sample contains
+> neither shape, nor the resumed-ingest shape. Treat these cells as pre-fix
+> values until a re-cut says otherwise.
+
+The cells' line citations carry a scope note of their own.
+
+> **Line citations below are into the MEASUREMENT commit** —
+> `main@eac49c0dd9aababd01016325a34a327481dd006c`, the tree this run was taken
+> on (stated at the end of the Reproduce block). `tools/longmem_eval/run.py` has
+> drifted since, so a `run.py:<line>` here may point elsewhere on today's `main`
+> while being exactly right for the run it documents. Re-resolve by SYMBOL
+> (`run.py::outcomes_to_report`, `…::_activate_beliefs_for_question`) before
+> treating a mismatch as a defect — and do not "fix" these numbers against a
+> tree the measurement was never taken on.
+
 ### Provenance note (why the cells come from a checkpoint, not a report)
 
 All 24 questions completed (`failed = 0`), then the runner's watchdog aborted the *finalisation*
 (`RUN ABORTED — degraded_aborted: leg_dead`) on a box at load 10–55, so no `*.report.json` was
 written. The census is therefore derived from the run's own checkpoint via the runner's own
-aggregation function — the same code path the report uses (`run.py:5693`) — not a second
-implementation. `probes/census.py` is that call, and it reads either shape.
+aggregation function — the same code path the report uses (`run.py`'s call to
+`measurement_posture.summarize_belief_activation`) — not a second implementation.
+`probes/census.py` is that call, and it reads either shape.
 
 ### The per-question block, on the REPORT path (the shape a finalised run writes)
 
-The checkpoint write has always carried each question's belief manifest
-(`run.py:5115-5116`), which is why the cells above could be audited row by row. The **report's**
-outcome projection is an explicit whitelist and did **not** carry it, so reading a report gave a
+The checkpoint write has always carried each question's belief manifest (`run.py`, where the
+checkpoint row spreads `belief_activation` in when it is not `None`), which is why the cells above
+could be audited row by row. The **report's** outcome projection is an explicit whitelist and did
+**not** carry it, so reading a report gave a
 correct aggregate (`methodology.measurement_posture.activation`) above **192 of 192 null**
 per-question cells — the ordinary path a future run takes was the one that lost the column, and a
 null `ep_ran` / `points_with_ep` in such a block is indistinguishable from a measured one
@@ -178,9 +256,15 @@ null `ep_ran` / `points_with_ep` in such a block is indistinguishable from a mea
   claim a source it never read. A *partial* population still publishes its rows, and
   `per_question_unread` says how many questions inside them have an **unread** census — the same
   rule, and the same predicate (`measurement_posture._UNKNOWN_PER_MANIFEST_KEYS`, coerced through
-  the module's own `_optional_int`, which refuses a `bool` or any non-numeric cell), the summed
-  cells use for `<key>_unread`, so the two disclosures can never disagree (#10137 review, P2/P3: a
-  manifest PRESENT is not a census READ — the producer's fail-open shape
+  the module's own `_optional_int`, which refuses a `bool` or any non-numeric cell), the four
+  pre-#10493 summed cells use for `<key>_unread`. It does **not** cover the four `points_substrate` /
+  `belief_eligible_*` sums: #10493 keeps those in their own `_UNKNOWN_PER_MANIFEST_KEYS_10137` tuple
+  on purpose, so that adding a cell can never retroactively mark a pre-#10493 checkpoint's measured
+  census as unread. The two disclosures therefore CAN disagree, and on this artifact they do —
+  `per_question_unread: 0` beside `points_substrate_unread: 24` — because each is true of its own
+  key set: every question's four pre-#10493 cells were read, and no question read the eligibility
+  population. Reading one as the other's verdict is the misreading the separate tuple prevents
+  (#10137 review, P2/P3: a manifest PRESENT is not a census READ — the producer's fail-open shape
   `{"ep_ran": false, "error": …}` carries a manifest and no cells, and used to count as read; and
   `operators: true` is not a count).
   Each row also carries that manifest's `error`, so the reason a census is missing is readable per
@@ -190,12 +274,12 @@ null `ep_ran` / `points_with_ep` in such a block is indistinguishable from a mea
   `summarize_belief_activation` only ever sees `outcomes`, so a checkpoint from a *crashed* run —
   the normal case, and the case this very bundle came from — would publish
   `questions_with_ep / questions = N/N = 1.00` over its survivors with the ablation invisible. The
-  probe therefore reads the input's own failure list (`run.py:2797` writes `failures`; a report
-  carries both the list and `n_failed`, `report.py:2792-2798`) and publishes `questions_failed`
-  beside `questions_in_run` — **the ratio's own denominator plus the questions it excludes**, which
-  is what makes `questions_in_run − questions == questions_failed` hold by construction rather
-  than by luck. The failure ids are counted as **distinct ids over both lists**, never
-  `len(outcomes) + len(failures)`: a qid completed by one worker and failed by another lands in
+  probe therefore reads the input's own failure list (`run.py` writes the `failures` key into the
+  checkpoint; a report carries both the list and `n_failed`, `report.py:2792-2798`) and publishes
+  `questions_failed` beside `questions_in_run` — **the ratio's own denominator plus the questions it
+  excludes**, which is what makes `questions_in_run − questions == questions_failed` hold by
+  construction rather than by luck. The failure ids are counted as **distinct ids over both lists**,
+  never `len(outcomes) + len(failures)`: a qid completed by one worker and failed by another lands in
   both (`report.py:1407-1410`), and summing the lengths published a 2-question population as a
   3-question run. And the total is never a *second* count of the population: the runner's own
   denominator counts rows while the ids are distinct, so a duplicate-`question_id` input published a
@@ -209,8 +293,17 @@ null `ep_ran` / `points_with_ep` in such a block is indistinguishable from a mea
   `tests/longmem_eval/test_ep_census_10137.py::test_census_probe_*`.
 
 `census.json` below was written by the *checkpoint* path, so it carries `per_question_source:
-"outcome.belief_activation"` and `per_question_unread: 0` — measured on every one of the 24
-questions, which is verifiable from the rows themselves (no `null` in any of the seven COUNT cells
-across the 24 questions; the eighth cell, `no_op_reason`, is `null` in all 24 because no question
-no-op'd — that null is the measured value, not a missing one; the ninth, `error`, is `null` for the
-same reason).
+"outcome.belief_activation"` and `per_question_unread: 0` — every one of the 24 questions produced an
+outcome, which is verifiable from the rows themselves. The rows carry **thirteen** value cells, and
+"measured" is a per-cell question, not a per-row one:
+
+- the **seven COUNT cells** (`operators`, `factor_edges`, `points_with_ep`, `points_unmeasured`,
+  `points_off_neutral`, `points_moved_off_neutral`, `ep_ran`) are non-`null` in all 24 rows;
+- `no_op_reason` is `null` in all 24 because no question no-op'd — that null is the measured value,
+  not a missing one, and `error` is `null` for the same reason;
+- the **four `points_substrate` / `belief_eligible_*` cells are `null` in all 24 rows, and those
+  nulls are NOT measured** — this run predates #10493, so no question ever read the eligibility
+  population. Each carries its `_unread: 24` companion, and that companion is the only thing
+  separating "we looked and the answer was nothing" from "nobody looked"; `belief_eligible_ratio`
+  is therefore withheld rather than published over an unread denominator. See the cell table
+  above, `cells.belief_eligible_total` and `census.json`'s own rows.

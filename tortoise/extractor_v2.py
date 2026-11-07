@@ -85,8 +85,8 @@ S4's removal relies on (*"did we account for everything the narrative said?"*),
 and S2.3 CLASSIFY is the fold's other half as this record counts it. Both
 stages are present in the tree (``_vet_gate.apply_vet``,
 ``kind_classifier.classify_items``) and both are wired into
-``extract_session_v2`` behind flags that DEFAULT OFF (``TORTOISE_VET``,
-``TORTOISE_CLASSIFY_LATER``), so on the default arm neither has run at all.
+``extract_session_v2`` behind flags: ``TORTOISE_CLASSIFY_LATER`` DEFAULTS OFF, and
+``TORTOISE_VET`` too — but since #10996 S2.2's mechanical half defaults ON.
 Presence is not sufficiency either: the fold's REMEDY half is unimplemented in
 both.
 
@@ -156,6 +156,8 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from . import failure_policy as _failure_policy  # #5095: S3's failure policy (§4.4 G3)
+from . import identity_hold as _identity_hold  # #10997: S3's HOLD
+from . import referentiality as _referentiality  # #11021: the referentiality test
 from . import value_gate as _value_gate  # #4899: the S2.2b identifier-only predicate
 from . import vet_gate as _vet_gate  # #5005: S2.2 VET (stdlib-only module)
 from ._gate_memo import GateMemo
@@ -1715,6 +1717,7 @@ OUTPUT_CONTRACT = """{
     {"src": str, "dst": str, "op_type": "IMPL|NAND"},
     {"src": str, "dst": str, "op_type": "MITIGATES", "target_edge": {"src": str, "dst": str, "op_type": "IMPL"}, "strength": 0.1|0.3|0.5}
   ],
+  "relations": [{"src": str, "dst": str, "predicate": "IMPL|NAND|addresses|supports|refutes|causes|mutuallySupportive|mutuallyExclusive|hasPart|dependsOn|transacts|related|ownedBy|managedBy", "semantics": "addresses|supports|refutes|causes|mutuallySupportive|mutuallyExclusive|hasPart|dependsOn|transacts|related|ownedBy|managedBy|null"}],  # S5 Job 1 (#10999): an ENTITY↔ENTITY relation the NARRATIVE itself states (e.g. "the retry storm causes the deadline slip"). src/dst are entity NAMES that must ALSO appear in entities[] above — spell one exactly as emitted (a case/whitespace/Unicode-fold-only variant resolves to the emitted spelling); an endpoint is never invented here, and one this emission does not produce is DROPPED. `predicate` is an ALLOWLIST spelled out in full above: those verbs are accepted verbatim, plus any verb a loaded pack declares as a relation. An invented verb is DROPPED. `semantics` is the optional Layer-2 meaning (ONTOLOGY §8) — same vocabulary; a token outside it is dropped from the RECORD (the relation survives). Emit only what the story asserts: a per-item aggregate of coincidences is not a relation.
   "chain_notes": [{"chain": str, "finding": str, "action": "repaired|warned", "note": str}],
   "link_before_create": [{"searched_for": str, "found": bool, "note": str}],
   "retractions": [{"content": str}|"id": str]  # E7: explicit withdrawals — emit when the conversation RETRACTS a previously-stated fact (additive; omit when nothing is withdrawn)
@@ -2134,7 +2137,7 @@ def render_s2_prompt(master: dict | None = None, *,
         core_only = _classify_later_enabled()
     transcript = _render_source_transcript(edus)
     tmpl = S2_TMPL_CORE_ONLY if core_only else S2_TMPL
-    contract = OUTPUT_CONTRACT_CORE_ONLY if core_only else OUTPUT_CONTRACT
+    contract = _prompt_contract(core_only=core_only)
     chains = "" if core_only else _render_chains(master)
     # The pack-namespace list is DYNAMIC — derived from the INSTALLED packs
     # (master["pack_kinds"] keys), never hardcoded (epistemic-team is not
@@ -3098,6 +3101,77 @@ def _candidate_covered(search: dict, entity_type: str, raw: str) -> bool:
     return isinstance(ran, list) and key in ran
 
 
+def _hold_endpoint(hold_store: object | None, held: list[dict], *,
+                   content: str, where: str, session_ref: str,
+                   operator: dict | None, ref: str | None = None) -> dict:
+    """Record ONE unresolved operator endpoint as HELD — with its edge (#10997).
+
+    The record keeps the OPERATOR, not just the endpoint, because `#2552` says the
+    disposition must hold *the edge together with its endpoint*: an endpoint held
+    alone would trade a duplicate for a lost operator edge, and I2 forbids that
+    trade. The record is appended to the run's `held` list **before** any store
+    is written, so a store that cannot be written still reports the hold instead
+    of losing it (`persisted: False`) — the run's own report is the floor.
+
+    ⛔ The store is OPTIONAL, and its absence is stated rather than smoothed over:
+    a held item nobody persists cannot be carried forward, which is a real
+    (loudly reported) limitation of the caller, never a silent drop.
+    """
+    rec: dict = {
+        "kind": _identity_hold.HOLD_ENDPOINT,
+        "content": content,
+        # ⛔ The ORIGINAL ref, kept beside the clamped `content` (#10997 review
+        # P1). `_write_span` truncates at `_MAX_CONTENT`, but the operator that
+        # travels with the record still names the FULL ref — a drain that
+        # re-minted from `content` would register a key the restored operator
+        # cannot resolve, so the prune would discard the Point and the item
+        # would be resolved into nothing. `content` stays the KEY (it is what the
+        # entity/value guards were evaluated against); `ref` is what gets minted.
+        "ref": str(ref or content),
+        "where": where,
+        "session_ref": session_ref,
+        "operator": dict(operator or {}),
+        # the same edge in the store's list form, so the run's own `held` and the
+        # persisted record read identically (#10997 review round 4, P1)
+        "operators": [dict(operator)] if operator else [],
+        "persisted": False,
+    }
+    # ⛔ The run's `held` list is an IDENTITY report, and `stats.held` is read off
+    # it — so every record carries the content-addressed key even when no store
+    # is supplied (#10997 review round 2, P2). Keyed on `where` instead, two
+    # operators naming ONE ref counted as two held identities in exactly the
+    # path that ships (`hold_store=None`), and the epic's "held count returns to
+    # zero" census would have read an occurrence count. The key is a pure
+    # function of the normalised text, so the census is the same either way.
+    rec["key"] = _identity_hold.hold_key(_identity_hold.HOLD_ENDPOINT, content)
+    held.append(rec)
+    if hold_store is None:
+        return rec
+    try:
+        stored = hold_store.hold(
+            _identity_hold.HOLD_ENDPOINT, content, where=where,
+            session_ref=session_ref, operator=rec["operator"], ref=rec["ref"])
+        rec["persisted"] = True
+        rec["reopened"] = bool(stored.get("reopened"))
+        # ⛔ AN ALREADY-RESOLVED KEY IS NOT A HOLD (#10997 review round 4, P2).
+        # `hold()` refuses to reopen a RESOLVED key and returns the record it
+        # already has — carrying the id it minted on an earlier resolved run.
+        # Reporting that as "held, and carried in the hold store" was three false
+        # signals at once: the caller then dropped the operator on the ordinary
+        # "src/dst did not resolve" arm, the census counted a candidate that was
+        # committed turns ago, and the epic's own acceptance ("the held count
+        # returns to zero") became unreachable — every ambiguous run after a
+        # resolution re-inflated it by one. The store already knows the answer for
+        # a completed key, so the caller wires the ref to it (the idempotent
+        # consumer's "return the recorded outcome" rule) and holds nothing.
+        if not rec["reopened"] and stored.get("state") == _identity_hold.HOLD_RESOLVED:
+            rec["already_resolved"] = True
+            rec["minted_id"] = stored.get("minted_id")
+    except Exception as exc:  # a store failure must not lose the hold itself
+        rec["persist_error"] = f"{type(exc).__name__}: {exc}"
+    return rec
+
+
 def _identity_report(search: dict, candidates: dict) -> dict:
     """§4.4 G3's run-level report — how much of this run's identity is unresolved.
 
@@ -3517,7 +3591,7 @@ def render_s4_prompt(story: str, search: dict, embed_list: dict,
         tmpl = S4_TMPL_CORE_ONLY_DELTA if core_only else S4_TMPL_DELTA
     else:
         tmpl = S4_TMPL_CORE_ONLY if core_only else S4_TMPL
-    contract = OUTPUT_CONTRACT_CORE_ONLY if core_only else OUTPUT_CONTRACT
+    contract = _prompt_contract(core_only=core_only)
     chains = "" if core_only else _render_chains(master)
     rendered = _fill_template(tmpl, {
         "master_list": _render_master(master, story, core_only=core_only),
@@ -3580,16 +3654,62 @@ def _merge_key(section: str, item: dict) -> tuple:
                 _norm(str(item.get("op_type"))),
                 _norm(te.get("src")), _norm(te.get("dst")),
                 _norm(str(te.get("op_type"))))
+    if section == "relations":
+        # E4 (#10999): an entity↔entity relation's identity is its
+        # (src, dst, predicate) triple — the same edge stated twice is ONE
+        # relation, and the semantics rides along on the survivor. The
+        # ENDPOINTS are compared EXACTLY (stripped): `_norm` lowercases, and
+        # two entities whose names differ only in case are distinct Layer-1
+        # Objects (`execute_embed` dedupes on `(name, kind)`), so folding them
+        # here merged two DIFFERENT edges before S5 ever saw them and the loss
+        # was reported as `relations_dropped == 0`. The PREDICATE is folded —
+        # `IMPL`/`impl` is one verb, and S5 records the DECLARED spelling.
+        #
+        # ⛔ #11333: a mapping that carries NONE of the three fields is a
+        # MAPPING OF RELATIONS, not a triple — keying it like one made every such
+        # item collide on `("relation", "", "", "")`, so two mapping items in one
+        # section collapsed to the first with `relations_dropped == 0` (an
+        # arrival-dependent, uncounted loss: judged entry by entry as the whole
+        # section, one blob beside a usable list). Key it by its CONTENT instead;
+        # S5's own candidate rule is what judges it.
+        if not ({"src", "dst", "predicate"} & set(item)):
+            return ("relation-mapping",
+                    json.dumps(item, sort_keys=True, default=str))
+        return ("relation", str(item.get("src") or "").strip(),
+                str(item.get("dst") or "").strip(),
+                _norm(item.get("predicate")))
     if section == "chain_notes":
         return ("chain", _norm(item.get("chain")), _norm(item.get("finding")))
     if section == "link_before_create":
         return ("lbc", _norm(item.get("searched_for")), bool(item.get("found")))
+    if section == "mentions":
+        # #11021: a mention's identity is the (surface, claim) pair — the same
+        # surface on two different claims is two records, and one surface twice
+        # on ONE claim is one.
+        return ("mention", _norm(item.get("surface")),
+                _norm(str(item.get("claim_ref") or "")))
     if section == "retractions":
         # E7 (D5): retraction refs dedupe by (content | id) — S4's
         # graph-informed version wins on collision (E4 union semantics).
         return ("retraction", _norm(str(item.get("content") or "")),
                 _norm(str(item.get("id") or "")))
     return (section, json.dumps(item, sort_keys=True, default=str))
+
+
+def _merge_mention_records(s2_item: dict, s4_item: dict) -> dict:
+    """Field-wise union of two mentions of the same (surface, claim) — **#11021**.
+
+    The S2-side record is DERIVED (it carries ``rule_id``, the span and the
+    ``kind_guess``); S4's is the model's contract-shaped re-statement
+    (``surface``/``claim_ref``/``quote``). S4 wins on nothing here: it has nothing
+    the derived record lacks, and letting it win erased the rule id and the span
+    (review P1).
+    """
+    out = dict(s4_item)
+    for k, v in s2_item.items():
+        if v not in (None, "", [], {}):
+            out[k] = v
+    return out
 
 
 def merge_embed_lists(s2: dict, s4: dict) -> dict:
@@ -3601,10 +3721,63 @@ def merge_embed_lists(s2: dict, s4: dict) -> dict:
     through by reference — unknown fields ride through untouched (E1/E3).
     None sections and non-dict entries are tolerated (skipped).
     """
-    sections = ("entities", "events", "points", "operators",
-                "chain_notes", "link_before_create", "retractions")
+    sections = ("entities", "events", "points", "operators", "relations",
+                "chain_notes", "link_before_create", "retractions",
+                # #11021: S4 reviews gaps against an index built while the
+                # surface was still an entity, so the channel is re-merged
+                # rather than replaced; a mention S4 omits is PRESERVED.
+                "mentions")
     out: dict = {}
     for section in sections:
+        # A MISTYPED section value (the one-object shape S5 drops and COUNTS)
+        # must reach S5 AS IT ARRIVED, or it is indistinguishable from "no
+        # relations" and the record reports nothing lost. But a mistype never
+        # DISPLACES a usable list from the other side (`#1789 Task 3`: the
+        # section keeps whichever side carries content) — it rides through only
+        # when NEITHER side carries one. S4 wins a mistype-vs-mistype collision.
+        #
+        # ⛔ SCOPED TO `relations`, the ONE section whose S5 consumer tolerates a
+        # non-list. For `points`/`events` a passed-through non-list reaches
+        # `validate_chains`, which concatenates them as lists → `TypeError` →
+        # `execute_embed` raises and its "S5 must NEVER block the pipeline" arm
+        # sets `payload=None`, so NOTHING in the batch commits. The other
+        # sections keep the pre-existing coercion (their malformed-section
+        # census, `_s4_malformed_sections`, still reports the drop).
+        raw_s2, raw_s4 = s2.get(section), s4.get(section)
+        relation_oddities: list = []
+        if section == "relations" and not any(
+                isinstance(raw, (list, tuple)) and raw
+                for raw in (raw_s2, raw_s4)):
+            # An EMPTY list is not a carrier: `s4 = {"relations": []}` is the
+            # normal "no gaps" delta, and letting it count left the S2 mistype
+            # coerced away with `relations_dropped == 0` — the silent loss this
+            # commit exists to close, still live in the commonest shape. The
+            # mistype is drawn from NON-list values only, so an empty list is
+            # never mistaken for one.
+            mistyped = next((raw for raw in (raw_s4, raw_s2)
+                             if raw is not None
+                             and not isinstance(raw, (list, tuple))), None)
+            if mistyped is not None:
+                out[section] = mistyped
+                continue
+        # ── Relations: nothing the union cannot carry as a dict may VANISH ──
+        # Two shapes reach S5 only if they survive this pass: a non-dict ITEM
+        # (`"garbage"`, an array-shaped triple) and a section-level MISTYPE
+        # riding ALONGSIDE a usable list on the other side. Filtering either
+        # one here is the silent loss this section exists to close — a dict
+        # filter over a mistyped mapping yields its KEYS (zero items), so the
+        # whole side vanished and `relations_dropped` stayed 0 with no warning.
+        # They are appended to the union AS ISOLATES and counted by S5's own
+        # census, so there is still exactly one place that reports a drop.
+        if section == "relations":
+            for _raw in (raw_s4, raw_s2):
+                if _raw is None:
+                    continue
+                if isinstance(_raw, (list, tuple)):
+                    relation_oddities.extend(
+                        i for i in _raw if not isinstance(i, dict))
+                else:
+                    relation_oddities.append(_raw)
         s2_items = [i for i in (s2.get(section) or []) if isinstance(i, dict)]
         s4_items = [i for i in (s4.get(section) or []) if isinstance(i, dict)]
         s4_by_key = {_merge_key(section, i): i for i in s4_items}
@@ -3615,6 +3788,15 @@ def merge_embed_lists(s2: dict, s4: dict) -> dict:
             if k in seen:
                 continue                      # S2-side duplicate — first wins
             seen.add(k)
+            if section == "mentions" and k in s4_by_key:
+                # ⛔ #11021: S4's contract-shaped entry is {surface, claim_ref,
+                # quote} — it carries NO rule_id and NO span, so "S4 wins" would
+                # replace a derived record with a provenance-free one. For this
+                # section the two sides are COMPLEMENTARY (the derived record has
+                # the rule and the address; S4 can only add text), so they are
+                # merged field-wise, S2's non-empty fields winning.
+                merged.append(_merge_mention_records(item, s4_by_key[k]))
+                continue
             merged.append(s4_by_key.get(k, item))   # S4 wins on collision; S2 never dropped
         for item in s4_items:
             k = _merge_key(section, item)
@@ -3625,7 +3807,25 @@ def merge_embed_lists(s2: dict, s4: dict) -> dict:
         # included — identity preserved; absent keys stay absent, so the
         # additive E7 ``retractions`` section never fabricates keys)
         if section in s2 or section in s4:
-            out[section] = merged
+            out[section] = merged + relation_oddities
+    # ── #11021: the hold DECISIONS survive the union too ──────────────────
+    # `mention_held` is the surface-level memory the union pass re-holds from
+    # (a hold whose only carrier is an EVENT writes no record, so the record
+    # channel cannot carry the decision). It is not a dict section, so it is
+    # unioned here by surface rather than by `_merge_key`; S2's rule wins on a
+    # collision, and a row the extraction model invented is RE-VERIFIED by
+    # `route_mentions` (`_carried_holds`) before it may hold anything.
+    held: dict[str, str] = {}
+    for source in (s2, s4):
+        for row in (source.get("mention_held") or []):
+            if not isinstance(row, dict):
+                continue
+            _surface = str(row.get("surface") or "").strip()
+            if _surface:
+                held.setdefault(_surface, str(row.get("rule_id") or ""))
+    if held or "mention_held" in s2 or "mention_held" in s4:
+        out["mention_held"] = [{"surface": k, "rule_id": v}
+                               for k, v in held.items()]
     return out
 
 
@@ -3801,6 +4001,50 @@ def _norm(s: str) -> str:
     them and abort the whole union-classify block.
     """
     return re.sub(r"\s+", " ", str(s or "").strip().lower())
+
+
+# ⛔ The cap on a relation field that could NOT be validated against a closed
+# vocabulary (a predicate with the registry unreadable, or `semantics` with the
+# Layer-2 set unreadable). Unverified is not unbounded: these fields are carried
+# as edge properties by the write leg (#11237), so free text of arbitrary length
+# and control characters is exactly the prose surface the channel exists to keep
+# out (#10000).
+_UNVERIFIED_TEXT_CAP = 64
+
+#: The characters the cap above must keep out, in addition to bounding length.
+#: C0 (incl. NUL/TAB/LF/CR), DEL and C1 (NEL, etc.), plus the two Unicode LINE /
+#: PARAGRAPH separators — the bytes/points that turn one edge property into
+#: several when the write leg (#11237) re-parses it (a `splitlines()`-based
+#: re-parse treats U+0085/U+2028/U+2029 as line boundaries exactly as it treats
+#: LF).
+_UNVERIFIED_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
+
+
+def _bounded_unverified(value: object) -> tuple[str, str | None]:
+    """Bound an UNVERIFIED relation field, returning ``(text, correction)``.
+
+    Both halves of what `_UNVERIFIED_TEXT_CAP`'s comment claims: control
+    characters are COLLAPSED TO A SPACE **first**, then the result is capped.
+    Order matters — capping first leaves a control character inside the kept
+    window whenever one arrives early (issue #11333: a 3-char ``"a\\nb"`` was
+    short enough that the cap never fired at all, so the newline reached a
+    record the write leg carries as an edge property, which is the prose
+    surface #10000's P0 exists to keep out).
+
+    `correction` names what was done (``None`` when the value was already
+    well-formed) so the caller's warning can say WHICH — a warning that always
+    says "clamped" hides the control-character case behind a length story.
+    """
+    text = str(value)
+    note: str | None = None
+    if _UNVERIFIED_CONTROL_CHARS.search(text):
+        text = _UNVERIFIED_CONTROL_CHARS.sub(" ", text)
+        note = "control characters replaced"
+    if len(text) > _UNVERIFIED_TEXT_CAP:
+        text = text[:_UNVERIFIED_TEXT_CAP]
+        note = (f"{note}, clamped to {_UNVERIFIED_TEXT_CAP}" if note
+                else f"clamped to {_UNVERIFIED_TEXT_CAP}")
+    return text, note
 
 
 def _clip(value: object, limit: int = 60) -> str:
@@ -4202,11 +4446,32 @@ def _value_form_outside_judged(token: str) -> bool:
 #: recoverable without a second pass over the text.
 _UNIT_EQUIV = {
     "ms": "ms", "msec": "ms", "msecs": "ms", "millisecond": "ms",
-    "milliseconds": "ms",
+    "milliseconds": "ms", "millisec": "ms", "millisecs": "ms",
     "s": "s", "sec": "s", "secs": "s", "second": "s", "seconds": "s",
     "min": "min", "mins": "min", "minute": "min", "minutes": "min",
     "h": "h", "hr": "h", "hrs": "h", "hour": "h", "hours": "h",
+    # The rest of the DURATION family (#10360 residual (d)). `_UNIT_WORDS` is
+    # what makes a unit FUSABLE; this table is what makes it COMPARABLE, and a
+    # unit the engine does not FUSE binds a value with NO unit, which
+    # `_value_identity_matches` reads as the deliberate "one side omits the
+    # unit" tolerance — so `800 seconds` against `800 milliseconds` was WRITTEN
+    # as verbatim. Two of the carve-out's OWN examples are that class ("back
+    # under 800 milliseconds", "a ten minute TTL"); the rest of the family is
+    # here because a duration table with a hole in it is how the gap survived
+    # review. `d`/`y` ARE keys here (and in `_UNIT_WORDS`), so an ATTACHED
+    # `3d`/`5y` becomes a COMPARED day/year identity rather than an unmapped
+    # suffix — measured: `3d` against `3 hours` is refused. That is the same
+    # class as `800ms`/`800s`, and the false-accusation direction is pinned by
+    # the spelling controls in
+    # `test_the_carve_outs_own_ADJACENT_time_units_are_judged` (`3 days`/`3 d`).
+    "d": "d", "day": "d", "days": "d",
+    "wk": "wk", "wks": "wk", "week": "wk", "weeks": "wk",
+    "mo": "mo", "month": "mo", "months": "mo", "mos": "mo",
+    "y": "y", "yr": "y", "yrs": "y", "year": "y", "years": "y",
     "%": "%", "percent": "%", "pct": "%",
+    # `mile`/`miles` beside the `mi` symbol: `20 miles` against `20 km` is the
+    # same rewrite `20 mi` against `20 km` is refused for (residual (d)).
+    "mile": "mi", "miles": "mi",
     # every unit `_value_bindings` can FUSE (`_UNIT_WORDS`) is spelled here, so
     # no fused unit falls through to the unmapped branch and is read as "no
     # unit" — the review-2 finding: `20 km` vs `20 mi` folded because the table
@@ -4248,9 +4513,9 @@ _KNOWN_UNITS = frozenset(_UNIT_EQUIV.values())
 #: rather than widened here on a guess.
 _MAGNITUDE_PREFIXES = frozenset({"k"})
 
-#: The factor each magnitude prefix denotes. Read ONLY by `_magnitude_agrees`,
-#: which is the whole of what the ambiguity arm is allowed to tolerate: the two
-#: sides must name the SAME number once the prefix is read as x1000.
+#: The factor each magnitude prefix denotes. Read by `_magnitude_agrees` and by
+#: `_composed_identity` — together the whole of what the ambiguity arm may
+#: tolerate: both sides must name the SAME number once the prefix reads x1000.
 #: ⛔ EVERY name in `_MAGNITUDE_PREFIXES` needs a factor here, and the test file
 #: asserts the containment: a prefix with no factor makes `_magnitude_agrees`
 #: return False for everything, so the arm becomes a silent no-op and the false
@@ -4276,6 +4541,100 @@ _MAGNITUDE_PREFIXES = frozenset({"k"})
 #: where the decision lives and reversible by the owner; raised by #10513
 #: review cycles 8 and 10.
 _MAGNITUDE_FACTORS = {"k": 1000}
+
+#: A cheap pre-check for the fusion branch in `_value_bindings`: does this value
+#: token end in a LETTER? It answers only "may a magnitude prefix already be
+#: carried here", and it is deliberately LOOSE — the authoritative
+#: sign/decoration/core reading is `_value_core`'s, inside
+#: `_compose_magnitude_and_unit` (#10360 review cycle 3, P1: a strict pattern here
+#: re-invented a narrower reading than the module's and made the verdict depend on
+#: the sign GLYPH). ⚠️ It does NOT distinguish the bare unit token `k` from a
+#: `k`-suffixed value — `search("k")` matches both. That is harmless (a bare `k`
+#: never arrives as a `value`) and is stated here because an earlier revision of
+#: this comment claimed that distinction, which the regex does not make (#10360
+#: review cycle 4, P3). ⛔ The POSITIVE branch is load-bearing and pinned: forcing
+#: this check to always fire changes `20k k miles` from `20000k` to `20kkiles`,
+#: so the grid test pins that shape instead of leaving the branch untested.
+_MAGNITUDE_TAIL = re.compile(r"[A-Za-z]$")
+
+#: The decoration before a numeral (signs, currency/math symbols) — `Nd` digits in
+#: EVERY script, because `_value_core` folds them to ASCII precisely so the digit
+#: script is invisible (pinned by #10513 cycle 16). ⛔ An ASCII-only class here
+#: refused composition for `２０k`/`٢٠k`, losing the `k` reading and withholding a
+#: truthful point — the "verdict depends on the SPELLING" defect moved from the
+#: unit to the SIGNS and then to the DIGITS (#10360 review cycle 6, P2). A value
+#: token with a LETTER before that run is not a quantity at all: `_value_core`
+#: reads the LAST numeric run of any token, so the identifier-shaped `s4[k` also
+#: returns core `4` + suffix `k`, and composing it multiplied an ARRAY INDEX into
+#: 4000 (measured on this repo's own docs corpus, cycle 5 P3).
+_NUMERIC_HEAD = re.compile(r"^[^\d\w]*[.\d]")
+
+
+def _compose_magnitude_and_unit(value: str, unit: str) -> str:
+    """`20k` + `miles` is 20000 miles — NOT an unknown unit `kmiles`.
+
+    `_value_bindings` fuses a unit WORD that follows a value onto it as one
+    token, and that is right for `20` + `miles` → `20miles`. On a value that
+    ALREADY carries a magnitude prefix it produced `20kmiles`, whose suffix maps
+    to nothing: `_value_core` returned an UNKNOWN unit, the `k` reading was
+    lost, and the pair then diverged on the numeric core (20 vs 20000) —
+    reaching the write boundary and WITHHOLDING a truthful point:
+
+        the fleet drove 20000 miles / the fleet drove 20k miles
+          before: c=('20000', None)      q=('20', 'k')      -> tolerated
+          glued : c=('20000', 'mi')      q=('20', 'kmiles') -> REFUSED
+
+    ⚠️ The shape is not new — it pre-existed for every unit that was already
+    fusable (`5k min` against `5000 min` was refused on the pre-change tree) —
+    so completing the vocabulary would have WIDENED a false-accusation class
+    rather than created it. Composing here closes it for both.
+
+    ⛔ THE SIGN AND DECORATION ARE READ BY `_value_core`, NOT BY A REGEX HERE
+    (#10360 review cycles 2, 3 and 6, all measured). Earlier revisions matched
+    the value token with a private pattern, and each invented a NARROWER reading
+    of "the same number" than the module already has: `\\d+` lost the sign
+    (`-20k miles`) and the leading dot (`_LEADING_DOT`: `.5k miles`); a
+    `[-\u2212]` class then lost every OTHER sign glyph `_reads_as_sign` admits
+    (the whole `Pd` family — en/em dash, hyphen, U+2011 "what PDF and Word
+    emits") and every `Sc`/`Sm` decoration `_value_core` already skips (`~`, `+`,
+    `>`, `<`, `$`, `\u2248`, `\u00b1`); and an ASCII digit class lost every
+    decimal script but Latin (`２０k`, `٢٠k`). Each omission turned a truthful
+    pair into an unknown-unit refusal. The sign/decoration reading is therefore
+    DELEGATED to `_value_core`, the single source of truth for it, and only the
+    HEAD of the token is checked (`_NUMERIC_HEAD`) to keep identifier-shaped
+    text out of the rule.
+
+    ⛔ SCOPE, and why not inside `_value_core` itself: there the same peel would
+    apply to a SINGLE token, where `20kms` is kilometres (`km`+`s`), and peeling
+    `k` would read it as 20000 milliseconds — re-introducing the false accusation
+    this exists to remove (`test_an_unknown_unit_is_a_spelling_not_a_rewrite`
+    pins `20kms`/`20km`). Here we KNOW the unit was a separate word.
+    """
+    if _NUMERIC_HEAD.match(value) is None:
+        return value + unit
+    try:
+        identity = _value_core(value)
+    except (IndexError, ValueError):  # pragma: no cover - defensive
+        return value + unit
+    # ⛔ `_value_core` returns None for a token it deliberately does NOT read —
+    # a SEPARATOR-bearing numeral (`1,200`), which is outside the judged set by
+    # the owner's #2817 ruling ("no separator rule, at all"). Gluing the unit on
+    # unchanged keeps that exclusion intact: refusing here would smuggle the
+    # separator decision back in through the unit.
+    if identity is None:
+        return value + unit
+    sign, core_text, suffix = identity
+    factor = _MAGNITUDE_FACTORS.get(suffix) if suffix else None
+    if factor is None or not core_text or "/" in core_text:
+        return value + unit
+    try:
+        core = Decimal(core_text) * factor
+    except (InvalidOperation, ValueError):  # pragma: no cover
+        return value + unit
+    # `Decimal * int` keeps `20.5k` exact; `f` would render `205000` as
+    # `2.05E+5`, which `_value_core` cannot read as a numeral.
+    return sign + format(core, "f") + unit
+
 
 #: The longest side the #10360 rule will JUDGE, in characters. The quote a point
 #: STORES is clamped to ``_MAX_QUOTE`` (200) and its content to ``_MAX_CONTENT``
@@ -4512,8 +4871,8 @@ def _value_identity_matches(a: tuple[str, str, str | None],
     # The gating is `_magnitude_agrees`: the unit mismatch alone is NOT enough
     # (review P2 — that version wrote `5k`/`6000`), so a numeric rewrite or a
     # dropped sign still reaches the core comparison below and still refuses.
-    if a[2] != b[2] and _MAGNITUDE_PREFIXES & {a[2], b[2]} \
-            and (_magnitude_agrees(a, b) or _magnitude_agrees(b, a)):
+    if a[2] != b[2] and (_magnitude_agrees(a, b) or _magnitude_agrees(b, a)
+                         or _composed_identities_agree(a, b)):
         return True
     if a[0] != b[0] or a[1] != b[1]:
         return False
@@ -5062,8 +5421,9 @@ def _resolve_slot_refs(slots: dict | None, entity_keys: set,
     kind) — a stray slot must never sink the whole commit (the
     operator-drop pattern; Layer-1's (name, kind) gate then never fires on
     S5 output). event slots pass through untouched: they are event-as-
-    content (#1417 B2) and the #1370 write path resolves them against
-    events.
+    content (#1417 B2) and NOTHING resolves them against entities — that
+    binding belongs to the #1417 ``aboutEvent`` work, which
+    ``subject_binding._ROLE_TARGET`` deliberately excludes (#11021 P3-a).
     """
     if not slots:
         return slots
@@ -5234,7 +5594,16 @@ def _apply_entity_resolution(embed_list: dict, resolution_map: dict) -> dict:
     """D3: rewrite the embed list's entity names + about_entities/slot refs
     to the canonical existing name (deep copy — the caller keeps the raw
     S2/S4 list for provenance). Operator endpoints reference CONTENT, not
-    names — untouched."""
+    names — untouched.
+
+    #10999: ``relations[].src/dst`` ARE names, so they are rewritten too. Left
+    out, every narrative relation whose endpoint the graph already knows —
+    i.e. the COMMON real case, since resolution only fires when S3 found
+    candidates — would name the pre-resolution spelling and S5 would drop it
+    as unresolvable. The rename is why the channel must be threaded here and
+    not merely case-folded at the endpoint: casefold absorbs a spelling
+    variant, not a canonicalisation.
+    """
     import copy
     out = copy.deepcopy(embed_list or {})
     name_map = {k: v.get("name", k) for k, v in (resolution_map or {}).items()}
@@ -5256,6 +5625,76 @@ def _apply_entity_resolution(embed_list: dict, resolution_map: dict) -> dict:
                     for s in slots.get(role) or []:
                         if isinstance(s, dict) and s.get("name") in name_map:
                             s["name"] = name_map[s["name"]]
+    # #10999: the entity↔entity channel names its endpoints, so a renamed
+    # entity must be renamed here too (see the docstring). The lookup answers
+    # the SAME question `_resolve_relation_endpoint` asks — exact first, then a
+    # UNIQUE case-insensitive hit over the EMITTED (post-rename) names — so the
+    # two stages cannot disagree about ambiguity: two emitted entities differing
+    # only in case leave the endpoint alone here, and the resolver refuses it
+    # downstream, instead of this stage guessing a node and S5 keeping it.
+    #
+    # Order, and why — each arm below is strictly STRONGER evidence than the
+    # next:
+    #   1. an EXACT emitted spelling: the model named a committed entity;
+    #   2. an EXACT pre-rename key of `name_map`: the model named the entity this
+    #      stage renamed, which is precisely what the map is FOR;
+    #   3. a UNIQUE fold hit over emitted names.
+    # ⛔ (2) before (3) is load-bearing. `emitted` holds POST-rename spellings
+    # only, so an endpoint spelled exactly as a renamed entity's ORIGINAL name
+    # has no exact emitted match and fell through to the fold arm — where a
+    # surviving casefold sibling answered for it, attributing the edge to the
+    # WRONG node and reporting it as `relations_dropped == 0` with no warning.
+    # An exact key in `name_map` is stronger evidence than a fold against a
+    # DIFFERENT entity.
+    emitted = {str(e.get("name")).strip() for e in out.get("entities") or []
+               if isinstance(e, dict) and e.get("name")}
+    # Keyed by BOTH folds — `_endpoint_fold_keys`, the same enumeration S5's
+    # resolver probes, through the same `_endpoint_fold_index`/
+    # `_endpoint_fold_hits` pair — so the rename stage and the resolver cannot
+    # disagree about which
+    # spellings are the same entity (`_norm` collapses a whitespace RUN,
+    # `.casefold()` folds ß/İ; neither is a superset of the other). The rule
+    # lives in ONE place; this stage expresses only its own POLICY over it
+    # (ambiguous → leave the spelling alone so the resolver, not this stage,
+    # refuses it), which is why the two share the hits and not the verdict.
+    folded_emitted = _endpoint_fold_index(emitted)
+
+    def _canonical_endpoint(ref: str) -> str:
+        if ref in emitted:
+            return ref
+        renamed_exact = name_map.get(ref)
+        if renamed_exact is not None and renamed_exact in emitted:
+            return renamed_exact
+        hits = _endpoint_fold_hits(ref, folded_emitted)
+        if len(hits) == 1:
+            return hits[0]
+        if hits:
+            return ref                      # ambiguous: never pick a witness
+        ref_keys = set(_endpoint_fold_keys(ref))
+        renamed = ({name_map[ref]} if ref in name_map else set()) | {
+            new_name for old_name, new_name in name_map.items()
+            if isinstance(old_name, str) and isinstance(new_name, str)
+            and ref_keys & set(_endpoint_fold_keys(old_name))}
+        # A resolved name this emission never produced is not an endpoint —
+        # keeping the original spelling lets S5 drop it, rather than minting a
+        # name the emission does not carry.
+        renamed &= emitted
+        return renamed.pop() if len(renamed) == 1 else ref
+
+    # `relations` is MODEL-emitted, so a mistyped value is reachable (the same
+    # reason `_assemble_relations` treats it as a drop, not a no-op). It
+    # contributes nothing here — it must never raise, because an exception
+    # escapes into `extract_session_v2`'s per-stage guard and silently loses
+    # the WHOLE D3 rename, i.e. exactly the canonicalisation this block exists
+    # to perform.
+    raw_relations = out.get("relations")
+    for rel in raw_relations if isinstance(raw_relations, list) else ():
+        if not isinstance(rel, dict):
+            continue
+        for side in ("src", "dst"):
+            ref = rel.get(side)
+            if isinstance(ref, str) and ref.strip():
+                rel[side] = _canonical_endpoint(ref.strip())
     return out
 
 
@@ -6028,6 +6467,35 @@ def _canonicalise_clocks(content: str) -> str:
 _UNIT_WORDS = frozenset({
     "k", "km", "mi", "m", "kg", "lb", "min", "mins", "h", "hr", "hrs",
     "s", "sec", "secs", "minutes", "hours",
+    # ⛔ THE GAP WAS COVERAGE, NOT THE INVARIANT (#10360 residual (d), measured):
+    # `set(_UNIT_WORDS) <= set(_UNIT_EQUIV)` was already true, but the table
+    # carried `minutes`/`hours` and NOT `minute`, `second(s)`, `hour`, the
+    # millisecond family, or the day/week/month/year and mile spellings — so a
+    # space-separated unit was never FUSED, its value bound with no unit, and the
+    # pair failed OPEN. `back under 800 seconds` against
+    # `back under 800 milliseconds` was written as verbatim.
+    # ⚠️ Completing the set only makes the JUDGED SET uniform: a unit CONVERSION
+    # across one dimension (`90 seconds` vs `1.5 minutes`) reads a DIFFERENT
+    # identity and is judged as a divergence — the verdict the h/min family has
+    # ALWAYS produced (it was already refused before this change). What changed
+    # is the READING, not the verdict, and the committed census contains no
+    # conversion pair, so `refused == 0` is silent on it.
+    "ms", "msec", "msecs", "millisecond", "milliseconds", "millisec", "millisecs",
+    "second", "seconds", "minute", "hour",
+    "d", "day", "days", "wk", "wks", "week", "weeks",
+    "mo", "month", "months", "mos", "y", "yr", "yrs", "year", "years",
+    "mile", "miles",
+    # ⛔ `percent`/`pct`/`%` are deliberately NOT here — the one place a DECLARED
+    # identity is left unfused on purpose (#10360 review cycle 3, P2, measured).
+    # `%` reaches a pair by two routes that do not agree: `20 %` is merged onto
+    # its numeral by the TOKENIZER, but `20k %` is NOT (`['20k', '%']`) and the
+    # attached `20k%` tokenises to `['20k']`, dropping the symbol. Fusing
+    # `percent` composed one side and not the other, so a truthful point was
+    # REFUSED. ⚠️ Leaving it unfused is measured to refuse NOTHING that HEAD did
+    # not already refuse across 144 same-value percent pairs, and the cost is the
+    # missed detection of a `20 percent`→`20 seconds` rewrite — the fail-OPEN
+    # direction. `test_the_unit_vocabulary_is_complete_in_the_direction_that_
+    # matters` pins both halves.
 })
 
 
@@ -6090,8 +6558,31 @@ def _value_bindings(content: str, *,
             # A unit word written apart belongs to the value: "ten km" and
             # "10km" are one quantity, and "2 hours"/"two hours" must agree
             # whichever way the unit is written.
-            value = value + seq[i + 1]
-            i += 1
+            # ⚠️ A BARE MAGNITUDE PREFIX is itself a `_UNIT_WORDS` member, so
+            # `20 k min` fused `k` and then stopped — the unit word AFTER it was
+            # never reached, leaving `('20k')` against `('20000min')` and
+            # refusing a pair that is one value in two spellings (measured: 260
+            # such pairs over a same-value spelling grid, ALL of them this one
+            # shape — #10360 review cycle 2, P1). Consume the prefix first when
+            # the value does not already carry one, then compose below.
+            if seq[i + 1] in _MAGNITUDE_FACTORS \
+                    and _MAGNITUDE_TAIL.search(value) is None:
+                value = value + seq[i + 1]
+                i += 1
+            if i + 1 < len(seq) and seq[i + 1] in _UNIT_WORDS \
+                    and any(c.isdigit() for c in value):
+                # `_compose_magnitude_and_unit` multiplies a magnitude prefix
+                # into the core first, because gluing it raw made `20k` +
+                # `miles` an UNKNOWN unit `kmiles` and withheld the truthful
+                # point (#10360 review cycle 1, P2). No second gate is needed
+                # for the ELEMENTARY case: `_UNIT_WORDS` is asserted a subset of
+                # `_UNIT_EQUIV`, so a plain `20` + `miles` is always a known
+                # unit. ⚠️ A COMPOUND suffix is still unknown and fails OPEN —
+                # `20m` + `miles` → `20mmiles` (#10360 review cycle 5, P3: the
+                # subset invariant does NOT cover the composed suffix, and
+                # fail-open is the intended outcome, not an assertion failure).
+                value = _compose_magnitude_and_unit(value, seq[i + 1])
+                i += 1
         if value is not None:
             if with_following:
                 out.append((anchor, value,
@@ -7023,18 +7514,18 @@ def _marker_scope(content: str) -> tuple[str, ...]:
 
 
 def _scripts(content: str) -> frozenset[str]:
-    """Scripts the claim's letters are drawn from — a language difference in
-    the one form decidable without a model."""
+    """Scripts the claim's characters are drawn from — a language difference in
+    the one form decidable without a model.
+
+    ⚠️ A letter in no known block is `_UNLISTED_SCRIPT` (defined at the end of
+    this module, below the #7949 marker), NOT nothing: contributing nothing meant
+    the claim was never compared for language, so an unlisted script folded (#5329).
+    """
     found: set[str] = set()
-    for ch in str(content or "").translate(_APOSTROPHES):
-        if ch.isascii() and ch.isalpha():
-            found.add("latin")
-            continue
-        cp = ord(ch)
-        for name, lo, hi in _SCRIPT_BLOCKS:
-            if lo <= cp <= hi:
-                found.add(name)
-                break
+    for ch in _fold_unicode(content).translate(_APOSTROPHES):
+        name = _script_of(ch)
+        if name is not None:
+            found.add(name)
     return frozenset(found)
 
 
@@ -7299,9 +7790,9 @@ def classify_consolidation(point: dict, priors: list[dict], *,
                            merge_flagged: bool = False) -> DecisionRecord:
     """D1: the consolidation classifier (no LLM, no graph I/O).
 
-    Maps (candidate point + S3-retrieved priors + entity/attribute context)
-    to one of ADD / UPDATE / NOOP / DELETE in priority order, plus the MERGE
-    (D12/O4) the `merge_flagged` operand admits:
+    Maps (candidate point + S3-retrieved priors + entity/attribute context) to
+    one of ADD / UPDATE / NOOP / MERGE in priority order (⛔ never DELETE: D5,
+    only retractions) plus the MERGE (D12/O4) `merge_flagged` admits:
 
       1. NOOP (identical)   — normalized content equals a prior (the
                               existing exact/content-hash dedup).  A fold is
@@ -8426,13 +8917,482 @@ def _canonicalize_nand_direction(src: str, dst: str, turns: dict) -> \
     return (dst, src)
 
 
+# ── S5 Job 1 (#10999): the batch's own story — entity↔entity relations ───
+#
+# The batch is a UNIT of work with its own narrative: what it was for, what it
+# concluded. Until this channel existed the pipeline could carry what the story
+# STORED (points, entities, events) and never what it CONCLUDED — a relation
+# between two entities that only the narrative states ("the retry storm
+# weakened the deadline rule", "A changed because of B"). Those conclusions are
+# EDGES, which is why the channel is entity↔entity and not more prose: #10000's
+# P0 keeps the narrative TEXT out of the graph (§9.1/D1 — the story lives in
+# Postgres, the graph indexes what was extracted from it), so the one shape of
+# "the story" that may legitimately enter the graph is a typed relation.
+#
+# Three rules, each an indicator on #10999:
+#   1. an endpoint must resolve to an entity THIS emission produced — it is
+#      NEVER minted (an unresolved endpoint is dropped and the warning NAMES
+#      it; this is S5 Job 1's declared fail-OPEN direction — the nodes still
+#      commit, and the reading is re-derivable from the same narrative);
+#   2. the predicate must be a DECLARED relation verb (the same vocabulary
+#      `sdk.create_operator` validates against). An invented verb re-opens
+#      #2766 (`predicate-not-in-allowlist`), so it is dropped, named; and when
+#      the declared set cannot be read at all the relation is KEPT with a
+#      warning — the gate fails open on its own uncertainty rather than
+#      destroying data it could not judge;
+#   3. duplicate triples collapse, first wins, so re-finalising the same batch
+#      cannot duplicate the story.
+
+
+def _declared_relation_predicates() -> frozenset[str] | None:
+    """The relation verbs an entity↔entity relation may carry, or ``None``
+    when the declared set cannot be read (the caller keeps the relation and
+    warns).
+
+    The derivation lives in ONE home — :func:`pack_registry.
+    declared_relation_predicates`, beside ``CORE_OPERATOR_LABELS`` — because
+    ``pack_registry`` records the defect a second derivation IS: "the declared
+    registry, the writer, the validator and the discoverable API each derived
+    the relation vocabulary independently" (#2766). ``sdk.create_operator``
+    reads the same helper.
+
+    ⛔ The pin for that claim is BEHAVIOURAL and lives where the write path can
+    actually be driven: ``test_operator_label_vocabulary.
+    TestWritePathDeclaredness.test_the_write_path_reads_the_ONE_declaration_home``
+    monkeypatches ``declared_relation_predicates`` to a widened set and asserts
+    ``create_operator`` publishes the widened verb — a private re-derivation in
+    the write path would ignore the patch and keep warning, so it reds.
+    ``test_the_declared_vocabulary_has_one_home`` here is the OFFLINE half (S5's
+    gate answers from the same call); it never imports ``tortoise.sdk``, so it
+    alone does not pin the write path — an earlier version of this docstring
+    claimed it did.
+    """
+    try:
+        from tortoise.pack_registry import declared_relation_predicates
+        return declared_relation_predicates()
+    except Exception:
+        return None
+
+
+def _endpoint_fold_keys(name: str) -> tuple[str, ...]:
+    """The TWO folds an endpoint is matched on — both, always.
+
+    ``_norm`` (whitespace-collapsed + lower) is how entity NAMES are compared in
+    ``_merge_key``'s entity/operator arms, and how ``vet_gate._norm`` matches
+    entity references. ⛔ It is NOT a universal identity, and reading it as one
+    re-introduces a fixed defect: this section's own union key builds the
+    ENDPOINT half from ``str(...).strip()`` — EXACT — and ``execute_embed``'s
+    committed-entity dedupe is ``(str(name).strip(), kind)``, also exact. Two
+    spellings differing by a whitespace run are therefore NOT one entity
+    downstream, which is why an endpoint needs this fold HERE instead of a key
+    that already folded it (`_merge_key`'s comment records the wrong attribution
+    that came of folding it there).
+    ``str.casefold()`` is the wider Unicode fold, and it is what
+    ``vet_gate._referenced_entity_names``' relation arm probes (the 'Straße' /
+    'STRASSE' pair on which ``_norm`` and ``casefold`` DIVERGE).
+
+    Neither fold is a superset of the other — ``casefold`` folds the ß/İ pair
+    that ``lower`` does not, and ``_norm`` collapses the whitespace run that
+    ``casefold`` does not — so resolving on one of them alone silently loses a
+    spelling every other stage accepts.
+    """
+    return (_norm(name), name.casefold())
+
+
+def _endpoint_fold_index(names: set[str]) -> dict[str, list[str]]:
+    """Index ``names`` by BOTH folds, the input :func:`_endpoint_fold_hits` reads.
+
+    The ONLY builder of this index. Both stages that resolve an endpoint (D3's
+    rename and S5's assembler) read it through this pair of helpers, so the
+    identity rule has one home and the two stages cannot drift apart about
+    which spellings are the same entity — the wrong-node attribution that
+    survived two review cycles while each stage carried its own copy.
+    """
+    folded: dict[str, list[str]] = {}
+    for name in names:
+        for key in _endpoint_fold_keys(name):
+            bucket = folded.setdefault(key, [])
+            if name not in bucket:
+                bucket.append(name)
+    return folded
+
+
+def _endpoint_fold_hits(ref: str, folded: dict[str, list[str]]) -> list[str]:
+    """Every indexed name sharing EITHER fold with ``ref``, deduped.
+
+    A ``list`` (not a set) for ONE consumed property: the LENGTH. Both callers
+    decide on it — one hit is an unambiguous resolution, two or more is an
+    ambiguity neither stage may guess through — and no caller reads the ORDER
+    (each takes ``hits[0]`` only when ``len(hits) == 1``). The ORDER is not a
+    policy either: the buckets are built by iterating a ``set`` in
+    `_endpoint_fold_index`, so it is stable within a run and NOT across runs
+    (``PYTHONHASHSEED``). The list also keeps a spelling indexed on both folds
+    from being counted twice.
+    """
+    hits: list[str] = []
+    for key in _endpoint_fold_keys(ref):
+        for name in folded.get(key) or []:
+            if name not in hits:
+                hits.append(name)
+    return hits
+
+
+def _resolve_relation_endpoint(name: str, exact: set[str],
+                               folded: dict[str, list[str]]) -> str | None:
+    """The emitted entity an endpoint names, or ``None`` (never a new one).
+
+    Exact name first; then a UNIQUE match on EITHER fold (see
+    :func:`_endpoint_fold_keys`) — an endpoint differing from the emitted name
+    only by case, a whitespace run or a Unicode fold is the same entity every
+    other stage treats it as, and dropping it was "an edge lost to a space".
+
+    An ambiguous match (two entities differing only by one of those) resolves
+    to ``None`` — guessing which one the story meant would attribute an edge to
+    the wrong node, which is worse than the missing edge this channel exists to
+    fix. ``folded`` must be keyed by BOTH ``_endpoint_fold_keys`` of each name."""
+    if name in exact:
+        return name
+    hits = _endpoint_fold_hits(name, folded)
+    return hits[0] if len(hits) == 1 else None
+
+
+def _relation_candidates(value, _depth: int = 0) -> list:
+    """The ONE rule both relation ARRIVALS are judged by (**#11333**).
+
+    One value reaches S5 two ways: as the whole ``relations`` SECTION, or as an
+    ITEM beside a usable list from the other side of the S2∪S4 union
+    (:func:`merge_embed_lists` carries a mistype through as an isolate, so it is
+    counted rather than vanishing). Judging those two arrivals by two rules made
+    the census answer a question about the MERGE SHAPE instead of about the
+    value — the same triple was kept as an item and dropped as a section.
+
+    The rule:
+
+    * ``None`` is ABSENT — zero candidates (the section value's own absent case is
+      handled by the caller before this function runs).
+    * a mapping carrying ANY of ``src``/``dst``/``predicate`` is **ONE**
+      candidate — the realistic mistype (the model emitting the triple where a
+      list of triples was asked for). It is RECOVERED, then validated exactly
+      like any other item: its endpoints still have to resolve to entities this
+      emission produced, so nothing is minted here.
+    * a mapping WITHOUT them is a mapping OF relations, judged entry by entry
+      (``{"a": {…}, "b": {…}}`` is two relations, not one lost blob); an EMPTY
+      mapping loses nothing. Nesting recurses until a triple or a non-mapping is
+      reached, so this arm is recursive, not one-level.
+    * a sequence is its items, and a mapping ITEM is expanded by the mapping arm
+      above — the union's isolate path and a nested mapping both land on the same
+      list.
+    * anything else that is not ``None`` (``""``, ``0``, a bare string, a
+      non-dict entry) is ONE malformed candidate, so the caller's own
+      diagnostics count it exactly once, as before.
+
+    Every candidate that is not a relation mapping is returned AS IS; the
+    caller's item loop names and counts it. This function never drops.
+
+    ``_depth`` bounds the mapping recursion: model output nests a handful of
+    levels at most, and a pathological (or self-referential) mapping must be
+    counted ONCE rather than raising `RecursionError` out of the census — a
+    crash here would surface as a dropped payload, not as the one lost relation
+    it actually is.
+    """
+    if value is None:
+        return []
+    if _depth > 8:
+        return [value]
+    if isinstance(value, dict):
+        if {"src", "dst", "predicate"} & set(value):
+            return [value]
+        out: list = []
+        for entry in value.values():
+            out.extend(_relation_candidates(entry, _depth + 1))
+        return out
+    if isinstance(value, (list, tuple)):
+        out = []
+        for entry in value:
+            if isinstance(entry, dict) and \
+                    not ({"src", "dst", "predicate"} & set(entry)):
+                out.extend(_relation_candidates(entry, _depth + 1))
+            else:
+                out.append(entry)
+        return out
+    return [value]
+
+
+def _assemble_relations(embed_list: dict, payload_entities: list[dict],
+                        warnings: list[str]) -> tuple[list[dict], int]:
+    """Validate the emission's entity↔entity relations. Returns
+    ``(kept, dropped_count)``.
+
+    ``payload_entities`` is the FINAL entity list this emission produced (post
+    frequency gate, post dedup) — resolving against the raw embed list would
+    admit an endpoint whose own entity never commits, i.e. an edge to nothing.
+    """
+    raw = embed_list.get("relations")
+    if raw is None:
+        # ⛔ ABSENT, not FALSY. `not raw` also swallowed "" / 0 / {} — a
+        # PRESENT but mistyped value — before the mistype arm below could name
+        # it, so a model emitting `"relations": ""` got no diagnostic at all
+        # and `relations_dropped` stayed 0.
+        return [], 0
+    # ⛔ ONE rule for both arrivals (#11333): the section value and an isolate
+    # ITEM from the union are the same question asked twice. Judging them
+    # separately is what made `relations_dropped` depend on the merge shape —
+    # the realistic mistype (the triple where a list was asked for) was KEPT
+    # beside a usable list and DROPPED as the whole section.
+    candidates = _relation_candidates(raw)
+    if not isinstance(raw, list):
+        # Still a SHAPE error and still named (the model is told what it
+        # emitted), but no longer an automatic loss: the candidates below are
+        # validated exactly as list items are, so an edge is recovered when the
+        # value carries one and counted as lost only when it does not. A TUPLE
+        # is named too — it is not a list to the schema, and the pre-#11333 arm
+        # was the only diagnostic for it.
+        recovered = sum(1 for _c in candidates if isinstance(_c, dict))
+        if recovered:
+            warnings.append(
+                f"relations section is {type(raw).__name__}, not a list — "
+                f"recovered {recovered} relation candidate(s), judged exactly "
+                "as list items")
+        elif candidates:
+            warnings.append(
+                f"relations section is {type(raw).__name__}, not a list — "
+                f"{len(candidates)} candidate(s) carrying no relation mapping, "
+                "judged exactly as list items")
+        else:
+            warnings.append(
+                f"relations section is {type(raw).__name__}, not a list — "
+                "nothing to carry")
+
+    exact = {str(e.get("name") or "").strip()
+             for e in payload_entities if isinstance(e, dict)}
+    exact.discard("")
+    folded = _endpoint_fold_index(exact)
+
+    declared = _declared_relation_predicates()
+    # Case-folded view of the declared vocabulary, carrying the DECLARED
+    # spelling as the canonical form. The union's own identity (`_merge_key`)
+    # folds the predicate, so S2's `IMPL` and S4's `impl` are ONE item and "S4
+    # wins"; a case-SENSITIVE membership test then dropped the survivor and
+    # blamed the model for an invented verb it never invented — an edge lost to
+    # a capital letter, in the one arm that was not fold-tolerant. `sorted` so
+    # a fold collision resolves identically on every run (`frozenset` order is
+    # hash-seed dependent).
+    folded_declared: dict[str, str] = {}
+    for _verb in sorted(str(d) for d in (declared or ())):
+        folded_declared.setdefault(_verb.casefold(), _verb)
+    # The closed Layer-2 vocabulary, imported lazily for the same reason as
+    # `declared` above. An unreadable vocabulary yields an empty set, and an
+    # EMPTY set must never be read as "nothing is valid" — that would drop
+    # every meaning on an import failure, which is the destructive direction.
+    try:
+        from tortoise.pack_registry import SEMANTICS_TRANSITION, SEMANTICS_VALUES
+    except Exception:
+        SEMANTICS_TRANSITION, SEMANTICS_VALUES = {}, frozenset()
+    # Both Layer-2 maps are consulted folded, for the same reason as the
+    # predicate gate: a case variant is the same word to every other stage.
+    folded_transition: dict[str, str] = {}
+    for _old in sorted(str(k) for k in (SEMANTICS_TRANSITION or {})):
+        folded_transition.setdefault(_old.casefold(),
+                                     SEMANTICS_TRANSITION[_old])
+    folded_semantics: dict[str, str] = {}
+    for _meaning in sorted(str(s) for s in (SEMANTICS_VALUES or ())):
+        folded_semantics.setdefault(_meaning.casefold(), _meaning)
+    # Names this emission produced MORE THAN ONCE (same `name`, different
+    # `kind` — `execute_embed` keeps those as distinct Layer-1 Objects). An
+    # endpoint spelled exactly like such a name denotes BOTH, and the fold arm's
+    # own rule is that ambiguity is never guessed through; the channel stays
+    # fail-open (keeping is safe, dropping is destructive), so the ambiguity is
+    # NAMED here rather than silently carried.
+    name_counts: dict[str, int] = {}
+    for _e in payload_entities:
+        if isinstance(_e, dict):
+            _n = str(_e.get("name") or "").strip()
+            if _n:
+                name_counts[_n] = name_counts.get(_n, 0) + 1
+
+    kept: list[dict] = []
+    seen: set[tuple[str, str, str]] = set()
+    dropped = 0
+    for i, item in enumerate(candidates):
+        if not isinstance(item, dict):
+            warnings.append(
+                f"non-dict relation entry {_clip(item, 60)!r} skipped")
+            dropped += 1
+            continue
+        src = str(item.get("src") or "").strip()
+        dst = str(item.get("dst") or "").strip()
+        # A non-string predicate is a SHAPE error and must not be reported as
+        # an invented VERB (`str(42)` -> "42" -> "not a declared relation
+        # verb"), which sends the model to fix a vocabulary mistake it did not
+        # make. `_SCHEMA_PRIMITIVES` types it, but rung 1 of the parse ladder
+        # returns parsed JSON without running that gate.
+        if item.get("predicate") is not None and \
+                not isinstance(item.get("predicate"), str):
+            warnings.append(
+                f"relations[{i}] predicate is "
+                f"{type(item.get('predicate')).__name__}, not a string — "
+                "dropped (a SHAPE error, not a vocabulary one)")
+            dropped += 1
+            continue
+        predicate = str(item.get("predicate") or "").strip()
+        if not (src and dst and predicate):
+            warnings.append(
+                f"relations[{i}] is missing src/dst/predicate "
+                f"({src!r}, {dst!r}, {predicate!r}) — dropped")
+            dropped += 1
+            continue
+        r_src = _resolve_relation_endpoint(src, exact, folded)
+        if r_src is None:
+            warnings.append(
+                f"relations[{i}] endpoint '{_clip(src, 40)}' does not resolve "
+                "to an entity this emission produced — dropped, NOT minted "
+                "(#10999: an endpoint is never invented)")
+            dropped += 1
+            continue
+        r_dst = _resolve_relation_endpoint(dst, exact, folded)
+        if r_dst is None:
+            warnings.append(
+                f"relations[{i}] endpoint '{_clip(dst, 40)}' does not resolve "
+                "to an entity this emission produced — dropped, NOT minted "
+                "(#10999: an endpoint is never invented)")
+            dropped += 1
+            continue
+        # ⛔ The self-relation test runs on the RESOLVED names ONLY, and they are
+        # the identity the edge would actually carry. A RAW fold test looks
+        # equivalent and is not: two entities whose names differ only in case are
+        # DISTINCT Layer-1 Objects (`execute_embed` dedupes on `(name, kind)`), so
+        # `{"src": "Apple", "dst": "APPLE"}` is a real edge between two
+        # Objects — a raw fold dropped it and MISLABELLED it "a self-relation",
+        # the one diagnosis that sends the model to fix a non-problem. Every TRUE
+        # self-edge still lands here, because both spellings then resolve to one
+        # emitted name (a pair that resolves to nothing is dropped, and named, by
+        # the resolver above).
+        if r_src == r_dst:
+            warnings.append(
+                f"relations[{i}] is a self-relation "
+                f"('{_clip(r_src, 40)}') — dropped")
+            dropped += 1
+            continue
+        if declared is not None:
+            canonical_verb = folded_declared.get(predicate.casefold())
+            if canonical_verb is None:
+                warnings.append(
+                    f"relations[{i}] predicate '{_clip(predicate, 40)}' is "
+                    "not a declared relation verb — dropped (#2766: an "
+                    "entity↔entity relation may not carry an invented "
+                    "predicate)")
+                dropped += 1
+                continue
+            # record the DECLARED spelling (a fold variant is the same verb)
+            predicate = canonical_verb
+        else:
+            # Unverified is not UNBOUNDED: with the registry unreadable nothing
+            # clamped this value, and `predicate` is a field the write leg
+            # (#11237) carries as an edge property. Bound BOTH halves — the
+            # control characters as well as the length (#11333) — and say which
+            # correction was made.
+            _unverified, _correction = _bounded_unverified(predicate)
+            if _correction:
+                warnings.append(
+                    f"relations[{i}] predicate is {len(predicate)} chars "
+                    "and could not be checked against the declared vocabulary "
+                    f"(registry unreadable) — {_correction}, kept, unverified")
+            else:
+                warnings.append(
+                    f"relations[{i}] predicate '{_clip(predicate, 40)}' could "
+                    "not be checked against the declared vocabulary (registry "
+                    "unreadable) — kept, unverified")
+            predicate = _unverified
+        # The endpoints are already CANONICAL emitted spellings (resolution
+        # returns the emitted name), so folding them adds nothing for a true
+        # duplicate and silently merges two DISTINCT entities whose names
+        # differ only in case — a collapse reported as `dropped == 0`.
+        key = (r_src, r_dst, predicate.casefold())
+        if key in seen:
+            continue
+        seen.add(key)
+        # Named only for a relation that is actually KEPT (after the predicate
+        # gate and the duplicate collapse), so "carried" is not claimed for an
+        # item this loop drops, nor emitted twice for a collapsed duplicate.
+        for _side, _resolved in (("src", r_src), ("dst", r_dst)):
+            if name_counts.get(_resolved, 0) > 1:
+                warnings.append(
+                    f"relations[{i}] {_side} '{_clip(_resolved, 40)}' names "
+                    f"{name_counts[_resolved]} entities this emission produced "
+                    "(same name, different kinds) — carried, but the edge's "
+                    "endpoint is ambiguous until the write leg carries kind"
+                )
+        rel = {"src": r_src, "dst": r_dst, "predicate": predicate}
+        semantics = item.get("semantics")
+        if semantics is not None and not isinstance(semantics, str):
+            # The optional field's wrong TYPE failed silently, while its
+            # out-of-vocabulary STRING case is named — same accounting rule.
+            warnings.append(
+                f"relations[{i}] semantics is "
+                f"{type(semantics).__name__}, not a string — ignored, the "
+                "relation is kept")
+            semantics = None
+        if isinstance(semantics, str) and semantics.strip():
+            semantics = semantics.strip()
+            # #10999 review: `semantics` is a CLOSED vocabulary (ONTOLOGY §8)
+            # exactly as the predicate is, and it is the one field on this
+            # channel that would otherwise carry free text into a record the
+            # write path (#11237) carries as an edge property — the prose
+            # surface the channel exists to keep out. A retired spelling is
+            # canonicalised
+            # (as `sdk.create_operator` does); an out-of-vocabulary token drops
+            # the KEY and keeps the RELATION (the endpoints and the verb are
+            # still the story's own assertion), and is named.
+            _retired = (SEMANTICS_TRANSITION.get(semantics)
+                        or folded_transition.get(semantics.casefold()))
+            if _retired is not None:
+                _original = semantics
+                semantics = _retired
+                warnings.append(
+                    f"relations[{i}] semantics '{_clip(_original, 40)}' is "
+                    f"retired — recorded as '{semantics}' (#7852)")
+            _canonical_semantics = folded_semantics.get(semantics.casefold())
+            if SEMANTICS_VALUES and _canonical_semantics is None:
+                warnings.append(
+                    f"relations[{i}] semantics '{_clip(semantics, 40)}' is not "
+                    "in the closed Layer-2 vocabulary — dropped from the "
+                    "record, the relation is kept (#7852)")
+            else:
+                # Including the unreadable-vocabulary case (`SEMANTICS_VALUES`
+                # empty): an import failure must never strip every meaning.
+                # ⛔ But it must not carry FREE TEXT either — with the closed set
+                # unreadable, nothing validated this value, and `semantics` is a
+                # field the write leg (#11237) carries as an edge property.
+                # Bound both halves (control characters AND length, #11333) and
+                # say which correction was made: bounded, never silently
+                # truncated.
+                _kept_semantics = _canonical_semantics
+                if _kept_semantics is None:
+                    _kept_semantics, _correction = _bounded_unverified(semantics)
+                    if _correction:
+                        warnings.append(
+                            f"relations[{i}] semantics is {len(semantics)} "
+                            "chars and could not be checked against the closed "
+                            f"vocabulary — {_correction}")
+                rel["semantics"] = _kept_semantics
+        kept.append(rel)
+
+    if dropped:
+        warnings.append(
+            f"connections_incomplete (#10999): {dropped} narrative relation(s) "
+            f"dropped, {len(kept)} carried — the items still commit (S5 Job 1 "
+            "fails open)")
+    return kept, dropped
+
+
 def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                   story_arc: str = "", summary: str = "",
                   extractor_version: str = "value@0.5.0+v2",
                   master: dict | None = None,
                   session_date: str | None = None,
                   edus: list[dict] | None = None,
-                  merge_flagged: frozenset[str] | set[str] = frozenset()) -> dict:
+                  merge_flagged: frozenset[str] | set[str] = frozenset(),
+                  hold_store: object | None = None) -> dict:
     """S5: deterministic embed EXECUTION (not a flash prompt).
 
     Maps the complete embed list to the Layer-1 commit payload in dependency
@@ -8460,12 +9420,34 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         instruction being skipped by the model. A minted endpoint no
         surviving operator references is pruned again.
 
+    ⛔ #10997 (§4.4 I1, the MINT half): the mint is an identity ASSERTION, so it
+    is licensed only by a lookup that RESOLVED. On an `unresolved`/`partial`
+    lookup the pre-pass *holds* the edge WITH its endpoint (#2552) instead — no
+    Point is fabricated from a ref nothing checked — and the held set is
+    reported in ``held``. A ``hold_store`` (``identity_hold.open_store``)
+    carries it to a later run against the same graph, where a resolved lookup
+    commits it exactly once.
+
     Returns {"payload", "chain_notes", "link_before_create", "warnings",
-             "minted_kinds", "stats"}.
+             "minted_kinds", "stats", "held", "held_drained", "hold"}.
     """
     master = master or build_master_list()
     idx = _index_search(search)
     warnings: list[str] = []
+    # #10997: the run-level identity state the mint gate reads, and the two
+    # populations it reports. `held` is what this run did NOT mint and did NOT
+    # drop (I2). `held_drained` is this run's DRAIN of what a previous run held —
+    # one entry per ATTEMPT, each carrying its own `committed` flag, because a
+    # drain can legally be released again (the #2552 prune discarded the Point,
+    # so the item is HELD again). ⛔ The run-level numbers say which is which:
+    # `stats["held_drained"]` counts the entries that COMMITTED and
+    # `stats["held_drain_attempted"]` counts the attempts — a census that reads
+    # "committed" while nothing committed is a false signal on the epic's own
+    # acceptance ("the held count returns to zero"), which is why the two are
+    # never collapsed into one number (#10997 review round 3).
+    _lookup = _failure_policy.lookup_state(search)
+    held: list[dict] = []
+    held_drained: list[dict] = []
 
     # ── entities (dependency order 1) ─────────────────────────────────────
     payload_entities: list[dict] = []
@@ -9062,6 +10044,15 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             "search_keys": search_keys,
             "source_turn_id": turn_idx,
         }
+        # #11021: the claim CARRIES the phrases it pointed with. This is the
+        # mention's home (DM1) — the information a hold would otherwise destroy
+        # rides the claim as `surface` + the span it addressed, and nothing here
+        # is ever minted as an :Object.
+        _mentions = _mentions_for_claim(
+            embed_list, content, armed=_referentiality.enabled(),
+            narrative=story_arc or summary)
+        if _mentions:
+            pt_entry["mentions"] = _mentions
         # #2684 (Slice B): a VALUE-BEARING point carries the verbatim source
         # SPAN — the offsets of its own quote inside the resolved turn — so a
         # consumer can re-read the exact value instead of re-deriving it from
@@ -9132,12 +10123,14 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     # (a MITIGATES may legitimately precede its target IMPL in the model
     # output).
     def _resolve(ref: str) -> str:
-        r = _norm(ref)
-        if r in point_ids:
-            return point_ids[r]
-        if r in event_ids:
-            return event_ids[r]
-        return ""
+        # BOTH key forms of BOTH maps (#10997 review 7-8, P1): `point_ids` holds the
+        # untruncated ref AND the `_write_span` clamp, `event_ids` only the HARD
+        # `[:cap]` cut — asking one form missed an Event emitted from a >cap ref,
+        # and the mint re-created the identity as a duplicate Point.
+        r, _s = _norm(ref), str(ref or "").strip()
+        h, c = _norm(_s[:_MAX_CONTENT]), _norm(_write_span(_s, _MAX_CONTENT))
+        return (point_ids.get(r) or event_ids.get(r) or point_ids.get(h)
+                or event_ids.get(h) or point_ids.get(c) or event_ids.get(c, ""))
 
     # ── MINT-BEFORE-WIRE (#2552, dependency order 3.5) ────────────────────
     # The OPERATOR REFERENCING hard rule in the S2/S4 prompts instructs the
@@ -9169,7 +10162,7 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     # still report ``operator_endpoints_minted == 0``.
     minted_endpoints: list[str] = []
 
-    def _mint_endpoint(ref: str, where: str) -> str:
+    def _mint_endpoint(ref: str, where: str, operator: dict | None = None) -> str:
         # ⛔ `_write_span`, never a bare `[:cap]` (review cycle 15, measured): a
         # HARD cut stores the truncated prefix of a split token, so
         # `_mint_endpoint` fabricated the value `… p95 hit 4` out of
@@ -9275,6 +10268,57 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                 f"{where} named the ENTITY {content[:60]!r} — the "
                 "OPERATOR REFERENCING rule forbids entity endpoints, so no "
                 "claim Point is fabricated for it")
+            return ""
+        # ── #10997 (§4.4 I1): THE MINT IS AN IDENTITY ASSERTION ─────────────
+        # It is licensed by a lookup that RESOLVED, and by nothing else. On an
+        # `unresolved`/`partial` run this ref's own query never ran (a minted
+        # endpoint is by definition NOT one of the model's emitted points, so
+        # `_derive_queries` derived no query for it), and fabricating a
+        # `statement` Point from it asserts `new` about a check that did not
+        # happen — the fail-open §4.4 names as the DUPLICATE MANUFACTURER.
+        # ⛔ The disposition is HOLD, and it holds the EDGE WITH ITS ENDPOINT
+        # (#2552): the operator travels in the record, so the drain re-emits
+        # both and the edge is not traded for the duplicate. ⛔ NOT a drop: I2
+        # forbids trading a duplicate for memory loss, and the held set is
+        # reported on every run (`held`) whether or not it could be persisted.
+        if _lookup != _failure_policy.LOOKUP_RESOLVED:
+            rec = _hold_endpoint(hold_store, held, content=content, where=where,
+                                 session_ref=session_id, operator=operator, ref=ref)
+            # ⛔ The store already RESOLVED this identity on an earlier run: the
+            # ref is not ambiguous any more, it is KNOWN — wiring it to the id the
+            # store recorded is the idempotent-consumer "return the recorded
+            # outcome" arm, and it is the only one that neither re-holds a
+            # committed identity (#10997 review round 4, P2) nor drops the edge
+            # (I2). The recorded id was committed against THIS graph (the store is
+            # per-graph), so the endpoint it names exists there.
+            if rec.get("already_resolved") and rec.get("minted_id"):
+                pid = str(rec["minted_id"])
+                point_ids[n] = pid
+                _full_prev = _norm(ref)
+                if _full_prev != n:
+                    point_ids.setdefault(_full_prev, pid)
+                # It is not held and it is not dropped, so it is not in `held`:
+                # the census stays the epic's own acceptance (a resolved identity
+                # returns the held count to zero).
+                held.remove(rec)
+                warnings.append(
+                    f"operator endpoint WIRED, not re-held (#10997 S3 HOLD): "
+                    f"{where} named {content[:60]!r}, whose identity was already "
+                    f"resolved to {pid} by an earlier run against this graph — "
+                    "the edge is wired to it and nothing is held")
+                return pid
+            if rec.get("persist_error"):
+                _carried = (", and the hold store write FAILED ("
+                            f"{rec['persist_error']}) so it is NOT carried forward")
+            elif rec["persisted"]:
+                _carried = " in the hold store"
+            else:
+                _carried = ", NOT persisted (no hold store was supplied)"
+            warnings.append(
+                f"operator endpoint HELD not minted (#10997 S3 HOLD): {where} "
+                f"named {content[:60]!r} but the identity lookup was {_lookup}, "
+                "so whether this endpoint already exists was never established "
+                "— held with its edge" + _carried)
             return ""
         # ── #4716 Part 2 (Defect A): the mint is not a side door around the
         # consolidation rule the ordinary point path already implements ~100
@@ -9493,14 +10537,14 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         for _side in ("src", "dst"):
             _ref = str(_op.get(_side, "") or "")
             if _ref and not _resolve(_ref):
-                _mint_endpoint(_ref, f"{_op_type} {_side}")
+                _mint_endpoint(_ref, f"{_op_type} {_side}", _op)
         if _op_type == "MITIGATES":
             _target = _op.get("target") or _op.get("target_edge") or {}
             if isinstance(_target, dict):
                 for _side in ("src", "dst"):
                     _ref = str(_target.get(_side, "") or "")
                     if _ref and not _resolve(_ref):
-                        _mint_endpoint(_ref, f"MITIGATES target_edge {_side}")
+                        _mint_endpoint(_ref, f"MITIGATES target_edge {_side}", _target)
 
     # source-turn map over the emitted payload points — the NAND-direction
     # canonicalizer's input (#2552 op_02: newer counter-claim must be src).
@@ -9514,10 +10558,135 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         if type(t) is int:
             turn_by_point[_pt["id"]] = t
 
+    # ── #10997 DRAIN: held edges whose identity THIS run resolved ──────────
+    # The named path out of the hold: a later run against the same graph whose
+    # lookup RESOLVED. `claim` makes it exactly-once in both directions (a second
+    # run, or a second pass here, cannot mint the same identity twice) and
+    # `confirm` binds the key to the id it minted. The endpoint goes through the
+    # SAME `_mint_endpoint` the ordinary pre-pass uses — one mint, so the
+    # consolidation fold (#4716), the identity window and the dedup cannot
+    # diverge between a fresh mint and a drained one.
+    _held_operators: list[dict] = []
+    #: (key, point id) pairs a drain has CLAIMED and minted but NOT yet
+    #: confirmed. ⛔ #10997 review P0: a mint is PROVISIONAL until the payload
+    #: knows it survived — the mint-before-wire prune below drops an endpoint no
+    #: surviving operator references. Confirming in the drain loop marked an item
+    #: `resolved` that the payload had already discarded: the hold's own store
+    #: leaking the memory I2 forbids leaking, while printing "COMMITTED".
+    _pending_confirm: list[tuple[str, str, str]] = []
+    if hold_store is not None and _lookup == _failure_policy.LOOKUP_RESOLVED:
+        # ⛔ RECLAIM BEFORE READING (#10997 review round 3): `claim` is a STATE, and
+        # the only thing that makes it recoverable is something that acts on it.
+        # A drain killed between `claim` and the settle leaves a record no later
+        # code path releases — `pending()` is this loop's entire input, so the item
+        # would be invisible to EVERY later drain (the I2 loss the store exists to
+        # prevent, one state further along). This is the idle reclaim scan SQS and
+        # Redis Streams converged on, bounded well above a live drain's own runtime.
+        try:
+            _reclaimed = hold_store.reclaim_stale()
+        except Exception as exc:  # a reclaim sweep must not sink the whole run
+            _reclaimed = []
+            warnings.append(
+                "hold store RECLAIM FAILED (#10997): the drain could not reclaim "
+                "claims left by an interrupted run "
+                f"({type(exc).__name__}: {exc}); those items stay claimed until a "
+                "later run can reclaim them")
+        else:
+            if _reclaimed:
+                warnings.append(
+                    f"hold store RECLAIMED (#10997): {len(_reclaimed)} item(s) left "
+                    "CLAIMED by a drain that never finished were returned to "
+                    "pending and are drained by this run")
+        try:
+            _drainable = hold_store.pending()
+        except Exception as exc:  # a store read must not sink the whole run
+            _drainable = []
+            warnings.append(
+                "hold store UNREADABLE (#10997): the drain was skipped because "
+                f"reading the held set failed ({type(exc).__name__}: {exc}); "
+                "the run's own candidates are unaffected")
+        for _rec in _drainable:
+            _claimed = False
+            try:
+                if not hold_store.claim(_rec["key"]):
+                    continue
+                _claimed = True
+                # ⛔ The ORIGINAL ref (review P1), RESOLVED BEFORE MINTING in BOTH key
+                # forms (review 6/7, P1): `event_ids` is keyed on the CLAMPED content
+                # while `point_ids` also holds the untruncated key, so asking one form
+                # missed the other and a >cap EVENT identity was re-minted as a Point.
+                _drain_ref = _rec.get("ref") or _rec["content"]
+                _pid = (_resolve(_drain_ref) or _mint_endpoint(
+                    _drain_ref, f"drained {_rec.get('where') or 'held endpoint'}"))
+                if not _pid:
+                    # The mint produced nothing (refused / an entity / empty) —
+                    # the item goes back to PENDING rather than leaking out of
+                    # the drainable set on a claim that minted nothing.
+                    hold_store.release(_rec["key"])
+                    continue
+            except Exception as exc:  # a store write must not sink the run
+                # ⛔ A claim taken and then abandoned is INVISIBLE to every later
+                # drain: `pending()` lists only HOLD_PENDING, so a key left
+                # CLAIMED by a raise inside this block would never be drained
+                # again — the silent I2 loss the store exists to prevent
+                # (#10997 review round 2, P2). Give the claim back before
+                # reporting the failure.
+                if _claimed:
+                    with contextlib.suppress(Exception):
+                        hold_store.release(_rec["key"])
+                warnings.append(
+                    "hold store WRITE FAILED (#10997): the drain could not take "
+                    f"{_clip(_rec.get('content'), 60)!r} ({type(exc).__name__}: "
+                    f"{exc}) — it stays held for a later run")
+                continue
+            _pending_confirm.append((_rec["key"], _pid, _rec.get("where") or ""))
+            held_drained.append({"key": _rec["key"], "content": _rec["content"],
+                                 "point_id": _pid, "where": _rec.get("where") or "",
+                                 "committed": False})
+            if _rec.get("operators") or _rec.get("operator"):
+                # ⛔ EVERY edge the record carries (#10997 review round 4, P1).
+                # The store key is the REF, so two operators naming one unresolved
+                # ref share a record; replaying only the first dropped the second
+                # edge for good while the run reported both as carried.
+                for _held_op in _identity_hold.operators_of(_rec):
+                    _held_operators.append(dict(_held_op))
+
     payload_operators: list[dict] = []
     emitted_edges: set[tuple[str, str, str]] = set()
     mitigates_pending: list[dict] = []
-    for op in embed_list.get("operators", []) or []:
+    # #10997: the run's OWN operators first, then the edges the drain above
+    # restored — deduplicated on the EDGE's identity (src, dst, op_type, plus a
+    # MITIGATES' target), because run 2 usually re-emits the operator it held in
+    # run 1 and ONE edge must not be emitted twice for it.
+    _run_ops = list(embed_list.get("operators", []) or [])
+
+    def _op_identity(o: object) -> tuple:
+        # ⛔ The identity pass 2 EMITS on (`identity_hold.drain_identity`): _norm
+        # endpoints, op_type upper, a MITIGATES' target PAIR — NOT the store's
+        # `operator_identity`, whose case-preserving form missed its own twin.
+        return _identity_hold.drain_identity(o)
+
+    # ⛔ And deduplicated AMONG THEMSELVES, not only against the run's own
+    # operators (#10997 review round 4, P2). One operator whose `src` AND `dst`
+    # are both unresolved is held twice — the pre-pass asks `_mint_endpoint`
+    # about each side, each call carrying the same `_op` — so the drain
+    # restored the same edge twice. Both copies survived the old filter, both
+    # were appended to `payload_operators` (the IMPL/NAND arm has no membership
+    # check), and `reconcile_payload` then marked EACH copy `new` against an
+    # unchanged GraphState: `net_new` and the declared write count — the budget
+    # numerators — counted one edge twice. The `#4971` probe keeps the graph
+    # write itself idempotent, so this was census/budget inflation, not a
+    # duplicate node.
+    _run_op_ids = {_op_identity(o) for o in _run_ops}
+    _dropped_ids: set[tuple] = set()
+    _all_ops = list(_run_ops)
+    for _held_op in _held_operators:
+        _oid = _op_identity(_held_op)
+        if _oid in _run_op_ids or _oid in _dropped_ids:
+            continue
+        _dropped_ids.add(_oid)
+        _all_ops.append(_held_op)
+    for op in _all_ops:
         if not isinstance(op, dict):
             warnings.append(f"non-dict operator entry {op!r} skipped")
             continue
@@ -9637,6 +10806,79 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                 "surviving operator — dropped rather than committing an "
                 "unsupported claim Point")
 
+    # ── S5 Job 1 (#10999): the batch's own story ──────────────────────────
+    # The narrative's entity↔entity relations, validated against the entities
+    # THIS emission produced. RESULT-level, not payload-level — the Layer-1
+    # commit payload does not grow for a channel no writer materialises yet
+    # (the D8 record-level convention the retractions/merges/noops records
+    # already follow). Materialising these as Object→Object edges is **#11237**
+    # — nothing in this tree consumes `result["relations"]`, which is why
+    # #10999 is `Part of`, not closed. ⛔ Do NOT read #11001 as this channel's
+    # writer: it is CLOSED COMPLETED and owned the DIFFERENT population (the
+    # pack-declared hierarchy, consumed from
+    # `pack_registry.relation_write_paths`), so an earlier attribution to it
+    # left this leg with no open owner. Whatever #11237 decides, it CONSUMES
+    # that declared verdict and must not re-derive it.
+    payload_relations, relations_dropped = _assemble_relations(
+        embed_list, payload_entities, warnings)
+    # ── #10997 SETTLE the drained claims (review P0) ───────────────────────
+    # ⛔ A drained item is confirmed ONLY if its Point survived the prune above,
+    # and every other claim is RELEASED back to `pending` — otherwise the store
+    # marks an identity resolved that the payload threw away, and the item is
+    # lost for good (the exact I2 loss this module exists to prevent).
+    if _pending_confirm and hold_store is not None:
+        # ⛔ "did my Point survive?" is NOT the same question as "is it in
+        # `payload_points`" (#10997 review round 2, P1). A drain can legally
+        # return an id that never enters the payload: the #4716 NOOP fold
+        # resolves a ref against a PRIOR point (`_decision.prior_id`), and that
+        # point is already in the graph, so it is neither minted nor appended.
+        # Asking membership alone then reported "no surviving operator
+        # references it, so the Point was pruned" about an item whose edge is
+        # in the payload — and released the claim, so the store re-drained it on
+        # every resolved run forever and the held count could never return to
+        # zero (the epic's own acceptance). The question a fold answers is
+        # "is it still WIRED?", so survival is payload membership OR a
+        # reference from a surviving operator.
+        _surviving = {str(p.get("id")) for p in payload_points}
+        _wired: set[str] = set()
+        for _po in payload_operators:
+            _wired.add(str(_po.get("src") or ""))
+            _wired.add(str(_po.get("dst") or ""))
+            _tgt = _po.get("target")
+            if isinstance(_tgt, dict):
+                _wired.add(str(_tgt.get("src") or ""))
+                _wired.add(str(_tgt.get("dst") or ""))
+        for _key, _pid, _where in _pending_confirm:
+            _entry = next((e for e in held_drained if e["key"] == _key), None)
+            if _pid in _surviving or _pid in _wired:
+                try:
+                    hold_store.confirm(_key, _pid)
+                except Exception as exc:
+                    warnings.append(
+                        "hold store WRITE FAILED (#10997): the drain minted "
+                        f"{_pid} but could not confirm it ({type(exc).__name__}: "
+                        f"{exc}) — the key stays claimed and the next drain will "
+                        "find it already held")
+                    continue
+                if _entry is not None:
+                    _entry["committed"] = True
+                warnings.append(
+                    f"held endpoint COMMITTED (#10997 drain): {_where} held in an "
+                    f"earlier run is now RESOLVED as {_pid} "
+                    "(exactly once — a resolved key is never re-held or re-minted)")
+                continue
+            # ⛔ Its EDGE did not survive — the ENDPOINT may not have either, so this
+            # message claims nothing about it; the item goes BACK to the hold.
+            with contextlib.suppress(Exception):
+                hold_store.release(_key)
+            if _entry is not None:
+                _entry["committed"] = False
+            warnings.append(
+                f"held endpoint NOT committed (#10997 drain): {_where} resolved "
+                f"as {_pid}, but no surviving operator references it — the "
+                "restored EDGE did not survive, so the item is HELD again for a "
+                "later run")
+
     # ── retractions (D5): explicit withdrawals → DELETE-soft records ──────
     # Never from content alone: only the embed list's additive `retractions`
     # refs (resolved with the never-guess discipline) produce deletions.
@@ -9718,6 +10960,69 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         payload["operators"], payload["summary"], payload["story_arc"],
         payload.get("events", []), payload.get("supersessions", []))
 
+    # ── #11021: do the mention records still resolve? ─────────────────────
+    # A claim can be folded away AFTER the selection: an intra-batch duplicate,
+    # a NOOP, or a MERGE (#5006) all exit before this point's `pt_entry` exists,
+    # so its mentions never attach and the information the hold was supposed to
+    # preserve is gone. That is recorded, never silent — the DM2 contract row
+    # says every `claim_ref` resolves to an EMITTED point, and an unchecked
+    # claim would make the row false without saying so.
+    _attached = sum(len(p.get("mentions") or []) for p in payload_points
+                    if isinstance(p, dict))
+    _armed = _referentiality.enabled()
+    # ⛔ The ACCOUNTING is built from the SAME clamped projection the evidence
+    # surface publishes, not from the raw channel:
+    #   • `_dedupe_mentions` runs inside `route_mentions` — the call that may have
+    #     raised — so on the fail-open path one hold was counted twice while the
+    #     published lists said one (review at `d785f3da8`, P2);
+    #   • and two RAW entries whose surfaces agree only after the 200-character cap
+    #     were still counted twice because the raw keys differ (`"a"*201+"X"` vs
+    #     `"a"*201+"Y"`), so `mentions_recorded` exceeded what the run published —
+    #     the self-disagreement the dedupe was supposed to close (review at
+    #     `b791a3eb2`, P3);
+    #   • and a raw `claim_ref` over `_MAX_CONTENT` keyed apart from its own emitted
+    #     claim, reporting a HAD-emitted claim as unresolved (review at `b791a3eb2`,
+    #     P2).
+    # Counting the clamped records answers all three by construction.
+    _records = (_dedupe_mentions([
+        r for r in (_clamped_mention(m) for m in (embed_list.get("mentions") or [])
+                    if isinstance(m, dict)) if r is not None])
+        if _armed else [])
+    _emitted_refs = {_norm(str(p.get("content") or "")) for p in payload_points
+                     if isinstance(p, dict)}   # payload content IS the write's form
+    unresolved = [m for m in _records
+                  if _norm(str(m.get("claim_ref") or "")) not in _emitted_refs]
+    if unresolved:
+        warnings.append(
+            f"{len(unresolved)} mention record(s) name a claim this run did not "
+            f"emit (a NOOP/duplicate/MERGE folded it away): "
+            + ", ".join(sorted({str(m.get("surface")) for m in unresolved})[:8]))
+
+    if held:
+        _held_ids = {r.get("key") or (r["content"], r["where"]) for r in held}
+        # ⛔ The carry-forward clause describes what ACTUALLY persisted, not
+        # whether a store object was passed (#10997 review round 4, P3). With a
+        # store that raises on write (read-only volume, full disk, bad
+        # permissions) each per-occurrence warning already said "the hold store
+        # write FAILED … so it is NOT carried forward", and this aggregate line
+        # said the opposite — two contradicting warnings in one list, on the line
+        # an operator/census reads.
+        _persisted = sum(1 for r in held if r.get("persisted"))
+        if hold_store is None:
+            _carried = "; NOT carried forward — no hold store was supplied"
+        elif _persisted == len(held):
+            _carried = ("; carried in the hold store for the next run against "
+                        "this graph")
+        else:
+            _carried = (
+                f"; {_persisted} of {len(held)} occurrence(s) carried in the "
+                f"hold store, {len(held) - _persisted} NOT persisted (the store "
+                "write failed) and therefore NOT carried forward")
+        warnings.append(
+            f"S3 HOLD (#10997): {len(_held_ids)} candidate(s) held because their "
+            f"identity lookup was {_lookup} — not minted (I1) and not dropped "
+            "(I2)" + _carried)
+
     return {
         "payload": payload,
         "noops": noops,                # E7 (D4): result-level, NOT in the payload
@@ -9728,10 +11033,28 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         "link_before_create": link_before_create,
         "warnings": warnings,
         "minted_kinds": minted,
+        "relations": payload_relations,   # #10999 — RESULT-level (see above)
+        "held": held,                  # #10997: HELD — never minted (I1), never dropped (I2)
+        "held_drained": held_drained,  # DRAIN ATTEMPTS this run, each with its own "committed" flag (not a committed count)
+        "hold": {"store_supplied": hold_store is not None,
+                 "store": (hold_store.summary()
+                           if hold_store is not None else None)},
         "stats": {
             "entities": len(payload_entities), "events": len(payload_events),
             "points": len(payload_points), "operators": len(payload_operators),
             "operator_endpoints_minted": len(minted_endpoints),
+            # #10997 review P2: an IDENTITY count, not an occurrence count — one
+            # ref named by two operators is ONE held item (one store key).
+            "held": len({r.get("key") or (r["content"], r["where"])
+                         for r in held}),
+            # #10997 review round 3: the COMMITTED subset, not `len(held_drained)`.
+            # A run that drains, mints and then PRUNES every endpoint reported
+            # `held_drained=N` with `committed: False` on all N — a census that
+            # reads as success on the epic's own acceptance ("the held count
+            # returns to zero") while nothing was committed. The attempt count is
+            # kept beside it rather than dropped, so the two facts stay readable.
+            "held_drained": sum(1 for e in held_drained if e["committed"]),
+            "held_drain_attempted": len(held_drained),
             "tier_a_points": tier_a_points,
             "noops": len(noops),
             "merges": len(merges),
@@ -9740,6 +11063,14 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             "search_degraded": bool((search or {}).get("degraded")),
             "chain_notes": len(chain_notes),
             "supersessions": len(supersessions),
+            "relations": len(payload_relations),      # #10999
+            "relations_dropped": relations_dropped,   # #10999
+            # #11021 — the mention channel's own accounting: records written vs
+            # records that found their claim, and the ones that did not (named
+            # in `warnings`). A mention is never promoted to an :Object.
+            "mentions_recorded": len(_records),
+            "mentions_attached": _attached,
+            "mentions_unresolved": len(unresolved),
         },
     }
 
@@ -10042,6 +11373,1254 @@ def _merge_flagged_contents(*surfaces: dict | None) -> frozenset[str]:
     return frozenset(flagged)
 
 
+def route_mentions(embed_list: dict, narrative: str = "") -> dict:
+    """S2.2 — the referentiality selection: hold a mention, never mint it (**#11021**).
+
+    **Where this runs, stated exactly.** At the S2.2 position in
+    :func:`extract_session_v2` — after S2 (and again after S4's union), before
+    S3 RESOLVE — because that is a *selection*, not a create-gate at S5.
+    ``#10997``'s S3/S5 HOLD and ``run_s4``'s gap-filling are untouched: a
+    mention is not a deferred creation, it is a phrase that never had a
+    referent to create.
+
+    **What it does, in four mechanical moves.** For every candidate in
+    ``entities[]`` whose surface :func:`referentiality.judge` holds as a
+    mention:
+
+    1. it is removed from ``entities[]`` — so the entity loop at S5
+       (``execute_embed``, the ``for e in embed_list.get("entities")`` mint)
+       cannot see it, which is the *structural* half of the no-mint guarantee;
+    2. it is stripped from every CLAIM's AND every EVENT's ``about_entities``
+       and from the typed ``subject``/``object`` **slots** — ``commit_schema``
+       resolves BOTH reference sets against the emitted entities
+       (``points[i].about_entities``/``events[i].about_entities``, then
+       ``_resolve_slot_refs``: "does not resolve to an emitted entity"), and a
+       hold that 422s the whole session — or drops a slot with a warning that
+       reads as an extraction error — is worse than the phantom node it removed;
+       ``slots.event`` is event-as-content and is never resolved against
+       entities, so it is left alone;
+    3. every operator whose endpoint names it is DROPPED, because
+       ``execute_embed``'s mint-before-wire pass materialises an unresolvable
+       operator endpoint as a fabricated statement Point (#2552) — exactly the
+       hazard ``vet_gate.apply_vet`` prunes for a DISCARD and this must prune
+       for a hold;
+    4. it is recorded as a mention on **every** claim that used it —
+       ``{surface, claim_ref, quote, span_start, span_end, span_source,
+       kind_guess, rule_id}`` — which is where the information a hold would
+       otherwise destroy now lives, **in the payload** (see the boundary below). ⚠️ Every POINT carrier, exactly: an EVENT is
+       a carrier too (its ``about_entities`` is stripped like a claim's), but
+       ``execute_embed``'s ref set is points-only, so a record written against an
+       EVENT can never resolve and would be reported as a fold that never
+       happened. An event-only hold therefore writes NO record, and says so: the
+       surface is listed in ``mention_unrecorded_surfaces`` and counted in
+       ``mention_carrier_is_event``. The surface is still HELD (never minted) —
+       only the DM1 record is missing, and that gap is the persistence slice's.
+
+    ⛔ **The record stops at the PAYLOAD, and that is stated, not implied.** All
+    FOUR write doors drop ``mentions`` — the REST ``CreatePointRequest``, the SDK
+    capture whitelist (``sdk._CAPTURE_PASSTHROUGH_ORDER``),
+    ``hosted_api._execute_commit_writes`` (the ``sdk.create_point`` call the v2
+    payload actually rides), and the SELF-HOST mirror
+    ``selfhost_api.CreatePointRequest`` / ``selfhost_api.create_point`` — so an
+    armed run's ``stats["mentions_recorded"]`` counts records the WRITE discards.
+    ⛔ The self-host pair is a SEPARATE model and route, not an alias: ``#4032``
+    frames it as the parity mirror of the hosted pair, so a ``mentions`` field
+    added on one side alone re-opens the divergence (review at `0c15ad04d`, P3 —
+    this line said THREE while the tree had four). That is #11239's slice (DM1's
+    home on the Point is declared and unfulfilled): the count is an extraction
+    measurement, never a claim that the graph holds it. There are also FOUR keys
+    carrying a record, and the two producer lists
+    (``result["embed_list"]["mentions"]``, ``result["s2_embed"]["mentions"]``)
+    are the model's RAW channel on the fail-open path — see
+    ``commit_schema.Mention``'s docstring.
+
+    **Held on the SURFACE, not on a live reference — because a hold removes the
+    reference it was decided from.** An earlier draft required
+    ``_claims_naming(surface)`` to be non-empty *at decision time*, so the second
+    sighting of the same surface (the S4 union pass, or a second entity of the
+    same name but a different kind) found no reference, was refused as
+    ``hold_abandoned_no_claim``, and MINTED — the selection undoing itself. So
+    the decision is taken once over the whole surface set, and a surface already
+    carrying a record is held again without needing a live reference.
+
+    ⛔ **The union pass CARRIES the decisions; it never re-derives them.** Pass 2
+    re-enters with a list pass 1 already rewrote, so anything pass 2 rebuilds from
+    that list disagrees with pass 1 along every axis: a surface S4 re-emits has no
+    reference left to find (the hold removed it), a record re-read through the
+    channel loses its ``span_source``, and a claim over ``_MAX_CONTENT`` no longer
+    resolves. Three mechanisms, one shape:
+
+    * ``mention_held`` — a compact ``[{surface, rule_id}]`` list of the surfaces
+      an earlier pass HELD. It survives the S4 union (``merge_embed_lists``
+      unions it by surface) and is what keeps an EVENT-only hold held on pass 2;
+      without it that surface is abandoned on the union pass and MINTED. ⛔ It is
+      re-verified, never trusted: a row re-arms only when ``judge()`` returns the
+      SAME rule, because the extraction model sees this list in the S4 render.
+    * a record this module WROTE (a cue ``rule_id`` that ``judge()`` agrees with)
+      is carried verbatim, so its ``span_source`` and ``reason`` survive;
+    * ``claim_ref`` is cut from the SAME window the write keeps
+      (``_mention_ref``), so the mention's identity is the write's identity, not
+      the raw claim's.
+
+    **A mention the model emitted itself is never promoted.** ``mentions[]`` is a
+    one-way channel: an entry there is a statement that the phrase is not a node,
+    so it is recorded and never re-read into ``entities[]``. When the flag is
+    OFF the whole channel is ignored and the list is returned UNCHANGED (the
+    unmeasured state must not lose a surface to a field nobody armed).
+
+    **A mention no claim can carry is refused** (the issue's own contract row: a
+    mention with no claim is not a record). Two DIFFERENT refusals, counted
+    separately because they lose opposite things: ``hold_abandoned_no_claim``
+    (the hold is abandoned, the entity stays — fail-open) and
+    ``channel_refused_no_claim`` (a model-emitted mention with no resolvable
+    claim is dropped, and the surface is named in
+    ``channel_refused_surfaces``).
+
+    Returns a NEW embed list — the caller's dicts are never mutated, so a
+    failure after this point cannot leave claims stripped of their aboutness with
+    no record to show for it.
+    """
+    if not embed_list or not isinstance(embed_list, dict):
+        return embed_list
+    if not _referentiality.enabled():
+        # The unmeasured default (plan R1): the list is returned **unchanged**, and
+        # NOTHING is added — not even a stats key. An empty S4-rescue guard reads
+        # `any(embed_list.values())` to tell "S2 produced nothing" from "S2
+        # produced content", and a bookkeeping key would have made an S2-empty
+        # session look non-empty (measured: it silently zeroed
+        # `stats["s4_full_rescues"]`, #2335's 2x-cost counter). "Unarmed is
+        # byte-identical" is the whole promise; a key is not byte-identical.
+        return embed_list
+
+    channel = embed_list.get("mentions")
+    channel = channel if isinstance(channel, list) else []
+    entities = embed_list.get("entities")
+    if not isinstance(entities, list):
+        # ⛔ A CHANNEL-ONLY response is reachable, and returning here skipped the
+        # channel entirely: ``_validate_output_shape`` accepts a section the
+        # parsed output omits (``if section not in parsed: continue``), and the
+        # armed prompt now ASKS for ``mentions[]``, so a model that believes the
+        # session has no entities could emit the channel and no ``entities[]``.
+        # The early return then handed the model's RAW entries to the payload —
+        # including a ``rule_id`` naming a cue that never ran on that surface
+        # (review at `591906397`, P2). No entity candidates is a legitimate
+        # state; no *verification* is not, so the channel is processed against
+        # an empty candidate set instead of being dropped.
+        if not channel and not isinstance(embed_list.get("mention_held"), list):
+            return embed_list
+        entities = []
+    points = [p for p in (embed_list.get("points") or []) if isinstance(p, dict)]
+    events = [e for e in (embed_list.get("events") or []) if isinstance(e, dict)]
+    # ── the decisions an EARLIER pass carried (see `_carried_holds`) ────────
+    carried_holds = _carried_holds(embed_list.get("mention_held"))
+    if not entities and not channel and not carried_holds:
+        return embed_list
+
+    # ── the decision, taken ONCE per surface ───────────────────────────────
+    # `hold` maps the surface -> (rule_id, reason). Every entry sharing a surface
+    # is held, so a second entity of the same name but a different kind cannot
+    # slip through the door the first one opened.
+    hold: dict[str, tuple[str, str]] = {}
+    for entity in entities:
+        if not isinstance(entity, dict):
+            continue
+        name = str(entity.get("name") or "").strip()
+        verdict = _referentiality.judge(name) if name else None
+        if verdict is not None:
+            hold[name] = verdict
+    # A surface an earlier pass held needs NO live reference — the pass that
+    # decided removed it, which is the whole reason the decision is carried.
+    for surface, rule_id in carried_holds.items():
+        hold.setdefault(surface, (rule_id, "held on an earlier pass"))
+    # A surface already carrying a record is held again without a live reference
+    # — the union pass's idempotence depends on this. ⛔ ONLY a CUE rule may
+    # re-arm it: `RULE_CHANNEL` is this module's own output marker for a
+    # MODEL-emitted mention, so re-arming from it made the two passes disagree
+    # (pass 1 kept a surface the model also mentioned, pass 2 removed it and
+    # stripped it from every claim — a 70-reference must-keep referent deleted on
+    # a model-supplied entry; #11021 review cycle 2, P1).
+    #: Surfaces the CHANNEL proved — the cue re-run on THAT surface and returns a
+    #: verdict (the model's `rule_id` string is NOT consulted; see the arm).
+    #: ⛔ Collected here and folded into
+    #: `held_surfaces` below, because writing `hold` alone is a decision nothing
+    #: enacts: `_strip_reference_sets`, the operator prune, `by_rule`,
+    #: `mention_held` and the record loop ALL key on `held_surfaces`. A
+    #: channel-only response (the shape this fix exists for) therefore kept the
+    #: surface in `about_entities` — `validate_payload_dict` returned
+    #: `about_entities reference unknown entities` — carried no `mention_held`
+    #: into the union pass, and reported `held_surfaces: 0` while writing a
+    #: record that named the cue rule (review at `5da3575b7a`, P1).
+    def _claims_naming(surface: str) -> list[dict]:
+        """Every carrier of this surface — claims AND events, in BOTH reference
+        sets Layer-1 resolves against the emitted entities.
+
+        ``about_entities`` is the first set; the typed ``subject``/``object``
+        SLOTS are the second (``_resolve_slot_refs`` refuses a slot that does
+        not resolve to an emitted entity). ⛔ Reading only the first set made a
+        slot-only reference invisible: the hold was abandoned, the phantom was
+        MINTED (fail-open) and the slot then dropped with a warning that reads
+        as an extraction error (#11021 review cycle 5, P1).
+
+        Defined ABOVE the channel loop because the hold asks it a question —
+        "can a claim carry this surface?" is a fact about the PAYLOAD, not a
+        verdict on the model's `claim_ref` string.
+        """
+        carriers: list[dict] = []
+        for carrier in [*points, *events]:
+            names = carrier.get("about_entities")
+            if ((isinstance(names, list)
+                 and any(str(a).strip() == surface for a in names))
+                    or surface in _slot_ref_names(carrier)):
+                carriers.append(carrier)
+        return carriers
+
+    #: The claims a mention can attach to, keyed by the identity the WRITE keeps
+    #: (`_mention_ref`) — one home for the carry loop and the channel record loop.
+    claims_by_ref = {_norm(_mention_ref(p)): p for p in points
+                     if str(p.get("content") or "").strip()}
+    channel_held: set[str] = set()
+    for m in channel:
+        if not isinstance(m, dict):
+            continue
+        surface = str(m.get("surface") or "").strip()
+        if not surface or surface in hold:
+            continue
+        # ⛔ The model's `rule_id` is a CLAIM and is not trusted — but it is not
+        # REQUIRED either, and requiring it was a gate on an input the prompt
+        # never asks for: `_MENTION_CONTRACT_LINE` is
+        # `{surface, claim_ref, quote, kind_guess}` and carries NO `rule_id`
+        # (`merge_embed_lists` says the same of S4's contract-shaped entry), so
+        # `verdict[0] == recorded_rule` held only for a model that echoed this
+        # module's internal id. Measured at `d785f3da8`: the prompt shape gave
+        # `held_surfaces: 0`, the surface stayed in `about_entities`, and Layer-1
+        # rejected the session ("about_entities reference unknown entities") —
+        # the failure this fix exists to close, open for every compliant model.
+        # ⛔ The CUE decides, and the rule id comes from the CUE: `judge()` is
+        # re-run, and a `None` verdict (a REFERENT) still never holds — that is
+        # the cycle-3 P1 protection (a model-supplied pronoun tag cannot delete a
+        # 70-reference must-keep), not the model's string.
+        # ⛔ And NOTHING ELSE in the entry decides it. A first cut also required
+        # the model's `claim_ref` to resolve, on the theory that "refused" must
+        # mean not-held rather than held-but-unrecorded — but the record loop is
+        # CARRIER-driven (`_claims_naming` above), so with a carrier the record
+        # is written whatever the model typed, and the gate only removed the
+        # HOLD: a contract-permitted `claim_ref: null` (the prompt allows
+        # `str|null`), or a paraphrase of the claim's text, left the surface in
+        # `about_entities` and 422'd the session (review at `40a0a81e6`, P1).
+        # The refusal is a fact about the PAYLOAD — "no claim can carry it" — so
+        # that is what is asked below, and the model's string is not.
+        # ⛔ The ref is compared THROUGH the write's window (`_mention_ref`), like
+        # every other lookup since the last door was fixed: `claims_by_ref` is keyed
+        # on the CUT identity, so a raw over-cap ref matched nothing and an entry
+        # whose claim is present was refused as claimless (review at `9561959ed7`,
+        # P3). A paraphrase still matches nothing — only the window changed.
+        if (_norm(_mention_ref({"content": str(m.get("claim_ref") or "")}))
+                not in claims_by_ref
+                and not _claims_naming(surface)):
+            continue                       # no claim to carry it — refused below
+        verdict = _referentiality.judge(surface)
+        if verdict is not None:
+            hold.setdefault(surface, (verdict[0],
+                                      "recorded on the mention channel"))
+            channel_held.add(surface)
+
+    stats: dict = {"held_surfaces": 0, "hold_abandoned_no_claim": 0,
+                   "channel_refused_no_claim": 0, "channel_entry_is_entity": 0,
+                   "mention_carrier_is_event": 0,
+                   "events_stripped": 0, "operators_dropped": 0,
+                   "by_rule": {}}
+    #: entity-candidate surfaces — a channel entry whose surface is one of these
+    #: is NOT taken as a mention: the model said "entity" in `entities[]` and
+    #: "mention" in `mentions[]`, and the fail-open direction is the entity.
+    #: ⛔ A surface this module ALREADY holds is not a contradiction, and pass 2
+    #: re-enters with exactly that pair — its own record beside S4's re-emitted
+    #: entity — so reading it as "the model changed its mind" DROPPED the record
+    #: (review cycle 4, P1-b: the surface ended up in no entity, no
+    #: `about_entities` and no mention, with no warning).
+    candidate_surfaces = {str(e.get("name") or "").strip()
+                          for e in entities if isinstance(e, dict)}
+    candidate_surfaces -= set(carried_holds)
+    kept_entities: list = []
+    kept_points: list = []
+    kept_events: list = []
+    records: list[dict] = []
+    #: The surfaces actually HELD. ⛔ Seeded from the CARRIED decisions, not from
+    #: what the entity loop happened to keep: a surface held on pass 1 must still
+    #: be stripped (and its operators pruned) on pass 2 even when no entity
+    #: re-emits it — a bare `about_entities` reference S4 added would otherwise
+    #: survive the union pass and 422 the whole session at Layer-1, downstream of
+    #: the caller's fail-open guard (review cycle 4, P1-a).
+    # ⛔ Seeded from the CARRIED decisions AND the channel's own: a surface the
+    # channel proved is held exactly like one an entity candidate proved.
+    held_surfaces: set[str] = set(carried_holds) | channel_held
+    #: a surface whose hold was REFUSED (no claim to record it against). It is
+    #: NOT held: it neither strips aboutness nor prunes operators nor counts as
+    #: held, so `held_surfaces` says exactly what its name says.
+    abandoned_surfaces: set[str] = set()
+    #: surfaces held but NOT recorded, because every carrier of them is an EVENT
+    #: (`execute_embed`'s refs are points-only). Named, never silent.
+    unrecorded_surfaces: set[str] = set()
+
+    for entity in entities:
+        if not isinstance(entity, dict):
+            kept_entities.append(entity)          # execute_embed warns + skips
+            continue
+        name = str(entity.get("name") or "").strip()
+        if name not in hold:
+            kept_entities.append(entity)
+            continue
+        if not _claims_naming(name) and name not in carried_holds:
+            # Nothing to record it against. Keep the entity (fail-open) and NAME
+            # the refusal so the rate is visible.
+            stats["hold_abandoned_no_claim"] += 1
+            abandoned_surfaces.add(name)
+            kept_entities.append(entity)
+            continue
+        held_surfaces.add(name)
+
+    # ── operator endpoints: judged too, never only the entity candidates ────
+    # An endpoint surface that is in nobody's `entities[]` is still materialised
+    # as a statement Point by mint-before-wire (#2552), so the cue is consulted on
+    # the endpoints themselves (review cycle 2, P2).
+    # ⛔ JUDGED BEFORE THE STRIP LOOPS. Run after them, an endpoint-only surface
+    # entered `held_surfaces` too late to be stripped from the claims that name
+    # it, so the docstring's "stripped from every claim's and every event's
+    # about_entities" was false for exactly that population (review P2).
+    # ⛔ The verdict goes into `hold` TOO, not only `held_surfaces`: `by_rule` is
+    # built from `hold`, so an endpoint-only surface raised KeyError, and the
+    # caller's fail-open guard then voided the ENTIRE selection — the hold, the
+    # about_entities strip and the prune (review cycle 3, P1).
+    for surface in _operator_endpoint_surfaces(embed_list.get("operators")):
+        if not surface or surface in held_surfaces or surface in abandoned_surfaces:
+            continue
+        verdict = _referentiality.judge(surface)
+        if verdict is not None:
+            held_surfaces.add(surface)
+            hold.setdefault(surface, verdict)
+
+    def _strip_reference_sets(carrier: dict) -> dict:
+        """Remove every held surface from BOTH reference sets Layer-1 resolves.
+
+        Returns ``carrier`` ITSELF when nothing changed (an untouched carrier
+        stays byte-identical and the caller's dicts are never mutated), else a
+        NEW dict. ⛔ `about_entities` alone leaves the slot dangling, and a
+        dangling slot is what Layer-1 reports as an extraction error.
+        """
+        out: dict = carrier
+        names = carrier.get("about_entities")
+        if isinstance(names, list):
+            pruned = [a for a in names
+                      if str(a).strip() not in held_surfaces]
+            if len(pruned) != len(names):
+                out = {**out, "about_entities": pruned}
+        slots = carrier.get("slots")
+        if isinstance(slots, dict):
+            stripped = _strip_held_slot_refs(slots, held_surfaces)
+            if stripped is not slots:
+                out = {k: v for k, v in out.items() if k != "slots"}
+                if stripped:
+                    out["slots"] = stripped
+        return out
+
+    for point in (embed_list.get("points") or []):
+        kept_points.append(_strip_reference_sets(point)
+                           if isinstance(point, dict) else point)
+
+    for event in (embed_list.get("events") or []):
+        if not isinstance(event, dict):
+            kept_events.append(event)
+            continue
+        stripped = _strip_reference_sets(event)
+        if stripped is not event:
+            stats["events_stripped"] += 1
+        kept_events.append(stripped)
+
+    kept_operators, dropped = _prune_held_operators(
+        embed_list.get("operators"), held_surfaces)
+    stats["operators_dropped"] = dropped
+
+    # ── record the mention on every POINT carrier of a held surface ─────────
+    # Carrier-driven, not entity-driven: a surface carried from pass 1 may be
+    # re-named by a claim S4 added without re-emitting the entity, and that claim
+    # must carry the record too — the contract row is "recorded on every claim
+    # that used it", not "on the claims that existed when the decision was taken".
+    kinds = {str(e.get("name") or "").strip(): str(e.get("kind") or "").strip()
+             for e in entities if isinstance(e, dict)}
+    for surface in hold:
+        if surface not in held_surfaces:
+            continue
+        rule_id, reason = hold[surface]
+        kind_guess = kinds.get(surface) or None
+        on_points = 0
+        on_events = 0
+        for carrier in _claims_naming(surface):
+            if "pointKind" not in carrier and "eventKind" in carrier:
+                on_events += 1
+                continue
+            on_points += 1
+            records.append(_mention_record(
+                surface=surface, claim=carrier, kind_guess=kind_guess,
+                rule_id=rule_id, reason=reason, narrative=narrative,
+                quote=str(carrier.get("quote") or "")))
+        stats["mention_carrier_is_event"] += on_events
+        if on_events and not on_points:
+            # An EVENT is a carrier, but `execute_embed`'s ref set is
+            # points-only, so this record can never attach — writing it would be
+            # reported as a claim the run folded away, which is a different
+            # (false) fact. The hold still stands: the surface is not minted, and
+            # the DM1 record it cannot carry is NAMED here.
+            unrecorded_surfaces.add(surface)
+
+    for surface in held_surfaces:
+        rule_id = (hold.get(surface) or ("", ""))[0] or _referentiality.RULE_CHANNEL
+        stats["by_rule"][rule_id] = stats["by_rule"].get(rule_id, 0) + 1
+
+    # ── the channel itself: model-emitted mentions are recorded, never promoted
+    # Keyed by `_mention_ref` — the claim's identity AS THE WRITE KEEPS IT — or a
+    # claim over `_MAX_CONTENT` keys apart from its own record and the mention is
+    # lost at the union pass while being reported as a fold that never happened
+    # (review cycle 4, P1-c).
+    # …`claims_by_ref` is built ABOVE the channel loop: the hold is gated on the
+    # same resolution the record loop uses.
+    # A record this module WROTE is CARRIED verbatim, never re-derived: pass 2
+    # would otherwise relabel a `quote`/`narrative` span as `model` and overwrite
+    # the cue's reason (review at 41fb0c65e, P1). A model entry (no cue rule, or a
+    # cue rule `judge()` contradicts) is NOT carried — it is re-derived below,
+    # where its fields are clamped.
+    seeded: set[tuple[str, str]] = set()
+    for entry in channel:
+        if not isinstance(entry, dict):
+            continue
+        surface = str(entry.get("surface") or "").strip()
+        rule_in = str(entry.get("rule_id") or "").strip()
+        if not surface or rule_in not in _referentiality.RULES:
+            continue
+        if rule_in == _referentiality.RULE_CHANNEL:
+            continue
+        verdict = _referentiality.judge(surface)
+        if verdict is None or verdict[0] != rule_in:
+            continue                       # not this module's record
+        ref = str(entry.get("claim_ref") or "").strip()
+        # ⛔ Same window as the record's own `claim_ref` — the MEMBERSHIP test and the
+        # SUBSCRIPT below are the same key, or an over-cap claim passes the test and
+        # `claims_by_ref[...]` raises KeyError on the raw string (review at
+        # `9561959ed7`, P3; the first cut of this fix moved only the test).
+        claim_key = _norm(_mention_ref({"content": ref}))
+        if surface in candidate_surfaces or claim_key not in claims_by_ref:
+            continue                       # the entity wins / the claim is gone
+        # ⛔ CARRIED, but still CONSTRUCTED: `dict(entry)` copied a model-supplied
+        # `span_start`/`span_end`/`span_source` verbatim, so an entry that guessed
+        # the cue's own `rule_id` (the S4 prompt renders the whole embed list, so
+        # the shape is visible) shipped a `span_source` naming a text that does not
+        # index it, and skipped the `_MAX_QUOTE` clamp on the way — the exact
+        # address defects the two branches above fix (review cycle 5, P2). Routing
+        # it through `_mention_record` keeps the cue's `rule_id`/`reason` the carry
+        # exists for, while clamping the quote first and demoting an unverified
+        # declaration to `"model"`.
+        records.append(_mention_record(
+            surface=surface, claim=claims_by_ref[claim_key],
+            kind_guess=str(entry.get("kind_guess") or "").strip() or None,
+            rule_id=rule_in,
+            reason=(str(entry.get("reason") or "").strip()
+                    or "carried from an earlier pass"),
+            narrative=narrative,
+            quote=str(entry.get("quote") or ""),
+            span=entry))
+        # ⚠️ Left on the RAW ref on purpose: aligning it to `_mention_ref` changes
+        # nothing observable (the trailing `_dedupe_mentions` removes the duplicate
+        # this set exists to prevent), and a change no row can discriminate is the
+        # unpinned shape reviews keep rejecting. Re-align it with the channel loop
+        # only if the final dedupe is ever removed (review at `9561959ed7`, P3).
+        seeded.add((surface, _norm(ref)))
+
+    for entry in channel:
+        if not isinstance(entry, dict):
+            continue
+        surface = str(entry.get("surface") or "").strip()
+        if not surface:
+            continue
+        if surface in candidate_surfaces:
+            # contradictory channel use: `entities[]` says node, `mentions[]` says
+            # phrase. The entity wins (fail-open) and the conflict is counted.
+            stats["channel_entry_is_entity"] += 1
+            continue
+        claim_ref = str(entry.get("claim_ref") or "").strip()
+        claim_key = _norm(_mention_ref({"content": claim_ref}))
+        if (surface, claim_key) in seeded:
+            continue                       # carried verbatim above
+        claim = claims_by_ref.get(claim_key)
+        if claim is None:
+            # ⛔ NOT A REFUSAL WHEN THE HOLD ALREADY PUBLISHED A RECORD. The hold
+            # gate above accepts an entry with a null/paraphrased `claim_ref` as long
+            # as a carrier NAMES the surface (`_claims_naming`), and the
+            # carrier-driven loop then writes the record — so counting this loop's
+            # unresolvable ref as `channel_refused_no_claim` made ONE run report
+            # `held_surfaces: 1` + a record + `mention_held` AND "1 mention lost for
+            # lack of a claim", naming that same surface in
+            # `channel_refused_surfaces`. That is the run-disagrees-with-itself class
+            # this PR closes, in the evidence a lane reads to decide whether mentions
+            # are being lost (review at `ea790070d`, P3).
+            if surface in held_surfaces:
+                continue                   # a carrier already wrote its record
+            # A mention with no resolvable claim AND no carrier is not a record.
+            stats["channel_refused_no_claim"] += 1
+            stats.setdefault("channel_refused_surfaces", []).append(surface)
+            continue
+        # ⛔ BOTH sides through the write's window here too: a cut key compared to the
+        # model's RAW ref never matched an over-cap claim, so the unstripped `claim`
+        # fallback was used. Not observable today (only `claim["content"]` is read
+        # and both yield the same `claim_ref`), but the comment above claims a
+        # uniformity this line did not have (review at `2a1153519`, P3).
+        carrier = next((p for p in kept_points
+                        if isinstance(p, dict)
+                        and _norm(_mention_ref(p))
+                        == _norm(_mention_ref({"content": claim_ref}))), claim)
+        # ⛔ THE DECISION ALREADY TAKEN WINS OVER THE MODEL'S SILENCE. The channel
+        # loop ABOVE wrote the cue's `(rule_id, reason)` into `hold` for this
+        # surface; stamping `entry.rule_id or RULE_CHANNEL` here overrode it, so a
+        # run published `referentiality.channel` ("the model said so") on the
+        # record while `by_rule`/`mention_held` said `referentiality.pronoun` — TWO
+        # ANSWERS to "what did this hold", and the disagreeing one is the surface
+        # plan R1's arming measurement READS. The shape is the one the armed prompt
+        # asks for: a mention its claim does not also NAME in `about_entities`, so
+        # the carrier-driven loop above writes no record for it (review at
+        # `40a0a81e6`, P2; re-verified at `0c15ad04d`).
+        hold_rule, hold_reason = hold.get(surface, ("", ""))
+        records.append(_mention_record(
+            surface=surface, claim=carrier,
+            kind_guess=str(entry.get("kind_guess") or "").strip() or None,
+            # `_mention_rule` re-checks the cue rule against `judge()`, so this
+            # can only ever REPEAT a verdict the cue took — never smuggle one.
+            rule_id=(hold_rule
+                     or str(entry.get("rule_id") or _referentiality.RULE_CHANNEL)),
+            reason=(str(entry.get("reason") or "").strip()
+                    or hold_reason
+                    or "emitted by the extraction model on the mention channel"),
+            narrative=narrative,
+            quote=str(entry.get("quote") or claim.get("quote") or ""),
+            span=entry))
+
+    out = dict(embed_list)
+    out["entities"] = kept_entities
+    if "points" in embed_list:
+        out["points"] = kept_points
+    if "events" in embed_list:
+        out["events"] = kept_events
+    if "operators" in embed_list:
+        out["operators"] = kept_operators
+    out["mentions"] = _dedupe_mentions(records)
+    # The decisions the UNION pass inherits — surface-level, so a hold whose only
+    # carrier was an EVENT (and therefore wrote no record) is still held there.
+    # ⛔ Cleared when nothing is held: a stale list would hold a surface this pass
+    # decided to keep.
+    out.pop("mention_held", None)
+    if held_surfaces:
+        out["mention_held"] = [
+            {"surface": surface,
+             "rule_id": (hold.get(surface)
+                         or (_referentiality.RULE_CHANNEL, ""))[0]}
+            for surface in sorted(held_surfaces)]
+    stats["held_surfaces"] = len(held_surfaces)
+    if unrecorded_surfaces:
+        stats["mention_unrecorded_surfaces"] = sorted(unrecorded_surfaces)
+    out["mention_stats"] = stats
+    return out
+
+
+def _carried_holds(rows: object) -> dict[str, str]:
+    """The hold decisions an EARLIER pass carried on ``mention_held`` (**#11021**).
+
+    ⛔ **A hold removes the reference it was decided from, so the union pass
+    cannot re-derive it.** ``execute_embed``'s ref set is points-only, so a
+    surface whose only carrier is an EVENT writes no record at all — and with no
+    surface-level memory of the decision, pass 2 found no carrier, counted
+    ``hold_abandoned_no_claim`` and **MINTED** the very entity pass 1 had held
+    (measured on the two-pass pipeline: pass 1 held ``it``, pass 2 abandoned it,
+    payload entities ``['the admin-merge rail', 'it']``). An event-only hold is a
+    DM1 loss the slice cannot repair — minting on the next pass is the phantom
+    node #11021 exists to delete.
+
+    ⛔ **Re-verified, never trusted.** ``mention_held`` rides the merged embed
+    list, and S4 is rendered that whole list, so the extraction model can emit
+    one. A row re-arms only when :func:`referentiality.judge` returns the SAME
+    rule for the surface — the gate the channel re-arm uses, and for the same
+    reason (review cycle 3, P1: a model-supplied cue rule for a surface the cue
+    calls a REFERENT deleted a 70-reference must-keep). ``RULE_CHANNEL`` re-arms
+    nothing: it is this module's marker for a record the MODEL emitted for a
+    surface the cue itself calls a referent.
+    """
+    out: dict[str, str] = {}
+    if not isinstance(rows, list):
+        return out
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        surface = str(row.get("surface") or "").strip()
+        rule_id = str(row.get("rule_id") or "").strip()
+        if not surface or rule_id not in _referentiality.RULES:
+            continue
+        if rule_id == _referentiality.RULE_CHANNEL:
+            continue
+        verdict = _referentiality.judge(surface)
+        if verdict is not None and verdict[0] == rule_id:
+            out.setdefault(surface, rule_id)
+    return out
+
+
+#: The participant-slot roles Layer-1 resolves against the EMITTED entities
+#: (``_resolve_slot_refs``). ``slots.event`` is deliberately absent: it binds
+#: event-as-content (#1417 B2) and NOTHING resolves it against the emitted
+#: entities — its binding belongs to the #1417 ``aboutEvent`` work, which
+#: ``subject_binding._ROLE_TARGET`` deliberately excludes — so a held SURFACE
+#: name in it is not a reference to an entity (#11021).
+_SLOT_ENTITY_ROLES = ("subject", "object")
+
+
+def _slot_ref_names(carrier: dict) -> set[str]:
+    """The typed participant-slot references that point at an EMITTED ENTITY.
+
+    This is the SECOND reference set ``commit_schema``/``_resolve_slot_refs``
+    validate against the emitted set (the first is ``about_entities``). A
+    surface named only here is still "a claim that used it", so the
+    referentiality selection must treat it as a CARRIER (#11021 review cycle 5,
+    P1: reading ``about_entities`` alone abandoned the hold and MINTED the
+    phantom, then Layer-1 dropped the dangling slot with a warning that reads
+    as an extraction error).
+    """
+    slots = carrier.get("slots")
+    if not isinstance(slots, dict):
+        return set()
+    names: set[str] = set()
+    for role in _SLOT_ENTITY_ROLES:
+        refs = slots.get(role)
+        if not isinstance(refs, list):
+            continue
+        for ref in refs:
+            if isinstance(ref, dict) and ref.get("name"):
+                names.add(str(ref["name"]).strip())
+    return names
+
+
+def _strip_held_slot_refs(slots: dict, held_surfaces: set[str]) -> dict:
+    """``slots`` with every held surface removed from ``subject``/``object``.
+
+    Returns the SAME object when nothing was removed (so an untouched carrier
+    stays byte-identical), otherwise a new dict — possibly empty, in which case
+    the caller drops the key. ``slots.event`` passes through untouched.
+    """
+    out: dict = {}
+    changed = False
+    for role, refs in slots.items():
+        if role in _SLOT_ENTITY_ROLES and isinstance(refs, list):
+            kept = [ref for ref in refs
+                    if not (isinstance(ref, dict)
+                            and str(ref.get("name") or "").strip()
+                            in held_surfaces)]
+            if len(kept) != len(refs):
+                changed = True
+            if kept:
+                out[role] = kept
+            continue
+        out[role] = refs
+    return out if changed else slots
+
+
+def _operator_endpoint_surfaces(operators: object) -> set[str]:
+    """Every surface an operator names as an endpoint.
+
+    ``target_edge`` AND its ``target`` alias: ``execute_embed``'s mint
+    pre-pass accepts either spelling for a ``MITIGATES`` (``op.get("target") or
+    op.get("target_edge")``), so reading only ``target_edge`` here left the
+    ``target`` spelling to be MINTED as a fabricated statement Point — the #2552
+    hazard this pass exists to close, one alias away (review cycle 4, P2).
+    """
+    out: set[str] = set()
+    if not isinstance(operators, list):
+        return out
+    for op in operators:
+        if not isinstance(op, dict):
+            continue
+        for k in ("src", "dst"):
+            v = str(op.get(k) or "").strip()
+            if v:
+                out.add(v)
+        for key in ("target_edge", "target"):
+            target = op.get(key)
+            if isinstance(target, dict):
+                for k in ("src", "dst"):
+                    v = str(target.get(k) or "").strip()
+                    if v:
+                        out.add(v)
+    return out
+
+
+def _prune_held_operators(operators: object,
+                          held_surfaces: set[str]) -> tuple[list, int]:
+    """Drop every operator that NAMES a held surface, with its count.
+
+    ``execute_embed``'s mint-before-wire pass (#2552) materialises an
+    unresolvable operator endpoint as a statement Point carrying the endpoint's
+    own text — so a held pronoun left in an operator comes back as a CLAIM node,
+    which is the same defect one step sideways. ``vet_gate.apply_vet`` prunes
+    this exact class for a DISCARD (Rule 3); this is the hold's mirror, and it
+    drops ``MITIGATES.target_edge`` endpoints too (the same reason), in either
+    spelling — ``target`` is the alias ``execute_embed``'s mint pre-pass accepts.
+    """
+    if not isinstance(operators, list):
+        # A non-list section is dropped, never echoed back: returning it would
+        # flip the section's type (dict/str) on the way to `execute_embed`
+        # (review cycle 2, P3).
+        return [], 0
+    kept: list = []
+    dropped = 0
+    for op in operators:
+        if not isinstance(op, dict):
+            kept.append(op)
+            continue
+        endpoints = [str(op.get(k) or "").strip() for k in ("src", "dst")]
+        for key in ("target_edge", "target"):
+            target = op.get(key)
+            if isinstance(target, dict):
+                endpoints += [str(target.get(k) or "").strip()
+                              for k in ("src", "dst")]
+        if any(e in held_surfaces for e in endpoints if e):
+            dropped += 1
+            continue
+        kept.append(op)
+    return kept, dropped
+
+
+def _mention_ref(claim: dict) -> str:
+    """The claim's identity **as the write keeps it** — one window, one home.
+
+    ``execute_embed`` stores ``_write_span(str(content).strip(), _MAX_CONTENT)``
+    (``.strip()``, then the token-boundary cut). A ``claim_ref`` cut from the RAW
+    content keys apart from its own claim for anything over the cap — the mention
+    then resolves against nothing and is dropped at the union pass while being
+    reported as a claim the run folded away, which is a different (false) fact
+    (review cycle 4, P1-c). Both the record and every lookup go through here.
+    """
+    return _write_span(str(claim.get("content", "")).strip(), _MAX_CONTENT)
+
+
+def _mention_rule(surface: str, rule_id: object) -> str:
+    """The ``rule_id`` a record may carry, sanitised against the vocabulary.
+
+    ⛔ A model-supplied ``rule_id`` is a CLAIM about a cue that may never have
+    run: copied verbatim, an entry tagged ``referentiality.pronoun`` on a surface
+    ``judge()`` calls a REFERENT persisted a hold that never happened — on the
+    exact evidence surface plan R1's arming gate reads (review cycle 4, P3). A
+    cue rule survives only when the cue, re-run, returns that same rule; anything
+    else becomes :data:`referentiality.RULE_CHANNEL`, which is the honest name for
+    "the model said so".
+    """
+    rule = str(rule_id or "").strip()
+    if rule not in _referentiality.RULES:
+        return _referentiality.RULE_CHANNEL
+    if rule == _referentiality.RULE_CHANNEL:
+        return rule
+    verdict = _referentiality.judge(surface)
+    if verdict is not None and verdict[0] == rule:
+        return rule
+    return _referentiality.RULE_CHANNEL
+
+
+def _mention_record(*, surface: str, claim: dict, kind_guess: str | None,
+                    rule_id: str, reason: str, narrative: str,
+                    quote: str, span: dict | None = None) -> dict:
+    """One mention, in DM1's property shape (#11021) — ``surface``, the span it
+    addressed, and a ``kind_guess``. ``claim_ref`` is the claim's own content (the
+    owning point IS the claim on this branch — there is deliberately no
+    ``claim_id``).
+
+    ⚠️ **The span is resolved from text, never fabricated, and it says which text.**
+    It is searched for in the claim's verbatim ``quote`` first and then in the
+    compiled narrative the extraction saw; ``span_source`` names which one, because
+    the two offset spaces are not interchangeable (a Point's own span is
+    quote-inside-turn). A surface that does not occur EXACTLY ONCE as a whole word
+    gets ``None`` — a half span or a guessed offset is the "fabricated address"
+    ``#5007``'s all-or-nothing contract forbids.
+
+    Every field is clamped to ``commit_schema.Mention``'s caps HERE, on both the
+    derived and the model-emitted path, so a hallucinated 300-character surface
+    cannot 422 the whole session (review P1: the model path bypassed the clamps).
+
+    ⚠️ **A declared ``span`` provenance is a CLAIM and must VERIFY.** An entry
+    that declares none (or declares "model") is read as model offsets. One that
+    declares ``quote``/``narrative`` keeps that space ONLY when its offsets are
+    exactly where that haystack puts the surface — otherwise it is demoted to
+    ``"model"``, so a fabricated ``span_source`` cannot ship an address that
+    names bytes the surface never occupied (review cycle 4, P2). A record this
+    module already derived carries ``span_source: quote|narrative`` and pass 2
+    re-reads it through this path — labelling those offsets "model" claimed the
+    model emitted an address that came from the cue's own search, on every
+    shipped record (review at ``41fb0c65e``, P1: "a consumer that resolves the
+    span per ``span_source`` reads the wrong bytes").
+
+    ⚠️ TWO exceptions, both stated rather than implied, and BOTH builders apply
+    them: an absent **narrative** is UNKNOWABLE (no haystack was supplied, so the
+    declaration stands unchecked instead of being relabelled ``"model"``), while
+    an absent **quote** is a MISMATCH (``"quote": null`` is in the output
+    contract, so there is no text to address).
+
+    ⛔ ``isinstance(True, int)`` is ``True``, and ``True`` is not an offset: a
+    boolean offset is DROPPED, not coerced to ``1``. ``commit_schema.validate_span``
+    has the same rule first (the one home, #5007) — this path may not be the
+    weaker copy.
+    """
+    # ⛔ STRIP **THEN** CAP: `_clamped_mention` now strips before capping too, so a
+    # padded surface over the cap is the same name on both builders — capping
+    # first left `"i"` here and `"itx"` there (review at `d785f3da8`, P3).
+    surface = str(surface or "").strip()[:200]
+    # ⛔ The record's own text is CLAMPED FIRST, because the span is located in it:
+    # locating in the unclamped quote and then storing 200 chars shipped
+    # `span_source: "quote"` with offsets pointing past the end of the quote the
+    # record names — an address that resolves to nothing, which is worse than no
+    # address (review cycle 3, P2).
+    quote = str(quote or "")[:_MAX_QUOTE]
+    span_start: int | None = None
+    span_end: int | None = None
+    span_source = ""
+    if span is not None:
+        # offsets arriving ON the channel: accepted only as a COMPLETE pair of ints
+        try:
+            s0, s1 = span.get("span_start"), span.get("span_end")
+            declared = str(span.get("span_source") or "").strip()
+            if (isinstance(s0, int) and not isinstance(s0, bool)
+                    and isinstance(s1, int) and not isinstance(s1, bool)
+                    and 0 <= s0 < s1 <= _SPAN_OFFSET_MAX):
+                span_start, span_end = s0, s1
+                # ⛔ A record RE-ENTERING through the channel keeps the space it was
+                # derived in. The union pass re-records every existing entry through
+                # this branch, so hard-setting "model" overwrote the
+                # "quote"/"narrative" provenance pass 1 computed: the field that
+                # says WHICH text the offsets address stopped saying it, and the
+                # `reason` re-described a derived record as a model-emitted one
+                # (review cycle 3, P2; the same defect the cycle-5 carry fixes at
+                # its root — this branch still has to be right for a model entry).
+                #
+                # ⛔ BUT a declared space is a CLAIM, and this branch is reachable by
+                # the MODEL: honour it only when it VERIFIES — the offsets must be
+                # exactly where that haystack puts the surface. Without this an entry
+                # asserting `quote` for made-up offsets shipped an address whose
+                # provenance field names a text it does not index (measured:
+                # `span_start=3, span_end=9, span_source="quote"` against
+                # `quote[3:9] == ' quick'` for surface `the problem`), and
+                # `validate_payload_dict` accepts it (review cycle 4, P2).
+                if declared == "quote":
+                    verified = _mention_span(quote, surface)
+                elif declared == "narrative":
+                    # ⛔ AN ABSENT NARRATIVE IS AN UNKNOWABLE HAYSTACK, not a
+                    # failed verification — the rule `_clamped_mention` states and
+                    # pins. `narrative` defaults to `""` in BOTH builders, so
+                    # demoting on it relabelled a genuinely cue-derived address as
+                    # `"model"` AND made the two builders disagree about WHICH TEXT
+                    # the same offsets address: the two-answers class this PR
+                    # closes (review at `40a0a81e6`, P2; re-verified at
+                    # `0c15ad04d`). `_clamped_mention`'s comment named the
+                    # divergence as known and this side as the incorrect one; they
+                    # now agree. An absent QUOTE stays a definite MISMATCH
+                    # (`"quote": null` is in the output contract).
+                    verified = (_mention_span(narrative, surface)
+                                if narrative else (span_start, span_end))
+                else:
+                    verified = None
+                span_source = (declared
+                               if verified == (span_start, span_end) else "model")
+        except Exception:
+            span_start, span_end, span_source = None, None, ""
+    else:
+        for haystack, label in ((quote, "quote"), (narrative, "narrative")):
+            found = _mention_span(haystack, surface)
+            if found is not None:
+                span_start, span_end = found
+                span_source = label
+                break
+    return {"surface": surface,
+            # ⛔ The claim's content is TRUNCATED by `execute_embed` before it
+            # becomes the point. Recording the raw text made the ref unresolvable
+            # for any claim over `_MAX_CONTENT`, losing the mention AND reporting
+            # it as a fold that never happened (review cycle 3, P2).
+            # `_mention_ref` is the ONE cut: the write's window, not the raw claim's
+            # (review cycle 4, P1-c).
+            "claim_ref": _mention_ref(claim),
+            "quote": quote,
+            "span_start": span_start,
+            "span_end": span_end,
+            "span_source": span_source,
+            "kind_guess": (kind_guess or "")[:60] or None,
+            "rule_id": _mention_rule(surface, rule_id),
+            "reason": reason}
+
+
+def _mention_span(haystack: str, surface: str) -> tuple[int, int] | None:
+    """The offsets of ``surface`` in ``haystack`` as a WHOLE WORD, or None.
+
+    Whole-word and unambiguous only: exactly one match, and the match must not be
+    flanked by letters. Substring arithmetic alone put a span on the ``us`` inside
+    ``usual`` (review P2) — a recorded address that names the wrong bytes, which is
+    worse than no address.
+    """
+    if not haystack or not surface:
+        return None
+    # `\w` is "a word character in any script"; `[A-Za-z]` let `it` match inside
+    # `itération`, `it2` and `_it`, which is a recorded address naming the wrong
+    # bytes (review cycle 2, P3).
+    pattern = re.compile(r"(?<!\w)" + re.escape(surface) + r"(?!\w)")
+    found = list(pattern.finditer(haystack))
+    if len(found) != 1:
+        return None
+    return (found[0].start(), found[0].end())
+
+
+def _dedupe_mentions(mentions: list) -> list[dict]:
+    """One record per (surface, claim) — the S2 and union passes both run the
+    selection, and a duplicated record is a duplicated measurement."""
+    out: list[dict] = []
+    at: dict[tuple[str, str], int] = {}
+    for m in mentions:
+        if not isinstance(m, dict):
+            continue
+        key = (_norm(str(m.get("surface") or "")),
+               _norm(str(m.get("claim_ref") or "")))
+        if not key[0]:
+            continue
+        if key in at:
+            # ⛔ FIRST-IN-LIST is not the right winner: a spanless duplicate listed
+            # first replaced a VERIFIED address listed second, so the shipped record
+            # had no address while one was available — and the address is the
+            # record's whole point (review at `b791a3eb2`, P3).
+            # ⛔ And the test is `is None`, NOT key presence: `_mention_record`
+            # ALWAYS emits `span_start`/`span_end` (`None` when it could not locate
+            # the surface) while `_clamped_mention` POPS them, so a presence test was
+            # inert on the builder where the defect was observed and the rule did
+            # nothing on the normal path (review at `9561959ed7`, P2).
+            # ⛔ The ADDRESS is merged into the FIRST record rather than swapping the
+            # record: a whole-record swap replaced the cue's `rule_id`/`reason` with
+            # the duplicate's channel-labelled ones — it fixed the address by losing
+            # the provenance that says the cue derived it.
+            # ⛔ ONE ADDRESS = LABEL + OFFSETS + THE TEXT THEY INDEX. Copying the
+            # offsets and `span_source` while keeping the FIRST record's `quote`
+            # (the old code adopted the winner's quote only when the kept one was
+            # EMPTY) shipped a `"quote"`-labelled address into a text it does not
+            # index: `quote[start:end]` read bytes the surface never occupied, and
+            # `Mention._span_is_an_address` cannot see it (it checks completeness,
+            # order and range only). Measured on the fail-open path, where the clamp
+            # runs BEFORE this dedupe: `{'quote': 'the budget is 40k',
+            # 'span_start': 2, 'span_end': 4, 'span_source': 'quote'}` →
+            # `quote[2:4] == 'e '` for surface `it` — the fabricated-address class
+            # #5007 forbids (review at `d59000f10`, P2; the peer lane found the same
+            # defect independently at `2a1153519`). The adopted pair therefore takes
+            # ITS OWN quote with it; a `narrative`/`model` pair needs none, since the
+            # narrative is not replaced here and `model` asserts nothing verified.
+            # Pinned as a PROPERTY by
+            # `test_a_deduped_address_must_INDEX_the_text_the_record_carries`: a
+            # shipped `"quote"` address must index its own surface in its own quote,
+            # whichever entry won.
+            kept = out[at[key]]
+            # ⛔ The ADDRESS is only adoptable for the SAME SPELLING of the surface: the
+            # key folds case and whitespace runs (`_norm`) while `_mention_span` is
+            # case-SENSITIVE, so a pair verified for `it` would otherwise ship under
+            # a survivor named `It` — an address that indexes a variant of the
+            # surface the record names (review at `1bc5847b4`, P3). The survivor
+            # keeps its (cue-derived) form and no address, which is the honest state;
+            # the published surfaces would demote such a pair to `"model"` anyway,
+            # one round later and only after disagreeing with the producer channel.
+            same_spelling = str(kept.get("surface") or "") == str(m.get("surface") or "")
+            if (same_spelling and kept.get("span_start") is None
+                    and m.get("span_start") is not None):
+                for field in ("span_start", "span_end", "span_source"):
+                    if m.get(field) is not None:
+                        kept[field] = m[field]
+                # ⛔ A `quote`-space address travels WITH its quote: the offsets were
+                # verified against the DUPLICATE's text, so filling the quote only
+                # "when absent" shipped `span_source: "quote"` beside the survivor's
+                # different quote — offsets that index bytes the record does not
+                # name, which is the forgery the whole clamp exists to refuse, and
+                # no later clamp can catch it because every published surface
+                # clamps BEFORE deduping (review at `2a1153519`, P2; found
+                # independently as the round-7 blocker at `d59000f10`).
+                # ONE ADDRESS = LABEL + OFFSETS + THE TEXT THEY INDEX: the shipped
+                # quote is therefore the one that indexes the shipped pair, and the
+                # surviving record's own quote is kept when it already indexes it.
+                if m.get("quote") and (kept.get("span_source") == "quote"
+                                       or not kept.get("quote")):
+                    kept["quote"] = m["quote"]
+
+            continue
+        at[key] = len(out)
+        out.append(m)
+    return out
+
+
+#: The fields ``commit_schema.Mention`` carries that this module forwards. ⚠️ It
+#: is a COPY FILTER, not a validation list: a field present here but absent from
+#: the model fails validation loudly, while a model field absent from here is
+#: dropped silently — so this tuple and the model must be changed together.
+_MENTION_FIELDS: tuple[str, ...] = (
+    "surface", "claim_ref", "quote", "span_start", "span_end", "span_source",
+    "kind_guess", "rule_id",
+)
+
+#: The caps ``commit_schema.Mention`` enforces. Clamped here for every mention
+#: that reaches the payload from the MODEL channel — an over-long surface or a
+#: half span from a hallucinated field 422'd the entire payload (review P1).
+#: ⚠️ It is NOT an unarmed-run guard: with the flag OFF `route_mentions` returns
+#: the list unchanged and :func:`_mentions_for_claim` returns ``[]`` on its first
+#: line, so an unarmed run copies no channel entry at all (the earlier comment
+#: here claimed the opposite — a docstring describing behaviour the code does not
+#: have, review P2).
+_MENTION_CAPS: dict[str, int] = {"surface": 200, "quote": 200, "kind_guess": 60}
+#: The only values ``commit_schema.Mention.span_source`` accepts.
+_MENTION_SPAN_SOURCES = ("quote", "narrative", "model")
+#: Mirrors ``commit_schema.SPAN_OFFSET_MAX`` (the store's int64 ceiling). ONE
+#: home for the rule is the schema; this copy exists because `extractor_v2` does
+#: not import `commit_schema` at module scope (the commit module is imported
+#: lazily on the write path), and
+#: ``tests/test_referentiality_11021.py::test_the_span_ceiling_mirrors_the_schema``
+#: fails the moment the two disagree — a mirrored constant with no drift pin is
+#: how the address ceiling rots.
+_SPAN_OFFSET_MAX = 2**63 - 1
+
+
+#: The ``mentions[]`` channel line, injected into the prompt contract **only when the
+#: cue is armed** — never part of ``OUTPUT_CONTRACT`` itself.
+_MENTION_CONTRACT_LINE = (
+    '  "mentions": [{"surface": str, "claim_ref": str|null, "quote": str|null, '
+    '"kind_guess": str|null}],  # a phrase that POINTS rather than NAMES (a '
+    'pronoun, `the former`, `the problem`): recorded against the claim that used '
+    'it, NEVER an entity (#11021)')
+
+#: The anchor the mention line is injected ABOVE. ``content`` is the one field the
+#: core-only variants do not rewrite, so this marker is stable in all four.
+_CONTRACT_EVENTS_ANCHOR = '  "events": [{"content": str,'
+
+
+def _prompt_contract(*, core_only: bool = False) -> str:
+    """The ``output_contract`` text a prompt renders — armed-aware for **#11021**.
+
+    The ``mentions[]`` channel is asked for **only when the cue is armed**. An
+    UNARMED run discards that channel (``route_mentions`` returns the list
+    unchanged, and nothing attaches or counts it), so asking the model for it moved
+    a referential phrase OUT of ``entities[]`` into a channel nobody reads: the
+    phrase was then neither minted nor recorded, which is the opposite of plan
+    **R1** (*fail-open to entity until measured*) — the recorded decision the OFF
+    default exists for (review cycle 3, P1).
+
+    Unarmed this returns ``OUTPUT_CONTRACT`` (or its core-only variant) BYTE-
+    IDENTICAL to the pre-#11021 contract, which is what makes the default path
+    unchanged and keeps the flag-off prompt pins honest; armed it is the same
+    contract with the channel line injected above ``events[]``.
+    """
+    contract = OUTPUT_CONTRACT_CORE_ONLY if core_only else OUTPUT_CONTRACT
+    if not _referentiality.enabled():
+        return contract
+    return contract.replace(_CONTRACT_EVENTS_ANCHOR,
+                            _MENTION_CONTRACT_LINE + "\n" + _CONTRACT_EVENTS_ANCHOR,
+                            1)
+
+
+def _clamped_mention(m: dict, *, narrative: str = "") -> dict | None:
+    """ONE mention entry in the committed shape, with every model CLAIM re-derived.
+
+    ⛔ **The single clamp, called by BOTH surfaces that publish a record.** It was
+    inline in :func:`_mentions_for_claim`, so only the payload was clamped and
+    ``result["mentions"]["records"]`` — assembled from the merged ``mentions[]`` in
+    :func:`extract_session_v2` — kept the model's raw claims. One run then reported
+    two answers to "what did this hold", and the unverified one was the one plan
+    R1's arming measurement reads (review at `11039b1bd8`, P2).
+
+    Two things a model entry may CLAIM and neither is trusted:
+
+    - ``rule_id`` — re-derived by :func:`_mention_rule`, which returns the same
+      rule only when :func:`referentiality.judge` agrees with it for THAT surface,
+      else ``referentiality.channel``. This is the last door: the caller that
+      keeps the raw channel whenever ``route_mentions`` raises is
+      :func:`extract_session_v2` — the ``try`` guarding its FIRST ``route_mentions``
+      call; ``execute_embed`` never calls it — so a record can reach here without
+      ever passing :func:`_mention_record`.
+    - ``span_source`` — a declared space is honoured only when the offsets are
+      EXACTLY where that haystack puts the surface; otherwise it is demoted to
+      ``"model"`` ("the model asserted these bytes"), never shipped as an address
+      of a text it does not index. ``"quote"`` verifies against the record's own
+      quote, ``"narrative"`` against the narrative this run was extracted from.
+      ⚠️ TWO exceptions, both stated rather than implied:
+      an absent **quote** is a MISMATCH (``"quote": null`` is in the output
+      contract, so there is no text to address), while an absent **narrative**
+      is UNKNOWABLE — no haystack was supplied, so the declaration stands
+      unchecked instead of being relabelled ``"model"``, which would tell a
+      consumer the cue invented offsets it derived.
+      ⚠️ Demotion is not dropping: an unverifiable declaration keeps its offsets
+      under the honest label, so a consumer still sees what the model claimed.
+
+    Returns ``None`` for an entry with no ``surface`` (nothing to record).
+    """
+    record: dict = {}
+    for k in _MENTION_FIELDS:
+        v = m.get(k)
+        if v is None or v == "":
+            continue
+        if k == "surface":
+            # ⛔ STRIP **THEN** CAP, the order `_mention_record` uses: capping
+            # first let a padded 202-character surface collapse to the
+            # one-character `"i"` here and stay `"itx"` on the sibling builder
+            # (review at `d785f3da8`, P3).
+            record[k] = str(v).strip()[:_MENTION_CAPS[k]]
+        elif k in _MENTION_CAPS:
+            record[k] = str(v)[:_MENTION_CAPS[k]]
+        elif k in ("span_start", "span_end"):
+            record[k] = v if isinstance(v, int) else None
+        elif k == "rule_id":
+            record[k] = _mention_rule(str(m.get("surface") or ""), v)
+        elif k == "claim_ref":
+            # ⛔ The ref is the claim's identity AS THE WRITE KEEPS IT — cut
+            # through the same window `_mention_ref` gives every record and every
+            # lookup. Copied raw, a claim over `_MAX_CONTENT` keyed apart from its
+            # own (truncated) point, so the mention never attached and the run
+            # reported a claim it HAD emitted as folded away by a NOOP/duplicate/
+            # MERGE that never happened — the defect `_mention_record` fixed at
+            # its own call site (review cycle 4, P1-c), left open at the last door
+            # on the fail-open path (review at `b791a3eb2`, P2).
+            record[k] = _mention_ref({"content": str(v)})
+        else:
+            # `span_source` is `str` on the model: a non-str value 422'd the
+            # payload (review cycle 3, P3).
+            record[k] = str(v)
+    if record.get("span_start") is None:
+        record.pop("span_start", None)
+    if record.get("span_end") is None:
+        record.pop("span_end", None)
+    surface = str(record.get("surface") or "")
+    if not surface:
+        return None
+    record["surface"] = surface
+    # ⛔ `rule_id` is emitted UNCONDITIONALLY, and this is the LAST door. The field
+    # loop above SKIPS empty values, so an entry that OMITS the key — the shape
+    # `_MENTION_CONTRACT_LINE` actually asks for — shipped with no rule at all and
+    # `commit_schema.Mention.rule_id` defaulted to `""`, a value outside
+    # `referentiality.RULES`: the field whose comment says "no silent hold" saying
+    # nothing. Reachable on the ONE path that never passes `_mention_record` (the
+    # fail-open path), which is exactly where the model's contract-shaped entry
+    # arrives (review at `40a0a81e6`, P2). `_mention_rule` re-derives it from the
+    # cue, which is what this function's docstring promises.
+    record["rule_id"] = _mention_rule(surface, record.get("rule_id"))
+    # An address must be COMPLETE, ORDERED and IN RANGE, and its space must be
+    # one `commit_schema.Mention` accepts — otherwise the whole payload 422s.
+    # Both halves are dropped rather than 422 (review cycle 2, P1: an over-cap
+    # pair and a junk `span_source` each lost the session).
+    s0, s1 = record.get("span_start"), record.get("span_end")
+    # ⛔ ``isinstance(True, int)`` is ``True``: a boolean offset coerces to ``1``
+    # on the model and names bytes the surface never occupied.
+    if not (isinstance(s0, int) and not isinstance(s0, bool)
+            and isinstance(s1, int) and not isinstance(s1, bool)
+            and 0 <= s0 < s1 <= _SPAN_OFFSET_MAX):
+        record.pop("span_start", None)
+        record.pop("span_end", None)
+    # ⛔ A PADDED space is the SAME declaration: `_mention_record` strips it
+    # (`str(span.get("span_source") or "").strip()`), so leaving it raw here
+    # demoted a verifiable address on one builder and verified it on the other.
+    # Written back STRIPPED, or the record carries `" quote "` and
+    # `commit_schema.Mention.span_source`'s `Literal` 422s the whole payload.
+    declared = str(record.get("span_source") or "").strip()
+    if declared in _MENTION_SPAN_SOURCES:
+        record["span_source"] = declared
+    if declared not in _MENTION_SPAN_SOURCES:
+        record.pop("span_source", None)
+    elif declared in ("quote", "narrative") and "span_start" in record:
+        haystack = (str(record.get("quote") or "") if declared == "quote"
+                    else str(narrative or ""))
+        # ⛔ THE AMNESTY IS `narrative`-ONLY. An absent NARRATIVE is not a failed
+        # verification: `execute_embed`'s `story_arc` defaults to `""`, so a
+        # caller that omits it (every test, any seam) otherwise DEMOTED a
+        # genuinely cue-derived `narrative` address to `"model"` — telling a
+        # consumer that resolves the span per `span_source` that the cue invented
+        # offsets it derived (review at `5da3575b7a`, P2).
+        # ⛔ An absent QUOTE is the opposite: `"quote": null` is IN the output
+        # contract, and `Mention.quote` defaults to `""`, so an empty quote is a
+        # definite MISMATCH, never an unknown. Exempting it (the first cut of this
+        # guard did) shipped a `quote`-labelled address into a record that has no
+        # quote — the caller resolves `quote[start:end]` to bytes that do not
+        # exist, which is the forgery this branch is (review at `1a7072e22`, P2).
+        want = (record["span_start"], record["span_end"])
+        # A `quote` address is ALWAYS checkable (an empty quote is a definite
+        # mismatch); a `narrative` one only when a haystack was supplied — the
+        # offsets cannot be checked here, so that declaration stands. `narrative`
+        # defaults to `""` in BOTH builders, so this is not an exemption this
+        # side makes and the record builder declines: :func:`_mention_record`
+        # applies the SAME rule (review at `40a0a81e6`, P2 — the earlier note here
+        # described the divergence as known and this side as the correct one).
+        checkable = declared == "quote" or bool(haystack)
+        if checkable and _mention_span(haystack, surface) != want:
+            record["span_source"] = "model"
+    # ⛔ A SPACE LABEL AND ITS OFFSET PAIR ARE ONE ADDRESS, and this clamp used to
+    # publish either half alone (review at `d785f3da8`, P2): a surviving pair with
+    # no declared space shipped with NO `span_source` — and `Mention`'s own field
+    # comment says "a bare offset that does not say which space it is in is not an
+    # address" — while a declared space whose pair did not survive kept its label.
+    # `_mention_record` can emit neither state (its label exists only inside the
+    # valid-pair branch, and an undeclared pair becomes `"model"`), and
+    # `Mention._span_is_an_address` checks only completeness/order/range, so
+    # Layer-1 accepted both. Mirror the record builder: an undeclared pair is
+    # `"model"` (the model asserted these bytes), and a label never outlives the
+    # address it describes.
+    if "span_start" in record:
+        record.setdefault("span_source", "model")
+    else:
+        record.pop("span_source", None)
+    return record
+
+
+def _mentions_for_claim(embed_list: dict, content: str,
+                        *, armed: bool, narrative: str = "") -> list[dict]:
+    """The mentions whose ``claim_ref`` is THIS claim — in the committed shape.
+
+    Resolution is by the claim's own text (:func:`_norm`), never by position: S4
+    reorders and merges the list, so an index would attach a mention to the wrong
+    claim the first time the order moved.
+
+    ``armed`` is the cue's own switch: with it OFF the attachment is skipped
+    entirely, so an unmeasured run's payload is genuinely unchanged (the comment
+    that claimed this without doing it was a review P2). ``narrative`` is only the
+    haystack a declared ``narrative`` span is verified against
+    (:func:`_clamped_mention`); when it is ABSENT that declaration stands
+    unchecked (an unknowable haystack is not a failed verification — see the
+    exception note there), and when a narrative IS supplied but does not put the
+    surface at the declared offsets, the label is demoted to ``"model"``.
+    """
+    if not armed:
+        return []
+    # ⛔ BOTH sides of the match go through `_mention_ref`: the record's `claim_ref`
+    # is cut to the write's window, so an over-cap claim did not match itself —
+    # the mention attached to nothing and was reported as a claim the run folded
+    # away (review at `b791a3eb2`, P2).
+    # ⚠️ WHICH SIDE IS LOAD-BEARING, measured: the ENTRY comparison below is (mutant
+    # G3 reddens the row). This one is idempotent on the content `execute_embed`
+    # passes (already `_write_span`-cut, 1000 chars measured), so removing it alone
+    # leaves the file green (G2) — kept because the two sides of one identity must be
+    # computed the same way, not because a test pins it.
+    key = _norm(_mention_ref({"content": str(content or "")}))
+    if not key:
+        return []
+    out: list[dict] = []
+    for m in embed_list.get("mentions") or []:
+        if not isinstance(m, dict):
+            continue
+        ref = str(m.get("claim_ref") or "").strip()
+        # ⛔ BOTH sides go through the SAME window: `key` is the write's cut of the
+        # claim, so comparing it to the model's RAW ref failed for any claim over
+        # `_MAX_CONTENT` — the entry was skipped as "not this claim" and a
+        # HAD-emitted claim was reported unresolved (review at `b791a3eb2`, P2).
+        if not ref or _norm(_mention_ref({"content": ref})) != key:
+            continue
+        record = _clamped_mention(m, narrative=narrative)
+        if record is not None:
+            out.append(record)
+    # ⛔ `_dedupe_mentions` runs INSIDE `route_mentions` — the call that may have
+    # raised. On the fail-open path nothing deduped, so ONE hold was counted twice
+    # (review at `d785f3da8`, P3). Idempotent: the normal path deduped upstream.
+    return _dedupe_mentions(out)
+
+
 def _run_vet_pass(embed_list: dict, narrative: str, *, arbiter=None,
                   prior: dict | None = None
                   ) -> tuple[dict, dict, list[str], dict]:
@@ -10093,10 +12672,10 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
 
     ``vet_arbiter`` (#5005) is the injected S2.2 VET arbiter seam — the
     decision-only model that answers *"should this candidate exist at all?"*.
-    Off-path only when ``vet_arbiter`` is ``None`` **and** all three env
-    switches are off: ``TORTOISE_VET``,
-    ``TORTOISE_VALUE_GATE`` (its ``#4899`` predicate runs inside this pass) and
-    ``TORTOISE_S2_DECISION_SEAM`` (seam arbiter even vs ``TORTOISE_VET=0``; can ``DISCARD``).
+    Off-path only when ``vet_arbiter`` is ``None`` **and** ``TORTOISE_VET`` is off **and**
+    ``TORTOISE_S2_DECISION_SEAM`` is unarmed **and** ``TORTOISE_VALUE_GATE`` reads falsy (``0``,
+    ``false``, and — per ``env_truthy`` — blank or garbage): its leaf reader DEFAULTS ON (#10996), so
+    *unsetting* it is the ON arm and only an explicit falsy value takes this pass off-path.
     A supplied ``vet_arbiter`` arms both passes on its own (``vet_enabled``'s
     FIRST term), so with every switch off an injected arbiter still runs them —
     the state the capstone probes and the seam's armed tests drive.
@@ -10194,7 +12773,7 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
             classify_later = False
             errors.append(f"classify-later init failed: {type(e).__name__}: {e}")
             _bump_census_class(error_census, "classify_later_init_failed")
-    # #5005: S2.2 VET — off unless TORTOISE_VET (or an injected arbiter).
+    # #5005: S2.2 VET — armed by TORTOISE_VET, an injected arbiter, or #4899's value gate (ON by default since #10996).
     # #4899: the mechanical predicate lives inside that pass, so its flag must
     # switch the pass on too or it would be inert (see `_value_gate_enabled`).
     vet_enabled = (vet_arbiter is not None or _vet_enabled()
@@ -10207,6 +12786,10 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                            "reason": "no conversation content"},
                 "payload": None, "chain_notes": [], "link_before_create": [],
                 "supersessions": [],
+                # #10999: the channel is present on EVERY return of this
+                # function, so a consumer never has to distinguish "no
+                # relations" from "the key is missing".
+                "relations": [],
                 "warnings": ["empty conversation — nothing extracted"],
                 "minted_kinds": [], "stats": {"llm": llm_stats,
                                                 "recovery": recovery_stats},
@@ -10292,6 +12875,21 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     # unchanged, which is the pre-existing behaviour.
     vet_s2_stats: dict = {}
     vet_s2_pool: dict = {}
+    # ── S2.2 referentiality (#11021): a mention is RECORDED ON ITS CLAIM, never
+    # minted. Runs before VET because a mention is not a candidate for VET's
+    # question ("should this exist?") — it is a phrase that never named a thing,
+    # so there is nothing for the gate to decide; and it runs before S3 so the
+    # resolver never sees a phantom referent. Fail-open: any failure returns the
+    # list with a warning, exactly like the VET pass.
+    mention_s2_stats: dict = {}
+    if embed_list:
+        try:
+            embed_list = route_mentions(embed_list, story)
+            mention_s2_stats = embed_list.get("mention_stats") or {}
+        except Exception as e:  # noqa: BLE001, RUF100 — never block capture (P1)
+            vet_warnings.append(
+                f"referentiality selection failed ({type(e).__name__}: {e}) — "
+                "candidates kept (fail-open)")
     if vet_enabled and embed_list:
         embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass(
             embed_list, story, arbiter=vet_arbiter)
@@ -10414,6 +13012,23 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     # than as a delta because merge_embed_lists rewrites/reorders it — the S2
     # verdict ids (which are positional) do not describe the union's items.
     vet_union_stats: dict = {}
+    # S2.2 referentiality, union pass (#11021): S4 can re-emit a held surface
+    # (it reviews gaps against the S3 index, where the entity was still visible
+    # when the search was built), so the selection runs again on the union —
+    # idempotent by (surface, claim), and the second pass is what makes the
+    # no-mint guarantee hold for the whole pipeline rather than for S2 alone.
+    if complete_list:
+        try:
+            complete_list = route_mentions(complete_list, story)
+            if complete_list.get("mention_stats"):
+                mention_s2_stats = {
+                    **mention_s2_stats,
+                    "union": complete_list["mention_stats"],
+                }
+        except Exception as e:  # noqa: BLE001, RUF100 — never block capture (P1)
+            vet_warnings.append(
+                f"referentiality selection (union) failed "
+                f"({type(e).__name__}: {e}) — candidates kept (fail-open)")
     if vet_enabled and complete_list:
         complete_list, vet_union_stats, _w, _ = _run_vet_pass(
             complete_list, story, arbiter=vet_arbiter, prior=vet_s2_pool)
@@ -10559,10 +13174,65 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                   "supersessions": [], "noops": [], "deletions": [],
                   "merges": [],
                   "warnings": [f"S5 embed execution failed: {e}"],
-                  "minted_kinds": [], "stats": {}}
+                  # #10999: no relations when S5 itself failed — the channel
+                  # is S5's output and nothing upstream can stand in for it.
+                  "relations": [],
+                  "minted_kinds": [], "stats": {},
+                  "held": [], "held_drained": [],
+                  "hold": {"store_supplied": False, "store": None}}
     result["chain_enforcer"] = {      # #1695 Task 1 evidence surface
         "notes": chain_enforcer_notes,
         "stats": chain_enforcer_stats,
+    }
+    # #11021: the referentiality evidence surface — additive always, like the VET
+    # one below. It reports the mentions HELD (with the rule that held each) and
+    # the mentions REFUSED (a mention with no resolvable claim is not a record),
+    # so "the run held N mentions" is a number the result carries rather than a
+    # claim the lane makes. `held` is 0 when the kill-switch is set to 0.
+    # ⛔ FLAG-GATED: unarmed, the list still holds the model's raw `mentions[]`
+    # entries (route_mentions returns the list unchanged), and publishing those as
+    # "the mentions held" claimed a hold that never ran (review cycle 4, P3).
+    # ⛔ FOUR keys carry a record, not two — and only the two PUBLISHED ones go
+    # through the clamp. `result["s2_embed"]` and `result["embed_list"]` are this
+    # pass's OUTPUT, not S2's raw list: both are assigned from the list
+    # `route_mentions` rewrote — its first call REBINDS `embed_list` in place, and
+    # `result["s2_embed"]` stores that same list — and the raw identity holds ONLY
+    # on the fail-open path, where `route_mentions` raised and the list was never
+    # rewritten. Both are the PRODUCER channel, and a reader who believed "two
+    # surfaces" would not look at them (review at `5da3575b7a`, P2).
+    # ⚠️ CITED BY SYMBOL, NOT BY LINE: three rounds of this PR shipped a stale
+    # absolute line number here (the branch merges, so every number rots), and a
+    # citation a reader cannot trust is worse than none (review at `d59000f10`,
+    # P3).
+    # ⛔ `records` is the surface plan R1's arming measurement READS, so it is
+    # clamped by the SAME function the payload uses (`_clamped_mention`), not
+    # copied from the merged list: on the fail-open path the entries there are
+    # the model's raw channel, and publishing them as "the mentions held"
+    # reported a cue rule and a span address that nothing had verified (review at
+    # `11039b1bd8`, P2 — the payload said `referentiality.channel`, this surface
+    # said `referentiality.pronoun`, for one run).
+    # ⛔ `reason` is NOT a `commit_schema.Mention` field, so `_clamped_mention`
+    # drops it — but this surface published it before this clamp existed, and it
+    # is the only prose saying WHY a surface was held. Restored here, on this
+    # surface only (review at `5da3575b7a`, P3).
+    _evidence_records: list[dict] = []
+    if _referentiality.enabled():
+        for _m in complete_list.get("mentions") or []:
+            if not isinstance(_m, dict):
+                continue
+            _r = _clamped_mention(_m, narrative=story)
+            if _r is None:
+                continue
+            _reason = str(_m.get("reason") or "").strip()
+            if _reason:
+                _r["reason"] = _reason      # see the note above: THIS surface only
+            _evidence_records.append(_r)
+    result["mentions"] = {
+        "stats": mention_s2_stats,
+        # …and deduped for the same reason `_mentions_for_claim` is: on the
+        # fail-open path `_dedupe_mentions` (inside `route_mentions`) never ran, so
+        # this surface double-counted one hold (review at `d785f3da8`, P3).
+        "records": _dedupe_mentions(_evidence_records),
     }
     # #1933 (E2E-4 negative a): the chain-completeness evidence surface +
     # human-readable warnings (additive keys — the S5-failure branch above
@@ -10580,9 +13250,9 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
         "restamp_overrides": restamp_overrides,
         "slot_rekeys": slot_rekeys,
     }
-    # #5005: the S2.2 VET evidence surface (additive — an empty block when the
-    # flag is off). The off-path delta is exactly this key: the embed list and
-    # every downstream payload byte are unchanged when the flag is off.
+    # #5005: the S2.2 VET evidence surface (additive — an empty block only when
+    # no switch arms the pass: `TORTOISE_VALUE_GATE=0` with no arbiter, #10996).
+    # The off-path delta is this key alone: embed list and payloads unchanged.
     result["vet"] = {
         "enabled": vet_enabled,
         "s2": vet_s2_stats,
@@ -10638,8 +13308,10 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                            for section in _failure_policy.LEG_BY_SECTION)
         _reason = f" ({_id['reason']})" if _id["reason"] else ""
         if _id["unresolved_total"]:
-            # ⛔ One sentence per FACT — three below, plus the residual arm for a
-            # state nobody wrote one for — and NONE of them asserts what a
+            # ⛔ One sentence per FACT — two below, plus the residual arm — for a
+            # state nobody wrote one for, OR whose own sentence its counters
+            # refuse (three facts in all, this one counted)
+            # — and NONE of them asserts what a
             # candidate's own `link_before_create` says: a candidate whose query
             # was cut can still be folded onto a prior by S5 (`found: true`), so
             # a sentence claiming its "record says UNRESOLVED" is a claim about a
@@ -10660,7 +13332,25 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                 f"S3 identity {_id['state']}{_reason}: part of the lookup did "
                 f"not run or did not complete, but every candidate's own query "
                 f"ran — no candidate was left unchecked")
-        elif _id["state"] == _failure_policy.LOOKUP_UNRESOLVED:
+        elif (_id["state"] == _failure_policy.LOOKUP_UNRESOLVED
+                and _denominator == 0):
+            # ⛔ The guard is the SENTENCE's own precondition, not merely the
+            # state: the sentence claims this run "proposed no candidate whose
+            # identity it could have established", so it may only fire when
+            # there was no checkable candidate — `_denominator == 0`, i.e. none
+            # was admitted past S5's `if not raw: continue`. Without that clause
+            # a `degraded` search that still carried a per-candidate query log
+            # would reach this arm with a NON-zero denominator and assert a
+            # vacancy that is not there — the same claim-about-an-unrun-check
+            # defect, one input over (#10633 review, P2). No such producer
+            # exists today (`extract_session_v2` takes no `search`, and every
+            # `search_graph` degrade path pins `query_results: {"ran": [],
+            # "failed": []}`), so this is the invariant held locally rather than
+            # a behaviour change: every reachable arm-3 run already has a zero
+            # denominator, which the arm's own tests assert. A contradictory
+            # input now falls to the residual arm, which claims the state, the
+            # counter, and that no arm covers that state with those counters.
+            #
             # ⛔ `unresolved` with a ZERO numerator is a THIRD fact, and it is
             # reachable on the main path: the lookup did not run AT ALL (no graph
             # client, an embedded backend, a first query that raised) and the run
@@ -10687,8 +13377,8 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
             # sentences above: a state added to `failure_policy.LOOKUP_STATES`
             # later would inherit a claim about a check nobody wrote for it, with
             # nothing to notice it — the defect class this whole change removes.
-            # This arm claims only what it was handed and is LOUD rather than
-            # silent, per I2.
+            # This arm claims only what it was handed, PLUS the fact that no arm
+            # covers it, and is LOUD rather than silent, per I2.
             # ⛔ The counter is reported as PROVENANCE, never as coverage. Arm 1
             # above consumes every non-zero numerator, so reaching this arm
             # IMPLIES `unresolved_total == 0` — a "0 of N were not checked
@@ -10699,9 +13389,18 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
             # is printed as the value that was handed in and nothing more — the
             # same distinction Prometheus/Grafana draw between a measured `0` and
             # *no data* (#10633 review, P3).
+            # ⛔ The clause says "for THAT STATE WITH THESE COUNTERS", not "for
+            # that state": this arm serves TWO populations — a state nothing was
+            # written for, and a state whose own sentence exists but whose
+            # counters contradict it (`unresolved` with a zero numerator over a
+            # NON-zero denominator, which arm 3's guard refuses). Saying "no
+            # sentence for that state" is false for the second, because arm 3 IS
+            # that state's sentence and both artifacts this PR edits say so — a
+            # false claim about the code itself, in the arm written to avoid
+            # false claims (#10633 review round 9, P2).
             result.setdefault("warnings", []).append(
                 f"S3 identity {_id['state']}{_reason}: this warning describes no "
-                f"sentence for that state; the run carries "
+                f"sentence for that state with these counters; the run carries "
                 f"unresolved_total={_id['unresolved_total']} of "
                 f"{_denominator} candidate(s)")
     result["errors"] = errors
@@ -11966,15 +14665,33 @@ _OUTPUT_SCHEMA: dict[str, tuple[str, ...]] = {
     "events": ("content", "eventKind"),
     "points": ("content",),
     "operators": ("src", "dst", "op_type"),
+    # #10999: the entity↔entity channel. `semantics` is optional so it is NOT
+    # a required key here — an absent/None optional rides through as an
+    # unknown key, which this gate accepts (see the docstring below).
+    "relations": ("src", "dst", "predicate"),
     "chain_notes": ("chain", "finding", "action"),
     "link_before_create": ("searched_for", "found"),
     "retractions": ("content", "id"),  # content | id — either satisfies
+    # #11021: the mention channel. NO required key — a truncated tail that
+    # reached a mention must not turn a salvageable partial payload into a
+    # `_ParseError` (review cycle 2, P3); `surface` is what the reader needs and
+    # an entry without it is dropped there, so `claim_ref` and `quote` (both
+    # contract-nullable, and `_is_primitive(None)` is False) are not required
+    # either. (The comment here used to say "`surface` ONLY is required" two lines
+    # above an EMPTY tuple — a docstring describing code it did not have, review
+    # cycle 4, P3.)
+    "mentions": (),
 }
 
 #: D5: primitive types for the required keys (structural strictness only).
 _SCHEMA_PRIMITIVES: dict[str, tuple[type, ...]] = {
     "name": (str,), "kind": (str,), "content": (str,),
     "eventKind": (str,), "src": (str,), "dst": (str,),
+    "predicate": (str,),   # #10999: typed so a shape error is not read as a
+    # vocabulary error downstream. NOTE: the `relations` section is deferred to
+    # S5 wholesale (see `_validate_output_shape`), and S5's own arm names a
+    # non-string predicate as a SHAPE error — this entry is kept so the type is
+    # declared once, and would gate again if the section were re-admitted.
     "op_type": (str,), "chain": (str,), "finding": (str,),
     "action": (str,), "searched_for": (str,), "found": (bool,),
     "id": (str,),
@@ -11993,7 +14710,10 @@ def _validate_output_shape(parsed) -> tuple[bool, list[str]]:
     must carry its required keys with primitive values; unknown keys and
     empty arrays are VALID (fields ride through by reference — S5's
     execution validation owns semantic repair). ``retractions`` items need
-    ``content`` OR ``id`` (the contract's ``content|id``)."""
+    ``content`` OR ``id`` (the contract's ``content|id``). The ONE exception is
+    the ``relations`` section: its shape (section- AND item-level) is S5's,
+    which drops and COUNTS every mistype, so this gate must not fail the
+    candidate and truncate the emission over it."""
     issues: list[str] = []
     if not isinstance(parsed, dict):
         return False, [f"top-level output is {type(parsed).__name__}, not an object"]
@@ -12001,6 +14721,18 @@ def _validate_output_shape(parsed) -> tuple[bool, list[str]]:
         if section not in parsed:
             continue
         items = parsed[section]
+        if section == "relations":
+            # S5 OWNS this section's shape, at BOTH levels: `_assemble_relations`
+            # drops the whole section or the single bad item and COUNTS every
+            # case — a non-list value, a non-dict entry, a missing/None
+            # endpoint, a non-string predicate (named as a SHAPE error) and a
+            # non-string `semantics` (named). Failing the candidate here would
+            # make the recovery ladder accept a SHORTER prefix instead, silently
+            # losing every section the model emitted after `relations` — and,
+            # because rung 1 returns parsed JSON without running this gate, a
+            # gate verdict here never protected the clean-parse path anyway.
+            # Every other section keeps the structural gate.
+            continue
         if not isinstance(items, list):
             issues.append(f"section {section!r} is {type(items).__name__}, not a list")
             continue
@@ -12277,7 +15009,7 @@ __all__ = [  # noqa: RUF022
     "run_s2", "render_s2_prompt",
     "resolve_backend_mode", "search_graph",
     "run_s4", "render_s4_prompt",
-    "merge_embed_lists", "_merge_key", "_s4_merge_stats",
+    "merge_embed_lists", "_merge_key", "_s4_merge_stats", "route_mentions",
     "execute_embed", "validate_chains", "validate_chain_completeness",
     "derive_supersessions",
     "classify_consolidation", "DecisionRecord", "resolve_entities",
@@ -12301,10 +15033,10 @@ def _s2_seam_armed() -> bool:
     """Whether `TORTOISE_S2_DECISION_SEAM` is truthy — the seam's ONE arming read.
 
     ⚠️ **Arming the seam ARMS VET unconditionally.** `_vet_enabled` ORs this in,
-    because the seam *is* S2.2's arbiter: with `TORTOISE_VET` unset and no
-    arbiter injected, `extract_session_v2` would skip the VET passes entirely
-    and the seam would never be consulted — an armed seam that no gate runs is
-    the inert-enforcer failure class (it reports itself as protection and
+    because the seam *is* S2.2's arbiter: with the mechanical half killed
+    (`TORTOISE_VALUE_GATE=0`, `#10996`) and no arbiter injected, this term is
+    the only thing that runs the pass — without it the seam is never consulted,
+    which is the inert-enforcer failure class (it reports itself as protection and
     protects nothing). Two consequences, stated because they surprise a reader:
     this flag **overrides an explicit `TORTOISE_VET=0`** (it is a new contributor
     to `_vet_enabled`, not a rider on it), and it does **not** by itself arm S2.3
@@ -12418,10 +15150,31 @@ def _compact_guarantee_tail(master: dict, lines: list[str]) -> str:
 #
 # The boundary refuses a fold on differences read from CLOSED, hand-written
 # word lists: ``_NEGATION_MARKERS``, ``_CONDITION_MARKERS`` /
-# ``_CONDITION_PHRASES``, ``_DATE_WORDS``, ``_CLOCK_UNITS``, ``_SCRIPT_BLOCKS``.
+# ``_CONDITION_PHRASES``, ``_DATE_WORDS``, ``_CLOCK_UNITS``.
 # Every one is finite, and a marker the lists do not name reaches NO identity
 # dimension — the pair then reads as a one-sided broadening and FOLDS (memory
 # loss: a wrong keep is noise, a wrong drop is a deleted claim).
+#
+# ⚠️ ``_SCRIPT_BLOCKS`` is NOT in that list any more, and its absence is the one
+# place #5329's class was closed rather than counted: a LETTER in no known block
+# is an UNKNOWN script (``_UNLISTED_SCRIPT``), which IS an identity difference,
+# so the fold is REFUSED and both claims survive. The script list stays finite —
+# its incompleteness now costs a refused fold instead of a dropped claim.
+#
+# ⛔ It is left out of this census's population, and that is NOT because "a
+# script token is never absorbed" — that would be false, and subtractive
+# reasoning is how a residual reports as healthy (review ISSUE 2). A one-sided
+# token in a script already present on BOTH sides is still absorbed and IS
+# counted here ({"ըը": 2} for a one-sided Armenian token), and that is the
+# usual broadening direction. The script POPULATION is excluded because the
+# letter case — the one this issue named — no longer folds, not because the
+# census cannot see a script.
+#
+# ⚠️ And one population this census provably CANNOT see, stated so it is not
+# assumed covered: a MARKS-or-DIGITS-only script difference (Thai `๑๒๓` against
+# `123`) never reaches a `_content_token`, so it is absorbed silently and
+# counted nowhere — it is a `number` difference, which permits a SUPERSEDE.
+# That residual is declared on `_UNLISTED_SCRIPT`; it is not this census's.
 #
 # The lists are not the bug: closing the class needs a model, not a longer list
 # (#5329's own recommendation), and failing closed on any unknown token would
@@ -12694,6 +15447,177 @@ def reset_vocabulary_gap_census() -> None:
     _VOCABULARY_GAPS.reset()
 
 
+# ── The RUN-level reader (#10626) ──────────────────────────────────────────
+#
+# `_VOCABULARY_GAPS` above is PROCESS-GLOBAL, and until #10626 the only egress a
+# run could see was `record()`'s first-sighting WARNING — capped at
+# `_VOCABULARY_GAP_LOG_CAP` distinct tokens per PROCESS, so after the first 32
+# the alarm is spent for the life of the process, while the token set that
+# answers WHICH markers we are losing stays in memory behind a function nobody
+# calls.  Invariant I2 (`docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md:927`) is
+# explicit about what reporting means — *"HOLD, or degrade loudly into the run's
+# census"* — so the count has to reach the RUN, not just the log.
+#
+# WHAT THIS IS.  A run-scoped accumulator the boundary feeds on the same call it
+# already makes, plus the one line that appends the run's reading to the run's
+# own receipt (`result["stats"]` + `result["warnings"]` — the surfaces the
+# sibling `error_census` already rides, which is what makes the reading reach the
+# SDK capture receipt with no second seam).  See
+# `_run_scoped_vocabulary_gap` at the end of this module for the entry point.
+#
+# ⛔ WHAT IT IS NOT: it changes NO fold decision.  Failing closed on a
+# shape-candidate marker is #5329's OWNER-GATED question — §16.4's two
+# deliberately FAIL-OPEN classes make that a REOPEN, not a guard tweak — and a
+# reader that quietly implemented it would be deciding it.  The reader's whole
+# job is that the loss a fold ALREADY measures stops being invisible.
+#
+# ⚠️ WHY A RUN-SCOPED ACCUMULATOR AND NOT A SNAPSHOT DELTA.  The process-global
+# census cannot answer "what did THIS run absorb": a before/after delta is a
+# SUPERSET of the run's own folds (another capture may have folded inside the
+# window), which is the safe direction for a COUNT but not for the token NAMES —
+# a hosted process serves many tenants, and a receipt that echoes a concurrent
+# tenant's token is a cross-tenant leak.  So the accumulator is scoped to the
+# RUN'S EXECUTION CONTEXT (a ``contextvars.ContextVar``, NOT a bare
+# ``threading.local``): the receipt names only tokens this run's own boundary
+# calls absorbed, and a fold that executes on a WORKER THREAD carrying the run's
+# context still lands on THIS run's reading instead of vanishing.
+#
+# ⛔ WHY THE CONTEXT MATTERS AND A THREAD-LOCAL WOULD NOT DO.  This block's
+# neighbour says it plainly — the census is *"Thread-safe (**the boundary runs on
+# extractor worker threads**)"* — and this repo already PROPAGATES contextvars
+# into its capture pool (`hosted_api._run_off_loop` copies the caller's
+# contextvars into the worker, which is what `_call_once`'s own
+# `copy_context()` snapshot depends on, #2185).  A thread-local would fail OPEN
+# on exactly that path: the fold happens, no counter sees it, and the receipt
+# reports an EMPTY reading — the "silent absence" invariant I2 forbids.  A
+# context that was never COPIED (a bare ``threading.Thread``) still sees nothing,
+# so the guarantee is only as good as the caller's copy; the pin in
+# `tests/test_vocabulary_gap_run_reader_10626.py` states that boundary rather
+# than implying a guarantee the scope cannot make.
+
+
+class _VocabularyGapRunAccumulator:
+    """The #5329 census as ONE run saw it — the run-level counterpart.
+
+    Mirrors the process census's bucketing rules exactly (it reuses
+    ``_pair_read_bucket`` and ``_VOCABULARY_GAP_MAX_TOKEN``), so the run reading
+    can never disagree with ``vocabulary_gap_snapshot()`` about which bucket a
+    token belongs to.  Bounded like the census: the token sample stops growing at
+    ``_VOCABULARY_GAP_CAP`` and says so (``truncated_observations``); oversize
+    tokens are counted and never retained.
+
+    Run-confined by construction (installed in the run's own execution context)
+    — and STILL LOCKED, because "run-confined" is not "thread-confined".
+    ``contextvars.copy_context()`` copies the *mapping*, not the values, so every
+    context-carrying thread holds **the same accumulator object**: that sharing is
+    precisely the propagation this scope exists for (a fold on a worker carrying
+    the run's context must land on THIS run's reading), and it is equally
+    precisely why ``absorb`` can run on several threads at once.  The process
+    census this mirrors carries a lock for the same reason
+    (``_VocabularyGapCensus._lock``, same three-way bucket logic); without one
+    here the unlocked ``+=`` would lose increments and could over-admit past
+    ``_VOCABULARY_GAP_CAP``, so the receipt would UNDER-report the loss it exists
+    to disclose — the silent absence invariant I2 forbids.
+    """
+
+    __slots__ = ("_counts", "_lock", "_oversize", "_paired", "_truncated",
+                 "fold_decisions")
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._counts: Counter[str] = Counter()
+        self._paired: dict[str, Counter[str]] = {
+            name: Counter() for name in _PAIR_READ_BUCKETS}
+        self._truncated = 0
+        self._oversize = 0
+        self.fold_decisions = 0
+
+    def absorb(self, tokens) -> None:
+        """Count one fold decision's absorbed tokens (mirrors ``_record``).
+
+        Serialized by ``self._lock``: several threads can carry the same run's
+        context, so this is a read-modify-write on SHARED state.
+        """
+        with self._lock:
+            self.fold_decisions += 1
+            for t in tokens:
+                bucket = _pair_read_bucket(t)
+                if bucket is not None:
+                    self._paired[bucket][t] += 1
+                    continue
+                if len(t) > _VOCABULARY_GAP_MAX_TOKEN:
+                    self._oversize += 1
+                    continue
+                if t in self._counts or len(self._counts) < _VOCABULARY_GAP_CAP:
+                    self._counts[t] += 1
+                else:
+                    self._truncated += 1
+
+    def reading(self) -> dict[str, Any]:
+        """The run's census — the SAME shape ``snapshot()`` reports, per run.
+
+        Taken under the lock (as ``snapshot()`` does): a worker thread carrying
+        the run's context may be mid-``absorb``, and a torn reading would report
+        its own sums inconsistently.
+        """
+        def _sorted(counter: Counter[str]) -> dict[str, int]:
+            return dict(sorted(counter.items(), key=lambda kv: (-kv[1], kv[0])))
+
+        with self._lock:
+            connective = self._paired["one_sided_connective"]
+            state = self._paired["one_sided_state"]
+            return {
+                "tokens": _sorted(self._counts),
+                "distinct_tokens": len(self._counts),
+                # NOT "claims folded": this counts the run's BOUNDARY calls that
+                # returned a fold decision (the census's own definition).
+                "fold_decisions": self.fold_decisions,
+                "one_sided_connective": _sorted(connective),
+                "one_sided_state": _sorted(state),
+                "pair_read_residual": (sum(connective.values())
+                                       + sum(state.values())),
+                "truncated_observations": self._truncated,
+                "oversize_observations": self._oversize,
+                "cap": _VOCABULARY_GAP_CAP,
+                "max_token_chars": _VOCABULARY_GAP_MAX_TOKEN,
+                # Named for what it is: the reading is THIS run's own boundary
+                # calls, not a window over the process's lifetime totals.
+                "scope": "run",
+            }
+
+
+#: The ContextVar carrying the run accumulator, created on FIRST USE so this
+#: block adds NO import line above `def extract_session_v2(` — the #7949 bundle's
+#: cites are typed against this file's line numbers and every line added there
+#: re-stales them (measured: a hook inside that function shifts eight; the same
+#: constraint the tail of this module already works under).  The `contextvars`
+#: import is therefore FUNCTION-local — the idiom `_VocabularyGapCensus._record`
+#: already uses for `logging` — and `_vocabulary_gap_run_scope` creates the
+#: ContextVar exactly once, under a lock.
+_VOCABULARY_GAP_RUN_ACCUMULATOR: Any = None
+_VOCABULARY_GAP_RUN_SCOPE_LOCK = threading.Lock()
+
+
+def _vocabulary_gap_run_scope():
+    """The ``ContextVar`` carrying the run accumulator (created once)."""
+    global _VOCABULARY_GAP_RUN_ACCUMULATOR
+    var = _VOCABULARY_GAP_RUN_ACCUMULATOR
+    if var is None:
+        with _VOCABULARY_GAP_RUN_SCOPE_LOCK:
+            var = _VOCABULARY_GAP_RUN_ACCUMULATOR
+            if var is None:
+                import contextvars
+
+                var = _VOCABULARY_GAP_RUN_ACCUMULATOR = contextvars.ContextVar(
+                    "tortoise_vocabulary_gap_run_accumulator", default=None)
+    return var
+
+
+def _vocabulary_gap_run_accumulator() -> _VocabularyGapRunAccumulator | None:
+    """The run accumulator for the calling context, else ``None``."""
+    return _vocabulary_gap_run_scope().get()
+
+
 def _record_vocabulary_gap(absorbed: list[str]) -> None:
     """Count one FOLD's absorbed tokens, and NEVER raise out of the boundary.
 
@@ -12708,3 +15632,537 @@ def _record_vocabulary_gap(absorbed: list[str]) -> None:
     """
     with contextlib.suppress(Exception):  # observability never decides
         _VOCABULARY_GAPS.record(absorbed)
+        # #10626: and the RUN-level ledger, when a run is executing in this
+        # context.  Inside the same suppress for the same reason — a reader that
+        # raised would abort the capture from `_boundary`'s ``finally:``, which
+        # is the escape this wrapper exists to prevent.
+        run = _vocabulary_gap_run_accumulator()
+        if run is not None:
+            run.absorb(absorbed)
+
+
+#: How many distinct tokens a run-level WARNING names.  Bounded on purpose: the
+#: census is a SAMPLE of the tail and says so, and a run that absorbed a thousand
+#: distinct tokens must not put a thousand token strings into one receipt entry
+#: (the reason `_VOCABULARY_GAP_LOG_CAP` bounds the log line).
+_VOCABULARY_GAP_WARN_NAMES = 8
+
+
+def _vocabulary_gap_run_warning(reading: dict[str, Any]) -> str:
+    """The run-level alarm for a reading that recorded a loss (#10626).
+
+    Carries the token NAMES because that is what makes the alarm actionable — a
+    count alone names nothing a reader can curate (the same trade `record()`'s
+    WARNING documents).  Unlike that WARNING it is bounded per RUN rather than
+    per process, so the 32-token cap cannot spend it.
+
+    ⛔ ONE CLAUSE PER SHAPE, because the predicate that attaches this alarm
+    (`_vocabulary_gap_recorded_a_loss`) fires on THREE — and only the FIRST is an
+    UNNAMED token:
+
+    * the token SAMPLE — unlisted, so each reached NO identity dimension;
+    * the PAIR-READ residual — a token a CLOSED connective/state list DOES name
+      (`_pair_read_bucket`), so its appearance means the guard did not fire on
+      THIS pair, not that a marker was lost;
+    * OVERSIZE tokens — counted, never retained, so no vocabulary can name them.
+    * the SAMPLE cap — an ADDITIVE fourth clause, not a fourth predicate shape:
+      once `_VOCABULARY_GAP_CAP` is reached `distinct_tokens` stops being the
+      count of distinct tokens, so the alarm says the list is incomplete rather
+      than shipping "512 unlisted token(s)" with no sign the rest were dropped.
+      It cannot appear alone — `_truncated` only increments once the sample is
+      FULL — which is why the predicate (`_vocabulary_gap_recorded_a_loss`)
+      still fires on the three shapes above.
+
+    A single trailing sentence describing all three as "reached NO identity
+    dimension" is FALSE for the residual, and an enumeration that covered only
+    the first two rendered an oversize-only loss as the literal sentence "this
+    run's folds absorbed .".  This is a CUSTOMER-VISIBLE receipt field on both
+    capture lanes, so it names the shape it actually recorded.
+    """
+    named = list(reading["tokens"].items())[:_VOCABULARY_GAP_WARN_NAMES]
+    distinct = reading["distinct_tokens"]
+    parts: list[str] = []
+    if distinct:
+        shown = ", ".join(f"{token!r} x{count}" for token, count in named)
+        hidden = distinct - len(named)
+        if hidden > 0:
+            shown = f"{shown}, +{hidden} more" if shown else f"+{hidden} more"
+        sample = f" ({shown})" if shown else ""
+        parts.append(
+            f"{distinct} unlisted one-sided token(s) no boundary vocabulary "
+            f"names{sample} — each reached NO identity dimension, so a marker "
+            "among them lost its difference")
+    if reading["pair_read_residual"]:
+        parts.append(
+            f"{reading['pair_read_residual']} named-but-unread pair-read "
+            "token(s) (one-sided connective/state) — NAMED by a closed list, so "
+            "the guard did not fire on THIS pair; not an unnamed marker")
+    if reading["oversize_observations"]:
+        parts.append(
+            f"{reading['oversize_observations']} oversize token(s) counted but "
+            f"never retained (over the {_VOCABULARY_GAP_MAX_TOKEN}-char cap, so "
+            "never sampled)")
+    # The SAMPLE cap, not the token-size cap (review P2): `distinct_tokens` stops
+    # being the count of distinct tokens once `_VOCABULARY_GAP_CAP` is hit, and the
+    # reading carries `truncated_observations` for exactly that. Silent, a run that
+    # absorbed 5,000 distinct tokens shipped "512 unlisted token(s)" with no sign
+    # the rest were dropped — and this is a customer-visible receipt field.
+    if reading["truncated_observations"]:
+        parts.append(
+            f"{reading['truncated_observations']} further observation(s) were "
+            f"counted but not retained (the {_VOCABULARY_GAP_CAP}-distinct-token "
+            "sample cap), so this list is not complete")
+
+    if not parts:  # unreachable through `_attach`, kept so no caller ships a hole
+        parts.append("no readable loss (the reading recorded none of the three "
+                     "shapes)")
+    return (
+        "boundary vocabulary gap (#5329): this run's folds absorbed "
+        + "; ".join(parts)
+        + ". The fold decision is UNCHANGED — this is the record, not a gate; "
+        "the reading is at stats.vocabulary_gap and the cure is curating the "
+        "vocabulary from it (#5329)."
+    )
+
+
+def _vocabulary_gap_recorded_a_loss(reading: dict[str, Any]) -> bool:
+    """Did this run RECORD anything a reader could act on? (#10626)
+
+    The predicate behind BOTH receipt keys, and the reason ``stats`` stays
+    ``{}`` on a run that recorded nothing.
+
+    ``fold_decisions`` alone is NOT evidence of a loss: every ``_boundary`` call
+    that returned a fold decision counts one — including the folds that absorbed
+    NO token — so attaching on that would have made ``stats`` non-empty on every
+    capture that folded at all, including a zero-call M2 capture whose documented
+    contract is a clean ``{}``.  What a reader can act on is the token sample (the
+    unnamed gap), the PAIR-READ residual (named-but-dropped connectives/states),
+    or oversize tokens counted but never retained — the three ways a fold can
+    lose something here.
+    """
+    return bool(reading["tokens"] or reading["pair_read_residual"]
+                or reading["oversize_observations"])
+
+
+def _run_scoped_vocabulary_gap(run):
+    """Wrap a run entry so its own census reading rides its own receipt (#10626).
+
+    The #5329 census is counted on the fold path and, before this, reachable only
+    through a process-global accessor nobody called.  This is the run-level
+    READER: it installs a per-run accumulator for the duration of the call (so
+    ``_record_vocabulary_gap`` feeds it on the same boundary call the fold
+    already makes), then appends the reading to the result the run returns:
+
+    * ``result["stats"]["vocabulary_gap"]`` — the reading, present WHEN THE RUN
+      RECORDED A LOSS (see `_vocabulary_gap_recorded_a_loss`) and ABSENT
+      otherwise, the same shape ``vocabulary_gap_snapshot()`` reports plus
+      ``"scope": "run"``.  Placed on ``stats`` because that is the receipt
+      surface the SDK's capture fold (``sdk._capture_stats_with_step_witness``)
+      already copies wholesale — so the reading reaches the product lane with no
+      second seam, which is the #2335 WI-1a lesson `error_census` taught.
+    * ``result["warnings"]`` — ONE entry naming the tokens, under the SAME
+      predicate that attaches the reading, so a receipt never alarms about a gap
+      it does not also report.  This is the run's own alarm; it is what a caller
+      sees instead of a process log line that is spent after 32 distinct tokens.
+
+    TWO RECEIPT SHAPES, because there are two capture lanes and both fold: the v2
+    entry returns a result dict (``stats``/``warnings``), and `sdk._extract_session_llm`
+    — the opt-in M2 lane — returns ``(extracted, meta)``, whose ``meta`` carries
+    the same two keys.  Covering only one would leave the MORE destructive fold
+    silent (the M2 seam DETACH-DELETEs the folded node).
+
+    A run that absorbed nothing reports NOTHING — no ``vocabulary_gap`` key and
+    no warning.  That is a CONTRACT, not a nicety: ``stats`` is passed through
+    verbatim by the hosted receipt (``hosted_api`` →
+    ``"stats": meta.get("stats") or {}``) and read by the cost seam
+    (``_capture_cost_props``), and the M2 lane documents a genuine zero-call path
+    as a clean ``{}`` (``sdk._extract_session_llm``'s meta build, and
+    ``_capture_stats_with_step_witness``'s replayed/M2 note).  An "always
+    present" reading made that ``{}`` impossible on the M2 lane, which is the
+    regression `tests/test_capture_cost_measurement.py::
+    test_emit_call_site_writes_no_cost_row_when_props_is_none` pins.  So: a run
+    WITH a gap is distinguishable from a run without — by the key's presence —
+    and neither fabricates a measured zero.
+
+    A run that RAISES leaves its reading unattached (there is no receipt to
+    carry it) and the process-level census + WARNING still hold it — the reader
+    never converts a failure into a silent one, and never changes a decision:
+    the fold outcome is whatever ``_boundary`` computed, bit-identical.
+
+    And the converse, which is the module's own invariant rather than a nicety
+    (#10626 review round 7, P2): a RAISING READER never converts a successful,
+    already-committed capture into an exception.  The post-run attach runs inside
+    ``contextlib.suppress(Exception)`` for exactly the reason the two census
+    writers do — the points have landed by then, so an escape would leave this
+    function and `sdk` would report ``ok: False`` on a capture that SUCCEEDED.
+    """
+    from functools import wraps
+
+    def _attach(receipt: dict, reading: dict[str, Any]) -> None:
+        """Land the reading on ONE receipt dict — ONLY if it recorded a loss.
+
+        ⛔ ABSENT-WHEN-NO-DATA, never a fabricated empty reading (#10626 review
+        round 4, ISSUE 1).  ``stats`` is the surface the hosted receipt passes
+        through verbatim and the surface the cost seam reads; writing a reading
+        unconditionally made the M2 lane's ``stats`` non-empty on EVERY capture,
+        including the zero-call path whose documented contract is a clean
+        ``{}``.
+
+        ⛔ THE RECEIPT FIELDS BELONG TO THE LANE, NOT TO THIS READER (#10626
+        review round 7, P2).  The alarm is built BEFORE anything is written, so a
+        raising builder leaves the receipt EXACTLY as the lane built it instead
+        of half-attached (the caller suppresses the escape — observability never
+        turns a committed capture into a raised one).  And a container of the
+        wrong type is never REPLACED: this reader adds its own key/entry to a
+        ``dict``/``list`` the lane provided, and where the lane shipped something
+        else (a foreign ``stats`` shape, a tuple ``warnings``) it leaves that
+        value alone and lands the half that fits — the alarm still names every
+        shape the reading recorded, and the process census + WARNING hold it.
+        Clobbering the lane's field to fit the reading is receipt-field loss, the
+        same class of damage the attach exists to prevent.
+        """
+        if not _vocabulary_gap_recorded_a_loss(reading):
+            return
+        # Build first, write second: nothing below can leave a torn receipt.
+        warning = _vocabulary_gap_run_warning(reading)
+        stats = receipt.get("stats")
+        if stats is None:
+            stats = receipt["stats"] = {}
+        if isinstance(stats, dict):
+            stats["vocabulary_gap"] = reading
+        warnings = receipt.get("warnings")
+        if warnings is None:
+            warnings = receipt["warnings"] = []
+        if isinstance(warnings, list):
+            warnings.append(warning)
+
+    @wraps(run)
+    def _run_with_census(*args, **kwargs):
+        accumulator = _VocabularyGapRunAccumulator()
+        scope = _vocabulary_gap_run_scope()
+        token = scope.set(accumulator)
+        try:
+            result = run(*args, **kwargs)
+        finally:
+            # ``reset`` restores the PREVIOUS value EXACTLY, so a nested run
+            # (none today) cannot silently detach its caller's ledger, and the
+            # accumulator cannot leak into the NEXT run in this context — that
+            # would report one run's folds on another run's receipt.
+            scope.reset(token)
+        # ⛔ INSIDE the module's own suppress, for the reason `_record_vocabulary_gap`
+        # and `_VocabularyGapCensus.record` are: this runs AFTER the run has
+        # already committed its points, so an escaping exception here would turn a
+        # SUCCESSFUL capture into a reported failure (`sdk.py` returns
+        # ``{**result, "ok": False, …}`` on an escape).  Observability may degrade
+        # to unattached — the process census + WARNING still hold the reading —
+        # but it may never decide the capture's outcome.
+        with contextlib.suppress(Exception):  # observability never decides
+            reading = accumulator.reading()
+            if isinstance(result, dict):
+                _attach(result, reading)
+            elif (isinstance(result, tuple) and len(result) == 2
+                  and isinstance(result[1], dict)):
+                # the M2 lane's ``(extracted, meta)`` contract (#1530 D8)
+                _attach(result[1], reading)
+        return result
+
+    return _run_with_census
+
+
+# The run-level reader, wired at the ONE entry every capture lane routes through
+# (`sdk`, `hosted_api`, `ingest_v2`, `run_v2_pipeline`).  Rebinding at module
+# scope — rather than inserting lines inside `extract_session_v2` — keeps every
+# #7949 bundle cite typed against this file's line numbers resolving (measured:
+# a hook at the top of that function shifts eight of them).
+extract_session_v2 = _run_scoped_vocabulary_gap(extract_session_v2)
+
+
+# ── The script reading (#5329) — appended AFTER the #7949 marker on purpose ───
+#
+# `_scripts` (above, unshifted) calls these.  Definition order does not matter
+# for a function body, and it matters a lot for the capstone's live cites: an
+# insertion ABOVE the marker re-stales every one of them, which is how this
+# change put five capstone tests red before it was moved down here.
+
+#: LATIN letters the ASCII branch in `_script_of` cannot see **and that NFD does
+#: not reduce to an ASCII base**: `ª` U+00AA, `µ` U+00B5 and `ʃ` U+0283 are
+#: NFD-stable (they decompose to themselves), and `ﬁ` U+FB01 / `ａ` U+FF41 carry
+#: only COMPATIBILITY decompositions, which NFD does not apply.  Without these
+#: ranges each is in NO block, reads `unlisted`, and refuses any fold it appears
+#: on one side of.
+#:
+#: ⛔ NOT for accented letters, and an earlier revision of this comment said it
+#: was: `é`/`Ā` decompose under NFD to an ASCII base, so `_script_of`'s
+#: NFD-base step already reads them `latin`.  Measured with this table EMPTIED,
+#: `_script_of('é')` is still `latin` and `café`/`cafe` still folds — so the
+#: `café` assertion in the tests is a JOINT pin (either mechanism alone keeps it
+#: green), and the discriminating leg for this table is the surface loop over
+#: `ª µ ʃ ﬁ ａ`.
+#:
+#: ⛔ LETTERS ONLY, and separate from `_SCRIPT_BLOCKS` for that reason: Latin-1
+#: Supplement also holds `U+00D7` (`×`) and `U+00F7` (`÷`), which are MATHS
+#: SYMBOLS.  Contributing `latin` for them reads a symbol as a language and
+#: refused `得る ×` against `得る` (review finding, pinned in the tests).
+_LATIN_SUPPLEMENT_BLOCKS = (
+    (0x00AA, 0x02AF),   # Latin-1 Supplement, Latin Ext-A/B, IPA Extensions
+    (0x1E00, 0x1EFF),   # Latin Extended Additional
+    (0xFB00, 0xFB06),   # Latin ligatures (`ﬁ` `ﬂ` — routine in PDF extraction)
+    (0xFF21, 0xFF5A),   # FULLWIDTH LATIN A-Z / a-z (the gap between them is
+                        # punctuation, excluded by the letters-only test)
+)
+
+#: The script a letter belongs to when no block names it.
+#:
+#: ⛔ The blocks are FINITE, and they used to be the whole reading: a letter in
+#: a block they did not name contributed NOTHING to `_scripts`, so a claim
+#: carrying one was never compared for language at all, its word read as a
+#: one-sided broadening, and the pair FOLDED — the silent memory loss of #5329
+#: in its script form (Armenian `ը`, Georgian, Thai, Ethiopic …).
+#:
+#: The list cannot be completed (a longer list only moves where the miss
+#: happens), so the miss no longer has to be CLOSED for the reading to be safe:
+#: a letter in no block is an UNKNOWN script, which is an identity difference,
+#: so the fold is REFUSED and both claims survive.  Incompleteness now costs
+#: NOISE — a refused fold — instead of a deleted claim (#5080's asymmetry).
+#:
+#: The "no block" test is searched one level deeper before it gives up: a
+#: precomposed letter decomposes under NFD into a base letter plus marks, and a
+#: letter belongs to its BASE's script — so polytonic `ἀ` (U+1F00, unlisted) is
+#: GREEK `α` + a mark, which keeps `ἐν ἀρχῇ`/`εν αρχη` folding and keeps a claim
+#: captured NFC from refusing to fold with the same claim captured NFD.
+#:
+#: ⚠️ Declared residuals, so they are not mistaken for coverage: this closes the
+#: LETTER case only.  A DIGIT or MARK in an unlisted script reaches no dimension
+#: (Thai `๑๒๓` against `123` reads as a `number` difference, which permits a
+#: SUPERSEDE), and a MODIFIER letter (category Lm, e.g. `ʰ` U+02B0) **in no
+#: `_SCRIPT_BLOCKS` range** is treated as not script-bearing, which is what it was
+#: before this reading existed.  (An Lm *inside* a listed block does carry it —
+#: `ー` U+30FC is `kana` — which the previous sentence about ranges already
+#: implies; the unqualified "an Lm is not a script" is false and was corrected
+#: here.)
+#:
+#: ⚠️ And a LABEL residual, which costs no decision and is stated anyway so a
+#: reader does not mistake the name for precision: `_UNLISTED_SCRIPT` is a
+#: SENTINEL carried in the same set as real script names, so
+#: `_identity_differences` reports a `language` difference for a one-sided
+#: letter whose script is ARGUABLY KNOWN and merely outside every
+#: `_SCRIPT_BLOCKS` range — `㐀` (Han Ext A) beside BMP `見`, or halfwidth `ｦ`
+#: beside fullwidth kana.  The REFUSAL there is the intended direction (base
+#: FOLDED both pairs and absorbed the letter — the #5329 loss this reading
+#: exists to stop), and the label changes no answer: `supersede_allowed` is
+#: `not _boundary(a, b)[1]`, so any identity dimension refuses a supersede
+#: alike.  Only the REPORTED reason is coarser than the truth, and extending
+#: `_SCRIPT_BLOCKS` to cover those ranges is the measurement that would sharpen
+#: it — deliberately not done here (this reading does not complete the list).
+_UNLISTED_SCRIPT = "unlisted"
+
+
+def _script_of(ch: str) -> str | None:
+    """The script one character belongs to, or ``None`` when it is not script-bearing.
+
+    Order matters and every step is pinned: ASCII letters are latin; accented
+    LATIN letters (letters only — see `_LATIN_SUPPLEMENT_BLOCKS`); anything in a
+    `_SCRIPT_BLOCKS` range, letters, digits and marks alike (Arabic-Indic and
+    Devanagari digits carry their script, and reading only letters there turned
+    a refused identity difference into a permitted `number` SUPERSEDE); and
+    finally a LETTER that no block names, which is searched one level deeper
+    under NFD — a precomposed letter belongs to its BASE's script — before it is
+    an unknown script.  A NON-LETTER **in no `_SCRIPT_BLOCKS` range** is not a
+    script, and neither is a modifier letter (Lm) in no range — one INSIDE a
+    listed block does carry it (`١` U+0661 is `arabic`, `ー` U+30FC is `kana`).
+    """
+    if ch.isascii():
+        return "latin" if ch.isalpha() else None
+    cp = ord(ch)
+    for lo, hi in _LATIN_SUPPLEMENT_BLOCKS:
+        if lo <= cp <= hi:
+            return "latin" if ch.isalpha() else None
+    for name, lo, hi in _SCRIPT_BLOCKS:
+        if lo <= cp <= hi:
+            return name
+    if not ch.isalpha() or unicodedata.category(ch) == "Lm":
+        return None
+    base = unicodedata.normalize("NFD", ch)[0]
+    if base != ch:
+        # One level is enough in practice (a starter does not decompose again),
+        # and the recursion is idempotent if it does.
+        return _script_of(base)
+    return _UNLISTED_SCRIPT
+# ── #10804 review P1: a magnitude prefix glued onto a unit WORD ───────────────
+#
+# ⛔ APPENDED AT MODULE SCOPE, NOT INSERTED, for the reason the `_run_scoped_
+# vocabulary_gap` rebinding above already records: this file's lines are cited
+# by number from the #7949 capstone bundle, `docs/00_index.md`, the runbook and
+# the hash-pinned `PRE-REGISTRATION.md`, so an insertion above them re-stales
+# every cite (that class produced a P0 on this very PR last cycle). Appending
+# after the last line shifts nothing, and the only lines that move anything
+# above it are the widen's own two hunks — +21 at `_UNIT_EQUIV` and +12 at
+# `_UNIT_WORDS` — accounted for below, never summarised as "nothing moved"
+# (what an earlier cut said, and false: `_UNIT_WORDS` is a GROWING hunk, not a
+# 1-for-1 swap).
+#
+# ⛔ AND THE OFFSET IS NOT ONE NUMBER, which is the trap in "+33" read as a
+# blanket: a cite BELOW `_UNIT_EQUIV` but ABOVE `_UNIT_WORDS` moved by +21.
+# Exactly two sites sit in that window — `_value_verbatim_span`'s definition
+# (`:4887` → `:4908`) and the `_carries_value` gate (`:4927` → `:4948`) — and
+# both are pinned at their +21 values rather than the +33 a hunk total suggests
+# (`_VALUE_FREE_GATE` in `tests/eval/write_path/test_value_span_census_2684.py`,
+# and the runbook's published `:4948-4949`). Every cite BELOW `_UNIT_WORDS`
+# moved by +33.
+#
+# ⛔ HOW TO CHECK IT, and why this note quotes NO running total. An earlier cut
+# of this paragraph pinned `git diff --numstat` at `33 0`; the very next commit
+# made that false, and a stale measurement quoted as an invariant is how the
+# cite P0 on this PR happened. So the invariant is stated STRUCTURALLY instead,
+# and it does not rot: between `_UNIT_EQUIV` and `_UNIT_WORDS` the only GROWING
+# hunks are the widen's own (+21, then +12 — see the split of offsets above) —
+# from `_UNIT_WORDS` up to the last cited line there must be NO
+# growing hunk at all, and everything this fix appends starts AFTER that line.
+# `git diff origin/main -- tortoise/extractor_v2.py | grep '^@@'` therefore has
+# to show: the two widen hunks (+21 at `_UNIT_EQUIV`, +12 at `_UNIT_WORDS`), any
+# number of NET-ZERO hunks (N lines for N lines — the magnitude arm's 2-for-2
+# swap, and comment corrections such as the one below, which is one), and a
+# final growing hunk at EOF. What must NOT appear is a GROWING hunk between
+# `_UNIT_WORDS` and the last cited line: THAT is what moves a cite. A net-zero
+# hunk cannot, which is why it is allowed and this note does not pin a count of
+# hunks — pinning one would make the next comment fix look like a moved cite,
+# and this paragraph has already been wrong once in exactly that direction.
+#
+# THE DEFECT.  `_value_bindings` glues a value to the unit word written beside
+# it with NO prefix arithmetic (``value + seq[i + 1]``), so a magnitude-prefixed
+# value followed by a SPACE-SEPARATED unit arrives as ONE token whose suffix is
+# a prefix and a unit word run together — ``20k`` + ``miles`` → ``20kmiles``.
+# That suffix is not a ``_UNIT_EQUIV`` key, so ``_value_core`` reads it as an
+# UNKNOWN unit and keeps the numeric core ``20``. Against ``20000 miles`` (core
+# ``20000``, unit ``mi``) the cores DIVERGE, and the point is REFUSED.
+#
+# ⛔ IT WAS INTRODUCED BY THIS PR'S WIDEN, and measured both ways — each row
+# returned ``()`` at `origin/main` `525fde4a9` (before the widen `miles`/`days`/
+# `milliseconds`/`weeks`/`percent` were absent from ``_UNIT_WORDS``, so the pair
+# never fused and fell open on the unknown-unit tolerance) and each REFUSED with
+# the widened tables alone:
+#
+#     `20k miles`/`20000 miles`            `3k days`/`3000 days`
+#     `5k milliseconds`/`5000 milliseconds`
+#     `2k weeks`/`2000 weeks`
+#
+# (`percent`/`pct` are NOT fused — see the `_UNIT_WORDS` note and the registry
+# row's (d). Fusing them refused `20k%`/`20000 percent`, because an ATTACHED
+# `k%` loses its `%` to the tokeniser; that family is equal by the pre-existing
+# factor arm instead, and is pinned in the test file.)
+#
+# Refusing a truthful point over how one value is written is the
+# FALSE-ACCUSATION direction the carve-out must never take — the row's residual
+# (i) says so in as many words — so the widen is only admissible WITH this arm.
+#
+# ⛔ NO NEW INTERPRETATION OF THE TOKEN (#2817 point 1's hazard). The factor is
+# ``_MAGNITUDE_FACTORS`` — the one-entry table the ``OVERRIDES:`` block on this
+# seam scopes to `k` — and `k` is already a unit IDENTITY in ``_UNIT_EQUIV``, so
+# this adds no second reading of a spelling the engine does not already read.
+def _composed_identity(identity: tuple[str, str, str | None],
+                       ) -> tuple[str, str, str | None] | None:
+    """``identity`` with a magnitude PREFIX folded into its core, or ``None``.
+
+    ``('', '20', 'kmiles')`` → ``('', '20000', 'mi')``. ``None`` whenever the
+    fold does not apply, which is the common case.
+
+    ⛔ DELIBERATELY NARROW, because "prefix + letters" is not always a prefix
+    over a unit:
+
+      * a unit ``_UNIT_EQUIV`` ALREADY knows is never composed, so ``20km``
+        stays kilometres instead of becoming 20000 metres;
+      * only ``_MAGNITUDE_FACTORS``' own prefixes compose, so the table cannot
+        grow a reading here by accident;
+      * the remainder must be a key of ``_UNIT_EQUIV``, so ``20kms``'s
+        ``ms`` composes but an arbitrary tail does not;
+      * a multi-run core (``24h/7d/4w``) carries ONE suffix for several
+        numbers and is never scaled.
+    """
+    sign, core, unit = identity
+    if not isinstance(unit, str) or len(unit) < 2 or unit in _KNOWN_UNITS:
+        return None
+    prefix = unit[:1]
+    # The declared set first, then its factor: the test file pins
+    # `set(_MAGNITUDE_PREFIXES) <= set(_MAGNITUDE_FACTORS)`, so this lookup is
+    # safe BY THAT INVARIANT rather than by a defensive `.get` that would let a
+    # prefix with no factor silently compose nothing.
+    if prefix not in _MAGNITUDE_PREFIXES:
+        return None
+    rest = _UNIT_EQUIV.get(unit[1:])
+    if rest is None or "/" in core:
+        return None
+    try:
+        scaled = Decimal(core) * _MAGNITUDE_FACTORS[prefix]
+    except (InvalidOperation, ValueError):  # pragma: no cover - belt and braces
+        return None
+    out = format(scaled, "f")
+    if "." in out:
+        whole, frac = out.split(".", 1)
+        frac = frac.rstrip("0")
+        out = whole + ("." + frac if frac else "")
+    return (sign, out, rest)
+
+
+def _composed_identities_agree(a: tuple[str, str, str | None],
+                               b: tuple[str, str, str | None]) -> bool:
+    """True when folding a glued prefix makes these two identities the SAME.
+
+    Called from the magnitude arm in ``_value_identity_matches``, where it is
+    the third of the three ways two identities can name one number (after "equal
+    cores" and "the prefix reading closes the gap").
+
+    ⛔ IT CAN ONLY EVER *ADD* TOLERANCE — it returns True only where the composed
+    form names the same number as the other side (exact equality, OR the same
+    sign+core where the other side states NO unit at all — that side's own
+    "unit is written or not" tolerance), so it cannot refuse. It
+    cannot rescue a rewritten NUMBER either: ``20k miles``/``21k miles`` composes
+    to ``20000 mi`` against ``21000 mi`` and ``20k miles``/``20000 km`` to
+    ``20000 mi`` against ``20000 km``, and both still reach the core comparison
+    and are refused (pinned in ``tests/test_state_value_verbatim_10360.py``).
+    ⛔ WHAT IT DOES *NOT* PROMISE, stated because the weaker claim is false: it
+    CANNOT stop a unit from being re-read. ``20kms`` against ``20000 ms`` is
+    TOLERATED — REFUSED at `origin/main` `525fde4a9` — and the docstring above
+    used to imply otherwise by saying the fold is "only ever used against an
+    equally composed side". It is not: ``_composed_identity`` returns ``None``
+    for ``('', '20000', 'ms')`` (``ms`` is a unit the table KNOWS) and the
+    equality is against that plainly-spelled side. That tolerance is
+    deliberate and pinned, not an oversight.
+
+    ⛔ AND THE AMBIGUOUS ``kms`` STAYS SAFE IN THE DIRECTION THAT MATTERS. A
+    colloquial "kms" for kilometres against ``20km`` does not compose to a match,
+    so the pair keeps its unknown-unit fail-open. (``20kms`` against ``20000 m``
+    IS refused — identically at `origin/main` `525fde4a9` — but NOT by
+    ``_K_ABBREVIATES``: ``_MAGNITUDE_FACTORS.get('kms')`` is ``None``, so
+    ``_magnitude_agrees`` returns at its first line and never reaches that gate.
+    It is refused by the numeric-core comparison, 20 against 20000, after the
+    compose arm fails to match ``ms`` against ``m``. **#10876 would not change
+    this pair** — it is a different root and is not covered there.)
+    """
+    for composed_side, other in ((a, b), (b, a)):
+        composed = _composed_identity(composed_side)
+        if composed is None:
+            continue
+        if composed == other:
+            return True
+        # ⛔ THE "UNIT IS WRITTEN OR NOT" TOLERANCE APPLIES TO THE COMPOSED FORM
+        # TOO, and leaving it out was a MEASURED FALSE ACCUSATION (review cycle 7,
+        # P2): exact equality against `other` can only rescue a side that STATES
+        # a unit, so `20k miles` against the same number written with NO unit at
+        # all — `('', '20000', None)` — matched nothing and fell through to the
+        # core comparison, 20 against 20000, and the truthful point was WITHHELD.
+        # Every spelling newly fused by the widen inherits that: `3k days`/
+        # `3000`, `5k seconds`/`5000`, `5k milliseconds`/`5000` were all WRITTEN at
+        # `origin/main` `525fde4a9` (the unit word was not fused there, so the
+        # value bound as a bare `k` and `_magnitude_agrees` closed the gap) and
+        # became REFUSED here. The composed identity names the SAME NUMBER on the
+        # same sign, and the other side states NO unit to contradict — which is
+        # `_value_identity_matches`' oldest tolerance (`800` / `800ms`), not a new
+        # one. It cannot rescue a rewrite: the sign and the post-fold core must be
+        # EQUAL, so `20k miles`/`21000` still refuses.
+        # ⚠️ Scoped to a side stating NO unit, deliberately: a side stating an
+        # unknown SPELLING (`millis`) keeps `_magnitude_agrees`' `_K_ABBREVIATES`
+        # refusal (#10876, recorded decision — #10513 review P1), and two STATED
+        # units still have to be equal, so `20k miles`/`20000 km` refuses.
+        if other[2] is None and composed[0] == other[0] and composed[1] == other[1]:
+            return True
+    return False

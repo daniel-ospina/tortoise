@@ -573,9 +573,13 @@ class TestTheReportCannotContradictItself:
         # candidate's record; exact equality forbids that by construction, and it
         # bites on a changed numerator, denominator, state or added clause. The
         # former body closed with `assert "their record says" not in messages[0]`
-        # — a phrase no producer ever emitted, so it could never bite (the
-        # inert-assertion class removed from the arm-3 test in round 5; #10633
-        # review, non-blocking observation 1).
+        # — redundant for that same reason, NOT because the phrase is
+        # unemittable: a pre-merge revision of this lane DID emit it
+        # (`docs/plans/2026-10-31-issue-5095-s3-hold.md`, P2·R4), and a
+        # reintroduction would trip that absence check rather than slip past it,
+        # so it is exact equality — which forbids any added clause — that makes
+        # the absence assertion unnecessary (the inert-assertion class removed
+        # from the arm-3 test in round 5; #10633 review, P2).
         assert messages[0] == _identity_line(
             ident,
             f"the existing-item lookup did not run for "
@@ -745,14 +749,21 @@ class TestTheRemainingAbsence:
     `#5095` made the prompt and the record truthful; it deliberately did NOT
     suppress a write (the correct seam is a create gate inside S5, and
     `execute_embed({})` also drops retractions, supersessions and chain notes).
-    So the run still mints a candidate whose identity was never established, and
-    that is the whole of what remains missing from `failure_policy`.
 
-    ⛔ This test exists to make the absence FALSIFIABLE rather than narrated: the
-    day a create gate lands, the payload below is empty for an unresolved lookup,
-    this reds, and `config/v4-mechanisms.yml`'s row must flip to `implemented`.
-    A register whose absence claim no call can see is the drift the register
-    exists to prevent (#5095 review A3).
+    ⚠️ **The MINTED candidate's half LANDED with `#10997`**, and this pin is
+    re-stated to cover only what is still absent: `_mint_endpoint` no longer
+    fabricates a `statement` Point from a model ref on an `unresolved`/`partial`
+    lookup — it HOLDS the edge with its endpoint (`held`, `test_10997_identity_hold.py`)
+    — while a Point and an entity the MODEL itself emitted are still created on
+    that same lookup. So the payload below is still non-empty for `{}`, and it is
+    non-empty **for the model-emitted candidates only**: the `_EMBED` fixture
+    carries no operator, so nothing in it is a minted endpoint.
+
+    ⛔ This test exists to make the REMAINING absence FALSIFIABLE rather than
+    narrated: the day the model-emitted half is gated too, the payload below is
+    empty for an unresolved lookup, this reds, and `config/v4-mechanisms.yml`'s
+    row must flip to `implemented`. A register whose absence claim no call can see
+    is the drift the register exists to prevent (#5095 review A3).
     """
 
     def test_an_unresolved_lookup_still_mints(self):
@@ -922,8 +933,12 @@ class TestIdentityOnTheResult:
         the reason it printed in the same line.
 
         ⛔ The discriminating assertion is the sentence's OWN text: an earlier
-        draft of this test asserted `"budget" not in message`, which no arm has
-        ever emitted — inert against the defect it named (review round 5).
+        draft of this test asserted `"budget" not in message`. No arm emits that
+        word at this revision, and a reintroduction would trip the check rather
+        than slip past it — a pre-merge revision (`0b3b9366d`) DID emit `the
+        query budget cut part of the lookup` from the `partial` arm, so the draft
+        was not inert against the defect it named; what makes it unnecessary is
+        exact equality, which forbids any added clause (review round 5).
         """
         out = v2.extract_session_v2(_NoCandidates(), _conv(), session_id="s1")
         block = out["identity"]
@@ -966,13 +981,66 @@ class TestIdentityOnTheResult:
             "the lookup did not run, and this run proposed no candidate whose "
             "identity it could have established"), messages[0]
 
-    def test_a_state_the_warning_does_not_describe_claims_nothing(self, monkeypatch):
+    def test_an_unresolved_state_with_a_checkable_candidate_cannot_claim_vacancy(
+            self, monkeypatch):
+        """Arm 3's guard is the SENTENCE's precondition, not only the state.
+
+        `unresolved` + a zero numerator normally means no candidate was
+        checkable, which is exactly what arm 3's sentence asserts. Guarding on the
+        state ALONE is weaker than the sentence: a `degraded` search that still
+        carried a per-candidate query log answers `unresolved` while covering the
+        candidate, so a state-only guard prints "this run proposed no candidate
+        whose identity it could have established" over a run that proposed one
+        and CHECKED it — the claim-about-a-check-that-did-not-happen defect, one
+        input over (#10633 review, P2).
+
+        No shipped producer emits that pair today (`extract_session_v2` takes no
+        `search`; both `search_graph` degrade paths pin `query_results` empty), so
+        this pins the INVARIANT rather than a live failure: `_denominator == 0`
+        is in the guard, and a contradictory input falls to the residual arm,
+        which claims the state, the counter, and that no arm covers that state
+        with those counters. Without this test the clause would be protected by
+        a comment alone — the shape this file exists to remove.
+        """
+        contradictory = {
+            "state": fp.LOOKUP_UNRESOLVED,
+            "reason": "degraded",
+            "unresolved_total": 0,
+            "candidates": {"entities": 1, "events": 0, "points": 0,
+                           "operators": 0, "retractions": 0},
+        }
+        monkeypatch.setattr(v2, "_identity_report",
+                            lambda *a, **k: dict(contradictory,
+                                                 candidates=dict(contradictory["candidates"])))
+        out = v2.extract_session_v2(_NoCandidates(), _conv(), session_id="s1")
+        block = out["identity"]
+        assert block["state"] == fp.LOOKUP_UNRESOLVED, block
+        assert block["unresolved_total"] == 0, block
+        assert _denominator(block) == 1, block
+        messages = [w for w in out["warnings"] if "S3 identity" in w]
+        assert len(messages) == 1, out["warnings"]
+        # The vacancy sentence is NOT reachable here; the residual arm names the
+        # state and the counter, and its clause is scoped to "this state WITH
+        # these counters" precisely so it stays TRUE here — `unresolved` does have
+        # a sentence (arm 3); what is missing is a sentence for `unresolved` with a
+        # non-zero denominator over a zero numerator (#10633 review round 9, P2).
+        assert messages[0] == _identity_line(
+            block,
+            "this warning describes no sentence for that state with these "
+            "counters; the run carries "
+            f"unresolved_total={block['unresolved_total']} of "
+            f"{_denominator(block)} candidate(s)"), messages[0]
+
+    def test_a_state_the_warning_does_not_describe_claims_no_coverage(self, monkeypatch):
         """The residual arm's only protection is this test (#5095 review round 6).
 
         A state added to `failure_policy.LOOKUP_STATES` later must not INHERIT the
         `partial` or the counted sentence — that is the defect class this whole
         change removes, and without this pin the arm would be protected by a
-        comment alone. The arm states only what it was handed.
+        comment alone. The arm states the state, the counter, and that no arm
+        covers that state with those counters — the last of those is DERIVED from
+        no earlier arm matching, not handed in, which is why it can go stale when
+        the arm partition changes and why this pin is what catches that.
         """
         monkeypatch.setattr(fp, "lookup_state", lambda search: "future_state")
 
@@ -982,16 +1050,19 @@ class TestIdentityOnTheResult:
         block = out["identity"]
         # EXACT, and the counter is pinned as PROVENANCE — the number the run was
         # HANDED — never as a coverage claim: reaching this arm implies
-        # `unresolved_total == 0`, so "0 of N were not checked against the graph"
-        # would assert universal coverage about a check this arm cannot know
-        # happened, for a state that is by construction not `resolved` (#10633
+        # `unresolved_total == 0`, so a "0 of N were not checked" clause would
+        # assert universal coverage about a check this arm cannot know happened,
+        # for a state that is by construction not `resolved` (#10633 review, P3).
+        # The exact pin above is the whole guard: it forbids any appended clause,
+        # so a negative substring assertion beside it could never bite and would
+        # be the inert-assertion class this file removed in round 5 (#10633
         # review, P3).
         assert messages[0] == _identity_line(
             block,
-            f"this warning describes no sentence for that state; the run carries "
+            f"this warning describes no sentence for that state with these "
+            f"counters; the run carries "
             f"unresolved_total={block['unresolved_total']} of "
             f"{_denominator(block)} candidate(s)"), messages[0]
-        assert "were not checked against the graph" not in messages[0], messages[0]
 
     def test_a_resolved_run_reports_resolved_and_does_not_warn(self):
         """The flag-side of R1: the disposition must not fire on a healthy run.

@@ -63,6 +63,46 @@ The only questions that can be asked of it are therefore window-level:
 * can the graded metric see the picks at all (``pick_ranks`` vs
   ``graded_by_recall_all_at_5``)?
 
+⛔ **THE GRADED SURFACE IS THE READER'S POOL, WHICH IS THE *DEDUPED* ONE.**
+``recall_all@5`` grades ``hits[:5]``, and ``hits`` is ``dedup_pool(annotated)``
+applied AFTER fusion — so the fused index space the splice works in is not the
+index space the metric grades. ``dedup_pool`` caps RAW ``session-transcript``
+chunks per session and never caps points/turn points, so the distinction is
+invisible on a chunk-free pool and decisive on the chunk-bearing shape the
+corpus is actually ingested as: the cap removes slots ABOVE a tail pick and
+lifts it into the graded top 5. Every pool therefore carries its chunk shape
+(``raw``, reported per row as ``chunk_bearing``), and the verdict is keyed by
+shape rather than stated once. A single number here would be a claim about ONE
+shape dressed as a property of the arm — which is exactly what a fresh-context
+review caught in the first draft.
+
+⚠️ HOW FAR THE CAP REACHES, measured row by row rather than inferred from the
+ceiling (review cycle 15: the earlier "the cap only bites past the metric's cut"
+was false at windows 5 and 6). On the chunk-bearing pools, at ``limit=2``:
+
+* ``window = 3, 4`` — the cap changes NOTHING: pre-cap and post-cap ranks are
+  identical (``[2]`` and ``[3]``), exactly as on the chunk-free rows.
+* ``window = 5`` — the cap lifts the pick's READER RANK (``[4]`` -> ``[3]``);
+  both readings are already inside the top 5, so the graded count is unchanged.
+* ``window = 6`` — the cap puts the SECOND pick inside the top 5
+  (``[4, 5]`` -> ``[3, 4]``, graded 1 -> 2); the chunk-free row stays
+  ``[4, 5]`` / graded 1.
+* ``window >= 7`` — the pre-cap ranks are ``5, 6`` or deeper, where the metric
+  sees nothing, so the cap is the only reason a pick CAN be graded. How many it
+  actually puts inside the top 5 is not uniform across the sweep, and the
+  receipt's rows are the statement: at ``window = 7`` and at the shipped ``12``
+  BOTH picks land at ``[3, 4]``; at ``13`` one lands on
+  ``chunk_bearing_issue_probe`` (``[11, 12]`` -> ``[4, 5]``) and both on the other
+  two pools; at ``14`` it is no longer enough on the probe at all
+  (``[12]`` -> ``[5]``, graded 0) while the deep pool still grades both. That is
+  why the sweep publishes 13 and 14 instead of stopping at the shipped window.
+
+So the boundary the two shapes share is 3-6 (both graded, the ceiling doing the
+work for the first pick) and the one they do NOT share is 7+: a chunk-free pool
+grades nothing there at any swept depth, while a chunk-bearing pool grades at
+least one pick at every swept depth except the probe's ``window = 14`` — where
+the cap is no longer sufficient. Read the row, not the rule.
+
 WHAT IT IS NOT
 --------------
 ⛔ It is **not** the #9097 Q3 exit measurement and must never be reported as one.
@@ -84,9 +124,23 @@ Usage::
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter BEFORE the imports below — this module is a
+# PACKAGE module, so its only working invocation is `python -m` (run as a script,
+# `sys.path[0]` is this file's own directory and the `tools.longmem_eval` import
+# dies), and a module-level 3.11+-only import would fail before a later guard
+# could run. The refusal names the invocation that works, not the one that does
+# not (#5136).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/longmem_eval/window_arm_baseline.py requires Python >= 3.12 "
+        f"(got {sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python -m tools.longmem_eval.window_arm_baseline`"
+    )
+
 import argparse
 import json
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -107,28 +161,64 @@ DATE_WINDOW = ("2023-04-10", "2023-04-21")
 SHIPPED_WINDOW = 12
 
 
-def _pool(spec: list[tuple[str, int]]) -> list[dict]:
+def _pool(spec: list[tuple[str, int]],
+          raw: tuple[str, ...] = ()) -> list[dict]:
     """Build a dated pool in semantic rank order from ``[(session, count), …]``.
 
     Indices are assigned in rank order exactly as a caller's annotated pool is,
-    so ``a0 … aN`` are the ids a reader window holds and ``<sid>1`` the ones a
+    so ``sa0 … saN`` are the ids a reader window holds and ``sb10`` the ones a
     promotion reaches for.
+
+    ``raw`` names the sessions whose hits are ingested as RAW
+    ``session-transcript`` chunks (``point_kind``), which is what the multi-
+    session corpus carries: the harness's ``ingest_mode=deterministic`` writes
+    turn points AND raw session-transcript chunks, and ``dedup_pool`` caps those
+    per session. A session NOT named is the compact epistemic surface (turn
+    points), which ``dedup_pool`` never caps — so ``raw=()`` is the chunk-free
+    geometry every other pool here uses, and the two shapes are told apart by a
+    pool field rather than by a reader's memory.
     """
+    from tortoise.retrieval import SESSION_TRANSCRIPT_KIND
+
     pool: list[dict] = []
     for session, count in spec:
         for _ in range(count):
-            pool.append({
+            hit = {
                 "id": f"{session.lower()}{len(pool)}",
                 "session_id": session,
                 "session_date": "2023-04-15",
                 "content": "alpha",
-            })
+            }
+            if session in raw:
+                hit["point_kind"] = SESSION_TRANSCRIPT_KIND
+            pool.append(hit)
     return pool
 
 
-#: The PRE-REGISTERED pools — every one of them is a shape the #10538 record
-#: already names, so the receipt reproduces the argument rather than inventing
-#: new cases. ``clustered`` is what the arm's clustering gate must answer for
+def pool_for(name: str) -> list[dict]:
+    """The pool a ``POOLS`` entry describes — spec AND chunk shape, together.
+
+    Callers must go through this rather than ``_pool(entry["spec"])``: the
+    ``raw`` field is part of the shape, and a helper that quietly dropped it
+    would measure the chunk-free geometry while labelling it chunk-bearing.
+    """
+    entry = POOLS[name]
+    return _pool(entry["spec"], entry.get("raw", ()))
+
+
+#: The PRE-REGISTERED pools — each is a shape the #10538 record already names,
+#: so the receipt reproduces the argument rather than inventing new cases.
+#: ⛔ TWO EXCEPTIONS, both DISCLOSED at the entry itself rather than left to this
+#: header: the ``chunk_bearing_issue_probe`` / ``chunk_bearing_whole_window_cluster``
+#: entries re-measure two of the shapes above with the clustering session
+#: ingested as raw transcript chunks (the shape the corpus is actually written
+#: in, added by the finding-1 remedy), and ``chunk_bearing_deep_window`` is a
+#: PURPOSE-BUILT shape with no pre-existing counterpart, added by the finding-3
+#: remedy because both chunk-bearing pools above cap down to a pool NO DEEPER
+#: than the window and so cannot express a displacement at all. It is not an
+#: argument the record already made; it is the shape the record's question needs
+#: in order to be answerable, and its entry says so.
+#: ``clustered`` is what the arm's clustering gate must answer for
 #: that pool at the shipped geometry (``head = window - limit``), so it is
 #: EXECUTABLE metadata, not a comment: the pin asserts it against
 #: ``tortoise.temporal_leg._session_clustered`` at every swept window. A
@@ -146,12 +236,12 @@ POOLS: dict[str, dict] = {
         "clustered": True,
     },
     # the decision card's most favourable shape: the failure taken to its end,
-    # one session owning the WHOLE window — at the SHIPPED window the arm is
-    # genuinely additive here (+2 distinct). ⚠️ Only at window 12: deeper in the
-    # sweep the picks reach past the window's tail and start deleting the
-    # single-slot sessions below it (window 13 rows carry ``additive: false``,
-    # ``deleted_sessions: ["sD"]``), which is the same finding in the other
-    # direction and is why the receipt publishes the whole sweep.
+    # one session owning the WHOLE window — and the arm is genuinely additive
+    # here (+2 distinct, no deletion) at windows 6, 7 AND the shipped 12.
+    # ⚠️ From 13 the picks reach past the window's tail and start deleting:
+    # w=13 deletes ["sD"] (net falls to +1), w=14 deletes ["sE"] (net 0). That
+    # is the same finding in the other direction, and it is why the receipt
+    # publishes the whole sweep rather than the shipped row alone.
     "whole_window_cluster": {
         "spec": [("sA", 12), ("sD", 1), ("sE", 1), ("sF", 1)],
         "clustered": True,
@@ -187,11 +277,65 @@ POOLS: dict[str, dict] = {
         "spec": [("sA", 14)],
         "clustered": True,
     },
+    # ⛔ THE SHAPE THE CORPUS IS ACTUALLY INGESTED AS (fresh-context review,
+    # finding 1). Every pool above is CHUNK-FREE: no hit carries a
+    # ``point_kind``, so ``dedup_pool`` is a no-op and the fused index space this
+    # arm splices into happens to equal the reader's. The multi-session corpus is
+    # not chunk-free — ``ingest_mode=deterministic`` writes raw
+    # ``session-transcript`` chunks alongside the turn points — and ``dedup_pool``
+    # caps those at ``DEFAULT_MAX_CHUNKS_PER_SESSION`` per session in rank order,
+    # which REMOVES slots ABOVE a tail pick and lifts it into ``hits[:5]``. The
+    # two pools below are the issue's own probe and the starved-cluster end shape
+    # made chunk-bearing, i.e. the same argument, measured on the geometry the
+    # arm targets instead of on a geometry that cannot show the cap's effect.
+    "chunk_bearing_issue_probe": {
+        "spec": [("sA", 10), ("sB", 1), ("sC", 1), ("sD", 1), ("sE", 1),
+                 ("sF", 1)],
+        "clustered": True,
+        "raw": ("sA",),
+    },
+    "chunk_bearing_whole_window_cluster": {
+        "spec": [("sA", 12), ("sD", 1), ("sE", 1), ("sF", 1)],
+        "clustered": True,
+        "raw": ("sA",),
+    },
+    # ⛔ THE DISPLACEMENT-EXPRESSIBLE CHUNK-BEARING SHAPE (fresh-context review,
+    # finding 3). On BOTH pools above the reader's chunk cap leaves the pool
+    # no deeper than the window — 8 and 6 against window 12 — so the
+    # reader's window holds the WHOLE pool, and `evicted_ids`, `deleted_sessions`
+    # and `additive` cannot express a displacement at all: they are entailed by
+    # `reader_pool_depth <= window`, not measured, so an `additive: True` row
+    # there
+    # would read as "nothing was displaced" when it means "nothing COULD be".
+    # This pool keeps the same shape (one raw-chunk session above the fold, the
+    # reusable evidence below it) but carries enough compact sessions that the
+    # capped pool — 3 raw chunks of sA + 12 turn-point sessions = 15 — still
+    # FILLS the window, so "no session was deleted" is a MEASUREMENT here. Rows
+    # publish `displacement_expressible` so the two readings cannot be confused.
+    "chunk_bearing_deep_window": {
+        "spec": [("sA", 12)] + [(f"s{chr(ord('B') + i)}", 1)
+                                  for i in range(12)],
+        "clustered": True,
+        "raw": ("sA",),
+    },
 }
 
-#: The geometry sweep. ``3,4,5,6`` are where a pick can still reach the graded
+#: The geometry sweep: ``3,4,5,6`` are where a pick can still reach the graded
 #: top 5; ``7`` is the first window where it cannot; ``12`` is the shipped one;
 #: ``13,14`` are the deep-window end.
+#:
+#: ⛔ THAT BOUNDARY IS A PROPERTY OF THE CHUNK-FREE SHAPE, NOT OF THE SWEEP
+#: (fresh-context review, finding 1). `fused rank == reader rank` only when no
+#: hit is a raw ``session-transcript`` chunk. At ``3,4,5,6`` a pick is graded on
+#: EITHER shape — the ceiling is inside the top 5 there, which is the CHUNK-FREE
+#: reason, and the cap only decides whether the SECOND pick is graded too. From
+#: ``7`` on the two shapes part: on a CHUNK-BEARING pool the cap removes the raw
+#: chunks ABOVE the pick, so it is still graded at EVERY swept window from 3
+#: through 13 (and at 14 on two of the three chunk-bearing pools), while on a
+#: chunk-free pool it is graded nowhere from 7 on. Stating "7 is where it cannot"
+#: as a fact about the sweep is the same one-shape-as-a-property-of-the-arm error
+#: the shape-keyed verdict fields exist to prevent — read the row's own
+#: ``chunk_bearing``.
 GEOMETRY = (3, 4, 5, 6, 7, SHIPPED_WINDOW, 13, 14)
 
 #: Pool depths swept at the shipped window — the "shallow pool" loophole: an arm
@@ -218,6 +362,7 @@ def _shallow_pool(depth: int) -> list[dict]:
 
 def _row(pool: list[dict], *, window: int, limit: int, placement: str) -> dict:
     """One measured row — the SHIPPED wiring, never a re-implementation."""
+    from tortoise.retrieval import is_raw_chunk
     from tortoise.temporal_leg import (
         effective_promotion_budget,
         temporal_leg_fusion_order,
@@ -227,17 +372,27 @@ def _row(pool: list[dict], *, window: int, limit: int, placement: str) -> dict:
     order, picks = temporal_leg_fusion_order(
         pool, anchors=(), window=window, limit=limit,
         date_window=DATE_WINDOW, placement=placement)
+    # ``window_arm_retention``'s DEFAULT models the reader (the post-``dedup_pool``
+    # pool the metric grades), so nothing here applies a chunk cap by hand: a row
+    # measures whatever shape ``pool`` carries, and the shape is reported beside
+    # it so a reader cannot mistake one for the other.
     retention = window_arm_retention(
         pool, order, picks=picks, window=window, limit=limit)
     return {
         "window": window,
         "pool_depth": len(pool),
+        "chunk_bearing": any(is_raw_chunk(h) for h in pool),
+        "reader_pool_depth": retention["reader_pool_depth"],
+        "reader_pool_depth_fused": retention["reader_pool_depth_fused"],
         "limit_requested": limit,
         "budget_effective": effective_promotion_budget(window, limit),
         "placement": placement,
         "picks": picks,
         "fired": bool(picks),
         "pick_ranks": retention["pick_ranks"],
+        "pick_ranks_before_dedup": retention["pick_ranks_before_dedup"],
+        "picks_dropped_by_reader_dedup":
+            retention["picks_dropped_by_reader_dedup"],
         "picks_outside_window": retention["picks_outside_window"],
         "graded_by_recall_all_at_5": retention["graded_by_recall_all_at_5"],
         "base_sessions": retention["base_sessions"],
@@ -251,32 +406,69 @@ def _row(pool: list[dict], *, window: int, limit: int, placement: str) -> dict:
         "fused_sessionless_slots": retention["fused_sessionless_slots"],
         "additive": retention["additive"],
         "base_graded_evicted": retention["base_graded_evicted"],
+        # ⛔ CAN THIS ROW EXPRESS A DISPLACEMENT AT ALL? `evicted_ids` is
+        # `[i for i in base_ids if i not in fused_set]` over two `[:window]`
+        # windows of the SAME pool, so when the reader's pool is NO DEEPER than
+        # the window (shallower OR exactly the window's height) both windows hold
+        # the whole pool and the displacement
+        # fields are entailed to be empty/True by arithmetic, not by the arm.
+        # A row with this False says NOTHING about displacement in either
+        # direction; the fields that name it (`additive`,
+        # `unit_reachable_without_displacement…`) must not be read from it.
+        "displacement_expressible": (
+            retention["reader_pool_depth"] > window
+            and retention["reader_pool_depth_fused"] > window),
         "order_changed": order != [c["id"] for c in pool],
     }
 
 
 def measure() -> dict[str, Any]:
     """Build the whole receipt. Deterministic; no DB, no dataset, no network."""
+    from tortoise.retrieval import DEFAULT_MAX_CHUNKS_PER_SESSION
     from tortoise.temporal_leg import (
         DEFAULT_TEMPORAL_LEG_BUCKET_CAP,
         DEFAULT_TEMPORAL_LEG_LIMIT,
     )
 
     rows: dict[str, list[dict]] = {}
-    for name, spec in POOLS.items():
-        pool = _pool(spec["spec"])
+    for name in POOLS:
+        pool = pool_for(name)
         rows[name] = [
             _row(pool, window=w, limit=DEFAULT_TEMPORAL_LEG_LIMIT,
                  placement="tail")
             for w in GEOMETRY
         ]
 
-    shipped_pool = _pool(POOLS["issue_probe_4520"]["spec"])
+    shipped_pool = pool_for("issue_probe_4520")
     shipped_geometry = [
         _row(shipped_pool, window=SHIPPED_WINDOW,
              limit=DEFAULT_TEMPORAL_LEG_LIMIT, placement=placement)
         for placement in ("tail", "head")
     ]
+
+    # The SAME shipped geometry on the chunk-bearing shape — the geometry the
+    # corpus is ingested with. Kept as an explicit pair rather than inferred from
+    # ``by_pool`` so the two halves of the verdict cannot silently diverge.
+    # ⛔ BOTH PLACEMENTS, PER POOL (fresh-context review, finding 2). The pre-fix
+    # table carried ONE chunk-bearing row (tail), while `verdict["why"]` stated
+    # that head "reaches ranks 0-1 on either shape" — a claim no chunk-bearing
+    # row measured. Publishing the pair makes the head sentence a measurement on
+    # each shape instead of an extrapolation from the chunk-free one.
+    chunk_bearing_shipped = {
+        f"chunk_bearing_{name}_{placement}": _row(
+            pool_for(f"chunk_bearing_{name}"), window=SHIPPED_WINDOW,
+            limit=DEFAULT_TEMPORAL_LEG_LIMIT, placement=placement)
+        for name in ("issue_probe", "whole_window_cluster", "deep_window")
+        for placement in ("tail", "head")
+    }
+    # The TAIL half alone — what "no pick is graded?" and "is the unit reachable
+    # without displacement?" are questions about. The head half is the
+    # counterfactual and is never folded into either verdict field.
+    chunk_bearing_tail = {
+        name.replace("_tail", ""): row
+        for name, row in chunk_bearing_shipped.items()
+        if name.endswith("_tail")
+    }
 
     shallow_rows = []
     for depth in SHALLOW_DEPTHS:
@@ -285,8 +477,9 @@ def measure() -> dict[str, Any]:
             _row(pool, window=SHIPPED_WINDOW,
                  limit=DEFAULT_TEMPORAL_LEG_LIMIT, placement="tail"))
 
-    # The arm's headline figure, stated once so a reader does not have to
-    # aggregate: at the shipped geometry, does the graded unit see ANY pick?
+    # The arm's headline figures, stated once so a reader does not have to
+    # aggregate: at the shipped geometry, does the graded unit see ANY pick — and
+    # does the answer depend on the pool's chunk shape?
     tail = shipped_geometry[0]
     head = shipped_geometry[1]
     return {
@@ -298,6 +491,9 @@ def measure() -> dict[str, Any]:
             "window": SHIPPED_WINDOW,
             "limit": DEFAULT_TEMPORAL_LEG_LIMIT,
             "bucket_cap": DEFAULT_TEMPORAL_LEG_BUCKET_CAP,
+            # The reader's per-session raw-chunk cap `window_arm_retention`
+            # models by default (`retrieve.py` applies it AFTER fusion).
+            "max_chunks_per_session": DEFAULT_MAX_CHUNKS_PER_SESSION,
         },
         "what_this_is": (
             "the window arm's RETENTION baseline on the shipped wiring — "
@@ -312,9 +508,28 @@ def measure() -> dict[str, Any]:
         ),
         "verdict": {
             "scope": "AT THE SHIPPED GEOMETRY ONLY (window=12, limit=2, "
-                     "bucket_cap=1). The sweep below reaches the graded top 5 "
-                     "at windows 3-6 — that is a different geometry, NOT the "
-                     "harness's tr_top_k, so it is not a way to reach the unit.",
+                     "bucket_cap=1, reader chunk cap applied), ON BOTH POOL "
+                     "SHAPES: CHUNK-FREE pools (no raw session-transcript hits, "
+                     "so the reader's per-session cap is inert and the fused "
+                     "index space equals the reader's) and CHUNK-BEARING pools "
+                     "(raw transcript chunks, the shape the multi-session "
+                     "corpus is ingested as). The two do NOT agree, and neither "
+                     "number is universal — read the field's own shape. The "
+                     "sweep below reaches the graded top 5 at windows 3-6 ON A "
+                     "CHUNK-FREE POOL (the pick's ceiling is itself inside the "
+                     "top 5 there) — a different geometry, NOT the harness's "
+                     "tr_top_k, so it is not a way to reach the unit. A "
+                     "CHUNK-BEARING pool is graded at those same windows for "
+                     "that same ceiling reason, and stays graded at EVERY swept "
+                     "window from 3 through 13 because from window 7 on the "
+                     "reader's chunk cap has removed the raw chunks above the "
+                     "pick. Where a row carries "
+                     "`displacement_expressible: false` the capped pool is "
+                     "no deeper than the window (it holds the WHOLE pool, and "
+                     "six non-expressible rows are exactly the window's "
+                     "height), so its `additive` / "
+                     "`evicted_ids` / `deleted_sessions` are arithmetic, not "
+                     "measurement — read them only where it is true.",
             "shipped_tail_picks_graded_by_recall_all_at_5":
                 tail["graded_by_recall_all_at_5"],
             "shipped_tail_net_distinct_sessions": tail["net"],
@@ -322,14 +537,81 @@ def measure() -> dict[str, Any]:
             "shipped_tail_deleted_sessions": tail["deleted_sessions"],
             "head_picks_graded_by_recall_all_at_5":
                 head["graded_by_recall_all_at_5"],
-            "unit_reachable_without_displacement_at_window_12": False,
+            # ⛔ SHAPE-KEYED, because the answer is. A single boolean here was
+            # the finding: it read FALSE only on the chunk-free pools the
+            # instrument happened to build, and it was about to be read as a
+            # property of the arm.
+            "unit_graded_by_recall_all_at_5_at_window_12": {
+                "chunk_free_pools": tail["graded_by_recall_all_at_5"],
+                "chunk_bearing_pools": {
+                    name: row["graded_by_recall_all_at_5"]
+                    for name, row in chunk_bearing_tail.items()
+                },
+            },
+            # DERIVED from the rows above (graded > 0 AND no session deleted),
+            # never asserted — so the two fields cannot drift apart.
+            #
+            # ⛔ THE CHUNK-BEARING HALF IS READ ONLY FROM EXPRESSIBLE ROWS
+            # (fresh-context review, finding 3). `additive` / `evicted_ids` are
+            # entailed to be True/empty when the reader's capped pool is
+            # no deeper than the window (it holds the whole pool), so a row
+            # carrying
+            # `displacement_expressible: false` cannot support a claim about
+            # displacement in either direction. The excluded rows are NAMED
+            # rather than silently dropped, and a shape with no expressible row
+            # at all reports ``None`` — never a vacuous True.
+            "unit_reachable_without_displacement_at_window_12": {
+                "chunk_free_pools": bool(tail["graded_by_recall_all_at_5"])
+                and tail["additive"],
+                "chunk_bearing_pools": (
+                    all(row["graded_by_recall_all_at_5"] and row["additive"]
+                        for row in chunk_bearing_tail.values()
+                        if row["displacement_expressible"])
+                    if any(row["displacement_expressible"]
+                           for row in chunk_bearing_tail.values()) else None),
+                "chunk_bearing_pools_displacement_expressible": {
+                    name: row["displacement_expressible"]
+                    for name, row in chunk_bearing_tail.items()
+                },
+            },
             "why": (
-                "picks are spliced at ceiling = window - budget, so at window=12 "
-                "they land at fused ranks 10-11 while recall_all@5 grades "
-                "hits[:5]. Placement='head' reaches ranks 0-1 — but only by "
-                "taking the semantic head's slots, so it too is a swap, not a "
-                "widening. ⚠️ What is NOT claimed here: this counterfactual has "
-                "never been measured on the shipped corpus. The nearest "
+                "TWO INDEX SPACES, and only one of them is graded. The splice "
+                "puts a tail pick at ceiling = window - budget in the caller's "
+                "PRE-cap fused order (ranks 10-11 at window=12). But the harness "
+                "fuses and THEN dedups — retrieve.py reassigns `annotated` to the "
+                "fused order and the next statement is `pool = "
+                "_dedup_pool(annotated, max_chunks_per_session=3)`, with `hits` "
+                "= that pool — and recall_all@5 grades hits[:5] of the DEDUPED "
+                "pool. dedup_pool caps RAW session-transcript chunks per session "
+                "in rank order and never caps points/turn points, so the cap is "
+                "a no-op on a chunk-free pool (fused rank == reader rank: 0 of 2 "
+                "picks graded) and REMOVES SLOTS ABOVE the pick on a "
+                "chunk-bearing one, lifting both picks to reader ranks 3-4 where "
+                "recall_all@5 grades BOTH. The chunk-bearing pool also loses no "
+                "session at the shipped window (net 0, deleted_sessions [], "
+                "additive True), where the chunk-free one trades sB and sC away "
+                "(net 0, deleted_sessions ['sB','sC'], additive False). So the "
+                "unit is reachable-without-displacement ONLY on the geometry the "
+                "arm targets, and NOT on a chunk-free pool — the opposite of what "
+                "the pre-fix receipt stated as a universal. Placement='head' "
+                "is a different answer on each shape, and it is MEASURED on "
+                "each (the shipped-geometry chunk-bearing table publishes the "
+                "head row beside the tail one): on a CHUNK-FREE pool head "
+                "reaches ranks 0-1 by EVICTING sB and sC — both sole "
+                "representatives — so it buys the unit with a swap, and that "
+                "is exactly the #8713 (a) risk below. On a CHUNK-BEARING pool "
+                "head also reaches ranks 0-1 but evicts NOTHING "
+                "(`evicted_ids: []`, `deleted_sessions: []`) on all three "
+                "pools INCLUDING `chunk_bearing_deep_window`, whose capped "
+                "pool still fills the window so the emptiness is measured "
+                "rather than entailed — because the chunk cap had already "
+                "brought both picks inside the reader window at ranks 3-4, so "
+                "the promotion is a pure RE-ORDER there. That is not a "
+                "recommendation for head: on that shape the TAIL already "
+                "reaches the graded top 5, so head buys no unit the default "
+                "does not. ⚠️ What is NOT claimed here: this counterfactual has "
+                "never been measured on the shipped corpus, and this instrument "
+                "still has no judge and no dataset. The nearest "
                 "measured analogue is #8713's C4 source-session RE-INJECTION "
                 "arm — a DIFFERENT mechanism, and legible only when its capsweep "
                 "receipt "
@@ -361,6 +643,7 @@ def measure() -> dict[str, Any]:
         },
         "by_pool": rows,
         "shipped_geometry_by_placement": shipped_geometry,
+        "shipped_geometry_chunk_bearing": chunk_bearing_shipped,
         "shallow_pool_at_shipped_window": shallow_rows,
     }
 

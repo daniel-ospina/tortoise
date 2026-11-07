@@ -443,7 +443,16 @@ def classify_sessions(report: dict) -> dict:
         sid = verdict["session"]
         problems = verdict.get("problems") or []
         missing = [p for p in problems if p.get("problem") == "missing_in_record"]
-        mismatched = [p for p in problems if p.get("problem") != "missing_in_record"]
+        # ⛔ `duplicate_window` IS NOT A "MISMATCHED FIELD" (review P3). The arm
+        # below names the class correctly, but this count was left alone: a
+        # DUPLICATE-WINDOW exclusion therefore carried `mismatched: 1` in the
+        # APPROVABLE artifact over a session the census never compared a single
+        # field of (its own reason says no key can be placed), so the artifact
+        # told an operator the MISMATCH remedy — a field fix — applied. The same
+        # inversion this commit fixes in `class`, from the other field.
+        mismatched = [p for p in problems
+                      if p.get("problem") not in ("missing_in_record",
+                                                  "duplicate_window")]
         duplicate = [p for p in problems
                      if p.get("problem") == "duplicate_window"]
         if duplicate and not missing:
@@ -589,6 +598,35 @@ def build_plan(report: dict, *, target: dict, health: dict | None,
             # `--census-json` file is not a plan about the live deployment, and
             # the artefact a human approves has to say so (#10483 review, P3-4).
             "source": census_source or {"kind": "unspecified"},
+            # ⛔ AND WHAT THE PARITY EVIDENCE ACTUALLY COMPARED (#10627 review,
+            # P3). `--execute` re-derives with the HOSTED leg and its seven
+            # fields, but `--census-json` is the ONLY preview path an operator
+            # has on a postponed hosted deployment — so without these keys a
+            # plan whose evidence compared `key`/`content`/`speaker` off the
+            # LOCAL JSONL is byte-for-byte indistinguishable from one built
+            # from a seven-field hosted census, and a human signs an
+            # irreversible graph delete on evidence of unknown width and
+            # unknown authority. The census artifact already discloses this
+            # (its own `record.leg` / `compared_fields` / `declared_absent`);
+            # the artifact a human APPROVES did not. A narrower comparison
+            # must never read as the strong one.
+            "record_leg": record.get("leg"),
+            "record_dir": record.get("dir"),
+            # ⛔ WHICH GRAPH THE PARITY EVIDENCE MEASURED (review P2, cycle 5). The
+            # census emits it and `load_parity_report` REFUSES a report that names
+            # none; the plan — the artefact a human signs for an IRREVERSIBLE delete —
+            # dropped it, so two consumers of one dict disagreed about whether a
+            # nameless census is evidence, and the lenient side was the signed one.
+            "graph": report.get("graph"),
+            # ⛔ The BINDING'S OWN LIMIT, in the artefact a human signs. The rule this
+            # PR added is name-only, so a same-named graph on another instance, or
+            # one measured earlier, passes — a signed plan that presented that
+            # binding without its limit would read as a stronger claim than the code
+            # makes (review P2, cycle 7).
+            "graph_binding": ("name-only — a same-named graph on another "
+                              "instance, or measured earlier, is NOT detected"),
+            "compared_fields": report.get("compared_fields") or [],
+            "declared_absent": report.get("declared_absent") or [],
             "episodic_graph_nodes": pop.get("episodic_graph_nodes"),
             "turn_shaped_nodes": pop.get("turn_shaped_nodes"),
             "sessions_with_graph_turns": pop.get("sessions_with_graph_turns"),
@@ -1249,6 +1287,42 @@ def _report_problem(report) -> str:
     for key in ("population", "parity", "dry_run"):
         if not isinstance(report.get(key), dict):
             return f"it carries no `{key}` block"
+    # ⛔ THE EVIDENCE'S AUTHORITY AND WIDTH ARE PART OF "IS THIS A CENSUS
+    # REPORT" (#10627 review, P3). A plan is the artefact a human signs for an
+    # IRREVERSIBLE graph delete, and `--census-json` is the only preview path
+    # on a postponed hosted deployment. Without these three keys the plan
+    # cannot state whether the parity evidence came from the hosted record or
+    # the local JSONL, nor which fields were compared — so a three-field local
+    # census and a seven-field hosted one would produce the same signable plan.
+    # Fail CLOSED on the artefact that does not say: an unstated width is not a
+    # full-width comparison. (Any census this repo emits carries all three —
+    # `since #10627`; an artifact without them predates the honesty fix.)
+    record = report.get("record")
+    if not isinstance(record, dict):
+        return ("it carries no `record` block, so which record its parity was "
+                "measured against is not established")
+    if not isinstance(record.get("leg"), str) or not record["leg"]:
+        return (f"record.leg is {type(record.get('leg')).__name__}, not a leg "
+                f"name, so which record its parity was measured against is "
+                f"not established")
+    if not isinstance(report.get("compared_fields"), list):
+        return ("compared_fields is missing or is not a list, so the width of "
+                "the comparison this plan rests on is not established")
+    if not isinstance(report.get("declared_absent"), list):
+        return ("declared_absent is missing or is not a list, so which fields "
+                "were NOT compared is not established")
+    # ⛔ A NAMELESS CENSUS IS NOT EVIDENCE (review P2, cycle 5) — the SAME rule
+    # `cache_eviction.load_parity_report` applies, because a plan is the artefact a
+    # human approves and the two consumers must not disagree about what evidence is
+    # worth: a `--census-json` file with `graph: null` was accepted here and produced
+    # an exit-0 signable plan that named no graph at all, while the cache census
+    # refused the very same file. `Graph` is what `census()` emits
+    # (`tools/turn_parity_census.py`); an artifact without it cannot say what it
+    # measured.
+    reported_graph = report.get("graph")
+    if not isinstance(reported_graph, str) or not reported_graph.strip():
+        return ("`graph` is missing or blank, so which graph this parity evidence "
+                "measured is not established — a nameless census is not evidence")
     for key in ("clean_sessions", "failed_sessions"):
         if not isinstance(report["parity"].get(key), list):
             return f"parity.{key} is missing or is not a list"
@@ -1672,7 +1746,13 @@ def _build_parser() -> _UsageParser:
     parser.add_argument("--census-json", default=None,
                         help="reuse a census report instead of reading the "
                              "stores (preview only — --execute ALWAYS "
-                             "re-derives live)")
+                             "re-derives live). The report's own `graph` must "
+                             "equal the graph THIS run resolves from "
+                             "--uri/--db-path/--graph-name: a census that names "
+                             "none is REFUSED, and so is one naming another "
+                             "graph. ⚠️ Name-only — a same-named graph on a "
+                             "different instance, or measured earlier, is NOT "
+                             "detected")
     parser.add_argument("--json", default=None,
                         help="write the full census report to this path")
     parser.add_argument("--plan-out", default=None,
@@ -1680,7 +1760,11 @@ def _build_parser() -> _UsageParser:
     parser.add_argument("--sample", type=int, default=3,
                         help="sample size per session in the census report")
     parser.add_argument("--expect-empty", action="store_true",
-                        help="allow a graph holding zero episodic nodes")
+                        help="allow a graph holding zero episodic nodes to "
+                             "certify. ⚠️ Presence proves the NAME exists, not "
+                             "that it is the graph you MEANT: a wrong name the "
+                             "store DOES hold still certifies under this flag. "
+                             "Use it only for the drained graph you purged")
     parser.add_argument("--execute", action="store_true",
                         help="PURGE the approved set. Refuses unless every "
                              "precondition is asserted at runtime and the "
@@ -1708,6 +1792,19 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.sample < 0:
         parser.error("--sample must be >= 0")
+    # ⛔ THE SAME PRESENCE-NOT-TRUTHINESS RULE AS THE CENSUS CLI, from the SAME
+    # implementation (review P2, cycle 3). This tool opens a graph from the same three
+    # flags, so `--uri "$UNSET_VAR"` read the EMBEDDED store and then either died with a
+    # traceback (`ValueError` escaping the `CensusError` handler below, exit 1 — the
+    # documented USAGE code) or, with `--graph-name` set, exited 0 having written a
+    # census artifact naming that graph for a store the URI never named; and
+    # `--db-path X --graph-name ""` exited 0 with `graph: ""` in the artifact while the
+    # read fell back to `tortoise`. Both are the accident the census CLI refuses.
+    empty_flag = census_mod.empty_graph_target_flag(args)
+    if empty_flag:
+        sys.stderr.write(f"purge_legacy_turns: {empty_flag}")
+        sys.stderr.write(" Nothing was read and nothing was deleted.\n")
+        return 1
     record_dsn = args.record_dsn or os.environ.get("TORTOISE_RECORD_DSN", "")
     if not args.org_id or not args.graph_id:
         sys.stderr.write(
@@ -1754,12 +1851,27 @@ def main(argv: list[str] | None = None) -> int:
                     and not args.expect_empty):
                 sys.stderr.write(
                     "purge_legacy_turns: the graph holds ZERO is_episodic "
-                    "nodes — an absence is NOT established (a wrong "
-                    "--graph-name/--db-path is indistinguishable from a "
-                    "drained graph). Pass --expect-empty if the graph is known "
-                    "to hold no turn nodes.\n")
+                    "nodes — an absence is NOT established. The graph DOES "
+                    "exist (presence is checked first, #11112); what presence "
+                    "proves is that the NAME exists, NOT that it is the graph "
+                    "you meant: a name the store DOES hold (another tenant's "
+                    "graph of that name, a stub an earlier run created, a "
+                    "wrong --db-path) still certifies under --expect-empty. "
+                    "Pass --expect-empty only if this is the drained graph "
+                    "you purged.\n")
                 return 3
-            report = census_mod.census(graph, record, sample=args.sample)
+            report = census_mod.census(
+                graph, record, sample=args.sample,
+                # ⛔ THE ARTIFACT MUST NAME THE TARGET THIS RUN OPENED (review P2 on
+                # #11097). `census()` emits `graph`, and the consumer
+                # (`cache_eviction.load_parity_report`) REFUSES a report that names
+                # none — so omitting it here did not merely lose a field: it made
+                # every artifact this producer writes unusable as evidence, while
+                # asserting an absence the run itself disproves. Resolved through the
+                # instrument's own helper (the canonical URI derivation), never a
+                # second parse.
+                graph_name=census_mod.resolve_graph_name(
+                    args.uri, args.db_path, args.graph_name))
     except census_mod.CensusError as exc:
         sys.stderr.write(f"purge_legacy_turns: {exc}\n")
         return 3
@@ -1774,6 +1886,38 @@ def main(argv: list[str] | None = None) -> int:
             f"purge_legacy_turns: REFUSED {REFUSE_CENSUS_UNREADABLE}: the "
             f"census report cannot be read as a census: {report_problem}. "
             f"Nothing was deleted and no plan was written.\n")
+        return 3
+
+    # ⛔ THE PLAN'S EVIDENCE MUST BE EVIDENCE ABOUT **THIS** TARGET (review P2, cycle
+    # 5). `--census-json` is the only preview path on a postponed hosted deployment,
+    # and a cached census of graph A was accepted for a run whose `--uri` names graph
+    # B: everything downstream compared counts, never identities. The check is the
+    # same one the cache census applies to the same artifact — the report's own
+    # `graph` against the graph this run resolved — so the two consumers cannot
+    # disagree about it.
+    # ⚠️ The check is NAME-ONLY: a census of the SAME graph measured on another
+    # instance, or earlier, passes. That limit is STATED where the operator reads it
+    # (`--census-json`'s help) and RECORDED in the artefact a human signs
+    # (`plan["census"]["graph_binding"]`) — never claimed closed (review P2, cycle 7).
+    # The resolution is GUARDED: the canonical resolver refuses a scheme it does not
+    # know (`bolt://`, a typo), and an unguarded call here escaped `main()` as a raw
+    # traceback at exit 1 — the documented USAGE code — while the LIVE route for the
+    # identical flag returns a named exit 3 (review P2, cycle 6).
+    try:
+        expected_graph = census_mod.resolve_graph_name(
+            args.uri, args.db_path, args.graph_name)
+    except (census_mod.CensusError, ValueError) as exc:
+        sys.stderr.write(
+            f"purge_legacy_turns: the graph target could not be resolved "
+            f"({type(exc).__name__}: {exc}) — an absence is NOT established, so no "
+            f"plan can be written. Nothing was deleted.\n")
+        return 3
+    if report.get("graph") != expected_graph:
+        sys.stderr.write(
+            f"purge_legacy_turns: REFUSED {REFUSE_CENSUS_UNREADABLE}: the census "
+            f"report measured graph {report.get('graph')!r}, but this run targets "
+            f"{expected_graph!r} — a CLEAN census of one graph does not license "
+            f"purging another. Nothing was deleted and no plan was written.\n")
         return 3
 
     if args.health_url and args.health_json:
@@ -1897,6 +2041,21 @@ def main(argv: list[str] | None = None) -> int:
     print(f"source     : {source.get('kind')}"
           + (f" ({source.get('path')})" if source.get("path") else "")
           + (f" — {source['note']}" if source.get("note") else ""))
+    # ⛔ WHAT THE PARITY EVIDENCE COMPARED, on the screen the operator reads
+    # before signing (#10627 review, P3). `record_leg` is `hosted` or `local`;
+    # the field list is the width, and `declared_absent` is what was NOT
+    # compared — printed, never implied. A local census compares fewer fields
+    # than the hosted one, and the difference must be visible here or the
+    # preview reads as the strong one.
+    record_leg = plan["census"].get("record_leg")
+    record_dir = plan["census"].get("record_dir")
+    compared = plan["census"].get("compared_fields") or []
+    absent_fields = plan["census"].get("declared_absent") or []
+    print(f"record leg : {record_leg or 'UNSTATED'}"
+          + (f" ({record_dir})" if record_dir else ""))
+    print(f"compared   : {', '.join(compared) if compared else 'NOTHING — the leg was skipped'}")
+    if absent_fields:
+        print(f"not compared: {', '.join(absent_fields)} — declared absent by the record, NOT verified by this census")
     print(f"census     : PARITY({counts[CLASS_PARITY]}, of which "
           f"{counts[CLASS_RECORD_AHEAD]} RECORD-AHEAD) · "
           f"RECORD-BEHIND({counts[CLASS_RECORD_BEHIND]}) · "
@@ -2366,7 +2525,13 @@ def _execute(plan: dict, args, target: dict) -> int:
                 node_keys=ids)
             now_graph = census_mod.read_graph_turns(
                 None, None, None, node_ids=ids, g=proj.g)
-            recheck = census_mod.census(now_graph, held, sample=0)
+            recheck = census_mod.census(
+                now_graph, held, sample=0,
+                # The delete-time re-check names the graph the DELETES go to — the
+                # projection this run issues them through — for the same reason the
+                # `target-drift` check above reads `proj.graph_name` rather than
+                # `args.graph_name` (review P2 on #11097).
+                graph_name=getattr(proj, "graph_name", None))
         except census_mod.CensusError as exc:
             sys.stderr.write(
                 f"purge_legacy_turns: the record or the graph could not be "

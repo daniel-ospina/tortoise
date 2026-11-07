@@ -1750,17 +1750,13 @@ def _pgrep_redis_servers() -> list[int]:
     O(servers) instead of scanning the whole tempdir (which holds tens of
     thousands of stale dirs on a leaky machine). Returns [] when pgrep is
     unavailable.
+
+    ⛔ THE LOSSY FORM, and it delegates to `_pgrep_redis_servers_or_none`
+    deliberately so the two cannot drift: `[]` here means "measured none OR the
+    probe failed". A caller that must distinguish those (#4740's residue bound,
+    and #8599's census — see `discover`) must use `_or_none` DIRECTLY.
     """
-    text = _run_text(
-        ["pgrep", "-f", "redislite/bin/redis-server"], timeout=5)
-    if text is None:
-        return []
-    pids: list[int] = []
-    for line in text.splitlines():
-        line = line.strip()
-        if line.isdigit():
-            pids.append(int(line))
-    return pids
+    return _pgrep_redis_servers_or_none() or []
 
 
 def _pgrep_redis_servers_or_none() -> list[int] | None:
@@ -1771,8 +1767,9 @@ def _pgrep_redis_servers_or_none() -> list[int] | None:
     A caller that must report an unaccounted residue (#4740: the conftest
     session-end sweep's `left`, which the CI orphan gate binds its bound to)
     needs the difference: `[]` means measured-none, `None` means
-    not-measured. Kept alongside (not inside) `_pgrep_redis_servers` so the
-    many existing callers keep their exact `[]`-on-failure contract.
+    not-measured. `_pgrep_redis_servers` DELEGATES here and collapses with
+    `or []`, so the many existing callers keep their exact `[]`-on-failure
+    contract while the two readers cannot drift apart (#10757 P3).
 
     pgrep exits 0 on matches and 1 on no matches — both are successful
     probes. Any other status, a timeout, or an OSError is a failed probe.
@@ -1786,8 +1783,20 @@ def _pgrep_redis_servers_or_none() -> list[int] | None:
         return None
     if out.returncode not in (0, 1):
         return None
+    # ⛔ READ THE STDOUT THROUGH `_stdout_text`, not `out.stdout` directly
+    # (#10757 review P3). `_run_text` applied that guard and this reader did
+    # not; while `_pgrep_redis_servers` was its own implementation the gap was
+    # confined, but now that it DELEGATES here the guard is the only thing
+    # keeping ITS callers' `[]`-on-failure contract (#4496: a seam handing back
+    # non-text stdout raised `TypeError` out of a probe documented as "or
+    # None", and that escaped into a fail-closed co-tenant check and leaked a
+    # daemon). Production passes `text=True`, so this is the monkeypatched-seam
+    # class — which is exactly the class #4496 measured.
+    text = _stdout_text(out)
+    if text is None:
+        return None
     pids: list[int] = []
-    for line in out.stdout.splitlines():
+    for line in text.splitlines():
         line = line.strip()
         if line.isdigit():
             pids.append(int(line))
@@ -1850,7 +1859,20 @@ def discover(jobs: int = 1, max_tempdir_entries: int = 5000,
     tmpdir = _real_gettempdir()
 
     # Pass 1: live servers (authoritative pid comes from pgrep).
-    live_pids = _pgrep_redis_servers()
+    #
+    # ⛔ READ THE `_or_none` FORM (#8599 review P3, #10757): the `[]`-collapsing
+    # reader cannot tell "measured zero" from "the 5 s pgrep probe timed out or
+    # pgrep is missing", and this function's `complete` flag is what decides
+    # whether the census may be PUBLISHED as measured. A failed pass 1 publishes
+    # a SUBSET as measured, which is the same fail-open the `dropped` flag closes
+    # for pass 2 — the vanished term then claims every live server pass 1 would
+    # have named as a natural exit. Reachability needs a pass-1 failure AND a
+    # server pass 2 does not cover (pass 2 walks the ephemeral namespace, where
+    # essentially every redislite dir lives), which is why it is `and`, not the
+    # main path — but it is exactly the load that produced #8599 in the first
+    # place, so it is closed rather than declared.
+    pass1_pids = _pgrep_redis_servers_or_none()
+    live_pids = pass1_pids or []
     seen_dirs: set[str] = set()
 
     # One batched ps for all live pids (issue #1005 perf).
@@ -1863,15 +1885,50 @@ def discover(jobs: int = 1, max_tempdir_entries: int = 5000,
     finally:
         _PROC_INFO_CACHE = {}
     out = _ScanAwareList(records)
-    out.complete = complete
+    # Fail-closed: a pass-1 probe that FAILED makes the census truncated
+    # whatever pass 2 saw.
+    out.complete = complete and pass1_pids is not None
     return out
 
 
 def _discover_from_live(live_pids, jobs, tmpdir, seen_dirs,
                         max_tempdir_entries, full_scan: bool = False):
     """Classification half of discover() (separated so the proc-info cache
-    has a deterministic lifetime). Returns ``(records, scan_complete)``."""
+    has a deterministic lifetime). Returns ``(records, scan_complete)``, where
+    `scan_complete` is BOTH the walk's flag (a bounded scan that ran out of
+    budget) and `not dropped` (a dir the walk found that classification then
+    refused) — either one makes the census TRUNCATED, and a truncated census
+    must never be read as one that found nothing."""
     results = []
+    # #8599 review P2 (#10757): a socket dir the walk ENUMERATED and this pass
+    # then DROPPED is a hole in the census, and `scan.complete` — the WALK's own
+    # flag — cannot see it. Measured: with `_classify_dir` raising for a live
+    # server's dir, `discover()` returned `records=0, complete=True`, so the
+    # vanished term read that server's pid as a natural EXIT and the gate's
+    # "the sweep's own measurement is broken" identity closed green. Every drop
+    # below therefore marks the census TRUNCATED; the flag is fail-closed at
+    # every consumer (a partial scan proves nothing about a cleared backlog
+    # either — `sweep_until_cleared`).
+    #
+    # WHICH ARMS ARE PINNED, so the claim is checkable rather than generous: the
+    # SERIAL `_classify_dir` arm by
+    # `test_discover_reports_a_dropped_record_as_a_TRUNCATED_census`, and the
+    # THREADPOOL `fut.result()` arm by
+    # `test_discover_reports_a_PARALLEL_classification_drop_as_a_TRUNCATED_census`
+    # (deliberately deleted from the flag, each one reds). The third — the
+    # `PermissionError/OSError` arm around `os.path.join`/`realpath`/`exists` —
+    # is DEFENSIVE and is not reachable through those calls: `os.path.exists`
+    # swallows `OSError` and returns False (so the dir takes the `not exists`
+    # continue), `realpath` does not raise for these inputs, and `join` cannot
+    # raise `OSError`. It is kept as belt-and-braces for a future guard added
+    # inside this `try` — and that is the ONLY reason to keep it: it is not
+    # pinned, because pinning it means forcing a raise the production calls
+    # cannot make. (An earlier revision of this comment claimed a measurement
+    # showed the arm unreachable; the measurement only showed that one
+    # monkeypatch of `os.path.exists` was consumed by `_scan_socket_dirs`'s own
+    # call — a fact about the patch, not about the arm. The reasoning above is
+    # the claim; no measurement is offered as evidence for it.)
+    dropped = False
 
     def _classify_live(pid: int) -> dict | None:
         sock_dir = _socket_dir_from_cmdline(pid)
@@ -1937,6 +1994,7 @@ def _discover_from_live(live_pids, jobs, tmpdir, seen_dirs,
             dirs.append((d, socket_path))
         except (PermissionError, OSError):
             logger.warning("dir skipped (OSError): %s", d)
+            dropped = True
             continue
 
     if jobs > 1 and len(dirs) > 1:
@@ -1949,6 +2007,7 @@ def _discover_from_live(live_pids, jobs, tmpdir, seen_dirs,
                     rec = fut.result()
                 except Exception as exc:  # per-record isolation
                     logger.warning("classification failed: %s", exc)
+                    dropped = True
                     continue
                 if rec is not None:
                     results.append(rec)
@@ -1958,10 +2017,11 @@ def _discover_from_live(live_pids, jobs, tmpdir, seen_dirs,
                 rec = _classify_dir(d, s)
             except Exception as exc:  # per-record isolation
                 logger.warning("classification failed: %s", exc)
+                dropped = True
                 continue
             if rec is not None:
                 results.append(rec)
-    return results, scan.complete
+    return results, scan.complete and not dropped
 
 
 class _ScanResult(NamedTuple):
@@ -1987,6 +2047,65 @@ class _ScanAwareList(list):
     # that forgets to set it reports no natural exits, so the gate's accounting
     # identity is NOT silently weakened (a lost pid still leaves a shortfall).
     exited: int = 0
+    # #8599: the `candidate` PIDs discovery actually EXAMINED. `exited` above
+    # can only claim a server the sweep saw — a server that shuts itself down
+    # in the window between the pre-sweep probe and discovery is in no bucket
+    # at all (not reaped, never a candidate so not `exited`, gone by `left`),
+    # and the gate's identity then reads that shortfall as "the sweep's own
+    # measurement is broken" on a run whose pytest passed. This set is what
+    # lets the builder MEASURE that window (see
+    # `_vanished_before_discovery`). `None` = NOT MEASURED (an un-instrumented
+    # seam), never "discovered nothing" — that difference is what stops a
+    # forgotten value from claiming a server this sweep genuinely lost.
+    discovered_pids: set[int] | None = None
+    # #11427: candidates discovery EXAMINED and `reap()` then DECLINED to act
+    # on, for a stated reason (a live client, an unconfirmed path-based or
+    # unattributed server, a spent kill budget, a refused provenance guard, a
+    # live owner). This is the identity's THIRD unaccounted window: such a
+    # server is in `discovered_pids` (so the #8599 vanished term cannot claim
+    # it), it is never killed (`reaped` cannot claim it) and it is never
+    # re-read for liveness (the #6984 dead-pid branch cannot claim it) — so
+    # when it shuts itself down on its own nothing accounts for it and the
+    # gate read the shortfall as "the sweep's own measurement is broken" on a
+    # run whose pytest passed (measured: before=26, reaped=0, exited=0,
+    # left=25, `pytest rc 0`). The builder MEASURES this window against the
+    # post-sweep `left` pid set, bounded to the pre-sweep `before` population
+    # so a server a sibling suite started MID-sweep cannot be claimed as ours
+    # (see `_declined_pids_gone`).
+    # `None` = NOT MEASURED (an un-instrumented seam, or an incomplete
+    # discovery), never "declined nothing" — same fail-closed rule as
+    # `discovered_pids`, for the same reason.
+    declined_pids: set[int] | None = None
+    # #11427 review P2: the PIDs `exited` above counted. `exited` is an
+    # INTEGER and the declined term is a pid SET, so "this exit is already
+    # counted, do not count it again" needs the identities, not the total —
+    # the same reason `discovered_pids` exists (#8599). Without them a pid
+    # this sweep DECLINED in one iteration and then observed DEAD at the
+    # #6984 liveness check in a LATER one is counted twice: once by
+    # `exited` here (a fresh kill budget each iteration, so the second
+    # iteration reaches the liveness check), and again by
+    # `_declined_pids_gone`, because the builder only subtracted the pids an
+    # iteration ACTED on. An inflated `exited` buys the gate's identity
+    # `reaped + exited + left >= before` exactly that much slack, so a
+    # double count is the fail-open direction #11427 itself names.
+    # `None` = NOT MEASURED, the same fail-closed rule as the two sets
+    # above: the builder then cannot tell an overlap from a disjoint pair,
+    # and must not claim the declined term at all rather than risk claiming
+    # an exit twice.
+    exited_pids: set[int] | None = None
+
+
+def _candidate_pids(records) -> set[int]:
+    """The PIDs of the `candidate` records a sweep examined (#8599).
+
+    Only `candidate` records are servers: a `stale_socket` record is a dead
+    pid's leftover directory (no process), and a non-candidate was declined by
+    classification. A record with no pid is not a server either.
+    """
+    return {
+        record["pid"] for record in records
+        if record.get("classification") == "candidate" and record.get("pid")
+    }
 
 
 def _always_match(name: str) -> bool:
@@ -2482,6 +2601,13 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
     # alive at discovery and is dead at kill time. See the dead-pid branch
     # below for why this is measured here rather than derived as a complement.
     exited = 0
+    # #11427 review P2: WHICH pids `exited` counted. `exited` is a count and
+    # the declined term is a pid set, so the two can only be reconciled by
+    # identity — the report builder subtracts this set from the pids it
+    # accumulated as declined, or a pid declined in one iteration and
+    # observed dead in a later one is claimed twice (see
+    # `_ScanAwareList.exited_pids`).
+    exited_pids: set[int] = set()
     # #1642 perf: pre-probe the CLIENT LIST before-counts of every candidate
     # in PARALLEL (raw unix-socket probes are thread-safe and read-only).
     # The old per-record serial double-check made a sweep over hundreds of
@@ -2511,11 +2637,27 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
                                            r["socket_path"]))
                        for r in candidate_records]
             _client_before_cache = {rid: f.result() for rid, f in futures}
+    # #11427: candidates this sweep examined and DECLINED to act on, by pid.
+    # Recorded at the decision (each skip below), never derived as a complement
+    # — a derived `examined - acted` set would claim a server this sweep
+    # committed to killing and then lost, which is the one shortfall #6984's
+    # measured `exited` exists to keep visible.
+    declined: set[int] = set()
+
+    def _decline(rec) -> None:
+        """Note a candidate this sweep decided NOT to act on (#11427)."""
+        if rec.get("pid"):
+            declined.add(rec["pid"])
+
     for record in records:
         if deadline is not None and time.monotonic() >= deadline:
             logger.info("sweep deadline hit (%.1fs elapsed) — %d acted, "
                         "stopping; cron sweeps clear the remainder",
                         time.monotonic(), len(acted))
+            # #11427: the records after this one are NOT recorded as declined —
+            # an exhausted sweep did not decide anything about them, so their
+            # later disappearance stays an unaccounted shortfall. Only a
+            # decision this sweep actually made can claim a natural exit.
             break
         classification = record.get("classification")
         if classification == "stale_socket":
@@ -2540,6 +2682,7 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
         # `continue` (not break) so interleaved stale records after the
         # budget is exhausted are still processed (#1383 branch ordering).
         if batch_size is not None and killed >= batch_size:
+            _decline(record)
             continue
         if only_safe and not (record.get("dir_missing")
                               or record.get("_orphan_confirmed")
@@ -2547,6 +2690,7 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
             logger.info(
                 "concurrent-suite guard: skipping live ephemeral candidate %s",
                 record.get("socket_path"))
+            _decline(record)
             continue
 
         # #1642 FIX 3: orphanhood for a LIVE-pid server is decided by
@@ -2568,6 +2712,7 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
                         "concurrent-suite guard: live-pid server not "
                         "orphan-confirmed under only_safe, skipping %s",
                         record.get("socket_path"))
+                    _decline(record)
                     continue
                 # #3767: 'path_based' OR 'unattributed' — a server with no
                 # tortoise-written owner instrument cannot be attributed to
@@ -2605,6 +2750,7 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
                     logger.info(
                         "path-based/unattributed server not orphan-confirmed, "
                         "skipping %s", record.get("socket_path"))
+                    _decline(record)
                     continue
 
         # Liveness-first: never kill a dead PID's leftovers via connect.
@@ -2625,6 +2771,10 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
             # A `None` pid is not a server and is never counted.
             if record.get("pid"):
                 exited += 1
+                # #11427 review P2: name it, so a pid this sweep declined in
+                # an EARLIER iteration is not claimed a second time by the
+                # report builder's declined-then-gone term.
+                exited_pids.add(record["pid"])
             logger.warning("dead pid, skipping: %s",
                            record.get("socket_path"))
             continue
@@ -2650,10 +2800,12 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
             logger.warning(
                 "CLIENT LIST probe failed, skipping (fail closed): %s",
                 record.get("socket_path"))
+            _decline(record)
             continue
         if clients_before > 0:
             logger.info("server has %d active client(s), skipping: %s",
                         clients_before, record["socket_path"])
+            _decline(record)
             continue
         clients_after = (0 if socketless
                          else _active_client_count(record["socket_path"]))
@@ -2661,10 +2813,12 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
             logger.warning(
                 "CLIENT LIST re-probe failed, skipping (fail closed): %s",
                 record.get("socket_path"))
+            _decline(record)
             continue
         if clients_after > 0:
             logger.info("server gained a client between checks, skipping: %s",
                         record["socket_path"])
+            _decline(record)
             continue
 
         # #3599 adversarial review (fail-open): the per-server owner signal is
@@ -2688,12 +2842,14 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
             logger.info(
                 "owner lock held (live owner), skipping: %s",
                 record["socket_path"])
+            _decline(record)
             continue
         owners_now = _owner_records(record["socket_path"])
         if owners_now is not None and owners_now[0] > 0:
             logger.info(
                 "owner attached since confirmation (%d live), skipping: %s",
                 owners_now[0], record["socket_path"])
+            _decline(record)
             continue
 
         # #4136 provenance guard — the SIGTERM authority is exercised HERE,
@@ -2707,6 +2863,7 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
                 "refusing to kill PID %s: %s — provenance guard (#4136); "
                 "skipping %s", record.get("pid"), refusal,
                 record["socket_path"])
+            _decline(record)
             continue
 
         if dry_run:
@@ -2777,6 +2934,16 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
             time.sleep(kill_pacing)  # avoid synchronized shutdown bursts (#1005)
     out = _ScanAwareList(acted)
     out.exited = exited
+    # #8599: what discovery examined, so the report builder can tell a server
+    # that vanished BEFORE discovery apart from one this sweep lost.
+    out.discovered_pids = _candidate_pids(records)
+    # #11427: what this sweep examined and then declined to act on, so the
+    # report builder can tell a DECLINED candidate that shut itself down from a
+    # server the sweep lost. See `_ScanAwareList.declined_pids`.
+    out.declined_pids = set(declined)
+    # #11427 review P2: the identities behind `out.exited`, so the builder's
+    # declined term cannot claim an exit this sweep already counted.
+    out.exited_pids = set(exited_pids)
     return out
 
 
@@ -3642,6 +3809,64 @@ def _run_sweep(dry_run: bool, batch_size: int | None, only_safe: bool = False,
     out = _ScanAwareList(acted)
     out.complete = discovery_complete
     out.exited = exited
+    # #8599: carried through the quarantine/pid-file passes too — the vanished
+    # term is measured against what DISCOVERY examined, and those passes add
+    # acted records that were never candidates.
+    #
+    # ⛔ BUT ONLY A COMPLETE DISCOVERY CAN SAY WHAT IT EXAMINED (review P2,
+    # #10757/#8599). `_vanished_before_discovery` can tell an ABSENT reading
+    # from a present one, never a SHORT one from a complete one, so a truncated
+    # discovery — a bounded scan that hit `SOCKET_WALK_TIMEOUT`, a per-dir
+    # `_classify_dir` failure swallowed by `continue`, a quarantine scan that
+    # came back partial — hands it a SUBSET. The difference then reads every
+    # live server the scan never reached as a natural exit, `exited` swallows
+    # the whole shortfall, and the identity `reaped + exited + left >= before`
+    # closes on a genuinely broken sweep: the complement form #6984 refused,
+    # re-entered through a measurement that still LOOKS like one. Measured: with
+    # this set from a short scan, the gate's own "the sweep's measurement is
+    # broken" case (`before=5, reaped=0, exited=0, left=2`) went RC=1 -> RC=0,
+    # and `cleared=false` is a diagnostic, not a red (#4989), so nothing else
+    # catches it. `records.complete` — the CANDIDATE census's own flag, not the
+    # AND below (the quarantine/pid-file passes never shorten `resolved`) — is
+    # the one that decides; when it is False the reading is UNMEASURED (None,
+    # never an empty or partial set) and the report leaves `exited` exactly as
+    # observed, which keeps the gate as strict as before this term existed.
+    #
+    # WHAT `records.complete` OBSERVES, stated so nobody has to infer it: the
+    # bounded walk running out of budget; a socket dir the walk enumerated that
+    # classification then refused (`_discover_from_live`'s `dropped`); and —
+    # since the #10757 P3 — a FAILED pass-1 `pgrep` probe, which `discover` now
+    # reads in its `_or_none` form instead of collapsing to `[]` (a subset census
+    # that reads as measured is this fail-open one door over, and pass 1 runs
+    # under exactly the load that produced #8599).
+    #
+    # RESIDUAL, narrow on purpose: pass 1 resolving a live pid whose `unixsocket`
+    # config it cannot READ (`_socket_dir_from_cmdline` swallowing an `OSError`)
+    # is not counted, because that read fails for reasons unrelated to this sweep
+    # and folding it in would disable the #8599 term far more often than it fires
+    # — a pre-existing property of that reader, not of this term. Pass 2 still
+    # finds such a dir whenever it is ephemeral-named, which is nearly all of
+    # them (`EPHEMERAL_PREFIXES`).
+    out.discovered_pids = _candidate_pids(resolved) if records.complete else None
+    # #11427: the same fail-closed rule for the declined set. A truncated
+    # discovery hands `reap()` a SUBSET of candidates, so the set it declined is
+    # a subset too — but unlike `discovered_pids` a short set here can only
+    # UNDER-claim a natural exit, never over-claim one. It is still published as
+    # UNMEASURED (None, never a partial set) because a report whose terms are
+    # measured over different populations is exactly what #10757 P2 refused:
+    # one reading, one scope, or no reading.
+    out.declined_pids = (getattr(acted, "declined_pids", None)
+                         if records.complete else None)
+    # #11427 review P2: the identities behind `exited` follow the SAME
+    # fail-closed rule, and for the same reason: a truncated discovery hands
+    # `reap()` a subset of candidates, so the exits it observed were observed
+    # over that subset. Published as UNMEASURED (None) together with
+    # `declined_pids`, because the two readings are reconciled against each
+    # other — one measured over a different population than the other is what
+    # #10757 P2 refused. A missing reading makes the builder drop the declined
+    # term (fail-closed), never treat it as "no overlap".
+    out.exited_pids = (getattr(acted, "exited_pids", None)
+                       if records.complete else None)
     return out
 
 
@@ -3656,6 +3881,12 @@ def _run_sweep(dry_run: bool, batch_size: int | None, only_safe: bool = False,
 # `reaped + exited + left >= before`; before #6984 the identity omitted
 # `exited`, so it read a server that shut itself down as a broken sweep and
 # refused green runs (before=28, reaped=16, left=11, pytest rc 0).
+#
+# #8599: the SAME identity had a second unaccounted window — a server alive at
+# the pre-sweep probe that shut down BEFORE discovery. It is measured as a
+# pid-set difference and folded into `exited` by `build_end_sweep_report`, so
+# the report keeps ONE field with one meaning ("natural exits this sweep
+# observed") and no consumer contract changes.
 #
 # #1005 (epic #1647 E2E-7): `own_left` is the post-sweep count of live servers
 # attributable to THIS RUN — those whose argv carries a socket path under one of
@@ -3683,7 +3914,16 @@ def _hygiene_report(reaped, cleared, left, before, exited, own_left) -> dict:
     for a server that shuts itself down, instead of reading it as a broken
     sweep. Derived as a complement it would be a tautology; it is measured at
     the dead-pid branch in :func:`reap` precisely so the identity stays
-    falsifiable.
+    falsifiable. #8599 WIDENS what it counts without weakening that: the
+    vanished-before-discovery window is measured as a pid-set difference
+    (:func:`_vanished_before_discovery`) and folded in by
+    :func:`build_end_sweep_report`, because it is the same physical event
+    observed by a second instrument. #11427 widens it once more, by the same
+    rule, for the third window — a candidate the sweep EXAMINED and DECLINED
+    to act on that shut itself down afterwards (:func:`_declined_pids_gone`).
+    The property the identity exists for is unchanged — a server the sweep DID
+    discover and then lost, and a server discovery never reached, are claimed
+    by neither window, so each still leaves a shortfall.
     ``own_left`` (#1005) is the count of live servers attributable to THIS RUN
     at the same post-sweep seam as ``left`` — see :func:`own_live_server_count`.
     `None` means the attribution could not be measured (no run roots, or the
@@ -3770,9 +4010,42 @@ def live_embedded_server_count() -> int | None:
     servers of every other concurrent job, and under `pytest -n` those of every
     other worker. It is a measurement of the PROCESS TABLE, not of this run's
     residue — use :func:`own_live_server_count` for the attributable number.
+
+    ⛔ NEVER FEED THIS TO `build_end_sweep_report` OR ANY PID-SET CONSUMER
+    (#10757 review P3). A count cannot say WHICH process left a population, so a
+    scalar where the builder `len()`s an observed pid set silently LOSES the
+    #8599 vanished term instead of failing — which is why `tests/conftest.py`
+    switched to :func:`live_embedded_server_pids` and why the AST pin in
+    `tests/test_reaper.py` rejects a count probe at that call site. The function
+    is kept because a count is a legitimate reading for a COUNT consumer; it is
+    a trap only where identities are required.
     """
     probe = _pgrep_redis_servers_or_none()
     return None if probe is None else len(probe)
+
+
+def live_embedded_server_pids() -> list[int] | None:
+    """Live embedded redis-server PIDs, or None when the probe itself failed.
+
+    #8599: the end-sweep report needs the PID SET, not just how many there
+    are. A count taken at the pre-sweep seam and a count taken at the
+    post-sweep seam can only be reconciled by ARITHMETIC, and arithmetic
+    cannot name which process left the population — so a server that shuts
+    itself down between the two readings lands in no bucket and the CI orphan
+    gate reports "the sweep's own measurement is broken" (its accounting
+    identity `reaped + exited + left >= before`) on a run whose pytest passed.
+    Measured nine times, on diffs that cannot move a server's lifetime (#8599:
+    before=4/5/10/11/15/20/28/32/44; every one with `pytest rc 0`).
+
+    `len()` of this reading IS :func:`live_embedded_server_count`, so the
+    builder derives both counts from ONE observation per seam and they can
+    never disagree with the pid sets the vanished term is measured against.
+    Two reads here would reintroduce exactly the two-instant window this term
+    exists to close.
+
+    ⚠️ HOST-WIDE, like :func:`live_embedded_server_count` (#1005).
+    """
+    return _pgrep_redis_servers_or_none()
 
 
 def own_live_server_count(roots, probe=None, cmdlines_of=None) -> int | None:
@@ -3862,6 +4135,105 @@ def own_live_server_count(roots, probe=None, cmdlines_of=None) -> int | None:
     return count
 
 
+def _vanished_before_discovery(before_pids, discovered_pids,
+                               left_pids) -> int | None:
+    """Servers alive at the pre-sweep probe that the sweep never saw and that
+    are GONE at the post-sweep probe (#8599).
+
+    `before` is read BEFORE `reap()` discovers anything. A server that shuts
+    itself down inside that window is in `before`, was never a discovery
+    candidate (so `reaped` cannot claim it and `exited` — measured at the
+    dead-pid branch for a candidate ALIVE AT DISCOVERY — cannot either), and is
+    gone by `left`. The gate's accounting identity
+    (`reaped + exited + left >= before`) then reports "the sweep's own
+    measurement is broken" on a run whose pytest passed. That is a false red of
+    the guard's own instrument, measured nine times on diffs that cannot move a
+    server's lifetime (#8599's body and its comments record every one).
+
+    THIS IS A MEASUREMENT, NOT THE COMPLEMENT `before - reaped - left`, which
+    #6984 explicitly refused: it needs THREE separate observations — the
+    pre-sweep pid set, the pids discovery actually examined, and the post-sweep
+    pid set — and it can FAIL. Both directions are pinned:
+
+      * a server this sweep DID discover and then lost (alive at discovery,
+        neither reaped nor observed dead nor alive at `left`) is in
+        `discovered_pids`, so it is NOT claimed here and the identity's
+        shortfall survives — the one control derived from the sweep's own work
+        stays falsifiable;
+      * a server still ALIVE at `left` is in `left_pids`, so it is not claimed
+        here either — `left` already counts it, and claiming it again would
+        let the term double-count and mask a genuine shortfall.
+
+    Returns None (UNMEASURED, never 0) when any of the three observations is
+    unavailable: the caller then leaves `exited` exactly as measured, which
+    keeps the gate exactly as strict as before this term existed.
+    """
+    if before_pids is None or discovered_pids is None or left_pids is None:
+        return None
+    return len(set(before_pids) - set(discovered_pids) - set(left_pids))
+
+
+def _declined_pids_gone(declined_pids, left_pids, before_pids) -> int | None:
+    """DECLINED candidates that are GONE at the post-sweep probe (#11427).
+
+    The identity's THIRD unaccounted window, and the one that redded this PR's
+    carve-out leg: `before=26, reaped=0, exited=0, left=25`, `pytest rc 0`. A
+    candidate the sweep examined and then DECLINED to act on (a live client, an
+    unconfirmed path-based/unattributed server, a spent kill budget, a refused
+    provenance guard, a live owner) is in `discovered_pids`, so
+    :func:`_vanished_before_discovery` cannot claim it; it is never killed, so
+    `reaped` cannot; and it is never re-read for liveness, so the #6984
+    dead-pid branch cannot either. When it shuts itself down on its own —
+    redislite's fire-and-forget NOSAVE close does exactly that, asynchronously
+    (`TORTOISE_FAST_ATEXIT=1`) — nothing accounts for it and the gate reads the
+    shortfall as a broken sweep.
+
+    THIS IS A MEASUREMENT, NOT THE COMPLEMENT `before - reaped - left` #6984
+    refused. It is a pid-set difference over observations of ONE declared
+    population: the set `reap()` recorded at each skip decision, the pre-sweep
+    `before` probe, and the post-sweep `left` reading. It can therefore FAIL
+    (None). Its population bound is the `before` probe, and it is applied here
+    rather than assumed: `declined` is accumulated over every iteration's
+    DISCOVERY, and discovery sees servers `before` never held — a sibling
+    suite's server started MID-sweep is discovered, declined (`only_safe`
+    declines every live ephemeral candidate), and can then shut itself down
+    before the post-sweep probe. Without the intersection that pid would be
+    claimed as one of OUR natural exits, and `exited` is the addend that makes
+    `reaped + exited + left >= before` hold, so the claim would cancel exactly
+    one server this sweep genuinely lost — a **false PASS** on a broken sweep
+    (#10757 P2: two readings reconciled against each other must be measured
+    over ONE population). Within that bound it can only ever claim pids the
+    sweep itself decided not to act on, so
+
+      * a candidate the sweep COMMITTED to act on and then lost is not
+        declined, is in neither `reaped` nor `exited` nor `left`, and its
+        shortfall survives — the one control derived from the sweep's own
+        work stays falsifiable;
+      * a candidate discovery never reached is not declined either (that is
+        :func:`_vanished_before_discovery`'s window), so a truncated census
+        cannot launder itself through this term;
+      * a declined candidate still ALIVE at `left` is counted by `left`, so it
+        is not claimed here — claiming it would double-count and mask a
+        genuine shortfall (the fail-open direction).
+
+    The CALLER keeps that last promise: it subtracts, from the declined set it
+    accumulates, every pid an iteration already accounted for — the pids it
+    ACTED on (`reaped`) and the pids it OBSERVED as natural exits
+    (`exited_pids`, #11427 review P2). The second cancellation is not optional:
+    the #6984 dead-pid branch counts an exit and does NOT append to `acted`, so
+    an acted-only cancellation lets a pid declined in one iteration and found
+    dead in a later one be claimed twice — measured `exited` 2 for one exit.
+
+    Returns None (UNMEASURED, never 0) when any observation is unavailable —
+    including `before`: an unbounded declined set cannot be measured over the
+    population the identity reconciles, and dropping the bound instead of the
+    term would silently re-open the fail-open direction above.
+    """
+    if declined_pids is None or left_pids is None or before_pids is None:
+        return None
+    return len((set(declined_pids) & set(before_pids)) - set(left_pids))
+
+
 def build_end_sweep_report(run_one, deadline, probe, clock=time.monotonic,
                            own_probe=None) -> dict:
     """Compose the session-end hygiene report the CI orphan gate consumes (#4740).
@@ -3869,13 +4241,35 @@ def build_end_sweep_report(run_one, deadline, probe, clock=time.monotonic,
     Extracted from `tests/conftest.py`'s `_sweep` so the COMPOSITION — the
     pre-sweep reading, the sweep, the post-sweep reading, and their arrangement
     into the report — is behaviourally testable (`tests/test_reaper.py` drives
-    this function directly). `probe` is called twice: the first reading is
-    `before`, the second is `left`; `cleared` is threaded verbatim from
-    `sweep_until_cleared`, because `cleared` is a diagnostic flag that does
-    not decide the gate's verdict at any measured count; `exited` (#6984) is
-    threaded from the same call — the natural exits the sweep observed — and
-    is what keeps the gate's identity from reading a self-shutdown as a
-    broken sweep.
+    this function directly). `probe` is called twice and returns the live-server
+    PID SET (`live_embedded_server_pids`, or None when the probe failed);
+    `before` and `left` are `len()` of those two readings.
+
+    #8599 — WHY THE PROBE RETURNS PIDS AND NOT A COUNT: the pid set is what
+    lets the vanished-before-discovery window be MEASURED
+    (`_vanished_before_discovery`) instead of left as an unaccounted shortfall
+    the gate reads as a broken sweep. A count cannot say WHICH process left the
+    population, so this seam needs the identities — and deriving the two counts
+    from these same readings is what stops `before` from describing a different
+    instant than the pid sets it is reconciled against (a second probe here
+    would reintroduce the very two-instant window this term closes).
+
+    `cleared` is threaded verbatim from `sweep_until_cleared`, because `cleared`
+    is a diagnostic flag that does not decide the gate's verdict at any measured
+    count. `exited` (#6984) is threaded from the same call — the natural exits
+    the sweep observed — and is widened here by TWO measured windows: the
+    vanished-before-discovery count (#8599), and the declined-then-gone count
+    (#11427). Both are natural exits observed by a DIFFERENT instrument (a
+    pid-set difference against the pre- and post-sweep readings), both are
+    measured only over pids the sweep's own decisions name — so neither can
+    claim a server the sweep committed to act on — and both are bounded to the
+    `before` population (the vanished term by construction, the declined term
+    by intersecting the accumulated declines with that probe), so neither can
+    claim a server that appeared after the pre-sweep reading. Neither can claim one the
+    sweep already counted either: the accumulation below subtracts the pids
+    each iteration ACTED on and the pids it OBSERVED as natural exits
+    (`exited_pids`), which is what keeps a single exit from being folded into
+    `exited` twice (#11427 review P2).
 
     ``own_probe`` (#1005) is called ONCE, immediately after the post-sweep
     `left` reading, and supplies `own_left` — the count of live servers this RUN
@@ -3884,10 +4278,86 @@ def build_end_sweep_report(run_one, deadline, probe, clock=time.monotonic,
     (`None`) means the report cannot attribute, which the gate treats as
     unmeasured rather than as zero.
     """
-    before = probe()
-    reaped, cleared, exited = sweep_until_cleared(run_one, deadline, clock)
-    left = probe()
+    before_pids = probe()
+    before = None if before_pids is None else len(before_pids)
+    # The pids discovery examined, unioned across iterations. `None` (not an
+    # empty set) the moment any iteration cannot report them: an un-instrumented
+    # seam must read as UNMEASURED, so the vanished term cannot claim a server
+    # this sweep genuinely lost.
+    discovered: set[int] | None = set()
+    # #11427: the same accumulation for the pids each iteration DECLINED.
+    declined: set[int] | None = set()
+
+    def _watched():
+        nonlocal discovered, declined
+        result = run_one()
+        pids = getattr(result, "discovered_pids", None)
+        if pids is None:
+            discovered = None
+        elif discovered is not None:
+            discovered |= set(pids)
+        decline_pids = getattr(result, "declined_pids", None)
+        # #11427 review P2: the pids `exited` already counted in this
+        # iteration. Without it, "an exit is already accounted" is a COUNT and
+        # the declined set is a SET, so the cancellation below can only be
+        # done for the pids an iteration acted on.
+        exit_pids = getattr(result, "exited_pids", None)
+        if decline_pids is None or exit_pids is None:
+            # Either reading absent = the declined term is UNMEASURED for this
+            # sweep, never "nothing declined". `exit_pids` absent while
+            # `decline_pids` is present is exactly the double-count window
+            # this term must not re-open: an exit observed in a later
+            # iteration could not be told from one that was not, and the term
+            # would add an exit `exited` already counted — the fail-open
+            # direction (#11427). Claim nothing: that makes the gate STRICTER,
+            # which is the only safe side of this measurement.
+            declined = None
+        elif declined is not None:
+            declined |= set(decline_pids)
+            # #11427: a LATER iteration can kill a server an earlier one
+            # declined (the client that blocked it went away). The swept pid is
+            # then counted by `reaped`, so keeping it in the declined set would
+            # let the term claim the SAME disappearance twice — an inflated
+            # `exited` masks a genuine shortfall, the fail-open direction. The
+            # union is therefore kept to pids no iteration acted on…
+            declined -= {r.get("pid") for r in result
+                         if isinstance(r, dict) and r.get("pid")}
+            # …and to pids no iteration OBSERVED as a natural exit. The two
+            # cancellations are separate because the sources are: `acted` is a
+            # decision this iteration made, `exited_pids` is a liveness
+            # reading it took. A declined server whose client went away and
+            # whose NOSAVE close then took it down reaches the #6984 dead-pid
+            # branch on the next iteration, which counts it and does NOT
+            # append to `acted` — so the acted-only cancellation left it in the
+            # set and `_declined_pids_gone` claimed the same exit again
+            # (measured: `exited` 2 for one observed exit).
+            declined -= set(exit_pids)
+        return result
+
+    reaped, cleared, exited = sweep_until_cleared(_watched, deadline, clock)
+    left_pids = probe()
+    left = None if left_pids is None else len(left_pids)
     own_left = own_probe() if own_probe is not None else None
+    vanished = _vanished_before_discovery(before_pids, discovered, left_pids)
+    if vanished:
+        exited += vanished
+        logger.warning(
+            "%d server(s) exited between the pre-sweep probe and discovery — "
+            "counted as natural exits, so the orphan gate's accounting "
+            "identity does not read a self-shutdown as a broken sweep "
+            "(#8599)", vanished)
+    # #11427: the same treatment for a candidate this sweep DECLINED and that
+    # then shut itself down — the third window, measured against `left`, and
+    # bounded to the `before` population so a server a sibling suite started
+    # MID-sweep can never close a shortfall this sweep is responsible for.
+    declined_gone = _declined_pids_gone(declined, left_pids, before_pids)
+    if declined_gone:
+        exited += declined_gone
+        logger.warning(
+            "%d declined server(s) exited on their own after the sweep "
+            "declined them — counted as natural exits, so the orphan gate's "
+            "accounting identity does not read a self-shutdown as a broken "
+            "sweep (#11427)", declined_gone)
     return _hygiene_report(reaped, cleared, left, before, exited, own_left)
 
 

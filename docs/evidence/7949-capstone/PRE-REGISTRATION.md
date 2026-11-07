@@ -186,6 +186,153 @@ The other pins survived re-derivation unchanged at this commit: 90 planted units
 14 value-bearing units, 29 marker sentences of 343, and the 25/15/9/6 salience measurement. Only the
 hash had moved.
 
+### 1.6 Amendment — the DOOR, and which corpus carries which row (`#10983` / C2)
+
+Added by `#10983`. Nothing above changes: no metric, no denominator, no threshold. What this section
+adds is the two facts a reader needs to know **what a number in §3 is a number ABOUT**, and it is
+written here — into the registration — because a measurement contract that lives in prose is one
+a reader can re-decide.
+
+#### 1.6.1 The door
+
+**The acceptance runs the fleet's v2 extraction lane:**
+
+```text
+tortoise/hosted_api.py::_capture_lane()            → "v2" (default), "m2" iff TORTOISE_SESSION_EXTRACTOR == "m2"
+  sdk.capture_session → sdk._extract_session_v2    → tortoise/extractor_v2.py::extract_session_v2
+```
+
+The hosted endpoint and the SDK path **select the lane from the same variable with the same
+comparison**, so the "hosted endpoint or SDK path" question is not a choice between two doors — it is
+one door with an optional HTTP boundary in front of it. The probe drives `sdk.capture_session`, i.e.
+the SDK side of that one door. The `m2` lane (`_extract_session_llm` → `tortoise/extractor.py`) is the
+**opt-in, non-default** extractor and is *not* the door.
+
+Every citation above is resolved from the tree by `tests/test_7949_c2_door.py`, not typed — a renamed
+or relocated function reds that suite.
+
+#### 1.6.2 The seam set, as the CODE resolves it at this head
+
+| seam | resolver | default at this head | behaviour seam? |
+|---|---|---|---|
+| `TORTOISE_VET` | `extractor_v2._vet_enabled` | **off** | yes |
+| `TORTOISE_CLASSIFY_LATER` | `extractor_v2._classify_later_enabled` | **off** | yes |
+| `TORTOISE_S2_DECISION_SEAM` | `s2_decision_seam.seam_enabled` | **off** | yes |
+| `TORTOISE_VALUE_GATE` | `value_gate.value_gate_enabled` | **ON** ⚠️ | yes |
+| `TORTOISE_S4_DELTA` | `extractor_v2._s4_delta_enabled` | **ON** | yes |
+| `TORTOISE_LABEL_ORDER` | `extractor_v2._label_order_rng` | off (render diagnostic) | **no** |
+
+⚠️ **`TORTOISE_VALUE_GATE` is default-ON at this head** — `#10996` made the mechanical predicate run
+unless the flag says otherwise (`is_truthy(os.environ.get(ENV_FLAG, "1"))`), and `extractor_v2` ORs it
+into `vet_enabled`. **The S2.2 VET pass is therefore armed on the fleet's default write path even
+with `TORTOISE_VET` unset**, so "VET is off by default" is true of the flag and false of the pass.
+`#10983`'s own ledger and the epic's "the fleet's write path performs zero selection" both predate
+that change; this table is the record at this head, and the pin suite resolves every row against the
+modules so it cannot rot quietly.
+
+**What the acceptance run arms:** `TORTOISE_VET=1`, `TORTOISE_CLASSIFY_LATER=1`,
+`TORTOISE_VALUE_GATE=0`, `TORTOISE_S2_DECISION_SEAM=0`; the lane pinned to (unset ⇒) `v2`;
+`TORTOISE_S4_DELTA` pinned to `1`; `TORTOISE_LABEL_ORDER` pinned unset; `TORTOISE_EXTRACTOR` pinned
+unset; and the three measurement switches an inherited shell must not supply —
+`TORTOISE_SESSION_LLM_MOCK` (the offline model seam, which swaps the model for `_V2SessionMock`
+**and** short-circuits the provider-key check, so an ambient `=1` would score canned output under a
+real key), `TORTOISE_EXTRACTOR_PROMPT` (a third render switch, not byte-identical to the default
+since `#9733`), `TORTOISE_EXTRACT_MODEL` (selects the model — NOT the output bound: every stage
+passes its own `max_tokens=_stage_cap(…)` per call, which beats the adapter default), and the
+truncation budgets `TORTOISE_EXTRACTOR_MAX_TOKENS` (`_stage_cap`, read at call time: unset ⇒ the
+shipped 1500/16000 stage defaults) and `TORTOISE_EXTRACTOR_ESCALATION_TOKENS` (the
+length-truncation retry budget), `TORTOISE_REFERENTIALITY` (the S2.2 mention arm, reached
+through `referentiality.ENV_FLAG`), `TORTOISE_CHANGE_FEED` (an ambient `=1` adds a `:GraphEvent`
+to the graph the run writes), and the two confidence gates `TORTOISE_SUBJECT_TAU_HI` /
+`TORTOISE_SUBJECT_TAU_LO` (read through a parameter by `subject_binding`, and they decide whether
+the `:aboutSubject`/`:aboutObject` edge is written at all), plus `TORTOISE_LABEL_ORDER_SEED` (inert while
+`TORTOISE_LABEL_ORDER` is off, pinned so the pair cannot be split), `TORTOISE_CONTEXT_ENRICH` (the per-turn REWRITE of the text each turn embeds, gated in `context_enrich.enrich_enabled` and reached from `sdk.capture_session` as `enrich_fn=_capture_enriched_texts`; fail-safe OFF) — all pinned **unset** — and `TORTOISE_JSON_MODE`, pinned to **`1`** because its absent state is already ON and it is read PER CALL to flip the request's `response_format` (`model_adapters`), and `TORTOISE_IDENTIFIER_TOKENS`, pinned to **`1`** because its absent state is already ON (`sparse.py:226`, `env_flag(IDENTIFIER_ENV, True)`) and it rewrites `search_keys` on every `:Point` the run writes (`projection/entities.py:1208`, reached from `create_point`); the registered corpus yields no aliases either way, measured. The last five are the cycle-7 to
+cycle-10 review findings (`TORTOISE_CONTEXT_ENRICH`/`TORTOISE_JSON_MODE`, then `TORTOISE_CHANGE_FEED`,
+then `TORTOISE_IDENTIFIER_TOKENS`, then `TORTOISE_SUBJECT_TAU_HI`/`_LO`): each sits on the acceptance
+path and was in no pin, no ledger row and no closure. The authoritative list is
+`capstone_measure.DOOR_PINNED_OFF` / `DOOR_PINNED_ON`, which `tests/test_7949_c2_door.py` resolves
+against the tree — this sentence is the reader's map, not the control. The set
+is CLOSED over the **measurement modules the path renders with**, and what
+`tests/test_7949_c2_door.py` enforces **mechanically is the CENSUS over that
+list, not the list's membership**: `path_modules` is a hand-maintained tuple, and every
+`TORTOISE_*` read inside those modules must be classified (an arm seam, a pin, a declared input, or
+an acknowledged non-seam with a stated reason) or the suite reds. Membership is hand-kept, so a read
+added to a module *outside* that tuple is **not** caught by it — stated plainly rather than left to
+be discovered, and tracked as **#11410** (the `sdk`/`hosted_api` helpers those two hops call are the
+measured gap). The same call chain also reads *infrastructure* variables (record DSN,
+packs dir, embedding gates, store connection): those are inputs a run needs in order to happen, not
+settings that move the measured population, and they are deliberately outside the door's partition —
+stated because an earlier revision of this section called the whole path "closed", which the review
+measured false (`TORTOISE_REFERENTIALITY` was read on every v2 capture and accounted for by
+nothing). The closure is derived over the modules the test names in `path_modules` — a POINTER rather than a
+count, because a count in this paragraph went stale three rounds running (six, then seven, then eight) while
+the derivation grew, which is itself the defect this section is about. Cycle 10 also made the derivation
+read the `TORTOISE_*` **literals** in those modules, not only the two read shapes its resolver understands:
+`subject_binding.py` holds both of its spellings and passes one to a helper as an argument, so it resolved
+to the EMPTY SET while sitting on the write path (`bind_point_subjects`, inside
+`_extract_session_v2`) and gating whether the `:aboutSubject`/`:aboutObject` edge is written at all
+(measured: `decide_binding(0.90)` is `bound` at the defaults and `suspected` with
+`TORTOISE_SUBJECT_TAU_HI=0.99`) — so the arm seams, the mention arm, the per-turn embed
+rewrite, the request's `response_format`, the change-feed writer, the identifier-token writer and the
+confidence-gated subject binder are inside the derived
+surface, not hand-listed beside it. That list grew one review round at a time (the last four are
+`TORTOISE_CONTEXT_ENRICH`/`TORTOISE_JSON_MODE`, then `TORTOISE_CHANGE_FEED`, then
+`TORTOISE_IDENTIFIER_TOKENS` in cycle 9, then `TORTOISE_SUBJECT_TAU_HI`/`_LO` in cycle 10, each found by a
+measured mutation that left the previous derivation green), which is the honest reason to state
+it as a CLOSURE over the reads INSIDE those modules rather than as a list somebody curated — not
+a closure over everything the path reaches, which is the gap #11410 records. Every one is written in-process, **read back**, and a run whose read-back
+disagrees is **refused** (`probes/capstone_measure.py`); the measurement switches were
+unpinned until the `#10983` reviews (rounds 1 and 2), which is the same declaration-versus-control gap one layer below
+the lane. The arm pins `TORTOISE_VALUE_GATE=0` on purpose: with the
+default-ON predicate the arm would otherwise measure the predicate's population while declaring an
+arm that does not include it.
+
+#### 1.6.3 Which corpus carries which row
+
+**The registered corpus (`tests/eval/write_path`) is a FIXTURE**, pinned by `fixtures_hash`, and one
+of its arms (`E1b`) is defined as a run on the **`m2`** lane. So the registered E1/E2 rows are
+statements about *this fixture on this lane* — they are **not** a proof about the graph the fleet
+builds. Writing that down does not weaken any row; it stops a green row from being read as a claim it
+never made.
+
+| row | corpus that carries it | the claim it supports | it is NOT a proof of |
+|---|---|---|---|
+| **E1** | `tests/eval/write_path` (fixture, this hash) | `^the <X>` share falls ≥50% **on this corpus**, both arms, same commit | that the fleet's graph volume falls |
+| **E1b** | `tests/eval/write_path` **on the `m2` lane** (`baselines/m2.json`, posture `m2`: `salient_unit_survival_strict` 1.0 = 90/90 at this `fixtures_hash`). ⚠️ The figure the probe **publishes** is read from `docs/evidence/9889/e1-e2-scores.json` → `e1b.real_facts` ← `on-arm.log`, which is a no-loss **CONTROL on the scored (v2) arm** and says so itself ("no committed artifact carries `grading.strict_survival_counts` over the m2 lane"), and the `m2` baseline's own history records its metrics as **carried forward** from `943a99ec6`, not re-measured at this hash | the anti-gaming control: planted units survive the deterministic lane (90/90) | anything about the v2 door: the `m2` lane is a *different extractor*, so unit survival there says nothing about what the v2 lane writes — **and the published 90/90 was not measured on it either** |
+| **E2a / E2b** | `tests/eval/write_path` (fixture) | value-bearing units survive; claims are not fused | the fleet's correctness, which needs a capture through the door |
+| **E3** | the run's **own door-written graph** (shape, not content) | every derived node carries a version anchor | a content claim: it is a structural property of the writer; nor a fleet-population claim, since the graph it counts is whichever graph the run wrote |
+| **E4** | `tests/eval/write_path`, graded **through the v2 door** (the receipt the probe selects by `corpus_hash`) | 5 of 15 planted operator edges are wired and persisted against the registered bar (15) | the fleet's graph: this is the fixture corpus. ⚠️ It is **not** an `m2` row — the selected receipt (`w2b-operator-2026-10-24-8503-b.json`) records `extract_session_v2` |
+| **E5** | `tests/eval/write_path` (fixture, §10) | the raw-vs-narrative premise, measured on this corpus | a fleet-corpus premise: a different corpus is a different measurement |
+| **any fleet-graph claim** | **`fleet-capture`** — a real capture through the door | what the fleet's write path actually produces | nothing yet: this registration pins no fleet-capture corpus, and one must be registered **before** such a number is scored |
+
+⚠️ **E4's figure, reconciled.** §10.3 and the record's `criteria.E4` `post_registration_measurement`
+state **2 of 15**, measured on receipt `w2b-operator-2026-10-19.json` — whose `corpus_hash`
+(`943a99ec…`) is **not** the frozen `fixtures_hash` (`dd7e8520…`), so that figure measures a different
+corpus revision. The probe now SELECTS E4's receipt by `corpus_hash` against the frozen pin, and the
+receipt that matches (`w2b-operator-2026-10-24-8503-b.json`) reads **5 of 15** on
+`extract_session_v2`. **5 of 15 is this row's figure at this head**; 2 of 15 is kept above as the
+historical disclosure it is, not as the row's current number. The denominator (**15**) and the
+threshold (`= 15 of 15`) are untouched by either figure, so the row is RED either way.
+
+#### 1.6.4 The negative control, MEASURED
+
+Same corpus session (`wp01_quarry_debug`), same offline model seam, both lanes, one embedded
+graph each:
+
+| lane | `:Object` | `:Point` | `:Event` | `:Session` | `:Operator` | `:Object` names |
+|---|---|---|---|---|---|---|
+| **v2 — the door** | **1** | **27** | **2** | 1 | 0 | `['the strategy']` |
+| **m2 — the other lane** | **0** | **149** | **1** | 1 | 0 | `[]` |
+
+The difference is measured, and it is **structural IN KIND, not a matter of degree**: the `m2` lane mints
+**no `:Object` at all** on this session, and it also writes **5.5×** the `:Point`s — the ratio is the
+*size* of a difference whose nature (a different extractor, not a different seam of the same one) is
+what makes a number measured on one lane not a number about the other.
+
+⇒ **A number measured on one lane is not a number about the other.** That is exactly why the `m2` column in §1.6.3 (E1b) must not be read as a fleet fact, and why the door is pinned structurally (§1.6.1)
+as well as measured here — a control measures the two lanes *as they are today*, while the pin is
+what stops the selector moving tomorrow.
+
 ---
 
 ## 2. The split
@@ -304,7 +451,7 @@ just E1b.
 **E2a, the value-bearing class (14 units).** The gold has no `state_value` kind, so the class is
 **derived by rule, not by hand**: a planted unit is value-bearing iff its `verbatim_anchor` contains a
 digit (**16** units), **minus two exclusions**, each argued against `STATE_VALUE_CARVE_OUT`'s own text
-(`tortoise/extractor_v2.py:294-310`, the constant's own extent, which keeps *"measurements,
+(`tortoise/extractor_v2.py:296-312`, the constant's own extent, which keeps *"measurements,
 deadlines/freezes, thresholds/TTLs, versions, and counts"* and drops only *"ids, hashes, and
 ephemeral counters"*):
 
@@ -576,6 +723,28 @@ Exit 0 only when **all** of these hold:
    `evidence_issue` that measured it — an entry without them is a waiver with no content. This is the
    rule that stops a step being quietly dropped from the capstone's gate (`#10215`).
 
+8. **A registered class the run measured ZERO nodes of cannot satisfy `= 1.000` (#9736).** E3's row
+   is scored by SUMMING its classes, so a class with no nodes contributes `0/0` to BOTH halves and
+   vanishes: the row then reports `share = 1.000` over a population NARROWER than the one registered.
+   That is reachable on every post-D10 graph, because `:Document` is a retired label (the writer
+   remaps it onto `:Source`) and §10.1 records that the run IT re-derives wrote none at all (the
+   scored log agrees: `capstone-measured-9152448d.log` carries `e3 label=Document nodes=0`) — a leg
+   that `0/0` makes permanently unable to fail. So the probe derives the empty legs from the census
+   (`e3_unmeasured_legs`, over `DERIVED_LABELS` and never `:Object`) and a row naming one **cannot
+   PASS** — it is `FAIL`, or `REFUSED` where the node floor applies (a too-small population is not a
+   verdict either way) — with the leg disclosed in its bar, note and log line. **This decides no
+   spelling and moves no threshold**: a row that already failed stays failed (the scored run shipped
+   in this bundle, `capstone-measured-9152448d.log`, reads E3 `157/397` and is RED before and after —
+   and it is itself the empty-leg shape, carrying `e3 label=Document nodes=0`), a row whose every
+   registered class carried nodes is scored exactly as
+   before, and whether the honest document class is `Document` or `Source`-as-document — and whether
+   that anchor belongs in the denominator at all — remains `#9736`'s owner-gated ruling.
+   ⛔ **This item is NOT one the gate can exit 0 on.** `tools/capstone_preregistration_check.py`
+   never reads `probes/capstone_measure.py` (it lints registrations, not runs), so a gate exit 0
+   says nothing about it. The rule lives in the probe and is pinned where it runs:
+   `tests/test_7949_capstone_measure.py`'s empty-leg arms (the pure rule, the census-derived log
+   line and row note, and an AST pin that `main` feeds the legs in).
+
 The pins block below is the machine-readable copy; the prose in §1–§3 is the argument. Both are
 checked, so neither can rot alone.
 
@@ -640,7 +809,7 @@ steps:
     - step: S2.3
       condition: >-
         the S2 map left at least one candidate's kind missing or `unclassified`, so
-        `_collect_classify_items` (tortoise/extractor_v2.py:9767, `def _collect_classify_items`) had an item to hand the classifier;
+        `_collect_classify_items` (tortoise/extractor_v2.py:11098, `def _collect_classify_items`) had an item to hand the classifier;
         when the map types every candidate the pass has no work and neither classify pass runs
       idle_evidence: >-
         the run's own classify surface reads enabled=true with empty s2/union, the receipt's
@@ -732,10 +901,12 @@ stops being true is visible as a log that does not carry `UNPREREGISTERED`.
 | 90 of 90 m2 baseline | `tests/eval/write_path/baselines/m2.json` at this `fixtures_hash` |
 | 53/37, 7/8, 5/9, 21/8 split counts | the per-session sums above, partitioned by §2.1 |
 | 9 of 15 shape coverage (60%) | §1.3, `is_positively_bare_definite_description` |
-| 7 unconditional / 1 conditional step (§11) | `tortoise/extractor_v2.py:9767-9789` (`_collect_classify_items`, the collector's item set), `:10310` and `:10442` (the two `if items:` gates, one per classify pass) |
+| 7 unconditional / 1 conditional step (§11) | `tortoise/extractor_v2.py:11098-11120` (`_collect_classify_items`, the collector's item set), `:12908` and `:13057` (the two `if items:` gates, one per classify pass) |
 | 148 / 433 (0.34180), 148 / 383 (0.38642) | `capstone-measured-e0fc940b.log`'s `E3 census` block: `e3 label=Point nodes=338 anchored=141`, `Object 50/0`, `Event 45/7`, no `Document` written (§10.1) |
 | 141/150 (0.940000), 159 turn rows, 29 operator Points | the same census block's `point composition` line — reported, NOT adopted as E3's denominator (§10.1) |
 | 5/25 (20%) vs 13/25 (52%) recovered; 0.4800 raw absolute on n=25 | §10 @ `ecc7bc8ca` (run 1 losses 80.0%/48.0%) and `capstone-measured-e0fc940b.log`'s E5 row (§10.2) |
+| §1.6.4's censuses — v2 `Object 1 / Point 27 / Event 2 / Session 1 / Operator 0`, m2 `0 / 149 / 1 / 1 / 0` — and the `5.5×` ratio | `tests/test_7949_c2_door.py` (`test_the_negative_control_is_measured_and_the_two_lanes_DISAGREE`), measured on `wp01_quarry_debug` under `TORTOISE_SESSION_LLM_MOCK=1`, one embedded graph per arm |
+| 5 of 15 operator edges (§1.6.3, E4) | `tests/eval/write_path/receipts/w2b-operator-2026-10-24-8503-b.json` — the receipt `select_e4_receipt()` selects at the frozen `fixtures_hash` `dd7e8520…` (`operator_audit.edge_correct = 5`, extractor `tortoise.extractor_v2::extract_session_v2`) |
 
 ---
 
@@ -978,8 +1149,8 @@ place a machine reads it.
   be either observed or witnessed **idle** with a basis. The conditional set is read from this record
   at the pre-registration commit; a run log may not declare it.
 - **Why it is not a relaxation**: `S2.3` structurally cannot run on a corpus whose S2 map types every
-  candidate — `_collect_classify_items` (`tortoise/extractor_v2.py:9767-9789`) collects only
-  kind-missing/`unclassified` candidates and both passes sit behind `if items:` (`:10310`, `:10442`).
+  candidate — `_collect_classify_items` (`tortoise/extractor_v2.py:11098-11120`) collects only
+  kind-missing/`unclassified` candidates and both passes sit behind `if items:` (`:12908`, `:13057`).
   The old rule therefore could not be satisfied by **any** legitimate run of the registered corpus,
   so the gate could not return a verdict at all (§11.2's four ordered refusals). Every one of the
   eight still has to be accounted for, and an idle claim needs the run's own four facts — flag ON,
@@ -1000,6 +1171,114 @@ place a machine reads it.
   empty. Where the checkout is too shallow to establish the order it returns no verdict at all
   rather than falling back to asking the record to assert it.
 
+### 10.6 E3 — a registered class the run measured ZERO nodes of can no longer satisfy `= 1.000` (2026-11-03, `#9736`)
+
+- **Original rule** (§3.1's E3 row as §10.1 left it): the row is scored by **summing** its registered
+  classes against `= 1.000`, and the document said nothing about a registered class the run wrote
+  **no** nodes of. Such a class contributed `0/0` to both halves, so it vanished from the ratio and
+  the row reported `1.000` over a population NARROWER than the one registered.
+- **New rule** (§7 item 8): a registered class the run measured **zero** nodes of makes the row
+  unable to PASS — `FAIL`, or `REFUSED` where the node floor applies — with the leg named in the
+  row's bar, in its note and in the log's `e3 unmeasured_legs=` line. The probe derives the legs from
+  its own census (`e3_unmeasured_legs`, over `DERIVED_LABELS` and never `:Object`).
+- **Why it is not a re-cut of a bar**: no threshold, no denominator and no class set moves. The
+  scored run reads E3 `157/397` and is RED before and after; a row whose every registered class
+  carried nodes is scored bit-identically; the change can only add refusals, never remove one. §7's
+  hazard is a denominator moved to fit a number, and nothing here moves toward a pass.
+- **Why it is honest to record it now**: the false green was MEASURED on the pre-fix probe — a census
+  with `Document` and `Event` at zero nodes and `Point` 30/30 anchored reported `PASS` (GREEN,
+  `1.000000`) — and the leg it protects is structurally empty on every post-D10 graph, `:Document`
+  being a retired label the writer remaps onto `:Source`. `#9736`'s own decision card names this as
+  `NOT-A-DECISION(9736-gate-empty-leg, …)`: *"the mechanical fix that would have caught the `Document`
+  spelling on its own, and it should land regardless of what you answer."*
+- **What it deliberately does NOT decide**: which spelling is the honest document class (`Document`
+  vs `Source`-as-document), and whether the document anchor belongs in E3's denominator at all. Both
+  stay `#9736`'s **owner-gated** ruling, exactly as §10.1 left them.
+- **Where it is enforced, and why not where the card named it**: in the probe, not in
+  `tools/capstone_preregistration_check.py`. That tool lints registrations and never runs the probe,
+  so it has no path to a measured leg at all; §7 item 8 states this rather than implying a gate
+  covers it, and the rule is pinned by the probe's own cases.
+
+### 10.7 — the §11 cite block re-pointed after a 167-line insert above it (2026-11-04, `#10360`)
+
+- **Original value (as this record was last cut):** `_collect_classify_items` at
+  `tortoise/extractor_v2.py:9987`, its extent `:9987-10009`, the two `if items:` gates at `:10530`
+  and `:11724`, and the two fail-open `except` arms at `:10543`/`:10673`.
+- **New value:** the same symbols at `:10020`, `:10169-10191`, `:10736`/`:10868` and
+  `:10749`/`:11973`.
+- **Why:** these are HEAD-relative cites, and `#10360`'s two changes together insert **167** lines
+  into `extractor_v2.py` above every one of them — `21` in `_UNIT_EQUIV` and `12` in `_UNIT_WORDS`
+  from the duration-family widen, then `134` more from the fusion-time composition block
+  (`_MAGNITUDE_TAIL`/`_NUMERIC_HEAD`/`_compose_magnitude_and_unit`) and the `percent`-non-fusion
+  note in `_UNIT_WORDS` — so every cite past them moves by exactly +167 while the symbols are
+  unchanged (`10310`→`10477`, `10442`→`10609`, `10323`→`10490`, `10453`→`10620`, `9767`→`9934`).
+  ⚠️ The earlier cut of this entry said `+33` and quoted only the two table hunks: that was the
+  WIDEN-only arithmetic, measured before the composition half landed in the same tree, and it
+  understated the shift by 134 — stated here rather than silently corrected, because a resident
+  offset is how this cite block went stale the first time. The numbers themselves were verified by
+  CONTENT at the merged head (`_collect_classify_items` at `:10169`, its `return items` at `:10191`,
+  the two `if items:` gates at `:10736`/`:10868`, the two fail-open `except` arms at
+  `:10749`/`:11973`), never by adding an offset.
+- **What moved: nothing else.** No metric, denominator, threshold, class set, corpus pin or `steps`
+  block is touched; the numbers this record exists to freeze are byte-identical. `document_sha256`
+  is re-cut in this same commit, per §8's rule for *any* edit to this file.
+
+### 10.8 — the §11 cite block re-pointed again after `#10997`'s hold/reclaim insert (2026-11-06, `#10997`)
+
+- **Original value (as §10.7 left it):** `_collect_classify_items` at
+  `tortoise/extractor_v2.py:10193`, its extent `:10193-10215`, the two `if items:` gates at
+  `:10736`/`:10868`, and the two fail-open `except` arms at `:10749`/`:11973`.
+- **New value:** the same symbols at `:10397`, `:10397-10419`, `:11849`/`:11998` and
+  `:11862`/`:12009`.
+- **Why:** `#10997` inserts **36** lines into `extractor_v2.py` above every one of them — the
+  hold/population comment in `execute_embed`, the drain's reclaim sweep before it reads
+  `pending()`, and the committed-vs-attempted census on the return. The symbols are unchanged.
+  Each number was verified by CONTENT at this head (the `def`, the `return items` that ends it,
+  the two `if items:` gates, the two `except` arms), never by adding an offset — the failure this
+  section has already recorded twice.
+- **What moved: nothing else.** No metric, denominator, threshold, class set, corpus pin or `steps`
+  block is touched; the numbers this record exists to freeze are byte-identical. `document_sha256`
+  is re-cut in this same commit, per §8's rule for *any* edit to this file.
+
+### 10.9 — the §11 cite block re-pointed after `main`'s S5 inserts moved `extractor_v2.py` (2026-11-07, `#11205`/`#11242`/`#11288` then `#11264`/`#11361`)
+
+- **Original value (as §10.8 left it):** `_collect_classify_items` at
+  `tortoise/extractor_v2.py:10397`, its extent `:10397-10419`, the two `if items:` gates at
+  `:11849`/`:11998`, and the two fail-open `except` arms at `:11862`/`:12009`.
+- **New value:** the same symbols at `:11098`, `:11098-11120`, `:12908`/`:13057` and
+  `:12921`/`:13068`.
+- **Why:** `main` landed five changes to `extractor_v2.py` while this branch was open, and they
+  moved these cites in **two windows** — only the second of which is what this entry's **749**-line
+  figure measures. The first window: **`#11205`** (S5 Job 1, the entity↔entity channel; `606`/`4`
+  lines), **`#11242`** (`4`/`4`) and **`#11288`** (`22`/`22`) all landed **after §10.8's own commit**
+  (`80c912244f`) and are **ancestors of** `04deeaacda`, so they carry the collector from `:10397`
+  (as recorded above) to `:10969` at `04deeaacda` — **+572**. The second window: **`#11264`**
+  (`482`/`81`) and **`#11361`** (`149`/`37`) are the only commits in `04deeaacda..origin/main` that
+  touch `extractor_v2.py`, and they carry it the rest of the way, `:10969` → `:11098` — **+129**.
+  Their **631** insertions and **118** deletions are exactly the **749** changed lines quoted here,
+  because `04deeaacda..origin/main` is the only range they are measured over.
+  ⚠️ The first cut of this entry attributed the 631/118/749 to all five changes ("inserting **631**
+  lines and re-cutting **118** above every one of these cites"), which is false for three of them:
+  those three are ancestors of `04deeaacda` and appear nowhere in the measured range — they moved
+  the cites in the window *before* it, not inside it. Corrected here rather than silently
+  restated, in this section's own idiom (§10.7 likewise records an understated shift instead of
+  quietly fixing it). ⚠️ Also carried, not silently reconciled: §10.8's recorded values are high by
+  a **per-symbol** amount at its own commit `80c912244f` — the `def` and its extent by one line
+  (`:10397`/`:10397-10419` against a measured `:10398`/`:10398-10420`), and the four gate/arm cites
+  by **seven** (`:11849`/`:11998`/`:11862`/`:12009` against a measured
+  `:11856`/`:12005`/`:11869`/`:12016`). Both routes therefore reach the same LINE, `:11098`, at two
+  different deltas: +572 then +129 from the recorded `:10397` is **701**, while +571 then +129 from
+  the measured `:10398` is **700**. Re-deriving the next move must anchor on the measured `:10398`,
+  never on the recorded value plus 700. The symbols are unchanged: the collector
+  grew no item and lost none, and both passes are still gated on `if items:`. Each number was
+  verified by CONTENT at this head (the `def`, the `return items` that ends it, the two `if items:`
+  gates, the two `except` arms), never by adding an offset — the failure this section has already
+  recorded twice, and this round it was the whole bundle's cites (README, both probes, the E-row
+  audit, `docs/00_index.md` and the architecture doc) that had to be re-derived the same way.
+- **What moved: nothing else.** No metric, denominator, threshold, class set, corpus pin or `steps`
+  block is touched; the numbers this record exists to freeze are byte-identical. `document_sha256`
+  is re-cut in this same commit, per §8's rule for *any* edit to this file.
+
 ## 11. The step set V5 gates over — seven unconditional, one conditional (`#10215`)
 
 **Why this section exists.** `tools/capstone_verdict_check.py`'s V5 and `probes/capstone_run.py`'s G5
@@ -1010,9 +1289,9 @@ the condition; the gate reads the declaration below instead of asserting eight.
 
 ### 11.1 The finding, and what it is not
 
-`_collect_classify_items` (`tortoise/extractor_v2.py:9767-9789`) collects only candidates whose kind
+`_collect_classify_items` (`tortoise/extractor_v2.py:11098-11120`) collects only candidates whose kind
 is **missing or the `unclassified` sentinel**. Both classify passes are gated on that list being
-non-empty — `if items:` at `:10310` (the S2 pass) and `:10442` (the post-S4 pass). So S2.3 has work **iff the S2 map left
+non-empty — `if items:` at `:12908` (the S2 pass) and `:13057` (the post-S4 pass). So S2.3 has work **iff the S2 map left
 something untyped** — and that is a property of the candidate set, not of the pipeline's health. A
 corpus whose map assigns a concrete kind to every candidate legitimately idles the pass.
 
@@ -1056,7 +1335,7 @@ evidence or its evidence issue.
    run log, so making a step conditional is a reviewed edit to a hash-pinned artefact rather than a
    lane's local choice. A log whose declaration the frozen record does not confirm is **refused**.
 
-**Why (2) is a witness and not a loophole.** The extractor's fail-open `except` (`:10323`, `classify(S2) failed` / `:10453`, `classify(union) failed`) leaves
+**Why (2) is a witness and not a loophole.** The extractor's fail-open `except` (`:12921`, `classify(S2) failed` / `:13068`, `classify(union) failed`) leaves
 the *same* empty `s2`/`union` block as an idle pass — `#9823` measured that. Accepting a bare empty
 block would therefore hand a **crashed** classify pass the same verdict as a pass with nothing to do,
 which is the fail-open shape a gate may not have. The failure is visible: the extractor appends

@@ -1233,6 +1233,329 @@ def test_the_page_is_not_RENDERED_when_the_AS_cannot_verify_what_it_mints(
         bounced.headers["location"])
 
 
+def test_the_bounce_does_not_append_a_SECOND_key_when_the_flow_already_has_one() -> None:
+    """The two callers are not alike, and an unconditional append made the URL ambiguous (#10487).
+
+    The bounce (`oauth_authorize`) carries no key, but the page's own sign-in link
+    (`consent_page_html` → SIGNIN_URL) is rendered ONLY for a keyed flow, so its raw query always
+    carries one. Appending there emitted `…&attempt_key=K&attempt_key=<minted>`: benign only while
+    every reader takes the FIRST value, and a re-run of this very dead end the day one takes the
+    last. A present-but-BLANK value counts as absent — it selects the bounce branch upstream, by
+    the same stripped predicate the bounce judges ABSENT-vs-PRESENT by — and so does a whitespace-only one.
+    """
+    from urllib.parse import parse_qs, urlsplit
+
+    from tortoise.oauth import (
+        CONSENT_ATTEMPT_KEY_PARAM,
+        consent_bounce_url,
+        presented_consent_attempt_key,
+    )
+
+    raw = f"client_id=c1&state=s1&{CONSENT_ATTEMPT_KEY_PARAM}=K-page"
+    emitted = consent_bounce_url(APP_ORIGIN, raw)
+    inner = parse_qs(urlsplit(parse_qs(urlsplit(emitted).query)["next"][0]).query,
+                     keep_blank_values=True)
+    assert inner[CONSENT_ATTEMPT_KEY_PARAM] == ["K-page"], (
+        "the bounce emitted a SECOND attempt key beside the flow's own: "
+        f"{inner[CONSENT_ATTEMPT_KEY_PARAM]}")
+
+    # …and a blank or whitespace-only value is treated as absent — for the SAME reason, and it is
+    # one state rather than two: `oauth_authorize` bounces on the stripped predicate above, so
+    # `%20` reaches this function in place of a key exactly like `` does.
+    # ⛔ Assert what the READERS see — the FIRST value — not that a minted key exists SOMEWHERE in
+    # the string. ``["", "<minted>"]`` satisfies "a key is present" while BOTH consumers of the
+    # value (`start.ts::searchParams.get`, the page's `attemptKey()` — JS `URLSearchParams.get`
+    # included) take the blank first value: `start` then minted its own key, i.e. the AS mint was
+    # dead on exactly the input it was added for. The whitespace form was worse — `%20` is TRUTHY
+    # upstream, so the page rendered and `start.ts` bound the row to the guessable one-character
+    # key `" "` (#10208).
+    #
+    # ⛔ `request.query_params.get` is NOT a first-value reader and must not be listed as one
+    # (review P3). Starlette's `ImmutableMultiDict.__getitem__` returns `_dict[key]`, and `setlist`
+    # stores `values[-1]` — the LAST value (verified against the installed Starlette, not the
+    # prose). It is the AS's own reader, and the single-key emit is what makes it AGREE with the
+    # two first-value consumers; it was never pinned by the same assertion.
+    for blankish in ("", "%20", "+"):
+        blank = consent_bounce_url(
+            APP_ORIGIN, f"client_id=c1&state=s1&{CONSENT_ATTEMPT_KEY_PARAM}={blankish}")
+        inner_blank = parse_qs(urlsplit(parse_qs(urlsplit(blank).query)["next"][0]).query,
+                               keep_blank_values=True)
+        keys = inner_blank[CONSENT_ATTEMPT_KEY_PARAM]
+        assert len(keys) == 1, (
+            f"the bounce emitted {len(keys)} attempt_key values for the blank input "
+            f"{blankish!r}. The page and `start.ts` take the FIRST value, so a blank pair beside "
+            f"a minted key leaves the mint unread and `start` mints its own: {keys}")
+        assert len(keys[0].strip()) >= 32, (
+            f"the blank input {blankish!r} was adopted as the flow's key instead of being "
+            f"replaced by a minted one — a guessable key reopens the ownerless window (#10208): "
+            f"{keys}")
+        # The forwarded authorize request still rides along verbatim — only the key was replaced.
+        assert (inner_blank["client_id"], inner_blank["state"]) == (["c1"], ["s1"]), inner_blank
+
+    # ⛔ A DUPLICATE PAIR — the ONE input the blank arms above cannot reach (review P2). Neither
+    # `""`, `"%20"` nor `"+"` is a duplicate, so a suite made only of those arms stays green while
+    # the collapse branch (`tortoise/oauth.py`: `if presented or not stripped: continue`) is
+    # deleted — measured: flipping it to `if not stripped:` leaves every other assertion in this
+    # file green and emits TWO `attempt_key` segments, restoring exactly the first-reader /
+    # last-reader disagreement #10487 was filed for. It is the page's own sign-in link that can be
+    # handed a pair (its `raw_query` is the caller's), and there a second segment puts the page and
+    # `start.ts` on different keys → `403 flow_not_yours` after sign-in.
+    #
+    # WHICH value must survive is not free: the page and `start.ts` read the FIRST value, so the
+    # collapse must ADOPT the first non-blank one and DROP the rest — never mint over it.
+    for label, raw_dup, expected in (
+        ("blank FIRST then a real key",
+         f"client_id=c1&state=s1&{CONSENT_ATTEMPT_KEY_PARAM}="
+         f"&{CONSENT_ATTEMPT_KEY_PARAM}=K2", "K2"),
+        ("real key FIRST then blank",
+         f"client_id=c1&state=s1&{CONSENT_ATTEMPT_KEY_PARAM}=K2"
+         f"&{CONSENT_ATTEMPT_KEY_PARAM}=", "K2"),
+        ("two different real keys",
+         f"client_id=c1&state=s1&{CONSENT_ATTEMPT_KEY_PARAM}=K1"
+         f"&{CONSENT_ATTEMPT_KEY_PARAM}=K2", "K1"),
+    ):
+        dup = consent_bounce_url(APP_ORIGIN, raw_dup)
+        inner_dup = parse_qs(urlsplit(parse_qs(urlsplit(dup).query)["next"][0]).query,
+                             keep_blank_values=True)
+        dup_keys = inner_dup[CONSENT_ATTEMPT_KEY_PARAM]
+        # ⛔ THE VALUE, NOT JUST THE SHAPE. Asserting only `len(keys) == 1 and keys[0]` lets an
+        # implementation that MINTED instead of ADOPTING a caller's real key pass every test —
+        # measured on main (#10757): replacing the adopt-the-first-survivor expression with a bare
+        # mint left the suite green. "Whatever the page reads first" is the assertion.
+        assert dup_keys == [expected], (
+            f"a duplicate pair ({label}) must collapse to exactly ONE key, and it must be the "
+            f"FIRST non-blank value the caller presented ({expected!r}): got {dup_keys}. The "
+            f"page reads the first value, so minting here instead of adopting puts the page and "
+            f"`start.ts` on different keys and restores `403 flow_not_yours` after sign-in")
+
+    # ⛔ A PADDED-BUT-REAL KEY — the ONE shape where "all three readers see the same bytes" was
+    # FALSE (review P2 at 04c9d5256), and the arm that catches an emitter which normalises the
+    # value it adopts. The page's `attemptKey()` reads the CALLER's query, not the emitted URL —
+    # `new URLSearchParams(window.location.search).get(...)` (`tortoise/oauth.py:2361-2362`) — and
+    # `mint()` POSTs exactly that to `/api/consent/token` (`:2478`). Nothing on the TS side strips:
+    # `start.ts:255` is `url.searchParams.get(ATTEMPT_KEY_PARAM) ?? ""` and `token.ts` hashes what
+    # it is handed (`attemptKeyHash(attemptKey)`). So for `attempt_key=%20K%20` the page carries
+    # `" K "`, and an emitter that strips puts its sign-in link on `"K"`: `recordConsentAttempt`
+    # writes `attempt_key_hash` ONLY on INSERT (`_shared/auth/consent-bridge.ts:362-397`), so
+    # `owns_flow` is false for the second key and the signed-in visitor meets
+    # `403 flow_not_yours` — the dead end this hop exists to remove. PRE-FIX this input WORKED (the
+    # old emitter left the single-non-blank-key case BYTE-EXACT), so stripping here is a
+    # regression, not a hardening; the strip's job is the ABSENT test, and it still does it.
+    padded = f"client_id=c1&state=s1&{CONSENT_ATTEMPT_KEY_PARAM}=%20K%20"
+    assert presented_consent_attempt_key(padded) == "K", (
+        "a padded-but-real key must still count as PRESENT (stripped predicate) — otherwise this "
+        "arm is measuring the blank path instead of the page branch")
+    inner_padded = parse_qs(urlsplit(parse_qs(urlsplit(
+        consent_bounce_url(APP_ORIGIN, padded)).query)["next"][0]).query, keep_blank_values=True)
+    page_reads = parse_qs(padded, keep_blank_values=True)[CONSENT_ATTEMPT_KEY_PARAM][0]
+    assert inner_padded[CONSENT_ATTEMPT_KEY_PARAM] == [page_reads] == [" K "], (
+        "the emitted key must be the VALUE THE READERS HASH, not a normalised form of it: the "
+        "page POSTs what `attemptKey()` reads from the caller's query (first value, verbatim) and "
+        "`start.ts`/`token.ts` adopt and hash it verbatim. Emitting the stripped form splits one "
+        f"flow across two keys → `403 flow_not_yours`. emitted={inner_padded[
+            CONSENT_ATTEMPT_KEY_PARAM]!r} page_reads={page_reads!r}")
+
+    # Every OTHER segment survives BYTE-EXACT — compared as bytes, not re-parsed, because the bug
+    # this guards is a re-ENCODING (`+` vs `%20`) that `parse_qs` would normalise away.
+    passable_raw = (f"redirect_uri=https%3A%2F%2Fc.example%2Fcb%3Fa%3D1&state=s1"
+                    f"&{CONSENT_ATTEMPT_KEY_PARAM}=")
+    emitted_passable = consent_bounce_url(APP_ORIGIN, passable_raw)
+    inner_raw = urlsplit(parse_qs(urlsplit(emitted_passable).query)["next"][0]).query
+    assert inner_raw.startswith("redirect_uri=https%3A%2F%2Fc.example%2Fcb%3Fa%3D1&state=s1&"), (
+        f"the mint path re-encoded a pass-through segment: {inner_raw}")
+
+
+def test_the_FIRST_value_predicate_and_the_AS_multidict_REALLY_do_disagree() -> None:
+    """The one FACT three comments on this hop got backwards (review P3, #10487).
+
+    `hosted_api.oauth_authorize` used to select the page-vs-bounce branch with
+    `request.query_params.get(...)`. Three sites on this hop described that reader as taking the
+    FIRST value — the same value `start.ts::searchParams.get` and the page's `attemptKey()` take —
+    so the single-key emit looked like a tidiness measure rather than the load-bearing thing it is.
+
+    It is not a first-value reader: Starlette's `ImmutableMultiDict.__getitem__` returns
+    `_dict[key]`, and `setlist` stores `values[-1]` — the LAST value. (Upstream documentation has
+    described it as "first" and been wrong; this asserts the library, not the prose.) So on a
+    duplicate pair the two readings genuinely DISAGREE, on both a blank-first and a two-real-key
+    pair — which is why the live predicate takes the consumers' reading and why
+    `consent_bounce_url` must emit exactly one segment instead of relying on any ordering.
+
+    Non-vacuity: this reds if `presented_consent_attempt_key` is ever changed to a last-value read
+    (the first assert pair), or if Starlette's `__getitem__` starts answering the first value (the
+    second) — i.e. exactly the two ways the comment that was deleted could come back true.
+    """
+    from urllib.parse import parse_qs
+
+    from starlette.datastructures import QueryParams
+
+    from tortoise.oauth import CONSENT_ATTEMPT_KEY_PARAM, presented_consent_attempt_key
+
+    # (1) blank FIRST: the AS's old reader saw a key, the consumers' predicate sees none.
+    blank_first = f"{CONSENT_ATTEMPT_KEY_PARAM}=&{CONSENT_ATTEMPT_KEY_PARAM}=K2"
+    assert presented_consent_attempt_key(blank_first) == "", (
+        "the consumers' predicate must read the FIRST value, so a blank first segment is ABSENT "
+        "— this is what makes `%20`/`` one state at the AS (#10208)")
+    assert parse_qs(blank_first, keep_blank_values=True)[CONSENT_ATTEMPT_KEY_PARAM][0] == ""
+    assert QueryParams(blank_first).get(CONSENT_ATTEMPT_KEY_PARAM) == "K2", (
+        "`query_params.get` must answer the LAST value — if this reds, Starlette changed and the "
+        "comments that claim it is a FIRST-value reader are not the only thing that was stale")
+
+    # (2) two real keys: FIRST for the consumers, LAST for that reader.
+    two_keys = f"{CONSENT_ATTEMPT_KEY_PARAM}=K1&{CONSENT_ATTEMPT_KEY_PARAM}=K2"
+    assert presented_consent_attempt_key(two_keys) == "K1"
+    assert QueryParams(two_keys).get(CONSENT_ATTEMPT_KEY_PARAM) == "K2"
+    assert presented_consent_attempt_key(two_keys) != QueryParams(two_keys).get(
+        CONSENT_ATTEMPT_KEY_PARAM), (
+        "the disagreement this hop's single-key emit exists to remove is no longer real — either "
+        "the predicate stopped being a first-value read, or the library changed")
+
+
+def test_the_predicates_docstring_does_not_claim_the_EMITTER_calls_it() -> None:
+    """#10790 review (P3): the ⚠️ Scope paragraph promised ONE predicate at both ends.
+
+    It said "the AS applies it at BOTH ends of this hop — branch selection, and the emission in
+    `consent_bounce_url`". The predicate has exactly ONE call site —
+    `hosted_api.oauth_authorize`'s page-vs-bounce test — and `consent_bounce_url` never calls it:
+    the emitter applies a WIDER first-NON-BLANK rule, so an existing binding is ADOPTED rather
+    than minted away. Measured here on the one shape where the two disagree (blank FIRST, a real
+    key after): the predicate answers `""` so the hop BOUNCES, and the emitter still carries
+    `attempt_key=K2` into the returned URL for `start` to adopt.
+
+    Why a prose claim is a defect here and not a nit: the obvious "de-duplication" a later lane
+    takes from "one predicate at both ends" is making the emitter CALL this predicate, which
+    turns the adoption of `K2` into a MINT and puts the page and `start.ts` on a key the attempt
+    row does not hold — `403 flow_not_yours` after sign-in, the dead end these docstrings exist to
+    prevent. Same failure mode as the `<<:` count-based carve-out: a rule stated in prose that a
+    reasonable repair implements differently.
+
+    BICONDITIONAL, so the pin cannot rot into a tautology in either direction: while the two rules
+    DISAGREE the docstring must state them separately and must not claim one covers both; if they
+    are ever genuinely unified, it must say THAT instead — so the next reader is told which rule
+    it can implement, and the trap does not come back.
+    """
+    from urllib.parse import parse_qs, urlsplit
+
+    from tortoise.oauth import (
+        CONSENT_ATTEMPT_KEY_PARAM,
+        consent_bounce_url,
+        presented_consent_attempt_key,
+    )
+
+    blank_first = (
+        f"client_id=c1&state=s1&{CONSENT_ATTEMPT_KEY_PARAM}="
+        f"&{CONSENT_ATTEMPT_KEY_PARAM}=K2")
+    predicate_value = presented_consent_attempt_key(blank_first)
+    emitted_key = parse_qs(
+        urlsplit(parse_qs(urlsplit(consent_bounce_url(APP_ORIGIN, blank_first)).query)["next"][0]).query,
+        keep_blank_values=True,
+    )[CONSENT_ATTEMPT_KEY_PARAM]
+
+    assert (predicate_value, emitted_key) == ("", ["K2"]), (
+        "the two ends of this hop no longer disagree on a blank-first duplicate pair — either the "
+        f"predicate stopped reading the first value ({predicate_value!r}) or the emitter stopped "
+        f"adopting the first non-blank one ({emitted_key!r}). Re-derive the ⚠️ Scope paragraph "
+        "before touching this pin: it is what makes the docstring assertion below load-bearing")
+    two_rules_measured = predicate_value != emitted_key[0]
+
+    source = OAUTH.read_text(encoding="utf-8")
+    start = source.index("def presented_consent_attempt_key")
+    end = source.find("\ndef ", start + 1)
+    docstring = source[start:end if end != -1 else len(source)]
+    claims_one_predicate = "BOTH ends" in docstring
+    states_the_wider_rule = "first NON-BLANK" in docstring
+    docstring_states_two_rules = states_the_wider_rule and not claims_one_predicate
+
+    assert two_rules_measured == docstring_states_two_rules, (
+        "`presented_consent_attempt_key`'s ⚠️ Scope paragraph and the code disagree about how many "
+        f"rules this hop applies: measured_two_rules={two_rules_measured} "
+        f"(predicate={predicate_value!r}, emitter={emitted_key!r}), "
+        f"docstring_states_two_rules={docstring_states_two_rules} "
+        f"(states_the_wider_rule={states_the_wider_rule}, "
+        f"claims_one_predicate={claims_one_predicate}). While the two rules still differ, state "
+        "them separately AND say the emitter must NOT call this predicate — collapsing them mints "
+        "away a binding the attempt row already holds. If you genuinely unified them, say that.")
+
+
+@pytest.mark.parametrize("blankish", ["", "%20", "+"])
+def test_the_AS_bounces_on_the_SAME_blank_predicate_the_readers_use(api_client, blankish):
+    """Blank and whitespace-only are ONE state at the AS too, and it is "absent" (#10487 review).
+
+    The two halves of this hop disagreed, and each disagreed in a different direction:
+    `oauth_authorize` tested `request.query_params.get(...)` — the RAW first value, so a blank one
+    bounced while `%20` did not — and `consent_bounce_url` appended its minted key after whatever it
+    found. Measured on the pre-fix code: a blank key emitted `…&attempt_key=&attempt_key=<minted>`,
+    where every reader takes the FIRST value and so read `""`, and `%20` was TRUTHY at the AS, so
+    the PAGE rendered, its sign-in link appended a second key, and `start.ts` bound the row to the
+    guessable one-character key `" "` — the ownerless-window form of #10208.
+
+    So this pins the AS side of the one predicate: any of the three encodings a browser can send for
+    "no usable key" must take the BOUNCE branch, and the bounce must then hand back exactly one
+    non-blank key — the value the page and `start.ts` will read.
+    """
+    from urllib.parse import parse_qs, urlencode, urlsplit
+
+    from tortoise.oauth import CONSENT_ATTEMPT_KEY_PARAM
+
+    tc, _ = api_client
+    # Hand-built RAW query, so the value arrives as written: httpx would re-encode a parsed
+    # `{"attempt_key": " "}` and `"%20"` as a literal value would test the wrong thing entirely.
+    params = _authorize_params(tc, state=f"st-blank-{blankish}")
+    r = tc.get(
+        f"/oauth/authorize?{urlencode(params)}&{CONSENT_ATTEMPT_KEY_PARAM}={blankish}",
+        follow_redirects=False)
+    assert r.status_code == 302, r.text
+    base, q, _raw = _split(r.headers["location"])
+    assert base == APP_ORIGIN + "/auth", (
+        f"the AS treated attempt_key={blankish!r} as a PRESENTED key, so it rendered the page "
+        f"instead of bouncing — a whitespace-only key is guessable, and `start.ts` adopts it: {base}")
+    keys = parse_qs(urlsplit(q["next"]).query, keep_blank_values=True)[CONSENT_ATTEMPT_KEY_PARAM]
+    assert len(keys) == 1 and len(keys[0].strip()) >= 32, (
+        f"the bounce did not leave exactly one minted key for attempt_key={blankish!r}: {keys}")
+
+
+def test_the_bounce_carries_the_attempt_key_the_flow_is_bound_to(api_client) -> None:
+    """#10487: the AS mints the attempt key on the ONE leg where none exists yet.
+
+    `/api/consent/start` binds a flow to a browser with an insert-only `attempt_key` and hands it
+    back inside the return target. On a cold start it had to INVENT that key, so the key lived only
+    in the URL it happened to emit — and a visitor who signed in on a different `/auth` entry for
+    the same flow (back button, refresh, this bounce's own return target) came back without it and
+    was refused `403 flow_not_yours`.
+
+    Generating it here gives the BOUNCE and its own return leg one value end to end, and `start` adopts
+    it instead of inventing one. What that does NOT buy is a per-FLOW key: each bounce mints a fresh
+    value, so a keyless re-entry AFTER the row exists still meets `flow_not_yours` — the part of #10487
+    that remains open, because closing it needs a key an unauthenticated re-entry can re-derive. The
+    three properties pinned below are what make the mint safe and useful: the key is carried at all,
+    it is UNPREDICTABLE and per-request (it is the browser's only proof of ownership, and `state` is
+    client-chosen and public), and the inner target is still the only allowlisted API path.
+    """
+    from urllib.parse import parse_qs, urlsplit
+
+    tc, _supabase = api_client
+    params = _authorize_params(tc, state="st-carriage")
+    _r1, q1, _raw1 = _bounce(tc, params)
+    inner1 = urlsplit(q1["next"])
+    assert inner1.path == "/api/consent/start", (
+        f"the bounce's inner target must stay the allowlisted route, got {inner1.path!r}")
+    iq1 = parse_qs(inner1.query, keep_blank_values=True)
+    assert iq1.get("attempt_key"), (
+        "the bounce carries NO attempt_key, so a cold visitor returns with nothing to prove "
+        "ownership and dies on `flow_not_yours` (#10487)")
+    key1 = iq1["attempt_key"][0]
+    assert len(key1) >= 32, f"the attempt key is too short to be unguessable: {key1!r}"
+    assert key1 != params["state"], "the attempt key is derived from the public `state`"
+
+    # The forwarded authorize request must still reach the app VERBATIM — the key is additive.
+    for name in ("client_id", "redirect_uri", "code_challenge", "state", "scope"):
+        assert iq1[name][0] == params[name], (name, iq1[name][0], params[name])
+
+    # Per-request, not a constant: two bounces of the SAME flow never share a key.
+    _r2, q2, _raw2 = _bounce(tc, params)
+    key2 = parse_qs(urlsplit(q2["next"]).query, keep_blank_values=True)["attempt_key"][0]
+    assert key1 != key2, "the attempt key is a constant — it would be guessable, and shared"
+
+
 @pytest.mark.parametrize("issuer", [
     # (1) absolute-but-not-a-serviceable-origin — the DOCUMENTED `None` branch.
     "app.premiselabs.co",

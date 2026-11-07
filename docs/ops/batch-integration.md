@@ -5,9 +5,9 @@ domain: platform
 doc_status: live
 subjects.team: epistemic-team
 aboutSubjects: batch-integration, ci-wall-clock, ci-headroom-guards
-aboutObjects: tortoise, "#10399", .mergify.yml, .github/workflows/python-ci.yml, .github/workflows/post-merge-validation.yml, config/ci-surfaces.yml
+aboutObjects: tortoise, "#10399", "#10897", "#2148", .mergify.yml, .github/workflows/python-ci.yml, .github/workflows/post-merge-validation.yml, config/ci-surfaces.yml, tools/batch_open.py, superseded-by-fold
 created: 2026-10-31
-updated: 2026-10-31
+updated: 2026-11-06
 ---
 
 # Batch integration — the gate is the batch, not the PR
@@ -138,6 +138,59 @@ practice agrees — the reason per-run containers are standard for test infrastr
 resources make results non-deterministic through "data corruption and configuration drift"
 (Testcontainers, *What problems does Testcontainers solve?*). Note the container is **not
 self-cleaning**: `tools/test_lane.py down` when the batch is over.
+
+**A stranded container whose owning worktree still EXISTS is REPORTED by default, not
+deleted (#5084, #10693).** Every
+`up`/`uri`/`run` (`start()`) sweeps the box's `fdb-lane-*` containers and classifies each by
+**ownership**, never by age alone. Three ownership proofs exist; the default **removes exactly one** of
+them:
+
+| proof | default behaviour |
+|---|---|
+| the worktree that owns it is **GONE** | removed — this is the only proof #8180's ruling authorises outright |
+| the owning worktree **exists but nothing holds it** (no live process names it, no Redis client, no observed use past `OWNER_GRACE_H` = 2 h) | **reported**, with the evidence chain and the release command; removal needs `TORTOISE_TEST_LANE_REAP_LANE_GONE=1` |
+| the owner cannot be determined **from this clone** (no observed use past `ORPHAN_MAX_AGE_H` = 24 h, and the name carries a 10-hex worktree slug) | **reported**; removal needs `TORTOISE_TEST_LANE_REAP_OWNER_INDETERMINATE=1` |
+
+Both switches are strict `"1"` (any other spelling is not consent for a destructive default) and
+**nothing in this repo sets them** — #8180's owner ruling scopes deletion to "when the worktree that
+owns it is gone" and to owner-**determinate** containers, and the reopen asking for the other two arms
+is pending on that issue. So do not expect `up` to reclaim a peer's stranded container whose owning
+worktree still exists, on its own: read the `reap:` lines it prints — the evidence-chain lines name the
+owner, the container's age, the measured gap since its last observed use and why it was kept, and where
+a read FAILED the line names the fact that could not
+be read rather than stating a conclusion that read never produced. To release one container, do it
+from **its own** worktree:
+
+```bash
+cd <the owning worktree> && uv run python tools/test_lane.py down
+```
+
+The sweep itself is gated on `TORTOISE_TEST_LANE_REAP` — on by default, and off for any of
+`0` / `false` / `no` / `off` / empty / unset-to-nothing (`export X=${SOMETHING_UNSET}`), which is
+the same predicate the `run` exit hook reads. Set it to one of those and the LANE's sweep does not
+run, nor does `run` reap on exit, so the stranded containers are neither reported nor reclaimed by
+either. Any other value — including `1`, `true`, `yes` — leaves both ON, so do not spell "off" with
+a value this list does not name. ⛔ It gates the LANE's two paths only: the installed
+`tortoise-container-reaper.timer` clears this variable (`UnsetEnvironment=`) and is armed by
+INSTALLATION, so disarming it is an installer act — `docs/ops/container-lifetime.md` §2.
+
+The two **liveness** proofs — the arms behind `TORTOISE_TEST_LANE_REAP_LANE_GONE` and
+`TORTOISE_TEST_LANE_REAP_OWNER_INDETERMINATE` — never treat a container a **live** lane is using as a
+candidate: before deciding, the sweep probes a process holding the worktree (via `/proc`, so a
+cross-clone lane is visible too) and asks the container itself for an attached client. Unreadable
+evidence there (`/proc` unreadable, `docker` refusing, a non-listing reply) is **report-only** — never a
+removal. The age figures are a backstop over that evidence, never a substitute for it.
+
+⛔ **That guarantee does not extend to the worktree-gone proof above** — the one arm that removes by
+**default**. Its ownership test is a directory (`Path(owner).is_dir()`), with no `/proc` scan: a
+worktree that was removed, moved, or is briefly on an unmounted mount therefore reads as "owner gone".
+(#10712's ownership LABEL narrows this — such a container is attributed rather than left
+indeterminate — but it does not turn a directory read into a liveness proof.) The container IS asked
+for an attached client before every proof-1 removal **of a container docker reports as RUNNING**, and
+is spared on `True` or on an unreadable answer (a TERMINAL container cannot have a client, so the probe
+is skipped there rather than failing on a dead server). So a live client is not the gap; the gap is
+that the client probe can only see a client that answers it. That residual is **#10697**; close it
+before widening this default.
 
 The **same lane** must serve Phase 1 and Phase 3. A batch measured on a different lane from its
 baseline is not comparable to it.
@@ -888,6 +941,98 @@ Plain `uv sync` silently drops the dense-retrieval extras; retrieval then degrad
 the run reports green for a product that no longer has embeddings. `uv sync --extra embeddings` alone
 drops `parity` (pyarrow). The extras are part of the lane definition, not setup trivia.
 
+### Before Phase 1 — close the constituents, so none of them lands ahead of the batch
+
+The batch is only *one* path to `main`. `.mergify.yml` sets
+`merge_protections_settings.auto_merge_conditions: true`, so **every PR that matches
+`queue_conditions` is queued with no human click** — including a constituent whose work the batch
+already carries. A constituent that wins that race is validated (~37 min) and squash-merged alone,
+and the batch then applies the same diff to a `main` that has moved, so its `tested-tree` is no
+longer the tree that lands (see [Landing](#landing--main-must-still-be-the-tree-you-tested)).
+
+That is not hypothetical. Measured 2026-11-04 with 32 open PRs and 10 open batch PRs: **7 of 7**
+open PRs named as some batch's constituent were ADMITTED by the entry gate. They were #10543
+(in #10894 and #10702), #10575 (#10894, #10704), #10610, #10641, #10850 and #10867 (the latter
+two both in #10880), and #10856 (#10895) — every one of them separately eligible to land ahead
+of the batch carrying it.
+
+Two mechanisms close that, and they are complementary — neither is sufficient alone:
+
+1. **The queue refuses a labelled constituent at ENTRY.** `queue_conditions` carries
+   `-label=superseded-by-fold`. Entry, not merge, because entry is where the cost is: a
+`merge_conditions` failure only dequeues the PR *after* the queue has built and validated a batch
+containing it, while an unmatched `queue_conditions` refuses it before any CI is spent. It is **not**
+true that a label condition in `merge_conditions` could never become true — Mergify's documentation
+scopes the temporary-queue-PR substitution to the conditions *for checks*, and `label` stays the pull
+request's own attribute — so the older "it would deadlock the queue for every PR" reasoning was
+wrong and is recorded here as corrected. Mergify's documented lifecycle also drops an
+already-queued PR that stops satisfying `queue_conditions`, so the label should drain the queue too —
+⚠️ that part is **documented, not measured** here; the entry gate does not rely on it, so confirm the
+drain in the Mergify UI before counting on it for a live batch.
+   ⚠️ **Measured limit: this gate refuses nothing until the label is applied.** With no label, all
+   7 were still admitted. So mechanism 2 is load-bearing; mechanism 1 is the belt.
+2. **`tools/batch_open.py` labels and closes the constituents when the batch opens.** A closed PR
+   cannot be queued, merged, or spend a runner slot.
+
+```bash
+# Dry run first — it mutates nothing and reports every constituent, contained or not.
+uv run python tools/batch_open.py --fold <batch PR> --constituent <n> --constituent <n>
+
+# Gate the queue without closing anything (reversible in one command):
+uv run python tools/batch_open.py --fold <batch PR> --label-only
+
+# Label + comment + close, once the dry run is clean:
+uv run python tools/batch_open.py --fold <batch PR> --apply
+```
+
+Pass `--repo <owner>/<name>` whenever the checkout you are standing in is not the repository you
+mean: every `gh` call is pinned to it, so a wrong `--repo` fails loudly instead of mutating
+same-numbered PRs in the repository you happen to be in.
+
+The tool closes a constituent **only** when its work is provably in the batch tree, by one of two
+routes: `CONTAINED-ANCESTOR` (`git merge-base --is-ancestor`) or `CONTAINED-CONTENT` (reverse-apply
+the constituent's own diff inside a scratch worktree of the batch head — the route that survives a
+squash-built batch, where ancestry is false though the work is present). Anything else is reported
+and **kept**, under `--apply` as well. Closing a PR whose work no batch carries destroys it.
+
+⛔ **`CONTAINED-CONTENT` means the reverse-apply exited 0 AND was silent.** Exit status alone is not
+the proof, because git exits **0** with two different messages that mean the change is *not* in the
+tree: `--3way` says `Applied patch to 'f.txt' with conflicts.`, and a plain `--check` says
+`warning: s.sh has type 100644, expected 100755` for a **mode-only** change the tree does not carry
+(the executable bit is lost if that PR is closed). A genuinely contained change prints nothing. So
+the tool treats a conflict phrase, and any other output at all, as `NOT-CONTAINED` — a false refusal
+costs one manual close; a false proof is unrecoverable.
+
+The exit status is the tool's own contract, and it is the same on both write paths: **0** every
+constituent contained, **1** at least one `NOT-CONTAINED` (reported — under `--label-only` the label
+still goes on, because it is reversible and it closes the queue rather than the PR), **2** could not
+measure (no constituent list, a `git`/`gh` call that failed, was absent, or hung, or a constituent
+whose head/base could not be read — never a traceback). An `UNMEASURABLE` constituent is exit **2**
+and is printed as *could not measure*, never under the `REFUSED (… closing would destroy work)` line:
+the first says nothing was measured, the second asserts the work is missing from the batch, and only
+the second is a reason to close a PR by hand.
+
+⛔ **The constituent list is never parsed from prose.** A batch title routinely names a PR it
+deliberately did **not** fold — #10894's title names `#10641`, which was dropped. Deriving the close
+list from that would close a PR the batch never carried, so the tool requires either a
+`fold-constituents: <n>, <n>` line in the batch PR body or explicit `--constituent` arguments, and
+exits 2 (listing the prose references only as a hint) when neither is present.
+
+The label is also what unblocks a PR: if the batch is abandoned, re-open the constituent and remove
+`superseded-by-fold`.
+
+**Priority for the batch itself.** A batch adds `queue-accelerator`, which the existing
+`priority_rules` resolves to `priority: high` with `allow_checks_interruption: true` — so the batch
+is not held behind dozens of constituents. That interruption spends CI time already paid for; it is
+the queue's own reliability/velocity trade, which is why the label goes on a batch and never on a
+preference. It is deliberately **not** a separate runner pool: this fleet registers no such label
+(`install-ci-runner-x64.sh --print-labels` → `self-hosted-x64`), and a `runs-on` naming an
+unregistered label selects zero runners — a job that never starts and never reports, which is worse
+than waiting in a queue.
+
+A batch PR is **still opened as a draft** and still owes every required context: closing the
+constituents removes the race, it does not exempt the batch from the landing rail.
+
 ## Aftermath
 
 - The batch PR body is the **evidence**: constituent PRs, conflicts dropped and why, the
@@ -965,7 +1110,10 @@ likely to over-credit.
 ⛔ **The draft gates ENTRY, not the MERGE — the residual window is real, and it is one queue cycle
 wide.** `.mergify.yml`'s own configuration contract states the split in a single line:
 `queue_conditions` gates **ENTRY** (evaluated against the PR head) and `merge_conditions` gates the
-**MERGE** (evaluated against the queue branch). `-draft` is a `queue_conditions` entry, so
+**MERGE**. Its **check** conditions are the ones evaluated against the queue branch / temporary queue
+PR; non-check conditions such as `label` and `draft` stay the pull request's own attributes (Mergify's
+`merge_conditions` doc scopes the temporary-PR substitution to "the merge conditions **for checks**").
+`-draft` is a `queue_conditions` entry, so
 un-drafting makes the PR *eligible*; it does not pin the base. From there:
 
 - `merge_method: squash` applies the batch's diff to `main` **as it is at merge time**, not to
@@ -1041,6 +1189,148 @@ branch. The batch PR therefore still owes those contexts — the batch run is th
 will pass, not a substitute for them, and this doctrine does not ask for an exemption. What it removes
 is waiting on each constituent PR's own CI before batching; what it adds is a full-suite run that the
 rail's tiered selection does not perform.
+
+## Priority — a fold's CI and landing outrank its constituents (#10897)
+
+**The owner's question (2026-11-04):** *"will we have a way to prioritise for CI queues the
+combined ones? so their components don't land before and disrupt the process?"*
+
+**The gap it names is structural, not a matter of speed.** Nothing in this document, and nothing in
+`.mergify.yml`, knew that a constituent PR was *already contained* in a fold. So a constituent stayed
+queue-eligible, and it could be merged **ahead of** the fold: a fragment lands, `main` moves under the
+fold's own validation run, and the landed pool is then a composition no run has certified — the exact
+failure the batch exists to prevent, arriving through the one door the doctrine left open.
+
+Three mechanisms answer it. **Two of them are STRUCTURAL and live on PR #10902** — they remove the
+work rather than reordering it, and they are the larger half of the answer:
+
+| mechanism | what it does | where |
+|---|---|---|
+| **1. Entry gate** | a superseded constituent cannot ENTER the queue (`-label=superseded-by-fold` in `queue_conditions`) | `.mergify.yml`, PR #10902 |
+| **2. Close at fold-open** | `tools/batch_open.py` proves the constituent's head is contained in the fold's tree, then labels, comments and closes it | `tools/batch_open.py`, PR #10902 |
+| **3. CI priority for the fold** | the fold's own matrix rows get their own runner class, and the fold is ordered first in the queue — ⛔ bounded by the matrix fan-out cap: 3 legs of a matrix run at once, on a fold run too (`docs/ops/ci-wall-clock.md` §7 "What the cap does NOT exempt") | this change |
+
+Entry, not merge, is where mechanism 1 must bite: a PR blocked at entry never costs a CI cycle, while
+one blocked at merge has already spent the queue's validation run — and under the queue's own
+`batch_size` it spends that run for the PRs it was batched with. (Same reasoning `-draft` carries in
+[Landing](#landing--main-must-still-be-the-tree-you-tested): the draft gates ENTRY.)
+
+### 3. The fold's own CI gets its own class — opt-in, fail-safe, OFF today
+
+GitHub does not prioritise jobs in a runner queue: a run starts when a runner carrying **every** label
+in `runs-on` is free. A label no runner carries therefore does not deprioritise the job — it makes it
+**unstartable**, and an unstartable required check reads as "still queued": a red-less, progress-less
+hang, strictly worse than waiting.
+
+**Measured 2026-11-04:** this fleet carries `self-hosted`, `self-hosted-x64`, the arch/OS ornaments and
+the gate-following `ubuntu-latest` fallback (`tools/install-ci-runner-x64.sh`,
+`scripts/ci_runner_gate.sh`). **There is no dedicated fold capacity**, so shipping
+`runs-on: [self-hosted, fold]` as the default would hang every fold.
+
+So the decision lives in Python, where it is unit-tested, and the operator declares the class:
+
+```text
+CI_FOLD_RUNNER_LABELS = '["self-hosted", "self-hosted-x64"]'   # a repo variable; unset = seam inert
+```
+
+⛔ **Declare a class the pool really carries.** `["self-hosted", "fold"]` is the tempting value and it
+is precisely the failure this section opens with: `fold` is carried by **no runner on this fleet**, so
+it does not deprioritise the job — it makes the eight non-`canary_producer` legs of every fold
+**unstartable**, and those legs feed the required `python-ci-gate`, so the result is a red-less,
+progress-less pending check. `parse_fold_runner` cannot catch this: it validates the **shape** of the
+declaration, never the live pool — whether a runner carries a label is a fact about the fleet, not
+about the string (`tools/ci_selection.py::parse_fold_runner`). So the fail-safe covers typos in the JSON, not
+typo'd or invented labels. At this writing the pool offers `["self-hosted"]`,
+`["self-hosted", "self-hosted-x64"]`, or `["ubuntu-latest"]`.
+
+⚠️ **Every one of those is a deliberate choice with a cost, and none is free.** `["ubuntu-latest"]` is
+main's current label but is also attached to the self-hosted pool as a FALLBACK whenever GitHub-hosted
+looks unhealthy **or the hosted queue is deep enough to stall work** (owner ruling #9878;
+`scripts/ci_runner_gate.sh`), so it is not a hosted-only class; a `self-hosted` class in either form
+removes the GitHub-hosted half of the race, so a **pool-side** stall — an outage on the box, or a
+contended box — holds the fold's required legs PENDING with nothing to answer them, the exposure
+`docs/ops/ci-runner-x64.md` records for every pool-only departure (`:773-779`); and the pool is
+MEASURABLY slower than hosted, in both of its architectures. On the x64 box, `test-slow (a)` over the
+same 365 nodeids took **1352.5 s against 246.5 s hosted — 5.49×** (`docs/ops/ci-runner-x64.md:208`); the
+ARM64 VMs resolve `ubuntu-latest` to a **~2× slower** class (`python-ci.yml:2097`) and one of them
+killed the canary at **32m12s of a 30m budget** (`python-ci.yml:2164`) — the same failure this section
+cites as the reason the `canary_producer` row is exempt. A priority mechanism that routes a fold onto a
+slower or stalled class makes the fold slower, which is the opposite of its purpose. Declare the class
+**and** the reason the fold may have it: on this fleet that reason is "dedicated fold capacity exists",
+and it does not yet.
+
+`tools/ci_selection.py::resolve_fold_runner` then, per matrix row:
+
+- PR has no `batch-fold` label → the row's own `runner`, **byte-identical** to main's;
+- fold + a usable declaration → every row carries that label array (a real `fromJSON`-able array —
+  `runs-on` is already per-row data, so no workflow rewrite) — **except the `canary_producer` row**;
+- fold + an unusable one (`[]`, a bare string, `[null]`, junk) → falls back and warns, once per
+  matrix (not once per row: `::warning::` annotations are capped at 10 per step). `[]` is the entry
+  that matters: it parses, it is a list, and it would emit a `runs-on` no runner can match.
+
+The `canary_producer` exemption is not a nicety: `fast_shard_runner` rule 1 pins the last shard to the
+hosted label precisely because the producer's artifacts feed the canary streak, and that streak is a
+comparison of TESTS across runs. Moving the producer onto another class would turn it into a
+comparison of runner classes — the failure measured 2026-10-27..30, when run `40986603502` (head
+`5a2ae6aa1`) had `test (i)`, the canary, taken by `pi-runner-vm-5` (ARM64) and killed at 32m12s of a
+30m budget (`docs/ops/ci-runner-x64.md:847`, `:888`). A fold gets priority on the legs that carry the
+wall; the producer stays where the streak expects it.
+
+⛔ **The class does not buy PARALLEL legs.** `strategy.max-parallel: 3` (#6744) is a bare literal on
+all three shard matrices, so it applies to a fold's validation run exactly as to any other PR: even
+with dedicated fold capacity for all eight wall-carrying legs, at most **three** of them run at
+once, and the matrix-band regression `docs/ops/ci-wall-clock.md` §7 measures and accepts
+(`+17.9 m p50 / +23.2 m max`) applies to the fold's own band as well. `max-parallel` is a JOB-level
+`strategy` key, not per-row data like `runs-on`, so a fold cannot be exempted per row — an
+exemption would have to be an expression on the key itself, which is unverified here and **not**
+taken. The invariants behind the cap are about fairness between PRs, which is why a fold is throttled
+by the same bound; see `docs/ops/ci-wall-clock.md` §7, "What the cap does NOT exempt".
+
+`CI_PR_LABELS` and `CI_FOLD_RUNNER_LABELS` ride **both** matrix emitters (`Emit push matrix`,
+`Tier-2 duration split`) at STEP scope. Job scope is barred — `tests/test_capstone_preregistration_9075.py`
+refuses any `env:` above the capstone gate step, because such a key can hook the gate's interpreter —
+and a lever carried by one emitter is dead on exactly the event a fold uses (#10186's shape).
+
+**What is live today is the ordering, not the class.** Until capacity is dedicated, a fold is prioritised
+inside the queue: `.mergify.yml` `priority_rules` puts `label = batch-fold` **first**, at `9000` against
+the accelerator's `high` (`3000`; unmatched is `medium`, `2000`), with `allow_checks_interruption: true`.
+Mergify uses the FIRST matching rule, so the order — not the number alone — is what makes a fold that
+also carries `queue-accelerator` resolve at 9000.
+
+**The trade-off, stated rather than glossed:** `allow_checks_interruption` cancels checks already running,
+spending CI time already paid for — the same RCV trade the accelerator rule records, bounded the same
+way (use the label for a real fold, never for preference). And the structural levers (mechanisms 1 + 2)
+are what actually shrink the queue a fold waits behind; ordering only decides who goes first in what is
+left.
+
+### What this does not claim
+
+- **The `batch-fold` label must exist, and nothing applies it automatically yet.** Both halves of
+  mechanism 3 key on it, so on a repository where it has not been created the rule can never match and
+  the runner-class seam can never fire: an inert mechanism, not a wrong one. Create it once
+  (`batch-fold`, "A batch/fold PR — CI priority + queue precedence"), or let the fold tooling apply it
+  — `tools/batch_open.py` on #10902 is the natural home, and until it does, a fold carrying ONLY
+  `queue-accelerator` resolves at the accelerator's `high` (3000), which is priority but not this rule's
+  9000.
+- **The label must be on the PR when the CI run is CREATED — the two halves read it at different
+  times.** The Mergify half is evaluated server-side against the live PR, so a label added later does
+  reach the queue. The runner half does not: both emitters read `CI_PR_LABELS:
+  ${{ join(github.event.pull_request.labels.*.name, ',') }}`, which is the **webhook payload snapshot
+  captured when the run was created** (`tools/ci_selection.py::fast_matrix_include` reads both
+  through a plain `os.environ.get`), and `on: pull_request:` carries no `types:`, so labelling an
+  existing PR starts **no new run**. Consequences,
+  in operator terms: apply `batch-fold` in the PR-create call (`labels:` on
+  `POST /repos/{o}/{r}/pulls` — the shape `tools/batch_open.py` should use when #10902 takes this over),
+  or push a commit after labelling so the `synchronize` event runs the emitters again. **A label added to
+  an idle fold PR changes its queue order but not its in-flight run**, and the runner half then returns
+  `identity` silently: the warning path covers only an *unusable declaration*, never a *label missing from
+  the snapshot*, which is indistinguishable from "this PR is not a fold".
+- A constituent **already queued** before its fold opened is not removed by mechanism 1; the label
+  refuses the *next* evaluation, and the tool closes it. De-queueing a live batch is a human action.
+- No required check was added, removed or weakened to make any of this faster — priority is not
+  permission. `queue_conditions ∪ merge_conditions` still equals the live required set, name for name
+  (`check-required-set.py`; pinned in `tests/test_mergify_config_guard.py`), and the priority rule names
+  no check at all.
 
 ## Prior art this matches (and where it diverges)
 

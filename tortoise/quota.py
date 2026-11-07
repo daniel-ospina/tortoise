@@ -464,17 +464,45 @@ class QuotaExceededError(Exception):
     def __init__(self, message: str, *, resource: str | None = None,
                  used: int | None = None, limit: int | None = None,
                  estimate: int | None = None,
+                 estimated: bool | None = None,
                  code: str = QUOTA_REFUSAL_CODE) -> None:
         super().__init__(message)
         self.resource = resource
         self.used = used
         self.limit = limit
         self.estimate = estimate
+        # #5331: ``estimated`` marks a refusal decided from a SAMPLING estimate
+        # (the graph byte meter). Omitted (None) by every raise site that knows
+        # its figure is exact, so the payload keeps its shape — a refusal may
+        # not present an estimate as exact, and may not claim precision either.
+        self.estimated = estimated
         self.code = code
 
 
 class QuotaCheckError(Exception):
     """Quota counting/config failed — fail closed (500/503), never pass."""
+
+
+class OrgNotFoundError(QuotaCheckError):
+    """The resolver has no RECORD for this org — a STATE, not a fault (#9567).
+
+    Still a :class:`QuotaCheckError`, so every existing caller keeps its exact
+    fail-closed behaviour: where the resolved limits dict IS the answer ("what
+    may this org do?"), a missing org must be refused, and it still is.
+
+    The subclass exists for the ONE caller that only AUGMENTS a dict it was
+    already given (:func:`tortoise.allowance_gate.carry_resolved_allowances`, at
+    the REST seam). There the consumer's own auth read is authoritative and the
+    resolver can only ADD an allowance — so "this org has no row" cannot arm a
+    cap (the gate's declared default is "absent key = unconfigured"), while "the
+    read failed" is our own fault and IS refused. Collapsing the two reported a
+    tenant's well-defined absence as a 500 on every gated door, which is the
+    over-block the module's own ``#3981`` note rules out for OUR bookkeeping —
+    and the same absence was UNLIMITED on every door that skips the fill, so the
+    one state had two answers depending on the door. Canonical error-code
+    guidance (AIP-193) draws the same line: NOT_FOUND is a state the caller can
+    act on; UNAVAILABLE is the fault that must refuse.
+    """
 
 
 def quota_refusal_payload(exc: QuotaExceededError) -> dict:
@@ -496,7 +524,7 @@ def quota_refusal_payload(exc: QuotaExceededError) -> dict:
         "code": getattr(exc, "code", None) or QUOTA_REFUSAL_CODE,
         "message": str(exc),
     })
-    for key in ("resource", "used", "limit", "estimate"):
+    for key in ("resource", "used", "limit", "estimate", "estimated"):
         value = getattr(exc, key, None)
         if value is not None:
             payload[key] = value
@@ -555,8 +583,11 @@ def resolve_org_limits(org_id: str) -> dict:
     empty graph (post-flip verification finding, #669). Registry mode: the
     Org node, as before.
 
-    Missing Org → QuotaCheckError (fail-closed; the auth layer should
-    guarantee key→org mapping).
+    Missing Org → :class:`OrgNotFoundError` (a ``QuotaCheckError`` subclass, so
+    fail-closed everywhere it is consumed; the auth layer should guarantee
+    key→org mapping). The subclass lets a caller that only AUGMENTS an
+    already-authoritative dict tell "no record" (a state — nothing to carry)
+    from "the read failed" (a fault it must refuse).
 
     CONTRACT (the return shape every caller must honour, #310 GAP-B / #4010):
     the returned dict carries EVERY value of ``_RESOURCE_LIMIT_KEYS``. A key
@@ -603,7 +634,8 @@ def resolve_org_limits(org_id: str) -> dict:
                             _ORG_ADDITIVE_BILLING_TIER],
         )
         if row is None:
-            raise QuotaCheckError(f"Team {org_id!r} not found in control plane")
+            raise OrgNotFoundError(
+                f"Team {org_id!r} not found in control plane")
         # #1082 PR2: the anon ceiling is tier-DERIVED at resolution — an
         # unclaimed zero-email org (owner user_id NULL) resolves to the
         # reduced ``anon`` tier until claimed, then lifts to free. The row
@@ -656,7 +688,7 @@ def resolve_org_limits(org_id: str) -> dict:
         params={"id": org_id},
     ).result_set
     if not rows:
-        raise QuotaCheckError(f"Team {org_id!r} not found in registry")
+        raise OrgNotFoundError(f"Team {org_id!r} not found in registry")
     tier, mu, mg, mp, mak, _ms = rows[0]
     tier = tier or "free"
     from tortoise.pricing import tier_limits
@@ -1004,6 +1036,20 @@ def _count_resource(org_id: str, resource: str, sdk=None) -> int:
 
         # ── Tenant-graph-scoped counts (sessions, points) ──
         if sdk is None:
+            # #8906: this fallback is the DEFAULT graph `org_{org_id}`, NOT the
+            # request's — a custom-graph-bound key writes elsewhere. So a caller
+            # reaching here for a tenant-graph resource with a RESOLVED request
+            # SDK absent is counting a graph the request MAY NOT WRITE — for a
+            # graph-bound key, and for a promoted default; for the bound-DEFAULT
+            # and org-wide classes whose default IS ``org_{org_id}`` the graph
+            # coincides, and the cost there is a SECOND HANDLE, not a wrong
+            # count. See `enforce_org_limit`'s `sdk:`/`sdk_factory:` docs for the
+            # full contract. ⚠️ The ONE deliberate exception is
+            # `hosted_api._gate_sdk_for`'s unresolved-binding arm, which answers
+            # `None` ON PURPOSE (no write can occur — `_data_sdk` refuses 403 —
+            # so substituting a graph here WOULD be a fail-open widening); it
+            # reaches this line by design and is not the defect this comment
+            # describes.
             sdk = _make_sdk(namespace=org_id)
         if resource == "documents":
             # #1726 Slice 1, re-pointed by D10 (ONTOLOGY v3.15 §4.4): the
@@ -1170,14 +1216,77 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None, *,
             `int()` refuses it and it is refused here too.
         resource: "points" | "api_keys" | "sessions" | "users" | "graphs"
             | "documents".
-        sdk: pre-built org SDK (REST callers already hold one) — optional.
+        sdk: the pre-built SDK this request WRITES through — pass it for every
+            resource, and it WINS over `sdk_factory` when given (a caller that
+            already holds the handle must not build a second one). ⛔ For a
+            TENANT-GRAPH resource (`points`, `sessions`, `documents`) never let
+            the count land on `_count_resource`'s `namespace=org_id`
+            construction: that is the org's DEFAULT graph ``org_{org_id}`` —
+            while a CUSTOM-graph-bound key writes its own
+            ``graph_namespace`` (``org_{org_id}_{gid}``). Those two graphs differ
+            for that credential class by construction, so such a count compares
+            the cap against a graph the request never touches: a full default
+            graph refuses writes to an EMPTY bound graph (a permanent refusal)
+            and a full bound graph is admitted while the default is small (a cap
+            hole). This was #8906, live on every REST points door. Pass the
+            request's own SDK; where a caller cannot, `sdk_factory` below is
+            what keeps the count on the write's graph. The invariant is MCP's
+            house rule verbatim ("count on the SAME org SDK the tool writes to …
+            so the count and the write can never target different databases"),
+            and the omission is silent — nothing fails loudly when a new door
+            forgets it, which is why the contract is stated HERE rather than at
+            each caller.
+            ⚠️ The bound-DEFAULT class is NOT a lane rule — a bound-default key
+            agrees with ``org_{org_id}`` only while the org's storage key is
+            ``org_{org_id}``. Its namespace IS the org's STORAGE KEY
+            (``organizations.graph_name``), which the hosted org-provisioning
+            paths (``create_org`` / ``register_user`` / ``agent_signup`` / tenant
+            onboarding) set to ``org_{org_id}`` since #1903; the hosted default
+            ``graphs`` row COPIES that key rather than constructing it
+            (``supabase_control.insert_graph``), so a legacy/pre-guard key bound
+            to the default node opens whatever the key holds and agrees with
+            ``org_{org_id}`` only while it is ``org_{org_id}``. That is not
+            hypothetical in the hosted lane either: a pre-#1903 org whose
+            storage key is ``team_{…}`` diverges, and ``hosted_api`` already
+            guards that class
+            (``_make_sdk(namespace=org_id)`` "would therefore open, and so MINT, a
+            different, absent graph"). In the SELFHOST/registry lane
+            ``sdk.org_create`` stores ``graph_name = org_{name}`` (#2023 — the
+            divergence is called out in ``hosted_api._data_sdk``'s docstring), so
+            a bound-default key there diverges from ``org_{org_id}`` exactly as
+            a custom binding does.
+            Registry resources (``api_keys``/``users``/``graphs``) are
+            unaffected BY THE COUNT: they resolve the registry either way — a
+            passed registry-named sdk is reused and any other sdk is discarded
+            (``_count_resource``'s registry arm), so the number is the same.
         sdk_factory: #4051 — called ONLY if and when the count is actually
-            taken, for callers that must count the graph the write will open but
-            must not build an SDK when the limit is unlimited (the capture lane's
-            `sessions` gate is vacuous by #4010 and counted nothing before this —
-            it must not start building a graph handle to prove it). Mutually
-            exclusive with `sdk`: a non-None `sdk` wins and the factory is never
-            called.
+            taken, and only when no `sdk` was passed: for callers that must
+            count the graph the write will open but must not build an SDK when
+            the limit is unlimited (the capture lane's `sessions` gate is vacuous
+            by #4010 and counted nothing before this — it must not start
+            building a graph handle to prove it). Mutually exclusive with `sdk`:
+            a non-None `sdk` wins and the factory is never called.
+            ``hosted_api._gate_sdk_for`` is that factory, and it mirrors the
+            OPENER's own call forms — a bound key's own binding, a promoted
+            default's namespace — so an omitted sdk counts the graph the write
+            lands in for every credential that HAS a write graph. Two arms are
+            the deliberate exceptions, both recorded in ``_gate_sdk_for``'s
+            docstring: the registry-scoped resources and an UNRESOLVED binding
+            answer ``None`` (for the latter no write can occur — ``_data_sdk``
+            refuses 403 — so substituting a graph would be a fail-open
+            widening). The REST doors pass `sdk=` anyway, for identity (one
+            handle for the count and the write) rather than because the fallback
+            is wrong.
+            ⛔ A non-None `sdk` is NOT sufficient — the pre-#10637 call passed
+            one (`_org_sdk_for_credential`, a default-graph handle) and still
+            counted another graph. Pass the write graph's SDK, or an
+            `sdk_factory` returning it. All 4 current executable call sites do
+            (`rg -n 'enforce_org_limit[(]' tortoise/` also prints the `def` and
+            two prose mentions): `hosted_api._check_org_limit` supplies
+            `sdk_factory=lambda: _gate_sdk_for(org, resource)` (`sdk=sdk` too,
+            when its caller already holds the handle); `mcp_server` supplies
+            `sdk=_get_org_sdk()`; the two `/v1/index/docs` gates supply
+            `sdk=org_sdk`, which IS their write target.
         slot_credit: #4355 — how many slots this write RELEASES as part of the
             same operation, so the admission check is evaluated against the
             post-release count. It exists for exactly ONE caller: the
@@ -1187,8 +1296,14 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None, *,
             client-supplied value — an unproven credit is a free slot.
 
     Raises:
-        QuotaExceededError: org at/over limit (402-equivalent).
-        QuotaCheckError: counting failed (fail-closed).
+        QuotaExceededError: org at/over limit (402-equivalent) — including a
+            RULED dimension at/over its configured allowance (#5331: graph MB /
+            Postgres bytes / extraction tokens), which is checked FIRST and
+            names the dimension in ``resource``.
+        QuotaCheckError: counting failed (fail-closed), or a ruled dimension has
+            an allowance configured but NO usable reading (never measured, meter
+            fault, older than the stated bound, blocked, or an unreadable limit
+            value). See ``tortoise/allowance_gate.py``.
     """
     if limits is None:
         return  # stdio/operator — no org context
@@ -1205,6 +1320,35 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None, *,
     # existing #5425-registered category, unchanged.
     if resource not in GATEABLE_RESOURCES:
         raise QuotaCheckError(f"unknown quota resource: {resource!r}")
+
+    # ── #5331/#9567 D11-D12: the DIMENSIONS THE OWNER RULED ──────────
+    # The gate below counts NODES and enforces ``max_points``. The ruled storage/
+    # LLM dimensions are BYTES (Postgres, graph MB) and TOKENS (extraction), and
+    # a node count is explicitly NOT the model (#4495/#5331). So they are
+    # enforced HERE, ahead of the legacy node count, through the ONE declared
+    # registry (``cost_dimensions``) — see ``tortoise/allowance_gate.py``.
+    #
+    # ⛔ INERT BY DEFAULT: no production resolver emits an ``ALLOWANCE_KEYS``
+    # value, so every dimension is unconfigured and this call is a dict-miss per
+    # dimension. It REFUSES only once an allowance is configured — the ordering
+    # the storage architecture requires (wire the meter, then configure).
+    # The legacy ``points`` count below is deliberately RETAINED (it is a real
+    # node cap with its own #4051 history); it is a LEGACY dimension whose unit
+    # the owner has replaced, and it stays until an allowance is configured.
+    try:
+        from .allowance_gate import enforce_allowances
+    except Exception as e:
+        # A swallowed import here would emit an unmapped 500 this gate promises
+        # never to produce (#4051). The gate's own drift check is deliberately
+        # LOUD at import (a renamed dimension is a hard failure), so the
+        # loudness is preserved inside the documented refusal type instead of
+        # escaping as a KeyError/ImportError.
+        _logger.error(
+            "allowance gate unavailable (fail-closed): team=%s error=%r",
+            org_id, e)
+        raise QuotaCheckError(
+            f"the allowance gate is unavailable ({type(e).__name__}: {e})") from e
+    enforce_allowances(limits, org_id=org_id, resource=resource)
     # ── documents: DERIVED-CONSTANT cap (T2-P2a, #1726) — handled BEFORE the
     # pricing-keyed generic path. Deliberately NOT in _RESOURCE_LIMIT_KEYS: a
     # pricing.json max_documents field would ripple through tier_limits /
@@ -1526,6 +1670,15 @@ def _commit_ingest_reclaim(store, now_ts: float) -> None:
 def commit_ingest_admit(org_id: str | None, charge_bytes: int) -> IngestAdmission:
     """Charge ``charge_bytes`` against the org's rolling-60s ingest allowance.
 
+    ⚠️ ONE WINDOW FOR BOTH SESSION WRITE LANES (#4051 §3.1). The name follows
+    the documented operator knob (``TORTOISE_COMMIT_INGEST_BYTES_PER_MIN``,
+    ``docs/capacity.md`` §3) and predates the second caller: since the capture
+    lane was wired, ``POST /v1/sessions`` charges the SAME per-org window as
+    ``POST /v1/sessions/commit`` (``hosted_api.capture_ingest_charge_bytes``).
+    Alternating endpoints therefore cannot buy a second allowance — the
+    allowance is per ORG and per WINDOW, not per route. A caller that adds a
+    third write lane must charge this same window rather than add a constant.
+
     Exemptions:
 
     * ``not org_id`` (stdio/operator) is unbounded — it mirrors
@@ -1535,7 +1688,11 @@ def commit_ingest_admit(org_id: str | None, charge_bytes: int) -> IngestAdmissio
       RECORDED when the window is EMPTY. Refusing it (with a Retry-After) would
       tell a client to retry a request that can never fit — an unbreakable loop
       that only appears if an operator sets
-      ``TORTOISE_COMMIT_INGEST_BYTES_PER_MIN`` below the route's 8 MiB body cap.
+      ``TORTOISE_COMMIT_INGEST_BYTES_PER_MIN`` below a route's body cap — 8 MiB
+      for commit, 16 MiB for capture
+      (``body_limits.CAPTURE_SESSION_MAX_BYTES``), which is ABOVE the default
+      10 MiB allowance, so a legitimate max-size capture exceeds the whole
+      window and is admitted only while that window is EMPTY (#11218).
       Admitting it once spends the window, so the NEXT request is throttled: at
       most one over-sized request per window, never an unlimited stream of
       them (which is why the ``used == 0`` condition is load-bearing, not a

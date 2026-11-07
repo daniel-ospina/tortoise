@@ -48,6 +48,7 @@ import tarfile
 from pathlib import Path
 
 import pytest
+import yaml
 
 REPO = Path(__file__).resolve().parent.parent
 SCRIPT = REPO / ".github" / "scripts" / "runner-tools.sh"
@@ -98,7 +99,15 @@ GH_JOBS = {
     # the `Ensure gh` step reds the JOB (it fails closed and has no
     # `continue-on-error`), so the advisory step never gets to report UNMEASURED —
     # which is exactly why the contract step is required here.
-    "drift-guard.yml": ["drift-guard"],
+    #
+    # ⚠️ It is mounted on its OWN workflow, not on `drift-guard.yml` where #10597
+    # first put it: that workflow is `disabled_manually`, so a step there never
+    # executes and the instrument was inert while the PR was green (#10634 review
+    # P1). A NEW workflow is `active` on creation. The pin that keeps a re-mount
+    # off a disabled host is `test_an_advisory_mount_is_not_on_a_disabled_workflow`
+    # below; `drift-guard.yml` therefore has no entry here any more — the step,
+    # its `Ensure gh` and the `pull-requests: read` grant it needed all moved.
+    "closes-coherence.yml": ["closes-coherence"],
 }
 
 #: Jobs that use `gh` and are NOT covered, with the reason each one cannot simply take
@@ -140,6 +149,86 @@ KNOWN_UNCOVERED = {
 }
 
 CONTRACT_STEP = "runner-tools.sh ensure gh"
+
+
+#: Workflows GitHub reports as NOT `active`, with the date each state was MEASURED.
+#: A workflow in this set never runs: no `pull_request`, no `workflow_dispatch`,
+#: nothing. Two review cycles on #10634 measured 45 workflows with exactly two in
+#: this state, both from the same window (`drift-guard.yml` updated
+#: 2026-10-29T02:33:12Z; `finding-provenance` around it).
+#:
+#: ⚠️ THIS IS A RECORD, NOT A LIVE READ, and it can go stale in ONE direction that
+#: matters: a workflow disabled AFTER this line was written will not red anything
+#: until someone adds it here. That is the price of a pin a unit suite can run
+#: (this repo's suite has no network and no token), and it is why the entry
+#: carries the date it was measured. Re-measure with
+#: `gh api "repos/<owner>/<repo>/actions/workflows?per_page=100" \
+#:   --jq '.workflows[] | select(.state!="active") | "\(.path)\t\(.state)"'`
+#: before trusting it — the same rule that retired a stale count in this repo's
+#: instruction file (`agent-infra#2936`).
+KNOWN_DISABLED_WORKFLOWS = {
+    "drift-guard.yml": "disabled_manually, measured 2026-11-03 (updated_at 2026-10-29T02:33:12Z)",
+    "finding-provenance.yml": "disabled_manually, measured 2026-11-03 (same window as drift-guard)",
+}
+
+#: Workflows whose job exists ONLY to ADVISE (warn, never gate). Their whole value
+#: is that a reader SEES the warning, so a mount on a workflow that cannot run is
+#: not a cosmetic defect — it is the instrument being absent (#10634 review P1).
+#: `drift-guard.yml:80` was exactly that: a well-built warn-only step on a
+#: `disabled_manually` workflow, green on every PR and never executed.
+ADVISORY_MOUNTS = {
+    "closes-coherence.yml": "closes-coherence",
+}
+
+
+def test_an_advisory_mount_is_not_on_a_disabled_workflow():
+    """A warn-only step on a workflow GitHub will not run advises nobody.
+
+    WHY THIS IS A PIN AND NOT A COMMENT. #10597's deliverable was one annotation
+    on a stacked PR; it was mounted in `drift-guard.yml`, which had been
+    `disabled_manually` for five days. Every other leg was green and correct —
+    the contract step was declared, the registration was in `ci-surfaces.yml`, the
+    suite passed — because NONE of them can see a workflow's live state. The
+    defect survived the whole review history for that reason, so the declared
+    disabled set above is the cheapest executable form that reds on a re-mount.
+    """
+    dead = sorted(set(ADVISORY_MOUNTS) & set(KNOWN_DISABLED_WORKFLOWS))
+    assert not dead, (
+        f"these workflows host a warn-only mount but are declared DISABLED, so the "
+        f"warning can never reach a reader: {dead}. Mount the advisory job on a "
+        f"workflow that runs (a new workflow is active on creation), or re-enable "
+        f"the host as its own reviewed decision — do not leave the step there "
+        f"(#10634 review P1)"
+    )
+    for workflow, job in ADVISORY_MOUNTS.items():
+        path = WORKFLOWS / workflow
+        assert path.exists(), f"advisory mount names a workflow that is not in the tree: {workflow}"
+        text = path.read_text()
+        # The TRIGGER, not the file. `workflow_dispatch`-only would pass a
+        # file-exists check and still never fire for the PR the warning is for —
+        # and a whole-file substring check cannot see that either, because
+        # `pull_request` also occurs in the step's `if:`, in
+        # `github.event.pull_request.number`, and in `github.event.pull_request.
+        # head.sha`. Measured (#10634 review P2): deleting the `on: pull_request:`
+        # entry while leaving the `if:` intact still matched the old substring
+        # assertion four times, so the pin passed on a workflow with no PR
+        # trigger at all. Parse the `on:` block instead.
+        doc = yaml.safe_load(text) or {}
+        # PyYAML parses the YAML 1.1 `on:` key as boolean True (same shape as
+        # `tests/test_mergify_config_guard.py::test_recut_workflow_is_never_required`).
+        triggers = doc.get("on") or doc.get(True) or {}
+        if isinstance(triggers, str):
+            triggers = {triggers}
+        assert "pull_request" in set(triggers), (
+            f"{workflow} is an ADVISORY mount but its `on:` trigger is "
+            f"{sorted(triggers) if not isinstance(triggers, str) else [triggers]!r}, not "
+            f"`pull_request`, so the advisory job cannot fire for a PR"
+        )
+        # …and the job must really be there, so a rename cannot leave this pin
+        # asserting over a workflow with no advisory step in it at all.
+        assert re.search(rf"^  {re.escape(job)}:\s*$", text, re.M), (
+            f"{workflow}: no job `{job}` — the advisory mount moved or was renamed"
+        )
 
 
 # ── the probe: the same call, both polarities ────────────────────────────────

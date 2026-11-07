@@ -59,10 +59,25 @@ def _report(clean=None, failed=None) -> dict:
     # fixture carries each clean session's ids on a side key so the helper can
     # reproduce that list without pretending to be the store legs.
     return {
+        # ⛔ THE EVIDENCE'S TARGET IS PART OF "IS THIS A CENSUS REPORT" (review P2,
+        # cycle 5): a nameless census is refused (the same rule
+        # `cache_eviction.load_parity_report` applies) and a census of ANOTHER graph
+        # is refused for the target this run resolved. "x" is the graph
+        # `_TARGET_ARGV`'s URI names.
+        "graph": "x",
         "population": {"episodic_graph_nodes": 9, "turn_shaped_nodes": 9,
                        "sessions_with_graph_turns": len(clean) + len(failed),
                        "outside_population": 0},
-        "record": {"turn_rows_total": 9, "episodic_rows_not_turn_shaped": 0},
+        "record": {"turn_rows_total": 9, "episodic_rows_not_turn_shaped": 0,
+                   # The authority and the comparison width, which every census
+                   # this repo emits states (#10627 review, P3). The fixture
+                   # carries what the tool really writes — the hosted leg and
+                   # its seven fields — so a plan built from it can be told
+                   # apart from one built from a three-field local census.
+                   "leg": "hosted"},
+        "compared_fields": ["key", "content", "speaker", "createdAt",
+                            "kind", "status", "content_hash", "embedding"],
+        "declared_absent": [],
         "parity": {"clean_sessions": clean, "failed_sessions": failed},
         "anomalies": {k: [] for k in ("orphan", "cross_wired",
                                       "non_decimal_suffix", "operator_flagged",
@@ -400,6 +415,218 @@ def test_cli_default_is_a_dry_run_and_writes_the_plan(tmp_path, capsys):
     # rather than implying a recovery path that has not been proven.
     assert plan["recovery"]["verdict"].startswith("NEEDS-RECOVERY-PATH")
     assert any("restore-proof" in m for m in plan["recovery"]["missing"])
+
+
+@pytest.mark.parametrize("flag,extra", [
+    ("--uri", []),
+    ("--db-path", []),
+    ("--graph-name", ["--uri", "docker://:pw@127.0.0.1:1/x"]),
+])
+def test_an_EMPTY_graph_target_flag_refuses_by_name(flag, extra, capsys):
+    """⛔ THE SAME SHELL ACCIDENT, THE SAME REFUSAL — in the SECOND producer.
+
+    Measured before the fix (review P2, cycle 3): `purge --uri ""` read the EMBEDDED
+    store and then died with `ValueError: Unsupported scheme:` escaping the
+    `CensusError` handler — exit **1**, the documented USAGE code, so a shell accident
+    read as a mistyped flag; with the URI unset but a working read it could exit 0 and
+    write a census artifact naming a graph on an instance the URI never named. And
+    `--db-path X --graph-name ""` exited 0 with `graph: ""` in the artifact while the
+    read fell back to `tortoise`.
+
+    Mutation that goes RED here: dropping the `empty_graph_target_flag` call from
+    `main` (all three red), or dropping `--graph-name` from the helper's own loop (the
+    third only).
+    """
+    code = purge.main([flag, "", *extra, "--record-dsn", _DSN,
+                       "--org-id", "org", "--graph-id", "graph",
+                       "--plan-out", "/tmp/unused-plan.json"])
+
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "EMPTY" in err and flag in err
+    assert "Nothing was read and nothing was deleted" in err
+
+
+def test_an_unresolvable_uri_is_exit_three_not_a_traceback(capsys):
+    """A URI whose scheme cannot be resolved must read as "the graph could not be read".
+
+    Measured before the fix (review P2, cycle 3), the reachable arm of this class was
+    `--uri ""`: the empty value fell through to the EMBEDDED read (which succeeds) and
+    the resolver's `ValueError` then escaped every handler, so the interpreter exited
+    **1** — indistinguishable from a mistyped flag, on a target nothing had
+    established. That input is now refused BY NAME before any read (the pin above);
+    this one keeps the sibling property pinned — a bad scheme is a named exit 3, never
+    a traceback.
+    """
+    code = purge.main(["--uri", "postgres://h:1/g", "--record-dsn", _DSN,
+                       "--org-id", "org", "--graph-id", "graph"])
+
+    assert code == 3
+    err = capsys.readouterr().err
+    assert "could not be read" in err
+    assert "Unsupported scheme" in err
+    assert "an absence is NOT established" in err
+
+
+def test_the_census_artifact_names_the_graph_the_run_opened(monkeypatch, tmp_path):
+    """⛔ `census()` HAS A SECOND PRODUCER, AND IT MUST NAME ITS TARGET TOO.
+
+    `purge_legacy_turns.py` calls `census()` too, and it reuses the same `instrument`
+    tag — so an artifact it writes is fed to `cache_eviction.load_parity_report`, which
+    now REFUSES a report that names no graph (review P2 on #11097). Omitting the name
+    did not merely lose a field: it made every artifact this producer writes unusable
+    AS EVIDENCE, while asserting an absence the run itself disproves (`census()`'s own
+    comment: an artifact that does not know its target must say so — this one does).
+
+    Mutation that goes RED here: dropping `graph_name=` from the call site (then
+    `seen["graph_name"]` is None while the report says null).
+    """
+    seen: dict = {}
+    real_census = purge.census_mod.census
+
+    def capture(graph, record, *, sample, graph_name=None):
+        seen["graph_name"] = graph_name
+        return real_census(graph, record, sample=sample, graph_name=graph_name)
+
+    node = {"id": "s1_t0", "content": "[user] body of s1_t0",
+            "speaker": "user", "status": "draft",
+            "createdAt": "2026-10-25T00:00:00+00:00", "pointKind": "event",
+            "embedding": None, "sessions": {"s1"}}
+    row = {"node_key": "s1_t0", "content": "[user] body of s1_t0",
+           "speaker": "user", "status": "draft",
+           "created_at": "2026-10-25T00:00:00+00:00", "point_kind": "event",
+           "is_episodic": True, "embedding": None}
+    monkeypatch.setattr(purge.census_mod, "census", capture)
+    monkeypatch.setattr(purge.census_mod, "read_graph_turns",
+                        lambda *a, **k: {"nodes": {"s1_t0": node}})
+    monkeypatch.setattr(purge.census_mod, "read_record_turns",
+                        lambda *a, **k: {"rows_by_key": {"s1_t0": row},
+                                         "non_turn_shaped": 0})
+
+    rc = purge.main(["--uri", "docker://:pw@127.0.0.1:1/team_x",
+                     "--record-dsn", _DSN,
+                     "--org-id", "org", "--graph-id", "graph",
+                     "--target-note", "unit test",
+                     "--plan-out", str(tmp_path / "plan.json")])
+
+    assert rc == 0, seen
+    # The graph the URI names — resolved by the instrument's own canonical helper,
+    # never a second parse of the URI here.
+    assert seen["graph_name"] == "team_x"
+    # …and the SIGNED artefact names it too (review P2, cycle 5): the plan is what a
+    # human approves for an irreversible delete, so the graph its parity evidence
+    # measured must be in it, not only in the census artifact the plan summarises.
+    plan = json.loads((tmp_path / "plan.json").read_text(encoding="utf-8"))
+    assert plan["census"]["graph"] == "team_x"
+
+
+def test_a_cached_census_that_names_no_graph_is_not_evidence(tmp_path, capsys):
+    """⛔ TWO CONSUMERS OF ONE DICT MUST NOT DISAGREE ABOUT WHAT EVIDENCE IS.
+
+    Measured before the fix (review P2, cycle 5): a `--census-json` file with
+    `graph: null` was accepted and produced an exit-0 signable plan naming no graph at
+    all, while `cache_eviction.load_parity_report` refused the very same file. The
+    lenient side was the artefact a human signs for an IRREVERSIBLE delete.
+
+    ⚠️ Which guard fires here, measured (review P2, cycle 6): removing the `graph`
+    requirement from `_report_problem` does NOT make the run exit 0 — the identity
+    refusal below fires first, on `graph: None` vs `'x'`. This pin reds on its
+    MESSAGE assertion, and `test_report_problem_refuses_a_nameless_census` is the pin
+    that reds on the `_report_problem` rule itself (which is the refusing guard on
+    paths the identity check does not reach, e.g. `_execute`'s live report).
+    """
+    report = _report(clean=[_clean_with_ids("s1", ["s1_t0"])])
+    report["graph"] = None
+    path = tmp_path / "census.json"
+    path.write_text(json.dumps(report), encoding="utf-8")
+
+    rc = purge.main([*_TARGET_ARGV, "--target-note", "unit test",
+                     "--census-json", str(path),
+                     "--plan-out", str(tmp_path / "plan.json")])
+
+    assert rc == 3
+    err = capsys.readouterr().err
+    assert "nameless census is not evidence" in err
+    assert not (tmp_path / "plan.json").exists()
+
+
+def test_report_problem_refuses_a_nameless_census():
+    """The SHAPE rule, pinned where it is the refusing guard.
+
+    `_report_problem` is what `_execute` applies to the LIVE report before any delete,
+    and what any second producer of `census()`'s dict meets. A nameless census must
+    not pass it, and the rule must treat every absence the same way — missing, blank,
+    whitespace, or a non-string.
+
+    Mutation that goes RED here: removing the `graph` rule (each case returns "").
+    """
+    report = _report(clean=[_clean_with_ids("s1", ["s1_t0"])])
+
+    for bad in (None, "", "   ", 3):
+        report["graph"] = bad
+        assert "nameless census is not evidence" in purge._report_problem(report), bad
+
+    report["graph"] = "x"
+    assert purge._report_problem(report) == ""
+
+
+def test_the_signed_plan_records_the_bindings_limit(monkeypatch, tmp_path):
+    """The artefact a human signs must record what the binding CANNOT see.
+
+    Review P2, cycle 7: the source claimed the name-only residual was "stated in
+    `--census-json`'s help and in the plan's `census` block", and the plan carried no
+    such field — so a signed plan for an IRREVERSIBLE delete presented a name-only
+    binding as if its limit needed no mention.
+    """
+    node = {"id": "s1_t0", "content": "[user] body of s1_t0", "speaker": "user",
+            "status": "draft", "createdAt": "2026-10-25T00:00:00+00:00",
+            "pointKind": "event", "embedding": None, "sessions": {"s1"}}
+    row = {"node_key": "s1_t0", "content": "[user] body of s1_t0",
+           "speaker": "user", "status": "draft",
+           "created_at": "2026-10-25T00:00:00+00:00", "point_kind": "event",
+           "is_episodic": True, "embedding": None}
+    monkeypatch.setattr(purge.census_mod, "read_graph_turns",
+                        lambda *a, **k: {"nodes": {"s1_t0": node}})
+    monkeypatch.setattr(purge.census_mod, "read_record_turns",
+                        lambda *a, **k: {"rows_by_key": {"s1_t0": row},
+                                         "non_turn_shaped": 0})
+
+    rc = purge.main(["--uri", "docker://:pw@127.0.0.1:1/team_x",
+                     "--record-dsn", _DSN, "--org-id", "org",
+                     "--graph-id", "graph", "--target-note", "unit test",
+                     "--plan-out", str(tmp_path / "plan.json")])
+
+    assert rc == 0
+    plan = json.loads((tmp_path / "plan.json").read_text(encoding="utf-8"))
+    assert plan["census"]["graph"] == "team_x"
+    binding = plan["census"]["graph_binding"]
+    assert "name-only" in binding
+    assert "another instance" in binding and "measured earlier" in binding
+
+
+def test_a_cached_census_of_ANOTHER_graph_cannot_license_this_one(tmp_path, capsys):
+    """The plan's evidence must be about the target this run resolved.
+
+    Measured before the fix (review P2, cycle 5): `--census-json <census of graph B>`
+    with `--uri …/x` exited 0 with a signable plan — every comparison downstream was
+    of counts, never identities.
+
+    Mutation that goes RED here: removing the `report["graph"] != expected_graph`
+    refusal (the run then exits 0).
+    """
+    report = _report(clean=[_clean_with_ids("s1", ["s1_t0"])])
+    report["graph"] = "other_graph"
+    path = tmp_path / "census.json"
+    path.write_text(json.dumps(report), encoding="utf-8")
+
+    rc = purge.main([*_TARGET_ARGV, "--target-note", "unit test",
+                     "--census-json", str(path),
+                     "--plan-out", str(tmp_path / "plan.json")])
+
+    assert rc == 3
+    err = capsys.readouterr().err
+    assert "other_graph" in err and "'x'" in err
+    assert not (tmp_path / "plan.json").exists()
 
 
 def test_cli_refuses_execute_from_a_cached_census(tmp_path, capsys):
@@ -1434,6 +1661,74 @@ def test_the_plan_records_a_LIVE_read_as_its_source(tmp_path, monkeypatch,
     assert plan["census"]["source"]["kind"] == "live-read"
     assert plan["census"]["source"]["uri_host"] == "127.0.0.1:1"
     assert "FILE" not in capsys.readouterr().out
+
+
+def test_the_plan_records_the_record_leg_and_the_comparison_WIDTH(
+        tmp_path, capsys):
+    """#10627 review (P3): the artefact a human SIGNS must state which record the
+    parity evidence came from and how wide the comparison was.
+
+    `--execute` re-derives with the hosted leg and its seven fields, but
+    `--census-json` is the only preview path an operator has on a postponed
+    hosted deployment. Before this pin the plan carried neither the leg nor the
+    field list, so a plan resting on the LOCAL JSONL's three compared fields
+    was byte-for-byte identical to one resting on all seven against
+    `public.point` — for an IRREVERSIBLE graph delete. Measured RED against the
+    pre-fix `census` block (the three keys are absent, `KeyError`).
+    """
+    report = _report(clean=[_clean_with_ids("s1", ["s1_t0"])])
+    report["record"] = {"turn_rows_total": 9,
+                        "episodic_rows_not_turn_shaped": 0,
+                        "leg": "local", "dir": "/home/x/.tortoise/session-events"}
+    report["compared_fields"] = ["key", "content", "speaker"]
+    report["declared_absent"] = ["embedding", "createdAt"]
+    plan_path = tmp_path / "plan.json"
+    assert purge.main([*_TARGET_ARGV, "--target-note", "t", "--census-json",
+                       _write(tmp_path, "census.json", report),
+                       "--plan-out", str(plan_path)]) == 0
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    assert plan["census"]["record_leg"] == "local"
+    assert plan["census"]["record_dir"] == "/home/x/.tortoise/session-events"
+    assert plan["census"]["compared_fields"] == ["key", "content", "speaker"]
+    assert plan["census"]["declared_absent"] == ["embedding", "createdAt"]
+    out = capsys.readouterr().out
+    # …and the PREVIEW the operator reads before signing says the same thing.
+    assert "record leg : local (/home/x/.tortoise/session-events)" in out
+    assert "compared   : key, content, speaker" in out
+    assert "not compared: embedding, createdAt" in out
+
+
+@pytest.mark.parametrize("mutate, needle", [
+    (lambda r: r.pop("record"), "no `record` block"),
+    (lambda r: r["record"].pop("leg"), "record.leg"),
+    (lambda r: r.__setitem__("record", {"leg": ""}), "record.leg"),
+    (lambda r: r.pop("compared_fields"), "compared_fields"),
+    (lambda r: r.pop("declared_absent"), "declared_absent"),
+])
+def test_a_census_report_that_states_no_leg_or_no_width_is_refused(
+        tmp_path, capsys, mutate, needle):
+    """#10627 review (P3), the fail-closed half: an artifact that does not say
+    which record it compared, or how wide, must not become a signable plan.
+
+    The plan is the artefact a human approves for an IRREVERSIBLE graph delete,
+    and an UNSTATED width is not a full-width comparison. Every census this
+    repo emits carries all three keys, so this refuses only a hand-edited or
+    pre-#10627 artifact — which is exactly the class whose evidence width is
+    not established. Measured RED against the pre-fix `_report_problem` (all
+    five mutations exited 0 and wrote a signable plan).
+    """
+    report = _report(clean=[_clean_with_ids("s1", ["s1_t0"])])
+    mutate(report)
+    plan_path = tmp_path / "plan.json"
+    rc = purge.main([*_TARGET_ARGV, "--target-note", "t", "--census-json",
+                     _write(tmp_path, "census.json", report),
+                     "--plan-out", str(plan_path)])
+    assert rc == 3
+    assert not plan_path.exists()          # no signable plan was written
+    err = capsys.readouterr().err
+    assert purge.REFUSE_CENSUS_UNREADABLE in err
+    assert needle in err
+    assert "Traceback" not in err
 
 
 # ── a malformed-but-parseable plan is a refusal, not a traceback ─────────
@@ -2613,6 +2908,14 @@ def test_a_record_side_DUPLICATE_is_named_not_reported_as_a_transcript_mismatch(
     assert out["counts"][purge.CLASS_DUPLICATE_WINDOW] == 1
     assert out["counts"][purge.CLASS_MISMATCH] == 0
 
+    # ⛔ AND NOT AS A "MISMATCHED FIELD" EITHER (review P3). `class` was fixed to
+    # name the duplicate; the `mismatched` COUNT was not, so the approvable
+    # artifact carried `mismatched: 1` for a session the census never compared a
+    # single field of — telling an operator the MISMATCH remedy (a field fix)
+    # applied to a session whose only repair is to resolve the capture by hand.
+    assert entry["mismatched"] == 0, entry
+    assert entry["missing"] == 0, entry
+
 
 def test_a_planned_DUPLICATE_session_refuses_under_its_OWN_name():
     """Review P2: the named diagnosis, before the generic set mismatch.
@@ -2667,3 +2970,54 @@ def test_every_plan_CLASS_is_defined_in_the_module_class_table():
     assert "DUPLICATE-WINDOW" in classes.values()
     undocumented = sorted(v for v in classes.values() if v not in doc)
     assert undocumented == []
+
+
+def test_the_census_json_help_states_the_identity_rule_and_its_residual(capsys):
+    """The flag's help is where the rule is read at the moment of choosing it.
+
+    Review P2, cycle 6: the destructive consumer ENFORCED the identity rule while its
+    help still described `--census-json` as a plain "reuse a census report", so nothing
+    on this surface said a nameless census is refused, that the report's graph must
+    match this run's, or that the comparison cannot see an INSTANCE or an earlier
+    measurement. The sibling consumer states all three in `--parity-graph`'s help.
+    """
+    with pytest.raises(SystemExit) as exc:
+        purge.main(["--help"])
+    assert exc.value.code == 0
+    text = capsys.readouterr().out
+    at = text.index("  --census-json")
+    rest = text[at + 1:]
+    block = " ".join(rest[:rest.index("\n  --")].split())
+    assert "REFUSED" in block
+    assert "another" in block and "graph" in block
+    assert "Name-only" in block and "NOT" in block
+    # ⛔ BOTH residuals, not just one (review P2, cycle 7): deleting the staleness
+    # clause alone left the three assertions above green, so the disclosure could
+    # regress to the sibling's gap with the suite green.
+    assert "measured earlier" in block
+
+
+def test_an_unresolvable_uri_on_the_CACHED_route_is_exit_three_not_a_traceback(
+        tmp_path, capsys):
+    """The resolver call the cached route added must be guarded like the live one.
+
+    Review P2, cycle 6: the identity check resolved the target OUTSIDE every handler,
+    so a URI the canonical resolver refuses (`bolt://` is a documented Tortoise URI
+    form, and the resolver accepts only docker/redis/rediss) escaped `main()` as a raw
+    traceback and the interpreter exited **1** — the documented "bad flags" code —
+    while the LIVE route for the identical flag returns a named exit 3.
+    """
+    path = tmp_path / "census.json"
+    path.write_text(json.dumps(_report(clean=[_clean_with_ids("s1", ["s1_t0"])])),
+                    encoding="utf-8")
+
+    rc = purge.main(["--uri", "bolt://h:1/x", "--org-id", "org",
+                     "--graph-id", "graph", "--record-dsn", _DSN,
+                     "--target-note", "unit test", "--census-json", str(path),
+                     "--plan-out", str(tmp_path / "plan.json")])
+
+    assert rc == 3
+    err = capsys.readouterr().err
+    assert "could not be resolved" in err
+    assert "Unsupported scheme" in err
+    assert not (tmp_path / "plan.json").exists()

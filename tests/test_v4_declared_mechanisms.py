@@ -13,7 +13,8 @@ place the declared set lives; this file is the gate over it. Every declared
 mechanism must be either
 
   * **implemented** — a code path AND a test, every declared path present; or
-  * **not-implemented** — an explicit marker (a tracking issue);
+  * **not-implemented** — an explicit marker (a tracking issue) AND the test
+    node that reds when the absence closes (`pins:`);
 
 and a mechanism that is **neither** FAILS the gate. A mechanism with code but no
 test is not "implemented with a test" — that is the `declared ⇒ present`
@@ -29,6 +30,24 @@ edited). An `implemented` row therefore names its `symbols:` and the gate
 resolves each one in the file(s) the SAME row declares — so "the mechanism is
 there" is a fact about the code, not about the path.
 
+⭐ THE ABSENCE PIN IS A TEST NODE, NOT A FILE PATH, and it is the mirror of
+`symbols:` on the other side of the registry. `tracking_issue:` says WHERE an
+absence is tracked; `tests:` proves a FILE exists — neither says anything would
+NOTICE the absence closing, and a pin whose cited call was renamed away kept the
+row reading as watched (#10636 measured the class: `span_link`'s one pinned gate
+stood in for four, and the other three were named only in the note's prose). So
+every `not-implemented` row names `pins:` — `path::test_name` or
+`path::Class::test_name`, pytest's own selector, so a reader can run exactly
+what the row cites — and the gate resolves the node against the file's AST. An
+unreadable test source is UNVERIFIABLE, never a pass; a pin on an `implemented`
+row is refused, because a pin asserts an ABSENCE. ⚠️ What the gate ESTABLISHES is
+narrower than what the pin MEANS, and the difference is stated rather than
+overclaimed: the cited NODE is still defined at that call, so a rename or a
+deletion cannot leave the row silently unwatched. That the node actually
+OBSERVES this absence is the row author's claim, reviewed once — and a node that
+never runs (`skip`/`xfail`) is a review-time refusal, not something this gate
+can see.
+
 WHAT THIS GATE DELIBERATELY DOES NOT DO (#5064, bounded slice)
 -------------------------------------------------------------
 * It does not implement any mechanism. Four of the thirteen are genuinely
@@ -39,12 +58,31 @@ WHAT THIS GATE DELIBERATELY DOES NOT DO (#5064, bounded slice)
   #5064's open question (a): registry-as-source vs registry-as-check). The
   registry is a CHECK over the two design documents here, not their source.
 
+⭐ THE DECLARATION SITE CARRIES THE STATE, and the gate fails closed when it
+cannot. This is the half `membership_errors` cannot reach: membership proves
+every declared mechanism HAS a verdict, and says nothing about whether the
+document a human actually reads states it. #10636 is the concrete case — it
+flipped `span_link` to `not-implemented` in the registry while §2.4.1 rule 1 of
+`EXTRACTOR-V4-ARCHITECTURE.md` went on reading *"Every committed `Point`/`Object`
+must carry a reachable link to its `Source` span"* with **nothing at that site**
+saying the every-point half is unbuilt. The absence was recorded in a file the
+reader of the design does not open, so the design still outran the code —
+#5064's root sentence, one level out. So the marker states the mechanism's
+state (`<!-- v4-mechanism: <id> state: not-implemented -->`) and
+`declaration_state_errors` refuses a marker that omits it, names an unknown
+state, or disagrees with the row in EITHER direction — a registry flip with a
+stale document and a document claim with a stale registry both red. What that
+buys is the refactor direction's own words: *"the sufficiency router, the
+fan-out cap and the EMBED gate become **visible absences** rather than assumed
+behaviour"* — visible where the design says the thing.
+
 ⭐ MEMBERSHIP IS CHECKED IN BOTH DIRECTIONS, because `DECLARED_IDS` alone cannot
 prove it is COMPLETE — and that is how `state_value_carve_out` (the verbatim
 state/operational-value carve-out, #2453) stayed unregistered while this gate
 stayed green: a hand-written list of seven cannot notice an eighth mechanism the
 design declares in prose. So every mechanism the registry knows about carries a
-`<!-- v4-mechanism: <id> -->` marker in EACH `docs/architecture/**/*.md` document
+`<!-- v4-mechanism: <id> state: <state> -->` marker in EACH
+`docs/architecture/**/*.md` document
 its row names — the convention is to place it at the declaration site, and that
 placement is a DISCIPLINE, not something this gate can read (see the stated
 limits) — and `membership_errors` fails closed on FOUR shapes:
@@ -80,6 +118,12 @@ limits) — and `membership_errors` fails closed on FOUR shapes:
     backfill, not a property the gate can derive. What IS closed is every MARKED
     case: a marker in a document the row omits is refused, so the registry's
     enumeration cannot silently shrink;
+  * a pin resolves at MODULE/CLASS depth only. A NESTED test class
+    (`path::TestOuter::TestInner::test_x`) is a selector pytest runs that this
+    gate cannot name, so it is refused as malformed rather than silently
+    accepted — the direction that cannot hide a mechanism nobody is watching,
+    and the reason the refusal message says "module/class depth" instead of
+    claiming "the node pytest selects";
   * a marker DETACHED from what it declares is not detected: the marker's
     position inside a document is a convention, so moving it to the file's end
     and deleting the passage it marked leaves the gate green (measured — a
@@ -139,6 +183,7 @@ import ast
 import re
 import sys
 import tokenize
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -184,15 +229,95 @@ DECLARED_IDS = (
 #: write path live there, and widening the scan to every `.md` would make an
 #: unrelated doc's prose able to red (or silently satisfy) the gate.
 #:
-#: ⚠️ A marker must be a WHOLE HTML comment (`<!-- v4-mechanism: <id> -->`, the id
-#: lowercase, digits and underscores). The token appearing in ordinary prose —
+#: ⚠️ A marker must be a WHOLE HTML comment (`<!-- v4-mechanism: <id>
+#: state: <state> -->`, the id lowercase, digits and underscores). The token appearing in ordinary prose —
 #: even in backticks, documenting the convention — is not a declaration and is
 #: ignored: a scan that counted bare token occurrences reported a malformed
 #: marker for a sentence that mentioned one (review cycle 1, P2), which is a
 #: false verdict from a gate whose verdicts are meant to be actionable.
 ARCH_DOCS = ROOT / "docs" / "architecture"
 MARKER_TOKEN = "v4-mechanism:"
+#: The token as it would be MIS-spelled. `MARKER_TOKEN` is an exact substring, so
+#: a comment writing `V4-MECHANISM:`, `v4-mechanism :`, `v4_mechanism:` or
+#: `v4mechanism:` was SKIPPED — no declaration, no parse error, no state verdict.
+#: A mechanism declared correctly in one document and mis-spelled in another then
+#: carried the honest state only, and BOTH gates passed while the second
+#: document published a contradiction: the fail-open this file exists to close,
+#: one typo deep (review cycle 2, P2). A near-miss now falls through to the
+#: malformed verdict instead of disappearing.
+#:
+#: ⚠️ The separator class is `[\W_]{0,3}` rather than an enumerated `[\s_-]*`: the
+#: enumerated set covered case/space/underscore/hyphen and STILL missed a dot
+#: (`v4.mechanism:`), a slash (`v4/mechanism:`) and an en dash — each of which
+#: left a mis-spelled marker invisible to this scan (review P3). A widened class
+#: cannot be shown complete either, but it is the difference between "the
+#: spellings we thought of" and "any non-word character a keyboard produces"
+#: (`_` is a WORD character, so it must be named in the class explicitly —
+#: `\W` alone silently dropped `v4_mechanism:`, which the first widening did).
+#: The match is case-insensitive for the same reason, and the
+#: direction of a false match is fail-CLOSED (a prose mention inside a comment
+#: is a malformed-declaration verdict, which a reader can fix, not a silent
+#: pass). ⚠️ What bounds this scan is `HTML_COMMENT.findall(...)` below: only the
+#: BODY of an HTML comment reaches this matcher, and `_prose_only` is an IDENTITY
+#: function (it deliberately does not strip code or prose), so prose INSIDE a
+#: comment does reach it and does produce a malformed-declaration verdict (review
+#: P3 - an earlier revision of this note credited `_prose_only` with a bound it
+#: does not implement, and the next widening would have inherited that premise).
+#: The accepted cost is a fail-closed false red on a comment that discusses the
+#: token in prose; the alternative was a silent gap, which is the defect class.
+MARKER_TOKEN_LOOSE = re.compile(r"v4[\W_]{0,3}mechanism\s*:", re.IGNORECASE)
+#: The state recorded for a marker that NAMED its mechanism but whose wording did
+#: not parse. It exists so `membership_errors` does not re-judge the same defect
+#: with a WRONG repair: before it, `<!-- v4-mechanism: x state: -->` produced the
+#: parse verdict AND "a registry row with NO `v4-mechanism: x` marker" AND "the
+#: row names NO declaring document", telling the reader to add a marker that is
+#: already on the page (review P3). A presence the state gate refuses is a
+#: presence here; `declaration_state_errors` skips this sentinel because the
+#: parse error already owns that verdict.
+UNPARSEABLE_STATE = "<unparseable>"
+#: The marker's TWO accepted shapes. The plain one is still read so
+#: `membership_errors` keeps its own verdict on an id-only marker (a synthetic
+#: fixture, and the shape every pre-state marker had); `declaration_state_errors`
+#: is what REFUSES it, because a declaration with no state publishes no verdict
+#: at the one place a reader of the design meets it.
 MARKER_COMMENT = re.compile(r"^\s*v4-mechanism:\s*([a-z][a-z0-9_]*)\s*$")
+MARKER_COMMENT_STATE = re.compile(
+    r"^\s*v4-mechanism:\s*([a-z][a-z0-9_]*)\s+state:\s*([A-Za-z][A-Za-z0-9_-]*)\s*$"
+)
+#: The leading id token, taken WHOLE — so an id outside the alphabet
+#: (`atomic-point-write`) is reported as a bad ID rather than as a bad `state:`
+#: tail. A prefix match reported `atomic`, an id that appears nowhere, and sent
+#: the reader to fix a `state:` value that was already correct (review cycle 2,
+#: P3 — the cycle-1 P3 defect mirrored).
+MARKER_ID = re.compile(r"^\s*v4-mechanism:\s*(?!(?:state)\s*:)([A-Za-z0-9_-]+)")
+#: The same id read through a NEAR-MISS token. When the token itself is
+#: misspelled (`v4.mechanism: x state: implemented`) the strict `MARKER_ID`
+#: cannot see the id either, so the malformed verdict also told membership the
+#: row was unmarked — a repair ("add the marker") for a marker already on the
+#: page (review P3). Reading the id through the loose token lets the defect be
+#: named once, as the misspelling it is.
+MARKER_ID_LOOSE = re.compile(
+    r"^\s*v4[\W_]{0,3}mechanism\s*:\s*(?!(?:state)\s*:)([A-Za-z0-9_-]+)",
+    re.IGNORECASE,
+)
+MARKER_ID_STRICT = re.compile(r"[a-z][a-z0-9_]*")
+
+
+@dataclass(frozen=True)
+class Declaration:
+    """ONE `<!-- v4-mechanism: <id> [state: <state>] -->` occurrence.
+
+    ``document`` is repo-relative to the docs dir (`sub/x.md`), because a basename
+    is not a document identity. ``state`` is the state the DECLARATION SITE
+    asserts, or ``None`` when the marker states none — which
+    :func:`declaration_state_errors` refuses and :func:`membership_errors` does
+    not, so the two verdicts stay separable (a fixture exercising membership is
+    not a declaration site a reader meets).
+    """
+
+    mechanism_id: str
+    document: str
+    state: str | None
 #: The sibling change log is HISTORY, not a declaration site (#8542 keeps status
 #: and change narration out of the design documents, which is exactly why a
 #: changelog entry may quote the convention when it records a marker change).
@@ -204,7 +329,9 @@ CHANGELOG_SUFFIX = "-CHANGELOG.md"
 #: what lets a scanned document explain the convention without satisfying a row
 #: (#9778 review). It can never make a row pass: a row whose only marker is the
 #: placeholder is reported as UNMARKED by `membership_errors`.
-PLACEHOLDER_ID = re.compile(r"^\s*v4-mechanism:\s*<[^<>\s]+>\s*$")
+PLACEHOLDER_ID = re.compile(
+    r"^\s*v4-mechanism:\s*<[^<>\s]+>(?:\s+state:\s*<[^<>\s]+>)?\s*$"
+)
 HTML_COMMENT = re.compile(r"<!--(.*?)-->", re.DOTALL)
 IMPLEMENTED = "implemented"
 NOT_IMPLEMENTED = "not-implemented"
@@ -220,6 +347,20 @@ STATES = (IMPLEMENTED, NOT_IMPLEMENTED)
 #: registry rather than discovered at implementation time"*). Read by
 #: `_precondition_cycles` and by the per-row rule in `gate_errors`.
 PRECONDITIONS = "preconditions"
+
+#: ⚠️ STATED LIMIT: a pin resolves at MODULE/CLASS depth, which is every shape
+#: `_test_node_names` can name. A NESTED test class
+#: (`path::TestOuter::TestInner::test_x`) is a selector pytest runs and this
+#: gate cannot name, so it is refused as malformed rather than silently accepted
+#: — the direction that cannot hide a mechanism nobody is watching (review
+#: cycle 2, P2).
+#:
+#: The ABSENCE PIN field: the test NODE that reds the day a `not-implemented`
+#: mechanism lands, so the row flips instead of the absence quietly outliving
+#: itself (#5064 indicator (3) applied to the mechanisms; `symbols:` on the
+#: test side). `path::test_name` or `path::Class::test_name` — pytest's own
+#: selector. Read by the per-row rule in `gate_errors`.
+PINS = "pins"
 
 
 def _precondition_cycles(edges: dict[str, list[str]]) -> list[list[str]]:
@@ -299,14 +440,24 @@ def _prose_only(text: str) -> str:
     return text
 
 
-def declaration_markers(docs_dir: Path = ARCH_DOCS) -> tuple[dict[str, list[str]], list[str]]:
-    """``{mechanism id: [doc name, ...]}`` from the design docs' own markers.
+def declaration_markers(
+    docs_dir: Path = ARCH_DOCS,
+) -> tuple[dict[str, list[Declaration]], list[str]]:
+    """``{mechanism id: [Declaration, ...]}`` from the design docs' own markers.
 
-    The marker is `<!-- v4-mechanism: <id> -->` and it sits at the DECLARATION
-    SITE, so the id is read where the design says the thing, not from a list
-    someone later maintained beside it. Two docs may declare the same mechanism
-    (`span_link`, `state_value_carve_out`) — that is a declaration, not a
-    duplicate defect, so repeats are collected rather than refused.
+    The marker is `<!-- v4-mechanism: <id> state: <state> -->` and it sits at the
+    DECLARATION SITE, so the id — AND the state — are read where the design says
+    the thing, not from a list someone later maintained beside it. Two docs may
+    declare the same mechanism (`span_link`, `state_value_carve_out`) — that is a
+    declaration, not a duplicate defect, so repeats are collected rather than
+    refused, and EVERY occurrence's state is kept (`declaration_state_errors`
+    needs each one: a second marker asserting a different state is the way a
+    document would read shipped while the registry says otherwise).
+
+    A marker may omit `state:` — this scan records that as ``None`` rather than
+    refusing it here, because the two verdicts are separate and this function is
+    shared by both. The omission is refused by
+    :func:`declaration_state_errors`, never silently accepted.
 
     FAIL CLOSED on the shapes that would otherwise be silent: a MALFORMED
     `v4-mechanism:` comment — one that neither names a mechanism id nor is the
@@ -363,7 +514,7 @@ def declaration_markers(docs_dir: Path = ARCH_DOCS) -> tuple[dict[str, list[str]
     malformed shapes and the membership verdicts together.
     """
     errors: list[str] = []
-    markers: dict[str, list[str]] = {}
+    markers: dict[str, list[Declaration]] = {}
     if not docs_dir.is_dir():
         return markers, [
             f"the declaration-marker surface is missing: {docs_dir} is not a "
@@ -397,20 +548,70 @@ def declaration_markers(docs_dir: Path = ARCH_DOCS) -> tuple[dict[str, list[str]
             continue
         comments = HTML_COMMENT.findall(_prose_only(text))
         for body in comments:
-            if MARKER_TOKEN not in body:
+            if not MARKER_TOKEN_LOOSE.search(body):
                 continue
             if PLACEHOLDER_ID.match(body):
                 continue  # the convention itself, not a declaration
-            match = MARKER_COMMENT.match(body)
+            match = MARKER_COMMENT_STATE.match(body)
+            state: str | None = None
+            if match is not None:
+                state = match.group(2)
+            else:
+                # The id-only shape: recorded, so `membership_errors` can still
+                # rule on the id, and refused by `declaration_state_errors` for
+                # publishing no verdict at the declaration site.
+                match = MARKER_COMMENT.match(body)
             if match is None:
-                errors.append(
-                    f"{rel}: a `{MARKER_TOKEN}` comment does not name a "
-                    f"mechanism id (expected `<!-- v4-mechanism: "
-                    f"<lowercase_id> -->`, got `{body.strip()[:60]}`) — a "
-                    f"malformed declaration is a violation, not an absence"
-                )
+                # A marker whose ID parses but whose `state:` tail does not is a
+                # different repair from one that names no id at all, and the
+                # message has to say which — a verdict that sends a reader to
+                # fix an id that is already correct is not actionable.
+                named = MARKER_ID.match(body)
+                if named is not None and MARKER_ID_STRICT.fullmatch(named.group(1)):
+                    # The id IS on the page: record it as present-but-unparseable
+                    # so membership does not also report the row as unmarked.
+                    markers.setdefault(named.group(1), []).append(
+                        Declaration(named.group(1), rel, UNPARSEABLE_STATE)
+                    )
+                    errors.append(
+                        f"{rel}: the `{MARKER_TOKEN} {named.group(1)}` marker's "
+                        f"`state:` tail is not a bare state token "
+                        f"(`{body.strip()[:60]}`) — expected `state: "
+                        f"{IMPLEMENTED}` or `state: {NOT_IMPLEMENTED}`, with no "
+                        f"space inside the value; a declaration that states no "
+                        f"parseable state publishes no verdict, which is a "
+                        f"violation and not an absence"
+                    )
+                else:
+                    loose = MARKER_ID_LOOSE.match(body)
+                    if loose is not None and MARKER_ID_STRICT.fullmatch(loose.group(1)):
+                        # A near-miss TOKEN, with a readable id: the repair is the
+                        # token, not the id, and membership must not also report
+                        # the row as unmarked.
+                        markers.setdefault(loose.group(1), []).append(
+                            Declaration(loose.group(1), rel, UNPARSEABLE_STATE)
+                        )
+                        errors.append(
+                            f"{rel}: a `{MARKER_TOKEN}` comment is spelled with a "
+                            f"near-miss token (`{body.strip()[:60]}`) — the only "
+                            f"token this gate reads is `{MARKER_TOKEN}` "
+                            f"(`<!-- v4-mechanism: {loose.group(1)} state: "
+                            f"<state> -->`); a misspelled declaration is a "
+                            f"violation, and it publishes no state at the "
+                            f"declaration site until the spelling is fixed"
+                        )
+                        continue
+                    errors.append(
+                        f"{rel}: a `{MARKER_TOKEN}` comment does not name a "
+                        f"mechanism id (expected `<!-- v4-mechanism: "
+                        f"<lowercase_id> state: <state> -->`, got "
+                        f"`{body.strip()[:60]}`) — a "
+                        f"malformed declaration is a violation, not an absence"
+                    )
                 continue
-            markers.setdefault(match.group(1), []).append(rel)
+            markers.setdefault(match.group(1), []).append(
+                Declaration(match.group(1), rel, state)
+            )
         # An opener with no closer is not a comment at all, so its marker (if it
         # carries one) is invisible to the scan above — the fail-OPEN direction.
         if _prose_only(text).count("<!--") > len(comments):
@@ -544,7 +745,7 @@ def membership_errors(
         declared_docs[row_id] = _declaring_paths(row)
 
     for mid in sorted(set(markers) - ids):
-        where = ", ".join(sorted(set(markers[mid])))
+        where = ", ".join(sorted({d.document for d in markers[mid]}))
         errors.append(
             f"{mid}: declared in {where} with a `{MARKER_TOKEN}` marker but has "
             f"NO row in config/v4-mechanisms.yml — a declared mechanism with no "
@@ -590,7 +791,7 @@ def membership_errors(
             # a marker in one satisfy the row for the other (review P2).
             rel = resolved.relative_to(docs_dir.resolve()).as_posix()
             named.add(rel)
-            if rel in markers[mid]:
+            if any(d.document == rel for d in markers[mid]):
                 continue
             errors.append(
                 f"{mid}: `declared_in:` names {rel}, but that document "
@@ -606,13 +807,107 @@ def membership_errors(
         # and every rule above would still pass (review P2 — the live case this
         # closed was `fanout_cap` in EXTRACTOR §13.8 and `near_dup_merge` in
         # STORAGE §14.1 O4).
-        for rel in sorted(set(markers.get(mid, [])) - named):
+        for rel in sorted({d.document for d in markers.get(mid, [])} - named):
             errors.append(
                 f"{mid}: {rel} carries a `{MARKER_TOKEN} {mid}` marker, but the "
                 f"row's `declared_in:` does not name it — a declaring document "
                 f"the registry omits is an enumeration that will shrink back "
                 f"silently, so name every document that declares the mechanism"
             )
+    return errors
+
+
+def declaration_state_errors(
+    mechanisms: list[dict], docs_dir: Path = ARCH_DOCS
+) -> list[str]:
+    """The STATE half of a declaration: the site a reader meets says what the
+    registry says, or the gate reds.
+
+    `membership_errors` proves every declared mechanism HAS a row, and nothing
+    about what the document says at the site it declares it. That gap is #5064's
+    root one level out: #10636 correctly flipped `span_link` to
+    `not-implemented` in the registry, and
+    `EXTRACTOR-V4-ARCHITECTURE.md` §2.4.1 rule 1 went on reading *"Every
+    committed `Point`/`Object` must carry a reachable link to its `Source` span"*
+    with no indication the every-point half is unbuilt. A reader of the design
+    met an adopted requirement; only a reader of the YAML met the absence.
+
+    The failure mode is a **false present**: a design claim read as shipped while
+    the code does not have it, which is exactly what this issue exists to make
+    impossible. So the state is written where the declaration is, and this
+    verdict refuses (all FAIL CLOSED):
+
+      * a marker that states NO state — a declaration publishing no verdict is
+        the shape that let the design outrun the code;
+      * a state outside the two the registry supports, so a typo
+        (`state: implemented-ish`) cannot read as agreement;
+      * a marker whose state disagrees with its row, in EITHER direction — a
+        registry flip with a stale document and a document claim with a stale
+        registry are the same defect seen from two sides, and both are exactly
+        how this issue was believed done twice;
+      * every occurrence independently, so a second marker added with a different
+        state cannot make a document read shipped while the row says otherwise.
+
+    A marker whose id has NO row is ``membership_errors``' verdict, not a second
+    one here: there is no state to compare it to, and one defect must not produce
+    two messages. For the same reason a row whose own `state:` is not one of the
+    two supported values is left to `gate_errors` — comparing against it would
+    report the symptom here as well.
+
+    The parse-level verdicts from :func:`declaration_markers` are included rather
+    than dropped: an unreadable or malformed surface must not pass THIS verdict
+    vacuously (the no-op-gate shape), and a malformed marker breaks both readings
+    of the same surface.
+    """
+    markers, errors = declaration_markers(docs_dir)
+    errors = list(errors)
+    row_states: dict[str, object] = {}
+    for row in mechanisms:
+        if not isinstance(row, dict):
+            continue
+        row_id = row.get("id")
+        if isinstance(row_id, str) and row_id:
+            row_states[row_id] = row.get("state")
+    accepted = STATES  # ONE definition: `gate_errors` reads the same tuple, so
+    # the accepted set and the message naming it cannot drift (cycle-2 review
+    # P2). A second literal here would fail OPEN the day `descriptive` joins
+    # STATES (#5064 open question (c)): `gate_errors` would accept the row while
+    # the skip below silently stopped comparing it.
+    for mid in sorted(markers):
+        if mid not in row_states:
+            continue  # no row: `membership_errors` owns that verdict
+        recorded = row_states[mid]
+        if recorded not in accepted:
+            continue  # a bad row state is `gate_errors`' verdict
+        for decl in markers[mid]:
+            if decl.state == UNPARSEABLE_STATE:
+                continue  # the marker's own parse error owns this verdict
+            if decl.state is None:
+                errors.append(
+                    f"{decl.document}: the `{MARKER_TOKEN} {mid}` marker states "
+                    f"no `state:` — a declaration that publishes no verdict is "
+                    f"the shape that let a declared mechanism read as a "
+                    f"shipped one (#5064): write `state: {recorded}`, the "
+                    f"state config/v4-mechanisms.yml records, so the reader of "
+                    f"this document meets the absence where it is declared"
+                )
+            elif decl.state not in accepted:
+                errors.append(
+                    f"{decl.document}: the `{MARKER_TOKEN} {mid}` marker states "
+                    f"`state: {decl.state}`, which is not a state the registry "
+                    f"supports ({', '.join(accepted)}) — an unknown state is a "
+                    f"violation, never agreement by default"
+                )
+            elif decl.state != recorded:
+                errors.append(
+                    f"{decl.document}: the `{MARKER_TOKEN} {mid}` marker states "
+                    f"`state: {decl.state}` while config/v4-mechanisms.yml "
+                    f"records `state: {recorded}` — the design document and the "
+                    f"registry disagree about whether the mechanism is built, "
+                    f"and a reader who meets only this document reads the "
+                    f"wrong one (#5064): make them agree, or the claim is not "
+                    f"checkable"
+                )
     return errors
 
 
@@ -660,6 +955,636 @@ def _defined_names(path: Path) -> set[str] | None:
                         elt.id for elt in target.elts if isinstance(elt, ast.Name)
                     )
     return {n for n in names if not (n.startswith("__") and n.endswith("__"))}
+
+
+def _test_node_names(path: Path) -> set[str] | None:
+    """The test nodes pytest COLLECTS from a file — or ``None`` if unreadable.
+
+    The mirror of :func:`_defined_names` on the test side, because `tests:`
+    proves only that a FILE exists: a row whose pin cites a call that was later
+    renamed away still read as watched while nothing would red when the absence
+    closed.
+
+    ⭐ Only shapes a pytest run selects, resolved by pytest's OWN rules WHERE
+    THEY ARE VISIBLE IN THE FILE, rather than by a name prefix:
+
+      * a module-level ``test_*`` function (this repo sets no
+        ``python_functions``, so pytest's default ``test*`` applies);
+      * a ``test_*`` method of a ``Test*`` class — UNLESS the class carries an
+        ``__init__``, which pytest refuses to collect (the probe walks the
+        IN-FILE base chain, because pytest's rule is
+        ``getattr(cls, "__init__", object.__init__)``, not the own body);
+      * a ``test_*`` method of a ``unittest.TestCase`` subclass, resolved
+        TRANSITIVELY through in-file bases and through the module's own import
+        alias (``from unittest import TestCase as TC`` / ``unittest.case``), and
+        regardless of the class-name prefix — pytest runs those through
+        unittest, so ``__init__`` never applies;
+      * nothing at all in a file whose module-level ``__test__ = False`` disables
+        collection, under a class carrying ``__test__ = False`` (in its body,
+        inherited, or written through the module-scope class handle), or for a
+        member opted out individually.
+
+    A HELPER, a ``test_*`` FUNCTION carrying a ``@pytest.fixture`` marker (pytest
+    does not collect it — `fixtures.getfixturemarker(obj) is None`), and a
+    ``test_*`` method of a class pytest never collects are therefore refused by
+    resolution: each reads like a pin while no run would reach it.
+
+    ⚠️ THE LIMIT OF THAT, stated because the alternative is an overclaim (review
+    cycles 4-5, extended cycle 9, narrowed cycle 10): the base chain is resolved
+    IN THIS FILE, and pytest's collection is a decision over the whole MRO. FIVE
+    shapes therefore remain REVIEW-TIME, not gate verdicts, and they err in BOTH
+    directions:
+
+      * a class defining ``__new__`` and an ABSTRACT class — pytest collects no
+        test under them, this gate accepts them (the fail-open direction); a node
+        marked ``skip``/``xfail`` — pytest COLLECTS it and never RUNS it, so the
+        pin would red nowhere while reading as watched — is NO LONGER in this
+        list: the UNCONDITIONAL forms are now detected by `_never_reds` /
+        `_pytestmark_never_reds` below (review cycles 10-11), which is why this
+        is FIVE shapes and not the earlier SIX;
+      * a base imported from ANOTHER file that defines ``__init__`` — pytest
+        REFUSES the subclass, this gate accepts it;
+      * an imported base carrying ``__test__ = False`` — pytest collects
+        nothing under the subclass, this gate accepts it;
+      * an imported ``unittest.TestCase`` subclass base — pytest COLLECTS the
+        subclass, this gate REFUSES it (the false-refuse direction).
+
+    The gate still proves the cited node is defined where the row says it is; it
+    cannot prove pytest will run it. For the INHERITED-method cause a pin can
+    cite the DEFINING class in ITS OWN file WHEN THAT CLASS IS ITSELF COLLECTED
+    (`Test*`, or a `unittest.TestCase` subclass). Two shapes have no citation
+    that resolves, and both are stated rather than papered over: a base in
+    ANOTHER file (the gate sees no nodes for the class at all), and an in-file
+    base that pytest does not collect — a plain `class Base:` holding `test_*`
+    methods contributes no node, so citing it loops back to this same refusal.
+    In that last shape, cite a node in the COLLECTED class's own body, or state
+    the limit in the row's `note`.
+
+    ``None`` — not an empty set — for a source that cannot be read or parsed, so
+    "this file defines nothing named that" stays distinct from "this file could
+    not be turned into names" (an unreadable pin is UNVERIFIABLE, never absent;
+    same polarity and same :func:`tokenize.open` encoding rules as
+    ``_defined_names``, so a legal PEP-263 cookie is not a false verdict).
+    """
+    try:
+        with tokenize.open(path) as fh:
+            source = fh.read()
+        tree = ast.parse(source, filename=str(path))
+    except (OSError, SyntaxError, ValueError, UnicodeError):
+        return None
+
+    def _own_disabled(node: ast.AST) -> bool:
+        """``__test__`` set FALSY in this body — pytest's own opt-out.
+
+        ⚠️ FALSY, not `is False` (review cycle 4, P2): pytest reads
+        `getattr(obj, "__test__", True)` for TRUTHINESS, so ``__test__ = 0`` is
+        just as opted-out as ``False`` and the allow-list-on-the-value spelling
+        accepted a node no run reaches. The ATTRIBUTE form
+        (``test_x.__test__ = False``) is read too, because that is how a
+        function-level opt-out is actually written.
+        """
+        for child in getattr(node, "body", ()):
+            if not isinstance(child, (ast.Assign, ast.AnnAssign)):
+                continue
+            targets = (
+                child.targets if isinstance(child, ast.Assign) else [child.target]
+            )
+            named = any(
+                isinstance(t, ast.Name) and t.id == "__test__" for t in targets
+            )
+            if not named:
+                continue
+            if isinstance(child.value, ast.Constant) and not child.value.value:
+                return True
+        return False
+
+    def _member_exclusions(
+        body: object,
+    ) -> tuple[set[str], dict[str, set[str]]]:
+        """Members opted out INDIVIDUALLY by ``member.__test__ = False``.
+
+        ⭐ A bare-`Name` target is the SCOPE opt-out above; an ATTRIBUTE target is
+        the per-member form, and conflating the two disabled the WHOLE module for
+        a single opted-out function — refusing pins pytest collects (review
+        cycle 5, P2, measured: a module with `test_off.__test__ = False` and a
+        sibling `test_kept` collects `test_kept` while the gate returned
+        nothing).
+
+        Returns ``(plain, qualified)``: `plain` names members excluded in the
+        SCOPE they are written in (a class body's own ``test_off.__test__``),
+        `qualified` maps a CLASS to the members excluded through the class
+        handle at module scope — ``TestCls.test_off.__test__ = False``, which
+        pytest honours and a Name-only read missed (review cycle 6, P2).
+        """
+        plain: set[str] = set()
+        qualified: dict[str, set[str]] = {}
+        for child in body:
+            if not isinstance(child, (ast.Assign, ast.AnnAssign)):
+                continue
+            targets = (
+                child.targets if isinstance(child, ast.Assign) else [child.target]
+            )
+            if not (isinstance(child.value, ast.Constant) and not child.value.value):
+                continue
+            for target in targets:
+                if not (
+                    isinstance(target, ast.Attribute)
+                    and target.attr == "__test__"
+                ):
+                    continue
+                owner = target.value
+                if isinstance(owner, ast.Name):
+                    plain.add(owner.id)
+                elif isinstance(owner, ast.Attribute) and isinstance(
+                    owner.value, ast.Name
+                ):
+                    qualified.setdefault(owner.value.id, set()).add(owner.attr)
+        return plain, qualified
+
+    #: `@pytest.fixture` names, however the module imported it (review cycle 6,
+    #: P1): a `test_*` function carrying the fixture marker is NOT collected
+    #: (`_pytest/python.py` — `fixtures.getfixturemarker(obj) is None`), and this
+    #: repo has live instances (`tests/test_mcp_telemetry.py`'s
+    #: `@pytest.fixture def test_tools()`), so a pin could cite a call no run
+    #: reaches.
+    #: ⚠️ SEEDED EMPTY on purpose (review cycle 8, P2): a seeded
+    #: {"fixture", "pytest.fixture"} made BOTH import branches inert — deleting
+    #: either left the suite green, because the seed already spelled the marker.
+    #: Every marker now comes from a real import, so each branch is decidable.
+    fixture_markers: set[str] = set()
+    for top in tree.body:
+        if isinstance(top, ast.Import):
+            fixture_markers.update(
+                f"{alias.asname or alias.name}.fixture"
+                for alias in top.names
+                if alias.name == "pytest"
+            )
+        elif isinstance(top, ast.ImportFrom) and (top.module or "") == "pytest":
+            fixture_markers.update(
+                alias.asname or alias.name
+                for alias in top.names
+                if alias.name == "fixture"
+            )
+
+    def _is_fixture(node: ast.AST) -> bool:
+        return any(
+            _dotted_decorator(decorator) in fixture_markers
+            for decorator in getattr(node, "decorator_list", ())
+        )
+
+    #: `TestCase` however the module imported it (review cycle 2, P2; cycle 3, P2
+    #: added the `unittest.case` spelling): pytest collects a
+    #: `unittest.TestCase` subclass regardless of the class-name prefix, so an
+    #: ALIASED base is the same node — and a name-only check reported a runnable
+    #: pin as "the cited call is gone".
+    testcase_aliases = {"TestCase"}
+    for top in tree.body:
+        if isinstance(top, ast.ImportFrom) and (top.module or "") in (
+            "unittest",
+            "unittest.case",
+        ):
+            testcase_aliases.update(
+                alias.asname or alias.name
+                for alias in top.names
+                if alias.name == "TestCase"
+            )
+
+    if _own_disabled(tree):
+        return set()  # the whole module is opted out of collection
+
+    classes: dict[str, ast.ClassDef] = {
+        top.name: top for top in tree.body if isinstance(top, ast.ClassDef)
+    }
+
+    def _dotted_decorator(node: ast.AST) -> str:
+        """The dotted name of a decorator expression (``pytest.fixture`` / ``fix``)."""
+        parts: list[str] = []
+        current = node
+        while isinstance(current, (ast.Call,)):
+            current = current.func
+        while isinstance(current, ast.Attribute):
+            parts.append(current.attr)
+            current = current.value
+        if isinstance(current, ast.Name):
+            parts.append(current.id)
+        return ".".join(reversed(parts))
+
+    #: Markers that leave a node COLLECTED but unable to RED. Only the
+    #: UNCONDITIONAL forms qualify, and that boundary is the whole point: an
+    #: `@pytest.mark.skip` or a non-strict `@pytest.mark.xfail` can never fail,
+    #: so citing one is a pin that watches nothing — the exact fail-open this
+    #: gate exists to close (review cycle 9, P2). `skipif`/`xfail` are CONDITIONAL
+    #: and decided by their condition's VALUE below (review cycles 10-11: presence
+    #: is not the test — `skipif(True)` and `xfail(True)` can never red either).
+    #: An in-body `pytest.skip()` still reds on the other branch and is NOT
+    #: excluded. Built from REAL imports, never seeded — seeding is what made both
+    #: `fixture_markers` import branches inert (cycle 8, P2).
+    never_red_skips: set[str] = set()
+    never_red_xfails: set[str] = set()
+    never_red_skipifs: set[str] = set()
+    for top in tree.body:
+        if isinstance(top, ast.Import):
+            for alias in top.names:
+                if alias.name != "pytest":
+                    continue
+                stem = alias.asname or alias.name
+                never_red_skips.add(f"{stem}.mark.skip")
+                never_red_xfails.add(f"{stem}.mark.xfail")
+                never_red_skipifs.add(f"{stem}.mark.skipif")
+        elif isinstance(top, ast.ImportFrom) and (top.module or "") == "pytest":
+            for alias in top.names:
+                spelled = alias.asname or alias.name
+                if alias.name == "skip":
+                    never_red_skips.add(spelled)
+                elif alias.name == "xfail":
+                    never_red_xfails.add(spelled)
+                elif alias.name == "mark":
+                    never_red_skips.add(f"{spelled}.skip")
+                    never_red_xfails.add(f"{spelled}.xfail")
+                    never_red_skipifs.add(f"{spelled}.skipif")
+
+    def _decorator_never_reds(decorator: ast.expr) -> bool:
+        """An UNCONDITIONAL skip/xfail decorator — it removes the node's red.
+
+        `xfail` has THREE ways to stay able to FAIL, and each keeps the node as
+        a pin:
+          * `xfail(strict=True)` REDS on an unexpected pass — it carries a red;
+          * `xfail(cond, …)` with a condition that may be FALSY runs the test
+            normally, so it can red: EVERY positional argument is a condition
+            (pytest applies the mark when ANY of them is true), and a
+            `condition=` keyword is one too — it REPLACES the positional args
+            rather than joining them (`_pytest/skipping.py::
+            evaluate_xfail_marks`); and
+          * `xfail(raises=…)`, which narrows only WHICH outcome becomes
+            `xfailed`: a different exception stays a true FAILURE (`_pytest/
+            skipping.py::pytest_runtest_makereport` — `if raises is None or
+            isinstance(call.excinfo.value, raises): skipped … else: failed`).
+            Measured on pytest 9.1.1: `xfail(raises=ValueError)` raising
+            `TypeError` reports **failed** (review cycle 15, P2).
+        Everything else cannot red, and is therefore not a watch: a bare `xfail()`
+        / `xfail(reason=…)` / `xfail(raises=None)` (pytest's "no restriction"
+        value, so the same bare mark); a condition that is a literal TRUTHY
+        constant, `xfail(True)` / `xfail(1)` / `xfail(condition=True)`, which
+        pytest xfails unconditionally (real pytest: `2 xfailed`); and
+        `xfail(…, run=False)` with no falsifiable condition, whose body is not
+        even run (measured: `[NOTRUN]`, exit 0).
+        ⚠️ xfail remaps the OUTCOME, it does not skip execution — the body still
+        RUNS (measured with side-effect markers); the RUN is what cannot go red.
+        That is the difference from a skip, and it is the sentence a maintainer
+        reasons from, so it is stated correctly (review cycle 12, P2).
+        A manifest can be read, not executed, so a NON-literal condition —
+        including a STRING, which pytest `eval()`s as an expression rather than
+        reading as a boolean — is unknowable here and is kept: that is this
+        gate's stated limit, and it errs toward keeping a pin (review cycle 12,
+        P2: a string `"False"` really does run the body and red).
+        """
+
+        def _literal_condition_truth(expr: ast.expr) -> bool | None:
+            """True/False when the AST alone decides it, else None.
+
+            pytest `eval()`s a STRING condition as an expression (`_pytest/
+            skipping.py`), so `skipif("True")` is skipped and `xfail("False")`
+            runs — quoting the condition must not defeat the gate. A string is
+            therefore DECODED here, without `eval`, when it parses to a literal
+            constant, and the TRUTHINESS of that literal is the answer for EVERY
+            type (a float, a list, a non-empty string all skip: measured). An
+            EXPRESSION like `"sys.platform == 'win32'"` stays unknowable (a
+            manifest is read, not executed — the stated limit).
+            """
+            if not isinstance(expr, ast.Constant):
+                return None
+            if not isinstance(expr.value, str):
+                return bool(expr.value)
+            try:
+                inner = ast.parse(expr.value, mode="eval").body
+                value = ast.literal_eval(inner)
+            except (SyntaxError, ValueError, TypeError):
+                return None
+            # `literal_eval` yields only literals, and pytest `eval`s the same
+            # text, so the TRUTHINESS of the decoded value IS pytest's answer —
+            # for every type, not just bool/int. Keeping only bool/int discarded
+            # a value already in hand, so `skipif("'x'")` / `skipif("1.5")` /
+            # `skipif("[1]")` were accepted as pins although pytest skips them
+            # (measured, review cycle 6, P1).
+            return bool(value)
+
+        def _skipif_never_reds(call: ast.expr) -> bool:
+            """`@pytest.mark.skipif(...)` — pytest skips when ANY condition is true.
+
+            `_pytest/skipping.py` takes the POSITIONAL arguments plus a
+            `condition=` keyword as conditions; a `cond=` keyword is IGNORED, so a
+            call carrying only `cond=` (or only `reason=`, or nothing) has NO
+            condition and pytest skips UNCONDITIONALLY — measured `SKIPPED` for
+            all of those. The arm is explicit in the library, not an emergent
+            consequence of the ANY-of rule: pytest 9.1.1 `_pytest/skipping.py:
+            177-180` reads `# Unconditional. / if not conditions: reason =
+            mark.kwargs.get("reason", "") / return Skip(reason)`, so an
+            `evaluate_skip_marks` reading that stopped at `any(conditions)`
+            (review @`70284375f`) would mis-predict it. Settled by execution on
+            this head: a probe file whose four nodes are
+            `skipif(reason=…)` x2, `skipif(cond=True)` and bare `skipif()` —
+            each asserting `False` where it could — reported `4 skipped`, i.e.
+            none of them ran (re-measured by the second repair lane on the same
+            pytest: `2 skipped` for `skipif(reason=…)` and `skipif(cond=False)`).
+            An older pytest without that branch leaves the node RUNNING, so the
+            floor matters, not the prose. So: no conditions at all => cannot red;
+            every condition a non-string literal => cannot red iff ANY of them is
+            truthy (pytest's ANY-of rule); anything non-literal => unknowable,
+            kept as a pin.
+            """
+            conditions: list[ast.expr] = []
+            if isinstance(call, ast.Call):
+                keyword_conditions = [
+                    keyword.value
+                    for keyword in call.keywords
+                    if keyword.arg == "condition"
+                ]
+                # pytest REPLACES the positional args when `condition=` is given
+                # (measured: `skipif(True, condition=False)` RUNS and fails, while
+                # `skipif(False, condition=True)` skips), so the keyword set is
+                # used ALONE rather than unioned into one ANY-of pool (cycle 6, P2).
+                conditions.extend(keyword_conditions or call.args)
+            if not conditions:
+                return True  # no condition at all: skipped unconditionally
+            # ANY-of: one true condition skips the node (SIM103: the condition
+            # IS the answer, so it is returned directly). Everything else is a
+            # PIN: every condition decidable and falsy means pytest does not
+            # skip, so the node runs and can red; and an undecidable condition
+            # is unknowable from a manifest — the gate's stated limit, which
+            # errs toward KEEPING a pin.
+            return any(_literal_condition_truth(expr) is True for expr in conditions)
+
+        def _xfail_condition(call: ast.expr) -> tuple[bool, bool | None]:
+            """`(present, truth)` over EVERY condition pytest would apply.
+
+            truth is True/False for a literal, None if unknowable.
+
+            pytest takes ALL positional args as conditions and applies the mark
+            as soon as ANY is true (`_pytest/skipping.py::evaluate_xfail_marks`:
+            `if "condition" not in mark.kwargs: conditions = mark.args`), while a
+            `condition=` keyword REPLACES them — the same ANY-of rule the skipif
+            arm above implements. Reading only `call.args[0]` accepted
+            `xfail(False, True)` and `xfail(COND, True)` as pins although pytest
+            xfails them unconditionally, so nothing could red: the #5064/#10636
+            fail-open reached by a spelling the gate mis-modelled (review cycle
+            14, P2). Collapsed to the single truth this arm consumes: any
+            literal-TRUE condition applies the mark always; only ALL-FALSE means
+            it never applies (the body runs and can red); anything else is
+            unknowable and keeps the pin.
+            """
+            conditions: list[ast.expr] = []
+            if isinstance(call, ast.Call):
+                # `cond=` is NOT an xfail parameter: pytest ignores it, so a call
+                # carrying only `cond=` is a BARE xfail that always applies and can
+                # never red (measured, review cycle 6, P1). Only `condition=` is a
+                # condition here — the same reading the skipif arm documents.
+                keyword_conditions = [
+                    keyword.value
+                    for keyword in call.keywords
+                    if keyword.arg == "condition"
+                ]
+                conditions.extend(keyword_conditions or call.args)
+            if not conditions:
+                return (False, None)
+            truths = [_literal_condition_truth(expr) for expr in conditions]
+            if any(truth is True for truth in truths):
+                # always applied: only `strict=` / `raises=` can still red
+                return (True, True)
+            if all(truth is False for truth in truths):
+                return (True, False)  # never applied: the body runs, so it can red
+            return (True, None)  # one unknowable condition: keep the pin
+
+        def _has_raises(call: ast.expr) -> bool:
+            """Whether the mark narrows xfail by exception (`raises=`).
+
+            `raises=None` is exactly the value pytest reads as "no restriction"
+            (`mark.kwargs.get("raises", None)`), and a literal None leaves the
+            bare-`xfail()` reading intact (measured: `xfail(raises=None)` on a
+            failing body is xfailed, not failed). EVERY other spelling — an
+            exception class, a tuple, `pytest.raises(...)`, or a name this gate
+            cannot resolve — can reject the raised exception and let the failure
+            stand, so it keeps the pin.
+            """
+            if not isinstance(call, ast.Call):
+                return False
+            for keyword in call.keywords:
+                if keyword.arg != "raises":
+                    continue
+                if (
+                    isinstance(keyword.value, ast.Constant)
+                    and keyword.value.value is None
+                ):
+                    continue
+                return True
+            return False
+
+        name = _dotted_decorator(decorator)
+        if name in never_red_skips:
+            return True
+        if name in never_red_skipifs:
+            return _skipif_never_reds(decorator)
+        if name not in never_red_xfails:
+            return False
+        strict = False
+        run_false = False
+        if isinstance(decorator, ast.Call):
+            for keyword in decorator.keywords:
+                if keyword.arg == "strict" and isinstance(
+                    keyword.value, ast.Constant
+                ):
+                    strict = bool(keyword.value.value)
+                elif keyword.arg == "run" and isinstance(keyword.value, ast.Constant):
+                    run_false = keyword.value.value is False
+        present, truth = _xfail_condition(decorator)
+        # ORDER IS THE RULE. A literal-FALSE condition means the mark never
+        # applies, so the body runs and can red — it wins over everything else
+        # (measured: `xfail(False, strict=True, run=False)` FAILS).
+        if truth is False:
+            return False
+        # An UNKNOWABLE condition may be FALSY, and when it is, `evaluate_xfail_
+        # marks` returns `None` — no mark applies at all — so the body RUNS and
+        # `run=False` is inert (measured: `xfail(COND, run=False)` with `COND =
+        # False` reports **failed**). Keeping the pin here, ahead of `run=False`,
+        # is the same verdict the unknowable arm reaches below; the earlier
+        # placement refused a node that really does red (review cycle 15, P2).
+        # `present` is what separates this from a BARE `xfail()` / `xfail(raises=
+        # None)`, which `_xfail_condition` also reports as `truth=None` but which
+        # applies unconditionally and can never red.
+        if present and truth is None:
+            return False
+        # From here the mark ALWAYS applies: `truth is True`, or no condition at
+        # all (a call carrying none is applied unconditionally).
+        # `run=False` disables execution outright, so nothing can red even with
+        # `strict=True` or `raises=` (measured `[NOTRUN]`, exit 0).
+        if run_false:
+            return True
+        # `strict=True` carries a red: an unexpected PASS fails, and that includes
+        # the always-applied condition case `xfail(True, strict=True)`.
+        if strict:
+            return False
+        # `raises=` narrows WHICH outcome becomes `xfailed`: a different
+        # exception is a true failure, so a non-strict `xfail(raises=…)` CAN red
+        # and is a watch. This arm sits BELOW `run=False` because the body is not
+        # run at all there (measured `[NOTRUN]`), which is why the answer is not a
+        # blanket "raises ⇒ pin" (review cycle 15, P2).
+        if _has_raises(decorator):
+            return False
+        if not present:
+            return True  # bare `xfail()` / `xfail(reason=…)`: cannot red
+        # Always applied AND non-strict: XPASS is not a failure, so it cannot
+        # red.
+        return truth is True
+    def _never_reds(node: ast.AST) -> bool:
+        """Collected, but it can never FAIL — so it is not a watch."""
+        if _own_disabled(node):
+            return True
+        return any(
+            _decorator_never_reds(decorator)
+            for decorator in getattr(node, "decorator_list", ())
+        )
+
+    def _pytestmark_never_reds(body: list[ast.stmt]) -> bool:
+        """`pytestmark = pytest.mark.skip` in THIS statement list: nothing reds.
+
+        Takes the statement list rather than the module so the SAME rule can be
+        applied at module scope and in a class body — a class-level
+        ``pytestmark`` marks every method under it (review cycle 10, P2).
+        """
+        for top in body:
+            targets: list[ast.expr]
+            value: ast.expr | None
+            if isinstance(top, ast.Assign):
+                targets, value = list(top.targets), top.value
+            elif isinstance(top, ast.AnnAssign) and top.value is not None:
+                targets, value = [top.target], top.value
+            else:
+                continue
+            if not any(
+                isinstance(target, ast.Name) and target.id == "pytestmark"
+                for target in targets
+            ):
+                continue
+            entries = (
+                list(value.elts) if isinstance(value, (ast.List, ast.Tuple)) else [value]
+            )
+            if any(_decorator_never_reds(entry) for entry in entries):
+                return True
+        return False
+
+    def _module_never_reds() -> bool:
+        """`pytestmark = pytest.mark.skip` at module scope: nothing can red."""
+        return _pytestmark_never_reds(tree.body)
+
+    if _module_never_reds():
+        return set()  # a module-wide skip marker: no collectable node can red
+
+    def _base_names(node: ast.ClassDef) -> list[str]:
+        out: list[str] = []
+        for base in node.bases:
+            if isinstance(base, ast.Name):
+                out.append(base.id)
+            elif isinstance(base, ast.Attribute):
+                out.append(base.attr)
+        return out
+
+    def _has_init(name: str, seen: frozenset[str] = frozenset()) -> bool:
+        """``__init__`` over the IN-FILE base chain (pytest's own rule)."""
+        node = classes.get(name)
+        if node is None or name in seen:
+            return False
+        if any(
+            isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and child.name == "__init__"
+            for child in node.body
+        ):
+            return True
+        return any(_has_init(base, seen | {name}) for base in _base_names(node))
+
+    def _disabled(name: str, seen: frozenset[str] = frozenset()) -> bool:
+        """``__test__`` opt-out over the IN-FILE base chain (pytest uses getattr)."""
+        # ⭐ The module-scope CLASS handle (`Base.__test__ = False`) disables the
+        # base AND every subclass pytest would have collected through it, so it
+        # must be consulted HERE too, not only where a class row is judged
+        # (review cycle 8, P1 — the cycle-7 fix covered the direct class and
+        # left the inherited shape accepted).
+        if name in module_plain or name in seen:
+            return True
+        node = classes.get(name)
+        if node is None:
+            return False
+        if _own_disabled(node):
+            return True
+        return any(_disabled(base, seen | {name}) for base in _base_names(node))
+
+    def _is_case(name: str, seen: frozenset[str] = frozenset()) -> bool:
+        """A ``unittest.TestCase`` subclass, TRANSITIVELY (review cycle 3, P2).
+
+        `class FooTest(MyCase)` where `MyCase(unittest.TestCase)` is in the same
+        file IS collected by pytest; a direct-base-only check refused it with
+        "the cited call is gone" — the exact false verdict the alias fix closed,
+        one inheritance hop out.
+        """
+        if name in seen:
+            return False
+        node = classes.get(name)
+        if node is None:
+            return name in testcase_aliases
+        return any(
+            base in testcase_aliases or _is_case(base, seen | {name})
+            for base in _base_names(node)
+        )
+
+    module_plain, module_qualified = _member_exclusions(tree.body)
+    nodes: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            # ⚠️ No opt-out probe here on purpose (review cycle 4, P2): pytest
+            # reads the FUNCTION's `__test__` ATTRIBUTE, and a local assignment
+            # in the body is not that attribute — a probe here could never
+            # decide, so it is pruned rather than left as unreachable code
+            # (module- and class-level opt-outs are read above).
+            if (
+                node.name.startswith("test")
+                and node.name not in module_plain
+                and not _is_fixture(node)
+                and not _never_reds(node)
+            ):
+                nodes.add(node.name)
+            continue
+        if (
+            not isinstance(node, ast.ClassDef)
+            or _disabled(node.name)
+            # A CLASS-level unconditional skip/xfail — the class's own decorator,
+            # OR a class-body `pytestmark` — collects every method and runs none,
+            # so each reads as a pin while nothing watches it: the same fail-open
+            # as a skipped function, one hop out (review cycles 9-10, P2). ONE
+            # clause per shape; the decorator is not tested twice.
+            or _never_reds(node)
+            or _pytestmark_never_reds(node.body)
+            # ... and the module-scope CLASS handle (`TestCls.__test__ = False`),
+            # which pytest honours and `_member_exclusions` has already read as a
+            # plain name (review cycle 7, P2).
+            or node.name in module_plain
+        ):
+            continue
+        collected = _is_case(node.name)
+        if not collected:
+            # The prefix route, with pytest's `__init__` refusal (cycle 2, P1;
+            # cycle 3, P1 made the probe walk the base chain).
+            collected = node.name.startswith("Test") and not _has_init(node.name)
+        if collected:
+            in_class, _ = _member_exclusions(node.body)
+            excluded = in_class | module_qualified.get(node.name, set())
+            nodes.update(
+                f"{node.name}::{child.name}"
+                for child in node.body
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and child.name.startswith("test")
+                and child.name not in excluded
+                and not _is_fixture(child)
+                and not _never_reds(child)
+            )
+    return nodes
 
 
 def _resolve_in_repo(rel: str, root: Path) -> Path | None:
@@ -1181,6 +2106,93 @@ def gate_errors(mechanisms: list[dict], root: Path = ROOT) -> list[str]:
                                 f"says is built is not where the row says it is"
                             )
 
+        # ── the ABSENCE PIN: a recorded absence must be falsifiable by a CALL ─
+        # `tracking_issue:` names WHERE an absence is tracked; nothing in it says
+        # anything would NOTICE the absence closing. #10636 found the live case:
+        # `span_link`'s row asserted an every-point requirement whose real
+        # coverage was 1 of 4 gates, with the other three named only in the
+        # note's own prose ("pinned ELSEWHERE, not by it") — a claim no call
+        # could falsify, and the same class this gate refuses one field up. So a
+        # `not-implemented` row names the test NODE that reds the day the absence
+        # closes (and the ROW is what then flips, not the pin silently deleted).
+        #
+        # A BARE PATH is refused on purpose: that is exactly what `tests:`
+        # already is, and a file whose cited call was renamed away is the drift
+        # this closes. A pin on an `implemented` row is refused too — a pin
+        # asserts an absence, so carrying one while claiming the mechanism is
+        # built reads watched-and-shipped at once.
+        if state == IMPLEMENTED:
+            if PINS in row:
+                errors.append(
+                    f"{mid}: `{PINS}` is declared on an `implemented` row — a "
+                    f"pin asserts that the mechanism is ABSENT and would red "
+                    f"when it closes, so a built mechanism carrying one reads "
+                    f"watched and shipped at once; drop the pin when the row flips"
+                )
+            continue
+        declared_pins = row.get(PINS)
+        if not isinstance(declared_pins, list) or not declared_pins:
+            errors.append(
+                f"{mid}: not-implemented with no absence pin (`{PINS}`) — an "
+                f"absent mechanism needs the test that reds the day the absence "
+                f"closes, or nothing notices it landing and this row keeps "
+                f"publishing the absence (#5064 indicator (3))"
+            )
+            continue
+        for entry in declared_pins:
+            if not isinstance(entry, str) or not entry:
+                errors.append(
+                    f"{mid}: `{PINS}` entry is not a non-empty string: {entry!r}"
+                )
+                continue
+            parts = entry.split("::")
+            if len(parts) == 1:
+                errors.append(
+                    f"{mid}: `{PINS}` entry names no test node ({entry!r}) — "
+                    f"name `path::test_name` or `path::Class::test_name`. A bare "
+                    f"path is what `tests:` is, and the call it cites can be "
+                    f"renamed away while the file stays"
+                )
+                continue
+            if len(parts) > 3 or not parts[0] or not all(p.strip() for p in parts[1:]):
+                errors.append(
+                    f"{mid}: `{PINS}` entry is malformed ({entry!r}) — expected "
+                    f"`path::test_name` or `path::Class::test_name` (pins "
+                    f"resolve at module/class depth — see the stated limits)"
+                )
+                continue
+            rel, node = parts[0], "::".join(parts[1:])
+            path_errors = _path_violations(mid, PINS, [rel], root, "test")
+            if path_errors:
+                errors.extend(path_errors)
+                continue
+            resolved_pin = _resolve_in_repo(rel, root)
+            if resolved_pin is None:
+                continue  # the path rule above already reported it
+            node_names = _test_node_names(resolved_pin)
+            if node_names is None:
+                errors.append(
+                    f"{mid}: `{PINS}` source {rel!r} could not be read or "
+                    f"parsed, so the pin cannot be resolved — an unreadable "
+                    f"test file is not a pin"
+                )
+            elif node not in node_names:
+                errors.append(
+                    f"{mid}: `{PINS}` entry {entry!r} is not a test node that "
+                    f"pytest collects from {rel!r} under that name (nor a node "
+                    f"in its OWN body under it). Causes, and this verdict does "
+                    f"NOT guess which: the cited call is gone; the name is not a "
+                    f"collected test (a helper, no `test` prefix, a non-test "
+                    f"method, or a non-test name); the node carries a "
+                    f"`@pytest.fixture` marker (pytest never collects it); the "
+                    f"method is INHERITED (pytest collects it, so cite the "
+                    f"DEFINING class WHEN THAT CLASS IS ITSELF COLLECTED — a "
+                    f"plain `class Base:` holding `test_*` methods is not); or "
+                    f"the CLASS is not collected — by name, "
+                    f"`__init__` or an opt-out this file can see, or by a base "
+                    f"in ANOTHER file the gate cannot read (a stated limit)"
+                )
+
     # ── the ordering must itself be orderable: a cycle is not an ordering ────
     # Judged over the SET, after the rows: `a → b → a` satisfies every per-row
     # rule, so no single row can report it. Unknown ids and self-references are
@@ -1245,6 +2257,20 @@ def test_every_declared_mechanism_has_a_declaration_marker_and_vice_versa() -> N
     errors = membership_errors(load_registry()["mechanisms"])
     assert errors == [], "declared-mechanism membership violations:\n  " + \
         "\n  ".join(errors)
+
+
+def test_every_declaration_marker_states_what_the_registry_records() -> None:
+    """#5064 Target 2, at the site a reader READS: the design says built/absent.
+
+    Membership proves every declared mechanism has a verdict *somewhere*; this
+    proves the document a human opens states it *at the declaration*. #10636 is
+    the case that made the difference visible: it flipped `span_link` to
+    `not-implemented` in the registry while §2.4.1 rule 1 went on reading as an
+    adopted requirement, so the design still outran the code for anyone reading
+    the design — #5064's root sentence, one level out.
+    """
+    errors = declaration_state_errors(load_registry()["mechanisms"])
+    assert errors == [], "declaration-state violations:\n  " + "\n  ".join(errors)
 
 
 def test_the_state_value_carve_out_row_records_what_is_enforced_and_what_is_not() -> None:
@@ -2043,6 +3069,7 @@ def test_the_artifact_fields_of_a_not_implemented_row_are_still_verified(
         _row("mid"),
         state=NOT_IMPLEMENTED,
         tracking_issue=2684,
+        pins=["test_x.py::test_ok"],
         code=["src.py"],
         tests=["test_x.py"],
         symbols=["present_symbol"],
@@ -2166,6 +3193,11 @@ def test_a_broken_code_field_yields_one_verdict_on_a_not_implemented_row(
         code=["src.py"],
         tests=["test_x.py"],
         symbols=["present_symbol"],
+        # #5064 indicator (3): an absent row also names the test that reds when
+        # the absence closes. Without it the row earns a SECOND verdict ("no
+        # absence pin"), which would make this test measure the pin rule instead
+        # of the one-defect-one-verdict shape it exists for.
+        pins=["test_x.py::test_ok"],
     )
     assert gate_errors([good], root=tmp_path) == []
 
@@ -2206,6 +3238,10 @@ def test_the_unreadable_source_verdict_names_the_symbols_it_could_not_verify(
         code=["broken.py"],
         tests=["test_x.py"],
         symbols=["present_symbol"],
+        # #5064 indicator (3): the pin is what makes the count below "ONE
+        # verdict for ONE defect" rather than "one verdict, plus the row's
+        # missing pin".
+        pins=["test_x.py::test_ok"],
     )
     errors = gate_errors([row], root=tmp_path)
     assert len(errors) == 1, errors
@@ -3505,6 +4541,21 @@ def test_a_placeholder_id_is_the_convention_not_a_declaration(tmp_path) -> None:
     assert membership_errors([_row("x")], docs) == []
 
 
+def test_the_placeholder_is_also_skipped_with_a_state(tmp_path) -> None:
+    """The convention's FULL form is a placeholder, not a malformed marker.
+
+    Now that a real declaration states its state, the convention is written down
+    as `<!-- v4-mechanism: <id> state: <state> -->`. That shape is still a
+    placeholder (the exemption is on the BRACKET), so documenting the convention
+    in a scanned document cannot red the gate — and it still makes no row pass.
+    """
+    docs = _docs(tmp_path, a__md="<!-- v4-mechanism: <id> state: <state> -->\n")
+    errors = membership_errors([_row("x")], docs)
+    assert not any("does not name a mechanism id" in e for e in errors), errors
+    assert any("UNMARKED row" in e for e in errors), errors
+    assert declaration_state_errors([_row("x")], docs) == []
+
+
 def test_membership_ignores_the_token_in_prose(tmp_path) -> None:
     """Documenting the token must not be reported as a declaration."""
     docs = _docs(
@@ -3961,6 +5012,472 @@ def test_gate_fails_closed_on_not_implemented_without_a_tracking_issue() -> None
         [{"id": "x", "name": "x", "declared_in": [], "state": "not-implemented"}]
     )
     assert any("no real tracking_issue" in e for e in errors), errors
+
+
+# ── the ABSENCE PIN: a recorded absence must be falsifiable by a CALL ───────
+#
+# `tracking_issue:` says WHERE an absent mechanism is tracked. It says nothing
+# about whether anything would NOTICE the absence closing — and that is not a
+# hypothetical: #10636 found `span_link`'s row publishing an every-point
+# requirement whose real coverage was 1 of 4 gates, with the other three named
+# only in the note's own prose ("pinned ELSEWHERE, not by it"). The registry's
+# remedy for a claim it cannot verify is to refuse it (see the `not-implemented`
+# artifact fields above), and an absence claim is a claim.
+#
+# So a `not-implemented` row names its PIN: the test node that reds the day the
+# absence closes, at which point the row flips to `implemented` rather than the
+# pin being quietly deleted. Same polarity as every other rule here — a pin this
+# gate cannot resolve to a real test is a violation, never a default, and an
+# unreadable test source is a violation of its own (never a silent pass).
+
+
+def _not_implemented_row(**overrides) -> dict:
+    row = {
+        "id": "x",
+        "name": "x",
+        "declared_in": ["config/v4-mechanisms.yml"],
+        "state": "not-implemented",
+        "tracking_issue": 4242,
+        "pins": ["tests/test_fanout_cap.py::test_bounded_fanout_defaults_to_the_cap"],
+    }
+    row.update(overrides)
+    return row
+
+
+def test_absence_pin_accepts_a_pin_that_resolves_to_a_real_test() -> None:
+    """The control: a resolvable pin is NOT a violation (so the cases below fail
+    for the reason they claim, not because the rule always fires)."""
+    errors = [e for e in gate_errors([_not_implemented_row()]) if "pin" in e]
+    assert errors == [], errors
+
+
+def test_absence_pin_accepts_a_class_qualified_pin() -> None:
+    """`Class::test_name` is a node pytest selects, so it is a pin."""
+    errors = [
+        e
+        for e in gate_errors(
+            [
+                _not_implemented_row(
+                    pins=[
+                        "tests/test_5095_s3_identity_policy.py"
+                        "::TestTheRemainingAbsence::test_an_unresolved_lookup_still_mints"
+                    ]
+                )
+            ]
+        )
+        if "pin" in e
+    ]
+    assert errors == [], errors
+
+
+def test_gate_fails_closed_on_not_implemented_without_an_absence_pin() -> None:
+    """An absence nobody would notice closing is the state #5064 exists to end."""
+    row = _not_implemented_row()
+    del row["pins"]
+    errors = gate_errors([row])
+    assert any("no absence pin" in e for e in errors), errors
+
+
+def test_gate_fails_closed_on_an_empty_absence_pin_list() -> None:
+    errors = gate_errors([_not_implemented_row(pins=[])])
+    assert any("no absence pin" in e for e in errors), errors
+
+
+def test_gate_fails_closed_on_a_bare_test_path_as_the_pin() -> None:
+    """A path is what `tests:` already is — and exactly the gap this closes:
+    the FILE can exist while the named call is renamed away."""
+    errors = gate_errors(
+        [_not_implemented_row(pins=["tests/test_fanout_cap.py"])]
+    )
+    assert any("names no test node" in e for e in errors), errors
+
+
+def test_gate_fails_closed_on_a_pin_naming_a_test_that_does_not_exist() -> None:
+    errors = gate_errors(
+        [_not_implemented_row(pins=["tests/test_fanout_cap.py::test_no_such_pin_5064"])]
+    )
+    assert any("is not a test node that pytest collects" in e for e in errors), errors
+
+
+def test_gate_fails_closed_on_a_pin_whose_test_file_is_missing() -> None:
+    errors = gate_errors(
+        [_not_implemented_row(pins=["tests/test_no_such_file_5064.py::test_x"])]
+    )
+    assert any("does not exist" in e for e in errors), errors
+
+
+def test_gate_fails_closed_on_a_pin_in_an_unreadable_source(tmp_path) -> None:
+    """An unparsable test file is UNVERIFIABLE, not absent — it must not read as
+    a resolved pin (the same direction `_defined_names` refuses)."""
+    (tmp_path / "test_broken_5064.py").write_text("def test_oops(:\n")
+    errors = gate_errors(
+        [_not_implemented_row(pins=["test_broken_5064.py::test_oops"])], root=tmp_path
+    )
+    assert any("could not be read or parsed" in e for e in errors), errors
+
+
+def test_gate_fails_closed_on_a_malformed_pin_entry() -> None:
+    """Each operand is asserted by the message IT ALONE produces.
+
+    `assert errors` was not enough (review cycle 1, P2): every case below also
+    reds through a DIFFERENT branch, so deleting the shape guard left the suite
+    green while the gate accepted a pin no reader can run.
+    """
+    for bad in (
+        "tests/test_fanout_cap.py::",                 # empty node
+        "::test_bounded_fanout_defaults_to_the_cap",  # empty path
+        "tests/test_fanout_cap.py::A::b::c",          # more than Class::method
+    ):
+        errors = gate_errors([_not_implemented_row(pins=[bad])])
+        assert any("is malformed" in e for e in errors), (bad, errors)
+
+    # ... and the TYPE operand, which the shape guard never reaches. The EMPTY
+    # string is included because it is the one case that pins `or not entry`
+    # (review cycle 2, P2): without it `pins: [""]` falls through to the
+    # bare-path branch and the operand could be deleted with the suite green.
+    for bad in (4242, ""):
+        errors = gate_errors([_not_implemented_row(pins=[bad])])
+        assert any("not a non-empty string" in e for e in errors), (bad, errors)
+
+
+def test_gate_fails_closed_on_a_non_list_pins_value() -> None:
+    """The container shape: `pins: "path::test"` iterates CHARACTERS and a
+    bare int must be a verdict, not a `TypeError` (review cycle 1, P2 — this
+    operand was unpinned, so deleting it left the suite green)."""
+    for value in ("tests/test_fanout_cap.py::test_bounded_fanout_defaults_to_the_cap", 5):
+        errors = gate_errors([_not_implemented_row(pins=value)])
+        assert any("no absence pin" in e for e in errors), (value, errors)
+
+
+def test_gate_fails_closed_on_a_pin_naming_a_node_pytest_never_collects(
+    tmp_path,
+) -> None:
+    """Resolution is over COLLECTABLE nodes, not over every ``def`` in the file.
+
+    Review cycle 1 (P1): `_test_node_names` accepted any top-level function and
+    any method of any class, so `path::_helper` resolved as a pin while no run
+    could ever select it — the row read as watched and nothing could red. Each
+    refused shape below is a name that EXISTS in the file and that pytest does
+    not collect; the accepted ones keep the rule from being vacuous.
+    """
+    (tmp_path / "test_shapes_5064.py").write_text(
+        "import unittest\n"
+        "def _helper():\n    return 1\n"
+        "def not_a_test():\n    return 1\n"
+        "def test_ok_5064():\n    assert True\n"
+        "class Helper:\n"
+        "    def test_looks_like_one(self):\n        assert True\n"
+        "class TestCollected:\n"
+        "    def test_yes(self):\n        assert True\n"
+        "    def helper(self):\n        return 1\n"
+        "class CaseTest(unittest.TestCase):\n"
+        "    def test_unittest_style(self):\n        assert True\n"
+        "class TestNeedsInit:\n"
+        "    def __init__(self):\n        self.x = 1\n"
+        "    def test_not_collected(self):\n        assert True\n"
+        "from unittest import TestCase as TC\n"
+        "from unittest.case import TestCase as TC2\n\n\n"
+        "class AliasedCase(TC):\n"
+        "    def test_aliased(self):\n        assert True\n"
+        "class ViaCaseModule(TC2):\n"
+        "    def test_via_case(self):\n        assert True\n"
+        "class BaseWithInit:\n"
+        "    def __init__(self):\n        self.x = 1\n"
+        "class TestIndirectInit(BaseWithInit):\n"
+        "    def test_inherited_init(self):\n        assert True\n"
+        "class TestDisabled:\n"
+        "    __test__ = False\n"
+        "    def test_no(self):\n        assert True\n"
+        "class MyCase(unittest.TestCase):\n"
+        "    def test_base(self):\n        assert True\n"
+        "class FooTest(MyCase):\n"
+        "    def test_indirect(self):\n        assert True\n"
+        "class DisabledBase:\n"
+        "    __test__ = 0\n"
+        "class TestInheritsDisabled(DisabledBase):\n"
+        "    def test_no(self):\n        assert True\n"
+        "class TestZero:\n"
+        "    __test__ = 0\n"
+        "    def test_zero(self):\n        assert True\n"
+        "import pytest\n"
+        "import pytest as pt\n"
+        "from pytest import fixture as fix\n"
+        "from pytest import fixture\n\n\n"
+        "@pytest.fixture\n"
+        "def test_a_fixture_5064():\n    return 1\n\n\n"
+        "@pt.fixture\n"
+        "def test_a_fixture_alias_5064():\n    return 1\n\n\n"
+        "@fix\n"
+        "def test_a_fixture_imported_5064():\n    return 1\n\n\n"
+        "@pytest.fixture()\n"
+        "def test_a_fixture_call_5064():\n    return 1\n\n\n"
+        "@fixture\n"
+        "def test_a_fixture_unaliased_5064():\n    return 1\n\n\n"
+
+        "class TestMemberForms:\n"
+        "    def test_off_in_class(self):\n        assert True\n"
+        "    test_off_in_class.__test__ = False\n"
+        "    def test_kept_in_class(self):\n        assert True\n"
+        "class TestClassHandle:\n"
+        "    def test_off_by_handle(self):\n        assert True\n"
+        "    def test_kept_by_handle(self):\n        assert True\n"
+        "TestClassHandle.test_off_by_handle.__test__ = False\n"
+        "class TestFixtureMethod:\n"
+        "    @pytest.fixture\n"
+        "    def test_a_fixture_method(self):\n        return 1\n"
+        "    def test_a_real_method(self):\n        assert True\n"
+        "class TestHandleOff:\n"
+        "    def test_x(self):\n        assert True\n"
+        "TestHandleOff.__test__ = False\n"
+        "class DisabledByHandleBase:\n"
+        "    pass\n"
+        "DisabledByHandleBase.__test__ = False\n"
+        "class TestChildOfDisabled(DisabledByHandleBase):\n"
+        "    def test_child(self):\n        assert True\n"
+    )
+
+    def pin_errors(node: str) -> list[str]:
+        return [
+            e
+            for e in gate_errors(
+                [_not_implemented_row(pins=[f"test_shapes_5064.py::{node}"])],
+                root=tmp_path,
+            )
+            if "pin" in e
+        ]
+
+    for node in (
+        "_helper",                        # a helper, not a test
+        "not_a_test",                     # a plain function
+        "Helper::test_looks_like_one",    # a class pytest does not collect
+        "TestCollected::helper",          # a method that is not a test
+        "TestNeedsInit::test_not_collected",  # `Test*` with __init__: not collected
+        "TestIndirectInit::test_inherited_init",  # ... `__init__` from a BASE
+        "TestDisabled::test_no",          # `__test__ = False` opts the class out
+        "TestZero::test_zero",            # ... any FALSY value, not just False
+        "TestInheritsDisabled::test_no",  # ... including an INHERITED opt-out
+        "test_a_fixture_5064",            # @pytest.fixture: pytest never collects it
+        "TestMemberForms::test_off_in_class",   # member opt-out in the class body
+        "TestClassHandle::test_off_by_handle",  # ... written through the CLASS handle
+        "test_a_fixture_alias_5064",       # `import pytest as pt` + `@pt.fixture`
+        "test_a_fixture_imported_5064",    # `from pytest import fixture as fix`
+        "test_a_fixture_call_5064",        # the CALL form `@pytest.fixture()`
+        "test_a_fixture_unaliased_5064",   # `from pytest import fixture` + `@fixture`
+        "TestFixtureMethod::test_a_fixture_method",  # a fixture METHOD
+        "TestHandleOff::test_x",           # the class handle `TestCls.__test__ = False`
+        "TestChildOfDisabled::test_child",  # ... inherited from a handle-disabled BASE
+    ):
+        assert any("is not a test node that pytest collects" in e for e in pin_errors(node)), (
+            node,
+            pin_errors(node),
+        )
+
+    # ⭐ An INHERITED test method is collected by pytest but NOT nameable as a
+    # pin (review cycle 5, P2 — the message said so and nothing asserted it, so
+    # an MRO-walking rewrite would have left the suite green and the message
+    # false). `FooTest` inherits `test_base` from `MyCase`.
+    inherited = pin_errors("FooTest::test_base")
+    assert any(
+        "OWN body" in e and "INHERITED" in e for e in inherited
+    ), inherited
+
+    for node in (
+        "test_ok_5064",
+        "TestCollected::test_yes",
+        "CaseTest::test_unittest_style",   # unittest.TestCase methods ARE collected
+        "AliasedCase::test_aliased",      # ... including through an ALIASED base
+        "ViaCaseModule::test_via_case",   # ... and the `unittest.case` spelling
+        "FooTest::test_indirect",         # ... and TRANSITIVELY via an in-file base
+        "TestMemberForms::test_kept_in_class",   # the sibling of an opted-out member
+        "TestClassHandle::test_kept_by_handle",  # ... same, through the class handle
+        "TestFixtureMethod::test_a_real_method",  # sibling of a fixture method
+    ):
+        assert pin_errors(node) == [], (node, pin_errors(node))
+
+
+def test_gate_treats_a_member_test_opt_out_as_one_member(tmp_path) -> None:
+    """`member.__test__ = False` excludes THAT member — not the whole module.
+
+    Review cycle 5 (P2): conflating the attribute form with the bare-`Name` scope
+    opt-out disabled collection for the entire file, so a sibling `test_kept`
+    that pytest DOES collect was refused with "the cited call is gone".
+    """
+    (tmp_path / "test_member_opt_out_5064.py").write_text(
+        "def test_off_5064():\n    assert True\n"
+        "test_off_5064.__test__ = False\n\n\n"
+        "def test_kept_5064():\n    assert True\n"
+    )
+    refused = gate_errors(
+        [_not_implemented_row(pins=["test_member_opt_out_5064.py::test_off_5064"])],
+        root=tmp_path,
+    )
+    assert any("is not a test node that pytest collects" in e for e in refused), refused
+    accepted = [
+        e
+        for e in gate_errors(
+            [_not_implemented_row(pins=["test_member_opt_out_5064.py::test_kept_5064"])],
+            root=tmp_path,
+        )
+        if "pin" in e
+    ]
+    assert accepted == [], accepted
+
+
+def test_gate_fails_closed_on_an_annotated_scope_opt_out(tmp_path) -> None:
+    """`__test__: bool = False` (`AnnAssign`) is the same scope opt-out."""
+    (tmp_path / "test_ann_opt_out_5064.py").write_text(
+        "__test__: bool = False\n\n\ndef test_nope_5064():\n    assert True\n"
+    )
+    errors = gate_errors(
+        [_not_implemented_row(pins=["test_ann_opt_out_5064.py::test_nope_5064"])],
+        root=tmp_path,
+    )
+    assert any("is not a test node that pytest collects" in e for e in errors), errors
+
+
+def test_gate_accepts_a_decorator_named_fixture_from_another_module(
+    tmp_path,
+) -> None:
+    """A decorator named ``fixture`` that is NOT pytest's is not the marker.
+
+    This is the case the EMPTY SEED needs (review cycle 9, P2): pytest collects
+    this node, so a marker set seeded with ``"fixture"`` would wrongly refuse it,
+    and the seed's comment could claim decidability that nothing observed.
+    """
+    (tmp_path / "test_foreign_fixture_5064.py").write_text(
+        "from helpers_5064 import fixture\n\n\n"
+        "@fixture\n"
+        "def test_collected_5064():\n    assert True\n"
+    )
+    errors = [
+        e
+        for e in gate_errors(
+            [_not_implemented_row(pins=["test_foreign_fixture_5064.py::test_collected_5064"])],
+            root=tmp_path,
+        )
+        if "pin" in e
+    ]
+    assert errors == [], errors
+
+
+def test_gate_fails_closed_on_an_unaliased_pytest_fixture_import(tmp_path) -> None:
+    """``from pytest import fixture`` + ``@fixture`` — the un-aliased marker.
+
+    Pins the ``alias.asname or alias.name`` operand: with the fallback removed,
+    the alias is ``None`` and the node is wrongly accepted.
+    """
+    (tmp_path / "test_unaliased_fixture_5064.py").write_text(
+        "from pytest import fixture\n\n\n"
+        "@fixture\n"
+        "def test_never_runs_5064():\n    return 1\n"
+    )
+    errors = gate_errors(
+        [_not_implemented_row(pins=["test_unaliased_fixture_5064.py::test_never_runs_5064"])],
+        root=tmp_path,
+    )
+    assert any("is not a test node that pytest collects" in e for e in errors), errors
+
+
+def test_gate_fails_closed_on_a_pin_in_a_module_opting_out_of_collection(
+    tmp_path,
+) -> None:
+    """Module-level `__test__ = False` — pytest collects NOTHING from the file.
+
+    Claimed in `_test_node_names`' docstring and, before this case, unexercised
+    (review cycle 4, P2): deleting the module-level probe left the suite green,
+    so a pin in an opted-out module would have read as watched.
+    """
+    (tmp_path / "test_opted_out_5064.py").write_text(
+        "__test__ = False\n\n\ndef test_never_runs():\n    assert True\n"
+    )
+    errors = gate_errors(
+        [_not_implemented_row(pins=["test_opted_out_5064.py::test_never_runs"])],
+        root=tmp_path,
+    )
+    assert any("is not a test node that pytest collects" in e for e in errors), errors
+
+
+def test_gate_fails_closed_when_the_defining_class_is_not_collected(
+    tmp_path,
+) -> None:
+    """A plain in-file base class holds `test_*` methods pytest runs ONLY via a
+    collected subclass — so there is no citation that resolves for the inherited
+    method.
+
+    The refusal message tells the author to cite the DEFINING class, and for this
+    shape that advice loops back to the same refusal (final verification pass,
+    P2): the fix is to say which bases qualify, and to prove the double refusal
+    rather than narrate it.
+    """
+    (tmp_path / "test_plain_base_5064.py").write_text(
+        "class Base:\n"
+        "    def test_inherited(self):\n        assert True\n"
+        "class TestSub(Base):\n"
+        "    def test_own(self):\n        assert True\n"
+    )
+
+    def pin_errors(node: str) -> list[str]:
+        return [
+            e
+            for e in gate_errors(
+                [_not_implemented_row(pins=[f"test_plain_base_5064.py::{node}"])],
+                root=tmp_path,
+            )
+            if "pin" in e
+        ]
+
+    inherited = pin_errors("TestSub::test_inherited")
+    assert any(
+        "WHEN THAT CLASS IS ITSELF COLLECTED" in e for e in inherited
+    ), inherited
+    defining = pin_errors("Base::test_inherited")
+    assert any(
+        "is not a test node that pytest collects" in e for e in defining
+    ), defining
+    assert pin_errors("TestSub::test_own") == [], pin_errors("TestSub::test_own")
+
+
+def test_gate_fails_closed_on_pins_declared_on_an_implemented_row() -> None:
+    """A pin asserts an absence. An `implemented` row carrying one reads as
+    watched-and-built at the same time — the two states are exclusive."""
+    errors = gate_errors(
+        [_implemented_row(pins=["tests/test_fanout_cap.py::test_bounded_fanout_defaults_to_the_cap"])]
+    )
+    assert any("declared on an `implemented` row" in e for e in errors), errors
+
+
+def test_every_absent_mechanism_in_the_registry_names_its_absence_pin() -> None:
+    """The deliverable on the REAL registry: indicator (3) for absences.
+
+    Every `not-implemented` row resolves its pin through `gate_errors`, and
+    `sufficiency_router` is the one row whose absence (#5009's *"nothing
+    escalates yet"*) had no call that could falsify it until this pin existed.
+    """
+    absent = {
+        row["id"]: row
+        for row in load_registry()["mechanisms"]
+        if row.get("state") == NOT_IMPLEMENTED
+    }
+    assert absent, "no absent mechanism to pin — this test is measuring nothing"
+    for mid, row in absent.items():
+        assert row.get("pins"), f"{mid}: not-implemented row carries no `pins:`"
+    # ⚠️ Guarded on PRESENCE, not asserted unconditionally (review cycle 1, P2):
+    # the pin's own docstring tells the next lane to flip `sufficiency_router` to
+    # `implemented` when escalation lands, and an unconditional assertion would
+    # red on that legitimate flip — a false verdict from a test whose job is to
+    # demand the pin, not to keep the mechanism absent.
+    if "sufficiency_router" in absent:
+        assert any(
+            "test_sufficiency_router.py" in p
+            for p in absent["sufficiency_router"]["pins"]
+        ), absent["sufficiency_router"]["pins"]
+
+    # ⚠️ UNFILTERED (review cycle 4, P2): filtering on the substring "pin"
+    # skipped the PATH verdict ("declared path does not exist"), so a pin naming
+    # a missing file left this test — whose whole job is "every absent row
+    # resolves its pin" — green while `gate_errors` was red.
+    errors = gate_errors(load_registry()["mechanisms"])
+    assert errors == [], errors
 
 
 # ── the CODE ANCHOR: `implemented` must name a SYMBOL, not just a file ──────
@@ -4674,6 +6191,9 @@ def test_gate_accepts_the_issue_number_one_and_a_symlinked_root(tmp_path) -> Non
                 "declared_in": ["config/v4-mechanisms.yml"],
                 "state": "not-implemented",
                 "tracking_issue": 1,
+                "pins": [
+                    "tests/test_fanout_cap.py::test_bounded_fanout_defaults_to_the_cap"
+                ],
             }
         ]
     ) == []
@@ -4780,6 +6300,7 @@ def _absent_row(**overrides) -> dict:
         "declared_in": ["config/v4-mechanisms.yml"],
         "state": "not-implemented",
         "tracking_issue": 5006,
+        "pins": ["tests/test_fanout_cap.py::test_bounded_fanout_defaults_to_the_cap"],
     }
     row.update(overrides)
     return row
@@ -4948,5 +6469,600 @@ def test_load_registry_refuses_a_non_mapping_document(tmp_path) -> None:
         load_registry(bad)
 
 
+# ── DECLARATION STATE: the site a reader meets says built / absent ──────────
+#
+# Each case below is a way the DESIGN DOCUMENT can disagree with the registry
+# while every membership rule stays green — which is the state #10636 left
+# behind: the row was right and the document still read as shipped.
+
+
+def test_a_marker_that_states_the_rows_state_is_accepted(tmp_path) -> None:
+    """POSITIVE CONTROL: the rule is not vacuously red."""
+    docs = _docs(
+        tmp_path, a__md="text <!-- v4-mechanism: x state: implemented -->\n"
+    )
+    assert declaration_state_errors([_row("x")], docs) == []
+    absent = _row("x")
+    absent["state"] = NOT_IMPLEMENTED
+    assert declaration_state_errors(
+        [absent], _docs(tmp_path, a__md="<!-- v4-mechanism: x state: not-implemented -->\n")
+    ) == []
+
+
+def test_a_marker_with_no_state_is_refused(tmp_path) -> None:
+    """A declaration that publishes no verdict is the shape the issue names."""
+    docs = _docs(tmp_path, a__md="text <!-- v4-mechanism: x -->\n")
+    errors = declaration_state_errors([_row("x")], docs)
+    assert any("states no `state:`" in e for e in errors), errors
+    # ... and the suggested remedy names the state the registry records.
+    assert any("state: implemented" in e for e in errors), errors
+
+
+def test_a_marker_state_that_contradicts_the_row_is_refused(tmp_path) -> None:
+    """The #10636 shape: the document claims built, the registry says absent."""
+    absent = _row("x")
+    absent["state"] = NOT_IMPLEMENTED
+    docs = _docs(tmp_path, a__md="a <!-- v4-mechanism: x state: implemented -->\n")
+    errors = declaration_state_errors([absent], docs)
+    assert any("`state: implemented`" in e and "`state: not-implemented`" in e for e in errors), errors
+
+
+def test_a_row_flipped_to_absent_with_a_stale_document_is_refused(tmp_path) -> None:
+    """The OTHER direction — a document claiming absent on a shipped row.
+
+    This must be the reverse of the case above, not a second copy of it: the
+    compare is bidirectional because BOTH sides can rot, and a one-directional
+    `elif decl.state == IMPLEMENTED and recorded == NOT_IMPLEMENTED` would leave
+    a shipped mechanism that a design now reports absent with NO verdict
+    (measured: that mutation left this suite green while the case above still
+    covered the other half). A design document claiming a mechanism is missing
+    is a different lie from one claiming it exists, and it is the one that would
+    send a lane to re-implement what is already there.
+    """
+    docs = _docs(tmp_path, a__md="a <!-- v4-mechanism: x state: not-implemented -->\n")
+    errors = declaration_state_errors([_row("x")], docs)  # row stays `implemented`
+    assert any("disagree" in e for e in errors), errors
+    assert any("records `state: implemented`" in e for e in errors), errors
+    assert any("`state: not-implemented`" in e for e in errors), errors
+
+
+def test_an_unknown_marker_state_is_refused(tmp_path) -> None:
+    """A typo must not read as agreement (no allow-list gap)."""
+    docs = _docs(tmp_path, a__md="a <!-- v4-mechanism: x state: implementedish -->\n")
+    errors = declaration_state_errors([_row("x")], docs)
+    assert any("not a state the registry supports" in e for e in errors), errors
+
+
+@pytest.mark.parametrize("order", ["loud-last", "loud-first"])
+def test_every_occurrence_is_checked_so_a_second_marker_cannot_shout_louder(
+    tmp_path, order
+) -> None:
+    """Two markers, one honest and one claiming shipped: the loud one reds.
+
+    `span_link` and `fanout_cap` legitimately carry two markers per document, so
+    repeats are collected rather than refused. That means the state verdict has
+    to judge EACH occurrence: admitting the pair as a set would let a
+    `state: implemented` marker be added beside the honest one and the document
+    read as shipped again.
+
+    ⚠️ BOTH ORDERS, because "each occurrence" is only pinned if neither a
+    first-only nor a last-only read survives. With the loud marker last, a
+    last-only read reds and a FIRST-only read passes — measured: `markers[mid][0]`
+    was green here before this was parametrized, which is the fail-open of a
+    document that keeps an honest marker first and appends a shipped one.
+    """
+    absent = _row("x")
+    absent["state"] = NOT_IMPLEMENTED
+    honest = "honest <!-- v4-mechanism: x state: not-implemented -->\n"
+    loud = "loud   <!-- v4-mechanism: x state: implemented -->\n"
+    body = honest + loud if order == "loud-last" else loud + honest
+    errors = declaration_state_errors([absent], _docs(tmp_path, a__md=body))
+    assert len(errors) == 1, errors
+    assert "`state: implemented`" in errors[0], errors
+
+
+def test_a_marker_with_no_row_is_memberships_verdict_not_a_second_one(tmp_path) -> None:
+    """One defect, one message: there is no state to compare a ghost to."""
+    docs = _docs(tmp_path, a__md="a <!-- v4-mechanism: ghost state: implemented -->\n")
+    assert declaration_state_errors([_row("x")], docs) == []
+    assert any(
+        "NO row" in e for e in membership_errors([_row("x")], docs)
+    )
+
+
+def test_a_row_with_an_unsupported_state_is_left_to_gate_errors(tmp_path) -> None:
+    """Same polarity: the row's own defect is `gate_errors`' verdict.
+
+    Asserted LOCALLY, not just as silence: the skip above is a fail-open path
+    whose entire safety is that another gate rules, so this is the one place the
+    referral has to be shown rather than assumed (a mutation deleting
+    `gate_errors`' unknown-state branch left the silence assertion green).
+    """
+    row = _row("x")
+    row["state"] = "descriptive"
+    docs = _docs(tmp_path, a__md="a <!-- v4-mechanism: x state: implemented -->\n")
+    assert declaration_state_errors([row], docs) == []
+    assert any("NEITHER" in e for e in gate_errors([row])), gate_errors([row])
+
+
+def test_an_unreadable_surface_is_not_a_vacuous_pass(tmp_path) -> None:
+    """A missing docs dir must red THIS verdict too, not pass it empty."""
+    errors = declaration_state_errors([_row("x")], tmp_path / "nope")
+    assert any("is not a directory" in e for e in errors), errors
+
+
+def test_a_malformed_marker_breaks_the_state_verdict_too(tmp_path) -> None:
+    """A marker no reader can parse publishes no state either.
+
+    Both malformed shapes are pinned apart, because the repair differs and the
+    message must not send a reader to fix the wrong field (review P3): an
+    unparseable `state:` tail on a CORRECT id, versus a comment that names no id
+    at all.
+    """
+    docs = _docs(tmp_path, a__md="a <!-- v4-mechanism: x state: -->\n")
+    errors = declaration_state_errors([_row("x")], docs)
+    assert any("`state:` tail is not a bare state token" in e for e in errors), errors
+    assert not any("does not name a mechanism id" in e for e in errors), errors
+    # The value with a space in it is not a bare token either — and it, too, is
+    # reported against the state field rather than the id.
+    docs = _docs(tmp_path, a__md="a <!-- v4-mechanism: x state: not implemented -->\n")
+    errors = declaration_state_errors([_row("x")], docs)
+    assert any("`state:` tail is not a bare state token" in e for e in errors), errors
+    # The id-less shape keeps its OWN message.
+    docs = _docs(tmp_path, a__md="a <!-- v4-mechanism: -->\n")
+    errors = declaration_state_errors([_row("x")], docs)
+    assert any("does not name a mechanism id" in e for e in errors), errors
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        "V4-MECHANISM:",
+        "v4-mechanism :",
+        "v4_mechanism:",
+        "v4mechanism:",
+        # Review P3: the enumerated separator class `[\s_-]*` missed these, so a
+        # marker spelled this way was invisible to BOTH gates unless a sibling
+        # document happened to mark the same id honestly — and all five
+        # dual-declared mechanisms have such a sibling.
+        "v4.mechanism:",
+        "v4/mechanism:",
+        "v4\u2013mechanism:",
+    ],
+)
+def test_a_misspelled_marker_token_is_a_verdict_not_silence(tmp_path, token) -> None:
+    """A near-miss token used to vanish — no marker, no error, no state.
+
+    `MARKER_TOKEN` is an exact substring, so every spelling here was SKIPPED
+    rather than reported (review cycle 2, P2). A typo must be a verdict: silence
+    is how a contradictory claim survives both gates. Since review P3 the verdict
+    names the SPELLING when the id is still readable, because the repair is the
+    token, not the id.
+    """
+    docs = _docs(tmp_path, a__md=f"a <!-- {token} x state: not-implemented -->\n")
+    errors = declaration_state_errors([_row("x")], docs)
+    assert any("near-miss token" in e for e in errors), errors
+    assert not any("does not name a mechanism id" in e for e in errors), errors
+
+
+def test_a_malformed_marker_is_ONE_defect_and_names_the_right_repair(tmp_path) -> None:
+    """Review P3: a marker that IS on the page was reported as missing.
+
+    `<!-- v4-mechanism: x state: -->` produced the parse verdict AND, because the
+    id was never registered, membership's "a registry row with NO `v4-mechanism:
+    x` marker" and "the row names NO declaring document" — two repairs that tell
+    a reader to add a marker already on the page. The id is now recorded
+    present-but-unparseable, so membership stays silent while the parse verdict
+    (the only actionable one) is emitted.
+    """
+    docs = _docs(tmp_path, a__md="a <!-- v4-mechanism: x state: -->\n")
+    row = _row("x")
+    assert declaration_state_errors([row], docs), "the parse defect must still red"
+    membership = membership_errors([row], docs)
+    assert not any("NO `v4-mechanism: x` marker" in e for e in membership), membership
+    assert not any("names NO declaring document" in e for e in membership), membership
+    # The near-miss TOKEN gets the same treatment: the repair is the spelling.
+    docs = _docs(tmp_path, a__md="a <!-- v4.mechanism: x state: implemented -->\n")
+    membership = membership_errors([row], docs)
+    assert not any("NO `v4-mechanism: x` marker" in e for e in membership), membership
+
+
+def test_a_near_miss_token_cannot_hide_a_contradiction(tmp_path) -> None:
+    """Review P3, the fail-open that remained after the cycle-2 fix.
+
+    The cycle-2 test used a mis-CASED token, which the loose scan already
+    covered. A punctuation variant (`v4.mechanism:`) was still invisible, so a
+    second document could publish the OPPOSITE state while both gates passed —
+    the same shape, one typo deeper. The separated class closes it.
+    """
+    for token in ("v4.mechanism:", "v4/mechanism:", "v4\u2013mechanism:"):
+        docs = _docs(
+            tmp_path,
+            a__md="honest <!-- v4-mechanism: x state: implemented -->\n",
+            b__md=f"loud <!-- {token} x state: not-implemented -->\n",
+        )
+        assert declaration_state_errors([_row("x")], docs), (
+            f"the `{token}` marker must not be silent"
+        )
+
+
+def test_a_misspelled_token_cannot_hide_a_contradiction(tmp_path) -> None:
+    """The live fail-open: one doc honest, one doc mis-cased and contradicting.
+
+    Every one of the five live mechanisms declared in two documents
+    (`span_link`, `fanout_cap`, `sufficiency_router`, `near_dup_merge`,
+    `state_value_carve_out`) had this shape available: the honest marker carried
+    the state, the mis-cased one carried none because it was never read.
+    """
+    docs = _docs(
+        tmp_path,
+        a__md="honest <!-- v4-mechanism: x state: implemented -->\n",
+        b__md="loud <!-- V4-MECHANISM: x state: not-implemented -->\n",
+    )
+    row = _row("x")  # `state: implemented`
+    assert declaration_state_errors([row], docs), "a mis-cased marker must not be silent"
+
+
+def test_the_id_dropped_but_the_state_kept_names_the_id(tmp_path) -> None:
+    """`<!-- v4-mechanism: state: implemented -->` has no id — say so.
+
+    Without a lookahead the whole-token `MARKER_ID` read `state` as the id, so
+    the verdict quoted `state: implemented` and then listed `state: implemented`
+    as the expected value — a message contradicting itself (review cycle 3, P3).
+    """
+    docs = _docs(tmp_path, a__md="a <!-- v4-mechanism: state: implemented -->\n")
+    errors = declaration_state_errors([_row("x")], docs)
+    assert any("does not name a mechanism id" in e for e in errors), errors
+    assert not any("`state:` tail" in e for e in errors), errors
+    # And the reserved-looking id still parses when it IS an id.
+    row = _row("state_value_carve_out")
+    docs = _docs(
+        tmp_path, a__md="a <!-- v4-mechanism: state_value_carve_out state: implemented -->\n"
+    )
+    assert declaration_state_errors([row], docs) == []
+
+
+def test_an_out_of_alphabet_id_is_an_id_defect_not_a_state_one(tmp_path) -> None:
+    """`atomic-point-write` is a bad ID, not a bad `state:` value.
+
+    A prefix match on the id reported `atomic` — an id that appears nowhere — and
+    told the reader to fix a `state:` value that was already correct (review
+    cycle 2, P3: the cycle-1 defect mirrored).
+    """
+    docs = _docs(
+        tmp_path,
+        a__md="a <!-- v4-mechanism: atomic-point-write state: not-implemented -->\n",
+    )
+    errors = declaration_state_errors([_row("x")], docs)
+    assert any("does not name a mechanism id" in e for e in errors), errors
+    assert not any("`state:` tail" in e for e in errors), errors
+
+
 if __name__ == "__main__":  # pragma: no cover - manual mutation aid
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+def test_an_unconditional_skip_or_xfail_is_not_a_pin(tmp_path):
+    """A `pins:` entry must cite a test that can RED (review cycle 9, P2).
+
+    `@pytest.mark.skip` and a non-strict `@pytest.mark.xfail` leave the node
+    COLLECTED but unable to fail, so a row citing one reads "watched" while
+    nothing watches it — the exact fail-open this gate closes. The boundary is
+    the point: `skipif(cond)` and an in-body `pytest.skip()` are CONDITIONAL and
+    still red on the other branch, so both stay legitimate pins.
+
+    The condition's VALUE matters, not its presence (review cycles 11-12):
+    `xfail(False)` runs the body and can red, but `xfail(True)` / `xfail(1)` /
+    `xfail(condition=True)` is xfailed unconditionally by pytest — MEASURED,
+    `2 xfailed` — so the RUN cannot go red. ⚠️ xfail remaps the OUTCOME, it does
+    not skip execution: the body still RUNS (measured with side-effect markers);
+    only `skip`, `skipif` and `run=False` suppress it. A non-literal condition —
+    INCLUDING A STRING, which pytest `eval()`s as an expression rather than
+    reading as a boolean — is unknowable from a manifest and is kept.
+
+    The same applies to every decoded TYPE, not just bool/int (review cycle 6,
+    P1): `skipif("[1]")` and `skipif("0.0")` are decided by the truthiness of the
+    decoded literal, because that is exactly what pytest's `eval` computes. And
+    the marker's own parameter list matters: `cond=` is NOT an xfail parameter —
+    pytest ignores it, so `xfail(cond=False)` is a BARE xfail that always applies
+    and cannot red — while `skipif(condition=…)` REPLACES its positional args
+    rather than joining them (`skipif(True, condition=False)` runs and fails).
+
+    Three more shapes are the same fail-open one marker over, each MEASURED
+    against real pytest before being refused (review cycle 12): `skipif` with no
+    condition at all (`skipif(reason=…)`, and `skipif(cond=…)` — pytest IGNORES
+    `cond=`, so the mark is unconditional), `skipif(True)` and `skipif(False,
+    True)` (pytest skips when ANY condition is true), and `xfail(strict=True,
+    run=False)` (`[NOTRUN]`, exit 0). `skipif(False)` and
+    `xfail(False, strict=True, run=False)` still RUN and still fail, so both stay
+    legitimate pins.
+
+    `xfail` carries the SAME ANY-of rule as `skipif`, and it was reasoned about
+    but not measured until review cycle 14 (P2):
+    `_pytest/skipping.py::evaluate_xfail_marks` takes EVERY positional arg as a
+    condition (`conditions = mark.args`; a `condition=` keyword REPLACES them)
+    and applies the mark as soon as ANY of them is true — so `xfail(False, True)`
+    and `xfail(COND, True)` are unconditional xfails that can never red, however
+    falsy the FIRST positional is. Both are refused here, next to the `skipif`
+    ANY-of control (`test_skipif_any_of`), while
+    `test_xfail_any_of_falsy_then_unknown` stays a pin: with an unknowable second
+    condition the mark may not apply, so the body can still red — the gate's
+    documented limit, which errs toward KEEPING a pin.
+
+    ⚠️ MEASURED against real pytest 9.1.1 while adding those cases: the ANY-of
+    readings above carry `reason=` (`3 xfailed, 1 failed` on the probe). A
+    BOOLEAN condition with NO `reason=` never gets as far as the verdict —
+    `_pytest/skipping.py::evaluate_condition` fails with *"you need to specify
+    reason=STRING when using booleans as conditions"* — so `xfail(False)` and
+    `xfail(True)` both ERROR at setup. An error is a red, which is why the
+    no-reason spellings remain pins here; this arm does not model the reason
+    requirement, and it only ever refuses the spellings a working row could use.
+    """
+    module = tmp_path / "test_pinned.py"
+    module.write_text(
+        "import pytest\n"
+        "\n"
+        "def test_plain():\n"
+        "    assert True\n"
+        "\n"
+        "@pytest.mark.skip(reason='not yet')\n"
+        "def test_skipped():\n"
+        "    assert True\n"
+        "\n"
+        "@pytest.mark.xfail\n"
+        "def test_xfailed():\n"
+        "    assert False\n"
+        "\n"
+        "@pytest.mark.xfail(strict=True)\n"
+        "def test_strict_xfail():\n"
+        "    assert True\n"
+        "\n"
+        "@pytest.mark.xfail(False)\n"
+        "def test_conditionally_xfailed():\n"
+        "    assert True\n"
+        "\n"
+        "@pytest.mark.xfail(True, reason='always')\n"
+        "def test_literally_true_xfailed():\n"
+        "    assert False\n"
+        "\n"
+        "@pytest.mark.xfail(condition=1, reason='always, kw')\n"
+        "def test_literally_true_xfailed_kw():\n"
+        "    assert False\n"
+        "\n"
+        "@pytest.mark.xfail(CONDITION)\n"
+        "def test_variably_xfailed():\n"
+        "    assert True\n"
+        "\n"
+        "@pytest.mark.xfail('False')\n"
+        "def test_string_condition_xfailed():\n"
+        "    assert False\n"
+        "\n"
+        "@pytest.mark.xfail('True')\n"
+        "def test_string_condition_true_xfailed():\n"
+        "    assert False\n"
+        "\n"
+        "@pytest.mark.skipif('True', reason='string true')\n"
+        "def test_string_condition_true_skipped():\n"
+        "    assert False\n"
+        "\n"
+        "@pytest.mark.skipif('False', reason='string false')\n"
+        "def test_string_condition_false_skipped():\n"
+        "    assert False\n"
+        "\n"
+        "@pytest.mark.skipif('[1]', reason='truthy list spelling')\n"
+        "def test_string_condition_truthy_other_type():\n"
+        "    assert False\n"
+        "\n"
+        "@pytest.mark.skipif('0.0', reason='falsy float spelling')\n"
+        "def test_string_condition_falsy_float():\n"
+        "    assert False\n"
+        "\n"
+        "@pytest.mark.xfail(cond=False, reason='cond= is not an xfail parameter')\n"
+        "def test_xfail_cond_kw_is_ignored():\n"
+        "    assert False\n"
+        "\n"
+        "@pytest.mark.xfail(condition=False, reason='a real xfail condition')\n"
+        "def test_xfail_condition_kw_counts():\n"
+        "    assert False\n"
+        "\n"
+        "@pytest.mark.skipif(True, condition=False, reason='kw replaces args')\n"
+        "def test_skipif_condition_replaces_args():\n"
+        "    assert False\n"
+        "\n"
+        "@pytest.mark.xfail(strict=True, run=False, reason='notrun')\n"
+        "def test_strict_notrun_xfailed():\n"
+        "    assert False\n"
+        "\n"
+        "@pytest.mark.xfail(False, strict=True, run=False, reason='cond wins')\n"
+        "def test_falsy_wins_over_notrun():\n"
+        "    assert False\n"
+        "\n"
+        "@pytest.mark.skipif(True, reason='literal true')\n"
+        "def test_skipif_literal_true():\n"
+        "    assert False\n"
+        "\n"
+        "@pytest.mark.skipif(False, True, reason='any-of')\n"
+        "def test_skipif_any_of():\n"
+        "    assert False\n"
+        "\n"
+        "@pytest.mark.xfail(False, True, reason='any-of: the literal decides')\n"
+        "def test_xfail_any_of_falsy_then_true():\n"
+        "    assert False\n"
+        "\n"
+        "@pytest.mark.xfail(CONDITION, True, reason='any-of: the literal decides')\n"
+        "def test_xfail_any_of_unknown_then_true():\n"
+        "    assert False\n"
+        "\n"
+        "@pytest.mark.xfail(False, CONDITION, reason='any-of: unknowable, kept')\n"
+        "def test_xfail_any_of_falsy_then_unknown():\n"
+        "    assert True\n"
+        "\n"
+        "@pytest.mark.skipif(cond=VARIABLE, reason='cond= is ignored')\n"
+        "def test_skipif_cond_kw_only():\n"
+        "    assert False\n"
+        "\n"
+        "@pytest.mark.skipif(reason='no condition at all')\n"
+        "def test_skipif_no_condition():\n"
+        "    assert False\n"
+        "\n"
+        "@pytest.mark.skipif(False, reason='conditional')\n"
+        "def test_conditionally_skipped():\n"
+        "    assert True\n"
+        "\n"
+        "def test_skips_in_body():\n"
+        "    pytest.skip('conditional at runtime')\n"
+        "\n"
+        "class TestGroup:\n"
+        "    @pytest.mark.skip\n"
+        "    def test_in_class(self):\n"
+        "        assert True\n"
+        "\n"
+        "    def test_kept(self):\n"
+        "        assert True\n"
+        "\n"
+        "@pytest.mark.skip(reason='whole class')\n"
+        "class TestSkippedGroup:\n"
+        "    def test_inside(self):\n"
+        "        assert True\n"
+    )
+    assert _test_node_names(module) == {
+        "test_plain",
+        "test_strict_xfail",
+        "test_conditionally_xfailed",
+        "test_variably_xfailed",
+        "test_string_condition_xfailed",  # pytest eval()s "False"; body runs
+        "test_string_condition_false_skipped",  # "False" evals falsy: runs
+        "test_string_condition_falsy_float",  # "0.0" evals falsy: runs
+        "test_xfail_condition_kw_counts",  # condition= is a real condition
+        "test_skipif_condition_replaces_args",  # condition= replaces args
+        "test_falsy_wins_over_notrun",  # literal-falsy beats run=False
+        "test_xfail_any_of_falsy_then_unknown",  # any-of with an unknowable: kept
+        "test_conditionally_skipped",
+        "test_skips_in_body",
+        "TestGroup::test_kept",
+    }
+
+
+def test_an_xfail_raises_mark_is_a_watch_when_it_can_still_fail(tmp_path):
+    """`xfail(raises=…)` narrows the OUTCOME; it does not guarantee one.
+
+    pytest converts a call to `xfailed` only when the raised exception MATCHES
+    `raises`; anything else keeps `rep.outcome = "failed"` (`_pytest/skipping.py
+    ::pytest_runtest_makereport` — `if raises is None or isinstance(call.excinfo
+    .value, raises): skipped … else: failed`). So a non-strict `xfail(raises=
+    ValueError)` whose body raises `TypeError` reports a REAL failure — it can
+    red, so it IS a watch, and refusing a `pins:` row that cites it was wrong
+    (review cycle 15, P2).
+
+    MEASURED on pytest 9.1.1 before this arm existed, one probe node per shape,
+    which is what makes each verdict below a measurement and not a reading
+    (`4 failed, 1 xfailed` over these spellings):
+
+        xfail(raises=ValueError)           raise TypeError   -> FAILED
+        xfail(True, raises=ValueError)     raise TypeError   -> FAILED
+        xfail(raises=pytest.raises(…))     raise TypeError   -> FAILED
+        xfail(CONDITION, run=False)        CONDITION=False   -> FAILED (no mark)
+        xfail(raises=None)                 assert False      -> XFAILED
+        xfail(True, run=False, raises=…)   raise TypeError   -> [NOTRUN]
+
+    The boundary is the same one the conditional arm draws: the answer is what
+    pytest DOES with the spelling, not whether the keyword is present.
+    `raises=None` is pytest's "no restriction" value (bare-`xfail()` semantics),
+    and `run=False` disables execution outright — neither can red, so neither is
+    a pin. A falsifiable condition is the third case: when it is falsy NO mark
+    applies, so `run=False` is inert and the body runs (`review cycle 15, P2`:
+    the old order returned `run=False ⇒ cannot red` before that check).
+    """
+    module = tmp_path / "test_raises_shapes.py"
+    module.write_text(
+        "import pytest\n"
+        "CONDITION = False\n"
+        "\n"
+        "@pytest.mark.xfail(raises=ValueError)\n"
+        "def test_raises_only():\n"
+        "    raise TypeError('other')\n"
+        "\n"
+        "@pytest.mark.xfail(raises=ValueError, reason='expected')\n"
+        "def test_raises_and_reason():\n"
+        "    raise TypeError('other')\n"
+        "\n"
+        "@pytest.mark.xfail(raises=pytest.raises(ValueError))\n"
+        "def test_raises_with_abstract_raises():\n"
+        "    raise TypeError('other')\n"
+        "\n"
+        "@pytest.mark.xfail(True, raises=ValueError, reason='always applied')\n"
+        "def test_literal_true_with_raises():\n"
+        "    raise TypeError('other')\n"
+        "\n"
+        "@pytest.mark.xfail(CONDITION, run=False, reason='the condition may be falsy')\n"
+        "def test_unknown_condition_with_run_false():\n"
+        "    assert False\n"
+        "\n"
+        "@pytest.mark.xfail(raises=None)\n"
+        "def test_raises_none_is_a_bare_xfail():\n"
+        "    assert False\n"
+        "\n"
+        "@pytest.mark.xfail(True, run=False, raises=ValueError, reason='notrun')\n"
+        "def test_notrun_wins_over_raises():\n"
+        "    raise TypeError('other')\n"
+    )
+    assert _test_node_names(module) == {
+        "test_raises_only",  # a DIFFERENT exception is a true failure
+        "test_raises_and_reason",
+        "test_raises_with_abstract_raises",  # pytest.raises(...) matches too
+        "test_literal_true_with_raises",  # always applied, but still falsifiable
+        "test_unknown_condition_with_run_false",  # falsy ⇒ no mark ⇒ the body runs
+        # NOT `test_raises_none_is_a_bare_xfail`: raises=None IS the bare xfail
+        # NOT `test_notrun_wins_over_raises`: run=False never runs the body
+    }
+
+
+def test_a_module_wide_pytestmark_skip_pins_nothing(tmp_path):
+    """`pytestmark = pytest.mark.skip` opts the whole module out of reddening."""
+    module = tmp_path / "test_all_skipped.py"
+    module.write_text(
+        "import pytest\n"
+        "\n"
+        "pytestmark = pytest.mark.skip(reason='whole module')\n"
+        "\n"
+        "def test_a():\n"
+        "    assert True\n"
+    )
+    assert _test_node_names(module) == set()
+
+
+def test_a_class_level_skip_pins_nothing_under_it(tmp_path):
+    """A CLASS-level skip collects every method and runs none — the same
+    fail-open as a skipped function, one hop out (review cycle 10, P2).
+
+    pytest was MEASURED on these exact shapes (`1 failed, 2 skipped`): the
+    class-decorator and class-body-`pytestmark` methods are collected and can
+    never red, while the unmarked class still fails. So the same nodes must be
+    refused here, and the clean class must survive (no over-block).
+    """
+    module = tmp_path / "test_class_skipped.py"
+    module.write_text(
+        "import pytest\n"
+        "\n"
+        "@pytest.mark.skip(reason='class decorator')\n"
+        "class TestDecorated:\n"
+        "    def test_in(self):\n"
+        "        assert False\n"
+        "\n"
+        "class TestMarked:\n"
+        "    pytestmark = pytest.mark.skip(reason='class body')\n"
+        "\n"
+        "    def test_in(self):\n"
+        "        assert False\n"
+        "\n"
+        "class TestMarkedList:\n"
+        "    pytestmark = [pytest.mark.xfail(reason='class body list')]\n"
+        "\n"
+        "    def test_in(self):\n"
+        "        assert False\n"
+        "\n"
+        "class TestClean:\n"
+        "    def test_kept(self):\n"
+        "        assert False\n"
+    )
+    assert _test_node_names(module) == {"TestClean::test_kept"}

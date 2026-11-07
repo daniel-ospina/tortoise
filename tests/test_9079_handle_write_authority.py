@@ -49,6 +49,11 @@ from pathlib import Path
 
 import pytest
 
+from tests._index_settle import (
+    index_cells,
+    index_rows_after_settle,
+    point_index_drops_visible,
+)
 from tortoise.projection import (
     _HANDLE_MUTATING_VERBS,
     DirectCacheWriteRefused,
@@ -259,6 +264,13 @@ def _count(proj, label: str, prop: str, value: str) -> int:
         f"MATCH (n:{label} {{{prop}:$v}}) RETURN count(n)",
         params={"v": value},
     ).result_set[0][0])
+
+
+#: A DROPPED INDEX IS RETIRED ASYNCHRONOUSLY (#10807) — see
+#: `tests/_index_settle.py` for the mechanism and the two measured CI runs. The
+#: wait lives there because `tests/test_search_engine.py` loses the same race
+#: through `_schema_is_current()`; ONE definition, two callers, so it cannot
+#: drift between them.
 
 
 def _journal_lines(path: Path) -> list[dict]:
@@ -806,6 +818,86 @@ def test_a_declared_apply_first_door_writes_under_the_armed_guard(
 
 # ── the schema-DDL decision (#9124's own, per the issue thread) ───────────
 
+#: Bound (seconds) for the sweep's DDL to become VISIBLE in `CALL db.indexes()`.
+#: Generous on purpose: it bounds a WAIT, it is not a duration expectation.
+_INDEX_VISIBLE_BOUND_S = 30.0
+
+
+def _point_indexes(cells: set[str]) -> tuple[bool, bool]:
+    """``(range, fulltext)`` — are the two Point indexes ``_ensure_indexes`` owes
+    PRESENT in these catalogue cells?
+
+    ONE predicate for both the wait below and the assertions in the schema-DDL
+    case, so the state the fixture waits for can never differ from the state it
+    asserts on (a second, lazier predicate is how a wait passes while the
+    assertion reds).
+    """
+    return (any("pointKind" in c for c in cells),
+            any("content" in c and "search_keys" in c for c in cells))
+
+
+def _await_point_indexes(proj, *, bound_s: float = _INDEX_VISIBLE_BOUND_S) -> None:
+    """Wait until the projection's OWN schema sweep is visible, then return.
+
+    ⛔ THE FIXTURE BELOW RACES THE SWEEP'S OWN CREATE (#10833 CI, shard `e`,
+    measured at `e43ea7562`). A projection CONSTRUCTS its schema, and that sweep's
+    FULLTEXT create is NOT synchronous with its return: on an idle engine it is in
+    the catalogue by the next round trip, and on a loaded one (the CI shard, 3604
+    tests, one shared server) it can still be in flight. A `DROP` that arrives in
+    that window lands on an index the catalogue does not yet carry, so it removes
+    NOTHING and the queued create then materialises — which is exactly the state
+    the shard measured: `Point` fulltext PRESENT at `[Indexing] 0/0: UNDER
+    CONSTRUCTION` with the range index (synchronous) correctly gone beside it, and
+    the case red before it could assert anything about the armed sweep.
+
+    The repo already carries this rule for its own drops:
+    `tortoise/graph_key_restore.py` refuses with "Re-creating an index the engine
+    refused to drop usually means the build is still UNDER CONSTRUCTION; wait for
+    it to reach OPERATIONAL and retry" — this is the fixture-side form of it.
+
+    Fail-closed, like every other probe here: an index that never becomes visible
+    RAISES with both readings and the bound, rather than waiting forever or
+    silently proceeding to a drop that would land on nothing.
+
+    The READ and the poll loop are `tests/_index_settle.index_rows_after_settle`'s
+    (#10807), not a second copy here: that module's docstring states why the read
+    must be `query` (a `ro_query` on a replica lane can answer from a lagging node
+    and spin), and a local loop would drift from the sibling drop-wait below it.
+    What stays local is the PRECONDITION — this fixture is the one caller that has
+    to see the sweep's CREATE land before it drops (`point_index_drops_visible`
+    answers the opposite question, and asks it after the drop).
+    """
+    rows = index_rows_after_settle(
+        proj, until=lambda rows: all(_point_indexes(index_cells(rows))),
+        timeout=bound_s)
+    range_present, fulltext_present = _point_indexes(index_cells(rows))
+    if not (range_present and fulltext_present):
+        raise AssertionError(
+            "the sweep's Point indexes never became VISIBLE in "
+            f"`CALL db.indexes()` within {bound_s:g}s (range="
+            f"{range_present}, fulltext={fulltext_present}), so the fixture "
+            "below would drop an index the catalogue does not carry yet and "
+            "the drop would land on nothing")
+
+
+def test_the_index_wait_reds_when_the_sweep_never_lands():
+    """The wait above is a GATE, not a pause.
+
+    Non-vacuity for #10833's CI repair: the helper must RAISE when the catalogue
+    never carries the sweep's indexes — otherwise a projection whose sweep failed
+    would sail through the wait and the drops, and the schema-DDL case would be
+    back to asserting against an inherited catalogue.
+    """
+    from types import SimpleNamespace
+
+    # `query`, not `ro_query`: the wait reads through the settle module's door.
+    proj = SimpleNamespace(g=SimpleNamespace(
+        query=lambda _cypher: SimpleNamespace(result_set=[])))
+    with pytest.raises(AssertionError) as exc:
+        _await_point_indexes(proj, bound_s=0.05)
+    assert "never became VISIBLE" in str(exc.value), exc.value
+
+
 def test_schema_ddl_survives_the_armed_guard(armed_sdk, enforced):
     """Schema DDL is INSIDE the guard's surface, and it declares itself.
 
@@ -849,11 +941,41 @@ def test_schema_ddl_survives_the_armed_guard(armed_sdk, enforced):
 
     # Remove the two indexes this test is about, so their presence afterwards is
     # the armed sweep's work and nothing else.
+    #
+    # ⛔ WAIT FOR THE SWEEP'S CREATE TO BE VISIBLE FIRST (#10833 CI, shard `e`).
+    # Construction's fulltext create is not synchronous with its return, so on a
+    # loaded engine the drop can arrive before the index the catalogue carries —
+    # it then drops NOTHING and the queued create materialises right after, which
+    # leaves the drop-wait below spinning to its bound and then handing back a
+    # catalogue that still carries the index. The measured failure is the whole
+    # reason this wait exists (see the helper).
+    _await_point_indexes(proj)
+    # ⛔ AND THE REMOVAL IS AWAITED, NOT ASSUMED (#10807). A drop REBUILDS the
+    # label's one index on the engine's indexer thread, and the retired row keeps
+    # naming the dropped field until it finishes — so the guard below could read a
+    # catalogue that still said `pointKind` about a drop that had landed, and
+    # refuse a GOOD fixture (measured: `test (g)`, run 41817275671, on a loaded
+    # runner; 0.3 s to converge idle). `index_rows_after_settle` waits for the
+    # rebuild to finish; the assertions are unchanged, so a drop that really
+    # cannot happen still fails here loudly rather than passing vacuously.
     with _graph_metadata_write_scope("test-fixture: drop the indexes"):
         proj.g._g.query("DROP INDEX ON :Point(pointKind)")
         proj.g._g.query("CALL db.idx.fulltext.drop('Point')")
-    before = {str(cell) for row in proj.g.ro_query("CALL db.indexes()").result_set
-              for cell in row}
+    # ⛔ AND QUIESCENCE ALONE IS NOT ENOUGH (#10807, review Finding 1). A catalogue
+    # read taken BEFORE the engine picked the drops up is internally CONSISTENT — no
+    # `UNDER CONSTRUCTION`, the idle `OPERATIONAL` status, the PRE-drop definition —
+    # so a quiescence-only wait returns it on its FIRST read and the guards below
+    # refuse a good fixture: the same false red as `test (g)`, just narrower. The
+    # caller's own preconditions are what make that read WAIT, which is what the
+    # sibling `index_rows_after_settle` call in `tests/test_search_engine.py`
+    # already does (cited by SYMBOL — the line number this carried rotted).
+    #
+    # `point_index_drops_visible` states those preconditions ONCE, in the module
+    # that owns the wait — the same module rule that keeps the wait itself single:
+    # a local copy here could drift from the two guards below, and the drift would
+    # be invisible, since it only bites on a loaded runner.
+    before = index_cells(
+        index_rows_after_settle(proj, until=point_index_drops_visible))
     assert not any("pointKind" in c for c in before), (
         "the fixture could not drop the Point range index, so the assertion "
         f"below would pass vacuously; catalogue={sorted(before)}")
@@ -868,11 +990,12 @@ def test_schema_ddl_survives_the_armed_guard(armed_sdk, enforced):
 
     rows = proj.g.ro_query("CALL db.indexes()").result_set
     names = {str(cell) for row in rows for cell in row}
-    assert any("content" in c and "search_keys" in c for c in names), (
+    range_back, fulltext_back = _point_indexes(names)
+    assert fulltext_back, (
         "the Point fulltext index must exist after the sweep — without it "
         f"fulltext retrieval silently returns nothing; catalogue={sorted(names)}"
     )
-    assert any("pointKind" in c for c in names), (
+    assert range_back, (
         "the Point range indexes must exist after the sweep; "
         f"catalogue={sorted(names)}"
     )

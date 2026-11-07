@@ -658,7 +658,14 @@ def _stub_create_point_path(monkeypatch, *, opener=None, listed=None):
     opens: list[tuple] = []
     written: list[tuple] = []
 
-    monkeypatch.setattr(ha, "_check_org_limit", lambda org, res: None)
+    # #8906: the doors now pass the request's own SDK to the gate (`sdk=`), so
+    # a stub that does not accept it breaks the call instead of standing in for
+    # it. Pin the REAL signature surface (keyword-only `sdk`/`slot_credit`), not
+    # `**kw` — `**kw` would also swallow a mistyped keyword (e.g. `sdkk=`) that
+    # production would 500 on.
+    monkeypatch.setattr(
+        ha, "_check_org_limit",
+        lambda org, res, *, sdk=None, slot_credit=0: None)
     monkeypatch.setattr(ha, "_get_onboarding_state", lambda oid: {})
     monkeypatch.setattr(ha, "_org_proj", lambda oid: object())
     monkeypatch.setattr(ha, "_maybe_apply_completion", lambda oid: False)
@@ -849,7 +856,10 @@ def _stub_mintable_org_graph(monkeypatch, *, listed=(), org_id: str = "org-truth
 
     monkeypatch.setattr(ha, "_make_sdk", _make_sdk)
     monkeypatch.setattr(ha, "_registry_existing_graphs", lambda: set(state))
-    monkeypatch.setattr(ha, "_check_org_limit", lambda org, res: None)
+    # #8906: same signature surface as the stub at :655 (keyword-only, pinned).
+    monkeypatch.setattr(
+        ha, "_check_org_limit",
+        lambda org, res, *, sdk=None, slot_credit=0: None)
     # ``_get_onboarding_state`` is the legacy jsonb mirror only; stub it so
     # the test does not open the registry. ``_graph_available`` is
     # deliberately NOT stubbed — the fixed auto-file never calls it, and a

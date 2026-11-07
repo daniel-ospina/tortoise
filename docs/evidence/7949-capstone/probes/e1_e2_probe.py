@@ -16,17 +16,16 @@ the SAME scripted candidate set (the corpus) feeding every arm:
 ============================  ==========  ==========================================
 arm                           scored?     what it is
 ============================  ==========  ==========================================
-``before``                    baseline    VET and the value gate OFF — the arm the
-                                          DEPLOYED config runs today (all three
-                                          S2.2 switches default off; ``fly.toml``
-                                          sets none).
-``after-vet-shipped``         **YES**     the SAME shipped code with both flags
-                                          FORCED ON (``TORTOISE_VET=1`` +
-                                          ``TORTOISE_VALUE_GATE=1``,
-                                          ``arbiter=None``). NOT what production
-                                          runs today: the deploy leaves all three
-                                          OFF, so this arm is what the gate WOULD do
-                                          once it is switched on.
+``before``                    baseline    VET and the value gate EXPLICITLY OFF
+                                          (``TORTOISE_VALUE_GATE=0``). Since `#10996`
+                                          this is the kill-switch arm, not the
+                                          deploy: the mechanical half defaults ON.
+``after-vet-shipped``         **YES**     the SAME shipped code with the gate set ON
+                                          (``TORTOISE_VET=1`` + ``TORTOISE_VALUE_GATE=1``,
+                                          ``arbiter=None``). This IS what production
+                                          runs by default since `#10996`: the deploy
+                                          sets no switch, and an unset value gate now
+                                          arms the S2.2 mechanical predicate.
 ``after-vet-arbiter``         no          the same, plus an INJECTED arbiter answering
                                           S2.2's *"is this an entity or a reference?"*
                                           with the in-repo predicate
@@ -43,22 +42,32 @@ arm                           scored?     what it is
                                           the reference goes).
 ============================  ==========  ==========================================
 
-**The scored arm is a WHAT-IF, not production — read it as one.** The deployed
-config leaves ``TORTOISE_VET``, ``TORTOISE_VALUE_GATE`` and — since #5087 —
-``TORTOISE_S2_DECISION_SEAM`` unset: ``_value_gate_enabled`` is
-``is_truthy(os.environ.get(...))``, and ``_vet_enabled`` is the same **OR**
-``_s2_seam_armed()``, which arms the pass even against an explicit
-``TORTOISE_VET=0``. All three default OFF and ``fly.toml``'s ``[env]`` sets none
-of them, so **production runs the ``before`` arm**. What is scored
-here is the SAME shipped code with ``TORTOISE_VET`` and ``TORTOISE_VALUE_GATE``
-FORCED ON and the seam switch left off — the behaviour of the
-gate once it is switched on. That distinction is the open question #7949 carries:
-if the gate is not armed in production, E1 does not move there because nothing is
-armed, and the next step is to enable the flag and re-measure; if it is armed and
-the discards are undone by referential integrity, the next step is to change
-``apply_vet``'s Rule 2. Only ``after-vet-shipped`` is scored, because it is the
-only arm that puts the shipped gate mechanism on-path at all (``before`` measures
-the pipeline with no gate, so it cannot show what the gate does). The two
+**Which arm production runs — read it before reading the number.** The deploy
+sets no switch (``fly.toml``'s ``[env]`` carries none of ``TORTOISE_VET``,
+``TORTOISE_VALUE_GATE``, ``TORTOISE_S2_DECISION_SEAM``), so every arm is
+resolved from a default. Since `#10996` the S2.2 **mechanical** half defaults ON
+(``EXTRACTOR-V4-ARCHITECTURE.md`` §S2.2, ``value_gate.value_gate_enabled``), while
+the **arbiter** half stays opt-in because arming it is a paid network call
+(``S2-DECISION-SEAM.md`` §6) and ``TORTOISE_CLASSIFY_LATER`` is unchanged. So
+production runs the gate-armed configuration, and ``before`` is a genuine
+counterfactual: the pre-`#10996` deploy, reproduced by the explicit kill-switch
+``TORTOISE_VALUE_GATE=0``.
+
+⚠️ **The arms are explicit on BOTH sides, and that is load-bearing.** ``run_arm``
+used to produce its OFF arm by popping the switch — an OFF arm only while the
+flag was default-OFF. `#10996` sets the value explicitly in both directions
+(``"1"`` / ``"0"``) and the pops stay only to keep an ambient value out; a
+pop-only OFF arm would silently be an ON arm, collapsing the comparison. Pinned
+by ``tests/test_e1_e2_measurement.py::test_the_probe_arms_every_switch_explicitly``.
+
+**The scored arm is the gate's own behaviour, and it is what production runs.**
+That distinction is the open question #7949 carries: if the gate is armed in
+production and the discards are undone by referential integrity, the next step is
+to change ``apply_vet``'s Rule 2; if it is armed and nothing changes, the
+mechanism is simply rare on this population (`#10996`'s measured 0 of 61
+Objects). Only ``after-vet-shipped`` is scored, because it is the only arm that
+puts the shipped gate mechanism on-path at all (``before`` measures the pipeline
+with no gate, so it cannot show what the gate does). The two
 counterfactual arms are reported as **estimates of what a mechanism that does not
 exist would buy** — never as green. ``tools
 /e1_e2_census_check.py`` fails if a counterfactual arm is ever the scored one.
@@ -405,9 +414,18 @@ def run_arm(embed_list: dict, *, vet: bool, arbiter=None) -> dict:
     saved = {k: os.environ.get(k) for k in env_keys}
     for k in env_keys:
         os.environ.pop(k, None)
+    # ⛔ EVERY arm is set EXPLICITLY, in both directions — `#10996`. Popping a
+    # switch was enough to produce an OFF arm only while the flag was
+    # default-OFF; since `TORTOISE_VALUE_GATE` defaults ON (the S2.2 mechanical
+    # half, required by `EXTRACTOR-V4-ARCHITECTURE.md` §S2.2), an unset value
+    # would make this function's `vet=False` arm an ON arm — E1's before/after
+    # comparison would silently collapse into one configuration, and
+    # `test_the_committed_log_is_what_the_probe_prints` would red. The pops stay
+    # (an ambient value must not leak in); the explicit writes are what make the
+    # arm mean what it says.
+    os.environ["TORTOISE_VALUE_GATE"] = "1" if vet else "0"
     if vet:
         os.environ["TORTOISE_VET"] = "1"
-        os.environ["TORTOISE_VALUE_GATE"] = "1"
     model = ScriptedModel(embed_list)
     try:
         out = v2.extract_session_v2(

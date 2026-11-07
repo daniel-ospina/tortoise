@@ -26,6 +26,58 @@ SAMPLE_FRONTMATTER = {
     "commitments": [{"text": "Write the license."}],
 }
 
+#: Warm-up attempts, and the pause between them. Both are BOUNDED and their
+#: failure is not a verdict — see `_warm_daemon`.
+_WARM_ATTEMPTS = 3
+_WARM_PAUSE_S = 2.0
+
+
+def _warm_daemon() -> None:
+    """Boot the daemon's embedded DB BEFORE anything this file asserts on.
+
+    #5049's doctrine — *a verdict from ambient machine speed is not a verdict* —
+    applied to the one thing the `daemon_url` fixture left cold. `server.started`
+    means the socket accepts connections; it does NOT mean the embedded store is
+    up, so the FIRST dispatched tool call pays the whole redislite boot plus
+    graph start, and it must fit inside the 10s transport wait bound
+    (`mcp_auth._TRANSPORT_WAIT_BOUND_S`, enforced in
+    `mcp_server._await_under_mcp_wait_bound`).
+
+    Measured on shard `test (d)`, job 126325424780 (head `9fe385d09c69`): the
+    first `tortoise_create_point` — the call `test_push_creates_points_over_mcp`
+    asserted on — returned at **10.27 s** with
+    `transport wait bound (10s) exceeded: MCP tools/call tortoise_create_point`,
+    so a bridge that WORKS read as `tortoise_push_failed`. Nothing about the
+    push was wrong: the shard had nine sibling jobs on the same host.
+
+    The refusal is the product's documented behaviour, not a fault in it ("the
+    work may still complete on the server … retry only if repeating the
+    operation is safe"), and `dedup=True` makes the retry safe here — so this
+    absorbs it up to a bounded count and NEVER asserts on the outcome. What it
+    buys is a condition: by the time the test's own assertions run, the store is
+    warm and the bridge is judged on creating points, which is what this
+    module exists to pin, rather than on cold-start latency.
+
+    Deliberately NOT pinned by a test: a warm-up has no pre-fix code to redden
+    on — the shape it removes is `10.27s > 10s` on a loaded host, which no
+    assertion in this file can produce deliberately. The evidence is the CI
+    log above.
+    """
+    from tortoise.mcp_client import call_tool
+
+    for attempt in range(_WARM_ATTEMPTS):
+        try:
+            call_tool("tortoise_create_point", {
+                "kind": "event",
+                "content": "daemon warm-up (test fixture)",
+                "authoredBy": "test-warmup",
+                "dedup": True,
+            })
+            return
+        except Exception:  # the legible refusal is what this absorbs
+            if attempt + 1 < _WARM_ATTEMPTS:
+                time.sleep(_WARM_PAUSE_S)
+
 
 @pytest.fixture
 def daemon_url(monkeypatch, tmp_path):
@@ -64,7 +116,14 @@ def daemon_url(monkeypatch, tmp_path):
         time.sleep(0.05)
     assert server.started, "daemon did not start"
     port = server.servers[0].sockets[0].getsockname()[1]
-    yield f"http://127.0.0.1:{port}/mcp"
+    url = f"http://127.0.0.1:{port}/mcp"
+    # Point the client at THIS daemon and warm its store before the test's own
+    # assertions (see `_warm_daemon`). The test re-sets both below; setting them
+    # here is what lets the warm-up reach the daemon at all.
+    monkeypatch.setenv("TORTOISE_MCP_URL", url)
+    monkeypatch.setenv("TORTOISE_API_KEY", "")
+    _warm_daemon()
+    yield url
     server.should_exit = True
     t.join(timeout=10)
 

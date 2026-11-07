@@ -233,6 +233,122 @@ def test_capture_points_estimate_reads_off_the_event_loop(client, monkeypatch):
         f"other request on the single loop (#4625 leg 72)")
 
 
+def test_capture_sessions_gate_allowance_read_is_off_the_event_loop(
+        client, monkeypatch):
+    """#9567 D12 (review round 10): the REST capture gate's allowance fill must
+    not run its control-plane read ON the event loop.
+
+    ``_check_org_limit(org, "sessions")`` now FILLS any missing allowance key
+    from ``quota.resolve_org_limits`` — a SYNC read (``_orgs_row_fail_soft``
+    → ``httpx`` with a retry ladder under schema drift, or
+    ``_make_sdk(namespace="registry")`` + a ``Team`` query). Pre-change that
+    call did NO I/O at all (every resolver supplies ``max_sessions: None``, so
+    ``enforce_org_limit`` returned before counting — the file's own #10133
+    note), which is why the new read is easy to leave inline: it runs on EVERY
+    REST capture, including the store-only (#3892/#4258) and replay lanes that
+    reach it having done no other I/O, and it parks the single uvicorn worker
+    for a control-plane round-trip (the #2988/#3498 class).
+
+    The discriminator is the thread the resolver ran on: a worker thread has no
+    running event loop. ``resolve_org_limits`` is patched on its SOURCE module
+    because the path imports it inside ``carry_resolved_allowances``, at call
+    time — so a path that stops calling it leaves ``ran_on_loop`` absent and
+    fails on the first assertion instead of passing vacuously.
+    """
+    seen: dict[str, object] = {}
+
+    import tortoise.quota as quota_mod
+
+    def _fake_resolve(org_id):
+        seen["thread"] = threading.current_thread().name
+        try:
+            asyncio.get_running_loop()
+            seen["ran_on_loop"] = True
+        except RuntimeError:
+            seen["ran_on_loop"] = False
+        # NO allowance configured — today's only production state. The read
+        # still happens (the fill cannot know a key is absent without asking),
+        # which is exactly the cost this test pins as OFF the loop.
+        return {"org_id": org_id, "tier": "free"}
+
+    monkeypatch.setattr(quota_mod, "resolve_org_limits", _fake_resolve)
+    r = client.post("/v1/sessions", json={"conversation": _CONV})
+
+    assert "ran_on_loop" in seen, (
+        "the sessions-door allowance fill never ran "
+        f"({r.status_code}: {r.text[:200]}) — this run proves nothing")
+    assert seen["ran_on_loop"] is False, (
+        f"the capture's allowance fill ran ON the event loop "
+        f"(thread {seen['thread']!r}) — a control-plane round-trip (laddered "
+        f"under schema drift) parks every concurrent request, including the "
+        f"/health check, on the single loop (#2988/#3498)")
+
+
+def test_capture_sessions_gate_carry_rides_its_own_substrate_lane(
+        client, monkeypatch):
+    """#9567 round 12 + main-repair (2026-11-04): the capture door's allowance
+    CARRY must ride its OWN substrate's pool — the control-plane pool in Supabase
+    mode, the graph pool in registry mode — and never the loop's default
+    executor. (A carry pinned to ``_cp_offload`` in BOTH modes would be the
+    #3718 inversion in the other direction: in registry mode the registry IS the
+    graph connection, which is why the assertion below expects ``graph`` here.)
+
+    Sibling of the off-the-loop pin above, and the LANE half of the same rule.
+    #9567 round 12 split the gate's two reads by substrate — the carry is a
+    control-plane read (``quota.resolve_org_limits``), the count is a graph
+    read — and every async door must submit each to the pool ITS OWN substrate
+    lives in. The capture door used to submit the pair with
+    ``asyncio.to_thread(_check_org_limit, org, "sessions", sdk=sdk)``: the
+    loop's DEFAULT executor — the lane ``hosted_api._commit_sync`` and
+    ``hosted_api._seed_demo_sync`` already use. That satisfies "off the loop"
+    and violates "on its own lane", and it is what made one fault answer with
+    two bodies — a control-plane stall on ``/v1/sessions`` returned ``500
+    "Quota check failed"`` while the identical stall on ``/v1/points`` returned
+    ``503``.
+
+    This pin drives the ROUTE (the off-the-loop pin proves the thread, this one
+    proves the pool), so a door that stops reaching the shared seam fails here.
+
+    Mutation this REDs: put the capture door back on
+    ``asyncio.to_thread(_check_org_limit, org, "sessions", sdk=sdk)`` — the
+    route then never reaches ``_carry_allowances_off_loop`` and neither
+    submission below is recorded.
+    """
+    seen: list[tuple[str, str]] = []
+
+    import tortoise.hosted_api as ha
+    from tortoise import quota
+
+    async def _cp(fn, *, op, **_kw):
+        seen.append(("cp", op))
+        return fn()
+
+    async def _graph(fn, *, op, **_kw):
+        seen.append(("graph", op))
+        return fn()
+
+    monkeypatch.setattr(ha, "_cp_offload", _cp)
+    monkeypatch.setattr(ha, "_graph_offload", _graph)
+    monkeypatch.setattr(quota, "resolve_org_limits",
+                        lambda oid: {"org_id": oid, "tier": "free"})
+
+    resp = client.post("/v1/sessions", json={"conversation": _CONV})
+    assert resp.status_code in (200, 201), resp.text[:300]
+
+    # This lane runs registry/self-host mode, where the registry IS the graph
+    # connection (#3718), so BOTH halves ride the graph pool — the pin is that
+    # the door reaches the seam at all, in one submission per read, with the
+    # carry FIRST. In Supabase mode the same code sends the carry to `_cp_offload`,
+    # so the control-plane half is pinned at the seam instead of behind a whole
+    # route: ``test_the_points_door_carries_the_allowance_on_the_control_plane_lane``
+    # and ``test_the_sessions_door_carries_the_allowance_on_the_control_plane_lane``
+    # (both in ``tests/test_allowance_gate.py``, one per gated door, mode patched).
+    relevant = [(pool, op) for (pool, op) in seen
+                if op.startswith("check_org_limit.sessions")]
+    assert relevant == [("graph", "check_org_limit.sessions.allowance_carry"),
+                        ("graph", "check_org_limit.sessions")], (relevant, seen)
+
+
 def test_stalled_capture_does_not_freeze_the_event_loop(client, monkeypatch):
     """The invariant: while a capture is stalled, the API keeps answering.
 
@@ -403,7 +519,7 @@ def test_health_answers_while_the_default_executor_is_saturated(
 
     The first revision moved the extraction to `asyncio.to_thread`, which uses
     the loop's SHARED default executor — at the time, also the pool /health's DB
-    probe (and the auth middleware's abuse hooks) rode. Six-plus concurrent
+    probe rode. Six-plus concurrent
     stalls (prod runs 2 vCPU → `min(32, cpu+4)` workers) would therefore leave
     that probe queued for minutes, miss Fly's 15s check timeout, and drop the
     machine exactly as in the original outage — one level down, with nothing

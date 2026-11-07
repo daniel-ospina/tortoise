@@ -10,6 +10,12 @@ Spec items 9/10 of docs/planning/2026-08-31-2070-scoping-package.md:
   exactly as the bench's docker lane does. On the degraded embedded lane
   the honest assertions are POOL MEMBERSHIP (the plan's "fix membership
   before ordering" step), which is what A1/A4/A5 deliver there.**
+
+**Corpus prerequisite — OPT-IN, not incidental.** These four arms seed a full
+LongMemEval haystack per question, so they run only when `TORTOISE_LME_BENCH=1`
+is set AND the cached corpus is present. Presence of the cache alone is NOT a
+licence to run them: that made a gated shard's cost depend on the runner's HOME
+rather than on the diff (`test (e)` on PR #10914). See the gate comment below.
 - Same-value numeric fixture (A1): a money question that itself carries an
   amount retrieves the amount-carrying turn with keep_numeric on.
 - OR-cap preservation (A4): injected expansion aliases never displace the
@@ -133,15 +139,116 @@ def _ask_pipeline(sdk, question: str, *, keep_numeric: bool = False,
         context_item_cap=item_cap, byte_cap=byte_cap)
 
 
+# ── The bench-corpus gate: an EXPLICIT opt-in, never an incidental cache ────
+#
+# `longmemeval_s_cleaned.json` is a corpus-scale download, so its presence on a
+# machine says nothing about whether a GATED CI SHARD should pay for it. While
+# presence alone was the licence to run, the four arms below cost either 1.3s
+# (every CI leg skips them — that is the committed `durations` row in
+# `config/ci-surfaces.yml`, which is what the shard watchdog is derived from) or
+# >300s (any runner whose HOME happened to carry the cache). A cost that is
+# 1.3s-or->300s by ambient state cannot be packed against, so it is not a
+# duration problem to weigh — it is a participation problem to decide.
+#
+# MEASURED 2026-11-04 on the self-hosted pool (`cmux/Linux-X64`): the cache was
+# present, `test_gold_turn_in_pool_membership_embedded` ran for real, blew the
+# repo-wide 300s pytest-timeout, and the shard then died on its derived 28m
+# watchdog (exit 124) — PR #10914's `test (e)`, red on a diff that does not
+# touch retrieval at all.
+#
+# So participation is a DECISION: set TORTOISE_LME_BENCH=1. Same shape as
+# `tests/test_battery_parity_mabench_tortoise.py`'s BATTERY_PARITY_TORTOISE_E2E.
+_BENCH_OPT_IN_ENV = "TORTOISE_LME_BENCH"
+
+# One full LongMemEval haystack is seeded per question. The loop arm this file
+# USED to carry seeded three of them in a SINGLE item, and that one item is what
+# crossed the 300s repo default; it is now parametrized one question per item
+# (`_POOL_MEMBERSHIP_QIDS` below), so what is left to justify is PER-ITEM
+# headroom on a loaded runner — 181-188 s warm, 294.31 s for `ceb54acb` under
+# load — not an aggregate in one item. A bench arm that legitimately needs
+# longer must SAY so (pyproject.toml's `timeout = 300` block: "A leg that needs
+# a longer single item must SAY so … `@pytest.mark.timeout(N)` on the test"), so
+# these four declare their budget instead of relying on the gate's.
+_BENCH_ITEM_BUDGET_S = 900
+
+_BENCH_SKIP_REASON = (
+    "bench prerequisite: the corpus-scale ask-lever arms seed a full "
+    "LongMemEval haystack per question and measure 181-188 s warm, 294.31 s for "
+    "one question under load — at the repo-wide 300s budget — "
+    f"so they run only when opted in — set {_BENCH_OPT_IN_ENV}=1 with "
+    f"{_CACHED_DATASET} present"
+)
+
+
+#: The repo's flag convention is "unset or `0` means OFF" (see `_BENCH_SKIP_REASON`
+#: above, which tells an operator to arm it with `=1`). `bool(os.environ.get(…))`
+#: instead reads the STRING `"0"` as on, so the documented way to turn the bench
+#: back off would arm four >300 s arms and say nothing.
+_BENCH_OPT_IN_TRUTHY = ("1", "true", "yes", "on")
+
+
+def _bench_opted_in() -> bool:
+    return os.environ.get(_BENCH_OPT_IN_ENV, "").strip().lower() in _BENCH_OPT_IN_TRUTHY
+
+
 def _recorded_questions() -> dict[str, dict]:
-    if not _CACHED_DATASET.exists():
+    """The four recorded-failure fixtures, or {} when this is not a bench run.
+
+    ⛔ The OPT-IN is checked FIRST and returning {} keeps every arm SKIPPING
+    (never silently passing). `_BENCH_SKIP_REASON` then names the opt-in, so a
+    bench operator is told how to arm it rather than being told the dataset is
+    missing when it is sitting right there — the two failures look identical
+    from an unhelpful skip message.
+    """
+    if not _bench_opted_in() or not _CACHED_DATASET.exists():
         return {}
     data = json.loads(_CACHED_DATASET.read_text(encoding="utf-8"))
     return {q["question_id"]: q for q in data if q["question_id"] in RECORDED_FAILURES}
 
 
+def test_the_bench_corpus_arms_are_opt_in_not_cache_incidental(
+        monkeypatch, tmp_path):
+    """Non-vacuity for the gate above: a PRESENT corpus with the opt-in UNSET
+    must yield no fixtures.
+
+    Pre-fix this returned all four questions, which is precisely how a gated
+    shard came to run a >300s bench arm on a machine whose HOME carried the
+    cache (PR #10914 `test (e)`); post-fix it returns {}. The second half pins
+    that the opt-in still ARMS the arms, so the fix gates them rather than
+    deleting them, and that the skip reason names the variable — otherwise a
+    bench operator cannot tell "not opted in" from "dataset missing".
+    """
+    corpus = tmp_path / "longmemeval_s_cleaned.json"
+    corpus.write_text(json.dumps([
+        {"question_id": qid, "question": "probe", "haystack_sessions": []}
+        for qid in RECORDED_FAILURES
+    ]), encoding="utf-8")
+    monkeypatch.setattr(sys.modules[__name__], "_CACHED_DATASET", corpus)
+
+    monkeypatch.delenv(_BENCH_OPT_IN_ENV, raising=False)
+    assert _recorded_questions() == {}, (
+        "a present corpus must not arm the bench arms on its own — that is the "
+        "ambient-state cost that reds a gated shard")
+    assert _BENCH_OPT_IN_ENV in _BENCH_SKIP_REASON, (
+        "the skip must name the variable that arms it")
+
+    monkeypatch.setenv(_BENCH_OPT_IN_ENV, "1")
+    assert set(_recorded_questions()) == set(RECORDED_FAILURES), (
+        "the opt-in must still arm them — this gates the arms, it does not "
+        "delete them")
+
+    # ...and the flag follows the repo convention the message above teaches:
+    # `unset or 0 means OFF`. `bool(os.environ.get(…))` read the STRING "0" as
+    # ON, so the documented way to switch the bench back off armed all four arms.
+    for off in ("0", "", "false", "no", " "):
+        monkeypatch.setenv(_BENCH_OPT_IN_ENV, off)
+        assert _recorded_questions() == {}, (
+            f"{_BENCH_OPT_IN_ENV}={off!r} must NOT arm the bench arms")
+
+
 # ── Indicator 1 / Target 0: 4 gold-turn-in-context fixtures ────────────────
 
+@pytest.mark.timeout(_BENCH_ITEM_BUDGET_S)
 @pytest.mark.parametrize("qid", RECORDED_FAILURES)
 def test_gold_turn_in_context_recorded_failure(qid):
     """Indicator 1 / Target 0: each recorded retrieval-gap failure retrieves
@@ -155,7 +262,7 @@ def test_gold_turn_in_context_recorded_failure(qid):
             "see the pool-membership tests for the degraded-lane assertions")
     questions = _recorded_questions()
     if not questions:
-        pytest.skip("cached LongMemEval dataset absent (bench prerequisite)")
+        pytest.skip(_BENCH_SKIP_REASON)
     q = questions.get(qid)
     if q is None:
         pytest.skip(f"{qid} not in cached dataset")
@@ -178,33 +285,55 @@ def test_gold_turn_in_context_recorded_failure(qid):
 
 # ── Degraded-lane honesty: pool membership (the "fix membership" step) ─────
 
-def test_gold_turn_in_pool_membership_embedded():
+# ONE ITEM PER QUESTION, never one item looping over all of them. `_seed`
+# ingests a full LongMemEval haystack, so the loop form seeded three in a
+# SINGLE item and crossed the repo-wide `timeout = 300` bound (pyproject.toml)
+# on a loaded runner: measured 2026-11-06, CI run 42169082726 shard `(a)`
+# reported `test_gold_turn_in_pool_membership_embedded - Failed: Timeout
+# (>300.0s) from pytest-timeout` at 300.01 s while every sibling
+# per-question item in this file finished in 181-188 s. Parametrizing is also
+# the honest attribution: a failure names the question instead of a loop
+# iteration that passed for the others.
+#
+# The `@pytest.mark.timeout(_BENCH_ITEM_BUDGET_S)` below is NOT a substitute for
+# splitting the loop, and it does not need to be: it is this file's declared
+# budget for an OPT-IN bench arm (see `_BENCH_OPT_IN_ENV`), which runs only when
+# an operator asks. One question per item measured 181-188 s warm on this box,
+# but 294.31 s for `ceb54acb` under load — a hair under the repo-wide default —
+# so the per-item bound is headroom on a loaded runner, not the absence of a fix.
+_POOL_MEMBERSHIP_QIDS = [q for q in RECORDED_FAILURES if q != "gpt4_d84a3211"]
+
+
+@pytest.mark.timeout(_BENCH_ITEM_BUDGET_S)
+@pytest.mark.parametrize("qid", _POOL_MEMBERSHIP_QIDS)
+def test_gold_turn_in_pool_membership_embedded(qid):
     """On the degraded embedded lane (no vector leg), the A1/A4/A5 levers
     deliver POOL MEMBERSHIP for the rank/cap + thin-overlap classes (the
     plan's "fix membership before ordering" step). gpt4_d84a3211 is the
     numeric-invisible class whose membership requires the vector leg (A2) —
-    asserted separately with its documented prerequisite."""
+    asserted separately with its documented prerequisite, so it is excluded by
+    `_POOL_MEMBERSHIP_QIDS` above rather than skipped inside the body."""
     questions = _recorded_questions()
     if not questions:
-        pytest.skip("cached LongMemEval dataset absent (bench prerequisite)")
-    for qid, q in questions.items():
-        if qid == "gpt4_d84a3211":
-            continue  # documented: needs the vector leg (A2), not A1
-        sdk = _fresh_sdk()
-        try:
-            _seed(sdk, q)
-            gold = _gold_turn_ids(q)
-            assert gold, f"{qid}: no has_answer turns"
-            hits = sdk.tortoise_fts_query(
-                q["question"], limit=120, pool_size=120,
-                include_terminal=True, keep_numeric=True,
-                search_keys_prf=True)
-            pool_ids = {h["id"] for h in hits}
-            assert pool_ids & gold, (
-                f"{qid}: gold {sorted(gold)} not even in the 120-pool on "
-                f"the degraded lane — membership lever failed")
-        finally:
-            sdk.close()
+        pytest.skip(_BENCH_SKIP_REASON)
+    q = questions.get(qid)
+    if q is None:
+        pytest.skip(f"{qid} not in cached dataset")
+    sdk = _fresh_sdk()
+    try:
+        _seed(sdk, q)
+        gold = _gold_turn_ids(q)
+        assert gold, f"{qid}: no has_answer turns"
+        hits = sdk.tortoise_fts_query(
+            q["question"], limit=120, pool_size=120,
+            include_terminal=True, keep_numeric=True,
+            search_keys_prf=True)
+        pool_ids = {h["id"] for h in hits}
+        assert pool_ids & gold, (
+            f"{qid}: gold {sorted(gold)} not even in the 120-pool on "
+            f"the degraded lane — membership lever failed")
+    finally:
+        sdk.close()
 
 
 def _embedder_installed() -> bool:
@@ -245,6 +374,7 @@ def _embedder_installed() -> bool:
            "so that a real fix there makes this an XPASS failure and forces the "
            "marker's removal.",
 )
+@pytest.mark.timeout(_BENCH_ITEM_BUDGET_S)
 def test_gold_turn_in_context_cap_review_embedded_1d4e3b97():
     """A6 measurement-gated cap review, embedded lane: 1d4e3b97 (in-pool,
     thin overlap) retrieves its gold IN CONTEXT once the retrieval window
@@ -272,7 +402,7 @@ def test_gold_turn_in_context_cap_review_embedded_1d4e3b97():
     """
     questions = _recorded_questions()
     if not questions:
-        pytest.skip("cached LongMemEval dataset absent (bench prerequisite)")
+        pytest.skip(_BENCH_SKIP_REASON)
     q = questions.get("1d4e3b97")
     if q is None:
         pytest.skip("1d4e3b97 not in cached dataset")
@@ -290,6 +420,7 @@ def test_gold_turn_in_context_cap_review_embedded_1d4e3b97():
         sdk.close()
 
 
+@pytest.mark.timeout(_BENCH_ITEM_BUDGET_S)
 def test_ask_cap_attribution_5821():
     """#5821 Task 1: pin WHICH cap binds, so this gate cannot mis-attribute it.
 
@@ -318,7 +449,7 @@ def test_ask_cap_attribution_5821():
     """
     questions = _recorded_questions()
     if not questions:
-        pytest.skip("cached LongMemEval dataset absent (bench prerequisite)")
+        pytest.skip(_BENCH_SKIP_REASON)
     q = questions.get("1d4e3b97")
     if q is None:
         pytest.skip("1d4e3b97 not in cached dataset")

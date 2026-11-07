@@ -24,11 +24,26 @@ The boundary cases the issue names are covered as a set: exactly-at-limit,
 limit+1, and page-2-of-2 (via the paginated control).
 
 Lane: embedded (``TORTOISE_TEST_CARVE_OUT=1``) or any ``TORTOISE_DB_URI``
-(``tests/conftest.py`` session gate).
+(``tests/conftest.py`` session gate). ⚠️ The lane is not the whole environment: a GREEN here also
+needs a LIVE DENSE LEG — a real embeddings model, not a stub — because two pre-existing tests in
+this file read the fusion scores the store actually produces. Both were RED on ``main`` at
+``5b1888a6e`` (#10560) and are GREEN at ``83a22b2a7`` on a private docker lane with
+``--extra embeddings``; the intervening ``search_engine`` change is ``6b8793351`` (#10506).
+``TestAScoreFloorIsNotProofOfCompleteness::test_a_read_with_a_score_floor_never_publishes_a_total``
+derives a strict score band from the seeded store, and the seed is five points whose content differs
+only by an index — so with the dense leg degraded they tie (``0.0870113 == 0.0870113``) and the
+test reds on a property of the RANKING rather than on the behaviour it pins;
+``TestAnArmThatServedTheSlotIsNotALostLeg::test_the_same_read_without_the_arm_is_still_lost``
+needs the #8488 BM25 arm to actually be gated by ``TORTOISE_BM25_LEXICAL=0``. So quote the lane AND
+the embeddings extra with any whole-file count from this module — a bare "49 passed" does not say
+whether the dense leg ran. On a COLD first touch of the model the hermetic egress guard (#4387)
+blocks and retries the HuggingFace HEAD requests, which can push an early test past its timeout;
+warm the model once before collecting evidence.
 """
 from __future__ import annotations
 
 import asyncio
+import re
 
 import pytest
 
@@ -40,6 +55,26 @@ from tortoise.truncation import (
 )
 
 # ── the marker's own contract ────────────────────────────────────────────
+
+#: A line coordinate in a census cell, in EITHER spelling the doc has used:
+#: contiguous (``hosted_api.py:10209``) and split across two code spans
+#: (`` `config/surface-manifest.yml` (`:121-143`) ``). The filename must be
+#: followed by the coordinate, allowing only the punctuation that separates
+#: them — a closing backtick, whitespace, and the opening paren/bracket.
+#:
+#: MODULE level, not a class attribute, because it is not this class's private
+#: business: `tests/test_8447_c3_ingest_door.py` asks the SAME question of its
+#: own docstrings and imports this predicate rather than re-spelling it. Two
+#: predicates for one question drift, and the drift is invisible in the worst
+#: direction — a citation one matches and the other misses is RED here and GREEN
+#: there.
+_LINE_CITATION = re.compile(
+    r"[\w./-]+\.(?:py|ya?ml)"
+    r"[\s`'\"]*"          # a closing code span and/or whitespace
+    r"[(\[]?"             # the split form's opening paren/bracket
+    r"[\s`'\"]*"
+    r":\d[\w-]*")        # the coordinate itself
+
 
 class TestMarkerVocabulary:
     def test_field_names_are_their_own_and_not_a_status_term(self):
@@ -879,3 +914,663 @@ class TestAnArmThatServedTheSlotIsNotALostLeg:
         assert truncation_field(sink)[TRUNCATED_FIELD] is True, (
             "with the arm off, nothing read the lexical half — the rows are "
             "unreachable and the read may not claim completeness")
+
+
+# ── #8447 (C2): the four boundary cases on the PAGINATION CONTROL ────────
+#
+# `paginated_query` is the contrast case: a row past the cap is REACHABLE, so it
+# is legitimate pagination and must never be marked `truncated` — but "reachable"
+# is only true if the four boundaries actually hold. Each test asserts the
+# pagination instrument that replaces the marker (`total` / `hasMore`), because
+# "returned 4" alone passes on a walk that cannot reach row 5.
+
+class TestThePaginationControlBoundaries:
+    def test_exactly_at_limit_is_one_page_and_not_more(self, sdk):
+        """Boundary 1 — limit == total: one page, `hasMore` False, unmarked."""
+        _seed(sdk, 4)
+        page = sdk.paginated_query(limit=4, skip=0)
+        assert len(page["results"]) == 4
+        assert page["total"] == 4
+        assert page["hasMore"] is False
+        assert TRUNCATED_FIELD not in page
+
+    def test_limit_plus_one_needs_a_second_page(self, sdk):
+        """Boundary 2 — limit+1: the extra row is a page 2, not a loss."""
+        _seed(sdk, 5)
+        first = sdk.paginated_query(limit=4, skip=0)
+        assert len(first["results"]) == 4
+        assert first["hasMore"] is True
+        second = sdk.paginated_query(limit=4, skip=4)
+        assert len(second["results"]) == 1
+        assert second["hasMore"] is False
+
+    def test_page_two_of_two_is_disjoint_and_the_walk_is_complete(self, sdk):
+        """Boundary 3 — page 2 of 2: reachable, disjoint, and the walk ends."""
+        _seed(sdk, 5)
+        first = sdk.paginated_query(limit=4, skip=0)
+        second = sdk.paginated_query(limit=4, skip=4)
+        ids = [r["id"] for r in first["results"] + second["results"]]
+        assert len(ids) == len(set(ids)) == 5
+        assert second["hasMore"] is False
+
+    def test_offset_exhaustion_is_an_empty_page_that_says_complete(self, sdk):
+        """Boundary 4 — skip == total: empty page, `hasMore` False, total STABLE.
+
+        The instrument is the (`empty`, `hasMore: False`, `total` unchanged)
+        triple; a caller that reads only the row count cannot tell an exhausted
+        cursor from a truncated one, which is the whole contract.
+        """
+        _seed(sdk, 2)
+        page = sdk.paginated_query(limit=2, skip=2)
+        assert page["results"] == []
+        assert page["hasMore"] is False
+        assert page["total"] == 2
+        assert TRUNCATED_FIELD not in page
+
+
+# ── the census: the artifact #8447's remaining scope is READ FROM ────────
+#
+# Review of this change found BOTH defects this class pins, and both had
+# already shipped once: the census row for hosted ``GET /v1/points`` still read
+# **SILENT** after the code started MARKS (P2), and §5 sent C2's mutation
+# evidence to a home that did not hold it — first "the issue" (no such comment
+# existed), then this PR's body (P3). The census and §5 are what a lane auditing
+# C2 reads before it derives anything, so a claim in them is asserted here
+# rather than trusted to the review that wrote it.
+
+class TestTheCensusNamesItsEvidenceHome:
+    """`docs/architecture/BOUNDED-OPERATION-CONTRACT.md` must agree with the tree
+    and point its evidence at a home that HAS the evidence."""
+
+    @staticmethod
+    def _doc_text() -> str:
+        from pathlib import Path
+        doc = (Path(__file__).resolve().parent.parent
+               / "docs" / "architecture" / "BOUNDED-OPERATION-CONTRACT.md")
+        assert doc.is_file(), f"the contract doc is missing: {doc}"
+        return doc.read_text(encoding="utf-8")
+
+    @classmethod
+    def _census_section(cls) -> str:
+        """§2 (the census + its park/deferral notes), the artifact a lane reads.
+
+        Bounded by its own headings so a line citation elsewhere in the doc is
+        out of this pin's scope — the census is what a lane auditing #8447
+        starts from, and it is where the drift was measured.
+        """
+        text = cls._doc_text()
+        assert "## 2. The census" in text, "§2 (the census) is gone"
+        assert "## 3. `OVERRIDES:`" in text, "§3 (the departures) is gone"
+        return text.split("## 2. The census", 1)[1].split(
+            "## 3. `OVERRIDES:`", 1)[0]
+
+    def test_the_pin_sees_the_split_form_too(self):
+        """Positive control: the split spelling is a line coordinate TOO.
+
+        The pin above is only worth its green if it can red. Its first version
+        matched the filename and the digits as one contiguous run, so the form
+        §2a actually carried —
+        ``config/surface-manifest.yml` (`:121-143`)`` — slipped past it: the
+        digits were still in the census, and the pin still said the census
+        cited none. This asserts the pattern against that exact string (and
+        against the symbol form that replaced it, which must NOT match), so
+        narrowing the pattern reds here instead of silently reopening the hole.
+        """
+        assert _LINE_CITATION.findall(
+            "a row in\n`config/surface-manifest.yml` (`:121-143`), **not** as an"), (
+            "the census pin no longer sees the split spelling of a line "
+            "coordinate, so it can pass over exactly the drift it exists to "
+            "catch")
+        assert not _LINE_CITATION.findall(
+            "a row in `config/surface-manifest.yml` → "
+            "`response_fields[tortoise_search].truncated`, **not** as an"), (
+            "the census pin reds on the SYMBOL form it recommends — a pin its "
+            "own suggested fix cannot satisfy is a trap")
+
+    def test_the_census_cites_symbols_not_line_numbers(self):
+        """A line number in the census goes stale on the next unrelated merge.
+
+        Pre-fix every evidence cell was a coordinate (`hosted_api.py:10209`,
+        `sdk.py:34655`, ...). They were exact when written and wrong 57 lines
+        later — the merge from `origin/main` moved the code, not the doc — so a
+        lane following the census was pointed into unrelated event code. That
+        is the re-derive-from-a-stale-map failure (#6134) this doc exists to
+        prevent, one field over from the state word this class already pins.
+
+        The fix is the form the register in `tortoise/truncation.py` already
+        uses and this PR's own scan pin already chose: cite `<module>::<name>`,
+        which does not move when somebody inserts a blank line above it.
+
+        ⚠️ BOTH spellings of the coordinate are caught, because the first
+        version of this pin only saw the contiguous one. A file named inside a
+        code span, with the line in its own parenthesised span —
+        ``config/surface-manifest.yml` (`:121-143`)`` — is the same stale
+        coordinate one keystroke apart, and it survived that pin while §2a
+        carried it. :meth:`test_the_pin_sees_the_split_form_too` is the
+        positive control: it reds if this pattern narrows back to contiguous.
+        """
+        stale = sorted(_LINE_CITATION.findall(self._census_section()))
+        assert not stale, (
+            "the census cites absolute line numbers, which go stale on every "
+            "unrelated edit to the file they point into — cite "
+            f"`<module>::<function>` instead: {stale}")
+
+    def test_every_symbol_the_census_cites_resolves_in_the_tree(self):
+        """A symbol citation is only staleness-proof if it EXISTS.
+
+        The line-number form was replaced because it drifts; a symbol form has
+        the opposite failure mode — a rename or a move leaves the census naming
+        something that is not there. This resolves every `<module>::<name>` the
+        census cites against the module's own AST (functions, classes and
+        module-level bindings such as `TOOL_REGISTRY`), so a rename reds here
+        instead of silently misdirecting a lane.
+        """
+        import ast
+        import re
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parent.parent
+        cited = sorted(set(re.findall(r"(tortoise/[\w/]+\.py)::([A-Za-z_]\w*)",
+                                     self._census_section())))
+        assert cited, (
+            "the census cites no `<module>::<name>` evidence at all — the "
+            "pointer form regressed to something this pin cannot check")
+
+        unresolved: list[str] = []
+        for module, name in cited:
+            path = root / module
+            if not path.is_file():
+                unresolved.append(f"{module} (module does not exist)")
+                continue
+            bound: set[str] = set()
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                     ast.ClassDef)):
+                    bound.add(node.name)
+                elif isinstance(node, ast.Assign):
+                    bound.update(t.id for t in node.targets
+                                 if isinstance(t, ast.Name))
+                elif isinstance(node, ast.AnnAssign) and isinstance(
+                        node.target, ast.Name):
+                    bound.add(node.target.id)
+            if name not in bound:
+                unresolved.append(f"{module}::{name}")
+        assert not unresolved, (
+            "the census cites symbols the tree does not bind (renamed, moved or "
+            f"invented), so its evidence cells point at nothing: {unresolved}")
+
+    @staticmethod
+    def _unresolved_symbol_citations(citations) -> list[str]:
+        """The `<module>::<name>` citations this tree does not bind.
+
+        Resolution is an AST walk over each cited module (functions, classes and
+        module-level bindings such as `TOOL_REGISTRY`), so a rename or a move reds
+        the caller instead of silently misdirecting a reader. Shared by the two
+        artifacts that cite the census's evidence — §2 of the doc, and the
+        `docs/00_index.md` row that routes a lane into it — because the same rot has
+        to red in both places or the upstream one drifts again.
+        """
+        import ast
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parent.parent
+        unresolved: list[str] = []
+        for module, name in citations:
+            path = root / module
+            if not path.is_file():
+                unresolved.append(f"{module} (module does not exist)")
+                continue
+            bound: set[str] = set()
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                     ast.ClassDef)):
+                    bound.add(node.name)
+                elif isinstance(node, ast.Assign):
+                    bound.update(t.id for t in node.targets
+                                 if isinstance(t, ast.Name))
+                elif isinstance(node, ast.AnnAssign) and isinstance(
+                        node.target, ast.Name):
+                    bound.add(node.target.id)
+            if name not in bound:
+                unresolved.append(f"{module}::{name}")
+        return unresolved
+
+    def test_the_index_row_that_routes_readers_here_cites_no_line_numbers(self):
+        """The front door must speak the citation form the census speaks.
+
+        `docs/00_index.md`'s #8447 row is how a lane FINDS this census, and it
+        kept `sdk.py:28434` / `sdk.py:27022` / `sdk.py:34398` /
+        `event_store.py:974` after §2 itself was converted — the exact form the
+        pin above forbids, one artifact upstream of it. The coordinates were
+        exact when written, and `sdk.py` has already moved 695 lines under them
+        once (`62e3f2f61` -> `d72983b99`, #10523), so a lane following them from
+        the index lands wherever the last insertion put them. Same rule, same
+        artifact family: cite `<module>::<name>`, and resolve it.
+        """
+        import re
+        from pathlib import Path
+
+        index = (Path(__file__).resolve().parent.parent / "docs" / "00_index.md")
+        rows = [ln for ln in index.read_text(encoding="utf-8").splitlines()
+                if "docs/architecture/BOUNDED-OPERATION-CONTRACT.md" in ln]
+        assert len(rows) == 1, (
+            "expected exactly ONE docs/00_index.md row routing a reader into the "
+            f"census, found {len(rows)}")
+        row = rows[0]
+
+        stale = sorted(re.findall(r"[\w./-]+\.(?:py|ya?ml):\d[\w-]*", row))
+        assert not stale, (
+            "the index row cites absolute line numbers, which re-stale on the "
+            "next insertion into the file they point into — cite "
+            f"`<module>::<name>` instead: {stale}")
+
+        cited = sorted(set(re.findall(r"(tortoise/[\w/]+\.py)::([A-Za-z_]\w*)",
+                                     row)))
+        assert cited, (
+            "the index row names no `<module>::<name>` evidence this pin can "
+            "check — the pointer form regressed to something unresolvable")
+        unresolved = self._unresolved_symbol_citations(cited)
+        assert not unresolved, (
+            "the index row cites symbols the tree does not bind (renamed, moved "
+            f"or invented), so a reader is sent to nothing: {unresolved}")
+
+    def test_the_parked_summary_names_the_arm_the_census_measured(self):
+        """§2a's opening claim must carry its own scope.
+
+        Read alone, *"All six return a bare list"* is a claim about each whole
+        tool, and it contradicted the ⚠️ two paragraphs above it: `tortoise_query`
+        is censused on its `text=` arm, whose bare list is real, but its
+        STRUCTURAL arm (`text=None`) returns `{"results", "suggestion"}` on one
+        branch. A summary that over-reads its own disclosure is how the
+        disclosure stops being read — the parked set is the arm, not the tool.
+        """
+        park = self._census_section().split("### 2a.", 1)[1]
+        opening = park.split("All six return", 1)[1].split("\n\n", 1)[0]
+        assert "bare list" in opening, (
+            f"§2a no longer states what the parked surfaces return: {opening}")
+        assert "arm" in opening or "text=" in opening, (
+            "§2a's opening claim is not scoped to the arm/route the census "
+            "measured, so it reads as a statement about each whole tool — "
+            "`tortoise_query`'s structural arm returns `{'results', "
+            "'suggestion'}` on one branch (see the ⚠️ above), not a bare list")
+
+    def test_every_test_the_contract_doc_names_exists(self):
+        """A pointer to a TEST is only a pointer if that test resolves.
+
+        The other half of the same defect class: §5 sent C2's mutation evidence
+        to a node id that existed nowhere in the tree, so a lane auditing C2
+        had to decide whether the evidence was fabricated. The evidence home
+        (the #8447 comment) now names the real ids, and §5 restates them — so a
+        rename has to red here rather than silently orphan the pointer.
+
+        Scoped to §5, where the evidence pointer lives: a node id is only
+        checked where it is load-bearing, and §5 carrying none reds (the
+        pre-fix state) instead of passing vacuously.
+        """
+        import ast
+        import re
+        from pathlib import Path
+
+        text = self._doc_text()
+        assert "## 5. Related" in text, "§5 (the evidence pointer) is gone"
+        section = text.split("## 5. Related", 1)[1]
+
+        cited = sorted(set(re.findall(
+            r"(tests/[\w/]+\.py)::([A-Za-z_]\w*(?:::[A-Za-z_]\w*)?)", section)))
+        assert cited, (
+            "§5 names no resolvable test node, so its evidence pointer is prose "
+            "a lane has to trust rather than grep")
+
+        root = Path(__file__).resolve().parent.parent
+        unresolved: list[str] = []
+        for module, dotted in cited:
+            path = root / module
+            if not path.is_file():
+                unresolved.append(f"{module} (module does not exist)")
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            found: set[str] = set()
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ClassDef):
+                    found.add(node.name)
+                    # a METHOD is cited `Class::method`, never as a bare name
+                    found.update(f"{node.name}::{child.name}"
+                                 for child in node.body
+                                 if isinstance(child, (ast.FunctionDef,
+                                                       ast.AsyncFunctionDef)))
+            for node in tree.body:
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    found.add(node.name)
+            if dotted not in found:
+                unresolved.append(f"{module}::{dotted}")
+        assert not unresolved, (
+            "§5 points at tests the tree does not define (renamed or "
+            f"invented), so its evidence home cannot be grepped: {unresolved}")
+
+    def test_the_hosted_points_row_says_marks_and_says_the_total_is_withheld(self):
+        """The census row and the tree must say the same thing.
+
+        Pre-fix this row read **SILENT** while `list_points` marked, so a lane
+        reading the census would re-open work that had landed — the #6134 shape
+        (a conclusion re-derived because the map was stale).
+        """
+        rows = [ln for ln in self._doc_text().splitlines()
+                if ln.startswith("| `GET /v1/points` (hosted")]
+        assert len(rows) == 1, (
+            f"expected exactly ONE hosted `GET /v1/points` census row, found "
+            f"{len(rows)}")
+        row = rows[0]
+        assert "**MARKS**" in row, f"the census row does not say MARKS: {row}"
+        assert "**SILENT**" not in row, row
+        # The third state is the point: a truncated page here states THAT more
+        # exist, never HOW MANY (`exact=False`), so the row must say so.
+        assert "exact=False" in row or "WITHHELD" in row, (
+            f"the row does not record that `total_available` is withheld: {row}")
+
+    def test_the_mutation_evidence_points_at_the_issue_not_a_pr_body(self):
+        """§5 must send a lane to #8447, because that is where the record is.
+
+        `AGENTS.md` -> DECISION RELAY: the answer lives on the artifact the next
+        lane reads. A PR body is neither durable (it is edited, force-pushed and
+        eventually buried) nor the record §2's census is written from — and this
+        doc's own census is written FROM the issue.
+        """
+        text = self._doc_text()
+        assert "## 5. Related" in text
+        section = " ".join(text.split("## 5. Related", 1)[1].split())
+
+        assert "MUTATION-MATRIX" in section, (
+            "§5 no longer records the mutation matrix at all — C2's evidence "
+            "claim went missing rather than moving home")
+        assert "#8447" in section, section
+        assert "mutation-evidence comment" in section, (
+            f"§5's mutation evidence does not name a comment ON #8447: {section}")
+        assert "'s body" not in section, (
+            "§5 sends C2's mutation evidence to a PR body, which is not the "
+            "artifact a lane reads (and was the P3 finding)")
+
+    def test_the_mutation_claim_names_the_kill_set_it_actually_kills(self):
+        """§5's M1/M2 arithmetic must match what the four tests assert.
+
+        M2 is "probe removed, the marker KEPT": with the probe gone
+        `candidates == returned`, so `mark_truncation` publishes
+        `truncated: False` over a page that IS cut. That reds exactly the tests
+        asserting `truncated: True` — 2 of the 4 M1 reds — so the kill sets are
+        NESTED (M2 ⊂ M1; the mutation-testing literature calls M2 *subsumed* by
+        M1) and the union is 4, not 6.
+
+        §5 said "6 named tests red, disjoint sets". That is the direction that
+        costs a lane real coverage: told the mutants are disjoint, a lane
+        trimming the boundary set believes each mutant owns its own tests, drops
+        one of M2's two reds, and loses the only discrimination against a marker
+        that is present but lying. So the sets are DERIVED from the tests here
+        instead of trusted — flip one test's `truncated` verdict and the doc's
+        claim has to move with it.
+        """
+        import ast
+        import re
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parent.parent
+        src = (root / "tests" / "test_hosted_api.py").read_text(encoding="utf-8")
+        cls = next((n for n in ast.parse(src).body
+                    if isinstance(n, ast.ClassDef)
+                    and n.name == "TestBoundedPointsListBoundaries"), None)
+        assert cls is not None, (
+            "the /v1/points boundary class is gone, so §5's mutation matrix has "
+            "nothing left to be true about")
+
+        #: M2 (probe removed) turns every page into the `truncated: False`
+        #: answer, so it reds exactly the tests asserting `True`.
+        asserting: dict[bool, set[str]] = {True: set(), False: set()}
+        for fn in cls.body:
+            if not isinstance(fn, ast.FunctionDef) or not fn.name.startswith("test_"):
+                continue
+            for verdict in re.findall(r'\["truncated"\] is (True|False)',
+                                      ast.get_source_segment(src, fn) or ""):
+                asserting[verdict == "True"].add(fn.name)
+        assert asserting[True] and asserting[False], (
+            "the boundary class no longer asserts BOTH marker directions, so it "
+            f"cannot pin a lying marker: {asserting}")
+
+        text = self._doc_text()
+        assert "## 5. Related" in text, "§5 (the evidence pointer) is gone"
+        bullets = [b for b in re.split(r"\n(?=- )",
+                                      text.split("## 5. Related", 1)[1])
+                   if "MUTATION-MATRIX" in b]
+        assert len(bullets) == 1, (
+            "expected exactly ONE §5 bullet carrying the mutation matrix, found "
+            f"{len(bullets)}")
+        claim = " ".join(bullets[0].split())
+
+        assert "disjoint" not in claim.lower(), (
+            "§5 calls the two mutants' kill sets disjoint. They are NESTED — M2 "
+            "reds 2 of M1's 4 — so a lane reading 'disjoint' believes each "
+            f"mutant owns its own tests and may drop one of M2's two: {claim}")
+
+        named = set(re.findall(r"TestBoundedPointsListBoundaries::([A-Za-z_]\w*)",
+                               claim))
+        assert named == asserting[True], (
+            "§5 names the wrong set as M2's kills. M2 (probe removed, marker "
+            "kept) publishes `truncated: False` on a cut page, so it reds "
+            f"exactly the `truncated: True` assertions {sorted(asserting[True])}; "
+            f"the doc names {sorted(named)}")
+
+        assert re.search(r"strict\s+subset|subsumed", claim, re.I), (
+            "§5 no longer says M2's kill set is a strict subset of M1's (M2 is "
+            "subsumed by M1) — the fact that stops 4 reds being counted as 6 "
+            f"distinct: {claim}")
+
+
+# ── the marker-site REGISTER: the docstring list a new site must join ────
+#
+# `tortoise/truncation.py`'s docstring is the authoritative register of the
+# surfaces that write the marker, and the ⛔ rule beside it ("A new marker site
+# joins this list") only means something if the list is TRUE. It has now shipped
+# wrong TWICE as a cardinality claim — first "the only place the marker is
+# written" (when `/v1/search` was already the second site), then "TWO sites meet
+# it today" (when `sdk.py::issue_insight` had been a third site all along, and
+# already had its own `truncated` row in the rendered surface doc). A lane
+# auditing #8447 starts from this register, so a count that has quietly gone
+# stale makes it conclude a real site does not write the marker — the same
+# re-derived-conclusion defect as a stale census row, one level down.
+
+class TestTheMarkerSiteRegisterIsComplete:
+    """Every `mark_truncation` call site in the tree is NAMED in the register.
+
+    The list is derived from the tree (an AST scan), never restated here, so
+    this test cannot itself go stale: adding a marker site without adding it to
+    the register reds, which is exactly what the docstring's ⛔ rule promises.
+    That promise was exercised by the merge that landed `hosted_api.py::search`'s
+    outage arm on `main` — a NEW site the register did not name, caught here and
+    not by review.
+
+    ⚠️ "Derived from the tree" includes the NAME the marker is called under.
+    The tree already imports `truncation.mark_truncation` under four local
+    aliases besides `_mark_truncation` (`_seed_mark`, `_lost_mark`,
+    `_lost_mark2` bound by `tortoise_fts_query`; `_lost_mark` again in
+    `hosted_api.py::search`), so a filter that
+    hard-codes the two names it happens to recognise sees 3 of the 7 call sites
+    and would leave the pin green while a NEW site was written in the aliasing
+    pattern the tree already uses three times. The name set is therefore read
+    off each module's own `ImportFrom` nodes (:meth:`_marker_aliases`), which is
+    the only form a hard-coded list cannot keep up with.
+    """
+
+    @staticmethod
+    def _module_docstring() -> str:
+        import tortoise.truncation as truncation
+
+        assert truncation.__doc__, "tortoise/truncation.py lost its docstring"
+        return truncation.__doc__
+
+    @staticmethod
+    def _marker_aliases(tree) -> set[str]:
+        """Every local name that binds `truncation.mark_truncation` in `tree`.
+
+        Collected from the module's own `ImportFrom` nodes whose module ends in
+        ``truncation`` — ``from tortoise.truncation import mark_truncation``,
+        ``from .truncation import mark_truncation as _seed_mark`` and any other
+        alias a future site invents — instead of a hard-coded name list.
+        """
+        import ast
+
+        names = {"mark_truncation"}
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom):
+                continue
+            module = node.module or ""
+            if module.split(".")[-1] != "truncation":
+                continue
+            for alias in node.names:
+                if alias.name == "mark_truncation":
+                    names.add(alias.asname or alias.name)
+        return names
+
+    @classmethod
+    def _scan(cls, root=None) -> set[tuple[str, int, str, str]]:
+        """`(module, lineno, name, outermost enclosing function)` per call site.
+
+        Function granularity is what the register is written at, but the NAME
+        the marker is called under is what proves the scan matched a given
+        call: all three aliased sites live inside `tortoise_fts_query`, so the
+        coarse `_call_sites()` set is identical under a two-name filter.
+        """
+        import ast
+        from pathlib import Path
+
+        if root is None:
+            root = Path(__file__).resolve().parent.parent / "tortoise"
+        root = Path(root)
+        assert root.is_dir(), f"the package root is missing: {root}"
+        found: set[tuple[str, int, str, str]] = set()
+        for path in sorted(root.rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            names = cls._marker_aliases(tree)
+            parents = {child: node for node in ast.walk(tree)
+                       for child in ast.iter_child_nodes(node)}
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                func = node.func
+                name = (func.attr if isinstance(func, ast.Attribute)
+                        else getattr(func, "id", ""))
+                if name not in names:
+                    continue
+                owner = ""
+                cursor = node
+                while cursor in parents:
+                    cursor = parents[cursor]
+                    if isinstance(cursor, (ast.FunctionDef,
+                                           ast.AsyncFunctionDef)):
+                        owner = cursor.name
+                found.add((path.relative_to(root.parent).as_posix(),
+                           node.lineno, name, owner))
+        return found
+
+    @classmethod
+    def _call_sites(cls, root=None) -> set[str]:
+        """`<module>::<outermost enclosing function>` for every call site.
+
+        The OUTERMOST def, not the innermost: a site inside a helper closure
+        still belongs to the entry point a reader can find and grep for.
+        """
+        return {f"{module}::{owner}"
+                for module, _lineno, _name, owner in cls._scan(root)}
+
+    def test_the_scan_sees_every_marker_call_site_in_the_tree(self):
+        """All SEVEN call sites, not the three a two-name filter can match.
+
+        The tree calls the marker under `mark_truncation`, `_mark_truncation`,
+        and four further alias bindings introduced by
+        `from .truncation import mark_truncation as …` — three inside `sdk.py`
+        and one in `hosted_api.py` (`search`'s out-of-`ImportFrom` alias
+        `_lost_mark`, which `main` added after this register was written).
+        Pre-fix the scan matched two hard-coded names, so the aliased calls were
+        invisible to it — the mount point for a new site that would have gone
+        unpinned while the class docstring promised it could not. Asserted by
+        the alias NAME, not by line number, because a line pin breaks on every
+        unrelated edit to `sdk.py` while an alias pin only breaks when a site is
+        added or moved. The same alias NAME can legitimately appear in two
+        modules, so the key is `(module, name)`.
+        """
+        from collections import Counter
+
+        seen = Counter((module, name)
+                       for module, _lineno, name, _owner in self._scan())
+        assert seen == Counter({
+            ("tortoise/hosted_api.py", "mark_truncation"): 1,
+            ("tortoise/hosted_api.py", "_lost_mark"): 1,   # search, outage arm
+            ("tortoise/sdk.py", "_mark_truncation"): 2,
+            ("tortoise/sdk.py", "_seed_mark"): 1,     # as _seed_mark
+            ("tortoise/sdk.py", "_lost_mark"): 1,     # as _lost_mark
+            ("tortoise/sdk.py", "_lost_mark2"): 1,    # as _lost_mark2
+        }), sorted(seen.items())
+
+    def test_a_new_site_under_an_invented_alias_is_seen(self, tmp_path):
+        """A marker site in a NEW function under a THIRD alias name reds.
+
+        This is the exact escape the two-name filter allowed: `as _m` is the
+        pattern the tree already uses three times, so it is what the next site
+        will look like. Built in a throwaway tree so the assertion is about the
+        SCAN, not about a site this repo happens to have today.
+        """
+        pkg = tmp_path / "tortoise"
+        pkg.mkdir()
+        (pkg / "new_marker_site.py").write_text(
+            "from tortoise.truncation import mark_truncation as _m\n"
+            "\n"
+            "\n"
+            "def a_new_bounded_read(sink, rows, limit):\n"
+            "    _m(sink, returned=len(rows[:limit]), candidates=len(rows))\n"
+            "    return rows[:limit]\n",
+            encoding="utf-8")
+
+        assert self._call_sites(pkg) == {
+            "tortoise/new_marker_site.py::a_new_bounded_read"
+        }
+
+    def test_the_scan_finds_the_four_sites_the_register_names(self):
+        """Guard against a vacuous scan: the AST really does see all four."""
+        sites = self._call_sites()
+        assert sites == {
+            "tortoise/hosted_api.py::list_points",
+            "tortoise/hosted_api.py::search",
+            "tortoise/sdk.py::issue_insight",
+            "tortoise/sdk.py::tortoise_fts_query",
+        }, sites
+
+    def test_every_marker_call_site_is_named_in_the_register(self):
+        doc = self._module_docstring()
+        missing = sorted(s for s in self._call_sites() if s not in doc)
+        assert not missing, (
+            "these surfaces write `truncated` but the REACHABILITY register in "
+            "tortoise/truncation.py does not name them — a lane auditing #8447 "
+            f"would conclude they are unmarked: {missing}")
+
+    def test_issue_insight_is_registered_as_a_marker_site(self):
+        """The site that was silently absent while the register said TWO.
+
+        Pre-fix the docstring listed the search path and hosted `/v1/points`
+        only, so `issue_insight` — a `[:limit]` cut with no offset and no
+        cursor, on a tool that already publishes a `truncated` row — was
+        invisible to anyone reading the register.
+        """
+        doc = self._module_docstring()
+        assert "tortoise/sdk.py::issue_insight" in doc, (
+            "the register omits `issue_insight`, which calls `_mark_truncation` "
+            "on a plain `[:limit]` cut — no offset, no cursor")
+
+    def test_the_register_states_no_cardinality_that_can_re_stale(self):
+        """A count is a claim that goes stale; the site list cannot.
+
+        Both shipped wordings are pinned out by their own claim form (the
+        docstring is allowed to narrate that they went stale — it is not allowed
+        to make the claim again).
+        """
+        doc = " ".join(self._module_docstring().split())  # unwrap the prose
+        for stale in ("TWO sites meet it today",
+                      "the only place the marker is written"):
+            assert stale not in doc, (
+                f"the register re-introduced the stale cardinality claim "
+                f"{stale!r} — name the sites, let the AST scan keep the count")

@@ -128,14 +128,14 @@ from tests.test_hosted_api import TEST_ORG_ID
 from tests.test_hosted_api import client as client
 from tortoise.sdk import TortoiseSDK
 
-# A stall long enough to be unambiguous, short enough to keep CI quick.
+# A stall long enough to be unambiguous, short enough to keep CI quick. It is
+# also the TIMEOUT on the condition wait below, so it bounds the run.
 STALL_S = 2.0
-# The loop's own tick period while the read is blocked.
+# The loop's own tick period — the poll interval the driver uses while it waits
+# for the request to reach the blocking call. NOT a sample rate for measuring
+# the stall: a wall-clock tick count measures the HOST's scheduler as much as
+# this code (see `test_delete_session_does_not_freeze_the_event_loop`).
 TICK_S = 0.02
-# Ticks completed INSIDE the blocking window. A blocked loop yields 0 (the
-# next tick cannot run until the freeze releases); a free loop yields
-# ~STALL_S/TICK_S = 100. Loose on purpose — see the write file's rationale.
-MIN_TICKS_IN_STALL = 10
 
 _INTERNAL_KEY = "loop-responsiveness-internal-key"
 _SEEDED_SESSION = "dataplane-loop-3718-session"
@@ -182,9 +182,18 @@ class _RequestScopedProbe:
     fail independently instead of together.
     """
 
-    def __init__(self, monkeypatch, ha_mod, state: dict, *, block: bool):
+    def __init__(self, monkeypatch, ha_mod, state: dict, *, block: bool,
+                 release: threading.Event | None = None):
         self._state = state
         self._block = block
+        # ⛔ WHEN `release` IS GIVEN THE STALL IS A CONDITION WAIT, NOT A SLEEP.
+        # The worker returns as soon as the event is set — so the test can release
+        # it from the LOOP after a concurrent request has been served, and the
+        # measurement stops depending on how much CPU the host grants this
+        # process. `STALL_S` is then the timeout (the backstop that keeps a
+        # never-released wait from hanging the suite), exactly the idiom
+        # `_stall_the_default_executor` uses in the sibling file.
+        self._release = release
         self._owned: list = state.setdefault("sdks", [])
         self._real_get_proj = TortoiseSDK._get_proj
 
@@ -251,7 +260,14 @@ class _RequestScopedProbe:
             if self._block:
                 self._state["entered"] = time.perf_counter()
                 try:
-                    time.sleep(STALL_S)  # stand-in for a slow FalkorDB round trip
+                    if self._release is None:
+                        time.sleep(STALL_S)  # stand-in for a slow round trip
+                    elif "released_by_loop_request" not in self._state:
+                        # THE FIRST blocking call is the one that measures; a later
+                        # one would overwrite the reading (last-write-wins) and, if
+                        # the first had timed out, report the loosened state instead.
+                        self._state["released_by_loop_request"] = self._release.wait(
+                            timeout=STALL_S)
                 finally:
                     self._state["exited"] = time.perf_counter()
             return self._real_get_proj(self_sdk, *args, **kwargs)
@@ -474,15 +490,28 @@ def test_delete_session_does_not_freeze_the_event_loop(client, monkeypatch):
     the handler with the most statements in the converted set (an existence
     read, three provenance reads and four DETACH DELETEs), which this change
     moved into ONE worker hand-off precisely so the sequence stays
-    uninterleaved. Two assertions that fail on the inline shape:
+    uninterleaved.
 
-    * ``ticks_in_stall >= MIN_TICKS_IN_STALL`` — the loop kept scheduling while
-      the attach was blocked (inline yields 0: the ticker's next wake-up cannot
-      run until the freeze releases).
-    * ``/health`` answered INSIDE the blocking window — the user-visible
-      consequence: a concurrent client is served DURING the graph call, not
-      queued behind it. /health is pure in-memory (#2850), so a delay in it can
-      only come from the loop being blocked, never from a saturated executor.
+    ⛔ THE ASSERTION IS A CONDITION, NOT A TICK COUNT — measured 2026-11-03.
+    This case used to sample a 20 ms ticker inside the stall window and require
+    `>= 10` of ~100 ticks. That measures the HOST's scheduler as much as this
+    code: on a CPU-starved self-hosted runner the process is granted no
+    timeslice for the whole window and the count is ZERO with no defect present
+    — `test (c)` red on PR #10783 (`only 0 tick(s) during a 2.0s blocked graph
+    call`) for a branch that changes no hosted code at all. The stall is now
+    released by the LOOP SERVING `/health`, so the signal is "the loop ran while
+    the graph call was held", not "the host gave us 10 slices". If the loop IS
+    frozen the wait can only run to its `STALL_S` timeout, so the assertion still
+    fails — including on the inline shape, which cannot serve `/health` at all.
+
+    The user-visible consequence is the same property in the vocabulary of the
+    request: a concurrent client is SERVED DURING the graph call, not queued
+    behind it. /health is pure in-memory (#2850), so a delay in it can only come
+    from the loop being blocked, never from a saturated executor.
+
+    RESIDUAL, filed rather than silently left (#10815):
+    `test_graph_write_loop_responsiveness.py`, `test_capture_loop_responsiveness.py`
+    and `test_notify_offloop_4456.py` still count wall-clock ticks the same way.
     """
     import tortoise.hosted_api as ha_mod
     from tortoise.hosted_api import app
@@ -490,23 +519,16 @@ def test_delete_session_does_not_freeze_the_event_loop(client, monkeypatch):
     _arm_dependencies(monkeypatch)
     _seed_session()
     state: dict = {}
-    _RequestScopedProbe(monkeypatch, ha_mod, state, block=True)
+    # Set by the driver FROM THE LOOP once `/health` has been answered; the
+    # request's blocking region waits on it with `STALL_S` as its backstop.
+    release = threading.Event()
+    _RequestScopedProbe(monkeypatch, ha_mod, state, block=True, release=release)
     request_kwargs = _delete_session_kwargs()
 
     async def _drive():
-        ticks: list[float] = []
-        stop = {"done": False}
-
-        async def _ticker():
-            while not stop["done"]:
-                ticks.append(time.perf_counter())
-                await asyncio.sleep(TICK_S)
-
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport,
                                      base_url="http://test") as ac:
-            tick = asyncio.create_task(_ticker())
-            await asyncio.sleep(TICK_S * 2)  # ticker mid-sleep before the read
             state["active"] = True
             read = asyncio.create_task(ac.request(**request_kwargs))
             for _ in range(2000):  # let the read reach the blocking call
@@ -521,32 +543,29 @@ def test_delete_session_does_not_freeze_the_event_loop(client, monkeypatch):
             read_in_flight = not read.done()
             health = await ac.get("/health")
             health_done = time.perf_counter()
+            # RELEASE THE STALL FROM THE LOOP — this line runs only because the
+            # loop scheduled it, which is the measurement.
+            release.set()
             response = await read
             state["active"] = False
-            stop["done"] = True
-            await tick
-        return ticks, health, health_done, response, read_in_flight
+        return health, health_done, response, read_in_flight
 
-    ticks, health, health_done, response, read_in_flight = asyncio.run(_drive())
+    health, health_done, response, read_in_flight = asyncio.run(_drive())
 
     assert state.get("ran_on_loop") is False, (
         "delete_session ran its synchronous FalkorDB attach ON the event loop "
         "(#3718)")
 
-    entered, exited = state["entered"], state["exited"]
-    in_stall = [t for t in ticks if entered < t < exited]
-    assert len(in_stall) >= MIN_TICKS_IN_STALL, (
-        f"the event loop completed only {len(in_stall)} tick(s) during a "
-        f"{STALL_S:.1f}s blocked graph call (need {MIN_TICKS_IN_STALL}) — the "
-        f"call is blocking the event loop, so every concurrent request waits "
-        f"for the graph round trip (#3718)")
+    exited = state["exited"]
+    assert state.get("released_by_loop_request") is True, (
+        "the /health probe did NOT reach the loop while the graph call was "
+        f"blocked: the stall ran its full {STALL_S:.1f}s timeout instead of "
+        "being released by a SERVED request — the call is holding the event "
+        "loop, so every concurrent request waits for the graph round trip "
+        f"(#3718); /health answered {health_done - exited:+.3f}s relative to "
+        "the block's release (negative = it queued behind the block)")
 
     assert health.json()["status"] in {"ok", "degraded"}, health.text
-    assert health_done < exited, (
-        "the /health probe was NOT served while the graph call was blocked "
-        "(answered %.0fms AFTER the block released) — a concurrent request "
-        "queued behind the graph call instead of being served (#3718)"
-        % ((health_done - exited) * 1000))
     assert read_in_flight, (
         "the request had already returned before /health was issued, so this "
         "run proves nothing about a request served DURING the blocking window "
@@ -586,7 +605,13 @@ def test_public_demo_seed_is_serialized_per_org(client, monkeypatch):
     # hanging — the second party never arrives, so ``wait`` raises.
     entered = threading.Barrier(2, timeout=3)
 
-    def _slow_seed(org_id):
+    # #8906: the demo door now hands its already-open SDK to the seeder, so a
+    # stub that does not accept it breaks the call instead of standing in for it.
+    # Same signature surface as the two stubs in
+    # `test_onboarding_truth_surface.py` (`:667`, `:861`) — an optional
+    # keyword-only-by-default `sdk`, not `**kw` (which would also swallow a
+    # mistyped keyword that production would 500 on).
+    def _slow_seed(org_id, sdk=None):
         with gate:
             state["concurrent"] += 1
             state["max"] = max(state["max"], state["concurrent"])

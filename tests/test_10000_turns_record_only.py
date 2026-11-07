@@ -2523,10 +2523,12 @@ def _assert_the_text_is_in_exactly_one_store(proj, needle: str, *, in_graph: boo
     and the scan below finds it. So it is searched because a caller-named
     property can carry prose, not because a writer does. A writer that carried
     turn text under a SEVENTH name (`body`, `summary`, `raw`…) would be outside
-    this population. That is not hypothetical: this tree derives the session's first
-    substantive utterance into a `summary` (`sdk._session_source_metadata`) and
-    writes it on the session `:Source` (`s.summary=$sum`), so a `:Source.summary`
-    hit is a route this scan cannot see. The scan therefore guards against a
+    this population. The session `:Source`'s ``summary`` used to be exactly that
+    (`sdk._session_source_metadata` derived the transcript's first substantive
+    utterance into it, `s.summary=$sum`) — a route this scan could not see;
+    #10000 removed it, that field now carries a descriptor over the session's
+    TOPIC lexicon, and `tests/test_10000_source_prose.py` scans the graph for a
+    capture's own text for that reason. The scan here therefore guards against a
     changed label, id space or wiring — the shapes the sibling id-space
     assertions cannot see — and not against a renamed property. Read the claim no
     wider than that.
@@ -3181,6 +3183,122 @@ def test_the_demo_seed_declares_NO_length_it_cannot_serve(monkeypatch):
     assert out["points"] == 9, out
 
 
+def test_the_repair_note_names_BOTH_halves_of_a_legacy_demo_graph():
+    """P2 (#10000 review): the NOT RETROACTIVE note named a NODE-ONLY delete.
+
+    A demo graph seeded before this change keeps the three `epi_turn*` nodes
+    AND its counter at 3, and the two are undone by DIFFERENT statements. The
+    node delete ALONE — not the re-seed half-state, which is the quieter one
+    pinned by the predicate test below — leaves `declared=3, served=0`: on an
+    armed, journaling deployment the demo session's read refuses with
+    `record_unavailable` (503); on an unarmed one it serves
+    `{"turns": 3, "turn_points": []}` — the exact split the counter note beside
+    the `:Session` write exists to eliminate. So
+    the note a destructive purge lane reads must name the counter as part of the
+    repair instead of presenting the node delete alone as it, and it must name
+    what owns the destructive step — and say that `#10017`'s purge is NOT it,
+    because that is the lane an operator reaches for first (§9.1 residual (a);
+    `#11325` makes the removal's non-existence explicit).
+
+    Fails without the fix: the pre-fix note says "Deleting those three nodes is
+    the graph-side repair" and mentions neither `turn_count`, `DETACH DELETE`
+    nor `#10017`.
+    """
+    from pathlib import Path
+
+    src = (Path(sdk_mod.__file__).resolve().parent / "hosted_api.py").read_text(
+        encoding="utf-8")
+    lines = src.splitlines()
+    # Located by its own opening clause: `hosted_api.py` carries a SECOND
+    # `NOT RETROACTIVE` note (the `tags` one this paragraph is modelled on), and
+    # that one is about a property `MERGE` rewrites — not this repair.
+    starts = [i for i, line in enumerate(lines)
+              if "NOT RETROACTIVE, the same posture as the `tags` note" in line]
+    assert len(starts) == 1, (
+        "expected exactly ONE demo-seed `NOT RETROACTIVE` note in "
+        f"hosted_api.py (found {len(starts)}) — this pin locates it by that "
+        "clause, so a re-spelling silently drops the coverage")
+
+    block: list[str] = []
+    for line in lines[starts[0]:]:
+        if not line.lstrip().startswith("#"):
+            break
+        block.append(line)
+    note = " ".join(" ".join(block).split())
+    # ⛔ NON-VACUITY: the extraction must have found the PARAGRAPH. One line
+    # would satisfy nothing below, and an empty block would pass an `in` test
+    # for the wrong reason.
+    assert "epi_turn" in note and "RE-SEEDING" in note, (
+        f"the repair-note extraction found the wrong span: {note!r}")
+
+    # ⛔ SCOPED TO THE REPAIR PARAGRAPH, not the whole note: the counter literal
+    # also appears in the RE-SEEDING paragraph ("sets `s.turn_count=0`"), so
+    # `"s.turn_count=0" in note` is satisfied by prose about the WRONG half —
+    # measured (#10675 review P2): reverting only the repair sentence to the
+    # node-only instruction left this pin GREEN. Everything below is therefore
+    # read from the sentence that tells a destructive lane what to DO.
+    parts = note.split("The graph-side repair", 1)
+    assert len(parts) == 2, (
+        "the note no longer has a distinct 'The graph-side repair' paragraph, "
+        "so this pin cannot tell the instruction from the surrounding history: "
+        f"{note!r}")
+    repair = parts[1]
+    # ⛔ AND SCOPED TO THE INSTRUCTION SENTENCE, not the paragraph. The tail of
+    # the paragraph explains the half-state, and it quotes the counter reset
+    # again — so reverting the INSTRUCTION to the node-only form while leaving
+    # the counter in a later sentence (a parenthetical, or the ⛔ note) left
+    # this pin GREEN: measured (#10675 review P3), one sentence further out
+    # than the RE-SEEDING paragraph the split above was added for.
+    instruction = next(
+        (s for s in re.split(r"(?<=[.!?])\s+", repair) if "DETACH DELETE" in s),
+        None)
+    assert instruction is not None, (
+        "the repair paragraph no longer states the `DETACH DELETE` half at "
+        f"all, so this pin cannot tell an instruction from its explanation: "
+        f"{repair!r}")
+    assert "epi_turn" in instruction, (
+        "the repair SENTENCE does not say which nodes go — the legacy demo "
+        f"turn nodes are `epi_turn*`: {instruction!r}")
+    # ⛔ Not the bare literal: `s.turn_count=0` demands one SPELLING of the
+    # instruction, so a same-meaning rewording ("reset `s.turn_count` to 0")
+    # is refused although the purge lane is told exactly the right thing
+    # (#10675 review round 11, P3). The VALUE is what the note must pin.
+    # Accept the VALUE however the sentence spells the operator: `= 0`,
+    # `to 0`, or `back to 0` — the note must name the counter and the value,
+    # not one punctuation choice (#10675 review round 12, P2: `\s*=\s*0` never
+    # accepted the `to 0` form the first version of this comment itself offered
+    # as the example; review cycle 2, P3: `back to 0` — the same meaning, and
+    # the pin's own contract above promises it — red with a message that said
+    # the sentence did not name the counter at all, which it did).
+    assert re.search(r"s\.turn_count[`\s]*(?:=|to|back\s+to)\s*0\b", instruction), (
+        "the repair SENTENCE names the node delete but not the counter — an "
+        "instruction that leaves the reset to the explanation beside it is how "
+        "a destructive lane reads 'delete the nodes' and stops: "
+        "deleting the `epi_turn*` nodes ALONE leaves `s.turn_count=3` beside "
+        "zero rows, which the read refuses (503 on an armed deployment, "
+        "`{\"turns\": 3, \"turn_points\": []}` on an unarmed one), so it "
+        f"instructs a lane to re-create the defect: {instruction!r}")
+    assert ("no instrument ships" in note
+            and "NOT `#10017`'s purge" in note), (
+        "the note describes a destructive graph-side repair without saying that "
+        "no instrument ships it and that `#10017`'s purge is NOT the lane "
+        f"(§9.1 residual (a); #11325): {note}")
+
+
+# ⛔ KEPT, NOT REMOVED — the resolution of a merge where BOTH sides were right. The
+# #10692 review P2 asked for this test's REMOVAL: as it stood, it called
+# `record_read.served_turn_count` with literals and passed VERBATIM on the
+# pre-#10000 tree (the predicate is not in this diff), so it discriminated
+# nothing while being presented as one of the two independent falsifiers of the
+# seeder's declared length. `origin/main` (#10675, review P3) answered the SAME
+# critique the other way — it kept the test and made it non-vacuous: every arm is
+# now asserted BY VALUE (`(3, "")` on the unarmed arm, `None` + `"short copy"`
+# on the armed one) instead of by `!= (0, "")`, and three HALF-REPAIRED arms were
+# added. Taking this branch's deletion would silently drop those additions, so
+# the removal no longer applies. The semantics are ALSO pinned independently
+# where the P2 said they are (`test_hosted_api.py`'s short-transcript 503,
+# `test_onboarding_seed_endpoint.py`'s read-door assertion, and the note at the
+# end of `test_the_demo_seed_declares_NO_length_it_cannot_serve` above).
 def test_the_shared_read_predicate_accepts_0_and_rejects_a_short_claim():
     """The predicate both session doors call must accept 0 and reject a short claim.
 
@@ -3192,16 +3310,26 @@ def test_the_shared_read_predicate_accepts_0_and_rejects_a_short_claim():
     counter pin above and by
     `tests/test_write_session_and_turns_3551.py::test_demo_seed_is_excluded_from_the_primitive`.
     What this test buys is the other half: it proves the semantic the seeder's 0
-    relies on — that 0 is an honest answer and a non-zero count with nothing
-    behind it is not.
+    relies on — that 0 is an honest answer, and that a non-zero count with
+    nothing behind it is caught **on the armed arm only**. The unarmed arm
+    publishes the session's own count, so the graph-only lane cannot catch it;
+    that is a property of the seam, not of this change.
 
     Asserted at the predicate rather than through HTTP, so it holds on the
     record-armed and the graph lane alike with no database:
       * declared 0, served 0 — the honest pair the seed now writes: no refusal,
         and the published count is the served count;
-      * declared 3, served 0 — the pair the seed used to write: the published
-        count DISAGREES with the rows (or the read refuses). Pinned so this test
-        guards the real defect rather than a tautology.
+      * declared 3, served 0 — the pair the seed used to write. UNARMED the
+        predicate publishes the session's own 3 beside zero rows (a
+        self-contradicting 200 — the defect, not a refusal); ARMED it refuses,
+        and that refusal is the 503 the demo session produced before the count
+        was 0. Both arms are pinned, because which one an operator sees is a
+        property of the deployment, not of the seeder;
+      * declared 0, served 3 — the HALF-REPAIRED legacy state the seeder's
+        `NOT RETROACTIVE` note names (sentinel deleted and re-seeded, nodes left
+        behind). Only a record-read FAILURE refuses it; the ordinary arms are
+        quiet, which is exactly why that note says the repair must move BOTH
+        halves instead of promising a loud 503.
     """
     from tortoise.record_read import TurnAnswer, served_turn_count
 
@@ -3210,20 +3338,54 @@ def test_the_shared_read_predicate_accepts_0_and_rejects_a_short_claim():
     assert reason == "", f"declaring 0 and serving 0 was refused: {reason!r}"
     assert published == 0, f"published {published!r} beside 0 rows"
 
+    # ⛔ THE UNARMED ARM IS THE DEFECT, NOT A REFUSAL, and this arm used to say
+    # otherwise: it asserted `!= (0, "")`, which `(3, "")` satisfies while the
+    # message claimed the count "must NOT read as an honest answer" — a property
+    # `served_turn_count` does not have on its first branch (#10000 review P3).
+    # Asserted BY VALUE now, so it pins the real behaviour rather than a
+    # tautology that any non-zero output passes.
     published3, reason3 = served_turn_count(
         answer=None, served=0, declared=3, read_failed=False)
-    assert (published3, reason3) != (0, ""), (
-        "declaring 3 while serving 0 must NOT read as an honest answer — "
-        "either the count disagrees with the rows or the read refuses. Got "
-        f"({published3!r}, {reason3!r}); if this abstains, the completeness "
-        "guard is not armed and the counter's value stops mattering")
+    assert (published3, reason3) == (3, ""), (
+        "the unarmed arm no longer publishes the session's own count, so the "
+        "counter would stop mattering on the graph-only lane. Got "
+        f"({published3!r}, {reason3!r})")
 
     # The ARMED arm refuses rather than publishing the contradiction, which is
     # the 503 the demo session produced before the count was set to 0.
+    # ⛔ Asserted BY VALUE like its sibling above, not by `!= (3, "")`: that
+    # form is satisfied by `(0, "")` — a PUBLISHED count beside zero rows,
+    # i.e. exactly the non-refusal this arm's docstring says cannot happen
+    # (#10675 review P3). `None` is the refusal; the reason names the shape.
     armed, armed_reason = served_turn_count(
         answer=TurnAnswer(answered=False, kind=TurnAnswer.NO_ACCOUNT),
         served=0, declared=3,
         read_failed=False)
-    assert (armed, armed_reason) != (3, ""), (
-        "the armed arm published a count its rows do not back: "
+    assert armed is None and "short copy" in armed_reason, (
+        "the armed arm no longer REFUSES the contradiction — it must return no "
+        "published count and say the served copy is short. Got "
         f"({armed!r}, {armed_reason!r})")
+
+    # ── the HALF-REPAIRED legacy state the seeder's `NOT RETROACTIVE` note
+    # names: the Session declares 0 while three stored rows remain (a sentinel
+    # delete followed by a re-seed leaves exactly this). Pinned on all three
+    # arms because the note tells a destructive purge lane what to expect, and
+    # only ONE arm is loud — without these, the note's claim about which arm
+    # refuses is unfalsifiable prose.
+    half_unarmed = served_turn_count(
+        answer=None, served=3, declared=0, read_failed=False)
+    assert half_unarmed == (0, ""), (
+        "the unarmed half-repaired state publishes the session's 0 beside its "
+        f"three rows — a quiet contradiction, not a refusal. Got {half_unarmed!r}")
+    half_armed = served_turn_count(
+        answer=TurnAnswer(answered=False, kind=TurnAnswer.NO_ACCOUNT),
+        served=3, declared=0, read_failed=False)
+    assert half_armed == (3, ""), (
+        "the armed half-repaired state serves the legacy 3 (the append arm) "
+        f"rather than refusing. Got {half_armed!r}")
+    half_failed, half_failed_reason = served_turn_count(
+        answer=None, served=3, declared=0, read_failed=True)
+    assert half_failed is None and "stale superset" in half_failed_reason, (
+        "a record that cannot be read is the ONE arm that refuses the "
+        "half-repaired state, and the seeder's note says so. If this stops "
+        f"refusing, that note is wrong: ({half_failed!r}, {half_failed_reason!r})")

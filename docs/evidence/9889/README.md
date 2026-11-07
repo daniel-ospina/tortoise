@@ -25,7 +25,7 @@ both gaps, plus the numbers they measured. No `tortoise/` file changed.
 | probe | the question it answers | falsifier |
 |---|---|---|
 | `probes/e1_paired_arm.py` | what is E1's **before** share on the pre-registered corpus, with the selection passes OFF? | refuses (measures nothing) if any pass switch is already set, if the backend cannot extract (no key → a measurement of a key's ABSENCE), or if the checkout's corpus is not the pre-registration's frozen one (`G1`); exit 2, writing no record, if the run's population is one E1's record refuses — a zero denominator, fewer `:Object` nodes than E1's frozen floor, or a before-share under the frozen `e1_min_before_share` |
-| `probes/e1_gate_drops.py` | does the v4 value-gate predicate drop **any** `^the <X>` Object? (deterministic, zero model calls) | exit 2 if the positive controls stop dropping, or if the graph yields no Object names |
+| `probes/e1_gate_drops.py` | does the v4 value-gate predicate drop any candidate, over **every section the S2.2 pass judges** (`objects`/`events`/`points` — the Objects half is the `^the <X>` class)? (deterministic, zero model calls) | exit 2 if the positive controls stop dropping, if no selected section yields candidate text, if the graph yields no Object names, or if `--sections` names a section the instrument does not census — and a refusal writes **no** `--out` artifact, so a file left at that path after a refused run is the PREVIOUS run's |
 | `probes/e2a_value_units.py` | how many of the frozen **14** value-bearing planted units STRICTLY survive? | refuses (exit 2, no record) when no searchable `TORTOISE_DB_URI` is set (the embedded fallback would read an empty graph as `0 of 14`) or when the graph holds no memory-level Points at all (an ABSENT population, not a losing pipeline); `--inject-anchor` refuses if injecting every lost unit's anchor moves the counter by nothing |
 
 ## The tree these numbers belong to
@@ -69,7 +69,11 @@ removed (a graph is a key in the keyspace — gone with it), and a re-run is a
 *new LLM realization*, not these numbers. So for these two records the head, the
 corpus hash and the two floors are the **prose facts in the section above**
 (`54922a800f96…`, `fixtures_hash=sha256:dd7e8520…`, `e1_objects` 30,
-`e1_min_before_share` 0.20) rather than fields of the artifact. No published
+`e1_min_before_share` 0.20) rather than fields of the artifact. Because that is
+the one operand E1's bar is a fraction of, the score record states it too: its
+`before_arm_provenance` block names both artifacts, the four pin fields they
+lack and the ones they carry, and why the after arm's corpus is re-verified
+while theirs is not. No published
 number moves: both OFF populations clear both floors (78 and 69 Objects;
 0.3590 and 0.5652), and the falsifier's claim is `value_survived` 8/14 → 14/14
 (recovered 6 of 6), which was the injected count in the record as committed.
@@ -85,6 +89,32 @@ The same corpus, the same entry point (`capstone_measure.run_corpus`), the same
 census (`capstone_measure.census`), with `TORTOISE_VET`,
 `TORTOISE_CLASSIFY_LATER` and `TORTOISE_VALUE_GATE` OFF. The arm is **read back
 from `os.environ`** and printed, never typed as a literal.
+
+⚠️ **`TORTOISE_VALUE_GATE` OFF means `=0`, not "unset" — since `#10996`.** The
+S2.2 mechanical half defaults **ON** (`tortoise/value_gate.py`), so an ABSENT
+value gate is the *treatment* arm; a control produced by unsetting it would be
+the treatment under the control's label. `e1_paired_arm.off_arm_readback()`
+therefore PINS the value gate to `0` and reads it back (a switch the shell
+EXPLICITLY armed is still refused), so the OFF arm is run with
+`TORTOISE_VALUE_GATE=0`. That reproduces the **intent** of
+`PRE-REGISTRATION.md`'s CONTROL arm ("the selection flags unset … their default
+is OFF"); the frozen record's *wording* predates the flip and is left unedited —
+amending a pre-registration is its owner's call, not a probe's.
+
+**And the SCORER enforces the same rule on the records, not just the probes.**
+`probes/e1_e2_scores.py` refuses a record that expresses this switch's OFF state
+by **absence** — `null` in a before arm's `arm` block, `<unset>` on the ON log's
+`arm:` line — on both sides of E1's pair, because `_is_truthy(None)` is False and
+that is exactly what certifies a gate-armed run as a control. The one exception
+is the records committed HERE: they predate the flip, so absence really was OFF
+when they were taken, and they are admitted only under the pre-`#10996` campaign
+head (`54922a800…`) — the licence is that head, so a record from any other head
+with the switch absent is refused, and stripping the pin fields to look old is
+not enough on its own. What the licence was used for travels with the numbers:
+`e1-e2-scores.json` carries a `value_gate_pin` block naming every arm read as
+`legacy-absent`. A re-take of E1's arms with `TORTOISE_VALUE_GATE=0` written and
+read back is what closes the residual (`#7949`), and it cannot be done from the
+repo: these graphs lived in a disposable container that no longer exists.
 
 ```bash
 export TORTOISE_DB_URI="$(uv run python tools/test_lane.py uri | sed -n 's/^export TORTOISE_DB_URI=//p' | tr -d "'")"
@@ -158,21 +188,65 @@ n >= 2 **per arm**, not just a second arm. E2a below carries the same caveat.
 
 `capstone_measure.py` can report a *share*; a share cannot say whether the v4
 selection path touched the class at all. This probe applies the exact predicate
-the S2.2 pass applies (`tortoise.value_gate.mechanical_verdict`) to the Object
-names the run wrote — zero model calls, so no LLM non-determinism.
+the S2.2 pass applies (`tortoise.value_gate.mechanical_verdict`) to the candidate
+text the run wrote — zero model calls, so no LLM non-determinism.
 
 ```bash
 uv run python docs/evidence/7949-capstone/probes/e1_gate_drops.py \
     --graph capstone_on_54922a800_1793378318 --out e1-gate-drops.json
 ```
 
+⚠️ **That artifact covers `:Object` names only, and that is a known gap — not a
+pass condition** (`#11201`). The pass judges three sections (`entities`,
+`events`, `points`: `vet_gate.SECTIONS`), and `#10996`'s Step-4 condition is
+written over **points+events**. The probe now takes `--sections`
+(`objects,events,points` — all three sections the pass judges, and that is its
+DEFAULT), records per-section
+candidate counts and drops, and marks a section that yielded no candidates
+`measured: false` / `coverage_complete: false` instead of printing a zero over
+it:
+
+```bash
+uv run python docs/evidence/7949-capstone/probes/e1_gate_drops.py \
+    --graph capstone_on_<head8>_<epoch> --sections objects,points,events \
+    --out e1-gate-drops-sections.json
+```
+
+The ON-arm graph is ephemeral and its container is gone, so **the points+events
+half of the pass condition is still UNMEASURED** — re-take it before treating
+Step 4 as evaluated. ⛔ **Mind the arm:** `apply_vet` REMOVES what the predicate
+discards before the payload is written, so a graph from a run with
+`TORTOISE_VALUE_GATE` ON contains only SURVIVORS and any `0` read off it is
+vacuous. The measurement needs a graph written by a run that pinned the
+predicate **OFF** (`TORTOISE_VALUE_GATE=0` — since `#10996` "unset" is the ON
+arm), which is what `capstone_measure.measured_arm()` does; the probe's record
+carries that precondition as `arm_precondition`. Its `graph` names the run, and
+the authoritative witness is that run's `# arm:` readback in its own log
+(`capstone_measure.arm_header`), not the record — the probe cannot see the log.
+Why the gap matters, measured with no
+DB at all: an identifier-only *claim* is discarded and takes the entity only it
+named with it (Rule 2 has no survivor left to reference), so one Discard removes
+two nodes while an Objects-only census shows one
+(`tests/test_9889_capstone_probes.py::
+test_the_mechanical_predicate_drops_a_claim_and_its_entity_together`).
+
 Measured on the ON arm's graph (matches that run's own census exactly — 61
-Objects, 13 bare-definite, 0.2131):
+Objects, 13 bare-definite, 0.2131) — ⛔ **and taken at head `54922a800`, which
+PREDATES the `#10996` flip**: `on-arm.log:8` reads
+`TORTOISE_VALUE_GATE=<unset>`, and before the flip absence really was OFF, so
+that population is a gate-OFF population and the zero below is a measurement
+rather than the vacuous kind:
 
 ```text
 objects=61 bare_definite=13 share=0.21311475409836064
 value_gate drops: 0 (among bare_definite: 0) controls alive=True
 ```
+
+(That two-line block is the PRE-PR instrument's output, kept as the record of
+what was measured. The shipped probe also prints the per-section line —
+`objects=61(drops=0) events=… points=…`, with `UNMEASURED` for a section that
+yielded no candidates — and a `STEP-4 (points+events) drops: …` line; it does not
+re-print this artifact's numbers because the artifact predates those sections.)
 
 **0 of 61 Objects** and **0 of 13 `^the <X>`** are dropped by the mechanical
 predicate. The positive controls stayed alive: `#4118` and `a/b/c.py` DO drop,
@@ -258,8 +332,8 @@ metric's own precision.
 3. **The ON arm here is n=1.** Two OFF runs, one ON run. A second ON run was not
    taken inside this pass, so the ON arm's own spread is unmeasured — read the
    ON share as one realization, not as the arm's value.
-4. **The E1/E2 rows in the verdict table USED to parse `e1-e2.log`; they no
-   longer do.** This was written as an open limitation when the probes landed
+4. **The E1/E2 rows in the verdict table USED to parse `e1-e2.log`; no row the
+   builder emits does.** This was written as an open limitation when the probes landed
    (#10342); the re-point followed and is landed
    (`docs/evidence/7949-capstone/probes/capstone_measure.py` cites
    `E1_E2_SCORES` for both rows, and `E1E2_LOG` no longer exists there). Kept as
@@ -314,20 +388,61 @@ GRAPHS (the ON log's own `# graph:` line — its `# head:` is equal either way, 
 the head cannot catch it), when the falsifier's SCORED `with_anchor` block is
 not the run the E2a record was taken on (a graph is `capstone_on_<head>_<stamp>`,
 so a SIBLING run of the same head is a different run, and naming the head is not
-enough), when a `with_anchor` block is present but EMPTY (a record that never
+enough), when the TWO before artifacts carry the SAME `object_names` population
+(two copies of one run are one realization, not two — the identity is the
+population and not the `graph` name, so a fresh graph stamp over one population is
+still one run and re-ordering the list does not make a second — and `decidable` is
+the SET of pairings, so
+two copies of one reading can only ever agree and would report a DECIDED E1 off
+the replication the design requires and never got), when a before artifact
+carries no graph at all (an absent run cannot be told apart from a duplicated
+one), when the falsifier's SCORED `with_anchor` block does not DECLARE the
+injection it is credited for (`injected_anchor is not True` — an un-injected
+reading that reaches 14/14 is the inert counter under another name), when a
+share is not the fraction its OWN `bare_definite` / `objects` counts give (on
+either arm — the share is the one number E1's bar is scored on, and nothing may
+edit it while the counts printed beside it stand), when a `with_anchor` block is present but EMPTY (a record that never
 wrote its counter is not the flat shape that has no block), when its `as_written`
 block carries no graph — an absent provenance is not an inherited one — sits on another run, or reads counts other than the E2a
 record's (that block IS the E2a reading), when the value-gate positive controls
-are dead, or
+are dead, when a BEFORE artifact that names a pin names one other than the
+frozen `fixtures_hash` / `e1_objects` / `e1_min_before_share` (E1's bar is a
+fraction of that share, so its corpus and its floors are part of the bar —
+`#9076`), or
 when the ON run's corpus is not the pre-registration's frozen `fixtures_hash` —
 so a row can never cite a corpus the record did not freeze, a denominator the
 record did not freeze, or a population from another run.
+
+**One provenance is disclosed rather than refused, and the record says so.**
+The two before artifacts predate the four pin fields the shipped
+`e1_paired_arm.py` writes (see "Which probe revision produced each artifact"),
+so *their* corpus is a producer-time fact — G1 — that the pair cannot re-prove,
+while the after arm's corpus is re-verified from `on-arm.log` on every run. A
+`required` field would delete the only before arm this bundle has (the graphs
+lived in a removed container, and a re-run is a new LLM realization, not these
+numbers), so the driver instead **refuses a before artifact that names a
+different corpus or floor** — the case that can lie — and carries the absence
+into the record as `before_arm_provenance`: `status`, `pin_fields`, and per arm
+`fixtures_hash` / `pin_fields_present` / `pin_fields_absent`. That is why the
+asymmetry is visible to a reader of `e1-e2-scores.json` and not only to a reader
+of this file. It does not move any number — E1 is `REFUSED` at n=1, so nothing
+scores green off these arms — and it becomes material at the **n >= 2** below,
+where the first DECIDED E1 will be computed from before shares whose corpus the
+record cannot show; re-recording the pair at the shipped probe closes it.
 
 **E1's refusal is a measurement, not a gap.** Two independent OFF realizations
 (0.3590, 0.5652) and one ON realization (0.2131) can be paired two ways, and the
 two pairings give different verdicts. At n=1 per arm the verdict would depend on
 which before run is chosen, so the aggregate is `REFUSED` with both pairings
-printed. The next requirement is **n >= 2 per arm**.
+printed. The next requirement is **n >= 2 per arm** — and the two realizations
+have to BE two runs: the driver refuses a before pair carrying the same
+`object_names` population (the `graph` name alone is not the identity — a re-stamped
+copy of one population is still one run), because two copies of one OFF record pair
+identically, which makes the row
+decidable off a single realization — a decided `FAIL` when the duplicated arm is
+the 0.3590 one, and a decided `PASS` when it is the 0.5652 one. The `PASS` is the
+direction that matters: it is the one this guard exists to stop, and the one
+`e1_e2_scores.py`'s own reproduction measured.
 
 **The counts reach the rows.** The capstone's E2 row now carries E2a's count over
 the FROZEN 14 (`8 of 14` today; the bar is `>= 13 of 14`), and E1's carries the

@@ -20,7 +20,11 @@
 #                              module level in the `code:` file(s) this same row
 #                              names — where `__all__`/dunders do not count,
 #                              because re-exporting a name is not defining it
-#   state: not-implemented  -> `tracking_issue:` is present. `code:`, `tests:`
+#   state: not-implemented  -> `tracking_issue:` is present AND `pins:` names
+#                              the test node that reds the day the absence
+#                              closes (`path::test_name` /
+#                              `path::Class::test_name`; see `pins:` below).
+#                              `code:`, `tests:`
 #                              and `symbols:` are OPTIONAL on this state — they
 #                              are how a row records the half that IS built —
 #                              but WHEN PRESENT they are verified by the SAME
@@ -49,6 +53,48 @@
 # test" half). `code:` alone proved a FILE existed, so a mechanism whose symbol
 # had been renamed or removed still read as shipped while any `.py` sat at that
 # path. Each `implemented` row therefore names the symbol that IS the mechanism.
+#
+# ⭐ `pins:` is the ABSENCE PIN (#5064 indicator (3) applied to the mechanisms,
+# and the mirror of `symbols:` on the TEST side). `tracking_issue:` says WHERE an
+# absence is tracked; it cannot say that anything would NOTICE the absence
+# closing, and `tests:` proves only that a FILE exists — so a pin's cited call
+# could be renamed away while the row kept reading as watched. ⚠️ A pin names the
+# test that observes the absence OR THE NAMED PART OF IT when a row records a
+# multi-part absence — `sufficiency_router` is the live case: its pin watches the
+# read-path caller, and the row's `note` owns the tier walk and the Tier-1
+# store. A row that narrows its pin this way says which part in its `note`:
+# `atomic_point_write`'s pin is not narrowed by PART (it targets the single
+# constraint claim; its SCAN scope is bounded in its note); `span_link` (1 of 4 gates),
+# `failure_policy` (1 of 3 declared parts) and `sufficiency_router` (the caller)
+# narrow theirs, and each NOTE names the part — so no row's `pins:` line can be
+# read as wider than its note.
+#
+# ⛔ WHAT A PIN PROVES, stated so this contract is not read as COVERAGE
+# either (#5064 review P1): the gate checks that the pin EXISTS, that its
+# node is COLLECTABLE, and that the node is not opted out — nothing more.
+# It does NOT check that the pin observes every part a row declares, and
+# it cannot: a valid-but-unrelated node resolves exactly as well as a
+# targeted one. The "narrowed to a named part" allowance above is
+# therefore a DOCUMENTED concession, not an enforcement — the row's own
+# `note` is the only thing bounding a narrowed pin, and no verdict reds if
+# that note understates the part. Read a green gate as "the absence is
+# CITED", never as "the absence is COVERED".
+# #10636 is the
+# measured case: `span_link`'s row asserted an every-point requirement whose real
+# coverage was 1 of 4 gates, with the other three named only in the note's prose
+# ("pinned ELSEWHERE, not by it"). Every `not-implemented` row therefore names
+# the test NODE that reds the day the absence closes — `path::test_name` or
+# `path::Class::test_name`, pytest's own selector, so a reader can run exactly
+# what the row cites — and the gate resolves it (an unreadable test source is
+# UNVERIFIABLE, never a pass). ⚠️ What the gate ESTABLISHES is narrower than
+# what the pin MEANS, and it is stated rather than overclaimed: the cited NODE is
+# still defined at that call, so a rename or a deletion cannot leave the row
+# silently unwatched. That the node actually OBSERVES this absence is the row
+# author's claim, reviewed once (a `skip`/`xfail` node that can never red is a
+# review-time refusal, not a verdict this gate can return). When the
+# mechanism lands, the ROW flips and the pin is dropped — never the pin deleted
+# while the row still claims the absence. A pin on an `implemented` row is
+# refused for that reason: it would read watched-and-shipped at once.
 #
 # A row that is **neither** fails the gate (FAIL CLOSED). That is the root
 # sentence made checkable: a declared-and-absent mechanism cannot be read as a
@@ -91,6 +137,21 @@
 # other citations are then UNMARKED prose. That is the stated limit, not an
 # omission — a discipline, not a verdict.
 #
+# ⭐ THE DECLARATION SITE CARRIES THE STATE, and that is what makes an absence
+# VISIBLE where the design is read. A marker is
+# `<!-- v4-mechanism: <id> state: <state> -->`, and
+# `declaration_state_errors()` in the gate fails closed when a marker states no
+# state, states one the registry does not support, or states a DIFFERENT one than
+# this file records — in either direction. Without that field the registry is the
+# only place the verdict lives, and #10636 is the measured case: it correctly
+# dropped `span_link` to `not-implemented` HERE while
+# `EXTRACTOR-V4-ARCHITECTURE.md` §2.4.1 rule 1 went on reading *"Every committed
+# `Point`/`Object` must carry a reachable link to its `Source` span"* with nothing
+# at the site saying the every-point half is unbuilt. A lane that read the design
+# (which is how this issue was twice believed done) met an adopted requirement.
+# The state marker is the same fix one level out: the document says, where it
+# declares the mechanism, whether the code has it.
+#
 # ⭐ MEMBERSHIP IS A GATE, NOT A HAND-PINNED TUPLE. Seven rows came from #5064's
 # own O/I/T indicator (1) — `vet`, `source_dedup`, `near_dup_merge`, `span_link`,
 # `embed_gate`, `sufficiency_router`, `fanout_cap`; `state_value_carve_out` came from the
@@ -104,7 +165,8 @@
 # ⚠️ That is the whole point of the exercise: a hand-written list cannot prove it
 # is complete, which is how a declared mechanism (this one) stayed unregistered
 # while the seven-entry gate stayed green. So every mechanism this registry knows
-# about carries a `<!-- v4-mechanism: <id> -->` marker in each scanned document
+# about carries a `<!-- v4-mechanism: <id> state: <state> -->` marker in each
+# scanned document
 # (`docs/architecture/**/*.md`, recursive) that its row names, and
 # `membership_errors()` in the gate fails closed in BOTH directions — a marker
 # with no row, and a row with no marker — AND holds each row to its OWN declared
@@ -199,11 +261,32 @@ mechanisms:
     symbols:
       - check_batch
     note: >-
-      Flag-gated (`TORTOISE_VET`), off by default — the gate is off-path until
-      the flag says otherwise. `TORTOISE_S2_DECISION_SEAM` (#5087) is a SECOND
-      switch that also arms this step, overriding even an explicit
-      `TORTOISE_VET=0`: the seam IS the arbiter, and an arbiter no gate consults
-      is the inert-enforcer class.
+      TWO halves, two defaults (since #10996). The MECHANICAL half runs by
+      default: `TORTOISE_VALUE_GATE` unset arms the #4899 identifier-only
+      predicate, which is what §S2.2 requires (*"unset must not mean 'the
+      predicate never runs'"*) now that its rate is measured and committed
+      (`docs/evidence/9889/e1-gate-drops.json`: 0 drops of 61 Objects, 0 of 13
+      bare-definite, positive controls firing) — the residual is the point/event
+      rate, which that artifact does not cover (`#10996` V8). The INSTRUMENT now
+      can cover it: `e1_gate_drops.py --sections` censuses exactly the sections
+      this pass judges (`entities`/`events`/`points` — the instrument spells them
+      `objects`/`events`/`points`, and `PASS_SECTION_OF` maps `objects`→`entities`),
+      defaults to all three, and
+      refuses to print a drop count over a section that yielded no candidates
+      (`measured: false`, `coverage_complete: false`) — but **the points+events
+      number is still NOT taken**: the ON-arm graph is ephemeral, so Step 4's
+      pass condition is now *evaluable* and not yet *evaluated* (`#11201`).
+      The ARBITER half stays OPT-IN. `TORTOISE_VET` runs the pass but supplies
+      NO arbiter, so it adds no spend; the paid network call arrives only with
+      the seam below (or an injected arbiter), which is why arming a
+      decision-only model stays an operator decision and not this default
+      (`docs/architecture/S2-DECISION-SEAM.md` §6): the spend decision is not
+      this default. `TORTOISE_S2_DECISION_SEAM` (#5087) is a THIRD switch that
+      also arms this step, overriding even an explicit `TORTOISE_VET=0`: the
+      seam IS the arbiter, and an arbiter no gate consults is the
+      inert-enforcer class. `TORTOISE_CLASSIFY_LATER` (S2.3) is unchanged and
+      still defaults off. Kill-switch: `TORTOISE_VALUE_GATE=0` (blank/garbage
+      read OFF too — the safe residual for a discard predicate).
 
   - id: source_dedup
     name: "S0a NORMALIZE + HASH → S0b SOURCE DEDUP"
@@ -410,6 +493,8 @@ mechanisms:
       - docs/architecture/STORAGE-ARCHITECTURE.md       # §9.4
     state: not-implemented
     tracking_issue: 2684
+    pins:
+      - tests/test_v4_declared_mechanisms.py::test_the_span_link_row_records_the_widening_as_unbuilt
     code:
       - tortoise/commit_schema.py
     tests:
@@ -496,6 +581,8 @@ mechanisms:
       - docs/architecture/STORAGE-ARCHITECTURE.md  # §12.4 the router, §12.5 the escalation write-back
     state: not-implemented
     tracking_issue: 5009
+    pins:
+      - tests/test_sufficiency_router.py::TestTheRemainingAbsence::test_nothing_outside_the_router_imports_it
     note: >-
       Escalate on measured INSUFFICIENCY of the assembled evidence, not on query
       type. The DECISION layer landed in `tortoise/sufficiency_router.py`
@@ -507,7 +594,12 @@ mechanisms:
       `not-implemented` on purpose: NOTHING ESCALATES YET — no tier walk, no
       Tier-1 store, no read-path caller, and #5009's premise measurement (are
       our queries actually answered badly by a cheap tier?) precedes that
-      wiring. §12.3's tier count is also OPEN (a design fold, not an owner
+      wiring. ⚠️ WHAT THE PIN COVERS, stated so the `pins:` contract is not read
+      as wider than it is: the pin observes the READ-PATH CALLER only — an AST
+      scan for a production module that reaches this one. The tier walk and the
+      Tier-1 store stay THIS note's claim (a tier walk added inside
+      `tortoise/sufficiency_router.py` reds nothing). §12.3's tier count is
+      also OPEN (a design fold, not an owner
       ruling). A row marked `implemented` here would recreate the exact
       declared-implies-present defect this registry exists to catch.
 
@@ -651,7 +743,20 @@ mechanisms:
       `_value_bindings` (the E5/E7 contradiction engine, live) and adds no second
       value CLASSIFIER — the P2 that killed the previous attempt at this row.
       THE DISCRIMINATOR — how the rule tells a droppable identifier from a
-      retainable state value: it never judges identifiers at all. It judges
+      retainable state value: it carries no identifier CLASSIFIER. What it judges
+      is a token's trailing numeric CORE, whatever letters precede it (`x4` reads
+      as `4`, so `x4`/`5` and `x4 ms`/`5000 ms` ARE judged). The identifier's own
+      letters reach the identity through the SUFFIX, which is read as a UNIT with
+      no identifier/unit distinction: a tail that SPELLS a known unit is compared
+      AS that unit (`arr4ms` IS `4 ms`, so `arr4ms` against `4 seconds` REFUSES),
+      and a tail that spells NOTHING in the table leaves the unit UNJUDGEABLE on
+      equal cores — a FAIL-OPEN, so `arr4zz` against `4 hours` TOLERATES. Of those
+      tails, ONLY the `k` one is ADDITIONALLY read as a SCALE, and that happens in
+      TWO shapes: BARE, where the ×1000 is closed by arm (i) with no unit folded
+      (`x4k` against `4000` TOLERATES, and `_composed_identity` DECLINES it
+      because `k` is already a known unit), and over a KNOWN UNIT, which is
+      residual (d2) below (`x4k`+`ms` → `4000 ms`).
+      It judges
       VALUES over the engine's own bindings, in three tolerances (#10360 lane
       record): (i) value identity, not string identity — a numeric core with its
       SIGN and its UNIT kept, so ``4.20``/``4.2``,
@@ -713,13 +818,136 @@ mechanisms:
       and neither is a colon-form value that happens to be a valid clock shape
       without being a clock (`4:32` read as a marathon time) — the two are the
       same token shape and nothing in the text separates them;
-      (d) a unit WORD the engine's own `_UNIT_WORDS` vocabulary does not carry
-      (`seconds`, `minute`, `hour`, `day`, `mile`, …) is never fused into the
-      value token — apart or not — so a minutes→seconds rewrite is not judged:
-      an ENGINE VOCABULARY limit, not a tolerance of this rule (the units it
-      does fuse are compared); a unit SPELLING outside `_UNIT_EQUIV` fails open
-      on purpose, because refusing `800millis`/`800ms` is the false-accusation
-      direction this rule must never take; (e) the S5
+      (d) a RATE unit written as `per <unit>` (`forty thousand requests per
+      day` against `… per week`) is not judged: no unit is ADJACENT to the
+      number, so `_value_bindings` fuses nothing and the pair fails open. That
+      is the carve-out's own fifth example. ⛔ The ADJACENCY half that used to
+      stand here is CLOSED: `_UNIT_WORDS` now carries the spellings the
+      carve-out names (`second(s)`, the millisecond family incl. `millisec(s)`,
+      `minute`, `day(s)`) **plus their conventional siblings** (`hour`, `week(s)`,
+      `mos`, `month(s)`, `year(s)`, `mile(s)` — the carve-out names none of
+      those, they are here because a duration family with a hole in it is how the
+      original gap survived review; ⛔ `percent`/`pct` are deliberately NOT among
+      them: fusing `percent` REFUSED the truthful pair `20k%`/`20000 percent`,
+      because an ATTACHED `k%` loses its `%` to the tokeniser (`20k%` binds as
+      `20k`, while `20 %` and `20%` keep it) — measured, #10804 review P1), so
+      `back under 800 seconds` against
+      `back under 800 milliseconds` and `a ten minute TTL` against
+      `a ten hour TTL` are REFUSED — pinned by
+      `tests/test_state_value_verbatim_10360.py::test_the_carve_outs_own_ADJACENT_time_units_are_judged`,
+      whose spelling controls (`3 days`/`3 d`, `5 years`/`5 yr`) pin the
+      false-accusation direction for every identity added. What SURVIVES of the
+      old (d) is the SPELLING case — a unit outside `_UNIT_EQUIV` (`800millis`)
+      still fails open on purpose, because refusing `800millis`/`800ms` is the
+      false-accusation direction this rule must never take. ⛔ A `k`-prefixed value
+      beside a FUSED unit word is NOT one of those tolerances in THIS tree, and
+      the earlier wording that called it one is corrected here rather than left
+      to be found: the fusion is COMPOSED (`_compose_magnitude_and_unit`, below),
+      so `the batch took 5k seconds` binds `5000s` against `… 5 minutes`' `5min`, the
+      cores differ (5000 vs 5) and the pair is REFUSED — which is CORRECT, the two
+      sides name different durations. What the composition buys is the opposite,
+      FALSE-ACCUSATION case: `3k minutes`/`3000 minutes` agree now. Pinned by
+      `tests/test_state_value_verbatim_10360.py::test_a_magnitude_prefix_beside_a_unit_word_is_COMPOSED_not_refused`
+      and `test_a_magnitude_prefix_COMPOSES_with_the_unit_word_that_follows_it`.
+      ⛔ A SECOND, SEPARATE tolerance, and it comes from the COMPOSITION arm
+      rather than from that unknown-suffix path: `the ride was 20kms` against
+      `… 20000 ms` REFUSED at `origin/main` `525fde4a9` and TOLERATES here,
+      because `_composed_identity` reads `k`+`ms` as a kilo-MILLISECOND. ⛔ The
+      unit tables do NOT endorse that reading — UCUM and Pint both forbid a
+      prefix on an already-prefixed atom — so this is the arm choosing fail-open
+      over a refusal on an AMBIGUOUS colloquial spelling, not a new unit. The
+      colloquially-correct `20kms`/`20km` is unaffected (it stays tolerated) and
+      `20kms`/`20000 m` stays REFUSED at both heads.
+      ⛔ AND A THIRD thing the same arm tolerates, which it did NOT until review
+      cycle 7 measured it: the SIDE THAT STATES NO UNIT. `the fleet drove 20k
+      miles` against `the fleet drove 20000` was TOLERATED at `origin/main`
+      `525fde4a9` — `miles` was not fused there, so the value bound as a bare `k`
+      and `_magnitude_agrees` closed the gap — and REFUSED here, because the
+      arm's match was an EXACT identity equality that `('', '20000', None)` can
+      never satisfy. Every spelling this widen fuses inherits it (`3k days`/
+      `3000`, `5k seconds`/`5000`, `5k milliseconds`/`5000`). It is now the
+      module's OLDEST tolerance (`800`/`800ms` — the unit is written or not)
+      applied to the composed form, with the same sign and post-fold core. Scoped
+      deliberately: a rewritten NUMBER (`20k miles`/`21000`), two STATED units
+      (`20k miles`/`20000 km`, `3k days`/`3000 hours`) and a stated spelling from
+      outside the tables (`5k millis`/`5000 ms`, #10876) are all still REFUSED.
+      Pinned by
+      `tests/test_state_value_verbatim_10360.py::test_a_composed_prefix_against_a_UNITLESS_side_keeps_the_omitted_unit_tolerance`.
+      ⛔ The OPPOSITE direction is REFUSED, and it is a FALSE ACCUSATION: when
+      the magnitude side carries no MAPPED unit — either a spelling outside both
+      tables (`5k millis`, `5k dys`) or NO unit word at all (`5k` alone) — the
+      binding is a bare `5k`, so `_magnitude_agrees`' `_K_ABBREVIATES` gate
+      (`{"km", "kg"}`) refuses it against any KNOWN unit it can FUSE (`5000 ms`,
+      `5000 days`, `5000 mos`, `5000 millisec`) and the truthful point is
+      withheld — with TWO exceptions the universal must not swallow: the gate's
+      own pair (`5k` IS 5 km/5 kg, so `km`/`kg` pass to the numeric comparison)
+      and a spaced `percent`/`pct`, which bind with NO unit because they are
+      deliberately absent from `_UNIT_WORDS` (see the CLOSED half of this residual, above), so the tolerance
+      fires instead. Measured: 44 of the 48 `_UNIT_EQUIV` spellings refuse
+      `the batch took 5k` / `… 5000 <spelling>`; the 4 that do not are exactly
+      `km`, `kg`, `percent`, `pct`.
+      PRE-EXISTING in mechanism (`5k millis` against `5000 hours` is refused at `origin/main` `525fde4a9` too);
+      #10804's widen extended which right-hand units trigger it, and the fold's
+      abbreviation completion (`mos`, `millisec(s)`) extends it once more by
+      exactly those two spellings — measured: `the batch took 5k` against `… 5000
+      mos` / `… 5000 millisec` was TOLERATED at `0a1c6b909` and is REFUSED here,
+      so the fold took the same direction as the widen, never a new one. ⛔ NOT fixed here on
+      purpose: that gate's narrowness is a recorded decision (#10513 review P1 —
+      `20k`/`20m` is 20 km against 20 metres), so splitting it needs that ruling
+      reversed deliberately, not patched here. Tracked and argued as **#10876**, and pinned here so the pair cannot
+      silently start agreeing without that issue moving.
+      ⛔ THE FUSION ITSELF MULTIPLIES (`_compose_magnitude_and_unit`, #10360
+      review cycle 1 P2, measured — the OTHER half of the same class, and both
+      halves are in this tree): `_value_bindings` fuses a unit WORD onto the value
+      before it, so a value that ALREADY carried a magnitude prefix became one
+      compound — `20k` + `miles` → `20kmiles` — whose suffix maps to nothing. The `k`
+      reading was lost and the pair diverged on the numeric CORE (20 vs 20000),
+      withholding a truthful point. ⚠️ The shape pre-existed for every
+      already-fusable unit (`5k min` against `5000 min` was refused BEFORE this
+      change), so completing the table would have WIDENED it. The prefix is now
+      multiplied into the core at fusion time, so `20k miles`/`20000 miles` read
+      one identity and `5k min`/`5000 min` agree — pinned by
+      `test_a_magnitude_prefix_COMPOSES_with_the_unit_word_that_follows_it`.
+      ⚠️ It is NOT peeled in `_value_core`, where the same rule would read the
+      SINGLE token `20kms` as 20000 milliseconds instead of kilometres.
+      ⛔ THE SIGN AND DECORATION READING IS `_value_core`'s, NOT A PRIVATE
+      PATTERN (#10360 review cycles 2, 3 and 6, all measured): earlier revisions
+      of the composition matched the value with its own regex, and each invented
+      a NARROWER reading of "the same number" than the module has — `\d+` lost the
+      sign and the leading dot, then `[-−]` lost every OTHER sign glyph
+      `_reads_as_sign` admits (the whole `Pd` family: en/em dash, hyphen,
+      U+2011) and every `Sc`/`Sm` decoration `_value_core` skips (`~`, `+`, `>`,
+      `<`, `$`, `≈`, `±`), and an ASCII digit class lost every decimal script but
+      Latin (`２０k`, `٢٠k`). Each omission turned a truthful pair into an
+      unknown-unit refusal — the "verdict depends on the SPELLING" defect merely
+      moved from the unit to the sign and then to the digits. The composition now
+      delegates that reading to `_value_core` and only checks the token's HEAD
+      (`_NUMERIC_HEAD`) to keep identifier-shaped text out (measured: the array
+      index `s4[k` was being multiplied to 4000).
+      ⚠️ A separator-bearing numeral is NOT read at all (`_value_core` returns
+      None) and the unit is glued on unchanged, so the composition cannot smuggle
+      the owner's #2817 "no separator rule" decision back in through the unit —
+      pinned by
+      `test_the_composition_does_not_smuggle_the_SEPARATOR_decision_back_in`.
+      ⚠️ The composition CHANGED one truthful pair's verdict, disclosed rather
+      than implied: `20k m` against `20 km` (20 km, two ways) now REFUSES. ⛔ The
+      cause is stated the way it was MEASURED (#10360 review cycle 5 P3 — the
+      first wording had it backwards): the old tolerance came from the two sides
+      collapsing into the SAME identity, not from different ones — `20k`+`m`
+      glued to `20km`, which reads `km`, exactly as `20 km` does (and that glue
+      is precisely how the `k`-as-prefix reading was lost). Composing now yields
+      `20000 m` against `20 km`, which is the same refusal `20000 m` against
+      `20 km` has always produced.
+      ⚠️ ONE more pair this tree refuses and the pre-widen tree did not, disclosed
+      because it is created by the SAME completion (#10360 review cycle 4 P3,
+      measured): `_CLOCK_FORM` anchors on `$`, so a colon form with a FUSED unit
+      word after it is NOT excluded — `the lap took 1:23 seconds` now reads the value
+      as the RATIO core `1/23` with unit `s`, and refuses against `83 seconds`.
+      The pre-existing `27:12 minutes` already behaved this way; what is new is
+      that the fused units reach it. The verdict (a conversion is a different
+      identity) is deliberate; the RATIO core is not a duration, and separating
+      the two is the same unsolved token-shape problem (c) describes.
+      (e) the S5
       minted-endpoint site is not judged against its own quote — there `quote` is
       the point's OWN text, cut with the module's one truncation helper
       (`_write_span`), so a rewrite is impossible by construction and a rule
@@ -770,6 +998,28 @@ mechanisms:
       callers
       (pinned by
       `test_an_over_long_side_is_not_judged_so_the_write_path_stays_bounded`).
+      (d2) AN IDENTIFIER-SHAPED value whose TAIL reads as a MAGNITUDE PREFIX
+      over a known unit (`x4k`+`ms` → `kms`) TOLERATES, AND IT DOES SO BY
+      INVENTING A SCALE — not by declining to judge (#10943, which records this
+      clause as `(q2)`; measured at this head): `the see was x4k ms` binds
+      `x4kms`, whose core is `4` with suffix `kms`, and `_composed_identity`
+      folds `k`+`ms` and multiplies it to `4000 ms` — so the pair IS judged, both
+      sides bind slots, and the identifier agrees with a quote it was never a
+      quantity to state. `_NUMERIC_HEAD` blocks only the TOKEN's own prefix peel
+      (`x4k` is not read as 4000 in place); it does not block the GLUED token,
+      which is why this is the composition arm's fail-open and not an identifier
+      exemption. That the digits ARE compared is measured: `x4k ms` against
+      `5000 ms` REFUSES. ⛔ SCOPE, measured: an identifier followed by a PLAIN
+      unit word is judged normally — `x4 ms` against `5000 ms` REFUSES and
+      `arr4 ms` against `9000 ms` REFUSES — so (d2) is the PREFIX-TAIL shape and
+      NOT a blanket identifier tolerance. (d2) does NOT reopen (d)'s ADJACENCY
+      result — the unit word IS fused.
+      ⚠️ Residuals (c) (`4:32` read as a marathon time), (d) (`per <unit>` rates),
+      (d2), the `20k-mile`/`20000 miles` agreement and THE DISCRIMINATOR's
+      identifier-tail UNIT reading (`arr4ms` compared as `4 ms`, `arr4zz` failing
+      open) are PINNED as a battery by
+      `tests/test_state_value_verbatim_10360.py::test_the_registry_rows_measured_disclosures_are_pinned`
+      — a row claim with no pin is the drift this row exists to prevent.
       (i) A `k` SUFFIX IS NOT JUDGED AS A UNIT WORD, AND IS NOT SCALED. `k` is
       SI's x1000 prefix (`5k` IS `5000`) and it is also a unit identity in
       `_UNIT_EQUIV`, because it is a unit `_value_bindings` fuses; the single
@@ -809,13 +1059,33 @@ mechanisms:
       ⛔ THE PART THAT IS STILL UNPROVEN, narrowed rather than claimed away: the
       gate can only compare unit words it knows, so an equal-core pair whose
       other side carries NO recognised unit still fails OPEN — `20k`/`20 zorks`
-      is tolerated, the same `_UNIT_EQUIV` residual (d) names for every unknown
-      spelling. And the module never asserts `5k == 5,000` as a VALUE anywhere:
-      the prefix branch TOLERATES the pair arithmetically, it does not rewrite
-      the core.
-      Still NOT caught, and named rather than implied: a `k`-suffixed value is
-      never multiplied into its core, so nowhere does the module assert
-      `5k == 5,000` as a VALUE — the arm merely tolerates the pair; and `M`/`m`
+      is tolerated, the same fail-open direction this residual list names for
+      every unknown spelling (and NOT a pointer to residual (d), which this issue
+      CLOSES — corrected on #10360 review cycle 4 P3, which caught the stale
+      cross-reference).
+      ⛔ AND THE `k` CORE IS NOW COMPOSED, WHICH THIS ARM ITSELF STILL DOES NOT DO
+      (corrected on #10360 review cycle 4 P3): `_compose_magnitude_and_unit`
+      DOES multiply a `k`-suffixed value into its core when a unit WORD follows
+      — measured `_value_bindings("the value was 5k min")` →
+      `('value', '5000min')`. What remains true is narrower: THIS arm
+      (`_magnitude_agrees`) still only TOLERATES `5k` against `5000`, it never
+      rewrites the core, so a bare `k` with no unit word after it is unchanged.
+      ⚠️ CONSEQUENCE, DISCLOSED RATHER THAN IMPLIED (#10360 review cycle 4 P2,
+      measured, 2,912 same-value pairs over a 330,625-pair grid): composing a
+      prefixed value gives it a CONCRETE unit, and this arm's factor bridge is
+      gated on `_K_ABBREVIATES` (`km`/`kg`), so a unit-STATING side now refuses
+      against a BARE `Nk` side for every other unit: `3000 ms` vs `3k`,
+      `20000 miles` vs `20k`, `2000 seconds` vs `2k` are REFUSED, while
+      `3000 kg` vs `3k` and `3000 km` vs `3k` are tolerated — i.e. the verdict
+      still depends on the unit's spelling. ⛔ This is NOT repaired here: the
+      `_K_ABBREVIATES` gate is a DELIBERATE, pinned bound
+      (`test_a_bare_magnitude_prefix_is_tolerated_only_against_a_DIFFERENT_unit`
+      refuses `5k QPS`/`5000 mi QPS` on purpose, because `5k` may be 5 km), and
+      widening it would re-admit the real `20k`/`20mi` unit rewrite it exists to
+      stop. The completion makes that pre-existing refusal SPELLING-UNIFORM for
+      `mi`/`s`/`min`/`ms`; the census is blind to it (`\b\d+k\s+[A-Za-z]`
+      → 0 hits), so `refused=0` says nothing about this class.
+      Still NOT caught, and named rather than implied: `M`/`m`
       carries the same prefix-vs-unit collision one letter over while
       `_value_core` lowercases the suffix, so an uppercase `M`
       (millions) is read as metres — widening the set to `m` would cost the real
@@ -892,7 +1162,8 @@ mechanisms:
       `we have 12 billion events` returns NO divergence, likewise `5 million`
       against `5 thousand` and `12 million` against `12` (pinned by
       `test_a_scale_WORD_rewrite_is_unjudged_because_the_engine_fuses_none`).
-      ⛔ A DIFFERENT CLASS from (d): (d) is a unit SPELLING the tables lack, this
+      ⛔ A DIFFERENT CLASS from (d): (d) is a RATE unit with no number adjacent
+      (or a unit SPELLING the tables lack), this
       is a MAGNITUDE the engine never multiplies, so closing it belongs in
       `_value_bindings` and would be its own change; a second scale reading inside
       this seam is the parallel-classifier shape the review P2 rejected. Stated
@@ -907,7 +1178,8 @@ mechanisms:
       UNJUDGEABLE and fails OPEN. Before this the pair was REFUSED, withholding a
       truthful point — "we have 12000000 events" against "we have 12 million
       events" is ONE value in two forms, the same tolerance this seam applies to
-      `20%`/`20 percent`. Reading a scale is `value_normalizer`'s territory and
+      a unit it cannot read (`800millis` against `800ms`). Reading a scale is
+      `value_normalizer`'s territory and
       #2817's "no magnitude table" ruling is NOT reopened here (the `OVERRIDES:`
       on #10360 covers the `k` unit identity only), so the class is outside the
       judged set rather than scaled. The scale is COMPARED, not dropped: a
@@ -1039,6 +1311,8 @@ mechanisms:
       - docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md  # §4.2 "The against-store exact dedup has FOUR preconditions"
     state: not-implemented
     tracking_issue: 9879
+    pins:
+      - tests/test_v4_declared_mechanisms.py::test_the_atomic_write_absence_is_pinned_to_the_schema
     note: >-
       The declared requirement, in §4.2's own words: *"`create_point(dedup=True)`
       is a check-then-CREATE, and there is no uniqueness constraint on `Point`.
@@ -1099,6 +1373,11 @@ mechanisms:
       - docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md  # §4.4 (declared in §4.3 as G3)
     state: not-implemented
     tracking_issue: 5087
+    pins:
+      - tests/test_5095_s3_identity_policy.py::TestTheRemainingAbsence::test_an_unresolved_lookup_still_mints
+      - tests/test_v4_declared_mechanisms.py::test_the_failure_policy_absence_is_pinned_to_the_mint_not_the_render
+      - tests/test_10997_identity_hold.py::TestTheGate::test_an_unresolved_lookup_holds_the_endpoint_and_its_edge
+      - tests/test_10997_identity_hold.py::TestTheHoldIsDrainable::test_run_1_holds_and_run_2_commits_it_exactly_once
     note: >-
       §4.4 states its own status in its closing paragraph: it *"is a SPEC, not a
       description of what runs"*, and the load-bearing instance is S3. The
@@ -1118,21 +1397,34 @@ mechanisms:
       an always-present `identity` block plus a warning that fires when a candidate's
       own identity query did not run (a budget cut that touches only non-candidate
       queries gets its own sentence, and a lookup that ran NOTHING at all with no
-      candidate to check gets a third — the three are different facts).
+      candidate to check gets a third on any run that reaches the warning block —
+      the empty-conversation early return precedes it, so it emits none — and the
+      three are different facts).
       ⛔ **WHAT IS STILL ABSENT — and this is why the row stays
-      `not-implemented`:** nothing suppresses a create. I1's *"never mint it"*
-      needs a CREATE gate inside S5, and NOT `execute_embed({})`: that function
-      is the sole carrier for retractions (whose same-session leg needs no graph
-      lookup), supersessions and chain notes, so a wholesale suppression drops
-      memory I2 forbids dropping (#5095's PLAN-VERIFY round 1 measured it).
-      §4.4's carry-forward store also does not exist. Pinned by
-      `tests/test_5095_s3_identity_policy.py::TestTheRemainingAbsence`, which
-      asserts a CALL that the mint is still UNGATED (`execute_embed` commits a
-      Point and an entity for an unresolved lookup — the day a create gate lands
-      it reds and this row must flip), together with
+      `not-implemented`:** the gate covers the MINTED candidate only. `#10997`
+      landed that half: `extractor_v2._mint_endpoint` no longer fabricates a
+      `statement` Point from a ref on an `unresolved`/`partial` lookup — it HOLDS
+      the edge WITH its endpoint (`#2552`) in `tortoise/identity_hold.py`, a
+      durable per-graph store whose drain commits a held item exactly once on a
+      later run whose lookup RESOLVED (`claim` before the mint, `confirm` binds
+      the id, `hold` never re-arms a resolved key). ⛔ It is NOT the whole create
+      gate: a Point/Entity the MODEL emitted is still created on an unresolved
+      lookup, so duplicates remain mintable through that path (the S5-Job-2 half),
+      and the S3-attach/S5-connect/S6-commit transaction boundary (I3) is
+      untouched. ⛔ Nor is it `execute_embed({})`: that function is the sole
+      carrier for retractions (whose same-session leg needs no graph lookup),
+      supersessions and chain notes, so a wholesale suppression drops memory I2
+      forbids dropping (#5095's PLAN-VERIFY round 1 measured it). Pinned in both
+      directions: `tests/test_10997_identity_hold.py` proves the mint is HELD (and
+      proves non-vacuity by flipping the predicate — a resolved lookup mints
+      again), and
+      `tests/test_5095_s3_identity_policy.py::TestTheRemainingAbsence` still
+      asserts the REMAINING absence with a CALL (`execute_embed` commits a Point
+      and an entity the MODEL emitted for an unresolved lookup — the day the
+      model-emitted half is gated it reds and this row must flip), together with
       `test_the_failure_policy_absence_is_pinned_to_the_mint_not_the_render`,
       which pins the record half's presence and this row's state. #5087 (E1)
-      remains the code-owner of the mint half.
+      remains the code-owner of the rest.
       ⚠️ NOT registered as one mechanism: §4.4 also gives each of the eight
       steps its own direction and transaction boundary. Those are per-step
       policies of THIS mechanism, not eight more mechanisms, and a row per step

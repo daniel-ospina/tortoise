@@ -1089,6 +1089,46 @@ _CONVERTED_CLIENT_SEAMS: dict[str, tuple[int, frozenset[str]]] = {
         "test_upload_malformed_json_500",
         "test_upload_empty_body_500",
         "test_tenant_a_pack_invisible_to_tenant_b"})),
+
+    # ── #10714: the #8582 sweep's last uncovered `POST /v1/register` caller ──
+    # Same seam, same declaration: `POST /v1/register` is NOT in
+    # `hosted_api._TRANSPORT_WAIT_BOUND_EXEMPT`, so reverting this fixture to
+    # `TestClient` puts the transport refusal back into an `assert 504 == 200`
+    # product FAIL. This file was missed by the #8802/#8818 sweeps and no entry
+    # existed, so the parametrized pin above generated NO case for it and the
+    # file went unchecked — the mechanism `_CONVERTED_CLIENT_SEAMS`'s own
+    # docstring warns about. The refusal is MEASURED, not hypothetical: `test
+    # (d)` of run 41747137960 answered `TestRegisterCaptcha::`
+    # `test_fail_open_without_secret_key` with a 504 after 60.41 s (an embedded
+    # `redislite` start inside the handler, widened to a 60 s bound by
+    # `tests/_embedded.py`, blocking the event loop past the product's own 10 s
+    # `WaitBoundMiddleware`) — in a file no part of that PR touched.
+    # 0 plain constructions: unlike the entries above, this file has no refusal
+    # pin of its own, so nothing here legitimately needs a client that observes
+    # a 504. The `client` fixture is the file's only construction.
+    "tests/test_turnstile_signup.py": (0, frozenset({"client"})),
+
+    # ── #10232: the #8582 seam reaches the #3516 capture-provenance file ────
+    # The same seam, and — unlike #10067 above — declared in the SAME change.
+    # `POST /v1/sessions` is NOT in `hosted_api._TRANSPORT_WAIT_BOUND_EXEMPT`
+    # (the file's own control asserts the reversal: `route not in
+    # _TRANSPORT_WAIT_BOUND_EXEMPT`), so every read these three tests bind from
+    # a client over the wait-bound app can be answered with a transport refusal
+    # instead of an answer — the `assert 504 == 200` class, measured on this
+    # very test in runs 40589993103 and 41750846941. The file was converted
+    # LEAF-by-leaf (`require_answered` wrapped around five individual reads,
+    # with the client left plain), which is the one shape this registry cannot
+    # see: a file absent from the dict is never checked, not
+    # checked-and-failing. Converting the CONSTRUCTION instead covers reads that
+    # do not exist yet, and a revert of any of the three goes RED here.
+    # +1: `test_a_wait_bound_refusal_on_this_route_is_inconclusive_not_a_failure`
+    # builds its own PLAIN client, which must stay plain to observe the 504 it
+    # proves is real (and then feeds that same refusal to `require_answered`
+    # under `pytest.raises`).
+    "tests/test_3516_client_captured_at.py": (1, frozenset({
+        "test_source_round_trips_through_the_http_boundary",
+        "test_the_floor_inputs_are_served_on_the_session_read_path",
+        "test_the_floor_inputs_are_served_on_the_session_LIST_path"})),
 }
 
 

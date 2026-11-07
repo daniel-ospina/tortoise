@@ -108,6 +108,7 @@ from __future__ import annotations
 import ast
 import dataclasses
 import inspect
+import tokenize
 import unicodedata
 from pathlib import Path
 from typing import ClassVar
@@ -1723,3 +1724,257 @@ def test_the_refusal_is_about_the_container_not_the_row() -> None:
         assert assess_sufficiency(
             [row], anchors=["acme corp"], required_anchor_coverage=1.0, resident=True,
         ).measures == ((MEASURE_ANCHOR_COVERAGE, 1.0),)
+
+
+# ── the ABSENCE PIN (#5064 indicator (3)) ────────────────────────────────────
+#
+# #5064's registry records this mechanism as `not-implemented` against #5009 and
+# states the absence in three parts: *"no tier walk, no Tier-1 store, no
+# read-path caller"*. A recorded absence that no call can falsify is the drift
+# the registry exists to prevent — an absence claim no test can see is
+# indistinguishable from a mechanism nobody is watching — so the row carries
+# this class as its PIN.
+#
+# ⚠️ WHAT THIS PIN OBSERVES, stated rather than overclaimed (review cycle 4,
+# P2): the CALLER half. The router module itself is skipped by name, so a tier
+# walk added INSIDE `tortoise/sufficiency_router.py` reds nothing here; what
+# reds is a production module REACHING the module, which is the trigger that
+# makes the rest wireable. The other two parts stay the row author's claim.
+
+_ROOT = Path(__file__).resolve().parent.parent
+_ROUTER_MODULE = "tortoise.sufficiency_router"
+
+
+def _dotted(node: ast.AST) -> str:
+    """``tortoise.sufficiency_router`` for an attribute/name chain, else ''."""
+    parts: list[str] = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if isinstance(node, ast.Name):
+        parts.append(node.id)
+    return ".".join(reversed(parts))
+
+
+#: The PRODUCTION source trees the pin scans (review cycle 2, P2 — the previous
+#: walk was hard-coded to ``tortoise/`` while its docstring claimed "every
+#: production module", so a caller wired from ``client/`` or ``integrations/``
+#: left the pin green). Measured cost: 273 files actually walked across the
+#: three (the `tests` path-part and the router's own file are skipped).
+#:
+#: ⚠️ NOT scanned, and why: ``tests/`` (every test imports the router by
+#: definition — including a TEST directory INSIDE a production tree, so
+#: ``integrations/tests/`` is skipped by path part), ``graph-scripts/`` (this
+#: repo's own `AGENTS.md` calls it historical graph operations, not read-path
+#: code), and the dev/measurement trees ``tools/``, ``benchmarks/``,
+#: ``battery/``, ``eval/``, ``spike/``. A measurement harness or a historical
+#: script reaching the router is not the read-path caller §12.4 needs, and
+#: reding on one would turn the pin into noise a lane routes around (review
+#: cycle 4, P2 — the previous tuple included `graph-scripts` and, through
+#: `integrations`, its test directory).
+_PRODUCTION_TREES = ("tortoise", "client", "integrations")
+
+
+def _router_importers(root: Path | None = None) -> list[str]:
+    """Every module in the PRODUCTION trees under ``root`` that REACHES the router.
+
+    AST, not a text search: the router is NAMED in prose in
+    ``tortoise/claim_class.py``'s docstring, and a text scan reported that
+    mention as a caller — a false verdict from a pin whose only job is to be
+    trusted when it is silent.
+
+    FOUR reach forms are read, because any one of them is a caller:
+      * ``import tortoise.sufficiency_router`` (with or without ``as``);
+      * ``from tortoise.sufficiency_router import …``;
+      * ``from tortoise import sufficiency_router``, and the RELATIVE
+        ``from . import sufficiency_router`` / ``from .sufficiency_router import …``
+        (this repo's own seam idiom: ``tortoise/extractor_v2.py`` wires its
+        siblings that way);
+      * the ATTRIBUTE chain ``tortoise.sufficiency_router.…`` (in-repo
+        precedent: ``tortoise/hosted_api.py`` imports the package and reaches
+        through it), and any STRING that spells the dotted module — the dynamic
+        form, ``importlib.import_module`` / ``__import__`` (precedent:
+        ``tortoise/connector_loader.py`` builds a module name and imports it).
+
+    ⚠️ STATED LIMIT: a reach assembled at runtime that never spells the module —
+    ``getattr(pkg, "sufficiency" + "_router")``, a name built from parts — is
+    invisible here. A DOTTED mention in prose reds too (the remedy is to reword
+    it), which is the same convention the registry gate applies to a DDL
+    mention: a string that spells the mechanism out is treated as naming it.
+    """
+    tree_root = root if root is not None else _ROOT
+    importers: list[str] = []
+    paths = sorted(
+        path
+        for tree in _PRODUCTION_TREES
+        for path in (tree_root / tree).rglob("*.py")
+    )
+    for path in paths:
+        if path.name == "sufficiency_router.py":
+            continue
+        # A TEST directory inside a production tree is still a test
+        # (``integrations/tests/…``): every test imports what it tests, so it
+        # can never be the read-path caller.
+        if "tests" in path.relative_to(tree_root).parts:
+            continue
+        rel = path.relative_to(tree_root).as_posix()
+        try:
+            with tokenize.open(path) as fh:
+                source = fh.read()
+            tree = ast.parse(source, filename=str(path))
+        except (OSError, SyntaxError, ValueError, UnicodeError) as exc:
+            # An unreadable production source is UNVERIFIABLE, never a silent
+            # pass and never a traceback (#10636's sibling gate returns `None`
+            # for the same condition): one Python-2 script under
+            # `graph-scripts/` would otherwise make a router pin fail with a
+            # SyntaxError from a file that has nothing to do with the router.
+            importers.append(
+                f"{rel}: UNREADABLE ({type(exc).__name__}) — the pin cannot be "
+                f"verified over this file"
+            )
+            continue
+        for node in ast.walk(tree):
+            hit = False
+            if isinstance(node, ast.Import):
+                hit = any(
+                    alias.name == _ROUTER_MODULE for alias in node.names
+                )
+            elif isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                names = {alias.name for alias in node.names}
+                hit = (
+                    module == _ROUTER_MODULE
+                    or (module == "tortoise" and "sufficiency_router" in names)
+                    # ⭐ THE RELATIVE FORM (review cycle 5, P1): this repo's own
+                    # intra-package seam idiom is `from . import <sibling>` —
+                    # `tortoise/extractor_v2.py` wires `failure_policy`,
+                    # `value_gate` and `vet_gate` exactly that way — and for it
+                    # `module` is `None` with `level=1`, so a module-name compare
+                    # alone could never see the caller this pin exists to catch.
+                    or (
+                        node.level >= 1
+                        and (
+                            module == "sufficiency_router"
+                            or (module == "" and "sufficiency_router" in names)
+                        )
+                    )
+                )
+            elif isinstance(node, ast.Attribute):
+                chain = _dotted(node)
+                hit = chain == _ROUTER_MODULE or chain.startswith(
+                    _ROUTER_MODULE + "."
+                )
+            elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+                hit = _ROUTER_MODULE in node.value
+            if hit:
+                importers.append(f"{rel}:{node.lineno}")
+    return importers
+
+
+class TestTheAbsencePinCanSeeAReach:
+    """The pin's OWN polarity proof (review cycle 1, P1).
+
+    Without this fixture, `_router_importers` returning ``[]`` forever would
+    leave the pin below green — a vacuous guard, which is the exact defect this
+    slice closes. One file per reach form, plus the prose shape that must NOT
+    count.
+    """
+
+    def test_each_reach_form_is_reported_and_prose_is_not(self, tmp_path) -> None:
+        pkg = tmp_path / "tortoise"
+        pkg.mkdir()
+        (pkg / "sufficiency_router.py").write_text("VALUE = 1\n")
+        (pkg / "a_import.py").write_text("import tortoise.sufficiency_router\n")
+        (pkg / "b_from.py").write_text(
+            "from tortoise.sufficiency_router import assess_sufficiency\n"
+        )
+        (pkg / "c_pkg.py").write_text("from tortoise import sufficiency_router\n")
+        (pkg / "d_attribute.py").write_text(
+            "import tortoise\n\n\ndef f():\n"
+            "    return tortoise.sufficiency_router.assess_sufficiency\n"
+        )
+        (pkg / "e_dynamic.py").write_text(
+            "import importlib\n\n\n"
+            "def f():\n"
+            "    return importlib.import_module('tortoise.sufficiency_router')\n"
+        )
+        (pkg / "f_prose.py").write_text(
+            '"""The ``sufficiency_router`` module is discussed here."""\n'
+        )
+        (pkg / "g_relative.py").write_text("from . import sufficiency_router\n")
+        (pkg / "i_sibling_from.py").write_text(
+            "from .sufficiency_router import assess_sufficiency\n"
+        )
+        # ... and the BARE chain, with no attribute reached through it: this is
+        # what pins the equality operand of the chain rule (`chain == module`),
+        # which every other fixture would satisfy through its `.` prefix
+        # (review cycle 7, P2).
+        (pkg / "j_bare_alias.py").write_text(
+            "import tortoise\n\n\nSR = tortoise.sufficiency_router\n"
+        )
+        (pkg / "h_exact_chain.py").write_text(
+            "import tortoise\n\n\n"
+            "def f():\n"
+            '    return getattr(tortoise.sufficiency_router, "VALUE")\n'
+        )
+        # ⚠️ ONE reach form outside `tortoise/`, on purpose (review cycle 3, P2):
+        # the walk covers THREE production trees, and a fixture that only used
+        # `tortoise/` left two of them deletable with the suite green (the loop
+        # below now drives the constant, so none can be).
+        # ⚠️ DRIVEN BY THE CONSTANT (review cycle 4, P2): a hand-written list
+        # left a member deletable with the suite green, so one reach file is
+        # written into every declared tree and each is asserted below.
+        for tree in _PRODUCTION_TREES:
+            (tmp_path / tree).mkdir(exist_ok=True)
+            (tmp_path / tree / "a_reach.py").write_text(
+                "import tortoise.sufficiency_router\n"
+            )
+        # ... and an unreadable source is a VERDICT, not a crash (cycle 3, P2).
+        (tmp_path / "client" / "legacy_py2.py").write_text("print 'python 2 syntax'\n")
+        # ... and a TEST directory inside a production tree is NOT a caller.
+        (tmp_path / "integrations" / "tests").mkdir()
+        (tmp_path / "integrations" / "tests" / "test_bridge_5064.py").write_text(
+            "import tortoise.sufficiency_router\n"
+        )
+
+        reported = "\n".join(_router_importers(tmp_path))
+        for expected in (
+            "tortoise/a_import.py",
+            "tortoise/b_from.py",
+            "tortoise/c_pkg.py",
+            "tortoise/d_attribute.py",
+            "tortoise/e_dynamic.py",
+            "tortoise/g_relative.py",
+            "tortoise/i_sibling_from.py",
+            "tortoise/j_bare_alias.py",
+            "tortoise/h_exact_chain.py",
+            "client/legacy_py2.py: UNREADABLE",
+            *(f"{tree}/a_reach.py" for tree in _PRODUCTION_TREES),
+        ):
+            assert expected in reported, (expected, reported)
+        assert "tortoise/f_prose.py" not in reported, reported
+        assert "integrations/tests/test_bridge_5064.py" not in reported, reported
+
+
+class TestTheRemainingAbsence:
+    """The CALLER half of #5009's absence — kept behind a call, not narrated.
+
+    ⛔ This is the falsifier for `config/v4-mechanisms.yml`'s `sufficiency_router`
+    row (``pins:``). The decision layer landed in ``tortoise/sufficiency_router.py``
+    and refuses to call itself an implementation of §12.4 while nothing escalates.
+    The day a read-path caller appears, this reds: wire the tier walk, then flip
+    the row to ``implemented`` (with the tier walk's own tests) instead of deleting
+    this test. Deleting it silently returns the registry to "a mechanism nobody
+    is watching", which is the exact state #5064 exists to end.
+    """
+
+    def test_nothing_outside_the_router_imports_it(self) -> None:
+        importers = _router_importers()
+        assert importers == [], (
+            "a production module now REACHES tortoise/sufficiency_router.py "
+            f"({importers}) — if that is the read-path caller §12.4 needs, the "
+            "tier walk exists and config/v4-mechanisms.yml's `sufficiency_router` "
+            "row must flip to `implemented` (and this pin be replaced by the "
+            "caller's own tests). If it is not escalation, name the reach in the "
+            "row's note so the absence stays true"
+        )

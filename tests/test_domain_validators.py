@@ -754,11 +754,14 @@ def _transport_context(monkeypatch):
 
 class TestMCPValidateTool:
     def test_registry_entry_readonly(self):
-        from tortoise.tool_registry import TOOL_REGISTRY
+        # #4282: the `validate_domain` DOOR retired into `graph_overview`'s
+        # `section="validate_domain"`; the read-only property now rides the container.
+        from tortoise.tool_registry import RETIRED_USE_INSTEAD, TOOL_REGISTRY
         entry = next(t for t in TOOL_REGISTRY
-                     if t.name == "tortoise_validate_domain")
+                     if t.name == "tortoise_graph_overview")
         assert entry.annotations.readOnlyHint is True
-        assert entry.sdk_method == "validate_domain"
+        assert 'section="validate_domain"' in RETIRED_USE_INSTEAD[
+            "tortoise_validate_domain"]
 
     def test_handler_returns_violations(self, graph_sdk, monkeypatch):
         import tortoise.mcp_server as mcp_mod
@@ -806,6 +809,20 @@ def commit_client():
         # close → clear overrides at exit (replaces the local
         # _patch_tortoise_sdk_init copy).
         with patched_tortoise_sdk(db_path), TestClient(app) as tc:
+            # #9567 D12: STORE-BACK the stubbed org dict — production's
+            # `get_current_org` resolves the limits FROM the store, and the
+            # commit lane's points door fills missing ALLOWANCE keys from
+            # `quota.resolve_org_limits`, so a store-backed org is the branch
+            # production takes. (A MISSING `:Team` row is NOT a refusal: since
+            # review round 11 the fill leaves the dict unarmed on
+            # `quota.OrgNotFoundError` — a cap cannot be armed from a record
+            # that does not exist.) `MERGE` with no properties
+            # (`tests/test_hosted_api.py`'s shape): the resolver takes the tier
+            # default and emits no allowance key, so the dict overridden above
+            # is unchanged.
+            import tortoise.hosted_api as _ha_mod
+            _ha_mod._make_sdk(namespace="registry")._get_registry().query(
+                "MERGE (t:Team {id:$id})", params={"id": "test-team-405"})
             yield tc
 
 

@@ -1,23 +1,68 @@
 name: Agent finding (internal)
 description: An internal finding from a lane — a measured result, a defect, or a routing decision
 title: "[finding]: "
-labels: ["internal"]
+# ⛔ THE GATE'S KEY IS THE PROVENANCE FIELD'S LABEL, BELOW — and the two keys
+# this header used to name were both DEAD IN PRODUCTION (#10146 F1, twice).
+#
+#   1. `labels: ["internal"]`. `internal` is NOT a label in this repo (measured
+#      2026-11-05: `gh api repos/daniel-ospina/tortoise/labels?per_page=100`
+#      → 78 labels, `.name | grep -x internal` → exit 1), and GitHub SILENTLY
+#      DROPS a template label that does not exist. So a form-filed issue
+#      arrived with NO label and a refusal keyed on it never fired.
+#   2. `<!-- finding -->` inside a `type: markdown` element. GitHub's form
+#      schema says of `markdown`: *“Markdown text that is displayed in the form
+#      … but is not submitted”* — so the marker NEVER reaches the issue body,
+#      and a gate keying on it saw nothing on any real filing either. Both
+#      tests were green because the renderer wrote the marker in itself.
+#
+# A label is repo STATE that silently diverged; a `markdown` element is UI text
+# the platform drops at filing. So the key is a SUBMITTED, REQUIRED field whose
+# LABEL the gate's own claim parser selects — `### Measured at …`, which GitHub
+# renders into the body for every filing (a field's `### <label>` heading is
+# part of the submitted markdown; only `markdown` elements are not). That is
+# the `measured_at` field below, and it is why its label begins `Measured at`:
+# it is not decoration, it is the gate's trigger. Delete or rename it and a
+# malformed filing goes back to being silently SKIPPED (#10146).
+#
+# The `title:` prefix above stays as a SECOND key: GitHub applies it at filing
+# and never validates it against repo state. It is weaker than the field label
+# — the filer can overwrite a pre-populated title — so the gate must never rest
+# on it alone.
+#
+# Pinned against a body RENDERED THE WAY GITHUB RENDERS IT (markdown elements
+# excluded) in `tests/test_finding_provenance.py`
+# (`test_the_form_delivers_the_key_the_gate_keys_on`) and
+# `tests/test_10146_agent_finding_form.py`, so dropping the claim from the
+# field label reddens them.
 body:
   - type: markdown
     attributes:
       value: |
         **Keep this short.** The owner's standing instruction is to reduce bureaucracy, so this form is
-        deliberately four fields. A finding that reaches the graph is worth more than a well-formatted one
-        that stays in a session.
+        deliberately four fields — plus the `working_process` block at the end, which is not a field to
+        fill in but the route the next agent follows (it is pre-filled; leave it alone). A finding that
+        reaches the graph is worth more than a well-formatted one that stays in a session.
 
-  - type: input
+  - type: markdown
+    attributes:
+      value: |
+        **Provenance is the one field the gate refuses you for (#10146).** Paste the output of
+        `uv run python tools/finding_provenance.py --emit`. It prints exactly one line, and that line has the shape `Measured at: <ref>@<40-hex-sha> on <YYYY-MM-DD>`. Do not hand-type a short sha.
+        `tools/finding_provenance.py --validate` accepts the body you are about to file.
+
+  - type: textarea
     id: measured_at
     attributes:
-      label: Measured at (commit / sha you read)
-      description: The exact revision this finding is true of. Leave blank if it was not measured against a checkout.
-      placeholder: "e.g. 98ab138c9"
+      # ⛔ THIS LABEL IS THE GATE'S TRIGGER — do not “tidy” it into `Provenance`.
+      # Rendered as `### Measured at (paste the `--emit` line)` it is a provenance
+      # CLAIM by the gate's own PROVENANCE_CLAIM_RE, so the body is gated (and
+      # refused as UNKNOWN_PROVENANCE when the answer is not a parseable line)
+      # instead of being skipped. See the file header.
+      label: Measured at (paste the `--emit` line)
+      description: The full `Measured at:` line from `uv run python tools/finding_provenance.py --emit` — a line beginning `Measured at` followed by `<ref>@<40-hex-sha> on <YYYY-MM-DD>`. Re-read the finding against the tree you name before you paste; an unmeasured guess is worse than none.
+      placeholder: Run `uv run python tools/finding_provenance.py --emit` in the checkout you measured and paste its single output line here.
     validations:
-      required: false
+      required: true
 
   - type: dropdown
     id: objective
@@ -79,6 +124,46 @@ body:
 
         ⛔ **Mark deliberate departures** with an `OVERRIDES:` line, so a later reader can tell an
         intentional ruling from an accident of history.
+
+  # --- The working process that TRAVELS WITH THE ISSUE --------------------
+  # Rationale and the full argument: docs/ops/ISSUE-WORKING-PROCESS.md.
+  #
+  # ⚠️ WHY A PRE-FILLED `textarea` AND NOT A `markdown` ELEMENT. A `markdown`
+  # element in a GitHub issue form is DISPLAY-ONLY: its text is shown while
+  # filling the form and is NOT submitted into the issue body (GitHub form
+  # schema, docs.github.com — "syntax for GitHub's form schema": markdown
+  # "displays explanatory text ... but is not submitted"). This block must reach
+  # the NEXT reader, who sees only the body, so it has to be a submitted field.
+  # A `textarea` whose `value:` is pre-filled does both: it renders with the
+  # text in place while the form is filled AND it is submitted as body markdown.
+  # Do not "tidy" this into a `markdown` element — that would silently stop
+  # persisting the very thing this field exists for.
+  - type: textarea
+    id: working_process
+    attributes:
+      label: Working this issue — process (keep it; it is authoritative)
+      description: >-
+        The route any agent follows when it takes this issue over. If a dispatch
+        brief omits a step, this wins. Do not delete it; if it needs to change,
+        change docs/ops/ISSUE-WORKING-PROCESS.md first.
+      value: |
+        ## Working this issue — process (authoritative; if a dispatch omitted it, this wins)
+        This issue states a PROBLEM. Its completion criteria do not exist yet — SCOPING creates them (§4).
+        1. PRE-FLIGHT all machines: `uv run python tools/collision_preflight.py <N> --repo .` exits 0, then
+           `uv run python tools/who_is_on.py <N> --repo .` (branches + worktrees + claims). Claim before starting.
+        2. WIP: read the newest `<!-- p01-status -->` comment. Merged work present ⇒ NOT a fresh start; take only unproven criteria.
+        3. RESEARCH (from 0 only): skills/research/SKILL.md in full — preflight + domain classification + three sources incl. external.
+        4. SCOPING ⇒ post a `## Satisfies` COMMENT: one `- [ ]` per acceptance criterion, each with a file:line or named test.
+           ⛔ Do not implement before this comment exists. Name any parallel issue covering part of it; mark a deliberate
+           `⚠️ BAND-AID: <why + where the real fix lives>`.
+        5. PLAN ⇒ skills/writing-plans/SKILL.md, one step per criterion.   6. IMPLEMENT red-first per criterion (red, green, revert-fails).
+        7. PR body: `Satisfies #<N>: <ids>` for partial work · `Closes #<N>` ONLY on the last unchecked criterion · no-issue PRs write neither.
+        8. REVIEW skills/code-review/SKILL.md (fresh context), findings fixed before the record; six ENTRY checks; rail from a linked worktree.
+        9. CLOSE: tick proved criteria in the `## Satisfies` comment; close only when all ticked; read the closure back.
+        ### Claim: append this line to the issue's `<!-- p01-status -->` comment
+        IN FLIGHT: <ids> — branch <b> — box <c> — since <UTC>
+    validations:
+      required: false
 
   - type: checkboxes
     id: confirmations

@@ -250,7 +250,7 @@ The measurement pass can only produce the numbers in §4 if these are true. Stat
 
 | # | what the measurement needs | today | what this change does |
 |---|---|---|---|
-| S1 | **Per-org extractor tokens per period must be READABLE from code** | writer landed (`record_capture_usage`), **no reader** | ✅ **landed** — `metering.get_capture_usage(org_id)`, mirroring `get_ask_usage`, reading `capture_calls` / `capture_tokens_in` / `capture_tokens_out` / `capture_cost_usd`, both substrates, zero-view degradation, never raises |
+| S1 | **Per-org extractor tokens per period must be READABLE from code** | ✅ `metering.get_capture_usage(org_id)` (landed by `#4051`) | ✅ **readable AND consumed** — same reader, extended with the presence fact the gate needs (`measured` / `unmeasured_reason`), reading `capture_calls` / `capture_tokens_in` / `capture_tokens_out` / `capture_tokens_total` / `capture_cost_usd`, both substrates, zero-view degradation, never raises; `allowance_gate` is its ONE consumer (`#9567` D11/D12) |
 | S2 | **Per-org graph MB must be readable, with its precision caveat** | ✅ `get_graph_storage_reading` (needs its caveat read first — `graph_storage.py`) | unchanged |
 | S3 | **A per-tenant figure for the Postgres substrate** | ✗ database grain only; declared *not a measurement* (`#5045`) | **not here** — `TBD-BY-MEASUREMENT`; the shape must be *attributed tuple bytes + named exclusions*, and it must be labelled an **estimate**, never a measurement. Belongs with the `#4492`/`#7879` family |
 | S4 | **The vector index must be inside the storage figure** | ✗ `GRAPH.MEMORY USAGE` is blind to it | **not here** — `#5331`'s remaining work; until then no storage allowance may be wired for a vector-bearing tenant |
@@ -258,15 +258,44 @@ The measurement pass can only produce the numbers in §4 if these are true. Stat
 | S6 | **Elasticity: bytes per write op, bytes per capture turn** | ✓ `get_write_op_yield` (nodes per billed op) + `nodes_written`; the **byte** counterpart is open | **not here** — derived at measurement time from S1 + S2 |
 | S7 | **No measurement may be presented as a cap** | ✓ the meters are declared measurement-only and fail-soft | §5's classification rule |
 
-**Why S1 and not the others was landed now.** It is the one that is *additive, unreachable from any request path,
-and a pure read of columns that already exist*: no new store, no new instrumentation, no route, no metered-response
-change, no MCP tool, no SDK method. It turns the recorded residual (*"written but not readable from code"*) into a
-number the owner can pull per tenant — which is the difference between a measurement pass that runs and one that
-does not.
+**Why S1 and not the others was landed first.** It is the one that is additive and a pure read of columns that
+already exist: no new store, no new instrumentation, no route, no metered-response change, no MCP tool, no SDK
+method. It turns the recorded residual (*"written but not readable from code"*) into a number the owner can pull per
+tenant — which is the difference between a measurement pass that runs and one that does not.
 
-**⛔ NOT in this change, deliberately:** no allowance key, no gate, no request-path call to any of these readers, no
-change to `/v1/team`'s metered response, no price, no invoice. `get_capture_usage` has **zero call sites** in
-`tortoise/**` — it exists for the measurement pass, and a test pins that.
+**⛔ NOT in this change, deliberately:** no allowance **VALUE** — the three `ALLOWANCE_KEYS` fields exist and are
+carried, but no resolver emits one, so nothing is armed — and no change to `/v1/team`'s metered response, no price,
+no invoice. Those all still hold.
+
+**⚠️ §1b's "no request path calls it" is SUPERSEDED — the reader is now an enforcement hook (`#9567` D11/D12).**
+`#4051` §1b recorded that this reader was MEASUREMENT ONLY, with zero call sites, and
+`tests/test_metering_capture_usage_reader.py` pinned that by scanning every module under `tortoise/`. The
+`#9567` change arms the `capture_extraction` dimension the owner ruled (2026-09-26: extraction bills in tokens),
+and an allowance cannot be enforced against a reader nothing is allowed to call — so `allowance_gate.py` is now its
+**one** consumer, reached from `quota.enforce_org_limit` on both the REST and MCP capture doors, and the pin names
+that consumer EXACTLY (`offenders == ["allowance_gate.py"]`) rather than relaxing to a blanket exemption.
+
+Why the reader had to grow a presence fact at the same time: this document is where the "zero is a measurement"
+rule lives (§4 — a capture that reported no provider usage records ZERO tokens), while the gate needs the opposite
+half — an unreadable ledger is NOT a zero. A reader that degraded every failure to a zero view is the `#4493`
+shape pointed the other way: a cap wired to it fails OPEN for exactly the tenant whose meter is broken. Hence
+`measured` / `unmeasured_reason` on the same reader, with `absent` (a cumulative FLOW's real zero) decided by the
+dimension and `read_error` / `period_error` refused by the gate.
+
+**OVERRIDES:** `#4051` §1b's "the reader is MEASUREMENT ONLY — no request path calls it" — the ruled token dimension
+has no other meter, so enforcement has to read this one; the measurement-only reading would leave the owner's
+2026-09-26 token ruling unenforceable. See §5's classification rule and the reopen recorded on `#4051`.
+
+**⚠️ "INERT" IS ABOUT WHAT THE GATE REFUSES, NOT ABOUT WHAT IT READS** — the correction that replaces the earlier
+"so nothing is refused today" wording here. No resolver emits an allowance value, so no dimension can be over its
+allowance and the gate refuses none on that ground. It is **not** free and it is **not** silent: `hosted_api._check_org_limit`
+and `mcp_server._enforce_quota` fill the missing allowance keys from `quota.resolve_org_limits` on every **gated**
+request (`points` / `documents` / `sessions`), so each such request performs one control-plane read — a PostgREST GET
+in Supabase mode, an SDK open plus a `MATCH (t:Team {id:…})` in registry/self-host mode — and a **fault** in that read
+is a `QuotaCheckError` → HTTP 500 **even with no allowance configured**. That is the read side of the `#3981` tension,
+chosen deliberately (a config read we could not complete must never degrade to "unlimited"); the state that is NOT
+refused is a resolver LOOKUP MISS — an org with no record keeps the caller's already-authoritative dict, because a cap
+cannot be armed from a record that does not exist.
 
 ---
 

@@ -31,7 +31,7 @@ makes it physically true — the license boundary moves to the network.
 | Component | Distribution | License | Content |
 |---|---|---|---|
 | **Server** | `tortoise-graph` (existing, 0.2.0) | BSL-1.1 | engine (sdk, projection, EP), daemon, MCP server, hosted/self-host APIs, CLIs (`tortoise`, `tortoise-serve`, `tortoise-ingest`) |
-| **Client** | `tortoise-client` (new) | Apache-2.0 | thin MCP driver (`tortoise/mcp_client.py`), shared config + error types, the recorded status vocabulary (`tortoise/status_vocabulary.py`, #3805), minimal CLI |
+| **Client** | `tortoise-client` (new) | Apache-2.0 | thin MCP driver (`tortoise/mcp_client.py`), the stdio bridge (`tortoise/mcp_bridge.py`, #10605), shared config + error types, the recorded status vocabulary (`tortoise/status_vocabulary.py`, #3805), minimal CLI |
 
 Industry precedent (verified 2026-08-13, issue comment): **MongoDB** (server
 SSPL, all drivers Apache-2.0 — an app using the driver is "a separate
@@ -76,6 +76,8 @@ then build with `python -m build` (falls back to `pip wheel`). Engine
 modules are never staged. The wheel ships exactly:
 
 - `tortoise/mcp_client.py` — the network driver (canonical copy)
+- `tortoise/mcp_bridge.py` — the stdio ↔ Streamable-HTTP bridge (canonical
+  copy, #10605 — see §8a)
 - `tortoise/config.py` — shared config (canonical copy)
 - `tortoise/exceptions.py` — shared error types (canonical copy)
 - `tortoise/status_vocabulary.py` — the one recorded status vocabulary
@@ -109,7 +111,9 @@ tree exactly as before — `from tortoise.mcp_client import ...` keeps working
 | `tortoise-client` (client) | `fastmcp-slim[client]==3.4.6`, `httpx>=0.27` |
 
 - `fastmcp-slim[client]` provides the exact `fastmcp.client` import surface
-  `mcp_client.py` uses (Client + BearerAuth + StreamableHttpTransport)
+  `mcp_client.py` uses (Client + StreamableHttpTransport, with the Bearer supplied
+  by a per-request `httpx.Auth` provider — never `BearerAuth`, which CAPTURES the
+  string; §8a)
   **without** the server extra (uvicorn/websockets/cyclopts) and without
   fastapi/numpy/scipy/falkordb. The pin `==3.4.6` matches the server's
   `fastmcp==3.4.6` — protocol/API lockstep.
@@ -193,6 +197,145 @@ client/verify_client.sh                         # clean-venv gate
 | `import tortoise.sdk` / `import tortoise.projection` | raises ImportError |
 | `pip list` | no falkordb / falkordblite / numpy / scipy / fastapi |
 | Existing suites (`tests/test_mcp_client.py`, `tests/test_tortoise_client.py`) | pass against `tortoise-graph` (unchanged server tree) |
+
+## 8a. Credentials in a long-lived session — the bridge (#10605)
+
+**The defect this closes.** A harness config that carries an `Authorization`
+header is a CAPTURE, not a lookup — and the capture has two halves, only one of
+which is the `${VAR}` syntax. The EXPANSION is not the stale part: on the
+harness that reported this, `expandExpr()` **re-runs at every connect**
+(measured from its source twice, and on the wire with 3/3 `initialize` POSTs,
+see #10605). What is frozen is `process.env` itself, captured when the harness
+process starts, plus the per-CONNECTION resolution: the header a config yields
+is resolved once per connection and replayed for that connection's life, so a
+mid-connection rotation is invisible until the next one. An UNSET variable
+expands silently to `""`, so a session whose credential is exported under a
+name the client never reads sends an `Authorization: Bearer` header with
+nothing after the scheme, on every connect — the shape that produced the
+reported 401.
+
+So the server can only answer `Unauthorized: invalid or missing Bearer token`.
+That message is accurate and useless: it points at the credential's VALUE when
+the name, or the source, was never read again after the process started. The
+design consequence is a CONFIG-NAME fix, not a cache-expiry fix (#10605; #5200 is
+the same class reached by a variable-name mismatch).
+
+**The fix, in two layers.**
+
+1. `tortoise/mcp_client.py` resolves the Bearer value **per request** (an httpx
+   `auth_flow` provider — the `token()`-callback shape the MCP SDKs converge on,
+   rather than a captured string), reading `TORTOISE_API_KEY`, then the fleet
+   alias `TORTOISE_MCP_API_KEY`, then the stored credentials in the recorded
+   #1708 D5 order: the PROJECT-LOCAL `./.tortoise` that `tortoise init --api-key`
+   writes, then `~/.tortoise/credentials.json`. A store that ARRIVES WITH a
+   repository is skipped rather than read — git reports it tracked, or git cannot
+   be asked and a `.git` sits above it (see the trust boundary below); an ordinary
+   untracked store is read. A rotation
+   therefore reaches the wire on the next call with no rebuild and no restart. A
+   blank value is "no credential", never an `Authorization: Bearer` header with
+   nothing after the scheme; if the endpoint then rejects the call, the client raises
+   `MCPKeyEmptyError` (code `MCP-KEY-EMPTY`) naming every source it read instead
+   of relaying the server's wording. `status()` reports that as the recorded
+   `unconfigured` term (a set-up gap, not an outage, #3805). The named refusals
+   hold on the PUBLIC constructor too (`get_client()` returns a guarded client),
+   not only on `status`/`available`/`list_tools`/`call_tool`.
+
+   A credential whose CO-SOURCED host is not this client's endpoint is
+   **withheld**, never sent, and reported as `MCPCredentialHostMismatchError`
+   (`MCP-CREDENTIAL-HOST-MISMATCH`) — and only for an auth rejection: a daemon
+   that is down is an outage whatever the credential situation. Endpoints are
+   compared as endpoints (scheme, host, default port, path without a trailing
+   slash), so one endpoint spelled two ways never reads as two hosts.
+2. `tortoise/mcp_bridge.py` is a local **stdio ↔ Streamable-HTTP** bridge, so a
+   harness can declare a command instead of a header:
+
+   ```json
+   {"mcpServers": {"tortoise": {
+       "command": "python3", "args": ["-m", "tortoise.mcp_bridge"],
+       "env": {"TORTOISE_MCP_URL": "https://api.premiselabs.co/mcp/"}}}}
+   ```
+
+   No key in the config, no `${VAR}` to expand, nothing to go stale. Its auth
+   refusals are named too, and split by cause: `MCP-KEY-EMPTY` when nothing
+   resolved (fixable without a restart), `MCP-CREDENTIAL-NOT-CARRIED` when one
+   resolved but the request that failed carried none — the cross-origin redirect
+   hop, after which httpx deliberately drops `Authorization` — versus a
+   value-fault message when a credential WAS sent and the server refused it. Each
+   cause carries the remedy that can actually work for its source: an env key is
+   pointed at the final URL, a stored key is given the `api_url` to record,
+   because a stored credential takes its endpoint from its own file (#2369 D1.1).
+   Server text is quoted as evidence, but a credential VALUE echoed back by the
+   server is redacted before it reaches the harness's transcript or logs.
+
+   One operational knob: `TORTOISE_MCP_BRIDGE_TIMEOUT` is the seconds allowed per
+   forwarded request (default 120, declared in `.env.example`). It is generous on
+   purpose because a `tortoise_search` carries the server's own wait budget; a
+   legitimately slow call is answered by raising it, not by reading the resulting
+   timeout as an outage. A malformed value falls back to the default.
+
+**WHICH SOURCE IS ACTUALLY LIVE — stated, because "reads the live environment" is
+too generous.** The bridge is a CHILD process, so its environment is a snapshot
+of the harness's at spawn: a key exported in another shell after the session
+started is not visible to it. Re-reading the environment helps a process that
+sets its own `os.environ` mid-run (a notebook, a login flow); the source that
+genuinely rotates under a long-lived session — and the one a hosted user has on
+disk, written by `tortoise init` — is the **credential file**, re-read per
+request. The env leg is precedence, not liveness. Both stores are read: a user
+who onboarded through the CLI has the project-local one, and a client that read
+only the global file would report "no credential" for a key sitting on disk.
+**One exception, and it is a trust boundary rather than a precedence rule: a
+store that ARRIVES WITH a repository is IGNORED.** Both halves of the identity
+come from one file (`api_key` and `api_url`), so a repository that commits
+`./.tortoise` would choose the key *and* the host its requests go to — the shape
+`#3660` fails closed on. Precisely: a store git TRACKS is skipped, and so is one
+inside a git work tree when git cannot be run at all to say whether it is tracked
+(the fail-closed arm; a store in no repository, and an ordinary untracked store
+in one, are read as before). The global store is vetted the same way whenever a
+`.git` sits above it. A store `tortoise init` writes is gitignored, so the
+ordinary project-local store is unaffected *where git can answer*; the ignored one
+is named in the refusal's source list and warned about once on stderr.
+
+**CO-SOURCE (#2369 D1.1).** When the key comes from the credential file, the
+endpoint comes from that SAME file (`api_url`), never from a `TORTOISE_MCP_URL`
+the environment supplies: a harness config can be committed to a repository, so
+letting it choose the host for a stored credential would be an exfiltration path.
+
+**What this does NOT do (residual — recorded on #10605, tracked OPEN on #10885).** The
+onboarding generator (`tortoise/__main__.py::_harness_mcp_config`) and this repo's committed
+`.mcp.json` still emit the `Authorization: Bearer ${TORTOISE_API_KEY}` capture for
+the **hosted** shape. That is deliberate and product-facing, not an oversight:
+the hosted recipe must work for a user who has installed *nothing* locally, and
+the bridge needs a Python package present. Switching those recipes — and the
+fleet's own harness configs, which agent-infra owns — is the follow-up that
+retires the capture everywhere; until it lands the bridge is the recipe for
+anyone with the client installed, and the named refusal is what everyone else now
+gets instead of a misleading 401.
+
+⛔ **#10605 is CLOSED, so it is not the live home for that residual — #10885 is.**
+A reader checking whether the capture has been retired must follow **#10885**
+(OPEN, filed with this residual's `file:line` scope and its acceptance criterion); #10605
+records only where the residual came from. The same relay applies to the
+`503 consent_store_unavailable` arm and the keyless-re-entry hole, which now live
+on **#10884** rather than in #10487's closed thread.
+
+The two halves are held by DIFFERENT pins, and this paragraph names them
+separately rather than claiming one covers both. The #10885 sentence is held by
+`tests/test_mcp_bridge.py::test_the_hosted_recipe_residual_has_a_home_this_fold_does_not_close`,
+whose biconditional reads this `**What this does NOT do**` paragraph itself. The
+`#10884` half is held by the two pins in `tests/test_oauth_consent_bff_routes.py` —
+`test_the_store_fault_residual_names_a_home_this_fold_does_not_close` (that
+module's docstring) and
+`test_the_whitespace_attempt_key_residual_names_a_home_this_fold_does_not_close`
+(`presented_consent_attempt_key`'s own docstring) — because #10884's two residuals
+live in the CODE, not on this page: they red when the arm or the unstripped
+adoption goes away, and they cannot read a markdown paragraph at all.
+
+Both modules are staged into the client-only wheel (`client/build_client.sh`), and
+both have guards registered on the `api` CI surface:
+`tests/test_mcp_client.py` (`TestCredentialResolution`) and
+`tests/test_mcp_bridge.py` — the latter drives a real bridge subprocess and
+asserts the header the UPSTREAM received, so "resolved per request" is measured
+on the wire rather than inferred.
 
 ## 9. Migration
 

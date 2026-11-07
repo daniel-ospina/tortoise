@@ -14,7 +14,7 @@ assertion below is one of the shapes that failure takes — a missing row, a
 green row on a file that does not exist, a denominator inherited from a
 different corpus, a green row whose evidence predates the thresholds it claims
 to validate, a red row with no named cause. Each one has a stable finding code
-(V1–V11) and a test that reds if the gate stops catching it.
+(V1–V12) and a test that reds if the gate stops catching it.
 """
 from __future__ import annotations
 
@@ -126,9 +126,11 @@ def _record(**over) -> dict:
 
 
 def _codes(record: dict, *, require_green: bool = False,
-           require_resolvable: bool = False) -> list[str]:
+           require_resolvable: bool = False,
+           blocker_states: dict | None = None) -> list[str]:
     findings = cvc.check(record, repo=_REPO, require_green=require_green,
-                         require_resolvable=require_resolvable)
+                         require_resolvable=require_resolvable,
+                         blocker_states=blocker_states)
     return [code for code, _w, _m in findings.items]
 
 
@@ -1352,8 +1354,11 @@ def test_a_degraded_search_is_not_s3():
     degraded=True) is exactly the shape of a search that failed. Scoring that
     attempt as resolved let V5, the epic's ONLY closing gate, pass on a step
     that never resolved, and every E-row measured on the run was then published
-    as valid. `README.md:204` records the rule ("a degraded search is not S3")
-    and the sibling probe already implements it
+    as valid. The README's `S3 RESOLVE` step row records the rule ("a degraded
+    search is not S3") — cited by its SENTENCE, not a line number, because this
+    branch's own README insertions moved it twice: `298` -> `305` -> `309`, each time
+    correct when written, each time stale after the next insertion — and the sibling
+    probe already implements it
     (`capstone_measure.py::observe_steps`, the arm that writes that sentence into
     the step's own note).
 
@@ -2040,8 +2045,20 @@ def test_the_readmes_line_citations_resolve_to_the_symbols_they_name():
     f"{sources['extractor_v2'][entry_line - 1].strip()!r}")
 
     # (b) The eight-row step table: `` `symbol` `:NNNN` `` into the same file.
+    #
+    # #10833 review (P1): the population is EXACT, not a floor. It read
+    # `>= 8`, so the loop below could pass while a re-chunk of the table hid a
+    # row from the regex — the same shape rule (c) already refuses on the
+    # probe (`== 9`), applied to the document that went stale in this PR: the
+    # fold's own `+33` moved every one of these eight numbers and this
+    # assertion was the thing that should have said so. A row added or removed
+    # on purpose updates this number deliberately; a row that stops matching
+    # reds instead of quietly shrinking the sweep.
     pairs = re.findall(r"`([A-Za-z_][\w.]*)`\s*`:(\d+)`", readme)
-    assert len(pairs) >= 8, f"the step table's cites are gone: {pairs}"
+    assert len(pairs) == 8, (
+        f"the step table is eight rows (one per step; S6 COMMIT prints no "
+        f"number) — {len(pairs)} cites matched, so a row was added, removed or "
+        f"reformatted and the sweep below is not reading it: {pairs}")
     for symbol, lineno in pairs:
         text = sources["extractor_v2"][int(lineno) - 1]
         assert symbol.split(".")[-1] in text, (
@@ -2084,8 +2101,9 @@ def test_the_readmes_line_citations_resolve_to_the_symbols_they_name():
     # reader reproduces from — was the ONLY cite in the bundle that nothing
     # re-checked. It rotted exactly as rule (a)'s README twin did: the
     # re-derivation moved the `def` half and left the `called at` half
-    # untouched, so `capstone_run.py:19` and `README.md:615` stated two
-    # different, both-wrong call sites for one fact, and both pin files stayed
+    # untouched, so the probe and the README each stated a different, both-wrong
+    # call site for one fact (the numbers are not repeated here — see the preamble
+    # above), and both pin files stayed
     # green. Two documents stating one fact is a claim that can only be pinned
     # where each one states it. (The numbers are deliberately NOT quoted here:
     # this paragraph outlived two heads, and a quoted line number is the very
@@ -2942,9 +2960,20 @@ def _multi_artifact_record(row: dict | None = None) -> dict:
 def test_a_non_green_row_on_another_corpus_must_declare_that_revision():
     """A row whose number comes from a DIFFERENT artifact must say so.
 
-    The capstone's rows do not all come from one run: E1/E2 cite #9076's arm run
-    and E4 an operator receipt, and neither measured the corpus the capstone run
-    froze. Refusing those rows outright would hide the only numbers they have;
+    The capstone's rows have not all come from one run. E1/E2 cited #9076's arm run,
+    which did not measure the corpus the capstone run froze, until `#9889` re-scored
+    them on the FROZEN corpus (their records now carry that digest); and E4 cited an
+    operator receipt on another revision until `#7949`'s selector made it choose the
+    receipt BY the frozen pin, so the CURRENT E4 row's corpus is the log's. The arm
+    still matters for every log written BEFORE those two changes — the shipped
+    `capstone-measured-9152448d.log` carries exactly those shapes, because `#10601`
+    re-measured the table at a head that still read the pre-selector constant, so its
+    E4 row declares `943a99ec…` while the log's own corpus was `dd7e8520…` — so a rule
+    deleted once the current probes stop taking it would leave those recorded rows
+    unverifiable. (`#10601` DELETED `capstone-measured-e0fc940b.log`, which this
+    docstring used to name as "the shipped" log: a docstring that points a reader at
+    a file the tree no longer holds is the same claim-vs-tree defect the arm exists
+    to catch.) Refusing such rows outright would hide the only numbers they have;
     accepting them on the row's word would let any red row name any corpus. So the
     row DECLARES the revision, and the declaration is checked against the artifact.
     """
@@ -3043,6 +3072,663 @@ def test_a_corpus_prefix_alone_is_not_a_different_corpus():
     codes = _codes(record)
     assert "V7" not in codes, codes
 
+
+# ── V12: a blocker that has CLOSED is not a blocker (#10537) ─────────────
+#
+# The shipped table named #9775 / #8503 / #9738 as its blockers for up to nine
+# days after those issues closed, and this gate printed "structurally sound"
+# over all three: V6 verified the POINTER (`#NNN`), never the thing it pointed
+# at. A pointer at closed work is stale evidence BY CONSTRUCTION — there is
+# nothing to judge, only to look up — so the arm is a lookup, not a threshold.
+
+def _instant(stamp: str):
+    """Parse a UTC instant so freshness is a comparison of TIMES, not of text.
+
+    The gate's own loader refuses an unparseable `checked_at` (#10537 review P2);
+    this is the same parse on the test side, so a stamp that sorts late but
+    means nothing can no longer satisfy the freshness bound.
+    """
+    from datetime import datetime
+    return datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+
+
+def _states(**over) -> dict:
+    """A blocker-state record covering the fixture rows, with one CLOSED entry."""
+    states = {
+        "_checked_at": "2026-11-02T12:09:48Z",
+        "#9075": {"state": "CLOSED", "closed_at": "2026-10-21T21:49:13Z"},
+        "#8503": {"state": "CLOSED", "closed_at": "2026-10-24T20:50:13Z"},
+    }
+    states.update(over)
+    return states
+
+
+def _live_record() -> dict:
+    """A COMPLETED-run table: V12 applies to it (see the exemption below).
+
+    ``_record()`` is a REFUSED run that measured nothing — the shape V12
+    deliberately exempts — so the V12 fixtures need a run that completed.
+    """
+    record = _record()
+    record["run"] = dict(record["run"], status="COMPLETED")
+    return record
+
+
+def test_a_row_citing_a_closed_blocker_is_a_finding():
+    """The live-blocker claim is checkable, so it is checked."""
+    record = _live_record()
+    codes = _codes(record, blocker_states=_states())
+    assert "V6" not in codes, codes            # the pointer's FORM is fine
+    assert codes.count("V12") >= 1, codes
+    findings = cvc.check(record, repo=_REPO, require_green=False,
+                         blocker_states=_states())
+    rendered = findings.render()
+    assert "rows[E1]" in rendered and "#9075" in rendered, rendered
+
+
+def test_a_blocker_the_record_does_not_cover_is_a_finding():
+    """`#NNN` nobody looked up is not a verified blocker either."""
+    record = _live_record()
+    codes = _codes(record, blocker_states={"_checked_at": "x"})
+    assert "V12" in codes, codes
+
+
+def test_the_record_itself_decides_and_an_open_blocker_passes():
+    """The control: same rows, the same blocker recorded OPEN, no finding."""
+    record = _live_record()
+    states = _states(**{"#9075": {"state": "OPEN", "closed_at": None}})
+    codes = _codes(record, blocker_states=states)
+    assert "V12" not in codes, codes
+    # …and a CLOSED state on the very same row is the finding, so the arm is
+    # reading the record and not the row's shape.
+    closed = _states(**{"#9075": {"state": "CLOSED",
+                                 "closed_at": "2026-10-21T21:49:13Z"}})
+    assert "V12" in _codes(record, blocker_states=closed)
+
+
+def test_an_unrecognised_state_cannot_clear_a_row():
+    """⛔ "NOT THE WORD `CLOSED`" IS NOT "OPEN" (#10601 review P2).
+
+    V12's polarity was `== "CLOSED"` … `else: pass`, so at the layer that
+    DECIDES the verdict every state that was not exactly `CLOSED` resolved to a
+    PASS. `main()` guards this through `load_blocker_states`, but `check()` is
+    the module's documented verdict engine ("Apply V1-V12 to a parsed verdict
+    table") and takes `blocker_states` from any caller — so the loader cannot be
+    the only guard, and an UNREADABLE state is exactly the class the arm exists
+    to refuse. Measured pre-fix on this fixture: `{"state": "closed"}`,
+    `{"state": ""}` and `{"state": None}` each returned NO V12 for a row whose
+    blocker is not shown open, while the same row with `{"state": "CLOSED"}`
+    produced its finding.
+
+    Non-vacuity: reds on the pre-fix tool for every word in the loop below.
+    """
+    record = _live_record()
+    for word in ("closed", "", None, "Open", "merge"):
+        codes = _codes(record, blocker_states=_states(**{"#9075": {"state": word}}))
+        assert "V12" in codes, (
+            f"state {word!r} cleared the row — an unrecognised state is not an "
+            f"OPEN blocker, so it cannot certify one (codes: {codes})")
+    # …and the two words the schema DOES define still behave as before, so this
+    # pins the POLARITY rather than blanket-redding the arm: OPEN clears the
+    # row, CLOSED is the finding.
+    assert "V12" not in _codes(
+        record, blocker_states=_states(**{"#9075": {"state": "OPEN",
+                                                  "closed_at": None}}))
+    assert "V12" in _codes(
+        record, blocker_states=_states(
+            **{"#9075": {"state": "CLOSED",
+                         "closed_at": "2026-10-21T21:49:13Z"}}))
+
+
+def test_a_refused_run_that_measured_nothing_is_exempt():
+    """`capstone.log` is a refusal: its rows record WHY the run stopped.
+
+    Five rows, no numbers, run.status=REFUSED. Their blockers closing is what
+    the refusal was FOR — re-pointing them would be rewriting history, so the
+    arm does not apply. The exemption is bounded by the ABSENCE of a
+    measurement, not by the verdict word.
+    """
+    record = _record()                      # run.status == "REFUSED", no counts
+    assert record["run"]["status"] == "REFUSED"
+    assert all(not cvc._count(r.get("numerator")) for r in record["rows"])
+    codes = _codes(record, blocker_states=_states())
+    assert "V12" not in codes, codes
+
+
+def test_the_committed_blocker_record_covers_every_cited_blocker():
+    """The bundle's own table must be checkable, not merely unchecked.
+
+    Loaded through the real loader from the real path: a record that is missing,
+    malformed, or silent about a blocker a committed log cites turns V12 off (or
+    into a finding) for the artifact this bundle ships.
+    """
+    record_path = _REPO / cvc.BLOCKER_STATES_DEFAULT
+    assert record_path.is_file(), f"missing {record_path}"
+    states = cvc.load_blocker_states(record_path)
+    assert states["_checked_at"]
+    scored = sorted((_REPO / "docs/evidence/7949-capstone").glob(
+        "capstone-measured-*.log"))
+    assert len(scored) == 1, [p.name for p in scored]
+    table = cvc.extract_block(scored[0].read_text())
+    for row in table["rows"]:
+        if row.get("verdict") == "GREEN" or not row.get("blocked_by"):
+            continue
+        state = states.get(row["blocked_by"])
+        assert state is not None, (
+            f"{row['criterion']} cites {row['blocked_by']}, which the blocker-state "
+            "record does not cover — refresh the record")
+        assert state["state"] == "OPEN", (
+            f"{row['criterion']} cites {row['blocked_by']}, recorded "
+            f"{state['state']} ({state.get('closed_at')}) — a row must name the "
+            "blocker that still holds")
+
+
+def test_every_citation_of_the_refusal_record_names_the_rows_that_carry_it():
+    """A `cited_by` is a CLAIM about a committed record, so it is checked against it.
+
+    ⛔ BOTH entries citing the REFUSAL record were wrong, and NOTHING read them
+    (#10601 review round 9, P3 ×2 — `git grep 'cited_by' -- '*.py'` finds no pin):
+    `#5199` claimed "E3/E4" while E4's `blocked_by` is `#9077`, and `#9075`
+    claimed that record's "four UNPREREGISTERED rows" where it has TWO (E1/E2),
+    a count no row-level reading could contradict because the string named no row
+    at all. This is the file V12 reads for provenance, and the OK line prints it
+    as a verification — so a stale claim here is read AS provenance by the gate.
+
+    The rule pinned is the one that makes the claim CHECKABLE, not the one that
+    makes it pretty: a citation of the refusal record must NAME the rows it is
+    talking about, and each named row must cite THAT issue in `capstone.log`.
+    Measured pre-fix on this tree: `#5199` reds on E4 (`blocked_by` `#9077`), and
+    `#9075` reds on naming no row at all.
+
+    Only the REFUSAL record is checkable: the SUPERSEDED table's log is deleted by
+    the bundle's own supersede rule, so its citations have no in-tree artifact.
+    The population is pinned below, so a renamed marker cannot empty this out.
+    """
+    states = cvc.load_blocker_states(_REPO / cvc.BLOCKER_STATES_DEFAULT)
+    table = cvc.extract_block(LOG.read_text())
+    blocked_by = {row["criterion"]: row.get("blocked_by")
+                  for row in table["rows"]}
+    assert blocked_by, "the refusal record carries no rows to check against"
+    checked, problems = set(), []
+    for issue, entry in states.items():
+        if issue.startswith("_"):
+            continue
+        text = entry.get("cited_by") or ""
+        if "REFUSAL record" not in text:
+            continue
+        checked.add(issue)
+        named = re.findall(r"\bE\d+[ab]?\b", text)
+        if not named:
+            problems.append(
+                f"{issue} cites the REFUSAL record but names no row, so the claim "
+                f"has nothing to be checked against: {text!r}")
+            continue
+        for row in named:
+            if blocked_by.get(row) != issue:
+                problems.append(
+                    f"{issue} cites {row}, whose blocked_by is "
+                    f"{blocked_by.get(row)!r}: {text!r}")
+    assert checked == {"#5199", "#9075", "#9077"}, (
+        f"the refusal-only citations are no longer readable as such (found "
+        f"{sorted(checked)}) — the marker this pin reads was renamed or dropped")
+    assert not problems, "\n".join(problems)
+
+
+def test_a_malformed_blocker_record_is_a_usage_error_not_a_disarm(tmp_path):
+    """A present-but-broken record must not answer "no V12".
+
+    ⛔ The fixture carries a VALID `checked_at` on purpose (#10601 review round 6).
+    Without it the loader raised on the read time first, so this pin proved the
+    `checked_at` leg twice and the `blockers is a list, not an object` guard — the
+    one whose own comment names `{"blockers": []}` as the disarm V12 must refuse —
+    was exercised by NOTHING: deleting that guard left this file green, and a
+    record with a good stamp then died on an uncaught `AttributeError` (exit 1)
+    instead of the contracted exit 2. The stamp is what makes the malformation
+    under test the ONLY malformation present.
+    """
+    bad = tmp_path / "states.json"
+    bad.write_text('{"schema": "capstone-blocker-states-v1", '
+                   '"checked_at": "2026-11-02T12:00:00Z", "blockers": []}')
+    import pytest
+
+    with pytest.raises(ValueError, match="blockers is a list"):
+        cvc.load_blocker_states(bad)
+    code = cvc.main([str(LOG), "--repo", str(_REPO), "--blocker-states", str(bad)])
+    assert code == 2, code
+
+
+def test_an_unparseable_checked_at_is_a_usage_error_not_a_verification(tmp_path):
+    """The read time is PRINTED as a verification, so it has to MEAN a time.
+
+    ⛔ Measured on the review (#10537 review P2): `checked_at` was validated only
+    as non-empty text, so `"zzz-not-a-timestamp"` loaded, satisfied the
+    freshness test's lexical `>=`, and the gate exited 0 with an OK line reading
+    "every cited blocker verified zzz-not-a-timestamp". A gate that prints a
+    string it cannot parse as the time it verified the blockers is the same lie
+    V12 exists to remove, one level up.
+    """
+    import json
+
+    import pytest
+
+    for stamp in ("zzz-not-a-timestamp", "2026-11-02T12:09:48", "2026-13-45T99:99:99Z"):
+        bad = tmp_path / "states.json"
+        record = json.loads((_REPO / cvc.BLOCKER_STATES_DEFAULT).read_text())
+        record["checked_at"] = stamp
+        bad.write_text(json.dumps(record))
+        with pytest.raises(ValueError, match="checked_at"):
+            cvc.load_blocker_states(bad)
+        code = cvc.main([str(LOG), "--repo", str(_REPO),
+                         "--blocker-states", str(bad)])
+        assert code == 2, f"{stamp!r} was accepted as a read time (exit {code})"
+    # The shipped record still loads, and its stamp still parses.
+    good = cvc.load_blocker_states(_REPO / cvc.BLOCKER_STATES_DEFAULT)
+    assert _instant(good["_checked_at"]) is not None
+
+
+def test_a_state_record_that_contradicts_itself_is_a_usage_error(tmp_path):
+    """One entry cannot say both "live" and "closed at <stamp>" (#10601 review P2).
+
+    The loader guarded the WORD and never read `closed_at`, so flipping the
+    shipped `"CLOSED"` to `"OPEN"` — one edit, leaving the close instant in
+    place — satisfied V12 while the same entry went on recording WHEN the issue
+    closed. Measured pre-fix: exit 0, OK line "every cited blocker verified".
+    That is the one-character disarm this loader exists to prevent (see its own
+    docstring), so the record's self-consistency is checked here — the record is
+    V12's only input, and its consistency is the one thing the check can verify
+    without the network.
+
+    Non-vacuity: both shapes below loaded and exited 0 on the pre-fix loader.
+    """
+    import json
+
+    import pytest
+
+    for state, closed_at in (("OPEN", "2026-11-02T08:53:06Z"),
+                             ("CLOSED", None)):
+        bad = tmp_path / "states.json"
+        record = json.loads((_REPO / cvc.BLOCKER_STATES_DEFAULT).read_text())
+        record["blockers"]["#9738"] = dict(record["blockers"]["#9738"],
+                                           state=state, closed_at=closed_at)
+        bad.write_text(json.dumps(record))
+        with pytest.raises(ValueError, match="#9738"):
+            cvc.load_blocker_states(bad)
+        code = cvc.main([str(LOG), "--repo", str(_REPO),
+                         "--blocker-states", str(bad)])
+        assert code == 2, (f"{state} with closed_at={closed_at!r} was accepted "
+                           f"as a consistent record (exit {code})")
+    # The SHIPPED record satisfies both invariants, so this changes no committed
+    # state: every OPEN entry carries `null`, every CLOSED entry a stamp.
+    shipped = json.loads((_REPO / cvc.BLOCKER_STATES_DEFAULT).read_text())
+    assert shipped["blockers"], "the shipped record must still carry entries"
+    for key, value in shipped["blockers"].items():
+        if value["state"] == "OPEN":
+            assert value.get("closed_at") is None, key
+        else:
+            assert value.get("closed_at"), key
+    cvc.load_blocker_states(_REPO / cvc.BLOCKER_STATES_DEFAULT)
+
+
+def test_the_ok_line_names_the_blocker_verification():
+    """The OK line is where the gate lied; it must state what it checked.
+
+    ⛔ AND IT MUST STATE WHICH ARM RAN (#10601 review round 2). Asserting only
+    `"blocker states:" in out` plus the record's `checked_at` is satisfied by ALL
+    THREE branches of the line, so the two honesty arms — the EXEMPT count and
+    the NOT-VERIFIED warning — were exercised by nothing: measured, with
+    `blockers_exempt` never incrementing (the pre-fix sentence over
+    `capstone.log`'s five CLOSED blockers) the old assertions still passed. The
+    exempt arm is pinned here from the SAME `main()` run that prints it.
+    """
+    import io
+    from contextlib import redirect_stdout
+    record_path = _REPO / cvc.BLOCKER_STATES_DEFAULT
+    states = cvc.load_blocker_states(record_path)
+    # (a) the SCORED log: the "every cited blocker verified" arm
+    buf = io.StringIO()
+    # ⛔ THE SCORED LOG IS DISCOVERED, NEVER NAMED (#10601 review P2). This line
+    # read `capstone-measured-9152448d.log` by hand, and the bundle's OWN
+    # sanctioned remedy — a re-run writes `capstone-measured-<new-head8>.log`
+    # and DELETES the file it supersedes (`check_single_measured_log`, stated in
+    # README.md) — would have redded this pin on a FILENAME: `main()` returns 2
+    # for the missing path. That is the same defect the sibling disclosure pin
+    # stood down for in round 3, turned on a strictly MORE correct artifact.
+    # Discover it the way the three neighbouring pins do, so what is pinned is
+    # the arm (the OK line's three branches), not this run's name.
+    scored = sorted((_REPO / "docs/evidence/7949-capstone").glob(
+        "capstone-measured-*.log"))
+    assert len(scored) == 1, [p.name for p in scored]
+    with redirect_stdout(buf):
+        code = cvc.main([str(scored[0]), "--repo", str(_REPO)])
+    assert code == 0, code
+    out = buf.getvalue()
+    assert "blocker states:" in out, out
+    assert states["_checked_at"] in out, out
+    assert "every cited blocker verified" in out, out
+    assert "EXEMPT" not in out, out
+    # (b) the REFUSAL log: the EXEMPT arm, with the count the arm itself set
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        code = cvc.main([str(LOG), "--repo", str(_REPO)])
+    assert code == 0, code
+    out = buf.getvalue()
+    assert "are EXEMPT" in out, out
+    assert "5 row(s) are EXEMPT" in out, (
+        f"the OK line no longer counts the exempt rows it skipped: {out}")
+    assert "every cited blocker verified" not in out, (
+        "the OK line claims a verification it did not perform over exempt rows "
+        f"— this is the exact sentence V12 exists to remove: {out}")
+
+
+def test_the_absent_record_arm_is_LOUD_and_is_the_only_place_it_shows(tmp_path):
+    """No record and no `--blocker-states` must SAY SO — and say nothing else.
+
+    The absent-record path is the PR's stated design (exit 0, V12 inert), so the
+    OK line's warning is the ONLY thing carrying it: a green `✅ … structurally
+    sound` with no `NOT verified` clause would be indistinguishable from a table
+    whose blockers were all checked (#10601 review round 2 — the arm had no pin
+    at all). The bundle is copied to a throwaway repo WITHOUT the record so the
+    default path genuinely does not resolve.
+    """
+    import io
+    import shutil
+    from contextlib import redirect_stdout
+    bundle = _REPO / "docs/evidence/7949-capstone"
+    dest = tmp_path / "docs/evidence/7949-capstone"
+    dest.mkdir(parents=True)
+    for name in ("capstone.log", "preregistration.json"):
+        src = bundle / name
+        if src.exists():
+            shutil.copy(src, dest / name)
+    assert not (dest / cvc.BLOCKER_STATES_DEFAULT.name).exists()
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        code = cvc.main([str(LOG), "--repo", str(tmp_path)])
+    out = buf.getvalue()
+    assert code == 0, (code, out)
+    assert "NOT verified" in out, (
+        "with no blocker-state record the gate printed the ordinary OK line — "
+        f"a reader cannot tell V12 never ran: {out}")
+    assert "every cited blocker verified" not in out, out
+
+
+def test_an_unreadable_record_at_the_default_path_is_exit_2_not_an_absent_one(tmp_path):
+    """`is_file()` is not "is the path free" (#10601 review round 3, P1).
+
+    ⛔ MEASURED ON THE REVIEW, and it is a B2-class disarm of the arm this PR
+    adds. The presence test was ``states_path.is_file()``, so a DIRECTORY, a
+    FIFO or a DANGLING SYMLINK at ``blocker-states.json`` made it False — the
+    loader was never called, ``blocker_states`` stayed ``None``, V12 did not
+    apply, and the gate exited 0 printing "no …blocker-states.json" over a path
+    that EXISTS. The SAME path named through ``--blocker-states`` exited 2, so
+    one unreadable record got two verdicts decided by how the path was spelled.
+    ``os.path.lexists`` makes anything that was PUT there the exit 2 this arm's
+    docstring promises; only a path with nothing at it is the documented
+    absent-record arm (pinned separately, and asserted here as the control).
+
+    Non-vacuity: with the pre-fix ``is_file()`` test the directory and the
+    dangling symlink both return 0 and both print "NOT verified".
+    """
+    import io
+    import os
+    import shutil
+    from contextlib import redirect_stderr, redirect_stdout
+    bundle = _REPO / "docs/evidence/7949-capstone"
+    dest = tmp_path / "docs/evidence/7949-capstone"
+    dest.mkdir(parents=True)
+    for name in ("capstone.log", "preregistration.json"):
+        src = bundle / name
+        if src.exists():
+            shutil.copy(src, dest / name)
+    record = dest / cvc.BLOCKER_STATES_DEFAULT.name
+
+    def gate():
+        buf, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(buf), redirect_stderr(err):
+            code = cvc.main([str(LOG), "--repo", str(tmp_path)])
+        return code, buf.getvalue(), err.getvalue()
+
+    # 1. A DIRECTORY at the record's path. Committable as `blocker-states.json/.keep`.
+    record.mkdir()
+    (record / ".keep").write_text("")
+    code, out, err = gate()
+    assert code == 2, (
+        "a DIRECTORY at the default blocker-states path was read as 'no record' "
+        f"and the gate exited {code} — V12 was disarmed by the path's TYPE: {out}")
+    assert "NOT verified" not in out, out
+    shutil.rmtree(record)
+
+    # 2. A DANGLING SYMLINK at the same path — nothing to read, but something
+    #    was put there, and it is not the absent arm.
+    os.symlink(str(tmp_path / "nope.json"), record)
+    code, out, err = gate()
+    assert code == 2, (
+        "a DANGLING SYMLINK at the default blocker-states path was read as 'no "
+        f"record' and the gate exited {code}: {out}")
+    record.unlink()
+
+    # 3. ⛔ AN UNREADABLE ANCESTOR IS NOT AN ABSENT RECORD (#10601 review round
+    # 4, P1). `os.path.lexists` swallowed every OSError from `lstat`, so one
+    # `chmod 000` on the enclosing DIRECTORY made a valid on-disk record read as
+    # "no record": V12 disarmed, exit 0, and a sentence asserting the file is
+    # absent over a file that was right there — the round-3 class, one
+    # indirection lower. Only ENOENT may take the absent arm.
+    (record.parent).chmod(0o000)
+    try:
+        code, out, err = gate()
+    finally:
+        record.parent.chmod(0o755)
+    assert code == 2, (
+        "an UNREADABLE ANCESTOR directory was read as 'no record' and the gate "
+        f"exited {code} — V12 was disarmed by a permission bit one level up: "
+        f"{out}{err}")
+    assert "NOT verified" not in out, out
+
+    # 4. ⛔ A NON-REGULAR FILE MUST NOT BE OPENED (#10601 review round 5, P2).
+    # A FIFO at the record path made `read_text()` BLOCK with no writer: no exit
+    # code, no output, a CI job wedged until its timeout — while the comment
+    # beside the arm claimed the whole class exits 2. No pipe writer is created
+    # here on purpose: if the guard regresses, this test hangs rather than
+    # failing a string compare, which is the honest signal for a hang.
+    os.mkfifo(record)
+    try:
+        code, out, err = gate()
+    finally:
+        record.unlink()
+    assert code == 2, (
+        "a FIFO at the record path was opened instead of refused: "
+        f"exit {code}, {out}{err}")
+    assert "not a regular file" in err, err
+
+    # 5. ⛔ AN EMPTY --blocker-states IS NOT AN ABSENT ONE (#10601 review round
+    # 5, P3). `args.blocker_states` was tested for truthiness, so
+    # `--blocker-states "$RECORD"` with RECORD unset silently fell back to the
+    # COMMITTED DEFAULT and the OK line claimed a verification of a file the
+    # caller never named.
+    buf, err = io.StringIO(), io.StringIO()
+    with redirect_stdout(buf), redirect_stderr(err):
+        code = cvc.main([str(LOG), "--repo", str(tmp_path), "--blocker-states", ""])
+    assert code == 2, (
+        "an EMPTY --blocker-states fell back to the committed record instead of "
+        f"failing closed: exit {code}, {buf.getvalue()}")
+    assert "every cited blocker verified" not in buf.getvalue(), buf.getvalue()
+
+    # 6. CONTROL — genuinely nothing at the path is still the documented arm.
+    assert not os.path.lexists(record), "the control needs the path to be empty"
+    code, out, _ = gate()
+    assert code == 0 and "NOT verified" in out, (
+        "the absent-record arm stopped being the loud exit-0 the bundle states: "
+        f"{code} {out}")
+
+
+def test_a_refused_run_whose_row_carries_a_measurement_is_not_exempt():
+    """The exemption needs ALL THREE legs, and this is the one that was missing.
+
+    Measured on the review (#10537 P2): flipping `run.status` to REFUSED and
+    nulling two measured rows' counts carried two CLOSED blockers past every
+    other arm — V6 passed, V7's measurement arm passed (the corpus digest was
+    present) and only V10's E4-specific arm redded. So a row that says
+    `evidence_kind: "measurement"` is NOT a refusal, whatever the run block says.
+    """
+    record = _record()                       # REFUSED, refusal kind, no counts
+    record["rows"] = [dict(r) for r in record["rows"]]
+    record["rows"][0]["evidence_kind"] = "measurement"
+    assert record["run"]["status"] == "REFUSED"
+    assert "V12" in _codes(record, blocker_states=_states())
+
+
+def test_a_refused_run_row_that_carries_numbers_is_not_exempt():
+    """A counted row asserts a result, so its blocker's state is checkable.
+
+    ⛔ THE TYPE OF THE NUMBER IS NOT A LICENCE TO SKIP THE CHECK (#10537 review
+    P2). This leg was ``not _count(num) and not _count(den)``, and ``_count``
+    deliberately refuses a float/string/bool — so the SAME measurement written
+    as ``157.0`` read as "measured nothing" and the row was exempted. Reproduced
+    on the shipped table: `E4`/`E5` re-pointed at the CLOSED blockers reded V12
+    as integers and passed as floats. Every present value is a claim, so every
+    one of these must red.
+    """
+    # ⛔ BOTH CELLS MUST CARRY THE NON-COUNT VALUE (#10601 review P2). This
+    # loop used to vary only `numerator` and pin `denominator=2` — an INT — and
+    # that made the pin VACUOUS: the pre-fix predicate `not _count(num) and not
+    # _count(den)` was `not _count(value) and not True` = False on all seven
+    # iterations, i.e. the row was not exempt under EITHER predicate, V12 fired
+    # for an unrelated reason, and reverting `_blocker_exempt` left the suite
+    # green. The hole the fix names is a row whose BOTH cells are `157.0 / 397.0`
+    # — so the pair (not the numerator alone) is what has to vary, and the
+    # shipped floats are the case that must be present. Measured after the fix:
+    # the float/string/bool/`""` pairs are EXEMPT under the old predicate (V12
+    # silent → this assert reds) and checked under `is None`; the int pairs are
+    # the control that a genuinely counted row was being checked all along.
+    for num, den in ((1, 2), (1.0, 2.0), ("1", "2"), (True, True),
+                     (0, 2), (0.0, 2.0), ("", "2"), (157.0, 397.0)):
+        record = _record()
+        record["rows"] = [dict(r) for r in record["rows"]]
+        record["rows"][0].update(numerator=num, denominator=den)
+        assert "V12" in _codes(record, blocker_states=_states()), (
+            f"numerator={num!r} ({type(num).__name__}), denominator={den!r} "
+            f"({type(den).__name__}) was EXEMPTED — a row that carries "
+            "anything in its count cells asserts a result, and the blocker's "
+            "state is checkable against it")
+    # The predicate ITSELF, asked directly: a V12 above can fire for another
+    # row's reason, so the leg this test names is also asserted where it lives.
+    refused = {"status": "REFUSED"}
+    assert cvc._blocker_exempt(refused, "refusal", 157.0, 397.0) is False, (
+        "the shipped measurement written as floats (157.0 / 397.0) is exempt — "
+        "the blocker check switches off on a numeric TYPE")
+    assert cvc._blocker_exempt(refused, "refusal", None, None) is True, (
+        "genuine absence (the shipped `capstone.log` rows are `null`/`null`) "
+        "stopped being the refusal shape")
+    # Only genuine ABSENCE is the refusal record's shape (the shipped
+    # `capstone.log` rows are `null`/`null`), and that stays exempt.
+    record = _record()
+    record["rows"] = [dict(r) for r in record["rows"]]
+    record["rows"][0].update(numerator=None, denominator=None)
+    assert "V12" not in _codes(record, blocker_states=_states())
+
+
+def test_a_refused_run_whose_RECORD_still_carries_a_measurement_is_not_exempt():
+    """The row's two cells are not the record's reader (#10601 review P1).
+
+    ⛔ MEASURED ON THE REVIEW, and it was a FAIL-OPEN in the arm this PR adds.
+    ``_blocker_exempt`` read only ``row["numerator"]``/``row["denominator"]``, and
+    the SAME one-field edit that nulls them (``evidence_kind: "refusal"``) also
+    turns V10's receipt arm off. A copy of the shipped scored log with E4 set to
+    ``verdict: BLOCKED``, ``evidence_kind: "refusal"``, both counts ``null`` and
+    ``blocked_by: "#8503"`` (CLOSED 2026-10-24) therefore EXITED 0 — printing
+    "structurally sound … 1 row(s) are EXEMPT" — while ``run.e4_receipt`` still
+    carried ``{"numerator": 2, "denominator": 15}`` and ``run.steps_observed``
+    still listed all eight steps. The measurement was in the same record and V12
+    never looked at it.
+
+    The repair is that the RUN block is read too: a record that still holds a
+    counted receipt or a non-empty step list is not a refusal that measured
+    nothing. Non-vacuity: with ``_record_carries_a_measurement`` returning False
+    unconditionally, the first assertion reds (the row is exempted).
+    """
+    # The predicate, asked directly, on the three shapes that must differ.
+    measured = {"status": "REFUSED",
+                "e4_receipt": {"numerator": 2, "denominator": 15}}
+    assert cvc._blocker_exempt(measured, "refusal", None, None) is False, (
+        "a REFUSED run whose e4_receipt still carries 2/15 was EXEMPTED — the "
+        "measurement is in the record and V12 must read it")
+    witnessed = {"status": "REFUSED", "steps_observed": ["S0", "S1"]}
+    assert cvc._blocker_exempt(witnessed, "refusal", None, None) is False, (
+        "a REFUSED run that still lists observed steps was EXEMPTED")
+    # ⛔ AND NOT JUST THE TWO KEYS THE FIRST FIX NAMED (#10601 review round 2,
+    # P1). Round 1's repair read `e4_receipt` and `steps_observed` only, so
+    # EMPTYING exactly those two and flipping status/evidence_kind still exited 0
+    # over five CLOSED blockers while the record's own census stayed behind
+    # (`sessions` 7 / `sum(extracted) = 150`, all eight `step_witnesses`,
+    # `e5_rescore.raw_recovery = 0.48`, `e1_e2_artifact.after_share = 0.6`).
+    # Every one of the emitter's measurement keys must refuse the exemption on
+    # its own — that is the whole point of deriving the set from the emitter.
+    for key, value in (
+            ("sessions", [{"session_id": "wp01", "extracted": 25}]),
+            ("step_witnesses", {"S5": "the graph write landed"}),
+            ("e3_census", {"anchored": 157, "derived": 397}),
+            ("e4_receipt", {"numerator": 2, "denominator": 15}),
+            ("e5_rescore", {"raw_recovery": 0.48}),
+            ("e1_e2_artifact", {"after_share": 0.6}),
+            ("errors", ["boom"]),
+    ):
+        run = {"status": "REFUSED", key: value}
+        assert cvc._blocker_exempt(run, "refusal", None, None) is False, (
+            f"a REFUSED run whose `{key}` still carries a measurement was "
+            "EXEMPTED — emptying the two keys the first fix named is a "
+            "one-field disarm of V12")
+    # Only a record with NEITHER is the refusal shape — which is what the
+    # shipped `capstone.log` is (verified: it carries neither key).
+    refusal = {"status": "REFUSED", "e4_receipt": None, "steps_observed": []}
+    assert cvc._blocker_exempt(refusal, "refusal", None, None) is True, (
+        "a genuine refusal record (no receipt, no observed steps) stopped being "
+        "the exempt shape the shipped `capstone.log` relies on")
+
+    # And on the SHIPPED record: the scored log really does carry both keys, so
+    # the reads above are not empty on the artifact this repository ships.
+    scored = sorted((_REPO / "docs/evidence/7949-capstone").glob(
+        "capstone-measured-*.log"))
+    assert len(scored) == 1, [q.name for q in scored]
+    table = cvc.extract_block(scored[0].read_text())
+    assert cvc._record_carries_a_measurement(table["run"]) is True, (
+        "the shipped scored log's run block no longer reads as a measurement — "
+        "re-derive this pin")
+    # …and the shipped REFUSAL record does not, which is why V12 keeps its five
+    # rows exempt instead of rewriting the history of a refusal.
+    refusal = cvc.extract_block(LOG.read_text())
+    assert cvc._record_carries_a_measurement(refusal["run"]) is False, (
+        "the shipped `capstone.log` refusal now reads as carrying a measurement "
+        "— its five rows would red V12 on historical causes")
+
+
+def test_the_blocker_record_was_refreshed_with_the_log_it_covers():
+    """`checked_at` older than the log it judges is the same decay, one level up.
+
+    V12's states are a committed snapshot, so the snapshot can itself go stale —
+    a blocker closing after the read makes the gate say "verified <old date>"
+    while the row's cause is gone. The cheapest honest bound needs no network:
+    the record must have been read no earlier than the newest SCORED log was
+    generated, i.e. the two were refreshed together. V12 then reports the read
+    time on its OK line, so the residual (a blocker closing between that read
+    and today) is visible rather than silent (#10537 review P2).
+    """
+    states = cvc.load_blocker_states(_REPO / cvc.BLOCKER_STATES_DEFAULT)
+    scored = sorted((_REPO / "docs/evidence/7949-capstone").glob(
+        "capstone-measured-*.log"))
+    assert len(scored) == 1, [p.name for p in scored]
+    generated = re.search(r"^# generated: (\S+)$", scored[0].read_text(),
+                          re.MULTILINE)
+    assert generated, scored[0].name
+    checked = states["_checked_at"]
+    # ⛔ COMPARE INSTANTS, NOT STRINGS (#10537 review P2). A lexical `>=` accepts
+    # any text that sorts late, so `"zzz-not-a-timestamp"` satisfied this test
+    # while the gate printed it on the OK line as a verification time. The
+    # loader now refuses an unparseable stamp (exit 2); this comparison is what
+    # makes the freshness BOUND a bound.
+    assert _instant(checked) >= _instant(generated.group(1)), (
+        f"the blocker-state record was read at {checked}, BEFORE the scored log "
+        f"was generated at {generated.group(1)} — the two describe different "
+        "trees; refresh and re-measure together")
 
 # ── V5's step ACCOUNTING (#10215) ────────────────────────────────────────────
 #

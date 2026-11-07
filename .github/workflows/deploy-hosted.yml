@@ -344,8 +344,39 @@ jobs:
           cols = table_columns()
           missing = sorted(c for c in ("node_key", "amount_minor") if c not in cols["point"])
           assert not missing, f"record schema stale in container: public.point missing {missing}"
+          # #10663: the PLACEMENT TABLE must resolve inside the image too — and it
+          # is the one runtime contract the image deliberately does NOT carry as a
+          # doc. `cache_projection` reads the record property namespace from
+          # `docs/epics/.../02-identity-and-placement.md`, which this Dockerfile
+          # does not COPY, so before the packaged carrier every `record-reconcile`
+          # / `record-restore` run refused in production with "the placement table
+          # is not on disk at /app/docs/…" wrapped as "the record is unreadable"
+          # (exit 2, divergence UNKNOWN) while CI read green from a checkout that
+          # HAS `docs/`. Asserted as a RUNTIME READ, not a file presence check:
+          # the failure was the read, and a carrier that ships unreadable would
+          # pass a presence check.
+          # ⛔ NO APOSTROPHE MAY APPEAR BELOW: this whole program is one
+          # SINGLE-QUOTED shell argument, so a stray apostrophe ends it early and
+          # turns the step into a bash syntax error that actionlint cannot see
+          # (the repo runs it with `-shellcheck=`). Verified with `bash -n` on
+          # the step body — the check this block was first written without.
+          from tortoise.cache_projection import (
+              PACKAGED_PLACEMENT_TABLE, placement_columns,
+          )
+          assert not Path("/app/docs").exists(), (
+              "this smoke only proves the packaged carrier when the docs tree is "
+              "absent — the image grew a docs/ COPY and the assertion is now "
+              "vacuous")
+          assert PACKAGED_PLACEMENT_TABLE.exists(), (
+              f"no packaged placement table at {PACKAGED_PLACEMENT_TABLE} — the "
+              "image cannot read the record property namespace (#10663)")
+          placement = placement_columns()
+          got = placement.get("point", {}).get("point_kind")
+          assert got == "pointKind", (
+              "placement table did not resolve in-container: got " + repr(got))
           print(f"hosted image pack smoke OK: {len(reg.packs)} >= {bound}")
           print("hosted image record-schema smoke OK: public.point read from the COPYd migrations")
+          print("hosted image placement-table smoke OK: record property namespace resolves without docs/")
           '
       # ── Out-of-band failure alert (#2240) ──────────────────────────────
       # A failure HERE leaves `deploy-api` skipped, i.e. the deploy is blocked
@@ -956,6 +987,123 @@ jobs:
           TURNSTILE_SECRET_KEY: ${{ secrets.TURNSTILE_SECRET_KEY }}
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
         run: |
+          # ⛔ #11122 — THE MITIGATION LEDGER, APPLIED TO THE ENVIRONMENT *FIRST*.
+          #
+          # This must run BEFORE the payload is composed, not only over the finished
+          # ARGS. Every `ARGS+=` below asserts a DESIRED STATE ("if the GitHub
+          # secret exists, the Fly secret must too"), which cannot tell "nobody
+          # configured this" from "an operator removed it 40 minutes ago as the only
+          # thing keeping production healthy". Measured 2026-11-05/06: with
+          # SENTRY_DSN unset as the live mitigation for #11092's serialization
+          # storm, deploys 42117073101 and 42135045025 each PUT IT BACK, on builds
+          # (46ea687dc, c3af2d0188) that provably did not contain the fix.
+          #
+          # ⛔ A TAIL-ONLY FILTER IS NOT ENOUGH, AND THE HOLE IS NOT COSMETIC. The
+          # payload does not merely copy env vars into ARGS: it COMPOSES derived
+          # values from them — `BACKUP_SWEEP_ENABLED=true` only when a conjunction
+          # of nine secrets is present, and the `::warning::`/`::notice::` emitted
+          # from `[ -z "$OPENROUTER_API_KEY" ]`. Filtering at the tail left those
+          # computed from the UNFILTERED values, so a ledger entry for
+          # `TORTOISE_BACKUP_KEY` shipped `BACKUP_SWEEP_ENABLED=true` in the same
+          # argv that did NOT carry the key: at boot `tortoise/backup_config.py`
+          # raises a ConfigError whose text asserts the now-FALSE invariant, the
+          # alert channel swallows it, and the backup sweep plus the staleness
+          # watcher start disabled with only a warning. The `OPENROUTER_API_KEY`
+          # branch was worse in the other direction — it never ran, so a payload
+          # that omits the key was staged with NO warning at all. ⛔ The versioned
+          # model DEFAULT is not part of that arm: it is selected by
+          # `TORTOISE_SESSION_LLM_MODEL` (below, and runbook §8.1), not by the key.
+          # What the tail-only filter suppressed there was the WARNING (#11332).
+          #
+          # So the ledgered names are BLANKED in the environment here, and every
+          # downstream `[ -n ]`, conjunction and default observes the deliberate
+          # absence. ⛔ BLANKED, NOT `unset`: the provenance gate classifies this
+          # payload under `bash -e -u`, where an unset variable makes the next
+          # `[ -n "$X" ]` an "unbound variable" abort — a classification failure
+          # that would block every deploy with a ledger entry. `printf -v` is a
+          # bash builtin, so it also satisfies the builtins-only rule below.
+          #
+          # The set is applied to ARGS again at the tail. That is the belt, not the
+          # mechanism, and it is load-bearing for the RENAMED PAIR: where a Fly name is
+          # fed by a GitHub secret of a DIFFERENT name (`GITHUB_CLIENT_ID` ←
+          # `GH_CLIENT_ID`, `SUPABASE_SERVICE_ROLE_KEY` ← `SUPABASE_SERVICE_KEY`;
+          # `fly-managed-secrets.txt` line 27 documents the class), blanking the FLY
+          # name above does not blank the SOURCE variable the compose line reads — so
+          # the line still stages the name and only the tail removes it. The gate
+          # proves the name did not reach the payload either way.
+          # ⛔ KNOWN RESIDUAL, stated rather than implied: for a renamed pair the
+          # SIBLING names a compose guard emits are still staged, and a guard that
+          # READS the source (`[ -z "$GH_CLIENT_ID" ]`) still sees the source present,
+          # so its warning does not fire. The mitigation itself — the recorded name is
+          # not staged — holds for every class; only that warning is not reached.
+          #
+          # `$FLY_MITIGATION_LEDGER` is a seam for that same harness; a real deploy
+          # takes the default, resolved from the run's cwd (the workspace root).
+          MITIGATED=" "
+          MITIGATION_LEDGER="${FLY_MITIGATION_LEDGER:-${GITHUB_WORKSPACE:-.}/.github/scripts/fly-secret-mitigations.txt}"
+          # ⛔ AN UNREADABLE LEDGER FAILS THE DEPLOY; IT IS NEVER READ AS "NO MITIGATIONS".
+          # The gate step above refuses the same state (exit 2), so this arm is the
+          # second reader of one rule, not a replacement for it — but a bare
+          # `if [ -r … ]; then … fi` with no `else` made a ledger-path divergence
+          # (a moved file, a wrong `$GITHUB_WORKSPACE`) a SILENT no-op that stages
+          # every mitigated secret while the provenance gate reports green (review
+          # round 2, P2). The gate's suppression proof is a simulation of this
+          # payload; failing loudly here keeps the production path from diverging
+          # from the thing that proves it.
+          #
+          # ⛔ `-f` AS WELL AS `-r`, BECAUSE `-r` IS TRUE FOR A DIRECTORY. `[ -r ]`
+          # cannot tell a ledger from a directory at the same path, and the loop's
+          # input redirect then fails in a way `bash -e` does NOT act on: measured
+          # `bash -e` with `done < <dir>` prints `read error: 0: Is a directory`,
+          # SKIPS the loop body and exits **0** with `MITIGATED=" "` — every
+          # mitigated secret staged, nothing failed. That is the exact state the
+          # paragraph above claims the guard rules out, so the guard has to name
+          # it. (The harness's `bash -e -u` catches it as an unbound `$LEDGER_LINE`;
+          # production runs `-e` only, which is why the claim and the code disagreed
+          # — #11332 review.)
+          if [ ! -f "$MITIGATION_LEDGER" ] || [ ! -r "$MITIGATION_LEDGER" ]; then
+            echo "::error::#11122 — the mitigation ledger could not be read as a FILE at ${MITIGATION_LEDGER} (missing, unreadable, or a directory), so this deploy cannot tell a deliberate absence from an unconfigured secret and must not stage anything. Restore the file (or the path) and re-run."
+            exit 1
+          fi
+          # The redirect is opened on a DEDICATED, FIXED fd (4) with its own failure
+          # check rather than inline on `done`, so an unopenable ledger is a hard
+          # failure instead of a skipped loop.
+          # ⛔ FIXED, NOT `exec {LEDGER_FD}<` — the auto-allocated form is a **bash
+          # ≥ 4.1** feature and it is the only thing in this block that needs anything
+          # newer than bash 3.2: stock macOS `/bin/bash` is 3.2, `shutil.which("bash")`
+          # in the provenance gate finds it, and every classification on a developer
+          # box then dies at `exec: {LEDGER_FD}: not found` (rc 127) — surfacing as an
+          # unrelated "unreadable ledger" over tests that never touch the ledger
+          # (#11332 review). The bash manual's own caveat about the dynamic form is
+          # that it allocates fd ≥ 10, and "redirections using file descriptors greater
+          # than 9 should be used with care, as they may conflict with file
+          # descriptors the shell uses internally". A fixed 4 is identical on bash
+          # 3.2 … 5.x. Locally: `/bin/bash -c 'echo $BASH_VERSINFO'` prints the floor
+          # this block now runs under.
+          # ⛔ NOT fd 3: the provenance gate classifies this payload by executing it
+          # under a wrapper that has ALREADY opened fd 3 as the stub binaries'
+          # write channel (`exec 3>argv.records`). Reusing THAT fd silently
+          # re-points the channel and the classification loses the argv it reads —
+          # a fork-free way to break the gate while looking tidier. fd 4 is opened by
+          # nothing else in this `run:` block, in the runner's shell, or in the
+          # harness's wrapper (pinned by
+          # `tests/test_deploy_workflow.py::test_the_ledger_fd_is_fixed_and_avoids_the_stub_channel`).
+          # ⛔ AND `-f` IS STILL REQUIRED: `exec 4<` SUCCEEDS on a DIRECTORY
+          # (measured — `open(2)` on a directory is permitted), so the fd form alone
+          # does not rule a directory out.
+          exec 4< "$MITIGATION_LEDGER" || {
+            echo "::error::#11122 — the mitigation ledger at ${MITIGATION_LEDGER} could not be opened for reading, so this deploy cannot tell a deliberate absence from an unconfigured secret and must not stage anything."
+            exit 1
+          }
+          while IFS= read -r LEDGER_LINE || [ -n "$LEDGER_LINE" ]; do
+            case "$LEDGER_LINE" in ''|'#'*) continue ;; esac
+            LEDGER_NAME="${LEDGER_LINE%%[[:space:]]*}"
+            case "$LEDGER_NAME" in ''|'#'*) continue ;; esac
+            MITIGATED="$MITIGATED$LEDGER_NAME "
+            printf -v "$LEDGER_NAME" '%s' ''
+          done <&4
+          exec 4<&-
+          # ⛔ #11122 — END OF THE ENVIRONMENT BLOCK. The payload composition follows.
           ARGS=(FASTAPI_INTERNAL_KEY="$FASTAPI_INTERNAL_KEY" TORTOISE_SECRET_PEPPER="$TORTOISE_SECRET_PEPPER" FALKORDB_CLOUD_URI="$FALKORDB_CLOUD_URI")
           # #2208: TORTOISE_GIT_SHA — the exact deploy commit, exposed by GET
           # /v1/version so clients/skills can detect an outdated server.
@@ -1159,6 +1307,42 @@ jobs:
           # fails open (signup works, warning logged), matching the optional
           # env-gated feature pattern.
           [ -n "$TURNSTILE_SECRET_KEY" ] && ARGS+=(TURNSTILE_SECRET_KEY="$TURNSTILE_SECRET_KEY")
+          # ⛔ #11122 — THE MITIGATION LEDGER, APPLIED TO THE PAYLOAD (THE BELT).
+          #
+          # The environment block at the TOP of this step already blanked every
+          # ledgered name, so the compose lines above never saw them and the derived
+          # values (`BACKUP_SWEEP_ENABLED`, the versioned model default) are
+          # consistent. This pass is the belt on top of that mechanism, and it is NOT
+          # redundant: for a RENAMED PAIR (`GITHUB_CLIENT_ID` ← `GH_CLIENT_ID`) the
+          # environment block blanks the Fly name while the compose line still reads the
+          # differently-named SOURCE, so the line stages the name and only this pass
+          # removes it. (An earlier draft justified this with
+          # `TORTOISE_SESSION_LLM_MODEL`, which is unreachable — it is declared
+          # `workflow`, and the ledger refuses any non-`gh-secret:` source.) A gate
+          # that merely warned would be a
+          # FALSE EXCEPTION — the measured Argo CD trap, where `ignoreDifferences`
+          # quiets the report while the sync still applies the desired value — so the
+          # exception is enforced where the WRITE happens, and
+          # `.github/scripts/check-fly-secret-drift.py` proves this filter suppressed
+          # the name (a ledger entry the payload still carries FAILS the deploy), so
+          # the two halves cannot rot apart. ⛔ Its bound, stated rather than implied:
+          # the gate proves the name does not reach the ARGV. That the ENVIRONMENT
+          # block at the top ran FIRST — so derived values saw the absence — is
+          # enforced by POSITION and pinned by
+          # `tests/test_fly_secret_drift.py::test_the_ledger_ENVIRONMENT_block_precedes_the_payload_composition`,
+          # not by the gate; a reordering that kept the argv clean would pass it.
+          STAGED_ARGS=()
+          for ARG in "${ARGS[@]}"; do
+            ARG_NAME="${ARG%%=*}"
+            case "$MITIGATED" in
+              *" $ARG_NAME "*)
+                echo "::notice::#11122 — $ARG_NAME is recorded as DELIBERATELY ABSENT in ${MITIGATION_LEDGER}; this deploy stages nothing for it (delete the entry to resume managing it)"
+                continue
+                ;;
+            esac
+            STAGED_ARGS+=("$ARG")
+          done
+          ARGS=("${STAGED_ARGS[@]}")
           flyctl secrets set --stage "${ARGS[@]}" --app tortoise-y4mjjq
       - name: Deploy (retry through Fly lease/API races)
         id: deploy

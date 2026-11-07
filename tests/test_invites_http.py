@@ -124,6 +124,15 @@ def quiesced_invite_ghost_sweep(monkeypatch):
     delete them — the same quiescing ``tests/test_export_delete.py`` does for
     its directly seeded rows (#3472). Declared BEFORE ``client`` in a test's
     signature so the patch lands before the lifespan arms the boot task.
+
+    ⛔ The RACE IS NOT LIMITED TO RAW ``reg.query`` SEEDS (measured on
+    #10737's CI, `test (b)` of run 41722551813): a test that reaches a
+    terminal state through the PRODUCT — mint an invite, then advance its
+    ``expires_at`` into the past — leaves the same sweep-eligible
+    ``invite-*`` placeholder behind, so it races the same live task and reds
+    ``assert 0 == 1`` when the sweep wins. Any arm that expires (or otherwise
+    terminals) an invite and then asserts on the member list must declare
+    this fixture, whichever door it used to get there.
     """
     from tortoise import hosted_api as _ha
 
@@ -1321,11 +1330,20 @@ class TestExpiredInviteReMint:
             f"{r.status_code}: {r.text})")
         assert r.json()["invite_id"] != inv["invite_id"]
 
-    def test_remint_after_expiry_sweeps_the_expired_placeholder(self, client,
-                                                                reg):
+    def test_remint_after_expiry_sweeps_the_expired_placeholder(
+            self, quiesced_invite_ghost_sweep, client, reg):
         """Indicator 1 (live): the re-mint itself is the terminal-state
         sweep for that email — the expired invite's placeholder must not
-        survive beside the new one."""
+        survive beside the new one.
+
+        ⛔ ``quiesced_invite_ghost_sweep`` is LOAD-BEARING, not decoration:
+        ``self._expire`` moves ``expires_at`` into the past, which makes the
+        placeholder sweep-eligible, so the boot/hourly retention task may
+        delete it before the pre-remint assert runs — the arm then reds
+        ``assert 0 == 1`` on a tree with no defect (#10737 `test (b)`, run
+        41722551813). The arm is about the RE-MINT sweeping, not about the
+        background task, so the background task is pinned off.
+        """
         inv = self._mint(client, reg)
         self._expire(reg, inv["invite_id"])
         assert len(self._ghost_rows(client)) == 1

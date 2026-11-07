@@ -960,6 +960,8 @@ def test_every_workspace_level_tool_is_excluded_by_derivation():
     import re
     from pathlib import Path
 
+    from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
+
     source = Path(mcp_server.__file__).read_text()
     callers = set()
     current = None
@@ -970,7 +972,20 @@ def test_every_workspace_level_tool_is_excluded_by_derivation():
         if "_reject_graph_bound_mcp_org_surface(" in line and current:
             callers.add(current)
     assert callers, "the derivation found no callers — it cannot fail, so it proves nothing"
-    missing = sorted(callers - mcp_auth.GRAPH_ARGUMENT_EXCLUDED)
+    # Restrict to tools that still RESOLVE (#4282 Phase 3.2): the property is "a
+    # served workspace-level tool must not advertise `graph`", and a handler that
+    # is no longer registered (the five dropped `run_onboarding` tools) advertises
+    # nothing — an unregistered handler cannot leak a `graph` argument to a client,
+    # so including it would red this arm on an unreachable name (a false positive,
+    # not a trap). Their bodies stay for two reasons, neither of them this test:
+    # the self-host REST suite drives `_state`/`_seed` directly, and the #2300
+    # body sweep in `tests/test_mcp_server.py` probes the reject on all five.
+    resolvable = {t.name for t in TOOL_REGISTRY} | {
+        t.name for t in RETIRED_TOOL_REGISTRY
+    }
+    missing = sorted((callers & resolvable) - mcp_auth.GRAPH_ARGUMENT_EXCLUDED)
+    assert callers & resolvable, (
+        "the derivation has no resolvable subject — it would prove nothing")
     assert not missing, (
         "these tools refuse a selected graph but advertise the `graph` "
         f"argument: {missing}")
@@ -1608,6 +1623,25 @@ def test_an_excluded_tool_is_not_a_graph_error_when_the_transport_refused(
     assert rows == [("refused", "transport_wait_bound")], (
         f"the argument refusal was recorded as {rows} — a false row in the "
         "series #3834 F-2 keeps truthful")
+
+    # ⛔ #10849: THIS call site passes `dispatched=False`, and that argument is what
+    # makes the write contract truthful here — no dispatch was ever scheduled, so
+    # nothing can have been written. Without this pin, deleting `, dispatched=False`
+    # at the call site leaves `test_wait_bound_write_ack.py`'s direct-call arm GREEN
+    # while a caller is told `committed: "unknown"` / "do NOT repeat it" about a
+    # write it never sent — i.e. it silently drops the retry, which is the exact
+    # defect `dispatched=False` was added to fix.
+    _refusal_text = "\n".join(getattr(c, "text", "") for c in (result.content or []))
+    # The pin below is only discriminating while this tool is a WRITE — the whole
+    # contract hangs off `name in WRITE_TOOL_NAMES`. Assert the precondition too,
+    # so a re-tier reds HERE with the real reason instead of blaming the prose.
+    assert name in mcp_server.WRITE_TOOL_NAMES, (
+        f"{name} is no longer a write tool — this pin can no longer observe the "
+        "write refusal arm it exists for")
+    assert _refusal_text == mcp_auth._TRANSPORT_WAIT_BOUND_NOT_SENT_MESSAGE, (
+        "the no-dispatch arm served the DISPATCHED-write prose "
+        f"({_refusal_text!r}) — a caller would reconcile a write that was never "
+        "sent, and withhold the safe re-send")
 
     # ...and NOT refused: the argument refusal still surfaces, classified.
     monkeypatch.setattr(mcp_server, "_wait_bound_state", lambda: None)

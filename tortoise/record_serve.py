@@ -131,6 +131,25 @@ column nor an invented field can hide behind the carve-out. A field the cache
 has and the record does not, and that is **not** in the refused set, is an
 UNEXPLAINED absence and reddens the test.
 
+⛔ FOUR sanctioned asymmetries, not one, and ALL are enumerated in
+:func:`parity_difference` rather than absorbed by a tolerant comparison: the
+SCHEMA's refusal set (the EP carve-out above), a fold ``ON CREATE`` default
+(``FOLD_ON_CREATE_DEFAULTS``, #9634), since #10853 the
+PROJECTION's own §9.1/D1 decline of an episodic Source's turn prose
+(``cache_projection.episodic_source_declined_properties``), and since #10394 the
+NOT-PROJECTABLE column class (``cache_projection.CACHE_FORBIDDEN_COLUMNS`` —
+§9.1/D1's narrative, authority the record KEEPS and the cache must never
+materialise). The decline exists because this module's parity rule is one of the
+THREE record↔cache
+field-comparison instruments in the tree — ``record_reconcile``, this function,
+and ``tools/turn_parity_census.py``, which compares turn rows rather than
+Source nodes; teaching only `record_reconcile` about the
+decline (#10867 review ISSUE 1) left this one reporting a legacy session node's
+own prose as a projection gap, i.e. a declared asymmetry reddening the same as a
+real defect. The not-projectable class exists for the MIRROR reason: it is
+explained in BOTH directions, because a record row rightly holding the column is
+the state the deny exists to create (#10394).
+
 ⚠️ ``content_hash`` is in the refused set and is still recomputable (a pure
 function of ``content``, #2795 D2) — a caller that wants it re-derives it with
 the writer's own function rather than reading a stored copy. This module does not
@@ -567,8 +586,20 @@ def open_record(record_dsn: str | None = None) -> Any:
     it is rather than an unreadable record. The connection is opened with the
     CONNECT bound the ARMING module owns
     (:data:`tortoise.record_writer.CONNECT_TIMEOUT_SECONDS`, applied inside
-    ``_default_connect``) plus a session ``statement_timeout`` set here: a served
-    read must not be able to hang a request on a wedged database.
+    ``_default_connect``) plus a ``statement_timeout`` set here: a served read
+    must not be able to hang a request on a wedged database.
+
+    ⚠️ The timeout is set **transaction-locally** (``set_config(..., true)``), not
+    with a session-level ``SET``, because ``_default_connect`` is POOLED (#9558)
+    and may hand back a connection an earlier caller returned: a session-level
+    ``SET`` would outlive this read and impose a READ-sized bound on the next
+    BORROWER — a write door's record, or a tenant's read under a different
+    timeout. Transaction-local scope is exactly the read (psycopg2's first
+    statement opens the transaction), and the pool's reset-at-reuse
+    (``record_writer._reset_parked_transaction``) then cannot leave it behind —
+    the bound dies with the transaction even though the handle outlives it. Pinned by
+    ``tests/test_9558_record_write_cost.py::test_the_read_door_bounds_its_read_transaction_locally``:
+    reverting this line reds it.
     """
     # ⚠️ The resolver is imported under a DISTINCT name: the parameter above is
     # also called `record_dsn`, and a same-named import rebinds the name so the
@@ -619,8 +650,20 @@ def open_record(record_dsn: str | None = None) -> Any:
             f"is NOT established") from e
     try:
         cur = conn.cursor()
-        cur.execute("SET statement_timeout = %s",
-                    (int(RECORD_STATEMENT_TIMEOUT_MS),))
+        # ⛔ TRANSACTION-LOCAL, because the handle is now POOLED (#9558).
+        # `_default_connect` may return a handle an earlier call returned, and a
+        # session-level `SET` would then outlive this read: the next borrower of
+        # that connection would inherit this read path's 15 s statement timeout
+        # (and, on the write door, a bound chosen for reads). `set_config(...,
+        # true)` scope it to THIS transaction — which is the whole read, since
+        # psycopg2's first statement opens one — and the pool resets that
+        # transaction at the next BORROW (`_reset_parked_transaction`), so the
+        # bound dies with it instead of following the handle to the next
+        # borrower. `SET LOCAL` would do
+        # the same; `set_config` is used because it takes a bind parameter, which
+        # `SET` does not.
+        cur.execute("SELECT set_config('statement_timeout', %s, true)",
+                    (str(int(RECORD_STATEMENT_TIMEOUT_MS)),))
         cur.close()
         return conn
     except Exception as e:
@@ -701,6 +744,13 @@ def read_node(conn: Any, *, org_id: str, graph_id: str, label: str,
     such row. ``None`` is an ANSWER — the record is authoritative — and it is
     reachable only after the record was successfully read; a failure to read
     raises :class:`RecordServeError`.
+
+    ⚠️ "The record's PRIMARY set" is the record's primary set **as the CACHE may
+    hold it**: `cache_projection.CACHE_FORBIDDEN_COLUMNS` subtracts the
+    not-projectable columns (an authority the target store forbids — §9.1/D1's
+    narrative on `source`/`event`, `#10394`), so a served node does not carry a
+    PRIMARY record column there. That is the same map `rebuild_from_record`
+    writes, which is the contract this function exists to keep.
 
     ⚠️ The map is the record's PRIMARY set **plus** the §2.6 cache names that
     ``node_from_row`` DERIVES from those columns (`status`, from a supersession
@@ -983,6 +1033,18 @@ def serve_point(*, tenant: tuple[str, str], point_id: str,
         # (`UnprojectableRecord` / `UnknownRecordColumn`) means the record row —
         # or a column the reader does not know — cannot be projected at all:
         # the "the record is newer than the reader" class.
+        # ⛔ One of its subclasses, `PlacementTableUnavailable`, is NOT that class
+        # and must not be read with it: nothing about the record is wrong — the
+        # property namespace came from a broken INSTALL (no carrier, a carrier
+        # or doc that will not decode/read/parse, an EMPTY or truncated one, or
+        # a malformed row), so the operator's remedy is to repair the install,
+        # not the credentials or the reader version (#10663, #11227).
+        # `UnprojectableRecord` and `UnknownRecordColumn` are not the whole set —
+        # `CacheProjectionError` has FIVE direct subclasses in
+        # `cache_projection.py`: `UnknownRecordLabel` is a caller's label with no
+        # record table and `AmbiguousRecordColumn` is a placement-table
+        # declaration fault, and neither is "newer than the reader" nor a broken
+        # install.
         # `RecordProjectionError` is where `scope_connection` refuses a
         # MISCONFIGURED tenancy: a role that BYPASSES RLS, a lost tenant GUC, an
         # unreadable role posture. Its message names the fix ("arm
@@ -1026,16 +1088,49 @@ def serve_point(*, tenant: tuple[str, str], point_id: str,
 class ParityDiff:
     """The EXPLAINED difference between a cache answer and the record's.
 
-    ``unexplained_missing``  cache fields the record did not answer, and whose
-                             absence the schema's carve-out does NOT explain —
-                             i.e. a projection gap. Non-empty = RED.
+    ``unexplained_missing``  cache fields the record did not answer, and that NO
+                             declared asymmetry explains — not the schema's
+                             carve-out, not a fold `ON CREATE` default, not the
+                             §9.1/D1 decline, and not the not-projectable set —
+                             i.e. a projection gap. Non-empty = RED. ⚠️ FOUR
+                             classes, not three: the decline (an episodic
+                             Source's `summary`/`_searchText`, #10853) is one of
+                             the explainers, so a reader resolving against only
+                             the other three concludes RED on a field that is
+                             correctly explained. The four are the same four
+                             ``explained_missing`` enumerates below.
     ``invented``             record fields the cache does not have, and that no
                              declared ``ON CREATE`` default explains — i.e. a
                              field the record path made up. Non-empty = RED.
+                             ⚠️ The not-projectable columns
+                             (``cache_projection.CACHE_FORBIDDEN_COLUMNS``) are
+                             EXCLUDED here, because a declared asymmetry runs in
+                             BOTH directions (#10394): the record holding a
+                             column the projection must not materialise is the
+                             state the deny exists to create, and calling it an
+                             invention would make the rule forbid its own fix.
     ``changed``              fields both stores answer, with different values.
                              Non-empty = RED.
-    ``explained_missing``    the carve-out at work: `confidence`, `content_hash`,
-                             `ep_*`, … — enumerated, never silently tolerated.
+    ``explained_missing``    a DECLARED asymmetry at work. Every member comes
+                             from one of FOUR declarations, and the member's
+                             NAME (not this dict) says which by resolving
+                             against it: the schema's carve-out (`confidence`,
+                             `content_hash`, `ep_*`, …), a fold `ON CREATE`
+                             default (`cache_projection.FOLD_ON_CREATE_DEFAULTS`,
+                             #9634 — the field is one the record row is SILENT
+                             about, so the column exists and only its VALUE is
+                             supplied), §9.1/D1's declined
+                             turn prose for an episodic Source (`summary`,
+                             `_searchText`), or a **not-projectable** column
+                             (`cache_projection.CACHE_FORBIDDEN_COLUMNS` —
+                             §9.1/D1's narrative on `source`/`event`, #10394).
+                             Enumerated, never silently tolerated.
+                             ⚠️ FOUR and not three: a fold default reaches this
+                             dict too (`parity_difference({'name': 'acme',
+                             'objectKind': 'other', 'title': ''}, {'name':
+                             'acme'}, label='Object')` explains both), so
+                             resolving a member against only the other three
+                             finds a legitimate one unmatched.
     """
 
     label: str
@@ -1069,8 +1164,17 @@ def parity_difference(cache_props: Mapping[str, Any],
     function so the rule has ONE home: the tests call it, and an audit of a
     production pair can call it without re-deciding what "the same" means.
 
-    Three explanations, and every one of them comes from a declaration the other
-    halves of the epic already made — none is re-listed here:
+    Four explanations, and every one of them comes from a declaration the other
+    halves of the epic already made — none is re-listed here. (The clause after
+    them — *"nothing else"* — is the ABSENCE rule that closes the list, not a
+    fifth explanation: it says what an UNEXPLAINED difference does.) ⛔ It was
+    TWO before #10853, the THIRD arrived with the narrowing that made it
+    necessary (#10867 review ISSUE 1), and the FOURTH with `#10394`: an
+    asymmetry absent from this list is not explained by omission, it is a RED,
+    so a declared asymmetry that this rule did not know about turned a
+    sanctioned decline into the same signal as a projection gap — *"a signal
+    indistinguishable from noise is not observability"*, the class this same
+    change treats as P1 elsewhere.
 
     * **the EP carve-out** — a field absent from the record whose name the SCHEMA
       refuses (``cache_projection._refused(table)``: ``confidence``,
@@ -1080,24 +1184,133 @@ def parity_difference(cache_props: Mapping[str, Any],
     * **a fold ``ON CREATE`` default** — a field absent from the record whose
       value is the constant the cache projection fills when the record is SILENT
       (``FOLD_ON_CREATE_DEFAULTS``, #9634).
+    * **the §9.1/D1 decline (#10853)** — for a ``Source`` whose CACHE node is an
+      EPISODIC source (``cache_projection.is_episodic_source_node``: either
+      identity arm), the names in
+      ``cache_projection.episodic_source_declined_properties()`` (``summary``,
+      ``_searchText`` / ``_search_text``). The record KEEPS them and this
+      projector deliberately does not materialise them, so a cache node that
+      still carries them — the legacy population, and every session the current
+      capture wrote — is CACHE-HELD, not a gap. ⛔ "cache-held", never
+      "cache-owned": the record DOES hold this pair, so the term reserved for what
+      the record cannot hold (`record_reconcile.RecordReconcileResult.graph_only_total`)
+      would tell an operator there is nothing to repair (#10394 review, cycle 9).
+      Scoped by the node's own
+      identity, never by the label alone: a transcript DOCUMENT Source keeps its
+      own ``summary``, and there the same absence IS a projection gap (leg
+      ``test_parity_reddens_on_the_same_names_for_a_document_source``).
+    * **a NOT-PROJECTABLE column** — a field the RECORD legitimately holds and
+      the projection must not materialise (``cache_projection.
+      CACHE_FORBIDDEN_COLUMNS``: §9.1/D1's narrative on ``source``/``event``,
+      ``#10394``). It is DECLARED IN BOTH DIRECTIONS, because the asymmetry is
+      the projection's, not a difference between the two stores:
+      - a LEGACY cache node that still carries the pre-purge prose is
+        ``explained``, not ``unexplained_missing``. ⛔ Without this arm it is
+        reported as a **projection gap**, whose only sanctioned repair is a
+        re-projection — i.e. this rule would instruct the operator to re-open
+        the door the projection exists to keep shut.
+      - and a RECORD row that carries the column the cache rightly lacks is
+        ``explained``, not ``invented``. ⛔ Without THAT arm the raw-record
+        direction reads ``invented: {story_arc}`` — *"the record path made up a
+        field"* — whose only sanctioned repair is likewise a re-projection, on
+        the very pair this deny exists to separate.
     * **nothing else.** A field the cache answers and the record does not, with no
       explanation, is a projection gap — and it reddens. A field the record
-      answers and the cache does not is an invention — and it reddens too. The
-      carve-out is the ONLY sanctioned asymmetry, and because it is enumerated
-      it cannot be used to hide a gap.
+      answers and the cache does not is an invention — and it reddens too, UNLESS
+      it is a not-projectable column, a DECLINED name (the §9.1/D1 pair above),
+      or a fold default. The four explanations above are the ONLY sanctioned
+      asymmetries, and because all four are enumerated they cannot be used to
+      hide a gap. ⚠️ THREE of the four
+      are mirrored into the ``invented`` direction (the decline and the
+      not-projectable set explicitly, and a FOLD DEFAULT via its own
+      ``_is_fold_default`` skip — so that arm needs no branch for it); the
+      CARVE-OUT is not, so a raw record row still
+      reports its own ``content_hash`` as invented — a pre-existing gap of that
+      arm, filed as ``#11192`` rather than absorbed here.
+      ⚠️ ``as_dict()`` is DIRECTION-BLIND by design: a legacy cache node still
+      holding the prose and a record row rightly holding it both render as
+      ``explained_missing: [...]``, because the caller supplied the arguments and
+      so knows which direction it asked. The two need different repairs
+      (on either ANCHOR a destructive clear — a full ``record-restore``'s
+      whole-graph wipe (refused PRE-WIPE on a production server graph name,
+      #2944's L2 guard), or a graph-side ``REMOVE n.story_arc`` no instrument
+      ships today — ⚠️ and the WIPE cannot be row-scoped: ``_wipe_all_nodes`` is
+      ``MATCH (n) DETACH DELETE n``, so a graph holding ANY row whose PROSE neither
+      ``public.{source,event}.story_arc`` nor ``public.session_narrative.narrative``
+      carries must NOT be restored at all — copy that prose out first, because the
+      wipe destroys the only copy (§17.2, `#11325`); ⚠️ a ``:Point``
+      copy has a NON-destructive one, **on the same per-row test** — only where the
+      record still HOLDS the text for that session
+      (``public.session_narrative.narrative`` — ⛔ NOT the point's own ``props``
+      tail, which the clear's OWN record write consumes: ``point`` has no
+      ``story_arc`` column, so the projection tails the key and the patch merges
+      RIGHT-HAND, ``props = props || %s::jsonb``, so a null OVERWRITES the prose);
+      where the narrative row does not carry it the
+      node's copy is the only one no SHIPPED route can put back on a production
+      graph (the record's KEYED view does not hold it), and the clear deletes it, because the
+      ``rebuild_all`` that would put it back is refused PRE-WIPE on a production
+      name:
+      ``update_point(<id>, story_arc=None)`` clears the property and keeps the
+      node (measured; ``record_reconcile``'s module docstring states the door);
+      ``#10017``'s purge clears only TURN-SHAPED legacy episodic ``:Point``
+      copies (turn shape = ``is_episodic`` + ``pointKind='event'`` +
+      ``is_operator=false`` + a ``<sid>_t<digits>`` id, per
+      ``tools/turn_parity_census.py``) — any other
+      episodic ``:Point`` refuses its sweep rather than being cleared — vs
+      nothing at all), and
+      ``record_reconcile`` is where that distinction is made (``graph_only``
+      versus a record-side omission), not here.
+
+    ⚠️ The decline explains an ABSENCE FROM THE RECORD'S ANSWER, never a VALUE:
+    the record's answer here is the projection's own map
+    (``cache_projection.node_from_row``, the same map ``read_node`` returns), and
+    the declined pair is absent from it by construction on every row where the
+    decline applies — ``summary`` on every row of the EPISODIC Source class,
+    ``_searchText`` too unless #10965 relaxes it — exactly the shape the
+    comparison must not redden on.
+    ⛔ NOT on every row: since #10965 a post-#10000 episodic row PROJECTS
+    ``_searchText``, so there the name is PRESENT in that same map and this arm
+    is OPERATIVE on the sanctioned path — the measured false GREEN the
+    ``invented``-loop comment below describes (filed as ``#11233``).
 
     ⚠️ A field BOTH sides carry is always compared, refused name or not. That is
     what keeps a caller's own re-derivation honest: the served endpoint puts a
     recomputed ``content_hash`` back into its response, and a wrong recomputation
     must redden here rather than hide behind the carve-out.
     """
-    from .cache_projection import FOLD_ON_CREATE_DEFAULTS, NODE_TABLES, _refused
+    from .cache_projection import (
+        FOLD_ON_CREATE_DEFAULTS,
+        NODE_TABLES,
+        _refused,
+        cache_forbidden_columns,
+        episodic_source_declined_properties,
+        is_episodic_source_node,
+        placement_spellings,
+    )
 
     table = NODE_TABLES.get(label)
     if table is None:
         raise RecordServeError(f"{label!r} has no record table")
     refused = _refused(table)
+    # ⚠️ WIDENED through the placement table, because the loop below compares
+    # GRAPH property names (`cache_props` keys) while `CACHE_FORBIDDEN_COLUMNS`
+    # holds RECORD COLUMN names — the contract
+    # :func:`cache_projection.cache_forbidden_columns` states and the `props`-tail
+    # filter honours. Today's one entry (`story_arc`) spells one way, so this
+    # changes no behaviour; it is here so a forbidden AMBIGUOUS column cannot be
+    # explained at the tail door and reported as a projection gap HERE, which
+    # would tell an operator to re-project the very field the deny keeps out.
+    not_projectable = cache_forbidden_columns(table) | {
+        spelled for column in cache_forbidden_columns(table)
+        for spelled in placement_spellings().get(table, {}).get(column, ())
+    }
     defaults = FOLD_ON_CREATE_DEFAULTS.get(label, {})
+    # #10853's declared decline, resolved ONCE per comparison and only for a
+    # Source: the set is graph-property names AND the raw column spellings, read
+    # from the projection's ONE declaration rather than re-listed here.
+    declined = (episodic_source_declined_properties()
+                if label == "Source" and is_episodic_source_node(cache_props)
+                else frozenset())
 
     def _is_fold_default(field_name: str, value: Any) -> bool:
         return field_name in defaults and value == defaults[field_name]
@@ -1107,7 +1320,16 @@ def parity_difference(cache_props: Mapping[str, Any],
     for field_name, value in cache_props.items():
         if field_name in record_props:
             continue
-        if field_name in refused or _is_fold_default(field_name, value):
+        if (field_name in refused or field_name in not_projectable
+                or _is_fold_default(field_name, value)):
+            explained[field_name] = value
+            continue
+        if field_name in declined:
+            # §9.1/D1 decline (#10853): the record keeps the prose, the
+            # projection does not materialise it, and a cache node that still
+            # carries it is CACHE-HELD — never a projection gap. Not
+            # "cache-owned": the record holds it (§17.5's term is for what the
+            # record cannot hold; see `graph_only_total`'s retraction).
             explained[field_name] = value
             continue
         unexplained[field_name] = value
@@ -1115,6 +1337,57 @@ def parity_difference(cache_props: Mapping[str, Any],
     invented: dict[str, Any] = {}
     for field_name, value in record_props.items():
         if field_name in cache_props:
+            continue
+        # ⛔ THE DECLARED ASYMMETRY IS SYMMETRIC (#10394 review, P2). The arm
+        # above explains a NOT-PROJECTABLE column the CACHE still holds; the
+        # record holding the same column is the state the projection exists to
+        # create (text authority in Postgres, never in the graph), so its
+        # absence from the cache is DECLARED, not an invention. Left out, this
+        # loop reddens `clean: False, invented: ['story_arc']` on a raw record
+        # row — the direction an audit of a production pair is handed — and
+        # `invented`'s only sanctioned repair is a re-projection, i.e. re-opening
+        # the door. Measured red-first in
+        # `tests/test_record_serve.py::test_a_not_projectable_column_in_the_RECORD_is_NOT_an_invention`.
+        # ⚠️ SCOPED, and the scope is narrower than it first looked — MEASURED,
+        # not reasoned (#11224's review, P2): with the record side supplied THE
+        # WAY THIS MODULE SAYS TO SUPPLY IT (`read_node`'s map = the projector's
+        # `node_from_row` map, plus the event-stream `status` fold for the labels
+        # that have one — a fold that adds no declined or not-projectable name),
+        # `not_projectable` CANNOT reach this loop, and NEITHER CAN `summary`:
+        # both are absent from that map by construction. ⛔ BUT `_searchText`
+        # CAN — whether it is declined is decided PER ROW, and since #10965 a
+        # post-#10000 episodic row PROJECTS it (`cache_projection._props_from_row`
+        # relaxes the decline when the row's `summary` is the topic join;
+        # `episodic_source_declined_properties`' own docstring says the set stays
+        # the full pair). So on that population this arm is OPERATIVE on the
+        # sanctioned path, and it FORGIVES a real gap: a cache node that lost the
+        # one field the Source FTS index is declared on answers `clean`.
+        # MEASURED (a post-#10000 row whose cache answer lacks `_searchText`):
+        # `parity_difference(...).clean is True`, `explained_missing
+        # ['_searchText']`. ⛔ That is a FALSE GREEN and it is FILED, not
+        # absorbed here — `#11233` owns the fix (exclude `_searchText` from the
+        # decline in this direction, or decide it per row), and until it lands
+        # `record_reconcile` is the instrument that still compares the name.
+        # What remains true of the arm: it is the right shape for a caller that
+        # hands RAW record rows (an audit that opened the record with its own
+        # SQL) — and such a caller also reds on `sessionId`-vs-`session_id`-style
+        # pairs (measured), which is why `read_node`'s map stays the shape to use.
+        # ⚠️ The same mirror for the §9.1/D1 DECLINE (`declined`, #10853) is
+        # applied here for the same reason and by the same rule: the record keeps
+        # `summary`/`_searchText` and the projection declines to materialise
+        # them, so the record holding them is DECLARED, not invented. It was
+        # MISSING until review cycle 2 measured it — a genuinely episodic Source
+        # audit reported `invented: ['summary']` on a correct pair, the identical
+        # false RED this arm exists to remove, one class over. Pinned by
+        # `test_the_DECLINED_prose_in_the_RECORD_is_not_an_invention`.
+        # ⚠️ ONE class is still unmirrored, and it is a PRE-EXISTING gap of this
+        # arm rather than this change's: the SCHEMA-REFUSED names (`_refused`),
+        # so a raw record row reports its own `content_hash` as invented. Filed
+        # as #11192 and deliberately NOT fixed here — that class is not the one
+        # this change introduces, and the fix is a different decision (the record
+        # is not even supposed to carry those names).
+        if field_name in not_projectable or field_name in declined:
+            explained[field_name] = value
             continue
         # A fold `ON CREATE` default fills a field the record row is SILENT
         # about (#9634): a cache-side constant, not an invention.

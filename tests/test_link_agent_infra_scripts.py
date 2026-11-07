@@ -734,6 +734,45 @@ class TestDriftGateCheckCommand:
         # And the vendored copy was respected, not deleted.
         assert (repo / "scripts" / "local-tool.sh").exists()
 
+    def test_an_empty_infra_is_refused_before_anything_is_written(
+        self, repo: Path, fake_infra: Path, node_shim: tuple[Path, dict[str, str]]
+    ) -> None:
+        """A refused ARGUMENT must not mutate the tree it was refused for.
+
+        ``--infra ""`` is a CALLER ERROR — the rule is pinned one layer down in
+        :class:`TestEmptyAndUnresolvableArguments` — and this wrapper must reach it WITHOUT
+        materialising. Measured live before the fix: the flag was forwarded on a TRUTHINESS test,
+        so ``""`` was DROPPED here, ``link_main`` fell back to ``$AGENT_INFRA_PATH`` and wrote
+        ``repo/scripts``; the invocation then exited 2 for the empty value, leaving a symlink in a
+        repo it had refused to build.
+
+        Harvested from #10250's stranded tail (``39a0c897d2``: *``is not None``, never
+        truthiness*). The resolution is HOISTED above materialisation rather than passed through,
+        so the error is reported once, by the same function that would have raised it later — and
+        nothing is written at all.
+        """
+        shim, extra = node_shim
+        env = self._env(shim, {**extra, "AGENT_INFRA_PATH": str(fake_infra)})
+
+        result = run_wrapper("--repo", str(repo), "--infra", "", env=env)
+
+        assert result.returncode == 2, (result.returncode, result.stdout, result.stderr)
+        assert "--infra" in result.stderr, result.stderr
+        # THE POINT — the refused call left the repo untouched. `is_symlink()` is True for a
+        # DANGLING link, which `exists()` misses; `exists()` is checked too so a real directory
+        # (the other way this could be written) cannot pass either.
+        assert not (repo / "scripts").is_symlink(), (
+            "the wrapper materialised `scripts` from a FALLBACK checkout for an invocation it "
+            f"then refused (`--infra ''`) — a config error must not write: {result.stderr}"
+        )
+        assert not (repo / "scripts").exists(), (
+            f"`scripts` exists after a refused `--infra '': {(repo / 'scripts').resolve()}"
+        )
+        # And the checker never ran: there was no resolved checkout to run it from.
+        assert not Path(extra["FAKE_NODE_ARGS"]).exists(), (
+            "the drift checker ran for an invocation whose `--infra` was refused"
+        )
+
 
 def git_commit(infra: Path, message: str) -> str:
     """Commit whatever is in ``infra`` and return the new HEAD sha.

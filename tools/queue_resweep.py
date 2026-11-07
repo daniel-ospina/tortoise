@@ -159,6 +159,14 @@ class QueueConfig:
     queue_name: str
     base: str
     required_checks: tuple[str, ...]
+    #: Labels a PR must carry (`label=X`) and must NOT carry (`-label=X`).
+    #: `forbidden_labels` is the entry gate for a FOLD CONSTITUENT: a PR whose work
+    #: an open fold already carries is labelled `superseded-by-fold` and must not
+    #: enter the queue ahead of the fold (owner's question, 2026-11-04). A sweep
+    #: that parsed this condition and then posted anyway would be a gate it queues
+    #: past, so it is enforced in `unmet_conditions` like every other condition.
+    required_labels: tuple[str, ...] = ()
+    forbidden_labels: tuple[str, ...] = ()
 
 
 def parse_config(text: str) -> QueueConfig:
@@ -194,6 +202,8 @@ def parse_config(text: str) -> QueueConfig:
 
     base = "main"
     checks: list[str] = []
+    required_labels: list[str] = []
+    forbidden_labels: list[str] = []
     for raw in conditions:
         cond = str(raw).strip()
         m = re.fullmatch(r"base=(\S+)", cond)
@@ -204,6 +214,14 @@ def parse_config(text: str) -> QueueConfig:
         if m:
             checks.append(m.group(1))
             continue
+        # Mergify's label grammar allows whitespace around the operator
+        # (`label = urgent`), and the repository writes it that way in
+        # `priority_rules`. Both spellings must parse to the same thing, or the
+        # gate would be read on one spelling and silently missed on the other.
+        m = re.fullmatch(r"(-?)label\s*=\s*(\S+)", cond)
+        if m:
+            (forbidden_labels if m.group(1) else required_labels).append(m.group(2))
+            continue
         if cond in ("-draft", "draft=false", "-draft=true"):
             continue
         raise ConfigError(
@@ -213,7 +231,13 @@ def parse_config(text: str) -> QueueConfig:
 
     if not checks:
         raise ConfigError(f"queue rule {name!r} names no `check-success` conditions")
-    return QueueConfig(queue_name=name, base=base, required_checks=tuple(checks))
+    return QueueConfig(
+        queue_name=name,
+        base=base,
+        required_checks=tuple(checks),
+        required_labels=tuple(required_labels),
+        forbidden_labels=tuple(forbidden_labels),
+    )
 
 
 def load_config_text(config: str | None, main_ref: str = "origin/main") -> tuple[str, str]:
@@ -353,6 +377,17 @@ def unmet_conditions(
     base_ref = str(((pr.get("base") or {}).get("ref")) or "")
     if base_ref != cfg.base:
         unmet.append(f"base={cfg.base} (actual {base_ref or 'unknown'})")
+
+    labels = {str((lb or {}).get("name") or "") for lb in (pr.get("labels") or [])}
+    for label in cfg.required_labels:
+        if label not in labels:
+            unmet.append(f"label={label}: absent")
+    for label in cfg.forbidden_labels:
+        if label in labels:
+            unmet.append(
+                f"-label={label}: present — this PR is a constituent of a fold that "
+                "already carries its work, so it must not enter ahead of the fold"
+            )
 
     newest = newest_by_name(check_runs)
     for check in cfg.required_checks:

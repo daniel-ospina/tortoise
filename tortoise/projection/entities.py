@@ -2032,15 +2032,43 @@ class _EntityHandlers:
         # ⚠️ Deliberate trade, stated: a legacy JOURNAL whose `DocumentCreated`
         # carried `story_arc` now replays without it, so a rebuild of a graph
         # holding that property no longer reproduces it. Accepted because the
-        # owner rule says the property must not exist, the destructive purge of
-        # what does exist is #10017, and no in-tree producer ever emitted the key
-        # on this event (`api.add_document` takes no such parameter).
+        # owner rule says the property must not exist, no in-tree producer ever
+        # emitted the key on this event (`api.add_document` takes no such
+        # parameter), and no shipped route clears the PROPERTY **on either ANCHOR**
+        # while KEEPING the entity: `tortoise_delete` reaches the node only by REMOVING it, and
+        # journals the delete that drops its record row. What DOES exist is
+        # removed destructively by a full restore's whole-graph wipe — which
+        # clears it where the L2 name rule admits the target
+        # (`test_`/`tortoise_test`-prefixed, or an embedded `path=` DB), and is
+        # refused pre-wipe on a production name (`org_<org_id>`, its child, a
+        # legacy `team_…`) — ⚠️ and it cannot be row-scoped
+        # (`MATCH (n) DETACH DELETE n`), so a graph holding ANY row whose PROSE
+        # the record does not carry must NOT be restored at all: copy that prose
+        # out first, because the wipe destroys the only copy (§17.2, `#11325`);
+        # a graph-side `REMOVE n.story_arc` is issued by nobody;
+        # `update_entity(…, story_arc=None)` is REFUSED here as server-managed
+        # (the `:Point` half DOES have an in-place clear,
+        # `update_point(<id>, story_arc=None)` — #11325, and only on the rows where
+        # the record still holds the text: `public.session_narrative.narrative` —
+        # ⛔ NOT the point's own `props` tail, which the clear's OWN record write
+        # consumes (`point` has no `story_arc` column, so the projection tails the
+        # key and the patch merges RIGHT-HAND, `props = props || '{"story_arc":
+        # null}'`, OVERWRITING the prose) — where the narrative row does not carry it
+        # the node's copy is
+        # the only one no SHIPPED route can put back on a production graph, and that
+        # clear deletes the prose); `#10017`'s purge is
+        # the legacy turn `:Point` population and never matches a `:Source`
+        # (`#11325`).
         #
         # ⛔ Scope, so this is not read as more than it is: it denies the KEY.
         # Another spelling (`storyArc`) still lands, exactly as any unknown key
         # does — that is #228's passthrough contract, not a narrative route, and
-        # no reader or restore lane reads it (door 2 restores the `story_arc`
-        # column only).
+        # no reader or restore lane reads it: the RECORD → CACHE restore is
+        # denied by `cache_projection.CACHE_FORBIDDEN_COLUMNS` as well (#10394
+        # door 2), so THAT route cannot materialise the key. ⛔ Scoped to that
+        # route on purpose — the `:Point` REPLAY half of the same door is still
+        # open (`_upsert_point_props`, #10429), and a `storyArc` spelling lands on
+        # any passthrough route, as the sentence above says.
         "story_arc",
     })
     # #2795 (D2): every key owned by the fixed SET clauses of

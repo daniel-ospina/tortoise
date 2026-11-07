@@ -53,7 +53,7 @@ body:
       label: Graph JSON (if relevant)
       description: >-
         Paste the graph payload — the point/operator JSON you sent, the response you got,
-        or the result of `tortoise_summarize_structure` (or a `tortoise backup --db <db-path>` export).
+        or the result of `tortoise_graph_overview(section="structure")` (or a `tortoise backup --db <db-path>` export).
         If it's long, attach it as a `.json` file instead (drag & drop below).
       render: json
       placeholder: '{"kind": "decision", "content": "...", "props": {...}}'
@@ -88,10 +88,22 @@ body:
   # hosted reporter has no checkout to emit from). Internal/agent findings,
   # filed with `gh issue create`, MUST include the line; the gate requires it
   # on any `bug` issue without `beta-feedback`.
+  #
+  # ⛔ THE LABEL MUST NOT READ AS A PROVENANCE CLAIM (`Measured at …`). It used
+  # to (`Measured at (if you have a checkout)`), and that alone made EVERY
+  # blank-filed beta report a "finding": the gate classifies a body with the
+  # repo's own claim parser BEFORE any label exemption, so the `beta-feedback`
+  # arm written for exactly this path became unreachable — beta reporters were
+  # labelled `provenance-stale` and told to "re-verify against origin/main",
+  # which a hosted reporter cannot do. A field's `### <label>` heading IS part
+  # of the submitted body; only `type: markdown` elements are not submitted.
+  # So the label is neutral here, and the shape is taught by the description +
+  # placeholder, which are UI-only and never reach the body. Pinned in
+  # `tests/test_finding_provenance.py::test_decide_still_exempts_a_beta_report_filed_through_the_form`.
   - type: input
     id: measured_at
     attributes:
-      label: Measured at (if you have a checkout)
+      label: Provenance (if you have a checkout)
       description: >-
         The exact commit you measured against. In your checkout run
         `uv run python tools/finding_provenance.py --emit` and paste the single line

@@ -1,8 +1,9 @@
 """Track C (#3011) — activate the belief layer (EP) for an eval namespace.
 
 The eval ingest path (``tools/longmem_eval/ingest_v2.py``) writes every
-extraction point with ``status="draft"`` (5 sites) and mints its operators
-with ``promote_source=False`` (≈ L373). ``tortoise/ep.py`` filters the
+extraction point with ``status="draft"`` (3 sites: ``:284``, ``:618``, ``:644``)
+and mints its operators with ``promote_source=False`` (``:425``).
+``tortoise/ep.py`` filters the
 factor graph with ``_live_only(...)``, which excludes ``draft`` — so EP
 skips the entire eval graph and every claim's confidence reads the neutral
 ``0.50`` of a Beta(1,1) prior that was NEVER measured. Issue #2598: a
@@ -11,9 +12,13 @@ draft is EP-inert and must never display a fabricated ``0.5``.
 This module closes that gap with two steps for a given eval graph:
 
 1. **Promote** draft points → ``live`` and draft operators → ``live``
-   (batch path, mirroring the capture auto-promotion block at
-   ``tortoise/sdk.py:1270-1320`` — the ``PointPromoted`` / ``OperatorPromoted``
-   events are emitted so a JSONL replay rebuilds the same live state).
+   (batch path, shaped after the capture auto-promotion block
+   ``sdk._apply_capture_ingest_ep`` at ``tortoise/sdk.py:8278+`` — the claim
+   candidate read is ``sdk.py:8357-8363``; the ``PointPromoted`` /
+   ``OperatorPromoted`` events are emitted so a JSONL replay rebuilds the same
+   live state). Its operator sweep (``sdk.py:8394-8401``) is NOT copied: see
+   ``_SELECT_DRAFT_OPERATOR_IDS`` and the Cypher header below for the three
+   divergences and why they are deliberate.
 2. **Run EP** so real posteriors (``posterior_alpha``/``posterior_beta``,
    falling back to ``ep_alpha``/``ep_beta``) are persisted.
 
@@ -47,8 +52,16 @@ state's own bar is deliberately NOT re-cut here (that is #8486's recorded
 disclosure rule and an open owner decision) — see
 ``measurement_posture.belief_layer_state``.
 
-Hermetic by construction: the module imports only the standard library
-(``logging``, ``time``, ``math``, ``sys``);
+Hermetic by construction: the module imports the standard library
+(``logging``, ``time``, ``math``, ``sys``) plus ONE leaf symbol from the
+package — ``epistemic_disjunction`` from ``tortoise.live`` (#10137), the
+canonical label predicate the engine's own R16 gate uses, imported rather than
+hand-rolled so the gate cannot drift from it. That import is not free: it pulls
+the ``tortoise`` package (``config``, ``embedded_lifecycle``, ``embedded_reaper``,
+``env_truthy``, ``fork_safety``, ``live``) even for a caller that only wants
+``read_confidence`` — which is why ``tortoise/subgraph_render.py``, a package
+module that imports this one, keeps working (the package is already loaded) but
+a bare pre-install probe of ``read_confidence`` no longer is.
 ``activate_beliefs`` takes an already-constructed SDK (or a stub) so it can
 be unit-tested without a database.
 """
@@ -72,15 +85,48 @@ import logging
 import math
 import time
 
+from tortoise.live import epistemic_disjunction
+
 logger = logging.getLogger(__name__)
 
 #: EP engine label for the manifest — names the entry point actually used.
 EP_ENGINE = "dream:full"
 
-# ── Cypher (byte-mirrored from the capture auto-promotion block) ──────────
+# ── Cypher ────────────────────────────────────────────────────────────────
+# Shaped after the capture auto-promotion block (``sdk._apply_capture_ingest_ep``,
+# ``sdk.py:8278+``), NOT byte-mirrored from it. THREE divergences are DELIBERATE
+# and must not be "restored to parity":
+#   * ``_PROMOTE_OPERATOR`` adds ``WHERE o.status = 'draft'`` and ``RETURN o.id``
+#     — capture's ``SET`` is unconditional, which double-counts and journals a
+#     duplicate ``OperatorPromoted`` under concurrency;
+#   * ``_SELECT_DRAFT_OPERATOR_IDS`` is explicit-``draft``-only and graph-wide,
+#     not incident-scoped — see its own block for why (an operator over
+#     already-live claims has no other promotion route, #10137).
+#   * ``_SELECT_DRAFT_OPERATOR_IDS`` also treats a node carrying ``op_type`` as
+#     an operator (``is_operator = true OR op_type IS NOT NULL``), wider than the
+#     engine's ``{is_operator:true}``, to match ``ep.py``'s own operator
+#     predicate (``ep.py:1456/:1804/:1870/:2579``) — the one the factor graph
+#     actually uses. ⚠️ On THIS path that wider arm is INERT, and the record
+#     should say so rather than claim it closes a hole: phase 1a promotes a
+#     hybrid node (``op_type`` set, ``is_operator`` false) as a POINT first
+#     (``_SELECT_DRAFT_POINT_IDS`` admits ``is_operator IS NULL OR = false``),
+#     so by the time this sweep runs the node is already ``live`` and is no
+#     longer a candidate. Measured: ``points_promoted: 1, operators_promoted: 0``
+#     for a hybrid over live claims. It is kept because the predicate is
+#     ``ep.py``'s and the sweep should never be narrower than the factor graph —
+#     not because the activation path needs it. What 1a does to such a node is
+#     itself unchecked: it promotes a hybrid operator ``live`` over even a
+#     RETRACTED endpoint, with no R16 gate at all (#10842). That is a different
+#     phase's defect, named here so this entry does not read as its fix.
+# Pinned by ``test_the_gate_promotes_an_operator_once`` (CAS, embedded),
+# ``test_the_gate_refuses_a_status_less_operator`` (explicit-draft-only arm,
+# embedded), and this one for graph-wide REACH (stub):
+# ``tests/longmem_eval/test_ep_activation.py``
+# ``::test_activate_promotes_an_operator_the_incident_query_cannot_reach``.
 # Candidate draft points: non-operator, draft-or-unset status (the canonical
 # read model treats unset status as live for most surfaces, but the ingest
-# shape is explicit "draft"; matching both mirrors sdk.py:1277-1281).
+# shape is explicit "draft"; matching both mirrors the capture candidate read
+# at ``sdk.py:8357-8363``).
 _SELECT_DRAFT_POINT_IDS = (
     "MATCH (n:Point) "
     "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
@@ -88,14 +134,133 @@ _SELECT_DRAFT_POINT_IDS = (
     "RETURN n.id"
 )
 _PROMOTE_POINTS = "MATCH (n:Point) WHERE n.id IN $ids SET n.status = 'live'"
-# Draft operators incident to the promoted claims (sdk.py:1296-1301).
-_SELECT_DRAFT_OPERATORS = (
-    "MATCH (o:Point {is_operator:true})-[:IMPL|NAND]->(c:Point) "
-    "WHERE c.id IN $ids "
-    "AND (o.status IS NULL OR o.status = 'draft') "
+_PROMOTE_OPERATOR = (
+    "MATCH (o:Point {id:$oid}) WHERE o.status = 'draft' "
+    "SET o.status = 'live' RETURN o.id"
+)
+
+#: CANDIDATE draft operators for the R16 promotion sweep (#10137).
+#:
+#: The selection this REPLACED was scoped to ``c.id IN $ids`` — the points
+#: promoted in THIS pass — so an operator was promoted only when one of its
+#: ENDPOINTS was draft a moment ago. "Endpoint", not "target": the source is
+#: written as an outgoing edge too (``idx:0``), and the deleted query matched
+#: ``(o)-[:IMPL|NAND]->(c:Point)``, so a promoted draft SOURCE reached it just as
+#: a promoted draft target did. The gap was never about which ENDS; it was that
+#: an operator with NO draft endpoint had no route at all. An operator whose
+#: endpoints were ALREADY live
+#: (a resumed/partial ingest: ``ingest_v2``'s ``_existing_point_ids`` batch probe
+#: (``ingest_v2.py:180``) skips points an earlier pass already wrote, while the
+#: operator loop still writes the draft operator over them — and the v2 ingest
+#: mints EVERY operator with ``promote_source=False`` → ``status='draft'``; the
+#: ``create_operator`` default is ``True``, which writes ``status='live'``, so
+#: this is the INGEST's posture, not every writer's) is therefore
+#: promoted by NOTHING, and ``ep._live_only('o.status')`` excludes it from the
+#: factor graph for ever. Measured on an embedded graph whose premise carries a
+#: real ``set_point_baseline(6.0, 2.0)``: ``activate_beliefs`` reports
+#: ``operators: 1, factors: 0, no_op_reason: 'no_ep_factors'`` and the conclusion
+#: claim is NEVER measured — the belief layer contributes nothing to a question
+#: that has both evidence and an operator. That is the #10137 symptom, and it is
+#: NOT the no-operator population the issue names.
+#:
+#: EXPLICIT ``status = 'draft'`` only, matching ``sdk._promote_incident_operators``
+#: (``sdk.py:21312-21333``): an unset status is LIVE under the canonical read
+#: model (``ep._live_only`` does not exclude it, so it is already a factor) and
+#: THAT function never re-promotes one into the event stream. Selecting
+#: unset-status rows here would flip a legacy graph's status-less operators and
+#: journal an ``OperatorPromoted`` for each.
+#:
+#: ⚠️ Deliberate divergence, named so it is not "harmonised" away: the capture
+#: block's operator sweep (``sdk._apply_capture_ingest_ep``, ``sdk.py:8394-8401``
+#: — the block this module's docstring cites as its template) DOES match
+#: ``o.status IS NULL`` and re-promotes a status-less operator with an
+#: ``OperatorPromoted``. That arm belongs to capture's own minted-operator
+#: contract (#1088), not to the eval activation path: this module activates a
+#: whole GRAPH, where a status-less operator already carries the EP live read,
+#: so not re-promoting it removes no FACTOR. Same reason the deleted incident
+#: query's unset-status arm went with it.
+#:
+#: ⚠️ It is NOT journal-noise-only, and the difference is graph state, not
+#: bookkeeping: the STRICT grounding selector reads
+#: ``MATCH (n:Point {status: 'live'})`` (``projection/grounding.py:19``, and the
+#: ``IMPL``/``NAND`` edge read at ``:46``), so a status-less node is excluded
+#: from ``compute_grounding`` while an explicitly-live one is included —
+#: ``sdk.py:22350-22353`` records exactly this ("a status-less Point is admitted
+#: by EP factor extraction but excluded by the STRICT grounding selector …
+#: so the rebuild alone changed the operator's grounding participation"). So on
+#: a graph that carries status-less operators, the narrowing here also drops
+#: those operators and their ``IMPL``/``NAND`` edges out of the grounding
+#: matrix that ``activate_beliefs`` used to normalise into it. Unreachable from
+#: ``ingest_v2`` (it mints every operator with an explicit ``'draft'``), and
+#: this module never calls ``compute_grounding``, so the census is unaffected —
+#: but a caller that grounds AFTER activating does see different values.
+#: MEASURED on an embedded graph (one IMPL operator over two live claims), and
+#: the TWO reads move differently — name the right one: the ``:19`` NODE read
+#: returns 3 live rows → 2 after ``REMOVE o.status`` (the claims are still live,
+#: so it can never reach 0), while the ``:46`` EDGE read returns 2 → 0 (the
+#: operator's ``IMPL`` edges leave the live-only matrix entirely). ``ep.py``'s
+#: ``_live_only('o.status')`` still admits the status-less node. Quote 2 → 0 for
+#: the edge read, 3 → 2 for the node read.
+_SELECT_DRAFT_OPERATOR_IDS = (
+    "MATCH (o:Point) "
+    "WHERE (o.is_operator = true OR o.op_type IS NOT NULL) "
+    "AND o.status = 'draft' "
     "RETURN DISTINCT o.id"
 )
-_PROMOTE_OPERATOR = "MATCH (o:Point {id:$oid}) SET o.status = 'live'"
+
+#: The only operator edges EP builds factors from — ``ep.py`` has no ``hasPart``
+#: / ``mitigated_by`` arm. Used ONLY to restrict what ``on_input`` dirty-marks;
+#: it must never narrow the GATE (see ``_SELECT_OPERATOR_ENDPOINTS``).
+_FACTOR_EDGE_TYPES = frozenset({"IMPL", "NAND"})
+
+#: An operator's endpoints, ``(id, status, rel_type, labels)`` — FOUR columns
+#: (see the last paragraph for why the last two exist). The ENGINE's read, edge
+#: set included — UNLABELED (``WHERE epistemic_disjunction``, #7853), so a draft
+#: ``:Subject`` / ``:Object`` / ``:Event`` endpoint blocks promotion here, and
+#: so does a ``hasPart`` / ``mitigated_by`` endpoint, exactly as it does in
+#: ``sdk._promote_incident_operators`` (``sdk.py:21338-21347``).
+#:
+#: ⛔ Reading ONLY ``-[:IMPL|NAND]->`` was tried and is WRONG, because narrowing
+#: the EDGE SET makes the gate WEAKER, not stricter: ``mitigate_operator`` mints
+#: ``(op)-[:mitigated_by]->(m)`` (``sdk.py:22814``), so an IMPL operator whose
+#: mitigation was retracted has two live IMPL endpoints and a dead third edge —
+#: a narrow read admits it and promotes an operator the engine keeps draft.
+#: MEASURED on an embedded graph: engine read 3 rows (``live, live, retracted``)
+#: → refuses; the narrow read 2 rows (``live, live``) → ``_promote_operator_row``
+#: returned True and flipped it. A harness that gates more loosely than the
+#: engine publishes promotions production cannot produce.
+#:
+#: ``type(r)`` and ``labels(x)`` are returned for ONE purpose — ``on_input``
+#: marks only ``_FACTOR_EDGE_TYPES`` endpoints that are ``:Point``s. Everything
+#: else GATES like any other endpoint but is not something to dirty-mark: EP does
+#: not propagate through ``hasPart`` / ``mitigated_by``, and ``_mark_dirty``
+#: stamps ``MATCH (n:Point {id: pid})`` only (``sdk.py:30730``), so a
+#: ``:Subject`` / ``:Object`` / ``:Event`` id handed to it is never stamped and
+#: is instead filed in ``_dirty_roots`` as an unmatched root — MEASURED: an
+#: ``:Event`` endpoint id lands in ``_dirty_roots`` with no ``ep_dirty`` stamp.
+#:
+#: ⚠️ A FOURTH DIVERGENCE, NAMED SO IT IS NOT ABSORBED — an operator that is
+#: ITSELF another operator's OPERAND can never be promoted, and no number of
+#: passes resolves it (#10874). ``create_operator`` mints the typed operand edge
+#: AND its mirror ``(s)-[:INPUT]->(o)`` in one statement (``sdk.py:22405-22407``),
+#: so such an operator acquires an outgoing ``:INPUT`` edge to a ``:Point`` — and
+#: THIS read, like the engine's, counts it as a gating endpoint
+#: (``epistemic_disjunction`` admits ``:Point``, ``live.py:509``). With ``A``'s
+#: operand ``B`` and ``B``'s ``:INPUT`` target ``A``, each keeps the other draft
+#: FOR EVER: a mutual deadlock whose fixed point is "both draft", so re-running
+#: cannot break it. MEASURED at this head — two such operators over two live
+#: claims report ``promoted=0, factors=0, no_op_reason='no_ep_factors'`` on pass
+#: 1 AND pass 2, i.e. the exact #10137 symptom, published as a silent zero.
+#: ⛔ Do NOT "fix" it HERE by excluding ``:INPUT`` from THIS read: that makes the
+#: harness gate more LOOSELY than the engine and publishes promotions production
+#: cannot produce — the invariant the block above exists to protect. The gap is
+#: the R16 gate's endpoint predicate, which has no notion of edge ROLE; it is
+#: filed as #10874 beside #10828 (the same gate ignoring ``outdated``).
+_SELECT_OPERATOR_ENDPOINTS = (
+    "MATCH (o:Point {id:$oid})-[r]->(x) "
+    "WHERE " + epistemic_disjunction("x") + " "
+    "RETURN x.id, x.status, type(r), labels(x)"
+)
 
 # ── EP-state census (non-operator claims only) ────────────────────────────
 _COUNT_POINTS_TOTAL = (
@@ -123,8 +288,9 @@ _COUNT_POINTS_WITH_EP = (
 # ⛔ ``is_episodic`` is NOT the discriminator, and using it is how this fix was
 # wrong on its first pass (review P0): the ingest stamps ``is_episodic=True`` on
 # the EXTRACTED CLAIMS TOO (``ingest_v2.py:275-290``, kind ``statement``). The
-# flag is the QUOTA discriminator (``tortoise/quota.py:1024-1030`` counts only
-# non-episodic points, which is why the eval ingest marks everything), not a
+# flag is the QUOTA discriminator (``tortoise/quota.py:1046-1050`` — the
+# Point-level ``is_episodic`` flag is the Point discriminator, which is why the
+# eval ingest marks everything), not a
 # belief/evidence one — filtering on it excluded every claim EP stamps: 3 claims
 # + 2 IMPL read ``belief_eligible_total = 0`` against ``points_with_ep = 3``.
 # The substrate is identified by the SHAPE its writer stamps, the one property
@@ -202,8 +368,8 @@ NEUTRAL_EPS = 1e-6
 
 #: Graph census of OPERATOR nodes (#10137).
 #:
-#: Widened to the ENGINE's operator predicate, NOT `_SELECT_DRAFT_OPERATORS`'s
-#: narrower ``is_operator:true`` one (#10137 review, P1). `ep.py` treats a node
+#: Widened to the ENGINE's operator predicate, NOT a ``is_operator:true``-only
+#: one (#10137 review, P1). `ep.py` treats a node
 #: as an operator when ``is_operator = true OR op_type IS NOT NULL`` (its
 #: operator-mediated selections), and the projection layer's canonical test is
 #: ``bool(is_operator or op_type)``. Counting only the flag MISSES legacy
@@ -215,7 +381,7 @@ NEUTRAL_EPS = 1e-6
 #: own ambiguity, reproduced faithfully rather than resolved here. A hybrid
 #: ``create_point(op_type=...)`` node is ``is_operator = false`` WITH
 #: ``op_type``: the operator-side selections admit it (`ep.py:1456`, `:1804`,
-#: `:1870`, `:2573` — all four spell this exact predicate), and
+#: `:1870`, `:2579` — all four spell this exact predicate), and
 #: `ep._non_operator` admits the SAME node as a CLAIM on the participant side
 #: (`ep.py:114-118`: "``is_operator = false`` — the modern plain Point AND the
 #: hybrid … are CLAIMS"). So one node can appear in BOTH this census and
@@ -508,6 +674,85 @@ def _read_no_op_reason(sdk) -> str | None:
     reason = health.get("no_op_reason")
     return reason if isinstance(reason, str) and reason else None
 
+def _promote_operator_row(sdk, g, oid, promoted_ops, on_input) -> bool:
+    """Promote ONE draft operator iff the R16 gate admits it (#10137).
+
+    The gate is ``sdk._promote_incident_operators``'s, read the same way: fetch
+    the operator's endpoints and require EVERY one to be ``'live'``
+    (``(st or "live") == "live"`` — unset status is LIVE under the canonical
+    read model). Returns ``True`` iff the CAS-guarded ``SET`` won, so the caller
+    counts and emits ``OperatorPromoted`` for exactly the flips that happened.
+
+    ⚠️ It blocks the terminal STATUS arm only, exactly as the engine's gate does
+    (``sdk.py:21339-21346`` reads ``s.id, s.status``): an endpoint carrying
+    ``status='live'`` PLUS ``outdated=true`` is admitted here because it is
+    admitted there, and ``ep.py:2128`` then strips it. That is a real engine-side
+    gap, deliberately NOT patched in the harness alone — a census that gates
+    more strictly than the engine publishes numbers production cannot produce.
+    Fixing it means fixing both, tracked in #10828.
+
+    ⛔ The predicate is NOT re-spelled in Cypher, and the difference is not
+    cosmetic — a draft-only Cypher predicate (``coalesce(status,'live')
+    <> 'draft'``) is how this change went WRONG on its first pass: it admits
+    every TERMINAL endpoint STATUS (retracted / superseded / outdated /
+    archived, and the legacy ``deprecated``), which ``(st or "live") == "live"``
+    blocks. A promoted operator over a terminal-status claim journals an
+    ``OperatorPromoted``, then ``ep.py`` strips the terminal input, the factor
+    DEGENERATES, and the manifest publishes ``operators_promoted: 1,
+    factors: 0`` — the "promoted but no factor" reading this change exists to
+    prevent on the TERMINAL-INPUT arm, which is NOT a claim that the pair is a
+    defect signal in general (see ``activate_beliefs``: a correct part/whole
+    promotion publishes it too). Re-spelling a liveness
+    predicate is what ``tortoise/live.py`` forbids; reading the endpoints and
+    comparing in Python mirrors the SDK's SHAPE instead (read → compare → CAS
+    SET), one round trip per candidate.
+
+    The endpoint read is the ENGINE's, edge set included (see
+    ``_SELECT_OPERATOR_ENDPOINTS``), because the engine's R16 gate is this
+    gate's authority: a harness that gates more loosely publishes promotions
+    production cannot produce, and one that gates more strictly hides them. An
+    earlier draft read ``-[:IMPL|NAND]->`` only — "only those edges form a
+    factor" — and that was wrong for exactly this reason: narrowing the edge set
+    made the gate WEAKER, so an IMPL operator whose mitigation had been retracted
+    (two live IMPL endpoints, one dead ``mitigated_by`` edge) was promoted here
+    while the engine kept it draft. Measured: engine 3 rows → refuse, narrow 2
+    rows → promoted.
+
+    ``on_input`` is called once per endpoint ROW, not once per id, so the caller
+    can dirty-mark the claims the newly-live factor connects (a raw status flip
+    is invisible to an incremental EP pass — the reason step 1c exists). The
+    self-support shape ``create_operator(op, a, [a])`` writes two edges over one
+    id and therefore reports ``a`` twice; the caller dedupes
+    (``dict.fromkeys``), so do not count calls here — count ids.
+    """
+    if not oid or oid in promoted_ops:
+        return False
+    endpoints = g.query(_SELECT_OPERATOR_ENDPOINTS,
+                        params={"oid": oid}).result_set
+    if not endpoints:
+        # ``all([])`` is True, so WITHOUT this the CAS below flips an operator
+        # that has no epistemic edge at all. The engine carries the same guard
+        # (``sdk.py:21344-21345``, "no endpoints — nothing to gate on"); pinned by
+        # ``test_the_gate_refuses_an_operator_with_no_endpoints``.
+        return False  # no endpoints — nothing to gate on (the SDK skips too)
+    if not all((st or "live") == "live" for _, st, _rel, _labs in endpoints):
+        return False  # keep draft until every endpoint is live (R16)
+    flipped = g.query(_PROMOTE_OPERATOR, params={"oid": oid}).result_set
+    if not flipped:
+        return False  # lost a race — a concurrent writer already flipped it
+    promoted_ops.add(oid)
+    sdk._emit_event("OperatorPromoted", id=oid, point=sdk.get_point(oid))
+    for eid, _st, rel, labs in endpoints:
+        # Only IMPL/NAND :Point endpoints are factor inputs to dirty-mark. A
+        # hasPart / mitigated_by endpoint gated the promotion but is not
+        # something EP propagates through, and a non-:Point endpoint cannot be
+        # stamped at all (``_mark_dirty`` matches ``:Point`` only) — handing its
+        # id over would file it in ``_dirty_roots`` as an unmatched root.
+        if eid and rel in _FACTOR_EDGE_TYPES and "Point" in (labs or ()):
+            on_input(eid)
+    return True
+
+
 def activate_beliefs(sdk, *, namespace: str | None = None,
                      batch_size: int = 500) -> dict:
     """Promote draft points/operators to live, then run EP.
@@ -618,27 +863,133 @@ def activate_beliefs(sdk, *, namespace: str | None = None,
             sdk._emit_event("PointPromoted", point=sdk.get_point(pid))
         points_promoted += len(chunk)
 
-    # ── 1b. Promote their draft operators (all endpoints now live) ────
+    # ── 1b. Promote draft operators whose endpoints are all live ──────
+    # #10137: the CANDIDATE SET is no longer the R16 gate. The old selection
+    # was "incident to a point this pass promoted", and it made an operator
+    # whose endpoints were ALREADY live unpromotable by ANY path —
+    # ``sdk.promote_point`` refuses an operator
+    # (``{blocked: True, reason: 'is_operator'}``) so it cannot stand in — so
+    # such a factor was EP-inert for ever. Every explicit-draft operator in the
+    # graph is now a candidate, and the GATE is applied once, in PYTHON, by
+    # reading each candidate's endpoints.
+    #
+    # The old incident query is DELETED rather than unioned, and the honest
+    # statement of what that changes is FOUR-part — the naive "strict subset"
+    # argument is FALSE against main, because the deleted query also matched an
+    # unset-status operator (``o.status IS NULL OR o.status = 'draft'``) while
+    # the sweep is explicit-``draft`` only:
+    #   * for the UNSET-STATUS arm specifically, the EP FACTOR GRAPH is
+    #     unchanged: an unset status is LIVE under the canonical read model
+    #     (``live.py``: "an ABSENT status is LIVE — the legacy-node rule"), so
+    #     ``ep._live_only('o.status')`` already admitted such an operator as a
+    #     factor; not re-promoting it removes no factor. ⛔ But that is NOT a
+    #     claim that the factor graph cannot move — see the NEXT bullet.
+    #   * the factor graph CAN LOSE a factor, on a shape ``main`` promoted and
+    #     this gate refuses. The deleted query matched on ``-[:IMPL|NAND]->``
+    #     alone, so it promoted a draft operator incident to a promoted draft
+    #     claim even when the operator ALSO carried ``mitigated_by`` to a
+    #     RETRACTED mitigation; the engine's read is label-wide, so this gate
+    #     refuses exactly that operator. MEASURED: the deleted query matches the
+    #     operator over a retracted mitigation (``main`` promoted it, and a live
+    #     IMPL operator over live claims is a factor — the shape
+    #     ``test_an_operator_minted_over_live_claims_moves_its_conclusion``
+    #     measures at conf 0.5945 with ``factors == 1``), while
+    #     ``_promote_operator_row`` returns ``False`` and the manifest publishes
+    #     ``operators_promoted: 0, factors: 0, no_op_reason: 'no_ep_factors'``
+    #     with the conclusion unmeasured. That direction is DELIBERATE (engine
+    #     parity: the engine keeps it draft too, pinned by
+    #     ``test_the_gate_reads_every_operator_edge_not_just_impl``), and it is
+    #     the price of never publishing a promotion the engine cannot produce.
+    #     A future census showing factors DOWN against these pre-fix cells has
+    #     this as its explanation.
+    #   * the MANIFEST and the JOURNAL do change, deliberately: a legacy
+    #     status-less operator incident to a promoted draft claim used to be
+    #     flipped to explicit ``'live'`` with an ``OperatorPromoted`` event, and
+    #     ``operators_promoted`` counted it. It no longer is — that is the
+    #     narrowing ``_SELECT_DRAFT_OPERATOR_IDS``' docstring states (never
+    #     re-promote a status-less operator into the event stream, exactly as
+    #     ``sdk._promote_incident_operators`` does not).
+    #   * GROUNDING can move, and calling this "manifest + journal only" would
+    #     be wrong. The strict grounding selector reads
+    #     ``MATCH (n:Point {status: 'live'})`` (``projection/grounding.py:19``,
+    #     edges at ``:46``), so a status-less operator and its ``IMPL``/``NAND``
+    #     edges are INVISIBLE to ``compute_grounding`` while an explicitly-live
+    #     one is not (``sdk.py:22350-22353``). A status-less operator this pass
+    #     used to normalise now stays status-less, so a later grounding run sees
+    #     a different matrix. Quote the EDGE read (2 → 0), not the node read
+    #     (3 → 2): the claims stay live, so only the edge selector can reach 0.
+    #     Not reachable from ``ingest_v2`` (explicit
+    #     ``'draft'``) and this module never grounds, so no census cell moves —
+    #     see the candidate query's block for the scope and the measurement.
+    # So keeping the incident query would NOT have been a free no-op; it is
+    # dropped because the behaviour it added is the behaviour being removed.
+    #
+    # ⛔ The gate is NOT re-spelled in Cypher. ``tortoise/live.py`` forbids a
+    # reader re-spelling the liveness predicate, and half-spelling it is a real
+    # defect this change shipped on its first pass: a draft-only predicate
+    # ("<> 'draft'") admits every TERMINAL endpoint STATUS (retracted /
+    # superseded / outdated / archived, and the legacy ``deprecated``), where
+    # the SDK's ``(st or "live") == "live"`` blocks them — so a resumed ingest
+    # writing an operator over a claim a human has since retracted would have
+    # gone live over a dead endpoint, journaled an ``OperatorPromoted`` for it,
+    # and published ``operators_promoted: 1, factors: 0`` (``ep.py`` strips
+    # terminal inputs, so the factor degenerates) — the terminal-input arm of the
+    # "promoted but no factor" reading this change exists to prevent. The
+    # ``outdated`` FLAG arm is NOT carried, because the engine's own gate does
+    # not carry it (#10828).
+    # Reading the endpoints and comparing in Python mirrors the
+    # SDK's SHAPE (read → compare → CAS SET), one round trip per candidate.
+    #
+    # ⚠️ ``operators_promoted: 1, factors: 0`` is NOT by itself a defect signal,
+    # and must not be read as one. The endpoint read is the ENGINE's, so a
+    # part/whole (``hasPart``) operator over live claims IS promoted by this
+    # sweep, and the ENGINE's GATE would admit it too (its read has no edge-type
+    # filter) — though the engine has no graph-wide sweep, and ``promote_point``
+    # returns ``already_live`` before its incident sweep, so on already-live
+    # claims this sweep is the only route that exists. EP builds no factor from
+    # ``hasPart`` by design (``_FACTOR_EDGE_TYPES``).
+    #
+    # Measured: a ``composedOf`` operator over two live claims publishes exactly
+    # ``operators_promoted=1, factors=0, no_op_reason='no_ep_factors'`` while
+    # being a correct promotion. So ``operators_promoted`` counts
+    # engine-promotable operators, NOT factors — read it with ``no_op_reason``
+    # and the factor count, never alone.
+    # (Narrowing the read to make that pair unreachable was tried and is wrong —
+    # it re-opens the retracted-mitigation divergence pinned by
+    # ``test_the_gate_reads_every_operator_edge_not_just_impl``.)
+    # The candidate set is bounded by the graph's draft operators.
     operators_promoted = 0
     promoted_ops: set[str] = set()
-    for chunk in _chunks(draft_ids, batch_size):
-        op_rows = g.query(_SELECT_DRAFT_OPERATORS,
-                          params={"ids": chunk}).result_set
-        for row in op_rows:
-            oid = row[0] if row else None
-            if not oid or oid in promoted_ops:
-                continue
-            promoted_ops.add(oid)
-            g.query(_PROMOTE_OPERATOR, params={"oid": oid})
-            sdk._emit_event("OperatorPromoted", id=oid,
-                            point=sdk.get_point(oid))
+    operator_inputs: list[str] = []
+
+    # Cost: one ``:Point`` label scan (the complement predicate
+    # ``_SELECT_DRAFT_POINT_IDS`` and ``_COUNT_POINTS_TOTAL`` scan the label
+    # unconditionally too) plus one endpoint read AND one CAS write per DRAFT
+    # operator, so on the all-draft path this is ~2N round trips (N reads + N
+    # CAS writes; the swept operators that fail the gate pay the read only). There is deliberately no memo for
+    # a draft operator permanently blocked by a terminal endpoint: it is
+    # re-gated on every call, which is bounded by the draft-operator count and
+    # keeps a later ``promote_point`` from being invisible (an un-memoised read
+    # cannot go stale).
+    candidates = [r[0] for r in
+                  g.query(_SELECT_DRAFT_OPERATOR_IDS).result_set if r]
+    for oid in dict.fromkeys(candidates):
+        if _promote_operator_row(sdk, g, oid, promoted_ops,
+                                 operator_inputs.append):
             operators_promoted += 1
 
     # ── 1c. Write-trigger dirty-mark (claims + reverse-BFS neighbors) ─
     # The promotion is a raw SET (never a per-point promote_point call), so
-    # EP would not otherwise know these claims are stale.
-    if draft_ids:
-        sdk._mark_dirty(draft_ids)
+    # EP would not otherwise know these claims are stale. #10137: the claims a
+    # newly-live operator connects are dirty-marked too — a factor that went
+    # live without its endpoints marked would be seen only by a FULL pass, and
+    # an incremental EP read would still call them settled. Deduped over the
+    # WHOLE concatenation: on the all-draft path every operator input is also a
+    # promoted draft, so a one-sided dedupe doubles the ``IN $ids`` payload on
+    # the very frontier ``ep.py`` names as its query-timeout risk (#6211).
+    dirty_ids = list(dict.fromkeys(draft_ids + operator_inputs))
+    if dirty_ids:
+        sdk._mark_dirty(dirty_ids)
 
     # ── 1d. PRE-pass contribution baseline (#10137 review, P1) ────────
     # `points_off_neutral` alone cannot separate "this pass MOVED a claim"

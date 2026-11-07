@@ -32,8 +32,10 @@ and that no ``${{ secrets.X }}`` remains in any step's run text.
 """
 from __future__ import annotations
 
+import importlib.util
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -43,7 +45,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pytest
 
-_WORKFLOW = Path(__file__).resolve().parent.parent / ".github" / "workflows" / "deploy-hosted.yml"
+ROOT = Path(__file__).resolve().parent.parent
+_WORKFLOW = ROOT / ".github" / "workflows" / "deploy-hosted.yml"
 
 # Anchors inside the workflow (the #1197 blocks). Slicing between markers keeps
 # the scan scoped: RESEND_API_KEY etc. live in other blocks and must not leak in.
@@ -2340,6 +2343,17 @@ _RECORD_ARMING_HEADING = "### Arming the Postgres record"
 _NUMERALS = {"TWO": 2, "THREE": 3, "FOUR": 4, "FIVE": 5, "SIX": 6}
 
 
+def _record_keys_missing_a_row(heads: list[str], names: set[str]) -> set[str]:
+    """The `names` that NO row's HEAD CELL in the arming table documents.
+
+    Split out of the pin so its non-vacuity can be MEASURED against the real head
+    cells instead of asserted: the same predicate applied to a coherently renamed
+    payload must report every renamed key missing, which is the state the pin
+    exists to catch (#9548 review P3).
+    """
+    return {name for name in names if not any(f"`{name}`" in head for head in heads)}
+
+
 def _record_arming_section() -> str:
     """The runbook's `Arming the Postgres record` section, verbatim.
 
@@ -2452,20 +2466,25 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
         "the bar states no presence requirement — name the reading that must "
         "EXIST after a capture before the reason breakdown means anything"
     )
-    # The presence LIST must be the five qualifying readings, in one clause — not
+    # The presence LIST must be the six qualifying readings, in one clause — not
     # merely a lead-in that some other, always-true reading could be appended to.
+    # (`record_writes_applied` is the POSITIVE witness added by #9548: without it
+    # required here, deleting that clause from the runbook left this pin green —
+    # the one reading the bar exists to add would have been the one reading the
+    # pin did not demand.)
     # ⛔ Read the FLAT copy, like its siblings above: this pin used to read `section`,
     # and its pattern spells the sentence out with literal single spaces, so a
     # wording-identical refill at widths 76/78/82 broke that clause across a line
     # boundary and reded it — measured here after the F3 fix, i.e. the file still
     # reds a reflow F3 exists to make harmless (#10083 review P2). Normalizing is
-    # NOT a relaxation: the five readings are still required verbatim below.
+    # NOT a relaxation: the six readings are still required verbatim below.
     presence = re.search(
         r"After the capture, require\s+at least one reading \*\*before\*\* you interpret anything:(.*?)\.\s",
         flat,
     )
     assert presence, "the presence requirement does not enumerate its readings"
-    for reading in ("record_write_failures", "record_non_journal_skips",
+    for reading in ("record_writes_applied", "record_write_failures",
+                    "record_non_journal_skips",
                     "record_position_unproven", "journal_event", "point"):
         assert reading in presence.group(1), (
             f"the presence list omits {reading!r} — an armed deployment whose only "
@@ -2490,10 +2509,35 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
         "never reaches Postgres"
     )
     # The BEFORE-and-after baseline: "growth" has no referent without it.
-    assert re.search(r"read both counters BEFORE the\s+capture and again after", flat), (
+    # ⛔ The noun is pinned as *every record counter*, not "both counters": the
+    # presence list below requires FOUR counters (plus two row reads), so a
+    # "both" baseline told the operator to take two of them — and the positive
+    # witness this bar exists to add (#9548's `record_writes_applied`) was one it
+    # omitted, leaving the delta it demands uncomputable from the reading it
+    # prescribed (#9548 review P2).
+    # ⛔ The clause is pinned from its lead-in through the RULE it states — `… the
+    # \*difference\* between the two reads, never an absolute count` — and that end
+    # point is deliberate: a pattern stopping at "between the two reads" was
+    # measured GREEN on the runbook dropping the very rule this assertion's message
+    # defends ("an absolute count left from earlier in the process's life then reads
+    # as this capture's growth"). Two earlier forms also failed, both measured: a
+    # bare fragment matched inside a sentence that FORBADE the baseline ("So ⛔ Do
+    # not **read every record counter …**" stayed green), and a negation-vocabulary
+    # guard bolted onto the fragment false-blocked accurate wording ("So never skip
+    # the baseline: **read every…**" red). Pinning the clause needs no vocabulary:
+    # any negation inserted before the imperative breaks the match, and a rewording
+    # reds — the trade the sibling clauses in this test make too. `flat` still
+    # tolerates a reflow.
+    assert re.search(
+        r"So \*\*read every record counter BEFORE\s+the capture and again after\*\*:"
+        r"\s+presence and growth are the \*difference\* between the two reads,"
+        r" never an absolute count",
+        flat,
+    ), (
         "the bar says 'growth' but never tells the operator to take a reading "
         "BEFORE the capture — an absolute count left from earlier in the "
-        "process's life then reads as this capture's growth"
+        "process's life then reads as this capture's growth — or it names a "
+        "subset of the counters the presence list then requires"
     )
     assert re.search(r"If nothing appeared at all, do not conclude the record is healthy", flat), (
         "the bar has no arm for an empty reading — an operator landing there is "
@@ -4016,6 +4060,96 @@ def test_the_health_build_block_is_documented_for_operators():
     )
 
 
+#: Depths at which the census's historical tree is sought in a SHALLOW clone, mirroring
+#: `tests/test_9397_about_edge_properties.py::_SHALLOW_DEPTHS`. Bounded on purpose: the cost is
+#: one shallow branch fetch and the bound is the point at which the tree is genuinely too old to
+#: reach — reported as a SKIP that says so, never as a measurement of zero.
+_CENSUS_SHALLOW_DEPTHS = (120, 400, 1500)
+
+
+def _census_git(repo: Path, *args: str) -> subprocess.CompletedProcess:
+    """A read-only git command in `repo`; a git that cannot run reports a NON-ZERO exit.
+
+    Never raises: every caller decides what a failure means, and none of them may read it as
+    "the command returned nothing" (#4309's fail-open shape).
+    """
+    try:
+        return subprocess.run(
+            ["git", "-C", str(repo), *args],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:  # pragma: no cover - no git at all
+        return subprocess.CompletedProcess([*args], 127, stdout="", stderr=str(exc))
+
+
+def _census_commit_available(repo: Path, rev: str) -> bool:
+    """True when `rev` resolves to a commit in THIS checkout's history."""
+    return _census_git(repo, "cat-file", "-e", f"{rev}^{{commit}}").returncode == 0
+
+
+def _census_is_shallow(repo: Path) -> bool:
+    """True when this checkout is a SHALLOW clone (`--is-shallow-repository`)."""
+    done = _census_git(repo, "rev-parse", "--is-shallow-repository")
+    return done.returncode == 0 and done.stdout.strip() == "true"
+
+
+def _census_deepen_to(
+    repo: Path, rev: str, depths: tuple[int, ...] = _CENSUS_SHALLOW_DEPTHS
+) -> bool:
+    """Make `rev` reachable IF the checkout is shallow — bounded, best effort.
+
+    ⛔ Gated exactly like `tests/test_9397_about_edge_properties.py::_ensure_commit`, whose
+    docstring records the measurement: `git fetch --depth=N` on a NON-shallow clone turns
+    `--is-shallow-repository` from `false` to `true` and cuts `git rev-list --count
+    origin/main` from 6106 to 120 — it TRUNCATES a developer's full history. So a full clone
+    that lacks the rev is never shallow-ified: this returns False and the caller SKIPS with a
+    message, rather than failing on a tree that structurally cannot carry the object.
+
+    The refspec is explicit so the fetch does not depend on `remote.origin.fetch` being
+    configured — a `actions/checkout@v4` clone of a PR does not set it up the way a developer
+    clone does, and `git fetch origin main` alone would then leave no `refs/remotes` entry.
+    """
+    if _census_commit_available(repo, rev):
+        return True
+    if not _census_is_shallow(repo):
+        return False
+    for depth in depths:
+        _census_git(
+            repo,
+            "fetch",
+            "--quiet",
+            f"--depth={depth}",
+            "origin",
+            "+refs/heads/main:refs/remotes/origin/main",
+        )
+        if _census_commit_available(repo, rev):
+            return True
+    return False
+
+
+def _census_count_at(repo: Path, rev: str, paths: list[str]) -> int:
+    """The census's line count at `rev` — FAIL-CLOSED on a git failure.
+
+    `git grep` exits **1** when it selects nothing (the legitimate "0 lines" reading) and
+    **128** when the object is missing. Summing stdout without looking at the exit code reads
+    the second as the first: a command that never ran would then satisfy a note that states 0,
+    which is the #4309 shape this whole block exists to close, reproduced inside its own pin.
+    """
+    done = _census_git(repo, "grep", "-c", _RECORD_DSN_ENV, rev, "--", *paths)
+    assert done.returncode in (0, 1), (
+        f"`git grep` at {rev} failed (exit {done.returncode}) instead of selecting nothing "
+        f"(exit 1), so its stdout is NOT a census of zero lines:\n{done.stderr.strip()}"
+    )
+    measured = 0
+    for line in done.stdout.splitlines():
+        tail = line.rsplit(":", 1)[-1]
+        if tail.isdigit():
+            measured += int(tail)
+    return measured
+
+
 def _superseded_census_note() -> str:
     """The epic's #9548 supersession note for the first census command, verbatim.
 
@@ -4125,9 +4259,11 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
     # baseline and nothing reds: the manifest grep above is executed, the baseline
     # census grep never was (#9548 review P1/P2).
     assert re.search(r"NOT empty", note), (
-        "the note claims the pre-#9548 census was empty — it returned one line, "
-        "#9556/R8's §9 operator example, and a later lane needs that line named to "
-        "tell it apart from a #9548 arming surface"
+        "the note claims the pre-#9548 census was empty — at `047c91f7a` (the "
+        "arming commit's parent) the same path set returns 10 lines, and a later "
+        "lane needs them named to tell them apart from a #9548 arming surface "
+        "(#11064 review r17, P3: this message still published the retired "
+        "\"one line\" reading)"
     )
     assert re.search(r"#9556", note), (
         "the note does not attribute the pre-existing census line to #9556/R8, so "
@@ -4145,12 +4281,86 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
     # documentation hits arrived on top of #9556/R8's invocation). The stated
     # number and the enumerated hits must be ONE measurement, or a later lane
     # re-runs the census and gets a different answer than the record of record.
-    stated = re.search(r"the pre-#9548 reading is\s+\*\*(\d+) lines?\*\*", note)
-    assert stated, (
-        "the note no longer states how many lines the pre-#9548 census returned, "
-        "so `NOT empty` is all it claims and the count can drift to any number"
+    # ⛔ The tree matters at least as much as the number, and this pin had the WRONG
+    # TREE (#11064 review r11, P2): it forced the pre-#9548 reading to be the
+    # `ff6379eb2` one. `ff6379eb2` is the #9601 merge — an ancestor of the base, 12
+    # commits and three runbook-touching commits BEFORE the #9548 arming (`785bb2b59`)
+    # — so the reading "immediately before #9548" is that commit's parent,
+    # `047c91f7a`, where the same path set returns 10. The pin therefore asserted a
+    # number that was true of a different tree than the sentence claimed, which is
+    # the stale-flag class this whole note exists to close. It now REQUIRES the tree
+    # to be named, MEASURES the count at that tree with git rather than trusting a
+    # numeral, and keeps the `ff6379eb2` enumeration pinned separately.
+    stated = re.search(
+        r"the pre-#9548 reading is\s+\*\*(\d+) lines?\*\* at `([0-9a-f]{7,40})`",
+        note,
+        re.I,
     )
-    count = int(stated.group(1))
+    assert stated, (
+        "the note no longer states how many lines the pre-#9548 census returned AT A "
+        "NAMED TREE, so `NOT empty` is all it claims and both the count and the tree "
+        "can drift"
+    )
+    pre_count, pre_sha = int(stated.group(1)), stated.group(2)
+    assert pre_sha != "ff6379eb2", (
+        "the note is back to calling `ff6379eb2` the tree immediately before #9548 — "
+        "that is the #9601 merge, three runbook-touching commits before the arming "
+        "commit `785bb2b59`"
+    )
+    # ... and the number is EXECUTED at the tree it names, not asserted: the same
+    # census the doc publishes, over the same path set (`paths`, read out of the doc
+    # above rather than retyped here), against the named sha.
+    #
+    # ⛔ AND IT MUST NOT RED ON A TREE THAT CANNOT SEE THE OBJECT (#11064 review, HIGH).
+    # This file is `tier1` (its `- test_deploy_workflow.py` entry under `tier1:` in
+    # `config/ci-surfaces.yml`), so it runs in python-ci's `test`
+    # job, and that job's ONLY checkout is a bare `actions/checkout@v4`
+    # (`.github/workflows/python-ci.yml`'s `test:` job header at `:680`, its checkout step at
+    # `:968`) — the default `fetch-depth: 1`. No step in that job unshallows it; the workflow's `fetch-depth: 0`
+    # belongs to the separate `changes` job (`:279`), which does not share a working tree.
+    # `047c91f7a` is far behind `origin/main` — `git rev-list --count 047c91f7a..origin/main`
+    # read 388 at 2026-11-06, and that figure only GROWS, so it is not the claim: the claim is
+    # that a depth-1 checkout does not carry it. `git grep` there exits 128 with EMPTY stdout,
+    # and the un-guarded form summed that to `measured == 0` and failed
+    # `measured == pre_count` on a CORRECT tree on every PR — a
+    # false RED produced by a guard whose purpose is to stop false GREENs. The repo already
+    # records this environment fact (`tests/test_capstone_preregistration_9075.py:550-566`:
+    # "CI test jobs check out at `fetch-depth: 1`") and carries five `--is-shallow-repository`
+    # guards for it; this is the sixth, in `_ensure_commit`'s shape (bounded deepen when
+    # SHALLOW only, else an explicit skip — never a silent pass, never a false red).
+    # ... and the MECHANISM above is executed, not merely named: this file's `tier1`
+    # membership is the premise for the whole shallow-checkout guard below. If this
+    # file ever leaves `tier1` it can be scheduled onto a lane with a full clone, and
+    # the bound it is guarding against stops existing while the guard keeps passing —
+    # the premise has to red, not the silent-pass path (#11064 review r15, P3).
+    from tools.ci_selection import load_manifest
+    assert "test_deploy_workflow.py" in set(load_manifest()["tier1"]), (
+        "this file is no longer a `tier1` entry, so the `fetch-depth: 1` premise the "
+        "census guard below rests on has changed — re-derive which job runs this file "
+        "instead of trusting the comment above (#11064 review r15, P3)"
+    )
+    if not _census_deepen_to(_REPO_ROOT, pre_sha):
+        pytest.skip(
+            f"`{pre_sha}` is not an object in this checkout (shallow: "
+            f"{_census_is_shallow(_REPO_ROOT)}) and a bounded fetch to depth "
+            f"{_CENSUS_SHALLOW_DEPTHS[-1]} did not reach it, so the census cannot be "
+            "MEASURED here. The textual pins above still ran; this SKIP is not a pass, and "
+            "the executed half of this pin needs a checkout carrying its history"
+        )
+    measured = _census_count_at(_REPO_ROOT, pre_sha, paths)
+    assert measured == pre_count, (
+        f"the note states {pre_count} line(s) at {pre_sha}, but running the census "
+        f"there returns {measured} — the number and the tree are then two different "
+        "measurements of the same claim"
+    )
+    # The `ff6379eb2` reading the note ENUMERATES is pinned to the enumeration below,
+    # so the two numbers cannot be quietly swapped back.
+    ff = re.search(r"that tree reads\s+\*\*(\d+) lines\*\*", note)
+    assert ff, (
+        "the note no longer states the `ff6379eb2` reading it enumerates, so the "
+        "enumeration below has no number to agree with"
+    )
+    count = int(ff.group(1))
     # \d{3,5}, not \d{4,5}: the runbook's early sections cite THREE-digit lines
     # (`docs/infra-runbook.md:382` is R9's `record-backup` section, and :528 its
     # drill commentary), and the narrower pattern silently dropped them while the
@@ -4220,6 +4430,242 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
     assert "3 lines immediately before #9548" not in row, (
         "§A8's evidence cell still carries the retired 3-line reading — the "
         "figure the census note's own last paragraph calls stale"
+    )
+    # ⛔ AND THE ROW MUST NOT CALL `ff6379eb2` THE TREE BEFORE #9548 (#11064 review
+    # r16, P1). The §G note was corrected — `ff6379eb2` is the #9601 merge, an
+    # ANCESTOR of this branch's base, and the commit immediately before the #9548
+    # arming (`785bb2b59`) is its parent `047c91f7a`, where the same path set
+    # returns 10 lines, not 5 — but the identical sentence survived HERE, 893 lines
+    # away, where this pin read only the count and the tree NAME. Measured:
+    # `git rev-list --count ff6379eb2..047c91f7a` → 12, and the row's own parenthetical
+    # already said "an ancestor of this branch's base", so the clause contradicted
+    # the sentence it was attached to.
+    # ⛔ AND NEITHER MAY THE PHRASE ITSELF BE BANNED, nor the claim be re-keyed past
+    # (#11064 review r17, P3 — the two directions the r16 shape got wrong that the
+    # r17 sha-exemption above does NOT cover). Both were measured by running the arm
+    # as it stood against candidate cells:
+    #   * the blanket `assert not re.search(r'what "?immediately before #9548"?
+    #     means')` that opened this pin REDDED `ff6379eb2 is not what "immediately
+    #     before #9548" means; that tree is `047c91f7a`` — a repair that BOTH denies
+    #     the equivalence AND names the true tree. Banning a phrasing is not the same
+    #     check as banning a claim: a guard that reds the fix teaches the next lane to
+    #     delete the guard, and this file warns about exactly that false-RED class.
+    #   * the predicate keyed on `immediately`, so `ff6379eb2 — the tree before #9548
+    #     — reads 5 lines` — the same FALSE claim with one word paraphrased away —
+    #     PASSED. A fail-open is the worse direction, so the key is `before #9548`.
+    #
+    # One predicate, four executed controls below: RED on the bare equivalence and on
+    # the paraphrase, GREEN on a positive correction, on a denial-shaped correction,
+    # and on the three truthful shapes the r17 review measured.
+    def _refuses_before_9548(sentence: str) -> bool:
+        """True when the sentence NAMES "before #9548" and neither denies nor corrects it.
+
+        Kept as a predicate (not inlined) so the arm can be exercised in BOTH
+        directions on fixed strings — the red direction (the bare equivalence and its
+        paraphrase) and the green one (a correction naming the true pre-#9548 tree,
+        in both its positive and its denial phrasing). A predicate that is only ever
+        run against the artefact it guards can go vacuous without anything reding;
+        these controls are what make its greenness a measurement.
+        """
+        if not re.search(r"\bbefore\s+#9548", sentence, re.I):
+            return False
+        if "047c91f7a" in sentence:
+            return False  # names the TRUE pre-#9548 tree — a correction, not the defect
+        # ADJACENT-anchored, not "anywhere in the sentence": the PRE-FIX cell carries
+        # "not empty and not one" AFTER the false clause, which is exactly what
+        # satisfied a whole-sentence test (the trap the manifest denial is windowed for).
+        return not re.search(r"\bnot\b[^.]{0,60}?before\s+#9548", sentence, re.I)
+
+    # ... and a cell that still NAMES the phrase must DENY the equivalence. Deleting
+    # the clause is equally correct, so both shapes pass — what may not pass is the
+    # bare equivalence, which is what the cell carried before this pin existed. The
+    # denial must sit ADJACENT to the phrase (a `not` anywhere in a 900-word cell
+    # sentence is not the correction — measured: the pre-fix sentence contains
+    # "not empty and not one" AFTER the false clause and satisfied a whole-sentence
+    # test, so this arm is windowed like the manifest denial above).
+    #
+    # ⛔ AND NAMING THE TRUE TREE IS THE CORRECTION, not a violation of it (#11064
+    # review r17, P2). The arm as first written required a denial in EVERY sentence
+    # that named the phrase, so the most natural fix — "the tree immediately before
+    # #9548 is `047c91f7a`" — was refused: a false RED produced by a guard whose
+    # purpose is to stop false GREENs, the same class this file warns about ~130
+    # lines above. A sentence that names `047c91f7a` is exempt, and the three
+    # truthful shapes are EXECUTED below so the exemption cannot be the whole arm.
+    offenders = [
+        sentence
+        for sentence in re.split(r"(?<=\.)\s+", row)
+        if _refuses_before_9548(sentence)
+    ]
+    assert not offenders, (
+        "§A8's evidence cell dates a figure to \"before #9548\" without either "
+        "denying it applies to `ff6379eb2` or naming `047c91f7a` (the arming "
+        "commit `785bb2b59`'s parent, where the same path set returns 10 lines, "
+        "not the 5 stated at `ff6379eb2`):\n  " + "\n  ".join(offenders)
+    )
+    # Controls, executed — the arm must still RED on the shape it was written for …
+    assert _refuses_before_9548(
+        "`grep -rn TORTOISE_RECORD_DSN …` → 5 lines at `ff6379eb2`, which is "
+        'what "immediately before #9548" means.'
+    ), (
+        "the denial arm no longer reds on the bare equivalence it exists to catch — "
+        "the exemption above has swallowed the finding (#11064 review r17, P2)"
+    )
+    # … and on the PARAPHRASE that drops `immediately` — the fail-open the r16 key
+    # left open (#11064 review r17, P3).
+    assert _refuses_before_9548(
+        "ff6379eb2 — the tree before #9548 — reads 5 lines."
+    ), (
+        "the arm is keyed on `immediately before` again: the same false claim with "
+        "that one word paraphrased away passes, which is a fail-open (#11064 review "
+        "r17, P3)"
+    )
+    # … and must NOT red on a DENIAL-shaped correction that also names the true tree
+    # — the false RED the r16 blanket substring ban produced (#11064 review r17, P3).
+    _denial_shaped = (
+        'ff6379eb2 is not what "immediately before #9548" means; that tree is `047c91f7a`.',
+    )
+    _refused_denials = [s for s in _denial_shaped if _refuses_before_9548(s)]
+    assert not _refused_denials, (
+        "the arm refuses a DENIAL-shaped correction — `is not what ... means` is a "
+        "repair, and banning that phrasing reds the fix (#11064 review r17, P3):\n  "
+        + "\n  ".join(_refused_denials)
+    )
+    # … and must NOT red on any of the three truthful corrections the r17 review
+    # measured RED before the exemption.
+    _truthful = (
+        "The tree immediately before #9548 is `047c91f7a`, where the same path set returns 10.",
+        "`047c91f7a` is the tree immediately before #9548.",
+        "Measured at `047c91f7a` — the tree immediately before #9548 — the census returns 10.",
+    )
+    _false_reds = [s for s in _truthful if _refuses_before_9548(s)]
+    assert not _false_reds, (
+        "the denial arm refuses a TRUTHFUL correction — naming the true pre-#9548 "
+        "tree is the fix, so it may not be the shape this pin rejects:\n  "
+        + "\n  ".join(_false_reds)
+    )
+    # … and those strings are load-bearing in that direction: none of them carries a
+    # denial, so without the `047c91f7a` exemption the arm above would red them. A
+    # control that already denied the phrase would prove nothing.
+    _denial_arm = re.compile(
+        r"\b(?:not|never|isn't|is not)\b[^.]{0,40}?immediately\s+before\s+#9548", re.I
+    )
+    assert not any(_denial_arm.search(s) for s in _truthful), (
+        "a control string carries a denial, so it no longer demonstrates that the "
+        "exemption is what makes a truthful correction pass (review r17, P2)"
+    )
+
+
+def test_the_census_git_guard_fails_closed_and_never_reds_a_shallow_checkout(tmp_path):
+    """#11064 review (HIGH): the executed census must not read a git failure as zero lines.
+
+    Two defects, both MEASURED here on a throwaway repo — no network, no DB, no docker:
+
+    1. FAIL-OPEN — `git grep` at an object this checkout does not carry exits **128** with
+       EMPTY stdout. The pre-fix block summed stdout and got `0`, so a note that ever states
+       `0` would be satisfied by a command that never ran: the `#4309` shape this block exists
+       to close, reproduced inside its own pin.
+    2. FALSE RED — that same empty stdout was compared against a real count, so on python-ci's
+       depth-1 `test` job (its bare `actions/checkout@v4` — `.github/workflows/python-ci.yml:968`,
+       inside the `test:` job header at `:680`) this pin failed on a CORRECT tree on every PR. The
+       depth-1 clone below reproduces the shape: the old tree is absent, and `_census_deepen_to` reaches it
+       with a bounded fetch instead of reddening — while a FULL clone that lacks the rev is
+       never shallow-ified, because `tests/test_9397_about_edge_properties.py::_ensure_commit`
+       measured that `git fetch --depth=N` truncates a developer's history.
+
+    Non-vacuity: on the pre-fix tree none of these helpers exists (the logic was inline and
+    unguarded), so this test reds at its first call — the defect, not the fixture. The two
+    `pytest.raises` arms are the ones the pre-fix code could not produce at all.
+    """
+    # ⛔ THE "FULL clone" FIXTURE IS A REAL CLONE, not a `git init` (review at
+    # `fb79abca4`, Finding 2, P2). With no `origin`, a `git fetch --depth=1 origin …`
+    # exits **128** instead of truncating, so the "never shallow-ify a full clone"
+    # arm at the end of this test stayed GREEN with the shallow gate DELETED — an
+    # inert arm under the exact mutation its comment documents. Cloning from a local
+    # seed gives `origin` a real target, so dropping that gate performs the fetch and
+    # really flips `--is-shallow-repository` to `true`, reddening the arm.
+    seed = tmp_path / "census-seed"
+    repo = tmp_path / "census-repo"
+    runbook = seed / "docs" / "infra-runbook.md"
+    runbook.parent.mkdir(parents=True)
+    # A path in the census set that selects NOTHING (the legitimate exit-1 reading), committed
+    # so the "git grep exits 1 when it selects nothing" arm is measured on a real path.
+    (seed / "fly.toml").write_text('[app]\nname = "fixture"\n', encoding="utf-8")
+    assert _census_git(seed, "init", "-q", "-b", "main").returncode == 0
+
+    def commit(n_lines: int, message: str) -> str:
+        runbook.write_text(
+            "".join(f"export TORTOISE_RECORD_DSN=line{i}\n" for i in range(n_lines)),
+            encoding="utf-8",
+        )
+        for args in (
+            ("add", "-A"),
+            (
+                "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                "commit", "-q", "-m", message,
+            ),
+        ):
+            done = _census_git(seed, *args)
+            assert done.returncode == 0, f"fixture git {args} failed: {done.stderr}"
+        head = _census_git(seed, "rev-parse", "HEAD")
+        assert head.returncode == 0, head.stderr
+        return head.stdout.strip()
+
+    census_paths = ["docs/infra-runbook.md"]
+    old_sha = commit(2, "two census lines")
+    commit(5, "five census lines")
+    # … and `repo` is that seed's FULL clone, so `origin` RESOLVES (the Finding-2 fix).
+    full_clone = _census_git(
+        tmp_path, "clone", "-q", f"file://{seed.resolve()}", str(repo)
+    )
+    assert full_clone.returncode == 0, full_clone.stderr
+    assert _census_git(repo, "remote", "get-url", "origin").returncode == 0, (
+        "the FULL-clone fixture has no `origin` — the never-shallow-ify arm below is "
+        "then inert, because a `git fetch --depth=1 origin …` with no remote exits 128 "
+        "instead of truncating (review at `fb79abca4`, Finding 2)"
+    )
+
+    # The reachability predicate the old block never asked.
+    assert _census_commit_available(repo, old_sha)
+    assert not _census_commit_available(repo, "0" * 40)
+    # A legitimate "selects nothing" (exit 1) is a measurement of ZERO, not a failure...
+    assert _census_count_at(repo, old_sha, ["fly.toml"]) == 0
+    # ...while an object the checkout does not have is a FAILURE, never a zero.
+    with pytest.raises(AssertionError) as excinfo:
+        _census_count_at(repo, "0" * 40, census_paths)
+    assert "failed" in str(excinfo.value) and "NOT a census of zero" in str(excinfo.value)
+    # The real counts, at the tree each was measured at.
+    assert _census_count_at(repo, old_sha, census_paths) == 2
+    assert _census_count_at(repo, "HEAD", census_paths) == 5
+
+    # ── the CI shape: a depth-1 checkout ────────────────────────────────────
+    shallow = tmp_path / "shallow"
+    clone = _census_git(
+        tmp_path, "clone", "-q", "--depth", "1", f"file://{repo.resolve()}", str(shallow)
+    )
+    assert clone.returncode == 0, clone.stderr
+    assert _census_is_shallow(shallow)
+    assert not _census_commit_available(shallow, old_sha), (
+        "the depth-1 fixture must not carry the old tree — otherwise it does not reproduce "
+        "the environment the HIGH finding was measured in"
+    )
+    # The PRE-FIX reading of that state: `git grep` fails, stdout is empty, and the sum is 0.
+    with pytest.raises(AssertionError):
+        _census_count_at(shallow, old_sha, census_paths)
+    # The guard's answer is to DEEPEN (bounded), not to red: measured, not asserted.
+    assert _census_deepen_to(shallow, old_sha, depths=(2, 4, 8))
+    assert _census_count_at(shallow, old_sha, census_paths) == 2
+
+    # ── and the deepen arm must never touch a FULL clone ────────────────────
+    # A bogus rev on a full clone returns False WITHOUT fetching: if the shallow gate were
+    # dropped, `git fetch --depth=1` would truncate this repo's history and
+    # `--is-shallow-repository` would flip to true — the destructive side effect
+    # `_ensure_commit` documents. `repo` is a CLONE (not a `git init`) so `origin`
+    # resolves and this arm actually reds under that mutation (review at
+    # `fb79abca4`, Finding 2: with no remote the fetch exited 128 and the arm could
+    # not fail).
+    assert not _census_deepen_to(repo, "0" * 40, depths=(1,))
+    assert not _census_is_shallow(repo), (
+        "the deepen arm shallow-ified a FULL clone — that truncates a developer's history"
     )
 
 
@@ -4679,3 +5125,564 @@ def test_the_health_gate_header_states_the_budgets_its_knobs_derive() -> None:
             "the gate's BEHAVIOUR header still says 3 min for a phase whose "
             "derived window is not 180 s"
         )
+
+
+def test_the_runbook_field_row_documents_the_positive_pair():
+    """#9548: the operator's FIELD ROWS must name the fields `metrics()` publishes.
+
+    ⛔ Registered on `tier1` — that is the whole point. `docs/infra-runbook.md` is under
+    `docs/`, which is in `NON_PYTHON_PREFIXES` and matches no `SOURCE_PATTERNS` entry, so
+    a runbook-only diff selects NO surface and runs `tier1` only (#4309). The assertion
+    that first tried to guard this was a whole-file `name in runbook` membership test in
+    `tests/test_9548_record_arming_health.py` — and it failed on BOTH counts, each measured:
+    that suite is not selected on a docs-only diff, and the membership form stays green
+    under the rename anyway (the row's own explanation still names both fields further
+    along it). So this pin names the row's HEAD CELL, in the suite the diff actually runs.
+
+    Scoped to the section's TABLE ROWS — and to each row's **HEAD CELL**, not its prose — so it
+    pins the operator's row without pinning its punctuation: a head cell that annotates the types
+    (`record_writes_applied` (int) / …) or a pair split across two rows is a better doc and still
+    passes, while a rename (or a deletion) reds. ⚠️ Head-cell scope is not fussiness: a same-row
+    substring test was measured GREEN on a rename of the pair in the head cell, because the row's
+    own explanation still names both fields further along it.
+
+    ⛔ **The set of names this pin DEMANDS is DERIVED FROM `metrics()`** — never a duplicate of it.
+    That is the finding this pin was rewritten for (#9548 review P3): the earlier form iterated two
+    LITERALS, so a *coherent* rename — payload keys, docstring, `test_9548`'s literals and this
+    file's literals all renamed together — left `docs/infra-runbook.md` documenting a field the
+    payload no longer published with **every test green**, while this docstring claimed it pinned
+    "the two fields the payload publishes". Reading the demanded set from `metrics()` is what reds
+    the runbook-stale half, and it is also the reason this pin is in `tier1` rather than beside the
+    docstring pin.
+
+    ⚠️ **What is still spelled out by hand, and why that is not a contradiction** (#11128 review P3):
+    the positive pair is hand-spelled at **four sites below, in three roles** —
+    (1) the `<= record_keys` **precondition**; (2) the non-vacuity **mutation**, both its `.replace(...)`
+    SEARCH strings and the `== {…}` EXPECTATION naming what the mutation must leave reported missing;
+    and (3) the **survivor** assertion that the unmutated cells satisfy the pair. Role (1) is the only
+    duplicate-in-the-harmful-sense, and it is deliberate: naming `record_writes_applied` /
+    `record_last_write_at` IS the #9548 claim (this pair exists, is published, and must be documented),
+    so the pin has to fail if either disappears rather than quietly demanding one fewer name.
+    Roles (2) and (3) are not second sources of truth: (2)'s search strings say which cells to mutate
+    and its expectation says which names must then be missing (they have to be the payload's names —
+    that is what makes the mutation mean "the runbook kept the OLD row"), and (3) asserts those same
+    names are satisfied before the mutation. So a coherent rename does require editing these
+    spellings too — and the pin still reds when the runbook keeps the old row; what it never does is
+    reduce the set it demands on its own.
+    """
+    from tortoise import monitoring  # local: this file keeps heavy imports inside tests
+
+    section = _record_arming_section()
+    rows = [line for line in section.splitlines() if line.lstrip().startswith("|")]
+    assert rows, "the arming section has no table rows at all — the field docs vanished"
+    heads = [row.split("|")[1] for row in rows if len(row.split("|")) > 1]
+    published = monitoring.metrics()
+    record_keys = {name for name in published if name.startswith("record_")}
+    assert {"record_writes_applied", "record_last_write_at"} <= record_keys, (
+        "`metrics()` no longer publishes the positive pair #9548 exists to add, so "
+        f"an empty failure object cannot be read as a write — record keys: {sorted(record_keys)}"
+    )
+    missing = _record_keys_missing_a_row(heads, record_keys)
+    assert not missing, (
+        f"the arming section's field table documents no row for {sorted(missing)} — "
+        "the operator has no reading to take for a counter the payload publishes, "
+        "however correct the `/health` payload is; a renamed key leaves this row "
+        "naming a field that no longer exists"
+    )
+    # Non-vacuity MEASURED, and it must be a measurement that can FAIL (#11128 review
+    # P3): the earlier form asserted `_record_keys_missing_a_row(heads, {f"{n}_renamed"})
+    # == {f"{n}_renamed"}` — which holds for ANY `heads` that mention no `*_renamed` cell,
+    # including `heads=[]`, so it could not red on the mutation its message described.
+    # This mutates the REAL head cells instead: rename the pair where the section
+    # documents it, and require the predicate to report exactly those two names
+    # missing and to stop reporting them once the mutation is reverted. Vacuous
+    # passes are impossible by construction — the mutation is asserted to have
+    # changed a cell, and the survivor check proves the cells are LIVE input, not an
+    # empty list the predicate would agree with.
+    mutated = [
+        head.replace("`record_writes_applied`", "`record_applied_writes`").replace(
+            "`record_last_write_at`", "`record_last_write_instant`"
+        )
+        for head in heads
+    ]
+    assert mutated != heads, (
+        "the rename mutation changed no head cell — the arming section no longer "
+        "documents either name in a head cell, so this measurement has no subject"
+    )
+    assert _record_keys_missing_a_row(mutated, record_keys) == {
+        "record_writes_applied",
+        "record_last_write_at",
+    }, (
+        "this pin would stay GREEN on a coherent rename of `metrics()`'s record "
+        "keys — the runbook would keep documenting the retired names while the "
+        "suite passed, the paper-only claim #9548 exists to end"
+    )
+    # …and the predicate reads the cells given to it (so it is not a constant):
+    # with the REAL head cells, neither name is missing.
+    assert not _record_keys_missing_a_row(heads, {"record_writes_applied",
+                                                "record_last_write_at"})
+
+
+def test_any_ci_surfaces_line_citation_here_resolves_to_this_files_own_row():
+    """#11064 review (P3), executed: a line citation into the manifest must RESOLVE.
+
+    The sentence establishing WHERE this file's `tier1` registration lives cited
+    `config/ci-surfaces.yml` by LINE NUMBER, and the number had rotted onto another
+    test's row — on `main` it was `- test_cli_serve.py`; on this branch it was
+    `- test_s2_decision_record_5087.py`. It is now cited by mechanism, which the manifest
+    itself requires ("Named by mechanism, not by line number"). A mechanism citation
+    cannot decay; a line citation decays on the next edit to a 7,600-line file, which is
+    precisely how the wrong one got there.
+
+    So this pin does not ban a line citation, it CHECKS one: every
+    `config/ci-surfaces.yml:<line>` pointer in THIS file must resolve to a row naming
+    this file. ⚠️ If a later lane needs to QUOTE a rotten pointer as history, quote it
+    without the `:<n>` suffix (the surviving row's own name), or this pin will treat the
+    quotation as a live claim — the distinction the rest of this file draws between a
+    live instruction and a `SUPERSEDED` record.
+
+    ⚠️ **The pin is CONDITIONAL, and says so** (#11064 review r17, P3): it checks the
+    citations that EXIST, and at the head that added it this file carries NONE (the
+    sentence it was written for cites the manifest by mechanism now). A green run
+    therefore means *"no rotten pointer here"*, not *"a pointer was verified"* — the
+    distinction matters because a scanner that matches nothing looks identical to one
+    that checked everything. It reds the moment a `:<n>` pointer is added and rots.
+
+    Falsified on the pre-fix text: the pointer resolved to another test's row.
+    """
+    source = Path(__file__).read_text(encoding="utf-8")
+    manifest = (_REPO_ROOT / "config" / "ci-surfaces.yml").read_text(encoding="utf-8").splitlines()
+    stale = []
+    for match in re.finditer(r"config/ci-surfaces\.yml:(\d+)", source):
+        number = int(match.group(1))
+        row = manifest[number - 1].strip() if 0 < number <= len(manifest) else "<beyond the file>"
+        if "test_deploy_workflow.py" not in row:
+            stale.append(f"{match.group(0)} -> {row!r}")
+    assert not stale, (
+        "a `config/ci-surfaces.yml:<line>` citation in this file resolves to a row that is "
+        "not this file's registration:\n  " + "\n  ".join(stale) + "\n"
+        "Cite the entry by mechanism (`its `- test_deploy_workflow.py` entry under "
+        "`tier1:` in `config/ci-surfaces.yml``) — a line number here has already rotted "
+        "onto a sibling test's row (#11064 review P3)"
+    )
+
+
+def test_any_workflow_line_citation_here_resolves_to_a_real_line_and_the_test_job_is_bare():
+    """#11064 review (P2), executed: a `.github/workflows/*.yml:<line>` citation must RESOLVE.
+
+    The census guard's premise — *the `test` job's only checkout is a bare `actions/checkout@v4`,
+    so the job runs at the default `fetch-depth: 1`* — was cited as `.github/workflows/python-ci.yml`
+    line 898. ⚠️ Quoted WITHOUT the `:<n>` suffix on purpose: this pin reads this file's own source,
+    so a live-looking `python-ci.yml:898` in a docstring would be treated as a claim (the sibling
+    `ci-surfaces` pin documents the same convention). That number was CORRECT at the head the
+    sentence was
+    written on and rotted **during this PR's own merge of `origin/main`**: at `fc92a8e3c` the line
+    was `      - uses: actions/checkout@v4`, and at the merge commit `ce0bb3d44` it is a prose
+    comment (*"published to every later step through `$GITHUB_ENV` …"*) — a `main` edit higher in
+    the file moved every later line down. The claim stayed true and its evidence pointed at
+    unrelated text, which is the exact "a past state quoted as a current one" decay this PR exists
+    to close, reproduced inside the PR that closes it.
+
+    So this pin executes the class rather than trusting the numeral:
+
+    1. every `.github/workflows/<name>.yml:<line>` pointer in THIS file must land inside its
+       workflow at a line that is real CONTENT — not blank, and not a `#` comment. That is what
+       catches a rotted pointer without needing to know what the line is *supposed* to say; a
+       citation that lands on a comment has provably moved.
+    2. the SEMANTIC half, asserted where the sentence makes it: the `test` job's checkout carries
+       no `with:`/`fetch-depth`. If a later lane unshallows that job, the shallow-checkout bound
+       this file guards against stops existing and the guard would keep passing — the premise has
+       to red, not the silent-pass path.
+
+    Falsified on the pre-fix text: line 898 resolved to a comment. Falsified on an unshallowed
+    `test` job: the second assertion names the added `with:` key.
+    """
+    source = Path(__file__).read_text(encoding="utf-8")
+    workflows = _REPO_ROOT / ".github" / "workflows"
+    stale = []
+    for match in re.finditer(r"\.github/workflows/([a-z0-9_.-]+\.ya?ml):(\d+)", source):
+        name, number = match.group(1), int(match.group(2))
+        lines = (workflows / name).read_text(encoding="utf-8").splitlines()
+        line = lines[number - 1] if 0 < number <= len(lines) else None
+        if line is None:
+            stale.append(f"{match.group(0)} -> beyond the file ({len(lines)} lines)")
+        elif not line.strip() or line.lstrip().startswith("#"):
+            stale.append(f"{match.group(0)} -> {line.strip()!r} (blank or a comment)")
+    assert not stale, (
+        "a `.github/workflows/<name>.yml:<line>` citation in this file no longer lands on "
+        "anything:\n  " + "\n  ".join(stale) + "\n"
+        "A workflow edit shifts every later line, so re-derive the number or cite the step by "
+        "mechanism — a pointer that lands on a comment has provably rotted (#11064 review P2)"
+    )
+
+    # ── the SEMANTIC half: the `test` job's checkout must stay BARE ─────────────────────
+    workflow = (workflows / "python-ci.yml").read_text(encoding="utf-8").splitlines()
+    header = next(
+        (i for i, ln in enumerate(workflow) if re.fullmatch(r"  test:\s*", ln)),
+        None,
+    )
+    assert header is not None, (
+        "`python-ci.yml` no longer declares a top-level `test:` job — the census guard's "
+        "shallow-checkout bound is derived from it"
+    )
+    end = next(
+        (i for i in range(header + 1, len(workflow)) if re.fullmatch(r"  [A-Za-z0-9_-]+:\s*", workflow[i])),
+        len(workflow),
+    )
+    checkouts = [
+        i for i in range(header, end)
+        if workflow[i].strip().startswith("- uses: actions/checkout@")
+    ]
+    assert len(checkouts) == 1, (
+        "the `test:` job no longer has exactly ONE `actions/checkout@` step "
+        f"(found {len(checkouts)}) — the guard's premise is that a single bare checkout "
+        "gives the job the default `fetch-depth: 1` (#11064 review P2)"
+    )
+    # The step's own body is the checkout line plus any `with:`/`env:` continuation lines up to
+    # the next step. `fetch-depth` anywhere in it means the job is no longer shallow.
+    step = [workflow[checkouts[0]]]
+    for ln in workflow[checkouts[0] + 1:end]:
+        if ln.strip().startswith("- "):
+            break
+        step.append(ln)
+    assert not any("fetch-depth" in ln for ln in step), (
+        "the `test:` job's checkout now sets `fetch-depth`, so the job is no longer shallow — "
+        "the false-RED bound `test_the_census_git_guard_fails_closed_and_never_reds_a_shallow"
+        "_checkout` guards against no longer exists, while the guard would keep passing "
+        "(#11064 review P2):\n  " + "\n  ".join(ln for ln in step if "fetch-depth" in ln)
+    )
+
+
+# ── #11122 — the mitigation ledger is honoured at SYNC time ───────────────────
+#
+# The ledger (`.github/scripts/fly-secret-mitigations.txt`) records secrets an
+# operator removed ON PURPOSE. Two deploys put SENTRY_DSN back on 2026-11-05/06,
+# on builds that did not contain the fix, because the sync step asserts a desired
+# state and cannot tell "unconfigured" from "deliberately removed".
+#
+# THESE TESTS PIN THE WORKFLOW HALF ONLY. The gate's half (it proves the filter
+# actually suppressed the name, refuses an expired entry, and refuses a name the
+# manifest does not declare) is in `tests/test_fly_secret_drift.py`
+# (`TestTheMitigationLedger`). Both halves are needed: a filter without the gate's
+# reverse check can rot silently, and a gate without the filter only reports the
+# exception (the measured Argo CD trap — `ignoreDifferences` quiets comparison
+# while the sync still applies the desired value).
+
+_LEDGER_PATH = ".github/scripts/fly-secret-mitigations.txt"
+#: Builtins only. The provenance gate classifies the payload by EXECUTING it with
+#: a PATH that holds only fly/flyctl stubs, where every forkable utility
+#: (`grep`, `awk`, `sed`, `tr`, `jq`, `python`) is absent — one would abort the
+#: classification with `command not found`, which the gate correctly reports as
+#: exit 2, i.e. a blocked deploy on every run.
+_FORKABLE_IN_LEDGER_BLOCK = (
+    "grep", "egrep", "awk", "sed", "tr", "cut", "jq", "sort", "uniq", "xargs",
+    "python", "python3", "cat", "wc",
+)
+
+
+def _ledger_block(run: str) -> str:
+    """The ledger machinery, both regions, in the order the deploy runs them.
+
+    Two regions by design: an ENVIRONMENT block before the payload is composed (it
+    blanks each ledgered name so derived values observe the absence) and a PAYLOAD
+    block after it (the belt that removes the name from ARGS when a default branch
+    re-adds it). Joining them is the whole mechanism; either alone is half of it.
+    """
+    env_start = run.index("# ⛔ #11122 — THE MITIGATION LEDGER, APPLIED TO THE ENVIRONMENT")
+    env_end = run.index("# ⛔ #11122 — END OF THE ENVIRONMENT BLOCK")
+    tail_start = run.index("# ⛔ #11122 — THE MITIGATION LEDGER, APPLIED TO THE PAYLOAD")
+    tail_end = run.index('flyctl secrets set --stage "${ARGS[@]}" --app tortoise-y4mjjq')
+    assert env_start < env_end < tail_start < tail_end, (
+        "marker drift: the ledger regions moved, or the environment block now runs "
+        "after the payload composition (which would restore the derived-value "
+        "inconsistency the ordering exists to prevent)"
+    )
+    return run[env_start:env_end] + run[tail_start:tail_end]
+
+
+def test_the_sync_step_honours_the_mitigation_ledger():
+    """The exception must be enforced where the WRITE happens, not where it is reported.
+
+    A gate that merely warns is the measured false exception: the sync applies the
+    declared value anyway and the exception exists only in the report.
+    """
+    run = _steps()[_SET_STEP]["run"]
+    block = _ledger_block(run)
+
+    # (1) it reads the ledger the manifest lives beside (#11122's file)
+    assert _LEDGER_PATH in block, (
+        "the secrets-set step does not read the mitigation ledger — a ledgered "
+        "secret would be re-staged on the next deploy"
+    )
+    assert "FLY_MITIGATION_LEDGER" in block, (
+        "the ledger path must stay overridable (the gate's stub harness seeds it "
+        "so the payload it classifies is filtered by the same file)"
+    )
+
+    # (2) it drops ledgered names from the argv
+    assert 'case "$MITIGATED" in' in block and 'continue' in block, (
+        "no filtering `case` over the ledger name set — the ledger is read but "
+        "never applied"
+    )
+    # ⛔ The DELIMITERS are the discrimination feature, not decoration (#11332
+    # review, P2). `MITIGATED` is a SPACE-DELIMITED accumulator, so the pattern
+    # must anchor on the leading AND trailing space: the `case` matches by the
+    # ARG's name, so without the delimiters an ENTRY for the LONGER name also
+    # matches the SHORTER arg. This payload really carries `TORTOISE_BACKUP_KEY`
+    # next to `TORTOISE_BACKUP_KEY_PREVIOUS` (deploy-hosted.yml:1214 / :1219, pinned
+    # by `test_every_citation_of_the_backup_key_pair_resolves`), and
+    # `TORTOISE_BACKUP_KEY_PREVIOUS` is the entry an operator is most likely to
+    # write after a rotation — so the LIVE key would silently stop syncing on every
+    # deploy, with no gate reporting it (rotation breaks, #2318). Executed coverage
+    # for this lives in
+    # `tests/test_fly_secret_drift.py::test_a_ledgered_name_does_not_suppress_a_SHORTER_name_it_extends`;
+    # this pin is the static half, so a weakening is visible in the diff as well.
+    assert '*" $ARG_NAME "*' in block, (
+        "the ledger match is not delimited on BOTH sides — `*\"$ARG_NAME\"*` makes "
+        "a ledger entry for `TORTOISE_BACKUP_KEY_PREVIOUS` also suppress the "
+        "SHORTER `TORTOISE_BACKUP_KEY` (the case matches by the ARG's name), so "
+        "the LIVE backup key silently stops syncing and the exception becomes "
+        "wider than the record it came from"
+    )
+    assert 'ARGS=("${STAGED_ARGS[@]}")' in block, (
+        "the filtered array must be assigned back to ARGS — otherwise the filter "
+        "computes a list and `flyctl` still receives the unfiltered one"
+    )
+
+    # (3) it does so BEFORE the call, and the call is unchanged (#4334)
+    assert run.index('ARGS=("${STAGED_ARGS[@]}")') < run.index(
+        'flyctl secrets set --stage "${ARGS[@]}" --app tortoise-y4mjjq'
+    )
+    assert 'flyctl secrets set --stage "${ARGS[@]}" --app tortoise-y4mjjq' in run
+
+    # (4) builtins only — see _FORKABLE_IN_LEDGER_BLOCK
+    code = "\n".join(
+        line for line in block.splitlines() if not line.lstrip().startswith("#")
+    )
+    for binary in _FORKABLE_IN_LEDGER_BLOCK:
+        assert not re.search(rf"(^|[|;&(\s]){binary}(\s|$)", code), (
+            f"`{binary}` appears in the ledger block — the provenance gate runs "
+            "this payload on a stub PATH holding only fly/flyctl, so a fork fails "
+            "the classification (`command not found` → exit 2 → every deploy "
+            "blocked). Use shell builtins: read/case/parameter expansion/arrays."
+        )
+
+
+def test_the_ledger_fd_is_fixed_and_avoids_the_stub_channel():
+    """The ledger fd is a FIXED number, and it is not the stub channel's (#11332 review).
+
+    Two independent constraints, each with its own failure mode:
+
+    * `exec {LEDGER_FD}<` — bash's auto-allocated form — is a **bash >= 4.1**
+      feature, and it is the ONLY thing in this block that needs anything newer
+      than bash 3.2. Stock macOS `/bin/bash` is 3.2 and the provenance gate
+      resolves its interpreter with `shutil.which("bash")`, so on a developer box
+      every classification dies at `exec: {LEDGER_FD}: not found` (rc 127) and
+      surfaces as an unrelated "unreadable ledger" fault over tests that never
+      touch the ledger. The bash manual also warns that the dynamic form
+      allocates fd >= 10, and that fds greater than 9 "should be used with care, as
+      they may conflict with file descriptors the shell uses internally".
+    * fd **3** is the harness's own write channel (`exec 3>argv.records`, opened by
+      `_capture_payload`'s wrapper around this payload). Reusing it silently
+      re-points that channel, so the classification loses the argv it reads.
+
+    Non-vacuous both ways: reverting to `exec {LEDGER_FD}<` reds the first
+    assertion, and moving the fd to 3 reds the second.
+    """
+    run = _steps()[_SET_STEP]["run"]
+    block = _ledger_block(run)
+    code = "\n".join(
+        line for line in block.splitlines() if not line.lstrip().startswith("#")
+    )
+    assert not re.search(r"exec\s+\{[A-Za-z_]\w*\}<", code), (
+        "the ledger redirect uses bash's `exec {var}<` auto-allocation (bash >= 4.1). "
+        "The gate resolves its shell with `shutil.which(\"bash\")`, so on stock "
+        "macOS (bash 3.2) every classification exits 127 and reports an unrelated "
+        "unreadable-ledger fault. Open a fixed fd instead."
+    )
+    opened = re.findall(r'exec\s+(\d+)<\s*"\$MITIGATION_LEDGER"', code)
+    assert opened == ["4"], (
+        "the ledger must be opened on the fixed fd 4 — NOT fd 3, which "
+        "`_capture_payload` has already opened as the stub binaries' write channel "
+        "(`exec 3>argv.records`), so reusing it loses the argv the gate reads: "
+        f"opened fd(s) = {opened or 'none'}"
+    )
+    assert "done <&4" in code and "exec 4<&-" in code, (
+        "the read loop must consume fd 4 and the shell must close it afterwards — "
+        "otherwise the descriptor leaks for the rest of the step"
+    )
+
+
+def test_the_ledger_mandatory_set_matches_the_verify_gate():
+    """`MANDATORY_FLY_SECRETS` is a SECOND owner of the hard-fail set — pin it.
+
+    The checker refuses a ledger entry naming a secret the deploy cannot run
+    without (removing it is an outage, not a mitigation). That set lives in the
+    workflow's `Verify secrets exist` gate, and a hardcoded copy rots the moment
+    the gate grows a name — so this test derives the set from the workflow's own
+    `exit 1` branches and requires EQUALITY.
+    """
+    run = _steps()[_VERIFY_STEP]["run"]
+    hard_fail: set[str] = set()
+    for block in re.finditer(r"if\b(.*?)\bthen\b(.*?)\n\s*fi\b", run, re.S):
+        condition, body = block.group(1), block.group(2)
+        if "exit 1" not in body:
+            continue
+        hard_fail |= set(_SHELL_TEST.findall(condition))
+    assert hard_fail, (
+        "no `if … then … exit 1 … fi` block in the verify-secrets step — anchor "
+        "drift; the mandatory-set derivation must fail loudly, not pass vacuously"
+    )
+
+    system = importlib.util.spec_from_file_location(
+        "check_fly_secret_drift_mandatory",
+        ROOT / ".github" / "scripts" / "check-fly-secret-drift.py",
+    )
+    assert system is not None and system.loader is not None
+    module = importlib.util.module_from_spec(system)
+    system.loader.exec_module(module)
+
+    assert set(module.MANDATORY_FLY_SECRETS) == hard_fail, (
+        "the ledger's mandatory set drifted from the deploy's hard-fail list: "
+        f"checker-only={sorted(set(module.MANDATORY_FLY_SECRETS) - hard_fail)}, "
+        f"workflow-only={sorted(hard_fail - set(module.MANDATORY_FLY_SECRETS))}. "
+        "A ledger entry for a mandatory name must be REFUSED (removing it is an "
+        "outage); a name missing here could be 'mitigated' into a dead API."
+    )
+
+
+def test_the_shipped_ledger_is_a_tracked_contract_file():
+    """The ledger is not optional: the gate exits 2 (never bypassable) without it."""
+    path = ROOT / _LEDGER_PATH
+    assert path.is_file(), (
+        f"{_LEDGER_PATH} is missing — check-fly-secret-drift.py reads it and treats "
+        "its absence as unreadable state (exit 2), so every deploy would be blocked"
+    )
+    text = path.read_text()
+    assert "issue #11122" in text.lower() or "#11122" in text, (
+        "the ledger must name the issue whose contract it states — a silent file "
+        "cannot be reviewed by the operator who needs to add an entry mid-incident"
+    )
+
+
+def _citation_window(text: str, match: re.Match[str], span: int = 400) -> str:
+    """The text AROUND a citation, where the sentence naming what it pins lives."""
+    return text[max(0, match.start() - span) : match.end() + span]
+
+
+def _test_function_names_in_the_tracked_tree() -> set[str]:
+    """Every `def test_…` name in the tracked tree, in ONE index read.
+
+    `git grep` reads the repo index, so resolving the cited names costs one bounded
+    process instead of a glob-and-read over ~1.4k test modules. A git that cannot run
+    is a HARD FAILURE here, never a `skip`: an empty set would resolve every citation
+    as dangling (a false red), and a skip would pass the guard silently — both are a
+    verdict about a datum that was never read.
+    """
+    proc = _census_git(
+        ROOT, "grep", "-h", "-o", "-E", r"def (test_[A-Za-z0-9_]+)", "--", "tests/"
+    )
+    assert proc.returncode == 0, (
+        "`git grep` over the tests tree failed, so no test-name citation in these "
+        f"comments can be resolved at all (rc={proc.returncode}): "
+        f"{proc.stderr.strip()[:300]}"
+    )
+    names = set(re.findall(r"def (test_[A-Za-z0-9_]+)", proc.stdout))
+    assert names, (
+        "`git grep` returned no `def test_…` for the tracked tests tree — every cited "
+        "name would then read as dangling, which is this guard's empty-set fail-open"
+    )
+    return names
+
+
+def test_every_citation_of_the_backup_key_pair_resolves():
+    """EVERY citation of the pair, not just the pin's own numbers (#11332 round 5, P2).
+
+    Three rounds in a row a `deploy-hosted.yml:<n>` citation in these comments went
+    stale as the payload above it grew. A pin that iterates a hardcoded tuple proves
+    only that the tuple matches — it cannot see a citation in some OTHER comment, and
+    exactly that survived one round of "fixed". So this walks every citation in BOTH
+    test files whose surrounding text names a backup-key variable, and requires the
+    cited line to actually be the assignment of a backup-key name.
+
+    (#11332 review r6, P3) The paragraph that makes the delimiter pattern look pinned
+    cited its companion by **test name**, and this walk was blind to that form: it sat
+    in a backup-key window, so it counted as a citation of the pair while the
+    line-number regex walked past it and the name resolved to nothing. A pointer to a
+    test nobody wrote reads exactly like a pin. So the walk resolves test-name
+    citations too, in the same windows and by the same rule: if it is cited as the
+    thing that pins the pair, it has to exist.
+    """
+    # ⛔ DERIVED, not a hardcoded tuple (#11332 review r8). The map was
+    # `{1197: …, 1202: …}` and it was a SECOND owner of the same two numbers: any
+    # payload block above the pair shifts both lines, the map then disagrees with the
+    # workflow it describes, and the failure it reports is misattributed — the
+    # citation is blamed with a `pair is at [1197, 1202]` that is itself stale
+    # (measured: the ledger block grew 15 lines and this test blamed a CORRECT
+    # citation). Deriving makes the workflow the only owner, and the assert below is
+    # what keeps the derive from passing vacuously.
+    pair_names = ("TORTOISE_BACKUP_KEY", "TORTOISE_BACKUP_KEY_PREVIOUS")
+    lines = _WORKFLOW.read_text().splitlines()
+    expected: dict[int, str] = {}
+    for index, line in enumerate(lines, start=1):
+        for name in pair_names:
+            if f"ARGS+=({name}=" in line:
+                expected[index] = name
+    assert sorted(expected.values()) == sorted(pair_names), (
+        "the backup-key pair is not where the derivation looks for it — expected one "
+        f"`ARGS+=(<name>=` line per name {list(pair_names)}, found {expected}. A "
+        "derivation that finds nothing resolves every citation as wrong."
+    )
+    pair = tuple(expected.values())
+    citation = re.compile(r"deploy-hosted\.yml:(\d+)(?:\s*/\s*:(\d+))?")
+    name_citation = re.compile(r"`(?:[\w/]+\.py::)?(test_[A-Za-z0-9_]+)`")
+    defined = _test_function_names_in_the_tracked_tree()
+    seen: set[int] = set()
+    named: dict[str, str] = {}
+    for path in (
+        ROOT / "tests" / "test_deploy_workflow.py",
+        ROOT / "tests" / "test_fly_secret_drift.py",
+    ):
+        text = path.read_text()
+
+        for match in citation.finditer(text):
+            if not any(name in _citation_window(text, match) for name in pair):
+                continue
+            for number in (int(n) for n in match.groups() if n):
+                seen.add(number)
+                assert 0 < number <= len(lines), (
+                    f"{path.name} cites deploy-hosted.yml:{number}, past the end of "
+                    f"the workflow ({len(lines)} lines)"
+                )
+                assert number in expected, (
+                    f"{path.name} cites deploy-hosted.yml:{number} for a backup-key "
+                    f"variable, but that line is {lines[number - 1].strip()!r} — the "
+                    f"pair is at {sorted(expected)}"
+                )
+                assert f"ARGS+=({expected[number]}=" in lines[number - 1], (
+                    f"{path.name} cites deploy-hosted.yml:{number} for "
+                    f"{expected[number]}, but that line is {lines[number - 1].strip()!r}"
+                )
+        for match in name_citation.finditer(text):
+            if not any(name in _citation_window(text, match) for name in pair):
+                continue
+            where = f"{path.name}:{text.count(chr(10), 0, match.start()) + 1}"
+            named[where] = match.group(1)
+
+    for where, name in sorted(named.items()):
+        assert name in defined, (
+            f"{where} cites `{name}` as the companion that pins the backup-key pair, "
+            "but no `def "
+            f"{name}` exists anywhere in the tracked tests tree — a citation of a "
+            "test nobody wrote reads as a pin and proves nothing (#11332 review r6, "
+            "P3). Point it at the test that does the pinning, or drop the claim."
+        )
+    assert seen == set(expected), (
+        f"the citation walk found {sorted(seen)} — it must see both halves of the "
+        "pair, or this guard passes vacuously"
+    )
+    assert named, (
+        "the test-name walk resolved no citation at all — the delimiter paragraph "
+        "cites its companion pin by name, so an empty walk means this leg is not "
+        "looking where the citations are"
+    )

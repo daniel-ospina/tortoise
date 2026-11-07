@@ -66,8 +66,14 @@ from __future__ import annotations
 
 import sys
 
-# #5128: refuse a <3.12 interpreter before the imports below — a module-level
-# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+# #5128: refuse a <3.12 interpreter BEFORE every other import. The POSITION is
+# the property this exists for, not this file's current import list: the corpus
+# rule (`tests/test_entry_point_python_guard.py`, property 1) requires `import
+# sys` + the guard to precede all other imports, because a module-level
+# 3.11+-only import — `from datetime import UTC`, present in sibling tools —
+# raises ImportError on an old interpreter before any LATER-placed guard could
+# run. This file imports no `datetime` today; the guard is hoisted anyway so the
+# rule holds uniformly instead of being re-litigated per import list.
 if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     raise SystemExit(
         f"tools/surface_manifest.py requires Python >= 3.12 (got "
@@ -77,6 +83,8 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
 
 import argparse
 import ast
+import os
+import re
 import subprocess
 import types
 from pathlib import Path
@@ -125,8 +133,20 @@ def _code_digest(code) -> str:
     for const in code.co_consts:
         # a nested code object must be recursed, never repr'd (its repr carries
         # a memory address and is not stable)
-        h.update(_code_digest(const).encode() if isinstance(const, types.CodeType)
-                 else repr(const).encode())
+        if isinstance(const, types.CodeType):
+            h.update(_code_digest(const).encode())
+        elif isinstance(const, (set, frozenset)):
+            # #10602: a SET's iteration order is `PYTHONHASHSEED`-dependent for str
+            # elements, so `repr(const)` differs between two runs over an UNCHANGED
+            # tree — the same instability as a nested code object's address, and it
+            # makes the frozen baseline un-pinnable: `served_from` flipped on every
+            # invocation, so `surface_manifest.py check` and this suite failed at
+            # random. Encode order-INDEPENDENTLY instead. (Measured: a tool whose
+            # body carries `frozenset({'kind','limit','skip'})` produced three
+            # different digests across three runs.)
+            h.update(b"{" + b",".join(sorted(repr(v).encode() for v in const)) + b"}")
+        else:
+            h.update(repr(const).encode())
     return h.hexdigest()[:16]
 
 
@@ -210,6 +230,12 @@ sys.path.insert(0, str(ROOT))
 
 ORDER_FILE = ROOT / "config" / "surface-order.yml"
 MANIFEST_FILE = ROOT / "config" / "surface-manifest.yml"
+
+# #11057: every git probe in this file uses ONE environment. `GIT_NO_LAZY_FETCH` keeps a
+# PARTIAL (promisor) clone from trying the network inside a lint, and `GIT_TERMINAL_PROMPT`
+# keeps a credential prompt from hanging a gate: without either, an absent object asks the
+# remote and the failure arrives as a transport error, which would be read as a verdict.
+_GIT_ENV = {**os.environ, "GIT_NO_LAZY_FETCH": "1", "GIT_TERMINAL_PROMPT": "0"}
 RENDERED_FILE = ROOT / "docs" / "product" / "mcp-sdk-surface.md"
 
 # The header `cut` RE-EMITS above the dumped document. `yaml.safe_dump` carries no
@@ -260,11 +286,38 @@ MANIFEST_HEADER = (
     "# YAML dumps no comments, so any comment below this block is SILENTLY DROPPED. Keep\n"
     "# rationale here or in the docs, never in an ad-hoc comment in the body.\n"
     "#\n"
+    "# LOWERED 82 \u2192 76 on 2026-11-04 by PR #10906 (#4282 Phase 3.2, the first tool batch:\n"
+    "# the five `run_onboarding` tools deleted), then 76 \u2192 72 by #10914 (the `graph_overview`\n"
+    "# container, five advertised names retired into one). The pin is lowered for the same\n"
+    "# reason it is raised elsewhere \u2014 it is only meaningful at the live surface: left at 82\n"
+    "# it would carry ten slots of slack, and left at 76 four, so re-adding one of the retired\n"
+    "# names (the regression `tests/test_tool_registry.py` pins) would pass\n"
+    "# `tools/surface-guard.py` green. \u26d4 72 IS DELIBERATE, NOT AN ANOMALY: if you are\n"
+    "# reading `tools: 72` next to a live 72 and wondering whether to \"restore\" 82 or 76, do\n"
+    "# not \u2014 that re-opens the slack. #10906 and #10914 compose because their retired name\n"
+    "# sets are disjoint (77 \u2212 5 = 72 advertised at #10914's head).\n"
+    "#\n"
     "# THE BASELINE BELOW IS A FREEZE OF WHAT EXISTS, NOT THE APPROVED TARGET. It exists so\n"
     "# drift is visible (tools/surface-guard.py). The approved TARGET is recorded in\n"
     "# docs/product/canonical-mcp-tools.md and docs/product/beta-sdk-surface.md; compliance\n"
     "# with it is checked by tools/surface-target-check.py, which reads those docs rather than\n"
     "# a constant here.\n"
+    "#\n"
+    "# `cut_at_commit` IS a DEFAULT-BRANCH COMMIT, never a lane one (#11057 review F1). It names\n"
+    "# the `main` commit this baseline was cut AGAINST, so `cut --commit <sha-in-main>` — not the\n"
+    "# worktree HEAD it happened to run in. This repo squash-merges and deletes the source\n"
+    "# branch, so a lane SHA resolves in the PR's own CI (which fetches every head) and exists\n"
+    "# NOWHERE once it lands; a required provenance check that accepted one would red `main`\n"
+    "# permanently. `check` therefore requires the record to be an ANCESTOR of the default\n"
+    "# branch, not merely present in the clone.\n"
+    "#\n"
+    "# ⛔ ONE ROW ONLY. A forward merge can leave this key TWICE (the merge of `origin/main` did\n"
+    "# exactly that: this branch's line and #10914's sat adjacent) and a YAML loader SILENTLY\n"
+    "# last-wins — the file then reads as ONE value while the diff shows two. The value must be a\n"
+    "# commit of `main`: measured with `gh api repos/<owner>/<repo>/compare/<sha>...main`,\n"
+    "# `status=ahead, behind=0` is an ancestor and `status=diverged` is a lane commit that will\n"
+    "# exist nowhere once its branch is deleted (a lane SHA still RESOLVES today, so a check that\n"
+    "# only asks that question calls it fine — which is why this record also asks about ancestry).\n"
 )
 
 
@@ -284,13 +337,418 @@ def _refuse(exc: SurfaceEvidenceUnreadable) -> int:
     return 1
 
 
-def _read_manifest(path: Path | None = None) -> dict:
+def commit_present(sha: str, root: Path | None = None) -> bool | None:
+    """Whether `sha` resolves to a commit in THIS checkout — `None` when it cannot say.
+
+    Three answers, and the third is the one that matters: `True` (the object is here),
+    `False` (the object database is complete and does not have it) and `None` (this
+    checkout cannot answer — a SHALLOW clone only knows the commits inside its depth).
+
+    ⛔ `False` must never be reported for a shallow checkout. `actions/checkout@v4`
+    defaults to `fetch-depth: 1`, so every CI job that does not ask for history is
+    shallow by construction, and an ancestor commit is simply absent from it — reading
+    that absence as "the recorded commit does not exist" would red every PR for a
+    correct record. The remedy for `None` is a deeper checkout, not a verdict.
+
+    `GIT_NO_LAZY_FETCH` keeps a PARTIAL (promisor) clone from trying the network inside
+    a lint: without it, `git cat-file -e` on an absent object asks the remote and the
+    failure arrives as `fatal: remote error: upload-pack: not our ref` — a transport
+    error that would be read as a verdict about the record.
+    """
+    where = ROOT if root is None else root
+    env = _GIT_ENV
+    try:
+        probe = subprocess.run(
+            ["git", "cat-file", "-e", f"{sha}^{{commit}}"],
+            cwd=where, capture_output=True, text=True, env=env,
+        )
+    except (OSError, ValueError):  # no git binary, or an unusable argument
+        return None
+    if probe.returncode == 0:
+        return True
+    # ONE shallow probe, shared with `on_default_branch` — two readers that disagreed about
+    # what "shallow" means would be one gate with a gap.
+    shallow = is_shallow(root)
+    if shallow is None:
+        return None  # not a git work tree at all: this checkout cannot answer either
+    return None if shallow else False
+
+
+def is_shallow(root: Path | None = None) -> bool | None:
+    """Whether this checkout has truncated history — `None` when it is not a git work tree.
+
+    One question, one implementation: `commit_present` and `on_default_branch` both need it,
+    and a shallow repository can answer NEITHER. `git merge-base --is-ancestor` does not
+    complain about truncated history — it walks what it has and exits 1, which would be read
+    as "not an ancestor" and red a record that is correct.
+    """
+    where = ROOT if root is None else root
+    try:
+        probe = subprocess.run(
+            ["git", "rev-parse", "--is-shallow-repository"],
+            cwd=where, capture_output=True, text=True, env=_GIT_ENV,
+        )
+    except (OSError, ValueError):
+        return None
+    if probe.returncode != 0:
+        return None
+    return probe.stdout.strip() == "true"
+
+
+def default_branch_ref(root: Path | None = None) -> str | None:
+    """The ref this repository's history is DURABLE in — or `None` when it is not here.
+
+    `origin/main` first, because CI checks out a PR head and a local `main` need not exist;
+    then `main` (the push-to-main run, and the common local clone); then the remote HEAD, so
+    a repo whose default branch is not called `main` still answers. No answer is a refusal
+    (`None`), never a guess about which branch is the default one.
+    """
+    where = ROOT if root is None else root
+    for ref in ("refs/remotes/origin/main", "refs/heads/main", "refs/remotes/origin/HEAD"):
+        try:
+            probe = subprocess.run(
+                ["git", "rev-parse", "--verify", "--quiet", ref],
+                cwd=where, capture_output=True, text=True, env=_GIT_ENV,
+            )
+        except (OSError, ValueError):
+            return None
+        if probe.returncode == 0 and probe.stdout.strip():
+            return ref
+    return None
+
+
+def on_default_branch(sha: str, root: Path | None = None) -> bool | None:
+    """Whether `sha` is IN the default branch's history — `True` / `False` / `None`.
+
+    #11057 review F1: RESOLUTION IS NOT SURVIVAL. `commit_present` answers "is the object
+    here", and on a PR checkout it IS here because the checkout fetches every head — so a
+    lane commit resolves right up to the moment it lands. This repo squash-merges
+    (`.mergify.yml::merge_method: squash`, `delete_branch_on_merge: true`), so the lane SHA
+    is never created on `main` and its only ref is then deleted: every later clone fails to
+    resolve it, and a gate that requires resolution reds `main` permanently.
+
+    The question that survives the merge is ANCESTRY — a squash-merged lane commit is
+    neither present nor an ancestor, while a `main` commit stays an ancestor forever.
+
+    `None` (cannot answer) for a shallow checkout, a missing default-branch ref, or a ref that
+    is BEHIND the record: truncated history makes `merge-base --is-ancestor` exit 1 rather than
+    complain, and a false "not on main" would red a correct record.
+
+    ⛔ #11057 review P2: `exit 1` is NOT by itself proof of absence. A remote-tracking ref is
+    only as fresh as the last fetch, so on a reviewer's clone whose `origin/main` lags, a commit
+    that IS on `main`'s tip answers 1 here — and the caller renders that as "lives only on a lane
+    branch … correct the field", i.e. it tells a reader to hand-edit a CORRECT record. The
+    discriminator is the reverse question: if the ref is an ancestor of the record, the record is
+    AHEAD of the ref, which is equally consistent with a stale ref and with an unmerged lane
+    commit. That is ambiguous, so it is `None` (`git fetch` and re-run), never `False`.
+    """
+    if is_shallow(root) is not False:
+        return None
+    if commit_present(sha, root) is None:
+        return None
+    ref = default_branch_ref(root)
+    if ref is None:
+        return None
+    where = ROOT if root is None else root
+    try:
+        probe = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", sha, ref],
+            cwd=where, capture_output=True, text=True, env=_GIT_ENV,
+        )
+    except (OSError, ValueError):
+        return None
+    if probe.returncode == 0:
+        return True
+    if probe.returncode != 1:
+        return None
+    # Ahead of the ref ⇒ the ref is stale or the commit is unmerged. Both answer "fetch first".
+    try:
+        behind = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", ref, sha],
+            cwd=where, capture_output=True, text=True, env=_GIT_ENV,
+        )
+    except (OSError, ValueError):
+        return None
+    return None if behind.returncode == 0 else False
+
+
+# A commit sha, not a revision expression. Deliberately hand-rolled rather than `re`: the
+# pinned copy of this gate (tools/surface-guard.py) may not import beyond its allow-list, and
+# two copies that share one predicate must not disagree about it.
+_HEX = frozenset("0123456789abcdef")
+
+
+def _is_object_id(sha: str) -> bool:
+    """Whether the recorded value is an OBJECT ID — not merely a valid revision.
+
+    ⛔ #11057 review P1: `cat-file -e <rev>` and `merge-base --is-ancestor <rev> <ref>` accept
+    ANY revision expression, so a REF NAME (`main`, `origin/main`, `HEAD~1`, a tag) answers BOTH
+    provenance questions "yes": the object resolves, and a branch is always an ancestor of
+    itself. `provenance_report` then returns no problem while naming no commit at all, and
+    `cmd_render` publishes `Cut against main` to `docs/product/mcp-sdk-surface.md`. It is
+    reachable honestly — `cmd_cut` writes `--commit` verbatim. So the field is refused unless it
+    is a hex OID: that is the one shape whose answer cannot move under the record.
+
+    ⛔ #11057 review P2 — the FULL id, never a 7-39 char PREFIX, and ONE predicate everywhere.
+    This used to accept 7-40 while the RESOLUTION probe (`cut_commit_verdict`) required exactly
+    40, so the two disagreed about the same string in three artifacts: `cut --commit af36e92`
+    passed this gate, `build_doc` wrote it verbatim, and the required
+    `surface_manifest.py check --provenance-strict` then refused the baseline as naming a commit
+    that "does not exist" — about a commit that resolves and is an ancestor of `main`. An
+    abbreviation is not the narrow shape: `gitrevisions(7)` resolves a prefix only while it is
+    UNIQUE, so the same 7 hex can name a different object after the repository grows — the
+    record's answer would move underneath it, which is what "a commit, not a revision" exists to
+    forbid. The full object id has no defender of the abbreviated form: `cut` records
+    `git rev-parse HEAD`, which is always 40.
+
+    The SIBLING COPY in `tools/surface-guard.py` must stay this same predicate (it is pinned
+    from the base ref, so it cannot import this one).
+    """
+    return len(sha) == 40 and all(c in _HEX for c in sha)
+
+
+def _unprovable(sha: str, question: str) -> str:
+    """The one wording for "this checkout cannot answer" — a remedy, never a verdict."""
+    return (
+        f"`cut_at_commit` {sha} is UNPROVABLE in this checkout (shallow or partial "
+        f"clone): it cannot answer whether the commit {question}. Not a verdict on the "
+        "record — re-run with full history (`git fetch --unshallow`, or `fetch-depth: 0`) "
+        "to check it"
+    )
+
+
+def _unprovable_ancestry(sha: str, ref: str) -> str:
+    """The ancestry arm's "cannot answer", naming BOTH causes and their two remedies.
+
+    Two different states produce this `None` and they are not fixed the same way: a truncated
+    clone needs `--unshallow`, while a remote-tracking ref that is merely BEHIND the record needs
+    `git fetch origin`. Naming only the shallow one is how #11057 review P2's false red got read
+    as a defect in a CORRECT record.
+    """
+    return (
+        f"`cut_at_commit` {sha} is UNPROVABLE in this checkout: it cannot answer whether the "
+        f"commit is in the default branch's history (`{ref}`). Either history is truncated "
+        "(shallow or partial clone), or the ref is only as fresh as the last fetch and is "
+        f"BEHIND the record — `{ref}` being an ancestor of it is ambiguous between the two, "
+        "never proof of absence. Not a verdict on the record — `git fetch origin` (and "
+        "`git fetch --unshallow` if shallow) and re-run to check it"
+    )
+
+
+def provenance_report(
+    doc: dict, *, resolve=None, reachable=None, strict: bool = False,
+) -> tuple[list[str], str | None]:
+    """#11057 reviews P2 and F1: the recorded `cut_at_commit` must RESOLVE **and SURVIVE**.
+
+    Two questions, both required, because either alone is green over a record that is
+    already broken: RESOLUTION is what a PR checkout can answer (and it answers `True` for a
+    lane SHA, because the checkout fetched every head), while ANCESTRY is what `main` can
+    still answer after this branch is squash-merged and deleted.
+
+    The verdict must also say which question it answered.
+
+    `cut_at_commit` is excluded from the drift comparison (`NON_DERIVABLE_DOC_KEYS`) and
+    `_read_manifest` only asserts it is a non-empty string, so a baseline whose recorded
+    commit exists NOWHERE passed every gate for eight review rounds while `cmd_render`
+    published the uncheckable sha to `docs/product/mcp-sdk-surface.md` and the owner read
+    it. Measured at `3a95ee6b9`: `9542024cb…` was absent from this object database AND
+    from the remote (`upload-pack: not our ref`), while the value it replaced resolved —
+    the mechanism is `cut` writing `git rev-parse HEAD` in a lane worktree whose head was
+    then rebased away (`cut` is the one documented human step).
+
+    Returns `(problems, unprovable)`: an unresolvable commit in a COMPLETE checkout is a
+    problem (red), and a checkout that cannot answer yields no problem plus the reason, so
+    the caller can print it as a remedy instead of pretending it checked (external
+    practice: a recorded generating commit is evidence only when independently
+    resolvable; truncated history is ambiguous, never proof of absence).
+
+    `strict=True` inverts the second arm: there, UNPROVABLE is itself the problem. That is
+    for a step that guarantees its own history, so it fails CLOSED — a gate that quietly
+    degrades to a notice when someone drops `fetch-depth: 0` is a no-op gate.
+    """
+    sha = str(doc.get("cut_at_commit") or "")
+    if not sha:
+        # ⛔ DO NOT "unify" this with `tools/surface-guard.py::_provenance_problems`, which
+        # REDS on absence (#11057 review FINDING 1). The deferral is correct HERE only
+        # because every caller reaches this function through `_read_manifest`, which refuses
+        # an absent/empty field before this line runs. The guard has no such caller and is
+        # the copy a PR cannot edit, so there the absence IS the defect — a pin that defers
+        # the presence half of its own rule to the un-pinned copy enforces nothing.
+        return [], None  # its SHAPE is `_read_manifest`'s refusal, one verdict
+    if not _is_object_id(sha):
+        # #11057 reviews P1 + P2: a REF NAME is a valid revision, so both probes answer "yes"
+        # for it and this function would verify a record that names no commit; and an
+        # ABBREVIATION passes every probe while the resolution arm below calls it fabricated,
+        # which is how the answered questions disagreed. Both are clone-shape independent, so
+        # both are PROVEN defects in both arms (never an "unprovable").
+        return [
+            f"`cut_at_commit` {sha!r} is not an OBJECT ID (a full 40-char lowercase hex "
+            "commit sha). Any other shape names no commit this record can be verified "
+            "against: a ref resolves and is its own ancestor, and an abbreviation's meaning "
+            "moves as the repository grows (git resolves a prefix only while it is unique). "
+            "Record the full commit id: `cut --commit <full-sha-in-main>`, never a ref name "
+            "or a short prefix"
+        ], None
+    # ⛔ ONE resolution implementation (`cut_commit_verdict`), not a second ad-hoc probe:
+    # two probes that disagree about what "cannot answer" means is one gate with a gap.
+    probe = cut_commit_resolves if resolve is None else resolve
+    reach = on_default_branch if reachable is None else reachable
+
+    def _cannot_answer(unprovable: str) -> tuple[list[str], str | None]:
+        if strict:
+            return [f"{unprovable} — and this step requires a checkout that CAN answer"], None
+        return [], unprovable
+
+    present = probe(sha)
+    if present is None:
+        return _cannot_answer(_unprovable(sha, "resolves"))
+    if present is False:
+        return [
+            f"`cut_at_commit` {sha} does not resolve to a commit in this repository — the "
+            "baseline records a provenance commit that does not exist, so no reader can "
+            "verify it. Re-cut at a commit in the default branch's history "
+            "(`cut --commit <sha>`), or correct the field explicitly to one that resolves"
+        ], None
+    in_history = reach(sha)
+    if in_history is None:
+        return _cannot_answer(
+            _unprovable_ancestry(sha, default_branch_ref() or "the default branch")
+        )
+    if in_history is False:
+        ref = default_branch_ref() or "the default branch"
+        return [
+            f"`cut_at_commit` {sha} resolves here, but it is NOT in {ref}'s history — it "
+            "lives only on a lane branch, and this repo squash-merges and deletes that "
+            "branch on merge, so the commit will exist NOWHERE the moment this lands and "
+            "this property will red `main` permanently. The field names the default-branch "
+            "commit the baseline was cut AGAINST, not the lane commit it was cut at: "
+            "`cut --commit <sha-in-main>`"
+        ], None
+    return [], None
+
+
+#: `cut_commit_verdict`'s answers. `UNPROVABLE` is NOT a pass — the reader that gets it
+#: says so out loud (`cmd_check` prints it); it is the arm for a clone that cannot answer.
+CUT_RESOLVED = "resolved"
+CUT_FABRICATED = "fabricated"
+CUT_UNPROVABLE = "unprovable"
+
+#: What git says when a PROMISOR REMOTE (`blob:none`, the fleet's default clone) was
+#: asked for an object and answered that it does not have it. That is a DISPROOF, not a
+#: fetch failure: the remote replied. Without this arm a partial clone — which is most
+#: of the fleet's checkouts — could only ever answer UNPROVABLE.
+#: ⛔ Deliberately ONLY the two messages in which the REMOTE states it has no such ref.
+#: git also says "could not read <sha>" for an object missing from a promisor clone's
+#: LOCAL store, which proves nothing about whether the commit exists — treating it as a
+#: disproof would red a healthy tree, which is the failure mode this arm exists to avoid.
+_REMOTE_HAS_NO_SUCH_OBJECT = re.compile(
+    r"not our ref|couldn't find remote ref", re.IGNORECASE)
+
+
+def _git(*args: str) -> tuple[int, str, str]:
+    """(rc, stdout, stderr) for one `git` run rooted at ROOT; rc 127 when git is absent."""
+    try:
+        proc = subprocess.run(
+            ["git", *args], cwd=ROOT, capture_output=True, text=True, check=False
+        )
+    except OSError as exc:  # no git binary, or no repository to run it in
+        return 127, "", str(exc)
+    return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
+
+
+def cut_commit_verdict(sha: str) -> tuple[str, str]:
+    """(verdict, why) for a `cut_at_commit` value — `resolved` / `fabricated` / `unprovable`.
+
+    `cut_at_commit` is PROVENANCE and is excluded from the drift comparison
+    (`NON_DERIVABLE_DOC_KEYS`), so this is the ONLY thing that constrains it. Before this
+    function it was constrained by nothing: `_read_manifest` asserted a non-empty string,
+    so a value naming no object at all passed `check`, `render`, `cut` and
+    `tools/surface-guard.py` — and `cmd_render` slices the value to nine characters for
+    the document's header, so the corruption was invisible in the rendered doc (measured
+    on #10914: `911a1e240c16c37a1a8e0f2bc46dba9dd8ae2a90`, an abbreviation whose 30-char
+    tail had been invented; the real merge commit is
+    `911a1e240c2415b094b370f32a2a24f88a5fb1ea`).
+
+    Three verdicts, because a checkout that does not hold the object cannot distinguish
+    "fabricated" from "not fetched" — and turning that absence into a refusal would red
+    the required `surface-guard` job (default `fetch-depth: 1`) on a HEALTHY tree, since
+    `cut_at_commit` names an ancestor of the head rather than the head itself:
+
+    * `resolved`   — the object is a commit THIS clone holds. Provenance carried.
+    * `fabricated` — the value is not a full 40-char lowercase sha, OR the object is absent
+      and its absence is PROVEN: either the repository is not shallow (nothing is missing
+      for it to hide in), or a promisor remote was asked and answered that it has no such
+      object. A fabricated provenance is a refusal.
+    * `unprovable` — git is unavailable, or this clone is shallow and no remote answered.
+      NOT a pass, and never silent: `cmd_check` prints the arm it took.
+    """
+    # ⛔ ONE shape predicate, not two (#11057 review P2): this arm has its own history — an
+    # inline 40-char regex — while `cmd_cut`'s write gate and `provenance_report`'s arm used
+    # `_is_object_id`'s 7-40. `cut` records `git rev-parse HEAD`, so an abbreviated,
+    # upper-cased or invented value never came from the generator, and a prefix is refused by
+    # both halves now: the write gate will not write one and this will not grade one.
+    if not _is_object_id(sha):
+        return CUT_FABRICATED, (
+            f"{sha!r} is not a full 40-character lowercase commit sha — `cut` records "
+            "`git rev-parse HEAD`, which always is one, and an abbreviation only resolves "
+            "while it stays unique in this repository"
+        )
+    rc, _, stderr = _git("cat-file", "-e", f"{sha}^{{commit}}")
+    if rc == 0:
+        return CUT_RESOLVED, ""
+    if rc == 127:
+        return CUT_UNPROVABLE, f"git is not runnable here ({stderr.splitlines()[-1:] or ['']})"
+    if _REMOTE_HAS_NO_SUCH_OBJECT.search(stderr):
+        return CUT_FABRICATED, (
+            "`git cat-file` asked the remote for it and the remote answered that it has no "
+            f"such object — git said: {stderr.splitlines()[0] if stderr else '(no output)'}"
+        )
+    rc_shallow, shallow, _ = _git("rev-parse", "--is-shallow-repository")
+    if rc_shallow == 0 and shallow == "true":
+        return CUT_UNPROVABLE, (
+            "this clone is SHALLOW, so the object may simply not have been fetched (git "
+            f"said: {stderr.splitlines()[0] if stderr else '(no output)'})"
+        )
+    return CUT_FABRICATED, (
+        "this clone is not shallow and holds no such commit, so nothing is missing for it "
+        f"to be hiding in (git said: {stderr.splitlines()[0] if stderr else '(no output)'})"
+    )
+
+
+def cut_commit_resolves(sha: str) -> bool | None:
+    """`cut_commit_verdict` as the lint's three-valued RESOLUTION probe.
+
+    ONE implementation of "does a `cut_at_commit` resolve here, and can this clone even
+    answer?" (#11057's merge with #10914): before it there were two, and they disagreed.
+
+    * the READER (`_read_manifest`) refuses only `fabricated` — an absence that is PROVEN;
+    * this lint's resolution arm must red an unresolvable record and stay silent on a
+      clone that cannot answer, so it needs the third value: `UNPROVABLE` → `None`.
+
+    Reading the verdict rather than re-probing keeps the two from drifting apart, and it is
+    what makes a stubbed `_git` control BOTH paths (a test that stubs only one of two
+    implementations pins neither: measured — `test_a_shallow_clone_that_cannot_answer_is_
+    UNPROVABLE_and_NEVER_SILENT` red on the merged tree because the lint's own probe reached
+    the real remote while the reader's was stubbed).
+    """
+    verdict, _why = cut_commit_verdict(sha)
+    if verdict == CUT_RESOLVED:
+        return True
+    if verdict == CUT_UNPROVABLE:
+        return None
+    return False
+
+def _read_manifest(path: Path | None = None, *, check_provenance: bool = True) -> dict:
     """Read the frozen baseline, or refuse. Never returns a partial document.
 
     `path` is resolved at CALL time (never bound as a default), so a caller that
     redirects `MANIFEST_FILE` — the tests do, and so would any future tool — reads the
     file it redirected to. A default argument bound at import time silently read the
     original, which is how a redirection can look effective and verify nothing.
+
+    `check_provenance=False` is for `cut` ONLY: a re-cut is the REPAIR path for a
+    `cut_at_commit` that resolves to nothing, so refusing to read the baseline there
+    would refuse the only way to fix it. Every gating reader keeps the default.
     """
     if path is None:
         path = MANIFEST_FILE
@@ -322,9 +780,29 @@ def _read_manifest(path: Path | None = None) -> dict:
     # opinions, and one of them a traceback.
     if not isinstance(doc.get("cut_at_commit"), str) or not doc["cut_at_commit"]:
         raise SurfaceEvidenceUnreadable(
-            f"{path} records no `cut_at_commit`: it must name the commit the baseline was cut "
-            "at, as a non-empty string. Re-cut the baseline."
+            f"{path} records no `cut_at_commit`: it must name the DEFAULT-BRANCH commit the "
+            "baseline was cut against, as a non-empty string. Re-cut the baseline."
         )
+    # A FABRICATED record is refused HERE, by every reader; a clone-dependent
+    # question is not. `cut_commit_verdict` answers `fabricated` only when the absence
+    # is PROVEN (not a 40-hex sha, or a non-shallow clone with no such object, or a
+    # promisor remote that answered it has none) — so this arm can never red a healthy
+    # tree for a record that is merely unfetched. RESOLUTION and ANCESTRY beyond that
+    # are `provenance_report`'s question, asked from `cmd_check`: a shallow CI checkout
+    # cannot answer them, and a refusal raised from the reader there would red
+    # `render`/`guard` for a record they do not own (`check` is the lint that owns
+    # provenance, and `--provenance-strict` is where "cannot answer" fails closed).
+    if check_provenance:
+        verdict, why = cut_commit_verdict(doc["cut_at_commit"])
+        if verdict == CUT_FABRICATED:
+            raise SurfaceEvidenceUnreadable(
+                f"{path} records `cut_at_commit: {doc['cut_at_commit']}`, which is NOT a commit "
+                f"this record can be verified against ({why}). The field is PROVENANCE and is "
+                "excluded from the drift comparison, "
+                "so this check is the only gate on it — and a value naming no object is a "
+                "fabricated provenance, not a stale one: restore the commit the baseline was "
+                "actually cut at, or re-cut the baseline."
+            )
     # A DUPLICATE NAME is unverified content, not a harmless repetition. Every comparison
     # in this file — here and in tools/surface-guard.py — keys rows by NAME, so a second
     # row with an existing name is silently DROPPED: a doctored duplicate inserted before
@@ -465,9 +943,16 @@ def read_approval(path: Path | None = None) -> dict:
 #     another checkout — measured with the log absent, 132 `used_by` and 25 `reason` rows
 #     differ, and those are the ONLY row keys that do. `recommendation` and `basis` are
 #     computed from the same observed-call signal, so they are excluded even where today's
-#     rows happen to agree. NOTE: a PR author can therefore rewrite the evidence the owner
-#     READS (the rendered `Used by` / `Recomm.` columns) while every gate stays green. That
-#     is a documented residual — the columns are not a function of the code — FILED, not hidden.
+#     rows happen to agree.
+#     ⛔ A re-cut does NOT re-derive them: `cut` CARRIES the committed values forward
+#     (`_carried_row_evidence`), and the log is consulted only for a row that has no
+#     committed evidence or under a deliberate `--refresh-observations` (#10914 review P2).
+#     Before that, every `cut` re-stamped these columns from whichever box ran it — measured
+#     on #10914, two untouched rows flipped `agents` -> `never called` while a tool the PR had
+#     just introduced was stamped `called by agents` off the lane's own test call, and every
+#     gate stayed green over it (they are not compared). So the residual is now narrower and
+#     explicit: a re-cut preserves the evidence it cannot reproduce, a hand edit or
+#     `--refresh-observations` is what moves it, and that edit lands in a reviewed diff.
 #   * `approval` is an unvalidated AUDIT reference: a PR number and a principal. NO check
 #     validates its shape, and none verifies that the review it names exists — the approval
 #     itself is READ from `docs/product/canonical-mcp-tools.md` (#4185). The consent carrier is
@@ -481,6 +966,8 @@ def read_approval(path: Path | None = None) -> dict:
 #     recording one — the path CONTRIBUTING documents — made the REQUIRED check red with no
 #     way back (`cut` resets it to False forever). Verified: `exemption: true` on an SDK row
 #     makes the guard report "1 exempt" and the check FAIL "recorded {True}, derived {False}".
+#     `cut` now CARRIES it forward (`CARRIED_TOOL_ROW_KEYS` / `CARRIED_SDK_ROW_KEYS`), so the
+#     recording survives a re-cut and `surface-guard.py` — not the re-cut — is what judges it.
 #   * `cut_at_commit` is provenance: `cut` records the commit it ran at.
 #   * the four top-level `approval_*` keys are deliberately NOT here. They are DERIVED
 #     (#4185): `read_approval` reads them from `docs/product/canonical-mcp-tools.md` at
@@ -501,6 +988,30 @@ def read_approval(path: Path | None = None) -> dict:
 NON_DERIVABLE_ROW_KEYS = frozenset(
     {"used_by", "recommendation", "basis", "reason", "approval", "exemption"}
 )
+
+# WHICH non-derivable row keys a re-cut must CARRY FORWARD verbatim (#10914 review P2).
+#
+# Being non-derivable (excluded from the drift comparison) is what makes a key safe from
+# `check`, not what makes it safe from `cut`. `build_doc` used to RE-DERIVE these from
+# `~/.tortoise/analytics_fallback.jsonl` — this box's own call log — so a routine re-cut
+# silently rewrote the evidence the owner reads. Measured on #10914: `tortoise_query` and
+# `tortoise_search` flipped `agents` -> `never called` (two rows the change never touched,
+# because that box's log carried no slice for them) while a tool the lane had just WRITTEN
+# was stamped `called by agents` (from the lane's own test call). `check`, `surface-guard`
+# and the render-diff all stayed green over it, because these keys are not compared.
+#
+# So `cut` now carries the committed value forward, exactly as `high_water_counts` and
+# `response_fields` are carried: the columns are EVIDENCE the manifest records, refreshed
+# only by a deliberate `--refresh-observations`.
+#
+# `approval` is DELIBERATELY NOT here: `cmd_cut` resets the per-row audit reference on
+# purpose and CONTRIBUTING.md makes that reset the control — carrying it would silently
+# reverse a recorded decision.
+CARRIED_TOOL_ROW_KEYS = ("used_by", "recommendation", "basis", "reason", "exemption")
+# An `sdk:` row carries no observed-usage columns, and its `reason` is DERIVED from the
+# caller scan (it must follow the code, so freezing it would report a stale call graph
+# forever). Only the human recording travels.
+CARRIED_SDK_ROW_KEYS = ("exemption",)
 NON_DERIVABLE_DOC_KEYS = frozenset(
     {
         "cut_at_commit",
@@ -1055,6 +1566,45 @@ def _component_fingerprint(fn) -> str | None:
     return f"{rel}:{_code_digest(code)}"
 
 
+def _carried_row_evidence() -> dict[str, dict]:
+    """Row name -> the COMMITTED evidence a re-cut must not re-derive (#10914 review P2).
+
+    Reads `MANIFEST_FILE` at call time (never a bound default) and returns only the keys a
+    row of that kind carries (`CARRIED_TOOL_ROW_KEYS` / `CARRIED_SDK_ROW_KEYS`), each
+    accepted only when its type is the one the derivation emits — a hand-mangled cell is
+    ignored and the row is re-derived rather than copied into the artifact.
+
+    Absence is not an error here: a tool introduced by this very change has no committed
+    row, and that is exactly the case the observed-usage columns must not invent. An
+    UNREADABLE manifest returns `{}` too, because `cmd_cut` refuses that case itself
+    (`_recorded_approvals`) — this function must not be the thing that raises first.
+    """
+    try:
+        with MANIFEST_FILE.open() as fh:
+            doc = yaml.safe_load(fh)
+    except (OSError, yaml.YAMLError):
+        return {}
+    if not isinstance(doc, dict) or not isinstance(doc.get("rows"), list):
+        return {}
+    types = {"used_by": str, "recommendation": str, "basis": str, "reason": str, "exemption": bool}
+    carried: dict[str, dict] = {}
+    for row in doc["rows"]:
+        if not isinstance(row, dict):
+            continue
+        name = row.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        keys = CARRIED_SDK_ROW_KEYS if name.startswith("sdk:") else CARRIED_TOOL_ROW_KEYS
+        kept = {
+            key: row[key]
+            for key in keys
+            if key in row and isinstance(row[key], types[key])
+        }
+        if kept:
+            carried[name] = kept
+    return carried
+
+
 def _carried_response_fields() -> list:
     """Preserve the hand-authored `response_fields` block across a re-cut.
 
@@ -1126,7 +1676,7 @@ def _carried_high_water_counts(fallback: dict) -> dict:
     return out
 
 
-def build_doc(commit: str | None = None) -> dict:
+def build_doc(commit: str | None = None, refresh_observations: bool = False) -> dict:
     """Derive the baseline from the declaration. THE single derivation.
 
     `cut` writes what this returns; `check` compares the committed artifact against it.
@@ -1183,6 +1733,10 @@ def build_doc(commit: str | None = None) -> dict:
     corpora = usage_index()
     called_names = telemetry_tools()
     clusters = seed_clusters()
+    # The COMMITTED observed-usage evidence, carried forward into this derivation (#10914
+    # review P2). Empty on a first cut (no manifest), and empty under
+    # `--refresh-observations`, which is the one deliberate way to re-stamp it.
+    carried_evidence = {} if refresh_observations else _carried_row_evidence()
 
     served_http = None
     try:
@@ -1266,7 +1820,21 @@ def build_doc(commit: str | None = None) -> dict:
         if resolves:
             bound_by.setdefault(declared, []).append(entry.name)
         cluster, canonical = clusters.get(entry.name, (None, None))
-        called = (entry.name in called_names) if called_names else None
+        # #10914 review P2 — the observed-usage columns are CARRIED, not re-derived.
+        #
+        # A row with committed evidence is written from it verbatim (the fresh derivation
+        # below is discarded). A row WITHOUT committed evidence is NEW to this artifact, so
+        # no production call can exist for it: `called=False` records that honestly instead
+        # of letting this box's log stamp the container `called by agents` off the lane's
+        # own test call. The log only drives these columns when the operator asks for it
+        # (`--refresh-observations`), so a re-cut can no longer re-stamp the evidence.
+        committed = carried_evidence.get(entry.name) or {}
+        if committed:
+            called = None
+        elif refresh_observations:
+            called = (entry.name in called_names) if called_names else None
+        else:
+            called = False
         used_by_str = used_by(entry.name, corpora, called)
         lifecycle = "deprecated alias" if entry.name in DEPRECATED_ALIASES else "active"
         # The full description, verbatim. An earlier cut took the first sentence,
@@ -1311,13 +1879,16 @@ def build_doc(commit: str | None = None) -> dict:
                           else "handler-served: no declared SDK link")
                 ),
                 "lifecycle": lifecycle,
-                "used_by": used_by_str,
-                "recommendation": _rec[0],
-                "basis": "decided" if _rec[0] in ("merge", "kill", "fix-declaration") else "observed",
-                "reason": _rec[1],
+                "used_by": committed.get("used_by", used_by_str),
+                "recommendation": committed.get("recommendation", _rec[0]),
+                "basis": committed.get(
+                    "basis",
+                    "decided" if _rec[0] in ("merge", "kill", "fix-declaration") else "observed",
+                ),
+                "reason": committed.get("reason", _rec[1]),
                 "recommended_family": None,
                 "proposed": False,
-                "exemption": False,
+                "exemption": committed.get("exemption", False),
                 "approval": None,
             }
         )
@@ -1333,6 +1904,7 @@ def build_doc(commit: str | None = None) -> dict:
         if declared:
             bound_by.setdefault(declared, []).append(f"{entry.name} (retired)")
     for name in public:
+        sdk_committed = carried_evidence.get(f"sdk:{name}") or {}
         reached = bool(bound_by.get(name))
         reached_paths = sorted(
             {category(p) for p in callers.get(name, set()) if not p.startswith(TEST_PREFIXES)}
@@ -1399,7 +1971,7 @@ def build_doc(commit: str | None = None) -> dict:
                 ),
                 "recommended_family": None,
                 "proposed": False,
-                "exemption": False,
+                "exemption": sdk_committed.get("exemption", False),
                 "approval": None,
                 "class": cls,
             }
@@ -1543,8 +2115,26 @@ def _recorded_approvals(doc: dict) -> list[tuple[str, str]]:
 
 
 def cmd_cut(args: argparse.Namespace) -> int:
+    # ⛔ #11057 review P1: `--commit` was written into the record with NO validation, so
+    # `cut --commit main` landed a record that `check` could not distinguish from a verified
+    # one — a ref resolves, and a branch is its own ancestor. The gate refuses the shape at
+    # read time; refusing it at WRITE time is what stops a broken baseline being committed
+    # in the first place.
+    recorded = str(getattr(args, "commit", None) or "")
+    if recorded and not _is_object_id(recorded):
+        print(f"::error::--commit {recorded!r} is not an object id")
+        print(
+            f"REFUSED `--commit` must be a full object id (40 lowercase hex), not a revision "
+            f"or a prefix: {recorded!r} may well resolve, but the baseline records this value "
+            "as its cut point and the read path refuses anything shorter — an abbreviation "
+            "also means something different once the repository grows. Use "
+            "`--commit $(git rev-parse <rev>)`."
+        )
+        return 1
     try:
-        doc = build_doc(args.commit)
+        doc = build_doc(
+            args.commit, refresh_observations=getattr(args, "refresh_observations", False)
+        )
     except SurfaceEvidenceUnreadable as exc:
         return _refuse(exc)
 
@@ -1566,7 +2156,7 @@ def cmd_cut(args: argparse.Namespace) -> int:
     doomed: list[tuple[str, str]] = []
     if MANIFEST_FILE.exists():
         try:
-            doomed = _recorded_approvals(_read_manifest())
+            doomed = _recorded_approvals(_read_manifest(check_provenance=False))
         except SurfaceEvidenceUnreadable as exc:
             return _refuse(exc)
     if doomed and not getattr(args, "allow_approval_reset", False):
@@ -1630,9 +2220,9 @@ def observed_usage(row: dict) -> str | None:
     absent (an empty `HOME`): every row lost its flag and `_never` counted all 82
     tools, so the committed document stopped matching its own generator and
     `render` + `git diff --exit-code` — the drift step — could only ever pass on one
-    laptop. The log still drives the artifact, through `build_doc`, which refreshes
-    the MANIFEST; that lands as a reviewed, committed diff instead of as whichever
-    machine happens to run the render.
+    laptop. A plain re-cut does not consult it either (#10914 review P2): `build_doc`
+    CARRIES the committed `used_by` forward and reads the log only for a row with no
+    committed evidence, or under a deliberate `--refresh-observations`.
     """
     first = (row.get("used_by") or "").split(",")[0].strip()
     if first == "agents":
@@ -1740,7 +2330,8 @@ def cmd_render(args: argparse.Namespace) -> int:
     add("")
     add("# The agent-facing surface — for review")
     add("")
-    add(f"Cut at `{doc['cut_at_commit'][:9]}`. **{len(tools)} MCP tools · {len(sdk)} SDK methods.**")
+    add(f"Cut against `{doc['cut_at_commit'][:9]}`, the default-branch commit this baseline "
+        f"was cut from. **{len(tools)} MCP tools · {len(sdk)} SDK methods.**")
     add("")
     add("Generated from `config/surface-manifest.yml`. **Do not edit this file** — change the manifest.")
     add("")
@@ -2233,8 +2824,14 @@ def _partition_rows(rows: list) -> tuple[list[dict], list[str]]:
 
 
 def cmd_check(args: argparse.Namespace) -> int:
-    """AC13's lint: eleven structural properties, a twelfth derived from the code, and a
-    thirteenth: the DECLARED surface is the approved one (#10034)."""
+    """AC13's lint: eleven structural properties, a twelfth derived from the code, a
+    thirteenth that the DECLARED surface is the approved one (#10034), and a fourteenth
+    that the recorded `cut_at_commit` RESOLVES (#11057).
+
+    The fourteenth is `--provenance-strict`-gated on purpose: `check` is documented as safe
+    to run anywhere, and a `fetch-depth: 1` checkout cannot answer it — so the default arm
+    reports the reason (`::notice::`) and the one step that owns its own git depth asks for
+    the strict verdict."""
     try:
         order = load_order()
         doc = _read_manifest()
@@ -2246,6 +2843,20 @@ def cmd_check(args: argparse.Namespace) -> int:
             SurfaceEvidenceUnreadable(
                 f"could not import the surface declaration: {type(exc).__name__}: {exc}"
             )
+        )
+
+    # `cut_at_commit` is PROVENANCE, excluded from the drift comparison, so
+    # `_read_manifest` is its only gate — and there it can answer `unprovable` when this
+    # clone does not hold the object. That arm is NAMED here rather than left silent: a
+    # verification that did not happen must never read as one that passed. (("a check
+    # nobody runs reports to nobody") — the same reason `changes` prints that the capstone
+    # ordering gate is UNPROVABLE on a shallow checkout rather than quietly skipping.)
+    verdict, why = cut_commit_verdict(doc["cut_at_commit"])
+    if verdict == CUT_UNPROVABLE:
+        print(
+            f"surface_manifest: `cut_at_commit: {doc['cut_at_commit']}` was NOT VERIFIED — "
+            f"{why}. Re-run `check` in a full clone (or with the object fetched) to prove "
+            "the provenance resolves."
         )
 
     verbs = order["keywords"]
@@ -2471,6 +3082,23 @@ def cmd_check(args: argparse.Namespace) -> int:
         "`uv run python tools/sdk_surface_declaration.py check`."
     )
 
+    # 14. the recorded `cut_at_commit` RESOLVES and SURVIVES (#11057 reviews P2, F1) ---
+    # Property 12 skips this key (it is provenance, not a derivation) and `_read_manifest`
+    # only asserts it is a non-empty string, so an unresolvable sha was green everywhere
+    # while `render` published it to the owner. Red where the object database can answer;
+    # say so loudly where it cannot (a shallow checkout is a remedy, not a red).
+    #
+    # RESOLVING IS NOT SURVIVING: on a PR checkout every head is fetched, so a LANE commit
+    # resolves right up to the squash merge that never creates it on `main` and the branch
+    # deletion that removes its only ref — and this property, made required, would then red
+    # `main` forever. So the field must name a commit in the DEFAULT BRANCH's history.
+    _prov_problems, _unprovable = provenance_report(
+        doc, strict=bool(getattr(args, "provenance_strict", False))
+    )
+    problems.extend(_prov_problems)
+    if _unprovable:
+        print(f"::notice::{_unprovable}")
+
     for p in problems:
         print(f"FAIL {p}")
     if problems:
@@ -2478,7 +3106,8 @@ def cmd_check(args: argparse.Namespace) -> int:
         return 1
     print(
         f"OK — {len(rows)} tool rows, {len(retired) if isinstance(retired, list) else 0} retired, "
-        "thirteen properties hold (eleven structural, one derived-from-code, one declared-vs-approved)"
+        "fourteen properties hold (eleven structural, one derived-from-code, "
+        "one declared-vs-approved, one provenance)"
     )
     return 0
 
@@ -2554,15 +3183,40 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="cmd", required=True)
     p_cut = sub.add_parser("cut", help="declare->manifest, once, by a human")
-    p_cut.add_argument("--commit", help="the commit to cut the baseline at")
+    p_cut.add_argument(
+        "--commit",
+        help="the full commit sha (40 lowercase hex) to cut the baseline at — the same shape "
+             "`check` will verify, so `$(git rev-parse <rev>)`, never a prefix",
+    )
     p_cut.add_argument(
         "--allow-approval-reset",
         action="store_true",
         help="permit dropping recorded per-row approvals (default: refuse and name every row)",
     )
+    p_cut.add_argument(
+        "--refresh-observations",
+        action="store_true",
+        help=(
+            "re-derive the observed-usage columns (used_by/recommendation/basis/reason) "
+            "from THIS machine's tool-call log instead of carrying the committed values. "
+            "Without it a re-cut carries the evidence forward (#10914 review P2)."
+        ),
+    )
     p_cut.set_defaults(func=cmd_cut)
     sub.add_parser("render").set_defaults(func=cmd_render)
-    sub.add_parser("check").set_defaults(func=cmd_check)
+    p_check = sub.add_parser("check")
+    # #11057 review P2: `strict` is for the ONE step that owns its own git depth (a
+    # `fetch-depth: 0` checkout, run BEFORE any `--depth` fetch can mark it shallow).
+    # Every other caller keeps the default, because `check` is documented as safe to
+    # run anywhere and a shallow clone cannot answer the question at all.
+    p_check.add_argument(
+        "--provenance-strict",
+        action="store_true",
+        help="red when the recorded `cut_at_commit` cannot be PROVEN to resolve AND to be "
+             "in the default branch's history (a shallow clone counts as unproven, not as "
+             "a pass)",
+    )
+    p_check.set_defaults(func=cmd_check)
     args = parser.parse_args()
     return args.func(args)
 

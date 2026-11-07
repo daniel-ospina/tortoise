@@ -1,6 +1,6 @@
 {
   "by_pool": {
-    "issue_probe_4520": [
+    "chunk_bearing_deep_window": [
       {
         "additive": true,
         "base_graded_evicted": [
@@ -9,7 +9,9 @@
         "base_sessionless_slots": 0,
         "base_sessions": 1,
         "budget_effective": 1,
+        "chunk_bearing": true,
         "deleted_sessions": [],
+        "displacement_expressible": true,
         "evicted_ids": [
           "sa2"
         ],
@@ -27,12 +29,945 @@
         "pick_ranks": [
           2
         ],
+        "pick_ranks_before_dedup": [
+          2
+        ],
+        "picks": [
+          "sb12"
+        ],
+        "picks_dropped_by_reader_dedup": [],
+        "picks_outside_window": [],
+        "placement": "tail",
+        "pool_depth": 24,
+        "reader_pool_depth": 15,
+        "reader_pool_depth_fused": 15,
+        "window": 3
+      },
+      {
+        "additive": true,
+        "base_graded_evicted": [],
+        "base_sessionless_slots": 0,
+        "base_sessions": 2,
+        "budget_effective": 1,
+        "chunk_bearing": true,
+        "deleted_sessions": [],
+        "displacement_expressible": true,
+        "evicted_ids": [],
+        "evicted_sessions": [],
+        "evicted_sole_representatives": [],
+        "fired": true,
+        "fused_sessionless_slots": 0,
+        "fused_sessions": 2,
+        "graded_by_recall_all_at_5": 1,
+        "limit_requested": 2,
+        "net": 0,
+        "order_changed": true,
+        "pick_ranks": [
+          3
+        ],
+        "pick_ranks_before_dedup": [
+          3
+        ],
+        "picks": [
+          "sb12"
+        ],
+        "picks_dropped_by_reader_dedup": [],
+        "picks_outside_window": [],
+        "placement": "tail",
+        "pool_depth": 24,
+        "reader_pool_depth": 15,
+        "reader_pool_depth_fused": 15,
+        "window": 4
+      },
+      {
+        "additive": true,
+        "base_graded_evicted": [],
+        "base_sessionless_slots": 0,
+        "base_sessions": 3,
+        "budget_effective": 1,
+        "chunk_bearing": true,
+        "deleted_sessions": [],
+        "displacement_expressible": true,
+        "evicted_ids": [],
+        "evicted_sessions": [],
+        "evicted_sole_representatives": [],
+        "fired": true,
+        "fused_sessionless_slots": 0,
+        "fused_sessions": 3,
+        "graded_by_recall_all_at_5": 1,
+        "limit_requested": 2,
+        "net": 0,
+        "order_changed": true,
+        "pick_ranks": [
+          3
+        ],
+        "pick_ranks_before_dedup": [
+          4
+        ],
+        "picks": [
+          "sb12"
+        ],
+        "picks_dropped_by_reader_dedup": [],
+        "picks_outside_window": [],
+        "placement": "tail",
+        "pool_depth": 24,
+        "reader_pool_depth": 15,
+        "reader_pool_depth_fused": 15,
+        "window": 5
+      },
+      {
+        "additive": true,
+        "base_graded_evicted": [],
+        "base_sessionless_slots": 0,
+        "base_sessions": 4,
+        "budget_effective": 2,
+        "chunk_bearing": true,
+        "deleted_sessions": [],
+        "displacement_expressible": true,
+        "evicted_ids": [],
+        "evicted_sessions": [],
+        "evicted_sole_representatives": [],
+        "fired": true,
+        "fused_sessionless_slots": 0,
+        "fused_sessions": 4,
+        "graded_by_recall_all_at_5": 2,
+        "limit_requested": 2,
+        "net": 0,
+        "order_changed": true,
+        "pick_ranks": [
+          3,
+          4
+        ],
+        "pick_ranks_before_dedup": [
+          4,
+          5
+        ],
+        "picks": [
+          "sb12",
+          "sc13"
+        ],
+        "picks_dropped_by_reader_dedup": [],
+        "picks_outside_window": [],
+        "placement": "tail",
+        "pool_depth": 24,
+        "reader_pool_depth": 15,
+        "reader_pool_depth_fused": 15,
+        "window": 6
+      },
+      {
+        "additive": true,
+        "base_graded_evicted": [],
+        "base_sessionless_slots": 0,
+        "base_sessions": 5,
+        "budget_effective": 2,
+        "chunk_bearing": true,
+        "deleted_sessions": [],
+        "displacement_expressible": true,
+        "evicted_ids": [],
+        "evicted_sessions": [],
+        "evicted_sole_representatives": [],
+        "fired": true,
+        "fused_sessionless_slots": 0,
+        "fused_sessions": 5,
+        "graded_by_recall_all_at_5": 2,
+        "limit_requested": 2,
+        "net": 0,
+        "order_changed": true,
+        "pick_ranks": [
+          3,
+          4
+        ],
+        "pick_ranks_before_dedup": [
+          5,
+          6
+        ],
+        "picks": [
+          "sb12",
+          "sc13"
+        ],
+        "picks_dropped_by_reader_dedup": [],
+        "picks_outside_window": [],
+        "placement": "tail",
+        "pool_depth": 24,
+        "reader_pool_depth": 15,
+        "reader_pool_depth_fused": 15,
+        "window": 7
+      },
+      {
+        "additive": true,
+        "base_graded_evicted": [],
+        "base_sessionless_slots": 0,
+        "base_sessions": 10,
+        "budget_effective": 2,
+        "chunk_bearing": true,
+        "deleted_sessions": [],
+        "displacement_expressible": true,
+        "evicted_ids": [],
+        "evicted_sessions": [],
+        "evicted_sole_representatives": [],
+        "fired": true,
+        "fused_sessionless_slots": 0,
+        "fused_sessions": 10,
+        "graded_by_recall_all_at_5": 2,
+        "limit_requested": 2,
+        "net": 0,
+        "order_changed": true,
+        "pick_ranks": [
+          3,
+          4
+        ],
+        "pick_ranks_before_dedup": [
+          10,
+          11
+        ],
+        "picks": [
+          "sb12",
+          "sc13"
+        ],
+        "picks_dropped_by_reader_dedup": [],
+        "picks_outside_window": [],
+        "placement": "tail",
+        "pool_depth": 24,
+        "reader_pool_depth": 15,
+        "reader_pool_depth_fused": 15,
+        "window": 12
+      },
+      {
+        "additive": true,
+        "base_graded_evicted": [],
+        "base_sessionless_slots": 0,
+        "base_sessions": 11,
+        "budget_effective": 2,
+        "chunk_bearing": true,
+        "deleted_sessions": [],
+        "displacement_expressible": true,
+        "evicted_ids": [],
+        "evicted_sessions": [],
+        "evicted_sole_representatives": [],
+        "fired": true,
+        "fused_sessionless_slots": 0,
+        "fused_sessions": 11,
+        "graded_by_recall_all_at_5": 2,
+        "limit_requested": 2,
+        "net": 0,
+        "order_changed": true,
+        "pick_ranks": [
+          3,
+          4
+        ],
+        "pick_ranks_before_dedup": [
+          11,
+          12
+        ],
+        "picks": [
+          "sc13",
+          "sd14"
+        ],
+        "picks_dropped_by_reader_dedup": [],
+        "picks_outside_window": [],
+        "placement": "tail",
+        "pool_depth": 24,
+        "reader_pool_depth": 15,
+        "reader_pool_depth_fused": 15,
+        "window": 13
+      },
+      {
+        "additive": true,
+        "base_graded_evicted": [],
+        "base_sessionless_slots": 0,
+        "base_sessions": 12,
+        "budget_effective": 2,
+        "chunk_bearing": true,
+        "deleted_sessions": [],
+        "displacement_expressible": true,
+        "evicted_ids": [],
+        "evicted_sessions": [],
+        "evicted_sole_representatives": [],
+        "fired": true,
+        "fused_sessionless_slots": 0,
+        "fused_sessions": 12,
+        "graded_by_recall_all_at_5": 2,
+        "limit_requested": 2,
+        "net": 0,
+        "order_changed": true,
+        "pick_ranks": [
+          3,
+          4
+        ],
+        "pick_ranks_before_dedup": [
+          12,
+          13
+        ],
+        "picks": [
+          "sd14",
+          "se15"
+        ],
+        "picks_dropped_by_reader_dedup": [],
+        "picks_outside_window": [],
+        "placement": "tail",
+        "pool_depth": 24,
+        "reader_pool_depth": 15,
+        "reader_pool_depth_fused": 15,
+        "window": 14
+      }
+    ],
+    "chunk_bearing_issue_probe": [
+      {
+        "additive": true,
+        "base_graded_evicted": [
+          "sa2"
+        ],
+        "base_sessionless_slots": 0,
+        "base_sessions": 1,
+        "budget_effective": 1,
+        "chunk_bearing": true,
+        "deleted_sessions": [],
+        "displacement_expressible": true,
+        "evicted_ids": [
+          "sa2"
+        ],
+        "evicted_sessions": [
+          "sA"
+        ],
+        "evicted_sole_representatives": [],
+        "fired": true,
+        "fused_sessionless_slots": 0,
+        "fused_sessions": 2,
+        "graded_by_recall_all_at_5": 1,
+        "limit_requested": 2,
+        "net": 1,
+        "order_changed": true,
+        "pick_ranks": [
+          2
+        ],
+        "pick_ranks_before_dedup": [
+          2
+        ],
         "picks": [
           "sb10"
         ],
+        "picks_dropped_by_reader_dedup": [],
         "picks_outside_window": [],
         "placement": "tail",
         "pool_depth": 15,
+        "reader_pool_depth": 8,
+        "reader_pool_depth_fused": 8,
+        "window": 3
+      },
+      {
+        "additive": true,
+        "base_graded_evicted": [],
+        "base_sessionless_slots": 0,
+        "base_sessions": 2,
+        "budget_effective": 1,
+        "chunk_bearing": true,
+        "deleted_sessions": [],
+        "displacement_expressible": true,
+        "evicted_ids": [],
+        "evicted_sessions": [],
+        "evicted_sole_representatives": [],
+        "fired": true,
+        "fused_sessionless_slots": 0,
+        "fused_sessions": 2,
+        "graded_by_recall_all_at_5": 1,
+        "limit_requested": 2,
+        "net": 0,
+        "order_changed": true,
+        "pick_ranks": [
+          3
+        ],
+        "pick_ranks_before_dedup": [
+          3
+        ],
+        "picks": [
+          "sb10"
+        ],
+        "picks_dropped_by_reader_dedup": [],
+        "picks_outside_window": [],
+        "placement": "tail",
+        "pool_depth": 15,
+        "reader_pool_depth": 8,
+        "reader_pool_depth_fused": 8,
+        "window": 4
+      },
+      {
+        "additive": true,
+        "base_graded_evicted": [],
+        "base_sessionless_slots": 0,
+        "base_sessions": 3,
+        "budget_effective": 1,
+        "chunk_bearing": true,
+        "deleted_sessions": [],
+        "displacement_expressible": true,
+        "evicted_ids": [],
+        "evicted_sessions": [],
+        "evicted_sole_representatives": [],
+        "fired": true,
+        "fused_sessionless_slots": 0,
+        "fused_sessions": 3,
+        "graded_by_recall_all_at_5": 1,
+        "limit_requested": 2,
+        "net": 0,
+        "order_changed": true,
+        "pick_ranks": [
+          3
+        ],
+        "pick_ranks_before_dedup": [
+          4
+        ],
+        "picks": [
+          "sb10"
+        ],
+        "picks_dropped_by_reader_dedup": [],
+        "picks_outside_window": [],
+        "placement": "tail",
+        "pool_depth": 15,
+        "reader_pool_depth": 8,
+        "reader_pool_depth_fused": 8,
+        "window": 5
+      },
+      {
+        "additive": true,
+        "base_graded_evicted": [],
+        "base_sessionless_slots": 0,
+        "base_sessions": 4,
+        "budget_effective": 2,
+        "chunk_bearing": true,
+        "deleted_sessions": [],
+        "displacement_expressible": true,
+        "evicted_ids": [],
+        "evicted_sessions": [],
+        "evicted_sole_representatives": [],
+        "fired": true,
+        "fused_sessionless_slots": 0,
+        "fused_sessions": 4,
+        "graded_by_recall_all_at_5": 2,
+        "limit_requested": 2,
+        "net": 0,
+        "order_changed": true,
+        "pick_ranks": [
+          3,
+          4
+        ],
+        "pick_ranks_before_dedup": [
+          4,
+          5
+        ],
+        "picks": [
+          "sb10",
+          "sc11"
+        ],
+        "picks_dropped_by_reader_dedup": [],
+        "picks_outside_window": [],
+        "placement": "tail",
+        "pool_depth": 15,
+        "reader_pool_depth": 8,
+        "reader_pool_depth_fused": 8,
+        "window": 6
+      },
+      {
+        "additive": true,
+        "base_graded_evicted": [],
+        "base_sessionless_slots": 0,
+        "base_sessions": 5,
+        "budget_effective": 2,
+        "chunk_bearing": true,
+        "deleted_sessions": [],
+        "displacement_expressible": true,
+        "evicted_ids": [],
+        "evicted_sessions": [],
+        "evicted_sole_representatives": [],
+        "fired": true,
+        "fused_sessionless_slots": 0,
+        "fused_sessions": 5,
+        "graded_by_recall_all_at_5": 2,
+        "limit_requested": 2,
+        "net": 0,
+        "order_changed": true,
+        "pick_ranks": [
+          3,
+          4
+        ],
+        "pick_ranks_before_dedup": [
+          5,
+          6
+        ],
+        "picks": [
+          "sb10",
+          "sc11"
+        ],
+        "picks_dropped_by_reader_dedup": [],
+        "picks_outside_window": [],
+        "placement": "tail",
+        "pool_depth": 15,
+        "reader_pool_depth": 8,
+        "reader_pool_depth_fused": 8,
+        "window": 7
+      },
+      {
+        "additive": true,
+        "base_graded_evicted": [],
+        "base_sessionless_slots": 0,
+        "base_sessions": 6,
+        "budget_effective": 2,
+        "chunk_bearing": true,
+        "deleted_sessions": [],
+        "displacement_expressible": false,
+        "evicted_ids": [],
+        "evicted_sessions": [],
+        "evicted_sole_representatives": [],
+        "fired": true,
+        "fused_sessionless_slots": 0,
+        "fused_sessions": 6,
+        "graded_by_recall_all_at_5": 2,
+        "limit_requested": 2,
+        "net": 0,
+        "order_changed": true,
+        "pick_ranks": [
+          3,
+          4
+        ],
+        "pick_ranks_before_dedup": [
+          10,
+          11
+        ],
+        "picks": [
+          "sd12",
+          "se13"
+        ],
+        "picks_dropped_by_reader_dedup": [],
+        "picks_outside_window": [],
+        "placement": "tail",
+        "pool_depth": 15,
+        "reader_pool_depth": 8,
+        "reader_pool_depth_fused": 8,
+        "window": 12
+      },
+      {
+        "additive": true,
+        "base_graded_evicted": [],
+        "base_sessionless_slots": 0,
+        "base_sessions": 6,
+        "budget_effective": 2,
+        "chunk_bearing": true,
+        "deleted_sessions": [],
+        "displacement_expressible": false,
+        "evicted_ids": [],
+        "evicted_sessions": [],
+        "evicted_sole_representatives": [],
+        "fired": true,
+        "fused_sessionless_slots": 0,
+        "fused_sessions": 6,
+        "graded_by_recall_all_at_5": 1,
+        "limit_requested": 2,
+        "net": 0,
+        "order_changed": true,
+        "pick_ranks": [
+          4,
+          5
+        ],
+        "pick_ranks_before_dedup": [
+          11,
+          12
+        ],
+        "picks": [
+          "se13",
+          "sf14"
+        ],
+        "picks_dropped_by_reader_dedup": [],
+        "picks_outside_window": [],
+        "placement": "tail",
+        "pool_depth": 15,
+        "reader_pool_depth": 8,
+        "reader_pool_depth_fused": 8,
+        "window": 13
+      },
+      {
+        "additive": true,
+        "base_graded_evicted": [],
+        "base_sessionless_slots": 0,
+        "base_sessions": 6,
+        "budget_effective": 2,
+        "chunk_bearing": true,
+        "deleted_sessions": [],
+        "displacement_expressible": false,
+        "evicted_ids": [],
+        "evicted_sessions": [],
+        "evicted_sole_representatives": [],
+        "fired": true,
+        "fused_sessionless_slots": 0,
+        "fused_sessions": 6,
+        "graded_by_recall_all_at_5": 0,
+        "limit_requested": 2,
+        "net": 0,
+        "order_changed": true,
+        "pick_ranks": [
+          5
+        ],
+        "pick_ranks_before_dedup": [
+          12
+        ],
+        "picks": [
+          "sf14"
+        ],
+        "picks_dropped_by_reader_dedup": [],
+        "picks_outside_window": [],
+        "placement": "tail",
+        "pool_depth": 15,
+        "reader_pool_depth": 8,
+        "reader_pool_depth_fused": 8,
+        "window": 14
+      }
+    ],
+    "chunk_bearing_whole_window_cluster": [
+      {
+        "additive": true,
+        "base_graded_evicted": [
+          "sa2"
+        ],
+        "base_sessionless_slots": 0,
+        "base_sessions": 1,
+        "budget_effective": 1,
+        "chunk_bearing": true,
+        "deleted_sessions": [],
+        "displacement_expressible": true,
+        "evicted_ids": [
+          "sa2"
+        ],
+        "evicted_sessions": [
+          "sA"
+        ],
+        "evicted_sole_representatives": [],
+        "fired": true,
+        "fused_sessionless_slots": 0,
+        "fused_sessions": 2,
+        "graded_by_recall_all_at_5": 1,
+        "limit_requested": 2,
+        "net": 1,
+        "order_changed": true,
+        "pick_ranks": [
+          2
+        ],
+        "pick_ranks_before_dedup": [
+          2
+        ],
+        "picks": [
+          "sd12"
+        ],
+        "picks_dropped_by_reader_dedup": [],
+        "picks_outside_window": [],
+        "placement": "tail",
+        "pool_depth": 15,
+        "reader_pool_depth": 6,
+        "reader_pool_depth_fused": 6,
+        "window": 3
+      },
+      {
+        "additive": true,
+        "base_graded_evicted": [],
+        "base_sessionless_slots": 0,
+        "base_sessions": 2,
+        "budget_effective": 1,
+        "chunk_bearing": true,
+        "deleted_sessions": [],
+        "displacement_expressible": true,
+        "evicted_ids": [],
+        "evicted_sessions": [],
+        "evicted_sole_representatives": [],
+        "fired": true,
+        "fused_sessionless_slots": 0,
+        "fused_sessions": 2,
+        "graded_by_recall_all_at_5": 1,
+        "limit_requested": 2,
+        "net": 0,
+        "order_changed": true,
+        "pick_ranks": [
+          3
+        ],
+        "pick_ranks_before_dedup": [
+          3
+        ],
+        "picks": [
+          "sd12"
+        ],
+        "picks_dropped_by_reader_dedup": [],
+        "picks_outside_window": [],
+        "placement": "tail",
+        "pool_depth": 15,
+        "reader_pool_depth": 6,
+        "reader_pool_depth_fused": 6,
+        "window": 4
+      },
+      {
+        "additive": true,
+        "base_graded_evicted": [],
+        "base_sessionless_slots": 0,
+        "base_sessions": 3,
+        "budget_effective": 1,
+        "chunk_bearing": true,
+        "deleted_sessions": [],
+        "displacement_expressible": true,
+        "evicted_ids": [],
+        "evicted_sessions": [],
+        "evicted_sole_representatives": [],
+        "fired": true,
+        "fused_sessionless_slots": 0,
+        "fused_sessions": 3,
+        "graded_by_recall_all_at_5": 1,
+        "limit_requested": 2,
+        "net": 0,
+        "order_changed": true,
+        "pick_ranks": [
+          3
+        ],
+        "pick_ranks_before_dedup": [
+          4
+        ],
+        "picks": [
+          "sd12"
+        ],
+        "picks_dropped_by_reader_dedup": [],
+        "picks_outside_window": [],
+        "placement": "tail",
+        "pool_depth": 15,
+        "reader_pool_depth": 6,
+        "reader_pool_depth_fused": 6,
+        "window": 5
+      },
+      {
+        "additive": true,
+        "base_graded_evicted": [],
+        "base_sessionless_slots": 0,
+        "base_sessions": 4,
+        "budget_effective": 2,
+        "chunk_bearing": true,
+        "deleted_sessions": [],
+        "displacement_expressible": false,
+        "evicted_ids": [],
+        "evicted_sessions": [],
+        "evicted_sole_representatives": [],
+        "fired": true,
+        "fused_sessionless_slots": 0,
+        "fused_sessions": 4,
+        "graded_by_recall_all_at_5": 2,
+        "limit_requested": 2,
+        "net": 0,
+        "order_changed": true,
+        "pick_ranks": [
+          3,
+          4
+        ],
+        "pick_ranks_before_dedup": [
+          4,
+          5
+        ],
+        "picks": [
+          "sd12",
+          "se13"
+        ],
+        "picks_dropped_by_reader_dedup": [],
+        "picks_outside_window": [],
+        "placement": "tail",
+        "pool_depth": 15,
+        "reader_pool_depth": 6,
+        "reader_pool_depth_fused": 6,
+        "window": 6
+      },
+      {
+        "additive": true,
+        "base_graded_evicted": [],
+        "base_sessionless_slots": 0,
+        "base_sessions": 4,
+        "budget_effective": 2,
+        "chunk_bearing": true,
+        "deleted_sessions": [],
+        "displacement_expressible": false,
+        "evicted_ids": [],
+        "evicted_sessions": [],
+        "evicted_sole_representatives": [],
+        "fired": true,
+        "fused_sessionless_slots": 0,
+        "fused_sessions": 4,
+        "graded_by_recall_all_at_5": 2,
+        "limit_requested": 2,
+        "net": 0,
+        "order_changed": true,
+        "pick_ranks": [
+          3,
+          4
+        ],
+        "pick_ranks_before_dedup": [
+          5,
+          6
+        ],
+        "picks": [
+          "sd12",
+          "se13"
+        ],
+        "picks_dropped_by_reader_dedup": [],
+        "picks_outside_window": [],
+        "placement": "tail",
+        "pool_depth": 15,
+        "reader_pool_depth": 6,
+        "reader_pool_depth_fused": 6,
+        "window": 7
+      },
+      {
+        "additive": true,
+        "base_graded_evicted": [],
+        "base_sessionless_slots": 0,
+        "base_sessions": 4,
+        "budget_effective": 2,
+        "chunk_bearing": true,
+        "deleted_sessions": [],
+        "displacement_expressible": false,
+        "evicted_ids": [],
+        "evicted_sessions": [],
+        "evicted_sole_representatives": [],
+        "fired": true,
+        "fused_sessionless_slots": 0,
+        "fused_sessions": 4,
+        "graded_by_recall_all_at_5": 2,
+        "limit_requested": 2,
+        "net": 0,
+        "order_changed": true,
+        "pick_ranks": [
+          3,
+          4
+        ],
+        "pick_ranks_before_dedup": [
+          10,
+          11
+        ],
+        "picks": [
+          "sd12",
+          "se13"
+        ],
+        "picks_dropped_by_reader_dedup": [],
+        "picks_outside_window": [],
+        "placement": "tail",
+        "pool_depth": 15,
+        "reader_pool_depth": 6,
+        "reader_pool_depth_fused": 6,
+        "window": 12
+      },
+      {
+        "additive": true,
+        "base_graded_evicted": [],
+        "base_sessionless_slots": 0,
+        "base_sessions": 4,
+        "budget_effective": 2,
+        "chunk_bearing": true,
+        "deleted_sessions": [],
+        "displacement_expressible": false,
+        "evicted_ids": [],
+        "evicted_sessions": [],
+        "evicted_sole_representatives": [],
+        "fired": true,
+        "fused_sessionless_slots": 0,
+        "fused_sessions": 4,
+        "graded_by_recall_all_at_5": 2,
+        "limit_requested": 2,
+        "net": 0,
+        "order_changed": true,
+        "pick_ranks": [
+          3,
+          4
+        ],
+        "pick_ranks_before_dedup": [
+          11,
+          12
+        ],
+        "picks": [
+          "se13",
+          "sf14"
+        ],
+        "picks_dropped_by_reader_dedup": [],
+        "picks_outside_window": [],
+        "placement": "tail",
+        "pool_depth": 15,
+        "reader_pool_depth": 6,
+        "reader_pool_depth_fused": 6,
+        "window": 13
+      },
+      {
+        "additive": true,
+        "base_graded_evicted": [],
+        "base_sessionless_slots": 0,
+        "base_sessions": 4,
+        "budget_effective": 2,
+        "chunk_bearing": true,
+        "deleted_sessions": [],
+        "displacement_expressible": false,
+        "evicted_ids": [],
+        "evicted_sessions": [],
+        "evicted_sole_representatives": [],
+        "fired": true,
+        "fused_sessionless_slots": 0,
+        "fused_sessions": 4,
+        "graded_by_recall_all_at_5": 1,
+        "limit_requested": 2,
+        "net": 0,
+        "order_changed": true,
+        "pick_ranks": [
+          3
+        ],
+        "pick_ranks_before_dedup": [
+          12
+        ],
+        "picks": [
+          "sf14"
+        ],
+        "picks_dropped_by_reader_dedup": [],
+        "picks_outside_window": [],
+        "placement": "tail",
+        "pool_depth": 15,
+        "reader_pool_depth": 6,
+        "reader_pool_depth_fused": 6,
+        "window": 14
+      }
+    ],
+    "issue_probe_4520": [
+      {
+        "additive": true,
+        "base_graded_evicted": [
+          "sa2"
+        ],
+        "base_sessionless_slots": 0,
+        "base_sessions": 1,
+        "budget_effective": 1,
+        "chunk_bearing": false,
+        "deleted_sessions": [],
+        "displacement_expressible": true,
+        "evicted_ids": [
+          "sa2"
+        ],
+        "evicted_sessions": [
+          "sA"
+        ],
+        "evicted_sole_representatives": [],
+        "fired": true,
+        "fused_sessionless_slots": 0,
+        "fused_sessions": 2,
+        "graded_by_recall_all_at_5": 1,
+        "limit_requested": 2,
+        "net": 1,
+        "order_changed": true,
+        "pick_ranks": [
+          2
+        ],
+        "pick_ranks_before_dedup": [
+          2
+        ],
+        "picks": [
+          "sb10"
+        ],
+        "picks_dropped_by_reader_dedup": [],
+        "picks_outside_window": [],
+        "placement": "tail",
+        "pool_depth": 15,
+        "reader_pool_depth": 15,
+        "reader_pool_depth_fused": 15,
         "window": 3
       },
       {
@@ -43,7 +978,9 @@
         "base_sessionless_slots": 0,
         "base_sessions": 1,
         "budget_effective": 1,
+        "chunk_bearing": false,
         "deleted_sessions": [],
+        "displacement_expressible": true,
         "evicted_ids": [
           "sa3"
         ],
@@ -61,12 +998,18 @@
         "pick_ranks": [
           3
         ],
+        "pick_ranks_before_dedup": [
+          3
+        ],
         "picks": [
           "sb10"
         ],
+        "picks_dropped_by_reader_dedup": [],
         "picks_outside_window": [],
         "placement": "tail",
         "pool_depth": 15,
+        "reader_pool_depth": 15,
+        "reader_pool_depth_fused": 15,
         "window": 4
       },
       {
@@ -77,7 +1020,9 @@
         "base_sessionless_slots": 0,
         "base_sessions": 1,
         "budget_effective": 1,
+        "chunk_bearing": false,
         "deleted_sessions": [],
+        "displacement_expressible": true,
         "evicted_ids": [
           "sa4"
         ],
@@ -95,12 +1040,18 @@
         "pick_ranks": [
           4
         ],
+        "pick_ranks_before_dedup": [
+          4
+        ],
         "picks": [
           "sb10"
         ],
+        "picks_dropped_by_reader_dedup": [],
         "picks_outside_window": [],
         "placement": "tail",
         "pool_depth": 15,
+        "reader_pool_depth": 15,
+        "reader_pool_depth_fused": 15,
         "window": 5
       },
       {
@@ -111,7 +1062,9 @@
         "base_sessionless_slots": 0,
         "base_sessions": 1,
         "budget_effective": 2,
+        "chunk_bearing": false,
         "deleted_sessions": [],
+        "displacement_expressible": true,
         "evicted_ids": [
           "sa4",
           "sa5"
@@ -131,13 +1084,20 @@
           4,
           5
         ],
+        "pick_ranks_before_dedup": [
+          4,
+          5
+        ],
         "picks": [
           "sb10",
           "sc11"
         ],
+        "picks_dropped_by_reader_dedup": [],
         "picks_outside_window": [],
         "placement": "tail",
         "pool_depth": 15,
+        "reader_pool_depth": 15,
+        "reader_pool_depth_fused": 15,
         "window": 6
       },
       {
@@ -146,7 +1106,9 @@
         "base_sessionless_slots": 0,
         "base_sessions": 1,
         "budget_effective": 2,
+        "chunk_bearing": false,
         "deleted_sessions": [],
+        "displacement_expressible": true,
         "evicted_ids": [
           "sa5",
           "sa6"
@@ -166,13 +1128,20 @@
           5,
           6
         ],
+        "pick_ranks_before_dedup": [
+          5,
+          6
+        ],
         "picks": [
           "sb10",
           "sc11"
         ],
+        "picks_dropped_by_reader_dedup": [],
         "picks_outside_window": [],
         "placement": "tail",
         "pool_depth": 15,
+        "reader_pool_depth": 15,
+        "reader_pool_depth_fused": 15,
         "window": 7
       },
       {
@@ -181,10 +1150,12 @@
         "base_sessionless_slots": 0,
         "base_sessions": 3,
         "budget_effective": 2,
+        "chunk_bearing": false,
         "deleted_sessions": [
           "sB",
           "sC"
         ],
+        "displacement_expressible": true,
         "evicted_ids": [
           "sb10",
           "sc11"
@@ -208,13 +1179,20 @@
           10,
           11
         ],
+        "pick_ranks_before_dedup": [
+          10,
+          11
+        ],
         "picks": [
           "sd12",
           "se13"
         ],
+        "picks_dropped_by_reader_dedup": [],
         "picks_outside_window": [],
         "placement": "tail",
         "pool_depth": 15,
+        "reader_pool_depth": 15,
+        "reader_pool_depth_fused": 15,
         "window": 12
       },
       {
@@ -223,10 +1201,12 @@
         "base_sessionless_slots": 0,
         "base_sessions": 4,
         "budget_effective": 2,
+        "chunk_bearing": false,
         "deleted_sessions": [
           "sC",
           "sD"
         ],
+        "displacement_expressible": true,
         "evicted_ids": [
           "sc11",
           "sd12"
@@ -250,13 +1230,20 @@
           11,
           12
         ],
+        "pick_ranks_before_dedup": [
+          11,
+          12
+        ],
         "picks": [
           "se13",
           "sf14"
         ],
+        "picks_dropped_by_reader_dedup": [],
         "picks_outside_window": [],
         "placement": "tail",
         "pool_depth": 15,
+        "reader_pool_depth": 15,
+        "reader_pool_depth_fused": 15,
         "window": 13
       },
       {
@@ -265,9 +1252,11 @@
         "base_sessionless_slots": 0,
         "base_sessions": 5,
         "budget_effective": 2,
+        "chunk_bearing": false,
         "deleted_sessions": [
           "sE"
         ],
+        "displacement_expressible": true,
         "evicted_ids": [
           "se13"
         ],
@@ -287,12 +1276,18 @@
         "pick_ranks": [
           12
         ],
+        "pick_ranks_before_dedup": [
+          12
+        ],
         "picks": [
           "sf14"
         ],
+        "picks_dropped_by_reader_dedup": [],
         "picks_outside_window": [],
         "placement": "tail",
         "pool_depth": 15,
+        "reader_pool_depth": 15,
+        "reader_pool_depth_fused": 15,
         "window": 14
       }
     ],
@@ -305,7 +1300,9 @@
         "base_sessionless_slots": 0,
         "base_sessions": 1,
         "budget_effective": 1,
+        "chunk_bearing": false,
         "deleted_sessions": [],
+        "displacement_expressible": true,
         "evicted_ids": [
           "sa2"
         ],
@@ -323,12 +1320,18 @@
         "pick_ranks": [
           2
         ],
+        "pick_ranks_before_dedup": [
+          2
+        ],
         "picks": [
           "sb8"
         ],
+        "picks_dropped_by_reader_dedup": [],
         "picks_outside_window": [],
         "placement": "tail",
         "pool_depth": 13,
+        "reader_pool_depth": 13,
+        "reader_pool_depth_fused": 13,
         "window": 3
       },
       {
@@ -339,7 +1342,9 @@
         "base_sessionless_slots": 0,
         "base_sessions": 1,
         "budget_effective": 1,
+        "chunk_bearing": false,
         "deleted_sessions": [],
+        "displacement_expressible": true,
         "evicted_ids": [
           "sa3"
         ],
@@ -357,12 +1362,18 @@
         "pick_ranks": [
           3
         ],
+        "pick_ranks_before_dedup": [
+          3
+        ],
         "picks": [
           "sb8"
         ],
+        "picks_dropped_by_reader_dedup": [],
         "picks_outside_window": [],
         "placement": "tail",
         "pool_depth": 13,
+        "reader_pool_depth": 13,
+        "reader_pool_depth_fused": 13,
         "window": 4
       },
       {
@@ -373,7 +1384,9 @@
         "base_sessionless_slots": 0,
         "base_sessions": 1,
         "budget_effective": 1,
+        "chunk_bearing": false,
         "deleted_sessions": [],
+        "displacement_expressible": true,
         "evicted_ids": [
           "sa4"
         ],
@@ -391,12 +1404,18 @@
         "pick_ranks": [
           4
         ],
+        "pick_ranks_before_dedup": [
+          4
+        ],
         "picks": [
           "sb8"
         ],
+        "picks_dropped_by_reader_dedup": [],
         "picks_outside_window": [],
         "placement": "tail",
         "pool_depth": 13,
+        "reader_pool_depth": 13,
+        "reader_pool_depth_fused": 13,
         "window": 5
       },
       {
@@ -407,7 +1426,9 @@
         "base_sessionless_slots": 0,
         "base_sessions": 1,
         "budget_effective": 2,
+        "chunk_bearing": false,
         "deleted_sessions": [],
+        "displacement_expressible": true,
         "evicted_ids": [
           "sa4",
           "sa5"
@@ -427,13 +1448,20 @@
           4,
           5
         ],
+        "pick_ranks_before_dedup": [
+          4,
+          5
+        ],
         "picks": [
           "sb8",
           "sc11"
         ],
+        "picks_dropped_by_reader_dedup": [],
         "picks_outside_window": [],
         "placement": "tail",
         "pool_depth": 13,
+        "reader_pool_depth": 13,
+        "reader_pool_depth_fused": 13,
         "window": 6
       },
       {
@@ -442,7 +1470,9 @@
         "base_sessionless_slots": 0,
         "base_sessions": 1,
         "budget_effective": 2,
+        "chunk_bearing": false,
         "deleted_sessions": [],
+        "displacement_expressible": true,
         "evicted_ids": [
           "sa5",
           "sa6"
@@ -462,13 +1492,20 @@
           5,
           6
         ],
+        "pick_ranks_before_dedup": [
+          5,
+          6
+        ],
         "picks": [
           "sb8",
           "sc11"
         ],
+        "picks_dropped_by_reader_dedup": [],
         "picks_outside_window": [],
         "placement": "tail",
         "pool_depth": 13,
+        "reader_pool_depth": 13,
+        "reader_pool_depth_fused": 13,
         "window": 7
       },
       {
@@ -477,7 +1514,9 @@
         "base_sessionless_slots": 0,
         "base_sessions": 3,
         "budget_effective": 2,
+        "chunk_bearing": false,
         "deleted_sessions": [],
+        "displacement_expressible": true,
         "evicted_ids": [],
         "evicted_sessions": [],
         "evicted_sole_representatives": [],
@@ -489,10 +1528,14 @@
         "net": 0,
         "order_changed": false,
         "pick_ranks": [],
+        "pick_ranks_before_dedup": [],
         "picks": [],
+        "picks_dropped_by_reader_dedup": [],
         "picks_outside_window": [],
         "placement": "tail",
         "pool_depth": 13,
+        "reader_pool_depth": 13,
+        "reader_pool_depth_fused": 13,
         "window": 12
       },
       {
@@ -501,7 +1544,9 @@
         "base_sessionless_slots": 0,
         "base_sessions": 3,
         "budget_effective": 2,
+        "chunk_bearing": false,
         "deleted_sessions": [],
+        "displacement_expressible": false,
         "evicted_ids": [],
         "evicted_sessions": [],
         "evicted_sole_representatives": [],
@@ -513,10 +1558,14 @@
         "net": 0,
         "order_changed": false,
         "pick_ranks": [],
+        "pick_ranks_before_dedup": [],
         "picks": [],
+        "picks_dropped_by_reader_dedup": [],
         "picks_outside_window": [],
         "placement": "tail",
         "pool_depth": 13,
+        "reader_pool_depth": 13,
+        "reader_pool_depth_fused": 13,
         "window": 13
       },
       {
@@ -525,7 +1574,9 @@
         "base_sessionless_slots": 0,
         "base_sessions": 3,
         "budget_effective": 2,
+        "chunk_bearing": false,
         "deleted_sessions": [],
+        "displacement_expressible": false,
         "evicted_ids": [],
         "evicted_sessions": [],
         "evicted_sole_representatives": [],
@@ -537,10 +1588,14 @@
         "net": 0,
         "order_changed": false,
         "pick_ranks": [],
+        "pick_ranks_before_dedup": [],
         "picks": [],
+        "picks_dropped_by_reader_dedup": [],
         "picks_outside_window": [],
         "placement": "tail",
         "pool_depth": 13,
+        "reader_pool_depth": 13,
+        "reader_pool_depth_fused": 13,
         "window": 14
       }
     ],
@@ -551,7 +1606,9 @@
         "base_sessionless_slots": 0,
         "base_sessions": 1,
         "budget_effective": 1,
+        "chunk_bearing": false,
         "deleted_sessions": [],
+        "displacement_expressible": true,
         "evicted_ids": [],
         "evicted_sessions": [],
         "evicted_sole_representatives": [],
@@ -563,10 +1620,14 @@
         "net": 0,
         "order_changed": false,
         "pick_ranks": [],
+        "pick_ranks_before_dedup": [],
         "picks": [],
+        "picks_dropped_by_reader_dedup": [],
         "picks_outside_window": [],
         "placement": "tail",
         "pool_depth": 14,
+        "reader_pool_depth": 14,
+        "reader_pool_depth_fused": 14,
         "window": 3
       },
       {
@@ -575,7 +1636,9 @@
         "base_sessionless_slots": 0,
         "base_sessions": 1,
         "budget_effective": 1,
+        "chunk_bearing": false,
         "deleted_sessions": [],
+        "displacement_expressible": true,
         "evicted_ids": [],
         "evicted_sessions": [],
         "evicted_sole_representatives": [],
@@ -587,10 +1650,14 @@
         "net": 0,
         "order_changed": false,
         "pick_ranks": [],
+        "pick_ranks_before_dedup": [],
         "picks": [],
+        "picks_dropped_by_reader_dedup": [],
         "picks_outside_window": [],
         "placement": "tail",
         "pool_depth": 14,
+        "reader_pool_depth": 14,
+        "reader_pool_depth_fused": 14,
         "window": 4
       },
       {
@@ -599,7 +1666,9 @@
         "base_sessionless_slots": 0,
         "base_sessions": 1,
         "budget_effective": 1,
+        "chunk_bearing": false,
         "deleted_sessions": [],
+        "displacement_expressible": true,
         "evicted_ids": [],
         "evicted_sessions": [],
         "evicted_sole_representatives": [],
@@ -611,10 +1680,14 @@
         "net": 0,
         "order_changed": false,
         "pick_ranks": [],
+        "pick_ranks_before_dedup": [],
         "picks": [],
+        "picks_dropped_by_reader_dedup": [],
         "picks_outside_window": [],
         "placement": "tail",
         "pool_depth": 14,
+        "reader_pool_depth": 14,
+        "reader_pool_depth_fused": 14,
         "window": 5
       },
       {
@@ -623,7 +1696,9 @@
         "base_sessionless_slots": 0,
         "base_sessions": 1,
         "budget_effective": 2,
+        "chunk_bearing": false,
         "deleted_sessions": [],
+        "displacement_expressible": true,
         "evicted_ids": [],
         "evicted_sessions": [],
         "evicted_sole_representatives": [],
@@ -635,10 +1710,14 @@
         "net": 0,
         "order_changed": false,
         "pick_ranks": [],
+        "pick_ranks_before_dedup": [],
         "picks": [],
+        "picks_dropped_by_reader_dedup": [],
         "picks_outside_window": [],
         "placement": "tail",
         "pool_depth": 14,
+        "reader_pool_depth": 14,
+        "reader_pool_depth_fused": 14,
         "window": 6
       },
       {
@@ -647,7 +1726,9 @@
         "base_sessionless_slots": 0,
         "base_sessions": 1,
         "budget_effective": 2,
+        "chunk_bearing": false,
         "deleted_sessions": [],
+        "displacement_expressible": true,
         "evicted_ids": [],
         "evicted_sessions": [],
         "evicted_sole_representatives": [],
@@ -659,10 +1740,14 @@
         "net": 0,
         "order_changed": false,
         "pick_ranks": [],
+        "pick_ranks_before_dedup": [],
         "picks": [],
+        "picks_dropped_by_reader_dedup": [],
         "picks_outside_window": [],
         "placement": "tail",
         "pool_depth": 14,
+        "reader_pool_depth": 14,
+        "reader_pool_depth_fused": 14,
         "window": 7
       },
       {
@@ -671,7 +1756,9 @@
         "base_sessionless_slots": 0,
         "base_sessions": 1,
         "budget_effective": 2,
+        "chunk_bearing": false,
         "deleted_sessions": [],
+        "displacement_expressible": true,
         "evicted_ids": [],
         "evicted_sessions": [],
         "evicted_sole_representatives": [],
@@ -683,10 +1770,14 @@
         "net": 0,
         "order_changed": false,
         "pick_ranks": [],
+        "pick_ranks_before_dedup": [],
         "picks": [],
+        "picks_dropped_by_reader_dedup": [],
         "picks_outside_window": [],
         "placement": "tail",
         "pool_depth": 14,
+        "reader_pool_depth": 14,
+        "reader_pool_depth_fused": 14,
         "window": 12
       },
       {
@@ -695,7 +1786,9 @@
         "base_sessionless_slots": 0,
         "base_sessions": 1,
         "budget_effective": 2,
+        "chunk_bearing": false,
         "deleted_sessions": [],
+        "displacement_expressible": true,
         "evicted_ids": [],
         "evicted_sessions": [],
         "evicted_sole_representatives": [],
@@ -707,10 +1800,14 @@
         "net": 0,
         "order_changed": false,
         "pick_ranks": [],
+        "pick_ranks_before_dedup": [],
         "picks": [],
+        "picks_dropped_by_reader_dedup": [],
         "picks_outside_window": [],
         "placement": "tail",
         "pool_depth": 14,
+        "reader_pool_depth": 14,
+        "reader_pool_depth_fused": 14,
         "window": 13
       },
       {
@@ -719,7 +1816,9 @@
         "base_sessionless_slots": 0,
         "base_sessions": 1,
         "budget_effective": 2,
+        "chunk_bearing": false,
         "deleted_sessions": [],
+        "displacement_expressible": false,
         "evicted_ids": [],
         "evicted_sessions": [],
         "evicted_sole_representatives": [],
@@ -731,10 +1830,14 @@
         "net": 0,
         "order_changed": false,
         "pick_ranks": [],
+        "pick_ranks_before_dedup": [],
         "picks": [],
+        "picks_dropped_by_reader_dedup": [],
         "picks_outside_window": [],
         "placement": "tail",
         "pool_depth": 14,
+        "reader_pool_depth": 14,
+        "reader_pool_depth_fused": 14,
         "window": 14
       }
     ],
@@ -747,7 +1850,9 @@
         "base_sessionless_slots": 0,
         "base_sessions": 1,
         "budget_effective": 1,
+        "chunk_bearing": false,
         "deleted_sessions": [],
+        "displacement_expressible": true,
         "evicted_ids": [
           "sa2"
         ],
@@ -765,12 +1870,18 @@
         "pick_ranks": [
           2
         ],
+        "pick_ranks_before_dedup": [
+          2
+        ],
         "picks": [
           "sb10"
         ],
+        "picks_dropped_by_reader_dedup": [],
         "picks_outside_window": [],
         "placement": "tail",
         "pool_depth": 14,
+        "reader_pool_depth": 14,
+        "reader_pool_depth_fused": 14,
         "window": 3
       },
       {
@@ -781,7 +1892,9 @@
         "base_sessionless_slots": 0,
         "base_sessions": 1,
         "budget_effective": 1,
+        "chunk_bearing": false,
         "deleted_sessions": [],
+        "displacement_expressible": true,
         "evicted_ids": [
           "sa3"
         ],
@@ -799,12 +1912,18 @@
         "pick_ranks": [
           3
         ],
+        "pick_ranks_before_dedup": [
+          3
+        ],
         "picks": [
           "sb10"
         ],
+        "picks_dropped_by_reader_dedup": [],
         "picks_outside_window": [],
         "placement": "tail",
         "pool_depth": 14,
+        "reader_pool_depth": 14,
+        "reader_pool_depth_fused": 14,
         "window": 4
       },
       {
@@ -815,7 +1934,9 @@
         "base_sessionless_slots": 0,
         "base_sessions": 1,
         "budget_effective": 1,
+        "chunk_bearing": false,
         "deleted_sessions": [],
+        "displacement_expressible": true,
         "evicted_ids": [
           "sa4"
         ],
@@ -833,12 +1954,18 @@
         "pick_ranks": [
           4
         ],
+        "pick_ranks_before_dedup": [
+          4
+        ],
         "picks": [
           "sb10"
         ],
+        "picks_dropped_by_reader_dedup": [],
         "picks_outside_window": [],
         "placement": "tail",
         "pool_depth": 14,
+        "reader_pool_depth": 14,
+        "reader_pool_depth_fused": 14,
         "window": 5
       },
       {
@@ -849,7 +1976,9 @@
         "base_sessionless_slots": 0,
         "base_sessions": 1,
         "budget_effective": 2,
+        "chunk_bearing": false,
         "deleted_sessions": [],
+        "displacement_expressible": true,
         "evicted_ids": [
           "sa4",
           "sa5"
@@ -869,13 +1998,20 @@
           4,
           5
         ],
+        "pick_ranks_before_dedup": [
+          4,
+          5
+        ],
         "picks": [
           "sb10",
           "sd12"
         ],
+        "picks_dropped_by_reader_dedup": [],
         "picks_outside_window": [],
         "placement": "tail",
         "pool_depth": 14,
+        "reader_pool_depth": 14,
+        "reader_pool_depth_fused": 14,
         "window": 6
       },
       {
@@ -884,7 +2020,9 @@
         "base_sessionless_slots": 0,
         "base_sessions": 1,
         "budget_effective": 2,
+        "chunk_bearing": false,
         "deleted_sessions": [],
+        "displacement_expressible": true,
         "evicted_ids": [
           "sa5",
           "sa6"
@@ -904,13 +2042,20 @@
           5,
           6
         ],
+        "pick_ranks_before_dedup": [
+          5,
+          6
+        ],
         "picks": [
           "sb10",
           "sd12"
         ],
+        "picks_dropped_by_reader_dedup": [],
         "picks_outside_window": [],
         "placement": "tail",
         "pool_depth": 14,
+        "reader_pool_depth": 14,
+        "reader_pool_depth_fused": 14,
         "window": 7
       },
       {
@@ -919,9 +2064,11 @@
         "base_sessionless_slots": 0,
         "base_sessions": 2,
         "budget_effective": 2,
+        "chunk_bearing": false,
         "deleted_sessions": [
           "sB"
         ],
+        "displacement_expressible": true,
         "evicted_ids": [
           "sb10",
           "sb11"
@@ -941,13 +2088,20 @@
           10,
           11
         ],
+        "pick_ranks_before_dedup": [
+          10,
+          11
+        ],
         "picks": [
           "sd12",
           "se13"
         ],
+        "picks_dropped_by_reader_dedup": [],
         "picks_outside_window": [],
         "placement": "tail",
         "pool_depth": 14,
+        "reader_pool_depth": 14,
+        "reader_pool_depth_fused": 14,
         "window": 12
       },
       {
@@ -956,9 +2110,11 @@
         "base_sessionless_slots": 0,
         "base_sessions": 3,
         "budget_effective": 2,
+        "chunk_bearing": false,
         "deleted_sessions": [
           "sD"
         ],
+        "displacement_expressible": true,
         "evicted_ids": [
           "sd12"
         ],
@@ -978,12 +2134,18 @@
         "pick_ranks": [
           11
         ],
+        "pick_ranks_before_dedup": [
+          11
+        ],
         "picks": [
           "se13"
         ],
+        "picks_dropped_by_reader_dedup": [],
         "picks_outside_window": [],
         "placement": "tail",
         "pool_depth": 14,
+        "reader_pool_depth": 14,
+        "reader_pool_depth_fused": 14,
         "window": 13
       },
       {
@@ -992,7 +2154,9 @@
         "base_sessionless_slots": 0,
         "base_sessions": 4,
         "budget_effective": 2,
+        "chunk_bearing": false,
         "deleted_sessions": [],
+        "displacement_expressible": false,
         "evicted_ids": [],
         "evicted_sessions": [],
         "evicted_sole_representatives": [],
@@ -1004,10 +2168,14 @@
         "net": 0,
         "order_changed": false,
         "pick_ranks": [],
+        "pick_ranks_before_dedup": [],
         "picks": [],
+        "picks_dropped_by_reader_dedup": [],
         "picks_outside_window": [],
         "placement": "tail",
         "pool_depth": 14,
+        "reader_pool_depth": 14,
+        "reader_pool_depth_fused": 14,
         "window": 14
       }
     ],
@@ -1018,7 +2186,9 @@
         "base_sessionless_slots": 0,
         "base_sessions": 3,
         "budget_effective": 1,
+        "chunk_bearing": false,
         "deleted_sessions": [],
+        "displacement_expressible": true,
         "evicted_ids": [],
         "evicted_sessions": [],
         "evicted_sole_representatives": [],
@@ -1030,10 +2200,14 @@
         "net": 0,
         "order_changed": false,
         "pick_ranks": [],
+        "pick_ranks_before_dedup": [],
         "picks": [],
+        "picks_dropped_by_reader_dedup": [],
         "picks_outside_window": [],
         "placement": "tail",
         "pool_depth": 14,
+        "reader_pool_depth": 14,
+        "reader_pool_depth_fused": 14,
         "window": 3
       },
       {
@@ -1042,7 +2216,9 @@
         "base_sessionless_slots": 0,
         "base_sessions": 4,
         "budget_effective": 1,
+        "chunk_bearing": false,
         "deleted_sessions": [],
+        "displacement_expressible": true,
         "evicted_ids": [],
         "evicted_sessions": [],
         "evicted_sole_representatives": [],
@@ -1054,10 +2230,14 @@
         "net": 0,
         "order_changed": false,
         "pick_ranks": [],
+        "pick_ranks_before_dedup": [],
         "picks": [],
+        "picks_dropped_by_reader_dedup": [],
         "picks_outside_window": [],
         "placement": "tail",
         "pool_depth": 14,
+        "reader_pool_depth": 14,
+        "reader_pool_depth_fused": 14,
         "window": 4
       },
       {
@@ -1066,7 +2246,9 @@
         "base_sessionless_slots": 0,
         "base_sessions": 5,
         "budget_effective": 1,
+        "chunk_bearing": false,
         "deleted_sessions": [],
+        "displacement_expressible": true,
         "evicted_ids": [],
         "evicted_sessions": [],
         "evicted_sole_representatives": [],
@@ -1078,10 +2260,14 @@
         "net": 0,
         "order_changed": false,
         "pick_ranks": [],
+        "pick_ranks_before_dedup": [],
         "picks": [],
+        "picks_dropped_by_reader_dedup": [],
         "picks_outside_window": [],
         "placement": "tail",
         "pool_depth": 14,
+        "reader_pool_depth": 14,
+        "reader_pool_depth_fused": 14,
         "window": 5
       },
       {
@@ -1090,7 +2276,9 @@
         "base_sessionless_slots": 0,
         "base_sessions": 6,
         "budget_effective": 2,
+        "chunk_bearing": false,
         "deleted_sessions": [],
+        "displacement_expressible": true,
         "evicted_ids": [],
         "evicted_sessions": [],
         "evicted_sole_representatives": [],
@@ -1102,10 +2290,14 @@
         "net": 0,
         "order_changed": false,
         "pick_ranks": [],
+        "pick_ranks_before_dedup": [],
         "picks": [],
+        "picks_dropped_by_reader_dedup": [],
         "picks_outside_window": [],
         "placement": "tail",
         "pool_depth": 14,
+        "reader_pool_depth": 14,
+        "reader_pool_depth_fused": 14,
         "window": 6
       },
       {
@@ -1114,7 +2306,9 @@
         "base_sessionless_slots": 0,
         "base_sessions": 7,
         "budget_effective": 2,
+        "chunk_bearing": false,
         "deleted_sessions": [],
+        "displacement_expressible": true,
         "evicted_ids": [],
         "evicted_sessions": [],
         "evicted_sole_representatives": [],
@@ -1126,10 +2320,14 @@
         "net": 0,
         "order_changed": false,
         "pick_ranks": [],
+        "pick_ranks_before_dedup": [],
         "picks": [],
+        "picks_dropped_by_reader_dedup": [],
         "picks_outside_window": [],
         "placement": "tail",
         "pool_depth": 14,
+        "reader_pool_depth": 14,
+        "reader_pool_depth_fused": 14,
         "window": 7
       },
       {
@@ -1138,7 +2336,9 @@
         "base_sessionless_slots": 0,
         "base_sessions": 12,
         "budget_effective": 2,
+        "chunk_bearing": false,
         "deleted_sessions": [],
+        "displacement_expressible": true,
         "evicted_ids": [],
         "evicted_sessions": [],
         "evicted_sole_representatives": [],
@@ -1150,10 +2350,14 @@
         "net": 0,
         "order_changed": false,
         "pick_ranks": [],
+        "pick_ranks_before_dedup": [],
         "picks": [],
+        "picks_dropped_by_reader_dedup": [],
         "picks_outside_window": [],
         "placement": "tail",
         "pool_depth": 14,
+        "reader_pool_depth": 14,
+        "reader_pool_depth_fused": 14,
         "window": 12
       },
       {
@@ -1162,7 +2366,9 @@
         "base_sessionless_slots": 0,
         "base_sessions": 13,
         "budget_effective": 2,
+        "chunk_bearing": false,
         "deleted_sessions": [],
+        "displacement_expressible": true,
         "evicted_ids": [],
         "evicted_sessions": [],
         "evicted_sole_representatives": [],
@@ -1174,10 +2380,14 @@
         "net": 0,
         "order_changed": false,
         "pick_ranks": [],
+        "pick_ranks_before_dedup": [],
         "picks": [],
+        "picks_dropped_by_reader_dedup": [],
         "picks_outside_window": [],
         "placement": "tail",
         "pool_depth": 14,
+        "reader_pool_depth": 14,
+        "reader_pool_depth_fused": 14,
         "window": 13
       },
       {
@@ -1186,7 +2396,9 @@
         "base_sessionless_slots": 0,
         "base_sessions": 14,
         "budget_effective": 2,
+        "chunk_bearing": false,
         "deleted_sessions": [],
+        "displacement_expressible": false,
         "evicted_ids": [],
         "evicted_sessions": [],
         "evicted_sole_representatives": [],
@@ -1198,10 +2410,14 @@
         "net": 0,
         "order_changed": false,
         "pick_ranks": [],
+        "pick_ranks_before_dedup": [],
         "picks": [],
+        "picks_dropped_by_reader_dedup": [],
         "picks_outside_window": [],
         "placement": "tail",
         "pool_depth": 14,
+        "reader_pool_depth": 14,
+        "reader_pool_depth_fused": 14,
         "window": 14
       }
     ],
@@ -1214,7 +2430,9 @@
         "base_sessionless_slots": 0,
         "base_sessions": 1,
         "budget_effective": 1,
+        "chunk_bearing": false,
         "deleted_sessions": [],
+        "displacement_expressible": true,
         "evicted_ids": [
           "sa2"
         ],
@@ -1232,12 +2450,18 @@
         "pick_ranks": [
           2
         ],
+        "pick_ranks_before_dedup": [
+          2
+        ],
         "picks": [
           "sd12"
         ],
+        "picks_dropped_by_reader_dedup": [],
         "picks_outside_window": [],
         "placement": "tail",
         "pool_depth": 15,
+        "reader_pool_depth": 15,
+        "reader_pool_depth_fused": 15,
         "window": 3
       },
       {
@@ -1248,7 +2472,9 @@
         "base_sessionless_slots": 0,
         "base_sessions": 1,
         "budget_effective": 1,
+        "chunk_bearing": false,
         "deleted_sessions": [],
+        "displacement_expressible": true,
         "evicted_ids": [
           "sa3"
         ],
@@ -1266,12 +2492,18 @@
         "pick_ranks": [
           3
         ],
+        "pick_ranks_before_dedup": [
+          3
+        ],
         "picks": [
           "sd12"
         ],
+        "picks_dropped_by_reader_dedup": [],
         "picks_outside_window": [],
         "placement": "tail",
         "pool_depth": 15,
+        "reader_pool_depth": 15,
+        "reader_pool_depth_fused": 15,
         "window": 4
       },
       {
@@ -1282,7 +2514,9 @@
         "base_sessionless_slots": 0,
         "base_sessions": 1,
         "budget_effective": 1,
+        "chunk_bearing": false,
         "deleted_sessions": [],
+        "displacement_expressible": true,
         "evicted_ids": [
           "sa4"
         ],
@@ -1300,12 +2534,18 @@
         "pick_ranks": [
           4
         ],
+        "pick_ranks_before_dedup": [
+          4
+        ],
         "picks": [
           "sd12"
         ],
+        "picks_dropped_by_reader_dedup": [],
         "picks_outside_window": [],
         "placement": "tail",
         "pool_depth": 15,
+        "reader_pool_depth": 15,
+        "reader_pool_depth_fused": 15,
         "window": 5
       },
       {
@@ -1316,7 +2556,9 @@
         "base_sessionless_slots": 0,
         "base_sessions": 1,
         "budget_effective": 2,
+        "chunk_bearing": false,
         "deleted_sessions": [],
+        "displacement_expressible": true,
         "evicted_ids": [
           "sa4",
           "sa5"
@@ -1336,13 +2578,20 @@
           4,
           5
         ],
+        "pick_ranks_before_dedup": [
+          4,
+          5
+        ],
         "picks": [
           "sd12",
           "se13"
         ],
+        "picks_dropped_by_reader_dedup": [],
         "picks_outside_window": [],
         "placement": "tail",
         "pool_depth": 15,
+        "reader_pool_depth": 15,
+        "reader_pool_depth_fused": 15,
         "window": 6
       },
       {
@@ -1351,7 +2600,9 @@
         "base_sessionless_slots": 0,
         "base_sessions": 1,
         "budget_effective": 2,
+        "chunk_bearing": false,
         "deleted_sessions": [],
+        "displacement_expressible": true,
         "evicted_ids": [
           "sa5",
           "sa6"
@@ -1371,13 +2622,20 @@
           5,
           6
         ],
+        "pick_ranks_before_dedup": [
+          5,
+          6
+        ],
         "picks": [
           "sd12",
           "se13"
         ],
+        "picks_dropped_by_reader_dedup": [],
         "picks_outside_window": [],
         "placement": "tail",
         "pool_depth": 15,
+        "reader_pool_depth": 15,
+        "reader_pool_depth_fused": 15,
         "window": 7
       },
       {
@@ -1386,7 +2644,9 @@
         "base_sessionless_slots": 0,
         "base_sessions": 1,
         "budget_effective": 2,
+        "chunk_bearing": false,
         "deleted_sessions": [],
+        "displacement_expressible": true,
         "evicted_ids": [
           "sa10",
           "sa11"
@@ -1406,13 +2666,20 @@
           10,
           11
         ],
+        "pick_ranks_before_dedup": [
+          10,
+          11
+        ],
         "picks": [
           "sd12",
           "se13"
         ],
+        "picks_dropped_by_reader_dedup": [],
         "picks_outside_window": [],
         "placement": "tail",
         "pool_depth": 15,
+        "reader_pool_depth": 15,
+        "reader_pool_depth_fused": 15,
         "window": 12
       },
       {
@@ -1421,9 +2688,11 @@
         "base_sessionless_slots": 0,
         "base_sessions": 2,
         "budget_effective": 2,
+        "chunk_bearing": false,
         "deleted_sessions": [
           "sD"
         ],
+        "displacement_expressible": true,
         "evicted_ids": [
           "sa11",
           "sd12"
@@ -1446,13 +2715,20 @@
           11,
           12
         ],
+        "pick_ranks_before_dedup": [
+          11,
+          12
+        ],
         "picks": [
           "se13",
           "sf14"
         ],
+        "picks_dropped_by_reader_dedup": [],
         "picks_outside_window": [],
         "placement": "tail",
         "pool_depth": 15,
+        "reader_pool_depth": 15,
+        "reader_pool_depth_fused": 15,
         "window": 13
       },
       {
@@ -1461,9 +2737,11 @@
         "base_sessionless_slots": 0,
         "base_sessions": 3,
         "budget_effective": 2,
+        "chunk_bearing": false,
         "deleted_sessions": [
           "sE"
         ],
+        "displacement_expressible": true,
         "evicted_ids": [
           "se13"
         ],
@@ -1483,12 +2761,18 @@
         "pick_ranks": [
           12
         ],
+        "pick_ranks_before_dedup": [
+          12
+        ],
         "picks": [
           "sf14"
         ],
+        "picks_dropped_by_reader_dedup": [],
         "picks_outside_window": [],
         "placement": "tail",
         "pool_depth": 15,
+        "reader_pool_depth": 15,
+        "reader_pool_depth_fused": 15,
         "window": 14
       }
     ]
@@ -1501,6 +2785,7 @@
   "geometry": {
     "bucket_cap": 1,
     "limit": 2,
+    "max_chunks_per_session": 3,
     "window": 12
   },
   "instrument": "tools/longmem_eval/window_arm_baseline.py",
@@ -1512,7 +2797,9 @@
       "base_sessionless_slots": 0,
       "base_sessions": 3,
       "budget_effective": 2,
+      "chunk_bearing": false,
       "deleted_sessions": [],
+      "displacement_expressible": false,
       "evicted_ids": [],
       "evicted_sessions": [],
       "evicted_sole_representatives": [],
@@ -1524,10 +2811,14 @@
       "net": 0,
       "order_changed": false,
       "pick_ranks": [],
+      "pick_ranks_before_dedup": [],
       "picks": [],
+      "picks_dropped_by_reader_dedup": [],
       "picks_outside_window": [],
       "placement": "tail",
       "pool_depth": 6,
+      "reader_pool_depth": 6,
+      "reader_pool_depth_fused": 6,
       "window": 12
     },
     {
@@ -1536,7 +2827,9 @@
       "base_sessionless_slots": 0,
       "base_sessions": 3,
       "budget_effective": 2,
+      "chunk_bearing": false,
       "deleted_sessions": [],
+      "displacement_expressible": false,
       "evicted_ids": [],
       "evicted_sessions": [],
       "evicted_sole_representatives": [],
@@ -1548,10 +2841,14 @@
       "net": 0,
       "order_changed": false,
       "pick_ranks": [],
+      "pick_ranks_before_dedup": [],
       "picks": [],
+      "picks_dropped_by_reader_dedup": [],
       "picks_outside_window": [],
       "placement": "tail",
       "pool_depth": 9,
+      "reader_pool_depth": 9,
+      "reader_pool_depth_fused": 9,
       "window": 12
     },
     {
@@ -1560,7 +2857,9 @@
       "base_sessionless_slots": 0,
       "base_sessions": 3,
       "budget_effective": 2,
+      "chunk_bearing": false,
       "deleted_sessions": [],
+      "displacement_expressible": false,
       "evicted_ids": [],
       "evicted_sessions": [],
       "evicted_sole_representatives": [],
@@ -1572,10 +2871,14 @@
       "net": 0,
       "order_changed": false,
       "pick_ranks": [],
+      "pick_ranks_before_dedup": [],
       "picks": [],
+      "picks_dropped_by_reader_dedup": [],
       "picks_outside_window": [],
       "placement": "tail",
       "pool_depth": 11,
+      "reader_pool_depth": 11,
+      "reader_pool_depth_fused": 11,
       "window": 12
     },
     {
@@ -1584,7 +2887,9 @@
       "base_sessionless_slots": 0,
       "base_sessions": 3,
       "budget_effective": 2,
+      "chunk_bearing": false,
       "deleted_sessions": [],
+      "displacement_expressible": false,
       "evicted_ids": [],
       "evicted_sessions": [],
       "evicted_sole_representatives": [],
@@ -1596,10 +2901,14 @@
       "net": 0,
       "order_changed": false,
       "pick_ranks": [],
+      "pick_ranks_before_dedup": [],
       "picks": [],
+      "picks_dropped_by_reader_dedup": [],
       "picks_outside_window": [],
       "placement": "tail",
       "pool_depth": 12,
+      "reader_pool_depth": 12,
+      "reader_pool_depth_fused": 12,
       "window": 12
     },
     {
@@ -1608,9 +2917,11 @@
       "base_sessionless_slots": 0,
       "base_sessions": 2,
       "budget_effective": 2,
+      "chunk_bearing": false,
       "deleted_sessions": [
         "sB"
       ],
+      "displacement_expressible": true,
       "evicted_ids": [
         "sb11"
       ],
@@ -1630,12 +2941,18 @@
       "pick_ranks": [
         10
       ],
+      "pick_ranks_before_dedup": [
+        10
+      ],
       "picks": [
         "sc12"
       ],
+      "picks_dropped_by_reader_dedup": [],
       "picks_outside_window": [],
       "placement": "tail",
       "pool_depth": 13,
+      "reader_pool_depth": 13,
+      "reader_pool_depth_fused": 13,
       "window": 12
     }
   ],
@@ -1646,10 +2963,12 @@
       "base_sessionless_slots": 0,
       "base_sessions": 3,
       "budget_effective": 2,
+      "chunk_bearing": false,
       "deleted_sessions": [
         "sB",
         "sC"
       ],
+      "displacement_expressible": true,
       "evicted_ids": [
         "sb10",
         "sc11"
@@ -1673,13 +2992,20 @@
         10,
         11
       ],
+      "pick_ranks_before_dedup": [
+        10,
+        11
+      ],
       "picks": [
         "sd12",
         "se13"
       ],
+      "picks_dropped_by_reader_dedup": [],
       "picks_outside_window": [],
       "placement": "tail",
       "pool_depth": 15,
+      "reader_pool_depth": 15,
+      "reader_pool_depth_fused": 15,
       "window": 12
     },
     {
@@ -1688,10 +3014,12 @@
       "base_sessionless_slots": 0,
       "base_sessions": 3,
       "budget_effective": 2,
+      "chunk_bearing": false,
       "deleted_sessions": [
         "sB",
         "sC"
       ],
+      "displacement_expressible": true,
       "evicted_ids": [
         "sb10",
         "sc11"
@@ -1715,19 +3043,262 @@
         0,
         1
       ],
+      "pick_ranks_before_dedup": [
+        0,
+        1
+      ],
       "picks": [
         "sd12",
         "se13"
       ],
+      "picks_dropped_by_reader_dedup": [],
       "picks_outside_window": [],
       "placement": "head",
       "pool_depth": 15,
+      "reader_pool_depth": 15,
+      "reader_pool_depth_fused": 15,
       "window": 12
     }
   ],
+  "shipped_geometry_chunk_bearing": {
+    "chunk_bearing_deep_window_head": {
+      "additive": true,
+      "base_graded_evicted": [],
+      "base_sessionless_slots": 0,
+      "base_sessions": 10,
+      "budget_effective": 2,
+      "chunk_bearing": true,
+      "deleted_sessions": [],
+      "displacement_expressible": true,
+      "evicted_ids": [],
+      "evicted_sessions": [],
+      "evicted_sole_representatives": [],
+      "fired": true,
+      "fused_sessionless_slots": 0,
+      "fused_sessions": 10,
+      "graded_by_recall_all_at_5": 2,
+      "limit_requested": 2,
+      "net": 0,
+      "order_changed": true,
+      "pick_ranks": [
+        0,
+        1
+      ],
+      "pick_ranks_before_dedup": [
+        0,
+        1
+      ],
+      "picks": [
+        "sb12",
+        "sc13"
+      ],
+      "picks_dropped_by_reader_dedup": [],
+      "picks_outside_window": [],
+      "placement": "head",
+      "pool_depth": 24,
+      "reader_pool_depth": 15,
+      "reader_pool_depth_fused": 15,
+      "window": 12
+    },
+    "chunk_bearing_deep_window_tail": {
+      "additive": true,
+      "base_graded_evicted": [],
+      "base_sessionless_slots": 0,
+      "base_sessions": 10,
+      "budget_effective": 2,
+      "chunk_bearing": true,
+      "deleted_sessions": [],
+      "displacement_expressible": true,
+      "evicted_ids": [],
+      "evicted_sessions": [],
+      "evicted_sole_representatives": [],
+      "fired": true,
+      "fused_sessionless_slots": 0,
+      "fused_sessions": 10,
+      "graded_by_recall_all_at_5": 2,
+      "limit_requested": 2,
+      "net": 0,
+      "order_changed": true,
+      "pick_ranks": [
+        3,
+        4
+      ],
+      "pick_ranks_before_dedup": [
+        10,
+        11
+      ],
+      "picks": [
+        "sb12",
+        "sc13"
+      ],
+      "picks_dropped_by_reader_dedup": [],
+      "picks_outside_window": [],
+      "placement": "tail",
+      "pool_depth": 24,
+      "reader_pool_depth": 15,
+      "reader_pool_depth_fused": 15,
+      "window": 12
+    },
+    "chunk_bearing_issue_probe_head": {
+      "additive": true,
+      "base_graded_evicted": [],
+      "base_sessionless_slots": 0,
+      "base_sessions": 6,
+      "budget_effective": 2,
+      "chunk_bearing": true,
+      "deleted_sessions": [],
+      "displacement_expressible": false,
+      "evicted_ids": [],
+      "evicted_sessions": [],
+      "evicted_sole_representatives": [],
+      "fired": true,
+      "fused_sessionless_slots": 0,
+      "fused_sessions": 6,
+      "graded_by_recall_all_at_5": 2,
+      "limit_requested": 2,
+      "net": 0,
+      "order_changed": true,
+      "pick_ranks": [
+        0,
+        1
+      ],
+      "pick_ranks_before_dedup": [
+        0,
+        1
+      ],
+      "picks": [
+        "sd12",
+        "se13"
+      ],
+      "picks_dropped_by_reader_dedup": [],
+      "picks_outside_window": [],
+      "placement": "head",
+      "pool_depth": 15,
+      "reader_pool_depth": 8,
+      "reader_pool_depth_fused": 8,
+      "window": 12
+    },
+    "chunk_bearing_issue_probe_tail": {
+      "additive": true,
+      "base_graded_evicted": [],
+      "base_sessionless_slots": 0,
+      "base_sessions": 6,
+      "budget_effective": 2,
+      "chunk_bearing": true,
+      "deleted_sessions": [],
+      "displacement_expressible": false,
+      "evicted_ids": [],
+      "evicted_sessions": [],
+      "evicted_sole_representatives": [],
+      "fired": true,
+      "fused_sessionless_slots": 0,
+      "fused_sessions": 6,
+      "graded_by_recall_all_at_5": 2,
+      "limit_requested": 2,
+      "net": 0,
+      "order_changed": true,
+      "pick_ranks": [
+        3,
+        4
+      ],
+      "pick_ranks_before_dedup": [
+        10,
+        11
+      ],
+      "picks": [
+        "sd12",
+        "se13"
+      ],
+      "picks_dropped_by_reader_dedup": [],
+      "picks_outside_window": [],
+      "placement": "tail",
+      "pool_depth": 15,
+      "reader_pool_depth": 8,
+      "reader_pool_depth_fused": 8,
+      "window": 12
+    },
+    "chunk_bearing_whole_window_cluster_head": {
+      "additive": true,
+      "base_graded_evicted": [],
+      "base_sessionless_slots": 0,
+      "base_sessions": 4,
+      "budget_effective": 2,
+      "chunk_bearing": true,
+      "deleted_sessions": [],
+      "displacement_expressible": false,
+      "evicted_ids": [],
+      "evicted_sessions": [],
+      "evicted_sole_representatives": [],
+      "fired": true,
+      "fused_sessionless_slots": 0,
+      "fused_sessions": 4,
+      "graded_by_recall_all_at_5": 2,
+      "limit_requested": 2,
+      "net": 0,
+      "order_changed": true,
+      "pick_ranks": [
+        0,
+        1
+      ],
+      "pick_ranks_before_dedup": [
+        0,
+        1
+      ],
+      "picks": [
+        "sd12",
+        "se13"
+      ],
+      "picks_dropped_by_reader_dedup": [],
+      "picks_outside_window": [],
+      "placement": "head",
+      "pool_depth": 15,
+      "reader_pool_depth": 6,
+      "reader_pool_depth_fused": 6,
+      "window": 12
+    },
+    "chunk_bearing_whole_window_cluster_tail": {
+      "additive": true,
+      "base_graded_evicted": [],
+      "base_sessionless_slots": 0,
+      "base_sessions": 4,
+      "budget_effective": 2,
+      "chunk_bearing": true,
+      "deleted_sessions": [],
+      "displacement_expressible": false,
+      "evicted_ids": [],
+      "evicted_sessions": [],
+      "evicted_sole_representatives": [],
+      "fired": true,
+      "fused_sessionless_slots": 0,
+      "fused_sessions": 4,
+      "graded_by_recall_all_at_5": 2,
+      "limit_requested": 2,
+      "net": 0,
+      "order_changed": true,
+      "pick_ranks": [
+        3,
+        4
+      ],
+      "pick_ranks_before_dedup": [
+        10,
+        11
+      ],
+      "picks": [
+        "sd12",
+        "se13"
+      ],
+      "picks_dropped_by_reader_dedup": [],
+      "picks_outside_window": [],
+      "placement": "tail",
+      "pool_depth": 15,
+      "reader_pool_depth": 6,
+      "reader_pool_depth_fused": 6,
+      "window": 12
+    }
+  },
   "verdict": {
     "head_picks_graded_by_recall_all_at_5": 2,
-    "scope": "AT THE SHIPPED GEOMETRY ONLY (window=12, limit=2, bucket_cap=1). The sweep below reaches the graded top 5 at windows 3-6 — that is a different geometry, NOT the harness's tr_top_k, so it is not a way to reach the unit.",
+    "scope": "AT THE SHIPPED GEOMETRY ONLY (window=12, limit=2, bucket_cap=1, reader chunk cap applied), ON BOTH POOL SHAPES: CHUNK-FREE pools (no raw session-transcript hits, so the reader's per-session cap is inert and the fused index space equals the reader's) and CHUNK-BEARING pools (raw transcript chunks, the shape the multi-session corpus is ingested as). The two do NOT agree, and neither number is universal — read the field's own shape. The sweep below reaches the graded top 5 at windows 3-6 ON A CHUNK-FREE POOL (the pick's ceiling is itself inside the top 5 there) — a different geometry, NOT the harness's tr_top_k, so it is not a way to reach the unit. A CHUNK-BEARING pool is graded at those same windows for that same ceiling reason, and stays graded at EVERY swept window from 3 through 13 because from window 7 on the reader's chunk cap has removed the raw chunks above the pick. Where a row carries `displacement_expressible: false` the capped pool is no deeper than the window (it holds the WHOLE pool, and six non-expressible rows are exactly the window's height), so its `additive` / `evicted_ids` / `deleted_sessions` are arithmetic, not measurement — read them only where it is true.",
     "shipped_tail_additive": false,
     "shipped_tail_deleted_sessions": [
       "sB",
@@ -1735,8 +3306,24 @@
     ],
     "shipped_tail_net_distinct_sessions": 0,
     "shipped_tail_picks_graded_by_recall_all_at_5": 0,
-    "unit_reachable_without_displacement_at_window_12": false,
-    "why": "picks are spliced at ceiling = window - budget, so at window=12 they land at fused ranks 10-11 while recall_all@5 grades hits[:5]. Placement='head' reaches ranks 0-1 — but only by taking the semantic head's slots, so it too is a swap, not a widening. ⚠️ What is NOT claimed here: this counterfactual has never been measured on the shipped corpus. The nearest measured analogue is #8713's C4 source-session RE-INJECTION arm — a DIFFERENT mechanism, and legible only when its capsweep receipt (docs/scoping/receipts/2026-09-17-2513-reinjection-capsweep-412470cd3.json) is split three ways: (a) the INJECTION's own eviction costs reader_surface@5 0.9436 -> 0.9289 — and the guard-ablated `inj_only` arm reads the same 0.9289, so the guard accounts for NONE of it; that is pure slot displacement damaging the reader surface, which is exactly the risk head placement carries; (b) the shared session-diverse guard — a session capped at 2 INSIDE the window — adds evidence_recall@5 0.527 -> 0.4706 (-5.6 pt, +4/-11 questions); (c) the closure is the guard's alone — `inj_only` is identical to `off` on every RECALL metric (recall_all@5 0.6761, session_recall@5 0.831, evidence_recall@5 0.527), its only difference being the two reader_surface@5 regressions the injection itself causes, per (a) — so the SAME arm NET GAINS recall_all@5 0.6761 -> 0.8592 (+0.1831, +13/-0). So the session-diverse re-order buys the ALL-sessions metric with item-level evidence, while unguarded displacement damages the reader surface for nothing. The only direct reading of head placement is temporal_leg.py's TF-IDF replay (-placement head -limit 2: recall@12 0.9506 vs 0.9228 tail), on a near-ceiling base that cannot represent the shipped 0/52 failure — which is why the placement A/B belongs on the eval lane and why this instrument reports it rather than ranking it."
+    "unit_graded_by_recall_all_at_5_at_window_12": {
+      "chunk_bearing_pools": {
+        "chunk_bearing_deep_window": 2,
+        "chunk_bearing_issue_probe": 2,
+        "chunk_bearing_whole_window_cluster": 2
+      },
+      "chunk_free_pools": 0
+    },
+    "unit_reachable_without_displacement_at_window_12": {
+      "chunk_bearing_pools": true,
+      "chunk_bearing_pools_displacement_expressible": {
+        "chunk_bearing_deep_window": true,
+        "chunk_bearing_issue_probe": false,
+        "chunk_bearing_whole_window_cluster": false
+      },
+      "chunk_free_pools": false
+    },
+    "why": "TWO INDEX SPACES, and only one of them is graded. The splice puts a tail pick at ceiling = window - budget in the caller's PRE-cap fused order (ranks 10-11 at window=12). But the harness fuses and THEN dedups — retrieve.py reassigns `annotated` to the fused order and the next statement is `pool = _dedup_pool(annotated, max_chunks_per_session=3)`, with `hits` = that pool — and recall_all@5 grades hits[:5] of the DEDUPED pool. dedup_pool caps RAW session-transcript chunks per session in rank order and never caps points/turn points, so the cap is a no-op on a chunk-free pool (fused rank == reader rank: 0 of 2 picks graded) and REMOVES SLOTS ABOVE the pick on a chunk-bearing one, lifting both picks to reader ranks 3-4 where recall_all@5 grades BOTH. The chunk-bearing pool also loses no session at the shipped window (net 0, deleted_sessions [], additive True), where the chunk-free one trades sB and sC away (net 0, deleted_sessions ['sB','sC'], additive False). So the unit is reachable-without-displacement ONLY on the geometry the arm targets, and NOT on a chunk-free pool — the opposite of what the pre-fix receipt stated as a universal. Placement='head' is a different answer on each shape, and it is MEASURED on each (the shipped-geometry chunk-bearing table publishes the head row beside the tail one): on a CHUNK-FREE pool head reaches ranks 0-1 by EVICTING sB and sC — both sole representatives — so it buys the unit with a swap, and that is exactly the #8713 (a) risk below. On a CHUNK-BEARING pool head also reaches ranks 0-1 but evicts NOTHING (`evicted_ids: []`, `deleted_sessions: []`) on all three pools INCLUDING `chunk_bearing_deep_window`, whose capped pool still fills the window so the emptiness is measured rather than entailed — because the chunk cap had already brought both picks inside the reader window at ranks 3-4, so the promotion is a pure RE-ORDER there. That is not a recommendation for head: on that shape the TAIL already reaches the graded top 5, so head buys no unit the default does not. ⚠️ What is NOT claimed here: this counterfactual has never been measured on the shipped corpus, and this instrument still has no judge and no dataset. The nearest measured analogue is #8713's C4 source-session RE-INJECTION arm — a DIFFERENT mechanism, and legible only when its capsweep receipt (docs/scoping/receipts/2026-09-17-2513-reinjection-capsweep-412470cd3.json) is split three ways: (a) the INJECTION's own eviction costs reader_surface@5 0.9436 -> 0.9289 — and the guard-ablated `inj_only` arm reads the same 0.9289, so the guard accounts for NONE of it; that is pure slot displacement damaging the reader surface, which is exactly the risk head placement carries; (b) the shared session-diverse guard — a session capped at 2 INSIDE the window — adds evidence_recall@5 0.527 -> 0.4706 (-5.6 pt, +4/-11 questions); (c) the closure is the guard's alone — `inj_only` is identical to `off` on every RECALL metric (recall_all@5 0.6761, session_recall@5 0.831, evidence_recall@5 0.527), its only difference being the two reader_surface@5 regressions the injection itself causes, per (a) — so the SAME arm NET GAINS recall_all@5 0.6761 -> 0.8592 (+0.1831, +13/-0). So the session-diverse re-order buys the ALL-sessions metric with item-level evidence, while unguarded displacement damages the reader surface for nothing. The only direct reading of head placement is temporal_leg.py's TF-IDF replay (-placement head -limit 2: recall@12 0.9506 vs 0.9228 tail), on a near-ceiling base that cannot represent the shipped 0/52 failure — which is why the placement A/B belongs on the eval lane and why this instrument reports it rather than ranking it."
   },
   "what_this_is": "the window arm's RETENTION baseline on the shipped wiring — hermetic, no reader/judge/graph/dataset/spend. It measures the ARM'S GEOMETRY, never answer quality.",
   "what_this_is_not": "NOT the #9097 Q3 exit measurement, and NOT a placement verdict. recall_all@5 on the frozen write_path corpus is owed to the eval lane, postponed by the owner ruling of 2026-11-02 (no eval runs while the P0/P1 queue is open)."

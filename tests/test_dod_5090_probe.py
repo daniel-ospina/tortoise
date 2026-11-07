@@ -43,6 +43,17 @@ claims:
 | `test_an_unreadable_surface_is_named_not_silently_excluded` | the `UNMEASURED` rule, applied to the walk | a file the walk could not read is folded into a measured `False` |
 | `test_every_unresolved_writer_carries_a_census_class` | the census and the unresolved set are the SAME SET, in both directions, LIVE | a writer this tree holds is unresolved and nothing says which of the three honest classes it is in — or a census entry outlives its hole, so `exempt` counts an instrument false positive that no longer exists |
 | `test_a_prose_MENTION_of_an_embedding_write_is_classed_exempt_not_a_hole` | `exempt`'s own definition — *"merely MENTIONS one in a comment/docstring (the instrument's own false positives)"* | `main` lands a fold whose COMMENT quotes `embedding=…` and the census, which must be an EXACT set match, has no class for the writer the needle then reports (measured: `#8488`/`#10523` → `tortoise.projection::_apply_one`) — or the fold grows a REAL vector write, so `exempt` stops describing it |
+| `test_the_census_reports_BYTES_for_an_UNINDEXED_label` | `#11088`'s Indicator — *"vector count **and bytes** per label"* — on the labels it is about | the byte figure is derived from the covering index's `dimension`, so the four UNINDEXED labels (the removable payload, and the whole reason the issue exists) report `UNMEASURED(no VECTOR index)` while the stored width sits already-probed one branch above |
+| `test_every_affected_entity_type_is_derived_from_the_ONE_mapping` | the surface question is a SET of `entity_type` values, not a label count | `document`+`source` → `:Source` and `point`+`operator` → `:Point` collapse to one name each (or a label no type reaches starts claiming one), so the consequence is stated for the wrong population. ⚠️ It pins the VALUES, so a second table with identical content would pass — the regression it can see is a mapping collapse, which is the likely one |
+| `test_the_census_states_the_consequence_of_removing_each_label` | the row's `affected_entity_types` / `removal_changes_query_results`, and `surface_consequence.requested_not_performed` | a census reads as an authorisation (`requested_not_performed` absent or `false`), a no-query-path label is listed as a surface consequence, or the whole thing goes through the write-capable verb |
+| `test_an_unreadable_catalogue_row_is_not_an_unindexed_label` | `#11088` round-1 P1/P2: a row's three consequence cells must AGREE | `removal_changes_query_results` is derived from pre-override locals, so a row whose `indexed`/`unindexed` read `UNMEASURED` publishes a `True` consequence (and enters `surface_consequence`), and its payload says "NO covering index" for a catalogue it could not read |
+| `test_an_UNMEASURED_consequence_is_CARRIED_not_dropped` | the under-reporting channel, `surface_consequence.unmeasured_labels` | a label whose consequence is `UNMEASURED` is skipped like a `False`, so `entity_types_whose_query_results_change` reads as the whole population while it is only the measured part |
+| `test_an_unresolvable_leg_method_reports_UNMEASURED_not_an_EMPTY_surface` | round-2 P2: a rename must not read as "no tool is affected" | `VECTOR_LEG_SDK_METHOD` stops resolving, both sets empty, and the surface reports `[]` — a measured-looking "no MCP tool can pass `entity_type`" — with no `UNMEASURED` channel |
+| `test_the_surface_named_is_the_one_that_can_pass_entity_type` | the CALLERS, derived from the registry **and** the handler AST **and** the SDK's own fixed-type call sites | the `sdk_method` binding alone is used, so `tortoise_query` (bound to `paginated_query`, yet forwarding a `text=` argument to `tortoise_fts_query(entity_type=…)`) is missing — the direction that UNDERSTATES a surface change |
+| `test_a_tool_whose_SDK_method_fixes_entity_type_is_named` | the THIRD entrant source, and the default it must resolve before reading any call site | a tool whose SDK method names the type itself (`tortoise_recall` → `object`, `tortoise_search_sessions` → `event`) is named by neither the registry nor the handler scan, and a one-pass walk reports a defaulted call as `UNKNOWN` |
+| `test_a_label_with_MIXED_stored_widths_refuses_the_byte_figure` | `#11088` round 7 P2: one row's width is not the label's | `stored × width × 4` multiplies ONE sampled row across every row, so a mixed-width label (an `EMBEDDING_DIM` rotation) publishes a wrong byte figure with no UNMEASURED signal |
+| `test_the_census_reports_EVERY_index_KIND_not_only_VECTOR` | §3.1's *"the same run settles it"* — the FULLTEXT datum the run promised to answer | the catalogue parse keeps VECTOR rows only, so whether a lexically-matching query survives a removal is not in the answer, while the doc says it is |
+| `test_the_LIVE_census_names_the_unindexed_labels_and_writes_NOTHING` | E2E D9 (`04-plan.md` §7) on a real engine: `Point` indexed, the four served labels unindexed **with bytes**, and the graph's visible shape unchanged across the call (⚠️ a corroborating observation — the READ-ONLY verb is what forbids the write) | the census mutates the graph it measures (labels / node counts / edges / the index catalogue / per-label embedding counts), or an unindexed label loses its `entity_type` set |
 | `test_the_census_guard_has_teeth_on_an_INJECTED_map` | the same guard's teeth, without pinning this head | the guard goes vacuous when #5090's remainder lands and this tree holds no unresolved writer |
 | `test_a_duplicate_identity_paints_no_census_note` | #10541's census population | a `duplicate` identity is counted as a census member, so a census is painted over a population that cannot hold a key for it |
 | `test_the_census_note_names_only_the_unresolved_producers` | the same population, in the other direction | a classed unresolved producer stops being named, or a duplicate is counted alongside it |
@@ -55,13 +66,22 @@ claims:
 | `test_a_workflow_prose_block_is_still_documentation` | the same fix must not call every workflow block a command | a `note: >-` body (text) inside a workflow starts voting on `on_by_default` |
 | `test_a_run_key_outside_the_workflow_surface_is_not_executed` | the executed-key rule is SCOPED to the surface that runs it | any `.yml` with a `run:` block is scanned as shell, so a config tool's own field completes a DoD row |
 | `test_a_MATCH_label_is_not_credited_as_the_writers_label` | the writer map credits the label the WRITE names | a read's `MATCH (n:Point)` resolves a writer's stored label — how a label the writer never writes can read as "covered" |
+| `test_a_refusal_with_TWO_causes_names_BOTH_of_them` | `#11337`: a refusal must not repair one cause and hide the other | a covering index with an unreadable `dimension` over a mixed-width label refuses naming only the width, so the dimension cause is silently dropped and a reader who fixes the width is refused again with new text |
+| `test_the_width_probe_report_says_the_rows_were_ENGINE_CHOSEN` | `#11337`: the probe query has no `ORDER BY`, so "the first 5" is not a property it has — asserted against the ISSUED statement, not the prose | `how` counts the sampled rows but says nothing about which rows they were, so `derived_payload_B` can move between two runs of the same graph with no explanation in the report — or the probe silently GAINS an `ORDER BY` while the report and the census doc keep asserting a bound the query no longer has |
+| `test_the_census_doc_states_the_same_probe_bound_the_report_does` | the doc must state the bound the CODE emits, not a parallel wording that agrees only with a deterministic test fake | the doc keeps claiming an order the query does not impose, or the doc and `how` drift apart with neither failing (the positive assertion is derived from the emitted fragment, so a rewording has to move both) |
+| `test_a_leg_reach_passed_BY_REFERENCE_is_declared_not_dropped` | `#11337`: the closure is over NAME-RESOLVED calls only, and its bound is DECLARED rather than implied — for every named shape, through to the published report | a method passes a leg-reaching function by reference (`_safe(self._review_pool, …)`, a bare name, literal or dynamic `getattr`, or an alias), the scan drops it with no entry anywhere, the caller list of an approval request reads short, or the declaration never reaches `vector_leg_surface()` |
+| `test_a_DECLARED_bound_does_not_swallow_the_DERIVED_failure` | `#11337`: the two channels stay SEPARATE — a declared bound says *"this reach was not traversed"*, never *"the derivation could not run"* | a tree that BOTH takes a leg-reaching function by reference AND fails to derive the surface reports only the declaration, so the derived failure is absorbed into a caveat and the surface reads as merely bounded instead of unknown |
+| `test_a_scan_FAILURE_is_not_a_DECLARED_bound` | the same separation, in the other direction: a scan failure must not be published as a declared bound | a failed walk is reported as `UNMEASURED(declared bound: …)`, so an entry that means *"nothing was measured"* is indistinguishable from one that means *"this named shape was measured and skipped"*, and the `declared bound:` marker stops identifying the by-reference class |
+| `test_an_ERROR_line_does_not_mask_the_derived_FAILURE` | `derived_tool_rows` is read from the scan BEFORE the error lines reach `out`, so "derived nothing" and "published an error" stay different facts | the emptiness check reads `not out` AFTER the handler/leg error entries were appended, so in the error-present, nothing-derived case the derived-failure line is silently dropped and an underivable surface reads as a measured one beside an unrelated failure |
 
 ⛔ **These tests never write a graph and never flip a gate.** `#10465` is
 measurement-only; the instrument is read-only and its pin must be too.
 """
 from __future__ import annotations
 
+import contextlib
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -702,6 +722,53 @@ def test_measure_restores_the_gate_flags(monkeypatch):
     assert os.environ["TORTOISE_VALUE_GATE"] == "1"
 
 
+def test_measure_pins_the_gate_flags_to_an_explicit_off(monkeypatch):
+    """Step 0 of the instrument — pinned by the state the ROWS are scored in.
+
+    `#10996` made `TORTOISE_VALUE_GATE` default ON, so a `measure()` that merely
+    POPPED the switches produced rows measured against a gate that was ARMED
+    while the instrument declared it idle. `measure()` now writes `"0"`
+    explicitly, and until this pin existed **nothing observed it**: the mutation
+    the review ran (delete the explicit write, keep the pop) left the suite
+    green, because `test_measure_restores_the_gate_flags` above only reads the
+    environment AFTER the run, which the `finally` block restores either way.
+
+    The assertion is on the RESOLVED predicate, not on the spelling: the
+    instrument's claim is "the gates were off while these rows were measured",
+    and only the resolver can say whether that was true. A future default flip
+    reds this test instead of silently re-arming the instrument.
+    """
+    from tortoise import embed_gate, value_gate
+
+    flags = ("TORTOISE_EMBED_GATE", "TORTOISE_VALUE_GATE")
+    seen: dict = {}
+
+    def _spy():
+        # The state the rows are actually scored in — sampled INSIDE the run.
+        seen["env"] = {var: os.environ.get(var) for var in flags}
+        seen["value_gate"] = value_gate.value_gate_enabled()
+        seen["embed_gate"] = embed_gate.embed_gate_enabled()
+        return []
+
+    # An ambient ON value must not survive into the measurement: a lane's own
+    # shell is exactly what Step 0 exists to neutralise.
+    monkeypatch.setenv("TORTOISE_EMBED_GATE", "1")
+    monkeypatch.setenv("TORTOISE_VALUE_GATE", "1")
+    monkeypatch.setattr(probe, "_measure_rows", _spy)
+    probe.measure()
+
+    assert seen["env"] == {var: "0" for var in flags}, (
+        "measure() did not PIN the gate flags to an explicit OFF — a pop-only "
+        "Step 0 reads as OFF only while the flag defaults OFF, and "
+        "TORTOISE_VALUE_GATE now defaults ON (#10996)")
+    assert seen["value_gate"] is False, (
+        "the rows were measured with the S2.2 mechanical predicate ARMED while "
+        "the report declares it idle")
+    assert seen["embed_gate"] is False, (
+        "the rows were measured with the embed gate ARMED while the report "
+        "declares it idle")
+
+
 # ── The census, on its POSITIVE path (all three tests above were negative) ──
 
 
@@ -718,6 +785,11 @@ class _CensusGraph:
         self._labels = labels
         self._vectors = vectors  # {label: (count, [1.0]*width | None)}
         self._dim = dim
+        #: Every statement the census issued, in order. Recorded so a claim
+        #: ABOUT the query (e.g. "the probe carries no `ORDER BY`") can be
+        #: asserted against the statement itself instead of against prose that
+        #: happens to agree with it (#11337 review).
+        self.queries: list[str] = []
 
     # ⛔ BOTH verbs answer through `_answer`, because the census must issue its
     # reads through `ro_query` (the engine's read-only verb) and a fake that
@@ -730,6 +802,7 @@ class _CensusGraph:
         return self._answer(cypher)
 
     def _answer(self, cypher):
+        self.queries.append(cypher)
         if "db.indexes()" in cypher:
             rows = self._catalogue
         elif "db.labels()" in cypher:
@@ -739,7 +812,24 @@ class _CensusGraph:
             rows = [[self._vectors.get(label, (0, None))[0]]]
         elif "RETURN n.embedding" in cypher:
             label = cypher.split("MATCH (n:")[1].split(")")[0].strip("`")
-            rows = [[self._vectors.get(label, (0, None))[1]]]
+            samples = self._vectors.get(label, (0, None))[1]
+            # A LIST OF VECTORS is several sampled rows (the width probe reads
+            # more than one); a single vector is one row. Without this a test
+            # could not model the mixed-width label `WIDTH_PROBE_SAMPLES`
+            # exists to refuse (#11088 review round 7, P2).
+            if samples and isinstance(samples[0], list):
+                rows = [[v] for v in samples]
+            else:
+                rows = [[samples]]
+            # ⛔ HONOUR THE `LIMIT` the production query issues. Returning every
+            # sample regardless made the mixed-width test pass with
+            # `WIDTH_PROBE_SAMPLES = 1` — i.e. with the exact single-row bug it
+            # exists to catch — so the test could not fail on a regression
+            # (review round 9, P2: a verification gate with no discriminating
+            # power).
+            limit = cypher.rsplit("LIMIT", 1)[-1].strip()
+            if limit.isdigit():
+                rows = rows[:int(limit)]
         else:
             rows = []
         return type("_R", (), {"result_set": rows})()
@@ -840,6 +930,144 @@ def test_the_census_does_not_claim_coverage_it_could_not_measure():
                               graph_names=["g"])["labels"]["Point"]
     assert str(row["unindexed"]).startswith("UNMEASURED"), row
     assert "index dimension" in row["unindexed"], row
+
+
+def test_a_refusal_with_TWO_causes_names_BOTH_of_them():
+    """A refusal must not repair one cause and hide the other (#11337).
+
+    Measured failure this pins: a covering `embedding` index whose `dimension`
+    cell is unreadable, on a label that ALSO holds two stored widths, refused
+    with `UNMEASURED(coverage not provable: the stored width (stored widths
+    disagree (384, 1024)))` — the dimension cause was computed and then
+    REASSIGNED away. A reader repairs the width probe, re-runs, is refused
+    again with different text, and is never told the second cause exists.
+
+    BOTH arms of the width cause are covered (a disagreeing sample and an
+    unprobeable one), because the assignment that dropped the dimension cause
+    lived in the disagreeing-arms branch while the plain arm joined correctly —
+    a fix in one arm leaves the other invisible.
+    """
+    # (a) unreadable dimension + sampled widths that DISAGREE
+    disagreeing = _CensusGraph(
+        catalogue=[_index_row("Point", "embedding", None)],
+        labels=["Point"],
+        vectors={"Point": (6, [[0.0] * 384] + [[0.0] * 1024] * 5)},
+    )
+    row = probe.vector_census(disagreeing, "g", at="2026-11-07T00:00:00Z",
+                              graph_names=["g"])["labels"]["Point"]
+    refused = str(row["unindexed"])
+    assert refused.startswith("UNMEASURED"), row
+    assert "index dimension" in refused, (
+        "the unreadable-dimension cause vanished from a two-cause refusal: "
+        f"{refused}")
+    assert "stored width" in refused, refused
+    assert "disagree" in refused, refused
+
+    # (b) unreadable dimension + a width probe that yielded NO row
+    unprobeable = _CensusGraph(
+        catalogue=[_index_row("Point", "embedding", None)],
+        labels=["Point"],
+        vectors={"Point": (5, None)},
+    )
+    other = str(probe.vector_census(
+        unprobeable, "g", at="2026-11-07T00:00:00Z",
+        graph_names=["g"])["labels"]["Point"]["unindexed"])
+    assert "index dimension" in other, other
+    assert "stored width" in other, other
+
+
+    # (c) unreadable dimension + an UNREADABLE STORED COUNT (#11389 review, P2:
+    # the two-cause rule was applied to the dim/width pair only, so this arm —
+    # one branch up in `vector_census` — still reported the count alone while
+    # `indexed: true` sat beside it, and repairing the count refuses again on
+    # the dimension. Measured before the fix with this fake.)
+    class _CountUnreadable(_CensusGraph):
+        def _answer(self, cypher):
+            if "RETURN count(n)" in cypher:
+                raise RuntimeError("count unreadable")
+            return super()._answer(cypher)
+
+    uncountable = _CountUnreadable(
+        catalogue=[_index_row("Point", "embedding", None)],
+        labels=["Point"],
+        vectors={"Point": (6, [[0.0] * 384])},
+    )
+    third = probe.vector_census(uncountable, "g", at="2026-11-07T00:00:00Z",
+                                graph_names=["g"])["labels"]["Point"]
+    refusal = str(third["unindexed"])
+    assert third["indexed"] is True, third
+    assert "stored count unreadable" in refusal, refusal
+    assert "index dimension" in refusal, (
+        f"the unreadable-dimension cause is masked by the count cause: {refusal}")
+    # ⛔ THE SINGLE-CAUSE TEXT IS BYTE-IDENTICAL: a count failure with a READABLE
+    # dimension still refuses in exactly the old words, because the third
+    # single-cause text is part of this change's contract.
+    readable_dim = _CountUnreadable(
+        catalogue=[_index_row("Point", "embedding", 384)],
+        labels=["Point"],
+        vectors={"Point": (6, [[0.0] * 384])},
+    )
+    alone = str(probe.vector_census(
+        readable_dim, "g", at="2026-11-07T00:00:00Z",
+        graph_names=["g"])["labels"]["Point"]["unindexed"])
+    assert alone == "UNMEASURED(stored count unreadable)", alone
+
+    # (d) THE BYTE FIGURE refuses with BOTH causes too (#11389 review, P2). The
+    # rule reached `unindexed` and stopped one branch short of the payload, so
+    # this row named both causes in one field and the width alone in the other —
+    # repair the width, re-run, be refused again on the dimension.
+    for label, samples in (("disagreeing", [[0.0] * 384] + [[0.0] * 1024] * 5),
+                           ("unprobeable", None)):
+        mixed = _CensusGraph(
+            catalogue=[_index_row("Point", "embedding", None)],
+            labels=["Point"],
+            vectors={"Point": (5 if samples is None else 6, samples)},
+        )
+        pay = probe.vector_census(
+            mixed, "g", at="2026-11-07T00:00:00Z",
+            graph_names=["g"])["labels"]["Point"]["payload"]
+        figure = str(pay["derived_payload_B"])
+        assert "index dimension" in figure, (
+            f"the byte figure ({label}) drops the unreadable-dimension cause: "
+            f"{figure}")
+        assert ("stored width" in figure or "stored widths" in figure), figure
+        # ⛔ …and `how` — the REMEDY channel — must name it too, or a reader
+        # fixes only the width and is refused again (#11389 review, P2).
+        assert "index dimension" in str(pay["how"]), (
+            f"`how` ({label}) names only the width while the refusal names "
+            f"both: {pay['how']}")
+    # ⛔ …and the single-cause text is byte-identical: a label with NO covering
+    # index has no index dimension to name, so the figure refuses in the old
+    # words.
+    no_index = _CensusGraph(
+        catalogue=[], labels=["Point"],
+        vectors={"Point": (5, [[0.0] * 384] + [[0.0] * 1024] * 4)},
+    )
+    solo = str(probe.vector_census(
+        no_index, "g", at="2026-11-07T00:00:00Z",
+        graph_names=["g"])["labels"]["Point"]["payload"][
+            "derived_payload_B"])
+    assert solo == ("UNMEASURED(stored widths disagree (384, 1024), so stored "
+                    "x width is not a figure)"), solo
+
+    # (e) A FAILED CATALOGUE READ DOES NOT CANCEL THE WIDTH THE PROBE MEASURED
+    # (#11389 review, P2). An unattributable catalogue row held BOTH columns at
+    # `catalogue row unreadable`, with `disagree` appearing nowhere in the row —
+    # though the probe had been issued and had returned both widths. Repair the
+    # catalogue, re-run, be refused again on the width: the same round trip.
+    blind = _CensusGraph(
+        catalogue=[[]], labels=["Point"],
+        vectors={"Point": (6, [[0.0] * 384] + [[0.0] * 1024] * 5)},
+    )
+    row_e = probe.vector_census(blind, "g", at="2026-11-07T00:00:00Z",
+                                graph_names=["g"])["labels"]["Point"]
+    for field in ("unindexed", "payload"):
+        blob = str(row_e["unindexed"] if field == "unindexed"
+                   else row_e["payload"]["derived_payload_B"])
+        assert ("catalogue row" in blob and "unreadable" in blob), (field, blob)
+        assert "disagree" in blob, (
+            f"{field} discards the disagreement the width probe measured "
+            f"because a DIFFERENT read failed: {blob}")
 
 
 def test_the_census_still_reports_zero_when_there_is_nothing_to_cover():
@@ -998,6 +1226,50 @@ def test_an_unreadable_catalogue_row_is_not_an_unindexed_label():
     row = census["labels"]["Point"]
     assert isinstance(row["indexed"], str) and row["indexed"].startswith("UNMEASURED"), row
     assert str(row["unindexed"]).startswith("UNMEASURED"), row
+    # ⛔ #11088 review round 1, P1: `changes` was computed from the LOCALS, and
+    # an unreadable catalogue row leaves `covering` empty — so the `else:
+    # unindexed = stored` branch fabricated full coverage and this row asserted
+    # a surface consequence (and entered `surface_consequence`) while its own
+    # `unindexed` cell three lines up read UNMEASURED. Same for the byte figure,
+    # whose `not covering` arm then said "NO covering index" (P2): `covering` is
+    # empty both because there is no index AND because the row could not be
+    # read, and those are different facts.
+    assert str(row["removal_changes_query_results"]).startswith("UNMEASURED"), row
+    assert str(row["payload"]["derived_payload_B"]).startswith("UNMEASURED"), row
+    assert "NO covering index" not in str(row["payload"]), row
+    assert "Point" not in {a["label"] for a in
+                           census["surface_consequence"]["labels"]}, (
+        "a label whose coverage is unreadable must not be published as a "
+        f"measured surface consequence: {census['surface_consequence']}")
+
+
+def test_an_UNMEASURED_consequence_is_CARRIED_not_dropped():
+    """A hole in one label must not silently shrink the affected set.
+
+    ⛔ #11088 review round 1, P1: `surface_consequence` skipped every row whose
+    `removal_changes_query_results` was not `True`, so an unmeasurable label
+    simply vanished — `entity_types_whose_query_results_change` printed `[]` —
+    while the doc calls UNDER-reporting the dangerous direction (a surface
+    request whose consequence is understated is one the owner can approve by
+    mistake). Reachable on a live engine: a per-label count that times out, and
+    a backtick-bearing label (which `_cypher_label`'s own docstring records as
+    failing closed into `stored=UNMEASURED(...)`).
+    """
+    graph = _CensusGraph(
+        catalogue=[_index_row("Point", "embedding", 384)],
+        labels=["Object"],
+        vectors={"Object": ("boom", None)},  # the count query could not answer
+    )
+    census = probe.vector_census(graph, "g", at="2026-11-05T00:00:00Z",
+                                 graph_names=["g"])
+    row = census["labels"]["Object"]
+    assert str(row["removal_changes_query_results"]).startswith("UNMEASURED"), row
+    sc = census["surface_consequence"]
+    assert sc["entity_types_whose_query_results_change"] == [], sc
+    assert [e["label"] for e in sc["unmeasured_labels"]] == ["Object"], (
+        f"an unmeasured consequence was DROPPED, so the affected set reads as "
+        f"complete when it is not: {sc}")
+    assert sc["unmeasured_labels"][0]["entity_types"] == ["object"], sc
 
 
 def test_an_UNATTRIBUTABLE_catalogue_row_holds_EVERY_label_UNMEASURED():
@@ -2710,3 +2982,1285 @@ def test_row_one_is_PARTIAL_when_a_duplicate_identity_collided(
     monkeypatch.delenv("TORTOISE_EMBED_GATE", raising=False)
     row = probe.score_rule_bullet()
     assert row.verdict == "PARTIAL", f"a duplicate identity must hold: {row.verdict!r}"
+
+
+# ── #11088: the census names the `entity_type` values, not just the labels ──
+
+
+class _NoWriteCensusGraph(_CensusGraph):
+    """A fake on which the write-capable verb is a FAILURE.
+
+    The census's doctrine is "stores nothing", and `graph.query` is
+    write-CAPABLE — the read-only verb is what makes the doctrine the engine's
+    rule instead of this file's memory. A census that reaches for `query` on
+    this fake raises instead of quietly storing.
+    """
+
+    def query(self, cypher, params=None, timeout=None):
+        raise AssertionError(
+            f"the census issued a read through the WRITE-CAPABLE verb: {cypher[:90]}")
+
+
+def test_every_affected_entity_type_is_derived_from_the_ONE_mapping():
+    """`label` is not `entity_type`, in BOTH directions (#11088).
+
+    The mapping is one-to-many and that is the whole finding: `:Source` answers
+    for `document` AND `source`, `:Point` for `point` AND `operator`. A census
+    that reported only labels would state the wrong population for the surface
+    question it exists to answer — and it must come from
+    `security.entity_label`, never from a second table here.
+    """
+    assert probe.affected_entity_types("Event") == ["event"]
+    assert probe.affected_entity_types("Object") == ["object"]
+    assert probe.affected_entity_types("Source") == ["document", "source"], (
+        "two entity types reach :Source — a label-only census under-counts them")
+    assert probe.affected_entity_types("Point") == ["operator", "point"], (
+        "`operator` is served from :Point (#172), so removing Point's vectors "
+        "would change a query that names no point")
+    assert probe.affected_entity_types("Chunk") == [], (
+        "a label no entity_type translates to has NO query path — it must read "
+        "as affected-for-nobody, not be omitted")
+
+
+def test_the_census_states_the_consequence_of_removing_each_label():
+    """The count is not the consequence; the SET of entity types is (#11088).
+
+    Every row carries `affected_entity_types` and
+    `removal_changes_query_results`, the surface block names the tools derived
+    from the registry — and the whole census goes through the READ-ONLY verb.
+    """
+    graph = _NoWriteCensusGraph(
+        catalogue=[_index_row("Point", "embedding", 384)],
+        labels=["Point", "Object", "Source", "Chunk"],
+        vectors={"Point": (3, [0.0] * 384),
+                 "Object": (2, [0.0] * 384),
+                 "Source": (1, [0.0] * 384),
+                 "Chunk": (4, [0.0] * 384)},
+    )
+    census = probe.vector_census(graph, "g", at="2026-11-05T00:00:00Z",
+                                 graph_names=["g"])
+
+    obj = census["labels"]["Object"]
+    assert obj["stored"] == 2, obj
+    assert obj["unindexed"] == 2, obj
+    assert obj["affected_entity_types"] == ["object"], obj
+    assert obj["removal_changes_query_results"] is True, obj
+
+    # `:Source` is served by TWO entity types, so BOTH change.
+    src = census["labels"]["Source"]
+    assert src["affected_entity_types"] == ["document", "source"], src
+
+    # The indexed label changes nothing.
+    point = census["labels"]["Point"]
+    assert point["indexed"] is True and point["unindexed"] == 0, point
+    assert point["removal_changes_query_results"] is False, point
+
+    # A stored, unindexed label NO entity_type reaches: reported, and it is not
+    # a surface change because nothing queries it.
+    chunk = census["labels"]["Chunk"]
+    assert chunk["stored"] == 4 and chunk["unindexed"] == 4, chunk
+    assert chunk["affected_entity_types"] == [], chunk
+    assert chunk["removal_changes_query_results"] is False, chunk
+
+    sc = census["surface_consequence"]
+    assert sc["requested_not_performed"] is True, (
+        "a census must never read as an authorisation — the removal is an "
+        "MCP/SDK surface change (#11088 / AGENTS.md)")
+    assert sc["entity_types_whose_query_results_change"] == \
+        ["document", "object", "source"], sc
+    assert {a["label"] for a in sc["labels"]} == {"Object", "Source"}, sc
+    assert "Chunk" not in {a["label"] for a in sc["labels"]}, (
+        "a label with no query path is not a surface consequence")
+
+    # ⛔ EVERY entrant, and WHICH of them actually change (review round 7, P1):
+    # `tortoise_recall` reaches `:Object` (affected) and `:Point` (indexed, so
+    # not); the `:Point`-only tools are entrants with NO change — printing them
+    # as affected would over-report as surely as dropping them under-reported.
+    by_tool = {e["tool"]: e for e in sc["surface"] if "tool" in e}
+    assert by_tool["tortoise_recall"]["reaches_affected_labels"] == ["object"], \
+        by_tool["tortoise_recall"]
+    assert by_tool["tortoise_suggest_entry_points"]["reaches_affected_labels"] == \
+        [], by_tool["tortoise_suggest_entry_points"]
+    assert by_tool["tortoise_search"]["reaches_affected_labels"] == \
+        "any (the caller chooses)", by_tool["tortoise_search"]
+    # `:Event` is not part of THIS fixture's affected set, so the sessions tool —
+    # which asks the leg for `event` — correctly reads NO change here.
+    assert by_tool["tortoise_search_sessions"]["reaches_affected_labels"] == [], \
+        by_tool["tortoise_search_sessions"]
+
+    # …and with an affected `:Event`, it does — the same derivation, one graph
+    # over, so the pair is pinned rather than assumed.
+    event_graph = _NoWriteCensusGraph(
+        catalogue=[], labels=["Event"],
+        vectors={"Event": (2, [0.0] * 384)},
+    )
+    event_sc = probe.vector_census(event_graph, "g2",
+                                   at="2026-11-05T00:00:00Z",
+                                   graph_names=["g2"])["surface_consequence"]
+    event_tools = {e["tool"]: e for e in event_sc["surface"] if "tool" in e}
+    assert event_tools["tortoise_search_sessions"]["reaches_affected_labels"] == \
+        ["event"], event_tools["tortoise_search_sessions"]
+
+
+def test_the_census_reports_BYTES_for_an_UNINDEXED_label():
+    """⛔ The population this issue exists to quantify had no byte figure.
+
+    Measured failure this pins: the payload was derived from the covering
+    index's `dimension`, so the four UNINDEXED labels — the removable payload,
+    and the whole reason #11088 is filed — reported
+    `UNMEASURED(no VECTOR index on embedding)`. The stored WIDTH is already
+    probed one line above (the `#4280` cross-check needs it), so the number was
+    in hand and not printed. `#11088`'s own Indicator asks for "vector count and
+    bytes per label"; before this, the labels it is about had no bytes at all.
+
+    The guard is NOT weakened: an unmeasurable width still refuses, and an
+    indexed label whose width disagrees with the index dimension still refuses.
+    """
+    graph = _NoWriteCensusGraph(
+        catalogue=[_index_row("Point", "embedding", 384)],
+        labels=["Point", "Object"],
+        vectors={"Point": (1, [0.0] * 384), "Object": (2, [0.0] * 384)},
+    )
+    census = probe.vector_census(graph, "g", at="2026-11-05T00:00:00Z",
+                                 graph_names=["g"])
+    obj = census["labels"]["Object"]["payload"]
+    assert obj["derived_payload_B"] == 2 * 384 * 4, (
+        f"an unindexed label has no bytes figure: {obj!r} — the stored width "
+        "was probed and ignored")
+    assert "probed width" in obj["how"], obj
+
+    # …and the refusal survives: an unprobeable width is still UNMEASURED.
+    graph = _NoWriteCensusGraph(
+        catalogue=[_index_row("Point", "embedding", 384)],
+        labels=["Object"],
+        vectors={"Object": (2, None)},
+    )
+    censored = probe.vector_census(graph, "g", at="2026-11-05T00:00:00Z",
+                                   graph_names=["g"])
+    assert str(censored["labels"]["Object"]["payload"]["derived_payload_B"]
+               ).startswith("UNMEASURED"), censored
+
+    # …and a COVERING index whose `dimension` cell is unreadable is NOT the
+    # "no index" case: the row reports `indexed: true`, so its `how` must not
+    # say "NO covering index" (review finding, P2 — `dim is None` conflated the
+    # two, and the row contradicted its own `vector_indexes_on_label`).
+    graph = _NoWriteCensusGraph(
+        catalogue=[_index_row("Point", "embedding", None)],
+        labels=["Point"],
+        vectors={"Point": (5, [0.0] * 384)},
+    )
+    covered = probe.vector_census(graph, "g", at="2026-11-05T00:00:00Z",
+                                  graph_names=["g"])["labels"]["Point"]
+    assert covered["indexed"] is True, covered
+    assert "NO covering index" not in str(covered["payload"]), (
+        f"a row reporting indexed=True claims it has no covering index: {covered}")
+    assert str(covered["payload"]["derived_payload_B"]).startswith("UNMEASURED"), (
+        f"an unreadable index dimension must not yield a verified byte figure: {covered}")
+
+
+def test_the_surface_named_is_the_one_that_can_pass_entity_type():
+    """The callers, derived from the registry and the handler AST (#11088).
+
+    ⛔ The `sdk_method` binding ALONE under-reports: `tortoise_query` binds
+    `paginated_query` (its structural arm) and still forwards a `text=` argument
+    to `tortoise_fts_query(entity_type=…)`. A census built on the binding names
+    ONE tool where the surface has two — the direction that UNDERSTATES the
+    consequence of a removal, which is the direction that gets a surface change
+    approved by mistake.
+    """
+    surface = probe.vector_leg_surface()
+    named = {t["tool"] for t in surface if "tool" in t}
+    assert {"tortoise_search", "tortoise_query"} <= named, (
+        f"the surface census missed a tool that can pass entity_type: {surface}")
+    # ⛔ AND the third entrant class (#11088 review round 7, P1): a tool whose
+    # SDK method names the type itself. `tortoise_recall`'s DEFAULT mode calls
+    # `recall_state`, which asks the leg for `:Object`; `tortoise_search_sessions`
+    # asks for `:Event`. Neither forwards `entity_type`, so both sources above
+    # miss them — and dropping them understates the approval request.
+    recall = next(t for t in surface if t.get("tool") == "tortoise_recall")
+    assert "object" in recall["entity_types"], (
+        f"tortoise_recall's default state read queries :Object and is not named: {recall}")
+    sessions = next(t for t in surface
+                    if t.get("tool") == "tortoise_search_sessions")
+    assert sessions["entity_types"] == ["event"], sessions
+    for entry in surface:
+        if "tool" in entry:
+            assert entry["takes_entity_type"] is True, entry
+    search = next(t for t in surface if t.get("tool") == "tortoise_search")
+    assert search["rest"] == "GET /v1/search", search
+
+
+def test_a_tool_whose_SDK_method_fixes_entity_type_is_named():
+    """The THIRD source, and the default it must resolve first (#11088 round 7, P1).
+
+    A handler that never forwards `entity_type` can still reach the leg, because
+    the SDK method it calls names the type (`recall_state` → `object`,
+    `search_sessions` → `event`). A call that OMITS the kwarg runs the SDK's own
+    default, which is an entrant too — so the derivation must read the default
+    from the leg's SIGNATURE before it reads any call site. A one-pass walk
+    reached `suggest_entry_points` first and reported
+    `UNKNOWN(no declared default found)` for a call whose type is `point`: an
+    order-dependent answer is not a measurement.
+    """
+    methods, error, declared = probe._sdk_methods_on_vector_leg()
+    assert error is None, error
+    # ⛔ A DECLARED BOUND is not a scan failure — the distinction is what keeps a
+    # legitimate by-reference shape from reading as "the scan could not run" and
+    # getting the declaration deleted (#11337 review, P1). The real tree DOES
+    # declare one at this head (`volunteer_context` passes the leg itself as
+    # `_search_fn`), so only the marker SPELLING is pinned here. The declared
+    # PASSERS are pinned by NAME, not by count, in
+    # `test_the_census_doc_states_the_same_probe_bound_the_report_does`: a
+    # declared passer that §3 of the census doc does not name reds it, while a
+    # second passer whose name already appears IN §3 would pass — the recorded
+    # residual of the `#11397` class, and the reason the census doc states the
+    # pin's shape instead of claiming the population is pinned.
+    assert declared is not None and declared.startswith(
+        "UNMEASURED(declared bound:"), declared
+    # ⛔ THE LEG ITSELF must be mentionable (#11389 review, P1). `direct` excludes
+    # the leg, so a walk built only on `direct` missed `volunteer_context`
+    # (`_search_fn=self.tortoise_fts_query`) — the ONE real shape in this tree —
+    # while three artifacts certified that no such shape existed. Pinned on the
+    # real tree, because that is where the claim was false.
+    assert "tortoise_fts_query" in declared, (
+        f"a mention OF THE LEG is not declared: {declared}")
+    assert methods["recall_state"] == {"object", "point"}, methods
+    assert methods["search_sessions"] == {"event"}, methods
+    assert methods["suggest_entry_points"] == {"point"}, (
+        "a call that omits entity_type runs the SDK default, and it must be "
+        f"resolved from the signature, not reported as UNKNOWN: {methods}")
+    assert probe.VECTOR_LEG_SDK_METHOD not in methods, (
+        "the leg was named as its own entrant")
+
+
+def _byref_sdk_source() -> str:
+    """A synthetic `sdk.py` with one method per by-reference SHAPE.
+
+    Each is a reach the `Call.func` scan cannot resolve: the function is
+    MENTIONED without being called. The positions are deliberately spread —
+    argument, keyword, `partial`, `getattr` (literal and dynamic), plain and
+    annotated assignment, walrus, container, bare `return` — because the rule
+    is the mention, so a pin covering only call arguments would leave the
+    claim wider than the pin.
+    """
+    return (
+        "class S:\n"
+        "    def tortoise_fts_query(self, q, entity_type='point'):\n"
+        "        return q\n"
+        "    def _review_pool(self, t):\n"
+        "        return self.tortoise_fts_query('x', entity_type=t)\n"
+        "    def passes_an_attribute(self):\n"
+        "        return _safe(self._review_pool, 'object')\n"
+        "    def passes_a_bare_name(self):\n"
+        "        return _safe(_review_pool, 'object')\n"
+        "    def passes_a_literal_getattr(self):\n"
+        "        return _safe(getattr(self, '_review_pool'), 'object')\n"
+        "    def passes_a_dynamic_getattr(self, which):\n"
+        "        return _safe(getattr(self, which), 'object')\n"
+        "    def passes_an_alias(self):\n"
+        "        f = self._review_pool\n"
+        "        return _safe(f, 'object')\n"
+        "    def passes_a_keyword_callback(self):\n"
+        "        return _safe(1, key=self._review_pool)\n"
+        "    def passes_a_partial(self):\n"
+        "        return _safe(functools.partial(self._review_pool, 'object'))\n"
+        "    def passes_a_FOREIGN_receiver(self):\n"
+        "        return _safe(self.conn._review_pool, 'object')\n"
+        "    def passes_an_annotated_assign(self):\n"
+        "        f: object = self._review_pool\n"
+        "        return _safe(f, 'object')\n"
+        "    def passes_a_walrus(self):\n"
+        "        return _safe(f := self._review_pool)\n"
+        "    def passes_a_container(self):\n"
+        "        return _safe([self._review_pool], 'object')\n"
+        "    def returns_it_bare(self):\n"
+        "        return self._review_pool\n"
+        "    def calls_one_and_passes_another(self):\n"
+        "        _safe(self._second_pool, 'event')\n"
+        "        return self._review_pool('object')\n"
+        "    def _second_pool(self, t):\n"
+        "        return self.tortoise_fts_query('y', entity_type=t)\n"
+        "    def calls_it_normally(self):\n"
+        "        return self._review_pool('object')\n"
+        "    def calls_a_bare_name(self):\n"
+        "        return _review_pool('object')\n"
+        "    def passes_two(self):\n"
+        "        _safe(self._review_pool, 'object')\n"
+        "        return _safe(self._second_pool, 'event')\n"
+        "    def passes_a_DEFAULTED_getattr(self):\n"
+        "        return _safe(getattr(self, '_review_pool', None))\n"
+        "    def shadows_an_entrant_name(self):\n"
+        "        _review_pool = 5\n"
+        "        return _review_pool\n"
+        "    def mentions_past_a_NESTED_shadow(self):\n"
+        "        def inner():\n"
+        "            _review_pool = 5\n"
+        "            return _review_pool\n"
+        "        return _safe(_review_pool, 'object')\n"
+        "    def CALLS_a_getattr(self):\n"
+        "        return getattr(self, '_review_pool')('object')\n"
+        "    def passes_from_super(self):\n"
+        "        return _safe(super()._review_pool, 'object')\n"
+        "    def shadows_via_EXCEPT(self):\n"
+        "        try:\n"
+        "            pass\n"
+        "        except Exception as _review_pool:\n"
+        "            pass\n"
+        "        return _safe(_review_pool)\n"
+        "    def shadows_via_IMPORT(self):\n"
+        "        import _review_pool\n"
+        "        return _safe(_review_pool)\n"
+        "    def mention_past_a_COMPREHENSION_shadow(self):\n"
+        "        _safe(_review_pool)\n"
+        "        return [x for _review_pool in (1, 2)]\n"
+        # ⛔ The OUTERMOST iterable is evaluated in the ENCLOSING scope, so a
+        # mention there is a real reach (#11389 review, P3).
+        "    def mentions_the_OUTERMOST_iterable(self):\n"
+        "        return [x for _review_pool in _review_pool]\n"
+        "    def binds_it_in_a_COMPREHENSION_only(self, rows):\n"
+        "        return [x for _review_pool in rows]\n"
+        # The comprehension's own target, REFERENCED inside it: the `Load`
+        # belongs to the comprehension's scope, not the method's, so it is not a
+        # mention of the entrant (#11389 review, P2).
+        "    def references_a_COMPREHENSION_TARGET_in_its_element(self, rows):\n"
+        "        return [_review_pool for _review_pool in rows]\n"
+        "    def references_a_COMPREHENSION_TARGET_in_its_if(self, rows):\n"
+        "        return [r for _review_pool in rows if _review_pool]\n"
+        # ⛔ Every generator AFTER the first is evaluated in the comprehension's
+        # OWN scope, so the later target's `Load` is the comprehension's local,
+        # not the method's (#11389 review round 2, P3). The element and `if`
+        # halves were pinned; this one was not, so over-generalising the fix to
+        # "generator iterables are the enclosing scope's" left the doc's
+        # sentence false with the suite still green.
+        "    def references_a_LATER_generators_target(self, rows):\n"
+        "        return [r for _ in rows for _review_pool in _review_pool]\n"
+        "    def assigns_the_attr(self, v):\n"
+        "        self._review_pool = v\n"
+        "    def augments_the_attr(self, v):\n"
+        "        self._review_pool += v\n"
+        "    def deletes_the_attr(self):\n"
+        "        del self._review_pool\n"
+        "    def mentions_inside_a_nested_CLASS(self):\n"
+        "        class K:\n"
+        "            cb = _safe(self._review_pool)\n"
+        "        return K\n"
+        # ⛔ A CALL in a class body, not a mention: it must be MEASURED by the
+        # closure, not left in neither channel (#11389 review, P3).
+        "    def calls_directly_inside_a_nested_CLASS(self):\n"
+        "        class K:\n"
+        "            hit = self._review_pool('point')\n"
+        "        return K\n"
+        # The shape that pins `_scan` specifically: the leg called DIRECTLY, with
+        # a literal `entity_type`, inside a class body. Membership comes from the
+        # closure edge, so only the TYPE SET can distinguish the walks.
+        "    def calls_the_leg_directly_inside_a_nested_CLASS(self):\n"
+        "        class K:\n"
+        "            hit = self.tortoise_fts_query('q', entity_type='object')\n"
+        "        return K\n")
+
+
+def test_a_leg_reach_passed_BY_REFERENCE_is_declared_not_dropped(
+        tmp_path, monkeypatch):
+    """The closure claim is over name-resolved calls, and says so (#11337).
+
+    `_safe(self._review_pool, …)` passes a leg-reaching function as an
+    **argument**. The callee extraction follows `func.attr` / `func.id`, so a
+    reach through a passed callable, a `key=`/callback, `functools.partial`,
+    `getattr` or an alias is dropped **with no entry anywhere** — the same
+    silent-hole class the handler scan declares for itself and reports through
+    an `UNMEASURED` entry. Under-reporting is the dangerous direction here: the
+    caller list is the surface an owner approves a removal against.
+
+    `tortoise/sdk.py` holds exactly ONE such shape at this head —
+    `volunteer_context` passes the leg itself as `_search_fn` — which is why the
+    fix is a NARROWER CLAIM plus a declaration, not a widening of the closure:
+    the class is real and cannot be traversed. The fixture covers each syntactic
+    position with a synthetic tree, because a bound that only ever fires on the
+    shapes one tree happens to contain would otherwise be untestable, and wastes
+    the report on a shape the crew does not have. The NEGATIVE cases are pinned
+    too (a resolved call, a shadowing local in several binding forms, a foreign
+    receiver, an attribute binding): an instrument that declares a reach it
+    already traversed puts a caveat on a complete table, which is how a real
+    declaration stops being read.
+    """
+    (tmp_path / "tortoise").mkdir()
+    (tmp_path / "tortoise" / "sdk.py").write_text(
+        _byref_sdk_source(), encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+
+    methods, error, declared = probe._sdk_methods_on_vector_leg()
+    assert error is None, (
+        "a DECLARED BOUND is not a scan failure — overloading the error slot "
+        f"made a legitimate shape read as a broken scan: {error}")
+    # ⛔ Every SYNTACTIC POSITION the class can appear in, not only the ones the
+    # first fixture happened to write: the reach is a mention of the function,
+    # so an annotated assignment, a walrus, a container and a bare `return` must
+    # be declared exactly like a call argument (#11337 review, P3).
+    shapes = ("passes_an_attribute", "passes_a_bare_name",
+              "passes_a_literal_getattr", "passes_a_dynamic_getattr",
+              "passes_an_alias", "passes_a_keyword_callback",
+              "passes_a_partial", "passes_an_annotated_assign",
+              "passes_a_walrus", "passes_a_container", "returns_it_bare",
+              "passes_a_DEFAULTED_getattr",
+              # A NESTED def's local is a different scope: it must not suppress
+              # the ENCLOSING body's genuine mention (#11337 review, P2).
+              "mentions_past_a_NESTED_shadow",
+              # A `getattr(...)(…)` func is NOT resolvable by the closure, so its
+              # mention must stay visible; `super()` is an in-module receiver.
+              "CALLS_a_getattr", "passes_from_super",
+              # A comprehension target is its own scope, so it must NOT suppress
+              # the body's genuine mention (#11389 review).
+              "mention_past_a_COMPREHENSION_shadow",
+              # A nested class BODY runs with the enclosing method, so a mention
+              # there is a real reach (#11389 review, P3).
+              "mentions_inside_a_nested_CLASS",
+              # The outermost iterable is the ENCLOSING scope's, so this is a
+              # real reach and must be declared (#11389 review, P3).
+              "mentions_the_OUTERMOST_iterable")
+    for name in shapes:
+        assert name not in methods, (
+            f"{name} reaches the leg through a reference this scan cannot "
+            f"resolve, and naming it would be a guess dressed as a "
+            f"measurement: {methods}")
+    # ⛔ An ENTRANT can also pass a DIFFERENT leg-reaching helper BY REFERENCE
+    # (#11337 review, P2). Skipping entrant functions kept it out of the
+    # declaration, so its caller-list entry was present while the entity-type
+    # SET published from `direct` silently missed the passed helper's types —
+    # the under-report direction, in the artifact an owner reads. It must be
+    # BOTH named and declared.
+    assert "calls_one_and_passes_another" in methods, methods
+    assert "calls_one_and_passes_another" in declared, (
+        "an entrant that also passes a leg-reaching helper by reference was "
+        f"declared nowhere, so its type set reads complete when it is not: {declared}")
+    assert declared, (
+        "the scan dropped every by-reference reach with no entry anywhere: the "
+        "caller list is silently short and nothing says so")
+    assert "by reference" in declared, declared
+    # ⛔ A machine consumer must be able to tell a DECLARED BOUND from a scan
+    # FAILURE: both publish `{"tools": "UNMEASURED(…)"}`, so the marker is what
+    # separates them (#11337 review).
+    assert "declared bound:" in declared, (
+        f"the declaration is indistinguishable from a scan failure: {declared}")
+    for name in shapes:
+        assert name in declared, f"{name} is not in the declaration: {declared}"
+    # ⛔ The OVER-REPORT directions, both of them. A spurious caveat on a
+    # COMPLETE caller table is the cry-wolf failure that makes the real
+    # declaration ignorable, and it was live: matching a `Call`'s own `func` made
+    # every ordinary `self.<entrant>(…)` read as an unresolved reference, which
+    # is what published five false "LIVE" entries on the real tree (#11337
+    # review, P0). A resolved call is the closure's, not this channel's.
+    for resolved in ("calls_it_normally", "calls_a_bare_name"):
+        # ⛔ MEASURED, not merely "not declared" (#11389 review, P2). The
+        # one-sided assertion was satisfied by dropping the reach from BOTH
+        # channels: deleting the bare-`Name` branch of the callee extraction
+        # took `_review_pool('object')` out of the caller list with the suite
+        # still green. A resolved call must be in the table this channel
+        # declines to declare.
+        assert resolved in methods, (
+            f"a NAME-RESOLVED call was measured by NEITHER channel, so the "
+            f"caller list reads short with nothing saying so: {resolved} not "
+            f"in {methods}")
+        assert resolved not in declared, (
+            f"a NAME-RESOLVED call was declared as an unresolved reference: "
+            f"{resolved} in {declared}")
+    # ⛔ A CALL in a nested class body is the CLOSURE's, not this channel's, and
+    # it must actually be measured there (#11389 review, P3): the call walks
+    # skipped `ClassDef` while the mention walk descended into it, so such a
+    # call was in NEITHER artifact — not an edge, and excluded here as a call
+    # the closure "owns". Asserted as MEASURED, because "not declared" alone is
+    # satisfied by the silent hole.
+    assert "calls_directly_inside_a_nested_CLASS" in methods, (
+        "a leg call in a nested class body was measured by neither channel: "
+        f"the caller list reads short with nothing saying so: {methods}")
+    assert "calls_directly_inside_a_nested_CLASS" not in declared, declared
+    # …and its ENTITY TYPE, because membership alone is supplied by the closure
+    # edge while the type set comes from the `_scan` walk: mutating only the
+    # latter left this test green (measured), which is how a short type set ships
+    # under a correct caller list.
+    assert (methods["calls_directly_inside_a_nested_CLASS"]
+            == methods["calls_it_normally"]), (
+        "a class-body call was measured DIFFERENTLY from the same call in the "
+        "plain body, so its entity-type set is short: "
+        f"{methods['calls_directly_inside_a_nested_CLASS']} != "
+        f"{methods['calls_it_normally']}")
+    # A DIRECT leg call in a class body is where the `_scan` walk is load-bearing:
+    # membership is the closure edge either way, so only the type set can tell
+    # whether the walk descended (#11389 review, P3 — measured: mutating only
+    # `_scan` left a membership-only assertion green).
+    assert (methods.get("calls_the_leg_directly_inside_a_nested_CLASS")
+            == {"object"}), (
+        "a direct leg call in a nested class body was not measured, so its "
+        "entity-type set is short or absent: "
+        f"{methods.get('calls_the_leg_directly_inside_a_nested_CLASS')}")
+    # …and it is a RESOLVED call, so it must never be declared a second time: a
+    # caveat on a table the closure already covers (measured: without this the
+    # `_scan` mutation was pinned by the type set alone and a resolved
+    # class-body leg call could be declared with the suite green).
+    assert "calls_the_leg_directly_inside_a_nested_CLASS" not in declared, declared
+
+    # A LOCAL that reuses an entrant's name is not a reach: `_review_pool = 5`
+    # binds the NAME without referring to the method, and declaring it would
+    # caveat a complete table — the same cry-wolf failure as the resolved call.
+    for shadowing in ("shadows_an_entrant_name", "shadows_via_EXCEPT",
+                      "shadows_via_IMPORT",
+                      # A comprehension TARGET is a binding, not a mention: it
+                      # read as a reach once the scope skip went in (#11389).
+                      "binds_it_in_a_COMPREHENSION_only",
+                      # …and a `Load` of that target INSIDE the comprehension is
+                      # the comprehension's own binding, not the method's
+                      # (#11389 review, P2).
+                      "references_a_COMPREHENSION_TARGET_in_its_element",
+                      "references_a_COMPREHENSION_TARGET_in_its_if",
+                      # …and a LATER generator's iterable is the
+                      # comprehension's own scope too — the natural
+                      # over-generalisation of the outermost-iterable rule
+                      # (#11389 review round 2, P3).
+                      "references_a_LATER_generators_target",
+                      # An attribute BINDING is not a mention either.
+                      "assigns_the_attr", "augments_the_attr", "deletes_the_attr"):
+        assert shadowing not in declared, (
+            f"a local shadowing an entrant's name was declared as a reach: "
+            f"{shadowing} in {declared}")
+    # A foreign receiver is not an in-module method either.
+    assert "passes_a_FOREIGN_receiver" not in declared, (
+        f"a call on a FOREIGN receiver was declared as an in-module reach: {declared}")
+    # …and a method taking TWO helpers by reference must name BOTH: keeping one
+    # target per method dropped the second with the entry still looking complete.
+    assert "passes_two" in declared, declared
+    assert "_second_pool" in declared.split("passes_two")[1][:80], (
+        f"only one of a method's two by-reference targets is named: {declared}")
+
+    # ⛔ The DECLARATION must reach the REPORT, not just the helper's tuple: a
+    # route that drops it reinstates the defect in full (this mutation left the
+    # suite green before this assertion existed — #11337 review, P1).
+    surface = probe.vector_leg_surface()
+    published = [e["tools"] for e in surface if "tools" in e]
+    assert any(t.startswith("UNMEASURED(") and "by reference" in t
+               and "passes_an_attribute" in t for t in published), (
+        "the by-reference declaration never reached the published surface, so "
+        f"a caller list read short with nothing saying so: {published}")
+
+
+def test_a_DECLARED_bound_does_not_swallow_the_DERIVED_failure(
+        tmp_path, monkeypatch):
+    """The two refusal channels must be publishable TOGETHER (#11389 review, P2).
+
+    The declared bound is appended to the same list the emptiness check reads, so
+    `not out` became UNREACHABLE whenever a declaration existed: a surface that
+    could not be derived AT ALL published only the by-reference caveat — which
+    says "the scan RAN and this is its known edge" — and nothing said the tool
+    table was empty. The separation #11337 established in one direction
+    collapsed in the other, and the dangerous reading is the one a consumer
+    takes from a lone caveat: a complete surface with an edge.
+    """
+    (tmp_path / "tortoise").mkdir()
+    (tmp_path / "tortoise" / "sdk.py").write_text(
+        "class S:\n"
+        "    def tortoise_fts_query(self, q, entity_type='point'):\n"
+        "        return q\n"
+        "    def _pool(self, t):\n"
+        "        return self.tortoise_fts_query('x', entity_type=t)\n"
+        "    def passes_it(self):\n"
+        "        return _safe(self._pool)\n",
+        encoding="utf-8")
+    # No handler forwards `entity_type`, so NOT ONE tool row can be derived.
+    (tmp_path / "tortoise" / "mcp_server.py").write_text(
+        "def tortoise_health():\n    return {'ok': True}\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    import tortoise.tool_registry as registry
+    monkeypatch.setattr(registry, "TOOL_REGISTRY", [])
+
+    published = [e["tools"] for e in probe.vector_leg_surface() if "tools" in e]
+    assert any("declared bound:" in line for line in published), (
+        "the fixture no longer declares a by-reference bound, so this test "
+        f"cannot see the swallow it exists to catch: {published}")
+    assert any("could not be derived" in line for line in published), (
+        "the declared bound swallowed the derived-failure line, so an "
+        "underivable surface reads as a measured one with a known edge: "
+        f"{published}")
+    # …and the FAILURE comes FIRST: presence alone is satisfied by an entry
+    # appended after the reader has already taken the surface as derived.
+    failure = next(i for i, line in enumerate(published)
+                   if "could not be derived" in line)
+    bound = next(i for i, line in enumerate(published)
+                 if "declared bound:" in line)
+    assert failure < bound, (
+        f"the derived FAILURE is published after the caveat: {published}")
+
+
+def test_an_ERROR_line_does_not_mask_the_derived_FAILURE(
+        tmp_path, monkeypatch):
+    """`derived_tool_rows` must be read BEFORE the error lines reach the list.
+
+The guard at `derived_tool_rows = bool(out)` exists because the error channel
+appends to `out` FIRST (handler/leg scan failures, a few lines above the
+emptiness check). Reading `not out` after that append conflates two different
+facts: `out` non-empty because a TOOL ROW was derived, versus `out` non-empty
+because an ERROR was published. In the error-present, nothing-derived case the
+two spellings disagree, and `not out` silently DROPS the derived-failure line —
+the under-reporting direction this channel exists to prevent.
+
+⛔ This case is invisible to `test_a_DECLARED_bound_does_not_swallow_the_
+DERIVED_failure`, whose fixture produces no error entry: with `out` still empty
+at the check, `not out` and `not derived_tool_rows` agree and a revert to
+`not out` stays GREEN. Measured: reverting to `if not out` leaves the whole
+file green without this test. The error arm is what makes the guard
+attributable.
+"""
+    (tmp_path / "tortoise").mkdir()
+    (tmp_path / "tortoise" / "sdk.py").write_text(
+        "class S:\n"
+        "    def tortoise_fts_query(self, q, entity_type='point'):\n"
+        "        return q\n"
+        "    def _pool(self, t):\n"
+        "        return self.tortoise_fts_query('x', entity_type=t)\n"
+        "    def passes_it(self):\n"
+        "        return _safe(self._pool)\n",
+        encoding="utf-8")
+    (tmp_path / "tortoise" / "mcp_server.py").write_text(
+        "def tortoise_health():\n    return {'ok': True}\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    import tortoise.tool_registry as registry
+    monkeypatch.setattr(registry, "TOOL_REGISTRY", [])
+    # ⛔ An ERROR entry, so `out` is NON-EMPTY by the time the emptiness check
+    # runs — the only state in which `not out` and `not derived_tool_rows`
+    # disagree. No tool row can be derived either (no handler forwards the arg).
+    monkeypatch.setattr(
+        probe, "_handlers_forwarding_entity_type",
+        lambda: (set(), "UNMEASURED(handler scan failed: synthetic)"))
+
+    published = [e["tools"] for e in probe.vector_leg_surface() if "tools" in e]
+    assert any("handler scan failed: synthetic" in line for line in published), (
+        f"the fixture no longer publishes the error entry: {published}")
+    assert any("could not be derived" in line for line in published), (
+        "an error entry in the list masked the derived-failure line, so an "
+        "underivable surface reads as a measured one beside an unrelated "
+        f"failure: {published}")
+
+
+def test_a_scan_FAILURE_is_not_a_DECLARED_bound(tmp_path, monkeypatch):
+    """The separation's other half: a scan that could not be TAKEN (#11389).
+
+    The separation #11337 promised is two-facts-or-nothing, and only the
+    declared half was pinned. An unparseable `sdk.py` must report `error` and
+    NO declaration — otherwise a by-reference caveat ("the scan ran") can stand
+    in for "the scan failed", which is the shape that reads as a complete table
+    with an edge.
+    """
+    (tmp_path / "tortoise").mkdir()
+    (tmp_path / "tortoise" / "sdk.py").write_text(
+        "def broken(:\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+
+    methods, error, declared = probe._sdk_methods_on_vector_leg()
+    assert methods == {} and error and "SDK scan failed" in error, (
+        f"an unparseable SDK source did not report the scan failure: "
+        f"{methods} {error}")
+    assert declared is None, (
+        "a scan that could not be TAKEN also published a DECLARED bound, so a "
+        f"consumer cannot tell the two channels apart: {declared}")
+
+
+def test_a_label_with_MIXED_stored_widths_refuses_the_byte_figure():
+    """One row's width is not the label's (#11088 review round 7, P2).
+
+    A graph that went through an `EMBEDDING_DIM` rotation holds vectors of two
+    widths. `stored × width × 4` then multiplies ONE sampled row's size across
+    every row — measured 5×1024 + 1×384 → 24,576 B reported for a true 22,016 B —
+    which is wrong in an unbounded direction, in the figure the issue exists to
+    produce, with nothing marking it as estimated. The module's posture is
+    UNMEASURED when the inputs disagree, and here they do.
+    """
+    # The minority width FIRST, so the `LIMIT WIDTH_PROBE_SAMPLES` window
+    # contains it — the fake honours the LIMIT, so where the odd row sits
+    # decides whether the probe can see it (the residual is pinned below).
+    graph = _CensusGraph(
+        catalogue=[],
+        labels=["Object"],
+        vectors={"Object": (6, [[0.0] * 384] + [[0.0] * 1024] * 5)},
+    )
+    row = probe.vector_census(graph, "g", at="2026-11-05T00:00:00Z",
+                              graph_names=["g"])["labels"]["Object"]
+    assert str(row["payload"]["derived_payload_B"]).startswith("UNMEASURED"), (
+        f"a mixed-width label published a byte figure extrapolated from one row: {row}")
+    assert "disagree" in str(row["payload"]["derived_payload_B"]), row
+    # …and the COUNT is unaffected: it is a count of rows, not a width.
+    assert row["unindexed"] == 6, row
+
+
+def test_the_mixed_width_refusal_needs_MORE_THAN_ONE_sample(monkeypatch):
+    """The width fix's own discriminating power (#11088 review round 9, P2).
+
+    With `WIDTH_PROBE_SAMPLES = 1` the single-row bug returns: the first sampled
+    row's width is multiplied across the label and the figure reads as measured.
+    Pinning BOTH directions is what makes the refusal attributable to the
+    multi-row probe rather than to the fixture.
+    """
+    vectors = {"Object": (6, [[0.0] * 384] + [[0.0] * 1024] * 5)}
+    graph = _CensusGraph(catalogue=[], labels=["Object"], vectors=vectors)
+    row = probe.vector_census(graph, "g", at="2026-11-05T00:00:00Z",
+                              graph_names=["g"])["labels"]["Object"]
+    assert str(row["payload"]["derived_payload_B"]).startswith("UNMEASURED"), row
+
+    # ⚠️ THE DECLARED RESIDUAL: a sample window that misses the minority width
+    # cannot refuse (5 of 6, minority last). The figure then stands, and `how`
+    # must say how many rows it came from — the sample size is what keeps it an
+    # observation rather than an implied exhaustive check.
+    late = {"Object": (6, [[0.0] * 1024] * 5 + [[0.0] * 384])}
+    residual = probe.vector_census(
+        _CensusGraph(catalogue=[], labels=["Object"], vectors=late),
+        "g", at="2026-11-05T00:00:00Z", graph_names=["g"])["labels"]["Object"]
+    assert residual["payload"]["derived_payload_B"] == 6 * 1024 * 4, residual
+    assert "5 sampled row(s)" in residual["payload"]["how"], residual["payload"]
+    assert "minority" in residual["payload"]["how"], residual["payload"]
+
+    # …and with a SINGLE sample the same fixture reports a measured-looking
+    # figure from one row: the regression this test must be able to see.
+    monkeypatch.setattr(probe, "WIDTH_PROBE_SAMPLES", 1)
+    one = probe.vector_census(
+        _CensusGraph(catalogue=[], labels=["Object"], vectors=vectors),
+        "g", at="2026-11-05T00:00:00Z", graph_names=["g"])["labels"]["Object"]
+    assert one["payload"]["derived_payload_B"] == 6 * 384 * 4, (
+        "with a single sample the first row's width is multiplied across the "
+        f"label — that is the regression this test must be able to see: {one}")
+
+
+def _residual_width_census():
+    """The census of a label whose minority width falls OUTSIDE the probe window.
+
+    5x1024 + 1x384, the minority LAST: the window sees one width, so the figure
+    stands — the case that must explain itself. Returns the `Object` row AND the
+    graph, because the claim is about the statement that produced the row.
+    """
+    graph = _CensusGraph(
+        catalogue=[], labels=["Object"],
+        vectors={"Object": (6, [[0.0] * 1024] * 5 + [[0.0] * 384])})
+    row = probe.vector_census(graph, "g", at="2026-11-07T00:00:00Z",
+                              graph_names=["g"])["labels"]["Object"]
+    return row, graph
+
+
+def _residual_width_row():
+    return _residual_width_census()[0]
+
+
+def test_the_width_probe_report_says_the_rows_were_ENGINE_CHOSEN():
+    """The probe imposes no order, so the report must say who chose (#11337).
+
+    `S3-VECTOR-CENSUS.md` §2 read *"the first `WIDTH_PROBE_SAMPLES` (5) of
+    them"*, while the query carries **no `ORDER BY`** — so "the first 5" is not
+    a property it has, and a re-run of the same graph can sample different rows
+    and move `derived_payload_B`. The test fake models a deterministic slice,
+    which is why the doc and the fake agreed with each other rather than with
+    the engine.
+
+    The fix is NOT `ORDER BY`: the window is 5 rows either way, so sorting
+    cannot close the residual blindness, and it would have to sort on a property
+    every label carries — which the census does not establish — so it would
+    claim a stability it cannot guarantee. What the report does instead is say
+    the rows were engine-chosen, so a figure that moves has an explanation.
+    """
+    row, graph = _residual_width_census()
+    how = row["payload"]["how"]
+    assert "5 sampled row(s)" in how, how
+    assert "chosen by the engine" in how, (
+        "the report does not say the sampled rows were engine-chosen, so a "
+        f"figure that moves between two runs has no explanation: {how}")
+    assert "no ORDER BY" in how, (
+        f"the report claims rows the query never ordered: {how}")
+
+    # ⛔ AND THE QUERY ITSELF (#11337 review, P3): the sentence above is about a
+    # PROPERTY of the statement, so it is asserted against the statement. Pinning
+    # only the prose let `ORDER BY n.id` be added to the probe — the natural
+    # attempt to stabilise the window — while `how` and the census doc went on
+    # asserting a bound the query no longer had: the defect this issue exists to
+    # remove, mirrored.
+    probe_statements = [q for q in graph.queries if "RETURN n.embedding" in q]
+    assert probe_statements, f"the width probe was never issued: {graph.queries}"
+    for statement in probe_statements:
+        assert "ORDER BY" not in statement.upper(), (
+            "the width probe gained an ORDER BY, so the report and the census "
+            f"doc now understate what it does — update all three: {statement}")
+
+
+def _doc_section(text: str, start: str, end: str) -> str:
+    r"""The slice of a markdown doc between two H2 headings, both halves required.
+
+    A pin that claims "the doc's §3 states this" must read §3, not the whole
+    file: every string in a pasted transcript is also "in the document", so a
+    whole-file search cannot falsify a deleted statement (#11389 review, P2).
+
+    ⛔ ANCHORED TO A LINE, AND UNIQUE (#11389 review, P2). A bare substring
+    boundary is not a heading: `"## 4."` is INSIDE `"### 4.1"`, so renaming the
+    §4 H2 — a one-character edit that leaves `### 4.1` alone — kept the slice
+    running past §4's provenance note and the pasted transcript, i.e. widened
+    the pin back to precisely the mentions this slice exists to exclude.
+    Measured: `## 4. The measurement taken here` -> `## 4 The measurement…`
+    kept a DELETED §3 statement green. `^## 3\.` cannot match `### 3.1` (it
+    wants a space where the third `#` sits), and requiring exactly ONE match
+    makes a heading that is gone, renamed, or repeated inside a pasted block
+    red the pin loudly instead of silently moving the boundary.
+    """
+    def _boundary(heading: str) -> int:
+        found = [m.start()
+                 for m in re.finditer(rf"(?m)^{re.escape(heading)}", text)]
+        assert len(found) == 1, (
+            f"the census doc has {len(found)} line-anchored {heading!r} "
+            "heading(s), so the §-slice boundary is not unique — a renamed or "
+            "duplicated heading must red this pin, never widen it")
+        return found[0]
+
+    begin = _boundary(start)
+    stop = _boundary(end)
+    assert stop > begin, f"{end!r} precedes {start!r} in the census doc"
+    return text[begin:stop]
+
+
+def test_the_doc_slice_requires_a_UNIQUE_LINE_ANCHORED_H2():
+    """`_doc_section`'s anchoring and uniqueness must be PINNED, not just prose.
+
+    The `#11389` round-3 fix replaced a bare-substring boundary with
+    `(?m)^<heading>` plus an exactly-one-match rule, because `"## 4."` is a
+    substring of `"### 4.1"` — so renaming the §4 H2 kept the slice running past
+    §4's note and the pasted transcript, and a DELETED §3 statement stayed green.
+    That measurement lived only in the docstring: reverting `_boundary` to
+    `assert heading in text; return text.index(heading)` left the whole file
+    green (measured), i.e. the improvement was unpinned and a one-line refactor
+    silently reinstated the defect.
+
+    So this test pins the MECHANISM on synthetic text, which needs no edit to the
+    real doc and cannot be satisfied by the transcript mentions the slice exists
+    to exclude.
+    """
+    # ⛔ A heading that has been RENAMED away must red, not widen. `## 4.` is a
+    # substring of `### 4.1`, so the old form returned here and sliced to EOF.
+    renamed = "## 3. a\nstet\n### 4.1 sub\nstet\n"
+    with pytest.raises(AssertionError):
+        _doc_section(renamed, "## 3.", "## 4.")
+    # ⛔ A heading repeated inside a pasted block must red, not pick the first.
+    duplicated = "## 3. a\n## 3. pasted\n## 4. b\n"
+    with pytest.raises(AssertionError):
+        _doc_section(duplicated, "## 3.", "## 4.")
+    # ⛔ A DEEPER heading must never satisfy a shallower one: `#### 4.1` is not
+    # the §4 H2, so with no real §4 H2 present the boundary is ABSENT and must
+    # red (this is the `### 4.1` case that made the substring form widen).
+    with pytest.raises(AssertionError):
+        _doc_section("## 3. a\n#### 4.1 deep\n", "## 3.", "## 4.")
+    # …and the ordinary case still cuts exactly this section.
+    assert _doc_section("x\n## 3. a\nb\n## 4. c\n", "## 3.",
+                        "## 4.") == "## 3. a\nb\n"
+
+
+def test_the_census_doc_states_the_same_probe_bound_the_report_does():
+    """The doc must state the bound the CODE emits, not a parallel wording.
+
+    The defect was a doc that agreed with a deterministic test fake instead of
+    with the engine, so the positive half is derived from the ACTUAL `how`
+    string: a fragment of it must appear in §2. Doc and report can then not
+    drift apart — and a legitimate rewording of either must move both.
+    """
+    how = _residual_width_row()["payload"]["how"]
+    assert "chosen by the engine" in how and "ORDER BY)" in how, (
+        f"the report no longer carries the bound this test pins: {how}")
+    fragment = how[how.index("chosen by the engine"):how.index("ORDER BY)") + 9]
+
+    doc = (Path(probe.__file__).resolve().parent.parent / "docs" / "epics"
+           / "2026-11-04-5090-vector-layer" / "S3-VECTOR-CENSUS.md")
+    assert doc.exists(), f"the census doc moved: {doc}"
+    text = doc.read_text(encoding="utf-8")
+    assert "the first `WIDTH_PROBE_SAMPLES`" not in text, (
+        "the census doc still claims the probe takes 'the first 5' rows, which "
+        "is not a property the query has (no ORDER BY)")
+    assert fragment in text, (
+        f"the census doc does not state the bound the report does: {fragment!r}")
+
+    # ⛔ The BY-REFERENCE half, derived from the RUN rather than restated: when the
+    # scan declares a bound, every method it names must appear in the doc's §3;
+    # when it declares nothing, the doc must say so. Otherwise deleting the
+    # declaration (the cheapest wrong repair) leaves every test green while the
+    # census goes on describing a bound the instrument stopped reporting.
+    _methods, _error, declared = probe._sdk_methods_on_vector_leg()
+    assert _error is None, (
+        "the scan could not be TAKEN on the real tree, so the declaration read "
+        f"below is measuring the wrong channel: {_error}")
+    if declared is None:
+        # ⛔ A PROPERTY, not a magic sentence (#11389 review, P3): requiring one
+        # exact phrase the doc never documented made this arm red on a doc+code
+        # pair that agreed, with the repair being to guess the wording from the
+        # test body. The property is that the doc does not claim this method is
+        # declared when the scan declares nothing.
+        assert "volunteer_context" not in text, (
+            "the scan declares nothing and the census doc still presents "
+            "`volunteer_context` as a declared reach")
+        # ⛔ THE SAME PROPERTY RULE APPLIES TO THE RESIDUAL ITSELF (#11389
+        # review, P2): this arm used to require ONE exact sentence
+        # ("nested `def`'s decorators and parameter defaults"), so any
+        # legitimate rewording of that clause red a doc+code pair that still
+        # agreed — the very failure the comment four lines up names. Assert the
+        # CLAIM instead: some SENTENCE of §3 names both a `decorator` and a
+        # `default`, which is what "the walk does not visit a nested def's
+        # decorators/defaults" reduces to once the wording is free.
+        #  · same-sentence keeps it falsifiable — a whole-document word search
+        #    stays green with the clause deleted, because both words appear
+        #    elsewhere in the document;
+        #  · NOT `"nested" in sentence` either: pinning that ADJECTIVE still red
+        #    a rewording to "an **inner** `def`'s decorators and parameter
+        #    defaults", which states the same claim (#11389 review, P2);
+        #  · and NOT a loosened `(def|function) + (decorator|default)`:
+        #    measured, that false-GREENS with the clause deleted — two other §3
+        #    sentences hit it ("…runs the SDK's own default …", "…`:Object` on
+        #    its default path").
+        # Measured on this doc: 1 hit with the clause, 1 with the `inner def`
+        # rewording, 0 with the clause deleted, 0 with the clause REVERSED
+        # ("Inside the walk, and therefore reported").
+        #  · the polarity cue is why the reversed doc reds: `"decorator" and
+        #    "default"` alone stays GREEN on a sentence that asserts the exact
+        #    inverse the comment above names (#11389 review, P3).
+        s3 = _doc_section(text, "## 3.", "## 4.").lower()
+        residual = [sentence for sentence in s3.split(". ")
+                    if "decorator" in sentence and "default" in sentence
+                    and ("not" in sentence or "never" in sentence
+                         or "outside" in sentence)]
+        assert residual, (
+            "the doc claims the declaration is total; the walk does not visit a "
+            "nested def's defaults/decorators, and no sentence of §3 says so")
+    else:
+        assert ("no such shape exists" not in text
+                and "no such body mention exists" not in text), (
+            "the run declares a by-reference bound while the census doc denies "
+            "that any such shape exists — the two describe different instruments")
+        # Derived from the DECLARATION's PASSERS, not from the entrant map. A
+        # hand-rolled split on "," / "(" dropped every target but the last and
+        # injected `getattr` as a name (#11337 review, P2), so this reads the
+        # emitted shape directly and pins what it can honestly pin: the passers.
+        # A target is already pinned by the two-target assertion above.
+        body = declared.split(": ", 1)[1].split(" —")[0]
+        passers = [n for n in re.findall(r"(\w+) \(", body) if n != "getattr"]
+        assert passers, f"no passer could be read out of the declaration: {declared}"
+        # ⛔ SCOPED TO §3, because that is what the doc CLAIMS (#11389 review,
+        # P2). `assert name in text` searched the WHOLE document, and
+        # `volunteer_context` appears three times in it — §3's doctrine
+        # sentence, §4's provenance note, and the pasted transcript block that
+        # this PR itself added. So deleting §3's statement left this green on
+        # the other two mentions (measured), which is exactly the residual the
+        # docstring concedes for a SECOND passer while claiming the primary one
+        # is pinned. The slice makes the falsifier match the claim: §3 is where
+        # the doc says a passer is declared, so that is what must name it.
+        section = _doc_section(text, "## 3.", "## 4.")
+        for name in passers:
+            assert name in section, (
+                f"the run declares {name!r} and §3 of the census doc does not "
+                f"name it (it appears elsewhere in the document: "
+                f"{name in text}) — a mention in the transcript or §4 is not "
+                f"the doc stating the bound")
+
+
+def test_the_census_doc_collects_what_the_file_collects():
+    """§6's run record must describe THIS tree, not a branch head (#11389 review).
+
+    The row stated *"collects 128 at #11337's head … six added"* while the tree it
+    sat in collected **129**: the figure was stated against a **moving** reference,
+    so it went stale on the next test added without any line of the doc changing —
+    the defect this PR exists to remove (a figure that describes a measurement it
+    no longer matches), one artifact over.
+
+    Bound to the tree instead: the count is re-derived here from the file's own
+    `--collect-only`, so adding a test reds this row until the figure is re-cut.
+    The passed/skipped **split** is deliberately NOT pinned — it moves with the
+    interpreter and the lane (the one skip is the `<3.12` re-derive), so pinning it
+    would red on a box rather than on a defect.
+    """
+    root = Path(probe.__file__).resolve().parent.parent
+    doc = (root / "docs" / "epics" / "2026-11-04-5090-vector-layer"
+           / "S3-VECTOR-CENSUS.md")
+    assert doc.exists(), f"the census doc moved: {doc}"
+    text = doc.read_text(encoding="utf-8")
+
+    run = subprocess.run(
+        [sys.executable, "-m", "pytest", str(Path(__file__).resolve()),
+         "--collect-only", "-q", "-p", "no:cacheprovider"],
+        capture_output=True, text=True, cwd=str(root),
+    )
+    assert run.returncode == 0, (
+        f"`--collect-only` on this file failed, so the doc's count cannot be "
+        f"checked:\n{run.stdout[-2000:]}\n{run.stderr[-2000:]}")
+    match = re.search(r"(\d+) tests? collected", run.stdout)
+    assert match, (
+        "`--collect-only` printed no collected count, so this pin measured "
+        f"nothing: {run.stdout[-2000:]}")
+    actual = int(match.group(1))
+
+    stated = re.search(r"this tree: (\d+) collected", text)
+    assert stated, (
+        "§6's run record no longer states the collected count of THIS tree. A "
+        "count stated against a branch head ('at #11337's head') describes a "
+        "measurement the row no longer matches as soon as a test is added")
+    assert int(stated.group(1)) == actual, (
+        f"§6 states this tree collects {stated.group(1)} and the file collects "
+        f"{actual}: the row describes a measurement it no longer matches — re-cut "
+        f"the figure, or delete it and let this pin stand alone")
+
+
+def test_a_pass_through_tool_changes_NOTHING_when_the_affected_set_is_EMPTY():
+    """No removable vector, nothing changes — including for the caller-chosen
+    tools (#11088 review round 9, P2).
+
+    A graph whose only label is indexed yields an empty affected set, and the
+    pass-through branch used to print "any (the caller chooses)" anyway, naming
+    `tortoise_search`/`tortoise_query` as changing on a graph where a removal
+    would change nothing.
+    """
+    graph = _CensusGraph(
+        catalogue=[_index_row("Point", "embedding", 384)],
+        labels=["Point"], vectors={"Point": (3, [0.0] * 384)},
+    )
+    sc = probe.vector_census(graph, "g", at="2026-11-05T00:00:00Z",
+                             graph_names=["g"])["surface_consequence"]
+    assert sc["entity_types_whose_query_results_change"] == [], sc
+    assert {e["tool"]: e["reaches_affected_labels"] for e in sc["surface"]
+            if "tool" in e and e["reaches_affected_labels"]} == {}, (
+        "a tool was reported as changing on a graph with nothing to remove: "
+        f"{sc['surface']}")
+
+
+def test_a_non_literal_entity_type_is_UNMEASURED_not_a_measured_no(
+        monkeypatch):
+    """An `UNKNOWN(...)` member must not intersect to `[]` (#11088 round 9, P2).
+
+    `_types_for` reports a non-literal argument as `UNKNOWN(<expr>)`, never
+    guessed. Intersecting that string with the affected types yields `[]`, which
+    the printer drops — an unmeasured consequence published as a measured "does
+    not change", the direction the module calls dangerous.
+    """
+    graph = _CensusGraph(
+        catalogue=[], labels=["Object"], vectors={"Object": (2, [0.0] * 384)},
+    )
+    monkeypatch.setattr(
+        probe, "_sdk_methods_on_vector_leg",
+        lambda: ({"recall_state": {"UNKNOWN(entity_type_var)"}}, None, None))
+    sc = probe.vector_census(graph, "g", at="2026-11-05T00:00:00Z",
+                             graph_names=["g"])["surface_consequence"]
+    recall = next(e for e in sc["surface"] if e.get("tool") == "tortoise_recall")
+    assert str(recall["reaches_affected_labels"]).startswith("UNMEASURED"), recall
+
+
+def test_a_tool_that_reaches_the_leg_through_a_HELPER_is_named():
+    """A private helper must not hide a tool (#11088 review round 9, P2).
+
+    `review_connections` → `_review_add`/`_review_prune` → `_review_pool` → the
+    leg. Keying the scan on the ENCLOSING function named only `_review_pool`,
+    which is not a `TOOL_REGISTRY.sdk_method`, so the tool vanished from the
+    caller list with no `UNMEASURED` entry anywhere.
+    """
+    methods, error, _declared = probe._sdk_methods_on_vector_leg()
+    assert error is None, error
+    assert methods["review_connections"] == {"point"}, methods
+    named = {e["tool"] for e in probe.vector_leg_surface() if "tool" in e}
+    assert "tortoise_review_connections" in named, sorted(named)
+
+
+def test_the_census_reports_EVERY_index_KIND_not_only_VECTOR():
+    """§3.1 says the run settles the FTS question — so the run must answer it.
+
+    Whether `:Source` carries a FULLTEXT index decides if a lexically-matching
+    query survives a vector removal, and `STORAGE-ARCHITECTURE.md` §12.1b's
+    dated inventory disagrees with the declared DDL on exactly that. The parse
+    kept VECTOR rows only, so the census promised a datum it never read
+    (#11088 review round 7, P2).
+    """
+    fulltext = ["Source", ["_searchText"], {"_searchText": ["FULLTEXT"]},
+                {}, "english", [], "NODE", "OPERATIONAL", {}]
+    graph = _CensusGraph(
+        catalogue=[_index_row("Object", "embedding", 384), fulltext],
+        labels=["Object", "Source"],
+        vectors={"Object": (1, [0.0] * 384), "Source": (2, [0.0] * 384)},
+    )
+    census = probe.vector_census(graph, "g", at="2026-11-05T00:00:00Z",
+                                 graph_names=["g"])
+    assert census["labels"]["Source"]["indexes_on_label"] == {
+        "FULLTEXT": ["_searchText"]}, census["labels"]["Source"]
+    assert census["labels"]["Object"]["indexes_on_label"] == {
+        "VECTOR": ["embedding"]}, census["labels"]["Object"]
+    # The vector coverage columns are UNCHANGED by the fuller record: a
+    # FULLTEXT index is not a vector index.
+    assert census["labels"]["Source"]["indexed"] is False
+    assert census["labels"]["Source"]["unindexed"] == 2
+
+    # ⛔ The TEXT line, not only the field: the first version put the closing
+    # paren on the whole join instead of on each entry, so two non-VECTOR kinds
+    # printed `FULLTEXT(a, RANGE(b)` — malformed in the one output a reader
+    # quotes into an approval request, and invisible to a single-kind fixture
+    # (verification gate, P2).
+    assert probe._non_vector_indexes_line(
+        {"FULLTEXT": ["name"], "RANGE": ["created"]}
+    ) == "other indexes on this label: FULLTEXT(name), RANGE(created)"
+    assert probe._non_vector_indexes_line({"VECTOR": ["embedding"]}) == "", (
+        "a VECTOR-only label needs no extra line — `indexed=` already says it")
+    assert probe._non_vector_indexes_line("UNMEASURED(x)").startswith("⛔ indexes:")
+
+
+@pytest.mark.parametrize("dotted", [probe.VECTOR_LEG_RUNNER,
+                                    f"{probe.VECTOR_LEG_SDK_METHOD}"])
+def test_every_name_the_census_hardcodes_still_RESOLVES(dotted):
+    """A hardcoded name must not outlive the thing it names (review, P3).
+
+    `VECTOR_LEG_SDK_METHOD` and `VECTOR_LEG_RUNNER` are the two strings the
+    census prints as the PATH a surface change travels. A rename in
+    `tortoise/sdk.py` or `tortoise/search_engine.py` would leave the census
+    quoting a method that no longer exists — a stale claim in exactly the place
+    a reader goes to check the consequence. `takes_entity_type` already reds on
+    the SDK rename; this pins both, and the runner had no pin at all.
+    """
+    import importlib
+
+    if dotted.startswith("tortoise."):
+        module_name, _, attr = dotted.rpartition(".")
+        module = importlib.import_module(module_name)
+    else:
+        from tortoise.sdk import TortoiseSDK as module  # the class, not a module
+        attr = dotted
+    assert hasattr(module, attr), (
+        f"the census prints `{dotted}` as the vector leg path, and it does not "
+        "resolve — a rename landed without updating the instrument")
+
+
+def test_an_unresolvable_leg_method_reports_UNMEASURED_not_an_EMPTY_surface(
+        monkeypatch):
+    """A broken name must not read as "no tool is affected" (review round 2, P2).
+
+    An unresolvable `VECTOR_LEG_SDK_METHOD` empties BOTH the binding set and the
+    handler set, so `out` was `[]` — while `takes`, correctly computed to
+    `UNMEASURED(...)` in that case, had no entry to ride on and was discarded.
+    The surface then read as a measured "no MCP tool can pass `entity_type`"
+    beside a non-empty `entity_types_whose_query_results_change`: the
+    under-reporting direction, produced by the very drift the resolution pin
+    above exists to catch (a pin protects the repo, not the tool as shipped).
+    """
+    monkeypatch.setattr(probe, "VECTOR_LEG_SDK_METHOD", "no_such_sdk_method")
+    surface = probe.vector_leg_surface()
+    assert surface, "a broken leg method produced an EMPTY surface (unmeasured reads as empty)"
+    assert any("tool" not in entry and str(entry.get("tools", "")).startswith(
+        "UNMEASURED") for entry in surface), surface
+
+
+def test_the_LIVE_census_names_the_unindexed_labels_and_writes_NOTHING():
+    """E2E D9 (`04-plan.md` §7): the census, on a real engine (#11088).
+
+    Three claims, none of which a fake can carry:
+
+    1. `Point` reports **indexed** and the served-but-unindexed labels report
+       **unindexed with a byte figure** — the population the issue exists to
+       quantify, measured rather than inferred from an inventory.
+    2. the census **writes nothing**: the label set, the node counts, the edge
+       count, the engine's catalogue and every per-label embedding count are
+       IDENTICAL across the call (verification row 1 of #11088). ⚠️ This
+       snapshot is a corroborating observation, not the proof — it cannot see a
+       same-shape property mutation. The proof is the READ-ONLY verb:
+       `GRAPH.RO_QUERY` is rejected server-side for a write, and
+       `_NoWriteCensusGraph` fails the test on any use of `graph.query`;
+    3. each label's `entity_type` values are named, and the surface block lists
+       exactly the ones whose query results would change.
+
+    Skips VISIBLY without a live URI (`_live_utils._skip_unless_live_uri`), never
+    early-return-green (#942).
+    """
+    from tests import _live_utils
+
+    _live_utils._skip_unless_live_uri()
+
+    import uuid
+
+    from tortoise.embeddings import EMBEDDING_DIM
+
+    uri = os.environ["TORTOISE_DB_URI"]
+    db, _names = probe._connect(uri)
+    name = f"census11088_{uuid.uuid4().hex[:12]}"
+    graph = db.select_graph(name)
+    labelled = ("Point", "Event", "Object", "Source", "Subject")
+    vector = [0.1] * EMBEDDING_DIM
+
+    def _create_vector_index() -> None:
+        """The product's own two index forms, in its own order (`_ensure_indexes`)."""
+        try:
+            graph.query(
+                f"CALL db.idx.vector.createNodeIndex('Point', 'embedding', "
+                f"{EMBEDDING_DIM}, 'cosine')")
+        except Exception:
+            graph.query(
+                "CREATE VECTOR INDEX FOR (p:Point) ON (p.embedding) "
+                f"OPTIONS {{dimension: {EMBEDDING_DIM}, "
+                "similarityFunction: 'cosine'}")
+
+    def _snapshot() -> dict:
+        """Everything the census must leave untouched."""
+        return {
+            "labels": sorted(r[0] for r in graph.ro_query(
+                "CALL db.labels()").result_set or []),
+            "nodes": graph.ro_query("MATCH (n) RETURN count(n)").result_set[0][0],
+            "edges": graph.ro_query("MATCH ()-[e]->() RETURN count(e)"
+                                    ).result_set[0][0],
+            "catalogue": sorted(
+                [r[0], str(r[2])] for r in
+                graph.ro_query("CALL db.indexes()").result_set or []),
+            "per_label": {
+                lab: graph.ro_query(
+                    f"MATCH (n:{lab}) WHERE n.embedding IS NOT NULL "
+                    "RETURN count(n)").result_set[0][0]
+                for lab in labelled
+            },
+        }
+
+    try:
+        _create_vector_index()
+        for lab in labelled:
+            graph.query(
+                f"CREATE (n:{lab} {{id: $id}}) SET n.embedding = vecf32($v)",
+                params={"id": f"census-{lab.lower()}", "v": vector})
+        names_after = db.list_graphs()
+
+        before = _snapshot()
+        census = probe.vector_census(graph, name, graph_names=names_after)
+        after = _snapshot()
+
+        # ── 2. the census writes NOTHING ──────────────────────────────────
+        assert before == after, (
+            "the census changed the graph — the one thing it must never do:\n"
+            f"before={before}\nafter={after}")
+        assert census["catalogue"] == "CALL db.indexes()", census
+
+        # ── 1. indexed vs unindexed, with BYTES on both ───────────────────
+        point = census["labels"]["Point"]
+        assert point["indexed"] is True, point
+        assert point["unindexed"] == 0, point
+        assert point["payload"]["derived_payload_B"] == EMBEDDING_DIM * 4, point
+
+        for lab, ets in (("Event", ["event"]), ("Object", ["object"]),
+                         ("Source", ["document", "source"]),
+                         ("Subject", ["subject"])):
+            row = census["labels"][lab]
+            assert row["stored"] == 1, row
+            assert row["indexed"] is False, row
+            assert row["unindexed"] == 1, row
+            assert row["payload"]["derived_payload_B"] == EMBEDDING_DIM * 4, (
+                f"an unindexed label has no bytes figure: {row!r}")
+            # ── 3. the entity_type values, not just the label ─────────────
+            assert row["affected_entity_types"] == ets, row
+            assert row["removal_changes_query_results"] is True, row
+
+        sc = census["surface_consequence"]
+        assert sc["requested_not_performed"] is True, sc
+        # ⛔ FOUR labels, and `Source` counts TWICE (`document` + `source`) while
+        # `Point` counts ZERO (it is indexed, so removing nothing changes
+        # nothing). `subject` is in the set because the LABEL is measured to
+        # hold a vector — #11088 leaves *"what Source/Subject actually hold"* to
+        # this census rather than assuming the 2026-09-24 inventory, and the
+        # answer is that they hold vectors and are served, so both are affected.
+        assert sc["entity_types_whose_query_results_change"] == [
+            "document", "event", "object", "source", "subject"], sc
+        assert {a["label"] for a in sc["labels"]} == {
+            "Event", "Object", "Source", "Subject"}, sc
+    finally:
+        # Cleanup must not mask a failed assertion (a fake on the failure path
+        # would replace the real one). `contextlib.suppress`, not try/pass.
+        with contextlib.suppress(Exception):
+            graph.delete()

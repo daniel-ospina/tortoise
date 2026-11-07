@@ -227,3 +227,42 @@ def test_an_offload_that_delivered_no_result_is_not_a_tenant(monkeypatch):
 
     assert org["default_graph_id"] is None          # never the sentinel
     assert ha._resolve_record_tenant(org) is None   # ⇒ counted `no_tenant`
+
+
+def test_the_sentinel_is_refused_only_on_the_default_graph_id_field():
+    """The premise of #10046's RECORDED refusal of indicator 2, pinned.
+
+    Indicator 2 — make `record_tenant_for_graph({"kind": "default"})` return the
+    org's default tenant — is refused on #10046, and the reason lives in ANOTHER
+    module's behaviour: a `kind='default'` plan row carries
+    `graph_id="default"`, the SENTINEL `supabase_control.graph_metadata` derives
+    (not a `public.graphs.id`), while `record_tenant_for` answers a PRESENT
+    `graph_id` with any non-empty string. An install there would therefore hand
+    the record an FK-invalid tenant and turn an attributable `no_tenant`
+    DECLINE into an unattributable `write_failed` — which is what
+    `mcp_auth.record_tenant_for_graph`'s docstring now states as its reason.
+
+    ⚠️ The ASYMMETRY asserted below is the HAZARD, not a behaviour anyone wants:
+    the sentinel is refused on the `default_graph_id` field and accepted on the
+    `graph_id` field. It is pinned so that the recorded reason cannot silently
+    stop being true — `mcp_auth`'s docstring would otherwise describe a seam
+    somebody had already tightened, with nothing red to say so. Tightening the
+    seam is welcome: when it happens this leg reds ON PURPOSE, and #10046's
+    refusal must be re-stated with the sharper reason (with the hazard gone, an
+    install reads a field that names no tenant at all, and the only install that
+    COULD name one would read `plan["stable_id"]` — the new resolution path that
+    #10046's review round declined).
+    """
+    from tortoise.record_writer import record_tenant_for
+
+    # Refused where it is known to be a sentinel: the org-list payload's field.
+    assert record_tenant_for(
+        {"org_id": SESSION_ORG, "graph_id": None, "default_graph_id": "default"},
+        control_plane_ids=True) is None
+
+    # …and ACCEPTED where it is not checked: a present `graph_id`. This is the
+    # FK-invalid tenant the refusal rests on. If this assertion ever reds, read
+    # the docstring above before "fixing" it.
+    assert record_tenant_for(
+        {"org_id": SESSION_ORG, "graph_id": "default"},
+        control_plane_ids=True) == (SESSION_ORG, "default")

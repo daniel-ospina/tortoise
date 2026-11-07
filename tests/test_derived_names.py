@@ -324,6 +324,31 @@ _ROUTED_FROM_URI_SITES: dict[str, list[str]] = {
         r"from_uri\(_probe_uri\)",
         r"from_uri\(\s*uri\s*\)",
     ],
+    # #8447 C3: the ingest door's live arms. EVERY `from_uri(uri)` site is the
+    # file's OWN handle on a per-test graph — either a "did the door write it?"
+    # read-back (`_resolution_points` in the resolution-Point control, and the
+    # sweep teardown in `TestTheSweepReportsOutstandingWork`) or the SEED an arm
+    # needs before the door can be asked anything
+    # (`test_an_already_extracted_document_answers_the_named_skip`, which creates
+    # the already-extracted `:Source` the `--upgrade` arm expects to skip). The
+    # seed is the opposite of a read-back, so the gloss names both shapes rather
+    # than calling every site a read-back. ⛔ SYMBOLS, not line numbers: the
+    # coordinates this comment carried drifted twice (round 12 measured them all
+    # +21), and nothing re-measures a comment in a different file.
+    #
+    # Every `uri` those sites receive comes from `_fresh_graph(...)`, which swaps
+    # the env URI's graph path for a per-run `test_8447_<stem>_<hex>`
+    # (`_graph_uri`, the same shape as `test_ingest.py::_live_uri`). SAFETY IS NOT
+    # "the handle is declared": `--upgrade-all` reads EVERY pending Source in the
+    # graph, and the sweep arm ends with `MATCH (s:Source {url: $id}) DETACH DELETE
+    # s` where `$id` is a SOURCE BASENAME, so on the shared `tortoise_test_matrix`
+    # path that delete could reach a peer file's `Source {url: "note.md"}`. The
+    # per-run graph is what makes both the sweep's verdict and the delete local to
+    # this test. The regex is deliberately narrow to the one shape that exists
+    # today so a second one reds instead — which is why round 8's seeding handle
+    # (the already-extracted arm) names its variable `uri` rather than widening
+    # this pattern.
+    "test_8447_c3_ingest_door.py": [r"from_uri\(\s*uri\s*\)"],
     # #10135 review (post-rebase): `test_5140_d10_relabel_migration.py` is
     # deliberately ABSENT here. Main's #10164 gave both of that file's
     # `from_uri(` sites an explicit `graph_name=` (`:50` the module probe,
@@ -583,6 +608,10 @@ _ENV_URI_PIN_FILES = (
     # main's #10164 gave its `from_uri(` sites an explicit `graph_name=`, so
     # the loose-net hazard this tuple guards (a declared, un-named site) no
     # longer exists in that file.
+    # #8447 C3: declares the same `from_uri(uri)` shape — every `uri` there is
+    # `_fresh_graph()` -> a per-test `test_8447_*` graph, so the invariant below
+    # (no raw-env `uri =` assignment) is what keeps that true.
+    "test_8447_c3_ingest_door.py",
 )
 
 
@@ -606,6 +635,24 @@ def test_env_uri_assignment_uses_live_uri_helper(fname):
 
 
 # ── raw falkordb-client census (cycle-6 P1-3 / cycle-8 P2-2) ────────────────
+
+
+def _journal_calls(code: str) -> int:
+    """How many CALLS to `_journal_append(` the masked block contains.
+
+    A `def _journal_append(...)` is a local SHADOW, not the record: it defines
+    the symbol and journals nothing, so counting it as a call lets a block go
+    clean while the graph stays UNOWNED (measured: a block whose only occurrence
+    was `def _journal_append(n): pass` read CLEAN). Named `_journal_calls` rather
+    than inlined so the exclusion is testable on its own.
+    """
+    calls = 0
+    for m in re.finditer(r"_journal_append\(", code):
+        line_start = code.rfind("\n", 0, m.start()) + 1
+        if re.fullmatch(r"\s*(?:async\s+)?def\s+", code[line_start:m.start()]):
+            continue  # a definition of the symbol, not a use of it
+        calls += 1
+    return calls
 
 
 def _raw_detach_violations(root=None):
@@ -635,7 +682,18 @@ def _raw_detach_violations(root=None):
             block = _enclosing_block(src, m.start())
             if not block or "DETACH DELETE" not in block:
                 continue
-            if "os.urandom" not in block or "_journal_append" not in block:
+            # `DETACH DELETE` and the uniqueness half are matched on the RAW
+            # block: both legitimately live inside string MATERIAL (`os.urandom`
+            # is normally inside the f-string that BUILDS the name, so masking
+            # would erase it). The OWNERSHIP half must be a CALL — matched on the
+            # MASKED block and with its paren, so a comment that NAMES it, a bare
+            # IMPORT of it, or a local `def` SHADOW of it cannot satisfy the
+            # guard. Same defect #10170 fixed for `from_uri` (`_sites_in_file`
+            # masks before matching), still open here — each shape below was
+            # measured GREEN before the corresponding tightening (#11182):
+            # comment-only, import-with-no-call, and `def _journal_append`.
+            code = _mask_strings_and_comments(block)
+            if "os.urandom" not in block or not _journal_calls(code):
                 violations.append(
                     f"{f.name}: raw FalkorDB( client + bulk DETACH at "
                     f"L{src.count(chr(10), 0, m.start()) + 1} without a "
@@ -662,6 +720,68 @@ def test_raw_falkordb_client_detach_uses_per_test_unique_graph():
     """
     violations = _raw_detach_violations()
     assert not violations, "\n".join(violations)
+
+
+def test_a_comment_NAMING_the_journal_does_not_satisfy_the_raw_detach_census(tmp_path):
+    """#11182: the guard is satisfied by PROSE (or by a bare IMPORT) otherwise.
+
+    Measured on the real site: with the fix's comment in place, deleting both
+    `from tests._embedded import _journal_append` AND the
+    `_journal_append(...)` call left the census GREEN — the check matched the
+    raw block text, and the comment names the symbol. After masking comments but
+    matching the bare token, an import with NO call was still GREEN (a fresh
+    review measured it). All three arms are pinned here, so neither fix can go
+    vacuous by only satisfying the shape it was written against.
+    """
+    prose_only = (
+        "def test_unowned():"
+        "\n    import os"
+        "\n    from falkordb import FalkorDB"
+        "\n    name = f\"g_{os.urandom(4).hex()}\""
+        "\n    # the record: _journal_append(name) is what a peer sweep needs"
+        "\n    c = FalkorDB(host=\"h\")"
+        "\n    c.query(\"MATCH (n) DETACH DELETE n\")"
+        "\n"
+    )
+    site = tmp_path / "test_prose_only.py"
+    site.write_text(prose_only)
+    assert _raw_detach_violations(root=tmp_path), \
+        "a comment naming _journal_append satisfied the guard"
+
+    # A bare IMPORT is not the record: the sweep reads the JOURNAL, so an
+    # imported-but-never-called symbol leaves the graph UNOWNED.
+    site.write_text(
+        prose_only.replace(
+            "\n    c = FalkorDB",
+            "\n    from tests._embedded import _journal_append"
+            "\n    c = FalkorDB",
+        )
+    )
+    assert _raw_detach_violations(root=tmp_path), \
+        "an IMPORT of _journal_append was accepted as the record"
+
+    site.write_text(
+        prose_only.replace(
+            "\n    c = FalkorDB",
+            "\n    _journal_append(name)"
+            "\n    c = FalkorDB",
+        )
+    )
+    assert not _raw_detach_violations(root=tmp_path), \
+        "the same site WITH the call must be clean"
+
+    # A local `def _journal_append` SHADOWS the symbol and journals nothing. It
+    # was measured CLEAN under the bare `_journal_append(` token.
+    site.write_text(
+        prose_only.replace(
+            "\n    c = FalkorDB",
+            "\n    def _journal_append(name):"
+            "\n        pass"
+            "\n    c = FalkorDB",
+        )
+    )
+    assert _raw_detach_violations(root=tmp_path), \
+        "a local DEF of _journal_append was accepted as the record"
 
 
 def _block_end(masked: str, start: int, indent: int) -> int:

@@ -93,19 +93,31 @@ def main(argv: list[str] | None = None) -> int:
     repo = Path(args.repo).resolve()
     node = args.node or os.environ.get("AGENT_INFRA_NODE") or "node"
 
-    # 1. Materialise. Its stderr already explains a refusal, so pass its exit through as a
-    #    FACT to weigh after the checker runs — do not turn it into an early return, or a
-    #    broken setup would skip the check entirely (the "no result" red is the defect this
-    #    wrapper exists to remove).
-    link_rc = link_main(
-        ["--quiet", "--repo", str(repo)] + (["--infra", args.infra] if args.infra else [])
-    )
-
+    # 0. Resolve the checkout BEFORE anything is written.
+    #
+    #    ⛔ A refused ARGUMENT is not a materialisation fact to weigh: nothing may be written by
+    #    an invocation whose own arguments are rejected. This was live until here — the flag was
+    #    forwarded on a TRUTHINESS test, so `--infra ""` was DROPPED, `link_main` took
+    #    `$AGENT_INFRA_PATH` instead, and it MATERIALISED `repo/scripts` before this wrapper
+    #    reported the empty value as a config error. Measured on the pre-fix tree: exit 2, and
+    #    `repo/scripts -> <infra>/scripts` sitting in a repo the call was refused for.
+    #    (Rescued from #10250's stranded tail, commit 39a0c897d2, which passed the flag through
+    #    with `is not None`; resolution is hoisted here so the caller error is reported ONCE, by
+    #    the same function that would have raised it later, instead of twice.)
     try:
         infra = resolve_infra(args.infra)
     except ConfigError as exc:
         print(f"⛔ {exc}", file=sys.stderr)
         return 2
+
+    # 1. Materialise. Its stderr already explains a refusal, so pass its exit through as a
+    #    FACT to weigh after the checker runs — do not turn it into an early return, or a
+    #    broken setup would skip the check entirely (the "no result" red is the defect this
+    #    wrapper exists to remove).
+    link_rc = link_main(
+        ["--quiet", "--repo", str(repo)]
+        + (["--infra", args.infra] if args.infra is not None else [])
+    )
 
     command = [node, str(infra / CHECKER), *CHECK_ARGS]
     try:

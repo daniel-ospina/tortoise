@@ -20,19 +20,41 @@ first and 9% on the second, and the second is the honest denominator for
 The denominator is ``_COUNT_POINTS_TOTAL`` — every non-operator ``Point`` — and
 the v2 ingest also writes episodic turn points and session-transcript chunks
 (``ingest_v2.py:611-618``, ``:637-643``), which are not claims and can never
-carry EP state, while the numerator can only ever be claims. A claim-only
-denominator does not exist as a cell, so the key is published as
-``point_coverage`` — a name that asserts only what was measured. (It shipped
-as ``claim_coverage`` until that review: a machine-readable key asserting a
-denominator the bundle's own README denies.)
+carry EP state, while the numerator can only ever be claims. The key is
+published as ``point_coverage`` — a name that asserts only what was measured.
+(It shipped as ``claim_coverage`` until that review: a machine-readable key
+asserting a denominator the bundle's own README denies.)
+
+**That floor is no longer the best available denominator, and this probe
+publishes both** (#10493 residual 1 — closed here). The belief-eligible
+population now exists as a cell: ``points_substrate`` (the turn/chunk points
+the ingest writes) and ``belief_eligible_total`` / ``_with_ep`` /
+``_unmeasured`` split it out of the denominator, with ``belief_eligible_ratio``
+the coverage over the population that can actually CARRY a belief. Every one
+of those is read off the posture summary this module already uses — none is
+re-derived here. They are published BESIDE ``point_coverage``, never instead
+of it: the point-level floor and the belief-eligible ratio answer different
+questions, and swapping one for the other would hide the substrate that makes
+the floor a floor.
+
+A ratio over a population nobody read is ``None``, never ``0`` — the same
+UNKNOWN rule the summed cells follow, enforced by ``measurement_posture``'s
+``belief_eligible_ratio``. Every cell this probe takes from the
+belief-eligible tuple therefore carries its ``<key>_unread`` companion.
 
 The per-question block is published only when the input CARRIES the manifests
 (``outcome.belief_activation``): an input with none reports
 ``per_question: null`` plus ``per_question_source`` saying so, never rows of
 nulls — a null ``ep_ran`` must not be readable as a measured one. A PARTIAL
 population publishes its rows AND ``per_question_unread``, the count that says
-how many questions inside them were never measured (the same disclosure
-``<key>_unread`` makes for the summed cells).
+how many questions inside them were never measured. That count is the same
+disclosure ``<key>_unread`` makes, but only for the four pre-#10493 census sums:
+it reads ``measurement_posture._UNKNOWN_PER_MANIFEST_KEYS``, while the
+belief-eligible sums use the separate ``_UNKNOWN_PER_MANIFEST_KEYS_10137`` tuple
+#10493 keeps apart on purpose (folding them in would retroactively mark a
+pre-#10137 checkpoint's measured census as unread). The two disclosures can
+therefore disagree, and a pre-#10493 artifact does: ``per_question_unread: 0``
+beside ``points_substrate_unread: 24``.
 """
 from __future__ import annotations
 
@@ -119,7 +141,8 @@ def cells(path: str) -> dict:
     else:                                                     # a checkpoint
         # ``requested`` is the caller's resolved ARM, never inferred from the
         # outcomes — but a checkpoint carries it in its fingerprint
-        # (``activate_beliefs``, run.py:1742), so read it when it is there
+        # (``activate_beliefs`` in ``run.py``'s checkpoint fingerprint), so read
+        # it when it is there
         # rather than asserting True: a checkpoint written under a different
         # arm must not be reported as an armed run.
         fp = doc.get("fingerprint") or {}
@@ -130,7 +153,7 @@ def cells(path: str) -> dict:
         requested = bool(fp.get("activate_beliefs"))
         summary = mp.summarize_belief_activation(outcomes, requested=requested)
         source = "checkpoint"
-        # The checkpoint's own failure list (``run.py:2797`` writes
+        # The checkpoint's own failure list (``run.py``'s checkpoint write of
         # ``"failures": failures`` at the top level). It is read HERE and not
         # left to the reader (#10137 review, P2): ``summarize_belief_activation``
         # only ever sees ``outcomes``, so a checkpoint from a CRASHED run — the
@@ -141,7 +164,8 @@ def cells(path: str) -> dict:
         # aggregate); ``questions_in_run`` below is what makes the difference
         # between the two READABLE.
         failures = [f for f in (doc.get("failures") or []) if isinstance(f, dict)]
-        # The checkpoint's list IS the authority here (``run.py:2797``); it is
+        # The checkpoint's list IS the authority here (``run.py``'s checkpoint
+        # ``"failures"`` list); it is
         # never short of the truth, so no separate count is carried.
         reported_failed = None
 
@@ -152,7 +176,8 @@ def cells(path: str) -> dict:
     # completed by one worker and failed by another lands in BOTH lists
     # (``report.py:1407-1410``), and ``_merge_checkpoint`` unions the two
     # independently, tombstones being present only when the writer knew it was
-    # a ``--retry-failed`` re-attempt (``run.py:2699-2729``). Summing the
+    # a ``--retry-failed`` re-attempt (``run.py``'s ``_merge_checkpoint``,
+    # which tombstones ``remove_failures``). Summing the
     # lengths published a 2-question population as a 3-question run, and the
     # gap the README calls "the disclosure" hid it — the gap was
     # ``questions_failed`` BY CONSTRUCTION.
@@ -182,23 +207,25 @@ def cells(path: str) -> dict:
     questions_failed = len(failed_ids - outcome_ids) + unlisted
     # DERIVED from the two published figures — never a second, independent count
     # of "how many questions". ``summary["questions"]`` is the runner's own
-    # ``len(rows)`` (``measurement_posture.py:353``), i.e. ROWS, while the id sets
-    # above are distinct non-empty ids; an input with a duplicate or absent
-    # ``question_id`` therefore made the two disagree and could publish a total
-    # SMALLER than the ratio's own denominator (#10137 review, P3 — reachable
-    # from hand-built/foreign JSON only: ``run.py``'s loader builds both lists
-    # dict-by-qid, and the vendored ``report.py`` grades per-qid precisely
-    # because duplicate outcome entries are a documented shape there, ``:1407-
-    # 1412``). Adding the ablation to the denominator instead makes the
-    # invariant ``questions_in_run - questions == questions_failed`` hold BY
-    # CONSTRUCTION for every input, which is what the disclosure claims.
+    # ``len(rows)`` (the ``questions`` cell of
+    # ``measurement_posture.summarize_belief_activation``), i.e. ROWS, while the
+    # id sets above are distinct non-empty ids; an input with a duplicate or
+    # absent ``question_id`` therefore made the two disagree and could publish a
+    # total SMALLER than the ratio's own denominator (#10137 review, P3 —
+    # reachable from hand-built/foreign JSON only: ``run.py``'s loader builds
+    # both lists dict-by-qid, and the vendored ``report.py`` grades per-qid
+    # precisely because duplicate outcome entries are a documented shape there,
+    # ``report.py:1407-1412``). Adding the ablation to the denominator instead
+    # makes the invariant ``questions_in_run - questions == questions_failed``
+    # hold BY CONSTRUCTION for every input, which is what the disclosure claims.
     n = (summary.get("questions") if isinstance(summary.get("questions"), int)
          else len(outcome_ids)) + questions_failed
 
     # NOT ``or 0``: an ABSENT cell is UNKNOWN, and coercing it would publish a
     # fabricated "measured zero" — the rule ``measurement_posture`` states for
-    # the summed cells (:387-390) applies to the headline pair too, so a cell a
-    # different code version never emitted reads as unread, never as zero.
+    # the summed cells (the ``<key>_unread`` sums in
+    # ``summarize_belief_activation``) applies to the headline pair too, so a
+    # cell a different code version never emitted reads as unread, never as zero.
     q = summary.get("questions")
     with_ep = summary.get("questions_with_ep")
     covered = summary.get("points_with_ep")
@@ -249,6 +276,23 @@ def cells(path: str) -> dict:
             "points_off_neutral": (o.get("belief_activation") or {}).get("points_off_neutral"),
             "points_moved_off_neutral":
                 (o.get("belief_activation") or {}).get("points_moved_off_neutral"),
+            # #10493: the belief-eligible population, carried PER ROW as well as
+            # in ``cells``. Without these the aggregate names a denominator its
+            # own rows cannot re-derive, so
+            # ``test_committed_census_rederives_its_own_aggregate`` would red on
+            # a CORRECT post-#10493 artifact — the false block that invites
+            # hand-editing the cell the pin exists to protect (review cycle 1,
+            # P1). Absent in a pre-#10493 run, which is why the committed rows
+            # read ``None`` and their ``_unread`` is the row count.
+            "points_substrate":
+                (o.get("belief_activation") or {}).get("points_substrate"),
+            "belief_eligible_total":
+                (o.get("belief_activation") or {}).get("belief_eligible_total"),
+            "belief_eligible_with_ep":
+                (o.get("belief_activation") or {}).get("belief_eligible_with_ep"),
+            "belief_eligible_unmeasured":
+                (o.get("belief_activation") or {}).get(
+                    "belief_eligible_unmeasured"),
             "ep_ran": (o.get("belief_activation") or {}).get("ep_ran"),
             "no_op_reason": (o.get("belief_activation") or {}).get("no_op_reason"),
             # A fail-open manifest's own diagnosis. Without it the row is
@@ -293,12 +337,31 @@ def cells(path: str) -> dict:
             # ...and the SAME rule for the two contribution sums (#10137
             # review, P3): both are partial sums when their bucket census is
             # UNKNOWN, and ``measurement_posture`` publishes one ``_unread``
-            # companion per key (:530-543). Without them a partial 185 is
+            # companion per key (the ``<key>_unread`` sums in
+            # ``summarize_belief_activation``). Without them a partial 185 is
             # indistinguishable from a complete one — and 185 is the headline
             # "0.67% moved" the artifact rests on.
             "points_off_neutral", "points_off_neutral_unread",
             "points_moved_off_neutral", "points_moved_off_neutral_unread",
-            "ep_ran", "failed")},
+            "ep_ran", "failed",
+            # #10493 residual 1 — the BELIEF-ELIGIBLE denominator. The point
+            # pair above counts the ingest's episodic substrate as if it were
+            # belief, so its ratio is a floor of UNBOUNDED dilution and cannot
+            # answer "did the belief layer cover the claims". ``ep_activation``
+            # emits these per manifest and ``measurement_posture`` sums them
+            # with the same UNKNOWN-not-0 rule (in its OWN tuple, so a
+            # pre-#10493 checkpoint is not retroactively marked unread); this
+            # allow-list was the one place they were dropped, which is why the
+            # published artifact could not carry the corrected denominator at
+            # all. ``belief_eligible_ratio`` is the posture summary's own gated
+            # computation — ``None`` whenever either side is unread — so it is
+            # published, never recomputed, here. Appended after ``failed`` so
+            # the committed artifact's key order is extended, not rearranged.
+            "points_substrate", "points_substrate_unread",
+            "belief_eligible_total", "belief_eligible_total_unread",
+            "belief_eligible_with_ep", "belief_eligible_with_ep_unread",
+            "belief_eligible_unmeasured", "belief_eligible_unmeasured_unread",
+            "belief_eligible_ratio")},
         "inert_by_reason": summary.get("inert_by_reason"),
         "inert_questions": summary.get("inert_questions"),
         "by_question_type": summary.get("by_question_type"),
@@ -312,7 +375,8 @@ def cells(path: str) -> dict:
         #
         # FAIL CLOSED (#10137 review, P2). ``o["belief_activation"]`` is only
         # carried by outcomes whose shape included it — the checkpoint write
-        # always does (``run.py:5115-5116``), the report's projection does
+        # always does (``run.py``'s checkpoint outcome, which carries
+        # ``belief_activation``), the report's projection does
         # since this review. On an input that carries NO manifest, emitting one
         # row per outcome would publish 24 rows of nulls under an aggregate
         # that still looks right: a null ``ep_ran`` /

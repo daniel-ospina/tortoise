@@ -6736,6 +6736,78 @@ def test_mcp_capture_missing_max_sessions_fails_closed(tmp_path, monkeypatch):
     assert "max_sessions" in str(result.get("error", "")), result
 
 
+def test_mcp_capture_bridge_carries_the_allowance_keys(tmp_path, monkeypatch):
+    """#9567 D11/D12: the capture bridge must carry the RULED-dimension allowance
+    keys, or the token dimension reads as UNLIMITED on the MCP lane while REST
+    refuses — the fail-open class this carry exists to close.
+
+    Mutation this REDs: delete the `for _key in ALLOWANCE_KEYS.values()` loop in
+    `tortoise_session_capture`, and a configured `max_extraction_tokens` never
+    reaches `_check_org_limit(org, "sessions")`, so an over-allowance capture is
+    served instead of refused.
+    """
+    from tortoise.mcp_auth import _current_org_id, _current_org_limits
+    from tortoise.mcp_server import tortoise_session_capture
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    with patched_tortoise_sdk(str(tmp_path / "mcp-allowance-body.db")):
+        _provision_team("team-9567-allowance")
+        tok_t = _current_org_id.set("team-9567-allowance")
+        # A synthetic allowance (D11/D12's "an allowance configured"): zero
+        # tokens, so the ledger's own zero reading is AT the allowance.
+        tok_l = _current_org_limits.set(
+            {"org_id": "team-9567-allowance", "tier": "free",
+             "max_points": 100000, "max_sessions": None,
+             "max_extraction_tokens": 0})
+        try:
+            result = tortoise_session_capture(
+                conversation=_CONV, harness="pi", session_id="s-allowance")
+        finally:
+            _current_org_id.reset(tok_t)
+            _current_org_limits.reset(tok_l)
+    # The refusal must NAME the ruled dimension — that is the proof the key
+    # crossed the bridge (a dropped key would serve the capture).
+    assert "capture_extraction" in str(result.get("error", "")), result
+
+
+def test_mcp_capture_bridge_refuses_when_the_allowance_gate_cannot_import(
+        tmp_path, monkeypatch):
+    """#9567 D12: a capture whose allowance gate cannot be LOADED is REFUSED in
+    the documented fail-closed shape — never served, and never an unmapped
+    ImportError/500 escaping the tool.
+
+    The gate's drift check is deliberately loud AT IMPORT (a renamed/removed
+    declared dimension raises ``_dimension()``), so the import is the one place
+    that loudness can reach a caller; `quota.enforce_org_limit` already wraps the
+    SAME import to keep it inside ``QuotaCheckError`` (#4051). The MCP bridge
+    used a bare import, which escaped as an exception out of the tool.
+
+    Mutation this REDs: drop the ``try/except`` around the bridge's
+    ``from tortoise.allowance_gate import …`` and the simulated import failure
+    propagates out of ``tortoise_session_capture`` instead of the refusal dict.
+    """
+    import sys
+
+    from tortoise.mcp_auth import _current_org_id, _current_org_limits
+    from tortoise.mcp_server import tortoise_session_capture
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    with patched_tortoise_sdk(str(tmp_path / "mcp-gate-import.db")):
+        _provision_team("team-9567-gateimport")
+        tok_t = _current_org_id.set("team-9567-gateimport")
+        tok_l = _current_org_limits.set(
+            {"org_id": "team-9567-gateimport", "tier": "free",
+             "max_points": 100000, "max_sessions": None})
+        # A failed module load, exactly as an import-time drift raises it.
+        monkeypatch.setitem(sys.modules, "tortoise.allowance_gate", None)
+        try:
+            result = tortoise_session_capture(
+                conversation=_CONV, harness="pi", session_id="s-gateimport")
+        finally:
+            _current_org_id.reset(tok_t)
+            _current_org_limits.reset(tok_l)
+    assert result.get("status") == 500, result
+    assert "capture allowance gate unavailable" in str(result.get("error", "")), result
+
+
 def test_session_capture_tool_stdio_honest_error(tmp_path, monkeypatch):
     """Task 13: stdio (no team context / selfhost) → honest 'requires hosted
     mode' error — no local fallback that bypasses the gates."""
@@ -6827,15 +6899,20 @@ def test_session_capture_tool_honours_capture_extract_off_4288(tmp_path, monkeyp
 
 
 def test_onboarding_state_tool_reads_capture_extract_4288(tmp_path, monkeypatch):
-    """#4288, READ half: the setting is ALREADY readable on the agent-facing
-    surface — ``tortoise_onboarding_state`` (the ``onboarding`` family, bound to
-    GET /v1/onboarding/state) returns ``capture_extract`` for the org.
+    """#4288, READ half: the setting is readable on an AGENT surface, but not
+    through a dedicated read tool any more.
 
-    This pins the half of #4288's outcome that needs NO frozen-baseline re-cut:
-    an agent can already discover whether this org's captures will be extracted,
-    before it decides how to report a capture's outcome. The WRITE half (a
-    parameter on the capture tool, or a state-PATCH tool) is the owner-gated
-    remainder tracked on #4288.
+    ``tortoise_onboarding_state`` was the reader this test was written against;
+    it left the MCP surface in #4282 Phase 3.2. The SURVIVING reader is
+    ``tortoise_manage_sources(action="list")``, whose ``onboarding`` key returns
+    this projection verbatim — and note it is admin-tier, so a ``graphs:read``
+    key is refused and must use ``GET /v1/onboarding/state`` instead. The test
+    below still drives the HANDLER directly (its body is unchanged and still
+    shipped), which is what makes the polarity claim measurable; it no longer
+    proves the MCP surface advertises a dedicated read.
+
+    The WRITE half (a parameter on the capture tool, or a state-PATCH tool) is
+    the owner-gated remainder tracked on #4288.
 
     Polarity (#4258): an older stored state with the key ABSENT must read ON,
     never OFF — so the first read happens on a team whose stored state is ``{}``.

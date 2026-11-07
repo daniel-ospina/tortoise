@@ -38,6 +38,17 @@ SESSION_START_HOOK = (REPO_ROOT / "tortoise" / "cursor-hooks"
                       / "session-start.sh")
 VERSION_MARKER = "# tortoise-hook-version: 5"
 
+#: How long a DETACHED worker may take to reach its own completion event.
+#:
+#: Identical in shape (and for the same measured reason) to
+#: `tests/test_codex_capture_hook.py::_WORKER_DEADLINE_S`, whose note carries the
+#: full provenance: the worker is a `nohup … &` grandchild, so its arrival time
+#: is set by the RUNNER, not by the hook. This seam did not red on run
+#: 42006117288, but it carries the SAME 10-12 s spawn-latency bounds, so leaving
+#: it behind would just move the next false red into this file. The
+#: `elapsed < 2.5` mutant detector is NOT widened.
+_WORKER_DEADLINE_S = 60.0
+
 #: The machine's REAL home, resolved from the password database — NOT from
 #: ``$HOME``, which tests monkeypatch.  ``~/.cursor`` under this path is the
 #: live Cursor store; no test may read or write it.
@@ -94,7 +105,7 @@ def _install_fake_nohup(bindir: Path) -> Path:
     return log
 
 
-def _wait_for_worker(nohup_log: Path, timeout: float = 12) -> None:
+def _wait_for_worker(nohup_log: Path, timeout: float = _WORKER_DEADLINE_S) -> None:
     """Bounded wait for the detached worker to EXIT.
 
     ``NOHUP-DONE`` (written by the fake `nohup` shim once the real one
@@ -151,7 +162,7 @@ def _run_hook(stdin_json: str, *, home: Path, bindir: Path, timeout: float = 15,
     return proc, time.monotonic() - start
 
 
-def _wait_for_done(log: Path, timeout: float = 12) -> None:
+def _wait_for_done(log: Path, timeout: float = _WORKER_DEADLINE_S) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if log.exists() and "DONE" in log.read_text(encoding="utf-8"):
@@ -713,7 +724,7 @@ def test_a_failed_capture_is_recorded_as_evidence_not_swallowed(tmp_path):
     # partial file and raise JSONDecodeError — the same "assert on the artifact
     # before it is complete" class this poll exists to close.
     crumb = home / ".tortoise" / "capture-errors" / "cursor.json"
-    deadline = time.monotonic() + 10
+    deadline = time.monotonic() + _WORKER_DEADLINE_S
     record = None
     while time.monotonic() < deadline:
         try:

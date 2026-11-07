@@ -92,9 +92,50 @@ class _FakeGraph:
     """Records every Cypher and answers by matching the (normalized) query."""
 
     def __init__(self, draft_ids, op_map, total, with_ep, operators=0,
-                 factor_edges=None, ep_rows=None):
+                 factor_edges=None, ep_rows=None, graph_operators=None,
+                 cas_lost=(), op_endpoints=None):
         self.draft_ids = list(draft_ids)
         self.op_map = dict(op_map)
+        # #10137: draft operators the GRAPH-WIDE sweep finds. There is only ONE
+        # real candidate query now (the per-chunk incident query was deleted), so
+        # this list is not a union of anything — ``op_map`` survives only as the
+        # fixture's convenient way to express "these operators over these ids".
+        # Defaults to ``op_map``'s own operators so the ordinary case keeps that
+        # shape; pass an explicit id (or ``[]``) to model an operator whose
+        # endpoints were all already live, which is the shape the fix exists for.
+        self.graph_operators = (
+            sorted({o for oids in self.op_map.values() for o in oids})
+            if graph_operators is None else list(graph_operators))
+        # #10137: the CAS-lost arm — a concurrent writer already flipped these.
+        self.cas_lost = set(cas_lost)
+        # #10137: operator -> ``(endpoint id, status, edge type)``, all LIVE.
+        # The fourth column the real read returns (``labels(x)``) is HARD-CODED
+        # to ``["Point"]`` by the stub, so the stub CANNOT model a non-:Point
+        # endpoint and no label-filter coverage can be written here — that
+        # behaviour is pinned against a real graph by
+        # ``test_on_input_marks_only_factor_point_endpoints``. An operator
+        # reachable ONLY through the graph-wide sweep gets a synthetic live
+        # endpoint, which is exactly the shape it models: endpoints that were
+        # live before the operator existed.
+        self.op_endpoints: dict[str, list[tuple[str, str | None, str]]] = {}
+        for cid, oids in self.op_map.items():
+            for oid in oids:
+                self.op_endpoints.setdefault(oid, []).append((cid, "live", "IMPL"))
+        for oid in self.graph_operators:
+            self.op_endpoints.setdefault(
+                oid, [(f"{oid}-src", "live", "IMPL")])
+        # #10137: an explicit override is the ONLY way to model a non-live
+        # endpoint — the default map is all-live on purpose, so a test that
+        # wants the gate to BLOCK passes ``op_endpoints={"op1": [("c1",
+        # "draft", "IMPL")]}`` (or "retracted"/"outdated"/…) and gets it — and
+        # the third slot is the edge type, so a non-``IMPL``/``NAND`` endpoint
+        # (``hasPart``, ``mitigated_by``) can be modelled: it GATES like any
+        # other, it just is not a factor input. Without this
+        # hook the comment below would promise an affordance that does not
+        # exist, and a draft-endpoint falsifier written against it would raise
+        # TypeError instead of going red.
+        if op_endpoints is not None:
+            self.op_endpoints.update(dict(op_endpoints))
         self.total = total
         self.with_ep = with_ep
         # #10137: graph operator census + direct factor-edge census (the two
@@ -114,13 +155,27 @@ class _FakeGraph:
         if "SET n.status = 'live'" in c:
             return _Result([])
         if "SET o.status = 'live'" in c:
-            return _Result([])
+            # #10137: the promotion is CAS-guarded (``WHERE o.status = 'draft'``
+            # ... ``RETURN o.id``), so a WON flip must return the id. An empty
+            # result set means a LOST race and the caller must not emit
+            # ``OperatorPromoted`` — ``cas_lost`` is how a test says so.
+            oid = params.get("oid")
+            return _Result([] if oid in self.cas_lost else [[oid]])
+        if "RETURN x.id, x.status, type(r), labels(x)" in c:
+            # #10137: the R16 endpoint read — the ENGINE's read (unlabeled, all
+            # outgoing edges), returning ``(id, status, rel_type, labels)`` with
+            # the label column stubbed to ``["Point"]`` (see ``op_endpoints``). The DEFAULT
+            # map (``op_endpoints`` built in ``__init__``) is all-live IMPL,
+            # modelling the ordinary graph; a test that needs the gate to block
+            # passes ``op_endpoints=`` explicitly. There is no other hook.
+            oid = params.get("oid")
+            return _Result([[eid, st, rel, ["Point"]]
+                            for eid, st, rel in self.op_endpoints.get(oid, [])])
         if "RETURN DISTINCT o.id" in c:
-            out = []
-            for cid in params.get("ids", []):
-                for oid in self.op_map.get(cid, []):
-                    out.append([oid])
-            return _Result(out)
+            # #10137: the ONE draft-operator query — the graph-wide sweep, which
+            # takes no params. (The per-chunk incident query it replaced is
+            # deleted, so there is no parameterised sibling to model.)
+            return _Result([[oid] for oid in self.graph_operators])
         if "RETURN count(o)" in c:            # #10137 COUNT_OPERATORS
             return _Result([[self.operators]])
         if "RETURN count(r)" in c:            # #10137 COUNT_FACTOR_EDGES
@@ -170,12 +225,16 @@ class _FakeSDK:
 
 
 def _make(draft_ids, op_map=None, total=None, with_ep=0, namespace="eval-ns",
-          operators=0, factor_edges=None, ep_rows=None):
+          operators=0, factor_edges=None, ep_rows=None, graph_operators=None,
+          cas_lost=(), op_endpoints=None):
     graph = _FakeGraph(draft_ids, op_map or {},
                        total=len(draft_ids) if total is None else total,
                        with_ep=with_ep, operators=operators,
                        factor_edges=factor_edges,
-                       ep_rows=ep_rows)
+                       ep_rows=ep_rows,
+                       graph_operators=graph_operators,
+                       cas_lost=cas_lost,
+                       op_endpoints=op_endpoints)
     return _FakeSDK(graph, namespace=namespace), graph
 
 
@@ -216,13 +275,93 @@ def test_activate_batches_promotion_queries():
     assert len(graph.matching("SET n.status = 'live'")) == 3
 
 
-def test_activate_operator_deduped_across_batches():
+def test_activate_flips_one_operator_exactly_once():
+    """#10137: operator promotion is ONE graph-wide sweep, not a per-chunk loop
+    (``batch_size`` governs POINTS only). One operator reached by three claims
+    must still produce one flip, one ``OperatorPromoted`` and one count.
+
+    This used to be named for a cross-batch operator dedupe, which no longer
+    exists — the old per-chunk incident query was deleted because every
+    explicit-draft operator is now selected by a single unconditional query.
+    """
     sdk, graph = _make(["c1", "c2", "c3"],
                        op_map={"c1": ["op1"], "c2": ["op1"], "c3": ["op1"]})
     manifest = epa.activate_beliefs(sdk, batch_size=1)
-    # op1 is incident to all three chunks but goes live exactly once
     assert len(graph.matching("SET o.status = 'live'")) == 1
+    assert [e[0] for e in sdk.events].count("OperatorPromoted") == 1
     assert manifest["operators_promoted"] == 1
+
+
+def test_activate_promotes_an_operator_the_incident_query_cannot_reach():
+    """#10137: the GRAPH-WIDE sweep is load-bearing, not a belt-and-braces second
+    opinion. ``op_map`` models the incident set (operators wired to a point THIS
+    pass promoted); an operator reachable only through the sweep is the shape
+    the fix exists for — a draft operator whose endpoints were already live.
+
+    MEASURED falsification map — with the sweep arm dropped from
+    ``activate_beliefs`` (candidates forced to ``[]``), THREE tests in this file
+    red, not this one alone:
+    ``test_activate_promotes_points_and_operators_then_runs_ep``,
+    ``test_activate_flips_one_operator_exactly_once``, and this one
+    (``3 failed, 54 passed``). The other two red because they also assert on a
+    promoted operator's effect; this is the only one whose SUBJECT is the reach
+    itself, which is why the stub answers the no-param query from a separate
+    ``graph_operators`` list rather than reusing ``op_map``.
+
+    ⚠️ Neutralising the query TEXT does not falsify anything: the stub answers
+    the no-param query from ``graph_operators`` whatever the Cypher says
+    (``57 passed``). The arm has to be dropped at the CALL SITE to move this.
+    """
+    sdk, graph = _make([], total=0, graph_operators=["op_live"])
+
+    manifest = epa.activate_beliefs(sdk)
+
+    assert len(graph.matching("SET o.status = 'live'")) == 1, (
+        "the graph-wide sweep found no candidate for an operator whose "
+        "endpoints are already live — the belief layer cannot reach its "
+        "conclusion (#10137)"
+    )
+    assert manifest["operators_promoted"] == 1
+    assert [e for e in sdk.events if e[0] == "OperatorPromoted"]
+
+
+def test_activate_does_not_promote_a_sweep_operator_with_a_terminal_endpoint():
+    """#10137: the graph-wide sweep applies the SAME R16 gate as the SDK — a
+    terminal endpoint blocks promotion, so the operator stays draft.
+
+    This is the end-to-end half of the pin;
+    ``test_ep_activation_operator_promotion_10137.py`` pins the gate directly
+    against the real SDK. Both exist because the two failure directions differ:
+    the real-SDK test catches a wrong PREDICATE, this one catches the sweep
+    reaching ``_PROMOTE_OPERATOR`` without going through the gate at all.
+    """
+    sdk, _graph = _make([], total=0, graph_operators=["op_live"],
+                        op_endpoints={"op_live": [("dead", "retracted", "IMPL")]})
+
+    manifest = epa.activate_beliefs(sdk)
+
+    assert manifest["operators_promoted"] == 0, (
+        "the sweep promoted an operator whose endpoint is RETRACTED — a "
+        "draft-only or missing liveness gate (#10137)"
+    )
+
+
+def test_activate_does_not_emit_for_a_lost_cas_race():
+    """#10137: the promotion is CAS-guarded. A concurrent writer that already
+    flipped the operator leaves an EMPTY result set, and the caller must not
+    journal a second ``OperatorPromoted`` nor count the flip (the pre-fix
+    unconditional ``SET`` double-emitted under concurrency)."""
+    sdk, _graph = _make(["c1"], op_map={"c1": ["op1"]}, cas_lost=("op1",))
+
+    manifest = epa.activate_beliefs(sdk)
+
+    assert manifest["operators_promoted"] == 0, (
+        "a lost CAS race was counted as a promotion"
+    )
+    assert not [e for e in sdk.events if e[0] == "OperatorPromoted"], (
+        "a lost CAS race journaled an OperatorPromoted — replay would restore "
+        "a promotion this pass did not perform"
+    )
 
 
 def test_activate_counts_unmeasured():

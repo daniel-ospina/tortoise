@@ -246,14 +246,68 @@ run_tool() {
     return $rc
 }
 
-needing_repair_count() {
-    local n
+summary_count() {
+    local key="$1" n
     # The count is read from the artifact the tool just wrote; `?` (not 0) when
     # it cannot be read, so an unreadable report never prints as "nothing wrong".
-    n="$("$PYTHON_BIN" -c "import json,sys; print(json.load(sys.stdin)['needing_repair'])" \
+    n="$("$PYTHON_BIN" -c "import json,sys; print(json.load(sys.stdin)['$key'])" \
         < "$OUT_FILE" 2>/dev/null)"
     [ -n "$n" ] || n="?"
     printf '%s' "$n"
+}
+
+needing_repair_count() {
+    summary_count 'needing_repair'
+}
+
+# ⛔ THE ZERO-JOB REFUSAL, READ WHERE THE COVERAGE SIGNAL IS DECIDED. A pass that
+# refuses the congested destruct act reports `needing_repair=0` (neither
+# `zero_job_named` nor `repair_refused` is a repair this pass will attempt), and this
+# rail used to read only that key — so `needing_repair=0, repair_refused=3` produced
+# the SAME signature as a clean window, no transition fired, and nobody was notified.
+# The count is emitted by the tool for exactly this reader (tools/ci_check_repair.py
+# summary keys).
+refused_repair_count() {
+    summary_count 'repair_refused'
+}
+
+# ── THE EXIT-1 CAUSE, ONE SENTENCE PER POLE (#10641 review P2) ────────────
+# ⛔ EXIT 1 HAS TWO INDEPENDENT CAUSES, and `repair_refused` is non-zero on BOTH
+# queue poles — so the refusal count alone cannot say which one an operator is
+# looking at. `tools/ci_check_repair.py` returns 1 for
+#   (a) a repair only a user credential can perform (`report()`: a `denied`/
+#       `failed` cancel, a spent trigger budget, `exhausted and apply`), and
+#   (b) a zero-job cancel REFUSED because the queue reading was NOT MEASURED
+#       (`main()`: `args.apply and code == 0 and congestion is None
+#       and any(p.repair_refused ...)`).
+# A refusal against a queue that WAS read and is congested is the third shape: it
+# is NOT an exit-1 cause by itself (the tool deliberately keeps exit 0 there —
+# the suppression is self-clearing), but it co-occurs with (a) on an ordinary
+# window (`exhausted and apply`, `missing_run and trigger_ok` each raise rc=1
+# independently of the refusal count). The discriminator is the machine-readable
+# `queue_congestion_measured` the tool already emits for this reader — never the
+# prose of one counter (clig.dev / structured-output practice: a caller
+# distinguishes causes with stable tokens, not by inferring them from a count).
+# Split out of the `notify` call so the test suite EXECUTES it once per pole
+# instead of grepping this file.
+exit_one_cause() { # $1 = needing_repair, $2 = repair_refused, $3 = measured
+    local needing="$1" refused="$2" measured="$3" cause
+    if [ "$refused" != "0" ] && [ "$measured" = "True" ]; then
+        cause="The ${refused} refused zero-job repair(s) met a queue that WAS read and is congested — that suppression is the correct, self-clearing outcome: the repair fires on the first pass that finds the queue drained, so no credential and no manual unjam is involved."
+    elif [ "$refused" != "0" ]; then
+        cause="A zero-job cancel was REFUSED because the queue reading did not certify it clear — read the queue (uv run python tools/ci_queue_health.py) rather than blaming the credential; an unreadable refused count or queue reading (?) is itself one of these causes."
+    else
+        cause="Some PR needs a repair even the local credential could not complete."
+    fi
+    # ⛔ THE CREDENTIAL CAUSE IS NOT DISCLAIMED when both counts are non-zero.
+    # `repair_refused` and a `denied` cancel are independent: a pass can refuse
+    # zero-job runs AND contain a permanent permission refusal, and this rail used
+    # to rule the credential out of a window that needed it fixed. A `denied` /
+    # `failed` cancel is a `rerun[]` entry, so it lands in `needing_repair`.
+    if [ "$refused" != "0" ] && [ "$needing" != "0" ]; then
+        cause="${cause} AND ${needing} PR(s) still need a repair this pass did not complete — exit 1 also covers a repair only a user credential can perform."
+    fi
+    printf '%s' "$cause"
 }
 
 # ── main ───────────────────────────────────────────────────────────────────
@@ -321,17 +375,36 @@ run_tool
 rc=$?
 mode_word="apply"; [ "$DRY" = 1 ] && mode_word="report-only"
 needing="$(needing_repair_count)"
+refused="$(refused_repair_count)"
+# The WITNESS for which queue pole a refusal came from (`True` measured /
+# `False` unmeasured / `?` unreadable). The refusal count is identical on both
+# poles, so the notification below cannot name a cause without it.
+measured="$(summary_count 'queue_congestion_measured')"
 last="$(cat "$STATE_FILE" 2>/dev/null || echo '')"
 # The signature carries the needing_repair COUNT as well as the exit code: a
 # repair that completes successfully (exit 0) but leaves the same PRs needing
 # attention must still read as a new state, or the one notice that matters would
-# be suppressed by an earlier exit-0 notification.
-signature="local:$rc:$needing"
+# be suppressed by an earlier exit-0 notification. ⛔ It carries the REFUSED count
+# too, for the same reason one step further out: a zero-job run the congestion gate
+# declined to cancel is work this pass identified and did NOT do, and it is invisible
+# in `needing_repair` — without this term a fail-shut window is indistinguishable from
+# a clean one.
+signature="local:$rc:$needing:$refused"
 if [ "$signature" != "$last" ]; then
     if [ "$rc" = 0 ]; then
-        notify "ci-check-repair ran LOCALLY in ${mode_word} mode (${reason}). PRs needing repair: ${needing}. The local fallback ran the same tools/ci_check_repair.py the workflow runs, exit 0."
+        notify "ci-check-repair ran LOCALLY in ${mode_word} mode (${reason}). PRs needing repair: ${needing}. Refused zero-job repairs: ${refused}. The local fallback ran the same tools/ci_check_repair.py the workflow runs, exit 0."
     elif [ "$rc" = 1 ]; then
-        notify "ci-check-repair RAN LOCALLY and is STILL UNRESOLVED in ${mode_word} mode (${reason}). PRs needing repair: ${needing}. Some PR needs a repair even the local credential could not complete; see $OUT_FILE."
+        # ⛔ EXIT 1 HAS TWO CAUSES and this message used to name only the first.
+        # See `exit_one_cause()` above for the full map: a credential-only repair,
+        # and a zero-job cancel refused under an UNMEASURED queue. The sentence is
+        # composed there from the record's own `queue_congestion_measured`, so the
+        # MEASURED pole no longer sends the operator to read a queue that was read
+        # and found congested, nor disclaims a credential the same pass may need.
+        # The cause is composed into a VARIABLE first: bash 3.2 (the plist's
+        # /bin/bash) is the target, and a nested double quote inside `$( )` inside a
+        # double-quoted string is the shape this file's header warns about.
+        cause="$(exit_one_cause "$needing" "$refused" "$measured")"
+        notify "ci-check-repair RAN LOCALLY and is STILL UNRESOLVED in ${mode_word} mode (${reason}). PRs needing repair: ${needing}. Refused zero-job repairs: ${refused}. ${cause} See $OUT_FILE."
     else
         notify "ci-check-repair COULD NOT MEASURE locally (${reason}), exit=$rc. No further action was taken; any repair already issued is not undone. See $LOG_FILE."
     fi
@@ -339,6 +412,7 @@ if [ "$signature" != "$last" ]; then
 else
     log "no transition (signature unchanged: $signature)"
 fi
-printf 'exit=%s mode=%s reason=%s needing_repair=%s\n' "$rc" "$mode_word" "$reason" "$needing" \
+printf 'exit=%s mode=%s reason=%s needing_repair=%s refused_repair=%s queue_congestion_measured=%s\n' \
+    "$rc" "$mode_word" "$reason" "$needing" "$refused" "$measured" \
     >> "$LOG_FILE"
 exit "$rc"

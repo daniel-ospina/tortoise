@@ -57,18 +57,20 @@ the measured arm — IN PROCESS, with the previous values restored in a ``finall
 and the set values READ BACK from ``os.environ`` before the pass, the way
 ``e1_e2_probe.run_arm`` does it (they default OFF in the deployed config), so
 S2.2/S2.3 are ON-PATH for this pass — the convention #9076's E1/E2 run used ("the
-gate is measured with its flags forced ON"). ``TORTOISE_VALUE_GATE`` is pinned
-UNSET for the same reason: it also switches S2.2 on, so an ambient value would
-silently change the arm. The ``arm:`` line is that read-back, never a typed
+gate is measured with its flags forced ON"). ``TORTOISE_VALUE_GATE`` is pinned to an
+EXPLICIT ``"0"`` (``ARM_OFF``, NOT popped) for the same reason: it also switches
+S2.2 on, so an ambient value would silently change the arm — and since ``#10996``
+an ABSENT ``TORTOISE_VALUE_GATE`` IS the ON arm, so popping it would arm the
+predicate this arm declares OFF. The ``arm:`` line is that read-back, never a typed
 literal — a run that cannot read a flag back as set REFUSES rather than printing a
 claim nothing supports. **The seam has since LANDED (#9116), so this module no
 longer reports them as unobservable-by-construction.** Pre-seam, ``capture_session``'s
 receipt could not carry them and the failure was ONE LAYER UP from where it was
 first attributed: ``extract_session_v2`` built the surfaces
-(``result["classify_later"]`` at ``tortoise/extractor_v2.py:10576-10582`` and
-``result["vet"]`` at ``:10586-10590``) while the meta fold dropped them with
+(``result["classify_later"]`` at ``tortoise/extractor_v2.py:13246-13252`` and
+``result["vet"]`` at ``:13256-13260``) while the meta fold dropped them with
 ``"stats": out.get("stats") or {}``. The fold now calls
-``_capture_stats_with_step_witness`` (``tortoise/sdk.py:16250``), which copies each
+``_capture_stats_with_step_witness`` (``tortoise/sdk.py:17086``), which copies each
 stage's own counts onto ``stats["step_witness"]`` and drops no candidate text — so
 this module READS that seam (:func:`_witness_block`) instead of citing the gap. A
 run measured at a stamp BEFORE the seam still reports S2.2/S2.3 unobserved, and
@@ -130,6 +132,7 @@ import re
 import subprocess
 import time
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 
 #: ``docs/evidence/7949-capstone/probes/capstone_measure.py`` → repo root.
@@ -223,6 +226,13 @@ E1_E2_SCORES = "docs/evidence/9889/e1-e2-scores.json"
 E1_E2_SCORES_CMD = (
     "uv run python docs/evidence/7949-capstone/probes/e1_e2_scores.py "
     f"--out {E1_E2_SCORES}")
+
+#: E4's evidence is selected by the receipt's OWN ``corpus_hash``, never by a filename
+#: (see ``select_e4_receipt``). ``E4_RECEIPT`` names the receipt the row USED to cite and
+#: is kept as that record — it is NOT a fallback for any row, and ``build_rows`` refuses an
+#: ``e4`` mapping that does not carry its own ``evidence``.
+E4_RECEIPT_DIR = "tests/eval/write_path/receipts"
+E4_RECEIPT_GLOB = "*.json"
 E4_RECEIPT = "tests/eval/write_path/receipts/w2b-operator-2026-10-19.json"
 E5_RESCORE = "docs/evidence/7949-capstone/e5-rescore.json"
 ARMS_DIR = "tests/eval/write_path/receipts/7947-arms-2026-10-18"
@@ -268,7 +278,7 @@ ANCHOR_OUT = ("extractedFrom",)
 #: ->(Event|Document)``, written by ``_EdgeHandlers.link_source_to_event``
 #: (``tortoise/projection/edges.py:2832-2857``, ``MERGE (s)-[r:references]->(e)
 #: ON CREATE SET r.sourceVersion = s.contentHash``) and reached from the capture
-#: path at ``tortoise/sdk.py:16531`` (``proj.link_source_to_event(source_key,
+#: path at ``tortoise/sdk.py:17472`` (``proj.link_source_to_event(source_key,
 #: event_id)`` — ``(Source)-[:references]->(sessionCaptured Event)``). The anchor
 #: is on the same link, but the DERIVED node is its TARGET.
 #: ⚠️ Counting this one in the ``extractedFrom`` direction counts SOURCES.
@@ -301,18 +311,215 @@ E3_RULE = (
 #: the probe printed an ON arm while measuring the default OFF one.
 ARM_ON = ("TORTOISE_VET", "TORTOISE_CLASSIFY_LATER")
 
-#: A flag the arm PINS OFF so the measured population is a function of THIS file,
-#: not of whatever the operator's shell held. ``TORTOISE_VALUE_GATE`` also
+#: The flags the arm PINS OFF so the measured population is a function of THIS
+#: file, not of whatever the operator's shell held. ``TORTOISE_VALUE_GATE`` also
 #: switches S2.2 on (``extractor_v2._value_gate_enabled``), so an ambient value
 #: would silently change the arm between two runs of the same probe — and
 #: ``TORTOISE_S2_DECISION_SEAM`` (#5087) is a THIRD switch for S2.2 (it arms the
 #: arbiter, so ``_vet_enabled`` is True), which would arm a network call and a
 #: spend inside an arm this file declares OFF.
+#:
+#: ⛔ These are pinned to ``"0"``, NOT popped (`#10996` review): popping produced
+#: an OFF arm only while the flag defaulted OFF, and an ABSENT
+#: ``TORTOISE_VALUE_GATE`` is now the ON arm (the S2.2 mechanical half defaults
+#: ON). Measured at the review head: inside ``measured_arm()`` the header printed
+#: ``TORTOISE_VALUE_GATE=<unset>`` while ``value_gate.value_gate_enabled()`` was
+#: True — a re-take of a committed log would have measured a population that
+#: includes the predicate, at a header claiming it was pinned off.
 ARM_OFF = ("TORTOISE_VALUE_GATE", "TORTOISE_S2_DECISION_SEAM")
+
+# ── the DOOR (#10983 / C2) ────────────────────────────────────────────────
+#
+# "Which code path produced this number" is a SEPARATE question from "which arm
+# was it run under", and this probe answered only the second one. The extraction
+# LANE is selected by an ordinary environment variable that ``measured_arm`` did
+# not touch:
+#
+#   * ``tortoise/sdk.py`` — ``TORTOISE_SESSION_EXTRACTOR == "m2"`` routes
+#     ``capture_session`` to ``_extract_session_llm``; everything else routes to
+#     ``_extract_session_v2`` (the v4 door).
+#   * ``tortoise/hosted_api.py::_capture_lane`` — the hosted endpoint's mirror of
+#     the SAME predicate, so the two entry points select ONE lane, not two.
+#
+# An ambient ``TORTOISE_SESSION_EXTRACTOR=m2`` on the operator's box therefore
+# rerouted all seven acceptance captures to the OTHER extractor while the log
+# still printed an ``arm:`` line that said nothing about it — the silent seam
+# #10983 exists to close. The lane, plus every switch on this path that changes
+# what the run MEASURES through it, is pinned here and READ BACK like every other
+# switch (the ``arm:`` rule, applied to the door).
+#
+# ⛔ The set below is CLOSED over the **measurement modules the path renders
+# with**, and what is enforced MECHANICALLY is the CENSUS over that list, not the
+# list's membership: `path_modules` is a HAND-MAINTAINED tuple, and every
+# ``TORTOISE_*`` read inside those modules must be classified, or the suite reds.
+# The module names are NOT restated here on purpose — a count in this comment is a
+# transcription that rots: it said "``extractor_v2.py`` plus the three modules it
+# reaches one call down" for three review rounds while the list had already grown
+# past it (cycle 9 measured the comment at four modules against eight in
+# `tests/test_7949_c2_door.py::path_modules`). The authority is `path_modules` in
+# that test. ⚠️ Membership is hand-kept, so a read added to a module OUTSIDE that
+# tuple is NOT caught by it — the ``sdk``/``hosted_api`` helpers the two hops call
+# are the measured gap, tracked as #11410. Every ``TORTOISE_*`` those modules
+# read is accounted for,
+# either as an arm seam in ``SEAM_LEDGER`` (``TORTOISE_VET``,
+# ``TORTOISE_CLASSIFY_LATER``, ``TORTOISE_S4_DELTA``), or as a pin below, or as
+# an INPUT rather than a setting (``TORTOISE_DB_URI`` the graph it writes,
+# ``TORTOISE_API_URL`` a backend label), or as a declared not-a-measurement-seam
+# read with its reason (`acknowledged_not_a_measurement_seam`).
+#
+# ⚠️ The claim is scoped to what it can enforce. The same call chain also reads
+# INFRASTRUCTURE variables (record DSN, packs dir, embedding gates, store
+# connection). Those are what a run needs in order to happen at all, not settings
+# that move the measured population, and the door neither pins nor partitions
+# them. Adding another derived module is a one-line change to `path_modules` in
+# the test (the arm-seam modules are already there). An earlier revision of this comment called the whole path "closed" over
+# "exactly ten" variables and then partitioned 3 arm seams + 6 pins + 2 inputs =
+# 11; the #10983 review (cycle 5) measured both halves of that false —
+# ``TORTOISE_REFERENTIALITY`` is read on every v2 capture through
+# ``referentiality.ENV_FLAG`` and was accounted for by nothing.
+#
+# ⚠️ The set below is what the #10983 reviews widened, in TWO rounds. The first
+# revision pinned the lane and the two render switches and called that "the seam
+# set"; round 1 found ``TORTOISE_SESSION_LLM_MOCK`` (decisive: it swaps the model
+# for ``_V2SessionMock`` — ``sdk._session_llm_mock_enabled`` — AND short-circuits
+# the provider-key check, so ``backend_ready()`` still passes on a real key and a
+# fully mocked run is byte-indistinguishable in the log from a real one), the
+# prompt render and the model selector; round 2 found the two TRUNCATION BUDGETS
+# (``_stage_cap`` / ``_extractor_escalation_tokens``, both read at call time),
+# which decide how much of each stage's output survives. A pin set that stops at
+# "the pipeline" and leaves "what the pipeline reads" ambient is the same
+# declaration-versus-control defect, one layer down.
+#
+# The provider ROUTE is deliberately NOT pinned: ``TORTOISE_EXTRACTOR_PROVIDER``
+# only chooses among routes the box already has a key for, and the route is
+# OBSERVED rather than forced — the receipt reports it as ``extraction_mode``
+# (``llm:<route>``, ``sdk.py``), which ``run_corpus`` records and ``render_log``
+# prints per session. Named here so the set below is not read as an exhaustive
+# list of every ``TORTOISE_`` variable in the process.
+
+#: The env var that selects the extraction lane.
+DOOR_LANE_ENV = "TORTOISE_SESSION_EXTRACTOR"
+
+#: The lane the acceptance runs when that var is unset — and the one the run is
+#: PINNED to (``_capture_lane()``'s default, ``hosted_api.py``).
+DOOR_LANE = "v2"
+
+#: Unset (not ``"0"``) is the correct pin for each of these: every one selects a
+#: DIFFERENT behaviour when PRESENT, and none is an on/off switch whose absent
+#: state is the risky one.
+#:
+#: * ``TORTOISE_SESSION_EXTRACTOR`` — ``m2`` is the OTHER extractor; only
+#:   ``unset`` is the default the fleet runs, and the log must state which one
+#:   this was.
+#: * ``TORTOISE_EXTRACTOR=v1`` — read by ``sdk.commit_session`` (``sdk.py``), NOT
+#:   by ``capture_session``: the acceptance path dispatches on
+#:   ``TORTOISE_SESSION_EXTRACTOR`` alone, so this pin is DEFENSIVE for any
+#:   commit the probe performs, not a route off the capture door. Said plainly
+#:   because the #10983 review found the earlier "a route off this door"
+#:   rationale claimed a reach this variable does not have on this path.
+#: * ``TORTOISE_LABEL_ORDER=shuffle`` — NOT a behaviour seam (#10983): it is a
+#:   render DIAGNOSTIC that reorders the kind lists per call, i.e. it makes two
+#:   runs of this probe differ for a reason that is not the arm. Pinned off.
+#: * ``TORTOISE_SESSION_LLM_MOCK`` — the offline model seam. It replaces the
+#:   model with ``_V2SessionMock`` AND short-circuits the provider-key check, so
+#:   an ambient ``=1`` makes every capture canned output while
+#:   ``backend_ready()`` still passes and the log still claims a real run. The
+#:   acceptance is scored on a REAL provider; a mock is only ever an explicit
+#:   arm, never an inherited one (#10983 review).
+#: * ``TORTOISE_EXTRACTOR_PROMPT=compact`` — a third render switch beside
+#:   ``TORTOISE_LABEL_ORDER`` (``extractor_v2.py`` renders a different master
+#:   under it, and that render is explicitly NOT byte-identical to the default
+#:   since #9733), so it changes what the run measures without changing the arm.
+#: * ``TORTOISE_EXTRACT_MODEL`` — selects the extractor's MODEL (the producer the
+#:   acceptance's numbers come from). It does NOT by itself move the output bound:
+#:   every stage passes ``max_tokens=_stage_cap(...)`` per call, which beats the
+#:   adapter's constructor default — measured at this head, an explicit model id
+#:   with ``TORTOISE_EXTRACTOR_MAX_TOKENS`` unset still caps S2/S4 at 16000. The
+#:   bound has its own switch, pinned below (#10983 review round 2 corrected this
+#:   bullet, which had credited the model selector with the bound).
+#: * ``TORTOISE_EXTRACTOR_MAX_TOKENS`` — the stage output cap (``_stage_cap``, read
+#:   at CALL time): pinned unset ⇒ the shipped 1500/16000 stage defaults. An
+#:   ambient value (the documented lever an operator raises after a timeout
+#:   spike) shrinks how much of each stage survives truncation, i.e. it changes
+#:   the population being measured, under a header that would still claim the
+#:   door held (#10983 review round 2).
+#: * ``TORTOISE_EXTRACTOR_ESCALATION_TOKENS`` — the length-truncation RETRY budget
+#:   (``_extractor_escalation_tokens``): the same class, pinned unset.
+#: * ``TORTOISE_REFERENTIALITY`` — the S2.2 mention-selection arm
+#:   (``referentiality.enabled()``, reached through ``referentiality.ENV_FLAG``
+#:   from ``extractor_v2``'s prompt/mention path): armed, the prompt contract and
+#:   the entity mentions a run yields change without changing the lane. Found in
+#:   the #10983 review (cycle 5) as the one measurement switch the set missed,
+#:   because it is read one module away from the file the closure test derived
+#:   from.
+#: * ``TORTOISE_LABEL_ORDER_SEED`` — inert while ``TORTOISE_LABEL_ORDER`` is off,
+#:   and pinned anyway so the pair cannot be split: setting the seed without the
+#:   render switch is a no-op today, and a future edit that reads the seed
+#:   independently must not inherit one from the operator's shell.
+DOOR_PINNED_OFF = ("TORTOISE_SESSION_EXTRACTOR", "TORTOISE_EXTRACTOR",
+                   "TORTOISE_LABEL_ORDER", "TORTOISE_LABEL_ORDER_SEED",
+                   "TORTOISE_SESSION_LLM_MOCK", "TORTOISE_EXTRACTOR_PROMPT",
+                   "TORTOISE_EXTRACT_MODEL", "TORTOISE_EXTRACTOR_MAX_TOKENS",
+                   "TORTOISE_EXTRACTOR_ESCALATION_TOKENS",
+                   "TORTOISE_REFERENTIALITY", "TORTOISE_CONTEXT_ENRICH",
+                   # cycle 8, dropped by the peer head and restored here: an
+                   # ambient =1 ADDS a :GraphEvent to the graph the run writes
+                   # (change_feed.py:182 via sdk._change_feed_enabled) and the
+                   # probe's S6 witness prints that count (measured: 2 vs 3).
+                   "TORTOISE_CHANGE_FEED",
+                   # cycle 10: read through a PARAMETER (`_pick(tau_hi,
+                   # "TORTOISE_SUBJECT_TAU_HI", ...)` -> `os.environ.get(env_name)`)
+                   # from the write path, and it decides whether the
+                   # `:aboutSubject`/`:aboutObject` edge is written at all
+                   # (measured: 0.90 -> bound at the defaults, suspected with
+                   # TORTOISE_SUBJECT_TAU_HI=0.99). Absent is the shipped
+                   # default, so pinning them UNSET matches today's behaviour.
+                   "TORTOISE_SUBJECT_TAU_HI", "TORTOISE_SUBJECT_TAU_LO")
+
+#: Seams pinned to an EXPLICIT value because their ABSENT state is not neutral.
+#: ``TORTOISE_S4_DELTA`` is DEFAULT-ON (``env_flag(..., True)``); an ambient
+#: ``=0`` silently swaps S4's output contract for the legacy complete-list one,
+#: which changes the embed list a run measures without changing the arm.
+DOOR_PINNED_ON = (("TORTOISE_S4_DELTA", "1"), ("TORTOISE_JSON_MODE", "1"),
+                  # cycle 9 (#10983): `sparse.py:226` `env_flag(IDENTIFIER_ENV,
+                  # True)` — default-ON, read through `projection/entities.py:1208`
+                  # on the write path (`create_point` -> `point_identifier_aliases`),
+                  # so it REWRITES `search_keys` on every ``:Point`` the run writes.
+                  # Pinned to the SHIPPED default, not off: an ambient `=0` is the
+                  # non-neutral state here, and the registered corpus yields no
+                  # aliases either way (0 of 27 points, 0 turns across the 7
+                  # fixtures — measured), so the pin makes the population
+                  # insensitive to the shell without moving a number.
+                  ("TORTOISE_IDENTIFIER_TOKENS", "1"))
+
+#: Every key a complete read-back carries — the pinned-off set plus the
+#: pinned-to set. A ``door_header``/``door_record`` handed an INCOMPLETE dict is
+#: treated as NOT MEASURED, because every pinned-off target state is ``<unset>``:
+#: rendering a partial dict would print ``KEY=<unset> … read back from os.environ``
+#: about keys nobody read (#10983 review round 11).
+DOOR_KEYS = frozenset(DOOR_PINNED_OFF) | frozenset(k for k, _ in DOOR_PINNED_ON)
+
+#: The v4 seam ledger AT THE HEAD THIS RUN MEASURED (#10983, C2's Target 3).
+#:
+#: ``(env var, module.resolver, default, is a behaviour seam)``. The DEFAULT
+#: column is the CODE's, not a document's — a ledger copied out of prose is how
+#: this one came to call ``TORTOISE_VALUE_GATE`` default-off after #10996 had
+#: already made it default-ON at ``value_gate.value_gate_enabled`` and, through
+#: ``extractor_v2``'s ``vet_enabled`` OR, armed the S2.2 pass on the fleet's
+#: default write path. ``tests/test_7949_c2_door.py`` resolves every row against
+#: the modules and reds if this table and the tree disagree.
+SEAM_LEDGER = (
+    ("TORTOISE_VET", "extractor_v2._vet_enabled", "off", True),
+    ("TORTOISE_CLASSIFY_LATER", "extractor_v2._classify_later_enabled", "off", True),
+    ("TORTOISE_S2_DECISION_SEAM", "s2_decision_seam.seam_enabled", "off", True),
+    ("TORTOISE_VALUE_GATE", "value_gate.value_gate_enabled", "on", True),
+    ("TORTOISE_S4_DELTA", "extractor_v2._s4_delta_enabled", "on", True),
+    ("TORTOISE_LABEL_ORDER", "extractor_v2._label_order_rng", "off", False),
+)
 
 #: The three Point classes E3's frozen denominator mixes, each read off a
 #: property its writer stamps (never a hand-kept list): ``is_episodic`` is set by
-#: the turn writer (``_TURN_WRITE_CYPHER``, ``tortoise/sdk.py:2452`` — turn
+#: the turn writer (``_TURN_WRITE_CYPHER``, ``tortoise/sdk.py:2455`` — turn
 #: rows carry ``is_episodic=true``, ``is_operator=false`` and are wired only by
 #: ``CONTAINS``), ``is_operator`` by the operator writers, and an
 #: ``extractedFrom`` edge by the extraction projection.
@@ -391,13 +598,22 @@ def measured_arm():
     (fail closed) rather than printing a claim nothing supports.
     """
     keys = (*ARM_ON, *ARM_OFF)
-    saved = {key: os.environ.get(key) for key in keys}
+    door_off = tuple(DOOR_PINNED_OFF)
+    door_on = tuple(key for key, _ in DOOR_PINNED_ON)
+    saved = {key: os.environ.get(key) for key in (*keys, *door_off, *door_on)}
     try:
         for key in ARM_ON:
             os.environ[key] = "1"
         for key in ARM_OFF:
+            # explicit falsy, never absent — `#10996`: an unset default-ON
+            # switch is the ON arm, so a pop would be a lie in the header below.
+            os.environ[key] = "0"
+        for key in door_off:
             os.environ.pop(key, None)
-        observed = {key: os.environ.get(key) for key in keys}
+        for key, value in DOOR_PINNED_ON:
+            os.environ[key] = value
+        observed = {key: os.environ.get(key)
+                    for key in (*keys, *door_off, *door_on)}
         for key in ARM_ON:
             if observed[key] != "1":
                 raise SystemExit(
@@ -405,6 +621,37 @@ def measured_arm():
                     f"{key}=1 but os.environ reads back {observed[key]!r}; a log "
                     f"that declares an arm it did not run is a fabricated "
                     f"measurement, so this pass writes no table")
+        leaked_lane = observed.get(DOOR_LANE_ENV)
+        if leaked_lane not in (None, ""):
+            raise SystemExit(
+                f"capstone-measure: REFUSED — the run pins the {DOOR_LANE!r} "
+                f"extraction lane, but {DOOR_LANE_ENV} reads back "
+                f"{leaked_lane!r} after being unset. A capture taken under "
+                f"another lane measures a DIFFERENT door (#10983), so this pass "
+                f"writes no table")
+        # EVERY other pinned-off switch, re-read and refused on a leak. The lane
+        # has its own message above (it changes the door); these change what the
+        # run MEASURES through the same door, and the #10983 review found them
+        # popped, printed in the ``door:`` line, and never checked — so the
+        # header's "read back" claim was one var wider than the code. A pin that
+        # cannot fail is a declaration, not a control.
+        for key in door_off:
+            if key == DOOR_LANE_ENV:
+                continue
+            leaked = observed.get(key)
+            if leaked not in (None, ""):
+                raise SystemExit(
+                    f"capstone-measure: REFUSED — {key} is pinned UNSET, but it "
+                    f"reads back {leaked!r} after being popped. It changes what "
+                    f"this run measures through the same door, so the arm cannot "
+                    f"be declared (#10983) and this pass writes no table")
+        for key, expected in DOOR_PINNED_ON:
+            if observed.get(key) != expected:
+                raise SystemExit(
+                    f"capstone-measure: REFUSED — {key} is pinned to "
+                    f"{expected!r} but reads back {observed.get(key)!r}; that "
+                    f"seam changes what the run measures, so the arm cannot be "
+                    f"declared (#10983)")
         yield observed
     finally:
         for key, value in saved.items():
@@ -421,8 +668,9 @@ def arm_header(observed: dict[str, str | None]) -> str:
         value = observed.get(key)
         parts.append(f"{key}={value if value not in (None, '') else '<unset>'}")
     return (" ".join(parts) + " (set/pinned IN-PROCESS for this pass and read "
-            "back from os.environ after setting; the deployed config leaves "
-            "both passes OFF)")
+            "back from os.environ after setting; the deployed config sets none "
+            "of them — since #10996 the value gate defaults ON, so the pinned 0 "
+            "is what makes this arm OFF)")
 
 
 def arm_record(observed: dict[str, str | None]) -> dict:
@@ -431,6 +679,235 @@ def arm_record(observed: dict[str, str | None]) -> dict:
                                      for key in (*ARM_ON, *ARM_OFF)}
     record["source"] = "os.environ read-back after measured_arm() forced it"
     return record
+
+
+def door_header(observed: dict[str, str | None]) -> str:
+    """The ``door:`` line, DERIVED from the run's own read-back (#10983).
+
+    Names the entry point in CODE terms — the function chain and the lane
+    selector, not "the pipeline" — plus the value each pinned switch RESOLVED TO
+    on this run and the six-seam ledger with the DEFAULTS the pin suite resolves
+    against the modules. A log therefore states the seam set it ran rather than
+    the one a reader remembers (`#10983` Target 3).
+
+    ⛔ An EMPTY read-back is NOT a pinned door. For every switch here the target
+    state is ``<unset>``, so a header rendered from nothing used to print
+    byte-identical text to a header rendered from a run whose pins HELD —
+    ``render_log``'s ``door`` defaults to ``None`` and the repo's own fixtures
+    call it that way, so a fixture log asserted "read back from os.environ" about
+    a read-back that never happened (#10983 review). Absence is now said out
+    loud, on the same rule the ``arm:`` line already follows for a flag it did
+    not measure.
+    """
+    if not _door_measured(observed):
+        return ("NOT MEASURED — this render carries NO COMPLETE measured_arm() "
+                "read-back, so no lane and no pinned switch is attested. Render "
+                "the log from a run that entered ``measured_arm()`` (``main`` "
+                "does) before citing the door")
+    lane = observed.get(DOOR_LANE_ENV)
+    # The HEADLINE is the read-back, never the module constant: a read-back that
+    # disagrees with the pin must not be summarised as the pin (#10983 review).
+    # ``main`` never reaches here in that state (measured_arm refuses first), so
+    # this is the path a re-render tool or a fixture would take.
+    lane_pinned = lane in (None, "")
+    lane_word = DOOR_LANE if lane_pinned else lane
+    pins = [f"{key}=<unset>" if observed.get(key) in (None, "")
+            else f"{key}={observed.get(key)}"
+            for key in DOOR_PINNED_OFF]
+    pins += [("<unset>" if observed.get(key) in (None, "")
+              else f"{observed.get(key)}") .join([f"{key}=", ""])
+             for key, _ in DOOR_PINNED_ON]
+    seams = ", ".join(f"{env}={default}" for env, _where, default, _seam
+                      in SEAM_LEDGER)
+    return (f"{lane_word} lane (sdk.capture_session -> sdk._extract_session_v2 "
+            f"-> extractor_v2.extract_session_v2; hosted_api._capture_lane() "
+            f"mirrors the same predicate) | {DOOR_LANE_ENV}="
+            f"{'<unset>' if lane_pinned else lane} "
+            f"{'PINNED' if lane_pinned else 'LEAKED — NOT THE PINNED LANE'} "
+            f"({' '.join(pins)} read back from os.environ) | seam defaults at "
+            f"this head: {seams}")
+
+
+def _door_measured(observed: dict[str, str | None]) -> bool:
+    """Does this read-back carry EVERY pinned key? A partial one is not a pin."""
+    return bool(observed) and set(observed) >= DOOR_KEYS
+
+
+def door_record(observed: dict[str, str | None]) -> dict:
+    """The machine half of the door: lane, pins, and the six-seam ledger.
+
+    An empty (or PARTIAL) read-back records ``measured: false`` and NO pin block,
+    rather than borrowing the measured record's ``source`` sentence — a machine
+    record that says "os.environ read-back after measured_arm() forced the door"
+    about a render that never ran one is the same false claim as the log line
+    (#10983 review). ``measured`` is stated in BOTH directions so a consumer can
+    key on it instead of inferring it from an absent key.
+
+    ``lane`` follows the READ-BACK, not the module constant: a record that
+    printed ``lane: v2`` beside ``lane_read_back: m2`` would let a consumer key
+    on the wrong field (#10983 review round 11). ``lane_pinned`` says whether the
+    read-back matched the pin.
+    """
+    if not _door_measured(observed):
+        return {
+            "measured": False,
+            "lane": DOOR_LANE,
+            "lane_env": DOOR_LANE_ENV,
+            "entry_point": ("sdk.capture_session -> sdk._extract_session_v2 -> "
+                            "extractor_v2.extract_session_v2"),
+            "hosted_selector": "hosted_api._capture_lane",
+            "note": ("NOT MEASURED — render_log was called without a door "
+                     "read-back, so no pin is attested for this run"),
+        }
+    return {
+        "measured": True,
+        "lane": observed.get(DOOR_LANE_ENV) or DOOR_LANE,
+        "lane_env": DOOR_LANE_ENV,
+        "lane_read_back": observed.get(DOOR_LANE_ENV),
+        "lane_pinned": observed.get(DOOR_LANE_ENV) in (None, ""),
+        "entry_point": ("sdk.capture_session -> sdk._extract_session_v2 -> "
+                        "extractor_v2.extract_session_v2"),
+        "hosted_selector": "hosted_api._capture_lane",
+        "pinned_off": {key: observed.get(key) for key in DOOR_PINNED_OFF},
+        "pinned_on": {key: observed.get(key) for key, _ in DOOR_PINNED_ON},
+        "seams": [{"env": env, "resolver": where, "default": default,
+                   "behaviour_seam": seam}
+                  for env, where, default, seam in SEAM_LEDGER],
+        "source": "os.environ read-back after measured_arm() forced the door",
+    }
+
+
+#: The ``extraction_mode`` values that mean a capture REACHED the door.
+#:
+#: ⛔ The COLON is the discriminator, not the ``llm`` — the two lanes differ by
+#: exactly that character, so do not "tidy" this into a route-agnostic ``llm``
+#: prefix (the #10983 review measured that the whole suite stays green under
+#: ``"llm"``):
+#:
+#: * the v2 lane reports ``llm:<route>`` (``sdk.capture_session`` ->
+#:   ``_extract_session_v2`` -> the adapter's own ``route``, always truthy on a
+#:   success);
+#: * the OTHER lane reports a BARE ``"llm"`` — ``_extract_session_llm`` reports it
+#:   with no route and no colon, pinned by
+#:   ``tests/test_capture_session.py::test_capture_session_zero_extraction_is_warning_not_failure``.
+#:   A prefix of ``"llm"`` would therefore admit an m2 capture as door-entered,
+#:   which is the one bypass this witness exists to refuse. The bare ``"llm"``
+#:   spelling is pinned in
+#:   `tests/test_7949_c2_door.py::test_a_capture_that_never_ENTERED_the_door_REFUSES_the_run`
+#:   so the widening cannot be made by aligning the m2 lane to this contract.
+#:
+#: ``replayed`` and ``no-provider`` mean the capture returned BEFORE the lane
+#: dispatch (#1727 replay, #3892 keyless), and ``extraction-disabled`` is the
+#: hosted endpoint's own pre-dispatch branch (the org's off switch) — it cannot
+#: arise on the probed ``sdk.capture_session`` path at all, so it is listed for
+#: completeness of the vocabulary, not as a shape this probe can meet. ``empty``
+#: has TWO origins and neither is this door: the blank session-id and
+#: blank-conversation gates in ``sdk.capture_session`` return before the dispatch,
+#: AND the other lane emits it after taking that lane. So none of the four is
+#: this door entered. (This sentence used to attach "took a lane that is not the
+#: v2 door" to all four spellings; only ``empty`` has that origin. The earlier
+#: "returned BEFORE" clause was also over-attributed to ``extraction-disabled``,
+#: which no ``sdk`` gate emits — #11298 review, source-verified both ways.)
+#:
+#: ⛔ ``error`` IS NOT ONE OF THOSE, and listing it here was a measured defect
+#: (#11298 review, round 14). ``error`` is a POST-dispatch outcome — the lane ran
+#: and REPORTED a failure (raised, or caught and appended), mode set INSIDE it: by
+#: ``sdk._extract_session_v2`` (the door itself) and by ``sdk._extract_session_llm``
+#: (the other lane), each setting ``meta["mode"]`` to ``"error"`` iff its own
+#: ``errors`` is non-empty. ``sdk.capture_session`` then maps a failed extraction
+#: onto it (``elif not ok: effective_mode = "error"``). Never by the pre-dispatch
+#: guards. Rows are cited by FUNCTION rather than by ``sdk.py:<line>``, because a
+#: line number in prose re-stales on the next insertion — the case this file
+#: already carries three times.
+#: Counting it as a bypass refused a run for a cause that was false, AFTER its
+#: full spend, and — because ``require_door_entered`` raises before the log is
+#: written — threw away the ``errors`` that would have shown what actually
+#: happened. See ``DOOR_ENTERED_THEN_FAILED``.
+DOOR_ENTERED_PREFIX = "llm:"
+
+#: The ``extraction_mode`` a capture reports when it DID enter the door and then
+#: FAILED. Treated as entered, not bypassed, for the reason above. The failure is
+#: not swallowed by that: ``run_corpus`` keeps each receipt's ``errors``,
+#: ``main`` collects the non-``ok`` sessions into ``failed``, and the log — which
+#: a bypass no longer prevents — carries them per session (``errors=[…]`` on the
+#: session's own line and in the machine record) plus a ``sessions failed: […]``
+#: line on stderr after the write.
+#:
+#: ⚠️ REPORTED, NOT SCORED — and that half is stated here rather than left to be
+#: discovered. Nothing about a failed capture stops the pass from being scored:
+#: ``main`` still exits 0 and the record's ``run.status`` is still ``"COMPLETED"``,
+#: which is the field ``tools/capstone_verdict_check.py`` V5 reads to decide the
+#: pass completed — it also reads ``run.steps_observed`` and the step-accounting
+#: keys, and none of those distinguishes a failed capture either, because the
+#: step totals are summed over sessions. So a run with a failed capture is not
+#: distinguishable from a clean one BY THE GATE (a human reading the log is).
+#: Filed as **#11414**; changing the exit or the status is a gate decision, not
+#: a comment fix.
+DOOR_ENTERED_THEN_FAILED = ("error",)
+
+
+def door_witness(runs) -> dict:
+    """How many captures actually ENTERED the door — derived from the receipts.
+
+    ⛔ Found in the #10983 review (round 11). The door was pinned and read back as
+    an ENVIRONMENT fact and nothing checked that the path was TAKEN, so a run
+    that never reached ``_extract_session_v2`` still produced a table whose
+    ``door:`` line asserted the v2 lane and whose record said ``measured: true``,
+    exit 0. Both exits are real and both return ``ok=True``:
+
+    * ``no_provider`` (``sdk.capture_session``) — no provider key resolves, so
+      the turns are stored and NOTHING is extracted (#3892);
+    * the ``#1727`` REPLAY — ``session_existed``, which a re-run against an
+      existing graph (``--graph``) reaches for all seven sessions at zero cost.
+
+    The pinned lane cannot catch either, because neither is a different lane: it
+    is no lane. ``backend_ready()``'s provider-key check narrows the first, but
+    it is a different predicate from ``_build_session_llm_extractor() is None``
+    (five provider keys vs ``DEEPSEEK_API_KEY``), so it is not the contract.
+    """
+    runs = list(runs or [])
+    entered = [run for run in runs
+               if str(run.get("extraction_mode") or "").startswith(
+                   DOOR_ENTERED_PREFIX)
+               # A post-dispatch FAILURE still took the door: ``measured_arm``
+               # pins this probe to the v2 lane and refuses a leak, so an
+               # ``error`` receipt here is a v2 receipt that raised, not another
+               # lane and not a return before the dispatch. The failure is
+               # reported by ``main``'s failed list, which a bypass would have
+               # prevented the log from ever reaching.
+               or str(run.get("extraction_mode") or "") in
+               DOOR_ENTERED_THEN_FAILED]
+    bypassed = [str(run.get("session_id")) for run in runs
+                if run not in entered]
+    return {"entered": len(entered), "sessions": len(runs),
+            "bypassed": bypassed}
+
+
+def require_door_entered(runs) -> dict:
+    """REFUSE a run in which any capture returned before the door.
+
+    A table measured on a graph this run did not write through the door is not a
+    measurement of the door, so the pass writes no table — the same posture
+    ``measured_arm`` takes for a leaked switch.
+    """
+    witness = door_witness(runs)
+    if witness["bypassed"]:
+        raise SystemExit(
+            f"capstone-measure: REFUSED — {len(witness['bypassed'])} of "
+            f"{witness['sessions']} capture(s) did not enter "
+            f"sdk._extract_session_v2 ({witness['bypassed']}), so this pass did "
+            f"not take the door it would declare: a keyless capture extracts "
+            f"nothing (#3892), a re-capture of an existing session REPLAYS "
+            f"(#1727) — both report ok=True — and a capture on the other lane "
+            f"reports a bare ``llm`` with no route. A table measured on a graph "
+            f"they did not write is a measurement of another run (#10983). "
+            f"NOTE: a capture that ENTERED the door and FAILED (mode ``error``) "
+            f"is not refused here — its ``errors`` are carried on its own log "
+            f"line and in the machine record, with a ``sessions failed: […]`` "
+            f"line on stderr after the write, because a refusal here would "
+            f"name a false cause AND discard the errors that say what "
+            f"actually happened")
+    return witness
 
 
 # ── pure helpers (pinned by tests/test_7949_capstone_measure.py) ───────────
@@ -672,16 +1149,99 @@ def e2a_outcome(e1: dict, bars: dict) -> dict:
                    value=f"value_units {survived}/{units} survived")
 
 
-def e3_outcome(*, anchored: int, derived: int, bars: dict) -> dict:
-    """E3: derived nodes carrying a version anchor, floor 30 derived nodes."""
+def e3_unmeasured_legs(per_label: dict[str, dict[str, int]] | None, *,
+                       labels: tuple[str, ...] = DERIVED_LABELS) -> tuple[str, ...]:
+    """The registered denominator classes the measured graph carries **zero** nodes of (#9736).
+
+    E3's row is scored by SUMMING its classes (``census()`` → ``derived_total``), so a registered
+    class with no nodes contributes ``0/0`` and disappears from BOTH halves of the ratio. The row
+    then reports ``share = 1.000`` — a PASS — over a population NARROWER than the one it registered,
+    which is a false green in the favourable direction: the exact failure ``= 1.000 (zero
+    unanchored)`` cannot distinguish from a real one.
+
+    That is the production shape, not a corner: ``:Document`` is a RETIRED label (the writer remaps
+    it onto ``:Source`` under D10 — the ``entity_label = "Source"`` remap in
+    ``tortoise/projection/edges.py``, cited by SYMBOL because a line number here would re-stale on
+    the next insertion above it), and §10.1 of the
+    pre-registration records that the run IT re-derives wrote none at all (the scored log agrees:
+    ``e3 label=Document nodes=0``). So the leg E3 names is
+    structurally empty on every post-D10 graph, and only #9736's owner-gated ruling can change
+    WHICH spelling the row names.
+
+    ⛔ Which classes are "registered" is ``DERIVED_LABELS`` (re-derived from the writer's
+    ``_DERIVATION_REFERENCES_LABELS``) and NOT the wider instrument census: ``:Object`` is left
+    unanchored BY DESIGN (#5199 option A) and #10525 dropped it from the row, so counting it as a
+    missing leg would re-red E3 for a recorded decision.
+
+    An ABSENT block is empty too — a census that never enumerated a registered class did not
+    measure it, and "absent" must not read as "fine".
+    """
+    blocks = per_label or {}
+    empty: list[str] = []
+    for label in labels:
+        block = blocks.get(label)
+        nodes = block.get("nodes") if isinstance(block, dict) else None
+        if not nodes:
+            empty.append(label)
+    return tuple(empty)
+
+
+def e3_legs_line(per_label: dict[str, dict[str, int]] | None) -> str:
+    """The log's ``e3 unmeasured_legs=`` line, DERIVED from the census it is printed beside.
+
+    ⛔ Derived from ``per_label``, never from a caller's ``e3``/``e3_out`` dict. The first cut read
+    the row's ``unmeasured_legs`` key, so a caller that built the row by hand (this bundle's own
+    render fixture did exactly that, over a canned census whose ``Document`` leg is 0) rendered
+    ``e3 unmeasured_legs=none — every registered class carried nodes`` two lines below
+    ``e3 label=Document nodes=0``. A positive measurement claim asserted from an ABSENT KEY is the
+    same defect this line exists to disclose, one layer up.
+    """
+    legs = e3_unmeasured_legs(per_label)
+    if legs:
+        return ("e3 unmeasured_legs=" + ",".join(legs)
+                + " — a registered class the run wrote ZERO of; its `0/0` cannot "
+                  "satisfy '= 1.000', so the measured denominator is narrower than "
+                  "the registered one and E3 cannot PASS on it (#9736)")
+    return ("e3 unmeasured_legs=none — every registered class the census "
+            "enumerates carried nodes, so the measured denominator IS the "
+            "registered one")
+
+
+def e3_outcome(*, anchored: int, derived: int, bars: dict,
+               unmeasured_legs: tuple[str, ...] = ()) -> dict:
+    """E3: derived nodes carrying a version anchor, floor 30 derived nodes.
+
+    ``unmeasured_legs`` is the ruling-free half of #9736 (``NOT-A-DECISION(9736-gate-empty-leg)``):
+    a registered class the run measured **zero** nodes of cannot SATISFY the ``= 1.000`` bar by
+    arithmetic. The bar is a claim about the REGISTERED class set, so a row whose population is a
+    strict subset of it has not been measured, however clean the subset looks.
+
+    The rule is deliberately narrow and moves NO recorded number:
+
+    * a row that already fails **stays** FAIL and the empty leg is disclosed in the bar — no
+      softening, and no new red on a reading that was already red;
+    * a row whose every registered class carried nodes is scored exactly as before;
+    * the node floor still wins where it applies (``derived < floor`` is REFUSED, not a verdict);
+    * the class set, the threshold and ``:Object``'s exclusion are all UNTOUCHED — choosing
+      ``Document`` vs ``Source``-as-document is #9736's owner-gated ruling, and this function
+      refuses to certify EITHER spelling when the run wrote none of it.
+    """
     floor = bars["floors"]["e3_derived_nodes"]
     share = (anchored / derived) if derived else 0.0
-    return outcome(measured=True, below_floor=derived < floor,
-                   passed=share >= bars["E3"]["required_share"],
-                   bar=f"share = {bars['E3']['required_share']} (zero "
-                       f"unanchored), floor {floor} derived nodes",
-                   value=f"anchored={anchored} derived={derived} "
-                         f"share={share:.6f}")
+    legs = tuple(unmeasured_legs)
+    share_ok = share >= bars["E3"]["required_share"]
+    bar = (f"share = {bars['E3']['required_share']} (zero unanchored), floor "
+           f"{floor} derived nodes")
+    if legs:
+        bar += (f"; ⛔ empty registered class leg(s) {', '.join(legs)} — the "
+                f"measured denominator is NARROWER than the registered one, so "
+                f"this row cannot pass by arithmetic (#9736)")
+    result = outcome(measured=True, below_floor=derived < floor,
+                     passed=share_ok and not legs, bar=bar,
+                     value=f"anchored={anchored} derived={derived} "
+                           f"share={share:.6f}")
+    result["unmeasured_legs"] = legs
+    return result
 
 
 def e4_outcome(*, edge_correct: int, planted: int, bars: dict) -> dict:
@@ -887,6 +1447,14 @@ def build_rows(*, head: str, out_path: str, log_corpus_sha: str,
     the corpus THIS run froze, the row also carries ``artifact_corpus_sha256`` and
     ``tools/capstone_verdict_check.py``'s V7 requires that digest to appear in the
     artifact's own text — a declaration nothing supports is a finding.
+
+    ⛔ E4 is the row where the two are the SAME, so it declares nothing: since the
+    selector landed, ``build_e4_row`` REFUSES a receipt whose ``corpus_hash`` is not
+    the frozen pin, so ``e4["corpus_sha256"]`` is this run's corpus by construction.
+    It carried ``artifact_corpus_sha256`` unconditionally anyway — a declaration that
+    told a machine consumer "a different revision" about the one row whose own note
+    says the opposite, and that V7 could never verify, because its same-corpus arm
+    short-circuits before it reads the field.
     """
     def row(criterion: str, *, verdict: str, evidence: str, sha: str | None,
             numerator: int | None, denominator: int | None,
@@ -917,6 +1485,33 @@ def build_rows(*, head: str, out_path: str, log_corpus_sha: str,
             built["artifact_corpus_sha256"] = artifact_corpus_sha256
         return built
 
+    # The docstring's rule, applied to E4's operands rather than hard-coded to
+    # "no declaration": on the real path this is False (`build_e4_row` refused an
+    # off-pin receipt before we got here), and an `e4` handed in from another
+    # revision still declares itself.
+    #
+    # ⛔ A NAMED REFUSAL FOR BOTH KEYS, AND BEFORE EITHER IS SUBSCRIPTED. The guard
+    # below was added for `evidence` alone and sat AFTER this line, so a caller
+    # omitting `corpus_sha256` still got the bare ``KeyError`` the guard exists to
+    # eliminate — from the line above it. Both are checked here, in one place, ahead
+    # of every subscript.
+    missing = [key for key in ("evidence", "corpus_sha256") if key not in e4]
+    if missing:
+        raise SystemExit(
+            "capstone-measure: REFUSED — build_rows was handed an e4 mapping with no "
+            + " and no ".join(f"`{key}`" for key in missing)
+            + ". Defaulting `evidence` to E4_RECEIPT would cite the pre-#8503 "
+            "artifact beside this run's numbers, and a missing `corpus_sha256` would "
+            "raise a bare KeyError from the comparison below — so the mapping is "
+            "refused by name rather than left to either")
+
+    # ⛔ `_same_corpus` coerces both operands itself, so this line passes them RAW on
+    # purpose: a non-string `corpus_sha256` must yield a ROW the gate can report (V7
+    # reds a non-string declaration), never an `AttributeError` from inside the
+    # comparison. `build_e4_row` cannot produce one — this is the synthetic-caller
+    # path — but the predicate's job is a verdict, not a traceback.
+    e4_off_this_corpus = not _same_corpus(e4["corpus_sha256"], log_corpus_sha)
+
     return [
         # E1 and E2 carry the counts their OWN criteria are written over — E2 the
         # E2a count over the FROZEN 14 value-bearing units (8/14, bar >= 13 of 14),
@@ -943,14 +1538,33 @@ def build_rows(*, head: str, out_path: str, log_corpus_sha: str,
         row("E3", verdict=e3["verdict"], evidence=out_path, sha=head,
             numerator=e3["numerator"], denominator=e3["denominator"],
             corpus_sha256=log_corpus_sha, blocked_by="#9736", note=e3["note"]),
-        row("E4", verdict=e4["verdict"], evidence=E4_RECEIPT, sha=e4["sha"],
+        row("E4", verdict=e4["verdict"], evidence=e4["evidence"], sha=e4["sha"],
             numerator=e4["numerator"], denominator=e4["denominator"],
             corpus_sha256=e4["corpus_sha256"],
-            artifact_corpus_sha256=e4["corpus_sha256"], blocked_by="#8503",
+            artifact_corpus_sha256=(e4["corpus_sha256"] if e4_off_this_corpus
+                                    else None),
+            # `#9596` is the row's LIVE BLOCKER POINTER on a red row — NOT the owner
+            # of the unformed edges. It is the only OPEN issue on E4 and it owns a
+            # DIFFERENT gap (the receipt's unmeasured retrievability rate); the
+            # planted-edge residual is UNOWNED, which `build_e4_row`'s note states and
+            # `#8503`'s own body says in its own words. `#8503` is not the pointer
+            # because it CLOSED 2026-10-24 — that closure records the DISPROOF, so it
+            # is this row's measurement record — and `#10601`'s V12 REFUSES a row for
+            # naming a blocker recorded CLOSED in `blocker-states.json`.
+            #
+            # ⛔ The literal is unconditional HERE because the GREEN invariant is
+            # enforced one layer down, in `row()`: "GREEN carries a blocker … green and
+            # blocked are mutually exclusive" (V5) is resolved once for all five rows,
+            # before the dict is built. Emitting the conditional here as well was a
+            # narrower duplicate of that rule, and it made the cell unreadable to
+            # `test_the_shipped_logs_blocker_cells_are_the_emitters_own`, which reads
+            # the five `blocked_by="#NNNN"` literals in ROW ORDER to hold the shipped
+            # log's cells to what this probe emits.
+            blocked_by="#9596",
             note=e4["note"]),
         row("E5", verdict=e5["verdict"], evidence=E5_RESCORE, sha=head,
             numerator=e5["numerator"], denominator=e5["denominator"],
-            corpus_sha256=log_corpus_sha, blocked_by="#9738", note=e5["note"]),
+            corpus_sha256=log_corpus_sha, blocked_by="#5087", note=e5["note"]),
     ]
 
 
@@ -1126,27 +1740,27 @@ _IDLE_CITES: dict[str, str] = {
         "The extractor emits exactly this shape when the flag is ON and the list "
         "the VET pass would have worked on is empty: `vet_enabled` is computed "
         "BEFORE the `if not edus:` early return that emits {'enabled': "
-        "vet_enabled, 's2': {}, 'union': {}} (tortoise/extractor_v2.py:10200, the "
-        "flag; :10204, the early return; :10220, its vet surface), and each VET "
-        "pass is gated on the LIST — `if vet_enabled and embed_list:` (:10295), "
-        "`if vet_enabled and complete_list:` (:10417) — so "
+        "vet_enabled, 's2': {}, 'union': {}} (tortoise/extractor_v2.py:12779, the "
+        "flag; :12783, the early return; :12803, its vet surface), and each VET "
+        "pass is gated on the LIST — `if vet_enabled and embed_list:` (:12893), "
+        "`if vet_enabled and complete_list:` (:13032) — so "
         "a block that says enabled=true proves the FLAG, never that the pass "
         "ran. A FAILED vet pass leaves the same empty stats (`_run_vet_pass` "
-        "returns {} on its fail-open path, :10079-10082)."
+        "returns {} on its fail-open path, :12658-12661)."
     ),
     "classify_later": (
         "The extractor emits exactly this shape when the flag is ON and the "
         "CLASSIFY pass had nothing to work on: `classify_later` is computed at "
-        "tortoise/extractor_v2.py:10169 (and set False when its classifier cannot "
-        "be constructed, :10194), the `if not edus:` early return emits "
+        "tortoise/extractor_v2.py:12748 (and set False when its classifier cannot "
+        "be constructed, :12773), the `if not edus:` early return emits "
         "{'enabled': classify_later, 's2': {}, 'union': {}, "
-        "'restamp_overrides': 0, 'slot_rekeys': 0} (:10216-10219), and each "
+        "'restamp_overrides': 0, 'slot_rekeys': 0} (:12799-12802), and each "
         "classify pass is gated on the LIST and then on a NON-EMPTY item set — "
-        "`if classify_later and embed_list:` (:10307) around `if items:` "
-        "(:10310), `if classify_later and complete_list:` (:10432) around "
-        "`if items:` (:10442) — so a block that says enabled=true proves the "
+        "`if classify_later and embed_list:` (:12905) around `if items:` "
+        "(:12908), `if classify_later and complete_list:` (:13047) around "
+        "`if items:` (:13057) — so a block that says enabled=true proves the "
         "FLAG, never that the pass ran. A FAILED classify pass leaves the same "
-        "empty stats (its fail-open `except` at :10323 / :10453)."
+        "empty stats (its fail-open `except` at :12921 / :13068)."
     ),
 }
 
@@ -1158,26 +1772,26 @@ def _pass_ran(block: dict) -> bool | None:
     where the two were confused. ``extract_session_v2`` emits ``result["vet"]``
     and ``result["classify_later"]`` UNCONDITIONALLY — on the flag-OFF arm and on
     the early-return path the block is ``{"enabled": False, "s2": {}, "union":
-    {}}`` (:10216-10219, :10220, :10576-10590) — so an acceptance test of "a non-empty dict"
+    {}}`` (:12799-12802, :12803, :13246-13260) — so an acceptance test of "a non-empty dict"
     reports S2.2/S2.3 WITNESSED on a run measured with the flags OFF, printing
     ``enabled=false, s2={}`` beside the word WITNESSED.
 
     ⛔ AND THE FLAG ALONE IS NOT ACTIVITY, which is the sharper half and the one
     this rule got wrong first. ``enabled`` is the FLAG value, computed BEFORE the
-    pass is reached: ``vet_enabled`` is set at ``extractor_v2.py:10200`` and
-    ``edus = _edus_from_conversation(...)`` follows at ``:10203``, whose
-    ``if not edus:`` early return (``:10204``) emits literally ``"vet": {"enabled":
-    vet_enabled, "s2": {}, "union": {}}`` (``:10220``) — with the flag ON. The
+    pass is reached: ``vet_enabled`` is set at ``extractor_v2.py:12779`` and
+    ``edus = _edus_from_conversation(...)`` follows at ``:12782``, whose
+    ``if not edus:`` early return (``:12783``) emits literally ``"vet": {"enabled":
+    vet_enabled, "s2": {}, "union": {}}`` (``:12803``) — with the flag ON. The
     passes themselves are gated on the LIST, not the flag: ``if vet_enabled and
-    embed_list:`` (``:10295``) and ``if vet_enabled and complete_list:``
-    (``:10417``). So a session whose conversation produced no list emits
+    embed_list:`` (``:12893``) and ``if vet_enabled and complete_list:``
+    (``:13032``). So a session whose conversation produced no list emits
     ``enabled: True`` with empty counters and no pass ever ran; so does a pass
     that FAILED, because ``_run_vet_pass`` returns ``{}`` stats on its fail-open
-    exception path (``extractor_v2.py:10079-10082``). ``enabled: true`` therefore
+    exception path (``extractor_v2.py:12658-12661``). ``enabled: true`` therefore
     proves the flag was read, never that the pass did anything.
 
     ⛔ The VET lines above are the VET pass's, not the rule's: the CLASSIFY pass
-    is different code (``classify_later`` at `:10169`, its own early-return
+    is different code (``classify_later`` at `:12748`, its own early-return
     block, its ``if classify_later and …`` gates around ``if items:``, its own
     fail-open ``except``), so the rule is stated pass-agnostically here and the
     CITES a reader gets are raised per surface from ``_IDLE_CITES`` — never one
@@ -1307,7 +1921,7 @@ def _summary(block: dict) -> str:
             if len(rendered) > 160:
                 rendered = rendered[:157] + "..."
             parts.append(f"{key}={rendered}")
-    return ", ".join(parts) or json.dumps(block, sort_keys=True, default=str)[:200]
+    return ", ".join(parts) or json.dumps(block, sort_keys=True, default=str)[:201]
 
 
 def anchor_census_cypher(label: str) -> str:
@@ -1559,7 +2173,29 @@ def e3_row_note(*, composition: dict | None, e3_result: dict, graph: str,
         f"the reopening of the model, and §10.1 reports BOTH readings — the "
         f"amended denominator and the pre-amendment one — while this row states the "
         f"amended one's composition, so neither is read "
-        f"off a denominator whose composition was hidden")
+        f"off a denominator whose composition was hidden"
+        + _e3_empty_leg_clause(e3_result))
+
+
+def _e3_empty_leg_clause(e3_result: dict) -> str:
+    """The #9736 empty-leg disclosure, when the run measured a registered class of ZERO nodes.
+
+    Empty when every registered class carried nodes, so a fully-measured run's note is byte-for-byte
+    what it was before this rule. When a leg IS empty the note says so on the row itself — the one
+    place a reader quotes — rather than leaving it in the log's per-label lines, because a
+    ``0/0`` leg is invisible in the totals the row prints.
+    """
+    legs = tuple(e3_result.get("unmeasured_legs") or ())
+    if not legs:
+        return ""
+    return (
+        f" ⛔ AND THE POPULATION IS NARROWER THAN THE REGISTRATION: this run "
+        f"wrote ZERO nodes of the registered class(es) {', '.join(legs)}, so the "
+        f"denominator above is a strict SUBSET of the one §3.1 registers, and "
+        f"`= 1.000` over a subset is not the criterion. The empty leg contributes "
+        f"0/0: it can neither pass nor fail, so the row may not PASS on it "
+        f"(#9736 NOT-A-DECISION(9736-gate-empty-leg); WHICH spelling the document "
+        f"class should name stays #9736's owner-gated ruling)")
 
 
 def _stage_calls(stats: dict, stage: str) -> int:
@@ -2101,25 +2737,286 @@ def census(uri: str) -> dict:
 
 # ── E4 / E5 / E1+E2 ───────────────────────────────────────────────────────
 
-def load_e4(repo: Path = ROOT) -> dict:
-    """E4's number, read VERBATIM out of the committed operator receipt."""
-    path = repo / E4_RECEIPT
-    if not path.is_file():
-        raise SystemExit(f"capstone-measure: REFUSED — E4's receipt {E4_RECEIPT} "
-                         "does not exist; a row with no artifact is an inference, "
-                         "not evidence")
-    record = json.loads(path.read_text())
-    audit = record.get("operator_audit")
-    if not isinstance(audit, dict):
-        raise SystemExit(f"capstone-measure: REFUSED — {E4_RECEIPT} carries no "
-                         "operator_audit block")
+def _same_corpus(a: object, b: object) -> bool:
+    """Two corpus hashes name the same corpus, with or without the ``sha256:`` prefix.
+
+    The record writes ``sha256:<hex>``; a receipt written by a different code path may
+    drop the prefix. Comparing the RAW strings made those two spellings unequal, so a
+    receipt on the pinned corpus was reported as "not measured on the frozen corpus" —
+    a refusal that names a false reason is the one failure mode a refusal must not have.
+
+    ⛔ Both operands are COERCED HERE, not at the call sites. This predicate's contract
+    is to RETURN A VERDICT — and a caller handing it a non-string (a synthetic `e4`, a
+    caller-supplied pin) must get that verdict, not `AttributeError: 'int' object has
+    no attribute 'removeprefix'` raised from inside the check. Doing it in one place is
+    also why the sites cannot drift apart again: three of them coerced one operand or
+    none, and each shape was a separate review round.
+    """
+    return (str(a or "").removeprefix("sha256:")
+            == str(b or "").removeprefix("sha256:"))
+
+
+def _instant(raw: object) -> tuple[int, object]:
+    """A comparable instant from a receipt's ``date``, or a sentinel that sorts FIRST.
+
+    A STRING compare is not an ordering here: ``…T01:00:00+02:00`` sorts ABOVE
+    ``…T00:30:00Z`` lexically while being genuinely EARLIER. The key decides both which
+    receipt wins and whether an unscorable one refuses the selection, so a wrong
+    compare makes the two disagree — a false refusal one way, a reopened silent skip
+    the other. Returns ``(0, "")`` for an ABSENT date, ``(0, <the date as text>)``
+    for one that is PRESENT but unreadable, and ``(1, datetime)`` otherwise (so an
+    undated record never displaces a dated one); the tag is compared first, so a
+    datetime is never ordered against a str.
+
+    ⛔ The two tag-0 shapes are NOT the same fact, and the CALLER must separate them:
+    ``(0, "")`` is "no date recorded", which the ordering can state honestly;
+    ``(0, <text>)`` is "a date is recorded and it cannot be read", which makes the
+    record's position in the order unknowable. Ranking the second as if it were the
+    first let an OLDER on-pin receipt publish E4's number while a newer measurement
+    sat unread (and silenced the would-have-won refusal when that newer one was also
+    unscorable) — so ``select_e4_receipt`` REFUSES it, on the same reasoning it
+    refuses an unreadable file: nothing can prove the newest measurement on the
+    frozen corpus is not the one whose date could not be parsed.
+
+    The second element of a tag-0 key is therefore ALWAYS a ``str``: an absent date
+    contributes ``""`` and a present-but-unreadable one contributes ``repr(raw)`` (a
+    non-string such as ``"date": 20261024`` lands here rather than being flattened
+    into the absent shape). Both are only ever compared against other strings, so
+    ordering is unaffected.
+    """
+    if raw is None:
+        return (0, "")
+    if not isinstance(raw, str):
+        # ⛔ NEVER PARSE `repr(raw)`. A recorded date that is not a string is
+        # UNREADABLE, and the repr of an int is the ISO BASIC form — `repr(20261024)`
+        # is `'20261024'`, which `datetime.fromisoformat` ACCEPTS, so parsing here
+        # silently ranked a malformed date at midnight UTC instead of refusing it
+        # (measured: it did exactly that, while `0` — whose repr fails to parse — was
+        # refused; two non-string dates, opposite outcomes, for no stated reason).
+        # Tag 0 puts every non-string on the refusal path `select_e4_receipt` already
+        # implements for a present-but-unreadable date.
+        return (0, repr(raw))
+    text = raw
+    if not text:
+        return (0, "")
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return (0, text)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return (1, parsed)
+
+
+def _sort_key(record: dict, name: str) -> tuple:
+    """The ONE ordering key, shared by the winner choice and the refusal predicate."""
+    return (_instant(record.get("date")), str(record.get("run_id") or ""), name)
+
+
+def select_e4_receipt(repo: Path = ROOT, frozen_pin: str = "") -> tuple[str, dict]:
+    """E4's artifact: the operator receipt measured on the FROZEN corpus.
+
+    Why this is not a filename constant. E4's bar is *"the planted-operator corpus
+    goes from 0/4 to 4/4"* — on the **pre-registered corpus**, like every other
+    row. A hard-coded path broke that silently: the roll-up cited
+    ``w2b-operator-2026-10-19.json``, whose own ``corpus_hash`` is ``943a99ec…``
+    — not the frozen ``dd7e8520…`` — and scored E4 at **2/15** from it, while three
+    of ``#8503``'s OWN measurement receipts, all on the frozen corpus, read
+    **5/15**. So the published row was measured on a different corpus than the one
+    the record froze. Nothing observed it: the row carried the mismatching
+    ``corpus_hash`` as a disclosure and the gate passes a disclosed mismatch (V7).
+
+    ⛔ NOT "written AFTER ``#8503``'s fix, on code that predates the fix" — there is
+    no fix. ``#8503`` CLOSED 2026-10-24 as a **DISPROOF** (*"This issue is that
+    residual, now measured post-close. No open issue owns it."*), and these three
+    receipts (`w2b-operator-2026-10-24-8503-{preleg,a,b}.json`) are dated
+    ``2026-10-24T05:46:51Z`` / ``06:03:47Z`` / ``06:10:47Z`` — 14.66–15.06 h BEFORE
+    that issue's ``closedAt`` of ``2026-10-24T20:50:13Z``. They are its measurement
+    artifacts, not the output of a repair it never made.
+
+    A filename constant is also an evidence hole: point it at any other receipt and
+    the row reports that receipt's number with no signal that the artifact moved.
+
+    Selection is therefore by the receipt's OWN ``corpus_hash``:
+
+    * ``frozen_pin`` must be a real pin — an un-pinned selection is refused;
+    * every ``*.json`` in the receipts directory is read (the name is not trusted to
+      say which files are receipts), and the one whose hash **matches** the pin wins;
+      no match REFUSES rather than falling back to "the newest file";
+    * among matches the ordering is by the record's own ``date`` and then ``run_id``,
+      and the winner is the last. The date is PARSED where it can be (the writer emits
+      a fixed ``…Z`` stamp, but a hand-authored receipt may carry an offset —
+      ``…T01:00:00+02:00`` sorts ABOVE ``…T00:30:00Z`` as a STRING while being
+      genuinely EARLIER); a receipt whose ``date`` is ABSENT sorts first, so an
+      undated record never displaces a dated one. One helper (``_sort_key``) produces
+      the key for BOTH the winner choice and the would-have-won refusal below, because
+      those two disagreeing is exactly how a silent revert gets in;
+    * a receipt ON the pin whose ``date`` is PRESENT but unparseable REFUSES the
+      selection. Its position in the order is unknowable, so it can neither be ranked
+      (an older receipt would publish while a newer measurement sat unread) nor be
+      shown not to be the newest unread one (which resurrects the silent skip this
+      selector exists to close). An ABSENT date is different and stays permitted: that
+      is a recorded fact, not an unreadable one. The reason is the same one the next
+      bullet gives for an unreadable file;
+    * a file in the receipts directory that cannot be read as a JSON object REFUSES
+      the selection: its corpus and date are unknowable, so nothing can prove the
+      newest measurement on the frozen corpus is not it;
+    * a candidate that IS on the frozen pin but carries no ``operator_audit`` REFUSES
+      **when it would have won** — i.e. when it sorts after the newest scorable
+      receipt. Skipping that one would let an OLDER on-pin receipt publish the row's
+      number while the newest measurement on the same corpus sat unread, which is the
+      same "the row's number is not the artifact you think it is" defect this selector
+      exists to close, one level down. One that sorts BEFORE the winner provably cannot
+      change the result and is ignored, because a refusal that names a consequence that
+      is not true is the one failure mode a refusal must not have;
+    * a candidate carrying no ``corpus_hash``, or one measured on another corpus, is
+      ignored and NAMED in the no-match refusal, so a missing artifact cannot read as
+      "no candidate".
+    """
+    if not frozen_pin:
+        raise SystemExit("capstone-measure: REFUSED — E4 was asked to select its "
+                         "receipt without the frozen corpus pin; a receipt whose "
+                         "corpus cannot be checked is not evidence for a bar "
+                         "written over the pre-registered corpus")
+    directory = repo / E4_RECEIPT_DIR
+    if not directory.exists():
+        raise SystemExit(
+            f"capstone-measure: REFUSED — the receipts directory {directory} does "
+            "not exist, so E4's artifact cannot be looked for. Check the root this "
+            "probe was pointed at; an ABSENT directory is a different failure from "
+            "an empty one, and reporting both as 'none present' points the reader "
+            "at a missing receipt when the real cause is a missing tree")
+    if not directory.is_dir():
+        # ⛔ `is_dir()` IS False FOR A PATH THAT EXISTS AS A FILE. Falling into the
+        # absent-tree refusal above would then assert "does not exist" about a path
+        # that IS there — and a refusal that names a false reason is the one failure
+        # mode a refusal must not have (the same rule `_same_corpus` states). The
+        # sibling commit that split absent-vs-empty made this exact distinction; this
+        # is its third arm, so the reader is never sent to check a root that is fine.
+        raise SystemExit(
+            f"capstone-measure: REFUSED — {directory} exists but is NOT a "
+            "directory, so E4's artifact cannot be looked for. An ABSENT directory "
+            "is a different failure from one that is present but unusable; this one "
+            "is present, so check what occupies that path rather than the root")
+    paths = sorted(directory.glob(E4_RECEIPT_GLOB))
+    matched: list[tuple[tuple, Path, dict]] = []
+    skipped: list[str] = []
+    #: Candidates that ARE on the frozen pin but carry no ``operator_audit``, so they
+    #: cannot be scored. Kept with their ORDERING key: one that sorts after the winner
+    #: is a REFUSAL (it would have won), one that sorts before it provably cannot affect
+    #: the result and is ignored — refusing on those would name a false reason.
+    unscorable: list[tuple[tuple, str]] = []
+    #: Files in the receipts directory that could not be read as a JSON object. Their
+    #: corpus and date are unknowable, so nothing can prove the newest measurement on
+    #: the frozen corpus is not one of them — a REFUSAL, never a silent skip.
+    unreadable: list[str] = []
+    #: Files ON the frozen pin whose ``date`` is present but cannot be parsed. Their
+    #: position in the order is unknowable, so they neither rank nor can be shown not
+    #: to be the newest unread measurement — a REFUSAL, for the same reason an
+    #: unreadable file refuses.
+    unorderable: list[str] = []
+    for path in paths:
+        try:
+            record = json.loads(path.read_text())
+        except (OSError, ValueError) as exc:
+            # JSONDecodeError and UnicodeDecodeError are both ValueError subclasses, so
+            # this catches a non-UTF-8 file too — otherwise it escapes as a traceback
+            # instead of the refusal naming the file.
+            unreadable.append(f"{path.name} (unreadable: {exc})")
+            continue
+        if not isinstance(record, dict):
+            unreadable.append(f"{path.name} ({type(record).__name__}, not a record)")
+            continue
+        corpus_hash = record.get("corpus_hash")
+        if corpus_hash in (None, ""):
+            skipped.append(f"{path.name} (no corpus_hash)")
+            continue
+        if not isinstance(corpus_hash, str):
+            # PRESENT but not a string: the label above would be UNTRUE (the file
+            # plainly carries a corpus_hash) and skipping it silently is the very
+            # defect this selector exists to close — a newer on-pin measurement
+            # whose hash cannot be read would lose to an older scorable one with
+            # nothing said. Its corpus is therefore UNKNOWABLE, which is the reason
+            # the unreadable-file refusal already names: nothing can prove the newest
+            # measurement on the frozen corpus is not this one.
+            unreadable.append(
+                f"{path.name} (corpus_hash is a "
+                f"{type(corpus_hash).__name__}, not a hash)")
+            continue
+        if not _same_corpus(corpus_hash, frozen_pin):
+            skipped.append(f"{path.name} (corpus_hash {corpus_hash[:20]}…)")
+            continue
+        raw_date = record.get("date")
+        if raw_date not in (None, "") and _instant(raw_date)[0] != 1:
+            # PRESENT and unreadable. Ranking it first would let an older receipt
+            # publish; ignoring it would let an unscorable newest measurement be
+            # skipped without the would-have-won refusal firing. Both are the defect
+            # this selector exists to close, so the position is unknowable ⇒ refuse.
+            unorderable.append(f"{path.name} (date {raw_date!r} is not an instant)")
+            continue
+        key = _sort_key(record, path.name)
+        if not isinstance(record.get("operator_audit"), dict):
+            unscorable.append((key, path.name))
+            continue
+        matched.append((key, path, record))
+    if unreadable:
+        raise SystemExit(
+            f"capstone-measure: REFUSED — {len(unreadable)} file(s) in "
+            f"{directory} could not be read as a receipt: {sorted(unreadable)}. "
+            f"Every {E4_RECEIPT_GLOB} there is a candidate receipt, so nothing can "
+            "prove the newest measurement on the frozen corpus is not one of them — "
+            "repair or remove the file, or re-run the operator probe")
+    if unorderable:
+        raise SystemExit(
+            f"capstone-measure: REFUSED — {len(unorderable)} receipt(s) in "
+            f"{directory} ARE on the frozen corpus ({frozen_pin}) but carry a date "
+            f"that is not an instant: {sorted(unorderable)}. The newest measurement "
+            "on the frozen corpus cannot be ORDERED against them, so no scorable "
+            "receipt can be shown to be the newest one — repair the date, or re-run "
+            "the operator probe")
+    if not matched:
+        if unscorable:
+            raise SystemExit(
+                f"capstone-measure: REFUSED — {len(unscorable)} receipt(s) in "
+                f"{directory} ARE on the frozen corpus ({frozen_pin}) but carry no "
+                "operator_audit, and nothing else matched, so none of them can be "
+                f"scored: {sorted(name for _key, name in unscorable)}. Repair or "
+                "remove them, or re-run the operator probe")
+        raise SystemExit(
+            f"capstone-measure: REFUSED — no operator receipt in "
+            f"{directory} was measured on the frozen corpus "
+            f"({frozen_pin}). {len(paths)} candidate(s) were scanned and none "
+            f"matched: {skipped or 'none present'}. E4 is a bar over the "
+            "pre-registered corpus; scoring it from another revision would report "
+            "a number this run's corpus cannot support")
+    matched.sort(key=lambda entry: entry[0])
+    winner = matched[-1][0]
+    would_have_won = sorted(name for key, name in unscorable if key > winner)
+    if would_have_won:
+        raise SystemExit(
+            f"capstone-measure: REFUSED — {len(would_have_won)} receipt(s) in "
+            f"{directory} ARE on the frozen corpus ({frozen_pin}) and sort AFTER the "
+            f"newest scorable one, but carry no operator_audit so they cannot be "
+            f"scored: {would_have_won}. Skipping them would let an OLDER on-pin "
+            "receipt publish the row's number while the newest measurement on the "
+            "same corpus sat unread — repair or remove the receipt, or re-run the "
+            "operator probe")
+    _key, path, record = matched[-1]
+    return path.relative_to(repo).as_posix(), record
+
+
+def load_e4(repo: Path = ROOT, *, frozen_pin: str = "") -> dict:
+    """E4's number, read VERBATIM out of the receipt measured on the frozen corpus."""
+    rel, record = select_e4_receipt(repo, frozen_pin=frozen_pin)
+    audit = record["operator_audit"]
     for key in ("planted", "edge_correct", "content_ok", "operators_total"):
         value = audit.get(key)
         if not isinstance(value, int) or isinstance(value, bool):
-            raise SystemExit(f"capstone-measure: REFUSED — {E4_RECEIPT} "
+            raise SystemExit(f"capstone-measure: REFUSED — {rel} "
                              f"operator_audit[{key!r}] is not an integer count: "
                              f"{value!r}")
     return {
+        "evidence": rel,
         "planted": audit["planted"],
         "edge_correct": audit["edge_correct"],
         "content_ok": audit["content_ok"],
@@ -2132,6 +3029,108 @@ def load_e4(repo: Path = ROOT) -> dict:
         "judge_pin": record.get("judge_pin"),
         "verdict": record.get("verdict"),
         "failure_origin": record.get("failure_origin"),
+    }
+
+
+def e4_outcome_for(receipt: dict, bars: dict) -> dict:
+    """The E4 outcome for a receipt — ONE derivation, two call sites.
+
+    ``build_e4_row`` and ``main``'s ``render_log`` call both need it. Deriving it
+    twice is how the log comes to print an outcome the row was not built from — the
+    exact "the number is not the one you think it is" class this probe exists to
+    refuse — so there is one definition here and no second transcription.
+    """
+    return e4_outcome(edge_correct=receipt["edge_correct"],
+                      planted=receipt["planted"], bars=bars)
+
+
+def build_e4_row(receipt: dict, *, bars: dict, corpus_sha: str) -> dict:
+    """E4's row, from a receipt ``load_e4`` selected on the frozen corpus.
+
+    Factored out of ``main`` so the union of *selection* and *row* is one pinned
+    unit: the row's ``evidence`` is the receipt it was measured from, and while this
+    was inline a reversion to a constant cited a path the row was not measured on
+    with every test still green.
+
+    ⛔ Three things are separate and the note keeps them separate: the corpus hash is
+    the FROZEN one (that is why the receipt was selected), the receipt's own ``date``
+    and ``commit`` are the RECEIPT's (it was written on an earlier head than this
+    run — saying they "equal the frozen corpus" was a sentence the fields refute),
+    and ``verdict``/``failure_origin`` are the receipt's gate verdict over its own
+    metrics, not this row's verdict.
+    """
+    if not corpus_sha or not _same_corpus(receipt.get("corpus_hash"), corpus_sha):
+        raise SystemExit(
+            f"capstone-measure: REFUSED — build_e4_row was handed "
+            f"{receipt.get('evidence')!r}, whose corpus_hash="
+            f"{receipt.get('corpus_hash')!r} is not the frozen corpus "
+            f"({corpus_sha}). The note below states that equality, so building the "
+            "row from a receipt that does not carry the pin would print a sentence "
+            "the row's own fields refute")
+    result = e4_outcome_for(receipt, bars)
+    # ⛔ THIS CLAUSE IS A CLAIM ABOUT THE NUMBER BESIDE IT, so it follows that
+    # number's operands. It used to be unconditional, which was harmless only while
+    # every receipt read below the bar: the bar is 15 of 15, so the moment an on-pin
+    # receipt reads 15/15 the row is GREEN and it announced that "the planted edges
+    # are still not all formed" — a sentence the row's OWN fields refute, fired at
+    # exactly the epic's success state. Nor is `FAIL` a single cause: `e4_outcome`
+    # fails on `edge_correct < required` OR on `planted != of`, so a receipt that
+    # plants its own count (14/14, 16/16) is RED with numerator == denominator and
+    # the wiring clause would be refuted there too. The `#9596` half is a fact about
+    # the RECEIPT (its retrievability is unreported whatever the edge count) and
+    # stays unconditional; only the `#8503` half is a claim about this number.
+    # ⛔ `#8503` is named as the MEASUREMENT RECORD, never as a live blocker: it
+    # CLOSED 2026-10-24 and that closure records E4's DISPROOF. `#10601`'s V12 refuses
+    # a row whose `blocked_by` has closed — so a row that still said "#8503 is what
+    # blocks this" would be refused by the gate for naming work that is finished.
+    #
+    # ⛔ THE RESIDUAL IS UNOWNED, AND SAYING OTHERWISE WAS A FALSE ATTRIBUTION.
+    # `#8503`'s own body closes by stating it plainly — *"This issue is that residual,
+    # now measured post-close. No open issue owns it."* — and `#9596` is scoped to a
+    # DIFFERENT gap: the receipt's retrievability rate is unmeasured (a v2 receipt must
+    # re-cut it on a real run). This clause used to say `#9596` owns the ten unformed
+    # planted edges; it does not, and the sentence would have been emitted into every
+    # future scored log. The row's `blocked_by` cell is still `#9596`, because the gate
+    # requires a non-green row to name a LIVE issue and that is the only open one on
+    # E4 — but the CELL is a pointer, and this NOTE is where its scope is stated.
+    # ⛔ NOT "#8503's fix holds here": there IS no fix. `#8503` closed 2026-10-24 as a
+    # DISPROOF, so a receipt that reaches the bar is evidence the edges were formed on
+    # that artifact — not that a fix landed. The PASS arm is printed into a future
+    # scored log, so it must not name work no issue ever did.
+    if result["outcome"] == "PASS":
+        edge_clause = ("the planted-edge bar IS met by this receipt, so nothing is "
+                       "missing on this row")
+    elif receipt["edge_correct"] < receipt["planted"]:
+        edge_clause = ("the planted edges are still not all formed (#8503 — CLOSED "
+                       "2026-10-24: that closure records the DISPROOF, so it is this "
+                       "row's measurement record and not a live blocker, and no open "
+                       "issue owns the residual — #8503 says so in its own words)")
+    else:
+        edge_clause = (f"the planted-edge COUNT, not the wiring, is the shortfall — "
+                       f"this receipt plants {receipt['planted']} where the record "
+                       f"freezes {bars['E4']['of']} (#8503 — CLOSED 2026-10-24: that "
+                       f"closure records the DISPROOF, so it is this row's measurement "
+                       f"record and not a live blocker, and no open issue owns the "
+                       f"residual — #8503 says so in its own words)")
+    return {
+        "verdict": verdict_word(result),
+        "numerator": receipt["edge_correct"],
+        "denominator": receipt["planted"],
+        "sha": receipt["commit"],
+        "evidence": receipt["evidence"],
+        "corpus_sha256": receipt["corpus_hash"],
+        "note": (f"{result['value']}; bar {result['bar']}; content_ok="
+                 f"{receipt['content_ok']} operators_total="
+                 f"{receipt['operators_total']} on the SAME receipt, from "
+                 f"{receipt['evidence']}. Its corpus_hash={receipt['corpus_hash']} "
+                 f"IS the frozen corpus ({corpus_sha}) — the receipt is selected by "
+                 f"that hash, so this row cannot be scored on another revision. The "
+                 f"receipt's own date={receipt['date']} and commit={receipt['commit']} "
+                 f"are the RECEIPT's, not this run's head. verdict="
+                 f"{receipt['verdict']} failure_origin={receipt['failure_origin']} "
+                 f"is the receipt's own gate verdict over its metrics, not this "
+                 f"row's: {edge_clause}, and "
+                 f"the receipt's retrievability rate is UNMEASURED (#9596)"),
     }
 
 
@@ -2277,7 +3276,8 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
                required: list[str] | None = None,
                accounts: list[dict] | None = None,
                steps_gap: str = "",
-               arm: dict | None = None) -> str:
+               arm: dict | None = None,
+               door: dict | None = None) -> str:
     """The human log with the machine table at the bottom (one artifact, one read)."""
     lines: list[str] = []
     add = lines.append
@@ -2293,6 +3293,7 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
     add(f"# graph: {graph} (fresh, disposable; every node in it was written by "
         "this run)")
     add(f"# arm: {arm_header(arm or {})}")
+    add(f"# door: {door_header(door or {})}")
     add("")
     add("## the run — one pass over the pre-registered corpus")
     for run in runs:
@@ -2333,6 +3334,7 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
     add(f"e3 numerator={e3['numerator']} denominator={e3['denominator']} "
         f"below_floor={'REFUSED' if e3['below_floor'] else 'no'} "
         f"outcome={e3['outcome']} bar={e3['bar']}")
+    add(e3_legs_line(census_data.get("per_label")))
     add("e3 relationship anchors: " + ", ".join(
         f"{name}={census_data['relationship_anchored'].get(name, 0)}/{count}"
         for name, count in sorted(census_data["relationship_counts"].items())))
@@ -2414,7 +3416,7 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
         "atomic POINTS rather than surviving planted units")
     add("")
     add("## E4 — the committed operator receipt, read verbatim")
-    add(f"e4 receipt={E4_RECEIPT} run_id={e4['run_id']} date={e4['date']} "
+    add(f"e4 receipt={e4['evidence']} run_id={e4['run_id']} date={e4['date']} "
         f"commit={e4['commit']} corpus_hash={e4['corpus_hash']} "
         f"judge_pin={e4['judge_pin']} verdict={e4['verdict']} "
         f"failure_origin={e4['failure_origin']}")
@@ -2423,12 +3425,19 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
         f"operators_total={e4['operators_total']} "
         f"operators_provenanced={e4['operators_provenanced']}")
     add(f"e4 outcome={e4_out['outcome']} {e4_out['value']} bar={e4_out['bar']}")
-    add("e4 provenance: the FILE postdates the pre-registration but the "
-        f"MEASUREMENT does not — its own date={e4['date']} and its "
-        f"corpus_hash={e4['corpus_hash']} are not the frozen corpus "
-        f"({corpus_sha}). This row is therefore scored as a NON-GREEN measurement "
-        "on ITS OWN corpus revision, and the gate requires that digest to appear "
-        "in the artifact itself (V7)")
+    on_pin = _same_corpus(e4["corpus_hash"], corpus_sha)
+    add("e4 provenance: the receipt's own "
+        f"date={e4['date']} and commit={e4['commit']} are the RECEIPT's, not this "
+        f"run's head. " + (
+            f"Its corpus_hash={e4['corpus_hash']} IS the frozen corpus "
+            f"({corpus_sha}) — this row was selected BY that hash, so it is scored "
+            "on the pre-registered corpus and V7's declared-mismatch arm is not "
+            "taken for it"
+            if on_pin else
+            f"Its corpus_hash={e4['corpus_hash']} is NOT the frozen corpus "
+            f"({corpus_sha}). This row is therefore scored as a NON-GREEN "
+            "measurement on ITS OWN corpus revision, and the gate requires that "
+            "digest to appear in the artifact itself (V7)"))
     add("")
     add("## E5 — a fresh re-score of the #7947 arms against this corpus's gold")
     add(f"e5 arms_dir={e5['arms_dir']} artifact={e5['artifact']}")
@@ -2490,6 +3499,8 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
             "probe": "docs/evidence/7949-capstone/probes/capstone_measure.py",
             "graph": graph,
             "arm": arm_record(arm or {}),
+            "door": {**door_record(door or {}),
+                     "captures": door_witness(runs)},
             # #10215: V5 reads the step split from THESE two fields. A log that
             # omits them is read as the pre-#10215 "all eight required" shape,
             # which is why emitting them is the whole point of the accounting.
@@ -2518,7 +3529,8 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
                 "content_ok": e4["content_ok"],
                 "operators_total": e4["operators_total"],
                 "measured_commit": e4["commit"],
-                "source": E4_RECEIPT,
+                "corpus_hash": e4["corpus_hash"],
+                "source": e4["evidence"],
             },
             "e5_rescore": {
                 "raw_loss_rate": e5["raw_loss"],
@@ -2606,6 +3618,16 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         raise SystemExit(f"capstone-measure: REFUSED — {exc}") from exc
     corpus_sha = check_corpus(prereg)
+    # ⛔ THE E4 ARTIFACT IS RESOLVED HERE, WITH THE OTHER PRE-FLIGHT READS, AND FOR
+    # THE SAME REASON: `select_e4_receipt` has ~8 refusal arms (absent pin, no match
+    # on the pin, unreadable / non-object / non-UTF-8 file, non-string `corpus_hash`,
+    # unorderable date, would-have-won unscorable) and every one of them is a property
+    # of the ARTIFACTS, not of the run. Resolved where it used to be — after
+    # `run_corpus` — a bad receipts tree burned the full 7-session extraction cost and
+    # wrote NOTHING, which is the exact class `#9889`'s own pin exists for ("a real run
+    # burned its 7-session LLM cost and wrote NOTHING"). The receipt is CARRIED to the
+    # E4 section rather than re-read, so this is one read, not two.
+    receipt = load_e4(frozen_pin=corpus_sha)
 
     ready, why = backend_ready()
     if not ready:
@@ -2639,6 +3661,11 @@ def main(argv: list[str] | None = None) -> int:
     with measured_arm() as arm:
         print(f"capstone-measure: arm {arm_header(arm)}", flush=True)
         runs = run_corpus(graph, sessions)
+    # The door is a PATH, not only an environment fact (#10983 review round 11):
+    # a capture that returned before the lane dispatch — keyless (#3892) or a
+    # re-capture of an existing session (#1727 replay) — reports ok=True, so the
+    # failed-list below cannot see it and the table would be written anyway.
+    require_door_entered(runs)
     failed = [run["session_id"] for run in runs if not run["ok"]]
     census_data = census(graph_uri(os.environ["TORTOISE_DB_URI"], graph))
     observed, unobserved = observe_steps(runs, census_data)
@@ -2707,8 +3734,13 @@ def main(argv: list[str] | None = None) -> int:
     }
 
     # ── E3 ────────────────────────────────────────────────────────────────
+    # The empty-leg set is passed to the row because the row's arithmetic cannot see it: the
+    # totals are SUMS, so a registered class with no nodes is already gone from both halves by the
+    # time `e3_outcome` is called (#9736).
     e3_result = e3_outcome(anchored=census_data["anchored_total"],
-                           derived=census_data["derived_total"], bars=bars)
+                           derived=census_data["derived_total"], bars=bars,
+                           unmeasured_legs=e3_unmeasured_legs(
+                               census_data.get("per_label")))
     composition = census_data.get("point_composition") or {}
     e3 = {
         "verdict": verdict_word(e3_result),
@@ -2722,25 +3754,10 @@ def main(argv: list[str] | None = None) -> int:
     }
 
     # ── E4 ────────────────────────────────────────────────────────────────
-    receipt = load_e4()
-    e4_result = e4_outcome(edge_correct=receipt["edge_correct"],
-                           planted=receipt["planted"], bars=bars)
-    e4 = {
-        "verdict": verdict_word(e4_result),
-        "numerator": receipt["edge_correct"],
-        "denominator": receipt["planted"],
-        "sha": receipt["commit"],
-        "corpus_sha256": receipt["corpus_hash"],
-        "note": (f"{e4_result['value']}; bar {e4_result['bar']}; content_ok="
-                 f"{receipt['content_ok']} operators_total="
-                 f"{receipt['operators_total']} on the SAME receipt. Its own "
-                 f"date={receipt['date']}, commit={receipt['commit']} and "
-                 f"corpus_hash={receipt['corpus_hash']} differ from the frozen "
-                 f"corpus ({corpus_sha}), and its verdict={receipt['verdict']} "
-                 f"failure_origin={receipt['failure_origin']}: the planted edges "
-                 f"are not formed at all (#8503), and the receipt's "
-                 f"retrievability rate is UNMEASURED (#9596)"),
-    }
+    # `receipt` was resolved by the PRE-FLIGHT, before the model pass, so a refusal
+    # cannot land after the spend. It is the same object, not a second read.
+    e4_result = e4_outcome_for(receipt, bars)
+    e4 = build_e4_row(receipt, bars=bars, corpus_sha=corpus_sha)
 
     # ── E5 ────────────────────────────────────────────────────────────────
     e5 = score_e5(sessions, Path(args.e5_out))
@@ -2763,7 +3780,13 @@ def main(argv: list[str] | None = None) -> int:
                  f"delta cannot be certified. #9738 also records that §10's prior "
                  f"measurement was visible when the record claimed it was not, and "
                  f"that the 25-bound vs 29-marker populations must be reconciled "
-                 f"before either number is called final"),
+                 f"before either number is called final. The row's blocker moved "
+                 f"on 2026-11-02 from #9738 to #5087: #9738 CLOSED that morning "
+                 f"because its own record correction landed (PR #10525), which is "
+                 f"not a measurement of this number — raw recovery "
+                 f"{e5_result['raw_recovery']:.4f} against the 0.80 floor is S3 "
+                 f"selection recovery, owned by the S0→S6 selective write path "
+                 f"(#5087)"),
     }
 
     rows = build_rows(head=head, out_path=out_path, log_corpus_sha=corpus_sha,
@@ -2778,7 +3801,7 @@ def main(argv: list[str] | None = None) -> int:
                       e3_out=e3_result, e4=receipt, e4_out=e4_result, e5=e5,
                       e5_out=e5_result, rows=rows, out_path=out_path,
                       required=required, accounts=accounts, steps_gap=steps_gap,
-                      arm=arm)
+                      arm=arm, door=arm)
 
     destination = ROOT / out_path
     destination.parent.mkdir(parents=True, exist_ok=True)

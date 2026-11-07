@@ -258,7 +258,7 @@ def _ingest_claim(sdk: TortoiseSDK, content: str) -> str:
     """A claim written EXACTLY as ``ingest_v2._write_payload`` writes one:
     kind ``statement``, ``status="draft"``, and — the trap — ``is_episodic=True``
     (``ingest_v2.py:275-290``). The flag is the QUOTA discriminator
-    (``quota.py:1024-1030``), not a belief/evidence one; a denominator filtered
+    (``quota.py:1046-1050``), not a belief/evidence one; a denominator filtered
     on it would exclude every claim EP stamps (review P0)."""
     return sdk.create_point("statement", content, dedup=False,
                             is_episodic=True, status="draft")["id"]
@@ -504,8 +504,21 @@ def _probe():
 
 
 def _manifest(**over) -> dict:
-    """The manifest ``ep_activation.activate_beliefs`` returns per question —
-    and the exact shape ``census.py`` reads its eight cells off."""
+    """The manifest ``ep_activation.activate_beliefs`` returns per question.
+
+    This default supplies EIGHT of the THIRTEEN census cells the probe's
+    per-question projection now reads: ``operators``, ``factor_edges``,
+    ``points_with_ep``, ``points_unmeasured``, ``points_off_neutral``,
+    ``points_moved_off_neutral``, ``ep_ran``, ``no_op_reason``. The five it omits
+    are ``error`` and the four ``points_substrate`` / ``belief_eligible_*`` cells,
+    and each omission is load-bearing rather than an oversight: `error: null` is
+    what a fail-open manifest looks like, and the four absent belief cells are
+    exactly what makes a pre-#10493 manifest project four UNREAD cells rather
+    than four measured ones. Callers that need either pass them through
+    ``**over``.
+
+    (Before #10493 the projection read NINE — these eight plus ``error``.)
+    """
     m = {"ep_ran": True, "ep_engine": "ep", "operators": 171,
          "factor_edges": 0, "points_with_ep": 121, "points_unmeasured": 1038,
          "points_off_neutral": 8, "points_moved_off_neutral": 8,
@@ -661,9 +674,104 @@ def test_census_probe_names_the_ratio_a_point_coverage_floor(tmp_path):
     assert out["point_coverage"]["points_with_ep"] == 242
 
 
+def test_census_probe_publishes_the_belief_eligible_denominator(tmp_path):
+    """The artifact publishes the denominator that can actually CARRY a belief.
+
+    ``point_coverage`` is a floor whose dilution is unbounded, because the v2
+    ingest writes episodic turn/chunk points that no factor can ever reach.
+    #10493 split the population (``points_substrate`` + ``belief_eligible_*``)
+    and the posture summary computes ``belief_eligible_ratio`` — but the probe
+    publishes cells through an ALLOW-LIST, so the corrected denominator reached
+    the manifest and the report and stopped there: the artifact that publishes
+    this issue's headline number could not carry it at all (#10493 residual 1).
+
+    Non-vacuous: the pre-fix probe's ``cells`` block has no such keys, so the
+    subscript raises ``KeyError``.
+    """
+    manifest = dict(_manifest(), points_substrate=1000,
+                    belief_eligible_total=159, belief_eligible_with_ep=121,
+                    belief_eligible_unmeasured=38)
+    outcomes = [{"question_id": f"q{i}",
+                 "question_type": "single-session-user",
+                 "belief_activation": dict(manifest)} for i in range(2)]
+    out = _probe().cells(_write(tmp_path, _report_doc(outcomes)))
+
+    cells = out["cells"]
+    assert cells["points_substrate"] == 2000
+    assert cells["belief_eligible_total"] == 318
+    assert cells["belief_eligible_with_ep"] == 242
+    assert cells["belief_eligible_unmeasured"] == 76
+    assert cells["belief_eligible_ratio"] == pytest.approx(242 / 318)
+    # The COMPLETE census, so nothing is withheld as unread.
+    assert cells["belief_eligible_total_unread"] == 0
+    assert cells["points_substrate_unread"] == 0
+    # The floor is still published beside it — the two answer DIFFERENT
+    # questions (242/2318 of the whole graph vs 242/318 of the population that
+    # can carry a belief), so a test that let them coincide would pass on a
+    # probe that had merely renamed one to the other.
+    assert out["point_coverage"]["ratio"] == pytest.approx(242 / 2318)
+    assert out["point_coverage"]["ratio"] != cells["belief_eligible_ratio"]
+
+
+def test_census_probe_withholds_the_belief_eligible_ratio_when_unread(tmp_path):
+    """A ratio over a population nobody read is the fabricated figure the
+    ``*_unread`` companions exist to make impossible (``measurement_posture``
+    publishes ``belief_eligible_ratio: None`` for exactly this shape).
+
+    The committed 24-question artifact is this shape: it predates #10493, so
+    its runs never measured the eligibility cells. Emitting a ratio there —
+    over a zero, or over the point-level pair — would be a measured claim
+    about a census that was never taken.
+    """
+    out = _probe().cells(_write(tmp_path, _report_doc(_outcomes(2))))
+
+    cells = out["cells"]
+    assert cells["belief_eligible_total"] is None
+    assert cells["belief_eligible_ratio"] is None
+    assert cells["belief_eligible_total_unread"] == 2
+    assert cells["points_substrate_unread"] == 2
+
+
+def test_probe_output_re_derives_its_own_belief_eligible_aggregates(tmp_path):
+    """The belief-eligible aggregate must be re-derivable from the probe's OWN
+    ``per_question`` rows, not only from the input it was handed.
+
+    The aggregate pin re-derives every committed ``cells`` entry from the
+    committed ``per_question`` rows. Publishing the new cells in ``cells``
+    alone therefore does not close #10493's residual — it reds that pin on a
+    CORRECT post-#10493 artifact (``cells.points_substrate = 2000, but the
+    committed per_question rows derive None``), which is a false block on the
+    very number the pin protects (review cycle 1, P1). The rows carry these
+    cells for the same reason the old ones do: an aggregate no row supports is
+    a hand-edit waiting to happen.
+    """
+    manifest = dict(_manifest(), points_substrate=1000,
+                    belief_eligible_total=159, belief_eligible_with_ep=121,
+                    belief_eligible_unmeasured=38)
+    outcomes = [{"question_id": f"q{i}",
+                 "question_type": "single-session-user",
+                 "belief_activation": dict(manifest)} for i in range(2)]
+    out = _probe().cells(_write(tmp_path, _report_doc(outcomes)))
+
+    # Round-trip exactly as ``test_committed_census_rederives_its_own_aggregate``
+    # does: probe output in, summarizer out, compare against the aggregate.
+    rows = out["per_question"]
+    shapes = _row_shapes(out)
+    summary = mp.summarize_belief_activation(
+        [_rebuild_outcome(r, sh) for r, sh in zip(rows, shapes, strict=True)],
+        requested=True)
+    for key in ("points_substrate", "belief_eligible_total",
+                "belief_eligible_with_ep", "belief_eligible_unmeasured",
+                "belief_eligible_ratio"):
+        assert summary[key] == out["cells"][key], (
+            f"cells.{key} = {out['cells'][key]!r} but the probe's own "
+            f"per_question rows derive {summary[key]!r}")
+    # Non-vacuous: a row that dropped the cells would derive None here.
+    assert out["per_question"][0]["points_substrate"] == 1000
+
+
 def test_census_probe_counts_a_fail_open_manifest_as_unread(tmp_path):
     """A manifest PRESENT is not a census READ (#10137 review, P2).
-
     The producer's fail-open shape — ``{"ep_ran": False, "error": ...}``, the
     one ``measurement_posture`` documents — carries a manifest and NO census
     cells. Counting manifests published ``per_question_unread: 0`` over rows
@@ -691,8 +799,8 @@ def test_census_probe_discloses_failed_questions_behind_the_ratio(tmp_path):
     """A crashed run's checkpoint must not read as ``N/N`` over its survivors
     (#10137 review, P2). ``summarize_belief_activation`` only ever sees
     ``outcomes``, so the failure population is read from the input itself
-    (``run.py:2797`` writes ``failures``; a report carries ``n_failed``) and
-    published beside it.
+    (``run.py`` writes each checkpoint's ``failures`` key; a report carries
+    ``n_failed``) and published beside it.
 
     Non-vacuous: the pre-fix probe reported ``questions_in_run: 2`` for this
     input and no ``questions_failed`` at all — the ablation was invisible."""
@@ -732,7 +840,8 @@ def test_census_probe_counts_an_overlapped_qid_once(tmp_path):
     by one worker and failed by another lands in both lists (``report.py:1407-
     1410``), and ``_merge_checkpoint`` unions the two independently, the
     ``remove_failures`` tombstone being present only when the writer knew it was
-    a ``--retry-failed`` re-attempt (``run.py:2699-2729``). Counting
+    a ``--retry-failed`` re-attempt (``_merge_checkpoint``'s ``remove_failures``
+    parameter, honored in its tombstone loop). Counting
     ``len(outcomes) + len(failures)`` would publish this 2-question population
     as a 3-question run, and the gap the README calls "the disclosure" could
     not see it, because the gap was ``questions_failed`` BY CONSTRUCTION.
@@ -889,7 +998,15 @@ def test_census_probe_keys_a_non_str_qid_apart_from_its_repr(tmp_path):
 
 _CENSUS_CELLS = ("operators", "factor_edges", "points_with_ep",
                  "points_unmeasured", "points_off_neutral",
-                 "points_moved_off_neutral", "ep_ran", "no_op_reason", "error")
+                 "points_moved_off_neutral", "ep_ran", "no_op_reason",
+                 "error",
+                 # #10493's belief-eligible population. Carried here as well as
+                 # in ``cells`` because the aggregate pin re-derives from the
+                 # ROWS: a cell published only in the aggregate is a number no
+                 # row supports, and the pin would red on a correct artifact
+                 # (review cycle 1, P1).
+                 "points_substrate", "belief_eligible_total",
+                 "belief_eligible_with_ep", "belief_eligible_unmeasured")
 
 
 # The two shapes a NEVER-read manifest can take, keyed by the classification the
@@ -904,10 +1021,11 @@ def _row_shapes(doc, source=None) -> list:
 
     A ``per_question`` row is LOSSY about exactly one thing. The probe projects
     every outcome through ``(o.get("belief_activation") or {}).get(...)``
-    (``probes/census.py:245-258``), so an outcome carrying NO
+    (the ``per_question`` projection in ``probes/census.py``), so an outcome
+    carrying NO
     ``belief_activation`` and one carrying ``"belief_activation": {}`` produce a
     byte-identical all-null row — the probe's own ``_census_unread`` calls BOTH
-    unread (``census.py:52-68``), while
+    unread (``census.py::_census_unread``), while
     ``measurement_posture._classify_question`` classifies them DIFFERENTLY:
     ``no_manifest`` for a non-dict (``:235``) and ``activation_failed`` for a
     manifest that carries none of the census cells, e.g. the empty dict
@@ -1106,7 +1224,8 @@ def test_a_recut_with_a_never_read_row_is_not_red(tmp_path, never_read):
 
     The committed sample is fully read, so the defect could not fire on it: it
     was a trap armed for the NEXT re-cut. Both shapes below are projected by
-    the probe (``census.py:245-258``) to the SAME all-null row, so a pin that
+    the probe (the ``per_question`` projection in ``census.py``) to the SAME
+    all-null row, so a pin that
     guesses ONE shape for every null row re-derives one of them wrongly and
     reds a correct artifact. Both are pinned, not just the empty one: absence
     is the more likely real shape (a resumed pre-arm checkpoint) and would
@@ -1487,7 +1606,7 @@ def test_committed_census_rederives_its_own_aggregate():
     (key set and ORDER only, never a value): keys alone let a cell carry a
     number no row supports.
 
-    ⚠️ Three things are RESIDUALLY un-derived, by the artifact's own limits
+    ⚠️ Two things are RESIDUALLY un-derived, by the artifact's own limits
     rather than by choice, and this pin cannot close them: the
     ``questions_in_run`` / ``questions_failed`` pair, checked only against each
     other and the ratio (the `questions_in_run - questions ==
@@ -1532,9 +1651,9 @@ def test_committed_census_rederives_its_own_aggregate():
     # it verbatim as "questions_with_ep / questions = 24 / 24 = 1.00", under
     # the heading sentence "The number this issue was opened to produce").
     # Derived exactly as the probe
-    # derives it — ``probes/census.py:268-270``: ``with_ep / q``, and ``None``
-    # when the denominator is not a usable count — the same way the sibling
-    # ``point_coverage.ratio`` is derived below. Without this the one number
+    # derives it — ``census.py``'s ``questions_with_ep_ratio`` (``with_ep / q``),
+    # and ``None`` when the denominator is not a usable count — the same way the
+    # sibling ``point_coverage.ratio`` is derived below. Without this the one number
     # this artifact exists to publish was the one number a hand could edit
     # (#10678 review, P1: ``1.0`` → ``0.5`` shipped green).
     if not doc["questions"]:
@@ -1551,10 +1670,17 @@ def test_committed_census_rederives_its_own_aggregate():
             f"{doc['questions']} derives {expected_ratio!r}")
 
     # ``errors`` is the summarizer's FIRST failure signal and the probe
-    # publishes it (``probes/census.py:305``). On this sample every committed
-    # row carries ``error: null``, so the only correct value is the committed
-    # empty list — an artifact naming a failure beside ``cells.failed == 0``
-    # used to ship with nothing reading it (#10678 review, P2).
+    # publishes it (``summary.get("errors")`` in ``probes/census.py``). On this
+    # sample every committed row carries ``error: null``, so the only correct
+    # value is the committed empty list — an artifact naming a failure beside
+    # ``cells.failed == 0`` used to ship with nothing reading it (#10678 review,
+    # P2).
+    #
+    # Citations INTO ``probes/census.py`` name a SYMBOL, never a line: a line
+    # citation there is invalidated by any insertion in that file, and the
+    # insertion that invalidated the citations above was this change's own — in
+    # ``census.py``. (This file changed too, but an insertion here cannot shift
+    # a citation into ``census.py``. Citations into OTHER files stay by line.)
     assert summary["errors"] == doc["errors"], (
         f"{_ARTIFACT}: errors = {doc['errors']!r}, but the committed "
         f"per_question rows derive {summary['errors']!r}")
@@ -1649,8 +1775,9 @@ def test_committed_census_rederives_its_own_aggregate():
         f"checks is how the headline ratio shipped editable (#10678 review)")
 
     # The disclosure fields describe THESE rows: nothing was unread. UNREAD is
-    # ``_optional_int(cell) is None`` — the one predicate the probe's
-    # ``_census_unread`` and the summarizer use — not ``value is None``, which
+    # ``_optional_int(cell) is None`` — the predicate the probe's
+    # ``_census_unread`` and the summarizer's own ``*_unread`` sums both use over
+    # ``_UNKNOWN_PER_MANIFEST_KEYS`` — not ``value is None``, which
     # would call a non-numeric cell (``operators: true``) READ here while its
     # ``cells.operators_unread`` companion calls it UNREAD.
     assert doc["per_question_source"] == "outcome.belief_activation"

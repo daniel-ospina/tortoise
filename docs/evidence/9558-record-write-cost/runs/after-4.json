@@ -1,0 +1,24 @@
+{
+  "head": "6ab6848b8b",
+  "per_record_ms": {
+    "max": 4.925,
+    "mean": 3.822,
+    "median": 3.751,
+    "min": 3.116,
+    "p95": 4.618
+  },
+  "per_timed_record": {
+    "connect_calls": 0,
+    "refused_props_calls": 60,
+    "table_columns_calls": 60
+  },
+  "records": 60,
+  "records_per_second": 261.41,
+  "table_columns_isolated_ms": {
+    "mean": 0.477,
+    "median": 0.353
+  },
+  "tree": "/home/cmux/tortoise/.worktrees/child-9558",
+  "wall_s": 0.2295,
+  "warmup": 5
+}
