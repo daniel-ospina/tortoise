@@ -1727,9 +1727,10 @@ and it is not a substitute for the TCP check that catches a dead process. Do
 the loop is fine is the exact circularity that let this outage run unattended.
 
 ⚠️ **And, like the Pages auth arm, it never consults the egress control probe.**
-`control_ok()` runs only on the restartable path (`availability-watchdog.sh:2529`,
-inside `if [ "$restart_mode" = "DOWN" ]`), because the disruptive action it
-guards — a machine restart — cannot happen on a hard-disarmed arm. So a TOTAL
+`control_ok()` runs only on the restartable path — the restart decision's own
+`if ! control_ok` guard, inside `if [ "$restart_mode" = "DOWN" ]` — because the
+disruptive action it guards — a machine restart — cannot happen on a
+disarmed arm. So a TOTAL
 runner-side egress failure pages `PROD DOWN` from THIS step instead of
 `INCONCLUSIVE`, even though nothing is wrong with the machine. See §7.8 (the
 INCONCLUSIVE bullet there is scoped to the restartable target) and #11401, which
@@ -2608,7 +2609,7 @@ tracked as **#5798**.
 - **A *total* runner-side network failure is INCONCLUSIVE, not DOWN** (the
   `CONTROL_URL` check) — **on the restartable Fly API target only.** The control
   probe is consulted inside the restart decision
-  (`availability-watchdog.sh:2529`), so the TWO hard-disarmed arms — the Pages
+  (its own `if ! control_ok` guard), so the TWO hard-disarmed arms — the Pages
   auth surface and the served-request liveness surface — never reach it: a total
   runner-side egress failure pages them as `PROD DOWN`/`PROD DEGRADED` (a TRUE
   alert about the runner, not the app), and the case is disambiguated by the

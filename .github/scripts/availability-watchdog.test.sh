@@ -2490,8 +2490,12 @@ assert_contains "$AUTH_STEP" "TELEGRAM_BOT_TOKEN: \${{ secrets.TELEGRAM_BOT_TOKE
 # fails silently:
 #   * the step's URL  — without it nothing probes the served path at all;
 #   * script membership in the production set — an unrecognised URL is a DRILL:
-#     [DRILL]-titled incident, NO page, self-heal disarmed. A step that looks
-#     exactly right in the diff can therefore alert nobody.;
+#     a [DRILL]-titled DEGRADED/DOWN incident, self-heal disarmed, and no PROD
+#     incident ever filed. ⛔ It is NOT silent: the DRILL still PAGES, with a
+#     [DRILL] label (e2e(l) pins that) — so a misclassified step is not
+#     inaudible: it reaches on-call labelled as a drill, files no PROD incident
+#     and can never restart. That is harder to diagnose at 3am than a silence,
+#     because something DID page.;
 #   * the 5 s bound — a liveness probe that waits 25 s for an answer is the
 #     status-only probe this issue already had. The bound IS the instrument, so
 #     a later "harmonise the timeouts" tidy-up must red HERE rather than in the
@@ -2503,7 +2507,8 @@ LIVENESS_HOST="$(printf '%s' "$LIVENESS_PROBE_URL_STEP" | sed -n 's|https://\([^
 assert_not_empty "$LIVENESS_PROBE_URL_STEP" "the liveness step's PROBE_URL is derivable (a quoted/folded value must not silently vacate the guards below)"
 assert_contains "$LIVENESS_PROBE_URL_STEP" "/liveness" "the liveness step probes the served-request path, not /health (the endpoint that answered from cached state)"
 # …the script must classify that same URL as PRODUCTION, or the step runs as a
-# DRILL and pages nobody.
+# DRILL — it still pages (labelled `[DRILL]`) but files no PROD incident and can
+# never restart.
 assert_contains "$(grep '^LIVENESS_PROBE_URL=' "$WATCHDOG" || true)" "$LIVENESS_PROBE_URL_STEP" \
   "the watchdog script's LIVENESS_PROBE_URL matches the step's probe URL (else the run is silently a DRILL)"
 assert_eq "$(prod_unit "$LIVENESS_PROBE_URL_STEP")" "PROD" \
