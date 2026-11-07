@@ -5114,10 +5114,37 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
         r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}"
         + re.escape(_FALSE_TREE)
         + r"[`*_]{0,3}"
-        + r"(?!\s*['\u2019]s\b)(?!\s+(?:parent|child|son|ancestor|descendant|successor|"
-        r"predecessor|merge|commit|tree|sha)\b)"
-        r"(?!\s+(?:itself|themselves|himself|herself)\b)"
-        r"(?!\s+(?:the|a|an)\s)",
+        + r"(?!\s*['\u2019]s\b)",
+        re.I,
+    )
+    #: ⛔ …AND THE `not` MAY BE NEGATING AN APPOSITIVE, WHICH IS NOT THE EQUIVALENCE
+    #: (#11191 review r9 F1/F2, P2 — MEASURED BOTH WAYS, r8's own fix got each direction
+    #: wrong: 24/27 separator×tail rows stayed ACCEPTED, and 12/12 truthful corrections
+    #: became REFUSED). Two things are true at once and a `\s+`-anchored lookahead can
+    #: only express the first:
+    #:   * the object may be separated from the sha by PUNCTUATION — one comma defeats a
+    #:     whitespace anchor, and the claim then passes with the pin GREEN:
+    #:       "`ff6379eb2` is the tree immediately before #9548, not `ff6379eb2`, the merge
+    #:        that landed #9601."                              ACCEPTED at r8, main REFUSES
+    #:       "The tree immediately before #9548 is not `ff6379eb2`; the #9601 merge."  same
+    #:   * but a tail is NOT automatically a defect: when the same sentence goes on to name
+    #:     `047c91f7a`, the appositive is part of a CORRECTION and refusing it reds a
+    #:     truthful repair of the very cell this pin guards:
+    #:       "The tree immediately before #9548 is not `ff6379eb2` the #9601 merge, but
+    #:        `047c91f7a`."                                     REFUSED at r8, main ACCEPTS
+    #: So the tail is detected PUNCTUATION-TOLERANTLY (whitespace, `,` `;` `:` `.`, the
+    #: dashes) and the exemption survives only when the sentence names the true tree.
+    #: The determiner branch is determiner-headed RELATION vocabulary — the same nouns the
+    #: bare tail above uses — so ordinary prose after a semicolon ("… is not `ff6379eb2`;
+    #: the note says …") is not read as an appositive.
+    _NOT_FALSE_SHA_APPOSITIVE = re.compile(
+        r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}"
+        + re.escape(_FALSE_TREE)
+        + r"[`*_]{0,3}"
+        + r"(?:[\s,;:.\u2014\u2013-]*(?:itself|themselves|himself|herself)\b"
+        + r"|[\s,;:.\u2014\u2013-]*(?:the|a|an)\s+(?:#\d+\s+)?"
+        r"(?:parent|child|son|ancestor|descendant|successor|predecessor|merge|commit|tree|sha|"
+        r"branch|tip|row)\b)",
         re.I,
     )
     #: The denial tokens a correction can carry BETWEEN the sha and the phrase. `isn't`,
@@ -6410,7 +6437,11 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
                 # Falling through lets step 3 (the adjacency arm) refuse it.
                 if not _FALSE_SHA_ADJACENT.search(clause):
                     return True
-            if _NOT_FALSE_SHA.search(own):  # "… is `047c91f7a`, not `ff6379eb2`"
+            # "… is `047c91f7a`, not `ff6379eb2`" — and an appositive tail is exempt
+            # only when the same sentence names the true tree (see r9 F1/F2 above).
+            if _NOT_FALSE_SHA.search(own) and (
+                not _NOT_FALSE_SHA_APPOSITIVE.search(norm) or _TRUE_TREE in norm
+            ):
                 return True
             if _RETIRED_ATTRIBUTION.search(own):  # "no longer calls it"
                 return True
@@ -7043,7 +7074,7 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
     def _offender_sentences(text: str) -> list[str]:
         """The phrase-bearing sentences of `text` that still assert the false equivalence.
 
-        ⛔ ONE DEFINITION, FOUR CALLERS, AND THAT IS THE POINT (#11191 review r7, F3, P3 —
+        ⛔ ONE DEFINITION, SIX CALLERS, AND THAT IS THE POINT (#11191 review r7, F3, P3 —
         MEASURED). The §A8 gate and the A2 injection controls each built their OWN
         `[s for s in re.split(...) if _refuses_before_9548(s)]` comprehension, so the
         controls re-implemented the thing they guard: replacing the GATE's predicate with
@@ -7309,8 +7340,12 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
     # REAL row through the gate). This control rewrites the cell's own figure and requires
     # the gate to reject it, so the wiring from the document to the gate is exercised
     # rather than assumed. It does not make the `assert` statement undeletable — nothing
-    # in-file can — and it does not claim that: what it pins is that the gate's verdict on
-    # THIS cell is a measurement of THIS cell.
+    # in-file can — and, measured, it does NOT: neutralising the `assert` statement itself
+    # to `assert True` is still 111 passed, because a control cannot pin the statement that
+    # calls it. What this row DOES pin is the gate's rejection of THIS cell's own figure when
+    # that figure is wrong, so a gate that stopped reading the figure reds here instead of
+    # staying green. The r8 comment claimed the stronger thing and was falsified (#11191
+    # review r9 F3) — corrected rather than reworded.
     _row_with_a_wrong_figure = re.sub(
         r"not one: \d+\*\*", f"not one: {_row_measured + 1}**", row, count=1
     )
@@ -8325,6 +8360,18 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
         "`ff6379eb2` the ancestor.",
         "The tree immediately before #9548 is not `ff6379eb2` the merge that landed #9601.",
         "The tree immediately before #9548 is not `ff6379eb2` the ancestor.",
+        # ⛔ …AND ONE PUNCTUATION CHARACTER MAY NOT RESTORE IT (#11191 review r9, F1, P2 —
+        # MEASURED, 24/27 separator×tail rows still ACCEPTED while the guard was
+        # `\s+`-anchored, all of them REFUSED by `origin/main`). The object can be
+        # separated from the sha by `,` `;` `:` `.` or a dash, so the guard is
+        # punctuation-tolerant by construction, not by a longer anchor.
+        "`ff6379eb2` is the tree immediately before #9548, not `ff6379eb2`, the merge "
+        "that landed #9601.",
+        "The census immediately before #9548 returns 5 lines at `ff6379eb2`, not "
+        "`ff6379eb2`, an ancestor.",
+        "The tree immediately before #9548 is not `ff6379eb2`, the #9601 merge.",
+        "The tree immediately before #9548 is not `ff6379eb2`; the #9601 merge.",
+        "The tree immediately before #9548 is not `ff6379eb2`: the #9601 merge.",
     )
     _complement_appositive_passed = [
         s for s in _complement_appositive if not _refuses_before_9548(s)
@@ -8344,6 +8391,14 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
         "The tree immediately before #9548 is not `ff6379eb2` but `047c91f7a`.",
         "The tree immediately before #9548 is `047c91f7a`, not `ff6379eb2` the tree the "
         "row used to name.",
+        # ⛔ …AND THE APPOSITIVE IS NOT ITSELF THE DEFECT WHEN THE SENTENCE NAMES THE TRUE
+        # TREE (#11191 review r9, F2, P2 — MEASURED, 12/12 truthful corrections were
+        # REFUSED by the r8 cut, all accepted by `origin/main`): the same tail is part of
+        # a correction, so the exemption survives when `047c91f7a` appears in the sentence.
+        "The tree immediately before #9548 is not `ff6379eb2` the #9601 merge, but "
+        "`047c91f7a`.",
+        "The tree immediately before #9548 is not `ff6379eb2` itself — it is `047c91f7a`.",
+        "The tree immediately before #9548 is not `ff6379eb2` an ancestor; `047c91f7a` is.",
     )
     _complement_truths_refused = [s for s in _complement_truths if _refuses_before_9548(s)]
     assert not _complement_truths_refused, (
