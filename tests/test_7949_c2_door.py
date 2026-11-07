@@ -86,6 +86,20 @@ REFERENTIALITY = REPO / "tortoise/referentiality.py"
 #: defect the whole PR exists to close, in its third round.
 CONTEXT_ENRICH = REPO / "tortoise/context_enrich.py"
 MODEL_ADAPTERS = REPO / "tortoise/model_adapters.py"
+CHANGE_FEED = REPO / "tortoise/change_feed.py"
+#: Round 9 of the #10983 review, and the reason this list is now SEVEN modules
+#: wide: `sparse.py:226` reads ``TORTOISE_IDENTIFIER_TOKENS`` (default ON) and
+#: `projection/entities.py:1208` gates the alias derivation on it
+#: (`point_identifier_aliases`), reached from the write path the acceptance
+#: takes (`sdk.capture_session` -> `_extract_session_v2` -> `create_point`), so
+#: it REWRITES `search_keys` on every ``:Point`` the run writes. MEASURED on the
+#: registered corpus at the previous head: not in `SEAM_LEDGER`, not in
+#: `DOOR_PINNED_OFF`/`ON`, not in either acknowledgement list, and `sparse.py` in
+#: `path_modules` was False — an unclassified write-path switch under a door the
+#: log called pinned. Its effect on the registered numbers is nil (0 of 27 points
+#: yield an alias; 0 turns across the 7 fixtures), which is why it is a closure
+#: defect and not a wrong figure.
+SPARSE = REPO / "tortoise/sparse.py"
 PROBE = REPO / "docs/evidence/7949-capstone/probes/capstone_measure.py"
 REGISTRATION = REPO / "docs/evidence/7949-capstone/preregistration.json"
 
@@ -831,11 +845,43 @@ def test_the_seam_var_the_ledger_names_is_the_one_the_module_reads():
         reads_literal = f'"{flag}"' in body or f"'{flag}'" in body
         # Two resolvers read their flag through a module constant
         # (``os.environ.get(ENV_FLAG)``), so the literal is not in the body.
-        reads_constant = _module_env_flag(path) == flag
+        # ⛔ But the CONSTANT has to be READ, not merely DEFINED: a name lookup
+        # over the module is satisfied by `ENV_FLAG = "TORTOISE_S2_DECISION_SEAM"`
+        # alone, and the cycle-9 review MEASURED that — rewriting
+        # `s2_decision_seam.seam_enabled` to read `TORTOISE_VET` left all 19 tests
+        # green, because the constant's DECLARATION was the whole evidence. So the
+        # resolver body must pass the constant to an env reader as an argument —
+        # parsed from the body, not grepped.
+        reads_constant = (_module_env_flag(path) == flag
+                          and _reads_the_constant(body, "ENV_FLAG"))
         assert reads_literal or reads_constant, (
             f"{module}.{resolver} does not read {flag} — the ledger names a "
             f"variable the resolver never reads, so pinning that spelling arms "
             f"nothing (#10983): {body[:220]!r}")
+
+
+def _reads_the_constant(body_src: str, name: str) -> bool:
+    """Does this function body pass ``name`` to an env reader as its ARGUMENT?
+
+    ``body_src`` is a def's source segment (``_body`` drops the docstring), so it
+    is re-parsed at its original column and walked structurally: a bare ``Name``
+    mention is NOT enough — the constant must be the argument of a call, which is
+    the only form that actually reads the environment through it.
+    """
+    try:
+        tree = ast.parse(body_src)
+    except SyntaxError:
+        return False
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not node.args:
+            continue
+        if not ast.unparse(node.func).endswith(
+                ("environ.get", "getenv", "env_flag", "ask_env_int")):
+            continue
+        arg = node.args[0]
+        if isinstance(arg, ast.Name) and arg.id == name:
+            return True
+    return False
 
 
 def _module_env_flag(path: Path) -> str | None:
@@ -1079,7 +1125,14 @@ def test_the_probe_refuses_a_PINNED_ON_switch_that_reads_back_wrong(monkeypatch)
     for key, expected in probe.DOOR_PINNED_ON:
         env = _Sticky(os.environ)
         env.stuck = key
-        env[key] = "0"          # the value it will READ BACK, not the pin
+        # ⛔ `dict.__setitem__`, NOT `env[key] = "0"`: `__setitem__` swallows
+        # every write for `stuck`, this one included, so the value the run read
+        # back was whatever the OPERATOR'S shell held — the suite passed on a
+        # clean box and failed on a box that exported one of the pinned-ON
+        # levers (measured: `TORTOISE_JSON_MODE=1` and `TORTOISE_S4_DELTA=1`
+        # each red this test at the previous head). The value read back has to
+        # be OURS, or the test asserts about the environment, not the probe.
+        dict.__setitem__(env, key, "0")   # the value it will READ BACK, not the pin
         monkeypatch.setattr(probe, "os", type(
             "os", (), {"environ": env})())
         with pytest.raises(SystemExit) as exc, probe.measured_arm():
@@ -1097,13 +1150,20 @@ def test_every_env_var_the_capture_path_reads_is_accounted_for():
     set did not cover (`TORTOISE_SESSION_LLM_MOCK`, then the two truncation
     budgets), because "every switch that changes what the run measures" was
     prose. This derives the list from the module instead: every
-    ``TORTOISE_*`` variable ``extractor_v2`` reads must be EXACTLY ONE OF
+    ``TORTOISE_*`` variable read by the SEVEN modules in ``path_modules`` below
+    (``extractor_v2`` plus the six it reaches) must be EXACTLY ONE OF FOUR
+    things — the lists are the authority, and this docstring deliberately does
+    NOT restate their sizes or the module names, because the enumeration that
+    used to live here was three modules and three categories while the code was
+    already wider (review cycle 9):
 
       * an arm seam in ``SEAM_LEDGER`` (the VET/CLASSIFY_LATER/S4_DELTA flags),
-      * a member of ``DOOR_PINNED_OFF`` / ``DOOR_PINNED_ON``, or
+      * a member of ``DOOR_PINNED_OFF`` / ``DOOR_PINNED_ON``,
       * a declared INPUT (the graph it writes, the backend label it resolves) —
         things the run needs a value FOR, not settings that change what it
-        measures.
+        measures, or
+      * a member of ``acknowledged_not_a_measurement_seam`` — a read on a derived
+        module that is NOT a measurement switch, with its reason stated.
 
     A new ``os.environ.get("TORTOISE_...")`` in the extractor therefore reds
     this suite until someone classifies it, which is the only form of this rule
@@ -1130,6 +1190,12 @@ def test_every_env_var_the_capture_path_reads_is_accounted_for():
             "rewrite what is extracted"),
         "TORTOISE_ASK_MODEL": "the ASK feature's model, not the extraction path",
         "TORTOISE_ASK_PROVIDER": "the ASK feature's provider, not the extraction path",
+        "TORTOISE_SESSION_LLM_MODEL": (
+            "the model spec `sdk._build_session_llm_extractor` resolves, built "
+            "unconditionally at capture time — but with the m2 lane pinned OFF the "
+            "built extractor is never used by the v2 door, and a spec that cannot "
+            "be resolved RAISES (loud) rather than silently changing the measured "
+            "population, so it is not a measurement seam"),
     }
 
     #: The MEASUREMENT modules the path renders with. `referentiality.py` is
@@ -1161,7 +1227,7 @@ def test_every_env_var_the_capture_path_reads_is_accounted_for():
     #: deliberately out of scope, NAME it here with the switch it reads and the
     #: reason, rather than leaving its reads invisible.
     path_modules = (EXTRACTOR, REFERENTIALITY, VALUE_GATE, SEAM,
-                    CONTEXT_ENRICH, MODEL_ADAPTERS)
+                    CONTEXT_ENRICH, MODEL_ADAPTERS, CHANGE_FEED, SPARSE)
 
     read: set[str] = set()
     for module in path_modules:
@@ -1196,12 +1262,21 @@ def test_every_env_var_the_capture_path_reads_is_accounted_for():
     # the path; the probe is included because it is the code that pops and
     # re-reads them.
     read_anywhere = read | _env_reads(SDK) | _env_reads(HOSTED) | _env_reads(PROBE)
-    dead = sorted(env for env in (set(probe.DOOR_PINNED_OFF)
-                                  | {e for e, _v in probe.DOOR_PINNED_ON})
-                  if env not in read_anywhere)
+    # ⛔ And the reverse check covers the ARM and LEDGER spellings too (cycle 9):
+    # it used to look only at `DOOR_PINNED_OFF`/`DOOR_PINNED_ON`, so a
+    # `SEAM_LEDGER` row or an `ARM_ON`/`ARM_OFF` member naming a variable the code
+    # stopped reading was a DEAD DECLARATION nothing caught — and a dead ledger
+    # row is worse than a missing one, because the acceptance log prints
+    # `TORTOISE_S2_DECISION_SEAM=off` from it and reads as a control.
+    declared = (set(probe.DOOR_PINNED_OFF)
+                | {e for e, _v in probe.DOOR_PINNED_ON}
+                | {e for e, _w, _d, _s in probe.SEAM_LEDGER}
+                | set(probe.ARM_ON) | set(probe.ARM_OFF))
+    dead = sorted(env for env in declared if env not in read_anywhere)
     assert not dead, (
-        f"{dead} are pinned but read nowhere on the capture path — a pin that "
-        f"cannot matter is the declaration this module refuses elsewhere")
+        f"{dead} are pinned or carried in the ledger but read nowhere on the "
+        f"capture path — a pin that cannot matter is the declaration this "
+        f"module refuses elsewhere")
 
 
 def test_the_probe_records_the_door_in_the_log_and_the_machine_record():

@@ -346,20 +346,19 @@ ARM_OFF = ("TORTOISE_VALUE_GATE", "TORTOISE_S2_DECISION_SEAM")
 # what the run MEASURES through it, is pinned here and READ BACK like every other
 # switch (the ``arm:`` rule, applied to the door).
 #
-# ⛔ The set below is CLOSED over the SIX modules the capture path DERIVES from —
-# ``extractor_v2.py`` (the renderer), the three it reaches one call down
-# (``referentiality`` for the S2.2 mention arm, ``value_gate`` and
-# ``s2_decision_seam`` for the seam decisions), and the two the door reaches
-# through the SDK (``context_enrich`` via ``capture_session(enrich_fn=…)``,
-# ``model_adapters`` via ``_extract_session_v2``) — and that claim is checkable
-# rather than rhetorical:
-# every ``TORTOISE_*`` those modules read is accounted for, either as an arm
-# seam in ``SEAM_LEDGER`` (``TORTOISE_VET``, ``TORTOISE_CLASSIFY_LATER``,
-# ``TORTOISE_S4_DELTA``), or as a pin below, or as an INPUT rather than a setting
-# (``TORTOISE_DB_URI`` the graph it writes, ``TORTOISE_API_URL`` a backend label).
-# The list itself is ``path_modules`` in `tests/test_7949_c2_door.py`, which
-# derives the reads from the code every run and refuses an unclassified one; a
-# module named HERE and not THERE is a module the closure does not see.
+# ⛔ The set below is CLOSED over the modules the capture path DERIVES from —
+# and which modules those are is NOT restated here on purpose. A count in this
+# comment is a transcription that rots: it said "``extractor_v2.py`` plus the
+# three modules it reaches one call down" for three review rounds while the
+# derivation had already grown past it (cycle 9 measured the comment at four
+# modules against eight in `tests/test_7949_c2_door.py::path_modules`). The
+# authority is `path_modules` in that test, which re-derives the set from the
+# code every run; every ``TORTOISE_*`` those modules read is accounted for,
+# either as an arm seam in ``SEAM_LEDGER`` (``TORTOISE_VET``,
+# ``TORTOISE_CLASSIFY_LATER``, ``TORTOISE_S4_DELTA``), or as a pin below, or as
+# an INPUT rather than a setting (``TORTOISE_DB_URI`` the graph it writes,
+# ``TORTOISE_API_URL`` a backend label), or as a declared not-a-measurement-seam
+# read with its reason (`acknowledged_not_a_measurement_seam`).
 #
 # ⚠️ The claim is scoped to what it can enforce. The same call chain also reads
 # INFRASTRUCTURE variables (record DSN, packs dir, embedding gates, store
@@ -455,13 +454,28 @@ DOOR_PINNED_OFF = ("TORTOISE_SESSION_EXTRACTOR", "TORTOISE_EXTRACTOR",
                    "TORTOISE_SESSION_LLM_MOCK", "TORTOISE_EXTRACTOR_PROMPT",
                    "TORTOISE_EXTRACT_MODEL", "TORTOISE_EXTRACTOR_MAX_TOKENS",
                    "TORTOISE_EXTRACTOR_ESCALATION_TOKENS",
-                   "TORTOISE_REFERENTIALITY", "TORTOISE_CONTEXT_ENRICH")
+                   "TORTOISE_REFERENTIALITY", "TORTOISE_CONTEXT_ENRICH",
+                   # cycle 8, dropped by the peer head and restored here: an
+                   # ambient =1 ADDS a :GraphEvent to the graph the run writes
+                   # (change_feed.py:182 via sdk._change_feed_enabled) and the
+                   # probe's S6 witness prints that count (measured: 2 vs 3).
+                   "TORTOISE_CHANGE_FEED")
 
 #: Seams pinned to an EXPLICIT value because their ABSENT state is not neutral.
 #: ``TORTOISE_S4_DELTA`` is DEFAULT-ON (``env_flag(..., True)``); an ambient
 #: ``=0`` silently swaps S4's output contract for the legacy complete-list one,
 #: which changes the embed list a run measures without changing the arm.
-DOOR_PINNED_ON = (("TORTOISE_S4_DELTA", "1"), ("TORTOISE_JSON_MODE", "1"))
+DOOR_PINNED_ON = (("TORTOISE_S4_DELTA", "1"), ("TORTOISE_JSON_MODE", "1"),
+                  # cycle 9 (#10983): `sparse.py:226` `env_flag(IDENTIFIER_ENV,
+                  # True)` — default-ON, read through `projection/entities.py:1208`
+                  # on the write path (`create_point` -> `point_identifier_aliases`),
+                  # so it REWRITES `search_keys` on every ``:Point`` the run writes.
+                  # Pinned to the SHIPPED default, not off: an ambient `=0` is the
+                  # non-neutral state here, and the registered corpus yields no
+                  # aliases either way (0 of 27 points, 0 turns across the 7
+                  # fixtures — measured), so the pin makes the population
+                  # insensitive to the shell without moving a number.
+                  ("TORTOISE_IDENTIFIER_TOKENS", "1"))
 
 #: The v4 seam ledger AT THE HEAD THIS RUN MEASURED (#10983, C2's Target 3).
 #:
