@@ -34,6 +34,18 @@ from tools import capstone_verdict_check as cvc  # noqa: E402
 LOG = _REPO / "docs/evidence/7949-capstone/capstone.log"
 PROBE = _REPO / "docs/evidence/7949-capstone/probes/capstone_run.py"
 
+#: The ``_MEASUREMENT_RUN_KEYS`` members the emitter writes NESTED rather than at
+#: run-block level, so the run-block scan in
+#: ``test_every_MEASUREMENT_key_the_emitter_writes_is_in_the_exemption_set`` cannot
+#: see them: ``errors`` rides inside each ``sessions[]`` entry
+#: (``capstone_measure.py`` run-block ``sessions`` comprehension) and
+#: ``corpus_sha256`` rides inside ``e1_e2_artifact``. DECLARED here rather than
+#: inlined into the assertion, because an inline ``- {"errors", "corpus_sha256"}``
+#: is an escape hatch any later author can extend silently, and a stale entry
+#: silenced that way is exactly the fail-open the arm exists to close (review P2,
+#: #10982). A new entry here must name the nesting path in this comment.
+_NESTED_MEASUREMENT_RUN_KEYS = ("errors", "corpus_sha256")
+
 
 def _load_probe():
     """Load the probe by path — the evidence dir is hyphenated (no import)."""
@@ -3723,18 +3735,46 @@ def test_every_MEASUREMENT_key_the_emitter_writes_is_in_the_exemption_set():
     the emitter's own ``"run": {`` literal and demands every key in it is EITHER a
     registered measurement (fail closed) or a declared non-measurement, so the next
     added key reds HERE instead of reopening V12 a third time.
+
+    ⛔ AND THE SCAN MUST NOT BE ABLE TO SKIP A KEY IT CANNOT PARSE (review P1, #10982).
+    The first cut of this arm matched ``^ {12}"([a-z0-9_]+)":``, so a key spelled with
+    a capital, a dot or a dash — ``"E6_receipt"``, the naming the ``E``-rows already
+    use — was silently SKIPPED, and a ``**spread`` hid every key it carried: measured,
+    ``"e6_receipt"`` reds this arm while ``"E6_receipt"`` leaves it GREEN, i.e. the
+    arm promised exactly the guarantee it did not provide. The capture now accepts any
+    quoted key, and a 12-space line that is neither blank, a comment, nor a quoted key
+    REFUSES rather than being skipped — the residual fail-open a skip would restore.
     """
     measure = _load_measure_probe()
     source = Path(measure.__file__).read_text().splitlines()
     start = next(i for i, line in enumerate(source) if line.strip() == '"run": {')
     emitter_keys: list[str] = []
     for line in source[start + 1:]:
-        if line.strip() and (len(line) - len(line.lstrip())) <= 8:
+        stripped = line.strip()
+        indent = len(line) - len(line.lstrip())
+        if stripped and indent <= 8:
             break
-        match = re.match(r'^ {12}"([a-z0-9_]+)":', line)
-        if match:
-            emitter_keys.append(match.group(1))
+        if not stripped or stripped.startswith("#") or indent != 12:
+            continue
+        if re.match(r'^ {12}[}\])]+,?$', line):
+            continue  # a nested block's closing brace, not a key
+        match = re.match(r'^ {12}"([^"]+)"\s*:', line)
+        assert match, (
+            f"the emitter's run block carries a 12-space line this scan cannot read as a "
+            f"quoted key: {line!r}. A SPREAD (`**mapping`) or a computed key carries "
+            "measurements this arm cannot see, so it would report 'no new key' while the "
+            "record's exemption set stayed blind — the fail-open this arm exists to close. "
+            "Spell the keys literally, or teach this scan to expand the spread")
+        emitter_keys.append(match.group(1))
     assert emitter_keys, "the emitter's run-block literal was not found — re-derive this scan"
+    # A declared NON-measurement must name a key the emitter really writes: otherwise the
+    # declaration list drifts into a dumping ground of names nothing produces, and the
+    # forward check below silently accepts a key that no longer exists.
+    stale_non_measurement = sorted(set(cvc._NON_MEASUREMENT_RUN_KEYS) - set(emitter_keys))
+    assert not stale_non_measurement, (
+        f"{stale_non_measurement} are declared NON-measurement run-block keys but the "
+        "emitter never writes them — a stale declaration is how the hand-listed escape "
+        "hatch stops describing the emitter")
     unregistered = sorted(
         key for key in emitter_keys
         if key not in cvc._MEASUREMENT_RUN_KEYS
@@ -3745,9 +3785,12 @@ def test_every_MEASUREMENT_key_the_emitter_writes_is_in_the_exemption_set():
         "EXEMPTED from the CLOSED-blocker refusal. Register it in _MEASUREMENT_RUN_KEYS "
         "(the fail-closed direction) unless it genuinely carries no number")
     # …and the other direction, so a RENAME cannot hide behind a stale entry: a key the
-    # set defends but the emitter can no longer write is a key no run produces.
+    # set defends but the emitter can no longer write is a key no run produces. The two
+    # set members the emitter writes NESTED rather than at run-block level are excluded
+    # BY NAME from a declared constant, not from an inline literal that any future
+    # author could extend silently (review P2, #10982).
     phantom = sorted((set(cvc._MEASUREMENT_RUN_KEYS) - set(emitter_keys))
-                     - {"errors", "corpus_sha256"})
+                     - set(_NESTED_MEASUREMENT_RUN_KEYS))
     assert not phantom, (
         f"{phantom} are registered as measurement keys but the emitter never writes them — a "
         "stale entry masks the moment the emitter's real key is renamed")

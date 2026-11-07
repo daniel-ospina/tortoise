@@ -168,13 +168,20 @@ BLOCKER_STATES_DEFAULT = Path("docs/evidence/7949-capstone/blocker-states.json")
 BLOCKER_STATES_SCHEMA = "capstone-blocker-states-v1"
 BLOCKER_STATE_WORDS = ("OPEN", "CLOSED")
 
-#: The RUN-block keys that carry a MEASUREMENT, as the emitter writes them
+#: The RUN-block keys that carry a MEASUREMENT
 #: (``docs/evidence/7949-capstone/probes/capstone_measure.py``). `_blocker_exempt`
 #: refuses the exemption when ANY of these is present and non-empty, so a table
 #: cannot hide a real run behind `evidence_kind: "refusal"` by nulling one or two
 #: cells. The shipped REFUSAL record (``capstone.log``) carries NONE of them;
 #: a record emptied of every one is a fabricated file, which is the residual
 #: limit stated in `_record_carries_a_measurement`.
+#:
+#: ⛔ TWO MEMBERS ARE NOT RUN-BLOCK TOP-LEVEL KEYS, and the distinction is
+#: load-bearing for the drift arm that reads the emitter's ``"run": {`` literal:
+#: `errors` rides INSIDE each ``sessions[]`` entry and `corpus_sha256` inside
+#: `e1_e2_artifact`. They stay in this set (a record carrying only them DOES carry
+#: a measurement, which is what the exemption turns on), and the arm excludes them
+#: from its phantom check by that nesting path, not by an anonymous literal.
 _MEASUREMENT_RUN_KEYS = (
     "sessions",
     "step_witnesses",
@@ -202,6 +209,17 @@ _MEASUREMENT_RUN_KEYS = (
 #: escaping the set above — which is exactly how ``a_row_census`` (#10982) reopened
 #: the construction #10601 review round 2 closed. A hand-listed pin cannot see a key
 #: nobody hand-listed; this list is the other half of that pin.
+#:
+#: ⛔ RESIDUAL, stated so no reader treats this pin as complete: membership in one list or
+#: the other is the ONLY question the drift arm asks, so a REAL measurement key PARKED in
+#: this list silences it — measured, `"e6_receipt"` added to the emitter AND declared here
+#: leaves the arm green while the exemption still fails open for that record shape. The
+#: stale-entry and double-declaration arms bound the hole (a phantom name reds, and a key
+#: declared in BOTH lists is refused at import) but neither can tell a measurement key
+#: from an identity one. Parking one here is therefore a REVIEWABLE act in a diff, not a
+#: silent one — which is the most a hand-listed pin can promise, and why the behavioural
+#: remedy ((key, reason) pairs asserting a non-measurement value carries no number) is
+#: recorded as open rather than claimed here (#10982 review).
 _NON_MEASUREMENT_RUN_KEYS = (
     "status",
     "kind",
@@ -212,6 +230,20 @@ _NON_MEASUREMENT_RUN_KEYS = (
     "steps_conditional",
     "steps_unobserved",
 )
+
+#: The two lists above answer OPPOSITE questions about one emitter block, so a key
+#: declared in BOTH would make the drift arm in
+#: ``tests/test_7949_capstone_verdict_check.py`` accept it either way while
+#: ``_record_carries_a_measurement`` still counted it — a silent disagreement no
+#: reader of either list can see. Refused at import: this module is a tool whose
+#: verdict CI reads, so a self-contradictory table must fail loudly at its own
+#: definition rather than produce a verdict.
+if set(_MEASUREMENT_RUN_KEYS) & set(_NON_MEASUREMENT_RUN_KEYS):
+    raise AssertionError(
+        "_MEASUREMENT_RUN_KEYS and _NON_MEASUREMENT_RUN_KEYS disagree about "
+        f"{sorted(set(_MEASUREMENT_RUN_KEYS) & set(_NON_MEASUREMENT_RUN_KEYS))} — a key is "
+        "either a measurement (fail closed) or it is not; declaring both hides the fact "
+        "that the exemption and the drift arm read differently")
 
 #: The nested blocks ``check()`` reads as OBJECTS. Declared so the type guard is
 #: derived from one list rather than repeated per call site.
