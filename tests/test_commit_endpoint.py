@@ -5279,8 +5279,12 @@ class Test4051ChargeCoversTheLoopShape:
         carries an `entities[]` entry — but because that leg asserts
         `declared >= minted` behind a multi-node cushion, so a one-node flat-rate
         deficit vanishes into the cushion instead of reddening it (measured: with
-        `_COMMIT_FLAT_NODE_LANES = ()` that leg stays GREEN). This leg asserts
-        the flat rate exactly. `supersessions[]` is pinned by nothing at all (see
+        `_COMMIT_FLAT_NODE_LANES = ()` that leg stays GREEN). This leg pins the
+        MINTED count exactly (4 chain nodes plus one node per entry) — that is
+        what removes the cushion a deficit could hide in; the declared rate is
+        still asserted only as an upper bound (`declared >= minted`), so an
+        over-charge of the flat rate stays green here, as it does everywhere
+        else in this class. `supersessions[]` is pinned by nothing at all (see
         this class's docstring). An entry
         that minted a node AND a durability `:GraphEvent` would make that rate a
         2× fail-open — the same defect review cycles 2 and 3 found on the points
