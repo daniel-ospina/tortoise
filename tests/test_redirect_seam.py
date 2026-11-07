@@ -479,8 +479,9 @@ def _closure_stamp(fn):
     that), so a ``__wrapped__``-only walk reported it as "never installed" —
     the FALSE-RED half of #11430's review. A closure cell is what makes the
     SHAPE visible here, but it is not the only static evidence: bytecode shows
-    whether a wrapper CALLS what it closes over (a caller carries
-    ``CALL_FUNCTION_EX`` on the cell, a bare reference does not). What no static
+    whether a wrapper CALLS what it closes over (a caller carries a CALL opcode
+    fed by the cell — ``CALL_FUNCTION_EX`` for the ``*a, **k`` forwarding shape,
+    ``CALL`` for plain positional — where a bare reference carries none). What no static
     check proves is that the call site is REACHED — so this helper stays a
     SHAPE test, and the ``@wraps``-that-never-calls shape stays tolerated rather
     than guessed at (see ``_is_stamp``). Deliberately NOT a globals-dict scan: any function defined
@@ -573,13 +574,12 @@ def _stamp_problems(start) -> list[str]:
        wrapper, or, on a PLAIN reload (no re-install at all), the assignment
        rewrites the ALREADY-INSTALLED stamp's delegate to itself, because the
        module body re-executes in the same ``__dict__``. The marker prevents a
-       re-install; it cannot prevent that rewrite. Neither shape is visible to a
-       chain-LENGTH check (the count stays 1), and one-hop fails when the
-       delegate is a WRAPPER whose inner frame is the previous stamp — which is
-       why fact 2 is checked by REACHABILITY. Only the PLAIN-RELOAD shape is
-       invisible to fact 1 (the count stays 1); a re-install after a reload
-       leaves two stamps and trips it — measured: count 2, path
-       ``[stamp2, old_stamp, old_stamp]``.
+       re-install; it cannot prevent that rewrite. Fact 1 sees the re-install
+       shape (two stamps — measured count 2, path
+       ``[stamp2, old_stamp, old_stamp]``); the PLAIN-RELOAD shape is the one
+       only fact 2 can see (count stays 1, path ``[s, s]``). One-hop fails for
+       both whenever the delegate is a WRAPPER whose inner frame is the previous
+       stamp — which is why fact 2 is checked by REACHABILITY.
     """
     links = _stamp_links(start)
     problems = []
