@@ -2117,6 +2117,17 @@ can put a value back — ⛔ though a targeted `REMOVE` IS in place, it is destr
 `session_source_prose_migration.reconcile_session_source_prose` (`#11070`/`#11152`)
 repairs it in place. The classes differ in both why and which lane.
 
+⚠️ **CORRECTED AGAIN (`#11325` review cycle 2)**: the sentence above says the class "lacks … a non-destructive"
+repair. That is true on the two ANCHORS this constant keys (`source`/`event`: `update_entity(…, story_arc=None)` is
+REFUSED as server-managed on a `:Source` and leaves the stored value in place on an `:Event`) and **false on a
+`:Point`**, which has a non-destructive in-place one: `update_point(<id>, story_arc=None)` clears the property and KEEPS
+the node (measured — the `None` passes `sdk._refuse_unpaired_narrative`, whose refusal is on a NON-EMPTY narrative, and
+`update_point`'s `SET n += $props` removes a `None`-valued key; the journal keeps the `None`, so a rebuild clears it
+rather than restoring it, and the same door is bound by the MCP tool `tortoise_update_point`). A `:Point` carrying the
+prose is a `graph_only` occurrence of THIS count (`:Point`'s placeable set omits `story_arc`, §17.2), so the sentence's
+unscoped "the PROPERTY" sent that operator to `tortoise_delete` — which REMOVES the node and journals the delete that
+drops its record row — when a clear-and-keep route shipped.
+
 ⚠️ **CORRECTED (`#11325`, review of the `#10394` follow-up)**: this entry named `#10017`'s purge as the targeted repair
 for THIS class. Measured at the tool, `tools/purge_legacy_turns.py`'s single destructive statement deletes legacy
 episodic turn `:Point`s (`MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point) WHERE t.is_episodic = true AND t.id IN $ids

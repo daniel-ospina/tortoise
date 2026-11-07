@@ -148,10 +148,21 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   → the projection's ``_assert_test_graph``, #2944), and no production name does
   (``org_<org_id>``, its ``org_<org_id>_<gid>`` child and a legacy
   ``team_<org_id>`` alike), so on a production cache no shipped route clears the
-  PROPERTY while keeping the entity (``tortoise_delete`` reaches the node only by
-  REMOVING it, and journals the delete that removes its record row; an embedded
-  ``path=`` DB is exempt from the name check, not from supervision) — and it has
-  NO repair that RESTORES the value. ⛔ That is the
+  PROPERTY on either ANCHOR while keeping the entity (``tortoise_delete`` reaches
+  the node only by REMOVING it, and journals the delete that removes its record
+  row; ``update_entity(…, story_arc=None)`` is REFUSED on a ``:Source``
+  (server-managed) and leaves the stored value in place on an ``:Event`` — both
+  measured; an embedded ``path=`` DB is exempt from the name check, not from
+  supervision) — ⚠️ **but the ``:Point`` half DOES have one, and it is
+  non-destructive**: ``update_point(<id>, story_arc=None)`` clears the property
+  and KEEPS the node (measured — the ``None`` passes
+  ``sdk._refuse_unpaired_narrative``, whose refusal is on a NON-EMPTY narrative,
+  and ``update_point``'s ``SET n += $props`` REMOVES a property set to ``None``;
+  the journal keeps the ``None`` too, so a rebuild clears it rather than leaving
+  it, and the same door is bound by the MCP tool ``tortoise_update_point``) — the
+  targeted clear for a ``:Point`` copy exists and needs no wipe, which is what
+  ``#10429``'s replay half does not change. And on NO label is there a repair that
+  RESTORES the value. ⛔ That is the
   PROHIBITION, not a missing source: the record's TABLE holds the column (§9.1
   puts the narrative in Postgres), but ``cache_projection.CACHE_FORBIDDEN_COLUMNS``
   forbids the RECORD→CACHE projection from writing it onto either ANCHOR and no
@@ -632,20 +643,25 @@ def reconcile_record_and_cache(
     that still carries the prose reads as a ``graph_only`` occurrence (one
     property the projection declines to write), NOT as a ``field_mismatches``
     against a record that is correct. The repair for that occurrence is a
-    DESTRUCTIVE CLEAR — a full ``record-restore`` (whose wipe is whole-graph, so
+    DESTRUCTIVE CLEAR on either ANCHOR — a full ``record-restore`` (whose wipe is
+    whole-graph, so
     it clears the copy too; measured by
     `test_the_record_restore_writes_no_story_arc_on_any_node` arm (3) — ⚠️ but
     refused PRE-WIPE on a production server graph name, #2944's L2 guard; see
     the module docstring's (5)), or a
-    graph-side ``REMOVE n.story_arc`` that no in-tree instrument issues today.
+    graph-side ``REMOVE n.story_arc`` that no in-tree instrument issues today;
+    ⚠️ a ``:Point`` copy is the exception that IS repairable in place —
+    ``update_point(<id>, story_arc=None)`` clears the property and keeps the
+    node (measured; see the module docstring's (5)).
     ⛔ NOT ``#10017``'s purge: ``tools/purge_legacy_turns.py`` deletes legacy
     episodic turn ``:Point``s — a different population, though a legacy turn
     ``:Point`` that carries the prose is cleared by it, by node deletion — and
     it never matches ``:Source``/``:Event``; what it contributes is durability
     for those ``:Point`` copies (its journaled turn removals stop a replay
-    resurrecting them), not the clearing of this class. Never a
-    non-destructive one, which is one sense in which this class differs from the
-    declined pair. Nothing here performs it. ⚠️ **What the exclusion CAN and
+    resurrecting them), not the clearing of this class. Never a destructive one
+    for the ``:Point`` half — it has a non-destructive route — which is one sense
+    in which the class differs from the declined pair, and the ``:Point`` clear
+    is the other. Nothing here performs either. ⚠️ **What the exclusion CAN and
     CANNOT hide, stated precisely**: `keep` includes ``record_props``, so a name
     the RECORD side carries is always compared — the exclusion cannot suppress a
     divergence in a caller-supplied ``props``-tail property. ⚠️ For `summary`,
@@ -808,7 +824,10 @@ def log_result(result: RecordReconcileResult,
         # column (the record holds it and the graph must NOT — its repair is a
         # destructive clear: a full restore's wipe — refused pre-wipe on a
         # production SERVER graph name, #2944 L2 — or a graph-side
-        # REMOVE n.story_arc that no instrument ships today; #10017's purge is
+        # REMOVE n.story_arc that no instrument ships today; ⚠️ on a `:Point` the
+        # clear is `update_point(<id>, story_arc=None)`, which KEEPS the node —
+        # measured, and the only one of the three that needs no wipe; #10017's
+        # purge is
         # a DIFFERENT population — legacy episodic turn :Points — and names no
         # story_arc). Calling them all "owned" sends the operator to the
         # wrong repair.

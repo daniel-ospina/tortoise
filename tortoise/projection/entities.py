@@ -2038,8 +2038,11 @@ class _EntityHandlers:
         # shipped instrument ON A PRODUCTION SERVER GRAPH — a full restore's
         # whole-graph wipe clears it where the L2 name rule admits the target
         # (`test_`-prefixed or an embedded `path=` DB) and is refused pre-wipe
-        # on every production name, and a graph-side `REMOVE n.story_arc` is
-        # issued by nobody; `#10017`'s purge is the legacy
+        # on a production name (`org_<org_id>`, its child, a legacy `team_…`),
+        # and a graph-side `REMOVE n.story_arc` is issued by nobody;
+        # `update_entity(…, story_arc=None)` is REFUSED here as server-managed
+        # (the `:Point` half DOES have an in-place clear,
+        # `update_point(<id>, story_arc=None)` — #11325); `#10017`'s purge is the legacy
         # turn `:Point` population and never matches a `:Source` (`#11325`).
         #
         # ⛔ Scope, so this is not read as more than it is: it denies the KEY.
