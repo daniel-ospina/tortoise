@@ -10269,6 +10269,49 @@ def test_the_re_run_recipe_states_the_arm_the_probe_actually_sets():
         "down is the one the next lane reverts")
 
 
+#: ⛔ THE FOURTH COPY (#11298 review, P2). The guard above scans the README; the
+#: arm definition a re-run operator reads FIRST is the PROBE'S OWN module
+#: docstring, and nothing read it. So the stale sentence survived the `#10996`
+#: flip in the file that defines the arm: it still said ``TORTOISE_VALUE_GATE``
+#: was "pinned UNSET" while ``measured_arm()`` sets an explicit ``"0"`` through
+#: ``ARM_OFF``. A phrase list over one document pins that DOCUMENT, not the class.
+_PROBE_DOCSTRING_STALE_ARM = (
+    "pinned UNSET",
+    "pinned unset",
+    "pinned to UNSET",
+    "pinned to an unset",
+)
+
+
+def test_the_probe_docstring_states_the_arm_the_probe_actually_sets():
+    """The probe's own prose must not teach the pre-`#10996` arm.
+
+    Red-first by construction: at the reviewed head the docstring read
+    "``TORTOISE_VALUE_GATE`` is pinned UNSET", so this test FAILED before the fix
+    and passes only once the prose states the explicit ``"0"`` pin AND names
+    ``ARM_OFF`` — the constant that holds the truth — so the next lane that pops
+    it reds here instead of in a re-take.
+    """
+    doc = ast.get_docstring(ast.parse(PROBE.read_text())) or ""
+    flat = " ".join(doc.split())
+    assert flat, (
+        f"no module docstring resolved from {PROBE.name} — the derivation is "
+        "broken, so this pin would pass over anything")
+
+    for phrase in _PROBE_DOCSTRING_STALE_ARM:
+        assert phrase not in flat, (
+            f"the probe's module docstring still says the OFF switches are "
+            f"{phrase!r} — since #10996 an ABSENT `TORTOISE_VALUE_GATE` IS the "
+            "ON arm, so the doc describes the pre-fix behaviour while "
+            "`measured_arm()` sets an explicit \"0\". A re-run operator reads "
+            "THIS docstring first (the README guard above cannot see it)")
+
+    assert 'pinned to an' in flat and '``"0"``' in flat and "ARM_OFF" in flat, (
+        "the probe docstring must state the pin the code actually sets — an "
+        "explicit ``\"0\"`` performed by ``ARM_OFF`` — or a reader cannot tell "
+        "the current arm from the pre-#10996 one")
+
+
 def test_the_control_arm_definition_names_the_frozen_records_divergence():
     """The frozen pre-registration and this bundle must not silently disagree.
 
