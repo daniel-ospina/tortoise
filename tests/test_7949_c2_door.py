@@ -1168,9 +1168,12 @@ def test_a_capture_that_ENTERED_the_door_and_FAILED_is_not_a_BYPASS():
     receipt carrying it took the door and raised. (Its mode emission, and the two
     in the other lane, are cited by FUNCTION rather than by ``sdk.py:<line>``: a
     line number there re-stales on the next insertion, which is the defect class
-    this whole file exists to retire. The file's remaining ``sdk.py:<line>`` cites
-    are for symbols the suite itself resolves, so this is scoped to the door's
-    emissions and is not a claim about every cite in the file.)
+    this whole file exists to retire. The file's TWO remaining ``sdk.py:<line>``
+    cites are historical prose notes nothing resolves — ``:110``
+    (``bind_point_subjects``) and ``:660`` (a cycle-10 mutation's insertion site)
+    — so they are the same re-staling class, not an exception to it; this
+    parenthetical is scoped to the door's own emissions and is not a claim about
+    every cite in the file.)
     Refusing it did three wrong things at once: it named a cause that was false
     (``returned BEFORE sdk._extract_session_v2``), it did so AFTER the run's full
     spend, and because ``require_door_entered`` raises before the log is written
