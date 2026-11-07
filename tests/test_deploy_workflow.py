@@ -4948,9 +4948,14 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
     #:    #9548."                                              -> REFUSED (both are denials)
     #: ⛔ The arm is PHRASE-LOCAL and PREDICATE-ANCHORED: `nor` must lead directly to the
     #: phrase it denies (`nor the tree … ` + `before #9548`), anchored at the END of the
-    #: prefix so the `nor` belongs to THIS occurrence; a coordinating negator must be
-    #: present before it; and the denied element must CLOSE there
-    #: (nothing after it in the clause). The closing condition is what keeps
+    #: prefix so the `nor` belongs to THIS occurrence; a coordinating negator must govern
+    #: that `nor` (same clause boundary, looking across only the `nor` itself); and the
+    #: denied element must CLOSE there
+    #: (nothing after it in the clause). ⚠️ MEASURED AT THIS HEAD: this condition is
+    #: OVER-DETERMINED — another arm refuses the same continuation shapes, so deleting it
+    #: does not red the suite. It is kept as a second line of defence against a re-widening
+    #: (the `which` alternative was removed here precisely because it ACCEPTED three
+    #: assertions), and that status is stated rather than claimed as a pinned arm. The closing condition is what keeps
     #: the arm from exempting an ASSERTION — ", nor the tree before #9548 IS `ff6379eb2`"
     #: continues into a copula, so it is the claim, not a denial element. All three
     #: conditions are load-bearing and each is separately pinned (#11191 review r13, P1).
@@ -4964,9 +4969,12 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
     #:   "It is not the #9601 merge, nor the tree before #9548, which is the arming
     #:    commit itself."                                        -> ACCEPTED
     #: was a fail-open this arm introduced (#11191 review r13r2, P2 — fixed here). The
-    #: truthful relative clause ("…, which is `047c91f7a`") is consequently refused, a
-    #: PRE-EXISTING false RED this spelling shares with `_DENIED_IN_PREDICATE`, recorded in
-    #: #11304 rather than bought back with the fail-open.
+    #: truthful relative clause that names the PARENT RELATION ("…, which is the arming
+    #: commit's parent") is consequently refused — a PRE-EXISTING false RED this spelling
+    #: shares with `_DENIED_IN_PREDICATE`, recorded in #11304 rather than bought back with
+    #: the fail-open. (The sha spelling "…, which is `047c91f7a`" is ACCEPTED, by another
+    #: arm; an earlier revision of this note named it as the refused one — measured, and
+    #: wrong.)
     _DENIAL_COMPLEMENT_ENDS = re.compile(r"[\s,;.]*$", re.I)
     _COORDINATING_NEGATOR = re.compile(r"\b(?:neither|not|never)\b", re.I)
     #: THE CLEFT — `<sha>, not <sha>, is the tree before #9548` (#11191 review, P1 —
@@ -5587,17 +5595,36 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
             # …and the COORDINATED spelling of the same denial (`neither A … nor B`),
             # where the negator sits in front of the PREVIOUS complement and therefore
             # outside this occurrence's span (#11191 review r13, P2 — measured false RED).
-            _hard_left = max(
-                norm.rfind(";", 0, phrase.start()),
-                norm.rfind(".", 0, phrase.start()),
-                norm.rfind("\u2014", 0, phrase.start()),
-                norm.rfind("\u2013", 0, phrase.start()),
-            )
-            _prefix = norm[_hard_left + 1 : phrase.start()]
+            # ⛔ THE NEGATOR MUST GOVERN THIS `nor` (#11191 review r13r3, P2 — MEASURED):
+            # `nor` is itself a `_CLAUSE_DELIM`, so the `nor` element is its own clause and
+            # a plain "some negator earlier in the sentence" let a DELIBERATELY UNRELATED
+            # denial buy the exemption:
+            #   "The note is not about `047c91f7a`, and `ff6379eb2` is the #9601 merge nor
+            #    the tree before #9548."                              -> ACCEPTED (132/672)
+            # The pairing is looked for across exactly ONE `nor`-led clause and no other
+            # boundary — the file's own `_CLAUSE_DELIM`, with `nor` skipped, so a `;`/dash/
+            # `, and`/`because` boundary stops the search exactly where every other denial
+            # arm stops it.
+            _prefix_cut = 0
+            for _delim in _CLAUSE_DELIM.finditer(norm[: phrase.start()]):
+                if not _delim.group(0).strip().lower().startswith("nor"):
+                    _prefix_cut = _delim.end()
+            _prefix = norm[_prefix_cut : phrase.start()]
             if (
                 _COORDINATING_NEGATOR.search(_prefix)
                 and _NOR_PREDICATE_DENIAL.search(_prefix)
                 and _DENIAL_COMPLEMENT_ENDS.match(norm[phrase.end() : clause_end])
+                # ⛔ …AND THE EXEMPTION MAY NOT SHELTER A LATER ASSERTION (#11191 review
+                # r13r3, P2 — MEASURED): a denial in clause 1 exempted a co-reference that
+                # restates the equivalence in clause 2:
+                #   "`ff6379eb2` is not the #9601 merge, nor the tree before #9548;
+                #    `ff6379eb2` is that tree."                        -> ACCEPTED
+                # The same guard the cleft arm carries, one clause over.
+                and not re.search(
+                    re.escape(_FALSE_TREE) + r"`?\s+(?:is|was|means|denotes)\b",
+                    norm[clause_end:],
+                    re.I,
+                )
             ):
                 return True
             # 2b. THE CLEFT — `<sha>, not <sha>, is the tree before #9548` (#11191
@@ -8278,7 +8305,7 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
     # CLAUSE") — and NEUTERING THAT CHECK (`if not _FALSE_SHA_ADJACENT.search(clause)` ->
     # `if True`) left the whole suite GREEN. A rule the contract lists, deciding a
     # fail-open, with no test is exactly what the contract's reviewer question asks about,
-    # so these shapes are chosen by MUTATION: they are the ones that flip.
+    # so the shapes below are CLASS GUARDS, not mutation-chosen controls.
     _cleft_then_assertion = (
         (
             "`047c91f7a`, not `ff6379eb2`, is the tree before #9548, and the tree before "
