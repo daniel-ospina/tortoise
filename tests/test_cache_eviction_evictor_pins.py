@@ -1051,7 +1051,7 @@ def test_a_node_that_becomes_SERVABLE_leaves_the_held_list():
         f"deleted AND reported as unservable: {sorted(deleted_ids & held_ids)}")
 
 
-def test_a_journalled_lane_graph_name_must_be_in_the_ownership_vocabulary():
+def test_a_journalled_lane_graph_name_must_be_in_the_ownership_vocabulary(monkeypatch):
     """#11373 P1 — the journal reclaims ONLY a name `_SWEEP_OWNED_PREFIXES` covers.
 
     `owns_by_ownership_record` is a PREFIX predicate, and it is what BOTH halves of
@@ -1064,15 +1064,17 @@ def test_a_journalled_lane_graph_name_must_be_in_the_ownership_vocabulary():
     its `finally:` leaked that graph PERMANENTLY, and the census could not even
     report it.
 
-    ⛔ `tests/test_derived_names.py`'s raw-client census reads GREEN either way, so it
-    is not evidence about this: `_raw_detach_violations` pins a per-run name and a
-    `_journal_append(` call, never the vocabulary. This pin is what settles it.
+    ⛔ `tests/test_derived_names.py`'s raw-client census is not evidence about this: it
+    checks that a per-run `os.urandom` and a `_journal_append(` CALL appear in the same
+    block, never the vocabulary of the name journalled. This pin is what settles it.
 
     Hermetic on purpose (no engine): the live suite `test_cache_eviction_evictor.py`
     `allow_module_level`-skips without a URI, so a pin living there would not run in
-    the PR lane that this defect would have merged through. It cannot import that
-    module for the same reason — the skip fires at import — so the coupling is read off
-    its SOURCE below.
+    the PR lane that this defect would have merged through — and it cannot be imported
+    here for the same reason, since the skip fires at import. So the fixture is COMPILED
+    from that file with its decorators and module-level skip removed, its three I/O
+    surfaces stubbed, and EXECUTED: the verdict is the name it actually journals versus
+    the name it actually mints, not a reading of its source text.
     """
     import ast
     import os
@@ -1096,113 +1098,126 @@ def test_a_journalled_lane_graph_name_must_be_in_the_ownership_vocabulary():
         "the bare `evict_` prefix is now ownership-covered — re-read #11373 P1 "
         "before assuming the fixture's `test_` prefix is still load-bearing")
 
-    # ⛔ COUPLING, and it is asserted because it cannot be imported: the pin above only
-    # constrains a name IT builds. Measured during this fix — reverting the fixture to
-    # `f"evict_{…}"` left every assertion above GREEN, i.e. a pin that does not pin.
-    # The live module cannot be imported here (its `allow_module_level` skip fires at
-    # import), so the coupling is read off its AST.
-    # ⛔ Read EVERY REPLAY, not "some name is owned somewhere". Two drafts were measured
-    # GREEN over #11373 P1 itself (#11373 review):
-    #   * a whole-file substring — green when the f-string is extracted to a helper that
-    #     still contains the line, and red when the local is merely renamed;
-    #   * a set of identifier NAMES that are assigned an owned name somewhere in `lane`
-    #     — green when the owned assignment is FOLLOWED by an `evict_…` one
-    #     (`graph_name = f"test_evict_…"` then `graph_name = f"evict_…"`), or when the
-    #     two sit in different branches of an `if`. At runtime the journalled name is
-    #     then unowned, the sweep preserves it and still consumes the journal, and the
-    #     graph leaks permanently — with the pin green.
-    # So every assignment reaching the journalled identifier must carry BOTH halves.
-    # Aliases (`graph_name = name`) are followed, so a rename stays green.
-    # ⛔ POSITION MATTERS, and it is checked: `owns_by_ownership_record` is a PREFIX
-    # predicate, so `f"{os.urandom(6).hex()}_test_evict"` is UNOWNED at runtime however
-    # much owned vocabulary it contains. The owned literal must therefore begin the
-    # expression (`_starts_owned` resolves an f-string's first element, an `+` chain's
-    # left operand, and a named prefix constant) — not merely appear in it.
-    # ⛔ What the sibling census does and does not catch — measured, not assumed:
-    # `_raw_detach_violations` matches `os.urandom` on the RAW enclosing block, so
-    # extraction to a helper REDs it (it fails CLOSED) **unless** the block keeps prose
-    # naming `os.urandom`, which satisfies that half by COMMENT — also measured, and the
-    # #11182 tightening masked only the ownership half. So that census is not evidence
-    # about the vocabulary, and this pin is what settles it.
-    live_module = (Path(__file__).resolve().parent / "test_cache_eviction_evictor.py").read_text(
+    # ⛔ COUPLING — and it is EXECUTED, not read off the source. Three static drafts were
+    # each measured wrong here (#11373 review, three rounds), and the reason is the same
+    # every time: a static pass can only answer "what does the text say", while the
+    # property is "what NAME is journalled at runtime".
+    #   1. a whole-file substring — GREEN when the f-string moved to a helper that still
+    #      contained the line, RED when the local was merely renamed;
+    #   2. a set of identifier NAMES assigned an owned name somewhere in `lane` — GREEN
+    #      when an owned assignment was followed by an `evict_…` one, or when the two sat
+    #      in different branches, because it never asked which assignment wins;
+    #   3. a static pass over `Assign`-to-`Name` only — blind to `AnnAssign`, walrus,
+    #      tuple targets, `for`/`with`/`except as`, so every one of those rebound the name
+    #      to an unowned one with the pin still GREEN; and it never related the journalled
+    #      name to the name the graph is actually MINTED under, so renaming the mint local
+    #      leaked an unowned graph on EVERY run (teardown deleted a name never created).
+    # Every one of those is the same consequence: the journal is INERT for reclamation,
+    # `_sweep_drop` preserves the graph and consumes the record anyway, and the graph
+    # leaks permanently (#11373 P1).
+    # So this compiles `lane` on its own, stubs the three things it touches that would
+    # otherwise do I/O, and runs it: whatever the source looks like, the pin asserts what
+    # is JOURNALLED, what is MINTED, and that the two are the same owned, per-run name.
+    #
+    # ⛔ SCOPE, stated rather than implied: this pins the VOCABULARY half (an owned name),
+    # the per-run half, and that the journal names the graph that is minted. It does NOT
+    # pin WHERE the name is built — the sibling census owns the same-block half, and
+    # genuinely cannot see a helper extraction whose block keeps prose naming
+    # `os.urandom` (measured; #11182 masked only the ownership half). Extraction is not a
+    # leak by itself, so leaving it to the census is deliberate.
+    import sys
+    import types
+
+    live_src = (Path(__file__).resolve().parent / "test_cache_eviction_evictor.py").read_text(
         encoding="utf-8")
-    module_ast = ast.parse(live_module)
-    lane = next(
-        (n for n in ast.walk(module_ast)
-         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == "lane"),
-        None)
-    assert lane is not None, (
-        "`test_cache_eviction_evictor.py` no longer defines a `lane` fixture, so this "
-        "coupling no longer locates the block it pins — re-read #11373 P1 instead of "
-        "deleting it")
+    module_ast = ast.parse(live_src)
+    assert any(isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == "lane"
+               for n in module_ast.body), (
+        "`test_cache_eviction_evictor.py` no longer defines a top-level `lane` fixture, "
+        "so this coupling cannot execute the block it pins — re-read #11373 P1 instead "
+        "of deleting it")
+    # Compile the module's defs and its LITERAL constants, nothing else: the imports and
+    # the module-level `pytest.skip(allow_module_level=True)` are exactly what a probe
+    # must not run, and a non-literal constant (`TURN_INSTRUMENT = …[...]`) would drag a
+    # real import in. Helpers are included so extracting the name into one still executes.
+    # Decorators say how the SUITE uses these objects, not what they build, so they go.
+    probe_body = []
+    for node in module_ast.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            node.decorator_list = []
+            probe_body.append(node)
+        elif isinstance(node, ast.Assign):
+            try:
+                ast.literal_eval(node.value)
+            except (ValueError, SyntaxError, TypeError):
+                continue
+            probe_body.append(node)
+    probe_module = ast.Module(body=probe_body, type_ignores=[])
 
-    # Every simple `NAME = "literal"` in the module, so an owned prefix may be named
-    # rather than repeated (`_PREFIX = "test_evict_"`; f-string form included). Only
-    # OWNED constants can ever make an expression pass, so a lookup miss is fail-closed.
-    constants = {a.targets[0].id: a.value.value
-                 for a in ast.walk(module_ast)
-                 if isinstance(a, ast.Assign) and len(a.targets) == 1
-                 and isinstance(a.targets[0], ast.Name)
-                 and isinstance(a.value, ast.Constant)
-                 and isinstance(a.value.value, str)}
+    minted: list[str] = []
+    journalled: list[str] = []
 
-    def _starts_owned(node) -> bool:
-        """Does the value this expression produces BEGIN with owned vocabulary?"""
-        if isinstance(node, ast.JoinedStr):
-            if not node.values:
-                return False
-            head = node.values[0]
-            return _starts_owned(head.value if isinstance(head, ast.FormattedValue) else head)
-        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
-            return _starts_owned(node.left)
-        if isinstance(node, ast.Constant):
-            return owns_by_ownership_record(node.value)
-        if isinstance(node, ast.Name):
-            return owns_by_ownership_record(constants.get(node.id))
-        return False
+    class _Graph:
+        def query(self, *a, **k):
+            return None
 
-    def _per_run(node) -> bool:
-        return any(isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
-                   and n.func.attr == "urandom" for n in ast.walk(node))
+    class _FalkorDB:
+        def _record(self, name):
+            minted.append(name)
+            return _Graph()
 
-    assigns: dict[str, list] = {}
-    for a in ast.walk(lane):
-        if isinstance(a, ast.Assign):
-            for t in a.targets:
-                if isinstance(t, ast.Name):
-                    assigns.setdefault(t.id, []).append(a.value)
+        select_graph = _record
+        create_graph = _record
 
-    def _every_replay_is_owned(name, seen=()):
-        """EVERY assignment to `name` in `lane` builds an owned, per-run name."""
-        if name in seen:
-            return False  # a cycle cannot launder an unowned name into an owned one
-        values = assigns.get(name)
-        if not values:
-            return False
-        for value in values:
-            if isinstance(value, ast.Name):
-                if not _every_replay_is_owned(value.id, (*seen, name)):
-                    return False
-            elif not (_starts_owned(value) and _per_run(value)):
-                return False
-        return True
+    redis_stub = types.ModuleType("redis")
+    redis_stub.Redis = lambda *a, **k: types.SimpleNamespace(
+        delete=lambda *a2, **k2: None)
+    falkordb_stub = types.ModuleType("falkordb")
+    falkordb_stub.FalkorDB = lambda *a, **k: _FalkorDB()
+    live_utils_stub = types.SimpleNamespace(
+        service_host=lambda: "127.0.0.1",
+        docker_port=lambda: 6379,
+        docker_password=lambda: "",
+    )
 
-    journal_calls = [c for c in ast.walk(lane)
-                     if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
-                     and c.func.id == "_journal_append"]
-    assert journal_calls, (
-        "the `lane` fixture no longer journals its graph name, so the ownership "
-        "contract the sweep reads is gone — re-read #11373 P1")
-    for call in journal_calls:
-        assert call.args and isinstance(call.args[0], ast.Name), (
-            "the `lane` fixture journals an EXPRESSION, not the name it builds, so "
-            "this coupling cannot check what is journalled — journal the name "
-            "(#11373 P1)")
-        target = call.args[0].id
-        assert _every_replay_is_owned(target), (
-            f"`lane` journals {target!r}, but not every assignment to it builds a name "
-            "carrying owned vocabulary (`test_`/`tortoise_test`/`team_`/`org_`) AND "
-            "per-run entropy (`os.urandom`). A later `evict_…` reassignment, an "
-            "unowned branch, or a helper-built name all leave the journal INERT for "
-            "reclamation: the sweep preserves the graph and still consumes the record, "
-            "so it leaks permanently (#11373 P1)")
+    import tests._embedded as embedded
+
+    monkeypatch.setitem(sys.modules, "redis", redis_stub)
+    monkeypatch.setitem(sys.modules, "falkordb", falkordb_stub)
+    monkeypatch.setattr(embedded, "_journal_append", journalled.append)
+
+    namespace = {"_live_utils": live_utils_stub}
+    exec(compile(probe_module, "<lane fixture>", "exec"), namespace)
+    # (`exec` here runs this repo's own committed fixture, not third-party input)
+
+    def _run_lane():
+        """Drive the fixture to its `yield` and close it, so `finally` also runs."""
+        del minted[:], journalled[:]
+        try:
+            gen = namespace["lane"]()
+            next(gen)
+        except NameError as exc:  # pragma: no cover - only on an unanticipated refactor
+            raise AssertionError(
+                f"this probe's stub namespace no longer covers what `lane` references "
+                f"({exc}) — extend the stubs above, do not drop the probe") from exc
+        gen.close()
+
+    _run_lane()
+    assert len(minted) == 1 and len(journalled) == 1, (
+        "`lane` no longer mints exactly one graph and journals it once (minted="
+        f"{minted}, journalled={journalled}) — this probe needs that shape to relate the "
+        "two, and the ownership contract needs it to hold (#11373 P1)")
+    assert journalled == minted, (
+        f"`lane` JOURNALS {journalled} but MINTS {minted} — the journal must name the "
+        "graph that is actually created, or the sweep reclaims a graph that does not "
+        "exist while the real one is preserved and leaks (#11373 P1)")
+    assert owns_by_ownership_record(minted[0]), (
+        f"`lane` mints {minted[0]!r}, which is OUTSIDE the ownership vocabulary "
+        f"{_SWEEP_OWNED_PREFIXES} — `_sweep_drop` preserves it and consumes the journal "
+        "anyway, so an interrupted run leaks it permanently (#11373 P1)")
+
+    first = minted[0]
+    _run_lane()
+    assert minted and minted[0] != first, (
+        f"`lane` minted {first!r} twice — the name is FIXED, not per-run, so two "
+        "concurrent sessions DETACH each other's live writes (#11373 P1)")
