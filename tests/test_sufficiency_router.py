@@ -1114,10 +1114,13 @@ def test_a_summary_unit_can_neither_carry_the_raw_payload_nor_supersede_it() -> 
 # what makes §12.5's "escalation is a permanent tax" true.
 #
 # Each test below is RED on the pre-fix module: every one that passes
-# `already_written` raises `TypeError: unexpected keyword argument` there, and
-# the two that assert `settled` redden on the missing property. So the red-first
-# evidence is the whole set, not a sample — measured by loading `origin/main`'s
-# module in place of this one: 11 failed, 212 passed (223 total).
+# `already_written` raises `TypeError: unexpected keyword argument` there, and the
+# one that reads the new field reddens on the missing `already_persisted`. So the
+# red-first evidence is the whole set, not a sample — measured by loading
+# `origin/main`'s module in place of this one: 13 failed, 212 passed (225 total).
+# (`settled`'s own SEMANTICS are not proved by that run — none of these tests
+# reaches it pre-fix; they are held by the `settled = not units` revert, which
+# reddens three of them.)
 #
 # ⚠️ `already_written=first.units` below STANDS IN for a store load, which the
 # tests cannot perform (the planner is pure and owns no store). It is not a
@@ -1305,11 +1308,19 @@ def test_planning_a_write_back_mutates_nothing_it_was_given() -> None:
     before = tuple(dataclasses.astuple(f) for f in findings)
     plan_writeback(list(findings), promote_to=None)
     assert tuple(dataclasses.astuple(f) for f in findings) == before
-    # ... and the store's units are equally a READ-ONLY input.
-    stored = plan_writeback([_finding()]).units
-    plan_writeback(list(findings), promote_to=None, already_written=list(stored))
-    assert tuple(dataclasses.astuple(u) for u in stored) == (
-        dataclasses.astuple(stored[0]),)
+    # ... and the store's units are equally a READ-ONLY input. The list is the
+    # MUTABLE object a caller actually passes (`SummaryUnit` is frozen, so
+    # asserting on its contents alone could never fail — a vacuous guard), and it
+    # is handed over in a deliberate, non-sorted ORDER so an in-place sort (the
+    # realistic mutation) reddens it.
+    stored = plan_writeback(
+        [_finding(), _finding(claim="acme corp renewed in April")]).units
+    # Descending by identity, so ANY in-place sort is a change.
+    store = sorted(stored, key=lambda u: u.unit_key, reverse=True)
+    assert store != sorted(store, key=lambda u: u.unit_key)
+    handed_over = list(store)
+    plan_writeback(list(findings), promote_to=None, already_written=store)
+    assert store == handed_over
 
 
 @pytest.mark.parametrize("kwargs", [

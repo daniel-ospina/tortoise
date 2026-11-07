@@ -1459,8 +1459,14 @@ def plan_writeback(
     ⚠️ The parameter is ``SummaryUnit``s, not bare ``unit_key`` strings, on
     purpose: a key is an identity, not a summary — the cheap tier cannot SERVE a
     key, and a key carries no class, so accepting one would silently disable the
-    class-conflict guard above (the fail-open direction). A store that holds only
-    keys must load the units it is about to serve anyway.
+    class-conflict guard above (the fail-open direction).
+
+    ⚠️ **EVERY unit handed in is graded**, not only the keys this batch happens to
+    touch: a store that holds one identity under two classes raises, wherever in
+    the passed sequence the contradiction sits. So pass the store you actually
+    have — a subset narrows what the guard can see, and a subset that hides a
+    contradiction while the docstring promised a repair would be a silent
+    downgrade of the only check the store gets.
     """
     units: list[SummaryUnit] = []
     refusals: list[WritebackRefusal] = []
