@@ -5195,8 +5195,11 @@ class Test4051ChargeCoversTheLoopShape:
             "ingest window charges for them (#4051)")
         assert charge == declared * 1024, (
             f"the charge for the cheapest loop iteration is {charge} B, not "
-            f"the node floor {declared * 1024} B — the payload term must never "
-            "let a small body under-charge the nodes it mints")
+            f"the node floor {declared * 1024} B — `commit_ingest_charge_bytes` "
+            "is `max(payload bytes, declared × 1024)`, so this can only fail "
+            "UPWARD: the payload term has won, so the body is now larger than "
+            "the floor and this leg's premise ('its body is ~840 B, so the "
+            "node floor is the WHOLE bound') is false")
 
     def test_the_endpoint_SPENDS_the_charge_on_the_shared_window(
             self, client, monkeypatch):
@@ -5254,9 +5257,11 @@ class Test4051ChargeCoversTheLoopShape:
             f"the charge for the `points: []` spend payload is {charge} B, not "
             f"the node floor "
             f"{declared_commit_write_count(payload) * 1024} B — this leg's "
-            "PREMISE is that the floor is the whole bound, so if a payload "
-            "term won here the `used == charge` observation below would be "
-            "measuring a different quantity than the one it claims")
+            "PREMISE is that the floor is the whole bound; if a payload term "
+            "won here, the note above that this leg cannot see the payload "
+            "term would be false (the `used == charge` observation would then "
+            "ALSO catch a floor-only spend site) and the message below ('the "
+            "node floor is not being SPENT') would name the wrong quantity")
 
         # A ONE-BYTE-tight boundary: two charges cannot fit.
         monkeypatch.setattr(
@@ -5264,7 +5269,10 @@ class Test4051ChargeCoversTheLoopShape:
             2 * charge - 1)
         quota_mod._reset_commit_ingest_budget_for_tests()
 
-        assert _commit(client, raw).status_code == 200
+        assert _commit(client, raw).status_code == 200, (
+            "the `points: []` spend payload was REFUSED before any charge "
+            "could be observed — this leg needs it admitted to read the "
+            "window it exists to observe")
         assert commit_ingest_admit(TEST_ORG_ID, 0).used == charge, (
             "the endpoint admitted a `points: []` commit but the shared ingest "
             "window recorded no charge — the node floor is not being SPENT, "
@@ -5444,7 +5452,12 @@ class Test4051ChargeCoversTheLoopShape:
         # below, which are measured against a fresh minute.
         quota_mod._reset_commit_ingest_budget_for_tests()
 
-        assert charge == declared * 1024
+        assert charge == declared * 1024, (
+            f"the residual leg's charge is {charge} B, not the node floor "
+            f"{declared * 1024} B — `commit_ingest_charge_bytes` is "
+            "`max(payload bytes, declared × 1024)`, so the payload term has "
+            "won and the 2,560-commit figure below (derived from that floor) "
+            "is no longer the shipped charge")
         assert admitted == 2560, (
             f"the 60 s window admits {admitted} `points: []` commits "
             f"({charge} B each against the shipped "
