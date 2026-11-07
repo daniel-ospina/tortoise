@@ -749,6 +749,83 @@ def test_a_row_ABSENT_from_the_floor_map_never_has_a_floor_clause_stripped():
     ), "a RATE reusing the floor's number is a bar, not the floor"
 
 
+def test_the_floor_exemption_binds_the_WHOLE_unit_phrase_not_a_PREFIX_of_it():
+    """FAILS IF a RATE spelled AFTER the row's own floor unit is laundered as the floor.
+
+    ⛔ Round 10 bound the exemption to the row's pinned VALUE **and its floor unit**, but on a
+    PREFIX of that unit — so `typed statements per claim` (and `… share`, `… ratio`) started with
+    the unit and was exempted, which is the `A4`-vs-`D3` rate bar `#10988`/`#1022` have not ruled
+    on, arriving through the other side of the hole `>= 30 % typed` came through. Measured at
+    `#11331` review round 11: all three spellings left `check_completeness` with NO finding while
+    `criteria[A4].floor` was untouched, i.e. a RECORD-ONLY edit gave `A4` a bar — the one thing
+    §7 item 1 says is impossible.
+
+    The clause must now END the cell at the unit: only closing punctuation may follow it. That is an
+    ALLOWLIST, deliberately, because a denylist of rate spellings is bypassed by the spelling it
+    does not list, and a delimiter is not a licence either (`typed statements, per claim` is
+    refused exactly as `typed statements per claim` is). The cost is that the floor clause has to be
+    the TAIL of the cell, which is why the pinned `A4` cell is re-worded that way and asserted here.
+    """
+    rows = check.parse_criteria_rows(PREREG.read_text())
+    real = check._registered_floor_values(PREREG_DIR)
+    assert real.units.get("A4") == "typed statements", real.units
+    # The pinned record — punctuated so the clause ENDS at its unit — is still accepted.
+    assert check.check_completeness(rows, real) == []
+
+    a4 = next(r for r in rows if r["id"] == "A4")
+
+    def failures(cell: str) -> list[str]:
+        return check.check_completeness(
+            [dict(r, threshold=cell) if r is a4 else r for r in rows], real)
+
+    # (1) A rate spelled AFTER the row's own unit is a BAR, however its denominator is named — and
+    #     a delimiter before it does not license it, which is the second half of the prefix hole.
+    for tail in ("per claim", "share", "ratio", "rate", "proportion", "over claims",
+                 "for each claim", "per decided candidate", ", per claim", ", share",
+                 ", per decided candidate"):
+        cell = f"UNMEASURED(#10988 decides) floor of `>= 30` typed statements {tail}, and no bar"
+        assert any("outside its floor" in f for f in failures(cell)), (cell, failures(cell))
+
+    # (2) …and so is ANY continuation that is not closing punctuation: the clause has to END the
+    #     cell at the unit, so `typed statements and compared to no bar` (no punctuation) is refused
+    #     too. This is the fail-CLOSED direction, and its message says how to fix it rather than only
+    #     that it failed.
+    undelimited = ("UNMEASURED(#10988 decides) floor of `>= 30` typed statements "
+                   "and compared to no bar)")
+    found = failures(undelimited)
+    assert any("outside its floor" in f for f in found), (undelimited, found)
+    assert any("END of the cell" in f for f in found), (
+        "the refusal must name the rule a fixer has to satisfy, or the report reads as 'the floor "
+        f"is not the floor': {found}")
+
+    # (3) The row's OWN floor, ending the cell at its unit, is still exempted in every spelling — and
+    #     it is the CLOSING PUNCTUATION that does it, not a particular mark.
+    for ending in ("", ".", ",", ";", ")", " —"):
+        cell = f"UNMEASURED(#10988 decides) floor of `>= 30` typed statements{ending}"
+        assert failures(cell) == [], (cell, failures(cell))
+
+    # (4) The PINNED cell is written so its floor clause ENDS it: reverting §10.12 turns the record
+    #     itself RED, so the document edit is load-bearing rather than tidying.
+    cell = a4["threshold"]
+    assert cell.rstrip().endswith("`>= 30` typed statements)"), (
+        f"A4's pinned cell must END at its floor clause's unit (§10.12): {cell!r}")
+    plain = check._plain(cell)
+    assert check._strip_the_rows_own_floor(plain, 30.0, "typed statements") != plain, (
+        "A4's own cell is not exempted at all — the gate would refuse the shipped record")
+    laundered = plain.replace("typed statements)", "typed statements per claim)")
+    assert check._strip_the_rows_own_floor(laundered, 30.0, "typed statements") == laundered, (
+        "a rate appended after A4's own unit must NOT be stripped as the floor")
+
+    # (5) The direct binding, at the function the composed cases above go through.
+    for text in ("floor of >= 30 typed statements per claim",
+                 "floor of >= 30 typed statements, per claim",
+                 "floor of >= 30 typed statements share",
+                 "floor of >= 30 typed statements and compared to no bar"):
+        assert check._strip_the_rows_own_floor(text, 30.0, "typed statements") == text, text
+    assert check._strip_the_rows_own_floor(
+        "floor of >= 30 typed statements)", 30.0, "typed statements") == " typed statements)"
+
+
 def test_a_REQUIRED_row_cannot_declare_itself_a_non_bar():
     """FAILS IF the `UNMEASURED(...)` exemption is reachable from a required row.
 

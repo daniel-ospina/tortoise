@@ -420,6 +420,18 @@ FLOOR_CLAUSE = re.compile(
 )
 
 
+#: The ONLY thing that may follow a row's floor UNIT: closing punctuation / whitespace, running to the
+#: END of the cell. ⛔ AN ALLOWLIST OF DELIMITERS, NEVER A DENYLIST OF RATE SPELLINGS (#11331 review
+#: round 11). A rate's denominator phrase can be ANY word after the unit (`per claim`, `share`,
+#: `ratio`, `over claims`, …), and a denylist is bypassed by the spelling it does not list — OWASP's
+#: input-validation control (C5) names that as the reason allowlisting is the required minimum. This
+#: arm is what keeps §7 item 1's "a record-only edit cannot give `A4` a bar" true, so the safe
+#: direction is to accept ONLY closing punctuation and refuse every word: over-blocking here costs a
+#: re-punctuated cell (the pinned `A4` cell is written so its clause ends it, §10.12), while failing
+#: open settles the owner-gated `A4`-vs-`D3` decision (§3.7, §10.10).
+FLOOR_CLAUSE_END = re.compile("[" + r"\s)\]}>.,;:!?—–\-" + "\"'" + "]*" + r"\Z")
+
+
 def _floor_unit(key: str) -> str:
     """The denominator phrase a floor is expressed in, derived from its record KEY.
 
@@ -471,6 +483,17 @@ def _strip_the_rows_own_floor(text: str, value: float | None, unit: str | None =
     row's own floor denominator (`a4_typed_statements` -> "typed statements"). No unit ⇒ strip
     nothing ⇒ the comparator reds.
 
+    ⛔ AND THE WHOLE UNIT PHRASE, NOT A PREFIX OF ONE (round 11). `typed statements per claim`,
+    `typed statements share` and `typed statements ratio` all START with the row's own unit, so the
+    round-10 prefix test exempted a RATE that reuses the floor's pinned 30 — measured, `floor of
+    >= 30 typed statements per claim, and compared to no bar` left the gate at exit 0 while the
+    identical cell with `%` after the number was refused. The clause must END at the unit: only
+    closing punctuation (`FLOOR_CLAUSE_END`) may follow it, to the end of the cell, because any
+    word there can re-scope the number into a rate and that is the `A4`-vs-`D3` bar `#10988`/`#1022`
+    have not ruled on. `, per claim` is refused for the same reason as ` per claim`: the delimiter
+    does not license a following denominator phrase. The pinned record's own `A4` cell is written so
+    its floor clause ends it (`#11331` §10.12).
+
     The no-record caller (a unit test on a bare row list) is the CHECKER's concern, not this
     function's: `check_completeness` strips by shape alone only when it was handed no map at all.
     The gate always hands it one (`check()` reads the map from the same record it validates), so
@@ -491,7 +514,13 @@ def _strip_the_rows_own_floor(text: str, value: float | None, unit: str | None =
         # The denominator the floor is expressed in must FOLLOW the number, ignoring the markdown
         # that usually wraps the value (`` `>= 30` typed statements ``).
         tail = re.sub(r"[`*_\s]+", " ", text[match.end():]).strip().lower()
-        return "" if tail.startswith(wanted) else match.group(0)
+        if not tail.startswith(wanted):
+            return match.group(0)
+        # …and it must be the WHOLE phrase, at the END of the cell: only closing punctuation may
+        # follow it, so a rate spelled after the unit — `typed statements per claim`, and
+        # `typed statements, per claim` alike — is NOT the floor (#11331 r11).
+        rest = tail[len(wanted):]
+        return "" if FLOOR_CLAUSE_END.match(rest) else match.group(0)
 
     return FLOOR_CLAUSE.sub(_drop, text)
 
@@ -3972,7 +4001,11 @@ def check_completeness(rows: list[dict[str, str]],
                 failures.append(
                     f"row {row['id']!r} (line {row['line']}): threshold {row['threshold']!r} "
                     "declares UNMEASURED(...) and still carries a comparator outside its floor "
-                    "clause — a registered non-bar cannot also be a bar"
+                    "clause — a registered non-bar cannot also be a bar. A floor clause is "
+                    "exempted only where the row's own floor unit is followed by closing "
+                    "punctuation to the END of the cell: a rate spelled after the unit "
+                    "(`typed statements per claim`) re-scopes the number and is refused, so move "
+                    "the floor clause to the end of the cell"
                 )
             continue
         if row["id"] in REGISTERED_NON_BAR_ROWS:
