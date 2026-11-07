@@ -527,7 +527,7 @@ def test_worker_thread_non_exempt_redirects(monkeypatch):
     assert graph_name.startswith("test_seam_worker_b_"), graph_name
 
 
-def _thread_start_stamp_violations(proj=None) -> list[str]:
+def _thread_start_stamp_violations() -> list[str]:
     """The install contract for the Thread.start stamp, as a VERDICT.
 
     Extracted so a fixture can make it fire in a chosen process state: inline in
@@ -569,7 +569,7 @@ def _thread_start_stamp_violations(proj=None) -> list[str]:
 
     from tortoise import projection as proj_mod
 
-    proj = proj or proj_mod
+    proj = proj_mod
     violations: list[str] = []
     if getattr(threading.Thread, "_tortoise_stamp_installed", False) is not True:
         violations.append(
