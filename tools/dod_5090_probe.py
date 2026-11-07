@@ -2218,14 +2218,18 @@ def vector_leg_surface() -> list[dict]:
         if fixed is not None and name in by_handler:
             entry["also_fixed_entity_types"] = fixed
         out.append(entry)
+    # ⛔ THE DERIVED-FAILURE LINE IS DECIDED FROM THE SCAN, NOT FROM `out`
+    # (#11389 review, P2). The DECLARED BOUND below is appended to `out`, which
+    # made `not out` UNREACHABLE whenever a declaration existed: a surface that
+    # could not be derived AT ALL then published only the by-reference caveat,
+    # which reads as "the scan ran and this is its known edge" — the two
+    # channels separated in one direction (#11337) and silently collapsed in the
+    # other. `derived_tool_rows` is the scan's own verdict, captured before
+    # either caveat line is added.
+    derived_tool_rows = bool(out)
     for error in (handler_error, fixed_error):
         if error:
             out.append({"tools": error})
-    # ⛔ The DECLARED BOUND is published on its own line, never merged into the
-    # scan-failure channel: it says the scan ran and this is its known edge, which a
-    # reader must be able to tell apart from "the scan could not run" (#11337).
-    if fixed_declared:
-        out.append({"tools": fixed_declared})
     # ⛔ An UNRESOLVABLE `VECTOR_LEG_SDK_METHOD` empties BOTH sets, so `out` was
     # `[]` — and `takes`, which is computed to be `UNMEASURED(...)` in exactly
     # that case, had no entry to ride on. The surface then read as a MEASURED
@@ -2233,10 +2237,47 @@ def vector_leg_surface() -> list[dict]:
     # change` naming real types: the under-reporting direction, produced by the
     # very drift the resolution pin exists to catch — a pin protects the repo,
     # not the instrument as shipped (review round 2, P2).
-    if not out or isinstance(takes, str):
+    if not derived_tool_rows or isinstance(takes, str):
         out.append({"tools": f"UNMEASURED(the surface could not be derived: "
                              f"{takes if isinstance(takes, str) else 'no tool resolves'})"})
+    # ⛔ The DECLARED BOUND is published on its own line, never merged into the
+    # scan-failure channel: it says the scan ran and this is its known edge, which a
+    # reader must be able to tell apart from "the scan could not run" (#11337).
+    # Emitted AFTER the derived-failure line for the same reason (#11389 review,
+    # P2): the failure is the more important fact, and appending it last would
+    # leave it present but unreachable when both apply.
+    if fixed_declared:
+        out.append({"tools": fixed_declared})
     return out
+
+
+#: The comprehension forms, each of which introduces its OWN scope (#11389
+#: review, P2). Named once so the two walks that must agree about them cannot
+#: drift apart.
+_COMPREHENSION_NODES = (ast.ListComp, ast.SetComp, ast.DictComp,
+                        ast.GeneratorExp)
+
+
+def _comprehension_targets(node: ast.AST) -> frozenset[str]:
+    """The names a comprehension binds in its OWN scope.
+
+    ⛔ A COMPREHENSION IS A SCOPE (#11389 review, P2). Its `for` target shadows
+    an enclosing binding for the element, the `if` clauses and the body, so a
+    `Load` of that name INSIDE the comprehension refers to the comprehension —
+    not to a leg-reaching function of the enclosing method. Reading it as a
+    mention published a spurious `declared bound` entry for
+    `[_review_pool for _review_pool in rows]` and
+    `[r for _review_pool in rows if _review_pool]`: the cry-wolf direction this
+    channel exists to narrow, and invisible to the pinned fixture because its
+    element is `x`. Collects TARGETS only (which may destructure, `for a, b in
+    …`), never the element expression.
+    """
+    bound: set[str] = set()
+    for gen in getattr(node, "generators", ()):
+        for sub in ast.walk(gen.target):
+            if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Store):
+                bound.add(sub.id)
+    return frozenset(bound)
 
 
 def _sdk_methods_on_vector_leg(
@@ -2450,7 +2491,10 @@ def _sdk_methods_on_vector_leg(
     # the class-definition-time argument that would justify excluding a METHOD
     # signature's default does not apply to a nested def, and the previous
     # comment wrongly used it for both. (A mention INSIDE a comprehension body
-    # IS walked and IS reported — only the target binding is skipped.) Also NOT
+    # IS walked and IS reported — EXCEPT a `Load` that reuses THAT comprehension's
+    # own target name: the target binds in the comprehension's own scope, so such
+    # a `Load` is the comprehension's binding, not the enclosing method's
+    # (#11389 review, P3).) Also NOT
     # modelled in `shadowed`: `*args`/`**kwargs` names, lambda parameters, `match`
     # patterns and `global`/`nonlocal` — those produce a spurious entry rather
     # than a missed one, and are owned by `#11397`. Under-
@@ -2569,8 +2613,7 @@ def _sdk_methods_on_vector_leg(
                 # suppresses a genuine mention elsewhere in the body — the
                 # under-report direction this guard exists to narrow, not create
                 # (#11389 review). Comprehension scopes are skipped entirely.
-                if isinstance(n, (ast.ListComp, ast.SetComp, ast.DictComp,
-                                  ast.GeneratorExp)):
+                if isinstance(n, _COMPREHENSION_NODES):
                     continue
                 if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store):
                     shadowed.add(n.id)
@@ -2585,9 +2628,18 @@ def _sdk_methods_on_vector_leg(
                         bound = alias.asname or alias.name.split(".")[0]
                         shadowed.add(bound)
                 stack_s.extend(ast.iter_child_nodes(n))
-        stack = list(fn.body)
+        # ⛔ A COMPREHENSION'S OWN BINDINGS SHADOW WITHIN IT (#11389 review,
+        # P2). `shadowed` above skips comprehension subtrees ON PURPOSE — a
+        # comprehension target binds in its own scope, so it must not suppress a
+        # mention elsewhere in the enclosing body. But this walk DESCENDS into
+        # the comprehension, where that target is exactly the binding a `Load`
+        # refers to; without the scope, `[_review_pool for _review_pool in
+        # rows]` and `[r for _review_pool in rows if _review_pool]` each read as
+        # a mention of the enclosing method's name.
+        stack: list[tuple[ast.AST, frozenset[str]]] = [
+            (n, frozenset()) for n in fn.body]
         while stack:
-            node = stack.pop()
+            node, comp_bound = stack.pop()
             # ⛔ A nested `class` BODY IS WALKED (#11389 review, P3): it executes
             # when the enclosing method does, and `self` inside it resolves to that
             # method's — so `class K: cb = _safe(self._review_pool)` is a real
@@ -2595,10 +2647,15 @@ def _sdk_methods_on_vector_leg(
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
             if id(node) not in call_funcs:
-                reached = _reachable_by_name(node, mentionable, shadowed)
+                reached = _reachable_by_name(node, mentionable,
+                                             shadowed | comp_bound)
                 if reached:
                     by_reference.setdefault(fn.name, set()).add(reached)
-            stack.extend(ast.iter_child_nodes(node))
+            here = comp_bound
+            if isinstance(node, _COMPREHENSION_NODES):
+                here = comp_bound | _comprehension_targets(node)
+            for child in ast.iter_child_nodes(node):
+                stack.append((child, here))
     declaration = None
     if by_reference:
         # ⛔ Every TARGET, not just the first: a method can take two different

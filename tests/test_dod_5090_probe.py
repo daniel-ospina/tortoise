@@ -3214,6 +3214,13 @@ def _byref_sdk_source() -> str:
         "        return [x for _review_pool in (1, 2)]\n"
         "    def binds_it_in_a_COMPREHENSION_only(self, rows):\n"
         "        return [x for _review_pool in rows]\n"
+        # The comprehension's own target, REFERENCED inside it: the `Load`
+        # belongs to the comprehension's scope, not the method's, so it is not a
+        # mention of the entrant (#11389 review, P2).
+        "    def references_a_COMPREHENSION_TARGET_in_its_element(self, rows):\n"
+        "        return [_review_pool for _review_pool in rows]\n"
+        "    def references_a_COMPREHENSION_TARGET_in_its_if(self, rows):\n"
+        "        return [r for _review_pool in rows if _review_pool]\n"
         "    def assigns_the_attr(self, v):\n"
         "        self._review_pool = v\n"
         "    def augments_the_attr(self, v):\n"
@@ -3327,6 +3334,16 @@ def test_a_leg_reach_passed_BY_REFERENCE_is_declared_not_dropped(
     # is what published five false "LIVE" entries on the real tree (#11337
     # review, P0). A resolved call is the closure's, not this channel's.
     for resolved in ("calls_it_normally", "calls_a_bare_name"):
+        # ⛔ MEASURED, not merely "not declared" (#11389 review, P2). The
+        # one-sided assertion was satisfied by dropping the reach from BOTH
+        # channels: deleting the bare-`Name` branch of the callee extraction
+        # took `_review_pool('object')` out of the caller list with the suite
+        # still green. A resolved call must be in the table this channel
+        # declines to declare.
+        assert resolved in methods, (
+            f"a NAME-RESOLVED call was measured by NEITHER channel, so the "
+            f"caller list reads short with nothing saying so: {resolved} not "
+            f"in {methods}")
         assert resolved not in declared, (
             f"a NAME-RESOLVED call was declared as an unresolved reference: "
             f"{resolved} in {declared}")
@@ -3373,6 +3390,11 @@ def test_a_leg_reach_passed_BY_REFERENCE_is_declared_not_dropped(
                       # A comprehension TARGET is a binding, not a mention: it
                       # read as a reach once the scope skip went in (#11389).
                       "binds_it_in_a_COMPREHENSION_only",
+                      # …and a `Load` of that target INSIDE the comprehension is
+                      # the comprehension's own binding, not the method's
+                      # (#11389 review, P2).
+                      "references_a_COMPREHENSION_TARGET_in_its_element",
+                      "references_a_COMPREHENSION_TARGET_in_its_if",
                       # An attribute BINDING is not a mention either.
                       "assigns_the_attr", "augments_the_attr", "deletes_the_attr"):
         assert shadowing not in declared, (
@@ -3396,6 +3418,76 @@ def test_a_leg_reach_passed_BY_REFERENCE_is_declared_not_dropped(
                and "passes_an_attribute" in t for t in published), (
         "the by-reference declaration never reached the published surface, so "
         f"a caller list read short with nothing saying so: {published}")
+
+
+def test_a_DECLARED_bound_does_not_swallow_the_DERIVED_failure(
+        tmp_path, monkeypatch):
+    """The two refusal channels must be publishable TOGETHER (#11389 review, P2).
+
+    The declared bound is appended to the same list the emptiness check reads, so
+    `not out` became UNREACHABLE whenever a declaration existed: a surface that
+    could not be derived AT ALL published only the by-reference caveat — which
+    says "the scan RAN and this is its known edge" — and nothing said the tool
+    table was empty. The separation #11337 established in one direction
+    collapsed in the other, and the dangerous reading is the one a consumer
+    takes from a lone caveat: a complete surface with an edge.
+    """
+    (tmp_path / "tortoise").mkdir()
+    (tmp_path / "tortoise" / "sdk.py").write_text(
+        "class S:\n"
+        "    def tortoise_fts_query(self, q, entity_type='point'):\n"
+        "        return q\n"
+        "    def _pool(self, t):\n"
+        "        return self.tortoise_fts_query('x', entity_type=t)\n"
+        "    def passes_it(self):\n"
+        "        return _safe(self._pool)\n",
+        encoding="utf-8")
+    # No handler forwards `entity_type`, so NOT ONE tool row can be derived.
+    (tmp_path / "tortoise" / "mcp_server.py").write_text(
+        "def tortoise_health():\n    return {'ok': True}\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    import tortoise.tool_registry as registry
+    monkeypatch.setattr(registry, "TOOL_REGISTRY", [])
+
+    published = [e["tools"] for e in probe.vector_leg_surface() if "tools" in e]
+    assert any("declared bound:" in line for line in published), (
+        "the fixture no longer declares a by-reference bound, so this test "
+        f"cannot see the swallow it exists to catch: {published}")
+    assert any("could not be derived" in line for line in published), (
+        "the declared bound swallowed the derived-failure line, so an "
+        "underivable surface reads as a measured one with a known edge: "
+        f"{published}")
+    # …and the FAILURE comes FIRST: presence alone is satisfied by an entry
+    # appended after the reader has already taken the surface as derived.
+    failure = next(i for i, line in enumerate(published)
+                   if "could not be derived" in line)
+    bound = next(i for i, line in enumerate(published)
+                 if "declared bound:" in line)
+    assert failure < bound, (
+        f"the derived FAILURE is published after the caveat: {published}")
+
+
+def test_a_scan_FAILURE_is_not_a_DECLARED_bound(tmp_path, monkeypatch):
+    """The separation's other half: a scan that could not be TAKEN (#11389).
+
+    The separation #11337 promised is two-facts-or-nothing, and only the
+    declared half was pinned. An unparseable `sdk.py` must report `error` and
+    NO declaration — otherwise a by-reference caveat ("the scan ran") can stand
+    in for "the scan failed", which is the shape that reads as a complete table
+    with an edge.
+    """
+    (tmp_path / "tortoise").mkdir()
+    (tmp_path / "tortoise" / "sdk.py").write_text(
+        "def broken(:\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+
+    methods, error, declared = probe._sdk_methods_on_vector_leg()
+    assert methods == {} and error and "SDK scan failed" in error, (
+        f"an unparseable SDK source did not report the scan failure: "
+        f"{methods} {error}")
+    assert declared is None, (
+        "a scan that could not be TAKEN also published a DECLARED bound, so a "
+        f"consumer cannot tell the two channels apart: {declared}")
 
 
 def test_a_label_with_MIXED_stored_widths_refuses_the_byte_figure():
@@ -3549,6 +3641,9 @@ def test_the_census_doc_states_the_same_probe_bound_the_report_does():
     # declaration (the cheapest wrong repair) leaves every test green while the
     # census goes on describing a bound the instrument stopped reporting.
     _methods, _error, declared = probe._sdk_methods_on_vector_leg()
+    assert _error is None, (
+        "the scan could not be TAKEN on the real tree, so the declaration read "
+        f"below is measuring the wrong channel: {_error}")
     if declared is None:
         # ⛔ A PROPERTY, not a magic sentence (#11389 review, P3): requiring one
         # exact phrase the doc never documented made this arm red on a doc+code
