@@ -73,8 +73,8 @@ ONE bounded graph pass:
    within the product every containing Session is a legitimate source
    session, but a seed shared across sessions widens the fetch.
 
-   ✅ SEED identity — CLOSED by #10540, and the closure is the whole point
-   of that change. The fetch TARGET was already product-real; the SEED gate
+   ✅ SEED identity AT THE IDENTITY LAYER — closed by #10540. The fetch
+   TARGET was already product-real; the SEED gate
    was blind, because the pool key authority
    (``retrieval.session_key_of``) read the snake ``session_id`` prop ONLY and
    the product's point fetch POPS that prop from EVERY point hit it returns
@@ -92,9 +92,21 @@ ONE bounded graph pass:
    session from ``n.sessionId`` / the snake prop / the ``:Session CONTAINS``
    edge and then pops the snake key (``sdk.tortoise_fts_query``), i.e. the
    reader ALREADY saw the identity (``retrieval.hit_session_id`` → ``[session
-   A]``) while the pool one layer below it did not. So a turn hit seeds its
+   A]``) while the pool one layer below it did not. So a turn hit CAN seed its
    own session, and :func:`reinjection_merge_order` anchors that session's
-   injected group after its own base ranks. (The defensive tail is NOT the
+   injected group after its own base ranks.
+
+   ⛔ SCOPE of the closure in this section — it is the IDENTITY, not the ARM.
+   Two facts a reader must not lose: (1) **no caller under ``tortoise/``
+   invokes this module** — every call site is the eval driver
+   (``tools/longmem_eval/retrieve.py``) — so the arm is still OFF in the
+   product, exactly as the ASK-lane sentence above says; and (2) every pool
+   the arm consumes today is built by ``_annotate_hits``, which stamps
+   ``session_id`` AND ``lme_session_index`` on EVERY hit
+   (``tools/longmem_eval/retrieve.py``), both of which outrank the camel leg —
+   so on today's only live path the camel branch is not reached at all. What
+   #10540 changes is what the AUTHORITY answers for a product-shaped hit; it
+   does not wire the arm, and it moves no eval-visible key. (The defensive tail is NOT the
    pre-fix symptom and not a fallback either: a group only exists for a key
    in ``seed_order``, whose own pool hit always supplies an anchor rank, so
    an absent group key is DROPPED by the merge rather than tailed — see
