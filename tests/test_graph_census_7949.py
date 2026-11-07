@@ -324,11 +324,12 @@ def test_an_object_identity_link_is_not_a_failed_anchor(captured):
     """FAILS IF an `Object` identity/mention link counts as a failed anchor.
 
     The writer sets NO property on an `(Source)-[:references]->(:Object)` link
-    (`edges.py:2015`: "Identity/mention links (`Object`) carry no
-    `sourceVersion` — this writer sets no property on them at all";
-    `entities.py` writes exactly that edge on the connector path). Counting one
-    in the derivation population would report a deliberate non-derivation as
-    E3 red — a false red. It is reported separately instead of being dropped.
+    (`projection/edges.py::link_source_to_entity`'s docstring: "Identity/mention
+    links (`Object`) carry no `sourceVersion` — this writer sets no property on
+    them at all"; `entities.py` writes exactly that edge on the connector path).
+    Counting one in the derivation population would report a deliberate
+    non-derivation as E3 red — a false red. It is reported separately instead of
+    being dropped.
     """
     sdk, session_id, snap = captured
     g = sdk._get_proj().g
