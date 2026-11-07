@@ -268,29 +268,112 @@ def test_the_guard_judges_the_RUNS_reader_cap_not_a_hard_wired_default():
             "guard would otherwise model a window the reader never sees")
 
 
-def test_a_reader_cap_change_moves_the_guard_verdict():
-    """Behavioural counterpart of the structural pin: the SAME pool and the
-    SAME picks are refused at the reader's real (tighter) cap and admitted at
-    the looser one — so the cap is genuinely an input to the verdict.
+def test_a_reader_cap_change_moves_the_guard_VERDICT_not_just_the_window():
+    """The cap's behavioural proof — on the GUARD'S ANSWER, not on `_reader_order`.
 
-    Four raw chunks of ``sA`` sit above the tail: at ``max_chunks_per_session``
-    0-free (``None``) they are all visible; at ``1`` the cap removes three of
-    them, which pulls a deeper session's only slot INTO the window, changing
-    which sessions a pick can delete.
+    ⚠️ This pin was written one call short on the first attempt (fresh-context
+    review, cycle 2, finding 1): it asserted only that `_reader_order` returns
+    different windows at different caps, which is a property of pre-existing
+    code and would stay green if `_non_eviction_filter` went back to a hard-wired
+    cap. It now compares `temporal_leg_fusion_order`'s VERDICT at two caps over
+    one pool: at the run's tighter cap the reader window is a different set of
+    sessions, so the same picks are refused — and at the looser cap they are
+    admitted.
+
+    The pool is chunk-bearing on purpose: the reader's cap removes raw
+    ``session-transcript`` chunks ABOVE the picks, which is the only way the cap
+    can change which sessions are visible.
     """
     pool = (
-        [{"id": f"c{i}", "session_id": "sA", "session_date": "2023-04-10",
+        [{"id": f"k{i}", "session_id": "sA", "session_date": "2023-04-10",
           "point_kind": "session-transcript", "content": "alpha"}
          for i in range(4)]
-        + [{"id": "b1", "session_id": "sB", "session_date": "2023-04-11",
+        + [{"id": f"a{i}", "session_id": "sA", "session_date": "2023-04-10",
+            "content": "alpha"} for i in range(4)]
+        + [{"id": "x0", "session_id": "sB", "session_date": "2023-04-11",
             "content": "alpha"},
-           {"id": "c1", "session_id": "sC", "session_date": "2023-04-12",
+           {"id": "x1", "session_id": "sC", "session_date": "2023-04-12",
             "content": "alpha"}]
     )
-    base = tl._reader_order(pool, _ids(pool), max_chunks_per_session=1)[:3]
-    looser = tl._reader_order(pool, _ids(pool), max_chunks_per_session=None)[:3]
-    assert base != looser, (
-        "fixture must expose the cap's effect, or the assertion below is vacuous")
+    tight_trace: dict = {}
+    tight_order, tight_picks = tl.temporal_leg_fusion_order(
+        pool, window=6, limit=2, date_window=RANGE, guard_trace=tight_trace,
+        max_chunks_per_session=1)
+    loose_trace: dict = {}
+    loose_order, loose_picks = tl.temporal_leg_fusion_order(
+        pool, window=6, limit=2, date_window=RANGE, guard_trace=loose_trace,
+        max_chunks_per_session=None)
+
+    # the SAME picks are selected in both arms — the cap moves the VERDICT, not
+    # the selection (so this cannot pass by the arm happening not to fire):
+    assert loose_picks == ["x0", "x1"], loose_picks
+    assert tight_picks == [], tight_picks
+    assert tight_trace["applied"] is True and loose_trace["applied"] is True
+    assert {r["id"] for r in tight_trace["rejected"]} == {"x0", "x1"}
+    # and at the reader's real (tight) cap each refusal names the reason that
+    # only that cap produces: x0 re-delivers a session the window already holds
+    # once the chunk cap lifts the deeper hits, and x1 would then evict sB.
+    reasons = {r["id"]: r["reason"] for r in tight_trace["rejected"]}
+    assert reasons == {"x0": "session_already_visible", "x1": "evicts:sB"}, reasons
+    # both arms agree that nothing was deleted — the difference is what the
+    # guard can SEE, which is exactly the false-PASS surface the fix closes.
+    for order in (tight_order, loose_order):
+        assert tl.window_arm_retention(
+            pool, order, window=6,
+            max_chunks_per_session=1 if order is tight_order else None,
+        )["deleted_sessions"] == []
+
+
+def test_each_pick_is_judged_CUMULATIVELY_not_in_isolation():
+    """A refusal must not make a later pick look harmless.
+
+    ⚠️ Unpinned until fresh-context review cycle 2 (finding 2): every other
+    multi-pick case in this file has each pick independently evicting its own
+    session, so a rewrite that judged picks in isolation would refuse the same
+    set and stay green. Here it is not the same set.
+
+    Pool: ``sB`` holds TWO visible slots (``b1``, ``b2``) and no sole
+    representative, and ``sC``/``sD`` sit below the window. Taught one pick at a
+    time, BOTH ``c1`` and ``d1`` look harmless (each alone displaces a redundant
+    ``sB`` slot); admitted together they take BOTH of them and **delete sB** from
+    the reader window — the harm the ruling forbids, invisible to
+    ``evicted_sole_representatives``. Judged cumulatively, ``c1`` is admitted and
+    ``d1`` is refused because it would take ``sB``'s last slot.
+    """
+    pool = (
+        [{"id": f"a{i}", "session_id": "sA", "session_date": "2023-04-10",
+          "content": "alpha"} for i in range(8)]
+        + [{"id": "b1", "session_id": "sB", "session_date": "2023-04-11",
+            "content": "alpha"},
+           {"id": "b2", "session_id": "sB", "session_date": "2023-04-11",
+            "content": "alpha"},
+           {"id": "c1", "session_id": "sC", "session_date": "2023-04-12",
+            "content": "alpha"},
+           {"id": "d1", "session_id": "sD", "session_date": "2023-04-13",
+            "content": "alpha"}]
+    )
+    trace: dict = {}
+    order, picks = tl.temporal_leg_fusion_order(
+        pool, window=10, limit=2, date_window=RANGE, guard_trace=trace,
+        max_chunks_per_session=None)
+    assert picks == ["c1"], picks
+    assert [(r["id"], r["reason"]) for r in trace["rejected"]] == [
+        ("d1", "evicts:sB")], trace["rejected"]
+    # the window WIDENS (2 -> 3 sessions) and sB survives: both halves of the
+    # ruling at once, on the shape a per-pick guard gets wrong.
+    got = tl.window_arm_retention(pool, order, picks=picks, window=10,
+                                  max_chunks_per_session=None)
+    assert got["deleted_sessions"] == []
+    assert (got["base_sessions"], got["fused_sessions"], got["net"]) == (2, 3, 1)
+    # control: the UNGUARDED arm admits both and deletes sB — i.e. this fixture
+    # really does carry the harm, so the assertion above is not vacuous.
+    u_order, u_picks = tl.temporal_leg_fusion_order(
+        pool, window=10, limit=2, date_window=RANGE, non_eviction=False,
+        max_chunks_per_session=None)
+    assert u_picks == ["c1", "d1"], u_picks
+    u = tl.window_arm_retention(pool, u_order, picks=u_picks, window=10,
+                                max_chunks_per_session=None)
+    assert u["deleted_sessions"] == ["sB"], u["deleted_sessions"]
 
 
 # ── 5. the OFF-SWITCH restores the pre-ruling splice byte-for-byte ─────────
