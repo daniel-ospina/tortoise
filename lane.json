@@ -1,0 +1,23 @@
+{
+  "_ref": "refs/lanes/Daniels-MacBook-Air-new.kfixer-11340-1794067866-p52586-1ae4e40b",
+  "_sha": "b8da1d2c8f5a3d5e20041588c2ab631a041c5e91",
+  "artifacts": [],
+  "attempt": 1,
+  "branch": null,
+  "budget_s": 7800,
+  "exit_code": null,
+  "heartbeat_at": 1794071817,
+  "host": "Daniels-MacBook-Air-new",
+  "issue": 11340,
+  "kind": "fixer",
+  "lane_id": "Daniels-MacBook-Air-new.kfixer-11340-1794067866-p52586-1ae4e40b",
+  "lease_until": 1794079617,
+  "pid": 52586,
+  "reason": null,
+  "repo": "daniel-ospina/tortoise",
+  "schema": 1,
+  "started_at": 1794067866,
+  "state": "RUNNING",
+  "tag": "11340",
+  "worktree": "/Users/danielospina/Documents/GitHub/tortoise"
+}
