@@ -197,6 +197,107 @@ def test_arm_out_tokens_falls_back_to_recovery_when_cost_is_absent():
         28000, "recovery.s4_out_tokens+truncation")
 
 
+def test_a_rejected_token_count_makes_the_arm_unmeasured():
+    """A multi-call arm whose second call's count was rejected (or was killed by
+    the deadline — billed, counted nowhere) leaves `calls_without_tokens > 0`.
+    The remaining sum is NOT the total: reading it as one under-counts in the
+    direction that flatters the delta arm."""
+    stats = {"cost": {"calls": 2, "completion_tokens": 5000,
+                      "calls_without_tokens": 1}}
+    tokens, basis = tool.arm_out_tokens(stats)
+    assert tokens is None
+    assert "no token usage for 1 of 2 call(s)" in basis
+
+
+def test_s4_delta_empty_uses_productions_own_predicate(tmp_path):
+    """`_s4_section_is_content` over EVERY emitted section, not the 4 tax
+    sections: a RETRACTION-ONLY delta carries content the merge keeps, so
+    production does not call it empty and neither may the instrument."""
+    sess = tool.load_sessions(_receipt(tmp_path / "r"))[0]
+    retraction_only = tool.run_arm(
+        _FakeModel({"entities": [], "events": [], "points": [], "operators": [],
+                    "retractions": [{"content": "the 62% claim is withdrawn"}]}),
+        sess, "delta")
+    assert retraction_only["s4_items"] == 0        # nothing on the tax surface
+    assert retraction_only["s4_delta_empty"] is False   # but the delta had content
+
+
+def test_both_arms_get_identical_inputs(tmp_path):
+    """R1, the load-bearing property: the SAME story / S2 list / search block /
+    cap reach both arms. If the delta arm silently got a different search block
+    the "tax" would double and every number in the report would be meaningless."""
+    sess = tool.load_sessions(_receipt(tmp_path / "r"))[0]
+    model = _FakeModel({"entities": [], "events": [], "points": [],
+                        "operators": []})
+    tool.run_arm(model, sess, "legacy")
+    tool.run_arm(model, sess, "delta")
+    assert len(model.calls) == 2
+    legacy, delta = model.calls
+    # the TEMPLATE lives in `system` (the user message is the same constant)
+    assert legacy["system"] != delta["system"]     # the contracts differ …
+    assert legacy["max_tokens"] == delta["max_tokens"]
+    # … and the story + S2 list + search block ride BOTH system prompts
+    for shared in (sess["story"], '"Halcyon archive"', '"stalled"'):
+        assert shared in legacy["system"] and shared in delta["system"]
+
+
+def test_the_gap_items_ride_the_artifact(tmp_path):
+    """The counts alone cannot support the follow-up the report points at
+    (Task 10 Step 5 partitions the CORRECTIONS into content-changing /
+    kind-lifecycle-only / re-emission-noise) — that needs the items."""
+    sess = tool.load_sessions(_receipt(tmp_path / "r"))[0]
+    gap = {"entities": [{"name": "Relay queue", "kind": "core:WorkItem"}],
+           "events": [], "points": [], "operators": []}
+    row = tool.run_arm(_FakeModel(gap), sess, "delta")
+    assert row["added_by_s4"] == 1
+    assert row["added_items"] == [{
+        "section": "entities", "key": "enti:entity | relay queue | workitem",
+        "content": "Relay queue", "kind": "core:WorkItem",
+        "lifecycle": None, "supersedes": None}]
+
+
+def test_the_CORRECTION_pairs_ride_the_artifact(tmp_path):
+    """⚠️ The defect this pins: a correction REUSES the S2 merge key (points and
+    events merge on content), so any "items not in S2" filter drops the entire
+    corrections channel — including the 65 corrections the residual argument is
+    about. The artifact must carry BOTH sides of the pair so Task 10 Step 5 can
+    classify it offline: a lifecycle-only change, a changed content (a new
+    identity), and a pure verbatim re-emit (which is the tax, not a correction)."""
+    sess = tool.load_sessions(_receipt(tmp_path / "r"))[0]
+    # same key, changed lifecycle -> a CORRECTION
+    life = {"entities": [{"name": "Halcyon archive", "kind": "core:WorkItem",
+                          "lifecycle": "superseded", "note": "stalled"}],
+            "events": [], "points": [], "operators": []}
+    row = tool.run_arm(_FakeModel(life), sess, "delta")
+    assert row["added_by_s4"] == 0            # nothing new appended
+    assert row["corrected_by_s4"] == 1
+    assert row["verbatim_reemissions"] == 0   # not a pure re-emit
+    (corr,) = row["corrected_items"]
+    assert corr["section"] == "entities"
+    assert corr["changed_fields"] == ["lifecycle"]
+    assert corr["s2_before"] == {"lifecycle": "created"}
+    assert corr["s4_after"] == {"lifecycle": "superseded"}
+    # a PURE verbatim re-emit is the tax, and must NOT appear as a correction
+    verbatim = tool.run_arm(_FakeModel({"entities": [
+        {"name": "Halcyon archive", "kind": "core:WorkItem",
+         "lifecycle": "created", "note": "stalled"}]}), sess, "delta")
+    assert verbatim["verbatim_reemissions"] == 1
+    assert verbatim["corrected_items"] == []
+
+
+def test_an_incomplete_recovery_sum_is_unmeasured_not_partial():
+    """A truncated base call + an escalated PARTIAL ACCEPT on an adapter with no
+    cost accumulator: the escalated call never reaches `s4_out_tokens`, so the
+    recovery sum is the base call alone (16 000 of 46 000 emitted). Reporting it
+    as the total would under-count in the direction that flatters the delta arm."""
+    stats = {"recovery": {"s4_out_tokens": 0,
+                          "truncation_completion_tokens_s4": 16000},
+             "completion_tokens": 30000}     # a call the accumulator never saw
+    tokens, basis = tool.arm_out_tokens(stats)
+    assert tokens is None
+    assert "incomplete after an escalated retry" in basis
+
+
 def test_arm_out_tokens_falls_back_and_says_so():
     """A single-call arm with no cost/recovery keys: the last-call count is the
     total, and the basis says so. Falling back silently to 0 would make the
