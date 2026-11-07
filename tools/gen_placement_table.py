@@ -34,24 +34,22 @@ from __future__ import annotations
 
 import sys
 
-# #5128: refuse a <3.12 interpreter before the imports below (D9 shape).
-# ⚠️ MEASURED, because the generic rationale is only half true here: this file has
-# no module-level 3.11+-only IMPORT, but it does fail on 3.9 — reached through
-# `tortoise.cache_projection`, which dies in `tortoise/security.py` with
-# `re.error: multiple repeat at position 40` (a 3.11+ regex), i.e. a traceback
-# raised from a module this generator imports rather than from `datetime.UTC`.
-# The refusal is what turns that into an attributable message; it is also CENSUS
-# CONFORMANCE (`tests/test_entry_point_python_guard.py` requires a guard on every
-# corpus entry point).
-# Exit 1 is NOT used: `main()` returns only 0 and 1, and 1 is this tool's own
-# `STALE` verdict — an environment refusal that exited 1 would be read as
-# "regenerate the table". #11342 owns that collision; it is not repaired here.
+# The #5128 interpreter guard MUST precede every other import: a module-level
+# 3.12-only import raises ImportError on an older interpreter BEFORE a later
+# guard could run, and the refusal then looks like a broken tool rather than a
+# floor. Print-then-`SystemExit(int)` is the shape the #5128 census's detector
+# accepts (`tests/test_entry_point_python_guard.py`), and exit 2 is reserved
+# here for "cannot answer" — 1 already means STALE under `--check`, and a
+# caller must never read an interpreter refusal as "regenerate the table".
+# Mirrors `tools/test_design_map_check.py`.
 if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
-    raise SystemExit(
+    print(
         f"tools/gen_placement_table.py requires Python >= 3.12 (got "
         f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
-        f"`uv run python tools/gen_placement_table.py`"
+        f"`uv run python tools/gen_placement_table.py`",
+        file=sys.stderr,
     )
+    raise SystemExit(2)
 
 import argparse
 import hashlib

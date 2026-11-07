@@ -1129,21 +1129,16 @@ def test_docs_only_edit_of_the_generated_doc_is_guarded_by_the_docs_job() -> Non
         # one that checks out at `fetch-depth: 0` (#5086 review P1-1). Listed
         # here, not exempted: the exactness of this assertion is the point.
         "python3 tools/substrate_map_check.py --check\n"
-        # #11084: the #5090 test-design surface map's guard is the FIFTH
-        # invocation and takes NO `--check` (it verifies by default) — the
-        # reason the "four `--check` commands" wording below could not absorb it.
-        # The `docs` job itself stays GREEN (it runs all five); what this stale
-        # pin reds is the required `test` matrix, in every PR, at two nodeids
-        # (#11412 Root 2). This pin and its sibling in
-        # `tests/test_merge_throughput.py` are the same assertion over the
-        # same step: both must name every invocation.
-        "python3 tools/test_design_map_check.py"
+        # #11084: the surface map's guard, BOTH arms — the check, and the
+        # self-test that proves the check still catches a consistent shrink.
+        "python3 tools/test_design_map_check.py\n"
+        "python3 tools/test_design_map_check.py --self-test"
     )
     assert _code(str(step.get("run", ""))).strip() == expected, (
-        "the drift step must invoke EXACTLY the installer plus the five guard "
-        "commands (four take `--check`, `test_design_map_check.py` verifies by "
-        "default) — no shell operator, no `echo` decoy, no wrapper, no "
-        f"trailing anything, or a real failure reports green (#2656); got "
+        "the drift step must invoke EXACTLY the installer, the four `--check` "
+        "commands and the map guard's two arms — no shell operator, no wrapper, "
+        f"no `echo` decoy, no trailing anything, or a real failure reports green "
+        f"(#2656); got "
         f"{_code(str(step.get('run', '')))!r}"
     )
     assert not docs_job.get("continue-on-error"), (
