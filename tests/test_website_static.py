@@ -4359,11 +4359,14 @@ class TestSiteIconAndSocialPreviewContract:
         """The bytes up to the end of the IEND chunk — a PNG's image IS its chunks.
 
         The JPEG walk above must never be applied to a PNG: `FF D9` inside IDAT is
-        ordinary compressed data, so it would measure the card by a random interior byte
-        pair. MEASURED on `website/logo.png` (35,670 B, whose IDAT happens to contain
-        `FF D9`): the JPEG scan reads 29,390 B — 6,280 B short — which would falsely
-        refuse a legitimate PNG card, and the reverse direction (a padded flat PNG) would
-        falsely accept one.
+        ordinary compressed data, so a card would be measured by a random interior byte
+        pair. Both directions were measured on real bytes: a flat PNG padded past 40 KB
+        measured 41,000 under a JPEG-only measure (a blank card clearing the floor), and
+        `website/logo.png` — 35,670 B, whose IDAT does contain `FF D9` — measured 29,390
+        under the superseded `rfind` measure, i.e. 6,280 B short of a legitimate card.
+        The padded-PNG fixture in `test_the_content_guards_reject_a_blank_image_and_keep_
+        their_measured_floors` is what catches a dispatch regression; the `logo.png` pin
+        beside it asserts the PNG path still measures a real PNG at its full length.
         """
         n = len(data)
         pos = 8
@@ -4952,15 +4955,20 @@ class TestSiteIconAndSocialPreviewContract:
                 # `rel="icon" href="/assets/og-tortoise.jpg"` (1200x630) passed every
                 # icon assertion, and so did a href naming a file that does not exist.
                 path_part = urlsplit(href).path
+                # ⛔ EXISTENCE FIRST, BEFORE ANY FORMAT EXEMPTION. The `.svg` exemption
+                # below is about having no intrinsic pixel box to squash — it is NOT a
+                # licence to skip the file check, and an early `continue` that did so let
+                # a page link a nonexistent vector icon while this guard reported green
+                # (measured: `href="/assets/nope.svg"` passed, the only format that did).
+                target = self.WEB / path_part.lstrip("/")
+                assert target.is_file(), (
+                    f"{page.name} links an icon this site does not serve ({path_part}) — "
+                    "the tab draws nothing")
                 if path_part.endswith(".svg"):
                     # A vector icon has no intrinsic pixel box to squash — the tab sizes
                     # it from the viewBox — so it is EXEMPT BY NAME rather than skipped
                     # silently by an extension filter.
                     continue
-                target = self.WEB / path_part.lstrip("/")
-                assert target.is_file(), (
-                    f"{page.name} links an icon this site does not serve ({path_part}) — "
-                    "the tab draws nothing")
                 raw = target.read_bytes()
                 if raw[:8] == b"\x89PNG\r\n\x1a\n":
                     w, h = self._png_size(raw)
