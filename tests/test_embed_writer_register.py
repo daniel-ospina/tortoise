@@ -524,6 +524,100 @@ def test_the_seam_CALL_population_is_the_one_the_register_names():
     )
 
 
+def _writer_function_source(at: str) -> str:
+    """A writer's own text, by the LINE RANGE `probe._embedding_writers` uses.
+
+    Mirrors the probe's extraction on purpose rather than calling
+    `ast.get_source_segment`: the probe joins the node's line range because
+    re-splitting the whole file per call cost 90 s on this tree, and a
+    re-derivation that read the source a different way could disagree with the
+    instrument for a reason that has nothing to do with the claim under test.
+    """
+    rel, line = at.rsplit(":", 1)
+    target = int(line)
+    source = (REPO_ROOT / rel).read_text(encoding="utf-8")
+    lines = source.splitlines()
+    enclosing = None
+    for node in ast.walk(ast.parse(source)):
+        if (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.lineno <= target <= (node.end_lineno or node.lineno)
+            # The INNERMOST enclosing def, so a nested writer is not read as its parent.
+            and (enclosing is None or node.lineno > enclosing.lineno)
+        ):
+            enclosing = node
+    assert enclosing is not None, (
+        f"no function encloses {at} — discovery's `at` does not resolve, so this arm cannot "
+        "re-derive anything from it"
+    )
+    return "\n".join(lines[enclosing.lineno - 1:enclosing.end_lineno])
+
+
+def test_the_AST_bought_population_is_the_one_the_register_names():
+    """The register's OTHER population sentence, held to the standard it applies 30 lines above.
+
+    The bullet closes with "the writers whose membership the AST pass actually bought are
+    `api::add_point`, `consistency::_graph_fingerprint`, `sdk::_index_gate_read` and
+    `sdk::_write_capture_turns` (the four named at the start of this bullet), and nothing else".
+    Nothing re-derived it — the four names appeared in a docstring and nowhere else — so a FIFTH
+    container-key-only writer would have been discovered, forced to declare, and this "and nothing
+    else" would have silently become false. That is exactly the rot the enumeration one line above
+    is pinned against, and the register's own argument for pinning it ("a pin can read it, not
+    rewrite it; the red is what makes the edit unavoidable") applies here unchanged.
+
+    `_writes_an_embedding` is `_EMBED_WRITE` OR the container-key AST arm, so of the
+    `unresolved_write` population (no recognised producer call, so membership rests on that
+    predicate) the writers the AST arm BOUGHT are exactly those the regex does not match. Re-derived
+    from the instrument at HEAD rather than stated, and reding in BOTH directions: a member the
+    sentence loses, and a name the sentence keeps whose membership the regex already explained.
+    """
+    doc = register.__doc__ or ""
+    anchor = "the writers whose membership the AST pass actually bought are"
+    start = doc.find(anchor)
+    assert start != -1, (
+        "the register no longer separates the writers the AST pass bought from the ones that "
+        f"merely hold the shape for another reason: {anchor!r}"
+    )
+    # The same token reader the CALL-population arm uses: the enumeration is the maximal run of
+    # backticked `module::symbol` tokens after the anchor, and `(the four named …)` ends it.
+    separator = re.compile(r"[\s,:()]*(?:and\s+)?`([A-Za-z_][\w.]*)::([A-Za-z_]\w*)`")
+    stated: list[tuple[str, str]] = []
+    position = start + len(anchor)
+    while match := separator.match(doc, position):
+        stated.append((match.group(1), match.group(2)))
+        position = match.end()
+    assert stated, (
+        f"the sentence after {anchor!r} names no writer: {doc[position:position + 120]!r}"
+    )
+
+    bought = {
+        key for key, row in probe.embedding_writers().items()
+        if row["kind"] == "unresolved_write"
+        and not probe._EMBED_WRITE.search(_writer_function_source(row["at"]))
+    }
+    assert bought, (
+        "no writer owes its membership to the container-key AST arm — the sentence this test reads "
+        "has lost its subject, or discovery stopped deciding that shape on the AST"
+    )
+
+    def matches(key: str, module: str, symbol: str) -> bool:
+        writer_module, writer_symbol = key.split("::", 1)
+        return writer_symbol == symbol and (
+            writer_module == module or writer_module.endswith(f".{module}")
+        )
+
+    unstated = sorted(key for key in bought if not any(matches(key, *t) for t in stated))
+    assert not unstated, (
+        "the register says these are the writers the AST pass bought `and nothing else` — bought "
+        f"and not in the sentence: {unstated} (named: {stated})"
+    )
+    overstated = sorted(t for t in stated if not any(matches(k, *t) for k in bought))
+    assert not overstated, (
+        "the sentence names a writer whose membership the AST arm did NOT buy — `_EMBED_WRITE` "
+        f"already explains it, so it is not one the AST pass bought: {overstated}"
+    )
+
+
 def test_the_instrument_and_the_product_declare_the_same_writers():
     """§6.2: the two cannot disagree about WHICH writer a row is about — or about what it is."""
     census = dict(probe.WRITER_CENSUS)
