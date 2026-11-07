@@ -2938,8 +2938,18 @@ def vector_census(graph, graph_name: str, at: str | None = None,
                 # wrong in an unbounded direction, in the figure #11088 exists
                 # to produce, with nothing marking it as estimated (review
                 # round 7, P2; measured 5x1024 + 1x384 → 24,576 B reported for
-                # a true 22,016 B). An indexed label cannot hold mixed widths,
-                # so the disagreement is the no-index case's own hazard.
+                # a true 22,016 B). ⚠️ A covering index does NOT make the
+                # disagreement impossible — measured: an index of dimension
+                # 384 over a label holding one 384-wide and five 1024-wide
+                # rows publishes `stored x dimension` on a 384-majority
+                # sample and refuses (`stored widths disagree`) on a mixed
+                # one, so a disagreement is BOTH arms' hazard. What the
+                # covering arm adds is a cross-check, not an invariant: it
+                # publishes `stored x dimension` only where the PROBED width
+                # agrees with the index dimension (`probed width W agrees`)
+                # and refuses otherwise. The census never establishes that an
+                # indexed label holds a single width, so that invariant is
+                # not assumed here — census doc §2 states the same.
                 probe = _read(
                     graph,
                     f"MATCH (n:{_cypher_label(label)}) "
