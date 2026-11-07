@@ -1299,10 +1299,15 @@ place a machine reads it.
 
 ⚠️ §10.8's own **New value** is deliberately left at `:10397`/`:11849`/`:11862` — the state
 `#10997` left — because it is the ANCHOR §10.9 re-derives from ("must anchor on the measured
-`:10398`, never on the recorded value plus 700"). Rewriting it to a later head's numbers would
-falsify §10.8's own arithmetic (*`#10997` inserts **36** lines*) and leave §10.9 citing an
-Original value its predecessor never stated. Each §10.N entry freezes ONE move; the moves after it
-are §10.N+1's to record.
+`:10398`, never on the recorded value plus 700"). Rewriting it to a later head's numbers leaves
+§10.9 citing an Original value its predecessor never stated, and contradicts §10.8's own stated
+insert size. Each §10.N entry freezes ONE move; the moves after it are §10.N+1's to record.
+⛔ NOT corrected here, and deliberately so: §10.7's New value gives `_collect_classify_items` as
+`:10020` with its extent as `:10169-10191`, while §10.8's Original states `:10193`/`:10193-10215`
+— three values for one symbol, and §10.8's "inserts **36** lines" reconciles with none of them
+(`:10193`→`:10397` is `+204`). Both entries are `main`'s BYTES, unmodified by this commit; fixing
+them in place is exactly what this note forbids, and the correction is tracked as **#11425**
+rather than smuggled into a cite re-derivation.
 
 ## 11. The step set V5 gates over — seven unconditional, one conditional (`#10215`)
 
