@@ -29,6 +29,7 @@ Red-first evidence (measured on `origin/main` before this change, 277a559b1a):
 from __future__ import annotations
 
 import copy
+import sys
 
 import pytest
 
@@ -136,22 +137,31 @@ def test_the_shape_gate_defers_the_relations_section_to_s5():
 
 
 def test_s5_owns_every_relations_mistype_the_gate_defers():
-    """The deferral is only sound because S5 COUNTS every one of those shapes
-    (the reporting discipline rule 1 rests on) — no mistype is silent."""
+    """The deferral is only sound because S5 ACCOUNTS for every one of those
+    shapes (the reporting discipline rule 1 rests on) — no mistype is silent.
+
+    ⛔ #11333: "accounts for" is not "drops". The first shape is the realistic
+    mistype (the triple where a list was asked for), and S5 now RECOVERS it,
+    which is still not silent — the shape error is named as recovered. Each
+    row's expectation is therefore `(kept, dropped, warning-fragment)` rather
+    than the single `dropped >= 1` the dropped-everything rule produced.
+    """
     cases = [
-        {"src": "Retry Storm", "dst": "Deadline Rule", "predicate": "IMPL"},
-        [{"src": "Retry Storm", "dst": "Deadline Rule"}],
-        [{"src": "Retry Storm", "dst": None, "predicate": "IMPL"}],
-        [42],
+        ({"src": "Retry Storm", "dst": "Deadline Rule", "predicate": "IMPL"},
+         1, 0, "recovered"),
+        ([{"src": "Retry Storm", "dst": "Deadline Rule"}], 0, 1, "dropped"),
+        ([{"src": "Retry Storm", "dst": None, "predicate": "IMPL"}],
+         0, 1, "dropped"),
+        ([42], 0, 1, "non-dict relation entry"),
     ]
-    for relations in cases:
+    for relations, kept, dropped, named in cases:
         emission = copy.deepcopy(EMISSION)
         emission["relations"] = relations
         result = _run(emission)
-        assert result["relations"] == [], relations
-        assert result["stats"]["relations_dropped"] >= 1, relations
-        assert any("connections_incomplete" in w
-                   for w in result["warnings"]), (relations, result["warnings"])
+        assert len(result["relations"]) == kept, (relations, result["relations"])
+        assert result["stats"]["relations_dropped"] == dropped, relations
+        assert any(named in w for w in result["warnings"]), \
+            (relations, named, result["warnings"])
 
 
 # ── 2. the story lands, between the two resolved entities ────────────────
@@ -1015,9 +1025,31 @@ def test_a_single_relation_object_where_a_list_was_asked_for_counts_as_one():
     """The realistic mistype is ONE relation object as the whole section value.
     `len(dict)` counts its three KEYS, so the counter added to make the report
     honest over-reported 3 lost relations for 1.
+
+    ⛔ #11333 CHANGED THE OUTCOME, not the count. Before the fix this value was
+    dropped as a section (`relations == []`, `relations_dropped == 1`) while the
+    SAME value beside a usable list was recovered — the census answering a
+    question about the merge ARRIVAL. It is now recovered on both arrivals, so
+    the loss this test guarded is a KEPT edge and the count is 0. The `== 1`
+    the counter was written for is pinned where it still applies:
+    `test_a_single_relation_object_counts_its_candidate_once` below.
     """
     emission = copy.deepcopy(EMISSION)
     emission["relations"] = {"src": "Retry Storm", "dst": "Deadline Rule",
+                             "predicate": "IMPL"}
+    result = _run(emission)
+    assert [(r["src"], r["dst"], r["predicate"])
+            for r in result["relations"]] == [
+        ("Retry Storm", "Deadline Rule", "IMPL")]
+    assert result["stats"]["relations_dropped"] == 0
+
+
+def test_a_single_relation_object_counts_its_candidate_once():
+    """The `len(dict)` defect this census row exists for, still pinned: the
+    mistype is ONE candidate, so an UNRESOLVABLE one is reported as exactly 1
+    lost relation (its three keys would say 3)."""
+    emission = copy.deepcopy(EMISSION)
+    emission["relations"] = {"src": "Ann", "dst": "Bob",
                              "predicate": "IMPL"}
     result = _run(emission)
     assert result["relations"] == []
@@ -1293,9 +1325,12 @@ def test_the_union_carries_a_one_object_relations_section_to_s5():
     assert merged["relations"] == {"src": "Retry Storm", "dst": "Deadline Rule",
                                    "predicate": "IMPL"}
     result = _run(merged)
-    assert result["relations"] == []
-    assert result["stats"]["relations_dropped"] == 1
-    assert any("connections_incomplete" in w for w in result["warnings"])
+    # ⛔ #11333: the union's job asserted here — the mistype reaching S5 AS IT
+    # ARRIVED — is unchanged. What changed is what S5 does with it: the value is
+    # ONE relation, so it is recovered rather than dropped (`== []` / `== 1`
+    # here was the arrival-dependent census the issue reports).
+    assert [r["predicate"] for r in result["relations"]] == ["IMPL"]
+    assert result["stats"]["relations_dropped"] == 0
 
 
 def test_the_restore_does_not_duplicate_an_entity_already_held_in_another_case():
@@ -1376,6 +1411,12 @@ def test_a_mistyped_section_never_displaces_a_valid_list_from_the_other_side():
         {"relations": []})
     assert merged4["relations"] == {"src": "A", "dst": "B",
                                     "predicate": "IMPL"}
+    # ⛔ #11333: this row used to assert `relations_dropped == 1` — S5 losing the
+    # edge while the SAME value beside a usable list kept it. The section is now
+    # judged by the same candidate rule, so the endpoint 'A'/'B' — which this
+    # emission never produced — is what drops it (still 1, still counted), and
+    # the ARRIVAL no longer decides. THIS body asserts the section arrival only;
+    # both arrivals are asserted in §12 below.
     assert v2.execute_embed(copy.deepcopy(merged4), {},
                             session_id="s-e")["stats"]["relations_dropped"] == 1
 
@@ -1581,13 +1622,219 @@ def test_a_falsy_mistyped_section_is_named_not_silent():
 def test_an_unverifiable_predicate_is_clamped(monkeypatch):
     """P3: the fail-open arm kept the model's verb verbatim — 5,000 chars and a
     newline reached a record the write leg (#11237) carries as an edge
-    property, which is the prose surface this channel exists to keep out."""
+    property, which is the prose surface this channel exists to keep out.
+
+    ⛔ #11333: the fixture used to put the newline at index 5,000 — PAST the
+    64-char cut — so the row was green whether or not control characters were
+    handled at all (the non-discriminating-fixture class of #11236). The
+    newline now sits at index 10, inside the kept window, so length alone
+    cannot satisfy this row.
+    """
     monkeypatch.setattr(v2, "_declared_relation_predicates", lambda: None)
     emission = copy.deepcopy(EMISSION)
     emission["relations"] = [{"src": "Retry Storm", "dst": "Deadline Rule",
-                              "predicate": "x" * 5000 + "\nDROP"}]
+                              "predicate": "x" * 10 + "\nDROP" + "x" * 5000}]
     result = _run(emission)
     kept = result["relations"][0]["predicate"]
     assert len(kept) == v2._UNVERIFIED_TEXT_CAP, len(kept)
     assert "\n" not in kept
     assert any("clamped" in w for w in result["warnings"]), result["warnings"]
+    assert any("control characters replaced" in w for w in result["warnings"]), \
+        result["warnings"]
+
+
+# ── 12. #11333 — the shape census must not depend on the ARRIVAL ──────────
+#
+# The shape census (kept / dropped) is a report about the VALUE the model
+# emitted. One value reaches S5 two ways:
+#
+#   SECTION  `{"relations": <value>}`                      — the value IS the section
+#   BESIDE   `merge_embed_lists(...)` with a usable list    — the value rides as an
+#                                                             isolate ITEM behind it
+#
+# Judged by two rules, the same value was KEPT as an item and DROPPED as a
+# section, so `relations_dropped` answered a question about the merge shape. The
+# rows below pin one rule (`_relation_candidates`) for both arrivals, and the
+# measured disagreement on the pre-fix tree (`de72cfd455`) was 3/3 values:
+
+#     value                     as SECTION   as ITEM (delta)
+#     one relation object        0 kept/1 drop   1 kept/0 drop
+#     mapping of 2 relations     0 kept/2 drop   0 kept/1 drop
+#     {}                         0 kept/0 drop   0 kept/1 drop
+
+_ONE_RELATION = {"src": "Retry Storm", "dst": "Deadline Rule",
+                 "predicate": "NAND"}
+_TWO_RELATIONS = {
+    "a": {"src": "Retry Storm", "dst": "Deadline Rule", "predicate": "NAND"},
+    "b": {"src": "Deadline Rule", "dst": "Retry Storm", "predicate": "IMPL"},
+}
+#: The usable relation the "beside" arrival carries; its own edge is subtracted
+#: from that arrival's counts so the two columns describe the SAME value.
+_BASE_RELATION = {"src": "Retry Storm", "dst": "Deadline Rule",
+                  "predicate": "IMPL"}
+
+
+def _as_section(value):
+    emission = copy.deepcopy(EMISSION)
+    emission["relations"] = copy.deepcopy(value)
+    return _run(emission)
+
+
+def _beside(value):
+    """The value beside a usable list — the shape `merge_embed_lists` emits when
+    one side of the S2∪S4 union carries a mistype (#11205's isolate path)."""
+    merged = v2.merge_embed_lists(
+        {"entities": copy.deepcopy(EMISSION["entities"]),
+         "relations": [copy.deepcopy(_BASE_RELATION)]},
+        {"relations": copy.deepcopy(value)})
+    return _run(merged)
+
+
+def _value_counts(result, carried_elsewhere: int = 0) -> tuple[int, int]:
+    return (result["stats"]["relations"] - carried_elsewhere,
+            result["stats"]["relations_dropped"])
+
+
+@pytest.mark.parametrize("label,value,expected", [
+    ("one relation object", _ONE_RELATION, (1, 0)),
+    ("mapping of 2 relations", _TWO_RELATIONS, (2, 0)),
+    ("empty mapping", {}, (0, 0)),
+])
+def test_the_census_does_not_depend_on_the_arrival(label, value, expected):
+    """#11333 defect 2: ONE value judged two ways.
+
+    A section-arrival value and the same value riding beside a usable list must
+    report the same `(kept, dropped)` — the census describes the value, not the
+    merge that produced it.
+    """
+    as_section = _value_counts(_as_section(value))
+    as_item = _value_counts(_beside(value), carried_elsewhere=1)
+    assert as_section == expected, (label, "section", as_section)
+    assert as_item == expected, (label, "beside", as_item)
+
+
+def test_a_one_object_section_carries_its_edge():
+    """#11333 defect 1: the realistic mistype — the model emitting the TRIPLE
+    where a list of triples was asked for — lost its edge on a missing pair of
+    brackets, and only when it arrived as the whole section.
+    """
+    result = _as_section(_ONE_RELATION)
+    assert [(r["src"], r["dst"], r["predicate"])
+            for r in result["relations"]] == [
+        ("Retry Storm", "Deadline Rule", "NAND")]
+    assert result["stats"]["relations_dropped"] == 0
+    # the shape error is still NAMED, and named as RECOVERED — a warning that
+    # says "ignored" over a kept edge is the mirror of the silent loss.
+    shape = [w for w in result["warnings"] if "not a list" in w]
+    assert shape, result["warnings"]
+    assert "recovered" in shape[0], shape
+
+
+def test_the_recovered_one_object_section_still_mints_nothing():
+    """The recovery is SHAPE-only: the value is validated exactly as a list item
+    is, so an endpoint this emission never produced is still dropped, named, and
+    never materialised (the mint pin the channel's whole safety rests on)."""
+    result = _as_section({"src": "Retry Storm", "dst": "Ghost Rule",
+                          "predicate": "NAND"})
+    assert result["relations"] == []
+    assert result["stats"]["relations_dropped"] == 1
+    assert {e["name"] for e in result["payload"]["entities"]} == {
+        "Retry Storm", "Deadline Rule"}
+    assert any("NOT minted" in w for w in result["warnings"]), \
+        result["warnings"]
+
+
+def test_a_mapping_section_is_judged_entry_by_entry():
+    """A mapping OF relations is two relations, not one lost blob: the mapping
+    arm is `_relation_candidates`'s dict-without-the-triple case."""
+    result = _as_section(_TWO_RELATIONS)
+    assert sorted((r["src"], r["dst"], r["predicate"])
+                  for r in result["relations"]) == [
+        ("Deadline Rule", "Retry Storm", "IMPL"),
+        ("Retry Storm", "Deadline Rule", "NAND")]
+    assert result["stats"]["relations_dropped"] == 0
+
+
+def test_an_empty_mapping_section_loses_nothing():
+    """`{}` carries no relation, so it loses none — and it is still NAMED.
+
+    ⚠️ This row is NOT the discriminating half of the fix: the section arrival
+    already reported `0 kept / 0 dropped` before #11333 (only the BESIDE arrival
+    reported 1 dropped), so every assertion here passes on the pre-fix tree. The
+    discriminating row is `test_the_census_does_not_depend_on_the_arrival`'s
+    `empty mapping` case, which measures both arrivals.
+    """
+    result = _as_section({})
+    assert result["relations"] == []
+    assert result["stats"]["relations_dropped"] == 0
+    assert any("not a list" in w for w in result["warnings"]), \
+        result["warnings"]
+
+
+def test_an_unverifiable_predicate_shorter_than_the_cap_loses_its_newline(
+        monkeypatch):
+    """#11333 defect 3 at the DISCRIMINATING size: `_UNVERIFIED_TEXT_CAP` bounds
+    length, while its comment claims control characters are kept out too.
+
+    A 3-char `"a\\nb"` is inside the cap, so length can never be what saves this
+    row — the earlier 5,000-char fixture put the newline PAST the cut and stayed
+    green with the defect live (#11236's non-discriminating-fixture class).
+    """
+    monkeypatch.setattr(v2, "_declared_relation_predicates", lambda: None)
+    result = _as_section([{"src": "Retry Storm", "dst": "Deadline Rule",
+                           "predicate": "a\nb"}])
+    kept = result["relations"][0]["predicate"]
+    assert not any(ord(c) < 0x20 or ord(c) == 0x7F for c in kept), repr(kept)
+    assert "a b" in kept, kept
+    warnings = [w for w in result["warnings"] if "predicate" in w]
+    assert any("control characters replaced" in w for w in warnings), warnings
+
+
+def test_an_unverified_semantics_shorter_than_the_cap_loses_its_control_char(
+        monkeypatch):
+    """The SECOND unverified call site (`semantics`), which the cap's comment
+    also covers: with the Layer-2 vocabulary unreadable the value is carried
+    verbatim, and `semantics` is an edge property on the write leg (#11237)."""
+    # a `None` module entry makes `from tortoise.pack_registry import …` raise
+    # ImportError — the same path a real unreadable registry takes (both the
+    # declared-predicate and the Layer-2 arm degrade fail-open).
+    monkeypatch.setitem(sys.modules, "tortoise.pack_registry", None)
+    result = _as_section([{"src": "Retry Storm", "dst": "Deadline Rule",
+                           "predicate": "IMPL", "semantics": "a\rb"}])
+    kept = result["relations"][0]["semantics"]
+    assert not any(ord(c) < 0x20 or ord(c) == 0x7F for c in kept), repr(kept)
+    assert "a b" in kept, kept
+    warnings = [w for w in result["warnings"] if "semantics" in w]
+    assert any("control characters replaced" in w for w in warnings), warnings
+
+
+def test_a_list_of_mappings_reaches_both_arrivals_intact():
+    """#11333 review P3 — the residual the docstring's "one rule" claim hid.
+
+    A LIST of mapping items is 2 relations judged entry by entry. As the whole
+    section it was 2 kept; beside a usable list the union keyed every mapping
+    item under `("relation", "", "", "")` and silently kept only the first
+    (`relations_dropped == 0`) — the same arrival-dependent, UNCOUNTED loss this
+    issue is about, one shape further out. `_merge_key` now keys a non-triple
+    mapping by its content, so both arrivals carry both relations.
+    """
+    value = [{"a": copy.deepcopy(_TWO_RELATIONS["a"])},
+             {"b": copy.deepcopy(_TWO_RELATIONS["b"])}]
+    assert _value_counts(_as_section(value)) == (2, 0)
+    assert _value_counts(_beside(value), carried_elsewhere=1) == (2, 0)
+
+
+def test_an_unverified_field_loses_a_C1_or_unicode_line_boundary(monkeypatch):
+    """The bound guards against a value that RE-PARSES into several properties, so
+    the line-boundary points count too: C1 NEL (U+0085) and the Unicode LINE /
+    PARAGRAPH separators (U+2028/U+2029) split a value under `splitlines()`
+    exactly as LF does, while a C0-only regex leaves them in the record.
+    """
+    monkeypatch.setattr(v2, "_declared_relation_predicates", lambda: None)
+    for bad in ("a\x85b", "a\u2028b", "a\u2029b", "a\x7fb"):
+        result = _as_section([{"src": "Retry Storm", "dst": "Deadline Rule",
+                               "predicate": bad}])
+        kept = result["relations"][0]["predicate"]
+        assert not any(ord(c) < 0x20 or 0x7F <= ord(c) <= 0x9F
+                       or ord(c) in (0x2028, 0x2029) for c in kept), (bad, repr(kept))
+        assert kept == "a b", (bad, repr(kept))
