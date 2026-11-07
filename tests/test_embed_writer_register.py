@@ -54,7 +54,7 @@ is the product home; this file is its proof.
 | `test_a_duplicate_key_raises` | the issue's third row (D4) | a second declaration silently wins — the stale row survives a rewrite |
 | `test_a_bypass_declaration_is_refused` | `04-plan.md` §6.2 — *"no `bypass` class; an unclassified writer is a refusal at export time"* | `bypass` becomes declarable, so the class that means *defect* can be asserted as *accepted* |
 | `test_an_undeclared_writer_is_a_refusal_not_a_default` | the same contract, at the LOOKUP | `classify` answers for a writer nobody declared — the fallback that makes "no silent bypass" unkeepable |
-| `test_every_writer_the_instrument_finds_outside_the_gate_is_declared` | the issue's second row, LIVE (D3) | the tree grows a writer **discovery decides** whose vector the gate does not see and the product has no declaration for it — the population is the syntax the AST/regex pass can decide, and the shapes it cannot are NAMED (`UNDECIDABLE_WRITE_SHAPES` in the instrument, `INVISIBLE_SHAPES` below for the forms neither the regex nor the AST pass decides) and pinned by `test_the_DISCOVERY_blind_spot_is_pinned_not_merely_documented` |
+| `test_every_writer_the_instrument_finds_outside_the_gate_is_declared` | the issue's second row, LIVE (D3) | the tree grows a writer **discovery decides** whose vector the gate does not see and the product has no declaration for it — the population is the syntax the AST/regex pass can decide, and what it cannot are NAMED (`UNDECIDABLE_WRITE_SHAPES` in the instrument, `INVISIBLE_SHAPES` below for the forms neither pass decides AND the scopes the walk never enters) and pinned by `test_the_DISCOVERY_blind_spot_is_pinned_not_merely_documented` |
 | `test_the_live_guard_has_teeth_on_an_INJECTED_writer` | the same guard, driven through **DISCOVERY** (`probe._embedding_writers` on an injected tree) rather than through set arithmetic | the guard goes vacuous when the tree's population is all-declared (the `#10541` guard's own lesson), or the discovery filter regresses and stops seeing a writer — in EITHER the clause shape or the container-key shape (`#11274`) |
 | `test_the_register_names_the_shapes_its_discovery_cannot_see` | `#11274` — the guard is exactly as wide as discovery, so discovery's blind spots are NAMED rather than implied | the instrument stops naming a shape it cannot decide, claims to decide one it cannot (or the reverse), or the register's docstring stops scoping its claim to the mechanism |
 | `test_the_instrument_and_the_product_declare_the_same_writers` | `04-plan.md` §6.2 — *"the instrument and the product cannot disagree about which writer a row is about"* | a class changes in one place, the census keeps an entry the register dropped, or the register invents one the instrument does not find |
@@ -564,7 +564,8 @@ def test_the_DECLARATIONS_tuple_is_what_the_live_map_was_built_from():
 
 # ── The discovery blind spot (pinned, not merely documented) ────────────────
 
-#: The shapes `_EMBED_WRITE` cannot spell, one scratch module each. Kept as data so the assertion
+#: The entries `_EMBED_WRITE` cannot SEE, one scratch module each — a SPELLING neither pass can
+#: decide, or a POSITION (module/class body) the walk never enters. Kept as data so the assertion
 #: below reads as the limitation it is measuring, not as hand-written cases.
 INVISIBLE_SHAPES = {
     "map_merge": 'def w(tx, p):\n    tx.query("SET n += $p", {"p": p})\n',
@@ -624,8 +625,9 @@ def test_the_DISCOVERY_blind_spot_is_pinned_not_merely_documented(tmp_path):
     """`#11274` row 1, in the direction that makes SILENCE distinguishable from coverage.
 
     The guard above discovers through `probe.embedding_writers()`, whose `_EMBED_WRITE` is a
-    source-text regex (plus the AST pass `_writes_an_embedding`). Every shape in `INVISIBLE_SHAPES`
-    stores a vector one of them cannot spell, so a writer using one is
+    source-text regex (plus the AST pass `_writes_an_embedding`). Every entry in `INVISIBLE_SHAPES` is
+    invisible to discovery — a SPELLING neither pass can decide, or a POSITION (module/class body)
+    the walk never enters — so a writer using one is
     ABSENT from the census — not unclassified, absent — and every other test in this file is green.
     That limitation is stated in the register's module docstring; this test is what keeps the
     statement from rotting:

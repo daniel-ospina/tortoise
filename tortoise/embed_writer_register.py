@@ -70,8 +70,10 @@ claim and a slogan:
   carries a vector is data flow, not syntax, and ~60 functions merge a props map. So the honest
   statement is not "no writer can bypass silently" but: **every writer discovery finds outside the
   gate is declared, and the shapes discovery cannot decide are named rather than assumed absent** —
-  which is why `sdk::_update_entity`, the live map-merge instance, carries the NAMED `#4094`
-  exemption instead of being read as "no write at all".
+  which is why `sdk::_update_entity`, one live map-merge instance, carries the NAMED `#4094`
+  exemption instead of being read as "no write at all" — and `sdk::update_point` is the OTHER: a
+  `SET n += $props` merge that carries a caller-supplied vector verbatim, classed `gated` and
+  declared nowhere (read the closure-claim caveat below for what that does and does not mean).
 
 **Leaf, and it must stay one.** `04-plan.md` §5: a leaf must not live under `tortoise/projection/`,
 whose `__init__` is the head of the `projection → pack_state → sdk → projection` cycle where a
@@ -566,9 +568,11 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
 #: reached on every call, so the verb is not "unconditionally": a `dedup=True` HIT returns at the
 #: dedup fold BEFORE it, and its props leg hands `props` (a caller vector included) to
 #: `update_point`, which skips its own derive for the same key (`"embedding" in props`) and merges
-#: it verbatim. So on the create path the gate RUNS and its verdict is OVERWRITTEN, and on the
-#: update path — including `create_point`'s own `dedup=True` delegation, which is the MCP door's
-#: default — it is not called at all. Neither outcome is "the gate decides this vector".
+#: it verbatim. So on the create path the gate RUNS and its verdict is OVERWRITTEN, and where the
+#: caller supplied a vector on the update path it is not called at all — including `create_point`'s
+#: own `dedup=True` delegation, which is the MCP door's default. A content-only revise DOES reach
+#: `encode_for_row` (`update_point` derives when `content` arrives without `embedding`), which is
+#: part of why `update_point` classes as `gated`; neither outcome is "the gate decides this vector".
 #: ⛔ Symbols only, never a line number: this block is comment prose
 #: and nothing re-derives it, which is the rot `WriterClass.reason`'s rule exists to prevent.
 #: ⛔ The difference between those two sentences is load-bearing and is stated in the module
@@ -576,7 +580,7 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
 #: LITERAL container key (`rec["embedding"] = …`), and writers neither can spell (a map-merge, a
 #: COMPUTED dict-key form (`d[KEY] = v`), an inline property map, a clause held in a module constant
 #: or an INTERPOLATED property name) are found BY SHAPE in no case — where one of them does reach the
-#: population it is for ANOTHER reason, and the three live instances differ exactly so:
+#: population it is for ANOTHER reason, and the live instances named here differ exactly so:
 #: `sdk::_update_entity` (a map-merge) arrives as an `unresolved_write` and is declared here as
 #: `exempt` under the named `#4094` exemption, `sdk::update_point`'s computed key arrives as `gated`
 #: and is therefore declared nowhere, and `cache_projection::node_statement`'s interpolated property
