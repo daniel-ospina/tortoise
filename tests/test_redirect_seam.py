@@ -1,8 +1,10 @@
 # tests/test_redirect_seam.py
 """Unit surface: the class-level URI-aware redirect (epic #1647 Task 1)."""
+import functools
 import os
 import subprocess
 import sys
+import threading
 
 import pytest
 
@@ -728,8 +730,293 @@ def test_stem_registry_prod_parity_and_patch_idempotence(monkeypatch):
 
     # (b) install idempotence: conftest installed the wrapper at session
     # start (install_thread_stamp called after _TEST_SESSION_ACTIVE=True),
-    # the marker is set, and re-invoking the installer is a no-op. The verdict
-    # is wrapper-AWARE — `Thread.start is _thread_start_inherit_stem` is false
-    # the moment the real Sentry SDK's ThreadingIntegration wraps it (#11354).
-    violations = _thread_start_stamp_violations()
-    assert not violations, "\n".join(violations)
+    # the marker is set, and re-invoking the installer is a no-op.
+    assert getattr(threading.Thread, "_tortoise_stamp_installed", False) is True, \
+        "Thread.start stamp not installed in the test session"
+    # The stamp must be IN the installed chain, exactly once — not the WHOLE of it.
+    # A third-party integration wraps `Thread.start` on TOP of whatever is
+    # installed and offers no uninstall: `sentry_sdk.integrations.threading` does
+    # exactly that when a REAL client is initialised
+    # (`tests/test_11092_sentry_loop_stall.py::live_sentry_client`), and its
+    # `functools.wraps` links our stamp as `__wrapped__`. Bare identity therefore
+    # reds for the whole rest of the session once such a test has run — a FALSE
+    # red about a stamp that is installed and still executes (it is the wrapper's
+    # `old_start`), and it red the `test` shard in CI (#11373). What the contract
+    # actually needs is that the stamp is reachable in the chain and present once.
+    installed = threading.Thread.start
+    chain = _installed_start_chain()
+    stamps = [f for f in chain if f is proj_mod._thread_start_inherit_stem]
+    assert len(stamps) == 1, (
+        "the test-stem stamp must appear exactly ONCE in the installed "
+        f"Thread.start chain (found {len(stamps)}; installed {installed!r}; "
+        f"chain {chain!r}) — absent means worker threads lose the per-thread "
+        "test-module attribution #1686 depends on. A SECOND occurrence is not "
+        "reachable here and so is not claimed: `install_thread_stamp` ASSIGNS "
+        "(`Thread.start = _thread_start_inherit_stem`) rather than chaining, and "
+        "the walk cuts a cycle. This call site cannot see a re-wrap either — "
+        "the session flag above is off, so the installer returns before any "
+        "assignment; the marker guard itself is pinned by "
+        "`test_the_marker_guard_stops_the_installer_replacing_a_third_party_"
+        "wrapper`"
+    )
+    _assert_reinvocation_is_a_no_op(installed)
+
+
+def _assert_reinvocation_is_a_no_op(installed: object) -> None:
+    """The idempotence arm, as a FUNCTION so it can be driven (#11373 P2).
+
+    `test_stem_registry_prod_parity_and_patch_idempotence` calls this with the REAL
+    installer; `test_the_install_idempotence_arm_has_teeth` calls the SAME function
+    with `install_thread_stamp` replaced by a chaining installer and requires the
+    AssertionError. Sharing the body is the whole point: the teeth test then
+    evaluates the assertion that SHIPS, so deleting or weakening this arm reds that
+    test. (Its predecessor re-implemented the installer locally and asserted a
+    property of its own stub, so it stayed green with this arm removed.)
+    """
+    import threading as _threading
+
+    from tortoise import projection as proj_mod
+
+    proj_mod.install_thread_stamp()  # re-invocation → no-op (marker)
+    assert _threading.Thread.start is installed, \
+        "re-invoked installer double-wrapped Thread.start"
+
+
+def test_the_install_idempotence_arm_has_teeth(monkeypatch):
+    """Drive the arm that SHIPS with a CHAINING installer and require it to red.
+
+    The real installer only ever ASSIGNS, so on an unwrapped tree re-running it
+    is an identity no-op even with the marker guard deleted — THIS arm cannot fire
+    there, and it does not claim to. What it CAN and must catch is the shape a
+    "guard removed" repair actually takes once a third-party wrapper exists:
+    wrapping whatever is installed, every time, which grows the chain and changes
+    the installed callable. Without this the arm is unproven, and an unproven pin
+    is a rubber stamp (#2656's class).
+
+    ⛔ The MARKER GUARD in `install_thread_stamp` is a different property and is
+    pinned elsewhere — by
+    `test_the_marker_guard_stops_the_installer_replacing_a_third_party_wrapper`,
+    which drives the REAL installer with the session flag live. Nothing here
+    exercises it (#11373 P2: the two were conflated, and the guard was
+    unfalsifiable).
+
+    ⛔ This drives `_assert_reinvocation_is_a_no_op` — the function the real test
+    calls — never a local copy of the installer. A mutation that makes the arm
+    unfalsifiable therefore reds HERE.
+    """
+    import threading as _threading
+
+    from tortoise import projection as proj_mod
+
+    saved_start = _threading.Thread.start
+
+    def _chaining_install() -> None:
+        prev = _threading.Thread.start
+
+        def chained(self, *args, **kwargs):
+            return prev(self, *args, **kwargs)
+
+        _threading.Thread.start = chained
+
+    try:
+        installed = _threading.Thread.start
+        monkeypatch.setattr(proj_mod, "install_thread_stamp", _chaining_install)
+        with pytest.raises(AssertionError, match=r"double-wrapped Thread\.start"):
+            _assert_reinvocation_is_a_no_op(installed)
+    finally:
+        _threading.Thread.start = saved_start
+
+
+def _installed_start_chain() -> list:
+    """`Thread.start` plus every wrapper it delegates to, outermost first.
+
+    Each wrapper installed with `functools.wraps` (or any wrapper that sets
+    `__wrapped__`) links the previous start, so the chain — not the single
+    outermost function — is what makes "is the test-stem stamp installed?"
+    decidable once a third party has wrapped on top of it. Cycles are cut at the
+    first repeat so a self-referential wrapper cannot hang the walk.
+    """
+    chain: list = []
+    fn = threading.Thread.start
+    while fn is not None and fn not in chain:
+        chain.append(fn)
+        fn = getattr(fn, "__wrapped__", None)
+    return chain
+
+
+def test_a_third_party_wrapper_on_top_cannot_hide_the_stamp(monkeypatch):
+    """#11373: a REAL sentry client wraps `Thread.start` over the stamp for the
+    rest of the session, which turned the identity assertion above into a false
+    red on the `test` shard.
+
+    Measured on the pre-fix assertion: `threading.Thread.start is
+    proj_mod._thread_start_inherit_stem` is False the moment this wrapper exists,
+    although the stamp is installed and still runs as the wrapper's inner start.
+    Both arms are pinned here, so the chain reading cannot go vacuous: a wrapped
+    start still FINDS the stamp, and a start with the stamp removed does NOT.
+    """
+    from tortoise import projection as proj_mod
+
+    def _third_party_start(self, *args, **kwargs):  # pragma: no cover - delegated
+        return inner(self, *args, **kwargs)
+
+    inner = threading.Thread.start
+    wrapped = functools.wraps(inner)(_third_party_start)
+    monkeypatch.setattr(threading.Thread, "start", wrapped)
+    assert threading.Thread.start is not proj_mod._thread_start_inherit_stem, (
+        "the fixture did not actually wrap Thread.start"
+    )
+    assert proj_mod._thread_start_inherit_stem in _installed_start_chain(), (
+        "a third-party wrapper hid the test-stem stamp — the chain walk must "
+        "follow `__wrapped__` (this is the false red that red the shard)"
+    )
+    # Non-vacuity: the SAME reading reports absence when the stamp is not there,
+    # so it is a real check and not a constant True.
+    monkeypatch.setattr(threading.Thread, "start", proj_mod._ORIG_THREAD_START)
+    assert proj_mod._thread_start_inherit_stem not in _installed_start_chain(), (
+        "the chain reading claims the stamp is installed on a start that never "
+        "carries it"
+    )
+
+
+def test_the_marker_guard_stops_the_installer_replacing_a_third_party_wrapper(
+        monkeypatch):
+    """#11373 P2: the marker clause in `install_thread_stamp` is pinned by EFFECT.
+
+    The idempotence arm (`_assert_reinvocation_is_a_no_op`) cannot see this
+    guard: its one real call site disables `_TEST_SESSION_ACTIVE` first, and the
+    installer returns before it ever reads the marker — so the arm asserts an
+    identity that holds with the guard deleted as well. That was measured, not
+    supposed: deleting
+    `and not getattr(threading.Thread, "_tortoise_stamp_installed", False)`
+    left the whole suite green before this test existed.
+
+    The state the guard exists for is the one a third-party wrapper creates. The
+    installer ASSIGNS `Thread.start`, so an unguarded re-invocation does not
+    "double-wrap" — it REPLACES the wrapper (`functools.wraps` links our stamp as
+    `__wrapped__`; `sentry_sdk.integrations.threading` wraps exactly like the
+    fixture below) with the bare stamp, silently un-installing that integration.
+    That is the reload path the installer's own docstring names as the reason the
+    marker exists.
+
+    Six arms, one per property, so no arm can be satisfied by an installer that
+    does nothing:
+
+      (a) marker PRESENT → the third-party wrapper survives the re-invocation;
+      (b) marker ABSENT  → the SAME call DOES install (non-vacuity: it is
+          exactly the harm (a) prevents, but it also reds an installer that
+          stopped assigning, or that assigns a decoy);
+      (c) the installer RECORDS the marker, which is what makes the NEXT
+          re-invocation a no-op;
+      (d) marker absent + `_TEST_SESSION_ACTIVE` off → declines, and records
+          nothing (a decline that still marks would poison the next call);
+      (e) marker absent + session live + `TORTOISE_TEST_MODE` UNSET → declines;
+      (f) marker absent + session live + `TORTOISE_TEST_MODE="0"` → declines,
+          which pins the clause's exact `== "1"` spelling rather than mere
+          truthiness ("0" is a non-empty string).
+
+    ⛔ What each mutation ACTUALLY reds — measured, so the next mutation-tester is
+    not sent down a wrong path: deleting the marker clause reds (a); deleting
+    `and _TEST_SESSION_ACTIVE` reds (d); deleting the `TORTOISE_TEST_MODE` clause
+    reds (e); relaxing that clause to a truthiness test reds (f). Deleting the
+    marker-RECORDING line, or making the installer inert, does NOT reach (a)-(f)
+    at all — it reds the precondition above (conftest's own install then never
+    sets the marker), and on CPython 3.12 `if False: return` in the source is
+    dead-code-eliminated, so `if False` is not even inert. Both non-marker
+    clauses were unpinned before (d)/(e) existed: dropping either left
+    `tests/test_redirect_seam.py` green except for the known pre-existing
+    connection arm.
+    """
+    from tortoise import projection as proj_mod
+
+    assert getattr(threading.Thread, "_tortoise_stamp_installed", False) is True, (
+        "precondition: conftest's installer must have run in this session"
+    )
+    # The installer's other two clauses, made explicit so this pin does not
+    # depend on ambient env: TORTOISE_TEST_MODE is the test-session signal and
+    # the flag is a RE-INVOCATION, so it must read as live.
+    monkeypatch.setenv("TORTOISE_TEST_MODE", "1")
+    monkeypatch.setattr(proj_mod, "_TEST_SESSION_ACTIVE", True)
+
+    inner = threading.Thread.start
+
+    def _third_party_start(self, *args, **kwargs):  # pragma: no cover - delegated
+        return inner(self, *args, **kwargs)
+
+    wrapped = functools.wraps(inner)(_third_party_start)
+    monkeypatch.setattr(threading.Thread, "start", wrapped)
+
+    # (a) the marker is present (conftest set it) → no assignment: the
+    # third-party wrapper must still be what `Thread.start` IS.
+    proj_mod.install_thread_stamp()
+    assert threading.Thread.start is wrapped, (
+        "re-invoking the installer while its marker is set REPLACED a "
+        "third-party `Thread.start` wrapper with the bare stamp — the marker "
+        "guard is what makes a reload idempotent once an integration has "
+        f"wrapped on top (installed {threading.Thread.start!r})"
+    )
+
+    # (b) non-vacuity: with the marker gone the same call must install — which is
+    # precisely the replacement arm (a) requires the guard to prevent. An
+    # installer that stopped assigning (or assigned a decoy) satisfies (a)
+    # trivially; this reds.
+    monkeypatch.delattr(threading.Thread, "_tortoise_stamp_installed",
+                        raising=False)
+    proj_mod.install_thread_stamp()
+    assert threading.Thread.start is proj_mod._thread_start_inherit_stem, (
+        "with the session live and the marker absent the installer must install "
+        "the stamp — otherwise arm (a) above proves nothing about the guard"
+    )
+    # (c) …and it must RECORD the marker, which is what makes the NEXT
+    # re-invocation idempotent; an installer that assigns without marking is not
+    # idempotent at all, and (a) alone would not notice.
+    assert getattr(threading.Thread, "_tortoise_stamp_installed", False) is True, (
+        "the installer installed the stamp but did not record "
+        "`_tortoise_stamp_installed`, so the guard arm (a) relies on can never "
+        "fire on a second re-invocation"
+    )
+
+    # (d) the SESSION-FLAG clause, which is what keeps the stamp out of a prod
+    # process — and the clause the idempotence arm's call site disables. Marker
+    # absent (so that clause would let the install through) and the flag off: the
+    # installer must decline, and must not record the marker either.
+    wrapped_2 = functools.wraps(inner)(_third_party_start)
+    monkeypatch.setattr(threading.Thread, "start", wrapped_2)
+    monkeypatch.delattr(threading.Thread, "_tortoise_stamp_installed",
+                        raising=False)
+    monkeypatch.setattr(proj_mod, "_TEST_SESSION_ACTIVE", False)
+    proj_mod.install_thread_stamp()
+    assert threading.Thread.start is wrapped_2, (
+        "the installer patched `Thread.start` with `_TEST_SESSION_ACTIVE` off — "
+        "that flag is what stops a leaked `TORTOISE_TEST_MODE=1` from stamping "
+        "stdlib in a PROD process, which the installer's own docstring names as "
+        "the reason it is a call and not a module-body side effect"
+    )
+    assert not getattr(threading.Thread, "_tortoise_stamp_installed", False), (
+        "the installer recorded `_tortoise_stamp_installed` while declining to "
+        "install — a later in-session call would then skip the real install"
+    )
+
+    # (e) the TEST-MODE clause: session live and marker absent, but the test-mode
+    # env signal gone → still declines (the same prod-process property, keyed on
+    # the other signal).
+    monkeypatch.setattr(proj_mod, "_TEST_SESSION_ACTIVE", True)
+    monkeypatch.delenv("TORTOISE_TEST_MODE", raising=False)
+    proj_mod.install_thread_stamp()
+    assert threading.Thread.start is wrapped_2, (
+        "the installer patched `Thread.start` with `TORTOISE_TEST_MODE` unset — "
+        "the env clause is one of the two signals that must both be live"
+    )
+
+    # (f) …and the clause is `== "1"`, not truthiness. "0" is a non-empty string,
+    # so a relaxed spelling would install here; the strict one must not.
+    wrapped_3 = functools.wraps(inner)(_third_party_start)
+    monkeypatch.setattr(threading.Thread, "start", wrapped_3)
+    monkeypatch.setenv("TORTOISE_TEST_MODE", "0")
+    proj_mod.install_thread_stamp()
+    assert threading.Thread.start is wrapped_3, (
+        "the installer patched `Thread.start` with `TORTOISE_TEST_MODE=\"0\"` — "
+        "the guard must compare against the literal `\"1\"`, not test "
+        "truthiness (a non-empty \"0\" is truthy), or any session that sets a "
+        "non-\"1\" value arms the stamp"
+    )
