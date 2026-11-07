@@ -9937,12 +9937,14 @@ durations:
   # escaped `run()` into the traceback exit 1 that the module docstring defines as
   # DRIFT) -> 44 once round 14's fix closed the stat that PRECEDES those reads
   # (control: `test_an_unreadable_parent_directory_is_a_state_error_not_drift`)
-  # -> 50 once round 16's three controls and round 17's fourth landed (the one-fault-one-line dispatch
-  # plus the two direct-caller arms), each mutation-verified; round 15 added none
-  # of them — its own delta touched `check_registration` only. Round 14's own
-  # guard exists because `Path.exists()` re-raises `PermissionError` (only the
-  # ENOENT family is swallowed) — each of these controls is mutation-verified:
-  # it FAILS with its guard reverted.
+  # -> 47 once round 16's three controls landed (the one-fault-one-line dispatch
+  # plus the two direct-caller arms for a MISSING doc and one that is a DIRECTORY)
+  # -> 48 once round 17's fourth landed
+  # (`test_an_UNREADABLE_document_is_recorded_for_a_direct_caller`), each
+  # mutation-verified; round 15 added none of them — its own delta touched
+  # `check_registration` only. Round 14's own guard exists because `Path.exists()` re-raises
+  # `PermissionError` (only the ENOENT family is swallowed) — each of these
+  # controls is mutation-verified: it FAILS with its guard reverted.
   # ⛔ The chain is FUNCTIONS, not
   # collected cases: the two differ by the parametrised arms (27 counts 29
   # collected, 39 counts 41), and a chain that mixes the two derives a wrong
