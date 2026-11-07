@@ -28,6 +28,7 @@ from __future__ import annotations
 import ast
 import os
 import re
+import string
 import warnings
 from pathlib import Path
 
@@ -978,6 +979,58 @@ _PURE_STR_METHODS = frozenset({
 _FOLD_WIDTH_CAP = 4096
 
 
+# `str` templates carry a WIDTH in a fixed position, and only that position is a
+# width: a digit run in the MATERIAL of a template or an argument is a substring
+# (`"{}".format("test_20240101")`, `.strip("0123456789")`), and reading it as a
+# width would make a DECIDABLE owned fold read UNDECIDABLE — a false BLOCK, which
+# is the cost this bound must not introduce (follow-up review round 2).
+_MOD_WIDTH = re.compile(r"%[-+ #0]*(?:\([^)]*\))?(\d*)(?:\.(\d+))?")
+
+
+def _width_digits_over_cap(*runs) -> bool:
+    """Do any of these WIDTH digits allocate past `_FOLD_WIDTH_CAP`?
+
+    5+ digits is >= 10000 > the cap, so `int()` runs only over the 4-digit band —
+    a very long digit run would otherwise trip CPython's int-string limit instead
+    of comparing.
+    """
+    for run in runs:
+        if not run:
+            continue
+        if len(run) >= 5 or int(run) > _FOLD_WIDTH_CAP:
+            return True
+    return False
+
+
+def _mod_width_over_cap(template: str) -> bool:
+    """A `%`-template's conversion WIDTH — `"%200000000s" % "a"` really builds
+    the field although no argument holds the width (measured: 200 MB)."""
+    return any(_width_digits_over_cap(*match.groups())
+               for match in _MOD_WIDTH.finditer(template))
+
+
+def _format_specs_over_cap(template: str) -> bool:
+    """A `.format` template's field SPEC width — `"{:>200000000}"` allocates
+    the width with no width argument anywhere. Read with `string.Formatter`, so
+    only a SPEC is inspected and never the material around it."""
+    try:
+        fields = list(string.Formatter().parse(template))
+    except ValueError:
+        return False  # a malformed template: the fold itself is not decidable
+    return any(_width_digits_over_cap(*re.findall(r"\d+", spec))
+               for _literal, _field, spec, _conversion in fields if spec)
+
+
+def _format_spec_takes_width_from_args(template: str) -> bool:
+    """Does a field SPEC itself contain a replacement field (`"{0:{1}}"`)?
+    Then the width IS an argument, so a digit-only string argument is a width."""
+    try:
+        fields = list(string.Formatter().parse(template))
+    except ValueError:
+        return False
+    return any("{" in spec for _literal, _field, spec, _conversion in fields if spec)
+
+
 def _pos(node) -> tuple[int, int]:
     """Source order for a node, as (line, column): what "BEFORE the call" and
     "the LAST binding" are decided on."""
@@ -1217,6 +1270,10 @@ def _const_str(node, _depth: int = 0) -> str | None:
         template, right = _const_str(node.left, _depth + 1), _const_str(node.right, _depth + 1)
         if template is None or right is None:
             return None
+        # `"%200000000s" % "a"` carries its width in the TEMPLATE, so the
+        # argument check below never sees it and it folds a 200 MB string.
+        if _mod_width_over_cap(template):
+            return None
         try:
             return template % right
         except (TypeError, ValueError, KeyError):
@@ -1275,8 +1332,23 @@ def _const_str(node, _depth: int = 0) -> str | None:
                 # line) instead of failing CLOSED on the site (third-session
                 # review, follow-up round). A handle is short; past the cap the
                 # value is simply not decidable here.
-                if any(isinstance(arg, int) and arg > _FOLD_WIDTH_CAP for arg in args):
+                # …and for `.format` the width may live in the format SPEC,
+                # where `node.args` cannot see it.
+                if any(isinstance(arg, int) and not isinstance(arg, bool)
+                       and arg > _FOLD_WIDTH_CAP for arg in args):
                     return None
+                # …and for `.format` the width may live in the format SPEC, where
+                # `node.args` cannot see it (`"{:>200000000}".format("a")`), or in
+                # an argument that the SPEC uses AS a width (`"{0:{1}}"`). Only
+                # the former is read off the template; a digit run in MATERIAL
+                # (`"{}".format("test_20240101")`) stays a decidable fold.
+                if func.attr == "format":
+                    if _format_specs_over_cap(receiver):
+                        return None
+                    if _format_spec_takes_width_from_args(receiver) and any(
+                            isinstance(arg, str) and arg.isdigit()
+                            and _width_digits_over_cap(arg) for arg in args):
+                        return None
                 try:
                     folded = getattr(receiver, func.attr)(*args)
                 except (TypeError, ValueError, KeyError, IndexError,
@@ -2142,16 +2214,65 @@ def test_no_shape_can_abort_the_census_instead_of_reding_it(tmp_path):
     site = tmp_path / "test_census_aborts.py"
     deep = "a" + ".b" * 1500
     for line in (f"    _journal_append({deep})",
-                 '    _journal_append("a".zfill(900000000) + os.urandom(2).hex())'):
+                 '    _journal_append("a".zfill(900000000) + os.urandom(2).hex())',
+                 # A width carried in the format SPEC / the `%` conversion, i.e.
+                 # NOT in `node.args` — the cap's blind spot (follow-up 2).
+                 '    _journal_append("{:>200000000}".format("a") + os.urandom(2).hex())',
+                 '    _journal_append("%200000000s" % "a" + os.urandom(2).hex())'):
+        # `os.urandom` in the block is what makes the OWNERSHIP half run at all:
+        # without it the PRESENCE half rejects the site first, and a violation
+        # would prove nothing about the undecidable-value path each line is here
+        # to exercise (follow-up review: the clause was reported vacuous).
         site.write_text(
-            _raw_client_site(line), encoding="utf-8")
+            _raw_client_site("    tag = os.urandom(4).hex()", line), encoding="utf-8")
         # The assertion IS the call: a RecursionError / MemoryError here fails the
         # test with the census never reaching a verdict.
         bad = _raw_detach_violations(root=tmp_path)
         assert bad, (
             f"`{line.strip()[:60]}…` must RED — the census cannot read it, and "
             f"aborting instead of reding names no site")
+        # ASSERT THE VERDICT, not merely "something red": an over-cap fold that
+        # resolved anyway would report a PREFIX, which is the false claim this
+        # arm exists to avoid. Asserting the reason is what makes removing the
+        # bound fail this pin instead of merely costing 200 MB.
+        assert "UNDECIDABLE" in bad[0], (
+            f"`{line.strip()[:60]}…` cannot be resolved without allocating it, "
+            f"so the violation must say UNDECIDABLE rather than claim a "
+            f"prefix: {bad}")
 
+
+def test_a_digit_run_in_MATERIAL_is_not_a_width(tmp_path):
+    """The allocation bound must not turn a DECIDABLE owned fold into a violation.
+
+    Follow-up review round 2. `_FOLD_WIDTH_CAP` was first applied to every string
+    argument of every pure `str` method and to the WHOLE `%` template, so a digit
+    run in MATERIAL read as a width: `"{}".format("test_20240101")`,
+    `"test_evict".strip("0123456789")` and `"test_20240101".removeprefix(…)` all
+    folded to an OWNED name at `15eff79bc74` and read RED here — a false BLOCK,
+    which the bound has no business introducing, and one whose message also lies
+    ("cannot PROVE owned" for a name that provably is).
+
+    A width has a POSITION: the field SPEC of a `.format` template, and the
+    conversion spec of a `%` template. Pinned as BEHAVIOUR over the census.
+    """
+    site = tmp_path / "test_digits_not_widths.py"
+    for journaled in (
+        '"{}.graph".format("test_20240101")',
+        '"%s_20240101" % "test_x"',
+        '"test_evict_20240101".replace("20240101", "x")',
+        '"test_evict".strip("0123456789")',
+        '"test_20240101".removeprefix("20240101")',
+        '"test_%s_20240101" % "x"',
+        '"test_{}".format("graph_2024")',
+    ):
+        site.write_text(_raw_client_site(
+            "    tag = os.urandom(4).hex()",
+            f"    _journal_append({journaled})"), encoding="utf-8")
+        bad = _raw_detach_violations(root=tmp_path)
+        assert not bad, (
+            f"`{journaled}` folds to an OWNED name — a digit run in MATERIAL is "
+            f"not a width, and reading it as one false-BLOCKs a compliant site: "
+            f"{bad}")
 
 def test_the_ownership_arm_resolves_the_JOURNALED_VALUE_not_a_text_shape(tmp_path):
     """#11243 + review round 3: the arm classified TEXT, so every shape it did not
