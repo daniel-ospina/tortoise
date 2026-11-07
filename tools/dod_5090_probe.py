@@ -2320,9 +2320,11 @@ def _sdk_methods_on_vector_leg(
             receiver = node.value
             # `self`, and the in-module receivers that stand for it (#11389
             # review, P3): `super()` and `type(self)`. A genuinely FOREIGN
-            # receiver (`self.conn.helper(1)`) is still excluded — that is the
-            # trade-off the docstring states, and it is about over-attributing
-            # someone else's method, not about missing our own base class.
+            # receiver (`self.conn.helper(1)`) is excluded HERE — but note the
+            # scope of that statement: this channel only. The transitive CLOSURE
+            # above matches `func.attr` with no receiver check, so it still names
+            # such a caller (pre-existing behaviour, unchanged by #11337). This
+            # channel's job is to add the caveat, not to correct the closure.
             if isinstance(receiver, ast.Name) and receiver.id == "self":
                 return node.attr
             if (isinstance(receiver, ast.Call)
@@ -2423,10 +2425,15 @@ def _sdk_methods_on_vector_leg(
     # closure cannot traverse it. The forms are not a list to keep current —
     # `_safe(self._review_pool, …)`, a `key=`/callback, `functools.partial`,
     # `getattr(self, <name>)`, an alias, a container, a bare `return` — the
-    # rule is that the function is MENTIONED without being called — anywhere
-    # in a function BODY (a nested `def`'s defaults and decorators are outside
-    # this walk, and at class-definition time a `self.<name>` default is not
-    # even evaluable, so that gap is named rather than plugged). Under-
+    # rule is that the function is MENTIONED without being called — anywhere in
+    # a function BODY, and not shadowed by a function-scope binding.
+    # ⚠️ OUTSIDE THE WALK, and named rather than implied: a nested `def`'s
+    # decorators and parameter DEFAULTS (evaluated when the outer method runs —
+    # `def inner(cb=self._review_pool)` IS a real reach), and a comprehension's
+    # own scope. Those are not reported, so the census doc says so too; the
+    # class-definition-time argument that would justify excluding a METHOD
+    # signature's default does not apply to a nested def, and the previous
+    # comment wrongly used it for both. Under-
     # reporting is the dangerous direction for a surface an owner approves, so
     # the shape is REPORTED through the same `UNMEASURED` channel the handler
     # scan uses for its own bound (see `by_reference` below) instead of being
@@ -2517,6 +2524,14 @@ def _sdk_methods_on_vector_leg(
                 n = stack_s.pop()
                 if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef,
                                   ast.ClassDef)):
+                    continue
+                # ⛔ NOT a comprehension target: `[x for _pool in …]` binds in the
+                # comprehension's OWN scope, so treating it as a function local
+                # suppresses a genuine mention elsewhere in the body — the
+                # under-report direction this guard exists to narrow, not create
+                # (#11389 review). Comprehension scopes are skipped entirely.
+                if isinstance(n, (ast.ListComp, ast.SetComp, ast.DictComp,
+                                  ast.GeneratorExp)):
                     continue
                 if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store):
                     shadowed.add(n.id)

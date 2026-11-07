@@ -3202,7 +3202,10 @@ def _byref_sdk_source() -> str:
         "        return _safe(_review_pool)\n"
         "    def shadows_via_IMPORT(self):\n"
         "        import _review_pool\n"
-        "        return _safe(_review_pool)\n")
+        "        return _safe(_review_pool)\n"
+        "    def mention_past_a_COMPREHENSION_shadow(self):\n"
+        "        _safe(_review_pool)\n"
+        "        return [x for _review_pool in (1, 2)]\n")
 
 
 def test_a_leg_reach_passed_BY_REFERENCE_is_declared_not_dropped(
@@ -3250,7 +3253,10 @@ def test_a_leg_reach_passed_BY_REFERENCE_is_declared_not_dropped(
               "mentions_past_a_NESTED_shadow",
               # A `getattr(...)(…)` func is NOT resolvable by the closure, so its
               # mention must stay visible; `super()` is an in-module receiver.
-              "CALLS_a_getattr", "passes_from_super")
+              "CALLS_a_getattr", "passes_from_super",
+              # A comprehension target is its own scope, so it must NOT suppress
+              # the body's genuine mention (#11389 review).
+              "mention_past_a_COMPREHENSION_shadow")
     for name in shapes:
         assert name not in methods, (
             f"{name} reaches the leg through a reference this scan cannot "
@@ -3467,11 +3473,17 @@ def test_the_census_doc_states_the_same_probe_bound_the_report_does():
     # census goes on describing a bound the instrument stopped reporting.
     _methods, _error, declared = probe._sdk_methods_on_vector_leg()
     if declared is None:
-        assert "no such shape exists" in text, (
+        assert "no such body mention exists" in text, (
+            "the census doc no longer states the state the run reports")
+        assert "nested `def`'s decorators and parameter defaults" in text, (
+            "the doc claims the declaration is total; the walk does not visit a "
+            "nested def's defaults/decorators, and the doc must say so")
+        assert "no such shape exists" in text or "no such body mention exists" in text, (
             "the scan declares no by-reference bound, and the census doc does "
             "not say so — the two describe different instruments")
     else:
-        assert "no such shape exists" not in text, (
+        assert ("no such shape exists" not in text
+                and "no such body mention exists" not in text), (
             "the run declares a by-reference bound while the census doc denies "
             "that any such shape exists — the two describe different instruments")
         # Derived from the DECLARATION's PASSERS, not from the entrant map. A
