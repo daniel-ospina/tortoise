@@ -3018,12 +3018,19 @@ _RESIDUAL_TRUTHFUL_STATEMENTS = (
     "the carve-out never reopens.",
     "the carve-out has never before been reopened.",
     "the carve-out has never before reopened.",
-    # ⛔ THE COORDINATOR GUARD'S FALSIFIER (#11258 review round 23 `P2`, MEASURED):
-    # the `(?!\b(?:and|but)\s+…(?:is|are|was|were|fails?)\b)` guard inside
-    # `_RESIDUAL_ANCHORED_OPENNESS` was deletable with the whole file GREEN, and
-    # this honest shape flipped GREEN -> RED without it. It is the measured
-    # false-block trade the round-2/3 notes describe, so it needs its own partner.
-    "the ADJACENCY half is unjudged and the pair is unjudgeable and fails open",
+    # ⛔ THE COORDINATOR GUARD'S FALSIFIER (#11258 review rounds 23 and 25 `P2`,
+    # MEASURED): the `(?!\b(?:and|but)\s+…(?:is|are|was|were|fails?)\b)` guard
+    # inside `_RESIDUAL_ANCHORED_OPENNESS` was deletable with the whole file
+    # GREEN, so it needs a partner. ⛔ The partner MUST NOT be a reopening:
+    # round 23 first pinned `the ADJACENCY half is unjudged and the pair is
+    # unjudgeable and fails open`, which asserts the CLOSED gap is open — the row
+    # at this head says *"the ADJACENCY half that used to stand here is CLOSED"*
+    # and `_RESIDUAL_REOPENING_MUTATIONS` carries `the ADJACENCY half is no longer
+    # judged.` as must-RED, so that entry required the scan to stay SILENT on a
+    # reopening and told the next lane (in this list's own failure text) to treat
+    # real coverage as a false block. Replaced with a shape that keeps the
+    # falsifier and is actually truthful (round 25, MEASURED both ways).
+    "the ADJACENCY half is closed and the pair fails open",
     # ⛔ AND THE `_SPELLING_FLOOR` COPY OF THE RUN NEEDS ITS OWN CURLY PARTNER
     # (#11258 review round 23 `P1`, MEASURED). Round 22 widened `’` at all six
     # patterns, but the only waived-path partners it added were for the `open again`
@@ -4101,12 +4108,12 @@ def test_every_apostrophe_shape_gives_the_same_verdict_in_EITHER_spelling():
         "them with a typographic apostrophe gets a different answer than its own "
         "proof list records, so one of the two is an UNRECORDED over-block: "
         f"{mismatches}")
-    assert converted >= 20, (
+    assert converted >= 21, (
         f"only {converted} proof-list shapes carry an apostrophe — the invariant "
         "above is measured on the shapes that exist, so a shrink here means the "
-        "surface it pins shrank. ⚠️ FLOOR IS THE CURRENT COUNT (20: 7 mutations + "
-        "13 truthful statements + 0 ledger entries — round 22's 19 plus round 25's "
-        "`… doesn't fail open.` partner for `_RESIDUAL_FAIL_OPEN`'s veto run), ZERO "
+        "surface it pins shrank. ⚠️ FLOOR IS THE CURRENT COUNT (21: 7 mutations + "
+        "14 truthful statements + 0 ledger entries — MEASURED at this head; the "
+        "apostrophe partners rounds 22-25 added are what carried it here), ZERO "
         "SLACK, the "
         "same rule the two proof-list floors carry: raise it in the same commit "
         "that adds shapes.")
