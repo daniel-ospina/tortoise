@@ -28,13 +28,15 @@ What it re-measures, offline, from the tree in front of it:
      satisfies `exists()` and pins nothing), and a pin that is a test module
      contains a `def test_`. A pin whose file survives but whose assertions were
      deleted pins nothing, which is the failure mode the pin column exists for.
-  5. **Summary counts** — §2's four `| STATUS | n |` rows, its `Total tracked`
-     row, its five per-workstream `**N of M fixed**` cells, and the frontmatter's
-     `**N fixed and N open**` headline all equal the rows below. A summary that
-     drifts from its own table is the same defect class as the missing
-     `content_hash` this map's Pattern 1 names. §8's and §10's prose counts are
-     NOT read — `check_workstreams`'s docstring and §9 state that residual rather
-     than implying coverage.
+  5. **Summary counts** — §2's three `| STATUS | n |` rows, its `Total tracked`
+     row, its five per-workstream `**N of M fixed**` cells (bound to their
+     workstream BY LABEL), and the page's opening abstract (`**N fixed and N
+     open**`) all equal the row table. A summary that drifts from its own table is
+     the same defect class as the missing `content_hash` this map's Pattern 1
+     names. Counts that are not a table cell's whole value — the issue numbers
+     narrated inside §2's cells, §8's sentence, §10's census — are NOT read;
+     `check_workstreams`'s docstring and §9 state that residual rather than
+     implying coverage.
   6. **Registration** — the page is listed in `docs/00_index.md`, so it is
      reachable rather than merely committed — **and the index entry's own
      headline counts match §2's**, because the index is what most readers see and
@@ -123,10 +125,17 @@ INDEX_REL = "docs/00_index.md"
 #:
 #: Keyed by workstream as well as flattened, because §2 prints a per-workstream
 #: "**N of M fixed**" line for each of the five — and a count nothing reads is a
-#: count that rots (§8's own lesson). The grouping is the issue's, not this
-#: tool's: `#2786`, `#2783`, `#2767`, `#2727` (canonical ≠ consistent) and `#2766`,
-#: `#2787`, `#2818`, `#2781` (promised ≠ expressible) are BOTH WS-B, which is why
-#: WS-B is eight rows in the map's table and two patterns there.
+#: count that rots (§8's own lesson). `#2786`, `#2783`, `#2767`, `#2727`
+#: (canonical ≠ consistent) and `#2766`, `#2787`, `#2818`, `#2781` (promised ≠
+#: expressible) are BOTH WS-B, which is why WS-B is eight rows in the map's table
+#: and two patterns there.
+#:
+#: ⛔ ONE ROW IS REASSIGNED FROM #2820's OWN GROUPING, and it is recorded rather
+#: than silently absorbed: `#2820` lists `#2726` in its WS-B row (nine issues) AND
+#: cross-references it under WS-D as "`#2726`/`#2727` (in PR #2747)". The map
+#: counts it ONCE, under WS-D (the delivery workstream it actually shipped in), so
+#: WS-B is eight and WS-D four here. A grouping that double-counted it would make
+#: 27 rows; one that dropped it would make 25.
 WORKSTREAMS: dict[str, tuple[int, ...]] = {
     "WS-A": (2813, 2795, 2814, 2788, 2742),                      # declared ≠ stored
     "WS-B": (2786, 2783, 2767, 2727,                             # canonical ≠ consistent
@@ -160,14 +169,30 @@ _SUMMARY_SECTION = "## 2."
 #: state "Total tracked 30" over a 26-row table and this tool still said CLEAN —
 #: found by review on the version that already guarded the other three counts, so
 #: the rule is: every count the document prints in MACHINE-READABLE form is
-#: compared, or it is not a count. (§8's and §10's counts are prose; they are
-#: disclosed as a residual in `check_workstreams` and in §9, not claimed here.)
+#: compared, or it is not a count. The rule's edge is precise: a count that IS a
+#: table cell's whole value is compared (the statuses, the total, each
+#: workstream's `N of M`, the abstract); a count narrated inside a sentence — the
+#: issue numbers in §2's cells, §8, §10 — is not, and `check_workstreams` plus §9
+#: disclose that instead of claiming it.
 _TOTAL = re.compile(r"^\|\s*\*\*Total tracked\*\*\s*\|\s*\*\*(\d+)\*\*\s*\|",
                     re.MULTILINE)
-#: §2's per-workstream "**N of M fixed**" cell, in table order (WS-A…WS-E).
-_WS_COUNT = re.compile(r"\*\*(\d+) of (\d+) (?:rows )?fixed\*\*")
-#: The frontmatter's headline: "**21 fixed and 5 open**".
+#: §2's per-workstream row, WITH its label: `| WS-A write-path integrity — … |
+#: **5 of 5 rows fixed**; …`. The label is captured because binding the count to
+#: a workstream by POSITION alone was measured to be defeatable: swap only the two
+#: labels (`| WS-A …` ↔ `| WS-C …`) and leave every count in place, and the
+#: pre-fix parse returned NO errors while §2 attributed WS-A's `5 of 5` to WS-C —
+#: the exact edit a re-cut makes.
+_WS_COUNT = re.compile(
+    r"^\|\s*(WS-[A-Z])\b[^|]*\|[^|]*\*\*(\d+) of (\d+) (?:rows )?fixed\*\*",
+    re.MULTILINE,
+)
+#: The page's opening abstract: "**21 fixed and 5 open**". It lives in the body's
+#: opening blockquote, NOT in the frontmatter (the frontmatter carries
+#: `measured_at_commit`/`measured_at` only), so it is read from the text BEFORE
+#: `## 1.` — and an abstract that carries the sentence twice is reported as
+#: ambiguous rather than resolved by first-match, the `_TOTAL` lesson.
 _HEADLINE = re.compile(r"\*\*(\d+) fixed and (\d+) open\*\*")
+_HEADLINE_SCOPE = "## 1."
 
 #: A test function, INDENTED OR NOT: most of this repo's tests are methods on a
 #: class, so a bare `^def test_` anchor would call 12 of this map's own pins
@@ -581,36 +606,59 @@ def check_workstreams(text: str, rows: list[Row]) -> list[str]:
     """§2's per-workstream "**N of M fixed**" lines and the frontmatter headline.
 
     WHY THIS EXISTS (found by fresh review at the post-merge head, reproduced): the
-    summary check above compared only the four `| STATUS | n |` rows and the
+    summary check above compared only the three `| STATUS | n |` rows and the
     total, so the document could print `**7 of 8 rows fixed**` over a WS-B table
-    that no longer had 7 fixed rows — and the four numbers the guard DID compare
-    could be edited to match, leaving §2 contradicting its own tables in three
-    places on a CLEAN `docs`-job run. Flip `#2783` to OPEN, set
-    `| VERIFIED-FIXED |` 21→20 and `| OPEN |` 5→6, and the pre-fix guard returned
-    NO errors. The lesson in `_TOTAL`'s comment is the rule: every count the
-    document prints in machine-readable form is compared, or it is not a count.
+    that no longer had 7 fixed rows — and the numbers the guard DID compare could
+    be edited to match, leaving §2 contradicting its own tables in three places on
+    a CLEAN `docs`-job run. Flip `#2783` to OPEN, set `| VERIFIED-FIXED |` 21→20
+    and `| OPEN |` 5→6, and the pre-fix guard returned NO errors.
 
     A workstream's rows come from `WORKSTREAMS`, not from the document's own
     tables — same reason as `TRACKED`: a set parsed out of the artifact cannot
-    report its own shrink.
+    report its own shrink. The count is bound to its workstream BY LABEL, not by
+    position (a label-only swap was measured to pass a positional bind).
 
-    RESIDUAL, stated rather than implied: §8's prose ("Five rows, and four of them
-    are defects") prints counts in a form this check does not read, and §10's
-    census prose likewise. §9 lists both.
+    RESIDUAL, stated rather than implied — the counts this check does NOT read are
+    the ones that are not a table cell's whole value:
+
+      * §1's census sentence ("four rows where …"), which is a count over a
+        criterion this guard cannot evaluate — it refuses to read the tracker,
+        which is what that census is about;
+      * the issue numbers NARRATED inside §2's cells (`(#2787 OPEN: …)`,
+        `**#2730, #2782 and #2684 remain open**`, `**#2696 (epic) remains open**`)
+        — deciding "which rows does this sentence call open" means reading prose,
+        and a guard that parsed those sentences would be a spelling trap: measured
+        at the post-merge head, flipping `#2684` and correcting the counts it DOES
+        read leaves that cell stale and every check green;
+      * §8's sentence ("Five rows, and four of them are defects") and §10's
+        census prose, whose second clause additionally needs to know which row is
+        an epic — the tracker half this guard refuses to read.
+
+    Both are listed in §9. Nothing here claims otherwise.
     """
     errors: list[str] = []
     section = _section(text, _SUMMARY_SECTION)
-    declared = [(int(n), int(m)) for n, m in _WS_COUNT.findall(section)]
+    declared = [(name, int(fixed), int(size)) for name, fixed, size in
+                _WS_COUNT.findall(section)]
     if len(declared) != len(WORKSTREAMS):
         errors.append(
             f"summary declares {len(declared)} workstream count(s); the taxonomy "
             f"has {len(WORKSTREAMS)} ({', '.join(WORKSTREAMS)})"
         )
         return errors
+    labels = [name for name, _, _ in declared]
+    if sorted(labels) != sorted(WORKSTREAMS):
+        unknown = [n for n in labels if n not in WORKSTREAMS]
+        missing = [n for n in WORKSTREAMS if n not in labels]
+        errors.append(
+            f"summary's workstream labels do not match the taxonomy — "
+            f"unknown {unknown or 'none'}, missing {missing or 'none'} (a count is "
+            f"bound to its workstream BY NAME, so a mislabelled row cannot pass)"
+        )
+        return errors
     by_issue = {r.issue: r for r in rows}
-    for (name, issues), (fixed, size) in zip(
-        WORKSTREAMS.items(), declared, strict=True
-    ):
+    for name, fixed, size in declared:
+        issues = WORKSTREAMS[name]
         present = [by_issue[i] for i in issues if i in by_issue]
         actual_size = len(present)
         actual_fixed = sum(1 for r in present if r.status == "VERIFIED-FIXED")
@@ -624,7 +672,16 @@ def check_workstreams(text: str, rows: list[Row]) -> list[str]:
                 f"summary says {fixed} of {size} {name} row(s) fixed; the table "
                 f"has {actual_fixed} VERIFIED-FIXED"
             )
-    headline = _HEADLINE.search(text)
+    abstract = text.split(_HEADLINE_SCOPE, 1)[0]
+    headlines = _HEADLINE.findall(abstract)
+    headline = _HEADLINE.search(abstract)
+    if len(headlines) > 1:
+        errors.append(
+            f"the page's opening abstract carries {len(headlines)} "
+            f"`**N fixed and N open**` headlines — which one is the claim is "
+            f"ambiguous, so nothing was compared"
+        )
+        return errors
     if headline is None:
         errors.append("the page carries no `**N fixed and N open**` headline")
     else:

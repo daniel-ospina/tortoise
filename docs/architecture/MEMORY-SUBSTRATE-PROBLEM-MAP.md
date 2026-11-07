@@ -318,9 +318,15 @@ schedule.
 The machine-checkable half of this map is guarded:
 
 ```bash
-uv run python tools/problem_map_check.py          # 0 = the doc and the tree agree
-uv run pytest tests/test_problem_map_2820.py -q   # the guard's own regression test
+uv run python tools/problem_map_check.py                          # 0 = doc and tree agree
+TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_problem_map_2820.py -q  # the guard's own test
 ```
+
+The `TORTOISE_TEST_CARVE_OUT=1` is not decoration: this suite is DB-free, and on
+a box with no database the default conftest refuses the run outright
+(`default pytest requires TORTOISE_DB_URI (epic #1647 P4)` — 54 errors, measured
+at this head), which reads as the guard being broken rather than the target being
+absent.
 
 The checker re-measures, offline and without network access:
 
@@ -349,12 +355,14 @@ The checker re-measures, offline and without network access:
    then unmeasured. A **directory** at a pin path is the third case and stays
    DRIFT (the case above): it pins nothing, and the guard CAN tell — calling that
    unreadable would excuse a row that fails no assertion.
-5. **Summary counts** — §2's four `| STATUS | n |` rows, its `Total tracked`
-   row, its five per-workstream `**N of M fixed**` cells, and the frontmatter's
-   `**N fixed and N open**` headline all equal the rows below. A summary that
-   drifts from its own table is the same defect class as the missing
-   `content_hash` this map's Pattern 1 names. §8's prose counts and §10's census
-   prose are NOT read — see the residuals below.
+5. **Summary counts** — §2's three `| STATUS | n |` rows, its `Total tracked`
+   row, its five per-workstream `**N of M fixed**` cells (each bound to its
+   workstream BY LABEL, so a mislabelled row cannot pass), and the page's opening
+   abstract (`**N fixed and N open**`, read from the body above `## 1.` — the
+   frontmatter holds only `measured_at_commit`/`measured_at`) all equal the rows
+   below. A summary that drifts from its own table is the same defect class as
+   the missing `content_hash` this map's Pattern 1 names. Counts narrated inside
+   a sentence are NOT read — see the residuals below.
 6. **Registration** — this page is listed in `docs/00_index.md`, so it is
    reachable rather than merely committed — **and that entry's own
    `**N fixed · N open · N unknown**` headline must equal §2's**, read from the
@@ -396,15 +404,19 @@ rounding:**
   exists to stop. Pinned by a real corrupted object in
   `test_a_corrupt_object_store_reads_as_no_answer_not_as_drift`, so a reword is
   caught by that control rather than by a reader.
-- **The prose counts (§8, §10).** §8 says "Five rows, and four of them are
-  defects" and §10 states its census in words. Both are counts the guard does not
-  read: they are prose, their clauses do not partition the same population
-  (§8's second clause needs to know which row is an epic — the tracker half this
-  guard refuses to read), and a guard that parsed those sentences would be a
-  spelling trap rather than a check. §2's machine-readable counts — the four
-  status rows, the total, the five per-workstream cells — ARE compared
-  (`check_workstreams`), so the split is stated here rather than left for a
-  reader to discover.
+- **The ENUMERATED and prose counts — §1's census sentence, §2's cell text, §8,
+  §10.** The counts §2
+  states as a table cell ARE compared (the three status rows, the total, the five
+  per-workstream cells, the abstract). What is not compared is every count
+  narrated inside a sentence: §2's `(#2787 OPEN: …)`, `**#2730, #2782 and #2684
+  remain open**` and `**#2696 (epic) remains open**`; §8's "Five rows, and four
+  of them are defects"; §10's census prose. Deciding "which rows does this
+  sentence call open" means reading prose — and §8's second clause additionally
+  needs to know which row is an epic, the tracker half this guard refuses to
+  read — so a guard that parsed those sentences would be a spelling trap rather
+  than a check. Measured at this head: flip `#2684` to VERIFIED-FIXED and correct
+  the counts the guard DOES read, and §2's narrated sentence goes stale with every
+  check green. That is the residual, named rather than dressed up.
 - **The `#2730`-class error.** A row can be VERIFIED-FIXED with a docs-only
   anchor and a prose pin (that is what this page shipped first, at #2730). The
   guard passed it. Only a reviewer reading the anchor *as a fix* catches it, which
