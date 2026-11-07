@@ -3023,10 +3023,14 @@ def _a5_subjects(projection) -> dict:
     return {"subjects": subjects,
             # ⛔ A5's BAR divides by the distinct actors the A-corpus NAMES, so the census must carry
             # that population or the bar is not producible from the block (review cycle 2, finding 8).
-            # The corpus's actor list is #10983's to register, and until it does the count is a
-            # NAMED gap rather than the Subject count standing in for it.
+            # ⛔ NOT a pending landing: `#10983` (C2) CLOSED on 2026-11-07 WITHOUT registering an actor
+            # list, and the record now says so (`a_corpus.requires` — "the requirement is on the
+            # CORPUS's content, not on a pending landing"). Pointing this gap at that issue would
+            # aim a scoring child (`#10984`–`#10988`) at closed work — the stale-pointer shape V12
+            # refuses for `blocked_by`, reachable here in prose where nothing reddens.
             "named_actors": unmeasured(
-                "the distinct actors the A-corpus names — #10983 (C2) registers the actor list; the "
+                "the distinct actors the A-corpus names — the corpus carries no registered actor "
+                "list yet (#10983 closed without one), so this is a CORPUS-content gap; the "
                 "`:Subject` count is NOT it, or the bar would be satisfied by the run's own writes"),
             "point_population": point_population,
             "families": {name: int(families.get(name, 0))
