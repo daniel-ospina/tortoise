@@ -512,8 +512,26 @@ def test_the_receipt_carries_the_guard_and_its_refusals():
     assert stats, "temporal_leg_stats lost the non_eviction field (#10538)"
     keys = {k.value for node in stats for k in node.keys
             if isinstance(k, ast.Constant)}
-    assert {"non_eviction", "non_eviction_applied",
+    # ⚠️ ALL FOUR, in the arm-bearing stats dict itself (cycle 3, finding 3):
+    # `non_eviction_targeting` was left unpinned, so renaming or dropping the
+    # field that makes `applied: False` legible would have gone unnoticed — and
+    # every scoped-out row would read like a window row where the guard ran and
+    # admitted everything.
+    assert {"non_eviction", "non_eviction_applied", "non_eviction_targeting",
             "non_eviction_rejected"} <= keys, keys
+    # ...and the targeting field is BOUND to the guard's trace, not re-derived
+    bound_to_trace = False
+    for node in stats:
+        for value in node.values:
+            if (isinstance(value, ast.Call)
+                    and isinstance(value.func, ast.Attribute)
+                    and value.func.attr == "get"
+                    and value.args
+                    and isinstance(value.args[0], ast.Constant)
+                    and value.args[0].value == "targeting"):
+                bound_to_trace = True
+    assert bound_to_trace, (
+        "non_eviction_targeting must come from guard_trace.get('targeting')")
 
 
 def test_the_leg_trace_passes_the_refusal_count_to_the_empty_reason():
@@ -681,3 +699,89 @@ def test_the_retention_measure_does_not_still_claim_it_never_gates():
     # the gate is real, not just documented: the issue's own pool is refused.
     _, g_picks, g_trace = _fuse(ISSUE_POOL)
     assert g_picks == [] and g_trace["applied"] is True
+
+
+# ── 11. the REPLAY instrument's switch and stamp ───────────────────────────
+
+def _replay_question() -> dict:
+    """One hand-built window-arm question: a dated range, one dominant session,
+    and gold in the deeper sessions the arm exists to reach."""
+    # ONE session owns the visible window (that is the clustering the guard's
+    # window branch requires); the deeper sessions are single-turn and carry
+    # gold, so a promotion would reach them.
+    sessions = [[{"content": "alpha beta gamma", "has_answer": True}]
+                for _ in range(10)]
+    sessions += [[{"content": "delta epsilon zeta", "has_answer": True}],
+                 [{"content": "eta theta iota", "has_answer": True}],
+                 [{"content": "iota kappa lambda", "has_answer": True}]]
+    return {
+        "question": "What did I do between 2023-04-10 and 2023-04-20?",
+        "question_date": "2023-04-25",
+        "haystack_sessions": sessions,
+        "haystack_dates": (["2023-04-15"] * 10
+                           + ["2023-04-16", "2023-04-17", "2023-04-18"]),
+        "haystack_session_ids": (["sA"] * 10 + ["sB", "sC", "sD"]),
+    }
+
+
+def test_the_replay_switch_is_forwarded_AND_stamped():
+    """#10538 (cycle 3, finding 2): the replay inherited the guard with neither a
+    switch nor a stamp, so a guarded row and a pre-ruling row were two
+    indistinguishable receipts with different numbers.
+
+    Both halves are pinned here because either alone is useless: forwarding
+    without the stamp gives an unattributable row, and the stamp without
+    forwarding LIES about the row. The fixture is measured to actually differ
+    between the arms, so the assertion cannot pass on an arm that never fires.
+    """
+    from tools.longmem_eval import temporal_leg_replay as rep
+
+    q = _replay_question()
+    guarded = rep.replay([q], window=12)
+    unguarded = rep.replay([q], window=12, non_eviction=False)
+
+    # (i) the stamp: each row names the guard state that produced it
+    assert guarded["non_eviction"] is True, guarded
+    assert unguarded["non_eviction"] is False, unguarded
+    # (ii) the forward: the switch really changes the measurement
+    assert guarded["leg_fired"] != unguarded["leg_fired"], (
+        "the fixture must expose the arm's effect, or the forward is unproven: "
+        f"guarded={guarded['leg_fired']} unguarded={unguarded['leg_fired']}")
+
+
+def test_the_replay_cli_exposes_the_switch_and_normalises_it():
+    """The operator's spelling (`--non-eviction on|off`) is the one that must
+    reach `replay()` — a flag that parses but does not forward is the shape that
+    produced this finding."""
+    import sys
+
+    from tools.longmem_eval import temporal_leg_replay as rep
+
+    seen: dict = {}
+    real_replay, real_subset = rep.replay, rep._subset_questions
+
+    def _spy(questions, **kwargs):
+        seen.update(kwargs)
+        # the reporter the CLI prints from — every key it reads, zeroed.
+        return {
+            "questions": 0, "window": 0, "leg_fired": 0,
+            "evidence_turn_recall_base": 0.0, "evidence_turn_recall_leg": 0.0,
+            "all_gold_turns_base": 0, "all_gold_turns_leg": 0,
+            "all_gold_sessions_base": 0, "all_gold_sessions_leg": 0,
+            "worst_gold_rank_up": 0, "worst_gold_rank_down": 0,
+            "budget_effective": 0, "limit_requested": 0,
+            "placement": "tail", "weight": 1.0, "bucket_cap": 1,
+            "non_eviction": kwargs.get("non_eviction"),
+        }
+
+    try:
+        rep.replay = _spy
+        rep._subset_questions = lambda data=None: []   # no dataset read
+        for flag, expected in (("on", True), ("off", False)):
+            seen.clear()
+            rep.main(["--non-eviction", flag])
+            assert seen.get("non_eviction") is expected, (flag, seen)
+    finally:
+        rep.replay = real_replay
+        rep._subset_questions = real_subset
+        sys.modules.pop("__main__", None)

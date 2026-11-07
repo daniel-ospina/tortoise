@@ -442,8 +442,9 @@ def non_eviction_applied(trace: dict | None) -> bool:
 
     * the ``#2976`` ANCHOR arm — measured AS-IS, deliberately unguarded, and the
       trace says so (``applied: False``, ``targeting: "anchor"``);
-    * an INERT leg — no picks, so the guard was never reached and the trace
-      carries no ``applied`` key at all (which is the same answer: ``False``).
+    * an INERT leg — no picks (or weight 0), so the guard was never reached and
+      the fusion caller stamps ``applied: False`` on that path too (the key is
+      always present; only its VALUE distinguishes "ran" from "not needed").
 
     The receipt is the ON/OFF reconstruction surface, so a field claiming
     ENFORCEMENT on a row where nothing was enforced is exactly the false PASS
