@@ -655,13 +655,21 @@ def test_the_instrument_is_selected_by_its_own_subjects():
     `eval`), and why `tools/dod_5090_probe.py` needs a `CORE_ALSO` entry (a
     `tools/`-only diff is swallowed by NON_PYTHON_PREFIXES before the fallback
     runs, so it selected 70 unrelated files and not this one).
+
+    ⛔ `#11444`: `tortoise/embed_writer_register.py` is now a SUBJECT of this
+    file's own scoring — row 1 reads it. It currently selects through the `core`
+    fallback (it matches no named SOURCE_PATTERNS entry, which `ci-surfaces.yml`
+    records at its `test_embed_writer_register.py` row); pinned here so a future
+    named match that REPLACES the fallback cannot silently stop selecting the
+    instrument whose row now depends on it.
     """
     import ci_selection
 
     manifest = ci_selection.load_manifest()
     for subject in ("tortoise/embed_gate.py", "tortoise/value_gate.py",
                     "tortoise/embeddings.py", "tortoise/search_engine.py",
-                    "tortoise/security.py", "tools/dod_5090_probe.py"):
+                    "tortoise/security.py", "tools/dod_5090_probe.py",
+                    "tortoise/embed_writer_register.py"):
         selected = ci_selection.select([subject], "pull_request", manifest)
         assert "test_dod_5090_probe.py" in selected["test_files"], (
             f"a {subject}-only diff does not select this file — its falsifiers "
@@ -2871,7 +2879,7 @@ def _writer(name: str, kind: str) -> dict:
     return {"callee": "embed_text", "at": f"{name.replace('::', '.py:')}", "kind": kind, "label": "Point"}
 
 
-def test_row_one_is_PARTIAL_because_ONE_writer_embeds_outside_the_gate(
+def test_row_one_is_PARTIAL_because_ONE_writer_the_PRODUCT_does_not_name(
         tmp_path, monkeypatch):
     """The epic body's load-bearing sentence: *"Either fact alone holds this row
     at `PARTIAL`"*. Re-review (P2) measured that dropping `ungated or` from the
@@ -2880,7 +2888,50 @@ def test_row_one_is_PARTIAL_because_ONE_writer_embeds_outside_the_gate(
     is ON and a population that is fully gated must still not publish `MET`
     while one writer embeds outside it: that writer is a path the rule never
     sees, and turning the flag on does not fix it.
+
+    ⛔ `#11444` moved the falsifier, it did not remove it. Reading (b) counts a
+    writer outside the gate as ACCEPTED when the product NAMES it, so the writer
+    this test holds the row with is one the register does **not** name
+    (`tortoise.z::_unnamed`). The sibling
+    `test_row_one_reaches_MET_when_the_REGISTER_names_an_UNGATED_writer` is the
+    other half: the same shape, named, must reach `MET` — otherwise the row is
+    unreachable again and this test alone would pin that.
     """
+    _fake_rule_tree(tmp_path)
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(probe, "embedding_writers", lambda: {
+        "tortoise.a::_gated": _writer("tortoise.a::_gated", "gated"),
+        "tortoise.z::_unnamed": _writer("tortoise.z::_unnamed", "ungated"),
+    })
+    monkeypatch.setattr(probe, "flag_in_shipped_configs", lambda flag: _fake_shipped(True))
+    monkeypatch.delenv("TORTOISE_EMBED_GATE", raising=False)
+    row = probe.score_rule_bullet()
+    assert row.verdict == "PARTIAL", (
+        f"gate ON + one writer the PRODUCT does not name must not publish MET: "
+        f"{row.verdict!r}")
+    assert "embed OUTSIDE the gate: 1" in row.observed, row.observed
+    assert "PRODUCT does NOT name (hold this row): 1 (tortoise.z::_unnamed)" in row.observed, (
+        "the row must name the writer it held itself on, not only count it: "
+        f"{row.observed}")
+
+
+def test_row_one_reaches_MET_when_the_REGISTER_names_an_UNGATED_writer(
+        tmp_path, monkeypatch):
+    """**Proof 2 of 3** (`#11444`) — a register-named writer outside the gate.
+
+    Before `#11444` this exact population read `PARTIAL`: the instrument scored
+    row 1 from its own census and never opened
+    `tortoise/embed_writer_register.py`, so a NAMED exception and a bypass were
+    the same reading. `tortoise.session_indexer::main` is the live shape (the
+    register declares it `recognised_producer` under `#5008`, the one write path
+    outside the gate), and using the REAL key keeps this proof attached to the
+    product rather than to a fixture.
+    """
+    registry = probe.writer_register()
+    assert registry is not None, "the product register must be importable"
+    assert registry.is_declared("tortoise.session_indexer::main"), (
+        "fixture drift: this test is only a proof while the register names the writer"
+    )
     _fake_rule_tree(tmp_path)
     monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(probe, "embedding_writers", lambda: {
@@ -2891,9 +2942,92 @@ def test_row_one_is_PARTIAL_because_ONE_writer_embeds_outside_the_gate(
     monkeypatch.setattr(probe, "flag_in_shipped_configs", lambda flag: _fake_shipped(True))
     monkeypatch.delenv("TORTOISE_EMBED_GATE", raising=False)
     row = probe.score_rule_bullet()
+    assert row.verdict == "MET", (
+        f"a writer the PRODUCT names must satisfy reading (b), or row 1 is "
+        f"structurally unreachable: {row.verdict!r} ({row.observed})")
+    assert "declared=1 (tortoise.session_indexer::main (recognised_producer / #5008))" \
+        in row.observed, row.observed
+    assert "PRODUCT does NOT name (hold this row): 0 (none)" in row.observed, row.observed
+
+
+def test_row_one_is_PARTIAL_when_the_census_grades_a_writer_BYPASS(
+        tmp_path, monkeypatch):
+    """**Proof 3 of 3, second half** (`#11444`) — a non-empty bypass set holds the row.
+
+    The bypass clause has to bite INDEPENDENTLY of the undeclared clause, so the
+    injected writer is one the register DOES name — a bypass is a defect the
+    product cannot declare away (the register refuses a `bypass` declaration by
+    construction), and if both readings fire the defect is what holds the row.
+    """
+    _fake_rule_tree(tmp_path)
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(probe, "embedding_writers", lambda: {
+        "tortoise.a::_gated": _writer("tortoise.a::_gated", "gated"),
+        "tortoise.session_indexer::main": _writer(
+            "tortoise.session_indexer::main", "ungated"),
+    })
+    # Injected into the CENSUS, not into the register: a bypass can only ever be
+    # FOUND by the instrument, never declared by the product.
+    monkeypatch.setitem(probe.WRITER_CENSUS, "tortoise.session_indexer::main", (
+        probe.CENSUS_BYPASS, "injected: a write that escapes the rule"))
+    monkeypatch.setattr(probe, "flag_in_shipped_configs", lambda flag: _fake_shipped(True))
+    monkeypatch.delenv("TORTOISE_EMBED_GATE", raising=False)
+    row = probe.score_rule_bullet()
     assert row.verdict == "PARTIAL", (
-        f"gate ON + one ungated writer must not publish MET: {row.verdict!r}")
-    assert "embed OUTSIDE the gate: 1" in row.observed, row.observed
+        f"a register-named writer graded `bypass` must still hold row 1 at "
+        f"PARTIAL: {row.verdict!r} ({row.observed})")
+    assert "graded `bypass` by the census (hold this row): 1 " \
+        "(tortoise.session_indexer::main)" in row.observed, row.observed
+
+
+def test_row_one_is_PARTIAL_when_the_product_register_cannot_be_read(
+        tmp_path, monkeypatch):
+    """An unreadable register is a HOLE, not an empty declaration.
+
+    Fail-closed: with no register every writer outside the gate is `undeclared`,
+    so the row holds. The opposite default — `unreadable ⇒ nothing to check ⇒
+    MET` — would make deleting the module the cheapest way to go green.
+    """
+    _fake_rule_tree(tmp_path)
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(probe, "writer_register", lambda: None)
+    monkeypatch.setattr(probe, "embedding_writers", lambda: {
+        "tortoise.a::_gated": _writer("tortoise.a::_gated", "gated"),
+        "tortoise.session_indexer::main": _writer(
+            "tortoise.session_indexer::main", "ungated"),
+    })
+    monkeypatch.setattr(probe, "flag_in_shipped_configs", lambda flag: _fake_shipped(True))
+    monkeypatch.delenv("TORTOISE_EMBED_GATE", raising=False)
+    row = probe.score_rule_bullet()
+    assert row.verdict == "PARTIAL", (
+        f"an unreadable register must not lift the row: {row.verdict!r} ({row.observed})")
+    assert "register readable: False" in row.observed, row.observed
+    assert "PRODUCT does NOT name (hold this row): 1 (tortoise.session_indexer::main)" \
+        in row.observed, row.observed
+
+
+def test_the_row_one_population_is_the_CENSUS_not_the_register(tmp_path, monkeypatch):
+    """The population must never shrink to the register (`#11444`).
+
+    A row scored over `EMBED_WRITER_CLASSES` would be silent about exactly the
+    writer the register is missing — the failure the row exists to catch. So a
+    writer discovery FINDS outside the gate is reported even though the register
+    knows nothing about it, and it is reported as the FALSE it is.
+    """
+    _fake_rule_tree(tmp_path)
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(probe, "embedding_writers", lambda: {
+        "tortoise.a::_gated": _writer("tortoise.a::_gated", "gated"),
+        "tortoise.nowhere::_unknown": _writer("tortoise.nowhere::_unknown", "unresolved_write"),
+    })
+    monkeypatch.setattr(probe, "flag_in_shipped_configs", lambda flag: _fake_shipped(True))
+    monkeypatch.delenv("TORTOISE_EMBED_GATE", raising=False)
+    dispositions = probe.row_one_dispositions()
+    assert dispositions == {"tortoise.nowhere::_unknown": probe.ROW_UNDECLARED}, dispositions
+    row = probe.score_rule_bullet()
+    assert row.verdict == "PARTIAL", row.verdict
+    # The over-inclusive enumeration is STILL printed in full.
+    assert "tortoise.nowhere::_unknown @ " in row.observed, row.observed
 
 
 def test_row_one_is_PARTIAL_because_ONE_writer_has_no_resolved_producer(

@@ -29,7 +29,7 @@ deliberately mechanical so a later lane re-runs it instead of re-reading prose:
 
 | bullet | the command | what makes it `MET` |
 |---|---|---|
-| 1 | `uv run python tools/dod_5090_probe.py --json` (reads the two gate modules + counts the write seams that reach the gate) | a stated predicate exists, ONE rule set (identity, not a copy), AND every embedding write path reaches it with the gate ON by default |
+| 1 | `uv run python tools/dod_5090_probe.py --json` (reads the two gate modules + counts the write seams that reach the gate + reads the product's writer register for every writer the gate does not decide) | a stated predicate exists, ONE rule set (identity, not a copy), AND every embedding write path reaches it with the gate ON by default — where *reaches it* means **gated, or named in `tortoise/embed_writer_register.py`**, and never `bypass` (`#11444`) |
 | 2 | same (`written labels ⊆ served labels`) | every label a write path embeds is one `run_vector_query` serves |
 | 3 | same (forces all three mechanisms through `run_vector_query`) | `index` / `scan` / `scan_fallback` are distinguishable in the caller's trace |
 | 4 | same (searches for a V1 ruling) | **`MET` is unreachable here**: the bullet is *decided **and implemented***, and this row cannot measure implementation — a record at most carries it to `PARTIAL`, and no record is `NOT MET` |
@@ -42,6 +42,33 @@ which is **unset in every shipped configuration** — so at default the epic's
 `enforced` half is an opt-in, not the operative rule of the write path. `#5008`
 chose that ordering on purpose (*"the rate effect is measurable before it is
 trusted"*); the instrument records the consequence rather than re-deciding it.
+
+## Row 1 reads the PRODUCT, not only its own census (`#11444`)
+
+⛔ **Before `#11444` this instrument never opened
+`tortoise/embed_writer_register.py`.** It graded row 1 from its own AST census,
+so a writer the product had NAMED as an accepted exception and a writer that
+bypassed the rule were the same reading — *"no recognised producer call"*. That
+made the rung **unreachable** rather than strict, and unreachable in the worse
+direction: `#5090`'s reading (b) is *"every writer must route through the gate
+**or** be a named, accepted exception in the product"*, and the instrument could
+not see that the naming had happened. `#11085` landed the register; `#11444` is
+the instrument learning to read it.
+
+⛔ **Reading the register does not lower the bar — it moves the falsifier to
+where reading (b) put it.** A writer the gate does not decide now holds the row
+only when it is **undeclared** (*neither* gated *nor* named in the product) or
+graded **`bypass`** by the census — a class the register can never absorb, since
+it refuses a `bypass` declaration by construction. Two consequences that keep
+the rung strict:
+
+* the register's **own completeness** is pinned by
+  `tests/test_embed_writer_register.py::test_the_register_names_the_shapes_its_discovery_cannot_see`
+  (and its both-direction guard), so *"add a name to go green"* is a RED test
+  there rather than a fix here;
+* the over-inclusive census is **still reported in full**, so the row's
+  population never shrinks to the register. A register that is missing a writer
+  is visible as `undeclared`, not invisible as a shorter list.
 
 ## §12.2a — the distinct-predicate count
 
@@ -1133,6 +1160,85 @@ def flag_in_shipped_configs(flag: str) -> dict:
             "surfaces": list(CONFIG_SURFACES)}
 
 
+#: ── Row 1's SECOND source: the PRODUCT's declaration (`#11444`) ──────────────
+#: `#5090`'s reading (b) allows a writer the gate does not decide when it is
+#: **named** in the product. `tortoise/embed_writer_register.py` (`#11085`) is
+#: that declaration, and this instrument read only its own census until
+#: `#11444` — which made an EXEMPT writer and a BYPASS indistinguishable and the
+#: row structurally unreachable at `MET`.
+#: ⛔ The register is read as the PRODUCT reading it: through its own
+#: :func:`~tortoise.embed_writer_register.undeclared`, with `bypass` coming from
+#: this instrument's census (the register refuses a `bypass` declaration by
+#: construction, so a bypass can only ever be FOUND, never declared).
+REGISTER_REL_PATH = "tortoise/embed_writer_register.py"
+
+#: How ROW 1 reads a writer the gate does not decide. `declared` is the only one
+#: that does not hold the row; both others are the falsifier.
+ROW_DECLARED = "declared"
+ROW_UNDECLARED = "undeclared"
+ROW_BYPASS = "bypass"
+
+#: The writer kinds whose vector the gate does not decide — the population the
+#: product must speak about. Named here because the instrument and the register
+#: cannot import each other's copy of it (`tests/` is not shipped in the wheel,
+#: and `tortoise/` must not depend on a tool);
+#: `tests/test_embed_writer_register.py::NEEDS_A_DECLARATION` is the same tuple.
+OUTSIDE_THE_GATE: tuple[str, ...] = ("ungated", "unresolved_write")
+
+
+def writer_register():
+    """The product's writer register, or ``None`` when it cannot be read.
+
+    ``None`` is a HOLE, never a pass. It cannot silently lift the row, because a
+    caller with no register sees every writer as :data:`ROW_UNDECLARED` — the
+    same fail-closed direction an unparseable module takes.
+    """
+    try:
+        import tortoise.embed_writer_register as registry
+    except (ImportError, SyntaxError, ValueError):
+        # A register that will not import, will not parse, or refuses its own
+        # declarations is unreadable as a DECLARATION — not empty.
+        return None
+    return registry
+
+
+def row_one_dispositions(writers: dict[str, dict] | None = None,
+                         registry=None) -> dict[str, str]:
+    """``{writer: disposition}`` for every writer the gate does not decide.
+
+    The population is the instrument's OWN census (:data:`OUTSIDE_THE_GATE`), not
+    the register's key set: a row scored over the register's population would be
+    silent about exactly the writer the register is missing, which is the
+    failure this row exists to catch.
+
+    Three states, and only one of them leaves the row free to reach `MET`:
+
+    * :data:`ROW_DECLARED` — the product names it (``recognised_producer`` or
+      ``exempt``). Reading (b) is satisfied for this writer.
+    * :data:`ROW_UNDECLARED` — the gate does not decide it and the product does
+      not name it. **The falsifier.**
+    * :data:`ROW_BYPASS` — the census grades it a bypass. Wins over a
+      declaration, because a bypass is a DEFECT the register cannot assert
+      away: if both readings fire, the defect is the one that must hold the row.
+    """
+    writers = embedding_writers() if writers is None else writers
+    registry = writer_register() if registry is None else registry
+    population = sorted(
+        writer for writer, info in writers.items()
+        if info["kind"] in OUTSIDE_THE_GATE
+    )
+    undeclared = set(population if registry is None else registry.undeclared(population))
+    dispositions: dict[str, str] = {}
+    for writer in population:
+        if _census_class(writer) == CENSUS_BYPASS:
+            dispositions[writer] = ROW_BYPASS
+        elif writer in undeclared:
+            dispositions[writer] = ROW_UNDECLARED
+        else:
+            dispositions[writer] = ROW_DECLARED
+    return dispositions
+
+
 def score_rule_bullet() -> Row:
     """Bullet 1 — the rule is stated, is ONE rule set, and is enforced."""
     import tortoise.embed_gate as embed_gate
@@ -1165,6 +1271,17 @@ def score_rule_bullet() -> Row:
     unresolved_writes = {w: d for w, d in writers.items()
                          if d["kind"] == "unresolved_write"}
     duplicates = [w for w, d in writers.items() if d["kind"] == "duplicate"]
+    # ⛔ `#11444`: the writers the gate does NOT decide are graded against the
+    # PRODUCT's own declaration, not against this instrument's guess. Before
+    # this, every one of them held the row for the same reason (`no recognised
+    # producer call`), so a named exception and a bypass were the same reading
+    # and the rung could never be met.
+    registry = writer_register()
+    dispositions = row_one_dispositions(writers, registry)
+    register_readable = registry is not None
+    declared = sorted(w for w, d in dispositions.items() if d == ROW_DECLARED)
+    undeclared = sorted(w for w, d in dispositions.items() if d == ROW_UNDECLARED)
+    bypasses = sorted(w for w, d in dispositions.items() if d == ROW_BYPASS)
     # ⛔ Two different questions, both asked: the ambient env is what
     # `measure()` deliberately clears (so a lane's shell cannot fake it), and
     # the SHIPPED config is where a default actually lives.
@@ -1180,6 +1297,13 @@ def score_rule_bullet() -> Row:
     unresolved_at = ", ".join(
         f"{w} @ {d['at']}" for w, d in sorted(unresolved_writes.items())
     )
+    # ⛔ The register's own CLASS per declared writer, so the evidence shows what
+    # the product claimed rather than only that a key was present.
+    declared_at = ", ".join(
+        f"{w} ({registry.classify(w).cls} / {registry.classify(w).owner_issue})"
+        if register_readable else f"{w} (register unreadable)"
+        for w in declared
+    )
     notes = [
         f"stated: {stated} (predicate in embed_gate: {stated_in_gate}; "
         f"{SEAM} calls it: {seam_wired})",
@@ -1188,9 +1312,19 @@ def score_rule_bullet() -> Row:
         f"write paths reaching the gated seam: {len(gated)} "
         f"({', '.join(sorted(gated)) or 'none'})",
         f"write paths that embed OUTSIDE the gate: {len(ungated)} "
-        f"({ungated_at or 'none'})"
-        + (" — the session/Turn writers #5008 declares as exempt"
-           if ungated else ""),
+        f"({ungated_at or 'none'})",
+        # ⛔ The row's OWN reading (`#11444`): of every writer the gate does not
+        # decide, which ones the PRODUCT names. `undeclared` and `bypass` are the
+        # two that still hold the row, and they are counted here rather than
+        # inferred from the census, so the verdict below cannot drift from the
+        # evidence printed above it.
+        f"writers outside the gate, CLASSIFIED against the product register "
+        f"(`{REGISTER_REL_PATH}`, #11085) — register readable: "
+        f"{register_readable}: declared={len(declared)} ({declared_at or 'none'})",
+        f"writers outside the gate the PRODUCT does NOT name (hold this row): "
+        f"{len(undeclared)} ({', '.join(undeclared) or 'none'})",
+        f"writers graded `bypass` by the census (hold this row): "
+        f"{len(bypasses)} ({', '.join(bypasses) or 'none'})",
         f"gate enabled by default: {on_by_default} (ambient "
         f"{embed_gate.ENV_FLAG}={os.environ.get(embed_gate.ENV_FLAG, '')!r}; "
         f"shipped config surface walked: {len(shipped['surfaces'])} "
@@ -1209,20 +1343,27 @@ def score_rule_bullet() -> Row:
         # callee vocabulary cannot see it (review round 5, P2).
         f"functions writing an embedding with no recognised producer call: "
         f"{len(unresolved_writes)} — deliberately OVER-INCLUSIVE (it also lists "
-        f"repair/backfill helpers and the clause builder itself, because a "
-        f"name-level enumeration cannot tell an exemption from a bypass; a "
-        f"bypass that reads as exempt is the failure this row exists to "
-        f"prevent): "
+        f"repair/backfill helpers and the clause builder itself) and STILL "
+        f"reported IN FULL, so the row's population can never shrink to the "
+        f"register — the classification above is what the row reads, never this "
+        f"count on its own: "
         f"{unresolved_at or 'none'}",
         f"duplicate writer names (hold this row): {sorted(duplicates) or 'none'}",
     ]
     if not stated or not shared or not gated:
         verdict = "NOT MET"
-    elif not on_by_default or ungated or unparsed or unresolved_writes or duplicates:
-        # EITHER condition alone means the rule is not the write path's
-        # operative rule: the flag is the operator's, and an ungated writer is
-        # a path the rule never sees. Turning the flag ON does not fix the
-        # second — which is why it must hold the row, not be masked by it.
+    elif not on_by_default or undeclared or bypasses or unparsed or duplicates:
+        # EITHER enforcement condition alone means the rule is not the write
+        # path's operative rule: the flag is the operator's, and a writer the
+        # product does not name is a path the rule never sees. Turning the flag
+        # ON does not fix the second — which is why it must hold the row, not be
+        # masked by it.
+        #
+        # ⛔ `#11444`: the writer clause is `undeclared or bypasses`, NOT
+        # `ungated or unresolved_writes`. Reading (b) is "gated **or** named in
+        # the product", so a NAMED writer must be able to satisfy it — while a
+        # writer in neither place, and any writer the census grades `bypass`,
+        # still holds the row (that is the falsifier this row exists for).
         verdict = "PARTIAL"
     else:
         verdict = "MET"
