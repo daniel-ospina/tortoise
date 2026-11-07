@@ -142,6 +142,9 @@ def _ledger(rows, **overrides):
     data = {
         "version": 1,
         "issue": 9664,
+        # Required, and pinned to the row count: an OPTIONAL denominator was
+        # measured to be no pin at all (a 9-row ledger without it exits 0).
+        "criteria_expected": len(rows),
         "measured_at": {"ref": "origin/main", "sha": SHA, "date": "2026-11-07"},
         "criteria": rows,
     }
@@ -489,6 +492,71 @@ def test_a_shallow_checkout_is_unprovable_never_absent(monkeypatch):
     if shallow == "absent":
         pytest.skip("this checkout is not shallow, so `absent` is the correct answer here")
     assert shallow == "unprovable"
+
+
+def test_a_ledger_without_criteria_expected_is_invalid(tmp_path):
+    """OPTIONAL was no pin: a 9-row ledger omitting the key exits 0 and prints
+    "UNCOVERED LIST: empty" — the denominator computed from the record itself."""
+    data = _ledger([_row("A")])
+    del data["criteria_expected"]
+    proc = _run_cli(tmp_path, data)
+    assert proc.returncode == cl.EXIT_INVALID, proc.stdout + proc.stderr
+    assert "criteria_expected" in proc.stderr
+
+
+@pytest.mark.parametrize(
+    "as_recorded",
+    [
+        # The shapes AGENTS.md's own Testing section hands a lane. Refusing them
+        # forces a lane to rewrite evidence into a form it did not run.
+        "cmd:`uv run pytest tests/test_9664_capstone_verdict_ledger.py`",
+        "cmd:TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
+        "cmd:TORTOISE_DB_URI='docker://:f@localhost:6379/g' uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
+        "cmd:cd .worktrees/x && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
+    ],
+)
+def test_a_command_as_a_lane_actually_records_it_is_accepted(tmp_path, as_recorded):
+    proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[as_recorded])]))
+    assert proc.returncode == cl.EXIT_CLEAN, proc.stdout + proc.stderr
+
+
+def test_an_absolute_wildcard_is_refused_not_crashed(tmp_path):
+    """`Path.glob` raises NotImplementedError on a non-relative pattern, so this
+    used to be a traceback instead of a named defect."""
+    absolute = str(REPO_ROOT / "tests" / "test_9664_capstone_*.py")
+    proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[f"cmd:uv run pytest {absolute} -q"])]))
+    assert proc.returncode == cl.EXIT_INVALID, proc.stdout + proc.stderr
+    assert "Traceback" not in proc.stderr
+    assert "names no artifact" in proc.stderr
+
+
+def test_merge_keys_are_flattened_not_reported_as_unparseable(tmp_path):
+    """`<<: *anchor` is legal YAML and a natural way to share a verdict across
+    rows; before the flatten it surfaced as "not parseable YAML"."""
+    ledger = tmp_path / "ledger.yml"
+    ledger.write_text(
+        "version: 1\n"
+        "issue: 9664\n"
+        "criteria_expected: 1\n"
+        "measured_at: {ref: origin/main, sha: " + SHA + ", date: 2026-11-07}\n"
+        "criteria:\n"
+        "  - &base\n"
+        "    id: A\n"
+        "    text: a criterion\n"
+        "    verdict: verified\n"
+        "    evidence: [" + REAL_EVIDENCE + "]\n"
+        "  - <<: *base\n"
+        "    id: B\n",
+        encoding="utf-8",
+    )
+    proc = subprocess.run(
+        [sys.executable, str(TOOL), "check", "--ledger", str(ledger)],
+        capture_output=True,
+        text=True,
+        cwd=str(REPO_ROOT),
+        check=False,
+    )
+    assert "not parseable YAML" not in proc.stderr, proc.stderr
 
 
 # ── the REAL committed ledger ──────────────────────────────────────────────

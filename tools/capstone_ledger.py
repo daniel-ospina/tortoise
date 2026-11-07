@@ -81,6 +81,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -146,6 +147,12 @@ def load_ledger(path: Path) -> dict[str, Any]:
         """A `SafeLoader` whose mappings refuse a repeated key."""
 
         def construct_mapping(self, node, deep=False):
+            # Merge keys (`<<: *anchor`) are legal YAML and a natural way to share
+            # a verdict across rows. They must be flattened BEFORE the duplicate
+            # scan, or the anchor's tag has no constructor and the file is reported
+            # as "not parseable YAML" — blaming the parser for our own check.
+            if isinstance(node, yaml.MappingNode):
+                self.flatten_mapping(node)
             seen: set[Any] = set()
             for key_node, _ in node.value:
                 key = self.construct_object(key_node, deep=deep)
@@ -195,12 +202,41 @@ RUNNERS: Final[frozenset[str]] = frozenset(
         "sh",
         "make",
         "docker",
-        "git",
-        "curl",
-        "timeout",
-        "env",
     }
 )
+
+#: A leading `NAME=value` shell assignment, or a `cd … &&` hop, is how a lane
+#: ACTUALLY records a command (AGENTS.md's Testing section spells both:
+#: `TORTOISE_TEST_CARVE_OUT=1 uv run pytest …`, `cd <worktree> && uv run pytest …`).
+#: Refusing those would force a lane to rewrite its evidence into a form it did
+#: not run — the opposite of the record's purpose.
+_ASSIGNMENT_RE: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def _command_body(command: str) -> tuple[str, str | None]:
+    """Return the segment to grade, or a refusal reason.
+
+    Handles the shapes a real record uses: a command wrapped in backticks, leading
+    `NAME=value` assignments, and a `cd … && …` chain. The segment graded is the
+    LAST one, because that is the one that runs the artifact.
+    """
+    text = command.strip()
+    if len(text) >= 2 and text.startswith("`") and text.endswith("`"):
+        text = text[1:-1].strip()
+    tokens: list[str] = []
+    for segment in (part.strip() for part in text.split("&&")):
+        try:
+            seg_tokens = shlex.split(segment)
+        except ValueError:
+            return "", f"`cmd:` evidence is not a parseable command: {command!r}"
+        while seg_tokens and _ASSIGNMENT_RE.match(seg_tokens[0]):
+            seg_tokens.pop(0)
+        if len(seg_tokens) < 2:
+            continue  # a `cd <dir>` hop or a bare assignment: not the real command
+        tokens = seg_tokens
+    if not tokens:
+        return "", f"`cmd:` evidence must be a COMMAND, not a word: {command!r}"
+    return " ".join(tokens), None
 
 
 def _commit_state(sha: str) -> str:
@@ -255,20 +291,33 @@ def _evidence_is_real(entry: str, repo_root: Path = REPO_ROOT) -> tuple[bool, st
     The `cmd:` arm gets the same treatment, for the same reason: accepting any
     non-empty string meant `cmd:done` — or a sentence explaining that the work
     was done — satisfied the strongest verdict in the vocabulary, so one word
-    defeated the whole record. A command entry must now NAME an artifact of this
-    tree (the script or test file it ran); prose names nothing and is refused.
+    defeated the whole record. A command entry must now have the SHAPE of a
+    command (a runner first, after any `NAME=value` prefix, backticks or `cd … &&`)
+    and NAME an artifact of this tree (a path, a pytest node-id, or an in-tree glob).
+
+    ⛔ WHAT THIS DOES NOT PROVE, stated because the module would otherwise read as
+    stronger than it is: a `cmd:` entry is validated for SHAPE and for the
+    existence of the artifact it names — the command is **not executed**, so the
+    tool cannot know that it ran or that it produced the cited result. Likewise a
+    path entry proves the artifact is IN the tree, not that it supports the row
+    citing it (22 rows citing one trace file would validate). The division is the
+    rest of the artifact's: the runner records a verdict and stands behind it; the
+    tool refuses a record that is malformed, ambiguous, or cites what it does not
+    hold. `verified` therefore means "an artifact in this tree is named as its
+    evidence", not "the evidence was audited".
     """
     root = repo_root.resolve()
     if entry.startswith(_CMD_PREFIX):
         command = entry[len(_CMD_PREFIX) :].strip()
         if not command:
             return False, "`cmd:` evidence names no command"
+        body, refusal = _command_body(command)
+        if refusal is not None:
+            return False, refusal
         try:
-            tokens = shlex.split(command)
-        except ValueError:
+            tokens = shlex.split(body)
+        except ValueError:  # pragma: no cover - _command_body already parsed it
             return False, f"`cmd:` evidence is not a parseable command: {command!r}"
-        if len(tokens) < 2:
-            return False, f"`cmd:` evidence must be a COMMAND, not a word: {command!r}"
         runner = Path(tokens[0]).name
         if runner not in RUNNERS:
             # This is the arm that kills prose. A token scan alone does not: both
@@ -294,6 +343,11 @@ def _evidence_is_real(entry: str, repo_root: Path = REPO_ROOT) -> tuple[bool, st
             if resolved.is_file() and resolved.is_relative_to(root):
                 return True, ""
             if any(wildcard in candidate_text for wildcard in "*?["):
+                if candidate.is_absolute():
+                    # `Path.glob` raises NotImplementedError on a non-relative
+                    # pattern, so an absolute wildcard crashed the validator with a
+                    # traceback instead of refusing with a named defect.
+                    continue
                 for match in root.glob(candidate_text):
                     if match.resolve().is_file() and match.resolve().is_relative_to(root):
                         return True, ""
@@ -354,6 +408,15 @@ def validate(data: dict[str, Any], repo_root: Path = REPO_ROOT) -> list[dict[str
     # the set now takes TWO visible edits (drop the row AND move the count), which is
     # what makes it a decision instead of an accident.
     declared = data.get("criteria_expected")
+    if declared is None:
+        # OPTIONAL was measured to be no pin at all: a 9-row ledger WITHOUT the key
+        # exits 0 and prints "UNCOVERED LIST: empty", because the denominator is
+        # then computed from the record being audited — the 14/18/22 drift this
+        # tool exists to end. Required, so omitting it is a refusal.
+        problems.append(
+            "`criteria_expected` is required — it pins the denominator, so a row "
+            "cannot be dropped without the count moving with it"
+        )
     declared_count: int | None = None
     if declared is not None:
         try:
