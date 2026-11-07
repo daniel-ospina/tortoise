@@ -57,8 +57,9 @@ aboutObjects: "epic #5090, decision V1, filtered ANN, pgvector, FalkorDB HNSW, e
 - **Second precedent: `#4997` had to reconstruct the gap by hand.** `CALL db.indexes()` plus reading two
   functions. The pattern conclusion — *"if the system holds the fact, the system should state it"* — is
   why this is S4 in the scope: a closing-out item **plus one piece of new state** — the served set is never
-  retained today (`projection/__init__.py:18552` computes it locally; only `measured & served` is stored at
-  `:18570`), so it is not one line (`03-scope.md` S4's corrected premise; `05-decompose.md` C4).
+  retained today (`_record_vector_index_inventory` computes it locally as
+  `served = set(ENTITY_TYPE_LABELS.values())`; only `self._vector_indexed_labels = measured & served` is
+  stored), so it is not one line (`03-scope.md` S4's corrected premise; `05-decompose.md` C4).
 
 ## Workflow Pattern Research
 
@@ -76,7 +77,7 @@ aboutObjects: "epic #5090, decision V1, filtered ANN, pgvector, FalkorDB HNSW, e
   served-vs-indexed gap. The **served** set is declared; the **indexed** set is **measured** from
   `CALL db.indexes()` (discriminator is the `types` column, index 2 — copying the older `_row[0]/_row[1]`
   read would read the wrong column).
-- **Operator workflow.** `_ensure_indexes` runs from `Projection.__init__` **unguarded**; ~28 sequential round trips (`monitoring.py:65`, `selfhost.py:392`). Any new read there **must be fail-open** or it breaks
+- **Operator workflow.** `_ensure_indexes` runs from `Projection.__init__` **unguarded**; ~28 sequential round trips (the probe cold-start notes marked `#3143` in `monitoring.py` and `#3243` in `selfhost.py`). Any new read there **must be fail-open** or it breaks
   store construction.
 
 ## Tech Stack Research
@@ -133,7 +134,7 @@ comparables now say what that measurement will probably show, and how to run it:
 
 | Assumption | Confidence | Source | Validation plan |
 |---|---|---|---|
-| Vectors are stored and unindexed on **two** labels in the 2026-09-24 count (`Object` 7,859 + `Event` 4,798 = 12,657; four served labels are unindexed). ⚠️ NOT a claim that `Source`/`Subject` can never hold one — their writers DO store `embedding` (`_upsert_document` → `:Source`, `_upsert_subject`), which is why the census measures `db.labels()` instead of the index inventory | high | `ENTITY_TYPE_LABELS` (5 served) + `Point`-only DDL (`projection/__init__.py:19765`, `:19783`) | re-run `tools/dod_5090_probe.py --census` on a graph that holds rows |
+| Vectors are stored and unindexed on **two** labels in the 2026-09-24 count (`Object` 7,859 + `Event` 4,798 = 12,657; four served labels are unindexed). ⚠️ NOT a claim that `Source`/`Subject` can never hold one — their writers DO store `embedding` (`_upsert_document` → `:Source`, `_upsert_subject`), which is why the census measures `db.labels()` instead of the index inventory | high | `ENTITY_TYPE_LABELS` (5 served) + `Point`-only DDL (the `db.idx.vector.createNodeIndex` procedure form and the `CREATE VECTOR INDEX FOR (p:Point) ON (p.embedding)` Cypher form) | re-run `tools/dod_5090_probe.py --census` on a graph that holds rows |
 | The EMBED rule exists and is **off** by default | high | `embed_gate.RULE_SET is value_gate.RULES` → `True`; flag unset in the 4 shipped surfaces that exist | the arming measurement (scope item 1) |
 | **A cross-store move PRESERVES recall on OUR mix** (this is the `01-align.md` K3 statement; §3's evidence below is *against* it) | **low — the hinge** | 0.942 → 0.401 @ 10 % selectivity (post-filter); 0.63–0.72 (epic's comparable); both **not our corpus** | **E1** (parked with V1) — exact ground truth, our selectivities, filtered recall reported separately |
 | `hnsw.iterative_scan` compensates enough to be a net win | **low — unmeasured** | recovers 0.847 in one config; costs CPU/memory/tail latency | **E1**, same sweep |

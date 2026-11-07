@@ -133,9 +133,9 @@ not this epic's.
 | seam | file | change | risk |
 |---|---|---|---|
 | the gate's default | `tortoise/embed_gate.py` (`ENV_FLAG`, `embed_gate_enabled`) | shipped config sets it; **the default-reading code is unchanged** | a config default can be overridden per deployment — intended |
-| the gate's consult point | `tortoise/embeddings.py:1268` | **untouched** | — |
-| the exemption register | new leaf module (pattern: `tortoise/vector_write.py`, `tortoise/live.py`) | add | a leaf must not live under `tortoise/projection/` — that package's `__init__` is the head of the `projection → pack_state → sdk → projection` cycle, where a module-scope read of the config constants is a **reproduced** `ImportError` (`import tortoise.sdk` / `import tortoise.pack_manifest_store` break; `import tortoise.projection` alone still succeeds, which is why the cycle is easy to miss — `projection/__init__.py:1466-1481`) |
-| the inventory report | `tortoise/projection/__init__.py:18491` | **retain the SERVED set** beside the already-unconditional `_vector_indexed_labels` (`:18570`) and report the pair; `if gap:` (`:18577`) keeps gating the **warning** only; keep fail-open | **the read is on the unguarded `Projection.__init__` path** — covered by an existing pin |
+| the gate's consult point | `embed_gate.embed_gate_enabled()` in `tortoise/embeddings.py` | **untouched** | — |
+| the exemption register | new leaf module (pattern: `tortoise/vector_write.py`, `tortoise/live.py`) | add | a leaf must not live under `tortoise/projection/` — that package's `__init__` is the head of the `projection → pack_state → sdk → projection` cycle, where a module-scope read of the config constants is a **reproduced** `ImportError` (`import tortoise.sdk` / `import tortoise.pack_manifest_store` break; `import tortoise.projection` alone still succeeds, which is why the cycle is easy to miss — `_config_classes()`'s docstring in `projection/__init__.py` documents it) |
+| the inventory report | `_record_vector_index_inventory` in `tortoise/projection/__init__.py` | **retain the SERVED set** beside the already-unconditional `_vector_indexed_labels` (`self._vector_indexed_labels = measured & served`) and report the pair; `if gap:` keeps gating the **warning** only; keep fail-open | **the read is on the unguarded `Projection.__init__` path** — covered by an existing pin |
 | the census | `tools/` (new, read-only) | add | must not run against production without `--dry-run` |
 
 **Failure modes addressed:** (a) a raising catalogue read breaks store construction → **fail-open is
