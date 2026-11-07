@@ -1082,16 +1082,14 @@ def test_wire_identity_is_stripped_like_the_reader_names_it():
     ``coalesce(p.session_id, s.id)`` — the RAW STORED spelling. So if a
     stored ``:Session`` id carried surrounding whitespace, the *stripped*
     seed key is the one that could never equal it, and the strip would
-    CAUSE a charged-then-dropped group rather than prevent it. That
-    configuration is unreachable wherever the ``:Session(id)`` index is
-    SERVED (an indexed key with surrounding whitespace cannot be matched —
-    #9599 — so a padded ``:Session`` never gets the ``CONTAINS`` edge the
-    fetch traverses, hence no group key). ⛔ It is NOT unreachable in the
-    label-scan form: index creation is BEST-EFFORT (a swallowed
-    ``try/except``), and a label scan compares STORED bytes, where the
-    padded id matches its own spelling, the edge IS wired, and the group
-    key comes back RAW. So normalising both sides is #9599's decision still,
-    not a moot one. On a REAL product hit the strip is also a no-op, because
+    CAUSE a charged-then-dropped group rather than prevent it. What makes
+    it unreachable is the WRITER'S SPELLING, not the index: #9599 indexes
+    the TRIMMED term, so a padded ``:Session`` IS findable by its trimmed
+    spelling, and a writer that names the id TRIMMED wires the
+    ``CONTAINS`` edge onto a padded node — the fetch then returns the RAW
+    padded key. It is unreachable only while every writer spells the id
+    exactly as stored, and normalising both sides is #9599's decision. On a
+    REAL product hit the strip is also a no-op, because
     ``sdk.tortoise_fts_query`` sanitises the wire value at the producer.
     What this test therefore pins is exactly the hand-built half: the pool
     and the reader agree on whether a hit HAS an identity, and on which.

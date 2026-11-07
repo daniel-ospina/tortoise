@@ -790,7 +790,10 @@ def session_key_of(hit: dict) -> str:
     ``_safe_session_tag`` (strip + allowlist) before it lands on the hit,
     so an id outside the allowlist arrives as ``""`` and falls through to
     the per-hit bucket on the reader's and the pool's read alike. So the
-    strip binds the hand-built / annotation-built shapes only.
+    strip binds the HAND-BUILT shapes only: NEITHER annotator writes
+    ``sessionId`` (``annotate_ask_hits`` and ``_annotate_hits`` both stamp
+    the SNAKE key), so an annotated hit carrying the camel key got it from
+    the sanitising fetch, where the strip is already a no-op.
 
     What the strip actually closes is therefore narrow and worth stating
     exactly: a whitespace-only camel value would otherwise key a session
@@ -812,15 +815,15 @@ def session_key_of(hit: dict) -> str:
     therefore have a group key this stripped key can never equal, so the
     seed would be spent and its group DROPPED (groups are built over
     ``seed_order``: ``session_reinjection.reinjection_merge_order``) — the
-    strip would CAUSE that, not prevent it. That configuration is
-    unreachable wherever the ``:Session(id)`` index is SERVED: an indexed key
-    with surrounding whitespace cannot be matched (#9599), so a padded
-    ``:Session`` never carries the ``CONTAINS`` edge the fetch traverses.
-    ⛔ It is NOT unreachable in the label-scan form — index creation is
-    BEST-EFFORT (a swallowed ``try/except``), and a label scan compares
-    STORED bytes, where the padded id matches its own spelling, the edge IS
-    wired, and the group key comes back RAW. So #9599's normalise-both-sides
-    decision is not moot, and this strip is no substitute for it.
+    strip would CAUSE that, not prevent it. What makes it unreachable is the
+    WRITER'S SPELLING, not the index: #9599 indexes the TRIMMED term, so a
+    padded ``:Session`` IS findable by its trimmed spelling — the engine's
+    own record says a padded row had no findability by its own spelling and
+    gains it by the trimmed one. So every writer that names the id TRIMMED
+    wires the ``CONTAINS`` edge onto a padded node, and the fetch then
+    returns the RAW padded key. It is unreachable only while every writer
+    spells the id exactly as stored. #9599's normalise-both-sides decision
+    is therefore not moot, and this strip is no substitute for it.
 
     Pinned by ``tests/test_session_reinjection_rules.py::test_session_key_
     matches_the_historical_bucket_key`` (the three historical cases, all
@@ -2375,8 +2378,8 @@ def _session_admission_key(
     (``session_reinjection.py``:750-753) — while ``dedup_pool`` /
     ``session_diverse_order`` / ``reinjection_merge_order`` only dict-key it,
     and dict-keying is safe only for a HASHABLE non-``str`` (``5``,
-    ``True``): an UNHASHABLE value (``{}``/``[]``) raises ``TypeError``
-    there too, measured); a whitespace-only snake id (the
+    ``True``): a TRUTHY unhashable (``[1]``/``{1: 2}``) raises ``TypeError``
+    there too, measured; a whitespace-only snake id (the
     pool keys it RAW because it is truthy, while this grain DISCARDS it
     rather than stripping); a WIRE id that
     spells the ``idx:`` namespace — ``_SAFE_SESSION_TAG_RE`` permits ``:``,
