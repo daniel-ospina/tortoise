@@ -5097,7 +5097,7 @@ class Test4051ChargeCoversTheLoopShape:
     ⛔ **This class does not bound the lane's TOTAL growth.** That is §4: a
     `points: []` commit mints nodes `quota._count_resource("points")` does not
     match, so the points gate cannot trip on this shape and the throttle bounds
-    a RATE. The third leg measures that residual as a number so it does not have
+    a RATE. The fourth leg measures that residual as a number so it does not have
     to be re-derived; it does not close it. Closing it needs a widened
     `max_points` (a meaning change for every existing tenant, needing a
     migration) or an armed byte ceiling whose figure the owner deferred on
