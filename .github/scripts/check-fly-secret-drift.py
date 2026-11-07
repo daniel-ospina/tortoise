@@ -277,6 +277,13 @@ _LEDGER_RE = re.compile(
     r"^(?P<name>[A-Z][A-Z0-9_]*)[ \t]+owner=(?P<owner>\S+)[ \t]+"
     r"expires=(?P<expires>\d{4}-\d{2}-\d{2})[ \t]+reason=(?P<reason>.+)$"
 )
+# Characters `str.splitlines()` treats as a line boundary but bash's `read` does
+# NOT: a CR-only (or \v/\f/\u2028-saved) ledger would be N entries to a Python
+# reader and ONE line to the sync filter, so the two halves would disagree about
+# which names are suppressed. The reader splits on "\n" (bash's model) and REFUSES
+# any of these inside a line, rather than letting the tail of a line parse as part
+# of `reason`. A CRLF file is unaffected: `strip()` removes the trailing `\r`.
+_EXTRA_LINE_BREAKS = frozenset("\r\v\f\x1c\x1d\x1e\x85\u2028\u2029")
 # The separators are SPACE/TAB only, never ``\s``: the sync filter in the workflow
 # tokenises with bash's ``[[:space:]]``, so a separator the glob class does not
 # match (U+00A0 and friends) would be a name to this parser and a fragment of the
@@ -732,10 +739,32 @@ def read_mitigation_ledger(
     REFUSED here rather than parsed generously — see the INDENT check below.
     """
     entries: dict[str, Mitigation] = {}
-    for lineno, raw in enumerate(path.read_text().splitlines(), start=1):
+    # Read with `newline=""` so Python does NOT translate line endings, and split on
+    # "\n": the sync filter's `while IFS= read -r` splits on `\n` ONLY. Both halves
+    # matter — `Path.read_text()` opens in universal-newline mode, so a CR-only file
+    # arrived here already rewritten as LF and parsed as TWO entries while bash read
+    # ONE line, so the second name was never filtered and the gate reported `LEDGER
+    # NOT HONOURED` against `deploy-hosted.yml`: the same misattribution the INDENT
+    # check below exists to prevent, from the other direction (review round 2 F1).
+    with path.open(newline="") as handle:
+        text = handle.read()
+    for lineno, raw in enumerate(text.split("\n"), start=1):
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
+        embedded = sorted(set(line) & _EXTRA_LINE_BREAKS)
+        if embedded:
+            # A line-break character `str.splitlines()` honours and bash's `read`
+            # does not. REJECT it rather than silently swallow the rest of the line
+            # (which would parse as part of `reason`, leaving an entry the deploy
+            # never honours and no reader any the wiser).
+            raise ValueError(
+                f"{path.name}:{lineno}: line contains {embedded[0]!r}, which ends a "
+                "line for a Python reader but NOT for the sync filter in "
+                "deploy-hosted.yml (which splits on newline only) — the two halves "
+                "would disagree about which entries exist (save the ledger with "
+                "plain newlines)"
+            )
         if raw != raw.lstrip():
             # An INDENTED entry parses fine here (the line is stripped first) and is
             # silently ignored by the sync filter (which takes the first
@@ -988,6 +1017,20 @@ def main() -> int:
             f"(`flyctl secrets unset {name} --app {app}`), or delete the ledger entry so "
             "the deploy resumes managing it (while both are true the value is frozen: a "
             "rotation in GitHub would not reach the app)"
+        )
+
+    # (0b-ii) The `[env]` half is a SECOND delivery path, and an entry that misses it
+    # is a false record with a GREEN gate: unsetting the secret does not remove a
+    # value `fly.toml` still assigns, so the app keeps reading it while every line of
+    # this ledger says the name is deliberately absent. `fly-toml-env` and `fly-only:`
+    # are already refused `name in env_keys`; a `gh-secret:` name is not, so it has to
+    # be caught here (review round 2 F4).
+    for name in sorted(mitigated & set(env_keys)):
+        unhonourable.append(
+            f"LEDGER NOT HONOURED — {name!r} is recorded as deliberately absent in "
+            f"{ledger_file.name} but is also an assigned key in fly.toml [env], so the "
+            "deploy applies that value whatever the secret list says — the omission "
+            "cannot be honoured. Remove the [env] assignment, or delete the entry"
         )
 
     # (0c) An EXPIRED entry keeps suppressing on purpose: silently re-arming on a
