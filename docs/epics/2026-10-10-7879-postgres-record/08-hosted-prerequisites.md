@@ -881,7 +881,7 @@ migrations. No pool exists.~~ ✅ **the mechanism LANDED (#9558/R10, PR #11386).
 BEHIND the private hook `_default_connect` (so the read door reuses it too), the column map is cached
 on a per-file STAT identity — `(name, mtime_ns, size, inode, ctime_ns)`, NOT a content hash (a
 content-preserving stat rewrite inside one inode-clock tick is the one shape it cannot see, and a
-digest was measured at ~25–40 % of the cache's own win and rejected), and the cost was MEASURED before
+digest was measured at ~31–36 % of the cache's own win and rejected), and the cost was MEASURED before
 and after with one instrument against two trees: **49.72–52.86 → 255.68–261.61 records/s**, per-record
 mean **18.89–20.10 → 3.82–3.91 ms**, `connect` calls per record **1.00 → 0.00**, server-logged
 `connection authorized` **+66 → +2** (`docs/evidence/9558-record-write-cost/`, whose eight committed
@@ -889,7 +889,7 @@ mean **18.89–20.10 → 3.82–3.91 ms**, `connect` calls per record **1.00 →
 parent — 7 of them touching the measured files, which makes the delta conservative rather than
 controlled. ⚠️ Two residual
 facts a later lane should not re-derive: the column-map CALL count is unchanged at 1/record (the WORK
-dropped, not the call — a caller-held map is the deferred lifecycle change), and 0.27–0.33 ms/record of
+dropped, not the call — a caller-held map is the deferred lifecycle change), and 0.32–0.34 ms/record of
 pure stat overhead remains because `replay_plan` drives both cached readers and each recomputes the
 fingerprint — the filed fix (#11388) saves ONE of those two passes (0.160–0.169 ms). Batching the per-record insert was explicitly deferred, not forgotten (see
 above).

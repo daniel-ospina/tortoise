@@ -62,4 +62,9 @@ def main() -> int:
     return 0
 
 
-raise SystemExit(main())
+# ⛔ GUARDED: an unguarded module-level call makes an IMPORT of this probe REWRITE the
+# committed `fingerprint-cost.json` with the importing box's wall-clock, silently
+# invalidating the numbers every docstring and the README cite. Every other probe in
+# `docs/evidence/` guards it; this one is a probe, not a module.
+if __name__ == "__main__":
+    raise SystemExit(main())

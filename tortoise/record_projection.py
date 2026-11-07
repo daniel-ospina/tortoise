@@ -1608,8 +1608,9 @@ def _migrations_fingerprint(base: Path) -> tuple:
     Closing it completely needs a content digest, and that was MEASURED and
     rejected — with the arithmetic quoted from the SAME measurement, because an
     earlier revision of this docstring compared the digest against one pass
-    instead of against the win: one fingerprint pass is 0.160–0.169 ms (`fingerprint-cost.json`), blake2b
-    over the same fifteen files (129 KB) is 0.42–0.55 ms, and the cached read it
+    instead of against the win: one fingerprint pass is 0.160–0.169 ms (`fingerprint-cost.json`),
+    blake2b over the same fifteen files (129,355 bytes) is 0.543–0.593 ms
+    (`fingerprint-cost.json`), and the cached read it
     would guard saves ~1.2 ms (uncached `table_columns()` 1.546–1.588 ms → warm
     cached 0.332–0.353 ms, medians from the committed run set), so a digest ADDS
     0.374–0.433 ms net of the pass it replaces — **~31–36 % of the win** — real but
