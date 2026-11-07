@@ -502,12 +502,6 @@ def _capture_payload(
             "PATH": stub_dir,
             "HOME": stub_dir,
             "GITHUB_SHA": "fixture-sha",
-            # #11122: seed the ledger the payload shell filters ARGS by, resolved
-            # ABSOLUTE, so the sample this harness classifies is filtered by the
-            # same ledger a real deploy reads regardless of the caller's cwd (a
-            # relative default would silently read "no mitigations" from a tmp
-            # cwd and make the gate certify an unfiltered payload).
-            "FLY_MITIGATION_LEDGER": str(ledger_path()),
         }
         # The step's and the job's `env:` are inherited by the payload shell, and a
         # guard may read one (`[ -z "$VAR" ]`). They are modelled with the same
@@ -516,6 +510,28 @@ def _capture_payload(
         # PATH/HOME/GITHUB_SHA authoritative for the harness itself.
         for key, value in (step_env or {}).items():
             env.setdefault(key, _SECRET_TMPL_RE.sub(substitute, value))
+        # #11122: seed the ledger the payload shell filters ARGS by, resolved
+        # ABSOLUTE, so the sample this harness classifies is filtered by the
+        # same ledger a real deploy reads regardless of the caller's cwd (a
+        # relative default would silently read "no mitigations" from a tmp
+        # cwd and make the gate certify an unfiltered payload).
+        #
+        # ⛔ SEEDED **AFTER** THE STEP/JOB ENV, NEVER BEFORE — a workflow binding
+        # of this seam MUST win, because the deploy's own shell resolves
+        # `${FLY_MITIGATION_LEDGER:-<default>}` from that same binding. Seeding it
+        # first made `setdefault` above a no-op for this one key, so a workflow
+        # that bound the seam was still CLASSIFIED against the default ledger: the
+        # payload under test filtered by `/dev/null` (staging every mitigated
+        # secret) while the harness filtered by the fixture, and the
+        # `LEDGER NOT HONOURED` tripwire stayed green over exactly the edit it
+        # exists to catch (#11332 review). A seam that cannot be declared is a
+        # fail-open, so the ordering is the fix and the assertion below states it.
+        env.setdefault("FLY_MITIGATION_LEDGER", str(ledger_path()))
+        assert env["PATH"] == stub_dir and env["HOME"] == stub_dir, (
+            "the step/job env overrode the harness's own PATH/HOME — the stub "
+            "`fly`/`flyctl` would not be found and the payload would be "
+            "classified against a shell that cannot run it"
+        )
         # fd 3 is opened by the wrapper and inherited across `exec`, so the stub
         # has somewhere private to write. `bash -e -u` mirrors GitHub's default
         # shell for a `run:` block, plus NOUNSET: a payload that reads a variable

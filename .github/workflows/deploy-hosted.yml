@@ -1229,16 +1229,43 @@ jobs:
           # round 2, P2). The gate's suppression proof is a simulation of this
           # payload; failing loudly here keeps the production path from diverging
           # from the thing that proves it.
-          if [ ! -r "$MITIGATION_LEDGER" ]; then
-            echo "::error::#11122 — the mitigation ledger could not be read at ${MITIGATION_LEDGER}, so this deploy cannot tell a deliberate absence from an unconfigured secret and must not stage anything. Restore the file (or the path) and re-run."
+          #
+          # ⛔ `-f` AS WELL AS `-r`, BECAUSE `-r` IS TRUE FOR A DIRECTORY. `[ -r ]`
+          # cannot tell a ledger from a directory at the same path, and the loop's
+          # input redirect then fails in a way `bash -e` does NOT act on: measured
+          # `bash -e` with `done < <dir>` prints `read error: 0: Is a directory`,
+          # SKIPS the loop body and exits **0** with `MITIGATED=" "` — every
+          # mitigated secret staged, nothing failed. That is the exact state the
+          # paragraph above claims the guard rules out, so the guard has to name
+          # it. (The harness's `bash -e -u` catches it as an unbound `$LEDGER_LINE`;
+          # production runs `-e` only, which is why the claim and the code disagreed
+          # — #11332 review.)
+          if [ ! -f "$MITIGATION_LEDGER" ] || [ ! -r "$MITIGATION_LEDGER" ]; then
+            echo "::error::#11122 — the mitigation ledger could not be read as a FILE at ${MITIGATION_LEDGER} (missing, unreadable, or a directory), so this deploy cannot tell a deliberate absence from an unconfigured secret and must not stage anything. Restore the file (or the path) and re-run."
             exit 1
           fi
+          # The redirect is opened on a DEDICATED, DYNAMICALLY ALLOCATED fd with its
+          # own failure check rather than inline on `done`, so an unopenable ledger
+          # is a hard failure instead of a skipped loop.
+          # ⛔ NOT fd 3: the provenance gate classifies this payload by executing it
+          # under a wrapper that has ALREADY opened fd 3 as the stub binaries'
+          # write channel (`exec 3>argv.records`). Reusing a fixed fd silently
+          # re-points that channel and the classification loses the argv it reads —
+          # a fork-free way to break the gate while looking tidier.
+          # ⛔ AND `-f` IS STILL REQUIRED: `exec {fd}<` SUCCEEDS on a DIRECTORY
+          # (measured — `open(2)` on a directory is permitted), so the fd form alone
+          # does not rule a directory out.
+          exec {LEDGER_FD}< "$MITIGATION_LEDGER" || {
+            echo "::error::#11122 — the mitigation ledger at ${MITIGATION_LEDGER} could not be opened for reading, so this deploy cannot tell a deliberate absence from an unconfigured secret and must not stage anything."
+            exit 1
+          }
           while IFS= read -r LEDGER_LINE || [ -n "$LEDGER_LINE" ]; do
             case "$LEDGER_LINE" in ''|'#'*) continue ;; esac
             LEDGER_NAME="${LEDGER_LINE%%[[:space:]]*}"
             case "$LEDGER_NAME" in ''|'#'*) continue ;; esac
             MITIGATED="$MITIGATED$LEDGER_NAME "
-          done < "$MITIGATION_LEDGER"
+          done <&$LEDGER_FD
+          exec {LEDGER_FD}<&-
           STAGED_ARGS=()
           for ARG in "${ARGS[@]}"; do
             ARG_NAME="${ARG%%=*}"

@@ -5412,6 +5412,21 @@ def test_the_sync_step_honours_the_mitigation_ledger():
         "no filtering `case` over the ledger name set — the ledger is read but "
         "never applied"
     )
+    # ⛔ The DELIMITERS are the discrimination feature, not decoration (#11332
+    # review, P2). `MITIGATED` is a SPACE-DELIMITED accumulator, so the pattern
+    # must anchor on the leading AND trailing space: without them `FOO` matches
+    # `FOO_BAR`, and this payload really carries `TORTOISE_BACKUP_KEY` next to
+    # `TORTOISE_BACKUP_KEY_PREVIOUS` (deploy-hosted.yml:1097 / :1102) — the longer
+    # name would silently stop syncing on every deploy, with no gate reporting it
+    # (rotation breaks, #2318). Executed coverage for this lives in
+    # `tests/test_fly_secret_drift.py::test_a_ledgered_name_does_not_suppress_a_LONGER_name_that_extends_it`;
+    # this pin is the static half, so a weakening is visible in the diff as well.
+    assert '*" $ARG_NAME "*' in block, (
+        "the ledger match is not delimited on BOTH sides — `*\"$ARG_NAME\"*` makes "
+        "a ledger entry for `TORTOISE_BACKUP_KEY` also suppress "
+        "`TORTOISE_BACKUP_KEY_PREVIOUS`, so the previous key silently stops "
+        "syncing and the exception becomes wider than the record it came from"
+    )
     assert 'ARGS=("${STAGED_ARGS[@]}")' in block, (
         "the filtered array must be assigned back to ARGS — otherwise the filter "
         "computes a list and `flyctl` still receives the unfiltered one"

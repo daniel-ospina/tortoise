@@ -2957,6 +2957,45 @@ class TestTheMitigationLedger:
             f"the block staged nothing at all — the harness broke, not the filter: {staged}"
         )
 
+    def test_a_workflow_binding_of_the_seam_is_what_the_payload_is_filtered_by(self):
+        """The classified payload must mirror the DEPLOY, not the harness (#11332 P1).
+
+        The harness seeds `FLY_MITIGATION_LEDGER` so the sample it classifies is
+        filtered by a known file, but the deploy's own shell resolves
+        `${FLY_MITIGATION_LEDGER:-<default>}` — so if a workflow ever BINDS that
+        seam, the binding is what the real step uses. Seeding the harness's value
+        first made `env.setdefault` a no-op for this one key, so the payload under
+        test filtered by `/dev/null` (staging every mitigated secret) while the
+        harness filtered by the fixture: the `LEDGER NOT HONOURED` tripwire stayed
+        GREEN over exactly the edit it exists to catch. A seam that cannot be
+        declared is a fail-open, so this pins the ordering.
+
+        Bound to an EMPTY ledger with a ledgered `SENTRY_DSN` on the gate's side:
+        the payload stages the name and the gate records it as deliberately
+        absent, which is the re-arm this whole change exists to refuse.
+        """
+        bound_ledger = _ledger("# bound by the workflow, deliberately empty\n", name="bound.txt")
+        bound_workflow = _LEDGER_WORKFLOW.replace(
+            "      - name: Set all app secrets on Fly.io\n",
+            "      - name: Set all app secrets on Fly.io\n"
+            "        env:\n"
+            f"          FLY_MITIGATION_LEDGER: {bound_ledger}\n",
+        )
+        assert bound_workflow != _LEDGER_WORKFLOW, (
+            "the step header moved — this fixture no longer binds the seam"
+        )
+        proc = _ledger_run(
+            _ledger(_entry("SENTRY_DSN")),
+            workflow=_fixture("ledger-workflow-bound-seam.yml", bound_workflow),
+        )
+        assert proc.returncode == 2, (
+            "the payload was classified against the harness's ledger instead of the "
+            "one the workflow binds, so a deploy filtering by a different (empty) "
+            f"ledger was certified OK: {proc.stdout}"
+        )
+        assert "LEDGER NOT HONOURED" in proc.stdout
+        assert "SENTRY_DSN" in proc.stdout
+
     def test_an_unreadable_ledger_fails_the_deploy_instead_of_staging_everything(self, tmp_path):
         """No `else` on the `-r` guard was a silent "no mitigations" (review round 2).
 
@@ -2982,6 +3021,98 @@ class TestTheMitigationLedger:
         )
         assert "could not be read" in proc.stdout
         assert "#11122" in proc.stdout
+
+    def test_a_DIRECTORY_at_the_ledger_path_fails_the_deploy_too(self, tmp_path):
+        """`[ -r ]` is TRUE for a directory, and the loop's redirect does not fail loudly.
+
+        `-r` cannot tell a ledger from a directory at the same path, and the skipped
+        loop is NOT caught by the shell GitHub actually uses: measured, `bash -e`
+        with `done < <dir>` prints `read error: 0: Is a directory`, runs NO loop
+        body and exits **0** with `MITIGATED=" "` — every mitigated secret staged,
+        nothing failed, which is the exact state the guard's own comment says it
+        rules out (#11332 review, P2).
+
+        ⛔ RUN WITH `bash -e` ONLY, NOT `-e -u`: the harness's `-u` turns the same
+        state into an unbound `$LEDGER_LINE` and exits 1 by ACCIDENT, so a `-e -u`
+        test passes with or without the `-f` guard and pins nothing. Production is
+        `bash -e`, so that is the shell this arm must fail under.
+        """
+        as_dir = tmp_path / "a-directory"
+        as_dir.mkdir()
+        script = 'ARGS=(FASTAPI_INTERNAL_KEY=k SENTRY_DSN=dsn)\n' + _LEDGER_FILTER
+        env = {
+            "PATH": "/usr/bin:/bin",
+            "HOME": str(tmp_path),
+            "FLY_MITIGATION_LEDGER": str(as_dir),
+        }
+        proc = subprocess.run(
+            ["bash", "-e", "-c", script],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=30,
+        )
+        assert proc.returncode != 0, (
+            "a directory at the ledger path was read as 'no mitigations' and the "
+            "deploy exited 0 — every mitigated secret staged: "
+            f"{proc.stdout}{proc.stderr}"
+        )
+        assert "could not be read as a FILE" in proc.stdout, (
+            "the guard fired for the wrong reason (or not at all) — it must name the "
+            f"directory case: {proc.stdout}{proc.stderr}"
+        )
+
+    def test_a_ledgered_name_does_not_suppress_a_SHORTER_name_it_extends(self, tmp_path):
+        """The `case` DELIMITERS are the discrimination feature (#11332 review, P2).
+
+        The ledger is matched as `" $NAME "` — leading AND trailing space — inside a
+        space-delimited accumulator. Drop either delimiter and `FOO_BAR` also matches
+        `FOO`, so a ledger entry for `TORTOISE_BACKUP_KEY_PREVIOUS` would suppress
+        `TORTOISE_BACKUP_KEY` as well — a REAL pair in this payload
+        (`deploy-hosted.yml:1097` / `:1102`), where the previous backup key is the
+        entry an operator is most likely to write after a rotation. The consequence
+        is not a re-arm but the mirror-image defect: the LIVE key silently stops
+        syncing on every deploy, so rotation breaks (#2318) and no gate reports it.
+        Suppression WIDER than the record is a false exception in the other
+        direction, and it is the direction the polarity of `for ARG in "${ARGS[@]}"`
+        makes reachable: the shorter name is compared against the longer ledger entry.
+
+        Every other fixture uses names that are not prefixes of one another, so
+        nothing in the suite pinned the delimiters — weakening the pattern to
+        `*"$ARG_NAME"*` passed the whole suite before this test.
+        """
+        ledger = _ledger(_entry("TORTOISE_BACKUP_KEY_PREVIOUS"), name="prefix-ledger.txt")
+        script = (
+            "ARGS=(FASTAPI_INTERNAL_KEY=k TORTOISE_BACKUP_KEY=v TORTOISE_BACKUP_KEY_PREVIOUS=p)\n"
+            + _LEDGER_FILTER
+            + 'printf "%s\\n" "${ARGS[@]}"\n'
+        )
+        env = {
+            "PATH": "/usr/bin:/bin",
+            "HOME": str(tmp_path),
+            "FLY_MITIGATION_LEDGER": str(ledger),
+        }
+        proc = subprocess.run(
+            ["bash", "-e", "-u", "-c", script],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=30,
+        )
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        staged = [line.split("=", 1)[0] for line in proc.stdout.splitlines() if "=" in line]
+        assert "TORTOISE_BACKUP_KEY_PREVIOUS" not in staged, (
+            f"the ledger entry for TORTOISE_BACKUP_KEY_PREVIOUS did not suppress it: {staged}"
+        )
+        assert "TORTOISE_BACKUP_KEY" in staged, (
+            "a ledger entry for TORTOISE_BACKUP_KEY_PREVIOUS also suppressed the "
+            "shorter TORTOISE_BACKUP_KEY — the match is not delimited by the "
+            "space-separated accumulator, so the LIVE backup key silently stops "
+            f"syncing and rotation breaks: {staged}"
+        )
+        assert "FASTAPI_INTERNAL_KEY" in staged, (
+            f"the block staged nothing at all — the harness broke, not the filter: {staged}"
+        )
 
     def test_a_ledgered_name_the_payload_still_stages_fails_the_deploy(self):
         """Dropping the filter from the workflow must not be a silent re-arm.
