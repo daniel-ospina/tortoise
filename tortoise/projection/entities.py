@@ -2037,7 +2037,8 @@ class _EntityHandlers:
         # parameter), and the destructive removal of what DOES exist has no
         # shipped instrument ON A PRODUCTION SERVER GRAPH — a full restore's
         # whole-graph wipe clears it where the L2 name rule admits the target
-        # (`test_`-prefixed or an embedded `path=` DB) and is refused pre-wipe
+        # (`test_`/`tortoise_test`-prefixed, or an embedded `path=` DB) and is refused
+        # pre-wipe
         # on a production name (`org_<org_id>`, its child, a legacy `team_…`),
         # and a graph-side `REMOVE n.story_arc` is issued by nobody;
         # `update_entity(…, story_arc=None)` is REFUSED here as server-managed
