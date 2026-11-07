@@ -57,8 +57,9 @@ aboutObjects: "epic #5090, decision V1, filtered ANN, pgvector, FalkorDB HNSW, e
 - **Second precedent: `#4997` had to reconstruct the gap by hand.** `CALL db.indexes()` plus reading two
   functions. The pattern conclusion — *"if the system holds the fact, the system should state it"* — is
   why this is S4 in the scope: a closing-out item **plus one piece of new state** — the served set is never
-  retained today (`projection/__init__.py:18552` computes it locally; only `measured & served` is stored at
-  `:18570`), so it is not one line (`03-scope.md` S4's corrected premise; `05-decompose.md` C4).
+  retained today (`_record_vector_index_inventory` computes it locally as
+  `served = set(ENTITY_TYPE_LABELS.values())`; only `self._vector_indexed_labels = measured & served` is
+  stored), so it is not one line (`03-scope.md` S4's corrected premise; `05-decompose.md` C4).
 
 ## Workflow Pattern Research
 
@@ -76,7 +77,7 @@ aboutObjects: "epic #5090, decision V1, filtered ANN, pgvector, FalkorDB HNSW, e
   served-vs-indexed gap. The **served** set is declared; the **indexed** set is **measured** from
   `CALL db.indexes()` (discriminator is the `types` column, index 2 — copying the older `_row[0]/_row[1]`
   read would read the wrong column).
-- **Operator workflow.** `_ensure_indexes` runs from `Projection.__init__` **unguarded**; ~28 sequential round trips (`monitoring.py:65`, `selfhost.py:392`). Any new read there **must be fail-open** or it breaks
+- **Operator workflow.** `_ensure_indexes` runs from `Projection.__init__` **unguarded**; ~28 sequential round trips (the `#3143: the probe has TWO phases` block in `monitoring.py` and the `#3243` cold-start block in `selfhost.py`; the figure wraps across two lines in the first, so grep the block header, not the literal). Any new read there **must be fail-open** or it breaks
   store construction.
 
 ## Tech Stack Research
@@ -133,7 +134,7 @@ comparables now say what that measurement will probably show, and how to run it:
 
 | Assumption | Confidence | Source | Validation plan |
 |---|---|---|---|
-| Vectors are stored and unindexed on **two** labels in the 2026-09-24 count (`Object` 7,859 + `Event` 4,798 = 12,657; four served labels are unindexed). ⚠️ NOT a claim that `Source`/`Subject` can never hold one — their writers DO store `embedding` (`_upsert_document` → `:Source`, `_upsert_subject`), which is why the census measures `db.labels()` instead of the index inventory | high | `ENTITY_TYPE_LABELS` (5 served) + `Point`-only DDL (`projection/__init__.py:19765`, `:19783`) | re-run `tools/dod_5090_probe.py --census` on a graph that holds rows |
+| Vectors are stored and unindexed on **two** labels in the 2026-09-24 count (`Object` 7,859 + `Event` 4,798 = 12,657; four served labels are unindexed). ⚠️ NOT a claim that `Source`/`Subject` can never hold one — their writers DO store `embedding` (`_upsert_document` → `:Source`, `_upsert_subject`), which is why the census measures `db.labels()` instead of the index inventory | high | `ENTITY_TYPE_LABELS` (5 served) + `Point`-only DDL (`_ensure_vector_index_api` in `tortoise/projection/__init__.py`: the `CALL db.idx.vector.createNodeIndex('Point', 'embedding'` procedure form, falling back to the `CREATE VECTOR INDEX FOR (p:Point) ON (p.embedding)` Cypher form) | re-run `tools/dod_5090_probe.py --census` on a graph that holds rows |
 | The EMBED rule exists and is **off** by default | high | `embed_gate.RULE_SET is value_gate.RULES` → `True`; flag unset in the 4 shipped surfaces that exist | the arming measurement (scope item 1) |
 | **A cross-store move PRESERVES recall on OUR mix** (this is the `01-align.md` K3 statement; §3's evidence below is *against* it) | **low — the hinge** | 0.942 → 0.401 @ 10 % selectivity (post-filter); 0.63–0.72 (epic's comparable); both **not our corpus** | **E1** (parked with V1) — exact ground truth, our selectivities, filtered recall reported separately |
 | `hnsw.iterative_scan` compensates enough to be a net win | **low — unmeasured** | recovers 0.847 in one config; costs CPU/memory/tail latency | **E1**, same sweep |
@@ -290,6 +291,22 @@ claims the diff carries none, and against `01-align.md:15-19`; replaced with a s
 that carries no line number. **(2)** the round-5 correction was made *in place* with no round of its own, so
 the artifact's log stopped at round 4 while a fifth round's fixes landed — the precise divergence this log's
 own opening paragraph says it exists to prevent. Both fixed here, and the two rounds recorded.
+
+**Rounds 7–9 (PR level, fresh context)** — three more rounds landed after the entry above and are recorded
+here for the same reason: the log had stopped while its own subject kept moving. (The `dc524f02e7` above is
+a pre-rebase head and **not** an ancestor of the branch, so read these entries as an ordered disclosure, not
+as a `git range`.) All three closed the same defect class — **a converted anchor that named the right topic
+but did not resolve to a location**, which is this PR's own subject one level up.
+**(7)** `d723dce1f70`: `if gap:` is not unique in `projection/__init__.py` — an earlier hit sits in
+`_rebuild_all_replay`, not the inventory report — so every occurrence was qualified by its enclosing
+function; and the `#3143` / `#3243` markers are prose tags that recur throughout their files rather than
+locations, so they were replaced by the figure they name. **(8)** `32959faf7df`: round 7's replacement figure
+was then refuted by measurement — in `monitoring.py` its copy is line-wrapped, so the exact literal resolves
+to a different docstring many lines away; re-anchored to the block header, which is unwrapped and unique.
+**(9)** `d451a66fb71`: the `Point`-only DDL cell had been rewritten to drop the file name in favour of two
+literals that each resolve to many `.py` files, at least one of whose plain-grep hits is a
+label-parameterised runbook call — the opposite shape from the "`Point`-only" claim the cell supports;
+re-anchored to `_ensure_vector_index_api`, whose definition is unique among `.py` files.
 
 ### P1-a — `iterative_scan` was reported without its documented failure at correlated filters
 

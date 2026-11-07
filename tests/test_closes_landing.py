@@ -5377,8 +5377,10 @@ def test_a_type_6_block_on_a_LAZY_line_belongs_to_the_item_it_is_still_inside():
         `- a` + `x` + `  </ul>` + `> > 2.     Closes #100`
             renderer: the `<li>` holds the paragraph AND an `html_block` whose raw text is `</ul>`;
             that block ends WITH THE ITEM, so the last line is a NEW blockquote whose wide-gap
-            content is `<pre><code>` -> CODE. `origin/main` `[]`; the pre-fix head `[100]` in
-            `lenient`, `strict=True` (the `issue_process_lint` PASS arm) AND `indented_code=True`.
+            content is `<pre><code>` -> CODE. `[]` at the branch point `origin/main` `80c912244`
+            (closing-tag spelling; the opening-tag spellings give `[100]` there) and `[100]` at the
+            pre-fix head `1bbc16ce5^` — `([100], [100], [100])`, a false PASS in the
+            `issue_process_lint` arm.
 
     The same root is why the `<div>` spelling has always leaked on `origin/main`
     (50 of 244 renderer-CODE bodies in the round-50 targeted grid): the binding was the container
@@ -5536,6 +5538,68 @@ def test_an_item_whose_CONTENT_is_a_bare_marker_leaves_NO_paragraph():
     assert cl.parse_closing_refs(leaf, None, strict=True) == [100], leaf
 
 
+def test_the_CONTENT_ladder_runs_AFTER_the_lazy_and_S4_4_guards():
+    """Round-52 — the content ladder's POSITION, and why it is UNCONDITIONAL.
+
+    It answers a fact about the ITEM (its own content is a bare marker) and it was evaluated at the
+    TOP of `_leaves_no_paragraph`, where it pre-empted the two guards this file documents as
+    load-bearing: round 40's "THE LAZY ANSWER COMES FIRST" and round 50's "§4.4 COMES BEFORE THE LEAF
+    TESTS". Moving it below them keeps this real close, which the top-of-function version blanked:
+
+        `Notes` + `2. -` + `2.     Closes #100`      renderer ONE `<p>` -> PROSE, `[100]` both arms
+
+    ⛔ AND IT IS NOT GATED ON "a paragraph was already closed above" (round-52 review, P0). That gate
+    re-opened, in BOTH arms, the fail-open the ladder exists to close for every body with a prose line
+    above the item — `strict` included, so a false PASS in `issue_process_lint`:
+
+        `x` + `- 1.` + `  2.     Closes #100`   renderer `code_block` -> CODE
+            `origin/main` `[]` both arms at `1177c6708` (`[100]` at the branch point `80c912244`,
+            so in `strict` the gate restored a fail-open that predates this branch); the gated head
+            `[100]` in both.
+
+    ⚠️ The gate protected exactly ONE body, and the fix for the sibling finding CLOSES it instead:
+        `- Text` + `> <br />` + `> <span>` + `> - *` + `>   2.     Closes #100`
+            renderer ONE `html_block` whose raw text ENDS WITH the marker line -> PROSE; `[100]` at the
+            branch point `origin/main` `80c912244`, `[]` at `1177c6708` and at the tip `3861f0a10`,
+            and `[100]` HERE — a line that adds a `>` interrupts the paragraph, so the type-7 veto
+            has nothing to protect (round-54).
+    """
+    md = MarkdownIt("commonmark")
+
+    def keyword_types(body: str) -> set[str]:
+        return {t.type for t in md.parse(body) if "Closes #100" in getattr(t, "content", "")}
+
+    body = "Notes\n2. -\n2.     Closes #100\n"
+    assert keyword_types(body) == {"inline"}, body
+    assert cl.parse_closing_refs(body) == [100], body
+    assert cl.parse_closing_refs(body, None, strict=True) == [100], body
+
+    # ⛔ …AND THE LADDER MUST STAY UNCONDITIONAL (round-52 review, P0). Gating it on "a paragraph was
+    # already closed above" re-opened, in BOTH arms, the fail-open it exists to close — every body
+    # with a prose line above the item. `strict` is the `issue_process_lint` PASS arm, so the second
+    # arm being wrong is a false PASS in that gate:
+    #     `x` + `- 1.` + `  2.     Closes #100`   renderer `code_block` -> CODE
+    #         `origin/main` `[]` both arms at `1177c6708` (`[100]` at the branch point `80c912244`,
+    #         so in the strict arm the gate restored a fail-open that predates this branch); the
+    #         gated head `[100]` in both.
+    for body in ("x\n- 1.\n  2.     Closes #100\n",
+                 "Notes\n- 2.\n  2.     Closes #100\n",
+                 "Summary of the change.\n- 2.\n  2.     Closes #100\n"):
+        assert keyword_types(body) == {"code_block"}, body
+        assert cl.parse_closing_refs(body) == [], body
+        assert cl.parse_closing_refs(body, None, strict=True) == [], body
+
+    # …and the body the removed gate used to keep as prose is a REAL close again (round-54, the
+    # sibling of the P0 above): a line that ADDS a `>` starts a new container and interrupts the
+    # paragraph, so the type-7 `<span>` opens the block the renderer opens and the marker line under
+    # it is that block's raw text. `[100]` at the branch point `80c912244`; `[]` at `1177c6708` and
+    # at the tip `3861f0a10`; `[100]` here.
+    recovered = "- Text\n> <br />\n> <span>\n> - *\n>   2.     Closes #100\n"
+    assert keyword_types(recovered) == {"html_block"}, recovered
+    assert cl.parse_closing_refs(recovered) == [100], recovered
+    assert cl.parse_closing_refs(recovered, None, strict=True) == [100], recovered
+
+
 def test_a_PHANTOM_leaf_block_does_not_EXEMPT_the_strict_arm():
     """A leaf-block state this module GUESSED must not outrank the `strict` arm's own contract.
 
@@ -5551,7 +5615,8 @@ def test_a_PHANTOM_leaf_block_does_not_EXEMPT_the_strict_arm():
 
         `-` + `    code` + `<br />` + `     -     Closes #100`
             renderer `<ul><li>code<br /><ul><li><pre><code>Closes #100` -> CODE
-            `main` before #11186 `[]` in `strict`; after #11186 `[100]` — a FALSE PASS.
+            `[]` in `strict` at the branch point `origin/main` `80c912244`; `[100]` from #11186
+            (`1177c6708`) — a FALSE PASS `main` carried until #11330 fixed `strict`.
 
     The mechanism is the strict arm's own declared over-blank feeding the guess: `strict` blanks
     `    code`, so no paragraph looks open, so `<br />` is read as a legal type-7 opener (§4.6: type
@@ -5601,3 +5666,345 @@ def test_a_PHANTOM_leaf_block_does_not_EXEMPT_the_strict_arm():
     assert keyword_types(indented_html) == {"html_block"}, indented_html
     assert cl.parse_closing_refs(indented_html) == [100], indented_html
     assert cl.parse_closing_refs(indented_html, None, strict=True) == [], indented_html
+
+
+def test_a_QUOTED_indented_block_never_reads_as_a_CLAIM_in_the_indented_code_arm():
+    """Round-53, P1 — a FAIL-OPEN in the `indented_code` arm, restored to the BRANCH POINT's answer.
+
+    §4.4's protection ("an indented code block cannot interrupt a paragraph") was applied to a line
+    that ADDS a blockquote marker. A lazy continuation may DROP a marker; one that adds it opens a
+    NEW block, and a 4+-column line in that new block is indented code. Measured against
+    `MarkdownIt("commonmark")`:
+
+        `Notes` + `>     Closes #100`                      renderer `code_block` in a blockquote
+        `Notes` + `>     IN FLIGHT: 3.2c — branch fix/x`   renderer `code_block` in a blockquote
+        `## Satisfies` + `Notes` + `>     - [ ] criterion`  renderer `code_block` in a blockquote
+
+    the branch point `origin/main` `80c912244` blanks all three in this arm; the pre-fix head
+    credited all three — a fail-open the branch introduced against that baseline, which this
+    restores. ⚠️ `main` has since moved: at `1177c6708` it still carries the `>=` term and KEEPS all
+    three, so this is a DIVERGENCE from the current tip in the renderer-correct direction, not
+    parity with it — measure the baseline, do not assume the name still means the same tree.
+
+    ⚠️ "RENDERER-CORRECT" IS TRUE OF THESE THREE, NOT OF THE TERM (review of this PR, P3): the
+    equality also LOSES a close the renderer keeps readable, in the `indented_code` arm only —
+    `> - *` + `  </ul>` + `Notes` + `>     Closes #100` renders one top-level `html_block`, whose
+    raw text this file READS (`test_an_HTML_blocks_own_text_is_READ_not_hidden`), so every arm owes
+    `[100]`: measured `lenient [100]`, `indented_code []` here, where `main` (`d69faaf38`) answers
+    `[100]` in both. No gate impact — the arm's only consumers (`in_flight_markers`,
+    `has_satisfies_checklist`) cannot see a `Closes` keyword — and the branch point `80c912244`
+    blanks it too, so this is branch-point parity rather than a new class.
+
+    ⛔ WHAT THIS FIX IS NOT (measured, not assumed — fresh-context review of this very change).
+    The two `issue_process_lint` consumers do NOT see these bodies: `IN_FLIGHT_RE` and `CHECKBOX_RE`
+    both anchor at `^[ \\t]*` (`tools/issue_process_lint.py:653`, `:637`), so a line beginning `>`
+    never reaches either predicate — a 7,200-pair sweep through both consumers found ZERO deltas
+    between the pre-fix and fixed states. So the justification is arm-level parity with the BRANCH
+    POINT `80c912244` (§4.4 is the branch's own rule and it was answering it wrongly), NOT a reachable
+    consumer false PASS. The two consumer assertions below are REGRESSION PINS of that contract,
+    not demonstrations of the fix: they hold at both states, and they exist so a future change that
+    starts crediting a quoted block through a reachable shape is caught.
+
+    The term is one character: the depth comparison is EQUALITY, not `>=`. A deeper quote is not
+    this paragraph's continuation. The shallower direction keeps its own terms elsewhere
+    (`_lazy_marker`, `_dropped_quote_is_lazy`), which the CONTROL below pins.
+    """
+    cl = _load_module()
+    md = MarkdownIt("commonmark")
+
+    def token_types_carrying(body: str, needle: str) -> set[str]:
+        return {t.type for t in md.parse(body) if needle in getattr(t, "content", "")}
+
+    closes = "Notes\n>     Closes #100\n"
+    inflight = "Notes\n>     IN FLIGHT: 3.2c — branch fix/x\n"
+    checkbox = "## Satisfies\nNotes\n>     - [ ] criterion\n"
+
+    for body in (closes, inflight, checkbox):
+        assert "code_block" in {t.type for t in md.parse(body)}, body
+    assert token_types_carrying(closes, "Closes #100") == {"code_block"}, closes
+    assert token_types_carrying(inflight, "IN FLIGHT:") == {"code_block"}, inflight
+    assert token_types_carrying(checkbox, "- [ ]") == {"code_block"}, checkbox
+
+    # The arm must hide what the renderer puts in code — this is the assertion the fix turns.
+    # ONE NEEDLE PER BODY, deliberately. This loop used to assert every needle against every
+    # body, which made six of its nine assertions tautologies: `closes` contains no
+    # `IN FLIGHT:` and `inflight` contains no `- [ ]`, and `strip_code` only ever REPLACES a
+    # line with `""` (it never inserts text), so those six could not fail for any implementation.
+    # The companion assertion is what makes each one discriminating: an arm that blanked the
+    # whole body — the cheapest way to pass every negative above — fails on the prose line.
+    for body, needle in ((closes, "#100"), (inflight, "IN FLIGHT:"), (checkbox, "- [ ]")):
+        stripped = cl.strip_code(body, indented_code=True)
+        assert needle not in stripped, body
+        assert "Notes" in stripped, (
+            f"the arm blanked the whole body instead of the code line: {stripped!r}"
+        )
+    assert cl.parse_closing_refs(closes, None, strict=True) == [], closes
+
+    # REGRESSION PINS (not discriminating for this fix — see the docstring): the two consumers
+    # that read this arm swallow nothing here, and must keep swallowing nothing.
+    sys.path.insert(0, str(ROOT))
+    from tools import issue_process_lint as ipl
+
+    assert ipl.in_flight_markers([inflight]) == [], inflight
+    assert ipl.has_satisfies_checklist([checkbox]) is False, checkbox
+
+    # CONTROL — a lazy line that DROPS the marker is still that paragraph's text (§4.4), so the
+    # equality must not be paid for by refusing every quote-depth change. The credit comes from
+    # `_lazy_marker` / `_dropped_quote_is_lazy`, NOT from this term (disabling this term alone
+    # leaves this body credited — measured), so this pins them, not it.
+    prose = "- > q\n  > 2.     Closes #100\n"
+    assert [t.type for t in md.parse(prose) if "Closes" in getattr(t, "content", "")] == ["inline"], prose
+    assert cl.parse_closing_refs(prose) == [100], prose
+
+
+def test_an_ITEM_whose_own_content_is_a_NESTED_LIST_leaves_NO_paragraph():
+    """Round-55, P0 — a FAIL-OPEN in BOTH arms (`strict` included) that the ladder's move introduced.
+
+    The round-52 fix answered "an item whose own content is itself a bare marker holds no
+    paragraph" AFTER `lazy_marker`, because `lazy_marker` is the caller's answer about a top-level
+    paragraph. That is right for a TOP-LEVEL paragraph and wrong when an ITEM holds it: the lazy
+    test's `line_col >= container.rest_col` arm measures against the OUTER item's content column, and
+    an item whose own content is a nested LIST keeps its paragraph one level DEEPER — so the line is
+    answered "lazy continuation" where the renderer put a `<pre><code>`:
+
+        `* - x` + `   2. -` + `  2.     Closes #100`
+            renderer: the `- x` list is nested INSIDE the `*` item, so the marker line under it is a
+            `code_block` -> CODE
+            `origin/main` `[]` both arms; the round-52 head credited `[100]` in both, and
+            `issue_process_lint.claims()` returned `closing: [100]` — a false PASS in arm 1 of the
+            gate this module feeds.
+
+    ⛔ THE DISCRIMINATOR IS THE LINE'S OWN CONTENT, NOT THE CONTAINER. Gating the lazy answer on
+    `container is None` was measured first and FALSIFIED: it disables the answer for EVERY item-held
+    paragraph, so a BLANK item — which §5.2 says cannot interrupt a paragraph — stopped being a
+    continuation and the renderer's real close was dropped in ALL FOUR arms:
+
+        `- item` + `  1.` + `  2.     Closes #100`     renderer ONE `<p>` -> PROSE
+            `origin/main` `[100]` in every arm; that form blanked it
+
+    33 such bodies on a 3,520-body grid, 10 of them in all four arms. Requiring the line to carry
+    content of its own keeps those lazy (the empty-content rule answers them, as round 40 recorded)
+    while an item whose content IS a marker falls through to the ladder. On the two composed grids
+    (5,376 + 3,520 bodies), all four arms: 0 new fail-opens and 0 new lost closes against
+    `origin/main` (`d69faaf38e1`).
+
+    ⛔ WHAT THIS GATE DOES **NOT** FIX, MEASURED (round-55 final re-review, P1): it overrides the
+    caller's `lazy_marker` answer, so an item-held lazy marker whose content merely LOOKS like a leaf
+    is read by the ladder — contradicting the module's own "the answer is the CALLER's" rule:
+
+        `- item` + `  2. # H` + `  2.     Closes #100`     renderer ONE `<p>` -> PROSE
+            `origin/main` `[100]` in all four arms, `claims()` `[100]`; THIS HEAD `[]` in all four
+            arms, `claims()` `[]` — a LOST close (332 such bodies on a 43,548-body sweep, 25 reaching
+            `claims()`). The right fix is the COLUMN inside `_is_lazy_marker`, not this gate; filed
+            rather than attempted here.
+
+    So "no regression" is a claim about the grids that were composed, and those grids do not compose a
+    leaf-shaped lazy marker's content. No assertion below relies on the overstated reading. The top-level CONTROL is the neighbouring test's body and must stay `[100]`;
+    `- item` + `  1.` + the marker is the BLANK-item control and must stay `[100]` in every arm.
+    """
+    cl = _load_module()
+    md = MarkdownIt("commonmark")
+
+    def keyword_types(body: str) -> set[str]:
+        return {t.type for t in md.parse(body) if "Closes #100" in getattr(t, "content", "")}
+
+    body = "* - x\n   2. -\n  2.     Closes #100\n"
+    assert keyword_types(body) == {"code_block"}, body
+    assert cl.parse_closing_refs(body) == [], body
+    assert cl.parse_closing_refs(body, None, strict=True) == [], body
+    assert "#100" not in cl.strip_code(body, indented_code=True), body
+    # …end-to-end through the gate's own reader, which is what makes this a P0 and not a nit.
+    sys.path.insert(0, str(ROOT))
+    from tools import issue_process_lint as ipl
+
+    assert ipl.claims(body)["closing"] == [], body
+
+    # CONTROL 1 — the top-level spelling the round-52 fix exists for, unchanged.
+    control = "Notes\n2. -\n2.     Closes #100\n"
+    assert keyword_types(control) == {"inline"}, control
+    assert cl.parse_closing_refs(control) == [100], control
+
+    # CONTROL 2 — a BLANK item cannot interrupt a paragraph (§5.2), so it stays a lazy continuation
+    # and the real close survives. This is the assertion that falsified the `container is None` form
+    # of the fix (round-55 re-review, P1): that form blanked it in all four arms, where `origin/main`
+    # credits it and the renderer says PROSE.
+    for control in ("- item\n  1.\n  2.     Closes #100\n",
+                    "- a\n  2. \n  2.     Closes #100\n"):
+        assert keyword_types(control) == {"inline"}, control
+        assert cl.parse_closing_refs(control) == [100], control
+        assert cl.parse_closing_refs(control, None, strict=True) == [100], control
+        assert "#100" in cl.strip_code(control, indented_code=True), control
+        assert ipl.claims(control)["closing"] == [100], control
+
+
+def test_the_TYPE_7_neighbour_of_the_round_55_gate_is_a_DECLARED_REGRESSION():
+    """Round-57/58 review, P1 + P2 — the round-55 gate's TYPE-7 neighbour, PINNED AS DECLARED.
+
+    The round-55 test above pins `* - x` + `   2. -` + the marker. It constructs NOTHING with a line
+    BETWEEN the bare-marker line and the wide-gap marker, and that neighbour is where this gate
+    moves BOTH columns the wrong way against `origin/main` (`a022f03ce4`, #11330 — a descendant of
+    the #11186 squash `193bbfd9a2`):
+
+        F1  `* - x` + an interposed line (`<br />`, `<span>`, `Notes`, `x`) + `   2. -` + marker
+                renderer `<pre><code>` -> CODE
+                `193bbfd9a2` / `origin/main`: `[]` in all four arms, `claims()` `[]`
+                THIS HEAD: `[100]` in all four arms, `claims()` `[100]` — a CLASS-A false PASS in
+                arm 1 (`strict`) of `issue_process_lint`, i.e. the gate this module feeds.
+                `<span>` in place of `<br />` measures identically — AND SO DO THE PLAIN PROSE
+                LINES `Notes` and `x`, which is the round-59 review's correction to a first draft
+                that named only the type-7 kind. Both are pinned below.
+        F2  `Notes` + `2. -` + `<br />` + `     - x` + `  2.     Closes #100`
+                renderer ONE `<p>` -> PROSE
+                `origin/main`: `[100]` in the two LENIENT arms, `[]` in both `strict` arms
+                THIS HEAD: `[]` in all four arms — a LOST close. `claims()` is `[100]` at THIS HEAD
+                as well (the gate loses nothing on F2); the loss is on the module's LENIENT DEFAULT
+                path, which is what the F2 pin below states.
+
+    ⛔ THE EXPECTATIONS BELOW ARE THE MEASURED HEAD ANSWER, AND MOST OF THEM ARE THE WRONG ONE.
+    This is a DECLARATION, not a correctness assertion: the module's own convention
+    (`⚠️ DECLARED RESIDUAL`, and `⚠️ DECLARED REGRESSION` at `_leaves_no_paragraph`) is that a known
+    gap is PINNED so it cannot move silently. Both rows are filed, not fixed — #11369 owns the
+    state fact ("which item held the open paragraph"); #11349 is ADJACENT (a lenient-arm false
+    CREDIT on a `>`-interrupt shape, the opposite direction from F2's lost close); and three
+    candidate terms were built and measured and each trades a family.
+
+    The assertions ride on the fixture and not only on the pin, which is what makes them
+    non-vacuous: `keyword_types` proves each body really is the rendered shape being claimed (a
+    fixture that drifts reddens here rather than pinning a mutation), and the CONTROLS at the end
+    are this PR's own fixes, which must NOT move when this family is fixed — `credit` is a fix
+    against `origin/main`, while `blank` is a control that `origin/main` and this head already
+    AGREE on (`n n n n` on both), i.e. it catches a fix that breaks a case that never was broken.
+    (`Y Y Y Y` is the BRANCH POINT's answer on that body, which is why the control exists.)
+    Deleting the interposed line reproduces the neighbouring test's body and answers `[]` in every
+    arm, so the intervening line is demonstrably the discriminator — the family the suite never
+    built.
+    """
+    cl = _load_module()
+    md = MarkdownIt("commonmark")
+
+    def keyword_types(body: str) -> set[str]:
+        return {t.type for t in md.parse(body) if "Closes #100" in getattr(t, "content", "")}
+
+    def answers(body: str) -> list[bool]:
+        """All four arms: lenient, lenient+`indented_code`, `strict`, `strict`+`indented_code`."""
+        return [100 in cl.parse_closing_refs(cl.strip_code(body, **kw))
+                for kw in ({}, {"indented_code": True},
+                           {"strict": True}, {"strict": True, "indented_code": True})]
+
+    sys.path.insert(0, str(ROOT))
+    from tools import issue_process_lint as ipl
+
+    # F1 — DECLARED-WRONG. The renderer puts the keyword in `<pre><code>` and `main` blanks it.
+    # ⛔ `Notes` and `x` are in this loop because the first draft of this declaration named only the
+    # TYPE-7 kind, and the round-59 review measured that a plain prose line reaches the same
+    # `container is None` arm and produces the same CLASS-A false PASS. They are not a subset.
+    for body in ("* - x\n<br />\n   2. -\n  2.     Closes #100\n",
+                 "* - x\n<span>\n   2. -\n  2.     Closes #100\n",
+                 "* - x\nNotes\n   2. -\n  2.     Closes #100\n",
+                 "* - x\nx\n   2. -\n  2.     Closes #100\n"):
+        assert keyword_types(body) == {"code_block"}, body
+        assert answers(body) == [True, True, True, True], body   # DECLARED: should be [] x 4
+        assert ipl.claims(body)["closing"] == [100], body        # DECLARED: the arm-1 false PASS
+
+    # …and the intervening line IS the discriminator: without it this is the test above, and blank.
+    without = "* - x\n   2. -\n  2.     Closes #100\n"
+    assert keyword_types(without) == {"code_block"}, without
+    assert answers(without) == [False, False, False, False], without
+
+    # F2 — DECLARED-WRONG. ONE `<p>` in the renderer; `origin/main` credits the lenient arms.
+    f2 = "Notes\n2. -\n<br />\n     - x\n  2.     Closes #100\n"
+    assert keyword_types(f2) == {"inline"}, f2
+    assert answers(f2) == [False, False, False, False], f2       # DECLARED: lenient should be True
+    # …and the GATE's F2 answer is pinned too, because it is the opposite of the row above: on this
+    # body `claims()` is `[100]` at THIS HEAD, so the strict arm loses nothing and a fix that changed
+    # the gate's answer here would move F2 without reddening anything else.
+    assert ipl.claims(f2)["closing"] == [100], f2                # DECLARED: the lenient loss is not a gate loss
+
+    # CONTROLS — this PR's own fixes. A fix for F1/F2 that moves either is not a fix.
+    # `credit` is a fix against `origin/main` (`[]` there, `[100]` here). `blank` is NOT a change vs
+    # `origin/main` — both answer `n n n n` — so it is a regression control, not a fix. (`Y Y Y Y`
+    # is the BRANCH POINT's answer on this body, measured, not either of these two states.)
+    credit = "Notes\n2. -\n  2.     Closes #100\n"
+    assert keyword_types(credit) == {"inline"}, credit
+    assert answers(credit) == [True, True, True, True], credit
+
+    blank = "x\n- 1.\n  2.     Closes #100\n"
+    assert keyword_types(blank) == {"code_block"}, blank
+    assert answers(blank) == [False, False, False, False], blank
+
+
+def test_the_INDENT_pops_DECLARED_strict_false_PASS_is_PINNED():
+    """Round-59 review, P2 — a DECLARED residual that had no pin, so it could move silently.
+
+    The indent-pop note in `strip_code` (the `⛔ THE RECORD IS STILL GATED ON prev_prose AT BOTH
+    POPS` block) declares this family as STILL a false PASS at this head. No test built the body, so
+    the declaration was prose only; the file's own convention (`⚠️ DECLARED RESIDUAL`, and the
+    `test_the_TYPE_7_neighbour…` above) is that a known gap is PINNED so it cannot move silently.
+
+        `- 2.` + `    - x` + `x` + `2.     Closes #100`
+            renderer `<pre><code>` -> CODE, so GitHub does NOT fire the keyword
+            `origin/main` `fc3f0e687` AND this head: `[]` lenient / `[100]` in BOTH `strict` arms
+            `issue_process_lint.claims()` -> `closing: [100]` — the arm-1 false PASS
+
+    ⛔ THIS IS A SHARED DECLARED TRADE WITH `main`, NOT A REGRESSION FROM IT, and pinning both sides'
+    SHA is the point. `strict` is the arm `issue_process_lint` reads a carrier body through, so
+    `[100]` there is a CLASS-A false PASS — the same answer `main` gives. **#11358** owns and
+    explains it (`own_code = own_gap > 4 and not ordered_continuation and not _html_here`, with
+    `ordered_continuation` True here). The round-55 lazy gate (**#11369**) does NOT cover it.
+
+    The expectations below are the MEASURED ANSWER, and most are the wrong one: this is a
+    DECLARATION pinning a known gap, not a correctness assertion. It is a REGRESSION LOCK — a green
+    here does NOT mean a candidate fix works. The mutation measurements, including the one lever
+    that DOES move this body and the lost-close price it carries, are recorded on #11358 rather
+    than restated here, so a fixer reads them once, at the issue that owns the fix.
+    """
+    cl = _load_module()
+    md = MarkdownIt("commonmark")
+
+    def keyword_types(body: str) -> set[str]:
+        return {t.type for t in md.parse(body) if "Closes #100" in getattr(t, "content", "")}
+
+    def answers(body: str) -> list[bool]:
+        """All four arms: lenient, lenient+`indented_code`, `strict`, `strict`+`indented_code`."""
+        return [100 in cl.parse_closing_refs(cl.strip_code(body, **kw))
+                for kw in ({}, {"indented_code": True},
+                           {"strict": True}, {"strict": True, "indented_code": True})]
+
+    sys.path.insert(0, str(ROOT))
+    from tools import issue_process_lint as ipl
+
+    body = "- 2.\n    - x\nx\n2.     Closes #100\n"
+    assert keyword_types(body) == {"code_block"}, body
+    assert answers(body) == [False, False, True, True], body   # DECLARED: should be [] x 4
+    assert ipl.claims(body)["closing"] == [100], body          # DECLARED: the arm-1 false PASS
+    # …and the `strict`-only shape is the discriminator: the LENIENT arms are already blank. A fix
+    # that moved only one of the two columns would otherwise be indistinguishable here.
+    assert cl.parse_closing_refs(body) == [], body
+    assert cl.parse_closing_refs(body, None, strict=True) == [100], body
+
+
+def test_the_leaf_veto_reads_the_PARAGRAPHS_depth_not_the_last_lines():
+    """Round-54, P1 — pinned, because the suite did NOT ride on this term (round-55 review, P2).
+
+    `prev_quote_depth` is reset by a `pushed` lazy continuation, so it can sit BELOW the paragraph it
+    continues. Asking the type-7 leaf veto against it drops the veto and blanks a real close:
+
+        `> Notes` + `     - x` + `> <br />` + `     -     Closes #100`
+            renderer ONE `<p>` in the blockquote -> PROSE
+            `c83cd2803` credited it; with `prev_quote_depth` in the placeholder term the line is
+            `[]` in `lenient` — a LOST close. `prev_para_depth` keeps the answer `[100]`.
+
+    Measured: reverting the term to `prev_quote_depth` leaves the whole file green without this
+    test, and moves 8 bodies (7 of them real closes lost in `lenient`) on a 252-body family.
+    """
+    cl = _load_module()
+    md = MarkdownIt("commonmark")
+
+    def keyword_types(body: str) -> set[str]:
+        return {t.type for t in md.parse(body) if "Closes #100" in getattr(t, "content", "")}
+
+    body = "> Notes\n     - x\n> <br />\n     -     Closes #100\n"
+    assert keyword_types(body) == {"inline"}, body
+    assert cl.parse_closing_refs(body) == [100], body
+    # `strict` blanks every indented line — the paragraph's own, included (round 30's choice).
+    assert cl.parse_closing_refs(body, None, strict=True) == [], body

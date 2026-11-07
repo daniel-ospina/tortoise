@@ -46,7 +46,7 @@ activation/cohort,oauth/clients/count,retention/cohort}`,
 larger) question than this issue asked, so they are measured, not adjudicated.
 
 Measured at this head, so the widening is a RECORDED measurement and not a guess:
-``hosted_api`` 62 GET routes / 5 read-only claims / 0 offenders; ``selfhost`` 11 GET
+``hosted_api`` 63 GET routes / 5 read-only claims / 0 offenders; ``selfhost`` 11 GET
 routes / 0 claims / 0 offenders. Enumerating the second app therefore changed no verdict
 — which is the honest reading: it closed a hole (the next self-hosted GET fronting a
 declared writer would have passed silently), it did not catch a second bug.
