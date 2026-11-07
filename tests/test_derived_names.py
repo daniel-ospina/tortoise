@@ -1013,7 +1013,15 @@ def _raw_client_call_positions(source: str) -> list[int]:
     # Four is generous (a chain of four hoists) and finite, so a pathological
     # file cannot spin here. ⛔ It ACCUMULATES rather than replacing: a site found
     # before the alias landed is still a site.
-    wanted = {"FalkorDB"}
+    # ⛔ `names` is part of the SEED, not just the growth. `_bindings` matches a
+    # value that MENTIONS one of `wanted`, so a chain rooted at an IMPORT ALIAS
+    # (`from falkordb import FalkorDB as Client` then `D = Client`) contains no
+    # `FalkorDB` token at all: seeded with the literal class name only, `D =`
+    # never bound, `D(` was never a site, and an unowned, un-journaled bulk
+    # DETACH in that file read CLEAN (measured: `sites=[]`, `violations=[]`;
+    # seeded with `names`, `sites=[220]`, `violations=[…]`, judged corpus
+    # byte-unchanged). #11217 round-15 review P2.
+    wanted = {"FalkorDB"} | names
     accumulated = set(found)
     for _ in range(4):
         aliases = _bindings(wanted) - names
@@ -2597,6 +2605,94 @@ def test_an_alias_leak_REDS_even_when_the_SAME_file_resolves_a_site(tmp_path):
         "resolved a site from the import — the alias pass must be gated by the "
         "FILE, not by `found`")
     assert any("test_mixed.py" in v for v in violations), violations
+
+
+def test_a_chain_rooted_at_an_IMPORT_ALIAS_is_resolved(tmp_path):
+    """#11217 round-15 review P2: the MENTION rule was seeded with the class
+    NAME only, so a chain rooted at an import ALIAS was never resolved.
+
+    `_bindings` matches a value that MENTIONS one of `wanted`; with
+    `wanted = {"FalkorDB"}`, `D = Client` (where `Client` is the import alias)
+    mentions no `FalkorDB` token, so `D` was never bound, `D(` was never a site,
+    and an unowned, un-journaled bulk DETACH in that file read CLEAN. The seed is
+    now `{"FalkorDB"} | names` — the import-resolved names are part of the root
+    set, not only a target of growth.
+
+    Measured before the fix: `sites=[]`, `violations=[]`. After: the site is
+    found and reds. The judged corpus is unchanged (`violations` stays empty).
+    """
+    site = tmp_path / "test_import_alias_root.py"
+    site.write_text(
+        "from falkordb import FalkorDB as Client\n"
+        "\n"
+        "D = Client\n"
+        "\n"
+        "\n"
+        "def test_leak():\n"
+        '    d = D(host="h")\n'
+        '    d.query("MATCH (n) DETACH DELETE n")\n'
+    )
+    assert _raw_detach_violations(root=tmp_path), (
+        "a chain rooted at an IMPORT alias (`from falkordb import FalkorDB as "
+        "Client`; `D = Client`) resolved nothing, so an unowned DETACH read CLEAN")
+
+
+def test_the_MODULE_LEVEL_block_start_is_a_KNOWN_false_BLOCK(tmp_path):
+    """⛔ RECORDED RESIDUAL, not an endorsement — see **#11433**.
+
+    `_enclosing_block_span`'s `indent == 0` branch starts the block at the SITE's
+    own line, while the `def` branch starts at the enclosing `def` LINE. So a
+    handle journaled just above a module-level client is OUTSIDE its own block
+    and reds, while the byte-identical body inside a `def` is CLEAN.
+
+    This test asserts the CURRENT, WRONG verdict on purpose. It exists so the
+    limitation is recorded where the arm's other limitations are recorded, and
+    so the next lane that hits this red cannot mistake it for a new regression:
+    the obvious repair (start the block where the preceding top-level `def`
+    ENDS) was implemented and REVERTED in this PR, because `_block_end` is
+    bracket-blind — a column-0 continuation line inside that def's body makes it
+    return a position INSIDE the body, sweeping the def's journal into the module
+    block and letting an unjournaled module-level DETACH read CLEAN (measured).
+    Fixing it needs the boundary resolved on the AST or `_block_end` made
+    bracket-aware, plus all three fixtures named in #11433.
+
+    ⛔ When #11433 is fixed this test MUST be inverted, deliberately: that is the
+    point of pinning a known-wrong verdict.
+    """
+    site = tmp_path / "test_module_level_block.py"
+    site.write_text(
+        "import os\n"
+        "from falkordb import FalkorDB\n"
+        "from tests._embedded import _journal_append\n"
+        "\n"
+        'NAME = f"test_modlevel_{os.urandom(4).hex()}"\n'
+        "_journal_append(NAME)\n"
+        "\n"
+        'c = FalkorDB(host="h")\n'
+        'c.query("MATCH (n) DETACH DELETE n")\n'
+    )
+    assert _raw_detach_violations(root=tmp_path), (
+        "#11433 says the module-level hoist is a KNOWN false BLOCK; if this is "
+        "now clean, the block-span bug was fixed — invert this pin and delete "
+        "the #11433 reference instead of leaving a stale claim here")
+
+    # The control is the reason the naive fix is not shippable: inside a `def`
+    # the SAME shape is already clean, and it must stay that way.
+    site.write_text(
+        "import os\n"
+        "from falkordb import FalkorDB\n"
+        "from tests._embedded import _journal_append\n"
+        "\n"
+        "\n"
+        "def test_modlevel():\n"
+        '    name = f"test_modlevel_{os.urandom(4).hex()}"\n'
+        "    _journal_append(name)\n"
+        '    c = FalkorDB(host="h")\n'
+        '    c.query("MATCH (n) DETACH DELETE n")\n'
+    )
+    assert not _raw_detach_violations(root=tmp_path), (
+        "the function-level mirror must stay CLEAN — the divergence IS the "
+        f"#11433 bug: {_raw_detach_violations(root=tmp_path)}")
 
 
 def test_a_journaled_NON_OWNED_handle_fails_the_raw_detach_census(tmp_path):
