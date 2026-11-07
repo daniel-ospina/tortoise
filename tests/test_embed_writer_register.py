@@ -22,11 +22,12 @@ outside the walk (`tortoise/embeddings.py` is skipped on purpose, which is why
 still absent); when its module will not parse (discovery carries one `UNPARSEABLE:<rel>` row and
 enumerates none of that module's writers); when the store sits at MODULE or CLASS scope, since the
 walk visits `def`s only — pinned as `module_scope_container_key` and `class_scope_container_key`
-below; and when its NAME collides with another `def` in the same module (the map key is replaced by
-`kind == "duplicate"`, which is outside `NEEDS_A_DECLARATION`, so such a writer owes no declaration).
-`#11274` owns widening it. ⚠️ "States the same boundary" is a pointer, not a claim of equality: this
-list is the MECE one, while the register's module docstring names the same causes in passing and
-defers the full list to `INVISIBLE_SHAPES` below.
+below; and when its NAME collides with another `def` in the same module (discovery replaces that
+key's KIND with `"duplicate"`, which is outside `NEEDS_A_DECLARATION` — so such a writer owes no
+declaration, and the guard PINS that the population holds none rather than reading the class as
+acceptable). `#11274` owns widening it. ⚠️ This list enumerates what makes the DISCOVERED MAP
+unable to name a writer; it is not a list of every reason a writer can escape a declaration —
+`gated` and `producer` escape it too, by design, and are stated in the register instead.
 
 **What `#11085` is.** `#10541` *classified* the embedding-writer population (read `WRITER_CENSUS`
 for the class counts rather than a number restated here — the #11274 widening moved them) but left
@@ -41,7 +42,7 @@ is the product home; this file is its proof.
 |---|---|---|
 | `test_the_register_resolves_at_runtime_from_tortoise` | the issue's first row — *"resolvable at runtime from `tortoise/`"* | the register moves out of `tortoise/`, under `tortoise/projection/`, or stops being importable without the tooling |
 | `test_the_register_imports_without_entering_the_projection_cycle` | `04-plan.md` §5's leaf requirement, EXECUTED | importing the register pulls `tortoise.projection`, `tortoise.pack_state` or `tortoise.sdk` into `sys.modules`, i.e. it re-enters `projection → pack_state → sdk → projection` — the cycle whose config read is a reproduced `ImportError` (`tortoise.projection.__init__::_config_classes` records it). The "imports ONLY the standard library" arm is `test_the_register_is_not_a_second_rule_set`, not this one |
-| `test_the_register_is_not_a_second_rule_set` | plan risk R2 — *"the register becomes a second source of truth and drifts from `value_gate.RULES`"* | the register imports `value_gate`/`embed_gate`, or names one of `RULES`/`EMBEDDING_RULES` in code (it does hold ONE regex, the `#\\d+` `owner_issue` format check, which is not a rule) |
+| `test_the_register_is_not_a_second_rule_set` | plan risk R2 — *"the register becomes a second source of truth and drifts from `value_gate.RULES`"* | the register's imports leave `{__future__, collections, re, dataclasses, types}`, or it names `value_gate`/`embed_gate`/`RULES`/`EMBEDDING_RULES` in code (the ONE regex it holds is the `#\\d+` `owner_issue` format check, which is not a rule) |
 | `test_a_duplicate_key_raises` | the issue's third row (D4) | a second declaration silently wins — the stale row survives a rewrite |
 | `test_a_bypass_declaration_is_refused` | `04-plan.md` §6.2 — *"no `bypass` class; an unclassified writer is a refusal at export time"* | `bypass` becomes declarable, so the class that means *defect* can be asserted as *accepted* |
 | `test_an_undeclared_writer_is_a_refusal_not_a_default` | the same contract, at the LOOKUP | `classify` answers for a writer nobody declared — the fallback that makes "no silent bypass" unkeepable |
@@ -283,6 +284,21 @@ def test_every_writer_the_instrument_finds_outside_the_gate_is_declared():
         "these writers store a vector the gate does not see and carry NO declaration in "
         f"`tortoise/embed_writer_register.py`: {register.undeclared(outside)}"
     )
+    # ⛔ `kind == "duplicate"` is OUTSIDE `NEEDS_A_DECLARATION`, so a name-colliding writer stores
+    # a vector the gate does not see and owes no declaration at all (round-17 review). Zero at this
+    # head, and the cheapest real repair is that it stays zero: an unverifiable class must not sit
+    # in the population at all, or the guard is green over a writer nobody can name.
+    duplicates = sorted(
+        key for key, entry in probe.embedding_writers().items()
+        if entry.get("kind") == "duplicate"
+    )
+    assert not duplicates, (
+        "discovery collapsed a name-colliding writer into a `duplicate` row, and `duplicate` is "
+        "outside NEEDS_A_DECLARATION — so this writer stores a vector the gate does not see and "
+        "owes NO declaration, which is the bypass this guard exists to refuse: "
+        f"{duplicates}. Repair the collision (two same-named defs in one module) or declare the "
+        "class; do not delete this arm."
+    )
 
 
 def test_the_live_guard_has_teeth_on_an_INJECTED_writer(tmp_path):
@@ -446,7 +462,12 @@ def _resolve_module(module: str) -> Path | None:
                 return candidate
         return None
     base = REPO_ROOT.joinpath(*module.split("."))
-    for candidate in (base.with_suffix(".py"), base / "__init__.py"):
+    # ⛔ A PACKAGE wins over a same-named MODULE. `tortoise/projection.py` is a DEPRECATED shim that
+    # re-exports the package's names, so resolving `.py` first did two wrong things at once (round-17
+    # review): a dotted `tortoise.projection::<symbol>` citation passed on the shim's re-export line
+    # `_apply_one = _pkg._apply_one` — a false PASS, since deleting the symbol from the package would
+    # not red it — and a symbol only the PACKAGE defines read as moved — a false RED.
+    for candidate in (base / "__init__.py", base.with_suffix(".py")):
         if candidate.is_file():
             return candidate
     return None

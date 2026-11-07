@@ -98,8 +98,10 @@ neither is in `WRITER_CENSUS` or this register at all); by contrast the computed
 `gated` — it carries no `WRITER_CENSUS` row at all, and that table's class vocabulary
 (`recognised_producer`/`exempt`/`bypass`) cannot spell `gated` — while
 `tortoise.hosted_backup::restore_graph` is IN `WRITER_CENSUS` and is declared here off its
-`set_embedding_clause`, NOT off its whole-node replace. The full list is
-`tests/test_embed_writer_register.py::INVISIBLE_SHAPES`, which is the authority: a count written
+`set_embedding_clause`, NOT off its whole-node replace. The authority for SHAPES is
+`tests/test_embed_writer_register.py::INVISIBLE_SHAPES` (and it is only the SHAPES: discovery's
+key-level causes — a skipped module, an unparseable one, a name collision — are the test module
+header's list, not that dict): a count written
 here re-stales with every shape added, so this paragraph names forms and instances and does not
 count them.
 ⚠️ `tortoise.sdk::_journal_event_raw_write` is
@@ -393,8 +395,9 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
             "CALLER-supplied vector OVER the server one, in the journal payload. That is the "
             "`#5004` carrier contract, not a producer: the key stays PRESENT so an explicit "
             "`None` means 'this id has no vector', and a foreign vector is restored verbatim "
-            "with NO attestation. The server vector is stamped by `tortoise.api::_point` (its "
-            "own entry). ⛔ A caller-supplied `embedding` is NOT refused by the SDK — "
+            "with NO attestation. The server vector is stamped by `tortoise.api::_point` (its own "
+            "`gated` classification, not an entry here). ⛔ A caller-supplied `embedding` is NOT "
+            "refused by the SDK — "
             "`create_point`/`update_point` store one VERBATIM by a recorded decision "
             "(`tortoise.sdk::_sanitize_props` rejects the embedding IDENTITY props, not "
             "`embedding` itself; `_create_map[\"embedding\"]` is assigned AFTER the props "
@@ -548,9 +551,10 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
 #: write it GATES. ⛔ That is not the same sentence as "the gate decides every vector this writer
 #: stores": the module docstring's caveat refutes the wider one for `create_point`/`update_point`,
 #: whose caller-supplied vector is stored verbatim — `create_point` calls `encode_for_row`
-#: UNCONDITIONALLY (the derive is behind no `props` guard) and then discards the result
-#: (`if "embedding" in props:` pops the caller vector, and `_create_map["embedding"] =
-#: _embedding_expr` is assigned AFTER the props loop, so the caller branch wins), while
+#: UNCONDITIONALLY (the derive is behind no `props` guard) and then discards the DERIVED result
+#: **when the caller supplied one** (`if "embedding" in props:` pops the caller vector, and
+#: `_create_map["embedding"] = _embedding_expr` is assigned AFTER the props loop, so the caller
+#: branch wins — with no caller vector the derived one is what gets stored), while
 #: `update_point` genuinely skips the derive when `"embedding" in props` — so on one path the gate
 #: RUNS and its verdict is OVERWRITTEN, on the other it is not called at all. Neither outcome is
 #: "the gate decides this vector". ⛔ Symbols only, never a line number: this block is comment prose
