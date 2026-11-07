@@ -2454,8 +2454,11 @@ _RESIDUAL_REOPENING_MUTATIONS = (
     # (#11258 review round 9 `P2`, MEASURED): at `7b3bdd231d` replacing that
     # pattern with `(?!)` left the WHOLE FILE `102 passed`. ⚠️ AT `ff1ff27c74` IT
     # WAS ALREADY PINNED by the peer's `the SPELLING gap is no longer being
-    # fused.`; these three cover the PARTICIPLE ENDINGS that entry does not
-    # (`fused`/`judged`/`retained` without a filler), and each is FLOOR-EXCLUSIVE
+    # fused.`; these three cover `judged` and `retained` — endings that entry does
+    # NOT reach — plus the filler-free twin of the `fused` it already exercises
+    # (MEASURED: removing the `fused` alternative greens BOTH `… no longer being
+    # fused.` and `… no longer fused.`, so that pair shares one alternative).
+    # Each is FLOOR-EXCLUSIVE
     # for a different reason than an openness gap: `judged` and `retained` ARE in
     # the unanchored openness arm — the floor decides them because
     # `_residual_reopening_claims` runs ONLY `_SPELLING_FLOOR` when every clause
@@ -2581,6 +2584,15 @@ _RESIDUAL_TRUTHFUL_STATEMENTS = (
     # open.` reopenings — a true closure the arm used to refuse.
     "the ADJACENCY half is no longer kept open.",
     "the ADJACENCY half is no longer held open.",
+    # \u26d4 THE TWO CONTRACTION SENTENCES (#11258 review round 14 `P2`, MEASURED):
+    # each is an honest closure about a DIFFERENT subject that the unanchored
+    # openness arm only reads when its lookbehind is dropped, so each is the
+    # END-TO-END falsifier for one of the two `(?<!['\u2019])` guards. They are here
+    # rather than only in `test_every_waiver_withhold_arm_earns_its_place` because
+    # this list is the surface the append-the-row proof runs, and a guard pinned by
+    # a proof shape is pinned against every future narrowing of the arms.
+    "I'm confident the pair is no longer fused",
+    "the pair's refusal is no longer fused",
 )
 
 #: ⛔ THE OVER-BLOCK LEDGER: truthful statements this pin REFUSES, each MEASURED
@@ -2704,13 +2716,18 @@ def test_every_waiver_withhold_arm_earns_its_place():
     (the peer's `the SPELLING gap is no longer being fused.` mutation already
     reds it there) — so the floor is listed for the head the finding was measured
     at, not as a claim about every head since.
-    For the five, an END-TO-END verdict cannot pin them: the verdict is an OR over
-    several arms, so a deleted branch is covered by a sibling and the mutation
-    that should have red became GREEN-through-OR. So each is pinned at the
-    CONTRACT IT OWNS — `_is_honest_spelling` for the waiver (does it withhold?),
-    `_RESIDUAL_OPENNESS` for each bare-token guard (does it match?) — where the
-    disarmed guard is the only thing deciding the assertion. The floor's arm is
-    pinned end-to-end instead, by the floor-exclusive entries in
+    For the TWO SUBSUMED SPELLINGS and the WITHHOLD lookbehind, an END-TO-END
+    verdict cannot pin them: the verdict is an OR over several arms (and a deleted
+    withhold guard only WIDENS the set), so no proof shape's verdict flips. So those
+    are pinned at the CONTRACT THEY OWN — `_is_honest_spelling` (does it withhold?)
+    — where the disarmed guard is the only thing deciding the assertion.
+    ⛔ THE TWO BARE-TOKEN LOOKBEHINDS ARE DIFFERENT, and an earlier version of
+    this very paragraph got it wrong (#11258 review round 14 `P2`, MEASURED): they
+    CAN be pinned end-to-end, because deleting them only ever ADDS a match, so an
+    honest sentence flips GREEN→RED — no sibling can cover for them. Both are
+    pinned at BOTH levels: by the assertions below, and by their honest sentences
+    in `_RESIDUAL_TRUTHFUL_STATEMENTS`, which red on either deletion.
+    The floor's arm is pinned end-to-end too, by the floor-exclusive entries in
     `_RESIDUAL_REOPENING_MUTATIONS`.
     """
     # 1. THE UNIT SPELLINGS. The waiver must WITHHOLD on every spelling the unit
