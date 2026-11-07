@@ -6,12 +6,17 @@ point's OWN source raw chunks/turns into ONE package entry (point + ≤ one
 verbatim ref), dedups cross-item near-dupe statements restating the same
 fact to one slot, and orders the surviving packages by D3 hit-type tier
 (statement Points, then turn Points, then raw chunks) with the #1763/#1945
-value mark and then relevance order preserved WITHIN a tier. The docker-lane
-half (the eval arm markers on ``retrieve_for_question`` outcomes + the ask
-lane knob default) is exercised by the existing docker suites
-(test_retrieval.py / test_eval_* / test_ask_retrieval_levers.py) — this
-file runs the IDENTICAL pure logic offline (the single-source-of-truth
-split that evidence.py establishes for the M6 marks).
+value mark and then relevance order preserved WITHIN a tier. The arm's
+EVAL-LANE WIRING (does ``retrieve_for_question`` actually hand the package to
+``assemble_context``, and is the OFF path untouched?) is pinned by the docker
+suite ``tests/test_evidence_assembly_wiring_2683.py`` — NOT, as an earlier
+revision of this docstring claimed, by ``test_retrieval.py`` /
+``test_eval_*`` / ``test_ask_retrieval_levers.py``, none of which reference the
+arm at all (measured: deleting the eval seam's rebind left this file's 30 tests
+and the #8043 guard's 22 fully green). The ask-lane knob default is pinned
+here (``test_ask_lane_knob_failsafe_off_by_default``); this file runs the
+IDENTICAL pure logic offline (the single-source-of-truth split that evidence.py
+establishes for the M6 marks).
 
 Design contract under test (docs/scoping/2026-09-09-evidence-assembly-wave.md
 §5 Slice A):
