@@ -3030,6 +3030,30 @@ def test_the_row_one_population_is_the_CENSUS_not_the_register(tmp_path, monkeyp
     assert "tortoise.nowhere::_unknown @ " in row.observed, row.observed
 
 
+def test_a_HOLE_register_read_is_never_silently_re_read():
+    """`registry=None` means *the caller read the register and it was a HOLE*.
+
+    It must not be re-read inside :func:`probe.row_one_dispositions` (PR `#11463`
+    review, non-blocking 1): a non-deterministic import failure — first read
+    raises, second succeeds — would otherwise publish `MET` beside the row's own
+    `register readable: False` evidence line. The sentinel default is what tells
+    "no map supplied" apart from "supplied, and it was a hole", and this pins
+    BOTH arms: an explicit `None` classifies a register-named writer as
+    `undeclared`, while omitting the argument reads the real register and
+    classifies the same writer as `declared`.
+    """
+    writers = {
+        "tortoise.session_indexer::main": _writer(
+            "tortoise.session_indexer::main", "ungated"),
+    }
+    assert probe.row_one_dispositions(writers, None) == {
+        "tortoise.session_indexer::main": probe.ROW_UNDECLARED,
+    }, "an explicit hole must not be re-read into a declaration"
+    assert probe.row_one_dispositions(writers) == {
+        "tortoise.session_indexer::main": probe.ROW_DECLARED,
+    }, "with no registry supplied the real register must still be read"
+
+
 def test_row_one_is_PARTIAL_because_ONE_writer_has_no_resolved_producer(
         tmp_path, monkeypatch):
     """The same argument for the other clause the epic names: an unresolved

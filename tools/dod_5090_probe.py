@@ -1186,12 +1186,28 @@ ROW_BYPASS = "bypass"
 OUTSIDE_THE_GATE: tuple[str, ...] = ("ungated", "unresolved_write")
 
 
+#: Sentinels `row_one_dispositions` uses to tell "no writer map supplied" from
+#: "the caller read the register and it was a HOLE". Without it, a `None` read
+#: was re-read inside the function, so a NON-DETERMINISTIC import failure (the
+#: first read raises, the second succeeds) could publish `MET` beside its own
+#: `register readable: False` evidence line (PR `#11463` review, non-blocking 1).
+_REGISTER_UNSET: object = object()
+
+
 def writer_register():
     """The product's writer register, or ``None`` when it cannot be read.
 
     ``None`` is a HOLE, never a pass. It cannot silently lift the row, because a
     caller with no register sees every writer as :data:`ROW_UNDECLARED` — the
     same fail-closed direction an unparseable module takes.
+
+    ⛔ What is caught is the DECLARATION-level failure of the module it reads:
+    an import that will not resolve, a body that will not parse, and a table
+    `load()` refuses (its own `ValueError` family). A structurally malformed
+    table that raises something else (a `TypeError` from a bad constructor
+    call) ESCAPES — and then this tool exits `2` `UNMEASURED` rather than
+    printing any row, so the direction is still fail-closed, only coarser (PR
+    `#11463` review, non-blocking 2).
     """
     try:
         import tortoise.embed_writer_register as registry
@@ -1203,7 +1219,7 @@ def writer_register():
 
 
 def row_one_dispositions(writers: dict[str, dict] | None = None,
-                         registry=None) -> dict[str, str]:
+                         registry=_REGISTER_UNSET) -> dict[str, str]:
     """``{writer: disposition}`` for every writer the gate does not decide.
 
     The population is the instrument's OWN census (:data:`OUTSIDE_THE_GATE`), not
@@ -1222,7 +1238,8 @@ def row_one_dispositions(writers: dict[str, dict] | None = None,
       away: if both readings fire, the defect is the one that must hold the row.
     """
     writers = embedding_writers() if writers is None else writers
-    registry = writer_register() if registry is None else registry
+    if registry is _REGISTER_UNSET:
+        registry = writer_register()
     population = sorted(
         writer for writer, info in writers.items()
         if info["kind"] in OUTSIDE_THE_GATE
