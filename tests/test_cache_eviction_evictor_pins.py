@@ -1181,8 +1181,11 @@ def test_a_journalled_lane_graph_name_must_be_in_the_ownership_vocabulary(monkey
 
     deletes: list[str] = []
     redis_stub = types.ModuleType("redis")
+    # ⛔ VARIADIC, not `name`: `redis.delete` takes `*names`, and a one-argument stub let
+    # `client.delete(graph_name, "test_evict_a_live_peer")` through GREEN — destroying a
+    # peer's LIVE owned graph is exactly the #11373 harm, so the stub must see every name.
     redis_stub.Redis = lambda *a, **k: types.SimpleNamespace(
-        delete=lambda name, *a2, **k2: deletes.append(name))
+        delete=lambda *names, **k2: deletes.extend(names))
     falkordb_stub = types.ModuleType("falkordb")
     falkordb_stub.FalkorDB = lambda *a, **k: _FalkorDB()
     live_utils_stub = types.SimpleNamespace(
@@ -1193,10 +1196,12 @@ def test_a_journalled_lane_graph_name_must_be_in_the_ownership_vocabulary(monkey
 
     import tests._embedded as embedded
 
+    def _journal_ok(name):
+        events.append(("journal", name))
+
     monkeypatch.setitem(sys.modules, "redis", redis_stub)
     monkeypatch.setitem(sys.modules, "falkordb", falkordb_stub)
-    monkeypatch.setattr(embedded, "_journal_append",
-                        lambda name: events.append(("journal", name)))
+    monkeypatch.setattr(embedded, "_journal_append", _journal_ok)
 
     # NOTE: no `from __future__ import annotations` node is injected here, and adding one
     # is a no-op: `compile(..., dont_inherit=False)` picks up the CALLING module's future
@@ -1291,12 +1296,19 @@ def test_a_journalled_lane_graph_name_must_be_in_the_ownership_vocabulary(monkey
         raise RuntimeError(f"journal write failed for {name!r}")
 
     monkeypatch.setattr(embedded, "_journal_append", _journal_fails)
-    # ⛔ AND the namespace binding. The module attribute covers an in-function
-    # `from tests._embedded import _journal_append` (read at CALL time), but a fixture that
-    # hoists that import to module level froze the HAPPY-path stub into the exec'd
-    # namespace, so patching only the module left this drive calling the stub — and a
-    # correct fixture was then accused of minting after a failed journal (measured).
-    monkeypatch.setitem(namespace, "_journal_append", _journal_fails)
+    # ⛔ AND every namespace binding that ALIASED the happy-path stub — BY IDENTITY, not
+    # by name. The module attribute covers an in-function `from tests._embedded import
+    # _journal_append` (read at CALL time), but a fixture that hoists that import froze
+    # the HAPPY-path stub into the exec'd namespace, so patching only the module left
+    # this drive calling the stub — and a correct fixture was then accused of minting
+    # after a failed journal (measured). A name-keyed rebind (`setitem(namespace,
+    # "_journal_append", …)`) covered only the literal key: the same hoist spelled
+    # `as _lane_journal`, or `_LANE_JOURNAL = _journal_append`, freezes the SAME object
+    # under another key and the drive stayed falsely RED (measured on a CORRECT fixture).
+    # Swapping every value that `is` the stub is spelling-independent by construction.
+    rebound = [key for key, value in namespace.items() if value is _journal_ok]
+    for key in rebound:
+        monkeypatch.setitem(namespace, key, _journal_fails)
     del events[:], deletes[:]
     try:
         gen = namespace["lane"]()
@@ -1308,7 +1320,7 @@ def test_a_journalled_lane_graph_name_must_be_in_the_ownership_vocabulary(monkey
         raise AssertionError(
             "`lane` MINTS a graph even when `_journal_append` raises — a swallowed "
             "journal failure leaves an UNOWNED graph the sweep preserves and can never "
-            "report (#11373 P1, tests/_embedded.py:1197-1240)")
+            "report (#11373 P1, tests/_embedded.py::_journal_append)")
     assert not [e for e in events if e[0] == "mint"], (
         f"`lane` created {events} after the journal write failed — no graph may exist "
         "without an ownership record (#11373 P1)")
