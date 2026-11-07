@@ -382,16 +382,22 @@ def check(text: str) -> tuple[list[str], dict[str, object]]:
     # its seam token, so its violation message is unchanged. (A surface number
     # typed a digit OFF still lands on a real row, so R5 does NOT catch that; its
     # wording is "names a surface with no row in §1", and that is all it claims.)
-    # Grade EVERY `|` line in §5, and let a line out only two ways: it is an
-    # alignment row (`|---|---|`), or it IS the crosswalk header, judged by CONTENT
-    # (`_is_crosswalk_header`). Nothing else is exempt — in particular the section
+    # Grade EVERY `|` line in §5, and let a line out only as one of THREE classes (see
+    # #11415 for the ONE gap: a `|` line indented 1–3 spaces is in no block at all and
+    # so is graded by none of them): an
+    # alignment row (`|---|---|`), a line that IS the crosswalk header by SHAPE
+    # (`_is_crosswalk_header`), or a line inside a whole WELL-FORMED block that is
+    # provably some other table (`_is_foreign_table`: a different separator width, no
+    # pinned seam token). In particular the section
     # is NOT split into "the crosswalk table" and "other tables" and graded block by
     # block, because that split was itself the last false PASS:
     #
-    #   A block counted as the crosswalk only when its separator was FOLLOWED by a
-    #   header, so a bare `|---|---|---|---|` inserted above `| §7 | … |` started a
-    #   block that HAD a separator and NO header. That block was excluded from
-    #   grading, so every row beneath it went unread: blank §7's surface cell, insert
+    #   A block counted as the crosswalk only when the line directly ABOVE its
+    #   separator was a header, so a BLANK LINE plus `|---|---|---|---|` inserted above
+    #   `| §7 | … |` started a block that OPENED with a separator and had NO header
+    #   (`_separator(block) == 0`, so `separator > 0` fails and the block can never be
+    #   recognised as crosswalk-headed). That block was excluded from grading, so every
+    #   row beneath it went unread: blank §7's surface cell, insert the blank line and
     #   the separator, and the map graded CLEAN (exit 0, measured) while the same
     #   document with the cell blanked and NO split red (`R5 §7: names no surface`,
     #   exit 1). One inserted line was the difference between the arm firing and the
@@ -410,19 +416,22 @@ def check(text: str) -> tuple[list[str], dict[str, object]]:
     #
     # ⚠️ Grading only BLOCKS the selection recognised was itself a bypass, and that
     # is why the lines below are filtered rather than the blocks: a block counted as
-    # the crosswalk only when its separator was FOLLOWED by a header, so a bare
-    # `|---|---|---|---|` inserted above `| §7 | … |` started a block with a separator
-    # and NO header — excluded from grading, leaving every row beneath it unread.
+    # the crosswalk only when the line directly ABOVE its separator was a header, so a
+    # BLANK LINE plus `|---|---|---|---|` inserted above `| §7 | … |` started a block
+    # that OPENED with a separator and had NO header — excluded from grading, leaving
+    # every row beneath it unread.
     # Measured on one document: blank §7's surface cell -> exit 1; blank it AND insert
-    # that separator -> CLEAN, exit 0 (false PASS), and exit 1 here.
+    # that blank line with the separator -> CLEAN, exit 0 (false PASS), and exit 1 here.
     #
-    # So: EVERY `|` line in §5 is graded, minus two classes — an alignment row, and a
-    # line that IS the crosswalk header by shape. The one remaining exemption is a
-    # WELL-FORMED table whose own header is a DIFFERENT width from the crosswalk's:
-    # it is genuinely another table, and grading it would refuse a docs-only edit that
-    # appends one to §5 (a false RED). In the SHIPPED map no such table exists — R5
-    # reads §5 only, and §6's 3-wide checklist table is never in scope — so the
-    # exemption exists for an editor's edit, and its negative control is what keeps it
+    # So: EVERY `|` line in §5 that belongs to a BLOCK is graded, minus THREE classes —
+    # an alignment row, a line that IS the crosswalk header by shape, and a line inside
+    # a WELL-FORMED foreign block (`_is_foreign_table`). That third exemption is a
+    # WELL-FORMED table whose own separator row is a DIFFERENT width from the
+    # crosswalk's: it is genuinely another table, and grading it would refuse a
+    # docs-only edit that appends one to §5 (a false RED). In the SHIPPED map no such
+    # table exists — R5 reads §5 only, and §6's 3-wide checklist table is never in
+    # scope — so the exemption exists for an editor's edit, and its negative control is
+    # what keeps it
     # honest.
     # A 4-wide decoy gets no such exemption — that is the shape an impersonating row
     # or a split-off tail would take.
@@ -612,9 +621,10 @@ def _rewrite_row(text: str, sf: str, column: int, value: str) -> str:
     return "".join(out)
 
 
-#: The surface-cell values a crosswalk HEADER carries. Used only to decide whether
-#: the row above a separator is a header, so a deleted header cannot make a DATA
-#: row ungraded.
+#: The surface-cell values a crosswalk HEADER carries. Matched by SHAPE (with the
+#: four-cell count and the `plan §` first cell) — there is NO positional condition:
+#: nothing here looks at the line above or below a candidate header. See #11415 for the
+#: one line class this predicate's block builder never reaches (an indented `|` row).
 _HEADER_SURFACE_CELLS = frozenset({"surface(s)", "surfaces", "surface"})
 
 #: The crosswalk header's FIRST cell. The crosswalk maps `04-plan.md`'s seams, so
@@ -637,9 +647,12 @@ def _is_crosswalk_header(line: str) -> bool:
     property, so requiring it costs nothing that a reworded `surface(s)` cell
     still gets: renaming THAT cell keeps the block headed.
 
-    A reworded FIRST cell does drop the block into the fail-closed fallback below
-    (every §5 block graded), which is that fallback's documented direction — a
-    re-run, never a gate that reports green over an ungraded row.
+    A reworded FIRST cell does NOT drop the block into the fail-closed fallback below
+    (every §5 block graded): the seam block is still discovered by its data rows, so
+    `measured_from` — and with it the crosswalk width — is set from the separator
+    anyway. That fallback fires only when NO block carries a pinned seam token in a
+    first cell. What a reworded first cell costs is the header exemption itself, so
+    the header row reds `R5 <label>: names no surface` (measured).
     """
     row = cells(line)
     if len(row) != 4:

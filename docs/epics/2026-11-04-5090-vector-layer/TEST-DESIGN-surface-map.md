@@ -210,13 +210,19 @@ self-test: 21/21 mutation(s) behaved as designed — the checker is not a rubber
 ```
 
 ⚠️ **The split-table case is the one this review added, because the selection was a bypass.** The
-crosswalk is graded line by line inside §5: every `|` line is a row unless it is an alignment row or
-the crosswalk header itself. It used to be graded **block by block**, and a block counted as the
-crosswalk only when its separator was *followed* by a header — so a bare `|---|---|---|---|` inserted
-above `| §7 | … |` started a block with a separator and **no** header, which was excluded from grading
-and left every row beneath it unread. Measured both ways on the same document: blank §7's surface cell
-and the map reds `R5 §7: names no surface` (exit 1); blank it **and** insert that one separator line and
-the pre-fix checker reported `CLEAN` (exit 0) while the fixed one still reds (exit 1).
+crosswalk is graded line by line inside §5: a `|` line is a row unless it is an alignment row, IS the
+crosswalk header by shape, or belongs to a whole well-formed table that is provably not the crosswalk (a
+different separator width, and no row whose **first cell begins with** a pinned seam token —
+`_is_foreign_table`). It used to be graded
+**block by block**, and a block counted as the crosswalk only when the line directly **above** its
+separator was a header — so a **blank line** plus `|---|---|---|---|` inserted above `| §7 | … |` started
+a block that opened with a separator and had **no** header, which was excluded from grading and left
+every row beneath it unread. (The blank line is load-bearing: at the pre-fix checker the same separator
+inserted with no blank line only extends the crosswalk block and reds `R5 ---: names no surface`,
+measured.) Measured both ways
+on the same document: blank §7's surface cell and the map reds `R5 §7: names no surface` (exit 1); blank
+it **and** insert that blank line with the separator and the pre-fix checker reported `CLEAN` (exit 0)
+while the fixed one still reds (exit 1).
 
 The header exemption is therefore **shape**, not a position. A `|` line is the header only when all three
 of these hold at once (`_is_crosswalk_header`): four cells, a first cell reading `plan §`, and a third
@@ -225,18 +231,39 @@ the line below a candidate header — so it must not be described as one, and an
 believing it was always there. What it closes is the content-only exemption: a crosswalk row whose
 surface cell was rewritten to the bare token `surface` impersonated the header and skipped **both** R5
 arms. Under the pre-fix BLOCK selection that needed the row in a header's POSITION (measured then: the
-cell rewrite alone red `R5 §6.4: names no surface`, exit 1; the same rewrite with a blank line and
-`|---|---|---|---|` placed after it graded `CLEAN`, exit 0 — the row was in the header slot, so the block
-selection swallowed it). At this head position buys nothing, because every `|` line is graded unless it
-is an alignment row or IS the header by shape: the rewritten `§6.4` row keeps a seam label in its first
-cell, not `plan §`, and reds (exit 1). The self-test case above pins the `plan §` requirement — drop that
+cell rewrite alone red `R5 §6.4: names no surface`, exit 1; the same rewrite with a blank line inserted
+**above** the row and `|---|---|---|---|` inserted **immediately below** it graded `CLEAN`, exit 0 —
+and it is the **blank line** that does the work, not the side the separator sits on. With a blank line two
+shapes were swallowed, for two different reasons: separator immediately BELOW the row — the rewritten row
+itself satisfied the pre-fix CONTENT header test (its surface cell read `surface`), so it was skipped as
+the header; separator as the block's OWN FIRST line — `_separator(block) == 0` fails `separator > 0`, so
+that block could never be recognised as crosswalk-headed and was excluded outright. Both graded `CLEAN`
+(measured at the same pre-fix checker, exit 0 for each). The one shape that still reds is a blank line
+BETWEEN the row and its separator (`R5 §6.4: names no surface`, exit 1) — the row then sits alone in a
+separator-less block, which is graded. At this head position buys nothing:
+a `|` line is graded unless it is an alignment row, IS the header by shape, or sits in a **well-formed
+block that is provably not the crosswalk at all** — a different separator width, no row whose first cell
+**begins with** a pinned seam token (`_is_foreign_table`) — and the rewritten `§6.4` row keeps a seam label
+in its first cell, not `plan §`, so it reds (exit 1). The self-test case above pins the `plan §` requirement — drop that
 one condition and the case reports `clean`, so `--self-test` reds (measured) — and there is no
-alignment-row condition to pin, because the checker has none. Two
+alignment-row condition **in the header predicate** to pin, because that predicate has none. Three
 costs are accepted in this file's own direction — a false RED costs a re-run, never a gate that reports
-green over an ungraded row: an ordinary non-crosswalk table placed **inside** §5 is graded as if it were
-the crosswalk, and its rows red `R5 <label>: names no surface` (measured: three such violations on an
-otherwise clean map), and **rewording the crosswalk header** reds for the same reason (measured:
+green over an ungraded **required** crosswalk row (no block whose row begins with a pinned seam token is
+ever exempt, so a required row cannot be hidden that way): a non-crosswalk table **of the crosswalk's own
+width** placed inside §5 is graded as if it were the crosswalk, and its rows red
+`R5 <label>: names no surface` (measured: a 4-column table of a header plus **two** data rows gives three
+such violations on an otherwise clean map); a WELL-FORMED table of a different width with no first cell
+beginning with a pinned seam token stays `CLEAN` (measured at 2, 3 and 5 columns), while one that carries
+such a token, or whose rows are ragged, is not exempt and is graded instead — refusing the row as
+unreadable (exit 2) or reding `R5 <label>` (exit 1), measured for each shape; and **rewording the
+crosswalk header** reds for the same reason (measured:
 `| plan section | seam / interface | surface names | note |` → `R5 plan section: names no surface`).
+**One hole is open and is not one of those exemptions:** a `|` line indented by 1–3 spaces belongs to no
+block at all — blocks are built from lines starting with `|` at column 0 — so it is never graded, and an
+invalid indented row grades `CLEAN` (measured; markdown still renders it as a row). A *required* row
+cannot hide that way (its seam token is then missing from the graded rows and R5 reds), but a row with
+no seam token can. Filed as #11415, with the fix direction (left-strip before the block test, and a
+self-test mutation that indents a blanked row).
 A second table belongs in its own section.
 
 The `--self-test` arm exists because a checker that passes on everything is worse than no checker:
