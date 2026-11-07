@@ -13,12 +13,13 @@ from discovery — and every test below is green. ⚠️ The SHAPE is what is bl
 WRITER carrying it — do not drop this qualifier, which the register's docstring carries:
 `tortoise.sdk::update_point`'s computed key sits in the discovered map as `gated`, and
 `tortoise.hosted_backup::restore_graph` is IN `WRITER_CENSUS` (declared off its
-`set_embedding_clause`, not off its `SET n = $p`). A WRITER is absent for one of TWO reasons and
-neither of them means "no such write": it holds NO decidable statement
+`set_embedding_clause`, not off its `SET n = $p`). A WRITER is absent for one of THREE reasons and
+none of them means "no such write": it holds NO decidable statement
 (`tortoise.cache_projection::node_statement`, `tortoise.sdk::_emit_event`), OR its module is outside
 the walk — `tortoise/embeddings.py` is skipped on purpose, which is why
 `stamp_journal_embedding` / `_drop_journalled_embedding` hold a DECIDABLE container key and are still
-absent (the register's docstring names both).
+absent — OR its module will not parse, in which case discovery carries one `UNPARSEABLE:<rel>` row
+and none of that module's writers is enumerated at all (the register's docstring names all three).
 `#11274` owns widening it; the register's module docstring states the same boundary.
 
 **What `#11085` is.** `#10541` *classified* the embedding-writer population (read `WRITER_CENSUS`
