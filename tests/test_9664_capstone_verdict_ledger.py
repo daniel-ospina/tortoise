@@ -362,6 +362,14 @@ def test_advisory_reports_but_does_not_enforce_with_its_OWN_exit_code(tmp_path):
         "cmd:sh *",
         "cmd:git *",
         "cmd:uv run pytest *.yml",
+        # The same vacuity spelled with `.`/`..`: a raw text split called these literal
+        # directory components, so each passed while resolving to the ROOT.
+        "cmd:sh ./*",
+        "cmd:sh docs/../*",
+        "cmd:sh tests/..//*",
+        "cmd:sh */../*",
+        # An absolute glob cannot be resolved against the tree at all.
+        "cmd:sh /tmp/*",
     ],
 )
 def test_a_cmd_entry_must_name_an_artifact_of_this_tree(tmp_path, prose):
@@ -389,6 +397,11 @@ def test_a_cmd_entry_must_name_an_artifact_of_this_tree(tmp_path, prose):
         # be mistaken for the target, or `timeout`/`env` become false blocks.
         "cmd:timeout 300 uv run python tools/capstone_ledger.py check",
         "cmd:env TORTOISE_CAPSTONE_LEDGER=off uv run python tools/capstone_ledger.py check",
+        # Globs over a NAMED directory stay legal, however they are spelled —
+        # `docs/./*` normalises to `docs/*`, so refusing it would be a false block.
+        "cmd:uv run pytest ./tests/test_9664_capstone_*.py",
+        "cmd:uv run python docs/./*.md",
+        "cmd:uv run python docs/**/*.md",
     ],
 )
 def test_a_cmd_entry_that_names_a_real_artifact_is_accepted(tmp_path, command):
@@ -488,6 +501,23 @@ def test_dropping_rows_without_moving_the_pin_is_invalid(tmp_path):
     proc = _run_cli(tmp_path, data)
     assert proc.returncode == cl.EXIT_INVALID, proc.stdout + proc.stderr
     assert "criteria_expected" in proc.stderr
+
+
+def test_an_unresolvable_evidence_entry_is_invalid_not_a_traceback(tmp_path):
+    """`validate`'s contract is "the rows, or `InvalidLedger` naming every defect".
+
+    Two entries broke it by raising out of the file-system layer instead: an
+    absolute glob (`Path.glob` -> NotImplementedError) and a NUL byte
+    (`Path.resolve` -> ValueError). Both exited 1, so the closed exit SET held — but
+    the `CAPSTONE-LEDGER: INVALID` marker a log reader or a caller keys on was
+    replaced by a traceback, and an in-process caller catching `InvalidLedger`
+    crashed instead.
+    """
+    for entry in ("cmd:sh /tmp/*", "docs/evidence/9664-capstone/READ\x00ME.md"):
+        proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[entry])]))
+        assert proc.returncode == cl.EXIT_INVALID, proc.stdout + proc.stderr
+        assert "Traceback" not in proc.stderr, proc.stderr
+        assert "CAPSTONE-LEDGER: INVALID" in proc.stderr, proc.stderr
 
 
 def test_the_committed_ledger_pins_its_denominator():

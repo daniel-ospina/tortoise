@@ -229,18 +229,34 @@ _ENV_ASSIGNMENT: Final = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _WILDCARDS: Final = "*?["
 
 
-def _glob_names_a_directory(text: str) -> bool:
-    """A glob may only count if it names a literal DIRECTORY to search.
+def _glob_names_a_directory(text: str, root: Path) -> bool:
+    """A glob may only count if it names a literal DIRECTORY inside the tree.
 
     `*` and `*.yml` resolve against the repo root, so they name *everything* and
     therefore nothing: `cmd:sh *` emptied a 22-row uncovered list to a clean exit.
-    Requiring a `/` plus at least one wildcard-free directory component keeps the
-    precise shapes (`tests/test_9664_capstone_*.py`) and refuses the vacuous ones.
+    Requiring a `/` plus a wildcard-free directory component was not enough — the
+    same vacuity is spellable with `.`/`..`, which a raw text split treats as
+    ordinary components: `./*`, `docs/../*`, `tests/..//*` and `*/../*` all passed
+    while resolving to the ROOT (measured: each exited 0 on a one-row `verified`
+    ledger). So the literal prefix is RESOLVED and must be a directory strictly
+    below the root.
+
+    `docs/./*` is deliberately NOT refused: it normalises to `docs/*`, so it names
+    the `docs` directory and is a legitimate citation. Refusing it would be a
+    false block on a shape someone types by accident.
     """
-    parts = text.split("/")
+    parts = [part for part in text.split("/") if part not in ("", ".")]
     if len(parts) < 2:
         return False
-    return any(not any(w in part for w in _WILDCARDS) for part in parts[:-1])
+    prefix: list[str] = []
+    for part in parts[:-1]:
+        if any(wildcard in part for wildcard in _WILDCARDS):
+            break
+        prefix.append(part)
+    if not prefix:
+        return False
+    base = (root / Path(*prefix)).resolve()
+    return base.is_relative_to(root) and base != root and base.is_dir()
 
 
 def _names_artifact(token: str, root: Path) -> tuple[bool, str]:
@@ -254,22 +270,37 @@ def _names_artifact(token: str, root: Path) -> tuple[bool, str]:
     text = token.split("::", 1)[0]
     if not text:
         return False, "it names nothing"
-    if any(wildcard in text for wildcard in _WILDCARDS):
-        if not _glob_names_a_directory(text):
-            return False, (
-                f"the glob {text!r} names no literal directory to search, so it names "
-                "everything and therefore no artifact (a bare `*`/`*.yml` is not a citation)"
-            )
-        for match in root.glob(text):
-            resolved_match = match.resolve()
-            if resolved_match.is_file() and resolved_match.is_relative_to(root):
-                return True, ""
-        return False, f"no file of this tree matches the glob {text!r}"
-    candidate = Path(text)
-    resolved = (candidate if candidate.is_absolute() else root / text).resolve()
-    if resolved.is_file() and resolved.is_relative_to(root):
-        return True, ""
-    return False, f"{text!r} is not a file in this tree"
+    try:
+        if any(wildcard in text for wildcard in _WILDCARDS):
+            if Path(text).is_absolute():
+                return False, (
+                    f"the glob {text!r} is ABSOLUTE — a citation must name a pattern "
+                    "inside this tree, and an absolute glob cannot be resolved against it"
+                )
+            if not _glob_names_a_directory(text, root):
+                return False, (
+                    f"the glob {text!r} names no literal directory inside the tree, so "
+                    "it names everything and therefore no artifact (a bare `*`/`*.yml`/"
+                    "`./*` is not a citation)"
+                )
+            for match in root.glob(text):
+                resolved_match = match.resolve()
+                if resolved_match.is_file() and resolved_match.is_relative_to(root):
+                    return True, ""
+            return False, f"no file of this tree matches the glob {text!r}"
+        candidate = Path(text)
+        resolved = (candidate if candidate.is_absolute() else root / text).resolve()
+        if resolved.is_file() and resolved.is_relative_to(root):
+            return True, ""
+        return False, f"{text!r} is not a file in this tree"
+    except (OSError, ValueError, NotImplementedError) as exc:
+        # An entry that cannot even be RESOLVED is a defect in the RECORD, not a
+        # crash in the tool: `validate`'s contract is "the rows, or InvalidLedger
+        # naming every defect". Measured escapes before this guard: an absolute
+        # glob raised NotImplementedError out of `Path.glob`, and a NUL byte raised
+        # ValueError out of `resolve` — both printed a traceback instead of the
+        # `CAPSTONE-LEDGER: INVALID` marker a log reader or caller keys on.
+        return False, f"{text!r} cannot be resolved against this tree ({type(exc).__name__}: {exc})"
 
 
 def _commit_state(sha: str, repo_root: Path = REPO_ROOT) -> str:
@@ -386,7 +417,10 @@ def _evidence_is_real(entry: str, repo_root: Path = REPO_ROOT) -> tuple[bool, st
             "cannot stand in for held evidence"
         )
     candidate = Path(entry)
-    resolved = (candidate if candidate.is_absolute() else root / candidate).resolve()
+    try:
+        resolved = (candidate if candidate.is_absolute() else root / candidate).resolve()
+    except (OSError, ValueError, NotImplementedError) as exc:
+        return False, f"evidence path cannot be resolved ({type(exc).__name__}: {exc})"
     if not resolved.is_relative_to(root):
         return False, f"evidence path escapes the tree (`{entry}` resolves outside it)"
     if not resolved.is_file():
