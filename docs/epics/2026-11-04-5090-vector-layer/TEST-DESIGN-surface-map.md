@@ -218,13 +218,20 @@ and left every row beneath it unread. Measured both ways on the same document: b
 and the map reds `R5 §7: names no surface` (exit 1); blank it **and** insert that one separator line and
 the pre-fix checker reported `CLEAN` (exit 0) while the fixed one still reds (exit 1).
 
-The header exemption is therefore **two** conditions — content match **and** an alignment row directly
-below it — and the second one is not decoration either. A content-only exemption let a crosswalk row
-whose surface cell was rewritten to the bare token `surface` impersonate the header and skip **both** R5
-arms, but only once it was in a header's POSITION (measured on the pre-fix checker: the cell rewrite
-alone red `R5 §6.4: names no surface`, exit 1; the same rewrite with a blank line and `|---|---|---|---|`
-placed after it graded `CLEAN`, exit 0 — the row was in the header slot, so the exemption swallowed it).
-The self-test case above pins the pair: it fails if the exemption ever goes back to a content-only test. Two
+The header exemption is therefore **shape**, not a position. A `|` line is the header only when all three
+of these hold at once (`_is_crosswalk_header`): four cells, a first cell reading `plan §`, and a third
+cell naming surfaces. There is **no** positional condition in it — nothing in the shipped checker looks at
+the line below a candidate header — so it must not be described as one, and an editor must not add one
+believing it was always there. What it closes is the content-only exemption: a crosswalk row whose
+surface cell was rewritten to the bare token `surface` impersonated the header and skipped **both** R5
+arms. Under the pre-fix BLOCK selection that needed the row in a header's POSITION (measured then: the
+cell rewrite alone red `R5 §6.4: names no surface`, exit 1; the same rewrite with a blank line and
+`|---|---|---|---|` placed after it graded `CLEAN`, exit 0 — the row was in the header slot, so the block
+selection swallowed it). At this head position buys nothing, because every `|` line is graded unless it
+is an alignment row or IS the header by shape: the rewritten `§6.4` row keeps a seam label in its first
+cell, not `plan §`, and reds (exit 1). The self-test case above pins the `plan §` requirement — drop that
+one condition and the case reports `clean`, so `--self-test` reds (measured) — and there is no
+alignment-row condition to pin, because the checker has none. Two
 costs are accepted in this file's own direction — a false RED costs a re-run, never a gate that reports
 green over an ungraded row: an ordinary non-crosswalk table placed **inside** §5 is graded as if it were
 the crosswalk, and its rows red `R5 <label>: names no surface` (measured: three such violations on an
