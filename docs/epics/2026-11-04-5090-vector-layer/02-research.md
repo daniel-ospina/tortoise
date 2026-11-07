@@ -263,9 +263,10 @@ review attestation and an edit wipes it; **P2** this inventory said §4.2 "holds
 which is false — the five correctness constraints sit before the resulting-order block and the dedup
 preconditions and the Jev note after it — corrected at the `#11088` bullet above.
 
-**Round 4 (PR level, fresh context, `0fe67cf486`)** — 4 P2, of which **three were defects the round-3 fix
-itself introduced** and one was a claim in this log that nothing backed. All four verified against their
-primary source first: **(1)** the round-3 sentence attached `#11088`'s paraphrase to `:883` — that section is
+**Round 4 (PR level, fresh context, `0fe67cf486`)** — 4 P2: **two** were defects the round-3 fix itself
+introduced (the `:883` attribution; the §4.2 ordering), one pre-dated round 3 (`embeddings.py:1268`, from
+`3f31bbcade`), and one was a claim in this log that nothing backed (`468bbf8c10`). All four were verified
+against their primary source first: **(1)** the round-3 sentence attached `#11088`'s paraphrase to `:883` — that section is
 the Jev/`llm_tail` note and §4.2 contains no `EMBED` text at all, so the quote is now attributed to
 `#11088`'s body where it actually lives; **(2)** "past the ordering block" misordered §4.2 — the five
 correctness constraints (`:827`) precede the resulting-order block (`:849`), not follow it; **(3)** the only
