@@ -2224,7 +2224,13 @@ def retrieve_for_question(
             bucket_cap=DEFAULT_TEMPORAL_LEG_BUCKET_CAP,
             weight=_tl_weight, date_window=_tl_date_window,
             placement=_tl_placement, non_eviction=_tl_non_eviction,
-            guard_trace=_tl_guard_trace)
+            guard_trace=_tl_guard_trace,
+            # the guard must judge the window the READER gets, i.e. the RUN's
+            # raw-chunk cap — the same value the pool is deduped with a few
+            # dozen lines below (``_dedup_pool(annotated, …)``). Passing this
+            # module's default instead would let the guard clear a pick that
+            # deletes a session from the real window (false PASS, #10538).
+            max_chunks_per_session=max_chunks_per_session)
         _tl_dated = sum(1 for h in annotated if h.get("session_date"))
         temporal_leg_stats = {
             "on": True,
@@ -2254,14 +2260,17 @@ def retrieve_for_question(
             # refused, with which of the three conditions refused it. The
             # rejection list is the guard's own evidence: an empty leg whose
             # cause is the guard reads ``non_eviction_guard`` below, and this
-            # block is where the ids come from. ``on`` is False on the
-            # ``head`` counterfactual by construction (that arm exists to
-            # measure the displacement the guard forbids), so the field is the
-            # RESOLVED switch and ``applied`` says whether the guard actually
-            # ran on this row.
+            # block is where the ids come from. ``on`` is the RESOLVED switch
+            # (true even on the anchor arm and the head counterfactual, where
+            # the guard does not run); ⛔ ``applied`` is the field that says
+            # whether it RAN on this row, and it comes from the guard's own
+            # trace — never recomputed here, or a row where the guard was
+            # scoped away would be indistinguishable from one where it ran and
+            # admitted every pick.
             "non_eviction": _tl_non_eviction,
             "non_eviction_applied": bool(
-                _tl_non_eviction and _tl_placement != "head"),
+                _tl_guard_trace.get("applied", False)),
+            "non_eviction_targeting": _tl_guard_trace.get("targeting"),
             "non_eviction_rejected": list(
                 _tl_guard_trace.get("rejected") or []),
         }

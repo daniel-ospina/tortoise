@@ -360,6 +360,11 @@ def _shallow_pool(depth: int) -> list[dict]:
     return _pool(spec)[:depth]
 
 
+#: #10538: the guard state every row of this receipt is measured under. It is
+#: a module constant so the row AND the geometry block read one value.
+NON_EVICTION = False
+
+
 def _row(pool: list[dict], *, window: int, limit: int, placement: str) -> dict:
     """One measured row — the SHIPPED wiring, never a re-implementation."""
     from tortoise.retrieval import is_raw_chunk
@@ -383,7 +388,7 @@ def _row(pool: list[dict], *, window: int, limit: int, placement: str) -> dict:
         # behaviour is pinned mechanism-level in
         # `tests/test_temporal_leg_non_eviction_10538.py`, where each of the
         # three conditions has its own discriminating case.
-        non_eviction=False)
+        non_eviction=NON_EVICTION)
     # ``window_arm_retention``'s DEFAULT models the reader (the post-``dedup_pool``
     # pool the metric grades), so nothing here applies a chunk cap by hand: a row
     # measures whatever shape ``pool`` carries, and the shape is reported beside
@@ -399,6 +404,14 @@ def _row(pool: list[dict], *, window: int, limit: int, placement: str) -> dict:
         "limit_requested": limit,
         "budget_effective": effective_promotion_budget(window, limit),
         "placement": placement,
+        # ⛔ #10538 (fresh-context review, finding 6): the row must name the
+        # GUARD state too, not only the placement. The instrument runs the
+        # PRE-RULING splice (``non_eviction=False``, see the call above), and
+        # without this field an operator comparing a fresh `temporal_leg_stats`
+        # row (guard ON by default) against this receipt would find two
+        # artifacts disagreeing on picks/net with nothing in either naming the
+        # difference.
+        "non_eviction": NON_EVICTION,
         "picks": picks,
         "fired": bool(picks),
         "pick_ranks": retention["pick_ranks"],
@@ -503,6 +516,10 @@ def measure() -> dict[str, Any]:
             "window": SHIPPED_WINDOW,
             "limit": DEFAULT_TEMPORAL_LEG_LIMIT,
             "bucket_cap": DEFAULT_TEMPORAL_LEG_BUCKET_CAP,
+            # the PRE-RULING splice: this receipt is the baseline the #10538
+            # non-eviction guard is measured AGAINST, so the guard is off here
+            # by construction and every row says so.
+            "non_eviction": NON_EVICTION,
             # The reader's per-session raw-chunk cap `window_arm_retention`
             # models by default (`retrieve.py` applies it AFTER fusion).
             "max_chunks_per_session": DEFAULT_MAX_CHUNKS_PER_SESSION,

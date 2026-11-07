@@ -196,16 +196,22 @@ def test_a_pick_may_displace_a_REDUNDANT_slot_and_the_window_widens():
     assert (g["base_sessions"], g["fused_sessions"], g["net"]) == (2, 3, 1)
 
 
-def test_the_guard_reads_the_POST_cap_reader_window_not_the_splice_index():
-    """The guard must judge the arm on what the READER receives.
+def test_the_guard_judges_the_RUNS_reader_cap_not_a_hard_wired_default():
+    """The guard must judge the window the READER actually receives.
 
-    ``window_arm_retention`` defaults to the product chunk cap
-    (``DEFAULT_MAX_CHUNKS_PER_SESSION``), because the harness fuses and THEN
-    dedups: a pick spliced at fused rank 12 can be GRADED at rank 3 once the
-    cap removes raw chunks above it. The guard calls the same measurement with
-    the same default, so its verdict and the published retention numbers are
-    computed on one surface. Pinned structurally: the filter's own call must
-    not pass ``max_chunks_per_session=None`` (the pre-reader view).
+    ``retrieve.py`` fuses and THEN dedups the pool with the RUN's
+    ``--max-chunks-per-session``, so a guard measuring a fixed cap would clear
+    a pick that deletes a session from the real window — a false PASS, which is
+    the failure mode this whole guard exists to prevent. Pinned structurally:
+    the cap must be THREADED from the fusion caller into the filter and into
+    ``window_arm_retention``, and never overridden to ``None`` (the pre-reader
+    view).
+
+    ⚠️ This was a live defect on the first head of this PR (fresh-context
+    review, finding 1): the filter hard-wired ``DEFAULT_MAX_CHUNKS_PER_SESSION``
+    while ``temporal_leg_fusion_order`` had no cap parameter at all, so on a run
+    with ``TORTOISE_LME_MAX_CHUNKS_PER_SESSION=1`` the guard reported
+    ``applied: True, rejected: []`` over an order that deleted a session.
     """
     src = Path(tl.__file__).read_text()
     fn = next(
@@ -216,14 +222,75 @@ def test_the_guard_reads_the_POST_cap_reader_window_not_the_splice_index():
         node for node in ast.walk(fn)
         if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name)
-        and node.func.id == "window_arm_retention"
+        and node.func.id in {"window_arm_retention", "_reader_order"}
     ]
-    assert calls, "the guard stopped consulting the retention measurement"
+    assert calls, "the guard stopped consulting the reader-window model"
     for call in calls:
-        keywords = {kw.arg for kw in call.keywords}
-        assert "max_chunks_per_session" not in keywords, (
-            "the guard must use the READER's default chunk cap — overriding it "
-            "would grade the pre-cap splice and disagree with the receipt")
+        keywords = {kw.arg: kw.value for kw in call.keywords}
+        assert "max_chunks_per_session" in keywords, (
+            f"{call.func.id} must be given the RUN's cap explicitly")
+        passed = keywords["max_chunks_per_session"]
+        assert isinstance(passed, ast.Name) \
+            and passed.id == "max_chunks_per_session", (
+            "the cap must be the threaded parameter, not a module constant and "
+            "not None — either would grade a window the reader does not get")
+    # ...and the fusion caller must thread its own parameter into the filter.
+    fus = next(
+        node for node in ast.walk(ast.parse(src))
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "temporal_leg_fusion_order"
+    )
+    filter_calls = [
+        node for node in ast.walk(fus)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_non_eviction_filter"
+    ]
+    assert filter_calls, "the guard is not called from the fused caller"
+    for call in filter_calls:
+        keywords = {kw.arg: kw.value for kw in call.keywords}
+        assert isinstance(keywords.get("max_chunks_per_session"), ast.Name) \
+            and keywords["max_chunks_per_session"].id == \
+            "max_chunks_per_session", (
+            "the fused caller must forward ITS cap into the guard")
+    # ...and the harness call site must forward the run's cap to the leg.
+    src_r = Path(r.__file__).read_text()
+    for call in [
+        node for node in ast.walk(ast.parse(src_r))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "temporal_leg_fusion_order"
+    ]:
+        kw = {k.arg: k.value for k in call.keywords}
+        assert isinstance(kw.get("max_chunks_per_session"), ast.Name) \
+            and kw["max_chunks_per_session"].id == "max_chunks_per_session", (
+            "retrieve.py must pass the run's max_chunks_per_session — the "
+            "guard would otherwise model a window the reader never sees")
+
+
+def test_a_reader_cap_change_moves_the_guard_verdict():
+    """Behavioural counterpart of the structural pin: the SAME pool and the
+    SAME picks are refused at the reader's real (tighter) cap and admitted at
+    the looser one — so the cap is genuinely an input to the verdict.
+
+    Four raw chunks of ``sA`` sit above the tail: at ``max_chunks_per_session``
+    0-free (``None``) they are all visible; at ``1`` the cap removes three of
+    them, which pulls a deeper session's only slot INTO the window, changing
+    which sessions a pick can delete.
+    """
+    pool = (
+        [{"id": f"c{i}", "session_id": "sA", "session_date": "2023-04-10",
+          "point_kind": "session-transcript", "content": "alpha"}
+         for i in range(4)]
+        + [{"id": "b1", "session_id": "sB", "session_date": "2023-04-11",
+            "content": "alpha"},
+           {"id": "c1", "session_id": "sC", "session_date": "2023-04-12",
+            "content": "alpha"}]
+    )
+    base = tl._reader_order(pool, _ids(pool), max_chunks_per_session=1)[:3]
+    looser = tl._reader_order(pool, _ids(pool), max_chunks_per_session=None)[:3]
+    assert base != looser, (
+        "fixture must expose the cap's effect, or the assertion below is vacuous")
 
 
 # ── 5. the OFF-SWITCH restores the pre-ruling splice byte-for-byte ─────────
@@ -374,16 +441,62 @@ def test_the_leg_trace_passes_the_refusal_count_to_the_empty_reason():
             "'no_window_candidates' (#10538)")
 
 
-def test_the_run_fingerprint_stamps_a_guarded_vs_unguarded_arm():
-    """A guard-OFF checkpoint must never resume under the guard ON: the
-    promotion sets differ, so the fused orders differ."""
-    src = (Path(r.__file__).parent / "run.py").read_text()
-    keys = {
-        node.value for node in ast.walk(ast.parse(src))
-        if isinstance(node, ast.Constant)
-        and isinstance(node.value, str)
-    }
-    assert "temporal_leg_non_eviction" in keys, (
-        "the run fingerprint does not stamp the non-eviction arm — the "
-        "ordinary way to flip the switch (env + the SAME --checkpoint) would "
-        "report a two-arm mixture as one arm (#10538)")
+def _fp(monkeypatch, *, leg: str | None, non_eviction: str | None):
+    """The eval fingerprint under a given (leg, guard) arm state."""
+    from tools.longmem_eval import run as runner
+
+    for name, value in (("TORTOISE_LME_TEMPORAL_LEG", leg),
+                        ("TORTOISE_LME_TEMPORAL_LEG_NON_EVICTION",
+                         non_eviction)):
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
+    return runner._build_fingerprint(
+        reader_model="r", judge_model="j", ks=(5,), top_k=5, split="s",
+        ingest_mode="deterministic", extractor_model=None, max_retries=3,
+        dataset_fingerprint="x", rerank_config={})
+
+
+def test_the_guard_is_stamped_into_the_run_fingerprint(monkeypatch, tmp_path):
+    """Behavioural, not a grep: flipping the switch must change the fingerprint.
+
+    The switch is flipped the ordinary way — env + the SAME `--checkpoint` — so
+    without this key every completed question is reused from the OTHER arm and
+    the report's aggregate is a two-arm mixture presented as one arm. ⚠️ The
+    first head of this PR pinned only that the string appeared in `run.py`
+    (fresh-context review, finding 4): an inverted `!=` there passed that pin
+    while stamping every guard-ON run and leaving guard-OFF unstamped.
+    """
+    assert _fp(monkeypatch, leg="1", non_eviction=None).get(
+        "temporal_leg_non_eviction") is None, (
+        "the shipped (guard-ON) default must leave the key ABSENT so every "
+        "existing arm-ON checkpoint still resumes byte-identically")
+    off = _fp(monkeypatch, leg="1", non_eviction="0")
+    assert off["temporal_leg_non_eviction"] is False, off
+    # a typo resolves to the shipped default, so it must NOT mint a new arm
+    assert _fp(monkeypatch, leg="1", non_eviction="of").get(
+        "temporal_leg_non_eviction") is None
+    # and a leg-OFF run carries no guard key at all (the whole arm is absent)
+    assert _fp(monkeypatch, leg=None, non_eviction="0").get(
+        "temporal_leg_non_eviction") is None
+
+
+def test_a_guard_off_checkpoint_refuses_to_resume_a_guarded_run(monkeypatch):
+    """The consequence, pinned end-to-end: the two arms do not mix."""
+    from tools.longmem_eval import run as runner
+
+    guarded = _fp(monkeypatch, leg="1", non_eviction=None)
+    off = _fp(monkeypatch, leg="1", non_eviction="0")
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        cp = Path(td) / "cp.json"
+        runner._save_checkpoint(str(cp), [], [], guarded)
+        try:
+            runner._load_checkpoint(str(cp), off)
+        except runner.CheckpointStaleError as exc:
+            assert "temporal_leg_non_eviction" in str(exc), str(exc)
+        else:  # pragma: no cover - the failure this test exists for
+            raise AssertionError(
+                "a guard-OFF run resumed a guard-ON checkpoint — the "
+                "aggregate would be a two-arm mixture (#10538)")

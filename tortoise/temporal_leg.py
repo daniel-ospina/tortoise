@@ -109,6 +109,18 @@ DEFAULT_TEMPORAL_LEG_WEIGHT = 1.0
 #: committed retention receipt (`docs/scoping/receipts/2026-11-03-10538-*`)
 #: reproducible; the harness switch is
 #: ``TORTOISE_LME_TEMPORAL_LEG_NON_EVICTION=0``.
+#:
+#: ⛔ **GRANULARITY, stated so the prose and the code agree.** The condition is
+#: SESSION-level: no *session* may lose its last visible slot, i.e. the reader
+#: window may trade a redundant slot and may never delete a session. That is
+#: deliberately not slot-level — "never displace any id" would forbid every
+#: tail splice at the shipped geometry and make the arm inert everywhere, and
+#: session survival is the unit the ruling's three conditions and
+#: :func:`window_arm_retention`'s ``deleted_sessions`` are written in. A pick
+#: that displaces a redundant slot (its session keeps another one visible) is
+#: ADMITTED, and the window then holds one MORE distinct session; a pick that
+#: re-delivers a session the reader already has is REFUSED however harmless it
+#: looks, because it buys no new session.
 DEFAULT_TEMPORAL_LEG_NON_EVICTION = True
 
 #: Minimum anchor-token overlap fraction for an anchor to accept a match.
@@ -699,6 +711,7 @@ def temporal_leg_fusion_order(
     date_window: tuple[str, str] | None = None,
     non_eviction: bool = DEFAULT_TEMPORAL_LEG_NON_EVICTION,
     guard_trace: dict | None = None,
+    max_chunks_per_session: int | None = DEFAULT_MAX_CHUNKS_PER_SESSION,
 ) -> tuple[list[str], list[str]]:
     """Fuse the temporal leg into the existing RRF — the window-tail wiring.
 
@@ -743,9 +756,12 @@ def temporal_leg_fusion_order(
     2. **Per-session cap** — two picks from one session are two deliveries of
        one source; the later one is rejected (``duplicate_session``).
     3. **Never crop the anchor / non-eviction** — the trial fusion is computed
-       and :func:`window_arm_retention` is asked whether ANY base-window
-       session would lose its last visible slot; if one would, the pick is
-       rejected (``evicts:<session_id>``).
+       and :func:`window_arm_retention` is asked (with the RUN's
+       ``max_chunks_per_session``, i.e. the window the reader actually gets)
+       whether ANY base-window SESSION would lose its last visible slot; if one
+       would, the pick is rejected (``evicts:<session_id>``). Granularity is
+       SESSION, not slot — see :data:`DEFAULT_TEMPORAL_LEG_NON_EVICTION` for why
+       slot-level would make the arm inert everywhere.
 
     Why the guard is the arm's GATE and not a caveat on it: measured at the
     shipped geometry (``window=12``, ``limit=2`` → ceiling 10) the UNGUARDED
@@ -767,10 +783,21 @@ def temporal_leg_fusion_order(
 
     ``guard_trace`` — optional mutable mapping the caller supplies to receive
     the guard's telemetry (this module never reads it): ``{"on": bool,
-    "rejected": [{"id": …, "session": …, "reason": …}], "accepted": […]}}``.
-    An out-parameter on purpose: the ``(fused_id_order, picks)`` return tuple
-    is unpacked by a large pinned test surface, so widening it would break
-    callers for a diagnostic.
+    "applied": bool, "targeting": …, "rejected": [{"id": …, "session": …,
+    "reason": …}], "accepted": […]}}``. ``applied`` is the ONLY field a
+    receipt should read to decide whether the guard ran on a row (``on`` is the
+    resolved switch, which is true even on the anchor arm and the head
+    counterfactual where the guard does not run). An out-parameter on purpose:
+    the ``(fused_id_order, picks)`` return tuple is unpacked by a large pinned
+    test surface, so widening it would break callers for a diagnostic.
+
+    ``max_chunks_per_session`` — the reader's raw-chunk cap, and it must be the
+    RUN's cap, not this module's default: the guard judges eviction on the
+    window the reader actually receives (``retrieve.py`` fuses and THEN dedups
+    with ``--max-chunks-per-session``), so a guard measuring a different cap
+    than the run's would admit a pick that deletes a session from the real
+    window — the false PASS this guard exists to prevent. ``None`` is the
+    pre-reader view (no cap) and is for measurement only.
 
     Returns ``(fused_id_order, picks)`` — ``picks`` is empty when the leg
     is inert, or when the guard rejected every pick, in which case
@@ -802,8 +829,9 @@ def temporal_leg_fusion_order(
         targeting_trace=_targeting)
     if not picks or weight <= 0:
         if guard_trace is not None:
-            guard_trace.update({"on": bool(non_eviction), "rejected": [],
-                                "accepted": []})
+            guard_trace.update({"on": bool(non_eviction), "applied": False,
+                                "targeting": _targeting.get("targeting"),
+                                "rejected": [], "accepted": []})
         return order_ids, []
 
     def _fuse(selected: list[str]) -> list[str]:
@@ -829,7 +857,8 @@ def temporal_leg_fusion_order(
                    and _targeting.get("targeting") == "window")
     if _guard_runs:
         picks = _non_eviction_filter(
-            candidates, picks, window=window, fuse=_fuse, trace=guard_trace)
+            candidates, picks, window=window, fuse=_fuse, trace=guard_trace,
+            max_chunks_per_session=max_chunks_per_session)
         if not picks:
             return order_ids, []
     elif guard_trace is not None:
@@ -847,6 +876,7 @@ def _non_eviction_filter(
     window: int,
     fuse,
     trace: dict | None = None,
+    max_chunks_per_session: int | None = DEFAULT_MAX_CHUNKS_PER_SESSION,
 ) -> list[str]:
     """Drop the picks that would cost the reader window an evidence SESSION.
 
@@ -864,7 +894,7 @@ def _non_eviction_filter(
     session_of = {c["id"]: str(c.get("session_id") or "") for c in candidates}
     base_window = _reader_order(
         candidates, [c["id"] for c in candidates],
-        max_chunks_per_session=DEFAULT_MAX_CHUNKS_PER_SESSION,
+        max_chunks_per_session=max_chunks_per_session,
     )[:max(int(window), 0)]
     visible_sessions = {session_of[i] for i in base_window} - {""}
 
@@ -884,7 +914,8 @@ def _non_eviction_filter(
         else:
             trial = [*accepted, pid]
             retention = window_arm_retention(
-                candidates, fuse(trial), picks=trial, window=window)
+                candidates, fuse(trial), picks=trial, window=window,
+                max_chunks_per_session=max_chunks_per_session)
             if retention["deleted_sessions"]:
                 # (3) never crop the anchor — the slot is not spare.
                 reason = "evicts:" + ",".join(retention["deleted_sessions"])
@@ -956,14 +987,17 @@ def window_arm_retention(
     ``tools/longmem_eval/window_arm_baseline.py``, which is the reproducible
     instrument over this function).
 
-    ⛔ **This function REPORTS; it never gates.** Nothing in this module branches
-    on any value it returns, and no caller may turn ``additive`` into a pick
-    filter without an owner ruling: whether an arm MAY pay for a slot by
-    evicting base evidence inside the reader window is the open question on
-    #10538 (``window-exit`` vs ``ab-head-ab``), so wiring the predicate into the
-    promotion would answer it silently. The predicate is exposed exactly so the
-    ruling — and the exit measurement behind it — can rest on reproducible
-    numbers instead of an argument.
+    ⛔ **This function itself never gates — one named caller does.** Nothing in
+    this function branches on any value it returns; the ONLY place the predicate
+    is enforced is :func:`_non_eviction_filter`, called from
+    :func:`temporal_leg_fusion_order` under the owner ruling of 2026-11-07
+    (``window-exit``: expansion may widen the reader window and may never evict
+    a session from it), on the DATE-WINDOW arm only. That filter reads
+    ``deleted_sessions`` from THIS function, so the measurement here and the
+    gate there are computed on one surface by construction — if you change the
+    window/reader modelling below, you change the guard's verdict too. No other
+    caller may gate on these values; a second enforcer would be a second
+    definition of "eviction".
 
     ``candidates`` is the caller's semantic pool in rank order; ``fused_ids`` is
     what :func:`temporal_leg_fusion_order` returned; ``picks`` is its second
