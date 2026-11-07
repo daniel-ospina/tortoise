@@ -1049,3 +1049,62 @@ def test_a_node_that_becomes_SERVABLE_leaves_the_held_list():
     assert deleted_ids, "the second pass evicted nothing, so the arm is not exercised"
     assert not (deleted_ids & held_ids), (
         f"deleted AND reported as unservable: {sorted(deleted_ids & held_ids)}")
+
+
+def test_a_journalled_lane_graph_name_must_be_in_the_ownership_vocabulary():
+    """#11373 P1 — the journal reclaims ONLY a name `_SWEEP_OWNED_PREFIXES` covers.
+
+    `owns_by_ownership_record` is a PREFIX predicate, and it is what BOTH halves of
+    the sweep apply: `_sweep_drop` deletes only names it covers, and the E2E-7 leak
+    census `_owned_survivors` counts through the same filter. So journalling a name
+    outside the vocabulary (`evict_…`, this fixture's pre-fix shape) bought the
+    PEER-protection half only — `_peer_journaled_graphs` reads journal names
+    prefix-blind — while the reclamation half stayed inert: the sweep put the graph
+    in `preserved` and then consumed the journal anyway, so a run interrupted before
+    its `finally:` leaked that graph PERMANENTLY, and the census could not even
+    report it.
+
+    ⛔ `tests/test_derived_names.py`'s raw-client census reads GREEN either way, so it
+    is not evidence about this: `_raw_detach_violations` pins a per-run name and a
+    `_journal_append(` call, never the vocabulary. This pin is what settles it.
+
+    Hermetic on purpose (no engine): the live suite `test_cache_eviction_evictor.py`
+    `allow_module_level`-skips without a URI, so a pin living there would not run in
+    the PR lane that this defect would have merged through. It cannot import that
+    module's builder for the same reason — the skip fires at import.
+    """
+    import os
+    from pathlib import Path
+
+    from tests._embedded import _SWEEP_OWNED_PREFIXES, owns_by_ownership_record
+
+    # The shape `test_cache_eviction_evictor.py::_lane_graph_name` builds (they must
+    # agree; that module's own comment cites this pin).
+    name = f"test_evict_{os.urandom(6).hex()}"
+    assert name.startswith("test_"), (
+        f"{name!r} does not start with the `test_` family member: "
+        f"vocabulary is {_SWEEP_OWNED_PREFIXES}")
+    assert owns_by_ownership_record(name), (
+        f"{name!r} is OUTSIDE the ownership vocabulary {_SWEEP_OWNED_PREFIXES} — "
+        "journalling it reclaims nothing and leaks the graph on an interrupted run")
+
+    # The PRE-FIX shape, asserted as the thing that must stay unowned: if this ever
+    # flips, the fixture's prefix rationale has changed and this pin says so.
+    assert owns_by_ownership_record(f"evict_{os.urandom(6).hex()}") is False, (
+        "the bare `evict_` prefix is now ownership-covered — re-read #11373 P1 "
+        "before assuming the fixture's `test_` prefix is still load-bearing")
+
+    # ⛔ COUPLING, and it is asserted because it cannot be imported: the pin above only
+    # constrains a name IT builds. Measured during this fix — reverting the fixture to
+    # `f"evict_{…}"` left every assertion above GREEN, i.e. a pin that does not pin.
+    # The live module cannot be imported here (its `allow_module_level` skip fires at
+    # import), so the coupling is read off its source: the fixture must CALL the builder
+    # and the builder must RETURN an owned name.
+    live_module = (Path(__file__).resolve().parent / "test_cache_eviction_evictor.py").read_text(
+        encoding="utf-8")
+    assert "graph_name = _lane_graph_name()" in live_module, (
+        "the live suite's `lane` fixture no longer takes its graph name from "
+        "`_lane_graph_name()` — reconcile it with this pin")
+    assert 'f"test_evict_{os.urandom(6).hex()}"' in live_module, (
+        "`_lane_graph_name()` no longer builds a `test_`-prefixed name — the journal "
+        "would be INERT for reclamation (#11373 P1)")

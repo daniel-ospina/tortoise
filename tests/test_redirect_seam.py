@@ -578,22 +578,43 @@ def test_stem_registry_prod_parity_and_patch_idempotence(monkeypatch):
         "the walk cuts a cycle — the idempotence arm below is the one that "
         "detects a re-wrap"
     )
+    _assert_reinvocation_is_a_no_op(installed)
+
+
+def _assert_reinvocation_is_a_no_op(installed: object) -> None:
+    """The idempotence arm, as a FUNCTION so it can be driven (#11373 P2).
+
+    `test_stem_registry_prod_parity_and_patch_idempotence` calls this with the REAL
+    installer; `test_the_install_idempotence_arm_has_teeth` calls the SAME function
+    with `install_thread_stamp` replaced by a chaining installer and requires the
+    AssertionError. Sharing the body is the whole point: the teeth test then
+    evaluates the assertion that SHIPS, so deleting or weakening this arm reds that
+    test. (Its predecessor re-implemented the installer locally and asserted a
+    property of its own stub, so it stayed green with this arm removed.)
+    """
+    import threading as _threading
+
+    from tortoise import projection as proj_mod
+
     proj_mod.install_thread_stamp()  # re-invocation → no-op (marker)
-    assert threading.Thread.start is installed, \
+    assert _threading.Thread.start is installed, \
         "re-invoked installer double-wrapped Thread.start"
 
 
 def test_the_install_idempotence_arm_has_teeth(monkeypatch):
-    """Drive the re-invocation assertion above with a CHAINING installer and
-    require it to red.
+    """Drive the arm that SHIPS with a CHAINING installer and require it to red.
 
     The real installer only ever ASSIGNS, so on an unwrapped tree re-running it
-    is an identity no-op even with the marker guard deleted — the assertion
-    above cannot fire there. What it CAN and must catch is the shape a
-    "guard removed" repair actually takes once a third-party wrapper exists:
-    wrapping whatever is installed, every time, which grows the chain and
-    changes the installed callable. Without this the arm is unproven, and an
-    unproven pin is a rubber stamp (#2656's class).
+    is an identity no-op even with the marker guard deleted — the arm cannot fire
+    there. What it CAN and must catch is the shape a "guard removed" repair
+    actually takes once a third-party wrapper exists: wrapping whatever is
+    installed, every time, which grows the chain and changes the installed
+    callable. Without this the arm is unproven, and an unproven pin is a rubber
+    stamp (#2656's class).
+
+    ⛔ This drives `_assert_reinvocation_is_a_no_op` — the function the real test
+    calls — never a local copy of the installer. A mutation that makes the arm
+    unfalsifiable therefore reds HERE.
     """
     import threading as _threading
 
@@ -612,11 +633,8 @@ def test_the_install_idempotence_arm_has_teeth(monkeypatch):
     try:
         installed = _threading.Thread.start
         monkeypatch.setattr(proj_mod, "install_thread_stamp", _chaining_install)
-        proj_mod.install_thread_stamp()
-        assert _threading.Thread.start is not installed, (
-            "the idempotence arm is vacuous: a chaining installer left "
-            "Thread.start identical, so the pin cannot detect a re-wrap"
-        )
+        with pytest.raises(AssertionError, match=r"double-wrapped Thread\.start"):
+            _assert_reinvocation_is_a_no_op(installed)
     finally:
         _threading.Thread.start = saved_start
 

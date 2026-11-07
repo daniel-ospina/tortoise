@@ -670,3 +670,57 @@ def test_the_DISCOVERY_blind_spot_is_pinned_not_merely_documented(tmp_path):
             "'What the closure claim does NOT cover' block and this test together, and declare "
             "the writer(s) the widened discovery now finds."
         )
+
+
+#: The name-collision criterion the register's `duplicate` parenthetical states, one scratch module
+#: each. `duplicate` requires BOTH defs to reach `_put`, and `_put` is only called for a def that
+#: discovery CLASSIFIES — not for every `def` the walk visits. Data, so the assertion reads as the
+#: criterion it measures rather than as three hand-written cases.
+DUPLICATE_CRITERION = {
+    # positive control: `duplicate` must remain REACHABLE, or the two arms below prove nothing
+    "both_defs_classified": (
+        'def w(tx):\n    tx.query("SET n.embedding = $e")\n'
+        '\ndef w(tx2):\n    tx2.query("SET n.embedding = $e")\n',
+        "duplicate",
+    ),
+    # the collider is a pure READER: never classified, so `_put` is not reached for it and the
+    # discovered writer's own kind survives — which is in `NEEDS_A_DECLARATION`, i.e. CAUGHT
+    "collider_is_a_reader": (
+        'def w(tx):\n    tx.query("SET n.embedding = $e")\n'
+        '\ndef w(a):\n    return a + 1\n',
+        "unresolved_write",
+    ),
+    # same pair, orders swapped — the criterion must not be read as order-dependent
+    "collider_is_a_reader_reversed": (
+        'def w(a):\n    return a\n'
+        '\ndef w(tx):\n    tx.query("SET n.embedding = $e")\n',
+        "unresolved_write",
+    ),
+}
+
+
+def test_the_duplicate_criterion_is_put_reached_not_walk_reached(tmp_path):
+    """#11373 P2 — `duplicate` needs BOTH defs to reach `_put`, not merely the walk.
+
+    The register's parenthetical read "two same-named defs in one module, BOTH of them reached by
+    the walk", which predicts `duplicate` for ANY same-named pair — `ast.walk` reaches every `def`
+    in the module, so the stated criterion was satisfied by the reader collision too. It does not
+    hold: `_put` is called only for a def discovery CLASSIFIES, so a colliding def that is a pure
+    reader never reaches it, the discovered def's own kind stays in the map, and an
+    `unresolved_write`/`ungated` sibling lands INSIDE `NEEDS_A_DECLARATION` — caught, not excused.
+
+    A `#11086` reader taking the old wording as the criterion would believe every collision lands
+    in the undeclarable `duplicate` class and miss exactly the case that IS declarable, so the
+    wording is pinned here rather than left to the next review round to re-measure by hand. The
+    both-writers arm is the control: if `duplicate` stops being reachable the two reader arms stop
+    discriminating and this test says so instead of passing vacuously.
+    """
+    for shape, (body, expected) in DUPLICATE_CRITERION.items():
+        found = probe._embedding_writers(_scratch_root(tmp_path, shape, body))
+        kinds = {name: entry.get("kind") for name, entry in found.items()}
+        assert kinds == {"tortoise.m::w": expected}, (
+            f"the {shape!r} collision measured {kinds}, not "
+            f"{{'tortoise.m::w': {expected!r}}} — discovery's collision rule changed. The "
+            "register's `duplicate` parenthetical and this file's header both state this "
+            "criterion; re-derive both before changing either."
+        )
