@@ -591,7 +591,12 @@ def test_the_connect_stage_has_a_named_call_site_or_no_claim():
         "emitter half of CONNECT is gone, so E4 has no operator data to "
         "persist (#7949 §2 R10)")
 
-    body = _resolve(SDK, "_extract_session_v2")
+    # ⛔ _body, never _resolve: the name also appears in the docstring, so a
+    # substring test over the whole segment stayed GREEN with the real call
+    # deleted (measured in the #10983 review — this file's own _body() helper
+    # exists for exactly this class, and the E4 "wired and persisted" claim is
+    # only a call-site claim if the CALL is what is read).
+    body = _body(SDK, "_extract_session_v2")
     assert "apply_payload_operators(" in body, (
         "sdk._extract_session_v2 no longer CALLS apply_payload_operators — the "
         "v2 lane would emit operator edges that nothing persists, and E4's "
