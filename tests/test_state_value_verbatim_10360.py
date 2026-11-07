@@ -1268,6 +1268,15 @@ def test_a_composed_prefix_against_a_UNITLESS_side_keeps_the_omitted_unit_tolera
 #: previous revision and this one).
 _ADJACENCY_CLOSED_CLAIM = (
     r"\b(is|are|was|were)\b[^.;]{0,20}\bclosed\b",
+    # ⛔ ONLY THE FIRST ALTERNATIVE HAS A FALSIFIER (#11258 review round 23 `P2`,
+    # MEASURED): delete any of the three below and the whole file stays GREEN —
+    # they are exercised by no proof, because the row's own sentence happens to use
+    # the `is … closed` form. They are carried as DECLARED SPECULATION, not as
+    # measured coverage: the failure direction here is OVER-BLOCK (a narrowed list
+    # refuses an honest row), which is a false block rather than a gate that passes
+    # something wrong, so the cost of leaving them unpinned is bounded. Recorded
+    # rather than repaired on purpose — a synthetic block per form would be
+    # machinery to prove a list nobody has needed to widen.
     r"\b(has|have|had)\s+been\s+closed\b",
     r"\bwe\s+have\s+closed\b",
     r"\bclosed\s+by\s+this\s+table\b",
@@ -2026,12 +2035,18 @@ def _residual_region(text: str) -> str:
 
 
 #: The clause boundary the scan splits on before matching. ⛔ `while`/`whereas`/
-#: `although`/`though`/`yet` belong here for the same measured reason `and`/`but`
+#: `although`/`though` belong here for the same measured reason `and`/`but`
 #: do: they join two claims too, and a joiner the splitter does not know leaves an
 #: honest `spelling` disclosure and a reopening in ONE segment — so the honest
 #: waiver swallowed the second claim (`the SPELLING gap is open while the
 #: remaining gap is not closed` GREEN; the same claim unwrapped RED — #11258 review
-#: round 4 `P2`, measured). ⚠️ This is a CLOSED list standing in for a clause
+#: round 4 `P2`, measured).
+#: ⛔ `yet` IS NOT ONE OF THESE JOINERS (#11258 review round 23, MEASURED): it is
+#: named in the negator bar below, NOT in the alternation, because splitting at
+#: `yet` severed `hasn't yet opened again`. An earlier revision of this note
+#: listed `yet` among the joiners, which was false about the pattern — and a
+#: `yet` mutation would then RED with or without the splitter, pinning nothing.
+#: ⚠️ This is a CLOSED list standing in for a clause
 #: boundary; a joiner not named here still joins. That residual is disclosed in
 #: `WHAT THIS CANNOT CATCH` rather than implied to be covered.
 _RESIDUAL_CLAUSE_SPLIT = (
@@ -2659,6 +2674,42 @@ _RESIDUAL_REOPENING_MUTATIONS = (
     "the ADJACENCY half is not only kept open.",
     "the ADJACENCY half is not merely held open.",
     "the ADJACENCY half isn't only kept open.",
+    # ⛔ ONE FALSIFIER PER `_RESIDUAL_OPEN_VERBS` ALTERNATIVE (#11258 review round 23
+    # `P1`, MEASURED at `6c3c18b828` by SOURCE-level mutation — delete the
+    # alternative, re-import, re-scan): ten of the sixteen alternatives had NO
+    # falsifier at all, so any one of them could be deleted with the whole file
+    # GREEN. Only `is`/`keep`/`remains`/`stays`/`keeps`/`kept`/`held` were pinned.
+    # ⛔ EACH SHAPE BELOW IS MEASURED AS A FALSIFIER, not merely as a RED: it REDs
+    # with the alternative present and goes GREEN when that ONE alternative is
+    # removed from the tuple. A plain `<verb> open` sentence is NOT usable here —
+    # `the ADJACENCY halves are open.` stays RED with `are` deleted, because another
+    # arm catches it, so it would pin nothing. These are the shapes only this arm
+    # reaches.
+    "the carve-outs are still open.",
+    "the carve-out was still open.",
+    "the carve-outs were still open.",
+    "the carve-outs remain open.",
+    "the ADJACENCY half remained open.",
+    "the carve-out may stay open.",
+    "the carve-out stayed open.",
+    "the ADJACENCY gap can hold open.",
+    "the ADJACENCY gap holds open.",
+    # ⛔ `whereas` AND `though` ARE LOAD-BEARING JOINERS (#11258 review round 23
+    # `P1`, MEASURED): deleting either from `_RESIDUAL_CLAUSE_SPLIT` left the whole
+    # file GREEN while these sentences flipped RED -> GREEN, i.e. the honest
+    # `spelling` waiver swallowed the second claim again. ⛔ `yet` IS DELIBERATELY
+    # ABSENT FROM THIS GROUP: it is NOT an alternative in the splitter (it appears
+    # only in the negator bar's lookahead), so a `yet` mutation here would RED with
+    # or without the splitter and would pin NOTHING.
+    "the SPELLING gap is open whereas the remaining gap is not closed.",
+    "the SPELLING gap is open though the remaining gap is not closed.",
+    # ⛔ `_RESIDUAL_CLASS_ANCHOR`'s `retention` / `the guarantee` / the SPACED
+    # `time unit` had no falsifier either (same round, MEASURED): the fused arm's
+    # own subject list does not reach these, and each sentence below goes GREEN the
+    # moment its anchor member is deleted.
+    "the retention rule has yet to be closed.",
+    "the guarantee has yet to be closed.",
+    "the time unit half has yet to be closed.",
 )
 
 #: Truthful statements that must stay GREEN. Each is a shape the row itself uses
@@ -2837,6 +2888,22 @@ _RESIDUAL_TRUTHFUL_STATEMENTS = (
     "the SPELLING gap hasn’t yet opened again.",
     "the ADJACENCY gap isn’t kept open.",
     "it doesn’t reopen (d)’s ADJACENCY result.",
+    # ⛔ THE `never …` LOOKBEHINDS' MISSING PARTNERS (#11258 review round 23 `P2`,
+    # MEASURED): the comment above the run asserts that "every form in this run has
+    # a must-stay-GREEN partner" here, and that was FALSE for three of them —
+    # `(?<!\bnever\s)`, `(?<!\bnever\sbefore\s)` and
+    # `(?<!\bnever\sbefore\sbeen\s)` had none (deleting all three left the file
+    # GREEN while the sentences below went RED). Adding the partners makes the
+    # claim true; it was not true before them.
+    "the carve-out never reopens.",
+    "the carve-out has never before been reopened.",
+    "the carve-out has never before reopened.",
+    # ⛔ THE COORDINATOR GUARD'S FALSIFIER (#11258 review round 23 `P2`, MEASURED):
+    # the `(?!\b(?:and|but)\s+…(?:is|are|was|were|fails?)\b)` guard inside
+    # `_RESIDUAL_ANCHORED_OPENNESS` was deletable with the whole file GREEN, and
+    # this honest shape flipped GREEN -> RED without it. It is the measured
+    # false-block trade the round-2/3 notes describe, so it needs its own partner.
+    "the ADJACENCY half is unjudged and the pair is unjudgeable and fails open",
 )
 
 #: ⛔ THE OVER-BLOCK LEDGER: truthful statements this pin REFUSES, each MEASURED
@@ -3125,10 +3192,13 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
     assert len(set(_RESIDUAL_TRUTHFUL_STATEMENTS)) == len(
         _RESIDUAL_TRUTHFUL_STATEMENTS), (
         "the truthful-statement proof list has duplicate entries — see above")
-    assert len(_RESIDUAL_REOPENING_MUTATIONS) >= 135, (
+    assert len(_RESIDUAL_REOPENING_MUTATIONS) >= 149, (
         "the reopening proof list SHRANK below its floor — re-derive the count "
         "in the docstrings/comments rather than deleting shapes. ⚠️ THE FLOOR IS "
-        "THE CURRENT LENGTH (135), i.e. ZERO SLACK: at `>= 81` against an 88-entry "
+        "THE CURRENT LENGTH (149 — raised by round 23's fourteen falsifiers: one "
+        "per `_RESIDUAL_OPEN_VERBS` alternative that had none, `whereas`/`though`, "
+        "and the three `_RESIDUAL_CLASS_ANCHOR` members), i.e. ZERO SLACK: at "
+        "`>= 81` against an 88-entry "
         "list the slack was SEVEN mutations, which is more than the SIX exclusive "
         "proofs of the `no longer …` arm — so that pattern and all six of its "
         "proofs could be deleted with both tests GREEN, and "
@@ -3137,10 +3207,13 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
         "twenty-one deletions while `_RESIDUAL_CLOSED_VERDICT` is three patterns. "
         "A `>=` at the current length costs nothing on growth and refuses any "
         "shrinkage; raise it in the same commit that adds proofs.")
-    assert len(_RESIDUAL_TRUTHFUL_STATEMENTS) >= 66, (
+    assert len(_RESIDUAL_TRUTHFUL_STATEMENTS) >= 70, (
         "the truthful-statement proof list SHRANK below its floor — a false-block "
         "list that can be deleted silently is not coverage. ⚠️ THE FLOOR IS THE "
-        "CURRENT LENGTH (66 — raised in the commit AFTER the two contraction "
+        "CURRENT LENGTH (70 — raised by round 23's four partners: the three "
+        "`never …` lookbehind forms that had none, and the coordinator guard's "
+        "honest shape; before that 66 — raised in the commit AFTER the two "
+        "contraction "
         "falsifiers landed, which is the 2-entry slack this closed; then raised "
         "again with round 22's six typographic-apostrophe partners), i.e. ZERO "
         "SLACK, the same rule the ledger and the "
