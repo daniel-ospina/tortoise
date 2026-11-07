@@ -896,6 +896,25 @@ def test_the_readme_figures_reproduce_from_the_committed_artifacts():
             "vs an S2 base of "
             f"{pri['summary']['composition']['legacy']['s2_items']}") in flat_all
 
+    # ⛔ The README's population figures were the ONE unguarded copy of a claim
+    # the index row and the emitted caveats both pin: rewriting every occurrence
+    # (231→230, 266-of-311→265-of-311) left the whole suite green, and the README
+    # is the document `docs/00_index.md` LINKS TO, so it is the surface most
+    # likely to be read (#11385 review P3). Pinned literally here — a
+    # regeneration that moves the population REDS this test and forces a doc
+    # update — plus the superseded pair banned outright, because a count would
+    # couple the pin to the document's prose and false-block a legitimate edit.
+    assert "231 of the 266" in flat_all, "the offered population"
+    assert "266 of the 311" in flat_all, "the replayed-list narrowing"
+    assert "230 of the 265" not in flat_all, "a drifting copy of the population"
+    assert "265 of the 311" not in flat_all, "a drifting copy of the narrowing"
+    # …and 266 is checkable against the artifacts themselves: it is the replayed
+    # S2 list's own total, which the composition must agree with. (311 and 231
+    # need the source receipts, not the artifacts, so those two are pinned as
+    # figures instead of re-derived here.)
+    assert (sum(i["s2_items"] for i in pri["inputs"])
+            == pri["summary"]["composition"]["legacy"]["s2_items"])
+
     assert (f"Re-run (`ab-20261107T024226Z`): "
             f"{_thousands(prs['sum_legacy_out_tokens'])} → "
             f"{_thousands(prs['sum_delta_out_tokens'])} tokens, **−"
@@ -1193,3 +1212,16 @@ def test_the_emitted_caveats_carry_the_corrected_population_and_direction():
     assert "231 of the 266" in caveats, "the offered population is not emitted"
     assert "266 of the 311" in caveats, "the replayed-list narrowing is not emitted"
     assert "is a CEILING" not in caveats, "the refuted one-sided wording is back"
+    # ⛔ The COUNT was unpinned: appending a seventh entry to `tool.CAVEATS` left
+    # the whole suite green, so the README's "the instrument emits **6**" had no
+    # guard — and the count is exactly what a reader uses to know the artifact
+    # list is short, i.e. the part that must not drift silently (#11385 review
+    # P3). The artifacts carry 5 and the instrument 6, and the difference is ONE
+    # ADDED entry (the 266-of-311 narrowing, split out of the first caveat) plus
+    # one REWRITTEN entry (the S3 caveat, which absorbed the 231-of-266 population
+    # fact) — NOT the "5 + 2" the README used to claim.
+    _artifact_caveats = json.loads(_PRIMARY.read_text())["caveats"]
+    assert len(_artifact_caveats) == 5, len(_artifact_caveats)
+    assert len(tool.CAVEATS) == 6, len(tool.CAVEATS)
+    assert len(tool.CAVEATS) == len(_artifact_caveats) + 1
+    assert len(json.loads(_RERUN.read_text())["caveats"]) == len(_artifact_caveats)
