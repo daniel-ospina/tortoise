@@ -37,9 +37,18 @@ estimated, tokenised or modelled: the number is what the model actually
 emitted.
 
 The S3 "existing graph" block is reconstructed from the session's own S2
-list, which is what production S4 sees (S2 has already been written when
-S4 runs — see ``extract_session_v2``'s step order), so both arms get the
-SAME search results and the comparison stays single-variable.
+list, so both arms get the SAME search results and the comparison stays
+single-variable. ⛔ **This is NOT production geometry, and an earlier
+revision of this docstring claimed it was.** ``extract_session_v2`` runs
+S3 (``search_graph``) BEFORE S4 (``run_s4``) and writes the session's items
+only afterwards (``execute_embed``), so production S4 sees PREVIOUS-graph
+hits — bounded at ``max_queries=15`` × ``limit=3``, with the capture's own
+turn echoes dropped — never the session's own list relabelled as "already
+exists". The reconstruction therefore maximally SUPPRESSES gap emission in
+the delta arm (a "emit only what is missing" contract told that everything
+already exists emits nothing), which is why `compare` reports the delta
+arm's `s4_items` / `added_by_s4` next to the token number instead of
+leaving the saving to be read alone (#11385 review P1).
 
 Composition is recorded alongside the tokens (`_s4_merge_stats` /
 `_verbatim_reemissions`, the #2408 census quantities), so a reader can see
@@ -191,10 +200,11 @@ def arm_out_tokens(stats: dict) -> tuple[int | None, str]:
     malformed list), i.e. it shrinks the legacy arm and flatters the delta.
 
     `stats["cost"]["completion_tokens"]` is the ONE accumulator with that
-    property: `_record_call_cost` adds one entry per SUCCESSFUL call, so an
+    `stats["cost"]["completion_tokens"]` is the ONE accumulator with that
+    property: `_accumulate_call_cost` adds one entry per SUCCESSFUL call, so an
     escalation or parse-retry is summed, never overwritten
-    (``tortoise/extractor_v2.py::_complete``'s ``cost`` docstring). It is read
-    FIRST for that reason.
+    (``tortoise/extractor_v2.py::_accumulate_call_cost``, called from
+    ``_complete``'s success path). It is read FIRST for that reason.
 
     The recovery-based sum is only a fallback: `recovery.s4_out_tokens` is the
     terminal successful call and `truncation_completion_tokens_s4` the
@@ -269,10 +279,19 @@ def run_arm(model: Any, sess: dict, arm: str) -> dict:
                       sess["s2"], session_date=sess["session_date"],
                       stats=stats, delta=(arm == "delta"))
     except Exception as e:  # a failed arm is data, not a crash
+        # ⛔ the SPEND is read here too: `_complete` accumulates cost on its
+        # SUCCESS return, BEFORE `_complete_parsed` parses, so an arm that
+        # emitted 16k tokens and then failed to parse HAS a populated
+        # accumulator. Hard-coding ``None`` threw that away — and the arm it
+        # threw away is the expensive one (a truncating / parse-failing arm),
+        # which biases the delta toward the arm that never fails. The `None`
+        # polarity of `arm_out_tokens` already covers a genuinely tokenless
+        # failure (#11385 review P3).
+        spent, spend_basis = arm_out_tokens(stats)
         row.update({
             "error": f"{type(e).__name__}: {e}"[:400],
-            "out_tokens": None,
-            "basis": None,
+            "out_tokens": spent,
+            "basis": spend_basis,
             "prompt_tokens": int(stats.get("prompt_tokens") or 0),
             "truncated": bool(stats.get("truncated")),
             "elapsed_s": round(time.monotonic() - started, 2),
@@ -618,7 +637,14 @@ def cmd_run(args: argparse.Namespace) -> int:
             "row via verbatim_reemissions / added_by_s4 / corrected_by_s4 / "
             "s4_delta_reemit_suspect.",
             "The S3 search block is reconstructed from the session's own S2 list "
-            "(what production S4 sees after S2 is written), not a live graph read.",
+            "and is NOT production geometry: extract_session_v2 runs S3 "
+            "(search_graph) BEFORE S4 and writes the session's items only "
+            "afterwards (execute_embed), so production S4 sees bounded "
+            "PREVIOUS-graph hits (max_queries=15 x limit=3, the capture's own "
+            "turn echoes dropped). Relabelling the session's own list as "
+            "already-in-the-graph is the maximally gap-SUPPRESSING input for a "
+            "delta contract, so the delta arm's added_by_s4 / s4_items are read "
+            "as a floor, not as production behaviour.",
             "model_id is the model REQUESTED; the served id is not recorded here.",
             "Accuracy / chunk@20 are the eval lane's gates and are NOT measured here.",
         ],
