@@ -32,10 +32,26 @@ declaration of the schema.
 
 from __future__ import annotations
 
+import sys
+
+# #5128: the interpreter guard is the FIRST statement after the docstring / the
+# `__future__` import, before EVERY other import — a module-level 3.11+-only
+# import raises ImportError on an older interpreter before a later guard could
+# run, so a later guard would be dead code (tests/test_entry_point_python_guard.py
+# pins the exact preamble). Exit 2, not 1: this tool's 1 means "the table is
+# STALE", and an interpreter that cannot run the tool has measured nothing.
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    print(
+        f"tools/gen_placement_table.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/gen_placement_table.py`",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
+
 import argparse
 import hashlib
 import json
-import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent

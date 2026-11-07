@@ -74,11 +74,25 @@ assert that a refused/errored pass issued none.
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: the interpreter guard is the FIRST statement after the docstring / the
+# `__future__` import, before EVERY other import — a module-level 3.11+-only
+# import raises ImportError on an older interpreter before a later guard could
+# run, so a later guard would be dead code (tests/test_entry_point_python_guard.py
+# pins the exact preamble). An old interpreter is this tool's own `usage`/import
+# class (#5128), exit 1: nothing was read, nothing was evicted.
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/cache_evict.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/cache_evict.py`"
+    )
+
 import argparse
 import contextlib
 import importlib
 import json
-import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any

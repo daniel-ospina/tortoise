@@ -40,10 +40,27 @@ Usage:
 
 from __future__ import annotations
 
+import sys
+
+# #5128: the interpreter guard is the FIRST statement after the docstring / the
+# `__future__` import, before EVERY other import — a module-level 3.11+-only
+# import raises ImportError on an older interpreter before a later guard could
+# run, so a later guard would be dead code (tests/test_entry_point_python_guard.py
+# pins the exact preamble). Exit 2 matches this tool's own table: 1 means "the
+# map VIOLATES its rules", which an interpreter that never read the map cannot
+# report — same posture as `tools/substrate_map_check.py`.
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    print(
+        f"tools/test_design_map_check.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/test_design_map_check.py`",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
+
 import argparse
 import json
 import re
-import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
