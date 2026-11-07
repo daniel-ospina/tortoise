@@ -2182,16 +2182,12 @@ def _population_verdicts(repo_root: Path, snap: Snapshot) -> None:
     One `jq` call for the whole population (not one per row), because the arm is a
     property of the ROW and not of the run.
     """
-    if not snap.issues:
-        # Even an EMPTY queue names the rule it would have used: "the source is
-        # printed, ALWAYS" is a property of the render, not of a non-empty run.
-        script = _population_script(repo_root)
-        if script:
-            prog = _pool_jq(script)
-            if prog:
-                digest = hashlib.sha256(prog.encode()).hexdigest()[:12]
-                snap.population_source = f"{script} · POOL_JQ sha256:{digest} (no rows)"
-        return
+    # ⛔ THE SWITCH IS DECIDED BEFORE ANYTHING ELSE (#10951 review, P3). It used to
+    # sit AFTER the zero-row early return, so an empty queue with the rule DISARMED
+    # printed the rule's path and digest — no ⚠️ marker, because the marker keys on
+    # `OFF` — i.e. the one artifact a closer audits said the deployed rule had
+    # decided the population, which is the opposite of the switch state. (Same
+    # defect class as the refused-map provenance line.)
     # ⛔ THE OFF-SWITCH IS NAMED AND LOUD (#10951). When it is off, this tool
     # consults NO population rule at all: every collected row is admitted on its
     # title and labels exactly as it was before this change — the pre-#10951
@@ -2203,6 +2199,17 @@ def _population_verdicts(repo_root: Path, snap: Snapshot) -> None:
         "0", "off", "no", "false",
     ):
         snap.population_source = "OFF — NEXT_WORK_POPULATION disabled; no row was checked"
+        return
+
+    if not snap.issues:
+        # Even an EMPTY queue names the rule it would have used: "the source is
+        # printed, ALWAYS" is a property of the render, not of a non-empty run.
+        script = _population_script(repo_root)
+        if script:
+            prog = _pool_jq(script)
+            if prog:
+                digest = hashlib.sha256(prog.encode()).hexdigest()[:12]
+                snap.population_source = f"{script} · POOL_JQ sha256:{digest} (no rows)"
         return
 
     script = _population_script(repo_root)
@@ -2704,7 +2711,13 @@ def render(
         # population was withheld by the work-unit rule was described by three causes,
         # none of which applied, which is the same misdescription the stolen-target
         # finding was filed for.
-        withholds = sorted({u.reason for u in units if u.reason in REASONS_WITHHELD})
+        # ⛔ BY PRESENCE, LIKE THE REFUSAL ITSELF (#10951 review, P3). Selecting on
+        # the tuple re-created the misdescription on exactly the input the presence
+        # flag exists for: a replay carrying a NEWER verdict string was refused
+        # correctly and then reported as "held, superseded, or a duplicate".
+        withholds = sorted(
+            {u.reason for u in units if u.withheld_by_population or u.reason in REASONS_WITHHELD}
+        )
         if withholds:
             out.append(
                 "  NONE — no unit is pickable: every measured one is withheld as "

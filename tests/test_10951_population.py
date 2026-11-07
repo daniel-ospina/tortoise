@@ -839,3 +839,34 @@ def test_a_zero_row_queue_still_names_the_rule_it_would_have_used(monkeypatch):
     snap = Snapshot(issues=[])
     _population_verdicts(REPO_ROOT, snap)
     assert "sha256:" in snap.population_source
+
+
+# ── the two reporting arms the fourth round found unpinned ────────────────
+def test_an_empty_queue_with_the_switch_off_still_reports_OFF(monkeypatch):
+    """The zero-row branch used to run BEFORE the off-switch and shadow it.
+
+    Measured: an empty queue with `NEXT_WORK_POPULATION=0` printed the rule's path
+    and `sha256:` with NO ⚠️ marker — so the one artifact a closer audits said the
+    deployed rule had decided the population, the opposite of the switch state.
+    """
+    monkeypatch.setenv("NEXT_WORK_POOL_JQ_SH", str(FIXTURE_RULE))
+    monkeypatch.setenv("NEXT_WORK_POPULATION", "0")
+    snap = Snapshot(issues=[])
+    _population_verdicts(REPO_ROOT, snap)
+    assert snap.population_source.startswith("OFF"), snap.population_source
+    assert "sha256:" not in snap.population_source
+
+
+def test_the_footer_names_an_unrecognised_verdict_by_presence(monkeypatch):
+    """The footer keyed on the tuple, so a newer-vocabulary verdict was misdescribed."""
+    snap = Snapshot(
+        repo=REPO,
+        base="main",
+        issues=[issue(9400, "fix(a): looks like work")],
+        population={"9400": "STANDING-CONSTRAINT-V2"},
+        population_source="replay from a newer vocabulary",
+    )
+    text, pick = next_work.render(build_units(snap, None), None, snap, repo=REPO, top=5)
+    assert pick is None
+    assert "STANDING-CONSTRAINT-V2" in text, text
+    assert "every measured one is held, superseded, or a duplicate" not in text
