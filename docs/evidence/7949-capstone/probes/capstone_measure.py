@@ -796,14 +796,18 @@ def door_record(observed: dict[str, str | None]) -> dict:
 #:   `tests/test_7949_c2_door.py::test_a_capture_that_never_ENTERED_the_door_REFUSES_the_run`
 #:   so the widening cannot be made by aligning the m2 lane to this contract.
 #:
-#: ``no-provider``, ``replayed`` and ``extraction-disabled`` mean the capture
-#: returned BEFORE the lane dispatch (#3892 keyless, #1727 replay, and the org's
-#: own off switch). ``empty`` has TWO origins and neither is this door: the blank
-#: session-id and blank-conversation gates in ``sdk.capture_session`` return
-#: before the dispatch, AND the other lane emits it after taking that lane. So
-#: none of the four is this door entered. (This sentence used to attach "took a
-#: lane that is not the v2 door" to all four spellings; only ``empty`` has that
-#: origin — #11298 review round 3, source-verified.)
+#: ``replayed`` and ``no-provider`` mean the capture returned BEFORE the lane
+#: dispatch (#1727 replay, #3892 keyless), and ``extraction-disabled`` is the
+#: hosted endpoint's own pre-dispatch branch (the org's off switch) — it cannot
+#: arise on the probed ``sdk.capture_session`` path at all, so it is listed for
+#: completeness of the vocabulary, not as a shape this probe can meet. ``empty``
+#: has TWO origins and neither is this door: the blank session-id and
+#: blank-conversation gates in ``sdk.capture_session`` return before the dispatch,
+#: AND the other lane emits it after taking that lane. So none of the four is
+#: this door entered. (This sentence used to attach "took a lane that is not the
+#: v2 door" to all four spellings; only ``empty`` has that origin. The earlier
+#: "returned BEFORE" clause was also over-attributed to ``extraction-disabled``,
+#: which no ``sdk`` gate emits — #11298 review, source-verified both ways.)
 #:
 #: ⛔ ``error`` IS NOT ONE OF THOSE, and listing it here was a measured defect
 #: (#11298 review, round 14). ``error`` is a POST-dispatch outcome — the lane ran
