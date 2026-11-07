@@ -987,9 +987,12 @@ def _raw_client_call_positions(source: str) -> list[int]:
         """Targets bound to an expression that REFERENCES one of `wanted`.
 
         Every binding FORM, not every spelling of one: plain, annotated,
-        chained (`C = D = …`), tuple/list unpacking, and the walrus. `wanted`
-        starts as the class itself and grows to the resolved aliases on each
-        pass, which is what lets `C = D` after `D = falkordb.FalkorDB` resolve.
+        chained (`C = D = …`), tuple/list unpacking, and the walrus. `wanted` is
+        the class name UNIONED with the file's import-resolved names, and grows
+        to the resolved aliases on each pass — the union is what lets a chain
+        ROOTED AT AN IMPORT ALIAS resolve (`from falkordb import FalkorDB as
+        Client`; `D = Client`), and the growth is what lets `C = D` after
+        `D = falkordb.FalkorDB` resolve.
         """
         out = set()
         for node in ast.walk(tree):
@@ -1019,8 +1022,20 @@ def _raw_client_call_positions(source: str) -> list[int]:
     # `FalkorDB` token at all: seeded with the literal class name only, `D =`
     # never bound, `D(` was never a site, and an unowned, un-journaled bulk
     # DETACH in that file read CLEAN (measured: `sites=[]`, `violations=[]`;
-    # seeded with `names`, `sites=[220]`, `violations=[…]`, judged corpus
-    # byte-unchanged). #11217 round-15 review P2.
+    # seeded with `names`, `sites=[220]`, `violations=[…]`).
+    #
+    # ⛔ The cost is NOT literally zero, and this is where that is recorded.
+    # `_mentions` matches a bare attribute NAME (`n.attr in wanted`), so seeding
+    # the author's alias token also lets an UNRELATED attribute of the same name
+    # bind its target and make a call on it a phantom construction site —
+    # `Registry.Client` → `maker = Registry.Client` → `maker(1)` is a
+    # `FalkorDB(` site (measured). Reachable only by an author-chosen alias
+    # collision, and measured ZERO in-tree across 1,882 files, so it is latent.
+    # It is also NOT a new mechanism: the identical attribute collision already
+    # fires on the literal class name (`maker = registry.FalkorDB`) both before
+    # and after this change. Not seeding is the category-A fail-open, so the
+    # trade is the right way round — it is named here so nobody "fixes" the
+    # seed back and re-opens the import-alias leak. #11217 round-15 review P2.
     wanted = {"FalkorDB"} | names
     accumulated = set(found)
     for _ in range(4):
