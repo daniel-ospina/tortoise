@@ -207,17 +207,27 @@ def test_the_amended_record_still_passes_its_own_gate():
 def test_the_registered_a_corpus_is_the_one_the_probe_REFUSES_to_substitute():
     """FAILS IF the A-rows could be scored on a corpus the record did not pin (`G1`).
 
-    Non-vacuity: this drives the probe's own `check_corpus`, so a record whose `a_corpus` pointed
-    somewhere else — or a probe that stopped refusing — reds here rather than in prose.
+    Non-vacuity, both halves. The record registers ONE corpus for both row families (§3.7):
+    `a_corpus.path` must be `corpus.path`, and a record whose `a_corpus` points elsewhere must be
+    REFUSED — before the fix nothing read `a_corpus` at all, so pointing it at another corpus left
+    this arm green (#10982 review, F3: a test named for a guard it never drove). The second half
+    drives the `G1` hash itself, so a probe that stopped refusing reds here rather than in prose.
     """
     probe = _probe()
     corpus = _record()["a_corpus"]
     assert corpus["path"] == _record()["corpus"]["path"]
     assert "#10983" in corpus["status"], (
         "the provisional status must name the child that owns the reconciliation")
-    # the record's own pin PASSES …
+    # the record's own pins PASS …
     probe.check_corpus(_record())
-    # … and a different corpus is REFUSED, never scored.
+    # … a SECOND corpus is REFUSED, never scored (§3.7's "one corpus" rule) …
+    moved = json.loads(RECORD.read_text())
+    moved["a_corpus"]["path"] = "tests/eval/another_corpus"
+    with pytest.raises(SystemExit) as refused:
+        probe.check_corpus(moved)
+    assert "REFUSED" in str(refused.value) and "a_corpus.path" in str(refused.value), (
+        str(refused.value))
+    # … and the corpus HASH pin still refuses a moved corpus.
     moved = json.loads(RECORD.read_text())
     moved["corpus"]["fixtures_hash"] = "sha256:" + "0" * 64
     with pytest.raises(SystemExit) as refused:

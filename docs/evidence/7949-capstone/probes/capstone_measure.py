@@ -1167,6 +1167,21 @@ def check_corpus(prereg: dict) -> str:
     from tests.eval.write_path.corpus import compute_fixtures_hash
 
     frozen = (prereg.get("corpus") or {}).get("fixtures_hash") or ""
+    # ⛔ `A`-rows score on the SAME corpus the `E`-rows pin (`#10982` review, F3). §3.7
+    # registers ONE corpus for both row families — "the record's corpus pin is a single
+    # `fixtures_hash` and two corpora would make the two row families incomparable on one
+    # run" — and the record's own `a_corpus.pinned_by` says a different corpus is REFUSED by
+    # G1. Nothing read `a_corpus` at all, so a record whose `a_corpus.path` pointed elsewhere
+    # still passed G1 and the claim was prose. It is checked here, before any model call.
+    a_corpus = (prereg.get("a_corpus") or {}).get("path")
+    corpus = (prereg.get("corpus") or {}).get("path")
+    if a_corpus is not None and a_corpus != corpus:
+        raise SystemExit(
+            f"capstone-measure: REFUSED — the pre-registration's a_corpus.path is "
+            f"{a_corpus!r} but corpus.path is {corpus!r}. §3.7 registers ONE corpus for "
+            "both row families (a single fixtures_hash), so a second corpus makes the "
+            "A-rows and the E-rows incomparable on one run: the run is refused, never "
+            "scored")
     actual = compute_fixtures_hash()
     if not frozen:
         raise SystemExit("capstone-measure: REFUSED — the pre-registration freezes "
