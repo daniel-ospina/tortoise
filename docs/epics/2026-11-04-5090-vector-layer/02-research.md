@@ -77,7 +77,7 @@ aboutObjects: "epic #5090, decision V1, filtered ANN, pgvector, FalkorDB HNSW, e
   served-vs-indexed gap. The **served** set is declared; the **indexed** set is **measured** from
   `CALL db.indexes()` (discriminator is the `types` column, index 2 — copying the older `_row[0]/_row[1]`
   read would read the wrong column).
-- **Operator workflow.** `_ensure_indexes` runs from `Projection.__init__` **unguarded**; ~28 sequential round trips (the probe cold-start notes marked `#3143` in `monitoring.py` and `#3243` in `selfhost.py`). Any new read there **must be fail-open** or it breaks
+- **Operator workflow.** `_ensure_indexes` runs from `Projection.__init__` **unguarded**; ~28 sequential round trips (the `~28 sequential round trips` note inside the `#3143` cold-start block in `monitoring.py`, and the same figure in the `#3243` block in `selfhost.py` — grep the figure, not the issue marker, which recurs 24× and 10×). Any new read there **must be fail-open** or it breaks
   store construction.
 
 ## Tech Stack Research

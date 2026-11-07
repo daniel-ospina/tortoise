@@ -67,7 +67,7 @@ contract is §6.2's).
 *Failure mode:* a writer that never reaches `encode_for_row` — **S2 gives it a declared home**.
 
 **W2 — store setup.** `Projection.__init__ → _ensure_indexes → _ensure_vector_index_api → _record_vector_index_inventory`.
-*Seam:* the `if gap:` warning is preserved; **S4 retains the served set — new state — and reports the pair
+*Seam:* the `if gap:` warning inside `_record_vector_index_inventory` is preserved; **S4 retains the served set — new state — and reports the pair
 beside the measured indexed set**. *Failure mode:* the read is
 **fail-open by requirement** — `Projection.__init__` calls it unguarded, so a raising catalogue read must
 leave store construction healthy (already true; **pinned**, not changed).
@@ -135,7 +135,7 @@ not this epic's.
 | the gate's default | `tortoise/embed_gate.py` (`ENV_FLAG`, `embed_gate_enabled`) | shipped config sets it; **the default-reading code is unchanged** | a config default can be overridden per deployment — intended |
 | the gate's consult point | `embed_gate.embed_gate_enabled()` in `tortoise/embeddings.py` | **untouched** | — |
 | the exemption register | new leaf module (pattern: `tortoise/vector_write.py`, `tortoise/live.py`) | add | a leaf must not live under `tortoise/projection/` — that package's `__init__` is the head of the `projection → pack_state → sdk → projection` cycle, where a module-scope read of the config constants is a **reproduced** `ImportError` (`import tortoise.sdk` / `import tortoise.pack_manifest_store` break; `import tortoise.projection` alone still succeeds, which is why the cycle is easy to miss — `_config_classes()`'s docstring in `projection/__init__.py` documents it) |
-| the inventory report | `_record_vector_index_inventory` in `tortoise/projection/__init__.py` | **retain the SERVED set** beside the already-unconditional `_vector_indexed_labels` (`self._vector_indexed_labels = measured & served`) and report the pair; `if gap:` keeps gating the **warning** only; keep fail-open | **the read is on the unguarded `Projection.__init__` path** — covered by an existing pin |
+| the inventory report | `_record_vector_index_inventory` in `tortoise/projection/__init__.py` | **retain the SERVED set** beside the already-unconditional `_vector_indexed_labels` (`self._vector_indexed_labels = measured & served`) and report the pair; the `if gap:` inside `_record_vector_index_inventory` keeps gating the **warning** only; keep fail-open | **the read is on the unguarded `Projection.__init__` path** — covered by an existing pin |
 | the census | `tools/` (new, read-only) | add | must not run against production without `--dry-run` |
 
 **Failure modes addressed:** (a) a raising catalogue read breaks store construction → **fail-open is
@@ -150,7 +150,7 @@ existing probe**, not silent.
 **6.1 `_record_vector_index_inventory` (S4) — behaviour change, signature unchanged.**
 `(self, catalogue_rows=None) -> None` today; unchanged. The change is that it retains and exposes **the served set** beside the already-unconditional
 `_vector_indexed_labels` (assigned on every successful read — there is no early return on an empty `gap`);
-`if gap:` keeps gating the warning only. Logging moves from *"warn on gap"* to *"report the pair at INFO; warn on gap"*, so the warning
+`if gap:` inside `_record_vector_index_inventory` keeps gating the warning only. Logging moves from *"warn on gap"* to *"report the pair at INFO; warn on gap"*, so the warning
 semantics a caller may match on are preserved. **The pin that must STAY GREEN:**
 `tests/test_4997_vector_index_parity.py::test_a_store_with_no_gap_does_not_warn` — it captures at
 `logging.WARNING` and asserts no `#4997` warning record plus `_vector_indexed_labels == set(SERVED)`, and

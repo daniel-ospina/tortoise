@@ -102,14 +102,14 @@ claim and not an assertion:
 - **O:** make which labels the vector leg searches and which the store indexes a fact the system states,
   instead of one reconstructed by hand.
 - **I:** `_record_vector_index_inventory` (in `projection/__init__.py`) emits the pair for **every** served
-  label; today `if gap:` gates the **warning only**, and the served set is never retained.
+  label; today the `if gap:` inside `_record_vector_index_inventory` gates the **warning only**, and the served set is never retained.
 - **T:** a store with **no** gap reports the pair; a store **with** a gap still warns; a raising/malformed
   catalogue leaves `Projection.__init__` healthy (fail-open preserved); **no second label declaration** —
   the served set stays `security.ENTITY_TYPE_LABELS`.
 - **Complexity:** micro · **Blocked by:** none · **Blocks:** none.
 - ⚠️ **Deliberate test change:** `tests/test_4997_vector_index_parity.py::test_a_store_with_no_gap_does_not_warn`
   — its *warning* claim stands, its *silence* claim is what this ends. Stated so it is not read as a regression.
-- ⚠️ **Corrected premise, and it changes the size of this child.** `_vector_indexed_labels` is assigned **unconditionally** (`self._vector_indexed_labels = measured & served`); `if gap:` gates only the **`log.warning`**, and `test_a_store_with_no_gap_does_not_warn` (in `tests/test_4997_vector_index_parity.py`) already asserts the attribute for a no-gap store. **What is missing is the SERVED set** — it is never retained — so this needs **new state**, not one un-gated emit. It is still **not** a second inventory: it extends the one function that already reads the catalogue.
+- ⚠️ **Corrected premise, and it changes the size of this child.** `_vector_indexed_labels` is assigned **unconditionally** (`self._vector_indexed_labels = measured & served`); the `if gap:` inside `_record_vector_index_inventory` gates only the **`log.warning`**, and `test_a_store_with_no_gap_does_not_warn` (in `tests/test_4997_vector_index_parity.py`) already asserts the attribute for a no-gap store. **What is missing is the SERVED set** — it is never retained — so this needs **new state**, not one un-gated emit. It is still **not** a second inventory: it extends the one function that already reads the catalogue.
 
 ### C5 — **#11088** `census the unretrievable vectors, and carry the surface call for removing them`
 
