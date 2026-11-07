@@ -20,9 +20,13 @@ it already moved inside this PR's own review — but every one of them shares a 
 outside the walk (`tortoise/embeddings.py` is skipped on purpose, which is why
 `stamp_journal_embedding` / `_drop_journalled_embedding` hold a DECIDABLE container key and are
 still absent); when its module will not parse (discovery carries one `UNPARSEABLE:<rel>` row and
-enumerates none of that module's writers); and when the store sits at MODULE or CLASS scope, since
-the walk visits `def`s only — pinned as `module_scope_container_key` below rather than described.
-`#11274` owns widening it; the register's module docstring states the same boundary.
+enumerates none of that module's writers); when the store sits at MODULE or CLASS scope, since the
+walk visits `def`s only — pinned as `module_scope_container_key` and `class_scope_container_key`
+below; and when its NAME collides with another `def` in the same module (the map key is replaced by
+`kind == "duplicate"`, which is outside `NEEDS_A_DECLARATION`, so such a writer owes no declaration).
+`#11274` owns widening it. ⚠️ "States the same boundary" is a pointer, not a claim of equality: this
+list is the MECE one, while the register's module docstring names the same causes in passing and
+defers the full list to `INVISIBLE_SHAPES` below.
 
 **What `#11085` is.** `#10541` *classified* the embedding-writer population (read `WRITER_CENSUS`
 for the class counts rather than a number restated here — the #11274 widening moved them) but left
@@ -37,7 +41,7 @@ is the product home; this file is its proof.
 |---|---|---|
 | `test_the_register_resolves_at_runtime_from_tortoise` | the issue's first row — *"resolvable at runtime from `tortoise/`"* | the register moves out of `tortoise/`, under `tortoise/projection/`, or stops being importable without the tooling |
 | `test_the_register_imports_without_entering_the_projection_cycle` | `04-plan.md` §5's leaf requirement, EXECUTED | importing the register pulls `tortoise.projection`, `tortoise.pack_state` or `tortoise.sdk` into `sys.modules`, i.e. it re-enters `projection → pack_state → sdk → projection` — the cycle whose config read is a reproduced `ImportError` (`tortoise.projection.__init__::_config_classes` records it). The "imports ONLY the standard library" arm is `test_the_register_is_not_a_second_rule_set`, not this one |
-| `test_the_register_is_not_a_second_rule_set` | plan risk R2 — *"the register becomes a second source of truth and drifts from `value_gate.RULES`"* | the register imports `value_gate`/`embed_gate`, or grows a pattern/predicate/rule id |
+| `test_the_register_is_not_a_second_rule_set` | plan risk R2 — *"the register becomes a second source of truth and drifts from `value_gate.RULES`"* | the register imports `value_gate`/`embed_gate`, or names one of `RULES`/`EMBEDDING_RULES` in code (it does hold ONE regex, the `#\\d+` `owner_issue` format check, which is not a rule) |
 | `test_a_duplicate_key_raises` | the issue's third row (D4) | a second declaration silently wins — the stale row survives a rewrite |
 | `test_a_bypass_declaration_is_refused` | `04-plan.md` §6.2 — *"no `bypass` class; an unclassified writer is a refusal at export time"* | `bypass` becomes declarable, so the class that means *defect* can be asserted as *accepted* |
 | `test_an_undeclared_writer_is_a_refusal_not_a_default` | the same contract, at the LOOKUP | `classify` answers for a writer nobody declared — the fallback that makes "no silent bypass" unkeepable |
@@ -339,7 +343,10 @@ def test_the_register_names_the_shapes_its_discovery_cannot_see():
     """`#11274`: the guard is exactly as wide as discovery — so its blind spots are NAMED.
 
     A register whose claim is "an undeclared writer cannot bypass silently" is only as true as the
-    filter that populates it. Two shapes matter and only one is decidable:
+    filter that populates it. Of the shapes the INSTRUMENT names, one is now DECIDED (the literal
+    container key, `probe._writes_an_embedding`) and one is deliberately not
+    (`UNDECIDABLE_WRITE_SHAPES`, map-merges); the shapes neither the regex nor the AST pass can
+    decide are pinned as data in `INVISIBLE_SHAPES` below, so this docstring does not count them:
 
     * CONTAINER KEYS are decided on the AST (`probe._writes_an_embedding`), so they must NOT be in
       the blind list any more;

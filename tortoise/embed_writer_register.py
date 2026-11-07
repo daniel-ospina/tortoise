@@ -19,8 +19,8 @@ rule exists to close.
 
 * **Not a second rule set.** It speaks to *writer classification* — a different axis from *what earns
   a vector*, which is `value_gate.RULES` (`embed_gate.RULE_SET is value_gate.RULES`). This module
-  holds no pattern, no predicate and no rule id, and it imports **nothing from `tortoise`** — see
-  "leaf" below.
+  holds no *rule* pattern, no predicate and no rule id — its only regex is the `owner_issue` format
+  check (`_OWNER_ISSUE`) — and it imports **nothing from `tortoise`** — see "leaf" below.
 * **Not a licence to change a writer.** It declares what each writer already does. Nothing consults
   it to decide a write yet; that is `#11086`'s seam.
 * **Not an audit log.** The evidence for each entry is the seam, cited in `reason` — never a line
