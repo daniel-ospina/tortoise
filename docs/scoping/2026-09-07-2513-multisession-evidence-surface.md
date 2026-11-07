@@ -237,10 +237,11 @@ open/closed issue state — that is how this epic was read as "unopened work" th
 
 ### 10.1 The branches carry no unlanded work — per-branch proof
 
-`git reachability` is useless for these branches: they are stale by months and `git merge-tree`
-returns conflict-marker trees for all of them (main rewrote the same regions since). Two tests are
-**authoritative** — `headRefOid` identity (tip == a MERGED PR's head), or, where that fails, blob
-identity of the files the branch adds against the commit that landed them:
+`git merge-base --is-ancestor` reachability is useless for these branches: they are stale by months
+and `git merge-tree --write-tree` returns conflict-marker trees for all of them (main rewrote the
+same regions since). Two tests are **authoritative** — `headRefOid` identity (tip == a MERGED PR's
+head), or, where that fails, blob identity of the files the branch adds against the commit that
+landed them:
 
 | branch | tip | merged PR | merged at | why the tip carries no unlanded work |
 |---|---|---|---|---|
@@ -276,11 +277,11 @@ must be able to name:
 
 | # | Candidate-scope unit | Mechanism (child) | Landing evidence on `de72cfd455a` | Where it is armed | Graded movement |
 |---|---|---|---|---|---|
-| 1 | Query expansion / time-aware retrieval | **C6 #2520**; C2 #2518; also **#4211** (recall-side candidate expansion, an open child of this epic) | #5297 sq `0b3e4a90240`; #10549 sq `2f2582a2720` (DATE-RANGE widens candidates by session); C2's key expansion #2557 sq `0b00b40c274` | **product SDK, default OFF**: C2's `entity_key_expansion` and C6's `time_aware` are keyword parameters of `TortoiseSDK.tortoise_fts_query` (`tortoise/sdk.py:37042`, `:37057`), both `False` by default (the #1745 fail-safe). No in-tree product lane turns them on — the REST search path calls the method without either (`tortoise/hosted_api.py:12952`); the eval lane is the only caller that sets them (`tools/longmem_eval/retrieve.py:1913`, `:1919`) | **UNMEASURED** — #10538 open; C2 measured and **not adopted**, fail-safe OFF stands (#2518); #4211 has its own O/I/T and no evidenced target (§10.4) |
+| 1 | Query expansion / time-aware retrieval | **C6 #2520**; C2 #2518; also **#4211** (recall-side candidate expansion, an open child of this epic) | #5297 merge `0b3e4a90240`; #10549 sq `2f2582a2720` (DATE-RANGE widens candidates by session); C2's key expansion #2557 merge `0b00b40c274` | **product SDK, default OFF**: C2's `entity_key_expansion` and C6's `time_aware` are keyword parameters of `TortoiseSDK.tortoise_fts_query` (`tortoise/sdk.py:37042`, `:37057`), both `False` by default (the #1745 fail-safe). No in-tree product lane turns them on — the REST search path calls the method without either (`tortoise/hosted_api.py:12952`); the eval lane is the only caller that sets them (`tools/longmem_eval/retrieve.py:1913`, `:1919`) | **UNMEASURED** — #10538 open; C2 measured and **not adopted**, fail-safe OFF stands (#2518); #4211 has its own O/I/T and no evidenced target (§10.4) |
 | 2 | Source-session re-injection | **C4 #2517** | #3577 sq `26207c42905` (`tortoise/session_reinjection.py`, 714 L); evolved by #10629 sq `58011ae535b` (the guard's missing LOWER bound) | `source_session_chunk_pass` / `reinjection_merge_order` have **exactly one non-test caller**: `tools/longmem_eval/retrieve.py` — a **library + eval arm**, not the product ask path | **MEASURED — NEGATIVE**: #8713's pre-registered surface census (sealed by #3789) FALSIFIED the arm — `reader_evidence@5` / `reader_surface@5` / `evidence_recall@5` all DROP; the unit's Target is unmeasured and the surviving fix is #10540 (§10.4) |
 | 3 | Official-metric framing (`recall_all@5`) | **C1 #2516** | #8707 sq `4a487147a0b`: per-category `recall_all@5` rows (`tools/longmem_eval/report.py:2701`) **and** the fact-grain leg `answer_evidence@k` (`run.py:5362`, `run.py:6215`) — this is item (a) of the #2513 scoping comment's §4.2 amendment | eval lane | the **metric exists**; the **sealed Phase-0 receipt does not** (#2516 indicator 1) |
-| 4 | Aggregation-aware reading | **C5 #2521** | #2607 merge `7361250f0e1` (content `6550db3ee80`): `tortoise/aggregate.py::detect_aggregative_intent`, called at `tortoise/reader.py:400` (via `_is_aggregative_question`, `:382`) and appended **unconditionally** — no env gate — by the prompt composer `_system_prompt_for_question` (`:510`); #10550 sq `7e866e462f9` (reader keeps counting discipline when its type fragment loses it). ⛔ **Not a product surface**: the reader is reached only from the **eval-only** ask lane (`tortoise/ask_lane.py:702`) — #3849 removed the `/v1/ask` route, the SDK `ask()` method and any MCP ask tool, and nothing product-side imports `tortoise.reader` (`tortoise/reader.py:1-10`) | **reader prompt composer, reached only from the EVAL-ONLY ask lane** (`tortoise/ask_lane.py`) — no MCP tool, no SDK `ask()`, no `/v1/ask` route (#3849) | #10553 open (exact-count accuracy before/after) |
-| — | Completeness loop (the loop both 1 and 2 compose through) | **C3 #2519** | #2608 sq `77e590f88f7`: `tortoise/coverage_loop.py` shell + `session_diverse_order`; `tortoise/retrieval.py::guard_and_recap_pool` is its single shipped composition point | `guard_and_recap_pool` has **two** non-test call sites — `tools/longmem_eval/retrieve.py:2294` and `tortoise/session_reinjection.py:561` (the re-injection merge) — and both are reached only from the eval lane (`retrieve.py:2597`) | **UNMEASURED**; #2569 / #2570 open |
+| 4 | Aggregation-aware reading | **C5 #2521** | #2607 merge `7361250f0e1` (content `6550db3ee80`): `tortoise/aggregate.py::detect_aggregative_intent`, called at `tortoise/reader.py:400` (via `_is_aggregative_question`, `:382`) and appended **unconditionally** — no env gate — by the prompt composer `_system_prompt_for_question` (`:510`); #10550 sq `7e866e462f9` (reader keeps counting discipline when its type fragment loses it). ⛔ **Not a product surface**: the reader is reached only from **eval-only** code — the ask lane (`tortoise/ask_lane.py:702`) and the harness re-export (`tools/longmem_eval/reader.py:60`) — #3849 removed the `/v1/ask` route, the SDK `ask()` method and any MCP ask tool, and nothing product-side imports `tortoise.reader` (`tortoise/reader.py:1-10`) | **reader prompt composer, reached only from EVAL-ONLY code** — the ask lane (`tortoise/ask_lane.py`) and the harness re-export (`tools/longmem_eval/reader.py:60`) — no MCP tool, no SDK `ask()`, no `/v1/ask` route (#3849) | #10553 open (exact-count accuracy before/after) |
+| — | Completeness loop (the loop both 1 and 2 compose through) | **C3 #2519** | #2608 merge `77e590f88f7`: `tortoise/coverage_loop.py` shell + `session_diverse_order`. The loop's merge **discipline** ships in `tortoise/retrieval.py::guard_and_recap_pool` (`:835`, `session_diverse_order` then `dedup_pool` — its own docstring calls it "the shared merge discipline"); the full composition (census→gap→expand→merge) exists **only** in `tools/longmem_eval/retrieve.py::retrieve_for_question` (`:1444`), so the shipped point is the discipline, not the loop | `guard_and_recap_pool` has **two** non-test call sites — `tools/longmem_eval/retrieve.py:2294` and `tortoise/session_reinjection.py:561` (the re-injection merge) — and both are reached only from the eval lane (`retrieve.py:2597`) | **UNMEASURED**; #2569 / #2570 open |
 
 **The pattern this table records, plainly:** every mechanism is landed, and **none of them has a
 product lane that turns it on** — but they are not all eval-lane code, and the difference is what
@@ -293,9 +294,10 @@ product lane that turns it on** — but they are not all eval-lane code, and the
   (`tools/longmem_eval/retrieve.py:1913`, `:1919`). Arming this unit is a **decision** (the sealed A/B),
   not build work — which is what the parameter's own docstring says (`tortoise/sdk.py`: "OFF by default
   in the product … the sealed #2513 A/B gate decides adoption").
-- **unit 4 (C5) is product code reached only from the EVAL-ONLY ask lane** (#3849: no MCP tool, no SDK
-  `ask()`, no `/v1/ask` route), where its fragment is appended unconditionally (ON, no env gate) — so
-  what ships is *code no product surface reaches*, not a product behaviour.
+- **unit 4 (C5) is product code reached only from EVAL-ONLY code** — the ask lane and the
+  `tools/longmem_eval/reader.py:60` re-export (#3849: no MCP tool, no SDK `ask()`, no `/v1/ask` route) —
+  where its fragment is appended unconditionally (ON, no env gate), so what ships is *code no product
+  surface reaches*, not a product behaviour.
 - **unit 2 (C4) and the completeness loop (C3) are eval-lane-armed**: their composition call sites are
   reached only from `tools/longmem_eval/retrieve.py` (`:2294`, `:2597`).
 
@@ -345,4 +347,5 @@ cohort run, which is blocked (§10.4).
 | **#10553 (C5 measurement)** | Exact-count accuracy before/after for the reader aggregation discipline. |
 | **#2569 / #2570 (C3 tails)** | Coverage-signal routing; stratified window reconciliation. |
 | **N1 / N2 (proposed, unfiled)** | N1 is BLOCKED-BY W2A's root-cause attribution; N2 is trigger-conditional on the fact-grain leg. Both are defined in the #2513 scoping comment's §4.3 (this doc has no such subsections). Neither is dispatchable, and neither should be filed to look busy. |
+| **The honest full-mix ceiling (~0.71)** | Not a work unit — a *target question* the #2513 body says the epic also owns: an honest full-mix ceiling of ~0.71 with a strong reader **until this program lands** (no published system exceeds ~0.71 honestly on this benchmark; the 85%+ figures are vendor self-grades). It has no O/I/T of its own and no owning child, and the one run that would move it is the same blocked sealed run as #2516/#2567, so it is named here for completeness rather than dispatched. |
 | **The sealed A/B** | The one measurement that would arm any of the OFF mechanisms. Cannot run here (same two blockers). #2513 therefore **stays OPEN**: its outcome is the evidence, and the evidence is what is missing. |
