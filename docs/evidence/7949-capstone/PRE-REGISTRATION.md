@@ -443,10 +443,10 @@ one (`#7949` §2 R7).
   half-way point. The measured context it exists to reverse is the backfill's own census
   (`tortoise/definite_description_backfill.py:15-23`): of a drop-shaped population of **6,533** Objects,
   **2,614 are single-use** and 402 unused, on **7,870** Objects and 27,324 reference edges — i.e. 40%
-  of that class is single-use. ⚠️ The 62.3% figure in §1.2 is a **different** measurement (`the `
-  -prefixed rows: 4,901 of 7,870, of which 2,570 are load-bearing) and it is **not** a single-reference
-  share — a bar must not be justified by a class it does not describe. No `A2` run exists, so nothing
-  is fitted to one.
+  of that class is single-use. ⚠️ The 62.3% figure in §1.2 is a **different** measurement (the
+  `the`-prefixed rows: 4,901 of 7,870, of which 2,570 are load-bearing) and it is **not** a
+  single-reference share — a bar must not be justified by a class it does not describe. No `A2` run
+  exists, so nothing is fitted to one.
 - **A3 — S5 emits the batch's story *and* the cross-batch link.** *Metric:* chain-join rate under the
   **registered** definition — an incident `IMPL`/`NAND` **and** at least one such edge crossing a batch
   boundary, with an `eventId` on **both** ends (a `coalesce(eventId,'')` comparison counted an
