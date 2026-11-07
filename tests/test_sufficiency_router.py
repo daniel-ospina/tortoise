@@ -66,8 +66,14 @@ RED:
 * **Report a MINTED unit as already stored** — drop the ``key in persisted`` half
   of the branch → ``test_a_minted_unit_is_never_also_reported_as_persisted`` RED.
 * **Leave the stored class out of the class guard** — compare only against
-  ``seen`` → ``test_a_stored_class_cannot_be_overwritten_by_a_re_escalation`` and
-  ``test_a_stored_class_conflict_beats_the_within_batch_dedupe`` RED.
+  ``seen`` → ``test_a_stored_class_cannot_be_overwritten_by_a_re_escalation``
+  RED, together with the seven the ACROSS-CALL bullet above already names
+  (measured: eight in total — that edit IS the loop being ignored; this test is
+  the one that names the STORE's class specifically).
+* **Drop the ``already`` strip on conflicted keys** — report a stored unit the
+  batch contradicts as "nothing to write" →
+  ``test_a_stored_class_conflict_beats_the_within_batch_dedupe`` RED, and it is
+  the ONLY test that reds (measured 1 failed, 227 passed).
 * **Grade the store lazily** — record a store contradiction and raise only when
   the batch hits that key → ``test_a_contradictory_store_is_refused_even_when_the_batch_never_touches_it``
   RED and the sibling contradiction test stays GREEN (this is the one edit that
@@ -1196,9 +1202,13 @@ def test_a_summary_unit_can_neither_carry_the_raw_payload_nor_supersede_it() -> 
 # what makes §12.8 item 4's "escalation is a permanent tax rather than an
 # investment" true.
 #
-# Each test below is RED on the pre-fix module. Measured by loading `origin/main`'s
-# module in place of this one — 17 failed, 211 passed (228 total) — and the 17 break
-# down EXACTLY as: 12 x `TypeError: unexpected keyword argument 'already_written'`,
+# RED-first. The 17 tests this change adds (15 of its 16) or extends (2) for the
+# across-call loop are RED on the pre-fix module; the 16th added test — the
+# within-call rename — is green on both BY DESIGN (`main` already deduped within
+# one call). Not every test below this line is in that 17: the pre-existing
+# `unit_key`/refusal-plan pair and the parametrised span case are green on both.
+# Measured by loading `origin/main`'s module in place of this one — 17 failed, 211
+# passed (228 total) — and the 17 break down EXACTLY as: 12 x `TypeError: unexpected keyword argument 'already_written'`,
 # 1 x `AssertionError: Regex pattern did not match` (the bare-key test asserts the
 # refusal MESSAGE, so the interpreter's own TypeError lands inside its
 # `pytest.raises`), 1 x `AttributeError: no attribute 'already_persisted'`, 2 x
