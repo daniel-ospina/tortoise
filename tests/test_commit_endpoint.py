@@ -5474,9 +5474,13 @@ class Test4051ChargeCoversTheLoopShape:
         # lane's points gate reads.
         before = self._points_count()
         for i in range(2):
-            assert _commit(client, _raw_payload(
+            r = _commit(client, _raw_payload(
                 0, session_id=f"s4051ResidLoop{i}", points=[], entities=[],
-                provenance_refs=[])).status_code == 200
+                provenance_refs=[]))
+            assert r.status_code == 200, (
+                f"residual-loop commit {i} was refused ({r.status_code}) — "
+                f"this leg needs both admitted to re-measure the points "
+                f"count: {r.text[:200]}")
         assert self._points_count() == before, (
             "the points count moved for a `points: []` commit — if this is a "
             "real widening of the counted category, §4 of #4051 has been "
