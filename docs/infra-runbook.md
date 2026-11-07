@@ -2783,10 +2783,12 @@ undone.
 - **Exit classes.** Exit 2 (never bypassable): the ledger is missing, malformed,
   **indented / carrying a line-break character the sync filter does not split on**,
   duplicates a name, names a name the manifest does not declare, names a
-  non-`gh-secret:` source, names one of the app's **mandatory** secrets (seven, per
-  `MANDATORY_FLY_SECRETS`: the five below plus `SUPABASE_ACCESS_TOKEN` and
-  `FLY_API_TOKEN`, which the manifest-declaration rule refuses first because they
-  are never Fly secrets — removing any of them is an outage, not a mitigation),
+  non-`gh-secret:` source, names one of the app's **mandatory** secrets — seven,
+  per `MANDATORY_FLY_SECRETS` in the checker: `FASTAPI_INTERNAL_KEY`,
+  `TORTOISE_SECRET_PEPPER`, `FALKORDB_CLOUD_URI`, `STRIPE_SECRET_KEY`,
+  `STRIPE_WEBHOOK_SECRET`, plus `SUPABASE_ACCESS_TOKEN` and `FLY_API_TOKEN`, which
+  the manifest-declaration rule refuses first because they are never Fly secrets
+  (removing any of them is an outage, not a mitigation) —
   names a Fly variable `fly.toml [env]` also assigns (the deploy would apply that
   value whatever the secret list says), **or records a name the deploy's payload
   still stages (`LEDGER NOT HONOURED`)**. Exit 1 (incident-bypassable): expired,
