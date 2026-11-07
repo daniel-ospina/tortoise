@@ -1205,8 +1205,10 @@ def test_a_summary_unit_can_neither_carry_the_raw_payload_nor_supersede_it() -> 
 # RED-first. The 17 tests this change adds (15 of its 16) or extends (2) for the
 # across-call loop are RED on the pre-fix module; the 16th added test — the
 # within-call rename — is green on both BY DESIGN (`main` already deduped within
-# one call). Not every test below this line is in that 17: the pre-existing
-# `unit_key`/refusal-plan pair and the parametrised span case are green on both.
+# one call). Not every test in the §12.5 section it sits in is in that 17: that
+# section's four pre-existing tests are green on both (measured: 8 collected
+# items) — the `unit_key`/refusal-plan pair, the refusal-reason allow-list, and
+# the parametrised span case (5 items).
 # Measured by loading `origin/main`'s module in place of this one — 17 failed, 211
 # passed (228 total) — and the 17 break down EXACTLY as: 12 x `TypeError: unexpected keyword argument 'already_written'`,
 # 1 x `AssertionError: Regex pattern did not match` (the bare-key test asserts the

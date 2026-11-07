@@ -1554,9 +1554,15 @@ def plan_writeback(
         if known is not None:
             if known.claim_class != finding.claim_class:
                 # Same identity, different CLASS: refuse the KEY outright rather
-                # than keep whichever arrived first. Order-independent by
-                # construction, and REPORTED — a silent drop here would be the
-                # promotion door closing quietly instead of bolted.
+                # than keep whichever arrived first. WHICH KEYS are refused is
+                # order-independent by construction (``conflicted`` is a set), and
+                # the refusal is REPORTED — a silent drop here would be the
+                # promotion door closing quietly instead of bolted. ⚠️ The NUMBER
+                # of rows is not order-invariant, by design: one `class-conflict`
+                # row per disagreeing finding (measured — the same three findings
+                # permuted leave ``units``/``already_persisted``/``ok``/``settled``
+                # identical and carry 1 or 2 rows), so deduping them would be a
+                # caller-visible behaviour change that needs its own test.
                 # ⚠️ The comparison is against the STORE's class too, which is the
                 # stronger side of it: the stored class is the record, so a
                 # re-escalation that re-verified the same span+claim under a
