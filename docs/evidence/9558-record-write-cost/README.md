@@ -63,8 +63,9 @@ re-derive and what to read as a local observation:
    committed AFTER runs (`per_timed_record.connect_calls = 0` in each);
 6. the RESOLUTION half of the residual — the fifteen `Path.exists()` calls
    `_migrations_dir()` -> `_complete()` pays BEFORE the key is built —
-   **0.169 ms**. This is the narrowest honest statement, because the other two
-   numbers in bullet (a) DO have committed sources: the warm total is
+   **0.169 ms**. This is the narrowest honest statement, because bullet (a)'s
+   warm total and fingerprint pass DO have committed sources (its 0.79× RATIO
+   does not — that is item 7): the warm total is
    `runs/*.json`'s `table_columns_isolated_ms.median` (0.332 / 0.339 / 0.342 /
    0.353 ms) and the fingerprint pass is `fingerprint-cost.json`'s
    `fingerprint_pass` (0.160–0.169 ms), so 2 x the warm median (≈0.66–0.71 ms) is
