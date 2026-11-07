@@ -232,7 +232,7 @@ This section first repeated v4's wiring note as an open defect. At the branch he
 This doc can only stop the NEXT copy; each issue body is what a lane building that slice reads as its brief.
 
 - **`#11086`** carries **four** superseded premises, not one: the value gate is no longer off by default; a `DISCARD` no longer reaches `S2.3`/`execute_embed`; its ordering table *and* its checklist both require **both** gates to stay subordinate to VET — the invented subordination this section disclaims; and that same table still carries the **`EMBED` before `execute_embed`** row, the invented placement refuted above. Correcting all four is part of S1, not a follow-up.
-- **`#11088`** — now **CLOSED**, and it carries the stale wiring note from v4's **`S2.3 — CLASSIFY`** passage — `EXTRACTOR-V4-ARCHITECTURE.md` `:755-756`, which is inside **§4.1**'s step list, **not** §4.2 — that section begins at `:781` and, past the ordering block, carries the five correctness constraints (`:827`), the dedup preconditions (`:867`) and the Jev classification-seam note (`:883`), so a reader sent to §4.2 for this passage would not find it **and** would miss `:883`, the passage most relevant to the S2.3/EMBED question: *"`S2.3 — CLASSIFY` collects from `embed_list`, and `classify_consolidation` does not remove items from it — so anything this issue stops embedding must also be skipped there, or it is classified and embedded anyway"*. ⚠️ The §4.2 mis-attribution is `#11088`'s own — its body calls it *"the ordering note from v4 §4.2"* — and this inventory repeated it as fact; a lane correcting the issue that opens §4.2 will not find it there. The "embedded anyway" half is false: the gate is at `encode_for_row`, so a row that is not embedded gets no vector whatever the classifier does. No successor issue carried the removal/surface-approval call (**`#11395`** carries it now), so this one needs checking before it is read as settled. ⚠️ It carries a **second** stale premise this inventory must not omit: *"Removing those two labels' vectors makes those queries return **zero rows** — that is the surface consequence"*. Both halves of that are superseded — the population is **FOUR labels / FIVE `entity_type` values**, and a lexically-matching query keeps answering, so what is lost is **semantic recall** and only a meaning-only query goes to zero rows (`03-scope.md` S3; `S3-VECTOR-CENSUS.md` §3.1). Do **not** quote the closed body's consequence statement; quote §3.1.
+- **`#11088`** — now **CLOSED**, and it carries the stale wiring note from v4's **`S2.3 — CLASSIFY`** passage — `EXTRACTOR-V4-ARCHITECTURE.md` `:755-756`, which is inside **§4.1**'s step list, **not** §4.2. §4.2 begins at `:781` and is not the ordering block alone: it carries the five correctness constraints (`:827`) **before** the resulting-order block (`:849`), and the against-store dedup preconditions (`:867`) and the Jev classification-seam note (`:883`) after it. A reader sent to §4.2 for the S2.3 passage would therefore not find it there, and would land instead on `:883`, which is about `llm_tail` and the classifier — **not** about `embed_list` (§4.2 mentions `EMBED` nowhere, which is the absence G2 records). The wiring note is `#11088`'s own paraphrase of `:755-756`, quoted here from its body and not from v4: *"`S2.3 — CLASSIFY` collects from `embed_list`, and `classify_consolidation` does not remove items from it — so anything this issue stops embedding must also be skipped there, or it is classified and embedded anyway"*. ⚠️ The §4.2 mis-attribution is `#11088`'s own — its body calls it *"the ordering note from v4 §4.2"* — and this inventory repeated it as fact; a lane correcting the issue that opens §4.2 will not find it there. The "embedded anyway" half is false: the gate is at `encode_for_row`, so a row that is not embedded gets no vector whatever the classifier does. No successor issue carried the removal/surface-approval call (**`#11395`** carries it now), so this one needs checking before it is read as settled. ⚠️ It carries a **second** stale premise this inventory must not omit: *"Removing those two labels' vectors makes those queries return **zero rows** — that is the surface consequence"*. Both halves of that are superseded — the population is **FOUR labels / FIVE `entity_type` values**, and a lexically-matching query keeps answering, so what is lost is **semantic recall** and only a meaning-only query goes to zero rows (`03-scope.md` S3; `S3-VECTOR-CENSUS.md` §3.1). Do **not** quote the closed body's consequence statement; quote §3.1.
 
 ## Review gate
 
@@ -242,8 +242,9 @@ brief presented the favourable half of its own evidence without the unfavourable
 **Cycles 2–8 — the §Extractor-v4 alignment section, added after the gate log above was written.** Recorded
 for the same reason `03-scope.md` §7.5 records its own rounds: a log that stops at round 1 while seven more
 landed fixes is the *"each cycle's issues and fixes documented"* exit condition failing quietly. Each finding
-was verified against its primary source before being applied, and **one was falsified and marked ⛔ DO NOT
-APPLY rather than applied** (a claim that `#11088`'s body lacks the 48%/52% material — it carries all of it).
+was verified against its primary source before being applied, and one was falsified and **not** applied —
+⚠️ a cycle claimed `#11088`'s body lacks the 48%/52% material, **⛔ DO NOT APPLY: it carries all of it**
+(`:92`: *"≈52% … (2,570 of 4,901) … ≈48% precision"*).
 The load-bearing corrections, in order: **2** the census population is the **union**, not the graph labels
 alone; **3** the EMBED gate is **not** subordinate to VET; **4** this document was **right at its own `Head`
 pin** and went stale, and the `EMBED before execute_embed` row was an invention; **5** `execute_embed`
@@ -259,7 +260,19 @@ belongs: **P1** the PR *body* is the pre-correction draft and asserts four of th
 refutes (value gate "off too", the DISCARD reaching `S2.3`, both gates subordinate to VET, `EMBED` before
 `execute_embed`) — answered in a PR comment rather than by editing the body, because the body carries the
 review attestation and an edit wipes it; **P2** this inventory said §4.2 "holds only the ordering block",
-which is false past the ordering table — corrected at the `#11088` bullet above.
+which is false — the five correctness constraints sit before the resulting-order block and the dedup
+preconditions and the Jev note after it — corrected at the `#11088` bullet above.
+
+**Round 4 (PR level, fresh context, `0fe67cf486`)** — 4 P2, of which **three were defects the round-3 fix
+itself introduced** and one was a claim in this log that nothing backed. All four verified against their
+primary source first: **(1)** the round-3 sentence attached `#11088`'s paraphrase to `:883` — that section is
+the Jev/`llm_tail` note and §4.2 contains no `EMBED` text at all, so the quote is now attributed to
+`#11088`'s body where it actually lives; **(2)** "past the ordering block" misordered §4.2 — the five
+correctness constraints (`:827`) precede the resulting-order block (`:849`), not follow it; **(3)** the only
+`path:line` **code** citation in the diff (against `01-align.md:15-19`'s convention) — already fixed by
+`416adf603191`, a peer commit on this branch, so this round records rather than repeats it; **(4)** this log
+claimed a falsified finding *"was marked ⛔ DO NOT APPLY"*, and **no such mark existed anywhere** — the
+correction is the mark itself, inline at the claim above, which is what that rule exists to leave behind.
 
 ### P1-a — `iterative_scan` was reported without its documented failure at correlated filters
 
