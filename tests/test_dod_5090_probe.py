@@ -66,6 +66,10 @@ claims:
 | `test_a_workflow_prose_block_is_still_documentation` | the same fix must not call every workflow block a command | a `note: >-` body (text) inside a workflow starts voting on `on_by_default` |
 | `test_a_run_key_outside_the_workflow_surface_is_not_executed` | the executed-key rule is SCOPED to the surface that runs it | any `.yml` with a `run:` block is scanned as shell, so a config tool's own field completes a DoD row |
 | `test_a_MATCH_label_is_not_credited_as_the_writers_label` | the writer map credits the label the WRITE names | a read's `MATCH (n:Point)` resolves a writer's stored label — how a label the writer never writes can read as "covered" |
+| `test_a_refusal_with_TWO_causes_names_BOTH_of_them` | `#11337`: a refusal must not repair one cause and hide the other | a covering index with an unreadable `dimension` over a mixed-width label refuses naming only the width, so the dimension cause is silently dropped and a reader who fixes the width is refused again with new text |
+| `test_the_width_probe_report_says_the_rows_were_ENGINE_CHOSEN` | `#11337`: the probe query has no `ORDER BY`, so "the first 5" is not a property it has — asserted against the ISSUED statement, not the prose | `how` counts the sampled rows but says nothing about which rows they were, so `derived_payload_B` can move between two runs of the same graph with no explanation in the report — or the probe silently GAINS an `ORDER BY` while the report and the census doc keep asserting a bound the query no longer has |
+| `test_the_census_doc_states_the_same_probe_bound_the_report_does` | the doc must state the bound the CODE emits, not a parallel wording that agrees only with a deterministic test fake | the doc keeps claiming an order the query does not impose, or the doc and `how` drift apart with neither failing (the positive assertion is derived from the emitted fragment, so a rewording has to move both) |
+| `test_a_leg_reach_passed_BY_REFERENCE_is_declared_not_dropped` | `#11337`: the closure is over NAME-RESOLVED calls only, and its bound is DECLARED rather than implied — for every named shape, through to the published report | a method passes a leg-reaching function by reference (`_safe(self._review_pool, …)`, a bare name, literal or dynamic `getattr`, or an alias), the scan drops it with no entry anywhere, the caller list of an approval request reads short, or the declaration never reaches `vector_leg_surface()` |
 
 ⛔ **These tests never write a graph and never flip a gate.** `#10465` is
 measurement-only; the instrument is read-only and its pin must be too.
@@ -74,6 +78,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -777,6 +782,11 @@ class _CensusGraph:
         self._labels = labels
         self._vectors = vectors  # {label: (count, [1.0]*width | None)}
         self._dim = dim
+        #: Every statement the census issued, in order. Recorded so a claim
+        #: ABOUT the query (e.g. "the probe carries no `ORDER BY`") can be
+        #: asserted against the statement itself instead of against prose that
+        #: happens to agree with it (#11337 review).
+        self.queries: list[str] = []
 
     # ⛔ BOTH verbs answer through `_answer`, because the census must issue its
     # reads through `ro_query` (the engine's read-only verb) and a fake that
@@ -789,6 +799,7 @@ class _CensusGraph:
         return self._answer(cypher)
 
     def _answer(self, cypher):
+        self.queries.append(cypher)
         if "db.indexes()" in cypher:
             rows = self._catalogue
         elif "db.labels()" in cypher:
@@ -916,6 +927,50 @@ def test_the_census_does_not_claim_coverage_it_could_not_measure():
                               graph_names=["g"])["labels"]["Point"]
     assert str(row["unindexed"]).startswith("UNMEASURED"), row
     assert "index dimension" in row["unindexed"], row
+
+
+def test_a_refusal_with_TWO_causes_names_BOTH_of_them():
+    """A refusal must not repair one cause and hide the other (#11337).
+
+    Measured failure this pins: a covering `embedding` index whose `dimension`
+    cell is unreadable, on a label that ALSO holds two stored widths, refused
+    with `UNMEASURED(coverage not provable: the stored width (stored widths
+    disagree (384, 1024)))` — the dimension cause was computed and then
+    REASSIGNED away. A reader repairs the width probe, re-runs, is refused
+    again with different text, and is never told the second cause exists.
+
+    BOTH arms of the width cause are covered (a disagreeing sample and an
+    unprobeable one), because the assignment that dropped the dimension cause
+    lived in the disagreeing-arms branch while the plain arm joined correctly —
+    a fix in one arm leaves the other invisible.
+    """
+    # (a) unreadable dimension + sampled widths that DISAGREE
+    disagreeing = _CensusGraph(
+        catalogue=[_index_row("Point", "embedding", None)],
+        labels=["Point"],
+        vectors={"Point": (6, [[0.0] * 384] + [[0.0] * 1024] * 5)},
+    )
+    row = probe.vector_census(disagreeing, "g", at="2026-11-07T00:00:00Z",
+                              graph_names=["g"])["labels"]["Point"]
+    refused = str(row["unindexed"])
+    assert refused.startswith("UNMEASURED"), row
+    assert "index dimension" in refused, (
+        "the unreadable-dimension cause vanished from a two-cause refusal: "
+        f"{refused}")
+    assert "stored width" in refused, refused
+    assert "disagree" in refused, refused
+
+    # (b) unreadable dimension + a width probe that yielded NO row
+    unprobeable = _CensusGraph(
+        catalogue=[_index_row("Point", "embedding", None)],
+        labels=["Point"],
+        vectors={"Point": (5, None)},
+    )
+    other = str(probe.vector_census(
+        unprobeable, "g", at="2026-11-07T00:00:00Z",
+        graph_names=["g"])["labels"]["Point"]["unindexed"])
+    assert "index dimension" in other, other
+    assert "stored width" in other, other
 
 
 def test_the_census_still_reports_zero_when_there_is_nothing_to_cover():
@@ -3050,8 +3105,18 @@ def test_a_tool_whose_SDK_method_fixes_entity_type_is_named():
     `UNKNOWN(no declared default found)` for a call whose type is `point`: an
     order-dependent answer is not a measurement.
     """
-    methods, error = probe._sdk_methods_on_vector_leg()
+    methods, error, declared = probe._sdk_methods_on_vector_leg()
     assert error is None, error
+    # ⛔ A DECLARED BOUND is not a scan failure — the distinction is what keeps a
+    # legitimate by-reference shape from reading as "the scan could not run" and
+    # getting the declaration deleted (#11337 review, P1). The real tree declares
+    # NOTHING at this head (`declared is None`, verified against the source: there
+    # is no `_safe(`-style helper call in `sdk.py`), so only the marker SPELLING is
+    # pinned here — an exact population would red on every unrelated `sdk.py`
+    # change while proving nothing extra, and would re-assert a state the
+    # instrument does not report.
+    assert declared is None or declared.startswith(
+        "UNMEASURED(declared bound:"), declared
     assert methods["recall_state"] == {"object", "point"}, methods
     assert methods["search_sessions"] == {"event"}, methods
     assert methods["suggest_entry_points"] == {"point"}, (
@@ -3059,6 +3124,176 @@ def test_a_tool_whose_SDK_method_fixes_entity_type_is_named():
         f"resolved from the signature, not reported as UNKNOWN: {methods}")
     assert probe.VECTOR_LEG_SDK_METHOD not in methods, (
         "the leg was named as its own entrant")
+
+
+def _byref_sdk_source() -> str:
+    """A synthetic `sdk.py` with one method per by-reference SHAPE.
+
+    Each is a reach the `Call.func` scan cannot resolve: the function is
+    MENTIONED without being called. The positions are deliberately spread —
+    argument, keyword, `partial`, `getattr` (literal and dynamic), plain and
+    annotated assignment, walrus, container, bare `return` — because the rule
+    is the mention, so a pin covering only call arguments would leave the
+    claim wider than the pin.
+    """
+    return (
+        "class S:\n"
+        "    def tortoise_fts_query(self, q, entity_type='point'):\n"
+        "        return q\n"
+        "    def _review_pool(self, t):\n"
+        "        return self.tortoise_fts_query('x', entity_type=t)\n"
+        "    def passes_an_attribute(self):\n"
+        "        return _safe(self._review_pool, 'object')\n"
+        "    def passes_a_bare_name(self):\n"
+        "        return _safe(_review_pool, 'object')\n"
+        "    def passes_a_literal_getattr(self):\n"
+        "        return _safe(getattr(self, '_review_pool'), 'object')\n"
+        "    def passes_a_dynamic_getattr(self, which):\n"
+        "        return _safe(getattr(self, which), 'object')\n"
+        "    def passes_an_alias(self):\n"
+        "        f = self._review_pool\n"
+        "        return _safe(f, 'object')\n"
+        "    def passes_a_keyword_callback(self):\n"
+        "        return _safe(1, key=self._review_pool)\n"
+        "    def passes_a_partial(self):\n"
+        "        return _safe(functools.partial(self._review_pool, 'object'))\n"
+        "    def passes_a_FOREIGN_receiver(self):\n"
+        "        return _safe(self.conn._review_pool, 'object')\n"
+        "    def passes_an_annotated_assign(self):\n"
+        "        f: object = self._review_pool\n"
+        "        return _safe(f, 'object')\n"
+        "    def passes_a_walrus(self):\n"
+        "        return _safe(f := self._review_pool)\n"
+        "    def passes_a_container(self):\n"
+        "        return _safe([self._review_pool], 'object')\n"
+        "    def returns_it_bare(self):\n"
+        "        return self._review_pool\n"
+        "    def calls_one_and_passes_another(self):\n"
+        "        _safe(self._second_pool, 'event')\n"
+        "        return self._review_pool('object')\n"
+        "    def _second_pool(self, t):\n"
+        "        return self.tortoise_fts_query('y', entity_type=t)\n"
+        "    def calls_it_normally(self):\n"
+        "        return self._review_pool('object')\n"
+        "    def calls_a_bare_name(self):\n"
+        "        return _review_pool('object')\n"
+        "    def passes_two(self):\n"
+        "        _safe(self._review_pool, 'object')\n"
+        "        return _safe(self._second_pool, 'event')\n"
+        "    def passes_a_DEFAULTED_getattr(self):\n"
+        "        return _safe(getattr(self, '_review_pool', None))\n"
+        "    def shadows_an_entrant_name(self):\n"
+        "        _review_pool = 5\n"
+        "        return _review_pool\n"
+        "    def mentions_past_a_NESTED_shadow(self):\n"
+        "        def inner():\n"
+        "            _review_pool = 5\n"
+        "            return _review_pool\n"
+        "        return _safe(_review_pool, 'object')\n")
+
+
+def test_a_leg_reach_passed_BY_REFERENCE_is_declared_not_dropped(
+        tmp_path, monkeypatch):
+    """The closure claim is over name-resolved calls, and says so (#11337).
+
+    `_safe(self._review_pool, …)` passes a leg-reaching function as an
+    **argument**. The callee extraction follows `func.attr` / `func.id`, so a
+    reach through a passed callable, a `key=`/callback, `functools.partial`,
+    `getattr` or an alias is dropped **with no entry anywhere** — the same
+    silent-hole class the handler scan declares for itself and reports through
+    an `UNMEASURED` entry. Under-reporting is the dangerous direction here: the
+    caller list is the surface an owner approves a removal against.
+
+    `tortoise/sdk.py` holds no such shape at this head (verified against the
+    SOURCE: there is no `_safe(`-style helper call in it), so the fix is a
+    NARROWER CLAIM plus a declaration when the shape appears — pinned with a
+    synthetic tree covering each syntactic position, because a bound that only
+    ever fires on a shape the real tree does not have would otherwise be
+    untestable. The NEGATIVE cases are pinned too (a resolved call, a foreign
+    receiver): an instrument that declares a reach it already traversed puts a
+    caveat on a complete table, which is how a real declaration stops being read.
+    """
+    (tmp_path / "tortoise").mkdir()
+    (tmp_path / "tortoise" / "sdk.py").write_text(
+        _byref_sdk_source(), encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+
+    methods, error, declared = probe._sdk_methods_on_vector_leg()
+    assert error is None, (
+        "a DECLARED BOUND is not a scan failure — overloading the error slot "
+        f"made a legitimate shape read as a broken scan: {error}")
+    # ⛔ Every SYNTACTIC POSITION the class can appear in, not only the ones the
+    # first fixture happened to write: the reach is a mention of the function,
+    # so an annotated assignment, a walrus, a container and a bare `return` must
+    # be declared exactly like a call argument (#11337 review, P3).
+    shapes = ("passes_an_attribute", "passes_a_bare_name",
+              "passes_a_literal_getattr", "passes_a_dynamic_getattr",
+              "passes_an_alias", "passes_a_keyword_callback",
+              "passes_a_partial", "passes_an_annotated_assign",
+              "passes_a_walrus", "passes_a_container", "returns_it_bare",
+              "passes_a_DEFAULTED_getattr",
+              # A NESTED def's local is a different scope: it must not suppress
+              # the ENCLOSING body's genuine mention (#11337 review, P2).
+              "mentions_past_a_NESTED_shadow")
+    for name in shapes:
+        assert name not in methods, (
+            f"{name} reaches the leg through a reference this scan cannot "
+            f"resolve, and naming it would be a guess dressed as a "
+            f"measurement: {methods}")
+    # ⛔ An ENTRANT can also pass a DIFFERENT leg-reaching helper BY REFERENCE
+    # (#11337 review, P2). Skipping entrant functions kept it out of the
+    # declaration, so its caller-list entry was present while the entity-type
+    # SET published from `direct` silently missed the passed helper's types —
+    # the under-report direction, in the artifact an owner reads. It must be
+    # BOTH named and declared.
+    assert "calls_one_and_passes_another" in methods, methods
+    assert "calls_one_and_passes_another" in declared, (
+        "an entrant that also passes a leg-reaching helper by reference was "
+        f"declared nowhere, so its type set reads complete when it is not: {declared}")
+    assert declared, (
+        "the scan dropped every by-reference reach with no entry anywhere: the "
+        "caller list is silently short and nothing says so")
+    assert "by reference" in declared, declared
+    # ⛔ A machine consumer must be able to tell a DECLARED BOUND from a scan
+    # FAILURE: both publish `{"tools": "UNMEASURED(…)"}`, so the marker is what
+    # separates them (#11337 review).
+    assert "declared bound:" in declared, (
+        f"the declaration is indistinguishable from a scan failure: {declared}")
+    for name in shapes:
+        assert name in declared, f"{name} is not in the declaration: {declared}"
+    # ⛔ The OVER-REPORT directions, both of them. A spurious caveat on a
+    # COMPLETE caller table is the cry-wolf failure that makes the real
+    # declaration ignorable, and it was live: matching a `Call`'s own `func` made
+    # every ordinary `self.<entrant>(…)` read as an unresolved reference, which
+    # is what published five false "LIVE" entries on the real tree (#11337
+    # review, P0). A resolved call is the closure's, not this channel's.
+    for resolved in ("calls_it_normally", "calls_a_bare_name"):
+        assert resolved not in declared, (
+            f"a NAME-RESOLVED call was declared as an unresolved reference: "
+            f"{resolved} in {declared}")
+    # A LOCAL that reuses an entrant's name is not a reach: `_review_pool = 5`
+    # binds the NAME without referring to the method, and declaring it would
+    # caveat a complete table — the same cry-wolf failure as the resolved call.
+    assert "shadows_an_entrant_name" not in declared, (
+        f"a local shadowing an entrant's name was declared as a reach: {declared}")
+    # A foreign receiver is not an in-module method either.
+    assert "passes_a_FOREIGN_receiver" not in declared, (
+        f"a call on a FOREIGN receiver was declared as an in-module reach: {declared}")
+    # …and a method taking TWO helpers by reference must name BOTH: keeping one
+    # target per method dropped the second with the entry still looking complete.
+    assert "passes_two" in declared, declared
+    assert "_second_pool" in declared.split("passes_two")[1][:80], (
+        f"only one of a method's two by-reference targets is named: {declared}")
+
+    # ⛔ The DECLARATION must reach the REPORT, not just the helper's tuple: a
+    # route that drops it reinstates the defect in full (this mutation left the
+    # suite green before this assertion existed — #11337 review, P1).
+    surface = probe.vector_leg_surface()
+    published = [e["tools"] for e in surface if "tools" in e]
+    assert any(t.startswith("UNMEASURED(") and "by reference" in t
+               and "passes_an_attribute" in t for t in published), (
+        "the by-reference declaration never reached the published surface, so "
+        f"a caller list read short with nothing saying so: {published}")
 
 
 def test_a_label_with_MIXED_stored_widths_refuses_the_byte_figure():
@@ -3125,6 +3360,114 @@ def test_the_mixed_width_refusal_needs_MORE_THAN_ONE_sample(monkeypatch):
         f"label — that is the regression this test must be able to see: {one}")
 
 
+def _residual_width_census():
+    """The census of a label whose minority width falls OUTSIDE the probe window.
+
+    5x1024 + 1x384, the minority LAST: the window sees one width, so the figure
+    stands — the case that must explain itself. Returns the `Object` row AND the
+    graph, because the claim is about the statement that produced the row.
+    """
+    graph = _CensusGraph(
+        catalogue=[], labels=["Object"],
+        vectors={"Object": (6, [[0.0] * 1024] * 5 + [[0.0] * 384])})
+    row = probe.vector_census(graph, "g", at="2026-11-07T00:00:00Z",
+                              graph_names=["g"])["labels"]["Object"]
+    return row, graph
+
+
+def _residual_width_row():
+    return _residual_width_census()[0]
+
+
+def test_the_width_probe_report_says_the_rows_were_ENGINE_CHOSEN():
+    """The probe imposes no order, so the report must say who chose (#11337).
+
+    `S3-VECTOR-CENSUS.md` §2 read *"the first `WIDTH_PROBE_SAMPLES` (5) of
+    them"*, while the query carries **no `ORDER BY`** — so "the first 5" is not
+    a property it has, and a re-run of the same graph can sample different rows
+    and move `derived_payload_B`. The test fake models a deterministic slice,
+    which is why the doc and the fake agreed with each other rather than with
+    the engine.
+
+    The fix is NOT `ORDER BY`: the window is 5 rows either way, so sorting
+    cannot close the residual blindness, and it would have to sort on a property
+    every label carries — which the census does not establish — so it would
+    claim a stability it cannot guarantee. What the report does instead is say
+    the rows were engine-chosen, so a figure that moves has an explanation.
+    """
+    row, graph = _residual_width_census()
+    how = row["payload"]["how"]
+    assert "5 sampled row(s)" in how, how
+    assert "chosen by the engine" in how, (
+        "the report does not say the sampled rows were engine-chosen, so a "
+        f"figure that moves between two runs has no explanation: {how}")
+    assert "no ORDER BY" in how, (
+        f"the report claims rows the query never ordered: {how}")
+
+    # ⛔ AND THE QUERY ITSELF (#11337 review, P3): the sentence above is about a
+    # PROPERTY of the statement, so it is asserted against the statement. Pinning
+    # only the prose let `ORDER BY n.id` be added to the probe — the natural
+    # attempt to stabilise the window — while `how` and the census doc went on
+    # asserting a bound the query no longer had: the defect this issue exists to
+    # remove, mirrored.
+    probe_statements = [q for q in graph.queries if "RETURN n.embedding" in q]
+    assert probe_statements, f"the width probe was never issued: {graph.queries}"
+    for statement in probe_statements:
+        assert "ORDER BY" not in statement.upper(), (
+            "the width probe gained an ORDER BY, so the report and the census "
+            f"doc now understate what it does — update all three: {statement}")
+
+
+def test_the_census_doc_states_the_same_probe_bound_the_report_does():
+    """The doc must state the bound the CODE emits, not a parallel wording.
+
+    The defect was a doc that agreed with a deterministic test fake instead of
+    with the engine, so the positive half is derived from the ACTUAL `how`
+    string: a fragment of it must appear in §2. Doc and report can then not
+    drift apart — and a legitimate rewording of either must move both.
+    """
+    how = _residual_width_row()["payload"]["how"]
+    assert "chosen by the engine" in how and "ORDER BY)" in how, (
+        f"the report no longer carries the bound this test pins: {how}")
+    fragment = how[how.index("chosen by the engine"):how.index("ORDER BY)") + 9]
+
+    doc = (Path(probe.__file__).resolve().parent.parent / "docs" / "epics"
+           / "2026-11-04-5090-vector-layer" / "S3-VECTOR-CENSUS.md")
+    assert doc.exists(), f"the census doc moved: {doc}"
+    text = doc.read_text(encoding="utf-8")
+    assert "the first `WIDTH_PROBE_SAMPLES`" not in text, (
+        "the census doc still claims the probe takes 'the first 5' rows, which "
+        "is not a property the query has (no ORDER BY)")
+    assert fragment in text, (
+        f"the census doc does not state the bound the report does: {fragment!r}")
+
+    # ⛔ The BY-REFERENCE half, derived from the RUN rather than restated: when the
+    # scan declares a bound, every method it names must appear in the doc's §3;
+    # when it declares nothing, the doc must say so. Otherwise deleting the
+    # declaration (the cheapest wrong repair) leaves every test green while the
+    # census goes on describing a bound the instrument stopped reporting.
+    _methods, _error, declared = probe._sdk_methods_on_vector_leg()
+    if declared is None:
+        assert "no such shape exists" in text, (
+            "the scan declares no by-reference bound, and the census doc does "
+            "not say so — the two describe different instruments")
+    else:
+        assert "no such shape exists" not in text, (
+            "the run declares a by-reference bound while the census doc denies "
+            "that any such shape exists — the two describe different instruments")
+        # Derived from the DECLARATION's PASSERS, not from the entrant map. A
+        # hand-rolled split on "," / "(" dropped every target but the last and
+        # injected `getattr` as a name (#11337 review, P2), so this reads the
+        # emitted shape directly and pins what it can honestly pin: the passers.
+        # A target is already pinned by the two-target assertion above.
+        body = declared.split(": ", 1)[1].split(" —")[0]
+        passers = [n for n in re.findall(r"(\w+) \(", body) if n != "getattr"]
+        assert passers, f"no passer could be read out of the declaration: {declared}"
+        for name in passers:
+            assert name in text, (
+                f"the run declares {name!r} and the census doc does not name it")
+
+
 def test_a_pass_through_tool_changes_NOTHING_when_the_affected_set_is_EMPTY():
     """No removable vector, nothing changes — including for the caller-chosen
     tools (#11088 review round 9, P2).
@@ -3161,7 +3504,7 @@ def test_a_non_literal_entity_type_is_UNMEASURED_not_a_measured_no(
     )
     monkeypatch.setattr(
         probe, "_sdk_methods_on_vector_leg",
-        lambda: ({"recall_state": {"UNKNOWN(entity_type_var)"}}, None))
+        lambda: ({"recall_state": {"UNKNOWN(entity_type_var)"}}, None, None))
     sc = probe.vector_census(graph, "g", at="2026-11-05T00:00:00Z",
                              graph_names=["g"])["surface_consequence"]
     recall = next(e for e in sc["surface"] if e.get("tool") == "tortoise_recall")
@@ -3176,7 +3519,7 @@ def test_a_tool_that_reaches_the_leg_through_a_HELPER_is_named():
     which is not a `TOOL_REGISTRY.sdk_method`, so the tool vanished from the
     caller list with no `UNMEASURED` entry anywhere.
     """
-    methods, error = probe._sdk_methods_on_vector_leg()
+    methods, error, _declared = probe._sdk_methods_on_vector_leg()
     assert error is None, error
     assert methods["review_connections"] == {"point"}, methods
     named = {e["tool"] for e in probe.vector_leg_surface() if "tool" in e}
