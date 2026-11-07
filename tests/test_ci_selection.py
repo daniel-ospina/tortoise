@@ -986,34 +986,69 @@ def _site_assets_the_icon_guard_reads() -> set[str]:
     return found
 
 
-def _in_tree_files_the_site_guard_opens() -> set[str]:
-    """The `website/` files the site guard OPENS, DERIVED from the guard's own source.
+def _class_constant_strings(src: str) -> dict[str, set[str]]:
+    """Class-level `NAME = "literal"` bindings in the guard, PARSED, not regexed.
 
-    `_site_assets_the_icon_guard_reads` covers one half of the guard's population: the
-    files a PAGE points at. This covers the other half — the fixtures it reads straight
-    off disk. A file the guard OPENS is a subject exactly as a linked one is: if editing
-    its bytes cannot select the guard, the assertion that reads it is unowned (the
-    #1349/#3332/#3616 class).
+    ⛔ ALL VALUES PER NAME, never last-wins. The previous `dict(re.findall(...))` was
+    file-global and last-wins: a second `ICON_PNG = "logo.png"` anywhere later in the
+    file silently REMAPPED every earlier read of `ICON_PNG`, so the derivation dropped
+    `website/favicon.png` while the suite stayed green (the page-derived half masks it).
+    A set can only ADD candidates, so a duplicate can never make a witness vanish. It
+    can at worst ask for one more registration, which is the closed side of this gate.
 
-    `website/logo.png` is why this exists. It is the PNG whose IDAT carries `FF D9`,
-    the witness that isolates "the JPEG walk was applied to a PNG", and NO page links
-    it as an icon — `test_the_wordmark_is_never_used_as_an_icon` requires that no page
-    does — so the page-derived half structurally cannot include it.
+    `ast` rather than a regex because the regex also could not see three shapes an
+    author actually writes: `ICON_X = 'x.png'` (single quotes),
+    `ICON_X = "x.png"  # note` (trailing comment) and `ICON_X: str = "x.png"`
+    (annotated). All three were silently SKIPPED, not reported — the fail-open shape
+    this whole ratchet exists to close.
+    """
+    consts: dict[str, set[str]] = {}
+    for node in ast.walk(ast.parse(src)):
+        if not isinstance(node, ast.ClassDef):
+            continue
+        for stmt in node.body:
+            if isinstance(stmt, ast.AnnAssign):
+                targets, value = [stmt.target], stmt.value
+            elif isinstance(stmt, ast.Assign):
+                targets, value = stmt.targets, stmt.value
+            else:
+                continue
+            if not (isinstance(value, ast.Constant)
+                    and isinstance(value.value, str)):
+                continue
+            for target in targets:
+                if (isinstance(target, ast.Name)
+                        and re.fullmatch(r"[A-Z][A-Z0-9_]*", target.id)):
+                    consts.setdefault(target.id, set()).add(value.value)
+    return consts
+
+
+def _opened_site_witnesses(src: str) -> set[str]:
+    """The `website/` files a guard's SOURCE opens, derived from its text.
+
+    Takes the guard's source TEXT (the only filesystem touch is the `is_file()` filter
+    that drops candidates which are not real files), so the shape coverage below is
+    PINNED — `test_the_opened_witness_derivation_resolves_every_documented_shape` feeds
+    it a synthetic guard, which reds if the constant pass is deleted or narrowed again.
 
     ⛔ THREE SHAPES ARE RESOLVED, and the boundary is stated rather than implied:
     a literal path chain (`self.WEB / "assets" / "og-tortoise.jpg"`), whether it is
     read inline or bound to a name first (`shared = self.WEB / "assets" / "x.png"`);
     and a class constant holding a literal (`self.ICON_PNG = "favicon.png"`, read as
-    `(self.WEB / self.ICON_PNG)`). NOT resolved: a name bound at runtime — today the
-    `(self.WEB / n).read_bytes()` comprehension over `(self.ICON_PNG, self.ICON_APPLE)`.
-    That is deliberate and not a coverage hole: a runtime-bound reader takes its names
-    from the same constants the constant pass already resolves, and the pages link the
-    files it reads, so the linked half owns it. A NEW witness stored in a shape this
-    pass cannot see would be unowned, which is what the `website/logo.png` floor below
-    exists to keep visible.
+    `(self.WEB / self.ICON_PNG)`), with NO call-suffix requirement — the same rule the
+    chain pass follows. The constant pass previously demanded a chained
+    `.read_bytes()`, so `(self.WEB / self.TEXT_FIXTURE).read_text()` — a shape the real
+    guard already uses for a text fixture — was resolved by nothing and reported by
+    nothing, while this docstring promised the shape was covered.
+
+    NOT resolved: a name bound at runtime — today the `(self.WEB / n).read_bytes()`
+    comprehension over `(self.ICON_PNG, self.ICON_APPLE)`. That is deliberate and not
+    a coverage hole: a runtime-bound reader takes its names from the same constants the
+    constant pass already resolves, and the pages link the files it reads, so the
+    linked half owns it. A NEW witness stored in a shape this pass cannot see would be
+    unowned, which is what the `website/logo.png` floor below exists to keep visible.
     """
-    src = (REPO / "tests" / "test_website_static.py").read_text()
-    consts = dict(re.findall(r'^\s+([A-Z][A-Z0-9_]*)\s*=\s*"([^"\n]+)"\s*$', src, re.M))
+    consts = _class_constant_strings(src)
     found: set[str] = set()
     # ⛔ The literal CHAIN only — NOT `(` … `).read_bytes()` as a unit. A fixture bound
     # first (`shared = self.WEB / "assets" / "x.png"` then `shared.read_bytes()`, the
@@ -1032,11 +1067,97 @@ def _in_tree_files_the_site_guard_opens() -> set[str]:
         if rel and (REPO / "website" / rel).is_file():
             found.add(f"website/{rel}")
     for name in re.findall(
-            r'\.WEB\s*/\s*(?:self|cls)\.([A-Z][A-Z0-9_]*)\s*\)\s*\.read_bytes\(\)', src):
-        rel = consts.get(name)
-        if rel and (REPO / "website" / rel).is_file():
-            found.add(f"website/{rel}")
+            r'\.WEB\s*/\s*(?:self|cls)\.([A-Z][A-Z0-9_]*)\b', src):
+        for rel in sorted(consts.get(name, ())):
+            if rel and (REPO / "website" / rel).is_file():
+                found.add(f"website/{rel}")
     return found
+
+
+def _in_tree_files_the_site_guard_opens() -> set[str]:
+    """The `website/` files the site guard OPENS, DERIVED from the guard's own source.
+
+    `_site_assets_the_icon_guard_reads` covers one half of the guard's population: the
+    files a PAGE points at. This covers the other half — the fixtures it reads straight
+    off disk. A file the guard OPENS is a subject exactly as a linked one is: if editing
+    its bytes cannot select the guard, the assertion that reads it is unowned (the
+    #1349/#3332/#3616 class).
+
+    `website/logo.png` is why this exists. It is the PNG whose IDAT carries `FF D9`,
+    the witness that isolates "the JPEG walk was applied to a PNG", and NO page links
+    it as an icon — `test_the_wordmark_is_never_used_as_an_icon` requires that no page
+    does — so the page-derived half structurally cannot include it.
+    """
+    return _opened_site_witnesses(
+        (REPO / "tests" / "test_website_static.py").read_text())
+
+
+def test_the_opened_witness_derivation_resolves_every_documented_shape():
+    """PINS the derivation above — deleting or narrowing a pass must be visible.
+
+    MEASURED before this test, each on a `/tmp` copy of the guard: dropping the whole
+    constant pass left the ENTIRE suite green (`opened` fell to
+    `{assets/og-tortoise.jpg, logo.png}`, and the ratchet's only floor is `logo.png`),
+    and narrowing the pass to a required `.read_bytes()` made
+    `(self.WEB / self.TEXT_FIXTURE).read_text()` invisible. Both are the #1349
+    silent-drop class and neither had a signal, because the three icons the pass
+    contributes are also page-LINKED, so the union loop covered for the loss.
+
+    The source is SYNTHETIC on purpose: it states the contract once, and it reds on a
+    regression in the DERIVATION rather than on a legitimate edit to the real guard.
+    """
+    synthetic = '''
+class T(BaseTestCase):
+    ICON_PNG = "favicon.png"
+    TEXT_FIXTURE = 'logo.png'  # single quotes AND a trailing comment
+    ANNOTATED: str = "apple-touch-icon.png"
+    def icons(self):
+        return self._png_size((self.WEB / self.ICON_PNG).read_bytes())
+    def text(self):
+        return self._head((self.WEB / self.TEXT_FIXTURE).read_text())
+    def annotated(self):
+        return self._head((self.WEB / self.ANNOTATED).read_text())
+    def bound(self):
+        shared = self.WEB / "assets" / "og-tortoise.jpg"
+        return shared.read_bytes()
+'''
+    assert _opened_site_witnesses(synthetic) == {
+        "website/favicon.png",
+        "website/logo.png",
+        "website/apple-touch-icon.png",
+        "website/assets/og-tortoise.jpg",
+    }, (
+        "the opened-witness derivation lost a documented shape — a witness read "
+        "through it is unowned (the #1349 silent-drop class)"
+    )
+
+    # ⛔ A DUPLICATE NAME MUST NOT REMAP. The constants were file-global and
+    # last-wins, so a second `ICON_PNG` in a later class dropped `favicon.png` from
+    # the derivation while the suite stayed green (the page half masks it). A set of
+    # VALUES per name can only add candidates, never drop one.
+    shadowed = '''
+class A(BaseTestCase):
+    ICON_PNG = "favicon.png"
+    def a(self):
+        return (self.WEB / self.ICON_PNG).read_bytes()
+class B(BaseTestCase):
+    ICON_PNG = "apple-touch-icon.png"
+    def b(self):
+        return (self.WEB / self.ICON_PNG).read_bytes()
+'''
+    assert _opened_site_witnesses(shadowed) == {
+        "website/favicon.png", "website/apple-touch-icon.png"}, (
+        "a duplicate constant name remapped the derivation"
+    )
+
+    # ...and the REAL guard, so this cannot pass on synthetic input alone: if the
+    # guard's own expression shape drifts, the synthetic contract would still hold
+    # while the derivation saw nothing. `logo.png` is here because no page links it.
+    real = _in_tree_files_the_site_guard_opens()
+    assert {"website/favicon.ico", "website/favicon.png",
+            "website/apple-touch-icon.png", "website/logo.png"} <= real, (
+        f"the real guard's opened-witness derivation lost a file: {sorted(real)}"
+    )
 
 
 def test_the_site_icon_set_and_card_select_the_guard_that_reads_their_bytes():
