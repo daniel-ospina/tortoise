@@ -923,6 +923,14 @@ def workflow_secret_refs(text: str) -> set[str]:
     return set(_SECRET_REF_RE.findall(text))
 
 
+ENV_HEADER_RE = re.compile(r"\[\s*env\s*\]")
+# A quoted key (`"NAME" = …`) is legal TOML and `tomllib` parses it to `NAME`.
+# A root-level `env = { … }` inline table is the same table, spelled differently.
+# Both are UNMODELLED here, so both are REFUSED rather than read as absent.
+QUOTED_KEY_RE = re.compile(r"\s*[\"\']")
+ROOT_ENV_TABLE_RE = re.compile(r"env\s*=\s*\{")
+
+
 def fly_toml_env_assignments(text: str) -> dict[str, str]:
     """``[env]`` key -> the value it assigns, as written (comments stripped).
 
@@ -948,19 +956,39 @@ def fly_toml_env_assignments(text: str) -> dict[str, str]:
         code = line.split("#", 1)[0]
         stripped = code.strip()
         if stripped.startswith("[") and stripped.endswith("]"):
-            in_env = stripped == "[env]"
+            # Any header ENDS the previous table; only `[env]` (however spaced)
+            # starts it. `fullmatch` rather than `==` so the legal `[ env ]`
+            # spelling is not read as a different table.
+            in_env = ENV_HEADER_RE.fullmatch(stripped) is not None
             continue
         if not in_env:
             continue
+        # ⛔ FAIL CLOSED ON EVERY SPELLING THIS LINE-READER CANNOT MODEL, because a
+        # spelling it misses makes a name `[env]` really assigns look UNASSIGNED — and
+        # that is a FALSE GREEN: the ledger then accepts an entry for a name the app is
+        # still configured with. TOML also accepts a QUOTED key (`"SENTRY_DSN" = "v"`,
+        # which `tomllib` parses to the same name) and a ROOT-LEVEL `env = { … }`
+        # inline table; both were invisible here (#11332 review round 7, P1 — measured:
+        # quoted key -> exit 0 + `MITIGATED`, the unquoted spelling of the identical
+        # file -> exit 2). Refusing is the only sound option for a reader this narrow.
+        if QUOTED_KEY_RE.match(code) or ROOT_ENV_TABLE_RE.match(stripped):
+            raise ValueError(
+                "fly.toml [env]: this reader models bare keys under a `[env]` header "
+                f"only and cannot read {code.strip()!r}. A spelling it misses reads "
+                'the name as UNASSIGNED, i.e. a false green. Write it as `NAME = "v"`.'
+            )
         match = re.match(r"\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$", code)
         if match:
             raw = match.group(2).strip()
-            # ⛔ A VALUE THAT DOES NOT START ON THIS LINE IS *NOT* EMPTY. TOML allows
-            # `X =` / newline / `"real value"`, and taking only this line's text read
-            # that as `""` — i.e. as the `[env] = ""` PLACEHOLDER — so check (0b-ii)
-            # skipped a name `[env]` really assigns and the ledger certified a
-            # mitigation that was not in effect (#11332 review round 6, P1). The
-            # sentinel is non-empty on purpose: it can only cause a REFUSAL.
+            # ⛔ A LINE WITH NOTHING AFTER `=` IS *NOT* THE `""` PLACEHOLDER. `X =`
+            # with the value on the following line is NOT legal TOML (`tomllib`
+            # refuses the whole file), so this is a belt for a line this reader cannot
+            # parse — never a shape that can ship. It matters because `raw == ""` is
+            # otherwise indistinguishable from `X = ""`, the placeholder shape that
+            # check (0b-ii) skips; the sentinel is non-empty on purpose, so its only
+            # possible effect is a REFUSAL. The multi-line forms that DO ship —
+            # `X = """…"""` and `X = '''…'''` — are handled by the quote
+            # normalisation below.
             if not raw:
                 raw = "<value on a following line>"
             # Normalise the quoting so `X = ""` and `X = ''` are EMPTY, not a
@@ -976,25 +1004,6 @@ def fly_toml_env_assignments(text: str) -> dict[str, str]:
 def fly_toml_env_keys(text: str) -> set[str]:
     """Assigned keys inside ``fly.toml``'s ``[env]`` table."""
     return set(fly_toml_env_assignments(text))
-
-
-@contextlib.contextmanager
-def _ledger_path_override(path: Path):
-    """Point the payload harness at `path` for the duration of the block.
-
-    `_capture_payload` seeds the ledger seam from `ledger_path()`, which reads the
-    environment — so this is how the gate executes the SAME payload against a second
-    ledger without a second code path.
-    """
-    saved = os.environ.get("FLY_MITIGATION_LEDGER")
-    os.environ["FLY_MITIGATION_LEDGER"] = str(path)
-    try:
-        yield
-    finally:
-        if saved is None:
-            os.environ.pop("FLY_MITIGATION_LEDGER", None)
-        else:
-            os.environ["FLY_MITIGATION_LEDGER"] = saved
 
 
 def resolve_app(toml_path: Path) -> str:
