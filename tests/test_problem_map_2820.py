@@ -762,6 +762,62 @@ def test_a_document_that_cannot_be_READ_is_a_state_error_not_drift(tmp_path):
     assert report.state_errors and "could not be read" in report.state_errors[0]
 
 
+def _refuse_read_of(monkeypatch, target: Path) -> None:
+    """Make `Path.read_text` raise for exactly ONE path, and answer normally elsewhere.
+
+    Scoped by RESOLVED path, not by name: the run reads several files and only the
+    named one may fail, otherwise the control cannot tell which read the assertion
+    is about (`_label_hits`' class-level-patch lesson, #10468).
+    """
+    real = Path.read_text
+    want = target.resolve()
+
+    def guarded(self, *args, **kwargs):
+        if Path(self).resolve() == want:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", guarded)
+
+
+def test_an_unreadable_INDEX_is_a_state_error_not_drift(monkeypatch):
+    """`check_registration`'s index read was the SECOND unguarded read of the run.
+
+    Reachable: `docs/00_index.md` replaced by a directory raises
+    `IsADirectoryError`, and an unreadable one raises `PermissionError` — both
+    escape `check_registration` into python's traceback exit (**1**, the DRIFT
+    code) before this control existed. Measured on the pre-fix tool: a directory
+    at that path printed a traceback and exited 1.
+    """
+    _refuse_read_of(monkeypatch, REPO / pmc.INDEX_REL)
+    report = pmc.run(REPO, DOC)
+    assert report.errors == [], report.errors
+    assert any(
+        pmc.INDEX_REL in e and "could not be read" in e for e in report.state_errors
+    ), report.state_errors
+    assert report.code == 2
+
+
+def test_an_unreadable_PIN_is_a_state_error_not_drift(monkeypatch):
+    """`check_pins` reads a test-module pin to prove it carries `def test_`.
+
+    Reachable: `chmod 000` on any pin the map names (the same POSIX state the
+    corrupted-object control needs) raises `PermissionError`. Pre-fix that escaped
+    `check_pins` → `run()` → the traceback exit **1**, telling a reader the map
+    disagrees with the tree about a pin nothing parsed. The pin chosen is a live
+    one from §2's table so the control fails if that row is retargeted.
+    """
+    pin = "tests/test_event_state_carrier_2788.py"
+    assert (REPO / pin).is_file(), f"{pin} is no longer a pin — retarget this control"
+    _refuse_read_of(monkeypatch, REPO / pin)
+    report = pmc.run(REPO, DOC)
+    assert report.errors == [], report.errors
+    assert any(
+        pin in e and "could not be read" in e for e in report.state_errors
+    ), report.state_errors
+    assert report.code == 2
+
+
 def test_a_cat_file_that_cannot_answer_withholds_the_verdict(monkeypatch):
     """The reachable failing state the no-git control does NOT cover.
 

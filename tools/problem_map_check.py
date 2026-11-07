@@ -371,7 +371,7 @@ def check_rows(rows: list[Row]) -> list[str]:
     return errors
 
 
-def check_pins(repo: Path, rows: list[Row]) -> list[str]:
+def check_pins(repo: Path, rows: list[Row], report: Report) -> list[str]:
     errors: list[str] = []
     for row in rows:
         for pin in row.pins:
@@ -389,7 +389,19 @@ def check_pins(repo: Path, rows: list[Row]) -> list[str]:
                 )
                 continue
             if pin.startswith("tests/") and pin.endswith(".py"):
-                body = path.read_text(encoding="utf-8", errors="replace")
+                try:
+                    body = path.read_text(encoding="utf-8", errors="replace")
+                except (OSError, UnicodeDecodeError) as exc:
+                    # The SAME channel as an unreadable document (#11384 review): the
+                    # run could not READ the pin, so it has not measured it. Letting
+                    # this raise escapes `run()` into python's traceback exit (**1**)
+                    # — "the map disagrees with the tree" — about a pin never parsed.
+                    # `chmod 000` a live pin and the pre-fix tool reported DRIFT.
+                    report.state_errors.append(
+                        f"#{row.issue}: pin {pin!r} could not be read ({exc}) — "
+                        f"nothing was measured"
+                    )
+                    continue
                 if not _DEF_TEST.search(body):
                     errors.append(
                         f"#{row.issue}: pin {pin!r} is a test module with no `def test_` "
@@ -482,7 +494,9 @@ _INDEX_COUNTS = re.compile(
 )
 
 
-def check_registration(repo: Path, doc: Path, text: str | None = None) -> list[str]:
+def check_registration(
+    repo: Path, doc: Path, text: str | None = None, report: Report | None = None
+) -> list[str]:
     """Registered, AND the index entry's counts agree with the document's §2.
 
     The count half is not decoration. The index is the artifact most readers
@@ -494,7 +508,18 @@ def check_registration(repo: Path, doc: Path, text: str | None = None) -> list[s
     index = repo / INDEX_REL
     if not index.exists():
         return [f"{INDEX_REL} does not exist — cannot check registration"]
-    body = index.read_text(encoding="utf-8", errors="replace")
+    try:
+        body = index.read_text(encoding="utf-8", errors="replace")
+    except (OSError, UnicodeDecodeError) as exc:
+        # Same state-error channel, same reason as `check_pins` and `run()`'s own
+        # document read: an index that cannot be READ is not an index that
+        # disagrees. `docs/00_index.md` replaced by a directory raises
+        # `IsADirectoryError` here and pre-fix exited **1** with a traceback.
+        if report is not None:
+            report.state_errors.append(
+                f"{INDEX_REL} could not be read ({exc}) — nothing was measured"
+            )
+        return []
     if doc.name not in body:
         return [
             f"{DOC_REL} is not listed in {INDEX_REL} — a committed page nobody can "
@@ -502,7 +527,19 @@ def check_registration(repo: Path, doc: Path, text: str | None = None) -> list[s
         ]
     errors: list[str] = []
     if text is None:
-        text = doc.read_text(encoding="utf-8") if doc.exists() else ""
+        if not doc.exists():
+            text = ""
+        else:
+            try:
+                text = doc.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as exc:
+                # An explicit `--doc` skips `run()`'s guard (which reads the default
+                # document only), so the second read of the same file needs its own.
+                if report is not None:
+                    report.state_errors.append(
+                        f"{doc} could not be read ({exc}) — nothing was measured"
+                    )
+                return errors
     summary = parse_summary(text)
     if not summary:
         return errors  # `check_summary` owns the missing-summary complaint
@@ -580,10 +617,10 @@ def run(repo: Path, doc: Path) -> Report:
         report.errors.append("the document contains no `| #N |` table rows")
         return report
     report.errors.extend(check_rows(rows))
-    report.errors.extend(check_pins(repo, rows))
+    report.errors.extend(check_pins(repo, rows, report))
     report.errors.extend(check_anchors(repo, rows, report))
     report.errors.extend(check_summary(text, rows))
-    report.errors.extend(check_registration(repo, doc, text))
+    report.errors.extend(check_registration(repo, doc, text, report))
     return report
 
 
