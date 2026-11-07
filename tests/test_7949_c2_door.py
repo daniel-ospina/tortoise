@@ -596,6 +596,34 @@ def test_the_sdk_lane_dispatch_and_the_hosted_mirror_agree():
         "one seam variable, the one that selects the lane; a second read either "
         "reroutes the capture or rewrites its input, and `door_record()` would "
         "still print lane: v2 (#10983)")
+    # ⛔ HOP 2, the middle one, not only hop 1. The door the record names is
+    # `capture_session -> _extract_session_v2 -> extractor_v2.extract_session_v2`,
+    # and only the FIRST function was pinned above; a new env-gated reroute
+    # inserted INSIDE `_extract_session_v2` kept all 19 tests green while the
+    # acceptance ran the other extractor — MEASURED at the #10983 review (cycle
+    # 10): `if os.environ.get("TORTOISE_V5_EXTRACTOR") == "1": return
+    # self._extract_session_llm(...)` inserted at `sdk.py:16324` left the suite
+    # green, `measured_arm()` ACCEPTED the run (the variable was in no pin), and
+    # the census came back as §1.6.4's m2 row while `door_record()["lane"]`
+    # still read "v2". A hop is part of the door, so it is pinned like one: ONE
+    # seam read, and exactly one return (the pair the pinned call produces).
+    hop2 = _funcs(SDK)["_extract_session_v2"]
+    hop2_reads = _env_read_names_in(hop2)
+    assert hop2_reads == {"TORTOISE_EXTRACT_MODEL"}, (
+        "sdk._extract_session_v2 reads "
+        f"{sorted(hop2_reads)} — the door's middle hop is pinned to exactly the "
+        "one seam it uses to build its model; any other read inside it can "
+        "reroute the capture while `door_record()` still prints lane: v2 "
+        "(#10983)")
+    hop2_returns = [n for n in ast.walk(hop2) if isinstance(n, ast.Return)]
+    assert len(hop2_returns) == 1 and \
+        ast.unparse(hop2_returns[0].value) == "(extracted, meta)", (
+        "sdk._extract_session_v2 has "
+        f"{len(hop2_returns)} returns "
+        f"{[ast.unparse(r.value)[:60] for r in hop2_returns]} — the middle hop "
+        "must have exactly one exit, the (extracted, meta) pair the pinned "
+        "extractor call produces; an early return is a reroute or a fabricated "
+        "payload, and the record would still declare v2 (#10983)")
     # ⛔ The WHOLE function, not just the chain above the door. `_lane_chain_gates`
     # walks `orelse` ancestors, so an arm placed as a SIBLING above the chain — or
     # nested inside another arm's body — was invisible to every pin above.
