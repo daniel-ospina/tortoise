@@ -1357,7 +1357,24 @@ mechanisms:
       as `Cls.name` — including a tuple target, a subscript target and a NESTED
       class `Outer.Inner.name`, or a class body that GUARDS its binding with
       `if` / `for` / `try` / `with` — or a collection that mixes a complete
-      statement with an incomplete fragment) wherever it is used. What no static
+      statement with an incomplete fragment) wherever it is used — ACROSS MODULES
+      TOO, and not only along an import edge: the taint is the UNION of every scanned
+      file's tainted spellings, so a fragment bound in one module and used in another
+      is refused even when the two modules never import each other. Keying on the
+      SPELLING is what makes that reach, and it is deliberately fail-CLOSED: a
+      coincident name in an unrelated module refuses too (a false block on a name
+      nobody assembled, never a false pass on one that was). A RENAME that hides the
+      spelling — `from a import X as Y` re-exported and used as `Y` — is followed to a
+      fixpoint over the import graph, with a RELATIVE import resolved through
+      `node.level` (its dots live there and not in `node.module`, so a
+      `module.startswith(".")` test never fires). An attribute target also mints its
+      FINAL name FOR THE TAINT TEST, so `self._ddl` bound here and `OBJ._ddl` used
+      there is refused too; the JOIN that names the completed statement keeps the
+      receiver-qualified spelling only (a final name in the join's binding map made a
+      colliding key `rebound` and took the keyword-split join with it — measured, and
+      pinned). That join therefore stays per-module, so a cross-module fragment is
+      reported as an unverifiable USE rather than classified — the refusal polarity,
+      never a reading of absence. What no static
       scan reaches is stated as EXAMPLES rather than as a closed list — a fragment
       whose keyword lives entirely outside the scanned module (handed in by a
       helper or a default argument), a lookup resolved dynamically
