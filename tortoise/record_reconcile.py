@@ -149,12 +149,14 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   CLEAR: the graph-side removal of the column itself (``REMOVE n.story_arc``) or
   ``record-restore`` / ``rebuild_from_record``, which wipe the graph first
   (``_wipe_all_nodes``, unconditional and whole-graph) and therefore clear a
-  legacy copy too — ⚠️ but ONLY where the record still holds the text for that
-  session: key it on the RECORD's row (``public.{source,event}.story_arc`` or
-  ``public.session_narrative.narrative``), never on how the prose arrived,
-  because on the pre-``#9555`` population (raw-Cypher write, never journalled;
+  legacy copy too — ⚠️ and that wipe **cannot** be restricted to the rows where the
+  record holds the text (``MATCH (n) DETACH DELETE n``, no label/``WHERE``/
+  ``LIMIT``): a graph holding ANY row whose PROSE neither
+  ``public.{source,event}.story_arc`` nor ``public.session_narrative.narrative``
+  carries must NOT be restored at all — copy that prose out first, because on the
+  pre-``#9555`` population (raw-Cypher write, never journalled;
   ``session_narrative`` TEXT columns measured NULL) the graph copy is the ONLY
-  copy and a wipe DESTROYS it (see the per-row bound below, `#11325`) — and on a
+  copy and the graph-wide wipe DESTROYS it (see the GRAPH gate below, `#11325`) — and on a
   SERVER graph that restore is refused PRE-WIPE unless
   the graph name starts ``test_``/``tortoise_test`` (``record_restore._ask_the_wipe_guard``
   → the projection's ``_assert_test_graph``, #2944), and no production name does
