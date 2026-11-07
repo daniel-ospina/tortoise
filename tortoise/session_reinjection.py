@@ -83,9 +83,11 @@ ONE bounded graph pass:
    hit's only identity. So a product pool hit keyed as the per-hit phantom
    ``idx:point:{id}`` and :func:`seeded_sessions` dropped it: on the raw
    search pool the arm could seed nothing at all, and an ASK-lane pool only
-   where ``annotate_ask_hits`` had re-attached a snake id from its ``:Event``
-   join (that lane dedups with its own ``ask_session_key``, and the arm is
-   off in the product).
+   where ``annotate_ask_hits`` had re-attached a snake id — from its ``:Event``
+   join OR from the Point's own camel ``sessionId`` prop
+   (``ev_session or n_session``, ``sdk.annotate_ask_hits``), so the Event join
+   is not the only source (that lane dedups with its own ``ask_session_key``,
+   and the arm is off in the product).
 
    ``session_key_of`` now also reads the CAMEL wire identity ``sessionId``,
    which is the spelling the product's own point fetch emits: it resolves the
@@ -96,8 +98,9 @@ ONE bounded graph pass:
    own session, and :func:`reinjection_merge_order` anchors that session's
    injected group after its own base ranks.
 
-   ⛔ SCOPE of the closure in this section — it is the IDENTITY, not the ARM.
-   Two facts a reader must not lose: (1) **no caller under ``tortoise/``
+   ⛔ SCOPE of the closure in this section — it is the IDENTITY (the pool key
+   and the reader tag), NOT the ARM, and not every reader. Three facts a
+   reader must not lose: (1) **no caller under ``tortoise/``
    invokes this module** — every call site is the eval driver
    (``tools/longmem_eval/retrieve.py``) — so the arm is still OFF in the
    product, exactly as the ASK-lane sentence above says; and (2) every pool
@@ -114,7 +117,10 @@ ONE bounded graph pass:
    deliberate: the fetch still scopes by ``(s:Session)-[:CONTAINS]->(p:Point)``
    and still RETURNs ``coalesce(p.session_id, s.id)``, because the Point
    property is what a *turn Point* does not have — only the PASSAGE-side hit
-   identity was missing.
+   identity was missing. (3) ``retrieval._session_admission_key`` — the key
+   ``session_blocks`` and the reader's session-completion pass use — is a
+   SECOND resolver, still camel-blind (#11393), so a session this authority
+   groups correctly is re-split one stage later.
 
    **Turn-shape constraint.** ``pointKind``'s vocabulary is open
    (``create_point`` accepts any registered kind), so ``pointKind='event'``

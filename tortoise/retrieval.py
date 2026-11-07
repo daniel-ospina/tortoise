@@ -740,6 +740,14 @@ def session_key_of(hit: dict) -> str:
       ``idx:-1``. That is the only bucket for which there is genuinely
       nothing to key on, and it is not reachable from a real pool hit
       (``seeded_sessions`` documents that pool hits always carry their id).
+      ⚠️ It is NOT the only way into ``idx:-1``: an explicit
+      ``lme_session_index: -1`` also returns it, because that leg is checked
+      for ``is not None`` (the historical contract above) and so OUTRANKS the
+      camel leg. That shape is produced by a real annotator —
+      ``_annotate_hits`` stamps ``p.get("lme_session_index", -1)`` on every
+      hit — so an annotated hit whose Point has no index and no snake id
+      shares this bucket with every other such hit. #3591's per-hit bucket
+      covers the hits that reach the ``id`` leg; it does not cover these.
 
     Every ``idx:*`` key is a PHANTOM with respect to a graph session: it
     names no ``p.session_id``, so
@@ -762,28 +770,51 @@ def session_key_of(hit: dict) -> str:
     spelling this function reads.
 
     ⛔ Not FILTERED — but the camel leg IS ``strip()``ped, and the two are
-    different questions. The reason to leave the ALLOWLIST out is NOT that
-    filtering would make a hit unseedable — the opposite: ``hit_session_id``
-    applies ``_safe_session_tag`` (strip + allowlist), so a hand-built hit
-    whose camel id is ``" sessA "`` is named ``sessA`` by the reader while
-    an unstripped pool key is the padded string, which can never equal the
-    fetch's own group key ``coalesce(p.session_id, s.id)`` — the seed is
-    spent and the injected group is then DROPPED (groups are built over
-    ``seed_order``: ``session_reinjection.reinjection_merge_order``), not
-    tailed. A whitespace-only id is worse than useless in the same
-    direction: the reader calls it UNKNOWN and the pool would seed it.
+    different questions. ``hit_session_id`` applies ``_safe_session_tag``
+    (strip + allowlist), so a hand-built hit whose camel id is ``" sessA "``
+    is named ``sessA`` by the reader; an unstripped pool key would be the
+    padded string, two authorities answering differently about a hit that has
+    one identity. A whitespace-only id is the same disagreement in its
+    sharpest form: the reader calls it UNKNOWN (no tag is rendered) while the
+    pool would seed it — a seed, a graph fetch and a census entry for a
+    session the answer refuses to name.
 
     So the WHITESPACE half is closed here — ``strip()`` on this leg only,
-    which moves NO existing key (a padded or whitespace-only camel value
-    was a PHANTOM before this leg existed) and refuses nothing the reader
-    can name; a value that is only whitespace falls through to the per-hit
-    bucket, i.e. it fails closed. The ALLOWLIST half is deliberately NOT
-    applied here: folding the render sanitizer into the pool identity
-    would silently move the key of every odd-shaped id on every lane at
-    once — a backlog item, not a rider on this fix. There is no injection
-    surface to close either way: this key is a DICT KEY and a comparison
-    operand, never interpolated into Cypher and never rendered (the render
-    and the wire go through ``hit_session_id``).
+    which moves NO existing key (a padded or whitespace-only camel value was
+    a PHANTOM before this leg existed) and refuses nothing the reader can
+    name; a value that is only whitespace falls through to the per-hit
+    bucket, i.e. it fails closed. It is also a no-op for a FETCHED hit: the
+    product fetch emits ``_safe_session_tag(...)`` already
+    (``sdk.tortoise_fts_query``), so the strip's only live addressee is a
+    hand-built or third-party hit.
+
+    ⛔ Direction, stated because it is NOT the intuitive one: for a PADDED
+    ``:Session`` id the padded spelling is REAL — ``capture_session`` /
+    ``commit_session`` store it verbatim, and ``ids.session_id_refusal``
+    returns ``None`` for ``"  s1  "`` (padded-but-real is an open owner
+    question on #9599, not a refusal) — and the fetch's group key
+    ``coalesce(p.session_id, s.id)`` is that same
+    RAW string. So for such a graph the STRIPPED key is the one that cannot
+    equal the group key, not the padded one: the seed is spent and the
+    injected group is DROPPED (groups are built over ``seed_order``:
+    ``session_reinjection.reinjection_merge_order``), surfacing only as a
+    ``total_cap_hit`` delta. Closing that needs the group key and the seed
+    normalised together — a change to the FETCH, not to this leg (#11394).
+
+    The ALLOWLIST half is deliberately NOT applied here: folding the render
+    sanitizer into the pool identity would silently move the key of every
+    odd-shaped id on every lane at once — #11394, not a rider on this fix. It
+    also covers the snake leg, which this change does not touch: ``session_id``
+    is returned RAW (no strip, no allowlist) and ``annotate_ask_hits`` attaches
+    the Event's ``sessionId`` raw, so a padded SNAKE id still splits the
+    reader's tag from this key. There is no injection surface either way: this
+    key is a DICT KEY and a comparison operand, never interpolated into
+    Cypher and never rendered (the render goes through ``hit_session_id``).
+
+    ⛔ SCOPE — ``retrieval._session_admission_key`` (used by ``session_blocks``
+    and so by the reader's session-completion pass) is a SECOND resolver and is
+    NOT covered by this leg; it is still camel-blind (#11393). "This function
+    answers what the fetch emits" is not "every reader agrees on a session".
 
     Pinned by ``tests/test_session_reinjection_rules.py::test_session_key_
     matches_the_historical_bucket_key`` (the three historical cases, all
@@ -792,7 +823,11 @@ def session_key_of(hit: dict) -> str:
     ``::test_wire_session_identity_keys_the_pool_and_seeds_the_session``
     (the #10540 case)."""
     session_id = hit.get("session_id")
-    if session_id:
+    # ``-> str`` is held: a non-str session_id used to be returned as-is, which
+    # reached ``_is_real_session_id``'s ``.startswith`` and raised — and the
+    # caller's ``except Exception`` then skipped session completion for the
+    # WHOLE pool. Same guard as the camel leg below, same reason (#11394).
+    if isinstance(session_id, str) and session_id:
         return session_id
     index = hit.get("lme_session_index")
     if index is not None:
@@ -866,7 +901,10 @@ def dedup_pool(annotated: list[dict], *,
     identity at all) —
     distinct sessions never share a bucket, and neither do two distinct
     identity-less hits. The only shared bucket left is ``idx:-1``, for a hit
-    with nothing at all to key on (see :func:`session_key_of`).
+    with nothing at all to key on (see :func:`session_key_of`) — and, second,
+    for every hit carrying an explicit ``lme_session_index: -1``, which the
+    index leg returns as ``idx:-1`` and which the eval annotator stamps by
+    default; that population DOES share a bucket, so the cap binds across it.
     ``idx:point:`` keys are per-hit, so the cap does NOT bind across the
     identity-less population: the pool-wide budget is what bounds it.
     ⚠️ #10540: a raw chunk carrying ONLY the camel ``sessionId`` would now be

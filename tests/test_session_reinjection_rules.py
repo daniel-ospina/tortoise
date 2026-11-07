@@ -1025,6 +1025,21 @@ def test_wire_identity_never_moves_an_existing_key():
     # non-str spellings are refused by the isinstance guard, not stringified
     for junk in (0, 5, True, {"a": 1}, ["s"]):
         assert session_key_of({"id": "e6", "sessionId": junk}) == "idx:point:e6"
+    # ... on the SNAKE leg too (#11394): a non-str session_id used to be
+    # returned as-is, which reached `_is_real_session_id`'s `.startswith`
+    # and raised — and the caller's `except` then skipped session completion
+    # for the WHOLE pool
+    for junk in (0, 5, 1.5, True, {"a": 1}, ["s"]):
+        assert session_key_of({"id": "e7", "session_id": junk}) == "idx:point:e7"
+
+
+def test_seeded_sessions_survive_a_non_str_session_id_11394():
+    """#11394: a malformed `session_id` must cost that hit its bucket, not
+    raise — the caller's fail-open `except` turns one exception into "the arm
+    did not apply" for every session in the pool."""
+    for junk in (0, 5, 1.5, True, {"a": 1}, ["s"]):
+        assert seeded_sessions([{"id": "x", "session_id": junk}],
+                               window=5, limit=5) == []
 
 
 def test_wire_identity_is_stripped_like_the_reader_names_it():
@@ -1068,13 +1083,21 @@ def test_injected_group_anchors_on_its_own_sessions_product_base_ranks():
     session's injected group lands immediately AFTER that session's own base
     ranks.
 
-    MEASURED before the fix on the pool below: the anchor map was built from
-    phantom keys, so ``sessA`` had no base rank at all and its injected turn
-    fell to ``reinjection_merge_order``'s defensive TAIL —
-    ``['A_t0', 'B_t0', 'B_t1', 'A_t1']`` — placing one session's context
-    behind every other session's evidence. That is the displacement direction
-    this issue's title forbids, arriving from the SEED side rather than from
-    a head placement."""
+    MEASURED before the fix on the pool below — the isolated-MERGE baseline:
+    the anchor map was built from phantom keys, so ``sessA`` had no base rank
+    at all and its injected turn fell to ``reinjection_merge_order``'s
+    defensive TAIL — ``['A_t0', 'B_t0', 'B_t1', 'A_t1']`` — placing one
+    session's context behind every other session's evidence. That is the
+    displacement direction this issue's title forbids, arriving from the SEED
+    side rather than from a head placement.
+
+    ⛔ ``added``/``seed_order`` are supplied DIRECTLY here on purpose: this
+    measures the MERGE given a group, and pre-fix the pipeline could not
+    produce one at all (``seeded_sessions`` returned ``[]`` on a camel-only
+    pool, so ``_tr_complete_sessions`` returned before the merge). The two are
+    different branches of the same function and both are true: a key ABSENT
+    from ``seed_order`` is DROPPED, a key PRESENT in it with no base rank is
+    tailed."""
     pool = [_wire_turn("A_t0", "sessA"), _wire_turn("B_t0", "sessB"),
             _wire_turn("B_t1", "sessB")]
     added = {"sessA": [_wire_turn("A_t1", "sessA")]}

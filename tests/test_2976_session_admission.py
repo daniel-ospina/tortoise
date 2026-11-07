@@ -546,8 +546,11 @@ def test_tr_complete_sessions_splices_on_the_wire_identity_10540(monkeypatch):
     to read ``h.get("session_id")`` directly, so on a camel-only pool — the
     exact population #10540 exists for — the seed fired, the graph fetch ran,
     and nothing was spliced: the report read ``seeded: 1`` with ``injected:
-    0``. Measured with the snake-only splice restored: ``(['a0','a1'],
-    sessions=0, injected=0)``; with this fix ``sessions=1, injected=1``.
+    0``. Measured with the snake-only splice restored (and the seed still
+    monkeypatched, i.e. a group that pre-fix could not exist):
+    ``(['a0','b0','a1'], sessions=0, injected=0, applied=False)`` — every
+    base hit survives, nothing is spliced; with this fix ``sessions=1,
+    injected=1``.
 
     This is the ONE assertion that makes the snake-only splice red — the
     snake-keyed sibling above exercises the leg that did not change.

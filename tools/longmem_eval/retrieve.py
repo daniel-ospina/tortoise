@@ -1057,9 +1057,12 @@ def _tr_complete_sessions(
         # stamp ``session_id`` AND ``lme_session_index`` on every hit, and both
         # outrank the camel leg — so this is CONSISTENCY HARDENING (a
         # hand-built or future product-shaped pool cannot silently un-fix the
-        # seam), not a measurement of a live defect. On an eval pool both
-        # expressions return the same snake id, so the #8713 census cannot
-        # move.
+        # seam), not a measurement of a live defect. The #8713 census cannot
+        # move for a different reason than "both expressions agree": where the
+        # snake id is absent the old expression returns "" and this one returns
+        # "idx:-1", and NEITHER can equal a fetch group key
+        # (``coalesce(p.session_id, s.id)``), so ``last_index`` and ``added``
+        # are unchanged either way; where it is present both return it.
         last_index: dict[str, int] = {}
         for i, h in enumerate(pool):
             sid = session_key_of(h)
