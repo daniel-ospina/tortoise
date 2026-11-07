@@ -76,8 +76,10 @@ claim to detect it — `attempts` is the running total of per-call attempt numbe
 call's own write clobbers it, so a gap against `cost["calls"]` is neither sound nor
 complete. **Both numbers are recorded on every row** — `attempts` and `calls`, on the
 success path AND the error path — so a reader can see a discrepancy even though the
-instrument cannot classify it; the two recorded runs have `attempts=1` and `calls=1`
-on all 14 arm calls.
+instrument cannot classify it. ⚠️ The two recorded runs PREDATE the `calls` field: they
+carry `attempts=1` on all 14 arm calls, and `calls` is recorded from the next run on
+(the instrument at this head writes both; hand-adding the key to the committed
+artifacts would be inventing a measurement, which is why it is stated here instead).
 
 **Inputs are real, not synthetic.** The sessions come from the recorded
 write-path eval receipts (`tests/eval/write_path/receipts/7947-arms-2026-10-18/`):
