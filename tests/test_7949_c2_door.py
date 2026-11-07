@@ -1594,7 +1594,61 @@ def _census(sdk) -> dict:
     return {"counts": counts, "objects": names}
 
 
-def test_the_negative_control_is_measured_and_the_two_lanes_DISAGREE():
+def _census_levers(probe) -> tuple[str, ...]:
+    """Every variable that can move the population the negative control measures.
+
+    Derived from the probe's own declarations — the pinned door set plus the
+    seam ledger's flags — so a lever added to the probe enters this control's
+    isolation WITHOUT an edit here. A hand-kept list is how the pin set drifted
+    three times in earlier rounds (#10983 review).
+
+    ``SEAM_LEDGER``'s ``TORTOISE_S4_DELTA`` / ``TORTOISE_LABEL_ORDER`` rows are
+    already in ``DOOR_KEYS``; the union is deduped.
+    """
+    flags = {flag for flag, _where, _default, _seam in probe.SEAM_LEDGER}
+    return tuple(sorted(set(probe.DOOR_KEYS) | flags))
+
+
+def _scrub_levers(monkeypatch, probe) -> tuple[str, ...]:
+    """Isolate this control from the operator's shell (pytest's own guidance).
+
+    ``os.environ`` is process-global state, so its isolation belongs to the
+    fixture: the control asserts EXACT published censuses, and an inherited
+    lever that moved the population would red it with a message claiming "the
+    door's census moved" — a false red pointing at the wrong thing (#10983
+    review, round 12 note). ``monkeypatch`` restores every key at teardown, so
+    the three-branch save/restore block this replaces cannot half-apply.
+    """
+    levers = _census_levers(probe)
+    for key in levers:
+        monkeypatch.delenv(key, raising=False)
+    return levers
+
+
+def test_the_control_scrubs_every_lever_the_probe_declares(monkeypatch):
+    """The scrub is a mechanism, not a comment (mutation-proven non-vacuous).
+
+    With every lever exported at a sentinel value, ``_scrub_levers`` must leave
+    none of them readable. Make the helper a no-op and this reds; that is the
+    whole assertion — it also keeps the derived set CLOSED, so a lever added to
+    the probe cannot silently fall outside the control's isolation.
+    """
+    probe = _load_probe()
+    levers = _census_levers(probe)
+    assert set(probe.DOOR_KEYS) <= set(levers), (
+        "a pinned door key is missing from the control's scrub set")
+    assert {flag for flag, _w, _d, _s in probe.SEAM_LEDGER} <= set(levers), (
+        "a seam-ledger flag is missing from the control's scrub set")
+    for key in levers:
+        monkeypatch.setenv(key, "sentinel")
+    _scrub_levers(monkeypatch, probe)
+    leaked = sorted(key for key in levers if key in os.environ)
+    assert not leaked, (
+        f"these levers survived the scrub and would be measured under the "
+        f"operator's values while the test asserts a published census: {leaked}")
+
+
+def test_the_negative_control_is_measured_and_the_two_lanes_DISAGREE(monkeypatch):
     """The control, run for real: the same session through both lanes.
 
     * ``v2`` — the door (``_extract_session_v2`` → ``extract_session_v2``);
@@ -1622,36 +1676,43 @@ def test_the_negative_control_is_measured_and_the_two_lanes_DISAGREE():
     become lane-blind, as it was believed to be during #10983's first pass), so
     it reds too — with the measurement printed, because which way it moved is
     the finding.
+
+    ⚠️ Isolated from the operator's shell: every lever the probe declares is
+    scrubbed before the captures (``_scrub_levers``), so the EXACT censuses
+    below describe this fixture under the shipped defaults, not under whatever
+    the box happened to export. Measured at the previous head (#10983 review
+    round 12 note): ten candidate levers — ``TORTOISE_EXTRACTOR_MAX_TOKENS``,
+    ``_SUBJECT_TAU_HI``, ``_CONTEXT_ENRICH``, ``_REFERENTIALITY``,
+    ``_CHANGE_FEED``, ``_JSON_MODE``, ``_IDENTIFIER_TOKENS``, ``_S4_DELTA``,
+    ``_EXTRACTOR_PROMPT``, ``_LABEL_ORDER`` — each exported alone left this
+    control green, because the offline mock seam does not consult them. The
+    scrub is applied anyway: the census is a published number, and a lever that
+    DOES move it later must not be able to red this with a message asserting
+    the door moved.
     """
     from tests.eval.write_path.corpus import load_fixture, session_ids
     from tortoise.sdk import TortoiseSDK
+
+    probe = _load_probe()
+    _scrub_levers(monkeypatch, probe)
 
     sid = session_ids()[0]
     conversation = load_fixture(sid)["conversation"]
     assert conversation, f"fixture {sid} carries no conversation"
 
-    saved = {key: os.environ.get(key)
-             for key in ("TORTOISE_SESSION_LLM_MOCK", "TORTOISE_SESSION_EXTRACTOR")}
     measured: dict[str, dict] = {}
-    try:
-        os.environ["TORTOISE_SESSION_LLM_MOCK"] = "1"
-        for lane in ("v2", "m2"):
-            os.environ.pop("TORTOISE_SESSION_EXTRACTOR", None)
-            if lane == "m2":
-                os.environ["TORTOISE_SESSION_EXTRACTOR"] = "m2"
-            sdk = TortoiseSDK(os.path.join(tempfile.mkdtemp(), "door.db"))
-            try:
-                receipt = sdk.capture_session(conversation, session_id=sid)
-                assert receipt.get("ok") is True, receipt.get("errors")
-                measured[lane] = _census(sdk)
-            finally:
-                sdk.close()
-    finally:
-        for key, prior in saved.items():
-            if prior is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = prior
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    for lane in ("v2", "m2"):
+        monkeypatch.delenv(probe.DOOR_LANE_ENV, raising=False)
+        if lane == "m2":
+            monkeypatch.setenv(probe.DOOR_LANE_ENV, "m2")
+        sdk = TortoiseSDK(os.path.join(tempfile.mkdtemp(), "door.db"))
+        try:
+            receipt = sdk.capture_session(conversation, session_id=sid)
+            assert receipt.get("ok") is True, receipt.get("errors")
+            measured[lane] = _census(sdk)
+        finally:
+            sdk.close()
 
     door, other = measured["v2"], measured["m2"]
     # The PUBLISHED counts, pinned exactly. §1.6.4 of the registration and this
