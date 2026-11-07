@@ -2156,6 +2156,7 @@ def run_vector_query(
     leg_trace: list[dict] | None = None,
     min_similarity: float | None = None,
     scope_kinds: tuple[str, ...] | None = None,
+    meter: bool = True,
 ) -> list[tuple[str, float]]:
     """Run vector similarity search via FalkorDB vector index.
 
@@ -2244,6 +2245,12 @@ def run_vector_query(
     must not launder a failed leg into "no declaration at all" (#4199
     review P2).
 
+    ``meter=False`` suppresses the retrieval-tally note while keeping the leg
+    trace, for a caller that runs this leg a SECOND time in the same dense slot
+    (C2's ``#2518`` indicator-2 expansion pass uses it). The read then reports
+    one vector leg — the same composition ``run_bm25_query``'s ``meter`` exists
+    for (``#8488``).
+
     Note: the connection-level `timeout` is passed straight to the FalkorDB
     driver (Graph.query(timeout=...)) so a slow query is killed server-side.
     The post-hoc check remains as a safety net for drivers that ignore the
@@ -2272,7 +2279,16 @@ def run_vector_query(
         # #4489: noted with the RAW ran/degraded the leg reports, BEFORE the
         # opt-in trace's ``_scope_hollow`` re-labelling below — the ledger is a
         # fact about the leg execution, not a derived declaration.
-        _retrieval_metering.note_leg("vector", ran=ran, degraded=degraded)
+        #
+        # ``meter=False`` suppresses the tally while keeping the trace entry:
+        # the read path uses it when it runs this leg a SECOND time in the same
+        # dense slot (C2's #2518 indicator-2 expansion pass). One slot, one
+        # tally, two distinguishable trace entries — the same composition
+        # ``run_bm25_query``'s ``meter`` exists for (#8488). Without it a read
+        # would report two vector legs for one dense slot, and any measurement
+        # folding ``legs["vector"]`` per read would double overnight.
+        if meter:
+            _retrieval_metering.note_leg("vector", ran=ran, degraded=degraded)
         if leg_trace is None:
             return
         if _scope_hollow and ran and not degraded:

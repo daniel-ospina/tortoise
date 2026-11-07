@@ -6089,6 +6089,104 @@ _ENTITY_ANCHOR_CANDIDATES = 20
 _ENTITY_ALIAS_MAX = 200
 _ENTITY_ALIAS_PER_ANCHOR = 64
 
+#: #2518 indicator 2 (dense-leg parity) — the switch that arms the dense half of
+#: the entity/fact-augmented key expansion, and the bounds on the alias text it
+#: appends to the read's own dense query.
+#:
+#: Default OFF: the #1745 fail-safe convention (a new retrieval lever ships OFF
+#: in the product until a measured delta adopts it), and the same posture the
+#: sparse half of this expansion already carries — the measured arm (issue
+#: comment 5821461301, ``NOT DECISIVE``) is the sparse-only arm, so its code path
+#: must stay BYTE-IDENTICAL and this switch is the only way the dense half can
+#: differ. Explicit falsy (``0``/``false``/``no``/``off``) is the operator's OFF;
+#: unset/blank/garbage resolves to the default through the ONE declared env
+#: contract (``tortoise/env_truthy.py``), so a typo never flips the knob.
+_ENTITY_KEY_DENSE_ENV = "TORTOISE_ENTITY_KEY_DENSE"
+#: The composer's bound, in the unit the encoder sees. An embedding is a
+#: FIXED-WIDTH vector no matter how long its input, so an unbounded alias tail
+#: costs no storage — it DILUTES the query vector, and a 200-alias tail would
+#: outvote the eight-token question it was meant to augment. Both bounds apply;
+#: whichever is hit first wins.
+_ENTITY_DENSE_ALIAS_CHARS = 240
+_ENTITY_DENSE_ALIAS_TERMS = 32
+
+
+def _entity_key_dense_enabled() -> bool:
+    """Is the DENSE half of C2's key expansion armed (#2518 indicator 2)?
+
+    Resolution goes through :func:`tortoise.env_truthy.env_flag`, whose contract
+    is exactly this case: unset/blank/garbage -> the DEFAULT (OFF), explicit
+    truthy -> True, explicit falsy -> False. A typo therefore never arms a
+    retrieval lever nobody measured.
+
+    The switch is INDEPENDENT of the sparse lever's (``entity_key_expansion``,
+    the SDK argument). Both must be on for the pass to fire at all — the dense
+    half is a PARITY, not a second mechanism — but this one alone decides
+    whether the measured sparse-only arm runs byte-identically, which is what
+    makes the two arms separable in an A/B.
+    """
+    from .env_truthy import env_flag
+
+    return env_flag(_ENTITY_KEY_DENSE_ENV, False)
+
+
+def _entity_key_dense_query(
+    dense_query: str | None, aliases: list[str] | None,
+) -> str | None:
+    """Compose the expansion's dense query text (#2518 indicator 2).
+
+    The read's OWN dense query (already carrying C6's date anchor when
+    ``time_aware`` rewrote it) followed by as many harvested aliases as the
+    bounds allow. Pure: no DB, no model, no clock — the testable half of the
+    pass, factored out the way :func:`tortoise.time_aware.dense_query_for` was.
+
+    Returns ``None`` when the composition adds NOTHING — the read's own tokens
+    already cover every alias token, or the alias pool is empty. The caller then
+    skips the extra embed entirely, which is the same "no wasted second pass"
+    guard the sparse half applies (a re-embed that cannot change the query
+    vector would only cost latency).
+
+    Determinism: ``aliases`` arrives sorted and de-duplicated from the harvest,
+    and this function never reorders — so two reads with the same harvest
+    compose the same string, and the same string embeds to the same vector.
+    """
+    if not dense_query or not str(dense_query).strip():
+        return None
+    if not aliases:
+        return None
+    from .sparse import tokenize_sparse_query
+
+    have = set(tokenize_sparse_query(dense_query, keep_numeric=True))
+    if not have:
+        return None
+    picked: list[str] = []
+    used_chars = 0
+    used_terms = 0
+    for alias in aliases:
+        text = alias.strip()
+        if not text:
+            continue
+        new_toks = [
+            t for t in tokenize_sparse_query(text, keep_numeric=True)
+            if t not in have
+        ]
+        if not new_toks:
+            continue
+        if used_chars + len(text) + 1 > _ENTITY_DENSE_ALIAS_CHARS:
+            continue
+        if used_terms + len(new_toks) > _ENTITY_DENSE_ALIAS_TERMS:
+            continue
+        picked.append(text)
+        have.update(new_toks)
+        used_chars += len(text) + 1
+        used_terms += len(new_toks)
+        if (used_chars >= _ENTITY_DENSE_ALIAS_CHARS
+                or used_terms >= _ENTITY_DENSE_ALIAS_TERMS):
+            break
+    if not picked:
+        return None
+    return f"{str(dense_query).strip()} {' '.join(picked)}"
+
 # #1709: process-local serialization for the registry recovery mint (FalkorDB
 # has no transactions; parity with the Supabase lane's FOR UPDATE row lock —
 # concurrent same-token recoveries must not overshoot the non-bootstrap key
@@ -37236,6 +37334,13 @@ class TortoiseSDK:
             sealed #2513 A/B gate decides adoption); the eval arms it via
             ``TORTOISE_LME_ENTITY_KEY_EXPANSION`` / its ``--entity-key-
             expansion`` flag.
+            ⛔ This argument alone arms the SPARSE half. The DENSE half
+            (indicator 2 of the same issue — the same harvested alias pool also
+            re-embeds the query and re-runs the dense leg, additively and
+            fail-open) is a SEPARATE switch, ``TORTOISE_ENTITY_KEY_DENSE``
+            (default OFF, see ``.env.example``), so the measured sparse-only
+            arm stays byte-identical and the two halves are separable in an A/B.
+            Both must be on for the dense half to fire.
         fusion_weights (A3 #2070): explicit per-strategy RRF weights
             override. Default None = the shared global resolution
             (TORTOISE_FUSION_WEIGHTS env → the shipped ``{"vector": 1.5}``)
@@ -37828,6 +37933,14 @@ class TortoiseSDK:
                     "shipped lexical scorer's rows are used",
                     "search_keys_prf" if search_keys_prf
                     else "entity_key_expansion")
+        # #4199: the read's OWN kind scope, resolved ONCE. Only ever supplied
+        # when a trace is being recorded (it decides a DECLARATION, never which
+        # rows are returned), so a leg_trace=None production caller pays neither
+        # the extra scope count nor any behavior change.
+        _scope_kinds = (
+            tuple(expanded_kinds)
+            if leg_trace is not None and query_vec is not None
+            and expanded_kinds else None)
         raw_results = degradation_chain(
             graph, query, struct_kind, query_vec, strategies,
             entity_type=entity_type, limit=str_limit,
@@ -37849,10 +37962,14 @@ class TortoiseSDK:
             # trace is being recorded (it decides a DECLARATION, never which
             # rows are returned), so a leg_trace=None production caller pays
             # neither the extra scope count nor any behavior change.
-            scope_kinds=(
-                tuple(expanded_kinds)
-                if leg_trace is not None and query_vec is not None
-                and expanded_kinds else None),
+            # Hoisted to ``_scope_kinds`` so C2's dense expansion pass (#2518
+            # indicator 2) measures the SAME scope: a second dense leg that
+            # omitted it recorded a healthy UNSCOPED entry, and one healthy
+            # vector entry is all ``declared_degraded_read`` needs to call the
+            # read hybrid — so an untagged expansion entry would launder the
+            # shipped leg's genuine ``no_embeddings`` into ``hybrid: True``
+            # (the #4199/#5287 class via a new leg).
+            scope_kinds=_scope_kinds,
         )
 
         if _bm25_lexical and "vector" not in _floored_legs:
@@ -38174,19 +38291,63 @@ class TortoiseSDK:
         # 'operator' arm would merge POINT ids into an event/operator top-k
         # and silently truncate the real hits (P1 #2557 review — the event
         # arm returned [] where OFF returned the event).
+        #
+        # #2518 indicator 2 (dense-leg parity): the same harvest also feeds a
+        # SECOND dense pass (``_entity_key_dense_pass``) when the operator arms
+        # ``TORTOISE_ENTITY_KEY_DENSE``. The harvest is taken ONCE and shared, so
+        # the dense half costs no extra graph query; and the harvest itself runs
+        # whenever EITHER half can use it — so a read whose sparse leg came back
+        # empty still expands its dense leg (and vice versa), instead of the two
+        # halves being chained on one another's success. With the dense switch
+        # OFF (the default, and the measured arm) the gate below reduces to the
+        # sparse half's original ``raw_results.get("fts")`` condition, and the
+        # code path is byte-identical to the shipped one.
+        _eek_dense_on = _entity_key_dense_enabled()
+        # additive to an EXISTING dense leg only: the pass never resurrects a
+        # leg this read did not have, and never re-populates one the #4028
+        # relevance floor emptied (that empty answer is the read's declared
+        # result).
+        _eek_dense_ok = bool(
+            _eek_dense_on
+            and raw_results.get("vector")
+            and "vector" not in _floored_legs
+            and query_vec is not None
+        )
         if (entity_key_expansion and entity_type == "point"
-                and raw_results.get("fts")):
-            expanded_fts = self._entity_key_expansion_pass(
-                query, raw_results["fts"],
-                str_limit=str_limit,
-                excluded_statuses=() if include_terminal else None,
-                leg_trace=status_trace,
-                # the anchor + alias tokenization honors the caller's A1
-                # numeric policy (same posture as the A4 P1-fix).
-                keep_numeric=keep_numeric,
-            )
-            if expanded_fts is not None:
-                raw_results["fts"] = expanded_fts
+                and (raw_results.get("fts") or _eek_dense_ok)):
+            _eek_aliases = self._entity_key_alias_harvest(
+                query, keep_numeric=keep_numeric)
+            if _eek_aliases and _eek_dense_ok:
+                expanded_vec = self._entity_key_dense_pass(
+                    _dense_query, raw_results["vector"],
+                    aliases=_eek_aliases,
+                    str_limit=str_limit,
+                    excluded_statuses=() if include_terminal else None,
+                    leg_trace=status_trace,
+                    min_similarity=_vector_floor,
+                    # #4199/#5287: the SAME scope the shipped leg measured, so
+                    # the expansion's entry is tagged (or re-labelled) exactly
+                    # like it — see the pass docstring's declaration note.
+                    scope_kinds=_scope_kinds,
+                    # the shipped leg's own timeout, so on a slow store the
+                    # expansion no-ops for the same reason rather than sooner.
+                    timeout_ms=int(_elevated_timeout_ms or 500),
+                )
+                if expanded_vec is not None:
+                    raw_results["vector"] = expanded_vec
+            if _eek_aliases and raw_results.get("fts"):
+                expanded_fts = self._entity_key_expansion_pass(
+                    query, raw_results["fts"],
+                    aliases=_eek_aliases,
+                    str_limit=str_limit,
+                    excluded_statuses=() if include_terminal else None,
+                    leg_trace=status_trace,
+                    # the anchor + alias tokenization honors the caller's A1
+                    # numeric policy (same posture as the A4 P1-fix).
+                    keep_numeric=keep_numeric,
+                )
+                if expanded_fts is not None:
+                    raw_results["fts"] = expanded_fts
 
         # 4. Fuse via RRF (skip if single strategy or full-scan)
         if is_full_scan or len(raw_results) == 1:
@@ -39343,20 +39504,19 @@ class TortoiseSDK:
     # the cross-session join key (b) of the scoping doc). The alias pool
     # re-enters ``build_or_query``'s bounded expansion tail (never displaces
     # original query tokens — the A4 slot-reservation regression guard).
-    def _entity_key_expansion_pass(
+    def _entity_key_alias_harvest(
         self,
         query: str,
-        fts_hits: list[tuple[str, float]],
         *,
-        str_limit: int,
-        excluded_statuses: tuple | None,
-        leg_trace: list[dict] | None,
         keep_numeric: bool = False,
-    ) -> list[tuple[str, float]] | None:
-        """C2 (#2518): entity/fact-augmented key expansion — bounded second
-        sparse pass with ADDITIVE entity anchors + linked points' E3 keys.
+    ) -> list[str] | None:
+        """C2 (#2518) steps 1-2: the ONE harvest both expansion legs consume.
 
-        Three deterministic steps (each bounded, each fail-open):
+        Bounded, deterministic, fail-open, and shared — so arming the dense half
+        (#2518 indicator 2, ``_entity_key_dense_pass``) costs NO extra graph
+        query: one anchor-resolution FTS pass over the Object spine plus one
+        batched ``aboutObject`` harvest feed both the sparse and the dense
+        re-run.
 
         1. **Anchor resolution (the query's own entities, via the index)** —
            bounded FTS over the Object-name spine with the query text
@@ -39364,26 +39524,28 @@ class TortoiseSDK:
            by (score, id) — stable tiebreak). A question that names its
            subject maps to the Object nodes whose names share its tokens;
            a question with no entity-name overlap resolves zero anchors and
-           the pass no-ops (quality gate by construction).
+           the expansion no-ops (quality gate by construction).
         2. **Key harvest (the entity spine join)** — for each resolved
            anchor, the anchor's own name + the E3 ``search_keys`` of EVERY
            Point linked ``-[:aboutObject]->`` to it, across ALL sessions
            (one batched Cypher query; the cross-session subject join).
-        3. **Additive sparse re-run** — ``run_fts_query(expansion_terms=…)``:
-           original query tokens keep their OR slots and the harvested
-           aliases fill the bounded expansion tail (``build_or_query``'s
-           A4 cap — never displacing an original token). Points in OTHER
-           sessions that carry the subject's keys in their index text
-           (content \u222a search_keys) now match and join the fts leg.
 
-        Fail-open contract (mirrors A4 #2070): any fetch/query failure or an
-        empty harvest returns ``None`` and the caller keeps the ORIGINAL fts
-        leg — byte-identical behavior; the expansion can never turn a working
-        lane into a broken one. Returns the MERGED fts leg (expanded run
-        first, first-pass-only ids appended in their original order) when the
-        expansion ran and returned hits; ``None`` otherwise.
+        Returns the alias pool — sorted, de-duplicated, capped at
+        ``_ENTITY_ALIAS_MAX`` — or ``None``. ``None`` means "no expansion": a
+        blank query, no anchor, no alias, a fetch failure, or an alias pool
+        that tokenizes to ONLY the query's own tokens (a pool that cannot add
+        recall; ``build_or_query``'s reserved-slot contract would drop it all,
+        so both legs no-op instead of paying for an identical pass).
+
+        Fail-open contract (mirrors A4 #2070): EVERY failure returns ``None`` and
+        the caller keeps its original legs — byte-identical behavior; the
+        expansion can never turn a working lane into a broken one.
+
+        ``query`` is the USER's question, never C6's dense rewrite: entity
+        anchoring reads the question's own vocabulary, so a date-injected dense
+        query must not change which Objects resolve.
         """
-        if not fts_hits or not query or not query.strip():
+        if not query or not query.strip():
             return None
         from .sparse import tokenize_sparse_query
         original_tokens = tokenize_sparse_query(
@@ -39476,14 +39638,53 @@ class TortoiseSDK:
             return None
         # An alias pool that tokenizes to ONLY original-query tokens cannot
         # add recall (build_or_query's reserved-slot contract would drop it
-        # all) — no-op instead of a wasted identical second pass.
+        # all) — no-op instead of a wasted identical second pass. The DENSE
+        # half inherits this guard for free, and needs it just as much: an
+        # alias tail made of the query's own words cannot change the query
+        # vector, so re-embedding it would buy latency and nothing else.
         orig_set = set(original_tokens)
         new_toks: set[str] = set()
         for alias in aliases:
             new_toks.update(tokenize_sparse_query(alias, keep_numeric=True))
         if not (new_toks - orig_set):
             return None
-        # Step 3 — the additive second sparse pass (A4 merge contract).
+        return aliases
+
+    def _entity_key_expansion_pass(
+        self,
+        query: str,
+        fts_hits: list[tuple[str, float]],
+        *,
+        aliases: list[str],
+        str_limit: int,
+        excluded_statuses: tuple | None,
+        leg_trace: list[dict] | None,
+        keep_numeric: bool = False,
+    ) -> list[tuple[str, float]] | None:
+        """C2 (#2518): the SPARSE half of entity/fact-augmented key expansion —
+        bounded second sparse pass with the harvested entity anchors + linked
+        points' E3 keys (step 3 of the pass; steps 1-2 are
+        ``_entity_key_alias_harvest``, shared with the dense half).
+
+        **Additive sparse re-run** — ``run_fts_query(expansion_terms=…)``:
+        original query tokens keep their OR slots and the harvested aliases fill
+        the bounded expansion tail (``build_or_query``'s A4 cap — never
+        displacing an original token). Points in OTHER sessions that carry the
+        subject's keys in their index text (content \u222a search_keys) now match
+        and join the fts leg.
+
+        Fail-open contract (mirrors A4 #2070): any fetch/query failure or an
+        empty expansion returns ``None`` and the caller keeps the ORIGINAL fts
+        leg — byte-identical behavior; the expansion can never turn a working
+        lane into a broken one. Returns the MERGED fts leg (expanded run
+        first, first-pass-only ids appended in their original order) when the
+        expansion ran and returned hits; ``None`` otherwise.
+        """
+        if not fts_hits or not query or not query.strip() or not aliases:
+            return None
+        proj = self._get_proj()
+        from .search_engine import run_fts_query
+        # The additive second sparse pass (A4 merge contract).
         _exp_trace: list[dict] = []
         try:
             expanded = run_fts_query(
@@ -39505,6 +39706,119 @@ class TortoiseSDK:
         seen = {pid for pid, _score in expanded}
         merged = list(expanded)
         merged.extend((pid, s) for pid, s in fts_hits if pid not in seen)
+        return merged
+
+    def _entity_key_dense_pass(
+        self,
+        dense_query: str,
+        vector_hits: list[tuple[str, float]],
+        *,
+        aliases: list[str],
+        str_limit: int,
+        excluded_statuses: tuple | None,
+        leg_trace: list[dict] | None,
+        min_similarity: float | None = None,
+        scope_kinds: tuple[str, ...] | None = None,
+        timeout_ms: int = 500,
+    ) -> list[tuple[str, float]] | None:
+        """C2 (#2518) indicator 2 — DENSE-leg parity for the key expansion.
+
+        The sparse half re-runs the sparse leg with the harvested aliases; the
+        dense leg kept the query vector of the ORIGINAL query, so a
+        same-subject point whose embedding is close to the ENTITY's vocabulary
+        but not to the question's phrasing stayed invisible to it. This pass
+        re-embeds the composed query (:func:`_entity_key_dense_query`) and
+        re-runs the dense leg **additively**.
+
+        Cost is bounded to EXACTLY ONE extra embed and ONE extra leg query per
+        read: the alias pool is capped by the harvest, the composition by
+        ``_ENTITY_DENSE_ALIAS_CHARS``/``_ENTITY_DENSE_ALIAS_TERMS``, and the
+        pass fires at most once. It is additionally skipped entirely when the
+        composition adds nothing (``_entity_key_dense_query`` returns ``None``).
+
+        Merge contract — identical to the sparse half's: the expanded run comes
+        first, the pass-1-only ids follow in their original order. Additive
+        recall, never a replacement; the read's original dense ranking survives
+        inside the merged leg.
+
+        Fail-open (mirrors A4 #2070 / the sparse half): no embedder, an encode
+        failure, a query failure or an empty result returns ``None`` and the
+        caller keeps the ORIGINAL dense leg — byte-identical behavior. The
+        expansion's trace entries are appended ONLY on success (the sparse
+        half's own pattern), so a leg-local failure here can never declare a
+        healthy read degraded — the same false-positive the #8488 arm refuses.
+
+        Stand-downs, both deliberate:
+        * the caller only calls this when the read's dense leg PRODUCED rows, so
+          the pass can never resurrect a leg the read did not have, and never
+          re-populates one the #4028 relevance floor emptied (that empty answer
+          is the read's declared result);
+        * ``EmbedderUnavailableError`` is re-raised rather than swallowed when
+          ``TORTOISE_EMBEDDING_MODEL_REQUIRED=1`` armed it (#5275): the contract
+          is "fail loud, never a silent keyword-only read", and an expansion
+          pass is not a licence to convert a named refusal into a degrade.
+        """
+        if not vector_hits or not aliases:
+            return None
+        composed = _entity_key_dense_query(dense_query, aliases)
+        if composed is None:
+            return None
+        from .embeddings import EmbeddingModel
+        from .exceptions import EmbedderUnavailableError
+        try:
+            model = EmbeddingModel.get()
+        except EmbedderUnavailableError:
+            raise  # #5275: REQUIRED — fail loud, never a silent fallback
+        except Exception:  # noqa: BLE001, RUF100
+            model = None
+        if model is None:
+            return None
+        try:
+            # THE bounded extra embed: one composed string, one vector.
+            expanded_vec = model.encode([composed])[0].tolist()
+        except Exception:  # noqa: BLE001, RUF100
+            _logger.warning(
+                "C2 dense expansion encode failed — keeping the original "
+                "dense leg", exc_info=True)
+            return None
+        proj = self._get_proj()
+        from .search_engine import run_vector_query
+        _exp_trace: list[dict] = []
+        try:
+            expanded = run_vector_query(
+                proj.g, expanded_vec, limit=str_limit,
+                is_embedded=getattr(proj, "_is_embedded", True),
+                entity_type="point",
+                vector_index_api=getattr(proj, "_vector_index_api", None),
+                excluded_statuses=excluded_statuses,
+                leg_trace=_exp_trace,
+                min_similarity=min_similarity,
+                # The READ's own kind scope, so this entry is tagged/relabelled
+                # by the same #4199 probe as the shipped leg's. Omitting it made
+                # the expansion record a healthy UNSCOPED entry, and ONE healthy
+                # vector entry is all ``declared_degraded_read`` needs to call
+                # the read hybrid — which would launder the shipped leg's
+                # genuine ``no_embeddings`` into ``hybrid: True`` (the class
+                # ``_vector_leg_healthy``'s docstring forbids).
+                scope_kinds=scope_kinds,
+                timeout_ms=timeout_ms,
+                # ONE dense slot, ONE tally: the shipped leg already counted it
+                # (the #8488 arm's ``meter=False`` precedent — the trace still
+                # records the second pass, so a measurement can see it ran).
+                meter=False,
+            )
+        except Exception:  # noqa: BLE001, RUF100
+            _logger.warning(
+                "C2 dense expansion leg failed — keeping the original dense "
+                "leg", exc_info=True)
+            return None
+        if not expanded:
+            return None
+        if leg_trace is not None:
+            leg_trace.extend(_exp_trace)
+        seen = {pid for pid, _score in expanded}
+        merged = list(expanded)
+        merged.extend((pid, s) for pid, s in vector_hits if pid not in seen)
         return merged
 
     def expand_relationships(self, point_id: str) -> list[dict]:
