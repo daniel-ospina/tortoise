@@ -252,11 +252,14 @@ then `TORTOISE_IDENTIFIER_TOKENS`, then `TORTOISE_SUBJECT_TAU_HI`/`_LO`): each s
 path and was in no pin, no ledger row and no closure. The authoritative list is
 `capstone_measure.DOOR_PINNED_OFF` / `DOOR_PINNED_ON`, which `tests/test_7949_c2_door.py` resolves
 against the tree — this sentence is the reader's map, not the control. The set
-is CLOSED over the **measurement modules the path renders with** — and which modules those
-are is DERIVED rather than enumerated here, because a hand-kept list in this paragraph is the one
-that rots: the derivation sentence below is the record — and `tests/test_7949_c2_door.py` derives
-that closure from the code (structurally, not a grep) rather
-than asserting the prose. The same call chain also reads *infrastructure* variables (record DSN,
+is CLOSED over the **measurement modules the path renders with**, and what
+`tests/test_7949_c2_door.py` enforces **mechanically is the CENSUS over that
+list, not the list's membership**: `path_modules` is a hand-maintained tuple, and every
+`TORTOISE_*` read inside those modules must be classified (an arm seam, a pin, a declared input, or
+an acknowledged non-seam with a stated reason) or the suite reds. Membership is hand-kept, so a read
+added to a module *outside* that tuple is **not** caught by it — stated plainly rather than left to
+be discovered, and tracked as **#11410** (the `sdk`/`hosted_api` helpers those two hops call are the
+measured gap). The same call chain also reads *infrastructure* variables (record DSN,
 packs dir, embedding gates, store connection): those are inputs a run needs in order to happen, not
 settings that move the measured population, and they are deliberately outside the door's partition —
 stated because an earlier revision of this section called the whole path "closed", which the review
