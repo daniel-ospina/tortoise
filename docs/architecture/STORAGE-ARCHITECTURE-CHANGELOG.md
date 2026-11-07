@@ -2124,9 +2124,10 @@ with the stored value untouched) and **false on a
 `:Point`**, which has a non-destructive in-place one: `update_point(<id>, story_arc=None)` clears the property and KEEPS
 the node (measured — the `None` passes `sdk._refuse_unpaired_narrative`, whose refusal is on a NON-EMPTY narrative, and
 `update_point`'s `SET n += $props` removes a `None`-valued key). ⚠️ It is a LIVE clear, not a durable one: the journal
-records the `None` but `projection.entities._persist_extra_props` SKIPS a `None` value, so a journal rebuild of a legacy
-copy whose creation record carried the prose re-materialises it — that replay half is `#10429`'s. The same live door is
-bound by the MCP tool `tortoise_update_point`. A `:Point` carrying the
+records the `None`, but the `PointRevised` fold has no `story_arc` clause and the one open-set passthrough
+(`projection.entities._persist_extra_props`) SKIPS a `None` value, so a journal rebuild of a legacy copy whose creation
+record carried the prose re-materialises it — that replay half is `#10429`'s. The same live door is bound by the MCP
+tool `tortoise_update_point`. A `:Point` carrying the
 prose is a `graph_only` occurrence of THIS count (`:Point`'s placeable set omits `story_arc`, §17.2), so the sentence's
 unscoped "the PROPERTY" sent that operator to `tortoise_delete` — which REMOVES the node and journals the delete that
 drops its record row — when a clear-and-keep route shipped.
