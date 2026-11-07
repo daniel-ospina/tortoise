@@ -243,7 +243,7 @@ truncation budgets `TORTOISE_EXTRACTOR_MAX_TOKENS` (`_stage_cap`, read at call t
 shipped 1500/16000 stage defaults) and `TORTOISE_EXTRACTOR_ESCALATION_TOKENS` (the
 length-truncation retry budget), `TORTOISE_REFERENTIALITY` (the S2.2 mention arm, reached
 through `referentiality.ENV_FLAG`), plus `TORTOISE_LABEL_ORDER_SEED` (inert while
-`TORTOISE_LABEL_ORDER` is off, pinned so the pair cannot be split), `TORTOISE_CONTEXT_ENRICH` (the per-turn REWRITE of the text each turn embeds, gated in `context_enrich.enrich_enabled` and reached from `sdk.capture_session` as `enrich_fn=_capture_enriched_texts`; fail-safe OFF) — all pinned **unset** — and `TORTOISE_JSON_MODE`, pinned to **`1`** because its absent state is already ON and it is read PER CALL to flip the request's `response_format` (`model_adapters`). The last two are the cycle-7 review finding: both sit on the acceptance path and were in no pin, no ledger row and no closure. The set
+`TORTOISE_LABEL_ORDER` is off, pinned so the pair cannot be split), `TORTOISE_CONTEXT_ENRICH` (the per-turn REWRITE of the text each turn embeds, gated in `context_enrich.enrich_enabled` and reached from `sdk.capture_session` as `enrich_fn=_capture_enriched_texts`; fail-safe OFF) — all pinned **unset** — and `TORTOISE_JSON_MODE`, pinned to **`1`** because its absent state is already ON and it is read PER CALL to flip the request's `response_format` (`model_adapters`), and `TORTOISE_IDENTIFIER_TOKENS`, pinned to **`1`** because its absent state is already ON (`sparse.py:226`, `env_flag(IDENTIFIER_ENV, True)`) and it rewrites `search_keys` on every `:Point` the run writes (`projection/entities.py:1208`, reached from `create_point`); the registered corpus yields no aliases either way, measured. The last three are the cycle-7, cycle-8 and cycle-9 review findings: each sits on the acceptance path and was in no pin, no ledger row and no closure. The set
 is CLOSED over the **measurement modules the path renders with** — and which modules those
 are is DERIVED rather than enumerated here, because a hand-kept list in this paragraph is the one
 that rots: the derivation sentence below is the record — and `tests/test_7949_c2_door.py` derives
@@ -253,12 +253,15 @@ packs dir, embedding gates, store connection): those are inputs a run needs in o
 settings that move the measured population, and they are deliberately outside the door's partition —
 stated because an earlier revision of this section called the whole path "closed", which the review
 measured false (`TORTOISE_REFERENTIALITY` was read on every v2 capture and accounted for by
-nothing). The closure is derived over **six** modules — `extractor_v2.py` itself, the three it reaches one
-call down (`referentiality.py`, `value_gate.py`, `s2_decision_seam.py`), and the two the door reaches
-through the SDK (`context_enrich.py` via `capture_session(enrich_fn=…)`, `model_adapters.py` via
-`_extract_session_v2`) — so the two arm seams, the mention arm and the two measurement switches added
-in cycle 7 are inside the derived surface, not hand-listed beside it. The list is the test's
-`path_modules`; a module it does not name is a module the closure does not see. Every one is written in-process, **read back**, and a run whose read-back
+nothing). The closure is derived over `extractor_v2.py` **and** the SEVEN modules the path reaches one call
+down — `referentiality.py`, `value_gate.py`, `s2_decision_seam.py`, `context_enrich.py`,
+`model_adapters.py`, `change_feed.py` and `sparse.py` — so the arm seams, the mention arm, the per-turn embed
+rewrite, the request's `response_format`, the change-feed writer and the identifier-token writer are inside the derived
+surface, not hand-listed beside it. That list grew one review round at a time (the last three are
+`TORTOISE_CONTEXT_ENRICH`/`TORTOISE_JSON_MODE`, then `TORTOISE_CHANGE_FEED`, then
+`TORTOISE_IDENTIFIER_TOKENS` in cycle 9, each found by a
+measured mutation that left the previous derivation green), which is the honest reason to state
+it as a CLOSURE over what the path reaches rather than as a list somebody curated. Every one is written in-process, **read back**, and a run whose read-back
 disagrees is **refused** (`probes/capstone_measure.py`); the measurement switches were
 unpinned until the `#10983` reviews (rounds 1 and 2), which is the same declaration-versus-control gap one layer below
 the lane. The arm pins `TORTOISE_VALUE_GATE=0` on purpose: with the
