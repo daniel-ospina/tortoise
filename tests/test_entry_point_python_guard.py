@@ -1018,7 +1018,7 @@ def test_guard_refuses_an_old_interpreter_and_passes_the_floor(
     exec(code, namespace)  # at the floor the guard must be inert
 
 
-#: The refusal code each of the three files this PR guards CHOOSES (`#4053`,
+#: The refusal code each of the three files below CHOOSES (`#4053`,
 #: `#11342`), and the verdict code it spares. `SystemExit(<message>)` exits 1 in
 #: CPython, so for two of these files an old interpreter was reported as the
 #: tool's own verdict — `gen_placement_table --check` prints `STALE` and returns
