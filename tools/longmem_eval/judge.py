@@ -71,7 +71,56 @@ from .reader import (
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_JUDGE_MODEL = "openai:gpt-4o-2024-08-06"
+#: The OFFICIAL LongMemEval judge model — the model the benchmark's own
+#: `evaluate_qa.py` baseline ran, and the ONLY identity `w7_publish.JUDGE_PIN`
+#: is minted for (external comparability lives here, not in a default).
+#:
+#: Kept NAMED and reachable on purpose: serving it is still a legal
+#: configuration (`TORTOISE_LME_JUDGE_MODEL=openrouter:openai/gpt-4o-2024-08-06`,
+#: or a box holding `OPENAI_API_KEY`), it is just no longer what the run
+#: DEFAULTS to. A consumer that must grade with the official judge — the ask
+#: spot-check's #2071 decision record — names THIS constant, never the default.
+OFFICIAL_JUDGE_MODEL = "openai:gpt-4o-2024-08-06"
+
+#: The judge a run defaults to. **NOT the official model, by owner ruling.**
+#:
+#: #8486 owner ruling (2026-10-27), recorded verbatim on the issue: *"Judge: our
+#: own model (`deepseek-v4-flash`), pinned to an exact snapshot id — not a
+#: floating alias. … What the benchmark is for, for now: progress against
+#: ourselves."* Re-stated 2026-11-03: *"we use deepseek … Not OpenAI, not
+#: OpenRouter. No credential request stands"* — the official
+#: `gpt-4o-2024-08-06` pre-registration *cannot* be honoured on the boxes we
+#: run, and substituting it is the ruling rather than an accident.
+#:
+#: WHY a default and not an env override: the ruling says *"fix as constants,
+#: not env overrides"* — an override is an undeclared configuration, and the
+#: whole point of this ruling is that the configuration a run used is READ OFF
+#: the code, not off whatever the launching shell happened to export.
+#:
+#: The consequence is DELIBERATE and is not a failure: `w7_publish` derives the
+#: pin from the judge that graded, so this judge records
+#: `judge_pin: unpinned:deepseek-v4-flash` and `verdict: inconclusive`. The
+#: receipt gate is correctly saying "this is not the official baseline", and the
+#: run report must say the same in words — an **internal baseline series**,
+#: never "the LongMemEval number". R12 is untouched by this: only an
+#: officially-graded completed run still records `pass`.
+#:
+#: The snapshot-id half of the ruling is served by the id itself. The only dated
+#: id in this family the repo records is `deepseek-v4-flash-0731`, a TEST
+#: FIXTURE (`tests/test_analyze.py`) with no `PRICING_MAP` row — pinning it would
+#: make `spend_guard.arm()` refuse the run before its first call with no partial
+#: run and no resumable marker. `deepseek-v4-flash` is the id the serving
+#: endpoint names and the one the pricing map holds (measured 2026-11-02,
+#: `#8486` credential audit); adopting the fixture id would trade a real,
+#: priced, servable configuration for a cosmetic date.
+#:
+#: OVERRIDES: the published benchmark's official judge pin (`gpt-4o`, the
+#: `evaluate_qa.py` baseline) as the RUN default — we measure our own progress
+#: with a pinned, disclosed, non-official judge, because publishing vendors do
+#: not use the official judge either (mem0's own LongMemEval table uses GPT-5
+#: for both answering and judging), so matching it buys comparability with a
+#: configuration almost nobody publishes. Recorded on #8486 by the owner.
+DEFAULT_JUDGE_MODEL = "deepseek:deepseek-v4-flash"
 
 # Issue #1949 decision record — judge near-miss (subset-rule) policy.
 #

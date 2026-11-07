@@ -1383,7 +1383,16 @@ def test_a_mock_judge_can_never_carry_the_official_pin(tmp_path):
     assert m.judge_pin_for("mock-judge") == "unpinned:mock-judge"
     assert m.judge_pin_for("some-other-judge") == "unpinned:some-other-judge"
     assert m.judge_pin_for(m.MOCK_JUDGE_SPEC) == m.MOCK_JUDGE_PIN
-    assert m.judge_pin_for(m.DEFAULT_JUDGE_MODEL) == m.JUDGE_PIN
+    # The official judge is named EXPLICITLY, never derived from the run default
+    # (#8486, 2026-11-07): the run default was re-pinned to DeepSeek by the owner
+    # ruling of 2026-10-27, and deriving "official" from it would have handed
+    # `JUDGE_PIN` to a DeepSeek-graded run — the R12 fail-open #9992 closed.
+    from tools.longmem_eval.judge import (DEFAULT_JUDGE_MODEL,
+                                          OFFICIAL_JUDGE_MODEL)
+    assert m.judge_pin_for(OFFICIAL_JUDGE_MODEL) == m.JUDGE_PIN
+    assert m.judge_pin_for(DEFAULT_JUDGE_MODEL) == (
+        f"unpinned:{DEFAULT_JUDGE_MODEL}")
+    assert m.judge_pin_for(DEFAULT_JUDGE_MODEL) != m.JUDGE_PIN
     # the official judge is the MODEL, not the transport
     assert m.judge_pin_for("openrouter:openai/gpt-4o-2024-08-06") == m.JUDGE_PIN
 

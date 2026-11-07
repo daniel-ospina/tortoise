@@ -185,7 +185,7 @@ from tools.longmem_eval.guard_measured_revision import (  # noqa: E402
     _is_noise,
 )
 from tools.longmem_eval.judge import (  # noqa: E402
-    DEFAULT_JUDGE_MODEL,
+    OFFICIAL_JUDGE_MODEL,
     VARIANT_CONTAINMENT_SPEC,
     MockJudge,
     build_judge,
@@ -265,7 +265,8 @@ READER_PINNED = True
 INJECTED_READER_SPEC = "injected"
 
 #: The pin a run whose spec names the OFFICIAL LongMemEval model records
-#: (``tools/longmem_eval/judge.py`` → ``build_judge()``), the same grading
+#: (``judge.OFFICIAL_JUDGE_MODEL``, which :func:`judge_pin_for` names
+#: explicitly), the same grading
 #: discipline the published LongMemEval numbers use. The rubric id is the same
 #: one the graded eval carries (``JUDGE_RUBRIC_ID`` in
 #: ``tools/longmem_eval/run.py``); the hash is computed with the same 16-hex
@@ -306,10 +307,14 @@ INJECTED_SPEC_PREFIX = "injected:"
 #: labels" class #8486 exists to close. Naming ``deepseek:`` fixes both halves:
 #: the direct route's model id is ``deepseek-v4-pro`` (not the namespaced one)
 #: and the credential is ``DEEPSEEK_API_KEY``, so the record — not the shell —
-#: decides who graded the run and which key it used. That constant is the
-#: LongMemEval-500Q / official-anscheck judge (``openai:gpt-4o-2024-08-06``) and
-#: stays exactly as it is — the other benchmark's published comparability rests
-#: on it. The ask benchmark has its own judge now, and before #11460 the two
+#: decides who graded the run and which key it used. The LongMemEval-500Q /
+#: official-anscheck judge is now its OWN named constant
+#: (``judge.OFFICIAL_JUDGE_MODEL``, ``openai:gpt-4o-2024-08-06``) and stays
+#: exactly as it is — the other benchmark's published comparability rests
+#: on it — while the graded-eval RUN's default was re-pinned to DeepSeek by the
+#: #8486 owner ruling, which is why nothing here may read "official" off
+#: ``judge.DEFAULT_JUDGE_MODEL`` any more. The ask benchmark has its own judge
+#: now, and before #11460 the two
 #: were conflated: this module inherited the official default, so a
 #: DeepSeek-graded run against the committed record returned
 #: ``inconclusive: config_mismatch`` no matter how green it was. That is the
@@ -356,7 +361,15 @@ def judge_pin_for(spec: str) -> str:
     # The official judge is the MODEL, not the transport: a routed provider that
     # serves the same model id (openrouter:openai/gpt-4o-2024-08-06) grades with
     # the same judge, so it keeps the official pin.
-    official = judge_model_id(DEFAULT_JUDGE_MODEL)
+    #
+    # It is named EXPLICITLY (#8486, 2026-11-07) and must never be derived from
+    # ``judge.DEFAULT_JUDGE_MODEL`` again: that default was re-pinned to DeepSeek
+    # by the #8486 owner ruling (2026-10-27), and deriving "official" from it
+    # would have minted ``JUDGE_PIN`` for a DeepSeek-graded run — the exact R12
+    # fail-open ``#9992`` closed, re-opened by a one-line default change. This
+    # benchmark's pre-registration is unchanged: it grades with the OFFICIAL
+    # judge.
+    official = judge_model_id(OFFICIAL_JUDGE_MODEL)
     if model == official or model.endswith("/" + official):
         return JUDGE_PIN
     return f"unpinned:{spec}"
@@ -430,6 +443,16 @@ def resolve_judge_spec(override: str | None = None,
     official LongMemEval default here is what made every DeepSeek run
     ``inconclusive: config_mismatch`` (#11460); the two records could not agree
     because nothing made them name the same judge.
+
+    ⛔ **The #8486 re-pin of ``judge.DEFAULT_JUDGE_MODEL`` does not reach this
+    line.** ``#8486`` moved that default to DeepSeek for the graded-eval RUN;
+    this benchmark was re-registered onto its OWN judge by #11460, so its
+    fallback is the pre-registered one and stays there. What the re-pin DOES
+    change here is the other derivation: :func:`judge_pin_for` names the
+    official judge id through ``OFFICIAL_JUDGE_MODEL`` instead of reading it off
+    ``DEFAULT_JUDGE_MODEL``, because deriving it from a default that moved would
+    have handed ``JUDGE_PIN`` to a DeepSeek-graded ask run — the R12 fail-open
+    ``#9992``.
     """
     if mock:
         return MOCK_JUDGE_SPEC
@@ -1724,11 +1747,12 @@ def score(*, run_report: dict, corpus_root: Path = corpus.ASK_DIR,
     golds = corpus.load_golds(corpus_root)
     if judge is None:
         # ⛔ Resolve the spec FIRST and BUILD from it. `build_judge()` has its own
-        # fallback (``judge.DEFAULT_JUDGE_MODEL``, the official LongMemEval
-        # judge), so resolving only the RECORDED spec let a run with no
-        # ``--judge`` be graded by gpt-4o while the record — and therefore the
-        # bar's config check — named DeepSeek: a false PASS on the one clause
-        # that exists to prove who graded the numbers (#11460 review).
+        # fallback (``judge.DEFAULT_JUDGE_MODEL`` — the #8486-pinned DeepSeek
+        # model, and before that the official LongMemEval judge), so resolving
+        # only the RECORDED spec let a run with no ``--judge`` be graded by one
+        # model while the record — and therefore the bar's config check — named
+        # another: a false PASS on the one clause that exists to prove who
+        # graded the numbers (#11460 review).
         spec = resolve_judge_spec(judge_spec, mock=mock)
         judge = MockJudge() if mock else build_judge(spec)
     elif isinstance(judge, MockJudge):

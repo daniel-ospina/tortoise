@@ -99,7 +99,30 @@ __all__ = [
 # by reader-model drift between runs (deepseek-chat → deepseek-v4-flash); the
 # pin makes the code default equal what runs use. Any override is recorded
 # (reader_pinned=false) + warned on stderr — never silent.
-READER_MODEL = "openrouter:deepseek/deepseek-v4-flash"
+#
+# TRANSPORT (#8486, 2026-11-07): the pin named `openrouter:deepseek/...`, which
+# made the DEFAULT unservable on the boxes we run — no `OPENROUTER_API_KEY`
+# exists on them, so `build_reader()` raised at the named-provider check before
+# a single question loaded (measured `reader.py:199 ValueError: model spec names
+# provider 'openrouter' but its key is not set (OPENROUTER_API_KEY)` on
+# 2026-10-23 and again 2026-11-02). Every run therefore needed an env override,
+# and an override records `reader_pinned: false` — i.e. the pin read as DRIFT
+# exactly when it WAS the ruling. The pin's own contract is "the code default
+# equals what runs use"; the MODEL is unchanged (`deepseek-v4-flash`), only the
+# transport is now the one the fleet actually holds.
+#
+# OVERRIDES: the OpenRouter-transport reader pin (M5 #1525's literal spec) — the
+# owner ruled on #8486 (2026-11-03) "we use deepseek … Not OpenAI, not
+# OpenRouter", and the 2026-10-27 follow-up on that issue asked in terms:
+# "point the reader constant at the transport we actually run … either update
+# the constant to the transport in use, or the report will read as an
+# accidental override when it is the ruling".
+#
+# A box holding only `OPENROUTER_API_KEY` still serves this model — pass
+# `TORTOISE_LME_READER_MODEL=openrouter:deepseek/deepseek-v4-flash` and the run
+# records itself as NOT pinned. That is the documented override path, not a
+# silent fallback: the default must be the configuration we ship.
+READER_MODEL = "deepseek:deepseek-v4-flash"
 
 # Provider priority for the READER when multiple keys are set — reuse the
 # session-extraction order (sdk._SESSION_LLM_PROVIDER_PRIORITY).

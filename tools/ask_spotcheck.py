@@ -37,7 +37,13 @@ provider key is absent (see ``_require_judge_key``).
 Requires live provider keys: DEEPSEEK_API_KEY / OPENROUTER_API_KEY /
 VENICE_API_KEY for the reader AND the judge provider key
 (``TORTOISE_LME_JUDGE_MODEL`` — default ``openai:gpt-4o-2024-08-06`` →
-``OPENAI_API_KEY``) for grading. Seeding (``_seed_memory``, #3910)
+``OPENAI_API_KEY``) for grading. That default is the OFFICIAL judge by the
+#2071 decision record, and it is named explicitly
+(``judge.OFFICIAL_JUDGE_MODEL``) rather than read off
+``judge.DEFAULT_JUDGE_MODEL``: the graded-eval lane's default judge was
+re-pinned to DeepSeek by the #8486 owner ruling (2026-10-27), and this
+spot-check's recorded purpose is to grade with the OFFICIAL judge, so it must
+not inherit that re-pin by accident. Seeding (``_seed_memory``, #3910)
 reproduces the memory the question was asked about in the CAPTURE shape a
 captured session's turn store actually has: one episodic turn Point per
 windowed turn of every session that passes the shared blank gate (a session
@@ -100,7 +106,7 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from tools.longmem_eval.judge import (  # noqa: E402
-    DEFAULT_JUDGE_MODEL,
+    OFFICIAL_JUDGE_MODEL,
     MockJudge,
     build_judge,
 )
@@ -1164,7 +1170,8 @@ def _require_judge_key() -> str:
     would re-False the 3 long-gold questions under an unreachable bar and
     produce a misleading aggregate (the pre-#2071 defect).
     """
-    raw_spec = os.environ.get("TORTOISE_LME_JUDGE_MODEL", "").strip() or DEFAULT_JUDGE_MODEL
+    raw_spec = (os.environ.get("TORTOISE_LME_JUDGE_MODEL", "").strip()
+                or OFFICIAL_JUDGE_MODEL)
     provider, _model = _parse_model_spec(raw_spec)
     if provider is not None:
         if provider not in _PROVIDERS:
