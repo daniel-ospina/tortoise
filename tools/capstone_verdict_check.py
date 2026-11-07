@@ -216,10 +216,19 @@ _MEASUREMENT_RUN_KEYS = (
 #: the lane pins: ``door_record()`` carries ``measured``/``lane``/``lane_env``/
 #: ``pinned_off``/``source``, i.e. WHICH door the run took, not a produced number. Its
 #: one counted cell, ``door.captures`` (``door_witness()``'s ``entered``/``bypassed``),
-#: is a ROUTING witness — the same shape ``steps_observed`` carries above — and it
-#: gates a run through ``require_door_entered()`` rather than scoring a criterion.
-#: It is therefore declared here, the fail-CLOSED direction for V12: nothing in
-#: ``door`` rescues an otherwise-emptied record from the CLOSED-blocker refusal.
+#: is a ROUTING witness and NO RECORD CAN VARY IT: ``main`` calls
+#: ``require_door_entered(runs)`` BEFORE it reaches ``render_log``
+#: (``capstone_measure.py:4159`` vs ``:4298``), and that function raises on any bypass,
+#: so ``bypassed`` is always ``[]`` and ``entered`` is always ``sessions`` re-counted.
+#: A constant carries no number of its own — ⛔ and NOT for the reason a witness like
+#: ``steps_observed`` would give: that key is itself a MEASUREMENT member of the set
+#: above, so it is not a precedent for parking anything here. ``arm`` is.
+#: Declaring ``door`` a measurement is the direction that cannot work: ``door`` is a
+#: non-empty dict on EVERY emitted record, so ``_record_carries_a_measurement`` would
+#: return ``True`` unconditionally and V12's exemption would be unreachable. Parking
+#: it here is therefore the only REACHABLE side — and this list is the PERMISSIVE
+#: side, never the fail-closed one: for a real measurement key the fail-closed
+#: direction is the set above, which is where the drift arm's refusal sends you.
 #: Parking a REAL measurement key here is still the residual this list states below.
 #:
 #: ⛔ RESIDUAL, stated so no reader treats this pin as complete: membership in one list or
