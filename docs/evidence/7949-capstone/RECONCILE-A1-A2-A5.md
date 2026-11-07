@@ -397,9 +397,10 @@ gh pr view 11211 --json state,mergeCommit,mergedAt,closingIssuesReferences
 gh pr view 11212 --json state,mergeCommit,mergedAt        # MERGED 21:33:54Z, mergeCommit 80c912244
 gh pr view 11205 --json state,mergeCommit,mergedAt,closingIssuesReferences   # MERGED 22:40:32Z, 316a572ce2
 gh issue view 11237 --json state,closedAt                # OPEN — the Object→Object WRITE path
-# The arms' own evidence — the two PRs whose merge sha arm 1 inherits, and arm 2's commit message.
+# The arms' own evidence — the two PRs whose merge sha arm 1 can inherit, and arm 2's commit message.
 # Without these three lines the loop prints a sha but nothing says WHAT it must equal, so a reader
-# cannot tell arm 1 (non-null sha) from arm 2 (empty + a commit keyword):
+# cannot tell arm 1 (a NON-EMPTY closedByPullRequestsReferences, whose commit_id may be NULL or that
+# PR's own merge sha) from arm 2 (empty refs + the keyword in the COMMIT message):
 gh pr view 11105 --json state,mergeCommit,mergedAt        # MERGED 11:18:49Z, mergeCommit 24d2dbcb
 gh pr view 10738 --json state,mergeCommit,mergedAt        # MERGED 16:14:21Z, mergeCommit fd6558c5
 git log -1 --format=%B 316a572ce2 | grep '^Closes #10999' # arm 2's keyword, in the COMMIT message
