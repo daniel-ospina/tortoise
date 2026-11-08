@@ -332,7 +332,7 @@ CLASSES: tuple[str, ...] = (RECOGNISED_PRODUCER, EXEMPT)
 #: reasons — do not name one as "the" reason, and do not cite the two-label pair among them:
 #: `_event_plain_merge` and `_rebuild_all_replay` keep their `MERGE`s in their own bodies (that is
 #: exactly why they derive TWO), while the fifteen include a label in a `MATCH` the derivation does
-#: not credit (`_embedding_repair_attempt`'s own `MATCH (e:Event {eventId:$eid})` + 
+#: not credit (`_embedding_repair_attempt`'s own `MATCH (e:Event {eventId:$eid})` +
 #: `set_embedding_clause("e")`), a store clause held in a module constant (`_write_capture_turns`
 #: executing `_TURN_WRITE_CYPHER`), a property-map merge over a constant tuple
 #: (`_update_entity`'s `_CANONICAL_ENTITY_ID_PROPS`), a store delegated to another writer, a writer
