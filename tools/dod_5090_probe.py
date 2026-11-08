@@ -1794,9 +1794,15 @@ def stores_dispositions() -> dict[str, str]:
 
 
 def _store_reading(
-    writer: str, entry: object, dispositions: dict[str, str]
+    entry: object, dispositions: dict[str, str]
 ) -> tuple[tuple[str, ...] | str | None, str | None]:
     """How to READ one declaration's ``stores`` — ``(reading, violation)``.
+
+    ⛔ No `writer` parameter, on purpose: every violation string below is written WITHOUT a key,
+    and both call sites prefix the writer when they record it. Passing the writer in made it read
+    as though this function attributed the message, while it never did (a dead parameter — measured
+    by AST, `#11492`'s review), and the next editor interpolating it would silently change the
+    malformed-`stores` note text.
 
     ``reading`` is a label tuple, a disposition string, or ``None`` for "nothing usable", and
     ``violation`` is the NAMED reason (empty when the declaration is shaped as a declaration).
@@ -1905,7 +1911,7 @@ def resolved_stored_labels(written: dict[str, str] | None = None,
         if writer not in declared:
             out["undeclared"].append(writer)
             continue
-        reading, violation = _store_reading(writer, declared[writer].get("stores"), dispositions)
+        reading, violation = _store_reading(declared[writer].get("stores"), dispositions)
         if violation:
             out["violations"][writer] = violation
         elif reading == dispositions["no_vector"]:
@@ -1929,7 +1935,7 @@ def resolved_stored_labels(written: dict[str, str] | None = None,
         measured = {label.strip() for label in written.get(writer, "").split(",") if label.strip()}
         if not measured or written.get(writer, "").startswith("UNKNOWN"):
             continue  # no concrete label on this row's side to disagree with
-        reading, violation = _store_reading(writer, entry.get("stores"), dispositions)
+        reading, violation = _store_reading(entry.get("stores"), dispositions)
         if violation:
             # ⛔ The FOURTH shape, and the same drop as the `at_runtime` arm above: an unusable
             # declaration returns `(None, violation)`, and discarding the violation left `None`

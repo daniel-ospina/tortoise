@@ -925,7 +925,12 @@ def test_every_declared_label_re_derives_at_this_head() -> None:
     DECLARATION that drifts off the label its own store names — all three red here. ⛔ The third is
     the one `#11492`'s review caught missing: the first version asserted only that the needle was
     still in the body, so a declaration mutated to `("Batch",)` passed. The label set is now part of
-    the evidence, compared against the declaration in both directions.
+    the evidence — but note WHICH half each pin closes, because `evidence_labels` above is a
+    hand-written tuple and comparing it to the declaration only proves they were written
+    consistently: THIS pin proves every DECLARED label still exists in the writer, and
+    `test_a_declared_label_set_covers_every_label_its_own_store_targets` proves the opposite
+    direction (no label the writer's own store clause targets is missing) by deriving it from the
+    alias that clause passes — the half a hand-written set cannot close on its own (`#11530`).
     """
     labelled = {key for key, entry in EMBED_WRITER_CLASSES.items()
                 if not isinstance(entry.stores, str)}
@@ -1020,6 +1025,75 @@ def test_every_declared_label_re_derives_at_this_head() -> None:
             f"the constant means the declaration names a store the code no longer has "
             f"{sorted(set(labels) - identified)}"
         )
+
+
+#: The clauses that name a store by ALIAS — the only ones this rule can attribute to a label.
+#: Each is a form the register's own writers use: the shared set-clause helper, the shared
+#: clear-then-set helper (`_TURN_WRITE_CYPHER`), and a literal `alias.embedding = …`. A `NULL`
+#: assignment is excluded: `SET t.embedding=NULL` REMOVES the property (`#4194`) and stores nothing.
+_STORE_ALIAS = (
+    re.compile(r"set_embedding_clause\(\s*[\"'](\w+)[\"']"),
+    re.compile(r"clear_then_set_prefix\(\s*[\"'](\w+)[\"']"),
+    re.compile(r"\b(\w+)\.embedding\s*=(?!\s*NULL)"),
+)
+#: `(alias:Label` — how a Cypher statement binds an alias to a label. `\w+` deliberately does not
+#: match an INTERPOLATED label (`CREATE (n:{safe_labels})`), which no static rule can attribute.
+_ALIAS_LABEL = re.compile(r"(?:MERGE|CREATE|MATCH)\s*\(\s*(\w+)\s*:\s*(\w+)")
+
+
+def test_a_declared_label_set_covers_every_label_its_own_store_targets() -> None:
+    """`#11530` / `#11492` review — a label tuple answers WHERE, so it may not UNDER-name.
+
+    ⛔ The OTHER direction from `test_every_declared_label_re_derives_at_this_head`: that pin
+    proves each DECLARED label still exists in the writer. This one proves no label the writer's
+    own store clause TARGETS is missing from the declaration. Without it, a writer that gains a
+    SECOND store keeps every test green while row 2 prints `stored-without-a-query-path: none`
+    over an unserved label — measured: `MERGE (b:Batch {id: turn.id}) SET b.embedding =
+    vecf32(turn.emb)` inside the real `_TURN_WRITE_CYPHER` kept `tests/test_dod_5090_probe.py`
+    and this suite at 189 passed, 1 skipped, byte-identical to the unmutated run, with `Batch`
+    absent from `scored_labels()`. That is the false PASS `#11492` exists to remove.
+
+    ⛔ Scoped to the ALIAS the store clause passes, never to every `MERGE|CREATE` label in the
+    body: `_rebuild_all_replay` binds `:Batch`/`:Session` for the pre-wipe SNAPSHOT and
+    `_event_plain_merge` binds `:Source`/`:Subject` with no vector, so a body-wide rule
+    false-reds three CORRECT entries. The alias is what ties the label to the store.
+    """
+    covered = 0
+    for key, (_rel, _symbol, _needle, declared) in sorted(LABEL_EVIDENCE.items()):
+        bound: dict[str, set[str]] = {}
+        aliases: set[str] = set()
+        for body in _declared_symbol_bodies(key):
+            for alias, label in _ALIAS_LABEL.findall(body):
+                bound.setdefault(alias, set()).add(label)
+            for pattern in _STORE_ALIAS:
+                aliases |= set(pattern.findall(body))
+        if not aliases:
+            # No statically readable store alias: the completeness claim must be carried by a
+            # CONSTANT re-derived in both directions, or this pin is silently INERT for the entry.
+            assert key in LABEL_CONSTANTS, (
+                f"{key} declares {sorted(declared)} but no store clause in its body names an "
+                "alias this pin can attribute. Either cite a LABEL_CONSTANTS entry (which is "
+                "re-derived in both directions), or add a reasoned exemption saying why the "
+                "label set cannot be re-derived — do NOT leave the completeness claim unbacked"
+            )
+            continue
+        stored = set().union(*(bound.get(alias, set()) for alias in aliases))
+        assert stored, (
+            f"{key}: store aliases {sorted(aliases)} resolved to NO label in its own body, so "
+            "this pin cannot attribute them and is INERT for this entry — the alias/label "
+            "reader broke, and a silent pass is what it exists to prevent"
+        )
+        covered += 1
+        assert stored <= set(declared), (
+            f"{key} declares stores={sorted(declared)} but its own store clause writes through "
+            f"alias/es {sorted(aliases)} bound to {sorted(stored)} — "
+            f"{sorted(stored - set(declared))} is STORED and NOT declared, so row 2 would print "
+            "`stored-without-a-query-path: none` over it. Declare the label, or remove the store."
+        )
+    assert covered >= 6, (
+        f"the alias rule resolved only {covered} entries — it is inert for the rest, which is the "
+        "shape this pin must never become"
+    )
 
 
 def test_a_runtime_label_declaration_is_named_not_guessed() -> None:

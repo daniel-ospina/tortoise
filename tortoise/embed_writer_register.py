@@ -69,12 +69,19 @@ fact; the field is that fact, declared once (the policy-as-data shape `#11444` a
 ⚠️ **Its residual, stated rather than implied:** a `NO_LIVE_VECTOR` or label-tuple declaration is
 accepted **by name** once `load()` validates it — the instrument cannot re-derive "this writer
 stores nothing" (that is `UNDECIDABLE_WRITE_SHAPES`, data flow, the same limit `exempt` has on row
-1). The register is product code under review, and this suite re-derives BOTH halves against the
-writer's own body at HEAD:
+1), and it cannot prove a label tuple is COMPLETE from the discovery alone. The register is product
+code under review, and this suite re-derives BOTH halves against the writer's own body at HEAD,
+with one pin per half and each naming which half it closes:
 `tests/test_embed_writer_register.py::test_every_declared_label_re_derives_at_this_head` for every
-declared label, and
+declared label (nothing declared that the code no longer stores),
+`tests/test_embed_writer_register.py::test_a_declared_label_set_covers_every_label_its_own_store_targets`
+for the opposite direction (nothing STORED that the declaration omits — added by `#11492`'s review
+after a second store on an unserved label kept every test green, `#11530`), and
 `tests/test_embed_writer_register.py::test_a_no_live_vector_declaration_executes_no_store_clause`
-for every `NO_LIVE_VECTOR` entry. ⛔ State the residual at its true size: the second pin proves the
+for every `NO_LIVE_VECTOR` entry. ⛔ State the residual at its true size: the completeness pin
+resolves the label through the ALIAS each store clause names, so it cannot attribute a label bound
+by interpolation (`CREATE (n:{safe_labels})`) — such an entry must carry a `LABEL_CONSTANTS` entry
+or the pin refuses to pass it silently. The `NO_LIVE_VECTOR` pin proves the
 symbol's own body (plus one hop of module constants) executes no store clause, which is NOT the
 same as proving the writer stores nothing — a door that EXECUTES A CALLER-SUPPLIED statement
 (`sdk::_event_raw_write_door`) carries no marker and is caught only by review.
