@@ -547,8 +547,11 @@ def _disarmed_artifact(
     ⛔ `census_measured` is present on BOTH arms of THIS helper, so a driver answers
     "was it measured?" uniformly instead of inferring it from a missing key (round-38
     P3 — and the claim is scoped to this helper on purpose: a FULL disarmed run never
-    reaches here, and carries `census_measured: true` from `cmd_plan`'s plan payload,
-    so the key is present on every disarmed artifact). When the census WAS measured
+    reaches here and carries the same KEY from `cmd_plan`'s plan payload, where it is
+    `unreconciled is None` and not a blanket `True` — an unreconcilable source listing
+    travels through that arm, so the source population was not measured (round-40).
+    The key is therefore on every disarmed artifact; its VALUE is the honest one). When
+    the census WAS measured
     (`census` given) it travels here in full, because a disarmed run over a damaged
     LEDGER still read the graph successfully: the two losses are not the same fact and
     must not be reported as one.

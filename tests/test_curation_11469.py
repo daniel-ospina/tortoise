@@ -2940,6 +2940,12 @@ def test_a_name_spelled_target_scopes_literally_and_never_skips(tmp_path):
     honestly: the two scopes stay disjoint (so a name can never SKIP rows), and a
     ledger built for one spelling driven against a plan for the other REFUSES loudly
     rather than quietly re-sending into a target it cannot account for.
+
+    ⛔ The mutant this pin kills is `d29e07cf56ef`, NOT the commit that introduced
+    `_ledger_row` (`b9793ae2b358`): there the ledger already refused the name pass, so
+    this test PASSES at it. Measured on `d29e07cf56ef`: the scope set
+    came back `{g_<hash>, 'new', org_x_g_<hash>}` — the row's refs leaking into a name
+    spelling, which is the round-38 skip.
     """
     assert C.ledger_scopes("new", ROWS) == frozenset({"new"}), C.ledger_scopes("new", ROWS)
     by_ref = C.ledger_scopes(ROWS[1]["namespace"], ROWS)
