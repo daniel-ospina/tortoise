@@ -1153,7 +1153,7 @@ _PUBLISHED_CITES = {
 #: ⛔ No concrete line number is spelled in this comment: the two examples that
 #: used to sit here went stale in the very drift this PR repairs, and an example
 #: that rots is the defect restated in the guidance (#10848 review P2).
-_VALUE_FREE_GATE = (5286, "if not _carries_value(content, quote):")
+_VALUE_FREE_GATE = (5354, "if not _carries_value(content, quote):")
 
 #: The same contract, for the RUNBOOK — the doc half of the census (#10742).
 #: The runbook `publishes the same numbers` as this file, so when the file's
@@ -1180,9 +1180,9 @@ _RUNBOOK_CITES = {
            "`_value_verbatim_span`'s definition"),
     8713: ("if not edus:", "the resolver's empty-edus silent bound"),
     8714: ("return None", "the resolver's silent early return"),
-    5286: ("if not _carries_value(content, quote):",
+    5354: ("if not _carries_value(content, quote):",
            "the value-free gate (`_VALUE_FREE_GATE`)"),
-    5287: ("return None", "the value-free gate's refusal"),
+    5355: ("return None", "the value-free gate's refusal"),
     10043: ('"source_ref": "session.md", "quote": quote, "status": "draft",',
            "the committed quote inside `pt_entry`"),
     10045: ('"source_turn_id": turn_idx,',
