@@ -1859,11 +1859,55 @@ def test_umask_accepts_the_end_of_options_marker(tmp_path):
     for command in (
         "cmd:umask -- 022 && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
         "cmd:umask -S -- 022 && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
+        # ⛔ `umask 07777` exits 0; an octal cap of four digits false-blocked it.
+        "cmd:umask 07777 && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
+        # ⛔ `o` ANYWHERE in a `set` cluster takes the next bare word as the option
+        # name — `set -oe pipefail` / `-eox` / `-ou` all exit 0. An `endswith("o")`
+        # test false-blocked all three.
+        "cmd:set -oe pipefail && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
+        "cmd:set -ou pipefail && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
+        # ⛔ When the word after `-o` is ITSELF a flag, bash does not read it as an
+        # option name: `set -o -e` and `set -o --` both exit 0.
+        "cmd:set -o -e && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
+        "cmd:set -o -- && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
+        # ⛔ `unset -` exits 0. (`shift $#` is NOT listed here: whether `shift`
+        # fails is governed by the separate "control builtin fails before a chain"
+        # rule, not by its operand grammar, and mid-chain it is still refused.)
+        "cmd:unset - && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
     ):
         proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, command])]))
         assert proc.returncode == cl.EXIT_CLEAN, (
             f"{command!r} was REFUSED ({proc.returncode}) — bash accepts it (rc 0)\n"
             f"{proc.stdout}{proc.stderr}"
+        )
+
+
+def test_umask_and_export_rejections_match_bash(tmp_path):
+    """`umask`/`export` spellings bash REJECTS must not be admitted.
+
+    ⛔ MEASURED, and this is the same false-PASS class the enforced half exists to
+    close — an invalid argument makes bash fail, the `&&` short-circuits, and the
+    graded command never ran:
+
+    * `umask --symbolic` — rc 2 (bash has no such option); it was on the accepted
+      flag list, which contradicted the ledger sentence directly above it.
+    * `umask a+s` / `g+s` / `o+t` / `u=X` — rc 1, "invalid symbolic mode character".
+      The only symbolic mode characters `umask` accepts are `rwx`; `s`/`t`/`X` are
+      `chmod`'s, and admitting them admitted records that never ran.
+    * `export -` and `export +` — rc 1 ("not a valid identifier"); an empty flag
+      string passed the subset test vacuously.
+    """
+    for command in (
+        "cmd:umask --symbolic && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
+        "cmd:umask a+s && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
+        "cmd:umask u=X && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
+        "cmd:export - && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
+        "cmd:export + && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
+    ):
+        proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, command])]))
+        assert proc.returncode == cl.EXIT_INVALID, (
+            f"{command!r} was ACCEPTED as clean ({proc.returncode}) — bash rejects it, "
+            f"so the graded command never ran\n{proc.stdout}{proc.stderr}"
         )
 
 

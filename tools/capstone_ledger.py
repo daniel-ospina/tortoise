@@ -378,14 +378,13 @@ _CD_SEGMENT: Final = re.compile(r"^cd\s+(\S[^;|&]*)$")
 
 #: The operand a shell CONTROL builtin accepts (`man bash`): one optional integer,
 #: OR the shell's own status expansion. `exit 1`, `return 0`, `shift 2`, `break`,
-#: `continue 3`, and — measured, `bash -c 'true ; exit $?'` → rc 0 — `exit $?`.
+#: `continue 3`, `exit $?`, and — measured, `bash -c 'shift $#'` → rc 0 — `$#`.
 #: A prose argument (`exit "I did not run this"`) does not match, which is the point:
 #: the control builtins were added to `_WRAPPER_VERBS` for `|| exit 1`, and without an
 #: argument grammar they admitted the very prose carriage that set exists to refuse.
-#: ⛔ `$?`/`${?}` are REQUIRED, not a nicety: refusing them false-blocked `… ; exit $?`
-#: — the idiom this repo's own install scripts use — and exit 1 hides the whole
-#: uncovered report (seventh review cycle).
-_CONTROL_OPERAND: Final = re.compile(r"^(?:[+-]?\d{1,10}|\$\?|\$\{\?\})$")
+_CONTROL_OPERAND: Final = re.compile(
+    r"^(?:[+-]?\d{1,10}|\$\?|\$\{\?\}|\$#|\$\{#\})$"
+)
 
 #: The shell CONTROL builtins admitted as wrappers. Named separately because the
 #: `exit`-position rule must treat them as non-inert: they terminate rather than
@@ -464,13 +463,14 @@ _ENV_FLAGS: Final[dict[str, frozenset[str]]] = {
 }
 
 #: A `umask` mask: octal, or the symbolic form. ⛔ The symbolic form is a
-#: COMMA-SEPARATED CLAUSE LIST (`u=rwx,g=rx,o=` — the exact spelling this comment
-#: has always named), and the first grammar matched only ONE clause, so the form
-#: the comment advertised was the form the arm refused. Measured: `bash -c 'umask
-#: u=rwx,g=rx,o='` exits 0, the classifier returned `EXIT_INVALID` with an EMPTY
-#: stdout, and the whole uncovered list was lost.
+#: COMMA-SEPARATED CLAUSE LIST (`u=rwx,g=rx,o=`), and the first grammar matched only
+#: ONE clause. ⛔ The ONLY symbolic mode characters bash's `umask` accepts are
+#: `rwx` — MEASURED: `umask a+s` / `g+s` / `o+t` / `u=X` all exit 1 ("invalid
+#: symbolic mode character"), so admitting `s`/`t`/`X` here (as `chmod` allows)
+#: admitted records for a command that never ran. ⛔ Octal is up to FIVE digits:
+#: `umask 07777` exits 0, so `{1,4}` false-blocked it.
 _UMASK_ARG: Final = re.compile(
-    r"^(?:[0-7]{1,4}|[ugoa]*[+\-=][rwxXst]*(?:,[ugoa]*[+\-=][rwxXst]*)*)$"
+    r"^(?:[0-7]{1,5}|[ugoa]*[+\-=][rwx]*(?:,[ugoa]*[+\-=][rwx]*)*)$"
 )
 
 
@@ -507,9 +507,14 @@ def _fails_before_a_chain(head: str, args: list[str]) -> bool:
     was written for. The message therefore names the CONDITION, not a `&&` the
     record may not contain.
 
-    DECLARED RESIDUAL (#11520 root 6): `set -o <invalid-option>` fails the same way
-    and is NOT covered here — refusing it needs the closed set of bash option
-    NAMES, which is flag-VALUE knowledge this module deliberately does not carry.
+    ⛔ `set -o <invalid-option>` USED to be recorded here as an open
+    residual on the grounds that refusing it needs the closed set of bash option
+    NAMES "which this module deliberately does not carry" — that is no longer true:
+    the module DOES carry `_SET_OPTION_NAMES`, and `_wrapper_argument_defect`
+    REFUSES `set -o NOTRUN` / `set -o "I did not run this"` (measured). Leaving the
+    old sentence in place told a maintainer a live guard was dead weight, which is
+    the same false-attestation class as an over-claiming ledger — corrected, not
+    deleted, so the next reader sees that the guard exists and where it lives.
     """
     if head in {"exit", "return"}:
         return True
@@ -572,6 +577,12 @@ def _wrapper_argument_defect(head: str, args: list[str], cwd: Path, root: Path) 
                 # Skipping dashed tokens admitted `export -e NOT RUN && <cmd>` as
                 # `verified` / `uncovered: 0` / CLEAN — a false PASS, not a
                 # convenience. The accepted letters are measured, not assumed.
+                # ⛔ A BARE `-`/`+` is not a flag: `export -` exits 1, so it is
+                # refused; `unset -` exits 0, so it is admitted.
+                if not arg[1:]:
+                    if head == "unset" and arg == "-":
+                        continue
+                    return f"{_short(arg)} is not a `{head}` flag"
                 if not set(arg[1:]) <= _ENV_FLAGS[head]:
                     return f"{_short(arg)} is not a `{head}` flag"
                 continue
@@ -594,17 +605,8 @@ def _wrapper_argument_defect(head: str, args: list[str], cwd: Path, root: Path) 
         # it. Requiring every operand to start with `-`/`+` REFUSED `set -euo
         # pipefail` and `set -o pipefail`, i.e. a false block on the most ordinary
         # wrapper there is (found by the second review cycle of this branch).
-        expect_option_name = False
+        pending_name = False
         for arg in args:
-            if expect_option_name:
-                expect_option_name = False
-                # ⛔ The option NAME is VALIDATED. `bash -c 'set -o NOTRUN'` exits 2,
-                # so the `&&` short-circuits and the graded command provably never
-                # ran; consuming any bare word admitted `set -o "I did not run
-                # this" && <cmd>` as CLEAN — a false PASS.
-                if arg not in _SET_OPTION_NAMES:
-                    return f"{_short(arg)} is not a shell option name"
-                continue
             # ⛔ `--` ENDS option parsing: every operand after it is a POSITIONAL
             # PARAMETER, not an option (`man bash`: `set … [--] [-] [arg …]`).
             # Requiring each of those to start with `-`/`+` refused `set -- a b`,
@@ -615,17 +617,32 @@ def _wrapper_argument_defect(head: str, args: list[str], cwd: Path, root: Path) 
             if arg == "--":
                 return None
             if arg in {"-", "+"}:
+                pending_name = False
                 continue
-            if not (arg.startswith("-") or arg.startswith("+")):
+            is_flag = arg.startswith("-") or arg.startswith("+")
+            if pending_name and not is_flag:
+                pending_name = False
+                # ⛔ The option NAME is VALIDATED. `bash -c 'set -o NOTRUN'` exits 2,
+                # so the `&&` short-circuits and the graded command provably never
+                # ran; consuming any bare word admitted `set -o "I did not run
+                # this" && <cmd>` as CLEAN — a false PASS.
+                if arg not in _SET_OPTION_NAMES:
+                    return f"{_short(arg)} is not a shell option name"
+                continue
+            if not is_flag:
                 return f"{_short(arg)} is not a shell option"
             # ⛔ The FLAG LETTERS are validated for the same reason as the option
             # name: `set -ZZZ` exits 2, so a record for `set -ZZZ && <cmd>` names a
-            # command that never ran. Measuring is what keeps this from being a
-            # false block — `-o` is a real letter, and a CLUSTER ENDING IN `o`
-            # (`-euo`) takes the NEXT word as its option name.
+            # command that never ran.
             if not set(arg[1:]) <= _SET_SHORT_FLAGS:
                 return f"{_short(arg)} is not a shell option"
-            expect_option_name = arg.endswith("o")
+            # ⛔ `o` ANYWHERE in the cluster takes the next BARE word as the option
+            # name — not only a trailing `o`. MEASURED: `set -oe pipefail`,
+            # `set -eox pipefail` and `set -ou pipefail` all exit 0, so an
+            # `endswith("o")` test false-blocked them, while `set -o -e` and
+            # `set -o --` exit 0 too and are handled by the `is_flag` / `--` arms
+            # above rather than being read as option names.
+            pending_name = "o" in arg[1:]
         return None
     if head == "umask":
         # ⛔ `man bash`: `umask [-p] [-S] [mode]` — the FLAGS precede the mask, so
@@ -634,7 +651,7 @@ def _wrapper_argument_defect(head: str, args: list[str], cwd: Path, root: Path) 
         # `set` got `--` before `umask` did, so the SAME asymmetry left `umask --
         # 022` refused while `set -- a b` was accepted — the false block halved.
         for arg in args:
-            if arg in {"-p", "-S", "-pS", "-Sp", "--symbolic", "--"}:
+            if arg in {"-p", "-S", "-pS", "-Sp", "--"}:
                 continue
             if not _UMASK_ARG.match(arg):
                 return f"{_short(arg)} is not a umask mask"
