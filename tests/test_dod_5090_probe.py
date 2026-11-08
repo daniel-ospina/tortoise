@@ -389,6 +389,8 @@ def test_an_unresolved_writer_is_reported_and_holds_bullet_two_at_partial(monkey
     `MET` without touching this test (review, P2 — the sibling assertion that
     read the live tree was exactly that trap).
     """
+
+    _no_register(monkeypatch)
     writers = {
         "tortoise.z::_store_without_a_producer": {
             "callee": "unrecognised", "at": "tortoise/z.py:3",
@@ -469,9 +471,12 @@ def test_row_two_reads_MET_when_the_register_resolves_every_writer(monkeypatch):
 
     Three ways a writer gets there, all present at once: through the gate (label derived), from a
     declared label, or by a declaration that it stores no live graph vector. ⛔ The third is what
-    makes `stored-without-a-query-path` a statement about STORES rather than about NAMES: twelve of
+    makes `stored-without-a-query-path` a statement about STORES rather than about NAMES: ten of
     this tree's twenty outside-gate writers never store a node vector at all (reads, carriers, the
-    clause builder), and a row that held them forever was measuring its own vocabulary.
+    clause builder), and two more store on a label chosen at RUNTIME — those two are held as
+    `PARTIAL`, never as `no-live-vector`, so twelve is the size of the two holds together and NOT
+    the count of writers that never store. A row that held those ten forever was measuring its own
+    vocabulary.
     """
     monkeypatch.setattr(probe, "embedding_writers", _row_two_population)
     monkeypatch.setattr(probe, "declared_writers", _row_two_declarations)
@@ -2457,6 +2462,8 @@ def test_a_duplicate_writer_identity_holds_bullet_two_at_partial(monkeypatch):
     hole: bullet 1 held `PARTIAL` on `duplicates` while bullet 2 said `MET`
     (review round 5, P2).
     """
+
+    _no_register(monkeypatch)
     writers = {
         "tortoise.x::_upsert_point": {
             "callee": probe.SEAM_CALL, "at": "tortoise/x.py:1",
@@ -2872,6 +2879,8 @@ def test_a_duplicate_identity_paints_no_census_note(monkeypatch):
     duplicate can never be: it has no key it could hold in `WRITER_CENSUS`.
     That line is quoted into `#5090`'s body as evidence (review at `adde2763f`).
     """
+
+    _no_register(monkeypatch)
     writers = {
         "tortoise.x::_upsert_point": {
             "callee": probe.SEAM_CALL, "at": "tortoise/x.py:1",
@@ -2892,6 +2901,8 @@ def test_a_duplicate_identity_paints_no_census_note(monkeypatch):
 
 def test_the_census_note_names_only_the_unresolved_producers(monkeypatch):
     """The census counts the `unresolved_write` set — never a duplicate."""
+
+    _no_register(monkeypatch)
     writers = {
         "tortoise.x::_upsert_point": {
             "callee": probe.SEAM_CALL, "at": "tortoise/x.py:1",
@@ -2941,6 +2952,8 @@ def test_the_census_note_does_not_break_the_markdown_table(monkeypatch):
     `adde2763f`). This derives the cell count from the header instead of
     pinning pipes per line, so any future note is covered too.
     """
+
+    _no_register(monkeypatch)
     writers = {
         "tortoise.z::_store_without_a_producer": {
             "callee": "unrecognised", "at": "tortoise/z.py:3",

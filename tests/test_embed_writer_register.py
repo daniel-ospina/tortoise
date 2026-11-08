@@ -982,10 +982,20 @@ def test_every_declared_label_re_derives_at_this_head() -> None:
     for key, (rel, symbol, labels) in sorted(LABEL_CONSTANTS.items()):
         source = (REPO_ROOT / rel).read_text(encoding="utf-8")
         lines = source.splitlines()
+        # BOTH statement shapes, on purpose: this test's own `constants` map above deliberately
+        # accepts `ast.Assign` as well as `ast.AnnAssign`, and a constant that only DROPS its type
+        # annotation is the SAME constant. Recing on the annotation is a false hold, and it names
+        # the wrong cause ("that file does not define it at module level") — verified by mutation.
         assigned = [
             node for node in ast.parse(source).body
-            if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
-            and node.target.id == symbol
+            if (
+                isinstance(node, ast.AnnAssign)
+                and isinstance(node.target, ast.Name)
+                and node.target.id == symbol
+            ) or (
+                isinstance(node, ast.Assign)
+                and any(isinstance(t, ast.Name) and t.id == symbol for t in node.targets)
+            )
         ]
         defined = "\n".join(
             "\n".join(lines[node.lineno - 1:node.end_lineno]) for node in assigned
@@ -1004,8 +1014,11 @@ def test_every_declared_label_re_derives_at_this_head() -> None:
         assert set(EMBED_WRITER_CLASSES[key].stores) == set(labels), key
         assert identified == set(labels), (
             f"{rel}::{symbol} names {sorted(identified)} while {key} declares "
-            f"{sorted(EMBED_WRITER_CLASSES[key].stores)} — a label added to the constant is a "
-            "label the writer STORES on, so the declaration must name it too"
+            f"{sorted(EMBED_WRITER_CLASSES[key].stores)} — the two must be the SAME set, in BOTH "
+            f"directions: a label ADDED to the constant is one the writer STORES on and the "
+            f"declaration must name it {sorted(identified - set(labels))}, while a label DROPPED from "
+            f"the constant means the declaration names a store the code no longer has "
+            f"{sorted(set(labels) - identified)}"
         )
 
 
