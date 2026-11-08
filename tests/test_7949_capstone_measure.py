@@ -10962,6 +10962,14 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # → `:1735`, `grep -n 'nothing in this tree consumes'` → `:10906`).
     assert "`hasPart`" in text and "`tortoise/extractor_v2.py:1735`" in text, (
         "the record must cite the relations schema where `hasPart` is spelled")
+    # ⛔ BOTH SIDES' shapes survive (#11519 review, P3): main split this into two membership
+    # tests, and the branch's side bound the PREDICATE to the CITE in one literal. Two independent
+    # memberships cannot tell "`hasPart`" in one sentence and the cite in another from a record
+    # that says both about the same line, so the adjacency is asserted as well — it holds today
+    # (`RECONCILE-A1-A2-A5.md:70`) and is the form a reader follows.
+    assert "`hasPart` (`tortoise/extractor_v2.py:1735`)" in text, (
+        "the record must bind the `hasPart` mention to the cite it names — a reword that moves "
+        "the two into separate sentences leaves both membership arms above green")
     # The A1 proof command must match BOTH shapes its sentence covers, and must stay on ONE line WITH
     # its pathspec. Two measured ways to pin the COMPLEMENT instead: a dot-ANCHORED `'\.(verb)\('`
     # exits 1 on an unqualified `return create_operator(payload)`, and a `[^[:alnum:]_.]` class
@@ -11287,19 +11295,34 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
             f"{_label} must quote the vet_enabled line as a BASE-QUALIFIED pair "
             f"(`:12929` at `a1dff7cec8`) — it reads {_found}; re-derive it with "
             "`git grep -n 'vet_enabled = ' -- tortoise/extractor_v2.py`")
-        _unqualified = re.findall(r":\d+`? at (?!`?[0-9a-f]{7,40}\b)[\w]", _region)
-        assert _unqualified == [], (
-            f"{_label} carries a cite whose qualifier is not a base ({_unqualified}) — a "
-            "`HEAD`-relative (`at HEAD`, `at the head`, `at this tree`) number here is the exact "
-            "shape `#11555` retired: true only until the next insertion above it")
+        # ⛔ WORDING-INDEPENDENT, because a deny-list of qualifiers is not a pin (#11519 review):
+        # binding the check to the literal word `at` meant a re-stale written ANY other way
+        # shipped green — measured, `` `:12944` (HEAD) `` in §2 passed. So the arm asserts the two
+        # things a wording cannot dodge: the LIVE number never appears in these regions at all, and
+        # every `:12929` there carries the base it was true at within 60 characters — the same
+        # idiom the neighbouring `:12779` arm already uses for its own number.
+        assert ":12944" not in _region, (
+            f"{_label} names the LIVE `:12944` — the record cites this symbol at the base it was "
+            "true at (`:12929` at `a1dff7cec8`), never at the tree, which is the shape `#11555` "
+            "retired: true only until the next insertion above it")
+        for _m in re.finditer(r":12929", _region):
+            _near = _region[max(0, _m.start() - 60):_m.end() + 60]
+            assert "a1dff7cec8" in _near, (
+                f"{_label}: `:12929` at offset {_m.start()} does not name the base it was true at "
+                "— an unqualified occurrence is a re-stale presented as live")
     # The SYMBOL is what the record cites, so the invariant that survives any later insertion is
-    # that `vet_enabled = (` is unique at module scope. A rename or a second definition is what
-    # makes the citation ambiguous; the line it happens to sit on is not the claim.
+    # that `vet_enabled = (` is unique IN THE FILE. A rename or a second assignment is what makes
+    # the citation ambiguous; the line it happens to sit on is not the claim.
+    # ⛔ The CLAIM must be what the predicate measures (#11519 review): `strip()` ignores
+    # indentation, so "at module scope" was a scope claim this scan cannot make — the real
+    # definition is itself indented inside its function. What IS asserted is uniqueness in the
+    # FILE, which is the invariant that keeps the record's symbol citation unambiguous; a rename
+    # or a second assignment of the same name is what breaks it.
     _vet_lines = [
         i for i, line in enumerate(ext, 1) if line.strip().startswith("vet_enabled = (")]
     assert len(_vet_lines) == 1, (
-        f"`vet_enabled = (` must appear exactly once at module scope in extractor_v2.py; found "
-        f"{_vet_lines} — the record cites this symbol, so a second definition or a rename is "
+        f"`vet_enabled = (` must appear exactly once in extractor_v2.py; found "
+        f"{_vet_lines} — the record cites this symbol, so a second assignment or a rename is "
         "what makes its citation ambiguous")
     # The INVARIANT is that every `:12779` names the base it was true at — never that there are
     # two of them. (A `count(...) >= 2` bound refused a legitimate consolidation to one
