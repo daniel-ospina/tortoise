@@ -15,6 +15,7 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 from tests._verdict import NODE_FLOOR_STRIP_TYPES, require_node_floor
@@ -29,20 +30,46 @@ def test_edge_function_parses():
     would make every signup 500 at deploy time. Regression guard for the
     duplicate-`const pepper` P0 caught in review (PR #847): string-assertion
     tests above cannot see redeclarations, and CI has no deno/tsc step, so
-    node's type-stripping parser is the cheapest gate (node >= 22.7 for
-    `--experimental-strip-types`; #4916 — a present-but-too-old host SKIPs,
-    it does not RED). Skips when node is absent."""
+    node's type-stripping is the cheapest gate (node >= 22.7; #4916 — a
+    present-but-too-old host SKIPs, it does not RED). Skips when node is absent.
+
+    WHY THE TWO STEPS: `node --experimental-strip-types --check <file>.ts` used
+    to strip types before parsing, so it was the whole check in one call. On
+    node 24 it no longer does — `--check` parses the .ts bytes as JavaScript and
+    dies on the first `interface` with "Unexpected strict mode reserved word" —
+    which made this guard a permanent false RED (and therefore no guard at all:
+    a REAL syntax error looked identical to the version noise). So the types are
+    stripped explicitly with `module.stripTypeScriptTypes` and the resulting
+    JavaScript is what `--check` sees. Measured on node v24.21.0.
+    """
     require_node_floor(
         NODE_FLOOR_STRIP_TYPES,
         what="the tenant-provision edge-function parse check",
     )
     node = shutil.which("node")
-    result = subprocess.run(
-        [node, "--experimental-strip-types", "--check", str(EDGE_FN)],
-        capture_output=True,
-        text=True,
-        timeout=120,
+    strip = (
+        "const m=require('node:module'),fs=require('node:fs');"
+        "fs.writeFileSync(process.argv[2], "
+        "m.stripTypeScriptTypes(fs.readFileSync(process.argv[1],'utf8')));"
     )
+    with tempfile.TemporaryDirectory() as tmp:
+        stripped = Path(tmp) / "tenant-provision-under-test.mjs"
+        proc = subprocess.run(
+            [node, "-e", strip, str(EDGE_FN), str(stripped)],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert proc.returncode == 0, (
+            "tenant-provision/index.ts could not be type-stripped "
+            f"(exit {proc.returncode}):\n{proc.stderr}"
+        )
+        result = subprocess.run(
+            [node, "--check", str(stripped)],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
     assert result.returncode == 0, (
         f"tenant-provision/index.ts does not parse (exit {result.returncode}):\n"
         f"{result.stderr}"
@@ -137,15 +164,22 @@ def test_shared_lookup_implements_plan_construction():
     assert "pepper + key" in src.replace(" ", "") or "encode(pepper + key)" in src
 
 
-# ── CORS regression guards (production incident 2026-08-13) ──────────────────
-# The welcome page calls tenant-provision DIRECTLY from the browser (JWT path,
-# #527/#802). A `Content-Type: application/json` + `Authorization: Bearer`
-# POST forces a CORS preflight; the function previously returned 405 with NO
-# CORS headers, so every browser signup was blocked with "No
-# 'Access-Control-Allow-Origin' header". These guards pin the fix: preflight
-# handled before the method gate, CORS headers on EVERY response path, and an
-# origin allowlist covering the welcome page's hosts (mirrors
-# waitlist-subscribe's proven pattern).
+# ── server-only guards (#1120 — supersedes the #1111 CORS guards) ─────────────
+# HISTORY: the welcome page used to call tenant-provision DIRECTLY from the
+# browser (#527/#802), so a `Content-Type: application/json` +
+# `Authorization: Bearer` POST forced a CORS preflight and the 2026-08-13
+# incident blocked every signup until #1111 added an origin allowlist,
+# an OPTIONS answer and ACAO on every response path.
+#
+# That caller is GONE. welcome.html's provisioning pipeline is dead (#1566) and
+# the dashboard reaches this function through its same-origin BFF route
+# (`website/apps/dashboard/functions/api/provision.ts`, #3501/#4054), which
+# mints the access token server-side from the `__Host-session` cookie and
+# STRIPS `Origin` before forwarding. #1120 therefore deletes the whole CORS
+# surface — no allowlist to maintain, no preflight to answer, no
+# `Access-Control-*` header on any path — and makes the absence ENFORCED: an
+# origin-bearing request is refused 403. These guards pin that shape; the
+# runtime behavior is executed by tests/test_tenant_provision_server_only.mjs.
 
 # ── #2406: onboarding-call offer email (post-provision trigger) ────────────
 
@@ -215,89 +249,95 @@ def test_edge_function_onboarding_email_retries_and_never_fails_provisioning():
     )
 
 
-def test_edge_function_answers_cors_preflight():
-    """OPTIONS (preflight) must be answered 204 BEFORE the method gate, with
-    methods/headers the welcome page actually sends."""
+def test_edge_function_has_no_cors_surface():
+    """#1120: ZERO CORS surface. No allowlist, no preflight answer, no
+    `Access-Control-*` header on any response path.
+
+    This inverts the #1111 guards on purpose. The preflight branch and the
+    allowlist existed only for the browser caller that welcome.html used to be;
+    a leftover allowlist is a surface to maintain (and a standing invitation
+    for the next client to call this from a page), so its absence is the
+    contract now. Do not "restore CORS" without re-opening #1120.
+    """
     src = EDGE_FN.read_text()
-    assert 'if (req.method === "OPTIONS")' in src, (
-        "OPTIONS preflight must be handled before the POST method gate"
-    )
-    assert 'if (req.method !== "POST")' in src
-    # Preflight must come first (file order = runtime order).
-    assert (
-        src.index('req.method === "OPTIONS"')
-        < src.index('req.method !== "POST"')
-    ), "preflight must precede the method gate"
-    assert "status: 204" in src, "preflight must return 204"
-    assert '"Access-Control-Allow-Methods": "POST, OPTIONS"' in src
-    # welcome.html sends Authorization: Bearer + Content-Type: json
-    assert '"Access-Control-Allow-Headers": "authorization, content-type"' in src
-
-
-def test_edge_function_sends_cors_headers_on_every_response():
-    """Every response path must carry Access-Control-Allow-Origin + Vary so the
-    browser can read success AND error bodies. Guarded via the single json()
-    helper: no bare Response may remain outside it / the preflight."""
-    src = EDGE_FN.read_text()
-    assert "function json(" in src, "responses must go through the CORS json() helper"
-    assert 'headers["Access-Control-Allow-Origin"] = corsOrigin ?? ALLOWED_ORIGINS[0];' in src
-    assert 'headers["Vary"] = "Origin";' in src
-    # The exact pre-incident regression: bare 405 with no CORS headers.
-    assert 'new Response("Method not allowed", { status: 405 })' not in src, (
-        "method gate must answer through json() (CORS headers), not a bare 405"
-    )
-    # Every remaining new Response must be ONE OF: the json() helper itself
-    # (`{ status, headers }` — headers carries ACAO+Vary) or the preflight
-    # (inline `"Access-Control-Allow-Origin"` map). A Response whose options
-    # only name `corsOrigin` in a THIRD constructor position would be a
-    # silent no-op — the Response constructor takes (body, init) only — so
-    # any other pattern fails this check.
-    import re
-
-    for match in re.finditer(r"new Response\s*\(", src):
-        # Balanced-paren statement extraction — no fixed window, so neighbor
-        # text can never mask a bare Response.
-        depth = 0
-        end = match.start()
-        for i in range(match.start(), len(src)):
-            c = src[i]
-            if c == "(":
-                depth += 1
-            elif c == ")":
-                depth -= 1
-                if depth == 0:
-                    end = i + 1
-                    break
-        chunk = src[match.start():end]
-        assert (
-            "{ status, headers }" in chunk
-            or '"Access-Control-Allow-Origin"' in chunk
-        ), (
-            f"Response at offset {match.start()} lacks CORS headers "
-            f"(Response(body, init) only — a third corsOrigin arg is ignored):\n{chunk}"
+    for forbidden in (
+        "ALLOWED_ORIGINS",
+        "ORIGIN_SUFFIXES",
+        "LOCAL_ORIGIN_RE",
+        "originAllowed",
+        "Access-Control-Allow-Origin",
+        "Access-Control-Allow-Methods",
+        "Access-Control-Allow-Headers",
+        "Access-Control-Max-Age",
+    ):
+        assert forbidden not in src, (
+            f"{forbidden} must not exist — #1120 deleted the CORS surface "
+            "(no allowlist to maintain, no preflight to answer, and no "
+            "Access-Control-* header on any path)"
         )
-    # Deno also supports the static constructor Response.json(body, init) — a
-    # CORS-free response written that way would escape a `new Response` scan.
-    for match in re.finditer(r"Response\.json\s*\(", src):
-        chunk = src[match.start():match.start() + 200]
-        assert (
-            "{ status, headers }" in chunk
-            or '"Access-Control-Allow-Origin"' in chunk
-        ), f"Response.json at offset {match.start()} lacks CORS headers:\n{chunk}"
-def test_edge_function_allowlists_welcome_page_origins():
-    """The allowlist must cover every host the welcome page is served on:
-    the tortoise product host (the reported failure origin), the company host,
-    Cloudflare previews, and ANY localhost/127.0.0.1 port (welcome.html's
-    isLocal treats every local port as local)."""
+    # An OPTIONS probe is a browser preflight and must NOT be answered as one:
+    # it falls through to the plain method gate.
+    assert 'req.method === "OPTIONS"' not in src, (
+        "no OPTIONS/preflight branch may exist — a 405 with no CORS header is "
+        "the whole answer a preflight gets"
+    )
+    assert 'req.method !== "POST"' in src, "the method gate must stay"
+
+
+def test_edge_function_refuses_browser_origin_calls():
+    """#1120: "no browser caller" is ENFORCED, not implied by absent headers.
+
+    CORS headers only decide whether a browser can READ a response — the POST
+    still executes. The dashboard BFF calls this server-side and strips
+    `Origin`, so any request that carries one is a browser call and is refused.
+    """
     src = EDGE_FN.read_text()
-    assert "https://tortoise.premiselabs.co" in src
-    assert "https://premiselabs.co" in src
-    assert "https://app.premiselabs.co" in src  # #1566: provisioning runs in-app now
-    assert ".premise-labs.pages.dev" in src
-    # Any-port local dev rule (replaces the 8788-only array — see the
-    # divergence note in index.ts): the regex must accept localhost/127.0.0.1
-    # with an optional port and nothing else.
-    assert re.search(r"LOCAL_ORIGIN_RE", src), "LOCAL_ORIGIN_RE must exist"
+    assert 'req.headers.get("origin")' in src, (
+        "the handler must read Origin to enforce the server-only invariant"
+    )
+    assert 'json({ error: "Forbidden: this endpoint is server-only" }, 403)' in src, (
+        "an origin-bearing request must be refused 403 server-only"
+    )
+    # The refusal must precede authentication: a browser call is refused on the
+    # caller's SHAPE, never after spending a token verification on it.
+    assert src.index('req.headers.get("origin")') < src.index(
+        "authenticateCaller(req)"
+    ), "the origin refusal must run before token verification"
+
+
+def test_edge_function_hook_path_is_gone():
+    """#1120: the `after_user_created` auth-hook path (AUTH_HOOK_SECRET /
+    Standard-Webhooks) is DELETED, not merely disabled.
+
+    It cannot be re-enabled: `after_user_created` is not a supported Supabase
+    auth hook (the docs list Before User Created, Custom Access Token, Send
+    SMS, Send Email, MFA Verification Attempt, Password Verification
+    Attempt). #839's 500 was a platform-capability gap, so keeping a
+    fail-closed, unverifiable branch alive only invites someone to
+    "re-enable" a path the platform can never call.
+    """
+    src = EDGE_FN.read_text()
+    assert "standardwebhooks" not in src, (
+        "the Standard-Webhooks import must be gone with the hook path"
+    )
+    assert "AUTH_HOOK_SECRET_ENV" not in src, (
+        "the hook-secret constant must be gone with the hook path"
+    )
+    assert "Deno.env.get(AUTH_HOOK_SECRET_ENV)" not in src
+    # A hook signature is no longer an authentication path: the ONLY path is a
+    # user JWT, whose identity must match the provisioning target (#802).
+    assert "authenticateCaller(req)" in src, (
+        "the JWT path is the only caller authentication left"
+    )
+
+
+def test_edge_function_declares_no_origin_allowlist():
+    """#1120: tenant-provision is the one HTTP-facing function with NO browser
+    surface, so it must declare no allowlist — and that absence must be
+    explicit, not an accident of a glob (see the sweep's SERVER_ONLY set)."""
+    src = EDGE_FN.read_text()
+    assert "ALLOWED_ORIGINS" not in src
+    assert "ORIGIN_SUFFIXES" not in src
 
 
 def _allowlist_pattern(const: str) -> re.Pattern[str]:
@@ -551,8 +591,18 @@ def test_edge_function_allowlist_parity_with_waitlist_subscribe():
     # literal: a sweep keyed on the literal would drop a file the moment the
     # constant is renamed — and dropping it is LOUD (the `missing` check fires),
     # which is the point. Every HTTP-facing function must declare an allowlist —
-    # `_shared` has no browser surface and is skipped explicitly, not by
-    # accident. The glob covers the extensions Supabase accepts, not just `.ts`.
+    # EXCEPT the ones with no browser surface, which are named in SERVER_ONLY
+    # below and whose absence is checked EXACTLY. The glob covers the extensions
+    # Supabase accepts, not just `.ts`.
+
+    # #1120: functions with NO browser caller declare NO allowlist, and this set
+    # is compared, not skipped. Two drifts it catches that a `continue` would
+    # not: a NEW function with no allowlist (it lands in `missing` and reds —
+    # it may be a browser surface someone forgot to scope), and a member of this
+    # set RE-declaring one (it leaves `missing`, so the sets differ — a
+    # server-only function carrying a CORS surface is exactly the drift #1120
+    # removed). `_shared` is imported, never served.
+    SERVER_ONLY = {"_shared", "tenant-provision"}
 
     decl = _allowlist_pattern("ALLOWED_ORIGINS")
     declaring: dict[str, str] = {}
@@ -560,8 +610,6 @@ def test_edge_function_allowlist_parity_with_waitlist_subscribe():
     unreadable: list[str] = []
     functions_dir = _REPO_ROOT / "supabase" / "functions"
     for fn_dir in sorted(p for p in functions_dir.iterdir() if p.is_dir()):
-        if fn_dir.name == "_shared":
-            continue
         files = [
             f for f in sorted(fn_dir.rglob("*"))
             if f.suffix in {".ts", ".tsx", ".mts", ".cts"}
@@ -588,12 +636,15 @@ def test_edge_function_allowlist_parity_with_waitlist_subscribe():
         "(and a commented literal beside it would pass while the served value "
         "drifted). Declare it inline as a literal array, or extend the sweep."
     )
-    assert not missing, (
-        f"these functions declare no ALLOWED_ORIGINS: {missing} — an HTTP-facing "
-        "function needs one. If it declares one the sweep cannot READ, that is "
-        "the other assertion; do NOT add the function to the `_shared` skip, "
-        "which would trade a loud failure for a permanent false green on a "
-        "function whose drift fails SHUT."
+    assert sorted(missing) == sorted(SERVER_ONLY), (
+        f"these functions declare no ALLOWED_ORIGINS: {sorted(missing)} — the "
+        f"server-only set is {sorted(SERVER_ONLY)}. An HTTP-facing function "
+        "needs an allowlist; a function that has NO browser surface belongs in "
+        "SERVER_ONLY with a reason, not in a `continue`. The two sets are "
+        "compared EXACTLY so both directions red: a new function that declares "
+        "nothing, and a SERVER_ONLY function that re-grows a CORS surface. If a "
+        "declaration cannot be READ that is the other assertion — do not paper "
+        "over it here."
     )
     assert len(declaring) >= 2, f"allowlist sweep found only {sorted(declaring)}"
     # The reference is stripped too: it is the anchor for every comparison, so a
@@ -622,13 +673,36 @@ def test_edge_function_allowlist_parity_with_waitlist_subscribe():
             )
 
 
-def test_edge_function_rejects_unknown_origins():
-    """Non-allowlisted browser origins must get 403 with CORS headers — never
-    an echoed ACAO (would grant arbitrary sites access to team minting)."""
-    src = EDGE_FN.read_text()
-    assert 'if (requestOrigin && !originAllowed(requestOrigin))' in src, (
-        "browser requests must pass the origin allowlist gate"
+def test_edge_function_only_caller_is_the_same_origin_bff():
+    """#1120: the dashboard's same-origin BFF is the ONLY caller of this
+    function, and it STRIPS `Origin` before forwarding — which is what makes the
+    server-only 403 in the handler correct rather than hostile to the live path.
+
+    Both halves are pinned together on purpose: the 403 is only safe while the
+    BFF keeps stripping `Origin`, and the browser only stays off the function
+    while the dashboard calls `/api/provision`. Either one drifting alone breaks
+    signup — silently, since nothing else reaches this endpoint.
+    """
+    bff = (
+        _REPO_ROOT / "website" / "apps" / "dashboard" / "functions" / "api" / "provision.ts"
+    ).read_text()
+    assert 'const PROVISION_PATH = "/functions/v1/tenant-provision";' in bff, (
+        "the BFF must be the function's caller"
     )
-    assert 'json({ error: "Origin not allowed" }, 403, corsOrigin)' in src
-    # No wildcard CORS anywhere — team minting must stay origin-scoped.
-    assert '"Access-Control-Allow-Origin": "*"' not in src
+    strip_block = bff.split("const STRIP_REQUEST", 1)[1].split("]", 1)[0]
+    assert '"origin",' in strip_block, (
+        "the BFF must keep stripping Origin — the handler refuses an "
+        "origin-bearing request 403 server-only"
+    )
+    # No browser-side caller: the dashboard's own source must never address the
+    # Edge Function directly (it posts to the same-origin `/provision` route).
+    main = (
+        _REPO_ROOT / "website" / "apps" / "dashboard" / "src" / "main.jsx"
+    ).read_text()
+    assert "functions/v1/tenant-provision" not in main, (
+        "the dashboard must call the BFF (`/api/provision`), never the Edge "
+        "Function directly — a browser caller is refused 403"
+    )
+    assert "${API_BASE}/provision" in main, (
+        "the dashboard's provisioning call must target the same-origin BFF"
+    )
