@@ -251,7 +251,7 @@ the `:aboutSubject`/`:aboutObject` edge is written at all), plus `TORTOISE_LABEL
 `TORTOISE_LABEL_ORDER` is off, pinned so the pair cannot be split), `TORTOISE_CONTEXT_ENRICH` (the per-turn REWRITE of the text each turn embeds, gated in `context_enrich.enrich_enabled` and reached from `sdk.capture_session` as `enrich_fn=_capture_enriched_texts`; fail-safe OFF) — all pinned **unset** — and `TORTOISE_JSON_MODE`, pinned to **`1`** because its absent state is already ON and it is read PER CALL to flip the request's `response_format` (`model_adapters`), and `TORTOISE_IDENTIFIER_TOKENS`, pinned to **`1`** because its absent state is already ON (`sparse.py:226`, `env_flag(IDENTIFIER_ENV, True)`) and it rewrites `search_keys` on every `:Point` the run writes (`projection/entities.py:1208`, reached from `create_point`); the registered corpus yields no aliases either way, measured. The last five are the cycle-7 to
 cycle-10 review findings (`TORTOISE_CONTEXT_ENRICH`/`TORTOISE_JSON_MODE`, then `TORTOISE_CHANGE_FEED`,
 then `TORTOISE_IDENTIFIER_TOKENS`, then `TORTOISE_SUBJECT_TAU_HI`/`_LO`): each sits on the acceptance
-path and was in no pin, no ledger row and no closure; cycle 11 added `TORTOISE_STATE_VALUE_VERBATIM` (the #10360 carve-out's write-path off-switch, `extractor_v2._state_value_verbatim_enforced`) pinned to **`1`**, because it too is default-ON and with it off a rewritten value is WRITTEN, which grows the measured population under a door that still claims the pin held. The authoritative list is
+path and was in no pin, no ledger row and no closure. The authoritative list is
 `capstone_measure.DOOR_PINNED_OFF` / `DOOR_PINNED_ON`, which `tests/test_7949_c2_door.py` resolves
 against the tree — this sentence is the reader's map, not the control. The set
 is CLOSED over the **measurement modules the path renders with**, and what
@@ -1373,8 +1373,8 @@ place a machine reads it.
   be either observed or witnessed **idle** with a basis. The conditional set is read from this record
   at the pre-registration commit; a run log may not declare it.
 - **Why it is not a relaxation**: `S2.3` structurally cannot run on a corpus whose S2 map types every
-  candidate — `_collect_classify_items` (`tortoise/extractor_v2.py:11174-11196`) collects only
-  kind-missing/`unclassified` candidates and both passes sit behind `if items:` (`:13058`, `:13207`).
+  candidate — `_collect_classify_items` (`tortoise/extractor_v2.py:11098-11120`) collects only
+  kind-missing/`unclassified` candidates and both passes sit behind `if items:` (`:12982`, `:13131`).
   The old rule therefore could not be satisfied by **any** legitimate run of the registered corpus,
   so the gate could not return a verdict at all (§11.2's four ordered refusals). Every one of the
   eight still has to be accounted for, and an idle claim needs the run's own four facts — flag ON,
@@ -1689,56 +1689,61 @@ last — so the pinned artifact stays green under the stricter rule.
 `UNMEASURED(...)` register changes: the cell is re-ordered and nothing else, `document_sha256` is
 re-cut from the resolved document (§8), and no committed verdict is re-scored.
 
-### 10.14 — the §11 cite block re-pointed after `main` grew `extractor_v2.py` above it (2026-11-08, `#11512`)
+### 10.14 — the §11 cite block re-pointed after `#11449`'s state-value insert moved `extractor_v2.py` (2026-11-08, `#11449`)
 
 - **Original value (as §10.10 left it):** `_collect_classify_items` at `:11098`, its extent
   `:11098-11120`, the two `if items:` gates at `:12982`/`:13131`, and the two fail-open `except`
   arms at `:12995`/`:13142`.
 - **New value:** the same symbols at `:11174`, `:11174-11196`, `:13058`/`:13207` and
   `:13071`/`:13218`.
-- **Why:** the collector and both passes sit BELOW an insert this time, so every one of the four
-  moves — unlike §10.10, where the collector sat ABOVE the insert and stayed put. Each cite in the
-  §11 block moved **+76** (`:11098`+76 = `:11174`, the `return items`
-  that ends the extent at `:11196`, `:12982`+76 = `:13058`, `:13131`+76 = `:13207`, `:12995`+76 =
-  `:13071`, `:13142`+76 = `:13218`) — every cite in §11 itself is +76. ⛔ The block is NOT the
-  bundle: the re-points this entry made outside §11 carry delta values of their own — the `#2684`
-  row in `docs/00_index.md` carries `extractor_v2.py:5286`/`:5287` → `:5354`/`:5355` (**+68**), and
-  the sdk.py sites in the inventory below move **+102**. ⛔ Nor is "three" enough: FOUR inserts sit
-  above this file's cites — `#11368`'s **+74** (the declared-span refactor; above `:12779`, below
-  `:11098`, which is why §11 never sees it), `#11449`'s **+68** (its hunks at `:5187` and `:5217`),
-  that same PR's remaining hunks above `:9920` taking it to **+76**, and the sdk **+102**. And the
-  `vet_enabled = (` line the record reads live as `:12779` sits under TWO of them: it is `:12929`
-  at this head, **+150** COMPOSED of +74 then +76. ⚠️ None of those inserts is this PR's — this
-  change moves no code, it re-derives the cites they invalidated, which is why every delta here is
-  read off the tree and none is carried forward. A row's delta must therefore be read from the
-  document — AND the band — that row lives in. Cites
-  ABOVE the first insert did not move at all (`:88-89`,
-  `:296-312`, `:1154`, `:1720` are still correct), which is why the bundled cites were
-  re-derived one by one rather than offset in a batch. ⛔ **`RECONCILE-A1-A2-A5.md` sits behind
-  NO test at all** — the grading tests sweep `_BUNDLE_DOCS` (README, E1-E5-PROOFS, both probes,
-  `docs/00_index.md`, the architecture doc) and `_PREREG_STEP_CITE_DOCS`, and neither names that
-  record — so every head-relative cite in it was re-derived by RUNNING its own command, not by
-  arithmetic: the S2.3 `steps.conditional[0].condition` cite (`extractor_v2.py:11098`→`:11174`,
-  in this document AND in `preregistration.json`'s machine mirror of the same text — no markdown
-  sweep can see the JSON half), `extractor_v2.py:10815`→`:10891` (twice: the prose and the grep
-  annotation beside it), the payload-entity write seam in `tortoise/sdk.py`
-  (`_payload_entity_kind`→`create_entity`) `:16414-16428`→`:16516-16530` (three times: the mint
-  sentence, the routing sentence and the `-A 14` annotation), the capture-path call in
-  `tortoise/sdk.py` (`link_source_to_event`) `:17472`→`:17574` (**+102**, a different band again;
-  three times: the prose cite, the bare "both now read" restatement beside it — the one form a
-  symbol-prefixed re-derivation misses — and the `sed -n '17574p'` reproduce command), §0's
-  `create_operator` annotation
-  `:8938/:8956/:8963/:9343`→`:9006/:9024/:9031/:9411`, the census enumeration in
-  `probes/capstone_measure.py` `:2238-2243`→`:2713-2716` (stale on `main` too — the number
-  described `_seam_cause`, not the `MATCH ()-[r]->()` query), and the two "a live grep cannot do it
-  (it prints `:12779` here)" clauses→`:12929`. Every number was verified by CONTENT at this head (the `def`,
-  the `return items` that ends it, the two `if items:` gates, the two `except` arms, the two
-  result blocks' opening braces and their closing `}`), never by adding an offset.
-- **What moved: no pin.** No metric, denominator, threshold, class set or corpus pin is touched,
-  and no `steps` member is added, removed or re-worded — only the `_collect_classify_items` cite
-  INSIDE S2.3's `condition` moved, in this document and in `preregistration.json`'s mirror of the
-  same sentence; the numbers this record exists to freeze are byte-identical. `document_sha256`
-  is re-cut in this same commit, per §8's rule for *any* edit to this file.
+- **Why:** between `5c866513c` (the head §10.10 was written at) and `origin/main` `5ef5805f0`, the
+  ONLY commit touching `extractor_v2.py` is `91dbc9a88` (`#11449`, **+80/−4**, net **+76**), whose
+  hunks START at `:5190`, `:5245`, `:5275`, `:5285`, `:9923` and `:9943` (the first group's added
+  lines run to `:5288`). The gross is the DEFAULT-CONTEXT view (`git show --numstat`); a `-U0`
+  recount reports `+79/−3`, because the one `"""` line this commit RELOCATES (its bytes are
+  unchanged) is rendered as a delete+add pair only when context is included. Same net `+76`, and the 68/76 split below is
+  identical under either view.
+  ⛔ **Two deltas from one commit, and the table states both** — this is why a blanket `+76` is a
+  wrong re-derivation for part of the block: the first four hunks contribute **68** NET lines
+  (`+54`, `+2−1`, `+9`, `+4` — the second is a two-for-one replacement) above `:5286`, so the #2684 `_carries_value` pair moves `:5286-5287` → `:5354-5355`
+  (**+68**), while everything at or below the collector sees all six hunks and moves **+76**:
+  `:11098`→`:11174`, `:11098-11120`→`:11174-11196` (the extent read out of `ast`, `def` through
+  `return items`), `:12982`→`:13058`, `:13131`→`:13207`, `:12995`→`:13071`, `:13142`→`:13218`.
+  Every one of those is verified against the LINE it names, by content, not by arithmetic.
+- **Also re-derived here, never moved by a §10 entry before:** the step table's `search_graph`
+  (`:13000` → `:13076`) and `run_s4` (`:13021` → `:13097`) cites, and the `_IDLE_CITES`
+  `classify_later` cause's `classify_later = False` site (`:12847` → `:12923`). The first two named
+  lines that are not the code their sentence claims (`:13000` is `run_s2`'s call; `:13021` is a
+  comment at the call site inside `extract_session_v2` — `_run_vet_pass` itself is `:12774-12811`);
+  the third was the only cause line the +76 had not reached.
+- **The `steps:` block's S2.3 `condition` carries this same cite, and it is re-pointed with it.**
+  That block is operative text, so its CONTENT EPOCH (`_steps_block_epoch`) moves with this commit;
+  what moves is a line NUMBER in the condition's provenance, not the condition, the step set, a
+  metric, a denominator or a threshold — the operative rule is unchanged. It is recorded as a §10.14
+  ENTRY in §10's own deviations list (a new numbered entry, not a struck-through edit to the operative
+  rows). The gate's arm is DOCUMENT-level, not entry-level (`check_steps_block_is_pre_scored` refuses a
+  `steps` block that post-dates the EARLIEST scored log — the gate takes `min(log_epochs)` — and only
+  when `_document_has_deviations(directory)` is false), and §10.1–§10.13 already clear it — so what this entry does is record THIS move, not
+  single-handedly keep the epoch legible. Stating it the stronger way would have been an
+  over-attribution: measured with §10.14 itself removed from the text, the arm still returns no
+  verdict.
+- **The union also pins one switch the base was red on.** `91dbc9a88` introduced
+  `TORTOISE_STATE_VALUE_VERBATIM`, resolved `env_flag(SWITCH, True)` in
+  `extractor_v2._state_value_verbatim_enforced` — the ONE module that reads it; the nine
+  modules the door's closure test names are the capture path it SCANNED, not the readers.
+  Its ABSENT state is not the neutral one to inherit (an ambient `=0` disarms the write
+  path's verbatim-value refusal), so it is pinned to the shipped default in the probe's
+  `DOOR_PINNED_ON` and in this record's `door.acceptance_arm.pinned_to` — the door's C2 closure
+  otherwise refuses the run (`test_every_env_var_the_capture_path_reads_is_accounted_for`).
+- **§10.5 is deliberately LEFT FROZEN, and unchanged by this commit.** Its prose still cites
+  `:11098-11120` and the gates `:12982`/`:13131` — the values it recorded for its own move. Each
+  §10.N freezes ONE move (see §10.10's tail), so re-pointing it here would make one entry describe
+  two heads; the fact that no pin reads a §10 entry is a convenience, not a licence. Where a §10
+  entry is BELIEVED wrong about an earlier move, the correction belongs to **#11425**'s set, not to
+  this re-derivation.
+- **What moved: nothing else.** No metric, denominator, threshold, class set or corpus pin is
+  touched: the values this record freezes are unchanged and only line citations move.
+  `document_sha256` is re-cut in this same commit, per §8's rule for *any* edit to this file.
 
 ## 11. The step set V5 gates over — seven unconditional, one conditional (`#10215`)
 
