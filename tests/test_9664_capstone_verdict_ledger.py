@@ -1722,5 +1722,3 @@ def test_the_tool_carries_the_5128_interpreter_guard_first():
         f"the refusal must name an invocation that WORKS; renders as {rendered!r} "
         f"(message node: {ast.dump(message)})"
     )
-
-

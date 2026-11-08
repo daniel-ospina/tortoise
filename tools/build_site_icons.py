@@ -26,16 +26,24 @@ artwork is ever replaced, re-measure that box — the crop is derived from it.
 Uses `sips` for cropping and resampling (macOS); everything else is stdlib. Run it once
 per asset change; CI only ever reads the resulting bytes:
 
-    python3 tools/build_site_icons.py --source path/to/mark.png
-    python3 tools/build_site_icons.py --source ... --out /tmp/icons --keep /tmp/icons/crops
+    uv run python tools/build_site_icons.py --source path/to/mark.png
+    uv run python tools/build_site_icons.py --source ... --out /tmp/icons --keep /tmp/icons/crops
 """
 
 from __future__ import annotations
 
+import sys
+
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/build_site_icons.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/build_site_icons.py`"
+    )
+
 import argparse
 import struct
 import subprocess
-import sys
 import tempfile
 import zlib
 from pathlib import Path
