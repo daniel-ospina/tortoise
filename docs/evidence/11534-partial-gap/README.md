@@ -166,10 +166,14 @@ what is new is the item's **abstraction level** (a rule derived from an
 observation). A coverage detector cannot reach that by construction, and neither
 can a stage triggered by coverage.
 
-The two missed `points` are the same shape (`wp01` "The hydrate stage shares the
+**Four `points` are missed** (the totals above are 8 of 12), and the two named here
+are the same shape (`wp01` "The hydrate stage shares the
 same code as the wire stage…" — the clause is only 2 content tokens, below the
 floor; `wp05` "The Bluepeak retro is published company-wide" — the content is in
-a covered statement, the item is a re-shaping of it).
+a covered statement, the item is a re-shaping of it). ⚠️ No numeral is given for
+HOW MANY are named, because a typed count in this record has gone stale every
+time one was written: the four is arithmetic off the pinned totals, and the two
+are examples of the class, not an inventory of it.
 
 ### What this means for `run_s4`
 

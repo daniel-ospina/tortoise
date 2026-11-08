@@ -120,13 +120,13 @@ halves, always, because each half alone is a different wrong answer:
 
   * #11534 adds the missing INSTRUMENT and its first CONSUMER inside S2.2: the
     detector ``vet_gate.partial_gaps`` (reported-never-acted-on, exactly like
-    ``coverage_suspect``) plus the stage ``run_partial_gap_fill`` (S2.2b,
+    ``coverage_suspect``) plus the stage ``run_partial_gap_fill`` (``S2.2b-ADD``,
     ``TORTOISE_PARTIAL_GAP_FILL``, **DEFAULT OFF**), which CAN add items for
     the spans the detector flagged. On the F3 population the detector reaches
     **9 of the 21 items ``run_s4`` added — 8 of the 12 ``points``, 1 of the 9
     ``operators``**.
   * So the pre-condition is **met for ADD-from-an-uncovered-span**, and met by
-    a TRIGGER rather than by a demonstrated stage: S2.2b's own yield is
+    a TRIGGER rather than by a demonstrated stage: ``S2.2b-ADD``'s own yield is
     **NOT measured** — it needs live sessions and a key. It is
     **NOT met for ADD-by-generalisation**: the operator misses restate a
     COVERED statement at a higher abstraction, so no narrative span is
@@ -3664,7 +3664,7 @@ def run_s4(model, story: str, search: dict, embed_list: dict,
                             stats=stats, seam="s4")
 
 
-# ── S2.2b — the ADD-capable PARTIAL-GAP FILL (#11534) ────────────────────
+# ── S2.2b-ADD — the ADD-capable PARTIAL-GAP FILL (#11534) ────────────────
 #
 # ⛔ WHY THIS STAGE EXISTS, IN ONE PARAGRAPH. `run_s4` is the only stage in the
 # shipped pipeline that can ADD a candidate (measured, F3 — see
@@ -3810,7 +3810,7 @@ def run_partial_gap_fill(model, narrative: str, embed_list: dict, *,
                          stats: dict | None = None,
                          session_date: str | None = None,
                          core_only: bool | None = None) -> dict:
-    """S2.2b — emit candidates for the narrative spans no candidate covers.
+    """``S2.2b-ADD`` — emit candidates for the narrative spans no candidate covers.
 
     Returns an embed-list fragment (the same shape ``run_s4`` returns) for
     :func:`merge_embed_lists` to union into the S2 list, or ``{}`` when there is

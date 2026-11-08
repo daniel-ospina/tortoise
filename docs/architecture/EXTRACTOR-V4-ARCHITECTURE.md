@@ -718,8 +718,12 @@ unfirable (block at the top of §10).
 > ⛔ **WHAT `#11534` MEASURED IS THE TRIGGER, NOT THE STAGE — and it covers ONE of the two gap
 > classes.** The PR ships two pieces inside S2.2: the DETECTOR `vet_gate.partial_gaps` — the
 > statement/clause coverage detector `check_batch` now reports (a char span into the narrative, so a
-> re-extraction has an address to read; it needs no `#2684` span layer) — and its consumer `S2.2b`
-> (`extractor_v2.run_partial_gap_fill`, behind `TORTOISE_PARTIAL_GAP_FILL`, **default OFF**). On the
+> re-extraction has an address to read; it needs no `#2684` span layer) — and its consumer `S2.2b-ADD`
+> (`extractor_v2.run_partial_gap_fill`, behind `TORTOISE_PARTIAL_GAP_FILL`, **default OFF**).
+> ⛔ **Why the `-ADD` suffix:** `S2.2b` is the VET gate of §4.1/§4.2 — a RECORDED decision ("DECIDED
+> 2026-09-25: S2.2b, i.e. HERE") and the value `tests/test_extractor_v4_step_list_consistency.py`
+> pins as `GATE_ID`. One id may not name two stages, so the ADD stage is `S2.2b-ADD` everywhere it is
+> labelled; the `S2.2b` occurrences that mean the gate are unchanged. On the
 > F3 population (the seven recorded sessions) the **trigger** flags a span whose tokens overlap **8 of
 > the 12 `points`** and **1 of the 9 `operators`** that `run_s4` adds. The operator half is not a
 > tuning problem — an operator addition GENERALISES a claim the batch already carries ("a retry path
@@ -727,7 +731,7 @@ unfirable (block at the top of §10).
 > span is uncovered even though the item is new, and a coverage detector cannot reach it by
 > construction. **So the pre-condition above is met for ADD-from-an-uncovered-span and is NOT met for
 > ADD-by-generalisation**, and `run_s4`'s removal therefore stays gated on the second half.
-> **`S2.2b`'s own yield is NOT measured** — it depends on whether a model handed a flagged span emits
+> **`S2.2b-ADD`'s own yield is NOT measured** — it depends on whether a model handed a flagged span emits
 > the right item, which needs live sessions and a key, so the coverage half is met by a *trigger*, not
 > by a demonstrated stage. The detector's own cost is measured too — 8.3% of 844 segments flagged —
 > but the flagged population is MIXED (7 genuine clause-level elisions, 4 non-claims and 3

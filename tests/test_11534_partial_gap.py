@@ -757,3 +757,44 @@ def test_the_coverage_floor_is_justified_by_the_measured_distribution():
     assert values[len(values) // 2] == 1.0
     assert values[int(0.10 * len(values))] == 0.355
     assert values[int(0.25 * len(values))] == 0.736
+
+
+def test_the_heading_mask_does_not_eat_issue_numbered_lines(monkeypatch):
+    """The mask is NARROW, not merely present (review round 9, P2).
+
+    Round 8 narrowed :func:`vet_gate._gap_mask` from ``^[ \\t]*#+[^\\n]*$`` to a
+    form that requires a space (or end-of-line) after the hashes — correctly: the
+    old pattern ate **any** line starting with ``#``, including a claim that opens
+    with an issue number, and that is the fleet's own prose shape.
+
+    ⛔ WHY THIS ROW EXISTS. The test above pins that the mask EXISTS; measured,
+    reverting the regex to the round-7 form left every row GREEN (``24 passed``),
+    so the narrowing was guarded by nothing. The failure it protects is the
+    detector's MISS direction: a blanked claim is never a segment, so a gap in it
+    can never be flagged — invisible by construction, in the population we
+    actually process.
+    """
+    claim = ("#11534 note: the canary rollback window is bounded by the operator "
+             "dashboard cache ttl so a stale panel outlives the revert")
+    narrative = claim + "\n\n" + NARRATIVE
+
+    narrowed = vet_gate.partial_gaps(COVERED_ITEMS, narrative)
+    assert any("canary rollback window" in text.lower()
+               for text in _flagged_texts(narrowed)), (
+        "an issue-numbered line is NOT a markdown heading — the mask must leave it "
+        "intact so its uncovered claim can still be flagged")
+
+    # NON-VACUITY: under the round-7 mask the line is blanked, so the claim is
+    # never a segment and the assertion above could not have observed it.
+    import re
+
+    wide = re.compile(r"^[ \t]*#+[^\n]*$", re.MULTILINE)
+    monkeypatch.setattr(
+        vet_gate, "_gap_mask",
+        lambda text: wide.sub(lambda m: " " * len(m.group(0)), str(text or "")))
+    starved = vet_gate.partial_gaps(COVERED_ITEMS, narrative)
+    assert not any("canary rollback window" in text.lower()
+                   for text in _flagged_texts(starved)), (
+        "with the round-7 mask the issue-numbered claim is swallowed, which is the "
+        "regression this row exists to catch — if this arm fails, the arm above "
+        "proves nothing")
