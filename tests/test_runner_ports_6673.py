@@ -639,10 +639,10 @@ def _imports_the_seam(path: Path) -> bool:
     and **67** importing the helper:
 
     * one false POSITIVE, HISTORICAL — `test_cache_eviction_evictor_pins.py` was
-      in the scan on a comment alone. `#11492` has since reworded that comment
-      (`The module's own import of `tests._live_utils` just bound the REAL
-      helper`), so in the tree this file sits in NEITHER selector selects it —
-      which is why the substring count above is 65 and not the 66 this move was
+      in the scan on a comment alone. `#11492` has since reworded that comment (it
+      now reads ``The module's own import of `tests._live_utils` just bound the
+      REAL helper``), so in this tree the file is in NEITHER selector's population
+      — which is why the substring count above is 65 and not the 66 this move was
       first cut on. The defect was never one file: it is that PROSE could decide
       membership at all;
     * two false NEGATIVES, LIVE — `test_8057_probe_embedder_mask.py`
@@ -808,11 +808,13 @@ def test_the_population_is_the_IMPORT_EDGE_and_not_the_substring():
     NEITHER, and the two newly covered files are clean — so no verdict changes and the
     revert is silent. A behaviour change nobody can watch fail is a comment, not a pin.
 
-    So this asserts the WIRING where the two selectors actually differ, and names the
-    difference rather than a count: the two files the substring scan cannot see must be
-    scanned (the false NEGATIVES — a guard that never runs is a false PASS), and the file
-    that only NAMES the seam must stay out (the false POSITIVE — a deliberate stub charged
-    as a dial site, which is what `#11485` had to exempt by hand).
+    So this asserts the WIRING where the two selectors actually differ — the two files the
+    substring scan cannot see must be scanned (the false NEGATIVES: a guard that never runs
+    is a false PASS) — plus the fact that keeps the `#11485` exemption dead (the stubbing
+    file, which must stay out: a deliberate stub charged as a dial site is the false red
+    that exemption existed for). Only the FIRST assertion discriminates the revert; the
+    second pins the `#11492` reword that put the file out of BOTH populations, and would
+    stay green under the substring selector.
     """
     population = _seam_population()
     assert {
@@ -827,6 +829,36 @@ def test_the_population_is_the_IMPORT_EDGE_and_not_the_substring():
         "that file STUBS the seam (`namespace[\"_live_utils\"] = live_utils_stub`) and does "
         "not import it; selecting it charges a deliberate stub as a dial site, which is the "
         "false red this population exists to avoid")
+
+
+def test_the_guard_reads_its_population_through_the_selector(monkeypatch):
+    """`#11437` review — the pin above closes `_seam_files()`; this closes its CALL SITE.
+
+    A selector nobody calls is the same dead remedy one level out: measured, replacing the
+    guard's `seam_files = _seam_files()` with an INLINE raw-text comprehension left this
+    whole file at **76 passed**, because every pin that could notice was driving the
+    function rather than the body that consumes it.
+
+    So this drives the GUARD end to end with the population replaced: a real file carrying a
+    docker-lane port literal and no exemption must be reported as an offender, and adding
+    the exemption must silence it. Neither outcome is reachable unless the guard reads
+    `_seam_files()` — an inline substring ignores the patch, finds nothing to report, and
+    this test fails.
+    """
+    target = ROOT / "tests/test_search_engine_gaps.py"
+    rel = target.relative_to(ROOT).as_posix()
+    assert _port_literals_in_code(target), (
+        f"{target} is the fixture this pin drives; it no longer carries a port literal, so "
+        "pick a file that does rather than letting this pin pass vacuously")
+    module = sys.modules[__name__]
+    monkeypatch.setattr(module, "_seam_files", lambda: [target])
+    # DROP the live exemptions first, or the fixture's own entry silences the guard and the
+    # offender arm never runs (measured: the first draft of this pin failed exactly that way).
+    monkeypatch.setattr(module, "SEAM_FILES_WITH_ALLOWED_LITERALS", {})
+    with pytest.raises(AssertionError, match="must not ALSO hardcode"):
+        test_no_migrated_file_still_hardcodes_a_lane_port()
+    monkeypatch.setattr(module, "SEAM_FILES_WITH_ALLOWED_LITERALS", {rel: ["6379"]})
+    test_no_migrated_file_still_hardcodes_a_lane_port()
 
 
 def test_no_migrated_file_still_hardcodes_a_lane_port():
@@ -971,10 +1003,12 @@ def _membership_refusal(rel: str, members: set[str], exemptions) -> str | None:
         "exec-then-rebind mechanism — which "
         "`test_every_seam_exemption_is_consulted` then requires to still hold "
         "(`#11437`: the entry is consulted only while its file is in the population). "
-        "⛔ Membership is an IMPORT EDGE (`_imports_the_seam`), never a raw-text search — so "
-        "rewording this file's prose cannot clear the rule, and neither can the exemption "
-        "alone: that spelling named a remedy which "
-        "left the pin red, with no route but deleting it."
+        "⛔ Membership is an IMPORT EDGE (`_imports_the_seam`), never a raw-text search, so "
+        "rewording this file's prose cannot clear the rule. And an exemption only DEFUSES this "
+        "rule: it does not remove the file from the population, so the membership assertion "
+        "beside this one still reds — which is the trap the old bare "
+        "`assert rel not in members` spelling set, naming a remedy that left the pin red with "
+        "no route but deleting it."
     )
 
 

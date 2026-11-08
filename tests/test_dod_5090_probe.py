@@ -7048,7 +7048,7 @@ def test_the_census_doc_collects_what_the_file_collects():
     (the skip is the `<3.12` re-derive) and the carve-out lane reads
     `164 passed, 2 skipped` (that skip plus `tests/_live_utils.py`'s live-graph
     fixture, which only a lane with a `TORTOISE_DB_URI` satisfies). Both splits add
-    to the `166` re-derived above, which is why the doc states its split as
+    to the `166` re-derived below, which is why the doc states its split as
     lane-bound: a carve-out run must not "correct" the docker lane's figure.
     """
     root = Path(probe.__file__).resolve().parent.parent
