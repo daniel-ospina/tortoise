@@ -315,6 +315,7 @@ FACT_STATEMENTS_IN_SIBLINGS: tuple[
         EVAL_SPEC,
         "the eval spec scopes P6 to the `#2421` design with the triage untracked",
         "**Scoped per the `#2421` design (CLOSED `COMPLETED`; the per-edge triage is not implemented and has no open tracker):**",
+        "P6",
     ),
     (
         EVAL_SPEC,
@@ -1279,7 +1280,12 @@ def _changelog_entry(needle: str) -> str:
     return matches[0]
 
 
-_SECTION_HEADING = re.compile(r"(?m)^(#{2,4}) (\d+(?:\.\d+)*)[.\s]")
+#: ⛔ The label may be NUMERIC (`9.1`) or a LETTER+digit phase label (`P6`) — the
+#: eval spec's sections are `### P6 — …`, so a numeric-only pattern made
+#: ``_section_body(EVAL_SPEC, "P6")`` raise "carries no §P6" and forced every
+#: eval-spec pin to stay document-wide, i.e. a name that says P6 while the
+#: assertion cannot see P6.
+_SECTION_HEADING = re.compile(r"(?m)^(#{2,4}) (\d+(?:\.\d+)*|P\d+)[.\s—-]")
 
 
 def _section_body(path: Path, number: str) -> str:
