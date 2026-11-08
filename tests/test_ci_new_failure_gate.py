@@ -208,6 +208,16 @@ NEW_LOG = _api_capture(_BARE_NEW_LOG)
 MAIN_RATES = "tests/test_cache_projection_live.py::test_a\t8\t10\n"
 MAIN_SIGS = "tests/test_cache_projection_live.py::test_a\tKeyError: 'id'\n"
 
+#: A PYTHON-PATH PARAMETER — the shape the rate door EXCLUDED (agent-infra#3690).
+#: `tests/test_entry_point_python_guard.py` is parametrised over `tools/*.py`, so its
+#: failure ids carry `/` and `.` INSIDE the `[...]`. This id is the one measured on
+#: PR #11508: main itself red on it (1/20), an unrelated diff on the PR, and the
+#: predicate reporting main's own red as "introduced by this PR".
+PATH_PARAM_ID = (
+    "tests/test_entry_point_python_guard.py::"
+    "test_entry_point_guards_the_interpreter_before_its_imports[tools/build_site_icons.py]"
+)
+
 
 def _jobs(*rows: tuple[int, str, str]) -> str:
     """A recorded jobs listing, in the `gh api --paginate --jq '.jobs[]'` JSONL shape."""
@@ -927,6 +937,66 @@ def test_the_rail_and_the_gate_agree_on_the_same_fixture(tmp_path):
     assert rail.returncode == 1 and gate.returncode == 1, (rail.stdout, gate.stdout)
     assert "tests/test_other.py::test_brand_new" in rail.stdout
     assert "tests/test_other.py::test_brand_new" in gate.stdout
+
+
+@pytest.mark.skipif(not RAIL_AVAILABLE, reason=RAIL_ABSENT_REASON)
+def test_the_rate_door_admits_a_PATH_inside_the_pytest_parameter_space(tmp_path):
+    r"""A main-red on a PATH-PARAMETRISED id must exempt, not read as PR-introduced.
+
+    The measured false BLOCK (PR #11508, agent-infra#3690): `_NODEID_RE`'s `rest`
+    class spelled the parameter-SYNTAX characters `[A-Za-z0-9_\[\]\-.:]` and carried
+    no `/`, so main's union-rate row for `…[tools/build_site_icons.py]` matched the
+    row shape, then was DROPPED as malformed. With the row gone, `decide` saw the id
+    absent from `main_rates` and said *"absent from main's failure set … introduced
+    by this PR"* — blocking a failure on a file the PR never touched, for every
+    path-parametrised id.
+
+    ⛔ THIS PINS ONE CHARACTER, NOT COMPLETENESS. `rest` is an allowlist of parameter
+    SYNTAX, not the whole parameter space: a SPACE-bearing param
+    (`[chromium-Claude Desktop]`), a `\`, or a non-ASCII test name is still dropped
+    upstream and still yields the identical BLOCK (agent-infra#3691, open). So a red
+    here naming some OTHER character is that residual, not a regression of this case.
+
+    ⛔ THE ASYMMETRY IS WHAT HID IT: main's SIGNATURE row for the same id parses
+    through `is_failure_key_loose`, which always admitted the path — so the signature
+    gate passed and only the presence gate refused. A signature-only fixery would not
+    have moved this, which is why the assertion is on the composed VERDICT.
+
+    ⛔ THIS CASE OBSERVES THE RAIL THE POINTER RESOLVES, NOT THE WORKFLOW'S PIN, and
+    no CI job runs it (see `RAIL_ABSENT_REASON`) — so it cannot by itself keep the pin
+    ahead of `agent-infra@cb7de2572`. What it does is make the SHAPE executable: a
+    checkout at or after that commit must pass it, and one before it fails here naming
+    the cause instead of leaving the next lane to re-derive it from a CI log.
+    """
+    #: ONE signature on both sides: the shape is the ID's parameter space, not
+    #: a signature difference. Identical text means the overlap gate passes and the
+    #: PRESENCE gate is the only thing under test — the gate that actually misfired.
+    SIG = "AssertionError: the #5128 interpreter guard is not the first statement"
+    pr_rows = tmp_path / "pr-rows.tsv"
+    pr_rows.write_text(f"{PATH_PARAM_ID}\t1\t1\t{SIG}\n", encoding="utf-8")
+    rates = tmp_path / "rates.tsv"
+    rates.write_text(f"{PATH_PARAM_ID}\t1\t20\n", encoding="utf-8")
+    sigs = tmp_path / "sigs.tsv"
+    sigs.write_text(f"{PATH_PARAM_ID}\t{SIG}\n", encoding="utf-8")
+    rail = subprocess.run(
+        [sys.executable, str(EXEMPTION_PY), "decide",
+         "--pr-failures", str(pr_rows), "--main-rates", str(rates),
+         "--main-signatures", str(sigs)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert "VERDICT\tCLEAN" in rail.stdout, (
+        "the shared decision did not exempt a main-red whose pytest parameter is a "
+        "PATH. Only ONE thing can cause this: the `scripts/ci_exemption.py` this box "
+        "resolves PREDATES agent-infra@cb7de2572 (#3690), or `rest` regressed again. "
+        "⛔ The workflow's `.ci-predicate` pin is NOT a candidate — this case never "
+        "reads it (see the docstring), so inspecting or moving that pin cannot change "
+        "this assertion. Fix the thing that ran: update the agent-infra checkout this "
+        "`scripts/` pointer resolves (`tools/link_agent_infra_scripts.py`).\n"
+        + rail.stdout + rail.stderr
+    )
+    assert PATH_PARAM_ID in rail.stdout, (
+        "the verdict must still NAME the id it exempted, not swallow it\n" + rail.stdout
+    )
 
 # ── the wiring contract: the verdict job and the aggregate cannot drift ─────
 

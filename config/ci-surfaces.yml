@@ -4286,6 +4286,18 @@ surfaces:
   # file pins it. Hermetic: no DB, no network, no `gh`; every surface is a fake or
   # a replayed snapshot.
   - test_next_work.py
+  # #10951: the queue consumer's POPULATION guard — `tools/next_work.py` drives the
+  # fleet's ONE work-unit rule (`POOL_JQ` in agent-infra's `refresh-candidates.sh`)
+  # by extracting and EXECUTING it, so a container (`epic:`, `design(…)`, `coord:`,
+  # `measure(…)`) or a declared `standing-constraint` is never handed a dispatch
+  # command. This file pins that seam: the two surfaces withhold the SAME rows over
+  # one fixture, every container spelling the repo emits is withheld while the
+  # bare-word collisions (`Measure …`, `lane-actions: …`) stay pickable, an
+  # unreadable rule withholds EVERY row rather than none, a replay without verdicts
+  # is INCOMPLETE, and the off-switch is reported as OFF instead of passing for a
+  # measurement. Hermetic apart from `jq` (which every runner carries): no DB, no
+  # network, no `gh`, no agent-infra checkout — the rule is supplied as bytes.
+  - test_10951_population.py
   # #6884: pins the `uri_requiring` declaration (re-derived BEHAVIOURALLY — it
   # runs the failing `pytest --collect-only` with an EMPTY TORTOISE_DB_URI and
   # compares) and
@@ -7649,6 +7661,7 @@ surfaces:
   - test_temporal_leg_date_window_10538.py  # #10538: a DATE-RANGE question widens the candidate set by session — window-as-target gating (session clustering), head-slice exclusion of the sessions the reader already holds, fused tail placement (hermetic, no DB)
   - test_window_arm_baseline_10538.py  # #10538: the window arm's RETENTION baseline — where a pick lands vs the graded top 5, whether the visible evidence-session SET widened or merely changed (net), and whether a displaced slot was a session's sole visible representative; pins the committed instrument receipt (hermetic, no DB/dataset/network)
   - test_temporal_leg_non_eviction_10538.py  # #10538: the NON-EVICTION GUARD (owner ruling 2026-11-07) — dedupe to unique sessions, the per-session cap and never-crop-the-anchor as three separately-discriminating cases, the env off-switch, and the declared scope (the #2976 anchor arm and the head counterfactual are deliberately unguarded) (hermetic, no DB/network/dataset)
+  - test_temporal_leg_non_eviction_receipt_11494.py  # #11494: the guard's RECEIPT observed on a WIRED read — drives `retrieve_for_question(..., temporal_leg=True)` with the leg armed and asserts `non_eviction`/`applied`/`targeting`/`rejected` (exact ids, sessions, reasons), the `non_eviction_guard` empty-leg reason, and the env off-switch ending in picks; replaces AST pinning, which let five slice-mutants survive. Lives at `tests/`, NOT the `tests/longmem_eval/` subtree, because #10194 subtracts that subtree from every gating leg — a pin there never runs on a PR (hermetic, no DB/network/dataset)
   - test_2976_session_admission.py  # #2976: TR session-level admission — token budget binds + session is the admission unit (gold at rank 45 admitted); render stays dated/contiguous (hermetic, pure functions)
   - test_sdk_ep.py
   - test_sdk_group3.py
@@ -7895,6 +7908,7 @@ surfaces:
   - longmem_eval/test_freq_count_disposition.py  # #2886: guards tools/longmem_eval/freq_count_disposition.py (the census frequency/count disposition tool) — `tools/longmem_eval/` is a SOURCE_PATTERNS entry of this surface, so an eval-tool change alone selects it
   - test_temporal_aggregate_arm.py  # #2886: guards tools/longmem_eval/retrieve.py's `temporal_aggregate_verdict` adapter — `tools/longmem_eval/` is a SOURCE_PATTERNS entry of this surface, so a retrieve.py-only change selects it (dual-registered with `core` for the core's verdict semantics)
   - test_temporal_leg_replay_wiring_10538.py  # #10538: the offline replay proxy reproduces the SHIPPED temporal wiring — the question's resolved date window is threaded to the leg with the question date as the recency clock (hermetic, no DB/network; TF-IDF proxy over a hand-built pool, no dataset read)
+  - test_temporal_leg_non_eviction_receipt_11494.py  # #11494: the non-eviction guard's RECEIPT on a WIRED read — `tools/longmem_eval/retrieve.py` is a SOURCE_PATTERNS entry of THIS surface, so a receipt-only change selects `eval`; without this arm the pin that kills the surviving slice-mutants never runs on the change it guards. Same #10194 reasoning as the sibling above: the file lives at `tests/`, not the subtracted `tests/longmem_eval/` subtree (hermetic, no DB/network/dataset)
   - test_window_arm_baseline_10538.py  # #10538 (dual with `sdk`): the window arm's RETENTION baseline. `tools/longmem_eval/` is a SOURCE_PATTERNS entry of THIS surface, so a change to the instrument (`tools/longmem_eval/window_arm_baseline.py`) selects `eval` and REPLACES the `core` fallback — without this arm, an instrument-only change would run none of the pins that would notice its output moving (the #1349/#2938 silent-drop class)
   - longmem_eval/test_temporal_admission_trace.py  # #2976: temporal admission trace — pool-membership vs reader-window-cut receipts + TR-machinery-inert mechanism pin (hermetic, no DB)
   - longmem_eval/test_variant_containment_judge.py  # #2976: deterministic variant-aware containment judge — the keyless grader that reproduces the 42/52 ceiling (hermetic; the dataset leg skips when the split is not cached)
@@ -10759,6 +10773,7 @@ durations:
   # `tests/test_gmm_proofs.py`, so no new dependency is introduced.
   test_temporal_leg_placement_10538.py: 2.0  # new in #10538 — a file a PR ADDS can never carry a CI junit reading yet (the refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT this host's local reading, which the map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default (the #3400/#4348 trap). ⛔ The CASE COUNT is deliberately NOT quoted: `tools/ci_timing.py --refresh-durations` replaces this row from junit, and a hand-written count re-stales on every case a later round adds. What the weight covers: pure-unit, no DB/server/network/model — it imports `tools.longmem_eval.retrieve` + `tools.longmem_eval.run` and `tortoise.temporal_leg`, builds candidate lists in memory, reads the two source files with `ast`, and writes one checkpoint JSON into `tmp_path`. Local wall time on a loaded box: 3.5 s.
   test_temporal_leg_replay_wiring_10538.py: 2.0
+  test_temporal_leg_non_eviction_receipt_11494.py: 2.0  # new in #11494 — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which the map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default. ⛔ The CASE COUNT is deliberately NOT quoted: `tools/ci_timing.py --refresh-durations` replaces this row from junit, and a hand-written count re-stales on every case a later round adds. What the weight covers: pure-unit and hermetic — it drives `retrieve_for_question` against a stubbed `hybrid_search` and stubbed annotators, with a fake SDK, and imports `tortoise.temporal_leg` + `tools.longmem_eval.retrieve`; no DB, no server, no network, no model, no dataset. Local wall time on a loaded box: 2.7 s.
   test_temporal_leg_non_eviction_10538.py: 2.0  # new in #10538 (the non-eviction guard) — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which the map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default. ⛔ The CASE COUNT is deliberately NOT quoted: `tools/ci_timing.py --refresh-durations` replaces this row from junit, and a hand-written count re-stales on every case a later round adds. What the weight covers: pure-unit and hermetic — it imports `tortoise.temporal_leg` (pure functions over in-memory candidate lists) and `tools.longmem_eval.retrieve`, reads two source files with `ast`, and touches no DB, no server, no network, no model and no dataset.
   # #2976: the three new surfaces take the header's flat `DEFAULT_FAST_WEIGHT`
   # (the #2818/#3419/#9121 convention), NOT a local timing. A file ADDED BY A

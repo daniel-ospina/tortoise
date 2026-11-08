@@ -1475,6 +1475,175 @@ exec {self.gh} "$@"
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn(f"fix/{ISSUE}-strand", proc.stdout)
 
+    def _interpreter_path(self, *, uv: bool) -> str:
+        """A PATH holding a pre-3.12 `python3` shim, and optionally a `uv` stub.
+
+        ⛔ HERMETIC, AND THAT IS THE POINT (#11202 review round 8). The wrapper's
+        interpreter selection was shipped with NO test: reverting it to the old
+        `exec python3 "$here/who_is_on.py" "$@"` left the whole suite green, so the
+        measured owner-Mac failure (3.9 -> the verb exits 1) could come back silently.
+        Every entry here is a shell script needing no interpreter, and the wrapper's
+        only other external call — `dirname` — is a symlink to the real one, so the
+        result cannot depend on what this host happens to have installed.
+
+        ⛔ AND THE PROBE PAYLOAD IS EVALUATED, NOT SWALLOWED (#11202 review round 10).
+        An `exit 1` for any `-c` pinned only the SHAPE of the fast path: the version
+        BOUND stayed unpinned, so lowering it to `>= (3, 9)` — the exact owner-Mac
+        regression, where a 3.9 `python3` wins and the module's own guard exits 1 —
+        left the suite green (measured). The real payload therefore runs under a
+        FAKED `sys.version_info`, the idiom `tests/test_collision_preflight.py` uses.
+        """
+        d = self.tmp / "interp-bin"
+        d.mkdir(exist_ok=True)
+        self._write_exec(d / "python3", (
+            "#!/bin/bash\n"
+            "# a 3.11 interpreter, one patch below the floor: EVALUATES the real probe\n"
+            "if [ \"$1\" = \"-V\" ]; then echo 'Python 3.11.99'; exit 0; fi\n"
+            "if [ \"$1\" = \"-c\" ]; then\n"
+            # ⛔ THE FAKE IS *BELOW* THE FLOOR, AT A POINT NO REAL BOUND CAN SIT ABOVE
+            # (#11202 review rounds 11-12). 3.9 pinned the bound only over
+            # (3,9,6]..host, so `>= (3, 10)` / `>= (3, 11)` shipped green. 3.11.9 fixed
+            # those but was itself a SINGLE POINT: `>= (3, 11, 10)` still shipped green
+            # (3.11.10 is a real release), which would take the fast path on a genuine
+            # 3.11 and land in the module's own guard -> exit 1, the owner-Mac failure.
+            # 3.11.99 sits above every real 3.11 patch, so any bound that would accept
+            # a real 3.11 fails this probe.
+            f'  exec "{PYTHON}" -c \'import sys; '
+            'sys.version_info = (3, 11, 99, "final", 0);'
+            ' exec(sys.argv[1])\' "$2"\n'
+            "fi\n"
+            "exit 1\n"
+        ))
+        for name in ("bash", "dirname"):
+            link = d / name
+            if not link.exists():
+                real = shutil.which(name)
+                self.assertIsNotNone(real, name)
+                link.symlink_to(real)
+        if uv:
+            self._write_exec(d / "uv", (
+                "#!/bin/bash\n"
+                "printf '%s\\n' \"$@\" > \"$UV_ARGS_FILE\"\n"
+                "exit 0\n"
+            ))
+        return str(d)
+
+    def test_the_wrapper_names_the_missing_runtime_instead_of_dying_in_the_module(self):
+        """No 3.12 interpreter and no `uv` -> rc 2 naming what is missing.
+
+        ⛔ rc 2 is this verb's "could not check" code (`rc 3` is a malformed
+        INVOCATION, and the flags here are fine — the RUNTIME is absent). Pre-change
+        the module's own guard exited 1, a code this verb documents it never returns.
+        """
+        proc = subprocess.run(
+            ["bash", str(WRAPPER), str(ISSUE), "--repo", str(self.repo)],
+            capture_output=True, text=True, timeout=120,
+            env={**self._env(), "PATH": self._interpreter_path(uv=False)},
+        )
+        self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+        self.assertIn("Python >= 3.12", proc.stderr)
+        self.assertIn("uv", proc.stderr)
+        # It must NAME the interpreter it found, not just assert one is missing.
+        self.assertIn("3.11.99", proc.stderr)
+
+    def test_a_312_python3_is_preferred_and_uv_is_never_reached(self):
+        """The FAST PATH: a >=3.12 `python3` wins, and `uv` must not run at all.
+
+        ⛔ AND IT IS THE ARM THAT RUNS ON EVERY NORMAL BOX (#11202 review round 9).
+        Both tests above use a shim whose version probe FAILS, so they drive only the
+        two fallback arms — deleting the `python3` fast path outright left this suite
+        green (measured: 61 passed). That mutation is not cosmetic: with the fast path
+        gone the wrapper falls through to the refusal, whose message says there is
+        "neither" a 3.12 python3 nor `uv` on a box that plainly has one — a
+        self-contradicting rc 2 for the verb AGENTS.md documents.
+
+        ⛔ AND IT IS DRIVEN AT TWO ABOVE-FLOOR POINTS (#11202 review round 12). One
+        point AT the floor pinned only that `>= (3, 12)` accepts (3,12,0); two
+        plausible tightenings — `sys.version_info[:2] == (3, 12)` and
+        `(3, 12) <= sys.version_info < (3, 13)` — then shipped green, and on a 3.13
+        host they lose the fast path and hand back the same self-contradicting refusal
+        ("neither a 3.12+ python3 nor uv", from an interpreter that IS 3.13). Faking
+        (3,12,0) and (3,13,0) pins "at the floor is accepted" AND "above it still is".
+        """
+        for version, text in (((3, 12, 0), "3.12.0"), ((3, 13, 0), "3.13.0")):
+            with self.subTest(python=text):
+                d = self.tmp / f"interp-fast-{text}"
+                d.mkdir(exist_ok=True)
+                ran = self.tmp / f"py-args-{text}.txt"
+                uv_ran = self.tmp / f"uv-ran-{text}.txt"
+                self._write_exec(d / "python3", (
+                    "#!/bin/bash\n"
+                    f'printf \'%s\\n\' "$@" >> "{ran}"\n'
+                    f"if [ \"$1\" = \"-V\" ]; then echo 'Python {text}'; exit 0; fi\n"
+                    # ⛔ THE PROBE IS PINNED, NOT RUN UNDER THE HOST INTERPRETER
+                    # (#11202 review round 11): delegating to the real interpreter made
+                    # this arm host-version dependent, so a raise above the floor
+                    # shipped green on a newer host.
+                    f'if [ "$1" = "-c" ]; then exec "{PYTHON}" -c \'import sys; '
+                    # ⛔ SPELLED AS A FULL FIVE-TUPLE, LIKE A REAL `version_info`
+                    # (#11202 review round 13). A bare `{version!r}` produced
+                    # `(3, 12, 0)` — no `releaselevel`/`serial` — so a
+                    # BEHAVIOUR-PRESERVING probe (`>= (3, 12, 0, "final", 0)`, which a
+                    # 3.12.3 interpreter answers True) was reported RED: the fake made
+                    # it False and the arm failed at `uv`'s exit 7. It was also not
+                    # quote-safe: `repr` of any string component emits `'final'`, which
+                    # closes the bash single-quoted `-c` word and leaves python with a
+                    # NameError. Spelling the components removes both.
+                    f'sys.version_info = ({version[0]}, {version[1]}, {version[2]},'
+                    ' "final", 0); exec(sys.argv[1])\' "$2"; fi\n'
+                    "exit 0\n"
+                ))
+                self._write_exec(d / "uv", (
+                    "#!/bin/bash\n"
+                    f'echo ran > "{uv_ran}"\n'
+                    "exit 7\n"      # loud if the fast path fails to short-circuit
+                ))
+                for name in ("bash", "dirname"):
+                    link = d / name
+                    if not link.exists():
+                        link.symlink_to(shutil.which(name))
+                proc = subprocess.run(
+                    ["bash", str(WRAPPER), str(ISSUE), "--repo", str(self.repo)],
+                    capture_output=True, text=True, timeout=120,
+                    env={**self._env(), "PATH": str(d)},
+                )
+                self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+                self.assertFalse(uv_ran.exists(),
+                                 f"uv must not be reached with a {text} python3")
+                args = ran.read_text().splitlines()
+                # The FIRST call is the version probe (`-c …`), never the module…
+                self.assertEqual(args[0], "-c")
+                # …and somewhere after it, the module is executed from THIS tree.
+                modules = [a for a in args if a.endswith("who_is_on.py")]
+                self.assertTrue(modules, args)
+                self.assertEqual(Path(modules[0]).resolve(), TOOL.resolve())
+
+    def test_the_wrapper_falls_back_to_uv_with_the_repo_project(self):
+        """`uv` is the fallback, and `--project` must select THIS repo's environment.
+
+        Without `--project`, uv resolves whatever environment the caller's cwd
+        happens to belong to — which is how a lane in another checkout gets a
+        different answer for the same verb.
+        """
+        log = self.tmp / "uv-args.txt"
+        proc = subprocess.run(
+            ["bash", str(WRAPPER), str(ISSUE)],
+            capture_output=True, text=True, timeout=120,
+            env={**self._env(), "PATH": self._interpreter_path(uv=True),
+                 "UV_ARGS_FILE": str(log)},
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        args = log.read_text().split()
+        self.assertIn("run", args)
+        self.assertIn("--project", args)
+        project = Path(args[args.index("--project") + 1]).resolve()
+        self.assertEqual(project, ROOT.resolve())
+        # argv after the project is `python <script>` — the interpreter uv owns, then
+        # the module. Assert the MODULE is ours (that is what the fallback must run).
+        self.assertEqual(args[args.index("--project") + 2], "python")
+        target = Path(args[args.index("--project") + 3])
+        self.assertEqual(target.name, "who_is_on.py")
+
     def test_the_ancestry_walk_uses_the_PS_binary_not_git(self):
         """Cycle-2 review, MEDIUM: `_ancestor_pids(ps_bin, …)` got `git_bin`.
 

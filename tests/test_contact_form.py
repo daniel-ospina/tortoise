@@ -1604,15 +1604,36 @@ def _contact_harness_runtime() -> list[str] | None:
     node = shutil.which("node")
     if node is not None:
         with tempfile.TemporaryDirectory() as probe_dir:
-            (Path(probe_dir) / "probe.ts").write_text("const x: number = 1;\n", encoding="utf-8")
-            probe = subprocess.run(
+            probe = Path(probe_dir)
+            # The harness is TWO `.ts` modules with an ESM `import` between them,
+            # and Node decides a `.ts` file's module type the same way it does a
+            # `.js` one: from the nearest `package.json`. Saying it explicitly is
+            # what makes the probe version-independent — module-syntax detection
+            # happens to be on in Node 24 and NOT in Node 22.23.4 (the CI runner),
+            # so relying on it made the same harness pass here and fail there.
+            (probe / "package.json").write_text('{"type": "module"}\n', encoding="utf-8")
+            (probe / "probe_dep.ts").write_text("export const a: number = 1;\n", encoding="utf-8")
+            # The probe IMPORTS another `.ts`, because that is what the harness
+            # does. A single self-contained file cannot tell the two capabilities
+            # apart: measured on Node 22.23.4, a self-contained `probe.ts` strips
+            # types and exits 0 while a `driver.ts` importing `./contact.ts` dies
+            # `Cannot use import statement outside a module` — so the old probe
+            # certified a runtime that could not run the harness, Deno was never
+            # reached, and the six harness checks failed instead of falling
+            # through.
+            (probe / "probe.ts").write_text(
+                'import { a } from "./probe_dep.ts";\n'
+                'if (a !== 1) throw new Error("the probe import resolved to the wrong value");\n',
+                encoding="utf-8",
+            )
+            probe_run = subprocess.run(
                 [node, "--experimental-strip-types", "probe.ts"],
                 cwd=probe_dir,
                 capture_output=True,
                 text=True,
                 timeout=60,
             )
-        if probe.returncode == 0:
+        if probe_run.returncode == 0:
             return [node, "--experimental-strip-types"]
     deno = shutil.which("deno") or str(Path.home() / ".deno" / "bin" / "deno")
     if Path(deno).is_file():
@@ -1638,6 +1659,12 @@ def _run_contact_harness(*checks: str) -> None:
         )
     with tempfile.TemporaryDirectory() as tmp:
         tmpdir = Path(tmp)
+        # Declare the module type explicitly. `contact.ts` and `driver.ts` are ESM
+        # (`driver.ts` imports `./contact.ts`), and without a `package.json` Node
+        # classifies a `.ts` file as CommonJS whenever module-syntax detection is
+        # off — which is the Node 22 runner's behaviour — so the driver died with
+        # `Cannot use import statement outside a module` before a single check ran.
+        (tmpdir / "package.json").write_text('{"type": "module"}\n', encoding="utf-8")
         entry = _src(FUNCTION_TS).replace(
             '"../_shared/contact-transport"', '"./contact-transport.ts"'
         )
