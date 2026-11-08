@@ -20,7 +20,7 @@ and left one statement uncovered was invisible to every instrument in the tree
 that can only count.
 
 It reports. It never acts. The **action** is a separate, flag-gated stage
-(`extractor_v2.run_partial_gap_fill`, S2.2b, `TORTOISE_PARTIAL_GAP_FILL`,
+(`extractor_v2.run_partial_gap_fill`, S2.2b-ADD, `TORTOISE_PARTIAL_GAP_FILL`,
 **default OFF**), and this record exists because that stage's value depends
 entirely on how good the detector is — a stage that "fills" a gap that was not
 a gap adds cost and noise.
