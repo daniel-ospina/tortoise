@@ -319,19 +319,29 @@ RUNNERS: Final[frozenset[str]] = frozenset(
 _CHAIN_WORDS: Final[frozenset[str]] = frozenset({"run", "exec", "x"})
 
 #: The ONE way a subcommand verb is admitted: **per runner**, never as a global
-#: word set. `ruff check <path>` / `ruff format --check <path>` are records this
-#: repo's own lint gate produces (`.github/workflows/main-lint.yml` runs
-#: `ruff check .`), and refusing them was a measured FALSE BLOCK that loses the whole
-#: uncovered list — exit 1 prints no report — measured at `0c259a39f3`
-#: (`'check' is not a file in this tree`) and on `origin/main` at `5ef5805f0`.
+#: word set. `cmd:ruff check <path>` / `cmd:ruff format --check <path>` were REFUSED
+#: (`'check' is not a file in this tree`) at `0c259a39f3` and on `origin/main` at
+#: `5ef5805f0` — exit 1, which prints no report, so a lane recording the lint gate it
+#: actually ran lost the whole uncovered list.
 #:
-#: ⛔ It was not fixable by skipping subcommand verbs generally, which is the
-#: `_CHAIN_WORDS` hole in a different hat: a global set skips `check` after ANY
-#: runner and re-admits `cmd:uv run not run - see tools/capstone_ledger.py`, the
-#: sentence-with-a-file-in-it this whole arm exists to refuse. Keyed by the runner
-#: ACTUALLY being invoked (the last RUNNER token in the chain, so `uv run ruff …`
-#: resolves to `ruff`), `git NOT-RUN`, `make check` and `ruff not - see <path>` stay
-#: refused.
+#: ⛔ What this does NOT admit, stated so the next lane does not read the fix as
+#: wider than it is: `.github/workflows/main-lint.yml:215` runs a bare `ruff check .`,
+#: and `cmd:ruff check .` is STILL refused — `.` resolves to the repository root and
+#: names everything, which is the vacuity `cmd:pytest .` is refused for
+#: (`_names_artifact`, "a bare `*`/`.`/`/` is not a citation"). A lane recording that
+#: shape must spell the target as a path (`ruff check tools/`, `ruff check <file>`).
+#: Pinned as REFUSED by
+#: `test_a_subcommand_verb_is_admitted_per_runner_and_nowhere_else`. Admitting `.`
+#: under a consumed subcommand is a defensible narrowing (it would confer nothing,
+#: like `cmd:make`), but it weakens a load-bearing vacuity rule and belongs in its
+#: own change with its own measurement — not folded in here.
+#:
+#: ⛔ And it was not fixable by skipping subcommand verbs GENERALLY, which is what a
+#: GLOBAL word set does — measured under that mutant, it newly admits
+#: `cmd:make check` and `cmd:docker format` (a bare word behind ANY runner becomes
+#: skippable, i.e. the one-word claim this gate exists to refuse). Keyed by the
+#: runner ACTUALLY being invoked (the last RUNNER token in the chain, so
+#: `uv run ruff …` resolves to `ruff`), those stay refused.
 #:
 #: ⛔ SCOPED TO THE RUNNERS THIS REPO WRITES DOWN — one entry, added because a real
 #: record was refused without it. A subcommand word is a NON-ARTIFACT argument, so
@@ -372,6 +382,19 @@ _MAX_SCRIPT_DEPTH: Final[int] = 3
 #: Two-character operators are matched before their one-character prefixes.
 _TWO_CHAR_SEPARATORS: Final[tuple[str, ...]] = ("&&", "||")
 _ONE_CHAR_SEPARATORS: Final[frozenset[str]] = frozenset({";", "|", "&", "\n"})
+
+
+def _is_redirection(text: str, index: int) -> bool:
+    """Is the `&`/`|` at `index` part of a REDIRECTION rather than a separator?
+
+    The shell's rule is adjacency to `>`: `&>`/`&>>` put the `&` before it;
+    `2>&1`, `>&2`, `N>&M`, `N>&-` and bash's noclobber override `>|` put it after.
+    Anything else — `a & b`, `a | b`, `a |& b` — is a separator (`|&` is a pipe plus
+    a background marker; it splits and the empty middle segment is skipped).
+    """
+    if text[index] not in "&|":
+        return False
+    return text[index - 1 : index] == ">" or text[index + 1 : index + 2] == ">"
 
 
 def _split_segments(text: str) -> list[str]:
@@ -429,20 +452,22 @@ def _split_segments(text: str) -> list[str]:
             current = []
             index += 2
             continue
-        elif char == "&" and (text.startswith("&>", index) or (current and current[-1] == ">")):
-            # ⛔ A REDIRECTION, not a separator (#11506 review, P1 regression).
-            # `&` was split as a separator wherever it appeared, so an ordinary
-            # recorded command carrying a redirection was torn in two and REFUSED:
-            # measured at the pre-fix head, `… -q 2>&1 | tail -20`,
-            # `… -q > /tmp/o.txt 2>&1`, `… -q &> /tmp/o.txt` and `… -q | tee log`
-            # all exited 1 — and exit 1 prints NO report, so the whole uncovered
-            # list disappeared. Every one of them was ACCEPTED on `origin/main`,
-            # so the every-segment rule had introduced a false block of exactly
-            # the class this PR exists to remove.
+        elif char in "&|" and _is_redirection(text, index):
+            # ⛔ A REDIRECTION, not a separator (#11506 review). The splitter runs
+            # over every `;` `|` `&` on the line, so an ordinary recorded command
+            # carrying a redirection was torn in two and REFUSED: measured at the
+            # pre-fix head, `… -q 2>&1 | tail -20`, `… -q > /tmp/o.txt 2>&1`,
+            # `… -q &> /tmp/o.txt`, `… -q | tee log` AND `… -q >| out.txt` all exited
+            # 1 — and exit 1 prints NO report, so the whole uncovered list vanished.
+            # Every one of them was ACCEPTED on `origin/main`, so the every-segment
+            # rule had introduced a false block of exactly the class this PR exists
+            # to remove. `>|` was the one spelling the first fix missed: the SAME
+            # defect in the SAME function, one separator over.
             #
-            # `&>`/`&>>` put the `&` BEFORE the `>` (bash); `2>&1`, `>&2`,
-            # `N>&M` and `N>&-` put it AFTER. A bare `&` between words is still a
-            # separator (`a & b` backgrounds `a`); `&&` is matched above.
+            # The shell's own rule is ADJACENCY TO `>`: `&>`/`&>>` put the `&` before
+            # it; `2>&1`, `>&2`, `N>&M`, `N>&-` and bash's noclobber override `>|`
+            # put it after. A `&`/`|` that is not adjacent still separates — `a & b`
+            # backgrounds `a`, `a | b` pipes (both pinned).
             current.append(char)
         elif char in _ONE_CHAR_SEPARATORS:
             segments.append("".join(current))

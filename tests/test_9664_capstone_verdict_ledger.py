@@ -799,11 +799,19 @@ def test_a_cmd_target_that_names_no_held_artifact_is_invalid(tmp_path):
         "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q | tee pytest.log",
         "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q | logger -t pytest",
         "cmd:bash -c 'uv run pytest tests/test_9664_capstone_verdict_ledger.py -q 2>&1'",
+        # ⛔ `>|` is bash's NOCLOBBER-OVERRIDE redirection, and it was the one spelling
+        # the first redirection fix missed: `|` was still split, so the segment
+        # `out.txt` came back as prose and the record was REFUSED (measured at
+        # `d38377417b`; ACCEPTED on `origin/main`, so the every-segment rule owned
+        # the false block). Verified against bash itself: `printf A >| f1` exits 0
+        # and writes `f1` — one command, a redirection.
+        "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q >| out.txt",
+        "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q >|out.txt",
         # ⛔ A runner's own SUBCOMMAND verb is not an artifact. `ruff check <path>`
-        # is a record this repo's lint gate really produces (`.github/workflows/
-        # main-lint.yml` runs `ruff check .`), and it was REFUSED at `0c259a39f3`
-        # with `'check' is not a file in this tree` — exit 1, so the whole uncovered
-        # list disappeared. `ruff` was already in `RUNNERS`, so the entry was inert.
+        # is a record this repo's lint gate really produces, and it was REFUSED at
+        # `0c259a39f3` with `'check' is not a file in this tree` — exit 1, so the
+        # whole uncovered list disappeared. `ruff` was already in `RUNNERS`, so the
+        # entry was inert.
         "cmd:ruff check tools/capstone_ledger.py",
         "cmd:uv run ruff check tools/capstone_ledger.py",
         "cmd:uv run ruff format --check tools/capstone_ledger.py",
@@ -995,13 +1003,22 @@ def test_a_subcommand_verb_is_admitted_per_runner_and_nowhere_else(tmp_path):
     nothing, because the only shape it helped was a LATER segment, which is not
     graded at all (#11520).
 
-    ⛔ The fix is NOT a global subcommand word set. That is the `_CHAIN_WORDS` hole
-    in a different hat: it would skip `check`/`format` after ANY runner and
-    re-admit `cmd:uv run not run - see tools/capstone_ledger.py`, the
-    sentence-with-a-file-in-it this arm exists to refuse. Keyed by the runner
+    ⛔ The fix is NOT a global subcommand word set. A global set makes a bare word
+    behind ANY runner skippable — measured under that mutant it newly admits
+    `cmd:make check` and `cmd:docker format` (both pinned below), i.e. the
+    one-word claim behind a runner this gate exists to refuse. Keyed by the runner
     ACTUALLY invoked — so `uv run ruff check` resolves the subcommand to `ruff` —
-    and scoped to the runners this repo writes down. One subcommand token, once,
+    and scoped to the runners this repo writes down: one subcommand token, once,
     immediately after its runner.
+
+    ⛔ STILL REFUSED, and pinned as such: `cmd:ruff check .`. The repo's own
+    `.github/workflows/main-lint.yml:215` runs a bare `ruff check .`, but `.`
+    resolves to the repository root and names everything — the same vacuity that
+    refuses `cmd:pytest .` — so a lane recording that shape must spell the target
+    as a path (`ruff check tools/`, `ruff check <file>`, both accepted below).
+    Admitting `.` under a consumed subcommand is a defensible narrowing (it would
+    confer nothing, like `cmd:make`), but it weakens a load-bearing rule and
+    belongs in its own change; here it is a DECLARED residual, not a silent one.
     """
     for legitimate in (
         "cmd:ruff check tools/capstone_ledger.py",
@@ -1021,6 +1038,12 @@ def test_a_subcommand_verb_is_admitted_per_runner_and_nowhere_else(tmp_path):
         # `ruff`'s map holds no such word, so the prose this arm exists to refuse
         # is still refused behind the runner that HAS a map.
         "cmd:ruff not - see tools/capstone_ledger.py",
+        # The repo's own CI shape (`.github/workflows/main-lint.yml:215` is
+        # `run: ruff check .`). `.` names everything, which is the vacuity the
+        # artifact rule refuses — declared, pinned, and answered by spelling the
+        # target as a path (`ruff check tools/` is accepted below).
+        "cmd:ruff check .",
+        "cmd:uv run ruff check .",
         # ONE subcommand token, immediately after its runner: a second bare word is
         # back in artifact position and must name something a clone holds.
         "cmd:ruff check format NOT-RUN",
