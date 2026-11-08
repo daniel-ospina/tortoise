@@ -127,12 +127,17 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "CACHE_READ_TIMEOUT_MS",
+    "FTS_PROBE_ENTITY_TYPE",
     "carries_pre_lexicon_prose",
     "census",
     "find_session_sources_carrying_prose",
+    "lexicon_control_token",
+    "probe_fts",
+    "probe_phrase_rejection",
     "reconcile_after_replay",
     "reconcile_session_source_prose",
     "record_turn_reader",
+    "source_fts_probe",
 ]
 
 #: Wall-clock bound on the cache-wide Source read. Bounded, never truncated —
@@ -467,20 +472,30 @@ def _read_source_rows(g, timeout_ms: int) -> list[dict]:
         rows = g.query(_SOURCE_ROWS).result_set
     out: list[dict] = []
     for row in rows or ():
-        if not row:
-            continue
-        tmi = row[6] if len(row) > 6 else None
-        # `id(s)` — the node identity the write addresses by (`_REPAIR_PAIR`'s
-        # ⛔). `None` when the row is short (a seam/fake that projects seven
-        # columns): such a row cannot be addressed and is reported, never
-        # guessed at.
-        nid = row[7] if len(row) > 7 else None
-        props = {"url": row[0], _KIND: row[1], _SUMMARY: row[2],
-                 _SEARCH_TEXT: row[3], _TOPICS: row[4], "sessionId": row[5],
-                 "turn_max_index": tmi if isinstance(tmi, int) else None,
-                 _NODE_ID: nid if isinstance(nid, int) else None}
-        out.append(props)
+        props = _row_props(row)
+        if props is not None:
+            out.append(props)
     return out
+
+
+def _row_props(row) -> dict | None:
+    """One ``_SOURCE_ROWS`` row as a property map, or ``None`` for an empty row.
+
+    Split out so the FTS leg's hit-classifier parses a Source row the SAME way
+    the census does — one row layout, one decoder (see :data:`_HITS_ROWS`).
+    """
+    if not row:
+        return None
+    tmi = row[6] if len(row) > 6 else None
+    # `id(s)` — the node identity the write addresses by (`_REPAIR_PAIR`'s
+    # ⛔). `None` when the row is short (a seam/fake that projects seven
+    # columns): such a row cannot be addressed and is reported, never
+    # guessed at.
+    nid = row[7] if len(row) > 7 else None
+    return {"url": row[0], _KIND: row[1], _SUMMARY: row[2],
+            _SEARCH_TEXT: row[3], _TOPICS: row[4], "sessionId": row[5],
+            "turn_max_index": tmi if isinstance(tmi, int) else None,
+            _NODE_ID: nid if isinstance(nid, int) else None}
 
 
 def _census_dedupe_enabled() -> bool:
@@ -1094,4 +1109,308 @@ def reconcile_after_replay(projection, *, engine: str,
                 len(report["written"]), len(report["candidates"]),
                 len(report["repaired"]), len(report["no_record"]),
                 len(report.get("left_alone") or []))
+    return report
+
+
+
+# ── the FTS leg — the SECOND half of the verification (#11161) ────────────
+#
+# ⛔ THE CENSUS IS NOT THE TARGET. #11070's own indicator says why in one
+# sentence: "the whole point is that the sentence is also in the FTS index, so
+# the verification is a search that stops finding it". The census reads NODE
+# PROPERTIES; the FTS index is a DIFFERENT artifact built from them
+# (``projection._REQUIRED_FULLTEXT_INDEXES`` declares ``("Source", "_searchText",
+# "FULLTEXT")``). A repair — or a later regression — that cleared the pair on the
+# node while the indexed tokens stayed findable passes every census and leaves
+# the leak live in the only way a user experiences it: the sentence is still
+# retrievable. So the verification needs a query that STOPS RETURNING THE
+# SENTENCE, and that is what this section provides.
+#
+# ⛔ AND A HIT IS NOT ALWAYS A LEAK — the distinguishing is what makes the leg
+# usable rather than a red light nobody believes. FalkorDB's FTS tokenises and
+# STEMS, so a probe token can come back from a node that is already repaired:
+# measured on a real FalkorDB, the probe ``fridays`` still returns a node whose
+# ``_searchText`` is the lexicon ``migration, plan, friday`` — the stem
+# ``friday`` matches. That node's indexed text is NOT the sentence; it is the
+# descriptor the post-#10852 writer produces. A leg that called that a leak would
+# report a CORRECT repair as unfinished, and the way an operator silences it is
+# by clearing the lexicon — the #3518 descriptor. So every hit is CLASSIFIED
+# against the module's own predicate: a hit whose node still carries
+# pre-lexicon prose is RESIDUE (a real leak); a hit whose node carries the
+# prefix is a stem collision, reported separately and never as a failure.
+#
+# ⛔ AND A ZERO FROM A DEAD INSTRUMENT IS NOT A ZERO. Three ways the leg can read
+# ``0`` while measuring nothing:
+#
+# 1. **The probe never matched anything** — an operator-invented phrase that is
+#    not in the corpus hits 0 BEFORE the repair too, so its 0 after proves
+#    nothing. That is what the BEFORE/AFTER pair is for: a probe with
+#    ``hits_before > 0`` that now reads 0 is the discriminating evidence, and a
+#    probe whose before was ALSO 0 is reported as undiscriminating rather than
+#    counted as a pass.
+# 2. **The index read itself returned nothing** — an FTS circuit breaker that is
+#    open, an index dropped, or a query that failed all surface to
+#    ``run_fts_query`` as ``[]``. ``leg_trace`` is therefore read on EVERY probe
+#    and a leg that did not run (or ran degraded) is reported as UNMEASURABLE,
+#    never as a clean zero. The positive CONTROL is the second half of the same
+#    guard: one token taken from a POST-fix lexicon node's own ``_searchText``
+#    must still be findable, because that proves the index answers at all.
+# 3. **The read was TRUNCATED** — a hit count that reaches the read's ``LIMIT``
+#    means the probe matched more nodes than were classified, so residue beyond
+#    the window would be invisible. A probe that common is not a probe: it is
+#    reported as ``truncated`` and it cannot certify.
+#
+# ⚠️ Why the leg goes through :func:`tortoise.search_engine.run_fts_query` and
+# not a raw ``CALL db.idx.fulltext.queryNodes``: that function is the product's
+# ONE source-FTS read, and it carries the ``documentKind IS NULL`` discriminator
+# (a document IS a ``:Source``, D10/#5026) plus the escaping and the measured
+# breaker. A second query here would be a second derivation of the same read.
+
+#: The label whose FULLTEXT index the sentence leaks through. A document is a
+#: ``:Source`` too, so ``run_fts_query``'s own ``documentKind IS NULL`` filter is
+#: what keeps this from measuring the document corpus.
+FTS_PROBE_ENTITY_TYPE = "source"
+
+#: The read's window. Every returned hit is CLASSIFIED (see the section header),
+#: so this is a classification budget, not a count: a probe that fills it is
+#: common enough that its residue could hide beyond the window, and
+#: :func:`probe_fts` marks that as ``truncated`` instead of certifying.
+_FTS_PROBE_LIMIT = 50
+
+#: The SAME columns as :data:`_SOURCE_ROWS` (so :func:`_row_props` decodes both),
+#: filtered to the urls the FTS read returned — one read for the whole hit set,
+#: so the classifier costs one query per probe, not one per hit.
+_HITS_ROWS = (
+    "MATCH (s:Source) "
+    "WHERE s.url IN $urls "
+    "RETURN s.url, s.sourceKind, s.summary, s._searchText, s.topics, "
+    "       s.sessionId, s.turn_max_index, id(s)"
+)
+
+#: One post-fix lexicon node's ``_searchText``, for the positive control. Read by
+#: the WITNESS (the ``summary`` prefix), which is the same discriminator
+#: :func:`carries_pre_lexicon_prose` uses — so the control queries a node the
+#: lexicon writer produced, not one this repair left behind.
+_CONTROL_LEXICON_ROWS = (
+    "MATCH (s:Source) "
+    "WHERE s.summary STARTS WITH $prefix "
+    "AND s._searchText IS NOT NULL "
+    "AND s.documentKind IS NULL "
+    "RETURN s._searchText LIMIT 1"
+)
+
+
+def probe_phrase_rejection(phrase: str) -> str | None:
+    """Why *phrase* cannot serve as an FTS probe, or ``None`` when it can.
+
+    ⛔ A PROBE MUST BE ONE TOKEN, AND THE REASON IS THE READ PATH'S OWN
+    SEMANTICS, not tidiness. ``run_fts_query`` routes the query through
+    :func:`tortoise.sparse.build_or_query`, which OR-joins a multi-token input
+    (``'the second-latest PR comment'`` → ``comment|second|latest|pr``). A probe
+    measured that way returns rows for ANY of its tokens — and a post-fix
+    lexicon's words are ordinary words — so a CORRECT repair would still read
+    "leaked", and the obvious way to silence it is to clear the lexicon, i.e.
+    destroy the descriptor #3518 exists to provide. Measured on the live hosted
+    graph: the single token ``the`` returns the pre-fix fixture at rank 1, and a
+    phrase that occurs nowhere still returns rows once it tokenises.
+
+    The identifier mechanism (#8933) is the second way one typed token becomes
+    several (``zx-99`` → ``zx|zx99|"zx 99"``), so that shape is refused too.
+
+    ⚠️ What this CANNOT decide is RARITY — whether the token exists in the
+    corpus. That is measured, not declared: the before/after pair on the writing
+    arm, and the ``truncated`` flag on a probe that matches too much.
+    """
+    token = (phrase or "").strip()
+    if not token:
+        return "it is empty"
+    # Lazy: `sparse` pulls the tokenizer + identifier machinery, and this module
+    # is imported by every whole-journal replay engine's trailing sweep.
+    from tortoise.sparse import build_or_query, tokenize_sparse_query
+
+    tokens = tokenize_sparse_query(token)
+    if len(tokens) != 1:
+        return (f"it tokenises to {len(tokens)} term(s) {tokens!r}; the FTS read "
+                f"OR-joins multi-term input, so the probe would match on any "
+                f"one of them — pass a SINGLE RARE token that appears only in "
+                f"the pre-fix prose (a stopword-only phrase is not a probe)")
+    built = build_or_query(token)
+    if len(built.split("|")) != 1:
+        return (f"the identifier mechanism expands it into several terms "
+                f"({built!r}); pass the plain token without an identifier shape "
+                f"(no digit/dash runs)")
+    return None
+
+
+def source_fts_probe(g, phrase: str, *,
+                     timeout_ms: int = CACHE_READ_TIMEOUT_MS) -> dict:
+    """Ask the Source FTS index whether *phrase* is still findable.
+
+    Returns ``{"phrase", "hits", "urls", "truncated", "ran", "degraded",
+    "reason"}``. ``hits`` counts the rows the read returned (capped at
+    :data:`_FTS_PROBE_LIMIT`), so ``0`` reads as "not findable"; ``urls`` is what
+    the classifier resolves, and ``truncated`` says the window filled — i.e. the
+    count is a FLOOR and residue could be hiding past it.
+
+    ``ran``/``degraded``/``reason`` come from the read path's own ``leg_trace``:
+    a breaker-open or index-missing leg returns ``[]`` exactly as a clean miss
+    does, and folding those together is the false PASS this leg exists to
+    prevent.
+
+    ``timeout_ms`` is CLAMPED to the server's own cap: the canonical docker lane
+    runs ``TIMEOUT_MAX 30000``, and an unclamped 60 000 raised ``ResponseError``
+    on every run of the census before #11152's review found it — the same
+    deployment setting applies to this query.
+    """
+    from tortoise.search_engine import run_fts_query  # lazy (see module docs)
+
+    trace: list[dict] = []
+    rows = run_fts_query(
+        g, phrase, entity_type=FTS_PROBE_ENTITY_TYPE, limit=_FTS_PROBE_LIMIT,
+        timeout_ms=_effective_timeout_ms(g, timeout_ms), leg_trace=trace)
+    leg = next((e for e in trace if e.get("leg") == "fts"), {})
+    urls = [row[0] for row in rows or () if row and isinstance(row[0], str)]
+    return {
+        "phrase": phrase,
+        "hits": len(rows or ()),
+        "urls": urls,
+        "truncated": len(rows or ()) >= _FTS_PROBE_LIMIT,
+        "ran": bool(leg.get("ran")),
+        "degraded": bool(leg.get("degraded")),
+        "reason": leg.get("reason"),
+    }
+
+
+def classify_fts_hits(g, urls, *,
+                      timeout_ms: int = CACHE_READ_TIMEOUT_MS) -> dict:
+    """Split *urls* into RESIDUE (still pre-fix prose) and LEXICON (repaired).
+
+    ⛔ THE SPLIT IS THE WHOLE POINT OF THE LEG (see the section header): the index
+    stems, so a probe token can come back from a node whose indexed text is
+    already the topic lexicon — a correct repair, not a leak. The classifier
+    applies the module's own :func:`carries_pre_lexicon_prose`, so the two halves
+    cannot drift from the census.
+
+    Returns ``{"residue": [...], "lexicon": [...], "unread": [...]}``. A url the
+    read did not return is ``unread`` — a hit that could not be classified is
+    NOT evidence either way, and the caller must not fold it into ``lexicon``.
+    """
+    wanted = [u for u in (urls or ()) if isinstance(u, str) and u]
+    out: dict = {"residue": [], "lexicon": [], "unread": []}
+    if not wanted:
+        return out
+    try:
+        rows = g.query(_HITS_ROWS, params={"urls": wanted},
+                       timeout=_effective_timeout_ms(g, timeout_ms)).result_set
+    except Exception:  # noqa: BLE001, RUF100 — an unreadable classification is
+        # reported as `unread`, never raised: this runs inside the verification
+        # step, where an exception would be a crash instead of a verdict.
+        logger.debug("#11070: the FTS hit classification read failed",
+                     exc_info=True)
+        out["unread"] = list(wanted)
+        return out
+    props_by_url = {}
+    for row in rows or ():
+        props = _row_props(row)
+        if props is not None and isinstance(props.get("url"), str):
+            props_by_url[props["url"]] = props
+    for url in wanted:
+        props = props_by_url.get(url)
+        if props is None:
+            out["unread"].append(url)
+        elif carries_pre_lexicon_prose(props):
+            out["residue"].append(url)
+        else:
+            out["lexicon"].append(url)
+    return out
+
+
+def lexicon_control_token(g, *,
+                          timeout_ms: int = CACHE_READ_TIMEOUT_MS) -> str | None:
+    """One token from a POST-fix lexicon node, or ``None`` when there is none.
+
+    The positive control: a token the lexicon writer put on a node must still be
+    findable, which is what makes the probes' zero evidence that the index
+    ANSWERS rather than evidence that the read is dead.
+    """
+    try:
+        rows = g.query(_CONTROL_LEXICON_ROWS,
+                       params={"prefix": SESSION_SOURCE_SUMMARY_PREFIX},
+                       timeout=_effective_timeout_ms(g, timeout_ms)).result_set
+    except Exception:  # noqa: BLE001, RUF100 — a control that cannot be read is
+        # reported as ABSENT by the caller, never raised: the probe result is the
+        # finding, and an exception here would turn "unmeasurable" into a crash.
+        logger.debug("#11070: the FTS control read failed", exc_info=True)
+        return None
+    for row in rows or []:
+        text = row[0] if row else None
+        if not isinstance(text, str):
+            continue
+        for token in text.split(","):
+            candidate = token.strip()
+            if candidate and probe_phrase_rejection(candidate) is None:
+                return candidate
+    return None
+
+
+def probe_fts(g, phrases, *, control: bool = True,
+              timeout_ms: int = CACHE_READ_TIMEOUT_MS) -> dict:
+    """Measure the Source FTS index for every probe phrase, plus the control.
+
+    Returns::
+
+        {"ran": bool,                # at least one probe was measured
+         "entity_type": "source", "limit": 50,
+         "probes": [{phrase, hits, urls, truncated, ran, degraded, reason,
+                     residue, lexicon, unread}, ...],
+         "leaked": [phrase, ...],          # residue still findable — a LEAK
+         "stem_only": [phrase, ...],       # hits, but every one is a lexicon node
+         "unmeasurable": [phrase, ...],    # the leg did not run / is degraded
+         "truncated": [phrase, ...],       # the window filled — a FLOOR, not a 0
+         "control": {"ok", "hits", "note"} | None}
+
+    ⚠️ ``control`` is only meaningful AFTER a repair has written a lexicon: on a
+    graph with no post-fix node it is ``{"ok": False, "hits": None, "note": …}``
+    and the caller reports why rather than treating the absence as a failure of
+    the repair itself.
+    """
+    measured: list[dict] = []
+    for phrase in phrases:
+        got = source_fts_probe(g, phrase, timeout_ms=timeout_ms)
+        split = classify_fts_hits(g, got["urls"], timeout_ms=timeout_ms)
+        got.update(split)
+        measured.append(got)
+    report: dict = {
+        "ran": bool(measured),
+        "entity_type": FTS_PROBE_ENTITY_TYPE,
+        "limit": _FTS_PROBE_LIMIT,
+        "probes": measured,
+        "leaked": [p["phrase"] for p in measured if p["residue"]],
+        "stem_only": [p["phrase"] for p in measured
+                      if p["hits"] and not p["residue"] and not p["unread"]],
+        "unmeasurable": [p["phrase"] for p in measured
+                         if not p["ran"] or p["degraded"]],
+        "truncated": [p["phrase"] for p in measured if p["truncated"]],
+        "control": None,
+    }
+    if control:
+        token = lexicon_control_token(g, timeout_ms=timeout_ms)
+        if token is None:
+            report["control"] = {
+                "ok": False, "hits": None,
+                "note": "no POST-fix lexicon node on this graph, so the index "
+                        "read cannot be corroborated by a known-present token "
+                        "(a graph that has only ever been CLEARED has none)"}
+        else:
+            # ⛔ The TOKEN IS NOT ECHOED. It is a transcript-derived word (the
+            # capture's own topic lexicon), and the dry run's report is
+            # deliberately redacted by whitelist so no piece of the utterance
+            # reaches stdout or `--json`; only the measured COUNT is reported.
+            got = source_fts_probe(g, token, timeout_ms=timeout_ms)
+            report["control"] = {
+                "ok": bool(got["hits"]), "hits": got["hits"],
+                "ran": got["ran"], "degraded": got["degraded"],
+                "reason": got["reason"],
+                "note": "one token of a post-fix lexicon node's `_searchText`",
+            }
     return report
