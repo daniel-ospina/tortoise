@@ -1465,11 +1465,16 @@ def test_the_10852_obligation_quotes_the_authority_AS_IT_NOW_READS():
     # ⚠️ The quote group admits an ESCAPED `\"` (`(?:\\.|[^"\\])+`): with a plain
     # `[^"]+`, a quoted sentence containing an escaped quote matched nothing and
     # the pin reported a MISSING QUOTATION for a parser gap (#11481 review round 5).
-    cands = list(re.finditer(
+    # ⚠️ ONE definition of the citation grammar. It is used twice below (the
+    # tethered search, and the beyond-tether diagnosis); a second inline copy
+    # would mean a future grammar widening fixes one call site and re-creates the
+    # very misdiagnosis the second one exists to remove (#11481 review round 10).
+    CITATION = (
         r'STORAGE-ARCHITECTURE\.md'
         r'(?P<loc>(?:(?!STORAGE-ARCHITECTURE\.md)[\s\S]){0,200}?)'
-        r':\s*\*"(?P<quote>(?:\\.|[^"\\])+)"\*',
-        window))
+        r':\s*\*"(?P<quote>(?:\\.|[^"\\])+)"\*'
+    )
+    cands = list(re.finditer(CITATION, window))
     # ⚠️ An EMPTY window result must not be reported as a MISSING quotation when
     # the quotation is merely FURTHER AWAY than `WINDOW` (#11481 review round 9,
     # measured: ~640 characters of prose inserted between the anchor and an
@@ -1477,11 +1482,7 @@ def test_the_10852_obligation_quotes_the_authority_AS_IT_NOW_READS():
     # pointing a maintainer at prose that is already correct). Search the whole
     # source so the two causes stay distinguishable.
     if not cands:
-        beyond = list(re.finditer(
-            r'STORAGE-ARCHITECTURE\.md'
-            r'(?P<loc>(?:(?!STORAGE-ARCHITECTURE\.md)[\s\S]){0,200}?)'
-            r':\s*\*"(?P<quote>(?:\\.|[^"\\])+)"\*',
-            source[anchor:]))
+        beyond = list(re.finditer(CITATION, source[anchor:]))
         if beyond:
             raise AssertionError(
                 "the narrowing's citation IS present, but "
@@ -1495,7 +1496,8 @@ def test_the_10852_obligation_quotes_the_authority_AS_IT_NOW_READS():
     assert len(cands) == 1, (
         "the narrowing's authority is not a SINGLE citation in the "
         f"{WINDOW}-character window after its anchor {ANCHOR!r}: found "
-        f"{len(cands)} — {[' '.join(m.group('loc').split()) for m in cands]}. "
+        f"{len(cands)} — "
+        f"{[(' '.join(m.group('loc').split()).strip('`').strip()) for m in cands]}. "
         "The citation shape this pin looks for is `<doc>.md <locator>: *\"…\"*` "
         "(the quote grammar admits an escaped quote). This pin cannot tell which "
         "one the narrowing rests on; leave exactly one — and if the list is EMPTY, "
