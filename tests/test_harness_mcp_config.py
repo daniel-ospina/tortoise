@@ -581,8 +581,8 @@ class TestPrintHarnessInstructions:
     #
     # These surfaces used to advertise a `tortoise-context` extension that has
     # never existed in this repo or in agent-infra, plus a per-turn context
-    # injection Pi has no seam for (#2119 is the injection seam and is still
-    # open). The name was hardcoded prose with nothing coupling it to the
+    # injection Pi has no seam for (that seam is #2119 — since landed). The
+    # name was hardcoded prose with nothing coupling it to the
     # shipped artifact, so nothing failed when the two drifted. The name is now
     # DERIVED from the install contract; these tests are the CI half of the
     # issue's fix — the drift fails the build instead of the user.

@@ -5623,9 +5623,11 @@ def _cmd_install_hooks(args) -> int:
         if rc != 0:
             return rc
     if harness == "pi":
-        # Pi has no shell-hook read seam — its only seam is the capture
-        # extension; `_install_capture_seam` already reported the install,
-        # the no-op, and the MCP/restart guidance.
+        # Pi's seam is TWO extension files, not a shell-hook registration —
+        # `_install_capture_seam` wrote both (the capture artifact and the
+        # per-turn read seam, #2119) and reported them. Falling through to
+        # `_install_read_hook` would inspect (and could rewrite) a CLINE
+        # registration via that helper's `else` branch.
         return 0
     # `openclaw` (#2120) has no shell-hook read seam either: its per-turn
     # injection IS the native plugin, so the capture installer's report is the
