@@ -1432,16 +1432,31 @@ def test_the_10852_obligation_quotes_the_authority_AS_IT_NOW_READS():
     # asserted, so deleting it is a loud failure rather than a quiet re-point.
     source = inspect.getsource(cp)
     ANCHOR = "The authority for the pair is"
+    # ⛔ THE ANCHOR ITSELF MUST BE UNIQUE, because `str.find` is FIRST MATCH — the
+    # same defect one level up. Measured (#11481 review round 4): a SECOND
+    # "The authority for the pair is …" paragraph placed above this one, carrying
+    # its own valid citation, silently became the candidate, so the narrowing's own
+    # citation could be broken to `§9.2` while the pin stayed GREEN. Duplication is
+    # not malice — any future paragraph reusing the phrase has that shape — so the
+    # count is part of what this pin asserts.
+    assert source.count(ANCHOR) == 1, (
+        f"the pin's ANCHOR {ANCHOR!r} occurs {source.count(ANCHOR)} times in "
+        "`cache_projection` — only the FIRST is used, so a second one silently "
+        "becomes the narrowing's citation. Leave exactly one, or re-point the "
+        "anchor at phrasing that is unique")
     anchor = source.find(ANCHOR)
-    assert anchor >= 0, (
-        "the pin's ANCHOR is gone from `cache_projection` — it locates the "
-        f"narrowing's citation by {ANCHOR!r}, so re-point the anchor rather than "
-        "deleting it (a first-match search is what let a decoy citation certify "
-        "this pin, #11481 review round 3)")
     WINDOW = 600
     window = source[anchor:anchor + WINDOW]
+    # ⚠️ A locator may not SWALLOW another `STORAGE-ARCHITECTURE.md` mention: the
+    # tempered `(?!)` makes a span that starts at an earlier bare mention fail to
+    # reach `: *"`, so the match begins at the mention that carries the locator.
+    # Without it the span could start at an earlier mention and yield a locator of
+    # "`STORAGE-ARCHITECTURE.md` §9.1", which the classifier would then report as a
+    # PARSER gap — fail-closed, but a wrong diagnosis (#11481 review round 4).
     cands = list(re.finditer(
-        r'STORAGE-ARCHITECTURE\.md(?P<loc>[\s\S]{0,200}?):\s*\*"(?P<quote>[^"]+)"\*',
+        r'STORAGE-ARCHITECTURE\.md'
+        r'(?P<loc>(?:(?!STORAGE-ARCHITECTURE\.md)[\s\S]){0,200}?)'
+        r':\s*\*"(?P<quote>[^"]+)"\*',
         window))
     # ⚠️ EXACTLY ONE, because two is AMBIGUOUS and ambiguity must be loud: nothing
     # here can tell which of two citations the narrowing rests on, so resolving
