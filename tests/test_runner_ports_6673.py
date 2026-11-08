@@ -600,6 +600,84 @@ def _port_literals_in_code(path: Path) -> list[tuple[int, str]]:
     return hits
 
 
+def _imports_the_seam(path: Path) -> bool:
+    """True when `path` IMPORTS the #6673 seam as code — not when it names it.
+
+    ⛔ NOT a substring test (#11437). The population used to be
+    `"import _live_utils" in path.read_text()`, which counts a COMMENT or a
+    docstring that merely QUOTES the seam. `test_cache_eviction_evictor_pins.py`
+    matched on one comment line — `# The module's own `from tests import
+    _live_utils` just bound the REAL helper` — and never imports the helper at
+    all: it STUBS it (`namespace["_live_utils"] = live_utils_stub`) precisely so
+    the exec'd fixture cannot dial a live service. The file was then charged
+    with a dial-site port it does not have, its `docker_port=lambda: 6379`
+    being the stub that REPLACES the seam rather than a client that uses it.
+
+    The population is what the guard is FOR, so it has to be the import edge:
+    a file that IMPORTS the helper can dial through it, and a file that only
+    NAMES it cannot. The substring test got this wrong in BOTH directions, and
+    both are corrected here — measured over `tests/` (66 files under the
+    substring, 67 under this predicate):
+
+    * one false POSITIVE — `test_cache_eviction_evictor_pins.py`, in the scan on
+      a comment alone;
+    * two false NEGATIVES — `test_8057_probe_embedder_mask.py`
+      (`import tests._live_utils as _live_utils`) and
+      `test_live_storage_fail_closed.py` (`from tests import _live_gate,
+      _live_utils`) import the helper as CODE but never spell
+      `import _live_utils`, so the split-brain guard silently did not apply to
+      them. Both are clean today, which is why this is a widening that reds
+      nothing.
+
+    ⛔ Scope still stops at the forms above. A `from tests._live_utils import …`
+    submodule import was never in scope and is not added: doing so would put 18
+    further files under a guard that has never judged them, inside a fix whose
+    reason is a false positive (#11437).
+    """
+    for node in ast.walk(ast.parse(path.read_text())):
+        if isinstance(node, ast.Import):
+            if any(a.name.split(".")[-1] == "_live_utils" for a in node.names):
+                return True
+        elif isinstance(node, ast.ImportFrom):
+            if any(a.name == "_live_utils" for a in node.names):
+                return True
+    return False
+
+
+def test_a_comment_that_names_the_seam_is_not_a_seam_file(tmp_path):
+    """#11437: the population is an IMPORT, not a mention — both directions.
+
+    The false positive this pins was measured, not hypothesised: a comment
+    quoting `from tests import _live_utils` put a file that only STUBS the seam
+    into the scan, and the stub's own `docker_port=lambda: 6379` was then
+    reported as a dial site — redding `test (e)` on `main` itself.
+    """
+    mention = tmp_path / "test_mentions_only.py"
+    mention.write_text(
+        "# The module's own `from tests import _live_utils` just bound the REAL helper\n"
+        'namespace["_live_utils"] = stub\n'
+    )
+    assert not _imports_the_seam(mention), (
+        "a comment that QUOTES the seam must not put a file in the scan — a file "
+        "that only stubs the helper cannot dial it"
+    )
+
+    for name, src in (
+        ("test_plain.py", "import _live_utils\n"),
+        ("test_module.py", "import tests._live_utils as _live_utils\n"),
+        ("test_from_module.py", "from tests import _live_utils\n"),
+        ("test_from_siblings.py", "from tests import _live_gate, _live_utils\n"),
+        ("test_aliased.py", "from tests import _live_utils as live\n"),
+        ("test_parenthesised.py", "from tests import (\n    _live_utils,\n)\n"),
+    ):
+        p = tmp_path / name
+        p.write_text(src)
+        assert _imports_the_seam(p), (
+            f"{name}: a real import must stay in the population — this fix "
+            "removes a mention, never a migration"
+        )
+
+
 def test_no_migrated_file_still_hardcodes_a_lane_port():
     """A file that reads the #6673 seam must not ALSO hardcode a docker-lane
     port wherever the code can use it.
@@ -610,7 +688,7 @@ def test_no_migrated_file_still_hardcodes_a_lane_port():
     """
     seam_files = sorted(
         p for p in (ROOT / "tests").rglob("*.py")
-        if "import _live_utils" in p.read_text()
+        if _imports_the_seam(p)
     )
     assert seam_files, "the seam must be imported somewhere"
 
