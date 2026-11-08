@@ -721,10 +721,17 @@ unfirable (block at the top of §10).
 > and the union), and what still stands between it and the deletion is §4.4's **F3** measurement —
 > `_s4_merge_stats`'s `added_by_s4 > 0` **while** the FIRST (pre-retry) arm's `coverage_suspect` is
 > False **and no retry fired** (one arm, one flag, one base — see §4.4), i.e. an episode the retry
-> cannot reach. **It has been MEASURED (2026-11-08) and it FIRES** — 4/7 sessions in
-> `docs/evidence/1789-s4-reeemit-tax/ab-20261107T023958Z.json`, 3/7 in the re-run, 5/7 across the
-> union — so `run_s4` **stays**, and the removal (and the partial-gap stage it needs) moved to
-> **#11534**. Not satisfiable by reasoning about the code: the artifacts are the instrument.
+> cannot reach. **It has been MEASURED (2026-11-08) and it FIRES** — 4/7 sessions on the
+> **`legacy` arm** (`TORTOISE_S4_DELTA=0`) in `docs/evidence/1789-s4-reeemit-tax/ab-20261107T023958Z.json`,
+> 3/7 on that arm in the re-run, 5/7 across their union — **and 2/7 on either run of the
+> `delta` arm, which is DEFAULT-ON** (`_s4_delta_enabled` resolves `env_flag(…, True)`), so
+> `run_s4` **stays** on both readings and the removal (and the partial-gap stage it needs)
+> moved to **#11534**. ⛔ **The arm must be named, because the number is arm-specific:** the
+> two artifacts are one replay holding both arms, and their `added_by_s4` is not comparable
+> across arms — the committed corpus input is maximally gap-suppressing for both, and
+> `docs/evidence/1789-s4-reeemit-tax/README.md` states that neither sign is established
+> (neither a ceiling nor a floor), so a count without its arm is a claim about neither.
+> Not satisfiable by reasoning about the code: the artifacts are the instrument.
 > (Pinned: `tests/test_extractor_v4_s4_stage_claims.py`, `tests/test_selection_step.py`.)
 >
 > **On the step *names*:** the code's own stages are **S1–S5** (`[S1] STORY SUMMARY` … `[S5] EMBED`, module
@@ -1043,18 +1050,23 @@ New entities + connections + **metadata**. The metadata includes **lifecycle eve
 **The removal's falsifier — F3, defined here because two places cite it by that name.**
 `run_s4`'s removal (the `#8500` migration deliverable, executed under `#11002`) was gated on **one**
 measurement — an eval-lane run, not a code change. It was run on 2026-11-08 over the two committed
-`docs/evidence/1789-s4-reeemit-tax/` artifacts (7 real sessions each) and it **FIRES**: 4/7 primary,
-3/7 re-run, 5/7 across the union. So `run_s4` **stays** and the removal moved to **#11534**; the
-definition below is kept as the instrument that decided it and the one a successor must re-run.
+`docs/evidence/1789-s4-reeemit-tax/` artifacts (7 real sessions each) and it **FIRES**: 4/7
+primary, 3/7 re-run, 5/7 across the union on the **`legacy` arm** (`TORTOISE_S4_DELTA=0`), and
+2/7 on either run of the **`delta` arm** — which is DEFAULT-ON. Both are above zero, so
+`run_s4` **stays** and the removal moved to **#11534**; the definition below is kept as the
+instrument that decided it and the one a successor must re-run. ⛔ **Name the arm whenever this
+number is quoted** — see the note on the two arms two paragraphs up.
 
 On the frozen corpus, count the sessions
 where `_s4_merge_stats`'s `added_by_s4 > 0` **while the FIRST (pre-retry) arm's `coverage_suspect` is
 False** — **restricted to sessions where the retry did not fire**
 (`stats["renarrate"]["fired"]` is `False`). ⛔ **Whose flag, spelled out, because this PR makes it
-two arms.** A retried run can reach `check_batch` twice, and the retried arm's flag is False *by
-construction* — the first arm's True is what fired the retry — so counting against the pipeline's
-published `result["vet"]["s2"]` (the SECOND arm's block) would count exactly the sessions the retry
-DID reach as ones it cannot. That arm's own value is on the run's record at
+two arms.** A retried run reaches `check_batch` twice, and the SECOND arm is an independent S2
+run whose flag can be `True` again (measured: an empty second yield flags `coverage_suspect=True`
+on both arms) — so counting against the pipeline's published `result["vet"]["s2"]`, which is the
+SECOND arm's block, attributes the wrong arm's verdict to the session. What makes the retry
+unreachable for this count is the `fired is False` RESTRICTION, not any property of the second
+arm's flag. That arm's own value is on the run's record at
 `stats["renarrate"]["first"]["coverage_suspect"]`; on a run that did not fire, the single arm's flag
 is the `vet.s2.batch` one. ⛔ **And whose BASE, which is the second half of the same trap.**
 `added_by_s4` is `merged - s2_items`, and on a retried run `s2_items` is the UNION (both arms), so

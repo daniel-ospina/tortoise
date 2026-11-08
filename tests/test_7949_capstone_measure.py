@@ -4488,7 +4488,7 @@ def test_the_bundles_cites_resolve_where_the_bundle_says_they_do():
     (`E1-E5-PROOFS.md`), the `docs/00_index.md` rows that are the bundle's entry
     point, and the `docs/architecture/
     EXTRACTOR-V4-ARCHITECTURE.md` S2.1 FINDING row this bundle owns — 47 cites at
-    this head, four of them the `projection/*.py` ones the sibling pattern made
+    this head, five of them the `projection/*.py` ones the sibling pattern made
     visible (`#10108` added the sixth document; the count is MEASURED, and it
     moves with the documents, so re-read `checked` rather than trusting this line).
 
