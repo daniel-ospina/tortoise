@@ -491,16 +491,29 @@ DOOR_PINNED_ON = (("TORTOISE_S4_DELTA", "1"), ("TORTOISE_JSON_MODE", "1"),
                   # fixtures — measured), so the pin makes the population
                   # insensitive to the shell without moving a number.
                   ("TORTOISE_IDENTIFIER_TOKENS", "1"),
-                  # the union that absorbed `#11449` (`91dbc9a88`): `extractor_v2` is
-                  # the ONLY module that reads this switch (`_state_value_verbatim_enforced`,
-                  # the module's one `env_flag` read — the nine modules the closure test
-                  # names are the path it SCANNED, not the readers), and its ABSENT state is
-                  # NOT the neutral one to inherit: the code resolves
-                  # `env_flag(SWITCH, True)`, so an ambient
-                  # `=0` DISARMS the write path's verbatim-value refusal (a rewritten
-                  # value is then WRITTEN and the resurrection guard cannot fire), which
-                  # changes the population under a header that would still claim the door
-                  # held. Pinned to the SHIPPED default, exactly as `TORTOISE_S4_DELTA`.
+                  # cycle 11 (#10360), absorbing `#11449` (`91dbc9a88`):
+                  # `extractor_v2._state_value_verbatim_enforced` ->
+                  # `env_flag(STATE_VALUE_VERBATIM_SWITCH, True)` — DEFAULT-ON, read
+                  # ONCE per point at the emit site and handed to the rule as
+                  # `armed=` (`_value_fidelity_judged` is that resolved value, not a
+                  # second reader; `_refuse_rewritten_value`'s own fallback never
+                  # fires on this path). It is that module's one `env_flag` read —
+                  # the nine modules the closure test names are the path it SCANNED,
+                  # not the readers. The code records the earlier shape it moved
+                  # AWAY from: a revision claimed a BATCH-level read the code did
+                  # not have, while the rule re-read the value itself, so a
+                  # mid-batch flip could suppress the disclosure and write the
+                  # divergent value with no warning. OFF is the non-neutral state:
+                  # it disarms `_refuse_rewritten_value`, so a point whose value the
+                  # model REWROTE is WRITTEN into the graph the run writes instead
+                  # of withheld (the pre-#10513 semantics, pinned by
+                  # `tests/test_state_value_verbatim_10360.py::`
+                  # `test_the_off_switch_defaults_ON_and_restores_the_pre_10513_write`).
+                  # Pinned to the SHIPPED default rather than popped: absent is
+                  # ON, so `"1"` equals today's behaviour on a clean shell and the
+                  # pin closes only the inherited-`=0` hole. Found by the CLOSURE,
+                  # not by hand — the switch landed under `path_modules` and red
+                  # the census in `tests/test_7949_c2_door.py`.
                   ("TORTOISE_STATE_VALUE_VERBATIM", "1"))
 
 #: Every key a complete read-back carries — the pinned-off set plus the
