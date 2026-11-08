@@ -596,6 +596,17 @@ def test_a_declaration_that_CONTRADICTS_a_measured_label_holds_row_two(monkeypat
         note = [n for n in row.notes if "CONTRADICT" in n]
         assert note, (stores, row.notes)
         assert "tortoise.x::_upsert_point" in note[0], note
+    # …and an UNUSABLE declaration on the same writer is a HOLD too, not a silent drop. The
+    # contradiction loop discarded `_store_reading`'s violation, so its `None` reading matched no
+    # arm and fell through: `("Point", "Batch", 3)` names a second, UNSERVED label but was dropped
+    # before the served-set comparison because one member is malformed, and the row read `MET`.
+    monkeypatch.setattr(
+        probe, "declared_writers",
+        lambda: {"tortoise.x::_upsert_point": _store_declared(
+            "tortoise.x::_upsert_point", ("Point", "Batch", 3))})
+    row = probe.score_path_bullet()
+    assert row.verdict == "PARTIAL", row.observed
+    assert any("tortoise.x::_upsert_point" in n for n in row.notes), row.notes
     # …and the AGREEING declaration is not a hold: the check reports disagreement, not difference.
     monkeypatch.setattr(
         probe, "declared_writers",

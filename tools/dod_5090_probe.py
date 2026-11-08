@@ -1929,8 +1929,17 @@ def resolved_stored_labels(written: dict[str, str] | None = None,
         measured = {label.strip() for label in written.get(writer, "").split(",") if label.strip()}
         if not measured or written.get(writer, "").startswith("UNKNOWN"):
             continue  # no concrete label on this row's side to disagree with
-        reading, _violation = _store_reading(writer, entry.get("stores"), dispositions)
-        if reading == dispositions["no_vector"]:
+        reading, violation = _store_reading(writer, entry.get("stores"), dispositions)
+        if violation:
+            # ⛔ The FOURTH shape, and the same drop as the `at_runtime` arm above: an unusable
+            # declaration returns `(None, violation)`, and discarding the violation left `None`
+            # neither a disposition nor a tuple, so it fell straight through with no contradiction
+            # recorded. `('Point', 'Batch', 3)` then read `MET` — a declaration naming a second,
+            # unserved label, dropped before the served-set comparison because one member was
+            # malformed. This row grades a TAMPERED or INJECTED register too (`_store_reading`'s own
+            # docstring says so), so `register.load()`'s refusal is not available as a defence here.
+            out["violations"][writer] = violation
+        elif reading == dispositions["no_vector"]:
             out["contradictions"].append(
                 f"{writer}: declares {dispositions['no_vector']!r} but its own Cypher measures "
                 f"{sorted(measured)}")

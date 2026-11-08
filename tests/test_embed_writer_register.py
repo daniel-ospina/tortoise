@@ -963,9 +963,9 @@ def test_every_declared_label_re_derives_at_this_head() -> None:
         for node in ast.walk(tree):
             if (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
                     and node.name == symbol):
-                own = "\n".join(lines[node.lineno - 1:node.end_lineno])
+                own = _without_comments("\n".join(lines[node.lineno - 1:node.end_lineno]))
                 bodies.append(own + "\n" + "\n".join(
-                    _constants_named_by(node, constants)
+                    _without_comments(text) for text in _constants_named_by(node, constants)
                 ))
         assert bodies, f"{key} cites {rel}::{symbol}, which that file does not define"
         assert any(needle in body for body in bodies), (
@@ -1101,6 +1101,20 @@ NO_STORE_EXEMPTIONS: dict[str, str] = {
 }
 
 
+def _without_comments(text: str) -> str:
+    """`text` with whole-line `#` comments removed.
+
+    ⛔ A needle test is a test about what the code EXECUTES. `tortoise/sdk.py:2927` is a COMMENT
+    carrying `MERGE (t:Point {id: turn.id})`, and it sits INSIDE `_write_capture_turns`'
+    line span (2827-3660) — so narrowing the search from the whole file to the symbol did NOT
+    exclude it, and the pin stayed green on a source whose real statement had been removed. Only
+    whole-line comments are dropped (a trailing `#` can live inside a Cypher string, and cutting
+    there would corrupt a needle).
+    """
+    return "\n".join(
+        line for line in text.splitlines() if not line.lstrip().startswith("#"))
+
+
 def _constants_named_by(node: ast.AST, constants: dict[str, str]) -> list[str]:
     """The module-level constants `node` actually NAMES, resolved through the AST.
 
@@ -1124,7 +1138,9 @@ def _declared_symbol_bodies(key: str) -> list[str]:
 
     One hop because a store clause can be held in a module-level constant the writer executes
     (`_TURN_WRITE_CYPHER`) — the same reader rule `test_every_declared_label_re_derives_at_this_head`
-    applies to its cited needles.
+    applies to its cited needles. ⛔ Comment lines are stripped (`_without_comments`): a docstring or
+    comment quoting a clause is not a store, and one such comment sits inside the very span this
+    reader returns, which is how a whole-file `in` check stayed green on a mutated source.
     """
     module, symbol = key.split("::", 1)
     if "/" in module or module.endswith(".py"):
@@ -1155,9 +1171,9 @@ def _declared_symbol_bodies(key: str) -> list[str]:
     for node in ast.walk(tree):
         if (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
                 and node.name == symbol):
-            own = "\n".join(lines[node.lineno - 1:node.end_lineno])
+            own = _without_comments("\n".join(lines[node.lineno - 1:node.end_lineno]))
             bodies.append(own + "\n" + "\n".join(
-                _constants_named_by(node, constants)))
+                _without_comments(text) for text in _constants_named_by(node, constants)))
     assert bodies, f"{key} cites {rel}::{symbol}, which that file does not define"
     return bodies
 
