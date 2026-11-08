@@ -1244,10 +1244,28 @@ def _names_artifact(token: str, cwd: Path, root: Path) -> tuple[bool, str]:
                     "names everything under it and therefore no artifact (the same "
                     "vacuity as a bare `*`)"
                 )
-            if not _is_tracked_dir(resolved, root):
+            dir_tracked = _is_tracked_dir(resolved, root)
+            if dir_tracked is None:
+                # ⛔ THE SAME THREE ANSWERS AS THE FILE ARM (#11474 review). `None` is
+                # NOTHING MEASURED, so the sentence below may not be the measured-`no`
+                # one: before this guard the caller rendered every falsy answer as
+                # "holds no TRACKED file", which is a cause git never gave when the
+                # directory fork failed to spawn or the index was unreadable.
+                return False, (
+                    f"{text!r} cannot be verified: the TRACKED check did not answer here"
+                )
+            if dir_tracked is False:
                 return False, (
                     f"{text!r} is a directory holding no TRACKED file, so it holds "
                     "nothing a reader's clone has"
+                )
+            if dir_tracked is not True:
+                # Unreachable while the annotation holds, and kept for the same reason
+                # as the file arm's fourth-answer guard: a future truthy return must not
+                # be read as "this directory holds a TRACKED file".
+                return False, (
+                    f"{text!r} cannot be verified: the TRACKED check answered "
+                    f"{dir_tracked!r}, which is not a measurement that it is in the tree"
                 )
             return True, ""
         if resolved.is_dir() and resolved == root:
@@ -1269,7 +1287,7 @@ def _names_artifact(token: str, cwd: Path, root: Path) -> tuple[bool, str]:
         return False, f"{text!r} cannot be resolved against this tree ({type(exc).__name__}: {exc})"
 
 
-def _is_tracked_dir(resolved: Path, root: Path) -> bool:
+def _is_tracked_dir(resolved: Path, root: Path) -> bool | None:
     """Does this in-tree DIRECTORY hold at least one TRACKED file?
 
     A directory is a legitimate `cmd:` target — `uv run pytest tests/ -v` is the
@@ -1277,24 +1295,78 @@ def _is_tracked_dir(resolved: Path, root: Path) -> bool:
     reader's clone actually holds something under it: an empty or untracked
     directory names nothing. (The ROOT is refused a level up, because `.` names
     EVERYTHING — the same vacuity as a bare `*`.)
+
+    ⛔ THE SAME THREE ANSWERS AS `_is_tracked` (#11503 Option 1), FOR THE SAME REASON
+    (#11474 review). `#11506` added this probe beside `_is_tracked` and carried BOTH
+    causes that change removes there; once the two arms are in one file the divergence
+    is a fail-open this tool measures against itself:
+
+        True   a reader's clone holds a TRACKED file under it (MEASURED);
+        False  git ran and ANSWERED that it holds none (MEASURED);
+        None   NOTHING was measured — so the row may not be counted.
+
+    ⛔ `OSError` IS NOT AN ABSTENTION HERE. It was (`except OSError: return
+    _tracked_unprovable()`), and `_tracked_unprovable()` is `True`, so a fork that never
+    ran — `git` absent, or EMFILE/EAGAIN under load — ACCEPTED the directory and let a
+    `verified` row reach exit **0 CLEAN**. That is verbatim the shape this PR closes one
+    function over, reached through the guard meant to make it safe: under `EMFILE` the
+    `cat-file -e` and file-shaped `ls-files` forks can succeed while this one does not,
+    so `_commit_state` answers `exists`, the row counts, and nothing was measured. A
+    spawn failure is a REFUSAL (`_tracked_dir_unrunnable`), never an abstention.
+
+    ⛔ `returncode == 0` IS THE MEASUREMENT; `1` IS THE OTHER MEASURED ANSWER; EVERY
+    OTHER NON-ZERO IS A FAILURE TO ANSWER. Unlike `_is_tracked`, this probe passes no
+    `--error-unmatch`, so "holds nothing tracked" is **rc 0 with empty stdout**
+    (measured on git 2.43.0 against an empty directory and an untracked one). Exit 1
+    cannot arise from this form in practice; it is admitted as a measured `no` because
+    it is `git ls-files`' documented "nothing matched" answer, and treating it as a
+    spawn-like failure would refuse a directory git had in fact answered about. Every
+    other non-zero (128/129: an unreadable index, a bad repo, a usage error) is routed
+    to `_tracked_dir_unanswered` — ⛔ NOT to the measured sentence: with a corrupt
+    `GIT_INDEX_FILE`, `ls-files -- tests/` exits 128 while `rev-parse
+    --is-inside-work-tree` still answers `true` rc 0, so reading that non-zero as "holds
+    no TRACKED file" tells the reader a cause git never gave — the third collapsed
+    cause this PR removes, one probe over.
+
+    ⛔ `-- <rel>` IS A PATHSPEC HERE TOO, AND THAT DIRECTION WAS LIVE (#11474 review,
+    the same defect the file probe's `:(literal)` closes). MEASURED on git 2.43.0: with
+    `docs/ev-axb/f.md` TRACKED and a real, untracked directory literally named
+    `docs/ev-*`, `git ls-files -- 'docs/ev-*'` prints `docs/ev-axb/f.md` and exits 0 —
+    so this probe answered "a reader's clone holds a TRACKED file under it" for a
+    directory no clone holds anything under, borrowing a SIBLING directory's match.
+    `:(literal)` makes the name a name: the same call answers nothing with rc 0.
+    (`*` matching across `/` is git's pathspec rule, not a shell rule — see
+    gitglossary "pathspec"; and `:(literal)` is documented there as the way to make
+    `*`/`?`/`[` literal.) A pre-2.11 git degrades CLOSED here: `:(literal)` is a usage
+    error (129), which routes to `_tracked_dir_unanswered` and refuses the row.
     """
     try:
         rel = resolved.relative_to(root)
     except ValueError:
+        # Not a git answer: git is never asked about a path outside `root`. Every call
+        # site pre-checks `is_relative_to(root)`, so this is a structural refusal kept
+        # as a guard — the same arm `_is_tracked` keeps.
         return False
     try:
         proc = subprocess.run(
-            ["git", "ls-files", "--", str(rel)],
+            # `:(literal)` is load-bearing, not decoration: without it `rel` is a
+            # PATHSPEC and a directory name carrying `*`/`?`/`[` borrows a SIBLING's
+            # tracked file — measured, `docs/ev-*` (untracked) answered rc 0 because
+            # `docs/ev-axb/f.md` is tracked. See the docstring.
+            ["git", "ls-files", "--", f":(literal){rel}"],
             cwd=str(root),
             capture_output=True,
             text=True,
             check=False,
         )
-    except OSError:
-        # No `git` at all is the ABSTENTION case, not a refusal (see `_is_tracked`).
-        return _tracked_unprovable()
+    except OSError as exc:
+        return _tracked_dir_unrunnable(exc, rel)
     if proc.returncode == 0:
         return bool(proc.stdout.strip())
+    if proc.returncode == 1:
+        # Git ran and answered "nothing matched". The only non-zero exit that is an
+        # ANSWER (see the docstring) — it may not be read as a spawn failure.
+        return False
     # Git failed. `_is_tracked` distinguishes "git answered and refused" from "git
     # cannot answer here", so this must too — otherwise a git-less build context
     # refuses `pytest tests/` while accepting a single cited file, which is the
@@ -1307,11 +1379,50 @@ def _is_tracked_dir(resolved: Path, root: Path) -> bool:
             text=True,
             check=False,
         )
-    except OSError:
-        return _tracked_unprovable()
+    except OSError as exc:
+        return _tracked_dir_unrunnable(exc, rel)
     if probe.returncode == 0 and probe.stdout.strip() == "true":
-        return False
-    return _tracked_unprovable()
+        # Git IS here and failed to answer for this directory (128/129). Nothing was
+        # measured, and the row may not borrow the measured-"holds no TRACKED file"
+        # sentence for it.
+        return _tracked_dir_unanswered(proc.returncode, rel)
+    # Hand the probe to the renderer so the NOTE names the cause THAT WAS MEASURED.
+    return _tracked_unprovable(probe)
+
+
+def _tracked_dir_unrunnable(exc: OSError, rel: Path) -> None:
+    """The DIRECTORY probe could not RUN for `rel`. Nothing was measured, so refuse.
+
+    ⛔ NOT `_tracked_unprovable()`, which answers `True` — that fold is the fail-open
+    this function exists to remove (see `_is_tracked_dir`), and NOT the file-shaped
+    `_tracked_unrunnable` sentence either: that one says the path "is not shown to be
+    in the tree", which is a claim about a FILE. What is unmeasured here is what the
+    directory HOLDS, so that is what the line says.
+    """
+    print(
+        "CAPSTONE-LEDGER: REFUSED — the TRACKED check could not be RUN here "
+        f"({exc.__class__.__name__}: {exc}), so nothing was measured about what {rel} "
+        "holds: no TRACKED file under it is shown to be in the tree",
+        file=sys.stderr,
+    )
+    return None
+
+
+def _tracked_dir_unanswered(returncode: int, rel: Path) -> None:
+    """Git ran and did NOT answer for the DIRECTORY `rel`. Nothing was measured.
+
+    The third refusal, kept distinct for the reason `_tracked_dir_unrunnable` is: the
+    cause is git present, having answered for the TREE, failing to answer for this
+    path — and rendering it as "holds no TRACKED file" is the guess-the-cause defect.
+    Only exit 1 is a `no`; every other non-zero is a failure to answer.
+    """
+    print(
+        "CAPSTONE-LEDGER: REFUSED — the TRACKED check did not get an ANSWER here "
+        f"(`git ls-files` exited {returncode}), so nothing was measured about what "
+        f"{rel} holds: no TRACKED file under it is shown to be in the tree",
+        file=sys.stderr,
+    )
+    return None
 
 
 def _commit_state(sha: str, repo_root: Path = REPO_ROOT) -> str:

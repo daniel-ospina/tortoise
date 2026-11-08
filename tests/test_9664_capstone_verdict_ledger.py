@@ -1900,8 +1900,16 @@ def test_the_carriage_total_is_the_list_it_summarises():
     )
 
     spelled = {
-        "ONE": 1, "TWO": 2, "THREE": 3, "FOUR": 4, "FIVE": 5,
-        "SIX": 6, "SEVEN": 7, "EIGHT": 8, "NINE": 9, "TEN": 10,
+        "ONE": 1,
+        "TWO": 2,
+        "THREE": 3,
+        "FOUR": 4,
+        "FIVE": 5,
+        "SIX": 6,
+        "SEVEN": 7,
+        "EIGHT": 8,
+        "NINE": 9,
+        "TEN": 10,
     }
     summary = re.search(r"\b([A-Z]+) carriages are enumerated above", section)
     assert summary, (
@@ -5051,7 +5059,7 @@ def test_a_probe_that_did_NOT_answer_false_states_the_OTHER_cause(capsys):
     only as a NEGATIVE assertion, i.e. nothing ever produced it — a renderer whose
     cause is unpinned is a renderer free to borrow the other one.
 
-    Driven through the helper rather than end to end: the abbreise this pins is the
+    Driven through the helper rather than end to end: the branch this pins is the
     ternary on the `probe` argument, and `_tracked_unprovable` is the only place that
     reads it.
     """
@@ -5480,3 +5488,217 @@ def test_a_truthy_non_True_TRACKED_answer_is_not_read_as_tracked(site, call, mon
     assert ok is False, f"a truthy non-True answer is not 'tracked' on the {site} arm"
     assert "not a measurement" in why, why
     assert "not TRACKED" not in why, why
+
+
+# =============================================================================
+# `_is_tracked_dir` — the SIBLING probe `#11506` added, carrying both collapsed
+# causes this PR removes from `_is_tracked` (#11474 review, merge-order finding).
+#
+# The reviewer's finding: this branch's base predates `#11506`, so before the merge
+# there was one probe; after it there are two, and the divergence is the bug — one
+# refuses on a spawn failure, the other ABSTAINS (which counts the row). Nothing
+# pinned either half (`grep -c '_is_tracked_dir'` over this file was 0), so both
+# were free to regress. The three tests below pin the three answers, each with a
+# CONTROL so a tool that simply refused every directory could not pass them.
+# =============================================================================
+
+
+def _hermetic_dir_repo(tmp_path) -> Path:
+    """A throwaway repo where `held/inside.txt` is TRACKED and `empty/` holds nothing."""
+    repo = tmp_path / "dirrepo"
+    (repo / "held").mkdir(parents=True)
+    (repo / "held" / "inside.txt").write_text("held\n", encoding="utf-8")
+    (repo / "empty").mkdir()
+    git = ["git", "-C", str(repo)]
+    subprocess.run([*git, "init", "-q"], check=True)
+    subprocess.run([*git, "add", "held/inside.txt"], check=True)
+    subprocess.run(
+        [
+            *git,
+            "-c",
+            "user.email=t@example.com",
+            "-c",
+            "user.name=t",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "-m",
+            "seed",
+        ],
+        check=True,
+    )
+    return repo
+
+
+def test_an_EMFILE_on_the_DIRECTORY_probe_cannot_manufacture_a_clean_exit(tmp_path):
+    """The directory fork could not RUN. The row must be REFUSED, not counted.
+
+    ⛔ THE FAIL-OPEN THIS PIN EXISTS FOR, verbatim from `#11506`'s arm: `except
+    OSError: return _tracked_unprovable()` — and `_tracked_unprovable()` is `True`, so
+    `if not _is_tracked_dir(...)` fell through to `return True, ""` and a `verified`
+    row citing `cmd:uv run pytest held -v` counted with NOTHING measured. That is the
+    same shape as the EMFILE fail-open on `_is_tracked` one function over, reached
+    through the guard meant to make it safe; under EMFILE/EAGAIN the `cat-file -e` and
+    file-shaped `ls-files` forks can succeed while this one does not.
+
+    ⛔ THE STUB IS SELECTIVE AND ITS FIRING IS ASSERTED. A blanket `OSError` would
+    refuse the row for some other path's cause; keying on the ABSENCE of
+    `--error-unmatch` (the directory form, as opposed to `_is_tracked`'s) and then
+    asserting `fired` is what proves the refusal came from THIS fork — a stub that
+    silently stopped matching would leave the fail-open covered by nothing.
+    """
+    import types
+
+    repo = _hermetic_dir_repo(tmp_path)
+    real_run = subprocess.run
+    fired: list[str] = []
+
+    def explode(argv, *a, **kw):
+        if argv[:2] == ["git", "ls-files"] and "--error-unmatch" not in argv:
+            fired.append(" ".join(argv[:2]))
+            raise OSError(24, "Too many open files")
+        return real_run(argv, *a, **kw)
+
+    mp = pytest.MonkeyPatch()
+    mp.setattr(cl, "subprocess", types.SimpleNamespace(run=explode))
+    mp.setattr(cl, "_commit_state", lambda sha, repo_root=None: "exists")
+    try:
+        data = _ledger([_row("A", evidence=["cmd:uv run pytest held -v"])])
+        with pytest.raises(cl.InvalidLedger, match="did not answer here"):
+            cl.validate(data, repo_root=repo)
+        # ⛔ CONTROL INSIDE THE WINDOW: the FILE-shaped probe is untouched here, so a
+        # tracked file is still ACCEPTED — this pin is not passing on a tool that
+        # refuses everything, and the split between the two forks is what is measured.
+        ok, why = cl._evidence_is_real("held/inside.txt", repo)
+        assert ok, why
+    finally:
+        mp.undo()
+    assert fired == ["git ls-files"], fired
+
+    # ⛔ OUTSIDE the patched window: with git working, the SAME directory is
+    # ACCEPTED when it holds a tracked file, and refused BY THE MEASURED CAUSE when it
+    # does not — so "nothing was measured" is not the answer for either normal case.
+    ok, why = cl._evidence_is_real("cmd:uv run pytest held -v", repo)
+    assert ok, why
+    ok, why = cl._evidence_is_real("cmd:uv run pytest empty -v", repo)
+    assert not ok and "holding no TRACKED file" in why, why
+
+
+def test_a_FAILED_ls_files_on_a_DIRECTORY_is_not_the_measured_no(monkeypatch, capsys):
+    """`ls-files` exit 128 is a FAILURE to answer, NOT the measured `no` (exit 1).
+
+    ⛔ THE CAUSE HALF of the finding, measured shape: with a corrupt `GIT_INDEX_FILE`,
+    `git ls-files -- tests/` exits 128 while `rev-parse --is-inside-work-tree` still
+    answers `true` rc 0 — so the shipped `if probe…: return False` told the reader
+    *"is a directory holding no TRACKED file, so it holds nothing a reader's clone
+    has"*, a cause git never gave. Same third collapsed cause `_tracked_unanswered`
+    exists for, one probe over.
+
+    ⛔ AND rc 1 STAYS AN ANSWER. `git ls-files`' documented "nothing matched" exit is 1,
+    so routing it to the unanswered renderer would refuse a directory git had in fact
+    answered about — the false block this arm exists not to reintroduce.
+    """
+    import types
+
+    class _Result:
+        def __init__(self, returncode, stdout="", stderr=""):
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = stderr
+
+    def run_with(rc):
+        def fake(argv, *a, **kw):
+            if argv[:2] == ["git", "ls-files"]:
+                return _Result(rc, "", "fatal: index file smaller than expected")
+            if argv[:3] == ["git", "rev-parse", "--is-inside-work-tree"]:
+                return _Result(0, "true\n")
+            raise AssertionError(f"unexpected probe: {argv}")
+
+        return fake
+
+    # --- exit 128: git is here and did not answer for the directory -----------
+    monkeypatch.setattr(cl, "subprocess", types.SimpleNamespace(run=run_with(128)))
+    ok, why = cl._names_artifact("tests", REPO_ROOT, REPO_ROOT)
+    assert ok is False, why
+    assert "did not answer here" in why, why
+    assert "holding no TRACKED file" not in why, (
+        f"git exited 128 — it never answered `no`, so the measured sentence may not "
+        f"be printed: {why}"
+    )
+    err = capsys.readouterr().err
+    assert "exited 128" in err, f"the per-path line must name the measurement it took: {err}"
+
+    # --- exit 1: the other MEASURED answer, and it may not become a refusal ---
+    monkeypatch.setattr(cl, "subprocess", types.SimpleNamespace(run=run_with(1)))
+    assert cl._is_tracked_dir(REPO_ROOT / "tests", REPO_ROOT) is False
+    ok, why = cl._names_artifact("tests", REPO_ROOT, REPO_ROOT)
+    assert ok is False and "holding no TRACKED file" in why, why
+
+    # --- exit 129 (a usage error, e.g. pre-2.11 `:(literal)`): unanswered, not `no`
+    monkeypatch.setattr(cl, "subprocess", types.SimpleNamespace(run=run_with(129)))
+    assert cl._is_tracked_dir(REPO_ROOT / "tests", REPO_ROOT) is None
+    capsys.readouterr()
+
+
+def test_a_directory_name_carrying_a_WILDCARD_cannot_borrow_a_siblings_match(tmp_path):
+    """`-- <rel>` is a PATHSPEC here too, and that direction was LIVE on the dir probe.
+
+    ⛔ MEASURED on git 2.43.0 before the fix: with `docs/ev-axb/f.md` TRACKED and a
+    real, untracked directory literally named `docs/ev-*`, the probe ran
+    `git ls-files -- 'docs/ev-*'`, which printed `docs/ev-axb/f.md` and exited 0 — so
+    `_is_tracked_dir` answered "a reader's clone holds a TRACKED file under it" for a
+    directory no clone holds anything under, borrowing a SIBLING's match. That is the
+    same fail-open this PR closes for the file probe (`docs/ev-a*b.md` borrowing
+    `docs/ev-axb.md`), one probe over; `:(literal)` makes the name a name (the same
+    call then answers nothing, rc 0).
+
+    A name carrying `*` needs no privilege — it is a legal POSIX directory name — and
+    `Path.resolve()` does not glob, so the tool really does ask git about that name.
+
+    ⛔ SCOPED HONESTLY: this hazard is LATENT end to end, not live through
+    `_names_artifact` — that arm routes any token carrying a wildcard to the GLOB arm
+    first, which refuses it (asserted below), so no record today reaches the directory
+    probe with a `*` in the name. What this pin covers is the SEAM: `_is_tracked_dir`
+    is a function any future caller can pass a resolved directory to, and before the
+    fix it answered `True` for one that holds nothing. `:(literal)` is what makes that
+    answer independent of what the name looks like.
+    """
+    repo = tmp_path / "globrepo"
+    (repo / "docs" / "ev-axb").mkdir(parents=True)
+    (repo / "docs" / "ev-axb" / "f.md").write_text("held\n", encoding="utf-8")
+    git = ["git", "-C", str(repo)]
+    subprocess.run([*git, "init", "-q"], check=True)
+    subprocess.run([*git, "add", "docs/ev-axb/f.md"], check=True)
+    subprocess.run(
+        [
+            *git,
+            "-c",
+            "user.email=t@example.com",
+            "-c",
+            "user.name=t",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "-m",
+            "seed",
+        ],
+        check=True,
+    )
+    decoy = repo / "docs" / "ev-*"
+    decoy.mkdir()
+    (decoy / "inner.txt").write_text("nothing tracked under here\n", encoding="utf-8")
+
+    # CONTROL: the tracked sibling IS accepted, so a probe that refused every
+    # directory could not pass this test.
+    assert cl._is_tracked_dir(repo / "docs" / "ev-axb", repo) is True
+    # The decoy holds nothing tracked and may not borrow the sibling's match.
+    assert cl._is_tracked_dir(decoy, repo) is False
+    # …and it cannot do so by any spelling: a relative token for the decoy is refused
+    # too, by the GLOB arm (whose precedence over the directory arm is why the borrow
+    # was never reachable through a record).
+    ok, why = cl._names_artifact("docs/ev-*", repo, repo)
+    assert ok is False, f"an untracked dir borrowed its sibling's match: {why}"
+    ok, why = cl._names_artifact(str(decoy), repo, repo)
+    assert ok is False, why
