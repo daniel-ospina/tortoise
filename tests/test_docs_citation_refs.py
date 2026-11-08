@@ -82,10 +82,11 @@ STATED LIMITS — deliberate, and measured rather than guessed:
     "the citation graph" here means the graph BETWEEN documents, not every
     citation in the tree.
   * The guard is scoped to those two directories ON PURPOSE. `docs/` outside them
-    held **10** further dead citations when this landed (ONTOLOGY.md ×4 — three
-    blank lines plus one PAST-EOF cite, which is a different repair from a blank
-    one — `ops/registry-backup-dr.md` ×2, `infra/embedded-reaper-cron.md`,
-    `architecture/STORAGE-ARCHITECTURE.md`, `plans/7714-data-model.md`,
+    held **10** further dead citations when this landed (paths below are relative
+    to `docs/`: `ONTOLOGY.md` ×4 — three blank lines plus one PAST-EOF cite, which
+    is a different repair from a blank one — `ops/registry-backup-dr.md` ×2,
+    `infra/embedded-reaper-cron.md`, `architecture/STORAGE-ARCHITECTURE.md`,
+    `epics/2026-08-03-tortoise-hosted-platform/plans/7714-data-model.md`,
     `epics/1402-eval-battery/01-align.md`), all pre-existing and none of them a
     target of #1165. A guard that shipped red would be disabled within a day, and
     repairing ten unrelated pointers is not this change's job — they are tracked
