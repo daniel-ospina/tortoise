@@ -248,9 +248,14 @@ through `referentiality.ENV_FLAG`), `TORTOISE_CHANGE_FEED` (an ambient `=1` adds
 to the graph the run writes), and the two confidence gates `TORTOISE_SUBJECT_TAU_HI` /
 `TORTOISE_SUBJECT_TAU_LO` (read through a parameter by `subject_binding`, and they decide whether
 the `:aboutSubject`/`:aboutObject` edge is written at all), plus `TORTOISE_LABEL_ORDER_SEED` (inert while
-`TORTOISE_LABEL_ORDER` is off, pinned so the pair cannot be split), `TORTOISE_CONTEXT_ENRICH` (the per-turn REWRITE of the text each turn embeds, gated in `context_enrich.enrich_enabled` and reached from `sdk.capture_session` as `enrich_fn=_capture_enriched_texts`; fail-safe OFF) — all pinned **unset** — and `TORTOISE_JSON_MODE`, pinned to **`1`** because its absent state is already ON and it is read PER CALL to flip the request's `response_format` (`model_adapters`), and `TORTOISE_IDENTIFIER_TOKENS`, pinned to **`1`** because its absent state is already ON (`sparse.py:226`, `env_flag(IDENTIFIER_ENV, True)`) and it rewrites `search_keys` on every `:Point` the run writes (`projection/entities.py:1208`, reached from `create_point`); the registered corpus yields no aliases either way, measured — and `TORTOISE_STATE_VALUE_VERBATIM`, pinned to **`1`** because its absent state is already ON (`extractor_v2._state_value_verbatim_enforced`, `env_flag(..., True)`, `#10360`) and OFF disarms `_refuse_rewritten_value`, so a point whose value the model REWROTE is written instead of withheld — a different graph than the ON arm writes; the pin equals today's behaviour on a clean shell and closes only the inherited-`=0` hole. The cycle-7 to cycle-11 review findings are `TORTOISE_CONTEXT_ENRICH`/`TORTOISE_JSON_MODE`, then `TORTOISE_CHANGE_FEED`,
-then `TORTOISE_IDENTIFIER_TOKENS`, then `TORTOISE_SUBJECT_TAU_HI`/`_LO`, then `TORTOISE_STATE_VALUE_VERBATIM`: each sits on the acceptance
-path and was in no pin, no ledger row and no closure. The authoritative list is
+`TORTOISE_LABEL_ORDER` is off, pinned so the pair cannot be split), `TORTOISE_CONTEXT_ENRICH` (the per-turn REWRITE of the text each turn embeds, gated in `context_enrich.enrich_enabled` and reached from `sdk.capture_session` as `enrich_fn=_capture_enriched_texts`; fail-safe OFF) — all pinned **unset** — and `TORTOISE_JSON_MODE`, pinned to **`1`** because its absent state is already ON and it is read PER CALL to flip the request's `response_format` (`model_adapters`), and `TORTOISE_IDENTIFIER_TOKENS`, pinned to **`1`** because its absent state is already ON (`sparse.py:226`, `env_flag(IDENTIFIER_ENV, True)`) and it rewrites `search_keys` on every `:Point` the run writes (`projection/entities.py:1208`, reached from `create_point`); the registered corpus yields no aliases either way, measured. The last five are the cycle-7 to
+cycle-10 review findings (`TORTOISE_CONTEXT_ENRICH`/`TORTOISE_JSON_MODE`, then `TORTOISE_CHANGE_FEED`,
+then `TORTOISE_IDENTIFIER_TOKENS`, then `TORTOISE_SUBJECT_TAU_HI`/`_LO`): each sits on the acceptance
+path and was in no pin, no ledger row and no closure. Cycle 11 added
+`TORTOISE_STATE_VALUE_VERBATIM` (the `#10360` carve-out's write-path off-switch,
+`extractor_v2._state_value_verbatim_enforced`), pinned to **`1`**, because it is default-ON and with
+it off the emit site takes no judgment at all — a rewritten value is WRITTEN, which grows the measured
+population under a door that still claims the pin held. The authoritative list is
 `capstone_measure.DOOR_PINNED_OFF` / `DOOR_PINNED_ON`, which `tests/test_7949_c2_door.py` resolves
 against the tree — this sentence is the reader's map, not the control. The set
 is CLOSED over the **measurement modules the path renders with**, and what
@@ -276,14 +281,10 @@ to the EMPTY SET while sitting on the write path (`bind_point_subjects`, inside
 `TORTOISE_SUBJECT_TAU_HI=0.99`) — so the arm seams, the mention arm, the per-turn embed
 rewrite, the request's `response_format`, the change-feed writer, the identifier-token writer and the
 confidence-gated subject binder are inside the derived
-surface, not hand-listed beside it. That list grew one review round at a time — cycles 7 to 11 are
+surface, not hand-listed beside it. That list grew one review round at a time (the last four are
 `TORTOISE_CONTEXT_ENRICH`/`TORTOISE_JSON_MODE`, then `TORTOISE_CHANGE_FEED`, then
-`TORTOISE_IDENTIFIER_TOKENS` in cycle 9, then `TORTOISE_SUBJECT_TAU_HI`/`_LO` in cycle 10 (each of those
-four found by a measured mutation that left the previous derivation green), then
-`TORTOISE_STATE_VALUE_VERBATIM` in cycle 11, which the **CENSUS** found rather than a mutation: the switch
-landed inside `path_modules` and red that suite (§10.15). Named positionally and never as a count:
-"the last four" WAS correct over the four rounds it then listed, and adding cycle 11 without restating it is
-the drift §10.15 corrected — which is the honest reason to state
+`TORTOISE_IDENTIFIER_TOKENS` in cycle 9, then `TORTOISE_SUBJECT_TAU_HI`/`_LO` in cycle 10, each found by a
+measured mutation that left the previous derivation green), which is the honest reason to state
 it as a CLOSURE over the reads INSIDE those modules rather than as a list somebody curated — not
 a closure over everything the path reaches, which is the gap #11410 records. Every one is written in-process, **read back**, and a run whose read-back
 disagrees is **refused** (`probes/capstone_measure.py`); the measurement switches were
@@ -1747,92 +1748,6 @@ re-cut from the resolved document (§8), and no committed verdict is re-scored.
 - **What moved: nothing else.** No metric, denominator, threshold, class set or corpus pin is
   touched: the values this record freezes are unchanged and only line citations move.
   `document_sha256` is re-cut in this same commit, per §8's rule for *any* edit to this file.
-
-### 10.15 — the door's pin set gains `TORTOISE_STATE_VALUE_VERBATIM` (`#10360`, 2026-11-08)
-
-⛔ **Scope, because §10.14 records the same PIN from the other direction.** `main` pins this switch
-too — it is in `probes/capstone_measure.py`'s `DOOR_PINNED_ON` and in `acceptance_arm.pinned_to` at
-`origin/main` `a1dff7cec`, and §10.14 records it there as a bullet. ⛔ `91dbc9a88` (`#11449`) is NOT
-that pin: it introduced the **switch** (`tortoise/extractor_v2.py`, plus `.env.example`,
-`config/v4-mechanisms.yml` and its own test) and touches no file in this bundle.
-`827141f19a031ce0589abc6e9dff8cbe86ad8c4e` is not on `main` at all
-(`git merge-base --is-ancestor … origin/main` → exit 1), and no branch this clone has fetched
-contains it, so a fresh clone of `main` does not have its object either — the check has to ask for
-that exact sha. ⛔ **Spell it in FULL.** `git fetch origin 827141f19` is not a shortened spelling of
-this command, it is a different one that always fails — measured here, it prints `fatal: couldn't
-find remote ref 827141f19`: a CANNOT-VERIFY that reads exactly like the absence this sentence is
-about, produced by nothing but the abbreviation:
-
-```bash
-git fetch origin 827141f19a031ce0589abc6e9dff8cbe86ad8c4e \
-  && git merge-base --is-ancestor 827141f19a031ce0589abc6e9dff8cbe86ad8c4e origin/main   # exit 1 = not an ancestor
-```
-
-(Both remaining outcomes are CANNOT-VERIFYs, not verdicts: a clone that never had the object prints
-`fatal: Not a valid object name` — exit 128, measured — and a full sha the server no longer holds
-fetches as `remote error: upload-pack: not our ref`, also measured.) An earlier revision
-of this paragraph credited that pair with the pin — the same defect class as every other claim in
-this record: stated, plausible, and not what the tree says. What THIS entry records is the part that
-landed here: the **§1.6.2 prose** sentence for the pin, and the roll-call restated **positionally**
-instead of counted. The merged pin set is one entry, not two.
-
-**Old value (verbatim).** §1.6.2's pin sentence ended at `TORTOISE_IDENTIFIER_TOKENS`, and its
-roll-call read:
-
-> The last five are the cycle-7 to
-> cycle-10 review findings (`TORTOISE_CONTEXT_ENRICH`/`TORTOISE_JSON_MODE`, then `TORTOISE_CHANGE_FEED`,
-> then `TORTOISE_IDENTIFIER_TOKENS`, then `TORTOISE_SUBJECT_TAU_HI`/`_LO`): each sits on the acceptance
-> path and was in no pin, no ledger row and no closure.
-
-`preregistration.json`'s `acceptance_arm.pinned_to` did **not** agree with that prose at this
-branch's base `a1dff7cec`: the record already carried **four** `"1"` pins
-(`TORTOISE_S4_DELTA`, `TORTOISE_JSON_MODE`, `TORTOISE_IDENTIFIER_TOKENS`,
-`TORTOISE_STATE_VALUE_VERBATIM`), while §1.6.2 still listed three and its roll-call stopped at
-cycle 10. The record and the document had drifted apart on `main`; this entry closes the prose
-side, so the two published copies say the same thing again.
-
-**New value.** Three things change, and the record's pin set is not one of them. (1) §1.6.2's
-**prose** sentence gains `TORTOISE_STATE_VALUE_VERBATIM` at its shipped default `"1"`; (2) its
-roll-call is restated **positionally** rather than counted ("the cycle-7 to cycle-11 review findings
-are …"), because the count in that paragraph had gone stale three rounds running (it said "last
-five" over a list of six); and (3) `acceptance_arm.read_back` gains the Cycle-11 paragraph — what
-the switch does, that absent already resolves ON, and that the CENSUS found it. ⛔
-`acceptance_arm.pinned_to` is **not** edited by this branch: `origin/main` already carries the fourth
-entry, so what lands here is prose plus the `read_back` narrative, not a second pin
-(`git diff origin/main... -- preregistration.json` touches only `document_sha256` and `read_back`).
-
-**Why.** `#10360`'s write-path guard landed **inside** `path_modules` — `TORTOISE_STATE_VALUE_VERBATIM`,
-read by `extractor_v2._state_value_verbatim_enforced` as `env_flag(..., True)` — so the door's census
-was RED at the head this defect was diagnosed on, `f76b74c3e62` (the `#11508` merge, `origin/main`'s
-parent; that tree's `capstone_measure.py` does not name the switch and its `DOOR_PINNED_ON` holds
-three entries)
-(`tests/test_7949_c2_door.py::test_every_env_var_the_capture_path_reads_is_accounted_for`):
-the switch was in no pin, no ledger row and no closure. It is a **pin and not an acknowledged
-non-seam**, because its absent state is already ON and its only non-neutral state is an inherited
-`=0`: OFF disarms `_refuse_rewritten_value`, so a point whose value the model **rewrote** is written
-into the graph the run writes instead of withheld — the pre-`#10513` semantics, already pinned by
-`tests/test_state_value_verbatim_10360.py::test_the_off_switch_defaults_ON_and_restores_the_pre_10513_write`.
-Pinning it to its shipped default **equals today's behaviour on a clean shell** and closes only the
-inherited-`=0` hole, which is the `TORTOISE_IDENTIFIER_TOKENS` precedent (§1.6.2, cycle 9).
-
-**A SECOND roll-call in the same subsection needed the same restatement, and this entry makes it
-too.** §1.6.2's later paragraph said "the last four are … `TORTOISE_SUBJECT_TAU_HI`/`_LO` in cycle 10,
-each found by a measured mutation that left the previous derivation green". That count was right over the
-four rounds it then named — **it is adding cycle 11 to the list, above, that makes it stale**, which is
-why the two edits belong together: once cycle 11 joins, the sentence (a) counts four over the five rounds
-7–11 and omits cycle 11 entirely, and (b) attributes every member to a measured mutation, which is
-**false for cycle 11**: the **CENSUS** found it, not a mutation (the "Why" above and
-`acceptance_arm.read_back` both say so — *"It was found by the CENSUS,
-not by hand: the switch landed inside path_modules and red that suite"*). It is now restated
-positionally, with the mutation attribution scoped to the four rounds it is true of and cycle 11's
-actual discovery mechanism named. A paragraph that states the count and the discovery method of a list
-**is** part of the registration's claim about that list; leaving it saying the opposite repeats, one
-sentence below, the defect this entry was already correcting.
-
-⛔ **No value moves.** No metric, denominator, threshold, bar, floor or split changes, and no
-committed verdict is re-scored: the pin makes the measured population **shell-insensitive** and the
-registered corpus's numbers are untouched. `document_sha256` is re-cut from the resolved document in
-the same commit (§8).
 
 ## 11. The step set V5 gates over — seven unconditional, one conditional (`#10215`)
 
