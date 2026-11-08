@@ -940,12 +940,14 @@ class TestOthersBranchFailClosedRecheck1879:
     sequential double-call would prove nothing). Mutation: delete the
     re-check → the mint returns 200 and the org ends at cap+1.
 
-    ⛔ The PROBE cache is warmed explicitly before `_make_sdk` is patched. That
-    cache is a PROCESS global whose warmth on entry is a startup-thread race, so
-    leaving it implicit made this test pass on an idle box and red on a loaded
-    CI runner (`_StubSDK` has no `_get_proj`, and a cold `_registry_anchor()`
-    builds through the very `_make_sdk` this test stubs). See the comment at the
-    warm call.
+    ⛔ The PROBE cache is warmed explicitly before `_make_sdk` is patched, and
+    `_StubSDK` is TOTAL (an unmodelled attribute delegates to a real registry
+    SDK). The two are layered, not redundant: totality means a COLD cache cannot
+    surface as an `AttributeError` that reads like a product bug, while the warm
+    call means the request is served by a REAL anchor (the production shape)
+    instead of a stub installed into a process-global cache. Cache warmth on
+    entry is a startup-thread race — 31/31 pass on an idle box, this test red in
+    CI `test (e)` run 42474716785 — so it must not decide what is measured.
     """
 
     def test_revoke_that_frees_no_slot_refuses_instead_of_overshooting(
@@ -1009,22 +1011,24 @@ class TestOthersBranchFailClosedRecheck1879:
             ns = kw.get("namespace") or (a[0] if a else None)
             return _StubSDK() if ns == "registry" else orig_make_sdk(*a, **kw)
 
-        # ⛔ WARM THE PROBE CACHE **BEFORE** THE STUB IS INSTALLED (#10180 lane).
+        # ⛔ WARM THE PROBE CACHE **BEFORE** THE STUB IS INSTALLED.
         # The request's first registry read is `_membership_role` ->
-        # `_registry_anchor()`, which in URI mode is the CACHED registry probe
-        # (#8098). With a COLD cache that anchor calls `_make_sdk(namespace=
-        # "registry")` — i.e. the stub — and `_build_registry_probe_handle` then
-        # calls `sdk._get_proj()`, which `_StubSDK` does not have:
-        # `AttributeError: '_StubSDK' object has no attribute '_get_proj'` as a
-        # raw 500. Whether the cache happens to be warm when the body starts is
-        # a STARTUP-THREAD race (an unrelated background thread binds the anchor
-        # during the `client` fixture on an idle box, and loses that race on a
-        # loaded CI runner — measured: 31/31 pass locally, the same test red in
-        # `test (e)`), so the race must not be what decides the test. Warming it
-        # here makes the anchor a REAL handle for this test's identity
-        # (`TORTOISE_DB_URI` + the per-test `TORTOISE_DB_PATH` pin, so no other
-        # test can match the entry) and leaves the stub doing its ONE job: the
-        # mint path's registry reads.
+        # `_registry_anchor()`, which in URI mode IS the cached registry probe
+        # (#8098). Its cache identity is (`TORTOISE_DB_URI`, the per-test
+        # `TORTOISE_DB_PATH` pin), so the entry warmed here is unreachable from
+        # any other test. Two reasons, in that order:
+        #   1. DETERMINISM OF WHAT IS MEASURED. Whether the cache is warm when
+        #      the body starts is a STARTUP-THREAD race: a background thread
+        #      binds the anchor during the `client` fixture on an idle box and
+        #      loses that race on a loaded runner (measured 2026-11-08 — the
+        #      whole file 31/31 locally, this test red in CI `test (e)`
+        #      42474716785). Warming it here makes the request use the REAL
+        #      handle on both boxes.
+        #   2. THE STUB STAYS OUT OF A PROCESS GLOBAL. `_StubSDK` is total
+        #      below, so a COLD cache no longer 500s — it INSTALLS the stub as
+        #      the probe handle, and every later registry probe read in this
+        #      test would then route through the spy. Warming first keeps the
+        #      stub doing its ONE job: the mint path's registry reads.
         ha._registry_anchor()
 
         monkeypatch.setattr(ha, "_make_sdk", _make_sdk_spy)

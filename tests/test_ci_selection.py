@@ -19558,7 +19558,11 @@ def test_curate_graph_tool_change_selects_core_not_tier1():
     # does NOT make a `tools/` path select `core` — which is why the module-arm assertion
     # below is paired with the tool-arm one.
     #
-    # Mutation check: removing the CORE_ALSO entry fails both arms.
+    # Mutation check: removing the CORE_ALSO entry fails the TOOL arm below (measured).
+    # The MODULE arm still passes — it is carried by the `core` row in
+    # `config/ci-surfaces.yml` via the `tortoise/curation.py` source pattern, not by
+    # CORE_ALSO — which is exactly why both arms are asserted: one entry cannot satisfy
+    # them together, and the tool arm is the one that regresses if the entry goes.
     r = _sel(["tools/curate_graph.py"])
     assert r["full"] is False, r
     assert r["surfaces"] == ["core"], r

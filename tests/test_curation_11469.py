@@ -2325,18 +2325,23 @@ def test_two_rows_sharing_an_id_and_a_hash_cannot_hide_the_second_text(tmp_path)
 
     # Non-vacuity: the same id with the SAME text is a genuine duplicate and must still
     # fold, so this is an identity guard and not a blanket refusal to detect duplicates.
-    # ⛔ These rows pass `kind="decision"` (default is UNDECIDABLE) so the fold is REACHED
-    # through the CARRIED branch (`duplicate_of == CARRY` → not-carried), which the
-    # default kind cannot exercise — it folds an undecidable row instead, down a different
-    # branch. The discrimination against a blanket-withhold mutant comes from the PHRASE
-    # pinned below, not from the kind (measured: without the phrase pin that mutant leaves
-    # this arm green).
+    # ⛔ These rows pass `kind="decision"` on purpose: the default kind (`"statement"`)
+    # classifies UNDECIDABLE, so `duplicate_of` is UNDECIDABLE and the fold takes the
+    # undecidable branch instead. `kind="decision"` is what reaches the CARRIED branch
+    # (`duplicate_of == CARRY` → not-carried), and BOTH pins below are load-bearing in a
+    # different way: the DISPOSITION pin kills a fold-to-the-wrong-branch mutant
+    # (measured: with only `!= C.CARRY` here, folding the CARRIED arm to UNDECIDABLE
+    # leaves this arm green), and the PHRASE pin kills a blanket-withhold mutant
+    # (measured: `duplicate_of is not None` → NOT_CARRIED for every duplicate leaves this
+    # arm green without it).
     same = C.build_plan(
         [row("dup", kind="decision", content="A durable claim", content_hash="H"),
          row("dup", kind="decision", content="A durable claim", content_hash="H")],
         source_graph="old", target_graph="new", packs={},
     )
     assert len(same.decisions) == 2, [d.content for d in same.decisions]
-    assert same.decisions[1].disposition != C.CARRY
+    assert same.decisions[1].disposition == C.NOT_CARRIED, (
+        "a duplicate of a CARRIED row folds to not-carried — the CARRIED and UNDECIDABLE "
+        f"arms are separate `if`s and this pin is what tells them apart: {same.decisions[1]!r}")
     assert "exact content duplicate" in same.decisions[1].reason, (
         f"a real duplicate must still be detected: {same.decisions[1]!r}")
