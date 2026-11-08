@@ -767,7 +767,7 @@ def test_edge_function_hook_path_is_gone():
     #   req.headers.forEach((v, k) => { headers[k] = v; });
     #   const payload = webhook.verify(rawBody, headers) as HookPayload;
     #
-    # (origin/main:supabase/functions/tenant-provision/index.ts:186-190).
+    # (origin/main:supabase/functions/tenant-provision/index.ts:184-187).
     # MEASURED: re-inserting exactly that branch into authenticateCaller — with
     # a plain `Deno.env.get("AUTH_HOOK_SECRET")` literal, so the name pins stay
     # green — kept every other static test AND the runtime harness passing while
