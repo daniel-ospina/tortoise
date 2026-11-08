@@ -19,9 +19,12 @@ postponed. Every figure the arm was justified with lived in issue prose and in
 These tests pin the LAW rather than a happy number: where a pick lands relative
 to the graded top 5, whether the visible evidence-session SET widened or merely
 changed, and whether a displaced slot was a session's sole visible
-representative. They do **not** pin a placement verdict — ``window-exit`` vs
-``ab-head-ab`` is an open owner ruling on #10538, and a test that decided it
-would be a decision recorded in the wrong place.
+representative. They do **not** pin a placement verdict — ``tail`` vs ``head``
+is the still-open question on #10538, and a test that decided it would be a
+decision recorded in the wrong place. ⚠️ Non-eviction itself is NOT open: the
+owner ruled ``window-exit`` on 2026-11-07 and the guard ships ON (it has its own
+file, ``test_temporal_leg_non_eviction_10538.py``); this file pins the
+PRE-RULING splice that the guard is measured against.
 """
 from __future__ import annotations
 
@@ -41,10 +44,27 @@ def _pool(spec):
     return baseline._pool(spec)
 
 
-def _fused(pool, *, window, limit=DEFAULT_TEMPORAL_LEG_LIMIT, placement="tail"):
+def _fused(pool, *, window, limit=DEFAULT_TEMPORAL_LEG_LIMIT, placement="tail",
+           non_eviction=False):
+    """The fused caller over this file's pools — the PRE-RULING splice by default.
+
+    ⛔ ``non_eviction=False`` is EXPLICIT and deliberate (#10538, owner ruling
+    2026-11-07). Every pin in this file measures the **retention instrument**
+    on the splice the committed receipt was built from, and the guard default
+    makes that splice unreachable on these pools — it refuses the picks, so
+    ``pick_ranks``/``evicted_ids``/``graded_by_recall_all_at_5`` would all
+    collapse to their inert values and the instrument would stop being
+    measured. Passing the switch here keeps the SUBJECT of this file (what a
+    pick does to the window) under test; the guard itself, and each of its
+    three conditions, is pinned in
+    ``tests/test_temporal_leg_non_eviction_10538.py`` — including a case that
+    runs one of these pools through BOTH arms and asserts the guarded arm is
+    the additive one.
+    """
     order, picks = temporal_leg_fusion_order(
         pool, anchors=(), window=window, limit=limit,
-        date_window=baseline.DATE_WINDOW, placement=placement)
+        date_window=baseline.DATE_WINDOW, placement=placement,
+        non_eviction=non_eviction)
     return order, picks
 
 
@@ -108,8 +128,8 @@ def test_the_receipt_disclaims_the_measurement_it_is_not():
     why = verdict["why"]
     assert "never been measured on the shipped" in why, (
         "the head counterfactual has NO direct shipped-corpus measurement")
-    # The #8713 citation must carry the source's own THREE-WAY split, because a
-    # pending ruling is argued from this receipt:
+    # The #8713 citation must carry the source's own THREE-WAY split, because the
+    # still-open PLACEMENT verdict is argued from this receipt:
     #   (a) the injection's own eviction -> reader_surface@5 0.9436 -> 0.9289,
     #       and `inj_only` (guard ablated) reads the SAME 0.9289, so the guard
     #       accounts for none of it;
@@ -151,9 +171,15 @@ def test_the_retention_recount_agrees_with_a_hand_count():
 
 
 def test_the_shipped_geometry_is_net_zero_and_loses_sole_representatives():
-    """The measured fact the whole open ruling rests on: at ``window=12`` the arm
-    widens by 2 and drops 2, and the two it drops are the SOLE visible
-    representatives of their sessions. Nothing in the repo pinned this before."""
+    """The measured fact the non-eviction ruling RESTED on: at ``window=12`` the
+    arm widens by 2 and drops 2, and the two it drops are the SOLE visible
+    representatives of their sessions. Nothing in the repo pinned this before.
+
+    ⚠️ "RESTED on", not "rests on" (review cycle 6): the owner ruled on this
+    fact on 2026-11-07 and the guard now refuses exactly these picks — the
+    question this test's premise leaves open is PLACEMENT, not eviction (see the
+    module docstring). A premise that still calls eviction undecided is how a
+    later lane argues the guard's refusal is the bug to remove."""
     pool = _pool([("sA", 10), ("sB", 1), ("sC", 1), ("sD", 1), ("sE", 1),
                   ("sF", 1)])
     order, picks = _fused(pool, window=SHIPPED_WINDOW)
@@ -641,8 +667,9 @@ def test_a_two_slot_session_that_loses_both_slots_is_a_deletion():
     ``evicted_sole_representatives`` is empty and ``net`` reports a WIDENING.
 
     ``additive`` is therefore defined on session DELETION, not on single-slot
-    occupancy — otherwise the field the pending owner ruling will be argued from
-    would answer "no harm, and it widened" for an arm that deleted a session.
+    occupancy — otherwise the field the still-open placement verdict is argued
+    from would answer "no harm, and it widened" for an arm that deleted a
+    session. (Non-eviction is already ruled — see the module docstring.)
     """
     pool = _pool([("sA", 10), ("sB", 2), ("sD", 1), ("sE", 1)])
     order, picks = _fused(pool, window=SHIPPED_WINDOW)
@@ -676,8 +703,9 @@ def test_a_hit_with_no_session_is_not_a_session():
     # ⚠️ `additive` is SESSION-level, so it says NOTHING about displaced
     # non-sessions: a displaced sessionless base slot leaves it True and shows
     # up only here and in the sessionless pair. Pinned as a stated limitation,
-    # not left as an incidental property — `additive` is the field the pending
-    # window-exit / ab-head-ab ruling will be argued from.
+    # not left as an incidental property — `additive` is the field the still-open
+    # PLACEMENT question (tail vs head) will be argued from. (Non-eviction is
+    # already ruled; see the module docstring.)
     assert got["additive"] is True
     assert got["evicted_ids"] == ["x0"], (
         "the displaced sessionless hit must still be reported")
@@ -820,11 +848,21 @@ def test_the_unclustered_window_declines_at_every_geometry():
         assert order == [c["id"] for c in pool]
 
 
-def test_the_predicate_is_reported_but_never_enforced():
-    """``window_arm_retention`` is read-only instrumentation: computing it must
-    not change a single pick, and it must not mutate its inputs. Whether the
-    predicate may GATE a promotion is the open owner ruling on #10538 — a
-    function that quietly enforced it would be answering that ruling in code."""
+def test_the_predicate_is_reported_but_the_guarded_arm_is_what_ships():
+    """⛔ #10538 PREMISE RETIRED BY THE OWNER RULING (2026-11-07).
+
+    This pin used to be ``test_the_predicate_is_reported_but_never_enforced``,
+    asserting that ``additive`` is a REPORT the module would not turn into a
+    pick filter *"without an owner ruling"*. The ruling arrived (``window-exit``
+    — non-eviction a HARD CONDITION), so the predicate is now enforced on the
+    shipped tail arm and this pin carries the NEW contract.
+
+    What survives unchanged: ``window_arm_retention`` stays REPORT-ONLY (it
+    never gates; its callers decide), it is deterministic, and it mutates
+    nothing. What changed: the FUSED caller refuses the splice the predicate
+    calls non-additive, so the two arms differ — and that difference is the
+    guard's whole effect, asserted here as one comparison on one pool.
+    """
     pool = _pool([("sA", 10), ("sB", 1), ("sC", 1), ("sD", 1), ("sE", 1),
                   ("sF", 1)])
     before = [(c["id"], c["session_id"]) for c in pool]
@@ -834,10 +872,27 @@ def test_the_predicate_is_reported_but_never_enforced():
     first = window_arm_retention(pool, order, picks=picks, window=SHIPPED_WINDOW)
     second = window_arm_retention(pool, order, picks=picks, window=SHIPPED_WINDOW)
 
+    # the measurement is a pure REPORT: deterministic, non-mutating.
     assert first == second
     assert first["additive"] is False
+    assert first["deleted_sessions"]
     assert [(c["id"], c["session_id"]) for c in pool] == before
     assert order == order_snapshot and picks == picks_snapshot
     # ...and the arm that produced it is unchanged by having been measured.
     again_order, again_picks = _fused(pool, window=SHIPPED_WINDOW)
     assert (again_order, again_picks) == (order_snapshot, picks_snapshot)
+
+    # ...while the GUARDED arm on the SAME pool promotes nothing and is
+    # additive — the ruling's effect, in one comparison.
+    g_order, g_picks = _fused(pool, window=SHIPPED_WINDOW, non_eviction=True)
+    guarded = window_arm_retention(pool, g_order, picks=g_picks,
+                                   window=SHIPPED_WINDOW)
+    assert g_picks == [], (
+        "the guard must refuse every pick that trades a session away")
+    assert guarded["additive"] is True
+    assert guarded["deleted_sessions"] == []
+    assert guarded["pick_ranks"] == [], (
+        "a fully-refused arm reports no pick rank at all — never a stale rank "
+        "for a pick that was not promoted")
+    assert g_order == [c["id"] for c in pool], (
+        "a fully-refused arm must leave the fused order byte-identical")
