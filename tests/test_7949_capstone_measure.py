@@ -10709,11 +10709,13 @@ def test_the_control_arm_definition_names_the_frozen_records_divergence():
 def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     """`RECONCILE-A1-A2-A5.md`'s LIVE cites, which no sweep reads.
 
-    Rule 3 of agent-infra#3442: this PR pins five cites in this record — four it
-    re-pointed (`extractor_v2.py:10815`->`:10891`, `sdk.py:17472`->`:17574`,
+    Rule 3 of agent-infra#3442: this leg pins six cites in this record — four
+    #11509 re-pointed (`extractor_v2.py:10815`->`:10891`, `sdk.py:17472`->`:17574`,
     `sdk.py:16414-16428`->`:16516-16530` x3, `probes/capstone_measure.py:2238-2243`
-    ->`:2724-2726`) plus the unchanged `extractor_v2.py:1720` — and, measured before
-    this pin existed, re-staling ANY of them
+    ->`:2724-2726`), `extractor_v2.py:1720` unchanged, and the `create_operator`
+    reproduction quote this PR re-derived (`:8938 :8956 :8963 :9343` ->
+    `:9006 :9024 :9031 :9411`, drifted +68 unnoticed across two merges) — and,
+    measured before this pin existed, re-staling ANY of them
     left every suite green: the record is in no `_BUNDLE_DOCS` entry and
     `grep -rn RECONCILE tests/` returned nothing. A record whose whole thesis is
     that "a claim nothing re-checks can rot silently" cannot leave its own numbers
@@ -10754,6 +10756,32 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     assert "nothing in this tree consumes" in ext[10891 - 1], (
         f"extractor_v2.py:10891 reads {ext[10891 - 1].strip()[:90]!r}, not the "
         "comment stating nothing consumes `result[\"relations\"]`")
+
+    # A1's environment block: the record's ONLY directly-falsifiable reproduction
+    # output — the bare-token grep whose four `create_operator` mentions ARE its
+    # evidence that the channel has no producer. It is pinned BOTH ways because a
+    # quoted number with nothing re-checking it is the very rot this record is about:
+    # the quote must be the live lines, and the live lines must be what the quote
+    # says. Measured on `main` before this assert existed, the quote had drifted +68
+    # (`:8938 :8956 :8963 :9343` vs live `:9006 :9024 :9031 :9411`) across two
+    # merges and no suite noticed. The HISTORICAL siblings above it in the same block
+    # (`de72cfd45` → `:8892 :8910 :8917 :9231`, `80c912244` → 0) are deliberately NOT
+    # pinned: they are claims about those commits, and they verify there.
+    assert re.findall(
+        r"git grep -n 'create_operator' -- tortoise/extractor_v2\.py\s+# (.*)",
+        text) == [":9006 :9024 :9031 :9411"], (
+        "the record's create_operator reproduction must quote the LIVE line numbers — "
+        "re-derive them with `git grep -n 'create_operator' -- tortoise/extractor_v2.py`")
+    live_mentions = [i for i, line in enumerate(ext, 1) if "create_operator" in line]
+    assert live_mentions == [9006, 9024, 9031, 9411], (
+        f"extractor_v2.py's create_operator mentions are at {live_mentions}, not the "
+        "four the record quotes — an insertion above them moves the quote, so "
+        "re-derive the record's block rather than this list")
+    assert not re.search(
+        r"\.(create_edge|create_about_edge|create_operator)\(",
+        "\n".join(ext)), (
+        "the record's load-bearing half is the CALL count (0) — a production call "
+        "site makes its 'no producer' conclusion false, not merely stale")
 
     # A2: the capture path that writes the `references` edge — the record names it
     # THREE times: the prose cite, the amendment parenthetical that states BOTH
