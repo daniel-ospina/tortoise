@@ -243,7 +243,7 @@ word lexicon — still projects.
 replaced the derivation: the capture now writes `summary` = a display DESCRIPTOR
 over the session's topic lexicon and `_searchText` = `", ".join(topics)`, both
 from the SAME list in one statement. So on a post-#10000 row `_search_text` is not
-a CHOSEN utterance — it is the token lexicon (a §4.6 metadata value, not the S1 narrative, per `STORAGE-ARCHITECTURE.md:527`; in a word-delimited script; a space-less CJK run can reach it whole, i.e. the field can BE the turn's prose verbatim, while a Thai run fragments at its combining marks, the residual named in `sdk._session_source_metadata`, #10852) — and it is the only field the Source FTS index is
+a CHOSEN utterance — it is the token lexicon (a §4.6 metadata value, not the S1 narrative, per `STORAGE-ARCHITECTURE.md` §9.1; in a word-delimited script; a space-less CJK run can reach it whole, i.e. the field can BE the turn's prose verbatim, while a Thai run fragments at its combining marks, the residual named in `sdk._session_source_metadata`, #10852) — and it is the only field the Source FTS index is
 declared on, which makes dropping it an UN-INDEXING of every restored session on
 the recovery door rather than a §9.1/D1 measurement. `_search_text` is therefore
 projected when the row proves the derivation, and declined otherwise — and the
