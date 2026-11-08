@@ -336,14 +336,17 @@ CLASSES: tuple[str, ...] = (RECOGNISED_PRODUCER, EXEMPT)
 #: `#11492`'s first review round closed.
 #:
 #: ⛔ Why this belongs in the declaration and NOT in a derivation inside the instrument: of the
-#: twenty outside-gate writers, the instrument's own label derivation (a `MERGE|CREATE (:Label`
-#: literal in the writer's own body) resolves a single label for three, two conflicting labels for
-#: two, and **no usable label at all for the other fifteen**. ⚠️ Those fifteen fail for SEVERAL
-#: reasons — do not name one as "the" reason, and do not cite the two-label pair among them:
+#: twenty outside-gate writers, a `MERGE|CREATE (:Label` literal scan over the writer's OWN body
+#: NAMES a single label for three and two conflicting labels for two, and **no usable label at all
+#: for the other fifteen** — and the instrument never hands those five readings out:
+#: `_embedding_writers` short-circuits `unresolved_write` BEFORE that scan (`continue` at
+#: `tools/dod_5090_probe.py:918`), so four of the five reach `written_labels` flattened to
+#: `UNKNOWN(unresolved producer)` and only `session_indexer::main` (the one `ungated`) reaches it as
+#: a label. ⚠️ Those fifteen fail for SEVERAL reasons — do not name one as "the" reason, and do not
+#: cite the two-label pair among them:
 #: `_event_plain_merge` and `_rebuild_all_replay` keep their `MERGE`s in their own bodies (that is
 #: exactly why their own Cypher NAMES TWO), while the fifteen include a label in a `MATCH` the
-#: derivation does
-#: not credit (`_embedding_repair_attempt`'s own `MATCH (e:Event {eventId:$eid})` +
+#: derivation does not credit (`_embedding_repair_attempt`'s own `MATCH (e:Event {eventId:$eid})` +
 #: `set_embedding_clause("e")`), a store clause held in a module constant (`_write_capture_turns`
 #: executing `_TURN_WRITE_CYPHER`), a property-map merge over a constant tuple
 #: (`_update_entity`'s `_CANONICAL_ENTITY_ID_PROPS`), a store delegated to another writer, a writer
@@ -354,8 +357,7 @@ CLASSES: tuple[str, ...] = (RECOGNISED_PRODUCER, EXEMPT)
 #: `turn_prior_vectors`, `_index_gate_read`, `_apply_one`), or a docstring QUOTING one
 #: (`_prewipe_synthetic_write_scope`, whose whole body is a `return` — the `SET n.embedding = NULL`
 #: it quotes is `_rebuild_all_replay`'s, and that writer is NOT among these fifteen), and a label
-#: interpolated at
-#: runtime (`restore_graph`'s `(n:{safe_labels})`). A
+#: interpolated at runtime (`restore_graph`'s `(n:{safe_labels})`). A
 #: second derivation in the grading instrument would be a second owner of the same fact; the field
 #: below makes the fact ONE declaration that every consumer reads (the policy-as-data shape `#11444`
 #: already applies to row 1, and the shape OPA's *Philosophy* states: policy is decoupled from the
