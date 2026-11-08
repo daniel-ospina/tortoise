@@ -666,10 +666,16 @@ def test_the_census_whitelist_is_the_merges_keep_set():
     — a channel `merge_embed_lists` KEEPS that the census does not know about.
     `mention_held` was exactly that: the merge unions it by surface, the census
     called it malformed, and a `mention_held` row was dropped and recorded as a
-    fabricated `gap_fill_shape_error`. The loop below now covers BOTH halves of
-    the keep-set, and asserts the census's own answer (`_unknown_delta_sections`)
-    as well as the merge's behaviour, so the two cannot drift in either
-    direction.
+    fabricated `gap_fill_shape_error`. The loop below covers BOTH halves of the
+    keep-set, and asserts the census's own answer (`_unknown_delta_sections`)
+    as well as the merge's behaviour.
+
+    ⛔ WHAT THIS DOES **NOT** PIN, because an earlier version of this docstring
+    claimed it did: the REVERSE direction — a channel added to
+    `merge_embed_lists`' own section list and not to `_MERGE_KEPT_EXTRA_SECTIONS`.
+    That list is a LOCAL variable in the merge, so no test can read it; the only
+    reverse evidence here is the single `{"items": …}` probe below. Say so rather
+    than claiming a bidirectionality the code cannot provide.
     """
     for section in (*v2._OUTPUT_SCHEMA, *v2._MERGE_KEPT_EXTRA_SECTIONS):
         # `mention_held` rows are keyed by SURFACE, not by `content` — a probe
@@ -693,6 +699,22 @@ def test_the_census_whitelist_is_the_merges_keep_set():
         "... and the census DOES name it")
     assert v2._unknown_delta_sections({"items": []}) == [], (
         "an EMPTY unknown key adds nothing, so it is not a shape error")
+    # ⛔ THE EXEMPTION IS CONDITIONAL, NOT A HOLE (#11554 review, P2).
+    # `mention_held` is exempt only in the shape the merge CARRIES (a non-empty
+    # list of dicts with a non-empty `surface`); every other value is a shape
+    # error the merge would drop silently, so the census must name it — the same
+    # round-5 guarantee, for the channel the exemption was added for.
+    _good = [{"surface": "it", "rule_id": "referentiality.pronoun"}]
+    assert v2._unknown_delta_sections({"mention_held": _good}) == []
+    for _bad in ("garbage", [42], [{}], [{"rule_id": "x"}], [], None):
+        _got = v2._unknown_delta_sections({"mention_held": _bad})
+        if _bad:
+            assert _got == ["mention_held"], (
+                f"mention_held={_bad!r} is NOT carried by the merge, so the "
+                "census must record it as malformed — an unconditional "
+                "exemption records it as 'the spans state no claim'")
+        else:
+            assert _got == [], f"mention_held={_bad!r} adds nothing"
 
 
 def _long_narrative_model(narrative, **kw):

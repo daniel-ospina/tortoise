@@ -15595,10 +15595,35 @@ _EMBED_SECTIONS = ("entities", "points", "events", "operators")
 #: Kept as a separate tuple rather than a shared constant because sharing one
 #: moves every line in this module and re-stales the #7949 bundle's absolute
 #: cites — the same reason ``test_the_census_whitelist_is_the_merges_keep_set``
-#: pins the two sets instead of unifying them. That row is now BIDIRECTIONAL
-#: over ``_OUTPUT_SCHEMA`` + this tuple, so a channel added to the merge and not
-#: here (or the reverse) reds it.
+#: pins the two sets instead of unifying them. ⛔ WHAT THAT ROW ACTUALLY PINS,
+#: said so that it is true: every channel in ``_OUTPUT_SCHEMA`` + this tuple is
+#: KEPT by the merge and NOT named by the census. The REVERSE direction — a
+#: channel added to ``merge_embed_lists``' own (module-local) section list and
+#: not here — is NOT caught, because that list is a local variable no test can
+#: read; an earlier version of this comment claimed it was. Tracked as its own
+#: follow-up; do not restate the claim until the merge's list is a constant.
 _MERGE_KEPT_EXTRA_SECTIONS = ("mention_held",)
+
+
+def _mention_rows_are_carried(value: object) -> bool:
+    """Is this a ``mention_held`` value ``merge_embed_lists`` will CARRY?
+
+    ⛔ THE EXEMPTION IS CONDITIONAL, and the first version of it was not
+    (#11554 review, P2). ``merge_embed_lists`` unions ``mention_held`` by a row's
+    non-empty ``surface`` and drops everything else — a non-list value, a
+    non-dict row, a row with no surface. Exempting the channel UNCONDITIONALLY
+    therefore traded the round-5 guard away for the channel it was added for:
+    measured, ``{"mention_held": "garbage"}`` recorded ``added_items: 0``, no
+    ``malformed_sections`` and NO census entry — byte-identical to "the spans
+    state no claim", which is the false record the round-4/round-5 guards exist
+    to prevent. So the exemption applies only to a NON-EMPTY list whose every
+    row is a dict carrying a non-empty ``surface``: exactly the shape the merge
+    keeps. Anything else falls through to the census and is named.
+    """
+    if not isinstance(value, list) or not value:
+        return False
+    return all(isinstance(row, dict) and str(row.get("surface") or "").strip()
+               for row in value)
 
 
 def _unknown_delta_sections(added: object) -> list[str]:
@@ -15607,13 +15632,21 @@ def _unknown_delta_sections(added: object) -> list[str]:
     A key outside both ``_OUTPUT_SCHEMA`` and ``_MERGE_KEPT_EXTRA_SECTIONS``
     that carries CONTENT is a SHAPE error (a wrapped answer: ``{"items": …}``,
     ``{"claims": …}``), not "the spans state no claim" — and ``merge_embed_lists``
-    drops it with no record, which is why the guard has to name it.
+    drops it with no record, which is why the guard has to name it. A key IN
+    ``_MERGE_KEPT_EXTRA_SECTIONS`` is exempt only when it carries the shape the
+    merge actually carries; see :func:`_mention_rows_are_carried`.
     """
     if not isinstance(added, dict):
         return []
-    return [k for k, v in added.items()
-            if k not in _OUTPUT_SCHEMA
-            and k not in _MERGE_KEPT_EXTRA_SECTIONS and v]
+    out: list[str] = []
+    for key, value in added.items():
+        if key in _OUTPUT_SCHEMA:
+            continue
+        if key in _MERGE_KEPT_EXTRA_SECTIONS and _mention_rows_are_carried(value):
+            continue
+        if value:
+            out.append(key)
+    return out
 
 
 def _close_balanced(text: str) -> str | None:

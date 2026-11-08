@@ -4657,6 +4657,35 @@ def test_the_bare_continuation_cites_name_what_they_say():
         ("README.md", "early return (`", (
             ("13247", "if not edus:"),
         )),
+        # ⛔ THE STEP TABLE'S OWN CITES — one per row, and the head of
+        # `capstone_run.py`'s pinned call chain. These went stale in the SAME
+        # commit that re-derived their siblings (measured: `:13224` punched a
+        # comment, `:13513` an `errors.append`, `:13534` a `check_batch` call),
+        # because only the numbers a PIN already watched were re-derived — the
+        # sweep is what makes that impossible next time. `run_s4` and
+        # `execute_embed` are the S5 row's two cites.
+        ("README.md", "S1 NARRATE | `run_s1`", (
+            ("13290", "run_s1("),
+        )),
+        ("README.md", "S2.1 EXTRACT | `run_s2`", (
+            ("13314", "run_s2("),
+        )),
+        ("README.md", "S2.3 CLASSIFY | `_apply_classify_kinds`", (
+            ("13596", "_apply_classify_kinds("),
+        )),
+        ("README.md", "S3 RESOLVE | `search_graph`", (
+            ("13612", "search_graph("),
+        )),
+        ("README.md", "S5 CONNECT | `execute_embed`", (
+            ("13853", "execute_embed("),
+            ("13633", "run_s4("),
+        )),
+        # The chain's LAST line carries only `execute_embed` — the row pins what
+        # its phrase line carries, and the seven earlier calls are pinned by the
+        # README rows above (same numbers, same symbols).
+        ("probes/capstone_run.py", "(S5+S6,", (
+            ("13853", "execute_embed("),
+        )),
         # ⛔ The #2684 row's cite (#10833 review, P2): the fold rewrote a CORRECT
         # `5042-5043` into `4948-4949` — inside `_refuse_rewritten_value`, an
         # unrelated #10360 function — on a file BYTE-IDENTICAL to `origin/main`,
@@ -10750,7 +10779,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
 
     Rule 3 of agent-infra#3442: this leg pins the record's LIVE cites — the four
     #11509 re-pointed (`extractor_v2.py:10815`->`:11099`, `sdk.py:17472`->`:17574`,
-    `sdk.py:16421-16435`->`:16523-16537` x3, `probes/capstone_measure.py:2238-2243`
+    `sdk.py:16414-16428`->`:16523-16537` x3, `probes/capstone_measure.py:2238-2243`
     ->`:2724-2726`), `extractor_v2.py:1744` unchanged, the `create_operator`
     reproduction quote this PR re-derived (`:8938 :8956 :8963 :9343` ->
     `:9006 :9024 :9031 :9411`, drifted +68 unnoticed since #11449 — the neighbouring
@@ -11228,7 +11257,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     assert re.findall(r"sed -n '(\d+)p' tortoise/sdk\.py", text) == ["17581"], (
         "the record's reproduction command must name the SAME line the prose does")
     assert sdk[17581 - 1].strip() == "proj.link_source_to_event(source_key, event_id)", (
-        f"sdk.py:17581 reads {sdk[17574 - 1].strip()!r}, not the references writer")
+        f"sdk.py:17581 reads {sdk[17581 - 1].strip()!r}, not the references writer")
 
     # ── The four LIVE cites a fresh review found STILL unwatched ─────────────────────
     #
