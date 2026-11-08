@@ -2811,3 +2811,99 @@ def test_a_disarmed_run_over_a_damaged_ledger_still_exits_zero(monkeypatch, tmp_
     assert payload["census_measured"] is True and payload["census"], payload
     assert "damaged" in payload["disarmed_reason"], payload["disarmed_reason"]
     assert payload["read_failure"] is None
+
+
+def test_a_disarmed_run_over_a_damaged_ledger_reports_what_it_still_owes(monkeypatch,
+                                                                         tmp_path, capsys):
+    """Round-38 review P2 — a measured census beside `pending: 0` reads as "done".
+
+    The disarmed-over-a-damaged-ledger arm carries a MEASURED census, so the ledger —
+    the only thing that could say which of those rows already landed — is exactly what
+    could not be read. Reporting the hardcoded `pending: 0` therefore said "nothing is
+    owed" about a run that wrote nothing, and a driver's `pending == 0 ⇒ done` check
+    reads a refused migration as finished. `pending` is now the carry count (the
+    upper bound the unreadable ledger leaves), so the documented three-counter
+    invariant still SPANS the carry set on this arm.
+    """
+    mod = _tool_module()
+    led = tmp_path / "l.jsonl"
+    led.write_text("null\n")          # a damaged ledger line: unreadable keys
+
+    def call(name, args):
+        if name == "tortoise_graph_overview" and args.get("section") == "status":
+            return {"counts": {"Source": 0}}
+        if name == "tortoise_query":
+            return {"result": [{"id": "p1", "kind": "decision", "content": "a"},
+                               {"id": "p2", "kind": "decision", "content": "b"}],
+                    "total": 2}
+        if name == "tortoise_ingest":
+            raise AssertionError("a disarmed run reached the wire")
+        return {"result": []}
+    monkeypatch.setattr(mod, "_live_call_tool", call)
+    rc = mod.main(["plan", "--graph", "org_x_g_old", "--target", "org_x_g_new", "--apply",
+                   "--off", "--ledger", str(led), "--no-verify-read",
+                   "--out", str(tmp_path / "p.json")])
+    assert rc == 0, capsys.readouterr()
+    payload = json.loads((tmp_path / "p.json").read_text())
+    carried = payload["census"]["carried_rows"]
+    run = payload["run"]
+    assert carried == 2, payload["census"]
+    assert run["pending"] == carried, run
+    assert run["skipped_known"] + run["duplicate_rows"] + run["pending"] == carried, run
+    # and the `refused` field names the LEDGER, not the switch the operator set
+    assert "damaged" in run["refused"], run["refused"]
+
+
+def test_a_disarmed_run_carries_census_measured_on_the_full_plan_arm(monkeypatch,
+                                                                     tmp_path, capsys):
+    """Round-38 review P3 — "present on BOTH arms" must be readable by key.
+
+    A driver told to answer "was the census measured?" from `census_measured` on every
+    disarmed artifact got a `KeyError` on the COMMONEST one: a plain `--off` run that
+    ran the whole plan carries `run` counters and no `census_measured` at all. The key
+    is now on the plan payload too (this path only runs when every read succeeded, so
+    the answer is always `true` there).
+    """
+    mod = _tool_module()
+    led = tmp_path / "l.jsonl"
+
+    def call(name, args):
+        if name == "tortoise_graph_overview" and args.get("section") == "status":
+            return {"counts": {"Source": 0}}
+        if name == "tortoise_query":
+            return {"result": [{"id": "p1", "kind": "decision", "content": "c"}], "total": 1}
+        if name == "tortoise_ingest":
+            raise AssertionError("a disarmed run reached the wire")
+        return {"result": []}
+    monkeypatch.setattr(mod, "_live_call_tool", call)
+    rc = mod.main(["plan", "--graph", "org_x_g_old", "--target", "org_x_g_new", "--apply",
+                   "--off", "--ledger", str(led), "--no-verify-read",
+                   "--out", str(tmp_path / "p.json")])
+    assert rc == 0, capsys.readouterr()
+    payload = json.loads((tmp_path / "p.json").read_text())
+    assert payload["census_measured"] is True, payload
+    assert payload["run"]["off"] is True, payload["run"]
+
+
+def test_a_name_spelled_target_scopes_literally_and_never_skips(tmp_path):
+    """Round-38 review P2 — record what a NAME spelling actually does.
+
+    A graph row that exposes ids makes its NAME a guard-accepted target spelling, but
+    a name is not an identity and must not enter the ledger match set (round-38 P2: a
+    name equal to another graph's id skipped every row into it). What the ledger does
+    instead is scope the spelling LITERALLY, and this pin states the consequence
+    honestly: the two scopes stay disjoint (so a name can never SKIP rows), and a
+    ledger built for one spelling driven against a plan for the other REFUSES loudly
+    rather than quietly re-sending into a target it cannot account for.
+    """
+    assert C.ledger_scopes("new", ROWS) == frozenset({"new"}), C.ledger_scopes("new", ROWS)
+    by_ref = C.ledger_scopes(ROWS[1]["namespace"], ROWS)
+    assert by_ref.isdisjoint({"new"}), by_ref
+
+    # the unit seam: a ledger scoped by the ref, driven against a plan for the name
+    led = C.Ledger(tmp_path / "l.jsonl", target=ROWS[1]["namespace"], graph_rows=ROWS)
+    led.record(["k1"])
+    plan = C.build_plan([row("a", content="c")], source_graph="old", target_graph="new",
+                        packs={})
+    with pytest.raises(C.CurationRefused, match="answering for another graph"):
+        C.run_plan(plan, writer=CountingWriter(), ledger=led, apply=True, graph_rows=ROWS)

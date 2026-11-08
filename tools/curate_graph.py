@@ -531,6 +531,8 @@ def _disarmed_artifact(
     *,
     census: Any = None,
     read_failure: str | None = None,
+    pending: int = 0,
+    refused: str = "off-switch active",
 ) -> int:
     """A DISARMED run that stopped early: exit 0, the reason on the artifact.
 
@@ -540,23 +542,36 @@ def _disarmed_artifact(
     contract: "a driver paged on a run that did exactly what it was told"). It must not
     SWALLOW the failure either.
 
-    ⛔ `census_measured` is present on BOTH disarmed arms, so a driver answers "was it
-    measured?" uniformly instead of inferring it from a missing key (round-38 P3). When
-    the census WAS measured (`census` given) it travels here in full, because a disarmed
-    run over a damaged LEDGER still read the graph successfully: the two losses are not
-    the same fact and must not be reported as one.
+    ⛔ `census_measured` is present on BOTH arms of THIS helper, so a driver answers
+    "was it measured?" uniformly instead of inferring it from a missing key (round-38
+    P3 — and the claim is scoped to this helper on purpose: a FULL disarmed run never
+    reaches here, and carries `census_measured: true` from `cmd_plan`'s plan payload,
+    so the key is present on every disarmed artifact). When the census WAS measured
+    (`census` given) it travels here in full, because a disarmed run over a damaged
+    LEDGER still read the graph successfully: the two losses are not the same fact and
+    must not be reported as one.
+
+    ⛔ `pending` is the plan's CARRY COUNT on that second arm, not a hardcoded 0: with
+    the census measured and a carry set on the artifact, `pending: 0` says "nothing is
+    owed" about a run whose ledger is UNREADABLE — a driver's `pending == 0 ⇒ done`
+    check would read a refused migration as finished (round-38 review P2). The ledger
+    could not be read, so the split is unknown and `pending` is the upper bound: the
+    three counters still SPAN the carry set (`0 + 0 + carried == carried`), the
+    documented invariant, and nothing was written.
     """
     payload = {
-        # ⛔ `null`, not a zeroed census: a zeroed one is indistinguishable from "the
-        # graph is empty", which is the silent-zero class R7 forbids.
+        # `null` when the census could not be measured — never a zeroed census, which
+        # is indistinguishable from "the graph is empty" (the silent-zero class R7
+        # forbids). When `census` is given it is a FULL measured census: this arm is a
+        # census that WAS read, stopped by the ledger.
         "census": census,
         "census_measured": census is not None,
         "disarmed_reason": reason,
         "read_failure": read_failure,
         "run": {
             "applied": False, "off": True, "skipped_known": 0, "written": 0,
-            "target_graph": args.target, "digest": None, "refused": "off-switch active",
-            "stopped": None, "identity": None, "duplicate_rows": 0, "pending": 0,
+            "target_graph": args.target, "digest": None, "refused": refused,
+            "stopped": None, "identity": None, "duplicate_rows": 0, "pending": pending,
         },
         "rows_written": None,
         "not_enumerable_by_this_read_path": dict(NOT_ENUMERABLE),
@@ -646,8 +661,11 @@ def cmd_plan(args: argparse.Namespace) -> int:
             # still exit 0 (nothing was going to be written), and the census it DID
             # measure travels on the artifact. Pre-fix this arm exited 3 while the failed
             # -read arm exited 0 — two disarmed runs in one incident, opposite contracts
-            # (round-38 P3).
-            return _disarmed_artifact(args, str(exc), census=plan.census())
+            # (round-38 P3). ⛔ `pending` is the carry count, NOT 0: the ledger is what
+            # could not be read, so its holdings are unknown and the rows it might have
+            # held are still owed (round-38 review P2).
+            return _disarmed_artifact(args, str(exc), census=plan.census(),
+                                      pending=len(plan.carry_rows()), refused=str(exc))
         print(f"REFUSED: {exc}", file=sys.stderr)
         return 3
     if args.rows:
@@ -661,6 +679,10 @@ def cmd_plan(args: argparse.Namespace) -> int:
     else:
         payload_rows = None
     payload = {"census": plan.census(), "run": result.as_dict(),
+               # Present on EVERY plan artifact, disarmed or not: this path only runs
+               # when every census read succeeded, so "was it measured?" has one answer
+               # a driver reads by key instead of inferring from the payload's shape.
+               "census_measured": True,
                "rows_written": payload_rows,
                "points_read": len(points), "points_total_reported": points_total,
                "sources_read": len(sources), "sources_total_reported": source_total,

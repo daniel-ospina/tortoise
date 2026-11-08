@@ -1218,9 +1218,6 @@ class IngestWriter:
             raise CurationRefused(refused, written_keys=written)
         return res
 
-#: The fields a row exposes as REFS that `mcp_auth.resolve_graph_target` accepts for
-#: the graph that row describes. Used verbatim (never `_tail`-derived): see
-#: `ledger_scopes` for why an id-space value must never enter a match set.
 #: The fields a ledger may resolve or record a target through. ⛔ `name` is NOT one of
 #: them, and neither is `_tail`'s derived identity: `mcp_auth.resolve_graph_target` is
 #: field-major and treats a name as the LAST resort, so a bare token that a row carries
@@ -1246,7 +1243,17 @@ def _ledger_row(
     write path resolves the same ref to BETA. The identity guard's error direction is a
     refusal; the LEDGER's is a skip, so it must not inherit that ambiguity: a ref the
     exact fields do not name gets NO row here, and the caller falls back to the literal
-    spelling (fail-closed — the guard refuses an unproven identity before a write).
+    spelling. ⛔ That fallback is NOT "the guard refuses it" in every case: a spelling
+    only a NAME resolves (identity-bearing rows, e.g. `{"graph_id": "g_x", "name":
+    "new"}`) is ACCEPTED by the guard, and the ledger then scopes it to the literal
+    string. The direction that matters is preserved — a literal scope can never
+    intersect ANOTHER graph's scope (a row whose exact field equals the spelling is
+    matched here first), so a name-spelled target can never SKIP; `run_plan`'s
+    disjoint-scope check turns a mismatched pair into a loud refusal instead. The cost
+    is a re-SEND when one graph was already recorded under another spelling (either
+    order; target-side content-hash dedup absorbs it, and `tortoise_ingest` is not
+    declared idempotent). None of it is reachable on the SHIPPED surface, which
+    exposes namespaces and no names — see `MCPReader.graphs()`.
     Measured 2026-11-08 (round-38 P2): with the shipped `graphs` shape losing
     `graph_id`/`stable_id`, ALPHA's `name: g_beta` made the two graphs share one ledger
     scope, so a run into BETA skipped every row and a run spelled by BETA's id recorded
@@ -1349,9 +1356,17 @@ def ledger_scopes(
     computed key would then refuse a ledger that is in fact this graph's — a false
     block on the one guard that protects the "skipped before the wire" half of R3.
 
-    ⛔ THE SET IS REFS, NOT IDENTITIES. It is the literal spelling plus the spelling
-    fields of the row that spelling RESOLVES THROUGH (`_matched_row`) — the refs
-    `mcp_auth.resolve_graph_target` accepts for that one graph, and nothing derived.
+    ⛔ THE SET IS REFS, NOT IDENTITIES. It is the literal spelling plus the REF fields
+    of the row that spelling resolves through — `_ledger_row`, which matches the EXACT
+    identity fields only (``graph_id``/``stable_id``/``namespace``), i.e. the fields
+    `mcp_auth.resolve_graph_target` compares with ``==``. ⛔ NOT `_matched_row` and
+    never a ``name``: that helper's casefolded-name fallback mirrors the resolver's
+    LAST resort, and a name is not an identity — a graph's name can equal ANOTHER
+    graph's id, so a ref resolved by name was matched by the ledger against one graph
+    and written by the real path into another (round-38 P2: ALPHA's `name: g_beta` put
+    BETA's id in ALPHA's scope, so a run into BETA skipped every row —
+    `applied: True, written: 0`, exit 0. The ledger's error direction is a SKIP, the
+    guard's is a REFUSAL, which is why it does not share the name fallback).
     Putting `_tail`'s identity in the set inverted this guard's error direction: a bare
     tail is id-SHAPED but is resolved by the real path as a NAME, so graph A's tail
     ``x`` matched a request for the different graph NAMED ``x`` and the run reported
@@ -1362,9 +1377,10 @@ def ledger_scopes(
     refs = {target_graph}
     row = _ledger_row(target_graph, graph_rows)
     if row is not None:
-        # `_refs_unique_to`, NOT every field verbatim: a `name` that equals another
-        # graph's id is carried by TWO rows, and putting it in the set let graph A's
-        # scope intersect graph B's (round-37 P2, second instance).
+        # `_refs_unique_to`, NOT every field verbatim: a value TWO rows carry is not
+        # this row's, so putting it in the set let graph A's scope intersect graph B's
+        # (round-37 P2, second instance). And a `name` never reaches this set at all
+        # (round-38 P2): `_LEDGER_REF_FIELDS` are the exact id fields only.
         refs |= _refs_unique_to(row, graph_rows)
     return frozenset(refs)
 
