@@ -321,8 +321,8 @@ Note on what remains UNGRADED: #2120's scope item "W3 harness seam entry
 (ingest + inject graded)" depends on the harness's graded-reflex bars, which
 are still the NULL reflex pending #8125 (`tests/eval/harness/runner.py`
 logs "graded seam lands with the W4 reflex delivery"). No per-seam matrix row
-can be blessed before that without a `--bless-protocol` change that
-#8125 owns.
+can be blessed before that without a `--bless-protocol` change that #8125
+owns.
 
 ## Frameworks (#2125) — SDK-level middleware, injection only
 
