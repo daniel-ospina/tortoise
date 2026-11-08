@@ -864,6 +864,61 @@ def test_install_refuses_a_symlinked_LEGACY_path_before_deleting_through_it(
     assert victim.exists(), "the legacy DELETE reached outside the install dir"
 
 
+def test_uninstall_refuses_a_symlinked_LEGACY_path_before_deleting_through_it(
+        tmp_path):
+    """The UNINSTALL half of the legacy-escape guard (#11588 review cycle 7).
+
+    The install half is pinned above; the uninstall arm deletes the same
+    out-of-root file and was unpinned — a mutant that drops `legacy_target`
+    from the uninstall candidate list removed `outside/hooks/UserPromptSubmit`
+    OUTSIDE the install root and exited 0, silently, with every existing test
+    green (both other uninstall symlink tests point at an EMPTY outside dir, so
+    the arm is skipped there).
+
+    MUTATION: drop the existing-candidate scope on the uninstall arm → the
+    outside file is deleted → RED.
+    """
+    outside = tmp_path / "outside-hooks"
+    (outside / "hooks").mkdir(parents=True)
+    victim = outside / "hooks" / "UserPromptSubmit"
+    victim.write_text("#!/usr/bin/env bash\n"
+                      "exec /nonexistent/volunteer-turn.sh cline\n")
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / ".cline").symlink_to(outside)
+
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+    r = _run(["install", "cline", "--dir", str(proj), "--uninstall"], env)
+
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "Refusing" in r.stderr
+    assert victim.exists(), "the uninstall DELETE reached outside the install dir"
+
+
+def test_install_cline_survives_a_symlink_loop_at_the_legacy_path(tmp_path):
+    """A loopy `<dir>/.cline` (the classic `ln -s .cline .cline` mistake) must
+    not turn a COMPLETED install into a failure (#11588 review cycle 7).
+
+    `_legacy_is_live_target()` compares `resolve()`d paths and is consulted
+    AFTER the hook is written; `resolve()` raises RuntimeError — not OSError —
+    on a loop, so the boundary reported
+    `Install failed: RuntimeError: Symlink loop` with exit 1 while the 0755 hook
+    sat on disk. That is the "working install reported as a failure" class
+    R10 declares closed.
+
+    MUTATION: let RuntimeError escape `_legacy_is_live_target` → RED on rc.
+    """
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / ".cline").symlink_to(".cline")
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+
+    r = _run(["install", "cline", "--dir", str(proj)], env)
+    assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+    assert "Install failed" not in r.stderr
+    assert (proj / ".clinerules" / "hooks" / "UserPromptSubmit").is_file()
+
+
 def test_install_cline_refuses_directory_target(tmp_path):
     """A directory sitting at the cline hook path is a clean refusal, not a
     traceback."""

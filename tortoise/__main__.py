@@ -6277,8 +6277,22 @@ def _install_read_hook_impl(args) -> int:
             ``.clinerules/hooks/`` empty). Nothing is retired in that shape —
             the one file IS the live registration.
             """
-            return (legacy_target is not None
-                    and legacy_target.resolve() == target.resolve())
+            if legacy_target is None:
+                return False
+            try:
+                return legacy_target.resolve() == target.resolve()
+            except RuntimeError:
+                # `resolve()` raises RuntimeError (NOT OSError) on a symlink
+                # LOOP, and this predicate is consulted AFTER the write. A
+                # loopy `<dir>/.cline` (a classic `ln -s .cline .cline`
+                # mistake) therefore turned a COMPLETED install into
+                # `Install failed: RuntimeError: Symlink loop` + exit 1, with
+                # the hook already on disk — the "working install reported as
+                # a failure" class R10 declares closed (#11588 review cycle 7).
+                # "Not the same file" is the honest answer here: the migration
+                # is skipped (the legacy path is not a usable file anyway) and
+                # the escape guard has already had its say before any write.
+                return False
 
         # `.clinerules` is ALSO Cline's rules-FILE convention (the single-file
         # form predates the `.clinerules/` directory its docs prescribe today),

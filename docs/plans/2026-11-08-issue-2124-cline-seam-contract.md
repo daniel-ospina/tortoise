@@ -116,7 +116,10 @@ hook script as a module. No MCP tool or public SDK method is touched.
   (`test_uninstall_cline_ignores_an_outside_symlink_on_the_untouched_path`,
   `test_uninstall_cline_removes_the_live_hook_when_dot_cline_leaves_the_root`): the escape guard covers
   only paths the operation writes or deletes, so a symlink on the path an uninstall does NOT touch can
-  no longer block removal of our own in-root registration.
+  no longer block removal of our own in-root registration. The OTHER half — a delete that WOULD escape
+  the root through a symlinked `.cline` — is refused on **both** operations
+  (`test_install_refuses_a_symlinked_LEGACY_path_before_deleting_through_it`,
+  `test_uninstall_refuses_a_symlinked_LEGACY_path_before_deleting_through_it`).
 - R6 A regression in the other harness arms (`claude|codex|devin` share one arm) → caught by their
   unchanged contract tests in the same file.
 - R7 A project whose `.clinerules` is a rules FILE (Cline's other rules convention) gets an install
@@ -140,7 +143,9 @@ hook script as a module. No MCP tool or public SDK method is touched.
   naming nothing left behind) or claims "nothing to remove" over our surviving hook (false green) →
   caught by `test_install_cline_reports_a_failed_legacy_cleanup_as_a_note` (install side) and
   `test_install_cline_reports_a_failed_legacy_cleanup_on_uninstall_as_a_note` (uninstall side, which
-  also pins that the summary keys on ownership rather than on what was removed).
+  also pins that the summary keys on ownership rather than on what was removed). A `resolve()` that
+  RAISES after the write (a symlink loop at `.cline`) turned a completed install into `Install failed:`
+  → caught by `test_install_cline_survives_a_symlink_loop_at_the_legacy_path`.
 
 **Threat classes:** (not adversarial) — not gate/enforcement code.
 
