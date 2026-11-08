@@ -599,6 +599,17 @@ OBJECT_DERIVATION_LINK_QUERY = (
     "MATCH (o)-[:extractedFrom|references]->() "
     "RETURN count(DISTINCT ID(o))"
 )
+#: #11237: the Object→Object edges incident to THIS session's Objects, grouped by
+#: type. This is the receipt's read of the S5 Job 1 relation WRITE path — the
+#: graph truth behind "the narrative stated it and an edge landed", rather than
+#: the write leg's own self-report. A before-arm of 0 was the whole point of the
+#: issue (`#11001` §5: 5,314 Objects and zero Object→Object edges), so the row
+#: must be read from the graph, not from the producer's counter.
+SESSION_OBJECT_EDGES_QUERY = (
+    "MATCH (a:Object) WHERE ID(a) IN $nids "
+    "MATCH (a)-[r]->(b:Object) "
+    "RETURN type(r), count(*)"
+)
 #: Anchored/total for one derivation predicate out of this session's nodes.
 #: The anchored predicate is the writer's own (`_anchor_on_create`).
 DERIVATION_ANCHOR_QUERY = (
@@ -735,6 +746,15 @@ def graph_census(sdk, session_id: str, point_ids: list[str]) -> dict:
                 "identity_excluded": identity}
                if rel == "references" else {}),
         }
+    # #11237: the Object→Object edges this session's Objects carry. Read for
+    # EVERY run (not only a relation-bearing one) so a zero is a MEASUREMENT
+    # rather than an absent key — the row this issue exists to move starts at 0.
+    object_edges: dict[str, int] = {}
+    if node_ids:
+        for rel, count in g.query(
+                SESSION_OBJECT_EDGES_QUERY,
+                params={"nids": node_ids}).result_set:
+            object_edges[str(rel)] = int(count or 0)
     return {
         "session_id": session_id,
         "objects": {
@@ -746,6 +766,7 @@ def graph_census(sdk, session_id: str, point_ids: list[str]) -> dict:
             "with_derivation_link": with_derivation_link,
         },
         "derivation_edges": derivation_edges,
+        "object_edges": object_edges,
     }
 
 
@@ -774,6 +795,7 @@ def aggregate_graph_census(per_session: dict[str, dict]) -> dict:
     objects_total = objects_the = objects_linked = 0
     edges = {rel: {"total": 0, "anchored": 0}
              for rel in ("extractedFrom", "references")}
+    object_edges: dict[str, int] = {}
     errored = sorted(
         sid for sid, census in per_session.items() if "error" in census)
     sessions_with_objects = 0
@@ -784,6 +806,10 @@ def aggregate_graph_census(per_session: dict[str, dict]) -> dict:
         objects_linked += int(obj.get("with_derivation_link") or 0)
         if obj.get("total"):
             sessions_with_objects += 1
+        # #11237: summed per edge type, exactly like the derivation counters.
+        for rel, count in (census.get("object_edges") or {}).items():
+            object_edges[str(rel)] = object_edges.get(str(rel), 0) + int(
+                count or 0)
         for rel, counts in (census.get("derivation_edges") or {}).items():
             if rel not in edges:
                 continue
@@ -807,6 +833,11 @@ def aggregate_graph_census(per_session: dict[str, dict]) -> dict:
             "with_derivation_link": objects_linked,
         },
         "derivation_edges": edges,
+        # #11237: the Object→Object write path's own row, summed over sessions.
+        # `object_edges_total` is the single number the E6 pre-registration
+        # reads against its before-arm of 0.
+        "object_edges": object_edges,
+        "object_edges_total": sum(object_edges.values()),
     }
 
 
@@ -1368,6 +1399,9 @@ def run_benchmark(
     if owned_sdk:
         sdk = _open_hermetic_sdk(run_id)
     session_results: list[dict] = []
+    #: #11237: {session_id: the capture receipt's `relation_write` block} — the
+    #: S5 Job 1 relation write path's own result, per session that stated one.
+    relation_runs: dict[str, dict] = {}
     runner_errors: list[str] = []
     semantic_block: dict | None = None
     total_cost: float = 0.0
@@ -1425,6 +1459,13 @@ def run_benchmark(
             # attributed between "the edge was never formed" and "the seam
             # dropped it" (the two mechanisms #8503 refuses to conflate).
             result["extraction_warnings"] = list(capture.get("warnings") or [])
+            # #11237: what the S5 Job 1 relation WRITE leg did on THIS session's
+            # capture — the per-edge record and the counts, taken from the
+            # capture receipt (absent when the extractor stated no relations, so
+            # "nothing was stated" stays distinguishable from "nothing was
+            # written"). Accumulated below into the run-level block.
+            if isinstance(capture.get("relation_write"), dict):
+                relation_runs[session_id] = capture["relation_write"]
             session_results.append(result)
         if ep_pass:
             try:
@@ -1674,6 +1715,12 @@ def run_benchmark(
         "metrics": metrics,
         "quote_spans_total": quote_spans_total,
         "operator_audit": operator_audit,
+        # #11237: the relationship channel's WRITE half. Present only when at
+        # least one session's extraction stated a relation; the receipt then
+        # carries both the graph-truth count (``graph_census.aggregate``
+        # ``object_edges_total``) and the leg's own per-edge record.
+        **({"relation_write": _aggregate_relation_write(relation_runs)}
+           if relation_runs else {}),
         "graph_census": graph_census_report,
         "extractor_identity": extractor_identity(),
         "semantic_judge": semantic_block,
@@ -1938,6 +1985,45 @@ _SUPERSEDE_REFUSAL_MARKERS = (
     # zero; without this marker the warning exists and the count does not see it.
     "with no surviving point id",
 )
+
+
+def _aggregate_relation_write(runs: dict[str, dict]) -> dict:
+    """Sum the per-session `relation_write` receipts into one run-level block.
+
+    ``#11237``: the S5 Job 1 channel's WRITE half. Two things are kept apart on
+    purpose, because collapsing them would let one hide a loss:
+
+    * ``written`` / ``dropped`` — what the leg DID, summed over sessions;
+    * ``drops`` — every individual refusal WITH its session and reason, so a
+      verb that binds no declared path is visible rather than counted.
+
+    ``edges`` keeps the per-edge record (ids, predicate written, the story's own
+    verb, the write path, and the declaring pack when one fixed the predicate).
+    Pure: same receipts → same block, so a receipt is comparable across runs.
+    """
+    written = dropped = 0
+    write_paths: dict[str, int] = {}
+    edges: list[dict] = []
+    drops: list[dict] = []
+    for session_id in sorted(runs):
+        block = runs[session_id] or {}
+        written += int(block.get("written") or 0)
+        dropped += int(block.get("dropped") or 0)
+        for path, count in (block.get("write_paths") or {}).items():
+            write_paths[str(path)] = write_paths.get(str(path), 0) + int(
+                count or 0)
+        edges.extend({**edge, "session_id": session_id}
+                     for edge in (block.get("edges") or []))
+        drops.extend({**drop, "session_id": session_id}
+                     for drop in (block.get("drops") or []))
+    return {
+        "sessions": sorted(runs),
+        "written": written,
+        "dropped": dropped,
+        "write_paths": write_paths,
+        "edges": edges,
+        "drops": drops,
+    }
 
 
 def operator_drop_warnings(session_results: list[dict]) -> dict:
@@ -2274,6 +2360,11 @@ def build_receipt(report: dict, *, justification: str | None = None) -> dict:
     # the identity is what lets the receipt check reject a wire-only number.
     if report.get("extractor_identity") is not None:
         receipt["extractor"] = report["extractor_identity"]
+    # #11237 additive relation-write block: the S5 Job 1 channel's WRITE half,
+    # added ONLY when the run stated one, so a receipt from a run whose
+    # extraction produced no relations is byte-identical to the pre-#11237 one.
+    if report.get("relation_write") is not None:
+        receipt["relation_write"] = report["relation_write"]
     # #5085 additive banded semantic judge block.  Added ONLY when the arm ran
     # (``--judge semantic``), so a mechanical-lane receipt is byte-identical to
     # the pre-#5085 runner's — the gated ``metrics``/``judge_pin`` surface is
@@ -2351,6 +2442,21 @@ def validate_receipt(receipt: dict) -> list[str]:
                 "receipt.extractor.real: expected a bool, got "
                 f"{extractor.get('real')!r}"
             )
+    # #11237 additive relation-write block — SHAPE only, and only when present.
+    # Whether the number is GOOD belongs to the write-path lane
+    # (``test_write_path_relation_lane``) and to the census, not to a receipt
+    # shape check.
+    relation_write = receipt.get("relation_write")
+    if relation_write is not None:
+        if not isinstance(relation_write, dict):
+            issues.append("receipt.relation_write: expected an object")
+        else:
+            for key in ("written", "dropped"):
+                value = relation_write.get(key)
+                if isinstance(value, bool) or not isinstance(value, int):
+                    issues.append(
+                        f"receipt.relation_write.{key}: expected an int, got "
+                        f"{value!r}")
     return issues
 
 
