@@ -553,10 +553,19 @@ def _disarmed_artifact(
     `unreconciled is None` and not a blanket `True` — an unreconcilable source listing
     travels through that arm, so the source population was not measured (round-40).
     The key is therefore on every disarmed artifact; its VALUE is the honest one). When
-    the census WAS measured
-    (`census` given) it travels here in full, because a disarmed run over a damaged
-    LEDGER still read the graph successfully: the two losses are not the same fact and
-    must not be reported as one.
+    `census` is given it is the census that WAS read, stopped by the ledger, and it
+    travels here in full: a disarmed run over a damaged LEDGER still read the graph
+    successfully, so the two losses are not the same fact and must not be reported as
+    one — `census_measured` still says whether its SOURCE population could be
+    reconciled, which is a different fact again.
+
+    ⛔ `census_measured` IS NOT `census is not None`, and the LABEL at the end of this
+    helper was the last place that still derived it from presence (round-42 review). A
+    caller that knows the source population was unreconcilable passes
+    `census_measured=False` while still handing over the census it did measure, because
+    "the points were read" and "the census is complete" are different facts — and the
+    operator-facing line must agree with the artifact it accompanies, or the incident
+    log and the JSON tell two stories about one run.
 
     ⛔ `pending` is the plan's CARRY COUNT on that second arm, not a hardcoded 0: with
     the census measured and a carry set on the artifact, `pending: 0` says "nothing is
@@ -566,18 +575,21 @@ def _disarmed_artifact(
     three counters still SPAN the carry set (`0 + 0 + carried == carried`), the
     documented invariant, and nothing was written.
     """
+    # Resolved ONCE: the artifact and the operator-facing line must not disagree.
+    measured = (census is not None) if census_measured is None else census_measured
     payload = {
         # `null` when the census could not be measured — never a zeroed census, which
         # is indistinguishable from "the graph is empty" (the silent-zero class R7
-        # forbids). When `census` is given it is a FULL measured census: this arm is a
-        # census that WAS read, stopped by the ledger.
+        # forbids). When `census` is given it is the census that WAS read, stopped by
+        # the ledger; `census_measured` says whether its SOURCE population could be
+        # reconciled, which is a different fact.
         "census": census,
         # The CALLER supplies the fact where it knows better than `census is not None`:
         # a measured-but-unreconciled census exists AND has an unmeasured source
         # population, and deriving the flag from presence alone reported it as measured
         # (round-41 review). `read_note` carries the reason when it is not in
         # `read_failure` (that field is for the read that RAISED).
-        "census_measured": (census is not None) if census_measured is None else census_measured,
+        "census_measured": measured,
         "disarmed_reason": reason,
         "read_failure": read_failure,
         "read_note": read_note,
@@ -594,7 +606,7 @@ def _disarmed_artifact(
         with open(args.out, "w", encoding="utf-8") as fh:
             fh.write(text + "\n")
     print(text)
-    label = "census measured" if census is not None else "census NOT measured"
+    label = "census measured" if measured else "census NOT measured"
     print(f"disarmed ({label}: {reason[:200]}): nothing written, nothing attempted",
           file=sys.stderr)
     return 0

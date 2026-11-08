@@ -2990,3 +2990,37 @@ def test_a_disarmed_run_over_a_damaged_ledger_keeps_the_unmeasured_source_fact(
     assert payload["census_measured"] is False, payload["census_measured"]
     assert "cannot be told from an unread one" in (payload["read_note"] or ""), payload
     assert "damaged" in payload["disarmed_reason"], payload["disarmed_reason"]
+
+
+def test_the_disarmed_operator_line_agrees_with_the_artifact_it_accompanies(monkeypatch,
+                                                                            tmp_path,
+                                                                            capsys):
+    """Round-42 P3 — the stderr label derived its claim from `census is not None`.
+
+    On the arm this file's round-41 pin covers (disarmed + damaged ledger + an
+    unreconcilable source listing) the artifact honestly said `census_measured: false`
+    while the operator-facing line said "census measured". The incident log and the
+    JSON told two stories about one run, and the label was the last place in the helper
+    still ignoring the caller-supplied fact.
+    """
+    mod = _tool_module()
+    led = tmp_path / "l.jsonl"
+    led.write_text("null\n")
+
+    def call(name, args):
+        if name == "tortoise_query":
+            return {"result": [{"id": "p1", "kind": "decision", "content": "c"}], "total": 1}
+        if args.get("section") == "sources":
+            return {"result": []}
+        if args.get("section") == "status":
+            return {"unexpected": "shape"}
+        return {"result": []}
+    monkeypatch.setattr(mod, "_live_call_tool", call)
+    assert mod.main(["plan", "--graph", "org_x_g_old", "--target", "org_x_g_new",
+                     "--apply", "--off", "--no-verify-read", "--ledger", str(led),
+                     "--out", str(tmp_path / "p.json")]) == 0
+    payload = json.loads((tmp_path / "p.json").read_text())
+    err = capsys.readouterr().err
+    assert payload["census_measured"] is False, payload["census_measured"]
+    assert "census NOT measured" in err, err
+    assert "census measured:" not in err, err
