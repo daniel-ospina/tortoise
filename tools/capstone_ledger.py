@@ -1125,6 +1125,7 @@ def _names_artifact(token: str, cwd: Path, root: Path) -> tuple[bool, str]:
             # A pattern with NO tracked match is still refused.
             untracked_seen = False
             unrunnable_seen = False
+            unmeasured_seen: list[object] = []
             for match in cwd.glob(text):
                 resolved_match = match.resolve()
                 if not (resolved_match.is_file() and resolved_match.is_relative_to(root)):
@@ -1139,8 +1140,28 @@ def _names_artifact(token: str, cwd: Path, root: Path) -> tuple[bool, str]:
                     return True, ""
                 if verdict is None:
                     unrunnable_seen = True
-                else:
+                elif verdict is False:
                     untracked_seen = True
+                else:
+                    # ⛔ THE FOURTH ANSWER (#11474 review): `is True … is None … else`
+                    # filed every OTHER truthy return (`1`, `"yes"`) under
+                    # `untracked_seen`, i.e. it reported a value git never measured as
+                    # the MEASURED sentence "every file the glob … is untracked by
+                    # git". Fail-closed either way, but the same guess-the-cause defect
+                    # the two branches above exist to remove, one arm over — and this
+                    # arm is the third of the three `_is_tracked` call sites, so a guard
+                    # at two of three is a guard with a hole the next caller change
+                    # walks through.
+                    unmeasured_seen.append(verdict)
+            if unmeasured_seen:
+                # A value that is not a measurement cannot be folded into a sentence
+                # about what WAS measured, so it is named on its own and takes
+                # precedence: the reader gets the answer git actually gave.
+                return False, (
+                    f"cannot be verified: the TRACKED check answered "
+                    f"{unmeasured_seen[0]!r} for a file the glob {text!r} matches, "
+                    "which is not a measurement that it is in the tree"
+                )
             # ⛔ AND THE MIXED CASE NEEDS BOTH CAUSES (#11474 review). `untracked_seen`
             # winning outright re-emitted the universal sentence "EVERY file the glob
             # matches is untracked by git" INCLUDING the matches git was never asked
