@@ -1777,7 +1777,20 @@ def _install_pi_volunteer_artifact(
     return changed, actions, ""
 
 
-def _install_pi(home: Path, *, dry_run: bool) -> InstallResult:
+def _install_pi(
+        home: Path, *, dry_run: bool,
+        introduce_read_seam: bool = True) -> InstallResult:
+    """Install the Pi capture extension, and optionally the per-turn read seam.
+
+    ``introduce_read_seam=False`` makes this the REPAIR path: the read seam is
+    refreshed when it is already on disk, but never introduced.  Installing the
+    read seam is the W4 opt-in for #2119, so a caller whose job is to *fix* an
+    install (``tortoise hooks upgrade``) must not be able to turn the capability
+    on — see `_upgrade_artifact_seam` in ``tortoise/__main__.py``, which routes
+    through this same installer and would otherwise reinstate a seam the user
+    explicitly removed with ``tortoise install pi --uninstall``, without saying
+    so.
+    """
     harness = "pi"
     ext_dir = pi_home(home)
     dst = ext_dir / PI_EXTENSION_NAME
@@ -1927,13 +1940,21 @@ def _install_pi(home: Path, *, dry_run: bool) -> InstallResult:
     # files nothing: a user would see memory appearing and never learn that
     # capture is broken). Its guards and its post-write byte check live in
     # `_install_pi_volunteer_artifact`, deliberately the same ones.
-    v_changed, v_actions, v_error = _install_pi_volunteer_artifact(
-        ext_dir, home, dry_run=dry_run)
-    changed = changed or v_changed
-    actions.extend(v_actions)
-    if v_error:
-        return InstallResult(harness, changed=changed,
-                             actions=tuple(actions), error=v_error)
+    # ``introduce_read_seam=False`` (the repair path) still REFRESHES a seam
+    # that is already installed — a stale copy is drift and repairing drift is
+    # exactly what this caller exists for — but it never creates one.  Absence
+    # is not reported as drift by `detect_artifact_install`, so skipping here
+    # leaves ``hooks status`` consistent with what ``hooks upgrade`` will do: a
+    # capture-only install stays capture-only until the user opts in.
+    read_seam_present = (ext_dir / PI_VOLUNTEER_EXTENSION_NAME).is_file()
+    if introduce_read_seam or read_seam_present:
+        v_changed, v_actions, v_error = _install_pi_volunteer_artifact(
+            ext_dir, home, dry_run=dry_run)
+        changed = changed or v_changed
+        actions.extend(v_actions)
+        if v_error:
+            return InstallResult(harness, changed=changed,
+                                 actions=tuple(actions), error=v_error)
 
     return InstallResult(harness, changed=changed, actions=tuple(actions))
 
@@ -2176,6 +2197,7 @@ def install_capture(
     root: str | os.PathLike[str] = ".",
     home: str | os.PathLike[str] | None = None,
     dry_run: bool = False,
+    introduce_read_seam: bool = True,
 ) -> InstallResult:
     """Install (or upgrade) the capture seam for ``harness``.
 
@@ -2235,7 +2257,8 @@ def install_capture(
         try:
             result = _install_pi(
                 Path(home) if home is not None else Path.home(),
-                dry_run=dry_run)
+                dry_run=dry_run,
+                introduce_read_seam=introduce_read_seam)
         except MemoryError:
             raise  # resource exhaustion is not a refusal; the handler allocates
         except Exception as e:

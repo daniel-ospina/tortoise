@@ -7127,6 +7127,21 @@ def _upgrade_artifact_seam(args, root, home) -> int:
     (``<home>/<root_relpath>``), derived by the caller from ``root`` — so
     ``--dir`` is honoured rather than ignored in favour of the process HOME,
     which would install into a different tree and leave ``--dir`` untouched.
+
+    ⛔ ``introduce_read_seam=False``: repairing a capture install must never
+    TURN ON the per-turn read seam (#2119).  Until this flag existed, this
+    function called ``install_capture`` with its defaults — the same entry
+    point ``tortoise install pi`` uses — so the repair command that
+    ``hooks status`` prints reinstalled ``tortoise-volunteer.ts`` in a tree
+    where the user had explicitly run ``tortoise install pi --uninstall``
+    (which had said "per-turn memory injection is uninstalled").  The seam then
+    searched the prompt on every turn and, on a machine with no ``tortoise`` on
+    ``PATH`` but a configured key, POSTed the prompt window to the hosted
+    endpoint — after the user had opted out, and without the command's own
+    output ever saying the exposure changed.  That is a bypass of the recorded
+    W4 opt-in ("installing the extension IS the opt-in"), so the repair path
+    REFRESHES an installed seam (a stale copy is real drift, which is this
+    caller's job) and never introduces one.
     """
     import sys as _sys
 
@@ -7136,7 +7151,8 @@ def _upgrade_artifact_seam(args, root, home) -> int:
     dry_run = getattr(args, "dry_run", False)
     try:
         result = install_capture(args.harness, root=root, home=home,
-                                 dry_run=dry_run)
+                                 dry_run=dry_run,
+                                 introduce_read_seam=False)
     except MemoryError:
         raise  # resource exhaustion is not a refusal; the handler allocates
     except Exception as e:

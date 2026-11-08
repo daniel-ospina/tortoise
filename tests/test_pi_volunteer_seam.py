@@ -261,6 +261,66 @@ def test_uninstall_removes_the_read_half_only(home, capsys):
     assert "not installed" in capsys.readouterr().out
 
 
+def test_a_repair_never_turns_on_the_read_seam(home):
+    """The repair verb REFRESHES the seam; it never INTRODUCES it (#2119 W4).
+
+    ``hooks status`` tells an operator to run ``hooks upgrade`` to repair a
+    capture install, and that command routes through ``install_capture`` — the
+    same entry point ``tortoise install pi`` uses.  Before
+    ``introduce_read_seam=False`` existed, a user who had explicitly run
+    ``install pi --uninstall`` got the per-turn read seam back on the next
+    repair: silently, because the command's own output never said the exposure
+    changed.  That is a bypass of the recorded opt-in ("installing the
+    extension IS the opt-in"), and on a machine with no ``tortoise`` on PATH
+    but a configured key it POSTs the prompt window to the hosted endpoint.
+
+    So both halves are pinned here: a repair restores the CAPTURE artifact, and
+    it does not resurrect the READ seam in a tree that opted out.
+    """
+    from types import SimpleNamespace
+
+    from tortoise.__main__ import _upgrade_artifact_seam
+
+    assert _install(home).ok
+    capture = _ext_dir(home) / CAPTURE_EXTENSION.name
+    read_seam = _ext_dir(home) / VOLUNTEER_EXTENSION.name
+    read_seam.unlink()                      # the user opted OUT
+    assert capture.is_file() and not read_seam.exists()
+
+    capture.unlink()                        # …and capture now needs repair
+    rc = _upgrade_artifact_seam(
+        SimpleNamespace(harness="pi", dry_run=False), _ext_dir(home), home)
+
+    assert rc == 0
+    assert capture.is_file(), "the repair must restore the capture artifact"
+    assert not read_seam.exists(), (
+        "the repair verb reintroduced the per-turn read seam in a tree where "
+        "the user had explicitly opted out — it must refresh, never introduce")
+
+
+def test_a_repair_still_refreshes_an_installed_read_seam(home):
+    """…but drift in an OPTED-IN seam is exactly what the repair is for.
+
+    The guard added above must not make a stale read seam unreachable: refusing
+    to introduce is a scope limit, not an exemption from drift repair.
+    """
+    from types import SimpleNamespace
+
+    from tortoise.__main__ import _upgrade_artifact_seam
+
+    assert _install(home).ok
+    read_seam = _ext_dir(home) / VOLUNTEER_EXTENSION.name
+    shipped = read_seam.read_bytes()
+    read_seam.write_bytes(shipped + b"\n// stale\n")
+
+    rc = _upgrade_artifact_seam(
+        SimpleNamespace(harness="pi", dry_run=False), _ext_dir(home), home)
+
+    assert rc == 0
+    assert read_seam.read_bytes() == shipped, (
+        "an installed (opted-in) seam must be refreshed to the shipped bytes")
+
+
 def test_uninstall_honours_dry_run(home, capsys):
     """⛔ `--dry-run` is documented as "without writing", and the delete is the
     strongest write this verb performs — there is no undo, the installed file is
