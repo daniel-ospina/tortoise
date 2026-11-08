@@ -161,8 +161,8 @@ def _sdk_line(code: str) -> int:
     A line cite is the one number in this bundle no reader can keep true by hand:
     any commit that inserts a line above the site moves it, and the meta fold has
     moved on this branch's own history and again on ``main``'s ``#9964``. Typed,
-    the CAUSE re-stales SILENTLY — a shipped cause once named ``:13663`` for a fold
-    that had moved to ``:13681``, and the only thing that caught it was
+    the CAUSE re-stales SILENTLY — a shipped cause once named ``:13593`` for a fold
+    that had moved to ``:13611``, and the only thing that caught it was
     ``tests/test_7949_capstone_measure.py``, which derives the line in the PIN and
     compares. Deriving it here too means the cause a reader (and #9116's fixer)
     actually reads cannot re-stale on a merge that touched nothing this bundle

@@ -1788,9 +1788,9 @@ re-cut from the resolved document (§8), and no committed verdict is re-scored.
 
 - **Baseline — measured at this branch's head before the fix (`ec7b897d`, the `origin/main` merge):**
   `_collect_classify_items` at `:11189`, its extent `:11189-11211`, the two `if items:` gates at
-  `:13171`/`:13320`, and the two fail-open `except` arms at `:13184`/`:13331`.
+  `:13101`/`:13250`, and the two fail-open `except` arms at `:13114`/`:13261`.
 - **New value — measured at this head:** the same symbols at `:11189`, `:11189-11211`,
-  `:13177`/`:13326` and `:13190`/`:13337`.
+  `:13107`/`:13256` and `:13120`/`:13267`.
 - **Why this is NOT §10.15's +43, and why the collector does not move.** The review fix behind this
   entry (keeping a first-arm DISCARD's verdict on the retried path) inserts **six** lines ABOVE the
   two classify gates — a `decisions` key and its comment inside `renarrate_stats`, in
@@ -1798,8 +1798,8 @@ re-cut from the resolved document (§8), and no committed verdict is re-scored.
   `if items:` gates and both fail-open `except` arms. The collector sits ABOVE the insert, so its
   `:11189` is unchanged and §10.15's +15 reading of it still stands. Two deltas from two commits is
   the same shape §10.15 records for its own move.
-- **Verified by content, not by arithmetic.** `:13177`/`:13326` are the two `if items:` gates (one per
-  classify pass) and `:13190`/`:13337` are the two fail-open `except` arms whose messages name
+- **Verified by content, not by arithmetic.** `:13107`/`:13256` are the two `if items:` gates (one per
+  classify pass) and `:13120`/`:13267` are the two fail-open `except` arms whose messages name
   `classify(S2) failed` / `classify(union) failed`. §11.1 and §11.3 carry the same four and were
   cross-checked against them.
 - **What moved: nothing else.** No metric, denominator, threshold, class set or corpus pin is
@@ -1811,8 +1811,8 @@ re-cut from the resolved document (§8), and no committed verdict is re-scored.
 - **Baseline — measured at this branch's head before the guard:** the two `if items:` gates at
   `:13107`/`:13256`, the two fail-open `except` arms at `:13120`/`:13267`, the two result blocks at
   `:13445`/`:13455`, and `_run_vet_pass`'s call at `:15542`.
-- **New value — measured at this head:** `:13146`/`:13295`, `:13159`/`:13306`, `:13484`/`:13494`,
-  and `:15581`.
+- **New value — measured at this head:** `:13177`/`:13326`, `:13190`/`:13337`, `:13515`/`:13525`,
+  and `:15612`.
 - **Why every number moves by the SAME delta.** The change wraps `extract_session_v2`'s S2.2
   re-narrate block in a fail-open `try/except`: the `try:` line above the block, the block's own
   62 lines re-indented (a column change, not a content change — all 62 pair 1:1 with new
@@ -1826,9 +1826,9 @@ re-cut from the resolved document (§8), and no committed verdict is re-scored.
   31 more lines. Every cite re-derived against the shorter guard was stale by exactly
   that difference, which is why this entry states the delta it was measured at rather than a rule.
 - **Verified by content, not by arithmetic.** Each re-pointed number was read out of the tree and
-  compared with the symbol the document names: `:13146`/`:13295` are the two `if items:` classify
-  gates, `:13159`/`:13306` the two fail-open `except` arms, `:13484` `result["classify_later"] = {`,
-  `:13494` `result["vet"] = {`, `:15581` the `= _run_vet_pass(` call.
+  compared with the symbol the document names: `:13177`/`:13326` are the two `if items:` classify
+  gates, `:13190`/`:13337` the two fail-open `except` arms, `:13515` `result["classify_later"] = {`,
+  `:13525` `result["vet"] = {`, `:15612` the `= _run_vet_pass(` call.
 - **What moved: nothing else.** No metric, denominator, threshold, class set or corpus pin is
   touched. `document_sha256` is re-cut in this same commit, per §8's rule for *any* edit to this
   file — which is why a cite move changes the digest even though no frozen value changed.
