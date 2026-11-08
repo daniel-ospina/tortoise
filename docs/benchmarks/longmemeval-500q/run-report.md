@@ -52,15 +52,112 @@ extends: docs/planning/2026-09-01-2080-gbrain-plan.md (DM-11, §6.6, §7 E2E-8),
 | Run | `run_protocol` step 5 (full 500-Q), resumable state machine |
 | Ingest mode | **`v2`** — the production extractor (statement points + IMPL/NAND operators), i.e. `run_protocol` step 5's documented mode. **SUPERSEDES the `deterministic` record this row carried before #8486**: the belief layer is armable ONLY on a `v2` graph (the runner **refuses** `--activate-beliefs` with `--ingest-mode deterministic` — `parser.error` at the CLI, `ValueError` for programmatic callers), and the #8486 protocol injects `--ingest-mode v2 --activate-beliefs` on every run step, so a `deterministic` step-5 command is now unrunnable. The deterministic raw-content mode (turn points + raw chunks, no operators) remains the historical variant documented in §3; it cannot carry a belief layer. |
 | Belief layer | **`inert` — not activated.** The belief-activation arm (`tools/longmem_eval/run.py --activate-beliefs` → `ep_activation.activate_beliefs`, `#3011`) is now wired into the runner and armed by the `#8486` run protocol; the step-5 run MUST arm it. Reasons it is not optional: `ingest_v2` writes every extraction point `status="draft"` and mints its operators with `promote_source=False`, and `tortoise/ep.py` filters the factor graph with `_live_only(..., include_draft=False)` — so an un-activated graph is **EP-inert** and every claim reads the neutral `0.50` of a Beta(1,1) prior that was never measured (`#2598`). **The four resolved states — and the bar in terms of them** (`tools/longmem_eval/measurement_posture.py::belief_layer_state`, the ONE place they are derived): `activated` = the arm ran **and every question carries a measured posterior** (its post-pass census found at least one non-operator point with `points_with_ep > 0`); `partial` = the arm ran but not every question does — a resumed outcome with no manifest, an activation that failed, or, in the common case on this benchmark, a question whose extraction minted no IMPL/NAND operators, so `sdk.dream` returned with zero belief writes (`no_op_reason = "no_ep_factors"`, and the #1163 stale-run stand-down — single-session questions are frequently this shape); `inert` = the arm was not requested; `unknown` = no posture was ever recorded. **`partial` is the state a correctly-armed step-5 run is expected to report**, so the disclosure bar is PER QUESTION, never all-or-nothing: a `partial` number may be described as measuring Tortoise's reasoning **for the N of M questions whose claims carry a measured posterior** (`posture.activation.questions_with_ep` of `posture.activation.questions`, with `beliefs_activated: false`), and must NOT be described as belief-activated as a whole. Only `activated` licenses the unqualified description (`#8486`). Both halves are carried mechanically: the report's `methodology.measurement_posture` records them, and `w7_publish.validate_receipt` **refuses** a `completed` receipt whose posture is absent or `unknown` (it accepts `partial` — which is why the state has to be defined here, on the surface that states the number). |
-| Reader | `openrouter:deepseek/deepseek-v4-flash` (M5 pinned default, `reader_pinned: true`) |
-| Judge | `openai/gpt-4o-2024-08-06` (the OFFICIAL LongMemEval judge model; verbatim `evaluate_qa.py` anscheck prompts, `judge_call_shape` = official, rubric hash `82d07b0de05daa48`) via the OpenRouter transport — OPENAI_API_KEY absent, identical model id |
+| Reader | `deepseek:deepseek-v4-flash` (M5 pinned default, `reader_pinned: true`) — see §1.1 |
+| Judge | `deepseek:deepseek-v4-flash` — **INTERNAL BASELINE SERIES, not comparable to any published LongMemEval figure**; receipt records `unpinned:deepseek-v4-flash` + `verdict: inconclusive` **by design** — see §1.1 |
 | Backend | real FalkorDB (docker `:falkordb@localhost:6379/tortoise_lme_w7`) — FTS + vector + hybrid RRF |
 | Embedder | `BAAI/bge-small-en-v1.5` (sentence-transformers, local — no API cost) |
 | Commit (exact) | `PENDING — machinery commit; the run's exact commit recorded at execution` |
 | Corpus hash | `sha256:d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442` (verified vs the official split pin) |
 | Protocol state | `.longmemeval_cache/run_protocol_state.json` (gates 1–4 passed with evidence notes; step-5 record) |
-| Cost | PENDING — no run executed; the run window's OpenRouter key-usage delta recorded at execution (see §6) |
+| Cost | PENDING — no run executed; the run window's provider key-usage delta recorded at execution (see §6) |
 | HARD_STOP_USD | 10.00 (pre-registered) |
+
+### 1.1 Judge and reader — annotated (#8486, 2026-11-07)
+
+> **Annotated addition, errata discipline (§9; publication discipline, #2106 §7):
+> no number above is changed.**
+> The Reader and Judge rows were repointed at the configuration the #8486 ruling
+> names. Both rows previously named a transport (`openrouter`) that
+> holds no key on the box this audit measured, and a judge (`gpt-4o-2024-08-06`)
+> the owner ruling of 2026-10-27 replaced.
+
+**Judge.** The owner ruled on this issue (2026-10-27): *"Judge: our own model
+(`deepseek-v4-flash`), pinned to an exact snapshot id — not a floating alias …
+What the benchmark is for, for now: progress against ourselves."* The owner
+re-stated it on 2026-11-03 — *"i have already mentioned multiple times that we
+use deepseek and that i want to complete the p0 and p1 issues before doing an
+eval"* — and the decision comment that records that answer draws the
+consequence in its own words (this is the comment's reading, not a quotation):
+the model is DeepSeek, not OpenAI, not OpenRouter, and no credential request
+stands. The code now defaults to it (`tools/longmem_eval/judge.py`,
+`DEFAULT_JUDGE_MODEL`), and `OFFICIAL_JUDGE_MODEL` keeps the official identity
+named and reachable.
+
+**What a run of this configuration may and may not claim.**
+
+- The receipt will read `judge_pin: unpinned:deepseek-v4-flash` and
+  `verdict: inconclusive`. **That is not a failed run.** It is the gate
+  correctly saying *"this is not the official baseline"* — the two fields are
+  derived from the judge that graded (`w7_publish.judge_pin_for`, an
+  allow-list, never a default), so they cannot say anything else.
+- **Describe it as an internal baseline series.** Never "the LongMemEval
+  number", and never beside a vendor figure (HydraDB 90.79 %, mem0's own
+  numbers) as if it were on the same axis. No comparison to a vendor number is
+  legitimate unless that vendor discloses its reader *and* judge.
+- **Reader and judge are the same model**, so the model grades its own
+  answers. Recorded as a limitation, not a blocker: the bias is roughly
+  constant between runs, so a *trend* survives it, but it can flatten exactly
+  the gains the benchmark is meant to show.
+- The rubric is unchanged (`judge_rubric_id_hash 82d07b0de05daa48`, the
+  verbatim `evaluate_qa.py` anscheck prompts). The **grader** is not the
+  official one, and the substitution is **not neutral**. Two measurements in the
+  #8486 record say how it errs. On its **16 scored triples** the #8486 fitness
+  probe (2026-11-02, `deepseek-v4-flash`) agreed with the expected verdict
+  16/16 with **0 over-credits**; a **separate #1949 near-miss probe in the same
+  comment** — gold `"University of Melbourne in Australia"` vs the hypothesis
+  `"University of Melbourne."`, which gpt-4o grades *no* and which
+  `NEAR_MISS_GRADING = "strict"` also grades wrong — then came back **3/3
+  over-credited for `deepseek-v4-flash`** (and 3/3 for `deepseek-v4-pro`; 6/6
+  across the two models). At the near-miss rate `judge.py`'s #1949 decision
+  record carries (**1/50 in reval3** — the probe's own basis for the estimate,
+  not a rate the probe measured) that is ≈ **+2 points, wrong→right: an UPWARD
+  bias** — the substituted grader can make this run's number look *better* than
+  the official configuration it stands in for. Its direction on the remaining
+  classes is unmeasured (the probe covered those with clearly-correct and
+  clearly-wrong hypotheses only).
+- **The judge's request body also gains one field**, for the same reason the
+  reader's does: the judge shares the reader's transport declaration
+  (`judge.py` → `self.disables_thinking = api_key_env in
+  THINKING_BY_DEFAULT_KEY_ENVS`), so a `deepseek:` spec adds a top-level
+  `thinking: {"type": "disabled"}` to each grading call. The official call
+  shape is otherwise reproduced verbatim (one user message, no system message,
+  `n=1`, `temperature=0`, `max_tokens=10`, no `response_format`); the `thinking`
+  field is the single deviation, and it exists so the grader does not spend its
+  10-token answer budget on hidden reasoning. Stated here because a run graded
+  under the official model does **not** send it — so the two configurations
+  differ by one request field as well as by model.
+- **The official judge is still servable**, and it takes BOTH the spec and
+  that provider's key: name it
+  (`TORTOISE_LME_JUDGE_MODEL=openrouter:openai/gpt-4o-2024-08-06` with
+  `OPENROUTER_API_KEY`, or `openai:gpt-4o-2024-08-06` with `OPENAI_API_KEY`).
+  Holding a key alone does NOT select it — the default is our own model, so a
+  box with only `OPENAI_API_KEY` still grades nothing until the spec names it
+  and `build_judge` fails closed and says so. That configuration is the only
+  one whose number may be compared to a published figure, and running it is a
+  legal configuration rather than a lane's decision.
+
+**Reader.** The M5 pin (#1525) exists so the code default equals what runs use.
+It named `openrouter:deepseek/deepseek-v4-flash`; `OPENROUTER_API_KEY` is absent
+on the box the #8486 credential audit measured (2026-11-02 — one box and
+worktree, not a fleet census), so a default-config run raised at the
+named-provider check *before loading a question* (also observed 2026-10-23:
+`reader.py: ValueError: model spec names provider 'openrouter' but its key is
+not set`). The constant now names the DeepSeek transport. The **model
+is unchanged**; the transport moved, and a box holding only another
+provider's key uses the documented override (which records
+`reader_pinned: false` rather than silently reporting a different endpoint as
+the pin).
+
+Two things moved with it, and only one of them is the endpoint. The reader
+class is a function of the **key env**, not of the model id
+(`reader.py` → `transport = _ThinkingDisabledTransport if key_env in
+THINKING_BY_DEFAULT_KEY_ENVS else OpenAICompatModel`, with
+`THINKING_BY_DEFAULT_KEY_ENVS = {"DEEPSEEK_API_KEY"}`), so under the new pin
+the request body also gains a top-level `thinking: {"type": "disabled"}`.
+That is required, not incidental: a reasoning-by-default provider would
+otherwise spend the bounded answer budget on hidden reasoning instead of the
+answer. Recorded here because a pinned instrument is only reproducible if the
+request shape is disclosed with it.
 
 ## 2. Official metric + labeled variants (R12: never mixed)
 
@@ -80,7 +177,7 @@ approximated, never any-hit presented as official.
 | per-question fraction @5 (non-_abs) | PENDING | — | LABELED VARIANT D1+D3 (paper-aligned exclusion) |
 | per-question fraction @5 (`_abs`-inclusive) | PENDING | — | LABELED VARIANT D1 (legacy) |
 | turn-level recall @5 (paper keys) | PENDING | — | LABELED VARIANT D2 (assistant-role turns included) |
-| QA accuracy (official anscheck judge) | PENDING | —/500 | end-to-end reader accuracy — NOT a retrieval metric (§3) |
+| QA accuracy (**official rubric**; judge model per §1.1) | PENDING | —/500 | end-to-end reader accuracy — NOT a retrieval metric (§3) |
 
 The metric-formula machinery (official-vs-any-hit projection, `_abs`
 exclusion, variant separation) is COMMITTED and tested in
@@ -91,7 +188,7 @@ update).
 ### 2.1 Per-category gate rows + type-stratified slices (#2516, C1 of #2513) — annotated
 
 > **Added 2026-10-15 (#2516).** This is an annotated addition, not a change
-> to any number above (§7 discipline — the table above is untouched).
+> to any number above (§9 discipline; publication discipline, #2106 §7 — the table above is untouched).
 
 The sealed run's gate surface is the **type tail**, not just the full-mix
 mean: the measured loss on the multi-session classes is invisible to an
@@ -129,7 +226,10 @@ Full per-`k` table + per-question digests: `w7a-500q.variants.json`
 - **Measures:** Tortoise's graph-indexed hybrid retrieval over each
   question's history (isolated per-question corpus — the report's
   `retrieval_scope`), scored with the official LongMemEval retrieval
-  semantics; and end-to-end QA accuracy via the official anscheck judge.
+  semantics; and end-to-end QA accuracy via the official anscheck RUBRIC —
+  graded by the run's judge, which by default is our own pinned model and not
+  the official one (§1.1), so only an explicitly official-graded run is
+  comparable to a published figure.
 - **Does NOT measure:** why-context assembly (the `#3011` B/C/D arms), and
   it does not measure the belief layer's effect on **retrieval** — the
   ranking is hybrid RRF over FTS/vector plus the structural leg, and no
@@ -153,20 +253,22 @@ Full per-`k` table + per-question digests: `w7a-500q.variants.json`
   this run used the runner's `deterministic` ingest (raw-content graph: turn
   points + raw chunks) — **superseded for step 5 by #8486**, which requires
   the belief layer and therefore `v2` (the runner REFUSES
-  `--activate-beliefs` on `deterministic`, so §1's ingest mode is `v2`). The
-  v2 (LLM-extraction) 500-Q baseline — `run_protocol` step 5's documented
-  mode — remains pending: it requires the 3-provider rotation for a ~40 h
-  run at tens of dollars (measured: 2-Q v2 slice ≈ 40 min; #1509 pilot
-  50-Q ≈ 4.7 h at 5 workers) and was NOT within this run's cost/time bound.
-  The deterministic run measures the same retrieval machinery over the same
-  content index; the v2 delta is the extraction leg, tracked as the #1509
-  protocol follow-up.
+  `--activate-beliefs` on `deterministic`, so §1's ingest mode and §4's command
+  are `v2`). Step 5 itself has NOT been executed: the v2 (LLM-extraction) 500-Q
+  run is PENDING, because it requires the 3-provider rotation for a ~40 h run at
+  tens of dollars (measured: 2-Q v2 slice ≈ 40 min; #1509 pilot 50-Q ≈ 4.7 h at
+  5 workers) and was NOT within the cost/time bound this machinery was approved
+  for. There is no third configuration: `deterministic` is the historical
+  variant, `v2` is what step 5 runs, and the v2-vs-deterministic delta is the
+  extraction leg itself — tracked as the #1509 protocol follow-up. (This bullet
+  previously closed by calling the v2 baseline "pending" as though `v2` were a
+  future configuration rather than this run's mode; the closing clause now says
+  what is pending — the RUN — and not a third mode.)
 
 ## 4. Run config (exact command + resolved knobs)
 
 ```bash
 TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_lme_w7' \
-TORTOISE_LME_JUDGE_MODEL='openrouter:openai/gpt-4o-2024-08-06' \
 python -m tools.longmem_eval.run_protocol run 5 -- \
   --ingest-mode v2 --workers 3
 ```
@@ -175,6 +277,14 @@ python -m tools.longmem_eval.run_protocol run 5 -- \
 and the protocol additionally injects `--activate-beliefs` on every run step.
 A `--ingest-mode deterministic` extra is now refused by the runner's CLI at
 arm resolution, so it can no longer appear here.)
+
+(#8486, 2026-11-07: this command carried
+`TORTOISE_LME_JUDGE_MODEL='openrouter:openai/gpt-4o-2024-08-06'` — the
+official judge via a transport holding no key here. The 2026-10-27 ruling made
+our own pinned model the run's judge, so the line is gone: the default *is*
+the ruled configuration (§1.1). Naming the official judge again is a
+`TORTOISE_LME_JUDGE_MODEL` override, and it buys the only number that may be
+compared to a published figure.)
 
 (Full argv in the protocol state file's step-5 `command`.) Resolved knobs are
 recorded in the report methodology: chunk_turns 2, context cap 8000,
@@ -197,7 +307,7 @@ digest).
 | failure_origin | PENDING |
 | commit | PENDING |
 | corpus_hash | sha256:d6f21ea9…3a442 (seal verified, gates 1-4) |
-| judge_pin | `longmemeval-official-anscheck-gpt4o-2024-08-06-v1` |
+| judge_pin | PENDING — derived from the judge that graded, so no value can be entered before the run. A run of the pinned default (§1.1) will record `unpinned:deepseek-v4-flash`; the `longmemeval-official-anscheck-gpt4o-2024-08-06-v1` pin is minted only for a run the OFFICIAL judge graded |
 | cost_usd | PENDING |
 
 `w7a-500q.receipt.json` / `w7a-500q.report.json` / `w7a-500q.seal.json`
@@ -213,9 +323,20 @@ are NOT committed in this machinery PR — they land WITH the executed run
 - Embeddings: local sentence-transformers (no API embedding cost); the
   dataset was cached and digest-verified (no re-download).
 - HARD_STOP_USD = 10.00 pre-registered; actual spend = REPLACE_COST
-  (OpenRouter key-usage delta over the run window — reader + judge flow
-  through OpenRouter; caveat: delta includes any concurrent traffic on the
-  key, see the receipt note).
+  (key-usage delta over the run window on the keys the run ACTUALLY uses. The
+  run bills THREE lanes, not two, so a delta on ONE key is complete only if every
+  lane lands there: `DEEPSEEK_API_KEY` covers `stage="reader"` and `stage="judge"`
+  (both default to `deepseek:deepseek-v4-flash` since #8486), and the
+  `stage="ingest"` extractor lane only while its pool resolves to
+  `deepseek-direct`. ⛔ That is NOT a promise it does: with three providers
+  configured the pool is a weighted rotation (venice 0.50 / openrouter 0.35 /
+  deepseek-direct 0.15, `model_adapters.py::_build_routing_model`), and a
+  transient failure puts that provider in a `cooldown_s` window (300 s by
+  default) before it re-enters the rotation. So the ingest lane's spend must be
+  SUMMED across every key it actually touched, never read off the DeepSeek key
+  alone. A run that NAMES the official judge through OpenRouter adds that key's
+  lane. A delta measured on a key the run did not use reports ~$0.00 for a paid
+  run, and any of these deltas includes concurrent traffic on the same key.)
 - The v2-extractor lane (the #1509-protocol 500-Q) is the cost/scale item
   NOT run here (§3).
 
@@ -255,6 +376,15 @@ never a silent in-place edit (publication discipline, #2106 §7):
 | (machinery commit) | Report committed in PENDING state: protocol gates 1-4 passed (evidence below); steps 5+ (full 500-Q execution) not run. |
 | 2026-10-21 | #8486 follow-up (doc reconciliation, raised by the PR's fresh-context review): §1's **Ingest mode** row now states `v2` (it still said `deterministic`, which is mutually exclusive with the adjacent **Belief layer** row — the runner refuses `--activate-beliefs` on a deterministic graph, and the #8486 protocol injects `--ingest-mode v2 --activate-beliefs`). §3's ingest-mode note and §4's exact command follow. No metric, gate or receipt value changed — the run is still PENDING. |
 | 2026-10-21 | #8486 follow-up, second pass (same review): §3's **Does NOT measure** bullet dropped its claim that the eval graphs contain no IMPL/NAND operators, and its `dataset_audit.py` attribution — both are false for the `v2` configuration §1 records (the extractor writes IMPL/NAND operators, which is what `--activate-beliefs` promotes and EPs), so the bullet now names what is genuinely unmeasured (why-context assembly, and the belief layer's effect on the RRF retrieval score). §1's **Belief layer** row now defines all four resolved states and reconciles the disclosure bar with them: `partial` is the expected state of a correctly-armed run, and the bar is per question (`questions_with_ep` of `questions`), not all-or-nothing. Pinned by `tests/longmem_eval/test_measurement_posture.py` (the report must define every state the module can return and must not restate the operators claim). No metric, gate or receipt value changed — the run is still PENDING. |
+| 2026-11-07 | #8486 (configuration half, PR #11493) — **seven in-place edits, recorded here per the discipline in the paragraph above**: §1's **Reader** row (`openrouter:deepseek/deepseek-v4-flash` → `deepseek:deepseek-v4-flash`), §1's **Judge** row (`openai/gpt-4o-2024-08-06` → `deepseek:deepseek-v4-flash`), §1's **Cost** row ("OpenRouter key-usage delta" → "provider key-usage delta"), §2's **QA accuracy** metric row ("official anscheck judge" → "**official rubric**; judge model per §1.1" — the rubric is unchanged, the grader is not), §3's **Measures** bullet (the same correction in prose: the anscheck *rubric* is official, the model that applies it is the run's judge), §5's receipt `judge_pin` row (the pre-filled official pin → `PENDING`, with the value a run of the pinned default will record — `unpinned:deepseek-v4-flash` — named in the cell and derived from the judge that graded), and §4's step-5 command (the `TORTOISE_LME_JUDGE_MODEL='openrouter:openai/gpt-4o-2024-08-06'` line removed — the default is now the ruled configuration). The disclosure of what a run of that configuration may and may not claim is **§1.1**, added in the same change. No **observed** metric, gate or receipt *value* changed — `run_status` is still PENDING, every number is still `PENDING`, and the only receipt cell that moved went from a pre-filled value to `PENDING` (an entered value would be a claim no run has earned). The historical 2026-09-04 gate-4 receipt pin in `gate-evidence.json` is retained untouched with an `errata` entry naming the ruling that supersedes it. |
+| 2026-11-07 | #8486, second pass (raised by a fresh-context review of this PR) — **one more in-place edit, recorded here per the same rule**. §6's spend bullet still planned the run as an *OpenRouter* key-usage delta ("reader + judge flow through OpenRouter"); under the configuration §1 records neither lane touches OpenRouter, so a paid run would have recorded ~$0.00 — it now names the keys the run actually uses, with the concurrent-traffic caveat unchanged. No metric, gate or receipt *value* changed — the run is still PENDING. |
+| 2026-11-08 | #8486, third pass (fresh-context review of the delta) — **one in-place edit**. §6's spend bullet enumerated two of the run's THREE billed lanes: `run.py` declares `stage="reader"`, `stage="judge"` and the `stage="ingest"` extractor lane to the hard stop, and the extractor's pool (`_chain("deepseek-direct", "openrouter", "venice")`) can fall off DeepSeek on a box whose only key is OpenRouter's — which the runbook's own strong-reader config requires. The bullet now names all three and the condition, and its dangling "see the receipt note" pointer is gone (no such note exists in §5). No metric, gate or receipt *value* changed — the run is still PENDING. |
+| 2026-11-08 | #8486, fourth pass (fresh-context review of the third) — **one in-place edit**. §6's three-lane bullet gave key absence as the only way the `stage="ingest"` lane leaves `DEEPSEEK_API_KEY`; two paths are not key-driven — a box holding three providers runs a WEIGHTED rotation (venice 0.50 / openrouter 0.35 / deepseek-direct 0.15, `model_adapters.py::_build_routing_model`) while `resolve_extractor_provider` still reports `deepseek-direct` as primary, and a transient failure only cools that provider for `cooldown_s` (300 s default) before it re-enters the rotation — forward-stickiness belongs to `RoutingModel`, the <3-provider path. The bullet now says the ingest delta must be summed across every key the lane touched. No metric, gate or receipt *value* changed — the run is still PENDING. |
+| 2026-11-08 | #8486, fifth pass (fresh-context review of the fourth) — **no in-place edit of the report's numbers or claims; this row records a correction to the record itself**. The fourth pass amended its own errata row rather than adding one, so the row above now reads as though the fourth pass wrote two things it did not. The fourth pass actually wrote `model_adapters.py::_build_pool` and "fails the lane over and STAYS there"; BOTH were wrong — `_build_pool` is not a symbol in `tortoise/model_adapters.py` (the 3-provider pool builder is `_build_routing_model`), and the rotating pool does not stay failed-over (a transient failure cools that provider for `cooldown_s`, 300 s by default, then re-admits it; forward stickiness is `RoutingModel`'s, the <3-provider branch). The amended facts above are correct and are kept; this row is the trace that they were CORRECTED. No metric, gate or receipt *value* changed — the run is still PENDING. |
+| 2026-11-08 | #8486, sixth pass (fresh-context review of the fifth) — **one in-place edit to §3** in this report, plus one clause in `docs/benchmarks/w7a-comparison-rows-for-2106.md`, both logged here per the rule above. §3's ingest-mode note already scoped `deterministic` correctly ("the pre-#8486 configuration of this run", "superseded for step 5 by #8486"), but it closed by saying *"The v2 (LLM-extraction) 500-Q baseline — `run_protocol` step 5's documented mode — remains pending"*, which left `v2` reading as future work in a report whose §1 ingest mode and §4 command are `v2`. It now states that what is pending is the RUN, that `v2` is what step 5 runs, and that there is no third configuration. The handoff row carried the same clause ("the v2 … 500-Q baseline remains pending — outside this run's bound") while declaring `v2` as this run's mechanism; it now says the run itself is PENDING. No metric, gate or receipt *value* changed — the run is still PENDING. |
+| 2026-11-08 | #8486, seventh pass (fresh-context review of the PR at `393be2d5d58b`) — **two in-place edits, both to §1.1, neither touching a number**: (a) the "the direction of that bias is unknown" bullet now carries the measurement the issue already holds — the #8486 fitness probe's 6/6 over-credit of the #1949 near-miss shape, ≈ +2 points *upward* at the recorded 1/50 rate — because a substituted grader that is known to inflate must not be disclosed as a bias of unknown direction beside the number it inflates; (b) the Judge paragraph's 2026-11-03 citation is split so only the owner's own words are quoted, with the recording comment's consequence stated as that comment's wording. No metric, gate or receipt *value* changed — the run is still PENDING. |
+| 2026-11-08 | #8486, eighth pass (fresh-context review of the PR at `3efdaf59316a`) — **three in-place edits to §1.1 and to the §1.1 annotation, none touching a number**. (a) §1.1 conflated two separate probes: the 16 scored triples graded 16/16 **with 0 over-credits**, and it is a *separate* #1949 near-miss probe in the same comment that came back **3/3 over-credited for `deepseek-v4-flash`** (3/3 for `deepseek-v4-pro`; 6/6 across the two models) — the seventh pass had put the 6/6 on this model alone, which double-counted the per-model evidence. (b) the 1/50 rate is now cited as the #1949 decision record's own **`reval3`** expectation that `judge.py` carries, not as a rate this probe measured (the probe's population is 16 triples plus the 3-repeat near-miss block). (c) the annotation's "errata discipline (§7)" pointer named §7 (Report gate evidence) and now names §9, where the rule lives. Same pass, outside this report: the fleet-wide credential quantifier was scoped to the measured surface in `tools/longmem_eval/reader.py`, `tools/longmem_eval/README.md` and `docs/runbook/1987-ask-abstention-check.md` — the 2026-11-02 audit measured ONE box and worktree, and `reader.py` already said so two lines away. No metric, gate or receipt *value* changed — the run is still PENDING. |
+| 2026-11-08 | #8486, ninth pass (fresh-context review of the PR at `762f6c4794`) — **this row is the log recording its own repair**, because commit `da33057e89` changed §2.1's cross-reference and RESTORED the seventh-pass row without logging either — the silent-in-place-edit class the seventh pass was itself repairing. Recorded here: (a) §2.1's "(§7 discipline" pointer now names §9, where the errata rule lives, with the #2106 §7 publication-discipline citation — matching the §1.1 fix; (b) the seventh-pass row is restored BYTE-IDENTICAL to its state at `3efdaf59316a`, so the record that a wrong 6/6 attribution once stood in §1.1 is visible again, with the eighth-pass row carrying the corrections that fixed it. The same commit's two non-report fixes ride with it, for the trace: `tools/longmem_eval/judge.py`'s docstring now says the RUBRIC is bit-identical and that comparability is the OFFICIAL model's (it had concluded that copying the official templates made published numbers "directly comparable", contradicting its own ruling eight lines below), and `docs/benchmarks/longmemeval-500q/gate-evidence.json`'s judge-pin errata now quotes only the owner's 2026-11-03 verbatim, attributing "The model is DeepSeek. Not OpenAI, not OpenRouter" to point 2 of the decision comment that records it. `tools/longmem_eval/README.md`'s env table was not a change to this report and carries no row: its blockquote rendered the rows after it as quote text, and commit `80e72e8656` restored it to one table. No metric, gate or receipt *value* changed — the run is still PENDING. |
 
 ## 10. Handoff to W7-b (#2106)
 
