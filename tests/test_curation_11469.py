@@ -852,3 +852,45 @@ def test_the_unqualified_label_is_credential_bound_everywhere():
     src = inspect.getsource(mod)
     assert "args.graph or \"(credential-bound)\"" in src
     assert 'args.graph or "default"' not in src
+
+
+# ── round-10 review findings ──────────────────────────────────────────────
+
+
+def test_the_fallback_vocabulary_matches_the_real_refusal_producers():
+    """Round-10: the markers were invented, so the documented credential-bound
+    fallback was unreachable while a bogus permission string passed the gate."""
+    from tortoise.mcp_auth import _retarget_refusal
+    mod = _tool_module()
+    real = str(_retarget_refusal("org_x_g_aaa"))
+    assert mod._looks_like_graph_refusal(real), real
+    assert mod._looks_like_graph_refusal("No graph 'foo' is reachable from this workspace")
+    assert not mod._looks_like_graph_refusal("permission denied: scope graph read not allowed")
+    assert not mod._looks_like_graph_refusal("ERR_QUOTA: budget exceeded")
+
+
+def test_a_duplicate_source_row_is_not_reported_as_already_migrated(tmp_path):
+    """Round-10: two `:Source` nodes sharing (url, kind) are two carry decisions but
+    one write; counting the second as `skipped_known` claims a migration that never
+    happened (`sdk.list_sources` has no GROUP BY)."""
+    plan = C.build_plan(
+        [row("https://x/y", node_type="source", kind="article", content="https://x/y"),
+         row("https://x/y", node_type="source", kind="article", content="https://x/y")],
+        source_graph="old", target_graph="new", packs={})
+    res = C.run_plan(plan, writer=CountingWriter(),
+                     ledger=C.Ledger(tmp_path / "l.jsonl", target="new"),
+                     apply=True, graph_rows=ROWS)
+    assert res.skipped_known == 0, "nothing was in the ledger"
+    assert res.duplicate_rows == 1
+    assert res.written + res.skipped_known + res.duplicate_rows == len(plan.carry_rows())
+
+
+def test_a_dry_run_reports_what_the_ledger_already_holds(tmp_path):
+    """Round-10: the dry run returned skipped_known=0 unconditionally, so the only
+    mode runnable today could not say how much had already migrated."""
+    plan = C.build_plan([row("p1", kind="decision", content="ship it")],
+                        source_graph="old", target_graph="new", packs={})
+    led = C.Ledger(tmp_path / "l.jsonl", target="new")
+    C.run_plan(plan, writer=CountingWriter(), ledger=led, apply=True, graph_rows=ROWS)
+    dry = C.run_plan(plan, writer=CountingWriter(), ledger=led, apply=False, graph_rows=ROWS)
+    assert dry.skipped_known == 1 and dry.written == 0

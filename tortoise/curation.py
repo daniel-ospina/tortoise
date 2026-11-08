@@ -879,6 +879,7 @@ class RunResult:
     refused: str | None = None
     stopped: str | None = None
     identity: str | None = None
+    duplicate_rows: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -891,7 +892,63 @@ class RunResult:
             "refused": self.refused,
             "stopped": self.stopped,
             "identity": self.identity,
+            "duplicate_rows": self.duplicate_rows,
         }
+
+
+def _pending_sections(
+    bundle: Mapping[str, Any], ledger: Ledger
+) -> tuple[dict[str, list[Mapping[str, Any]]], int, int]:
+    """Split a bundle into what this target has NOT seen, and tote up the rest.
+
+    Returns ``(sections, skipped_known, duplicate_rows)``. `skipped_known` is a
+    LEDGER fact; `duplicate_rows` counts rows this READ repeats (two :Source nodes
+    sharing url+kind — `sdk.list_sources` has no GROUP BY). Conflating the two is
+    how a row never sent got reported as "already migrated".
+    """
+    # BOTH sections are pending-tracked: a carried Source that never reaches the
+    # wire is exactly the silent no-op this pass must not have.
+    sections: dict[str, list[Mapping[str, Any]]] = {}
+    total = 0
+    duplicates = 0
+    for section in ("points", "sources"):
+        items = list(bundle.get(section) or [])
+        total += len(items)
+        keyed = []
+        for item in items:
+            key = item.get("migrationKey")
+            if key is None:
+                # Sources carry no key on the node (#3998), so their ledger key is
+                # derived from the url, which is what the target merges on.
+                # kind AND url: two Source rows can share a url with different
+                # kinds (create_source merges by url, list_sources groups by
+                # (url, kind)), and a url-only key silently collapsed them onto one
+                # ledger entry — reported as skipped_known on a FIRST run.
+                # …and the pair is HASHED rather than delimiter-joined: a `kind` may
+                # contain the delimiter (`article:https` + `//x/y:z` and `article` +
+                # `https://x/y:z` both used to derive the same key, so one row was
+                # reported `skipped_known` on a first run with an empty ledger).
+                pair = hashlib.sha256(json.dumps(
+                    [item.get("sourceKind") or "", item.get("url") or ""],
+                    sort_keys=True).encode("utf-8")).hexdigest()
+                key = f"{MIGRATION_KEY_PREFIX}source:{pair}"
+            if key in ledger:
+                continue
+            if any(k.get("migrationKey") == key for k in keyed):
+                # A DUPLICATE within this read, not a row already in the target: two
+                # :Source nodes can share (url, kind) — `sdk.list_sources` has no
+                # GROUP BY — and counting it as `skipped_known` would claim a
+                # migration that never happened.
+                duplicates += 1
+                continue
+            keyed.append({**item, "migrationKey": key})
+        sections[section] = keyed
+    pending_count = sum(len(v) for v in sections.values())
+    # `skipped_known` is a LEDGER fact, so it is reported identically in a dry run
+    # and in an apply — otherwise the only mode runnable today reports 0/0 over a
+    # ledger that already holds rows, and the numbers cannot be reconciled.
+    skipped = total - pending_count - duplicates
+    return sections, skipped, duplicates
 
 
 def run_plan(
@@ -926,41 +983,16 @@ def run_plan(
     if off_switch_active(off):
         return RunResult(False, True, 0, 0, plan.target_graph, plan.digest(), refused="off-switch active")
     if not apply:
-        return RunResult(False, False, 0, 0, plan.target_graph, plan.digest(),
+        # Accounting happens BEFORE this return: a dry run over a ledger that already
+        # holds rows must not report 0 written / 0 skipped, which cannot be
+        # reconciled with a census of 127 carry rows.
+        _sections, skipped, _dups = _pending_sections(plan.bundle(), ledger)
+        return RunResult(False, False, skipped, 0, plan.target_graph, plan.digest(),
                          refused="dry run (--apply not given)", identity=identity_note)
 
     bundle = plan.bundle()
-    # BOTH sections are pending-tracked: a carried Source that never reaches the
-    # wire is exactly the silent no-op this pass must not have.
-    sections: dict[str, list[Mapping[str, Any]]] = {}
-    total = 0
-    for section in ("points", "sources"):
-        items = list(bundle.get(section) or [])
-        total += len(items)
-        keyed = []
-        for item in items:
-            key = item.get("migrationKey")
-            if key is None:
-                # Sources carry no key on the node (#3998), so their ledger key is
-                # derived from the url, which is what the target merges on.
-                # kind AND url: two Source rows can share a url with different
-                # kinds (create_source merges by url, list_sources groups by
-                # (url, kind)), and a url-only key silently collapsed them onto one
-                # ledger entry — reported as skipped_known on a FIRST run.
-                # …and the pair is HASHED rather than delimiter-joined: a `kind` may
-                # contain the delimiter (`article:https` + `//x/y:z` and `article` +
-                # `https://x/y:z` both used to derive the same key, so one row was
-                # reported `skipped_known` on a first run with an empty ledger).
-                pair = hashlib.sha256(json.dumps(
-                    [item.get("sourceKind") or "", item.get("url") or ""],
-                    sort_keys=True).encode("utf-8")).hexdigest()
-                key = f"{MIGRATION_KEY_PREFIX}source:{pair}"
-            if key in ledger or any(k.get("migrationKey") == key for k in keyed):
-                continue
-            keyed.append({**item, "migrationKey": key})
-        sections[section] = keyed
+    sections, skipped, duplicate_rows = _pending_sections(bundle, ledger)
     pending_count = sum(len(v) for v in sections.values())
-    skipped = total - pending_count
     if not pending_count:
         return RunResult(True, False, skipped, 0, plan.target_graph, plan.digest())
     try:
@@ -975,4 +1007,4 @@ def run_plan(
     accepted = [k for k in (result.get("written") or [])]
     ledger.record(accepted)
     return RunResult(True, False, skipped, len(accepted), plan.target_graph, plan.digest(),
-                     stopped=result.get("stopped"))
+                     stopped=result.get("stopped"), duplicate_rows=duplicate_rows)

@@ -236,25 +236,31 @@ def _live_call_tool(name: str, args: dict[str, Any] | None = None) -> Any:
 
 
 #: A fallback to the credential's own graph is only legitimate when the refusal is
-#: ABOUT the graph argument — the message must name the graph AND a refusal. A
-#: quota/budget/DB error ("ERR_QUOTA", "budget exceeded") matches neither, so it
-#: RAISES instead of quietly reading a different graph under the same identity.
-_GRAPH_SUBJECTS = ("graph", "tenant", "binding", "scope")
-_REFUSAL_WORDS = ("refus", "denied", "deny", "forbidden", "forbid", "unauthor",
-                  "not allowed", "not permitted", "unknown", "not found", "no such",
-                  "does not exist", "invalid", "permission", "cannot access",
-                  "not visible", "not accessible")
-_GRAPH_REFUSAL_CODES = ("GRAPH_WRITE_REFUSED", "GRAPH_NOT_FOUND", "GRAPH_FORBIDDEN",
-                        "GRAPH_SCOPE", "GRAPH_BINDING")
+#: ABOUT the graph argument. The vocabulary is DERIVED from the producers, not
+#: invented: `tortoise/mcp_auth.py::_retarget_refusal` ("This credential is bound to
+#: one graph and cannot be re-targeted by a `graph` argument (requested …)") and
+#: `tortoise/mcp_server.py` ("A graph-bound credential cannot be re-targeted"), plus
+#: the resolver's "No graph '…' is reachable from this workspace". A quota/budget/DB
+#: error matches none of these and RAISES instead of reading a different graph under
+#: the requested graph's identity.
+_GRAPH_REFUSAL_PHRASES = (
+    "cannot be re-targeted",
+    "cannot be retargeted",
+    "bound to one graph",
+    "is reachable from this workspace",
+    "graph-bound credential",
+)
 
 
 def _looks_like_graph_refusal(reason: str) -> bool:
     low = (reason or "").lower()
-    if any(code.lower() in low for code in _GRAPH_REFUSAL_CODES):
+    if any(phrase in low for phrase in _GRAPH_REFUSAL_PHRASES):
         return True
-    if not any(sub in low for sub in _GRAPH_SUBJECTS):
-        return False
-    return any(word in low for word in _REFUSAL_WORDS)
+    # A refusal that names the graph ARGUMENT itself ("unknown graph 'x'", "graph
+    # 'x' does not exist") is about the binding; a bare subject word is not enough,
+    # or "permission denied: scope graph read" would re-read another graph.
+    return ("graph" in low and ("refus" in low or "unknown" in low
+                                or "does not exist" in low or "not found" in low))
 
 
 def _source_gap(counts: Any, read: int) -> int | None:

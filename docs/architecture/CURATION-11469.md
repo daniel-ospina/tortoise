@@ -25,7 +25,7 @@ Two measured facts govern the risk:
   a migration here is moving the only copy of a tenant's data.
 
 Code: `tortoise/curation.py` (classification + guards + additive writer) and
-`tools/curate_graph.py` (the CLI). Tests: `tests/test_curation_11469.py` (70 tests).
+`tools/curate_graph.py` (the CLI). Tests: `tests/test_curation_11469.py` (73 tests).
 
 ## The inventory — measured 2026-11-08 against `live-v4`
 
@@ -91,8 +91,9 @@ unjudged. Two options, and this issue does not choose between them:
    carry-set for review; or
 2. **incremental curation**: migrate the decided slice now (the 127 carried rows + the operators the
    rule carries), and let the statement bulk be curated as the fleet writes new memory into the clean
-   graph anyway. Subjects are NOT in that slice: this pass has no subject rule, so every Subject is
-   `undecidable` (26 rows — a decision, not a rule).
+   graph anyway. Subjects are NOT in that slice: the read path cannot enumerate them
+   (`NOT_ENUMERABLE["subject"]`), so no Subject row ever enters a plan — the 26 in the graph are
+   counted, never classified.
 
 What the tool guarantees either way: a run only ever carries rows whose disposition is `carry`,
 and every other row is reported with its reason. Nothing is dropped from the old graph — it stays
@@ -154,7 +155,8 @@ busy fleet.
    workspace's graphs today are `default`, `acl-verify-20261027` and `live-v4`. Creating the
    target is `#10175`'s step, not this issue's.
 2. **The MCP credential is graph-bound to `live-v4`** — it cannot write to another graph, and
-   `live-v4` is at its cap, so any write there is `GRAPH-WRITE-REFUSED` by design. A graph-bound
+   `live-v4` is at its cap, so a write there is refused by the venue's node cap (the credential
+   cannot be re-targeted: `tortoise/mcp_auth.py::_retarget_refusal`). A graph-bound
    credential refusing a re-target is a property of the venue, not a bug to route around.
 3. **15,708 statements have no deciding rule** (above) — carrying them un-reviewed would migrate
    the mess rather than curate it.
