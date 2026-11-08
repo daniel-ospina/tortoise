@@ -36,12 +36,26 @@ import sys
 
 # #5128: refuse a <3.12 interpreter before the imports below — a module-level
 # 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+#
+# The message names the ONE form that always resolves. A bare ambient `python3`
+# (3.9 on the CLT host) would die inside the stdlib calls below with an
+# UNATTRIBUTED error, which reads as "the tool is broken"; the bare path exits 2
+# on argparse's own usage error instead (a SECOND unattributed error), so the
+# refusal points at `--help`, which needs no `--source` token.
+#
+# Exit 4, not 1: 1 is this tool's OWN failure status (`raise SystemExit(<message>)`
+# on every other refusal), `main()` returns 0 only and argparse takes 2, so an
+# environment refusal must not wear 1 or a caller cannot tell "the artwork is
+# wrong" from "the interpreter is too old". Pinned in
+# tests/test_entry_point_python_guard.py::REFUSAL_CODES.
 if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
-    raise SystemExit(
+    print(
         f"tools/build_site_icons.py requires Python >= 3.12 (got "
         f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
-        f"`uv run python tools/build_site_icons.py`"
+        f"`uv run python tools/build_site_icons.py --help`",
+        file=sys.stderr,
     )
+    raise SystemExit(4)
 
 import argparse
 import struct
