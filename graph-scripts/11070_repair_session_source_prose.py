@@ -1182,12 +1182,25 @@ def main() -> int:
         report["fts_probe_skipped"] = ("no_fts_probe" if args.no_fts_probe
                                        else "no_probe_phrase")
         if args.repair or args.assert_clean:
+            # ⛔ "TAKEN BY NAME" IS ONLY TRUE WHEN A NAME WAS GIVEN (#11536 review
+            # round 12, P2). `fts_probe_skipped` has TWO arms, and only
+            # `no_fts_probe` is the operator's explicit acceptance — that is the
+            # flag whose whole doctrine is "the weaker evidence, taken BY NAME"
+            # (same as `--clear-without-record`). On the `no_probe_phrase` arm
+            # NOTHING was named: the flag was simply omitted, and `--repair` does
+            # not refuse that omission (only `--assert-clean` does, at exit 2), so
+            # the run printed this notice claiming an acceptance the operator
+            # never gave. A disclosure that misstates its own evidence is the
+            # exact defect class this leg exists to remove — ordinary words.
+            how = ("taken by name" if args.no_fts_probe else
+                   "taken by OMISSION — nothing was named; pass --no-fts-probe "
+                   "to name it, or --probe-phrase to measure it")
             print("⚠️ the Source FTS leg was NOT measured on this run "
                   f"({report['fts_probe_skipped']}): the census reads node "
                   "properties, and the removed sentence also lives in the "
                   "Source FTS index — only a probe can show it has left. This "
-                  "sign-off certifies the CENSUS only (the weaker evidence, "
-                  "taken by name). Re-run with --probe-phrase <a single rare "
+                  f"sign-off certifies the CENSUS only (the weaker evidence, "
+                  f"{how}). Re-run with --probe-phrase <a single rare "
                   "token from the removed sentence> for the full verification.",
                   file=sys.stderr)
 

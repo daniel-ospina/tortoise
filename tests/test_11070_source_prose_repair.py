@@ -2613,7 +2613,19 @@ def test_a_MULTI_token_probe_is_REFUSED_because_the_FTS_read_OR_joins_it(
                    # implicit AND — an UNDER-match that reads a still-findable
                    # sentence as absent. Measured before the fix: both returned
                    # None from `probe_phrase_rejection`.
-                   "the fridays", "fridays x"):
+                   "the fridays", "fridays x",
+                   # ⛔ AND THESE TWO ARE THE ONES THAT ACTUALLY PIN THE GUARD
+                   # (#11536 review round 12, P2). `"the fridays"` and
+                   # `"fridays x"` each have TWO alphanumeric runs, so the
+                   # `len(runs) > 1` guard below refuses them on its own and the
+                   # whitespace guard could be deleted with this row still green.
+                   # A single run plus a punctuation-only word is the shape ONLY
+                   # the whitespace guard owns — MEASURED at this head:
+                   # `_indexed_term_runs("friday .") == ['friday']` and the
+                   # tokeniser yields one term, so without the guard they are
+                   # ACCEPTED, and the read then sends `friday .` raw, which
+                   # RediSearch evaluates as an implicit AND that under-matches.
+                   "friday .", "the ."):
         assert probe_phrase_rejection(phrase), (
             f"{phrase!r} was accepted as a probe — the FTS read OR-joins it, so "
             f"it measures the OR of its words, not the sentence")
@@ -3592,6 +3604,75 @@ def test_a_BREAKER_OPEN_read_is_UNMEASURABLE_not_a_clean_zero(monkeypatch):
     assert report["unmeasurable"] == ["zebraquux"], (
         "a probe whose read never ran was reported as a clean zero")
     assert report["leaked"] == []
+
+
+def test_an_UNMEASURABLE_probe_VETOES_even_when_the_CONTROL_answers(monkeypatch):
+    """The fold's `unmeasurable` veto — the leg this whole file exists for.
+
+    (1) FAILS on a `_merge_probe` that drops this veto: the probe's own read was
+        DEGRADED (`ran=True, degraded=True, reason="query_failed"` — the shape
+        `run_fts_query` records for a failed query and for a missing index), the
+        CONTROL answered, and `_merge_probe(None, …)` then reached arm (b)
+        `control_ok and not wrote` and returned `certifies=True, vetoed=None`, so
+        `--dry-run --assert-clean` printed ✓ and exited 0 over a probe that
+        measured NOTHING — the false PASS #11161 exists to close, on the very leg
+        this PR adds.
+
+        ⛔ WHY THE OTHER UNMEASURABLE TESTS DO NOT CATCH THIS. They install a leg
+        that applies to EVERY read, so the control is degraded too, `control_ok`
+        is False, and the fold falls through to `uncorroborated` — the WRONG VETO
+        FOR THE RIGHT OUTCOME. That pins "nothing corroborates the zero", never
+        "the probe's own read did not run". Verified by mutation: with
+        `elif out["unmeasurable"]:` deleted the rest of the suite stays green.
+    (2) REACHABLE: a breaker trip or a `query_failed` between the probe read and
+        the control read is the ordinary transient this leg exists for.
+    """
+    from tortoise import search_engine as se
+    from tortoise import session_source_prose_migration as m
+
+    class _LexiconGraph(_RecordingGraph):
+        """Answers the CONTROL read, so a control token exists and can answer."""
+
+        def query(self, cypher, params=None, timeout=None):
+            if "STARTS WITH $prefix" in cypher:
+                return _Result([("migration, plan, friday",)])
+            return super().query(cypher, params=params, timeout=timeout)
+
+    def fake(graph, query, **kwargs):
+        # THE PROBE's read is the DEGRADED one; the CONTROL's read runs and
+        # answers. Same shape the read path records for `query_failed`.
+        degraded = query == "zebraquux"
+        if kwargs.get("leg_trace") is not None:
+            kwargs["leg_trace"].append({
+                "leg": "fts", "ran": True, "degraded": degraded,
+                "reason": "query_failed" if degraded else "ok"})
+        return [] if degraded else [("session:s-post", 2.0)]
+
+    monkeypatch.setattr(se, "run_fts_query", fake)
+    report = m.probe_fts(_LexiconGraph([(_post_fix_node(),)]), ["zebraquux"],
+                         control=True)
+
+    # THE PREMISE, asserted so a fixture change cannot silently empty this test:
+    # the probe measured nothing, the instrument still answered, and no earlier
+    # veto in the fold's ladder is reached.
+    assert report["unmeasurable"] == ["zebraquux"], (
+        "the fixture did not degrade the PROBE's read: "
+        + repr(report["probes"][0]))
+    assert (report["control"] or {}).get("ok") is True, (
+        "the fixture did not make the CONTROL answer, so the fold would fall "
+        "through to `uncorroborated` and never reach the veto under test: "
+        + repr(report["control"]))
+    assert report["leaked"] == [] and report["stale"] == [], (
+        "the fixture is meant to reach the `unmeasurable` arm alone, not an "
+        "earlier veto: " + repr(report))
+
+    folded = _cli._merge_probe(None, report)
+    assert folded["certifies"] is False, (
+        "a probe whose OWN READ WAS DEGRADED certified — `--dry-run "
+        "--assert-clean` would exit 0 over a leg that measured nothing")
+    assert folded["vetoed"] == "unmeasurable", (
+        "the refusal is not the unmeasured-probe one: "
+        + repr(folded["vetoed"]))
 
 
 def test_a_probe_that_FILLS_the_window_is_TRUNCATED_not_certified(monkeypatch):
@@ -4880,14 +4961,30 @@ def test_a_JSON_signoff_STATES_the_leg_it_did_not_measure(monkeypatch, capsys):
     assert "fts_probe" not in payload
     assert "CENSUS only" in captured.err, (
         "the skip was silent on stderr too")
+    assert "taken by name" in captured.err, (
+        "`--no-fts-probe` IS the by-name acceptance, and the notice must say so: "
+        + captured.err)
 
     # …and a repair with no probe names its own reason, on the same field.
+    # ⛔ AND IT MUST NOT CLAIM A NAME THAT WAS NEVER GIVEN (#11536 review round
+    # 12, P2). `fts_probe_skipped` has two arms; this is the OMISSION one — the
+    # flags were simply left off, which `--repair` does not refuse (only
+    # `--assert-clean` does, at exit 2). The notice used to print "taken by name"
+    # on BOTH arms, i.e. it asserted an operator acceptance that never happened,
+    # in the one message whose job is to state the evidence honestly.
     _install_cli(monkeypatch, graph, ["--repair", "--clear-without-record",
                                       "--json"])
     capsys.readouterr()
     assert _cli.main() in (0, 1)
-    payload = json.loads(capsys.readouterr().out)
+    omitted = capsys.readouterr()
+    payload = json.loads(omitted.out)
     assert payload["fts_probe_skipped"] == "no_probe_phrase"
+    assert "by OMISSION" in omitted.err, (
+        "the omission arm did not disclose that nothing was named: "
+        + omitted.err)
+    assert "taken by name" not in omitted.err, (
+        "the notice claimed a by-name acceptance the operator never gave: "
+        + omitted.err)
 
 
 def test_the_documented_report_contracts_are_the_ones_the_run_RETURNS(monkeypatch):
