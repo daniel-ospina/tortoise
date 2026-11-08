@@ -96,7 +96,7 @@ def collect_pack_config(proj) -> dict:
     """#1936: the pack-config block carried INSIDE the encrypted payload.
 
     Reads the graph's ``PackInstall`` activation records (namespace, version,
-    source) plus the ``:PackManifest`` nodes' YAML (custom packs only —
+    source, status) plus the ``:PackManifest`` nodes' YAML (custom packs only —
     starter packs live in the shared catalog, yaml=null). Shape (v1):
     ``{schema_version: 1, packs: [{namespace, version, activated, status,
     yaml}]}`` — ``activated`` mirrors the record's status/active, ``status``
@@ -107,11 +107,18 @@ def collect_pack_config(proj) -> dict:
     ``status`` is what makes restore parity (#1936 indicator 2) expressible:
     ``activated`` alone collapses ``disabled`` and ``removed`` into one
     boolean, so an importer could not tell "the tenant switched this pack
-    off" (carry it, write ``disabled``) from "the tenant removed this pack"
-    (its ``:PackManifest`` is gone and ``yaml`` is null — the entry must be
-    skipped, NOT fail as an unknown starter). Additive within v1: the shape
-    validator leaves unknown keys unconstrained, so a pre-``status``
-    importer ignores it.
+    off" (carry it, write ``disabled``) from "the tenant removed this pack".
+
+    ⛔ A REMOVED PACK STILL CARRIES ITS MANIFEST, and the docs elsewhere say so:
+    a live graph removes through ``pack_state.set_graph_packs``, which only sets
+    ``:PackInstall.status='removed'`` and KEEPS the ``:PackManifest`` — so a real
+    export is ``status: removed`` WITH ``yaml``. The ``yaml: null`` removal shape
+    comes from the caller-less ``delete_tenant_manifest``. Either way the entry
+    must be SKIPPED on import: never re-installed ``active`` (the tombstone-
+    erasing widening this PR fixes, which is what the with-yaml shape did before
+    it), and never failed as an unknown starter (all the ``yaml: null`` shape
+    could raise). Additive within v1: the shape validator leaves unknown keys
+    unconstrained, so a pre-``status`` importer ignores it.
     """
     records = []
     try:
