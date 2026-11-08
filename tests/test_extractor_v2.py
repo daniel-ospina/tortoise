@@ -5469,15 +5469,16 @@ def test_over_32k_residual_census_killer_not_partial_parse(monkeypatch):
     out = v2.extract_session_v2(_MegaSession(), _conv())
     census = out["error_census"]
     assert census.get("partial_parse", 0) == 0       # never a silent partial
-    assert census.get("truncated_parse_error", 0) == 2  # S2 + S4 residuals
+    assert census.get("truncated_parse_error", 0) == 3  # S2 x2 (coverage retry, #11002) + S4 residuals
     assert census.get("empty_embed_list", 0) == 1    # killer class: HARD
     rec = out["stats"]["recovery"]
-    assert rec["escalated"] == 2 and rec["escalated_residual"] == 2
+    # #11002: S2 is retried once (its first arm was a coverage loss), so +1.
+    assert rec["escalated"] == 3 and rec["escalated_residual"] == 3
     assert rec["escalated"] == (rec.get("escalated_recovered", 0)
                                 + rec["escalated_residual"]
                                 + rec.get("escalated_abort", 0)
                                 + rec.get("escalated_partial", 0))
-    assert out["stats"]["llm"]["truncated"] == 2  # both recorded
+    assert out["stats"]["llm"]["truncated"] == 3  # both recorded; S2 retried once (#11002)
 
 
 def test_s2_residual_then_s4_recovers(monkeypatch):
@@ -5509,13 +5510,13 @@ def test_s2_residual_then_s4_recovers(monkeypatch):
     out = v2.extract_session_v2(_Rescue(), _conv())
     census = out["error_census"]
     assert census.get("partial_parse", 0) == 0
-    assert census.get("truncated_parse_error", 0) == 1  # S2 residual only
+    assert census.get("truncated_parse_error", 0) == 2  # S2 residual, retried once (#11002)
     assert census.get("empty_embed_list", 0) == 0       # S4 rescued
     contents = [p["content"] for p in out["embed_list"]["points"]]
     assert "gp0" in contents and "gp2" in contents  # S4 recovery embedded
     rec = out["stats"]["recovery"]
-    assert rec["escalated"] == 2  # S2 (residual) + S4 (recovered)
-    assert rec["escalated_residual"] == 1
+    assert rec["escalated"] == 3  # S2 x2 (coverage retry, #11002) + S4 (recovered)
+    assert rec["escalated_residual"] == 2  # #11002: the S2 residual, retried once
     assert rec["escalated_recovered"] == 1
 
 
