@@ -529,6 +529,14 @@ def _commit_state(sha: str, repo_root: Path = REPO_ROOT) -> str:
 
     `repo_root` is honoured for the same reason `_evidence_is_real` honours it: a
     validator asked to judge a DIFFERENT tree must not answer against this one.
+
+    ⛔ `GIT_NO_LAZY_FETCH=1` on the object probe (#11217): a PARTIAL clone
+    (`--filter=blob:none`) reports `--is-shallow-repository` as FALSE, so the
+    shallow probe below does not cover it — and without the env an absent sha
+    triggers a PROMISOR REFETCH against the origin (measured 2m29s here before
+    returning 128) and only then reads as `absent`. Commit objects are never
+    blob-filtered, so an absent commit in a partial clone really is absent: the
+    fetch buys nothing but latency and a false RED.
     """
     try:
         proc = subprocess.run(
@@ -537,6 +545,7 @@ def _commit_state(sha: str, repo_root: Path = REPO_ROOT) -> str:
             capture_output=True,
             text=True,
             check=False,
+            env={**os.environ, "GIT_NO_LAZY_FETCH": "1"},
         )
         if proc.returncode == 0:
             return "exists"
@@ -922,10 +931,25 @@ def validate(data: dict[str, Any], repo_root: Path = REPO_ROOT) -> list[dict[str
                     "this checkout (no `git` on PATH, or not a repository), so a "
                     f"fabricated sha would render as provenance: {sha}"
                 )
-            # `unprovable` (a shallow checkout) is NOT a defect and must not red the
-            # suite: CI shards check out at fetch-depth 1, where an ancestor sha is
-            # simply not in the object database. Blaming the record for that is the
-            # #9075 r4 P1 shape.
+            elif state == "unprovable":
+                # ⛔ NOT SILENT (#11217 review). `render()` prints this sha as
+                # provenance unconditionally, and the module's own premise is that a
+                # SUBSTITUTION there is the harm. Staying quiet while printing it as
+                # fact is the one outcome this check exists to prevent, so the
+                # abstention is ANNOUNCED — the sibling gate reports UNPROVABLE for
+                # the same condition, and this reports it too.
+                #
+                # ⛔ It is still NOT a defect and must not red the suite: CI shards
+                # check out at fetch-depth 1, where an ancestor sha is simply not in
+                # the object database. Blaming the record for the checkout's SHAPE is
+                # the #9075 r4 P1 error.
+                print(
+                    f"NOTICE: `measured_at.sha` {sha} is UNPROVABLE in this checkout "
+                    f"(shallow clone) — NOT verified, and not reported as fabricated "
+                    f"either. Fetch full history (`git fetch --unshallow`, or "
+                    f"`fetch-depth: 0`) to verify it.",
+                    file=sys.stderr,
+                )
         date = str(measured_at.get("date") or "").strip()
         if not date:
             problems.append("`measured_at.date` must be set (YYYY-MM-DD)")
