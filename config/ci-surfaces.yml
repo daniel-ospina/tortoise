@@ -7944,7 +7944,7 @@ surfaces:
   # note §8); provisioning the dataset in CI is out of scope for this measurement-only
   # PR, so it is recorded as the gap rather than implied away. The row is
   # still correct: it is the ownership answer `--surface-audit`/`classify_test_file`
-  # gives, and every sibling `tests/longmem_eval/**` file is registered the same way.
+  # gives for THIS file.
   # Do NOT "fix" that gap by dropping `longmem_eval/**` from `on_demand` — that reverses
   # owner decision A of 2026-10-27 (#10194).
   - longmem_eval/test_haystack_overlap_1779.py
