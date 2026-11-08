@@ -625,7 +625,7 @@ git grep -nE '\.(create_edge|create_about_edge|create_operator)\(' tortoise/extr
                                                           # origin/main since #11205 (four COMMENTS naming
                                                           # sdk.create_operator) and 0 at this base — a
                                                           # count is only as good as the base it was taken at
-git grep -n 'result\["relations"\]' -- tortoise/        # ONE hit, the comment at :10815 — no production
+git grep -n 'result\["relations"\]' -- tortoise/        # ONE hit, the comment at :10891 — no production
                                                           # consumer of #11205's channel (⚠️ the `-- tortoise/`
                                                           # scope is the claim: unscoped it also matches the
                                                           # reader below)
