@@ -31,7 +31,7 @@
 // type stripping resolves relative imports from the importing file's own path.
 
 import assert from "node:assert";
-import { createHash } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import { readFileSync, writeFileSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { __resetRpcCalls, __rpcCalls, __setJwtUser, __setRpcResult } from "./edge-function-stubs/supabase-js.ts";
@@ -167,21 +167,41 @@ try {
 
   // ── Phase 2: the auth-hook path is GONE ───────────────────────────────
   // `after_user_created` is not a supported Supabase auth hook, so the
-  // AUTH_HOOK_SECRET / Standard-Webhooks path was deleted (#1120). A request
-  // that presents only webhook-style headers is simply unauthenticated, and
-  // setting the secret changes nothing.
-  envVars["AUTH_HOOK_SECRET"] = "v1,whsec_tstsecret";
+  // AUTH_HOOK_SECRET / Standard-Webhooks path was deleted (#1120).
+  //
+  // This arm sends a CRYPTOGRAPHICALLY CORRECT Standard-Webhooks signature,
+  // not a literal, and that is what makes the arm able to FAIL. The deleted
+  // handler returned 401 for an UNVERIFIABLE signature anyway (its stub threw
+  // "signature mismatch" → the fail-closed return), so `v1,AAAA` got 401 from
+  // the OLD code too: the arm passed identically with the hook path restored,
+  // i.e. a tautology against its own name. A signature the old handler would
+  // have ACCEPTED discriminates — old code → 201 (provisioned via the hook
+  // path), today → 401 (webhook headers authenticate nothing).
+  const HOOK_SECRET = "v1,whsec_tstsecret"; // what the handler read from AUTH_HOOK_SECRET
+  const hookId = "msg_1";
+  const hookTs = "1700000000";
+  const hookBody = JSON.stringify({ user: { id: USER_ID, email: EMAIL } });
+  // The deleted stub used the env value VERBATIM as the HMAC key
+  // (createHmac("sha256", secret) — it did NOT base64-decode the `whsec_`
+  // part), so this reproduces an accepted signature exactly. Do not
+  // "simplify" it back to a literal `v1,AAAA`.
+  const hookSig =
+    "v1," +
+    createHmac("sha256", HOOK_SECRET)
+      .update(`${hookId}.${hookTs}.${hookBody}`)
+      .digest("base64");
+  envVars["AUTH_HOOK_SECRET"] = HOOK_SECRET;
   await check(
-    "POST with webhook signature headers and no JWT → 401 (the hook path no longer exists)",
+    "POST with a VALID webhook signature and no JWT → 401 (the hook path no longer exists)",
     call(
       "POST",
       {
         ...JSON_HEADERS,
-        "webhook-id": "msg_1",
-        "webhook-timestamp": "1700000000",
-        "webhook-signature": "v1,AAAA",
+        "webhook-id": hookId,
+        "webhook-timestamp": hookTs,
+        "webhook-signature": hookSig,
       },
-      JSON.stringify({ user: { id: USER_ID, email: EMAIL } })
+      hookBody
     ),
     401
   );
