@@ -10465,7 +10465,11 @@ _IMPORT_ARTIFACT_VERSION = 1
 # module-level dependency on the pack machinery; the drift is locked by
 # tests/test_export_pack_config.py, which derives the expected set from
 # ``pack_state``'s own ``PACK_STATUS_*`` constants — so ADDING a status there
-# fails that test instead of silently 422ing a legitimately-exported artifact.
+# fails that test. What such a drift WOULD cost changed with the exporter's
+# clamp (``export._importable_pack_status``): an artifact can no longer be
+# 422'd by an out-of-vocabulary status — it is NARROWED to ``disabled`` on
+# export. The lock is what makes that narrowing a decision instead of an
+# accident.
 _PACK_CONFIG_STATUSES = frozenset({"active", "disabled", "removed"})
 # 64 MiB streaming cap — enforced WHILE reading the body, never via
 # Content-Length alone (a spoofed short Content-Length would otherwise let
@@ -30670,21 +30674,22 @@ def _apply_import_pack_config(sdk, payload: dict) -> None:
     # set the restore will leave behind rather than against install order.
     # (Before #2781 the validator's temp registry held one manifest and no
     # cross-pack reference could validate at all.)
-    # #1936: only entries this pass will actually APPLY may seed the sibling
-    # set. A `removed` entry is skipped below and never installed, so letting
-    # its yaml into the validator would let a cross-pack reference resolve
-    # against a namespace the import deliberately does not create.
-    sibling_yamls = {}
-    for p in packs:
-        if not (isinstance(p, dict) and isinstance(p.get("namespace"), str)):
-            continue
-        _ns = p["namespace"]
-        _yaml = p.get("yaml")
-        if not (isinstance(_yaml, str) and _yaml):
-            continue
-        if _pack_entry_activation(p, _ns) is None:
-            continue
-        sibling_yamls[_ns] = _yaml
+    # ⛔ EVERY entry with a yaml feeds the validator, INCLUDING one this pass
+    # will SKIP as ``removed`` — this set is what the ARTIFACT DECLARES, not
+    # what this pass will install. Filtering it to "what gets applied" is a
+    # regression, and it was tried: ``set_graph_packs`` removal only flips
+    # ``p.status`` and leaves the ``:PackManifest`` in place (pack_state.py:
+    # 1153), so a real artifact carries ``{"status": "removed", "yaml":
+    # <manifest>}``. Excluding that entry from the validator makes any custom
+    # pack declaring ``depends_on`` the removed namespace fail validation and
+    # raise — aborting the WHOLE import post-swap, which is indicator 3 of
+    # #1936 one shape over. A dangling edge is resolved where edges are
+    # resolved (#2781), never by aborting a restore.
+    sibling_yamls = {
+        p.get("namespace"): p.get("yaml") for p in packs
+        if isinstance(p, dict) and isinstance(p.get("namespace"), str)
+        and isinstance(p.get("yaml"), str) and p.get("yaml")
+    }
     for pack in packs:
         ns = pack.get("namespace")
         if not ns:

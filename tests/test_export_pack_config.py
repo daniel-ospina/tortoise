@@ -685,6 +685,56 @@ class TestRemovedPackGranularity:
         # and the healthy entry really did apply (no abort short-circuit)
         assert _install_status(sdk, "gone-ops") is None
 
+    def test_removed_sibling_still_seeds_the_validator(self, sdk):
+        """A REMOVED entry's own yaml still counts as an available sibling.
+
+        ⛔ This pins a regression that was introduced and reverted on this PR:
+        building the validator's sibling set from "what this pass will apply"
+        looks tidier and ABORTS the whole import. ``set_graph_packs`` removal
+        only flips ``p.status`` and leaves the ``:PackManifest`` in place
+        (``pack_state.py:1153``), so a real artifact carries
+        ``{"status": "removed", "yaml": <manifest>}``; excluding it makes any
+        custom pack declaring ``depends_on`` that namespace fail validation
+        and raise — indicator 3 of #1936, one shape over.
+        """
+        from tortoise.hosted_api import _apply_import_pack_config
+        removed_manifest = (
+            "namespace: gone-ops\n"
+            "name: Gone Ops\n"
+            "version: 0.1.0\n"
+            "tier: free\n"
+            "ontology:\n"
+            "  extends: core\n"
+            "  objectKinds:\n"
+            "  - contract\n"
+        )
+        dependent_manifest = (
+            "namespace: tenant-ops\n"
+            "name: Tenant Operations\n"
+            "version: 0.1.0\n"
+            "tier: free\n"
+            "depends_on:\n"
+            "- gone-ops\n"
+            "ontology:\n"
+            "  extends: core\n"
+            "  objectKinds:\n"
+            "  - contract\n"
+        )
+        payload = {"pack_config": {"schema_version": 1, "packs": [
+            {"namespace": "gone-ops", "version": "0.1.0",
+             "activated": False, "status": "removed",
+             "yaml": removed_manifest},
+            {"namespace": "tenant-ops", "version": "0.1.0",
+             "activated": True, "status": "active",
+             "yaml": dependent_manifest},
+        ]}}
+        # must NOT raise: the removed sibling is declared by the artifact, so
+        # the dependent pack validates and installs
+        _apply_import_pack_config(sdk, payload)
+        assert _install_status(sdk, "tenant-ops") == "active"
+        # the removed entry itself is still skipped by this pass
+        assert _install_status(sdk, "gone-ops") is None
+
     def test_removed_pack_writes_no_record_of_its_own(self, sdk):
         """This WRITE PATH creates no record for a removed pack — it does not
         claim the end state of a real restore has none.
@@ -864,11 +914,21 @@ class TestStatusShapeGate:
             _pack_entry_activation({"namespace": "dev", "status": "bogus"},
                                    "dev")
 
+    @pytest.mark.parametrize("present", [True, False])
     @pytest.mark.parametrize("status", ["active", "disabled", "removed", None])
-    def test_vocabulary_is_legal(self, status):
+    def test_vocabulary_is_legal(self, status, present):
+        """Every vocabulary value is legal — and so are BOTH spellings of the
+        "field absent" case.
+
+        Parametrised on ``present`` as well as on the value: writing
+        ``if status is not None: entry["status"] = status`` made the ``None``
+        id exercise the ABSENT case, so ``status: null`` — which the shape
+        gate's own contract promises stays legal ("absent/None stays legal:
+        the entry predates the field") — was never pinned here.
+        """
         from tortoise.hosted_api import _pack_config_shape_error
         entry = {"namespace": "dev"}
-        if status is not None:
+        if present:
             entry["status"] = status
         assert _pack_config_shape_error(
             {"schema_version": 1, "packs": [entry]}) is None

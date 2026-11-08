@@ -77,9 +77,15 @@ def _importable_pack_status(status: str | None) -> str:
     No in-product writer can produce an out-of-vocabulary status (``pack_state``
     and ``pack_manifest_store`` both validate), so this is a residual against
     an out-of-band graph write — which is exactly the case a restore exists
-    for. Clamping to ``disabled`` rather than ``active`` keeps the record's own
-    ``activated`` boolean truthful (it is False for any non-``active`` status)
-    and never silently WIDENS a tenant's vocabulary on restore.
+    for.
+
+    A non-empty unknown status clamps to ``disabled``: it never WIDENS a
+    tenant's vocabulary on restore, and it agrees with the ``activated``
+    boolean emitted beside it, which is ``(status or "active") == "active"``
+    — False for any such value. A FALSY status (absent, ``None``, ``""``)
+    clamps to ``active`` for the same reason: it is what ``activated``
+    already says, and it is how ``pack_state`` itself normalises a missing
+    status (``status or PACK_STATUS_ACTIVE``).
     """
     if status in ("active", "disabled", "removed"):
         return status
