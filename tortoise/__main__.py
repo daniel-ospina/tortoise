@@ -5511,7 +5511,9 @@ def _cmd_install_hooks(args) -> int:
     # `pi` has NO read-hook registration, so it must not fall through to
     # `_install_read_hook`'s cline target (a non-codex/claude harness lands in
     # that `else` branch): `tortoise install pi --uninstall` would otherwise
-    # inspect — and could rewrite — `<dir>/.cline/hooks/UserPromptSubmit`.
+    # inspect — and could rewrite — `<dir>/.clinerules/hooks/UserPromptSubmit`
+    # (the cline target since #2124; the pre-#2124 `.cline/hooks` path is the
+    # legacy one, removed by cline's own uninstall).
     if uninstall and harness == "pi":
         # Derived from the install contract, never retyped (#3502). The
         # `cursor` and `openclaw` sibling branches below already interpolate
@@ -6202,6 +6204,32 @@ def _install_read_hook_impl(args) -> int:
                     p.read_text(encoding="utf-8", errors="replace"))
             except OSError:
                 return False
+
+        # `.clinerules` is ALSO Cline's rules-FILE convention (the single-file
+        # form predates the `.clinerules/` directory its docs prescribe today),
+        # so a project can already hold a REGULAR FILE at that name. Then
+        # `<dir>/.clinerules/hooks` is unrepresentable and the write below can
+        # only die on ``NotADirectoryError`` — an errno that names neither the
+        # cause nor the remedy. It also made ``--dry-run`` a FALSE PASS: it
+        # printed `would write` and exited 0 for an install that cannot happen
+        # (measured: `.clinerules` as a file → dry-run exit 0, real run
+        # NotADirectoryError). Refuse up front, before the dry-run report, so
+        # the prediction and the real run agree. A silent fall back to the
+        # SDK/CLI-only legacy path is the very defect #2124 repairs, so the
+        # refusal says what to do instead. Uninstall is unaffected: it never
+        # creates a directory, and a legacy registration must still be
+        # removable from such a project.
+        clinerules = root / ".clinerules"
+        if not uninstall and clinerules.exists() and not clinerules.is_dir():
+            print(f"Install failed: {clinerules} is a regular file, so Cline's "
+                  "hooks directory "
+                  f"{target.parent} cannot be created. Cline reads hooks only "
+                  "from a .clinerules/ DIRECTORY — and that same name is also "
+                  "where its rules live (as markdown files inside the "
+                  "directory). Move the file's contents to "
+                  f"{clinerules}/rules.md, or point --dir at a project whose "
+                  ".clinerules is a directory.", file=_sys.stderr)
+            return 1
 
         if dry:
             print(f"[dry-run] would write {target}:")

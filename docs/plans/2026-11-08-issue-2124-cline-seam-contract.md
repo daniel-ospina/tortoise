@@ -60,6 +60,7 @@ Cline's own e2e fixture and by six independent web results. **Confidence: high.*
 | `tortoise/__main__.py:6001-6003` target selection | `root/".cline"/"hooks"/"UserPromptSubmit"` | `root/".clinerules"/"hooks"/"UserPromptSubmit"` + legacy path for uninstall/migration |
 | `tortoise/__main__.py:5919-5921` `install --list` row | prints the path | print the new path |
 | `tortoise/__main__.py:6137-6179` cline install/uninstall branch | ownership check, atomic write, uninstall | migrate away our legacy `.cline/hooks` file; uninstall both |
+| `tortoise/__main__.py` cline branch, pre-write | no pre-check for `.clinerules` being a rules FILE | refuse up front (actionable message), before the dry-run report |
 | `tests/test_platform_seams.py:284-320, 540-548, 526-538, 730-770, 932-946` | install/path/uninstall/ownership | retarget to `.clinerules/hooks`; add legacy-migration case |
 | `tests/test_platform_seams.py:683-688` cline contract | feeds `{"prompt":…}`, asserts object | feed Cline's real nested stdin, assert flat string |
 | `docs/research/2026-09-01-gbrain-learnings/platform-seams.md` matrix + correction log | records the Cline row + correction log | correct row; record this pass's F1/F2/F3 with locators |
@@ -71,8 +72,10 @@ hook script as a module. No MCP tool or public SDK method is touched.
 ## Implementation steps
 
 1. **Hook script, input half.** Extract `userPromptSubmit.prompt` when the top-level keys are absent.
-   Test: `test_volunteer_turn_hook_cline_contract` fed Cline's nested stdin must show the reflex
-   receiving the *question*, not the envelope.
+   Test: `test_volunteer_turn_hook_cline_stdin_prompt_is_extracted` (reflex **stubbed** to echo what it
+   received) must show it receiving the *question*, not the envelope. The graph-seeded contract test
+   cannot serve as this evidence — measured: reverting the nested read leaves it green, because the
+   envelope CONTAINS the question and retrieval still matches.
 2. **Hook script, output half.** Emit the flat string. Test: same, asserting `isinstance(str)`.
 3. **Installer path.** Retarget to `.clinerules/hooks/UserPromptSubmit`; keep the ownership marker,
    symlink-escape guard and atomic 0755 write (they are path-agnostic, inherited not re-implemented).
@@ -90,8 +93,9 @@ hook script as a module. No MCP tool or public SDK method is touched.
 
 **Risk surface** — what this change can break, each with the check that would catch it:
 
-- R1 The reflex receives the envelope instead of the question for a Cline turn → caught by the cline
-  contract test fed Cline's **real** stdin shape and asserting the reflex input.
+- R1 The reflex receives the envelope instead of the question for a Cline turn → caught by
+  `test_volunteer_turn_hook_cline_stdin_prompt_is_extracted`, whose reflex is STUBBED to echo what it
+  was handed (the graph-seeded contract test cannot see this — the envelope contains the question).
 - R2 The emitted JSON is rejected by Cline's validator → caught by asserting
   `isinstance(out["contextModification"], str)` (the exact predicate `hook-factory.ts:75` applies).
 - R3 `install cline` writes where no Cline surface reads → caught by asserting the install target is
@@ -100,6 +104,10 @@ hook script as a module. No MCP tool or public SDK method is touched.
 - R5 Uninstall leaves our file behind at either path → caught by uninstall assertions on both paths.
 - R6 A regression in the other harness arms (`claude|codex|devin` share one arm) → caught by their
   unchanged contract tests in the same file.
+- R7 A project whose `.clinerules` is a rules FILE (Cline's other rules convention) gets an install
+  that dies on `NotADirectoryError` — or a `--dry-run` that promises a write it cannot perform →
+  caught by `test_install_cline_refuses_when_clinerules_is_a_rules_file`, which asserts BOTH runs
+  refuse with the actionable message and that the dry run prints no `would write`.
 
 **Threat classes:** (not adversarial) — not gate/enforcement code.
 

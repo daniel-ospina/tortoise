@@ -10,7 +10,8 @@ Covers the SHIPPED seam surfaces (issues #2123 Codex / #2126 Claude-family /
 3. ``tortoise/claude-hooks/volunteer-turn.sh`` — the SHIPPED UserPromptSubmit
    hook script, executed for real, asserting the per-harness OUTPUT
    contracts (codex/claude ``hookSpecificOutput.additionalContext``, cline
-   ``contextModification.context``) carry the reflex block; empty graph →
+   ``contextModification`` as a FLAT STRING — Cline rejects any other shape)
+   carry the reflex block; empty graph →
    empty stdout + exit 0 (content fail-open).
 
 The reflex only surfaces EP-MEASURED points (neutral Beta(1,1) = 0.5 sits
@@ -616,6 +617,34 @@ def test_install_cline_refuses_directory_target(tmp_path):
     assert "Traceback" not in r.stderr
 
 
+def test_install_cline_refuses_when_clinerules_is_a_rules_file(tmp_path):
+    """`.clinerules` is ALSO Cline's rules-FILE convention, so a project can
+    hold a regular file at that name — and then `.clinerules/hooks/` is
+    unrepresentable.
+
+    At the PR head the write died inside ``mkdir`` with
+    ``NotADirectoryError: [Errno 20] Not a directory`` — an errno naming
+    neither the cause nor the remedy — while ``--dry-run`` printed
+    `[dry-run] would write …` and exited 0 for an install that cannot happen.
+    So the assertion is the PAIR: both runs refuse, with the same actionable
+    message, and the dry run promises nothing.
+    """
+    rules = tmp_path / ".clinerules"
+    rules.write_text("Always use TypeScript.")
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+    dry = _run(["install", "cline", "--dir", str(tmp_path), "--dry-run"], env)
+    real = _run(["install", "cline", "--dir", str(tmp_path)], env)
+    for r in (dry, real):
+        assert r.returncode == 1, (r.returncode, r.stdout, r.stderr)
+        assert "Install failed:" in r.stderr
+        assert "regular file" in r.stderr
+        assert "Traceback" not in r.stderr
+    assert "would write" not in dry.stdout
+    # Nothing was created, and the user's rules file is untouched.
+    assert rules.is_file()
+    assert rules.read_text() == "Always use TypeScript."
+
+
 def test_volunteer_turn_hook_no_interpreter_fails_open(tmp_path):
     """No tortoise + no python3 resolvable → the hook exits 0 with empty
     output (fail-open preserved even when the reflex cannot run at all).
@@ -763,9 +792,11 @@ def test_volunteer_turn_hook_cline_contract(env, tmp_path):
       anything else — so the `{"context": …}` object this arm used to emit
       reached no model on any Cline surface.
 
-    MUTATION: revert either shape → RED (the object check is the exact
-    predicate `hook-factory.ts` applies; the prompt assertion fails because
-    the reflex is handed the raw JSON envelope).
+    MUTATION: emit the object shape → RED on the exact predicate Cline's
+    validator applies. The INPUT half is NOT observable here — see
+    ``test_volunteer_turn_hook_cline_stdin_prompt_is_extracted`` for why (the
+    envelope CONTAINS the question, so retrieval still matches) and for the
+    test that does discriminate it.
     """
     stdin = json.dumps({
         "userPromptSubmit": {
@@ -781,11 +812,15 @@ def test_volunteer_turn_hook_cline_contract(env, tmp_path):
         "Cline rejects a non-string contextModification — got "
         f"{type(out['contextModification']).__name__}: {out!r}")
     assert out.get("cancel") is False
-    # The reflex must see the QUESTION, never the JSON envelope.
+    # The reflex must see the QUESTION, never the JSON envelope. Asserted on
+    # WHAT IT RECEIVED, not on the reflex block: this test's reflex is the real
+    # graph-seeded one, whose output never echoes the query — so an
+    # "envelope not in the block" assertion here could never fire (measured:
+    # reverting the nested read leaves this test GREEN). That discrimination
+    # lives in test_volunteer_turn_hook_cline_stdin_prompt_is_extracted, where
+    # the reflex is stubbed to echo its input.
     assert "point/" in out["contextModification"]
     assert "CI pipeline deploys" in out["contextModification"]
-    assert "userPromptSubmit" not in out["contextModification"], (
-        "the reflex was queried with the raw stdin envelope")
 
 
 def test_volunteer_turn_hook_cline_stdin_prompt_is_extracted(tmp_path):
@@ -1176,10 +1211,14 @@ _BOUNDARY_CASES = [
      lambda r: ((r / ".clinerules").mkdir(),
                 (r / ".clinerules" / "hooks").write_text("x")),
      ["Install failed:", "FileExistsError"]),
-    # NotADirectoryError — a regular FILE where a parent dir belongs.
-    ("cline-dotdir-as-file-notadirectoryerror", "cline",
+    # `.clinerules` as a regular FILE — Cline's rules-FILE convention, so the
+    # hooks DIRECTORY cannot be created there. The read half refuses UP FRONT
+    # with the cause and the remedy (#11588 review) instead of letting
+    # ``mkdir`` raise ``NotADirectoryError``, and before the ``--dry-run``
+    # report, so the prediction never promises a write that cannot happen.
+    ("cline-clinerules-as-rules-file", "cline",
      lambda r: (r / ".clinerules").write_text("x"),
-     ["Install failed:", "NotADirectoryError"]),
+     ["Install failed:", "regular file"]),
 ]
 
 
