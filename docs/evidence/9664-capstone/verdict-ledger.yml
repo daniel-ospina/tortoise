@@ -93,6 +93,11 @@
 #           (2) prose INSIDE the graded command's own segment;
 #           (3) a `#` COMMENT;
 #           (4) a TRUSTED HEAD's decorative ARGUMENT — `… && echo "I did not run this"`;
+#               ⛔ ONLY FOR A PRINTER, and the reason is NOT that "bash executes
+#               nothing here": bash executes `echo`/`printf` fine and they succeed,
+#               which is exactly why that operand cannot short-circuit the `&&`.
+#               The same carriage for a READER/SINK is a FALSE PASS, not inert data
+#               — see carriage (6).
 #           (5) `NAME=value` is the FIFTH carriage: the leading assignment is
 #               stripped and nothing after the `=` is graded, so
 #               `A="I did not run this" && uv run pytest …` yields a `verified` row
@@ -109,6 +114,25 @@
 #               file and by `test_wrapper_flags_and_option_names_the_shell_REJECTS_are_refused`
 #               for the enforced half — so neither declaration can be deleted
 #               while the tests stay green.
+#           (6) ⛔ A SIXTH CARRIAGE, and unlike (1)-(5) it is a FALSE PASS rather
+#               than inert data: a READER/SINK head `: {cat,grep,wait,tee,ls,sed,
+#               awk,jq,sort,wc,head,tail}` placed BEFORE the graded command is
+#               admitted with ANY operand, and those heads FAIL on an operand that
+#               does not resolve, so the `&&` short-circuits exactly as the
+#               wrapper family does. Measured at `22668a11`, each reaching
+#               `uncovered: 0` / CLEAN / exit 0:
+#                 cmd:cat "I did not run this" && uv run pytest …   (bash rc 1:
+#                     `cat: 'I did not run this': No such file or directory`)
+#                 cmd:grep "I did not run this" /nonexistent && …   (bash rc 2)
+#                 cmd:export -f FOO && …                            (bash rc 1:
+#                     `export: FOO: not a function` — the `export`/`unset` branch
+#                     skips flag-prefixed operands, so `-f`'s NAME is never read)
+#               It is listed here so it cannot read as closed, and it is tracked on
+#               #11520 with the two structural exits (grade a non-runner head's
+#               operative operand the way `source` already is, or declare the family
+#               per head with the before/after distinction). It is NOT claimed
+#               closed: closing it is a grammar decision, not another spelling.
+#               Pinned OPEN by `test_a_reader_head_before_the_command_is_a_known_false_PASS`.
 #         ⛔ ONE KNOWN-OPEN FALSE BLOCK in the same arm, declared rather than
 #         implied closed: a BARE word to `set` (`set I did not run this`) is
 #         shell-valid (rc 0 — it sets positional parameters) and is REFUSED. It is

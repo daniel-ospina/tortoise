@@ -1760,9 +1760,13 @@ def _command_body(raw: str, base: Path, root: Path) -> tuple[str, Path, str]:
             # (`-L` is a second operand there) and the graded command never ran.
             # ⛔ MEASURED, so the scope is not overstated: over the 584-spelling matrix
             # (1-3 groups of `-P -L -PL -LP -Pe -Le -e --`) the PREVIOUS head admitted
-            # 68 spellings whose `cd` bash rejects, and every one of those 68 contains
+            # 128 spellings whose `cd` bash rejects, and every one of those 128 contains
             # a `--` — they are all this class. This head admits 0 of them and agrees
-            # with bash on all 584.
+            # with bash on all 584. ⛔ The count is RE-MEASURED, not carried: this line
+            # first said "68", and re-running the identical matrix at `75d68eafca`
+            # returned 128 (all 128 containing `--`, 0 without) and 0 at this head. The
+            # qualitative claim was right and the number was not — the failure a reader
+            # cannot detect without redoing the sweep.
             _prefix = ""
             while True:
                 _group = re.match(r"^(?:-[PLe]+|--)(?:\s+|$)", target)

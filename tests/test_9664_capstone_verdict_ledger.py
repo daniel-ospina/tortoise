@@ -2520,6 +2520,46 @@ def test_a_control_builtin_argument_is_graded_not_skipped(tmp_path):
         )
 
 
+def test_a_reader_head_before_the_command_is_a_known_false_PASS(tmp_path):
+    """A READER/SINK head's operand is ungraded BEFORE the command — pinned OPEN.
+
+    ⛔ MEASURED at `22668a11`, and this pin records a FALSE PASS, not a guarantee.
+    `_wrapper_argument_defect` returns `None` for every `_DECORATIVE` head, and that
+    family is not inert: `cat`, `grep`, `wait`, `tee`, `ls`, `sed`, `awk`, `jq`,
+    `sort`, `wc`, `head` and `tail` FAIL on an operand that does not resolve, so the
+    `&&` short-circuits and the graded command provably never runs. Likewise the
+    `export`/`unset` branch SKIPS flag-prefixed operands, so `export -f FOO`'s NAME
+    is never read. Each record below reaches `uncovered: 0` / CLEAN / exit 0 with the
+    committed tool while bash exits non-zero:
+
+        cmd:cat "I did not run this" && uv run pytest …   bash rc 1
+        cmd:grep "I did not run this" /nonexistent && …   bash rc 2
+        cmd:export -f FOO && uv run pytest …             bash rc 1
+
+    ⛔ WHY THE ECHO CARRIAGE IS DIFFERENT. `… && echo "I did not run this"` IS inert
+    data: bash executes `echo` and it SUCCEEDS, so nothing short-circuits. The
+    ledger used to give that same reason for the whole decorative family, which is
+    false for readers/sinks — the justification, not only the carriage, was wrong.
+
+    ⛔ DO NOT delete this pin without closing the carriage: the fix is a GRAMMAR
+    decision (grade a non-runner head's operative operand the way `source` already
+    is, measured first against the accepted `… && echo PASS`), tracked on #11520
+    with the other five carriages. Eight review cycles have each closed one spelling
+    and opened the next; inverting this pin is what closing it looks like.
+    """
+    for command in (
+        'cmd:cat "I did not run this" && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q',
+        'cmd:grep "I did not run this" /nonexistent && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q',
+        "cmd:export -f FOO && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
+    ):
+        proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, command])]))
+        assert proc.returncode == cl.EXIT_CLEAN, (
+            f"{command!r} changed behaviour ({proc.returncode}) — #11520 may have been "
+            f"fixed: INVERT this pin to EXIT_INVALID rather than deleting it\n"
+            f"{proc.stdout}{proc.stderr}"
+        )
+
+
 def test_a_cd_is_graded_on_the_shell_precondition_not_on_containment(tmp_path):
     """`cd /tmp` SUCCEEDS, so refusing it asserted a failure that did not happen.
 
