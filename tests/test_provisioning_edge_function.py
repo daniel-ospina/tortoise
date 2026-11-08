@@ -18,11 +18,102 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from tests._verdict import NODE_FLOOR_STRIP_TYPES, require_node_floor
+from tests._verdict import (
+    NODE_FLOOR_STRIP_TYPES,
+    host_capability,
+    require_node_floor,
+)
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 EDGE_FN = _REPO_ROOT / "supabase" / "functions" / "tenant-provision" / "index.ts"
 SHARED_LOOKUP = _REPO_ROOT / "supabase" / "functions" / "_shared" / "lookup.ts"
+
+# The version `module.stripTypeScriptTypes` was introduced in — a HIGHER band
+# than `NODE_FLOOR_STRIP_TYPES` (22.7, the `--experimental-strip-types` FLAG),
+# which this file no longer passes. Not used for a numeric compare (the API is
+# PROBED, and a numeric floor would wrongly admit 23.0/23.1): it is here because
+# the probe's failure message and the docstring must name a version a reader can
+# act on.
+NODE_FLOOR_STRIP_TYPES_API: tuple[int, int] = (22, 13)
+
+_STRIP_SCRIPT = (
+    "const m=require('node:module'),fs=require('node:fs');"
+    "fs.writeFileSync(process.argv[2], "
+    "m.stripTypeScriptTypes(fs.readFileSync(process.argv[1],'utf8')));"
+)
+
+
+def _node_has_strip_api(node: str) -> bool:
+    """PROBED, never assumed — the two APIs do not share a version floor.
+
+    Measured via `npx node@<v>`: absent on 22.12.0 and 23.1.x, present on
+    22.13.0. A numeric compare against (22, 13) would wrongly admit 23.0/23.1,
+    so the capability itself decides.
+    """
+    probe = subprocess.run(
+        [
+            node,
+            "-e",
+            "const m=require('node:module');"
+            "process.stdout.write(typeof m.stripTypeScriptTypes)",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    return probe.stdout.strip() == "function"
+
+
+def _parse_verdict(node: str, source: str) -> str | None:
+    """THE guard mechanism: strip types with the API, `--check` the JavaScript.
+
+    Returns None when `source` parses, else the failing step's output. Split out
+    so `test_the_parse_guard_rejects_broken_typescript` can prove the mechanism
+    is able to FAIL at all — a parse guard that cannot fail is a no-op.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        src_path = Path(tmp) / "subject.ts"
+        src_path.write_text(source)
+        stripped = Path(tmp) / "subject.mjs"
+        proc = subprocess.run(
+            [node, "-e", _STRIP_SCRIPT, str(src_path), str(stripped)],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if proc.returncode != 0:
+            return f"type-strip step (exit {proc.returncode}):\n{proc.stderr}"
+        result = subprocess.run(
+            [node, "--check", str(stripped)],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if result.returncode != 0:
+            return f"--check step (exit {result.returncode}):\n{result.stderr}"
+    return None
+
+
+def _require_parse_mechanism(what: str) -> str:
+    """The node binary this guard can use, or a SKIP naming what is missing.
+
+    Two distinct floors, deliberately: `require_node_floor` keeps #4916's
+    absent/unprobeable contract at the shared 22.7 band, and the API probe is
+    what actually decides (a host-capability gap SKIPs, never REDs — #5049
+    rule 5).
+    """
+    require_node_floor(NODE_FLOOR_STRIP_TYPES, what=what)
+    node = shutil.which("node")
+    host_capability(
+        lambda: _node_has_strip_api(node),
+        what=f"module.stripTypeScriptTypes for {what}",
+        remedy=(
+            f"use Node >= {NODE_FLOOR_STRIP_TYPES_API[0]}."
+            f"{NODE_FLOOR_STRIP_TYPES_API[1]} (the API was added in v22.13.0 / "
+            "v23.2.0) — the guard cannot run on this host"
+        ),
+    )
+    return node
 
 
 def test_edge_function_parses():
@@ -30,85 +121,57 @@ def test_edge_function_parses():
     would make every signup 500 at deploy time. Regression guard for the
     duplicate-`const pepper` P0 caught in review (PR #847): string-assertion
     tests above cannot see redeclarations, and CI has no deno/tsc step, so
-    node's type-stripping is the cheapest gate (node >= 22.7; #4916 — a
-    present-but-too-old host SKIPs, it does not RED). Skips when node is absent.
+    node's type-stripping is the cheapest gate. A present-but-incapable host
+    SKIPs (#4916/#5049 rule 5), it does not RED. Skips when node is absent.
 
-    WHY THE TWO STEPS, AND WHY THE FALLBACK: `node --experimental-strip-types
-    --check <file>.ts` was meant to strip types before parsing, so it was the
-    whole check in one call. It is not reliable, and it fails in BOTH
-    directions on node v24.21.0 (both measured):
+    WHY THE TWO STEPS, AND WHY THERE IS NO ONE-STEP FALLBACK: `node
+    --experimental-strip-types --check <file>.ts` was meant to strip types
+    before parsing, so it was the whole check in one call. Measured over real
+    runtimes (`npx node@<v>`, this exact file): `--check` NEVER type-strips, so
+    it fails in BOTH directions and was never a valid guard on any node —
 
-      * FALSE RED, in this repo's tree — a clean file exits **1** with
-        "Unexpected strict mode reserved word" at the first `interface`, i.e.
-        `--check` parsed the .ts bytes as JavaScript. That is what this file hit
-        on every run, and it is why the guard was red on a healthy tree.
-      * FALSE GREEN, on a copy of the same file under `/tmp` — exit **0**, and
-        still exit 0 after appending `const oops: number = ;`. A broken function
-        would have merged green.
+      * **false RED on 24.21.0** — a CLEAN file exits 1 with "Unexpected strict
+        mode reserved word" at the first `interface`, because `--check` parsed
+        the .ts bytes as JavaScript. Reproduced in this repo's tree and on a
+        /tmp copy of the same file (both exit 1): the guard was red on a
+        healthy tree, which is what made it indistinguishable from version
+        noise and therefore no guard at all.
+      * **false GREEN on 22.10.0, 22.13.0 and 23.1.x** — the same clean file
+        exits 0, and still exits 0 after appending `const oops: number = ;`. A
+        broken function would have merged green.
 
     So the types are stripped explicitly with `module.stripTypeScriptTypes` and
-    the resulting JavaScript is what `--check` sees. Measured, same node: broken
-    input exits non-zero at the strip step, clean input exits 0.
-
-    `module.stripTypeScriptTypes` only exists from node **22.13**, while this
-    guard's floor is `NODE_FLOOR_STRIP_TYPES = 22.7` (`tests/_verdict.py:462`) —
-    so the one-step form is used on 22.7–22.12, where `--check` DID strip types
-    and was the correct check. A host in that band therefore stays covered
-    instead of RED-ing on a missing API and blaming the FILE for a host gap.
+    the resulting JavaScript is what `--check` sees: measured, clean input
+    exits 0 and broken input exits 1 at the strip step on 22.13.0 and 24.21.0.
+    The one-step form is only reachable on hosts WITHOUT that API (22.7–22.12,
+    23.0–23.1) — exactly the band where it is a false GREEN — so those hosts
+    SKIP with a named remedy instead of running a guard that cannot fail.
     """
-    require_node_floor(
-        NODE_FLOOR_STRIP_TYPES,
-        what="the tenant-provision edge-function parse check",
+    node = _require_parse_mechanism("the tenant-provision edge-function parse check")
+    failure = _parse_verdict(node, EDGE_FN.read_text())
+    assert failure is None, f"tenant-provision/index.ts does not parse — {failure}"
+
+
+def test_the_parse_guard_rejects_broken_typescript():
+    """NON-VACUITY for `test_edge_function_parses`: the mechanism must REJECT
+    broken TypeScript, or the guard above passes everything.
+
+    This is not hypothetical. Measured on 22.10.0 / 22.13.0 / 23.1.x, the
+    one-shot `--check --experimental-strip-types <file>.ts` exits **0** for a
+    file ending in `const oops: number = ;` — it accepts broken code, so a
+    guard built on it prints green forever (it was the previous fallback for
+    exactly the band that lacks the strip API). The strip-then-check mechanism
+    exits non-zero at the strip step, which is what this test pins.
+    """
+    node = _require_parse_mechanism("the parse guard's non-vacuity check")
+    broken = EDGE_FN.read_text() + "\nconst oops: number = ;\n"
+    failure = _parse_verdict(node, broken)
+    assert failure is not None, (
+        "the parse mechanism ACCEPTED a deliberately broken copy of "
+        "tenant-provision/index.ts — it guards nothing; check that the guard is "
+        "not invoking a form that skips type stripping"
     )
-    node = shutil.which("node")
-    # Which mechanism this host supports — probed, never assumed (F1: the two
-    # APIs do not share a version floor).
-    probe = subprocess.run(
-        [node, "-e", "const m=require('node:module');"
-                     "process.stdout.write(typeof m.stripTypeScriptTypes)"],
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
-    has_strip = probe.stdout.strip() == "function"
-    if not has_strip:
-        # node 22.7–22.12: `--check` strips types itself (this is the form the
-        # guard shipped with, and it is correct in this band).
-        result = subprocess.run(
-            [node, "--experimental-strip-types", "--check", str(EDGE_FN)],
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-    else:
-        strip = (
-            "const m=require('node:module'),fs=require('node:fs');"
-            "fs.writeFileSync(process.argv[2], "
-            "m.stripTypeScriptTypes(fs.readFileSync(process.argv[1],'utf8')));"
-        )
-        with tempfile.TemporaryDirectory() as tmp:
-            stripped = Path(tmp) / "tenant-provision-under-test.mjs"
-            proc = subprocess.run(
-                [node, "-e", strip, str(EDGE_FN), str(stripped)],
-                capture_output=True,
-                text=True,
-                timeout=120,
-            )
-            assert proc.returncode == 0, (
-                "tenant-provision/index.ts could not be type-stripped — that is "
-                "the parse verdict: the file (or its types) does not parse "
-                f"(exit {proc.returncode}):\n{proc.stderr}"
-            )
-            result = subprocess.run(
-                [node, "--check", str(stripped)],
-                capture_output=True,
-                text=True,
-                timeout=120,
-            )
-    assert result.returncode == 0, (
-        f"tenant-provision/index.ts does not parse (exit {result.returncode}):\n"
-        f"{result.stderr}"
-    )
+
 
 
 def test_edge_function_writes_supabase_only():
