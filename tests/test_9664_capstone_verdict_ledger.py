@@ -1897,7 +1897,6 @@ PINNED_TOOLS = [
 ]
 
 
-@pytest.mark.parametrize("tool", PINNED_TOOLS)
 def _preamble_index(body: list[ast.stmt]) -> int | None:
     """Index of the `#5128` guard in a tool's module body, or None (#9664).
 
@@ -1905,9 +1904,12 @@ def _preamble_index(body: list[ast.stmt]) -> int | None:
     docstring, then ZERO OR MORE `__future__` imports, then exactly ONE **bare**
     `import sys`, then the `if sys.version_info < (3, 12)` guard.
 
-    Requiring a `__future__` import would red a census-LEGAL tool — measured, 3 of
-    185 tracked `tools/*.py` carry none as their first post-docstring statement —
-    and skipping every leading `ast.Expr` is wrong too: a second bare string literal
+    Requiring a `__future__` import would red census-LEGAL files — measured at this
+    head, 19 of `graph-scripts/`'s 60 tracked `.py` files (which the census DOES
+    walk) carry none as their first post-docstring statement, against 0 of
+    `tools/`' 185, where the only three that lack one are `__init__.py` and the
+    census excludes those by name — and skipping every leading `ast.Expr` is wrong
+    too: a second bare string literal
     before the guard passed a skip-all-Expr loop and reded the census.
 
     `asname is None` is the conjunct nothing else can see, and it is NOT redundant:
@@ -2011,20 +2013,41 @@ def test_the_tool_carries_the_5128_interpreter_guard_first(tool, capsys, monkeyp
     exemption sets), PLUS one arm the census does carry but this pin can only carry
     for one tool: the invocation the `tools/build_site_icons.py` refusal names
     RESOLVING (its `--source` is `required=True`, so only the `--help` form it names
-    resolves). ⛔ NOTHING here grades what `tools/capstone_ledger.py`'s refusal
-    NAMES — the census has no such arm for it either, so that dimension is ungraded
-    for that tool on a tool-only diff; measured: mutating its message to name
-    `--help` (exit 5, no verdict) or `--ledger NONEXISTENT` leaves this file
-    completely GREEN — no arm notices. (Deliberately no count: a number here went
-    stale three rounds running as arms were added.) It does not mirror the
-    census's `docs/` + `graph-scripts/` + sibling-`tools/` walk, nor its corpus
-    vacuity, `RUNTIME_39`/`UNGUARDABLE` accuracy, detector self-test or `-m`
-    resolution arms: reaching any of those needs an edit to `docs/`, to another
-    tool, or to the census file itself — and `tests/` edits select 788 files
-    INCLUDING the census, so the census itself would then run. This bound is
-    declared rather than implied because a pin that silently claims parity is how
-    each of six review rounds found it weaker than the census by one more
-    dimension.
+    resolves). ⛔ NOTHING here grades whether the form `tools/capstone_ledger.py`'s
+    refusal NAMES **resolves** — only that it names one (the prefix clause above
+    reds a message naming a different form); the census has no resolve arm for it
+    either, so that dimension is ungraded for that tool on a tool-only diff;
+    measured: mutating its message to name `--help` (exit 5, no verdict) or
+    `--ledger NONEXISTENT` leaves this file completely GREEN — no arm notices.
+    (Deliberately no count: a number here went stale three rounds running as arms
+    were added.)
+
+    It does not mirror the census's `docs/` + `graph-scripts/` + sibling-`tools/`
+    walk, its corpus vacuity, `RUNTIME_39`/`UNGUARDABLE` accuracy, detector
+    self-test or `-m` resolution arms.
+
+    ⚠️ ONE OF THOSE EXCLUSIONS IS A REAL HOLE AND IS NAMED AS ONE: the `docs/`
+    sweep, which is why this paragraph no longer says "not a hole" about it.
+    Reaching it needs an edit to `docs/` and NOT to `tests/` — and a docs-only diff
+    selects 82 test files INCLUDING this one and EXCLUDING the census (`select(
+    ['docs/plans/x.md'], 'pull_request', load_manifest())`; the same 82 for
+    `docs/ci/**` and `docs/research/**`), which is precisely why
+    `config/ci-surfaces.yml` registers this file as `tier1`. Measured: appending
+    a line advertising `python3 tools/capstone_ledger.py check` to a tracked doc
+    leaves THIS file GREEN while the census reds
+    `test_no_doc_or_usage_advertises_the_form_the_guard_refuses`. So on a docs-only
+    diff the refusal-ADVERTISING surface is ungraded. That is a routing gap in
+    `tools/ci_selection.py`, not something a pin in this file can close, and it is
+    tracked as #11363 (same root, the `tools/` surface: a diff that never selects
+    the census leaves its #5128 guard unchecked).
+
+    The REMAINING exclusions ARE closed by selection, and that is the difference
+    this paragraph exists to keep visible: `tests/` edits select 788 files
+    INCLUDING the census, and an edit to another tool or to the census file itself
+    selects the census too — so for those arms the census itself would then run.
+    This bound is declared rather than implied because a pin that silently claims
+    parity is how each of six review rounds found it weaker than the census by one
+    more dimension.
     """
     tree = ast.parse(tool.read_text(encoding="utf-8"))
     body = list(tree.body)
