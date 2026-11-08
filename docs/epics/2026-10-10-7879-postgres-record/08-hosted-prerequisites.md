@@ -173,7 +173,7 @@ appears in prose only — e.g. this document, §12.1c's decided record, this epi
 `03-schema.md`, and the competitor notes. So the record is a **durability carrier** for vectors, not a retrieval index — which was
 exactly right while §2.0 kept the cache fully populated, and **V1 is now DECIDED** (§12.1c/§14.3, 2026-11-07):
 the retrieval index and the embedding payload move to Postgres, so this row's *reason for being a carrier only*
-dis gone — the record becomes the home of the index, not just of the bytes.
+is gone — the record becomes the home of the index, not just of the bytes, **once the migration lands**.
 
 ### A6. Metering / billing — **EXISTS and is live, org-scoped**
 
@@ -939,7 +939,7 @@ calibrates after beta from measured consumption.
 | # | what | why it is not on the list |
 |---|---|---|
 | **N1** | **The read path and its cutover** (`#7970`, **OPEN**) | §2.0 defers it in the owner's own words (§0.1). The instruments exist and are off. |
-| **N2** | **`pgvector` / moving the vector index into Postgres** (`#4997`, **CLOSED 2026-10-05** — its analysis is what this item rests on; §12.1c **V1**, §14.3) | **DECIDED 2026-11-07 — ADOPTED** (`docs/architecture/SEARCH-ARCHITECTURE.md`): the vector index and its payload move to Postgres (`pgvector`). What is not decided is WHEN — not on this epic's critical path. Embeddings are already durable as `jsonb` (A5). Note the settled blocker if it is decided: **`pgvectorscale` is unavailable on Supabase** (§14), so it would be `pgvector` proper. |
+| **N2** | **`pgvector` / moving the vector index into Postgres** (`#4997`, **CLOSED 2026-10-05** — its analysis is what this item rests on; §12.1c **V1**, §14.3) | **DECIDED 2026-11-07 — ADOPTED** (`docs/architecture/SEARCH-ARCHITECTURE.md`): the vector index and its payload move to Postgres (`pgvector`). What is not decided is WHEN — not on this epic's critical path. Embeddings are already durable as `jsonb` (A5). Note the settled blocker now that it is decided: **`pgvectorscale` is unavailable on Supabase** (§14), so it would be `pgvector` proper. |
 | **N3** | **A FalkorDB → Postgres backfill / migration-safety apparatus** | Owner scope ruling 2026-10-10: no customers, no apparatus designed. The dual-write is journal-first by construction (§3/§17.1). |
 | **N4** | **Journal completeness** (`#5089`) | A **precondition owned by another epic** (this epic's *blocked-by (soft)*) — ⚠️ **and that epic CLOSED COMPLETED on 2026-10-12**, so the soft block is discharged *as a ticket*. What is not discharged is the measurement: §17.1's surface (**387 mutating sites / 211 functions / 32 files**) is quoted here, not re-verified by this lane. Named, not re-filed: a projection replayed from an unfaithful journal is faithfully wrong. |
 | **N5** | **The record's failure counter has no alert** | Real (§A3: fail-soft, counted only on `monitoring.metrics()`), but **not** a gate while the cache is fully populated — a lost record is healed by replay. Becomes a gate if the cache is ever allowed to go partial. |

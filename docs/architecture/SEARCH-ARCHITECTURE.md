@@ -243,8 +243,9 @@ as authority**; the record schema carries **no column** for them and its `chk_po
 table comment restates the carve-out). ⚠️ **The one narrowed exception, stated so this section does not
 overstate the carve-out:** `baseline_source` / `baseline_alpha` / `baseline_beta` **are** columns —
 PRIMARY when `baseline_source = 'set-by-author'`, because an author-set prior is a non-reconstructible
-input rather than a derived value (the `#7955` correction to §17.5; `STORAGE-ARCHITECTURE.md:2055` says
-the carve-out is **not** reopened by it). That ruling stands and nothing here reverses it.
+input rather than a derived value (the `#7955` correction to `STORAGE-ARCHITECTURE.md` **§17.5**, paragraph
+“`baseline_source` is NOT unconditionally DERIVED”, which says the carve-out is **not** reopened by it).
+That ruling stands and nothing here reverses it.
 
 **Which is why the retention unit must be a CLOSED component (§7):** a closed subgraph has no missing
 boundary, so recomputing EP for it is **exact**, not approximate. Retention policy and the EP carve-out
@@ -332,8 +333,10 @@ two stores is expensive. ⚠️ **Read the scope honestly:** the owner's ruling 
 \$5.70 = 30 % of \$19. Applying `0.30 × price` to **pro and team** is **this document's generalisation**, recorded
 in the same thread (comment
 [`6712718679`](https://github.com/daniel-ospina/tortoise/issues/4051#issuecomment-6712718679)) rather than
-spoken by the owner — so those two rows are a derivation from the rule's form, and they are priced by the same
-formula rather than against a quoted figure.
+spoken by the owner — ⚠️ and read that comment for what it does, not for what it claims: it *applies* the rule
+(`30 % of that tier's price`) to pro and team while calling the general form *“the owner's”*. The **derivation of
+the pro and team rows is this document's**, and a reader who needs authority for those two numbers has it only as
+the rule's form carried to another price, not as a ruling on pro or team.
 
 For a tier priced `P`, with a record allowance of 1 GB, the threshold must be solved *together with density*,
 since the shared project line is `$85 ÷ tenants`:
@@ -384,7 +387,7 @@ mistaken for the stronger one.
 ⚠️ **And the Postgres side is not free of unknowns, only of cost:** under both states the dominant
 **unmeasured** lines are compute tier, provisioned IOPS and egress, driven by the **miss rate** — which
 nobody has measured (§17.4.6). Everything above is the **storage and shared-project** lines and says so —
-the `shared \$` column is `plan $25 + compute $60` per project divided by tenants, where $60 is an **assumed**
+the `shared $` column is `plan $25 + compute $60` per project divided by tenants, where $60 is an **assumed**
 compute line and the **tier choice itself is unmeasured**: a higher compute tier raises that column and the
 total with it.
 
@@ -425,4 +428,6 @@ complete graph affordable.
 
 Tier prices and overage values; the compute/IOPS/egress tier; retention (`#3853`); the session cap
 (`#4010`); the `record_only` tier's scope beyond `:Point` (`#10017`); **the implementation order** —
-deliberately last, per the owner: canonical docs first.
+deliberately last, and **this document's** sequencing choice, not a quoted ruling: canonical docs first, so a
+lane never implements against a superseded architecture. (Its shape matches the phase correction in `#4051`
+comment [`6714119028`](https://github.com/daniel-ospina/tortoise/issues/4051#issuecomment-6714119028).)

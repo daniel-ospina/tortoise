@@ -1536,8 +1536,10 @@ follows is the evidence each ruling rests on, which is design.
 
 **The ruling (owner, 2026-10-08, §2.0):** *"we do hybrid now, data goes to postgres and it's loaded to hot (falkor); for now we keep the limit in falkor high…"*
 
-> ⛔ **Split by the 2026-11-07 ruling — see §2.0's marker.** The dual-store read path is adopted (vector search in Postgres,
-> traversal in the graph); the full cache is retained through private-beta and bounded only after the search doc's M2 measures retrieval quality (`SEARCH-ARCHITECTURE.md` §1.5, §9).
+> ⛔ **Split by the 2026-11-07 ruling — see §2.0's marker.** The dual-store **SEARCH** path is adopted (similarity
+> candidates come from Postgres, the walk stays in the graph); the full cache is retained through private-beta and bounded
+> only after the search doc's M2 measures retrieval quality (`SEARCH-ARCHITECTURE.md` §1.5, §9). ⚠️ **`#7970`'s
+> anchored-read cutover — serving the ordinary read path from Postgres — stays DEFERRED by §2.0.**
 
 **FalkorDB stays hosted, and there is still no engine rewrite. What changes is its ROLE:**
 
