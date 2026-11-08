@@ -645,6 +645,13 @@ ON CONFLICT (id) DO NOTHING;
 -- The guard must still BE in the live body: a later `CREATE OR REPLACE` that
 -- re-issues provision_team from an older text would silently drop the backstop
 -- and this suite would otherwise stay green.
+--
+-- The marker pin matches the RAISE STATEMENT, not the bare token: `prosrc` is
+-- the body only, but it still carries the body's own COMMENTS, and the comment
+-- above the gate names `one_free_org_limit:<org_id>` (migration `:190`). A
+-- `LIKE '%one_free_org_limit:%'` is therefore satisfied by that prose and stays
+-- GREEN when the RAISE itself is renamed — which would degrade every
+-- cross-worker refusal to a 500 (measured, agent-infra#3442).
 DO $$ BEGIN
   PERFORM tests.assert(
     (SELECT prosrc FROM pg_proc
@@ -654,8 +661,8 @@ DO $$ BEGIN
   PERFORM tests.assert(
     (SELECT prosrc FROM pg_proc
       WHERE proname='provision_team' AND pronamespace='public'::regnamespace)
-      LIKE '%one_free_org_limit:%',
-    '#1981: provision_team must keep the one_free_org_limit marker');
+      ~ 'RAISE[[:space:]]+EXCEPTION[[:space:]]+''one_free_org_limit:',
+    '#1981: provision_team must RAISE the one_free_org_limit marker');
 END $$;
 
 -- ── 8a. a user's FIRST free org provisions; the SECOND is refused ───────────

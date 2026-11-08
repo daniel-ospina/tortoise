@@ -13,6 +13,7 @@ file (the dashboard gate-on-click UX is covered by the e2e suite).
 from __future__ import annotations
 
 import os
+import re
 import tempfile
 from datetime import UTC, datetime, timedelta
 
@@ -1030,7 +1031,17 @@ class TestAtomicProvisionBackstop:
         (`supabase/tests/0010_provisioning_rpcs.sql` §8) pins the BEHAVIOUR; this
         pins that the migration carrying it still carries exactly this marker —
         a rename on either side would otherwise silently degrade the refusal to
-        a 500."""
+        a 500.
+
+        Both assertions match the STATEMENT, not a bare token: this migration
+        explains itself in comments that name `one_free_org_limit:` (``:190``)
+        and `pg_advisory_xact_lock` (``:40``), so a substring test is satisfied
+        by the prose and stays GREEN when the code it claims to protect is
+        deleted or renamed (agent-infra#3442 — an assertion whose value cannot
+        vary under any mutation is dead weight, not a pin). Measured: with the
+        bare `in sql` form, renaming the marker and deleting the `PERFORM` both
+        left this test passing.
+        """
         from pathlib import Path
 
         from tortoise.hosted_api import _ONE_FREE_ORG_RPC_MARKER
@@ -1038,11 +1049,15 @@ class TestAtomicProvisionBackstop:
                      / "supabase/migrations"
                      / "20261108000001_one_free_org_atomic_provision.sql")
         sql = migration.read_text()
-        assert _ONE_FREE_ORG_RPC_MARKER in sql, (
-            f"{migration.name} no longer raises {_ONE_FREE_ORG_RPC_MARKER!r}; "
+        assert re.search(
+            r"RAISE\s+EXCEPTION\s+'" + re.escape(_ONE_FREE_ORG_RPC_MARKER) + r"%'",
+            sql), (
+            f"{migration.name} no longer RAISES {_ONE_FREE_ORG_RPC_MARKER!r}; "
             "hosted_api would map its refusal to a 500")
         # the atomicity mechanism, not just the message
-        assert "pg_advisory_xact_lock" in sql
+        assert re.search(r"PERFORM\s+pg_advisory_xact_lock\s*\(", sql), (
+            f"{migration.name} no longer PERFORMs the cross-process advisory "
+            "lock; the entitlement would be a read-then-write again")
 
 
 def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
