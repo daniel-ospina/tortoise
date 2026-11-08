@@ -954,8 +954,16 @@ class Ledger:
                     try:
                         row = json.loads(line)
                         self._keys.add((row["target"], row["migrationKey"]))
-                    except (json.JSONDecodeError, KeyError):
-                        continue  # a torn tail line is skipped, not fatal
+                    except (json.JSONDecodeError, KeyError) as exc:
+                        # NOT "skip and continue": a damaged line means the keys it held
+                        # (and any appended after a torn tail) are unknowable, and a row
+                        # the target ACCEPTED would be silently re-sent — the exact
+                        # "the ledger can be lost" failure its own docstring forbids.
+                        raise CurationRefused(
+                            f"ledger {self.path!r} is damaged at a line that is not valid "
+                            f"JSON ({type(exc).__name__}): the keys it recorded are "
+                            "unknowable, so rows it held would be re-sent. Inspect the "
+                            "file (truncate to the last complete line) before re-running") from exc
         except FileNotFoundError:
             pass
 
@@ -970,7 +978,17 @@ class Ledger:
         if not keys:
             return
         os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
+        # A torn tail (killed process, ENOSPC mid-flush) leaves a line with no
+        # newline; appending straight onto it CONCATENATES the new record with the
+        # torn one, destroying BOTH keys. Terminate the last line first.
+        needs_nl = False
+        if os.path.exists(self.path) and os.path.getsize(self.path):
+            with open(self.path, "rb") as probe:
+                probe.seek(-1, os.SEEK_END)
+                needs_nl = probe.read(1) != b"\n"
         with open(self.path, "a", encoding="utf-8") as fh:
+            if needs_nl:
+                fh.write("\n")
             for k in keys:
                 fh.write(json.dumps({"target": self.target, "migrationKey": k}) + "\n")
                 self._keys.add((self.target, k))

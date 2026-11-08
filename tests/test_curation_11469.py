@@ -1377,3 +1377,36 @@ def test_a_content_change_only_the_second_pass_can_see_is_refused():
 
     with pytest.raises(RuntimeError, match=r"DIFFERENT row sequence|second read"):
         mod.MCPReader(call, None).read_points(page=2)
+
+
+# ── round-22 review findings ──────────────────────────────────────────────
+
+
+def test_a_torn_ledger_tail_does_not_swallow_the_next_key(tmp_path):
+    """Round-22: appending onto a torn line (no trailing newline) CONCATENATES the two
+    records, destroying both keys — so an accepted row was silently forgotten."""
+    path = tmp_path / "l.jsonl"
+    path.write_text('{"target": "new", "migrationKey": "k-tor')   # torn write
+    with pytest.raises(C.CurationRefused, match=r"damaged"):
+        C.Ledger(path, target="new")                               # the tear is not silently skipped
+    path.write_text('{"target": "new", "migrationKey": "k1"}\n')    # repaired by truncation
+    led = C.Ledger(path, target="new")
+    led.record(["k2"])
+    assert "k2" in C.Ledger(path, target="new")
+
+
+def test_a_disarmed_run_is_not_reported_as_a_failure(monkeypatch, tmp_path, capsys):
+    """Round-22: `plan --apply --off` exited 3 ("REFUSED"), so a driver paged on a run
+    that did exactly what it was told."""
+    mod = _tool_module()
+
+    def call(name, args):
+        if name == "tortoise_query":
+            return {"result": [{"id": "p1", "kind": "decision", "content": "c"}], "total": 1}
+        return {"result": []}
+    monkeypatch.setattr(mod, "_live_call_tool", call)
+    rc = mod.main(["plan", "--graph", "org_x_g_old", "--target", "org_x_g_new",
+                   "--apply", "--off", "--no-verify-read",
+                   "--ledger", str(tmp_path / "l.jsonl"), "--out", str(tmp_path / "p.json")])
+    assert rc == 0
+    assert "disarmed" in capsys.readouterr().err

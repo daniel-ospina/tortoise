@@ -509,6 +509,12 @@ def cmd_plan(args: argparse.Namespace) -> int:
         with open(args.out, "w", encoding="utf-8") as fh:
             fh.write(text + "\n")
     print(text)
+    if result.off and not result.applied:
+        # The operator ASKED for this (`--off` / TORTOISE_CURATE_OFF): nothing was
+        # written because nothing was meant to be. Checked BEFORE the generic refusal
+        # branch, which would otherwise read the off-switch as a failure and exit 3.
+        print(f"disarmed ({result.refused}): nothing written, nothing attempted", file=sys.stderr)
+        return 0
     if result.refused and not result.applied and args.apply:
         # A refused WRITE (or a refused identity) is a failure, not a successful
         # plan: a scripted driver must not read exit 0 as "migrated".
