@@ -142,6 +142,42 @@ def test_a_content_holding_row_displaces_an_empty_keeper():
         "its own rule decides its disposition — here the narrative marker does")
 
 
+def test_the_promotion_loop_identifies_the_keeper_by_position_not_by_node_id():
+    """Round-36 review finding — the PROMOTION pass had the round-35 bug the third pass lost.
+
+    Point ids are not unique (`test_two_nodes_sharing_an_id_in_one_page_are_not_a_pagination
+    _shift` pins that as a legal read shape), so a `node_id`-keyed promotion skipped a row
+    that HOLDS content merely because it shared the empty keeper's id: the empty row stayed
+    the keeper and the content row's decision read "the keeper dup is the row of record for
+    this content" over a row holding no content, while the only copy was `not-carried` and
+    `carry_rows()` came back EMPTY. Deleting this identity test (restoring the id comparison)
+    leaves the rest of the suite green, so this is the pin that witnesses it.
+
+    Asserted by POSITION, never through a `{d.node_id: d}` map: the two rows share an id, so
+    a map silently keeps only one of them and cannot see the swap at all.
+    """
+    plan = C.build_plan(
+        [row("dup", kind="decision", content="", content_hash="H"),
+         row("dup", kind="decision", content="the venue refuses writes at its node cap",
+             content_hash="H")],
+        source_graph="old", target_graph="new", packs={},
+    )
+    assert len(plan.decisions) == 2
+    empty, holder = plan.decisions
+    # The row that HOLDS the content is the row of record, whatever its id is.
+    assert holder.disposition == C.CARRY, (
+        f"the row holding the only copy of the text must carry: {holder.reason!r}")
+    assert "duplicate" not in holder.reason, (
+        f"the content-holding row must not be labelled a duplicate: {holder.reason!r}")
+    # …and the empty row may never be presented as the row of record for that content.
+    assert empty.disposition != C.CARRY
+    assert "row of record" not in empty.reason, (
+        f"an empty row cannot be the row of record for content it does not hold: "
+        f"{empty.reason!r}")
+    # The only copy of the text reaches the wire — the whole point of the promotion pass.
+    assert [d.node_id for d in plan.carry_rows()] == ["dup"]
+
+
 def test_the_promotion_loop_does_not_reorder_a_single_row_plan():
     """Guard: the keeper-promotion pass must not perturb an order it has no work for."""
     plan = C.build_plan([row("solo", kind="decision", content="a claim")],
@@ -581,6 +617,27 @@ def test_ingest_refusal_envelope_is_not_a_success():
     writer = C.IngestWriter(call_tool)
     with pytest.raises(C.CurationRefused):
         writer.write_sections("new", {"points": [{"migrationKey": "k", "content": "c"}]})
+
+
+@pytest.mark.parametrize("key, payload", [
+    # One key PER CASE: an envelope carrying two of them cannot tell which one the guard
+    # consulted, which is how dropping "violations" (or "detail") from `_ingest_refused`
+    # left this suite green while a violations-only refusal would have been ledgered as
+    # migrated (round-36 review finding).
+    ("error", "ERR_QUOTA"),
+    ("violations", [{"section": "points", "reason": "missing content"}]),
+    ("detail", "the target rejected the bundle"),
+])
+def test_each_refusal_envelope_key_refuses_on_its_own(key, payload):
+    """Every key `_ingest_refused` consults must refuse BY ITSELF, naming the payload."""
+    def call_tool(tool, args):
+        return {key: payload}
+
+    writer = C.IngestWriter(call_tool)
+    with pytest.raises(C.CurationRefused) as excinfo:
+        writer.write_sections("new", {"points": [{"migrationKey": "k", "content": "c"}]})
+    assert str(payload) in str(excinfo.value), (
+        f"the refusal must carry the {key!r} payload it acted on: {excinfo.value!r}")
 
 
 # ── classification rules the inventory table cites ───────────────────────
