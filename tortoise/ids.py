@@ -113,18 +113,27 @@ def session_id_refusal(session_id: object) -> str | None:
       This branch extends that predicate to the ``SessionRecorded`` carrier
       rather than stacking a second predicate in front of it.
 
-    The two halves agree on ABSENT / BLANK / non-``str`` — pinned class by
-    class in
+    The two halves agree on BLANK and on a non-``str`` — pinned class by class
+    in
     ``tests/test_9599_blank_session_id.py::test_the_fold_gate_and_the_door_gate_are_one_rule``
-    — and they DELIBERATELY disagree on the RESERVED demo/sample namespace
-    (#8290), which this predicate now refuses and the fold must still ADMIT.
-    ⛔ That asymmetry is not drift to be "fixed": the reservation belongs on the
-    LIVE WRITE path, where a caller can be told and can re-file under a minted
-    id, while a REPLAY must accept every id an older tree legitimately wrote or
-    it loses those rows (#9594 / #9553 govern the replay half). Widening
-    ``_writable_container_id`` to the reserved class is therefore a data-loss
-    change, and the same test asserts BOTH halves of the asymmetry so either
-    direction reds there instead of being read as prose.
+    — and they differ, DELIBERATELY and in three named classes (that same test
+    asserts each one, so neither half can be "unified" silently):
+
+    * **ABSENT** (``None``/``""``) — a DOOR mints for it; a FOLD has nothing to
+      mint with and refuses it. This is the ORIGINAL asymmetry, older than
+      #9599's pin, and it is why the two are NOT "equal on every non-empty
+      string" either.
+    * **the RESERVED demo/sample namespace** (#8290) — this predicate REFUSES
+      it; the fold must still ADMIT it. The reservation belongs on the LIVE
+      WRITE path, where a caller can be told and can re-file under a minted id,
+      while a REPLAY must accept every id an older tree legitimately wrote or it
+      loses those rows (#9594 / #9553 govern the replay half). Widening
+      ``_writable_container_id`` to the reserved class is a DATA-LOSS change.
+    * **an id the ENGINE cannot parse** (NUL, lone surrogate) — the fold's
+      ``_writable_id`` refuses it and it is not the blank rule.
+
+    ⛔ Do not read those three as drift to be repaired: each is a recorded
+    decision, and each reds in the cited test if either half is widened.
 
     ABSENT (``None`` or ``""``) is not a refusal — the host named no session,
     and every door mints one (``mint_session_id``). That is today's contract
