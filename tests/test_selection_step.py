@@ -488,8 +488,8 @@ def test_every_return_carries_the_renarrate_channel(monkeypatch):
     was the one path that omitted it (review F2), so a consumer crashed with
     `KeyError` on exactly the session where nothing ran.
     """
-    model, _ = _run(monkeypatch, ["Alice set a budget."], [_embed("Northwind")])
-    assert _entity_names(_) == {"Northwind"}, "the fixture really did extract"
+    _, result = _run(monkeypatch, ["Alice set a budget."], [_embed("Northwind")])
+    assert _entity_names(result) == {"Northwind"}, "the fixture really did extract"
     empty = extract_session_v2(_Scripted(["story"], [_EMPTY_EMBED]), [],
                                sdk=None, session_id="11002-empty")
     assert empty["stats"]["renarrate"] == {"fired": False}
