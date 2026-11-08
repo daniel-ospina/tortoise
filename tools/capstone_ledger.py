@@ -400,8 +400,46 @@ _ENV_NAME: Final = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 #: bash exits 0 for it, so requiring a bare NAME refused it — a false block on a
 #: record bash accepts, and exit 1 hides the whole uncovered report. Deliberately
 #: NOT extended to `export`: `export 'A[0]'` is a real bash error ("not a valid
-#: identifier"), so admitting it there would be a false PASS.
+#: identifier"), so admitting it there would be a false PASS. ⛔ The SUBSCRIPT is
+#: arbitrary inert data (`bash -c "unset 'A[I did not run this]'"` → rc 0) and is
+#: NOT graded — declared as an open carriage in the ledger.
 _ENV_ARRAY_ELEMENT: Final = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\[[^\]]+\]$")
+
+#: The option NAMES `set -o`/`set +o` accept — `bash -c 'set -o'` on this fleet.
+#: ⛔ VALIDATED, because an UNKNOWN name is an ERROR (`bash -c 'set -o NOTRUN'`
+#: → rc 2): the `&&` short-circuits and the graded command provably never ran, so
+#: consuming any bare word here admitted `set -o "I did not run this" && <cmd>` as
+#: CLEAN. That is a false PASS, which is worse than a false block.
+_SET_OPTION_NAMES: Final[frozenset[str]] = frozenset(
+    {
+        "allexport", "braceexpand", "emacs", "errexit", "errtrace", "functrace",
+        "hashall", "histexpand", "history", "ignoreeof", "interactive-comments",
+        "keyword", "monitor", "noclobber", "noexec", "noglob", "nolog", "notify",
+        "nounset", "onecmd", "physical", "pipefail", "posix", "privileged",
+        "verbose", "vi", "xtrace",
+    }
+)
+
+#: The single-letter flags `set` accepts (`man bash`:
+#: `set [-abefhkmnptuvxBCEHPT] [-o option-name] [--] [-] [arg …]`). ⛔ Validated for
+#: the same reason as `_SET_OPTION_NAMES`: `set -ZZZ` exits 2, so a record for
+#: `set -ZZZ && <cmd>` names a command that never ran. `-` and `+` alone are
+#: valid (`set -` clears -x/-v) and are handled before this set is consulted.
+#: ⛔ `o` IS in the cluster set even though `man bash`'s synopsis lists `-o`
+#: separately: bash accepts `-euo pipefail` as the cluster `-e -u -o pipefail`, so
+#: omitting `o` here false-blocked the canonical `set -euo pipefail` preamble —
+#: measured, not assumed.
+_SET_SHORT_FLAGS: Final[frozenset[str]] = frozenset("abefhkmnoptuvxBCEHPT")
+
+#: The flag LETTERS `export` and `unset` accept, MEASURED (not assumed):
+#: `export -f/-n/-p` → rc 0/0/0 while `export -e/-x/-v` → rc 2; `unset -f/-n/-v`
+#: → rc 0/0/0 while `unset -e/-p` → rc 2. ⛔ Validated for the same reason as the
+#: `set` sets: a rejected flag makes bash exit 2, so `export -e NOT RUN && <cmd>`
+#: is a record for a command that never ran.
+_ENV_FLAGS: Final[dict[str, frozenset[str]]] = {
+    "export": frozenset("fnp"),
+    "unset": frozenset("fnv"),
+}
 
 #: A `umask` mask: octal, or the symbolic form. ⛔ The symbolic form is a
 #: COMMA-SEPARATED CLAUSE LIST (`u=rwx,g=rx,o=` — the exact spelling this comment
@@ -490,13 +528,26 @@ def _wrapper_argument_defect(head: str, args: list[str], cwd: Path, root: Path) 
         return None
     if head in {"export", "unset"}:
         for arg in args:
-            if arg.startswith("-") or arg == "--":
+            if arg == "--":
+                continue
+            if arg.startswith("-") or arg.startswith("+"):
+                # ⛔ VALIDATED, not skipped. An invalid flag is an ERROR
+                # (`export -e NOTRUN` → rc 2, `unset -p X` → rc 2), so the `&&`
+                # short-circuits and the graded command PROVABLY never ran.
+                # Skipping dashed tokens admitted `export -e NOT RUN && <cmd>` as
+                # `verified` / `uncovered: 0` / CLEAN — a false PASS, not a
+                # convenience. The accepted letters are measured, not assumed.
+                if not set(arg[1:]) <= _ENV_FLAGS[head]:
+                    return f"{_short(arg)} is not a `{head}` flag"
                 continue
             if _ENV_NAME.match(arg) or _ENV_ASSIGNMENT.match(arg):
                 continue
             # ⛔ `unset 'A[0]'` removes ONE array ELEMENT and bash exits 0 for it;
             # requiring a bare NAME (or `NAME=`) refused it as prose. `unset` only:
             # see `_ENV_ARRAY_ELEMENT` for why `export` keeps the stricter rule.
+            # The SUBSCRIPT is arbitrary inert data and is NOT graded — declared as
+            # an open carriage in `docs/evidence/9664-capstone/verdict-ledger.yml`,
+            # because an unlisted carriage reads as closed.
             if head == "unset" and _ENV_ARRAY_ELEMENT.match(arg):
                 continue
             return f"{_short(arg)} is neither a NAME nor a NAME=value assignment"
@@ -512,28 +563,43 @@ def _wrapper_argument_defect(head: str, args: list[str], cwd: Path, root: Path) 
         for arg in args:
             if expect_option_name:
                 expect_option_name = False
+                # ⛔ The option NAME is VALIDATED. `bash -c 'set -o NOTRUN'` exits 2,
+                # so the `&&` short-circuits and the graded command provably never
+                # ran; consuming any bare word admitted `set -o "I did not run
+                # this" && <cmd>` as CLEAN — a false PASS.
+                if arg not in _SET_OPTION_NAMES:
+                    return f"{_short(arg)} is not a shell option name"
                 continue
             # ⛔ `--` ENDS option parsing: every operand after it is a POSITIONAL
             # PARAMETER, not an option (`man bash`: `set … [--] [-] [arg …]`).
             # Requiring each of those to start with `-`/`+` refused `set -- a b`,
             # which bash accepts (rc 0) — a false block on a record that ran, and
-            # exit 1 hides the whole uncovered report.
+            # exit 1 hides the whole uncovered report. The parameters are inert (they
+            # are ASSIGNED, never executed), so their text is not graded — declared
+            # as an open carriage in the ledger rather than left to read as closed.
             if arg == "--":
                 return None
+            if arg in {"-", "+"}:
+                continue
             if not (arg.startswith("-") or arg.startswith("+")):
                 return f"{_short(arg)} is not a shell option"
-            # ⛔ A CLUSTER ENDING IN `o` takes the NEXT bare word as its option
-            # name: `-euo pipefail` is `-e -u -o pipefail`, which is the spelling
-            # every `.ci-checks/*.sh` in this repo actually uses. Recognising only
-            # a bare `-o` refused it a second time (the second review cycle's
-            # finding caught `-o pipefail` and missed the cluster one word over).
+            # ⛔ The FLAG LETTERS are validated for the same reason as the option
+            # name: `set -ZZZ` exits 2, so a record for `set -ZZZ && <cmd>` names a
+            # command that never ran. Measuring is what keeps this from being a
+            # false block — `-o` is a real letter, and a CLUSTER ENDING IN `o`
+            # (`-euo`) takes the NEXT word as its option name.
+            if not set(arg[1:]) <= _SET_SHORT_FLAGS:
+                return f"{_short(arg)} is not a shell option"
             expect_option_name = arg.endswith("o")
         return None
     if head == "umask":
         # ⛔ `man bash`: `umask [-p] [-S] [mode]` — the FLAGS precede the mask, so
         # `umask -S` was refused as "not a umask mask".
+        # ⛔ `--` ends option parsing here too (`bash -c 'umask -- 022'` → rc 0).
+        # `set` got `--` before `umask` did, so the SAME asymmetry left `umask --
+        # 022` refused while `set -- a b` was accepted — the false block halved.
         for arg in args:
-            if arg in {"-p", "-S", "-pS", "-Sp", "--symbolic"}:
+            if arg in {"-p", "-S", "-pS", "-Sp", "--symbolic", "--"}:
                 continue
             if not _UMASK_ARG.match(arg):
                 return f"{_short(arg)} is not a umask mask"

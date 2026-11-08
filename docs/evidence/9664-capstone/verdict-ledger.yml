@@ -73,19 +73,50 @@
 #         decorative reader is admitted without grading one argument, so
 #         `… && echo "I did not run this"` and `… && printf "%s" "NOT RUN"` yield a
 #         `verified` row and `uncovered: 0`. The WRAPPER half of that root is
-#         closed ONLY where the wrapper has a grammar the shell enforces: `export`,
-#         `unset`, `set`, `umask`, `source`/`.` and the control builtins
-#         `exit`/`return`/`shift`/`break`/`continue` each grade their argument, so
-#         `export "I did not run this" && …` and `… && exit "I did not run this"`
-#         are both refused. ⛔ `NAME=value` is the FIFTH carriage and is OPEN: the
-#         leading assignment is stripped and nothing after the `=` is graded, so
-#         `A="I did not run this" && uv run pytest …` yields a `verified` row and
-#         `uncovered: 0` (measured). Admitting it is CORRECT — an assignment runs
-#         nothing and cites nothing, so it is inert exactly like `cd`/`set` — the
-#         defect was that it went UNLISTED while being named among the allowed
-#         wrappers, so the carriage read as closed. Tracked in #11520 and pinned by
-#         `test_the_assignment_carriage_is_open_and_declared`, which fails if the
-#         behaviour and this declaration ever diverge.
+#         closed ONLY where the wrapper has a grammar the shell ENFORCES and
+#         REJECTS a bad argument for: `set -o <name>` (`set -o NOTRUN` → rc 2),
+#         `set` short flags (`set -ZZZ` → rc 2), `export`/`unset` flags
+#         (`export -e`, `unset -p` → rc 2), `umask` masks, and the control
+#         builtins' operands. In each of those an invalid argument makes bash FAIL,
+#         the `&&` short-circuits, and the graded command provably never ran — so
+#         admitting it would be a false PASS. They are validated, and
+#         `export "I did not run this" && …` / `… && exit "I did not run this"`
+#         are refused.
+#         ⛔ WHERE THAT CLOSURE STOPS, stated because the previous wording claimed
+#         it was total and the claim was FALSE — this artifact is validated by the
+#         tool itself, so an over-claim here is a false attestation, not a typo. A
+#         wrapper argument that is INERT DATA is NOT graded. There are FIVE such
+#         carriages, each measured against bash, and each admitted DELIBERATELY
+#         (bash executes nothing in these positions, so refusing would be a false
+#         block):
+#           (1) a later RUNNER-HEADED segment (root 4 above);
+#           (2) prose INSIDE the graded command's own segment;
+#           (3) a `#` COMMENT;
+#           (4) a TRUSTED HEAD's decorative ARGUMENT — `… && echo "I did not run this"`;
+#           (5) `NAME=value` is the FIFTH carriage: the leading assignment is
+#               stripped and nothing after the `=` is graded, so
+#               `A="I did not run this" && uv run pytest …` yields a `verified` row
+#               and `uncovered: 0` (measured). Two more inert DATA positions sit
+#               inside the SAME fifth class and are declared with it: `set --`
+#               POSITIONAL PARAMETERS (`set -- "I did not run this"` → rc 0; they
+#               are ASSIGNED, never executed) and an `unset` array SUBSCRIPT
+#               (`unset 'A[I did not run this]'` → rc 0; the subscript is a lookup
+#               key). The defect this enumeration fixes was never the admission —
+#               it was that these went UNLISTED while the surrounding text claimed
+#               the wrapper half was closed, so an unlisted carriage read as
+#               closed. Tracked in #11520 and pinned by
+#               `test_the_assignment_carriage_is_open_and_declared`, which READS this
+#               file and by `test_wrapper_flags_and_option_names_the_shell_REJECTS_are_refused`
+#               for the enforced half — so neither declaration can be deleted
+#               while the tests stay green.
+#         ⛔ ONE KNOWN-OPEN FALSE BLOCK in the same arm, declared rather than
+#         implied closed: a BARE word to `set` (`set I did not run this`) is
+#         shell-valid (rc 0 — it sets positional parameters) and is REFUSED. It is
+#         the same inert position as `set --`'s operands reached without `--`, and
+#         closing it means admitting ANY bare word to `set`, which re-opens the
+#         bare-prose carriage this arm exists to refuse. The price is not paid until
+#         a spelling that separates the two is measured; it is filed with root 5's
+#         class.
 #         A control builtin takes AT MOST ONE operand, and that
 #         operand may be the shell's own status expansion (`exit $?`, the idiom this
 #         repo's install scripts use) — refusing that was a measured false block.

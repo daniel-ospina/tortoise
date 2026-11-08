@@ -1119,12 +1119,11 @@ def test_a_comment_ends_the_LINE_and_the_next_line_is_still_graded(tmp_path):
         # report. Without the artifact the same spelling IS refused (pinned by
         # `_UNREAD_TOKEN_BYPASSES`), so the deferral still closes the naked case.
         'cmd:uv run pytest "-q I did not run this" tests/test_9664_capstone_verdict_ledger.py',
-        # ⛔ Root 6: `set -o <invalid>` FAILS at script level, so the `&&`
-        # short-circuits exactly as `return`/`shift` do — but `_fails_before_a_chain`
-        # refuses only the builtins measured to fail UNCONDITIONALLY. Closing this
-        # needs the closed set of bash option NAMES (flag-VALUE knowledge), so it is
-        # recorded here rather than bought at that price.
-        "cmd:set -o nosuchoption && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
+        # ⛔ Root 6 was pinned HERE as a known-open false PASS. It is now CLOSED and
+        # asserted REFUSED at the bottom of this test: `set -o <name>` validates the
+        # option name against bash's own list (`set -o NOTRUN` → rc 2, so the `&&`
+        # short-circuits and the graded command never ran). The inversion is the one
+        # this docstring instructed, not a deletion.
     ],
 )
 def test_the_known_residual_false_PASSes_are_pinned_as_OPEN(tmp_path, disclaimer):
@@ -1169,11 +1168,13 @@ def test_the_known_residual_false_PASSes_are_pinned_as_OPEN(tmp_path, disclaimer
     that this branch kept getting wrong harder to keep complete. The inversion
     instruction below is the tripwire, and it is checked by the reviewer, not by
     the runner.
-    (root 6) `set -o <invalid-option>` before a `&&`: the builtin FAILS, so the
-             chain short-circuits, but `_fails_before_a_chain` refuses only the
-             builtins measured to fail UNCONDITIONALLY (`return`, `shift`). Closing
-             it needs the closed set of bash option NAMES, which is flag-VALUE
-             knowledge this module deliberately refuses to carry.
+    (root 6) `set -o <invalid-option>` before a `&&` — **NOW CLOSED** (this branch
+             inverted this pin, as instructed below). `set -o <name>` validates the
+             name against bash's own option list, so `set -o nosuchoption` is
+             REFUSED: bash exits 2, the chain short-circuits, and the graded
+             command never ran. The same validation now covers `set` short flags
+             and the `export`/`unset` flag letters (all measured). So FIVE carriages
+             remain open, and root 6 is asserted CLOSED at the bottom of this test.
     """
     proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, disclaimer])]))
     assert proc.returncode == cl.EXIT_CLEAN, (
@@ -1188,6 +1189,8 @@ def test_the_known_residual_false_PASSes_are_pinned_as_OPEN(tmp_path, disclaimer
     for closed in (
         'cmd:export "I did not run this" && uv run pytest tests/ -q',
         'cmd:source "I did not run this" && uv run pytest tests/ -q',
+        # Root 6, inverted from OPEN to CLOSED (see the docstring above).
+        "cmd:set -o nosuchoption && uv run pytest tests/ -q",
     ):
         proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, closed])]))
         assert proc.returncode == cl.EXIT_INVALID, (closed, proc.stdout + proc.stderr)
@@ -1803,6 +1806,66 @@ def test_the_assignment_carriage_is_open_and_declared(tmp_path):
         "the assignment carriage changed shape without the ledger being updated "
         f"({proc.returncode})\n{proc.stdout}{proc.stderr}"
     )
+    # ⛔ THE DECLARATION HALF IS READ, not assumed. Asserting only the exit code
+    # left the ledger paragraph deletable with all tests still green — so the
+    # "pinned" claim was unenforced. This reads the artifact the tool validates.
+    ledger_text = LEDGER.read_text(encoding="utf-8")
+    assert "`NAME=value` is the FIFTH carriage" in ledger_text, (
+        "the ledger no longer declares the assignment carriage — a carriage that "
+        "is open but UNLISTED reads as closed, which is the drift this pin exists "
+        "to prevent"
+    )
+
+
+def test_wrapper_flags_and_option_names_the_shell_REJECTS_are_refused(tmp_path):
+    """A flag bash rejects makes the `&&` short-circuit, so the command NEVER RAN.
+
+    ⛔ MEASURED FALSE PASS, found by the review cycle after the grammar was
+    widened, and worse than a false block because the record names a command that
+    provably did not execute:
+
+    * `set -o "I did not run this"` — bash exits 2 ("invalid option name"). The
+      arm consumed ANY bare word as an option name, so the row reached
+      `verified: 1` / `uncovered: 0` / `CLEAN` / exit 0.
+    * `export -e NOTRUN` / `unset -e NOTRUN` — bash exits 2 ("invalid option").
+      Every dashed token was skipped unvalidated.
+    * `set -ZZZ` — bash exits 2; any dash-led token was accepted.
+
+    `export -f fn` is NOT in this list even though bash exits 1: the FLAG is valid
+    and the failure is an operand (`fn` is not a defined function), which is
+    box-dependent and not this grammar's business.
+    """
+    for command in (
+        'cmd:set -o "I did not run this" && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q',
+        "cmd:set -o NOTRUN && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
+        "cmd:set -ZZZ && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
+        "cmd:export -e NOTRUN && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
+        "cmd:unset -p A && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
+    ):
+        proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, command])]))
+        assert proc.returncode == cl.EXIT_INVALID, (
+            f"{command!r} was ACCEPTED as clean ({proc.returncode}) — bash rejects the "
+            f"option, so the `&&` short-circuits and the graded command never ran\n"
+            f"{proc.stdout}{proc.stderr}"
+        )
+
+
+def test_umask_accepts_the_end_of_options_marker(tmp_path):
+    """`umask -- 022` is valid bash (rc 0) and was refused — a false block.
+
+    `set` was given `--` handling one commit earlier and `umask` was not, so the
+    SAME asymmetry left `umask -- 022` refused while `set -- a b` was accepted.
+    Exit 1 prints no report, so the false block lost the whole uncovered list.
+    """
+    for command in (
+        "cmd:umask -- 022 && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
+        "cmd:umask -S -- 022 && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
+    ):
+        proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, command])]))
+        assert proc.returncode == cl.EXIT_CLEAN, (
+            f"{command!r} was REFUSED ({proc.returncode}) — bash accepts it (rc 0)\n"
+            f"{proc.stdout}{proc.stderr}"
+        )
 
 
 def test_a_quoted_flag_and_value_together_is_not_prose(tmp_path):
