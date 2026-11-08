@@ -125,7 +125,7 @@ Unit (crypto envelope: round-trip/tamper/rotation/KDF vectors) → integration (
 - `cryptography==50.0.0` (pinned; AESGCM/HKDF/HMAC/scrypt) — **zero new third-party deps for the crypto core**; client-side embedding needs the `[embeddings]` extra/ONNX on the client (noted — "zero new deps" qualified).
 - #316 vector-benchmark methodology (read baseline); new write-path baseline defined in P0.
 - #160 hosted embeddings: "implementation complete, verified — **pending merge**" — server-side pipeline bypassed for v1 teams (client-side embedding, model-version pinned); sequencing window pinned in ADR addendum.
-- #317 cross-encoder reranker: consumes content (max_length 512 contract, 317 scoping:98) — **v1 disposition: skip rerank for encryptionVersion>=1 teams with disclosed result-parity impact**, or route via proxy; carve-out note filed (extra issue E2 = #1165).
+- #317 cross-encoder reranker: consumes content (max_length 512 contract — `317` scoping, Task 6 row "CE-input content truncation contract") — **v1 disposition: skip rerank for encryptionVersion>=1 teams with disclosed result-parity impact**, or route via proxy; carve-out note filed (extra issue E2 = #1165).
 - Registry schema extension (7714 plan): `wrapped_key`/`key_version`/`kdf_params` on Team node.
 - No dependency on #307 (severed; #1137 tracks the #265 body edit — bodies untouched by scoping).
 

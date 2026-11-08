@@ -96,8 +96,8 @@ Architecture **high** · Ontology/metadata **high** · UX low-medium · Library-
 | sentence-transformers / ONNX (`[embeddings]` extra) | — | existing extra | Client-side embedding (all-MiniLM-L6-v2/384). Model + dimension + version must be pinned + write-time model-version check (P2). |
 | #316 | — | scoping + research committed | Read-latency baseline methodology (p50/p95/p99, warm-up, ≥100 samples, degradation chain, E2E-8 p95≤300ms). |
 | #160 | — | "implementation complete, verified — pending merge" | Server-side embedding pipeline — bypassed for v1 encrypted teams (client-side embedding); sequencing window pinned in ADR addendum. |
-| #317 | — | scoping + research committed | Cross-encoder reranker consumes content (max_length 512 contract, 317 scoping:98) — v1: skip for encrypted teams, disclosed impact (extra issue E2). |
-| #307 / #1137 | — | #307 scoped (email integration, NOT encryption keys); #1137 open chore | #265 dependency severed; #1137 tracks #265 body edit; HKDF-from-API-key text in #1137 + 307 scoping doc superseded by scrypt-passphrase two-key model (extra issue E1). |
+| #317 | — | scoping + research committed | Cross-encoder reranker consumes content (max_length 512 contract — `317` scoping, Task 6 row "CE-input content truncation contract") — v1: skip for encrypted teams, disclosed impact (extra issue E2 = #1165). |
+| #307 / #1137 | — | #307 scoped (email integration, NOT encryption keys); #1137 open chore | #265 dependency severed; #1137 tracks #265 body edit; HKDF-from-API-key text in #1137 + 307 scoping doc superseded by scrypt-passphrase two-key model (extra issue E1 = #1164). |
 
 ## Claims → source confidence
 
