@@ -644,9 +644,15 @@ def test_the_production_entrypoint_reads_the_live_probe(monkeypatch):
     catch.
     """
     monkeypatch.setenv("TORTOISE_DB_URI", _SHARED["TORTOISE_DB_URI"])
-    monkeypatch.delenv(wt.ACK_ENV, raising=False)
-    monkeypatch.delenv(wt.WORKERS_ENV, raising=False)
-    monkeypatch.delenv(wt.WEB_CONCURRENCY_ENV, raising=False)
+    for _name in (wt.ACK_ENV, wt.WORKERS_ENV, wt.WEB_CONCURRENCY_ENV,
+                  wt.UVICORN_WORKERS_ENV, wt.RELOAD_ENV):
+        # ⛔ EVERY input `observe()` reads, not just the three this arm started
+        # with: `$UVICORN_WORKERS` sits between the CLI flag and
+        # `$WEB_CONCURRENCY`, so a box (or CI leg) that exports it reddened this
+        # arm before the gate ever looked at the probe — MEASURED: same command
+        # with `UVICORN_WORKERS=2` exported → 2 failed, without it → 2 passed.
+        # A false RED is indistinguishable from a real regression in the gate.
+        monkeypatch.delenv(_name, raising=False)
     monkeypatch.setattr(wt, "has_supervisor_parent", lambda: True)
 
     with pytest.raises(wt.MultiWorkerRefused) as excinfo:
@@ -662,7 +668,8 @@ def test_the_production_entrypoint_reads_the_live_probe(monkeypatch):
 
 def test_the_production_entrypoint_permits_a_single_worker_boot(monkeypatch):
     """The unmodified live environment (this test process) must boot clean."""
-    for name in (wt.WORKERS_ENV, wt.WEB_CONCURRENCY_ENV, wt.ACK_ENV):
+    for name in (wt.WORKERS_ENV, wt.WEB_CONCURRENCY_ENV, wt.ACK_ENV,
+                 wt.UVICORN_WORKERS_ENV, wt.RELOAD_ENV):
         monkeypatch.delenv(name, raising=False)
     topology = wt.assert_multi_worker_admissible()
     assert topology.is_multi_worker is False
@@ -789,6 +796,15 @@ _AGREEMENT_TABLE: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
     (("uvicorn", "app:app"), {"WEB_CONCURRENCY": "10_"}),
     (("uvicorn", "app:app"), {"WEB_CONCURRENCY": "1__0"}),
     (("uvicorn", "app:app"), {"WEB_CONCURRENCY": "1_0_"}),
+    # ⛔ A REPEATED flag whose LAST occurrence carries no value: the parser
+    # boundary, not the value grammar. click exits 2 on this argv ("Option
+    # '--workers' requires an argument"), so no topology runs — but the two arms
+    # still must agree, and they did not: the shell overwrites with the empty
+    # value (falling through to `$WEB_CONCURRENCY`) while the Python arm kept the
+    # EARLIER `2`. Caught by the reviewer, pinned here.
+    (("uvicorn", "app:app", "--workers", "2", "--workers"), {}),
+    (("uvicorn", "app:app", "--workers", "2", "--workers"),
+     {"WEB_CONCURRENCY": "4"}),
 )
 
 
@@ -842,6 +858,67 @@ def test_the_shipped_block_says_nothing_about_multi_worker_at_one():
     assert proc.returncode == 0, proc.stderr
     assert "uvicorn workers = 1" in proc.stdout
     assert "MULTI-WORKER" not in proc.stdout
+
+
+def test_the_shipped_block_reports_one_worker_while_reloading():
+    """`--reload --workers 4` serves ONE child; the banner must say so.
+
+    uvicorn's own words on the pinned 0.52.1: `"workers" flag is ignored when
+    reloading is enabled`, and `grep -c "Started server process"` = 1. Reporting
+    the requested 4 was the fourth instance of the class this block exists to
+    close — a measurement lying about the topology it reports.
+    """
+    for argv, environ in (
+        (("uvicorn", "app:app", "--reload", "--workers", "4"), {}),
+        # click's vocabulary, not ours: `y`/`t` DO start the reloader.
+        (("uvicorn", "app:app", "--workers", "4"), {"UVICORN_RELOAD": "y"}),
+        (("uvicorn", "app:app", "--workers", "4"), {"UVICORN_RELOAD": "t"}),
+    ):
+        proc = _run_worker_block(argv, environ)
+        assert proc.returncode == 0, proc.stderr
+        assert "workers = 1 (reload" in proc.stdout, (argv, environ, proc.stdout)
+        assert "MULTI-WORKER" not in proc.stdout, (argv, environ, proc.stdout)
+
+    # …and a value click REJECTS is not a reload: the count stands.
+    proc = _run_worker_block(("uvicorn", "app:app", "--workers", "4"),
+                            {"UVICORN_RELOAD": "enabled"})
+    assert "MULTI-WORKER" in proc.stdout, proc.stdout
+
+
+def test_the_shipped_block_refuses_a_multi_worker_boot_with_the_lifespan_off():
+    """⛔ The gate cannot run without the lifespan — so the boot script must.
+
+    `assert_multi_worker_admissible()` is the FIRST statement of
+    `hosted_api._lifespan`, so `--lifespan off` (or click's
+    `$UVICORN_LIFESPAN=off`) removes it: MEASURED on the pinned 0.52.1,
+    `UVICORN_LIFESPAN=off WEB_CONCURRENCY=2` with no `TORTOISE_DB_URI` served TWO
+    server processes and the gate was never entered. N workers on an embedded DB
+    are N divergent copies of one file, so the boot script refuses where it can
+    still see the count.
+    """
+    for argv, environ in (
+        (("uvicorn", "app:app", "--workers", "2"), {"UVICORN_LIFESPAN": "off"}),
+        (("uvicorn", "app:app", "--lifespan", "off"), {"WEB_CONCURRENCY": "2"}),
+        (("uvicorn", "app:app", "--lifespan=off"), {"WEB_CONCURRENCY": "2"}),
+    ):
+        proc = _run_worker_block(argv, environ)
+        assert proc.returncode != 0, (argv, environ, proc.stdout)
+        assert "REFUSING" in proc.stderr, (argv, environ, proc.stderr)
+        # The message must name where the gate lives, or it is a mystery.
+        assert "hosted_api._lifespan" in proc.stderr
+
+    # A CLI `--lifespan on` beats the envvar (click gives the CLI value
+    # precedence), so this boot is gated in the app as usual.
+    proc = _run_worker_block(("uvicorn", "app:app", "--lifespan", "on",
+                              "--workers", "2"), {"UVICORN_LIFESPAN": "off"})
+    assert proc.returncode == 0, proc.stderr
+    assert "MULTI-WORKER" in proc.stdout
+
+    # One worker with the lifespan off is not gated by this rule — nothing to
+    # gate — but the loss of the gate is a fact the operator should see.
+    proc = _run_worker_block(("uvicorn", "app:app"), {"UVICORN_LIFESPAN": "off"})
+    assert proc.returncode == 0, proc.stderr
+    assert "lifespan DISABLED" in proc.stdout, proc.stdout
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -902,6 +979,38 @@ def test_lifespan_calls_the_gate_FIRST():
         f"the #1677 admission gate is no longer the FIRST call in _lifespan "
         f"(found `{calls[0]}` at index 0) — anything it precedes has already run"
     )
+
+    # …and POSITION alone is not enough: a `try/except Exception` around the call
+    # keeps it at index 0 while making the gate a no-op that the suite reads as
+    # green. `_lifespan` already carries several such blocks BELOW the gate, so
+    # swallowing this one is a plausible edit, not a hypothetical. Walk the AST
+    # and refuse any enclosing handler that would catch the refusal.
+    swallowing = {
+        "Exception", "BaseException", "MultiWorkerRefused", "RuntimeError",
+    }
+    for node in ast.walk(_lifespan_fn()):
+        if not isinstance(node, ast.Try):
+            continue
+        for handler in node.handlers:
+            caught = handler.type
+            names: set[str] = set()
+            if caught is None:                      # bare `except:`
+                names = {"BaseException"}
+            elif isinstance(caught, ast.Name):
+                names = {caught.id}
+            elif isinstance(caught, ast.Tuple):
+                names = {e.id for e in caught.elts if isinstance(e, ast.Name)}
+            if names & swallowing and any(
+                    isinstance(inner, ast.Call)
+                    and isinstance(inner.func, ast.Name)
+                    and inner.func.id == gate
+                    for inner in ast.walk(node)):
+                raise AssertionError(
+                    "hosted_api._lifespan wraps the #1677 admission gate in a "
+                    f"try/except {sorted(names)} — the gate stays at index 0 "
+                    "while the refusal is swallowed, so a misconfigured "
+                    "multi-worker boot would start instead of being refused"
+                )
 
     # Named beside the reason it is dangerous to touch first, so a reader who
     # moves the gate gets a message about the hazard rather than just an index.

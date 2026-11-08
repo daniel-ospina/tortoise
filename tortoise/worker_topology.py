@@ -122,6 +122,26 @@ THE ESCAPE HATCHES, STATED EXACTLY
 
 RESIDUALS, NAMED RATHER THAN IMPLIED
 ====================================
+* **The gate only exists where the APP LIFESPAN runs.** It is installed as the
+  first statement of ``hosted_api._lifespan``, so ``--lifespan off`` (or click's
+  ``$UVICORN_LIFESPAN=off``) removes it: uvicorn starts N workers, none runs the
+  gate, and on an embedded DB they open N divergent files. MEASURED on the
+  pinned 0.52.1: ``UVICORN_LIFESPAN=off WEB_CONCURRENCY=2`` served two server
+  processes with the gate never entered. The SHIPPED path is closed in
+  ``entrypoint.sh`` (refuses when the count is >1 and the lifespan is off); a
+  direct ``uvicorn tortoise.hosted_api:app --lifespan off --workers N`` that
+  bypasses the boot script is NOT gated — it also disables every other startup
+  hook (backup watcher, healthz, liveness), so it is a broken deployment, but the
+  divergence would be silent rather than refused.
+* **The repo ships a SECOND uvicorn app with NO gate**: ``tortoise.selfhost:app``
+  (``tortoise/selfhost.py``'s own ``_lifespan``), served by
+  ``Dockerfile.selfhost`` with ``ENV TORTOISE_DB_PATH=/data/tortoise.db`` — i.e.
+  EMBEDDED by default — and no ``entrypoint.sh``. ``WEB_CONCURRENCY=4`` there is
+  four workers on four copies of one file, with only that image's single-writer
+  banner as a signal. That posture is a recorded decision (#942: bound embedded
+  FalkorDBLite to single-writer, warn loudly at every runtime entrypoint) and
+  #1677's components are hosted-only, so gating it is the OWNER's call, not this
+  module's — it is named here so this ledger stops implying repo-wide coverage.
 * A process manager that pre-forks before importing the app (Gunicorn +
   ``UvicornWorker``) leaves ``parent_process() is None``, so on that (not
   deployed, not supported) topology only the count arm speaks.
@@ -134,6 +154,20 @@ RESIDUALS, NAMED RATHER THAN IMPLIED
   reloader started PROGRAMMATICALLY (``uvicorn.run(reload=True)`` from a script)
   leaves neither, so such a child would be read as a supervised multi-worker and
   refused (fail-closed). Nothing in this repo launches the app that way.
+* The MIRROR of that case is the one place the env arm can read HIGH: an ambient
+  ``$UVICORN_RELOAD`` truthy while the app is launched by ``uvicorn.run(workers=N)``
+  (which bypasses click, so the reloader never starts) is read as ``reloading``
+  and therefore PERMITTED. Nothing in this repo uses the programmatic launcher
+  (``Dockerfile.hosted`` runs the CLI), and it needs BOTH a stray variable and a
+  launcher this repo does not use; it is named rather than implied.
+* **The refusal is fatal to SERVICE, not to the parent's EXIT STATUS.** MEASURED
+  on the pinned 0.52.1: both children raise ``MultiWorkerRefused``, the parent
+  logs ``stopping the parent process`` and exits **0** (``Multiprocess.run``
+  returns normally after ``terminate_all()``; uvicorn's own
+  ``sys.exit(STARTUP_FAILURE)`` is gated on ``config.workers == 1``). So a deploy
+  wrapper keyed on the exit code sees a clean shutdown — what blocks the deploy
+  is nothing serving (the health check), plus ``entrypoint.sh``'s own refusal and
+  the deploy-blocking healthz check.
 """
 from __future__ import annotations
 
@@ -295,8 +329,14 @@ def _workers_flag_value(argv: Sequence[str] | None = None) -> str | None:
     found: str | None = None
     for index, token in enumerate(args):
         if token == WORKERS_FLAG:
-            if index + 1 < len(args):
-                found = args[index + 1]
+            # ⛔ A trailing bare flag CLEARS the value; it must not keep an
+            # earlier occurrence's. The shell arm overwrites unconditionally
+            # (`_count="${_args[$_i]:-}"`, which reads empty past the end and
+            # falls through to `$WEB_CONCURRENCY`), so `--workers 2 --workers`
+            # resolved to 1 there and 2 here — a parser-boundary divergence no
+            # `_AGREEMENT_TABLE` row pinned. click exits 2 on that argv, so no
+            # topology exists to describe; the two resolvers must still agree.
+            found = args[index + 1] if index + 1 < len(args) else None
         elif token.startswith(WORKERS_FLAG + "="):
             found = token[len(WORKERS_FLAG) + 1:]
     return found if found else None
@@ -592,8 +632,8 @@ def refusal_reason(topology: Topology) -> str | None:
         else:
             observed = (
                 "a uvicorn supervisor child whose SERVED worker count is not "
-                "readable here (no --workers token, no $WEB_CONCURRENCY) — so it "
-                "is treated as N>=2"
+                "readable here (no --workers token, and no $WEB_CONCURRENCY "
+                "value this resolver can read) — so it is treated as N>=2"
             )
         return (
             f"Refusing to run {observed}: this "
