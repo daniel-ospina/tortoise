@@ -376,7 +376,9 @@ def _before_leg_state(probes) -> str:
                         "matched a pre-fix node before the repair")
         else:
             sentence = ("it returned no PRE-FIX node BEFORE the repair either "
-                        "(a token that is not in the corpus)")
+                        f"(its {before.get('hits')} BEFORE hit(s) were all on "
+                        "nodes that do not carry the pre-fix prose, or it hit "
+                        "nothing at all)")
         said.setdefault(sentence, []).append(str(probe.get("phrase")))
     if len(said) == 1:
         return next(iter(said))
@@ -393,6 +395,14 @@ def _report_fts(fts: dict) -> None:
                   else f"{residue_before} residue before")
         # ⛔ TWO UNITS, TWO WORDS: `residue` holds urls and `hits` counts rows, so
         # the same line must not call both of them one thing (#11536 review round 5).
+        # ⛔ AND A COUNT FROM A LEG THAT DID NOT MEASURE IS NOT A READING (#11536
+        # review round 5, P2). `residue_before` is populated whenever a BEFORE
+        # reading EXISTS, so `0 residue before` printed for a breaker-open or
+        # degraded leg states a measurement the run never took — the same
+        # conflation the refusals were fixed for, on the one line the operator reads
+        # first.
+        if residue_before is not None and _before_leg_kind(probe) != "clean-zero":
+            before = f"{before} ⚠️ BEFORE leg did not measure"
         print(f"          {probe['phrase']!r}: {before} -> "
               f"{len(probe['residue'])} residue url(s) after, "
               f"{probe['hits']} hit(s)"
@@ -456,32 +466,38 @@ def _report_fts(fts: dict) -> None:
                   "through the Source FTS index")
         else:
             # ⛔ NARROWED TO WHAT WAS MEASURED — AND ONLY TO WHAT WAS MEASURED
-            # (#11536 review rounds 3 and 4). Two claims that were NOT measured
-            # are gone: "the probe token returns NOTHING" is false whenever the
-            # hits were classified benign (the ORDINARY record-arm outcome, since
-            # the derived lexicon is the transcript's own topic list), and "this
-            # run took no BEFORE reading" is false on a writing arm that wrote
-            # nothing. Both are derived here from the two data the fold holds.
+            # (#11536 review rounds 3, 4 and 5). Three claims that were NOT
+            # measured are gone: "the probe token returns NOTHING" is false
+            # whenever the hits were classified benign (the ORDINARY record-arm
+            # outcome, since the derived lexicon is the transcript's own topic
+            # list); "this run took no BEFORE reading" is false on a writing arm
+            # that wrote nothing; and "the BEFORE reading returned no pre-fix node
+            # either" is false when that leg never ran, was degraded, or could not
+            # classify what it got. The first two are derived from the counts and
+            # `residue_before`; the third branches on `_before_leg_kind`, the SAME
+            # four-state answer the refusals use, rather than re-deriving it.
             hits = sum(int(p.get("hits") or 0) for p in fts["probes"])
             benign = sum(len(p.get("lexicon") or ()) for p in fts["probes"])
-            took_before = any(p.get("residue_before") is not None
-                              for p in fts["probes"])
-            if took_before:
-                print("          ✓ no node carrying the pre-fix prose is findable "
-                      f"through the Source FTS index ({hits} hit(s), {benign} on "
-                      "nodes whose own lexicon accounts for the token) — but the "
-                      "BEFORE reading this run took returned no pre-fix node "
-                      "either, so its zero cannot show the sentence LEFT the "
-                      "index. Re-measure with a single rare token taken from the "
-                      "removed sentence.")
+            kinds = [_before_leg_kind(p) for p in fts["probes"]]
+            counts = (f" ({hits} hit(s), {benign} on nodes whose own lexicon "
+                      f"accounts for the token)")
+            head = ("          ✓ no node carrying the pre-fix prose is findable "
+                    "through the Source FTS index")
+            tail = (" Re-measure with a single rare token taken from the removed "
+                    "sentence.")
+            if kinds and all(kind == "clean-zero" for kind in kinds):
+                print(head + counts + " — but the BEFORE reading this run took "
+                      "returned no pre-fix node either, so its zero cannot show "
+                      "the sentence LEFT the index." + tail)
+            elif kinds and all(kind == "absent" for kind in kinds):
+                print(head + counts + ", and the read ANSWERS — but this run took "
+                      "no BEFORE reading, so it did NOT establish that the token "
+                      "was ever in the corpus. Run `--repair --probe-phrase "
+                      "<token>` for the Target's before/after pair.")
             else:
-                print("          ✓ no node carrying the pre-fix prose is findable "
-                      f"through the Source FTS index ({hits} hit(s), {benign} on "
-                      "nodes whose own lexicon accounts for the token), and the "
-                      "read ANSWERS — but this run took no BEFORE reading, so it "
-                      "did NOT establish that the token was ever in the corpus. "
-                      "Run `--repair --probe-phrase <token>` for the Target's "
-                      "before/after pair.")
+                print(head + counts + " — and " + _before_leg_state(fts["probes"])
+                      + "; its zero therefore cannot show the sentence LEFT the "
+                      "index." + tail)
         return
     if fts["vetoed"] == "leaked":
         print(f"✗ {len(fts['leaked'])} probe(s) still return a node that CARRIES "

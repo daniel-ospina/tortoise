@@ -3088,6 +3088,10 @@ def test_the_certify_line_states_ONLY_what_the_run_measured(monkeypatch, capsys)
             return super().query(cypher, params=params, timeout=timeout)
 
     # (1)+(2) the documented step 3: a zero, corroborated by the control only.
+    # ⛔ A URI, or the CLI exits at its own `no DB URI` guard before ANY assertion
+    # (#11536 review round 5, P2) — the row then has zero discriminating power on a
+    # box with no ambient URI, which is exactly how it looked green.
+    _export_a_record_dsn(monkeypatch)
     _install_fts(monkeypatch, {"zebraquux": [], "migration": [("session:s-post", 2.0)]})
     _install_cli(monkeypatch, _LexiconGraph([(_post_fix_node(),)]),
                  ["--dry-run", "--assert-clean", "--probe-phrase", "zebraquux"])
@@ -3101,7 +3105,14 @@ def test_the_certify_line_states_ONLY_what_the_run_measured(monkeypatch, capsys)
         "a dry run asserted the Target's before/after property from a token it "
         "never showed was in the corpus")
     assert "did NOT establish that the token was ever in the corpus" in out
-    assert "0 hit(s)" in out, "the green did not state the count it measured"
+    # ⛔ ASSERT ON THE GREEN ITSELF (#11536 review round 5, P2): a bare
+    # `"0 hit(s)"` is emitted by the per-probe line on EVERY run, so it passed on
+    # the pre-fix wording too. These two red on the pre-fix green AND on a revert.
+    assert "findable through the Source FTS index (0 hit(s)" in out, (
+        "the green did not state the count it measured")
+    assert "the probe token returns NOTHING" not in out, (
+        "the pre-fix green is back — it claims the probe returns nothing, which "
+        "is false as soon as a hit is classified benign")
 
     # (3) the writing arm, where the token DID hit before, keeps the full claim.
     hit_before = {"ran": True, "probes": [{"phrase": "zebraquux", "hits": 1,
@@ -3114,6 +3125,64 @@ def test_the_certify_line_states_ONLY_what_the_run_measured(monkeypatch, capsys)
     assert "no node still carrying the pre-fix prose is findable" in out, (
         "a probe that watched the sentence LEAVE the index lost the categorical "
         "claim it had earned")
+
+
+def test_the_green_does_not_claim_a_BEFORE_reading_that_did_not_MEASURE(monkeypatch,
+                                                                       capsys):
+    """#11536 review round 5, P2: the new BEFORE clause was not the four-state one.
+
+    (1) FAILS on the shipped green: its BEFORE clause was gated on
+        `residue_before is not None`, which is true whenever a BEFORE reading
+        EXISTS — so a leg that never ran (breaker open), came back DEGRADED, or
+        returned hits nothing could classify printed as a measured zero:
+        "the BEFORE reading this run took returned no pre-fix node either".
+        `_before_leg_kind` already separates those four states, and both refusals
+        branch on it; the green derived the same fact a second time.
+    (2) REACHABLE: a breaker trip between the BEFORE and AFTER reads (the run that
+        WROTE NOTHING is the one that certifies on the control).
+    (3) POLARITY THAT MUST NOT GO RED: a BEFORE leg that DID measure and found no
+        pre-fix node still says so.
+    """
+    from tortoise import session_source_prose_migration as m
+
+    def _after():
+        return {"ran": True, "entity_type": "source",
+                "probes": [{"phrase": "zebraquux", "hits": 0, "urls": [],
+                            "truncated": False, "ran": True, "degraded": False,
+                            "reason": None, "residue": [], "lexicon": [],
+                            "stale": [], "foreign": [], "unexplained": [],
+                            "unread": []}],
+                "leaked": [], "stale": [], "stem_only": [], "unmeasurable": [],
+                "truncated": [], "unresolved": 0,
+                "control": {"mode": "probe", "ok": True, "hits": 1}}
+
+    measured = "returned no pre-fix node either"
+
+    # (1) the three states that are NOT a measurement must not print as one.
+    for overrides in ({"degraded": True, "reason": "breaker_open"},
+                      {"unread": ["session:s-x"]},
+                      {"unresolved": 1}):
+        before = {"ran": True, "probes": [dict({"phrase": "zebraquux", "hits": 0,
+                                                "residue": []}, **overrides)]}
+        fts = _cli._merge_probe(before, _after(), wrote=False)
+        assert _cli._before_leg_kind(fts["probes"][0]) != "clean-zero"
+        _cli._report_fts(fts)
+        out = capsys.readouterr().out
+        assert measured not in out, (
+            f"the green claimed a BEFORE reading that did not measure: {overrides}")
+        assert "BEFORE leg did not measure" in out, (
+            "the probe line printed a BEFORE count for a leg that did not measure")
+    assert m  # the module import keeps this row's name in the probe diagnostic
+
+    # (3) a BEFORE leg that DID measure still states its finding.
+    before = {"ran": True, "probes": [{"phrase": "zebraquux", "hits": 0,
+                                       "residue": [], "ran": True,
+                                       "degraded": False, "reason": None}]}
+    fts = _cli._merge_probe(before, _after(), wrote=False)
+    assert _cli._before_leg_kind(fts["probes"][0]) == "clean-zero"
+    _cli._report_fts(fts)
+    out = capsys.readouterr().out
+    assert measured in out
 
 
 def test_the_green_line_claims_only_the_two_data_the_fold_holds(monkeypatch,
@@ -3212,6 +3281,7 @@ def test_the_control_TOKEN_is_measured_and_never_ECHOED(monkeypatch, capsys):
         "the control's lexicon token reached the report — it is transcript text")
 
     # …and the CLI prints the COUNT, not the token.
+    _export_a_record_dsn(monkeypatch)
     clean = _LexiconGraph([(_post_fix_node(),)])
     _install_cli(monkeypatch, clean, ["--dry-run", "--assert-clean",
                                       "--probe-phrase", "zebraquux"])
@@ -3615,6 +3685,7 @@ def test_an_EMPTY_Source_index_corroborates_a_CLEAR_only_graph(monkeypatch,
             return super().query(cypher, params=params, timeout=timeout)
 
     graph = _IndexGraph([(cleared,)], empty=True)
+    _export_a_record_dsn(monkeypatch)
     _install_fts(monkeypatch, {"zebraquux": []})
     report = m.probe_fts(graph, ["zebraquux"], control=True)
     assert report["control"]["mode"] == "empty-index"
