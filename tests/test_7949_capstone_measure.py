@@ -5229,11 +5229,26 @@ def test_the_pre_registration_cites_the_classify_sites_the_tree_actually_has():
         # which makes no extent claim) stay out, and the lookbehind keeps `log:1-2`
         # style ranges on unrelated lines untouched.
         _bare_range = re.compile(r"(?<![A-Za-z0-9_.]):(\d+)\s*[-\u2013\u2014]\s*(\d+)")
+        # ⛔ THE BARE RANGE BELONGS TO THE CARRIER'S SENTENCE, NOT TO ITS LINE
+        # (round 7, P2). Line-scoping the bare-range rule above was one re-wrap away
+        # from blind: the document wraps at ~103 columns and `_live_blocks` scopes
+        # carriers to the BLOCK precisely so re-wrapping cannot red this pin — but
+        # with a line test it made the pin MISS instead, measured: a wrapped
+        # `…was formerly \`:11098-11120\`` appended to the §11.1 carrier left this
+        # leg `PASSES (NOT caught)`. So a bare range counts on ANY line of the carrier
+        # EXCEPT one that attributes it to another file — the §9 block legitimately
+        # spells a second log cite bare (`capstone-measured-9152448d.log:271` …
+        # `:299-309`), and block-scoping without this predicate REDS the document.
+        _other_file = re.compile(r"[\w./-]+\.(?:log|md|json|jsonl|py|yml|yaml|txt|csv):\d")
+
+        def _carries_extractor_cite(line: str) -> bool:
+            return "extractor_v2.py:" in line
 
         def _extent_numbers(
             block: str,
             _re: re.Pattern[str] = _extent_cite,
             _bare: re.Pattern[str] = _bare_range,
+            _other: re.Pattern[str] = _other_file,
         ) -> list[int]:
             numbers: list[int] = []
             for lo, hi in _re.findall(block):
@@ -5241,7 +5256,7 @@ def test_the_pre_registration_cites_the_classify_sites_the_tree_actually_has():
                 if hi:
                     numbers.append(int(hi))
             for line in block.splitlines():
-                if "extractor_v2.py:" in line:
+                if _carries_extractor_cite(line) or not _other.search(line):
                     for lo, hi in _bare.findall(line):
                         numbers.extend((int(lo), int(hi)))
             return numbers
@@ -5250,10 +5265,11 @@ def test_the_pre_registration_cites_the_classify_sites_the_tree_actually_has():
             block: str,
             _re: re.Pattern[str] = _extent_cite,
             _bare: re.Pattern[str] = _bare_range,
+            _other: re.Pattern[str] = _other_file,
         ) -> list[str]:
             pairs = [(lo, hi) for lo, hi in _re.findall(block) if hi]
             for line in block.splitlines():
-                if "extractor_v2.py:" in line:
+                if _carries_extractor_cite(line) or not _other.search(line):
                     pairs.extend(_bare.findall(line))
             return [f"{lo}-{hi}" for lo, hi in pairs if int(lo) >= int(hi)]
 
