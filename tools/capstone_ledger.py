@@ -530,13 +530,25 @@ def _commit_state(sha: str, repo_root: Path = REPO_ROOT) -> str:
     `repo_root` is honoured for the same reason `_evidence_is_real` honours it: a
     validator asked to judge a DIFFERENT tree must not answer against this one.
 
-    ⛔ `GIT_NO_LAZY_FETCH=1` on the object probe (#11217): a PARTIAL clone
-    (`--filter=blob:none`) reports `--is-shallow-repository` as FALSE, so the
-    shallow probe below does not cover it — and without the env an absent sha
-    triggers a PROMISOR REFETCH against the origin (measured 2m29s here before
-    returning 128) and only then reads as `absent`. Commit objects are never
-    blob-filtered, so an absent commit in a partial clone really is absent: the
-    fetch buys nothing but latency and a false RED.
+    ⛔ `GIT_NO_LAZY_FETCH=1` on the object probe (#11217) — and what it does NOT buy.
+    A PARTIAL clone (`--filter=blob:none`) reports `--is-shallow-repository` as
+    FALSE, so the shallow probe below does not cover it, and an absent sha makes
+    `cat-file -e` reach for the origin: measured 2m29s here before exiting 128.
+
+    **It removes LATENCY, not a verdict, and that distinction was wrong in an
+    earlier draft of this comment (found in review).** The measured fetch exited
+    128, so the state was `absent` WITH the refetch and `absent` WITHOUT it — the
+    env cannot clear a false RED here, because there was none to clear. The 2m29s
+    is the whole observable difference on this shape.
+
+    ⛔ The flip it DOES introduce is the opposite one, stated rather than denied:
+    suppressing the fetch also stops git materialising an object the promisor
+    remote holds but this clone's refspec does not, and this function then answers
+    `absent` — so `validate` refuses a sha that does exist upstream. It is NARROW:
+    a `blob:none` clone carries every commit, and the ledger cites a mainline sha
+    whose ref the clone already has. But it is a real cost of the env, and a
+    comment that claims the fetch "buys nothing" would hide it from the next
+    reader.
     """
     try:
         proc = subprocess.run(

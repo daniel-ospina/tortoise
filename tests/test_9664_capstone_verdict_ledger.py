@@ -606,12 +606,18 @@ def test_an_unprovable_sha_is_not_a_defect(monkeypatch, capsys):
 
 
 def test_the_object_probe_never_lazy_fetches(monkeypatch):
-    """A partial clone must not turn an absent sha into a promisor REFETCH (#11217).
+    """A partial clone must not turn a missing-commit probe into a promisor REFETCH (#11217).
 
     `--filter=blob:none` clones report `--is-shallow-repository` as FALSE, so the
     shallow probe does not cover them. An absent sha then makes `git cat-file`
-    reach for the origin, which took 2m29s here before exiting 128 — the `absent`
-    verdict was right and the latency plus the false red were not.
+    reach for the origin, which took 2m29s here before exiting 128.
+
+    ⛔ This pins the ENV, not a verdict: the measured fetch exited 128 either way,
+    so the state was `absent` with and without it. What the env buys is latency,
+    and the flip it costs (a fetch that would have materialised a commit the
+    promisor holds but this clone's refspec does not is suppressed, so a real sha
+    can answer `absent`) is recorded in `_commit_state`'s docstring rather than
+    hidden here.
     """
     seen: dict[str, object] = {}
 
