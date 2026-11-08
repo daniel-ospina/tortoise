@@ -41,13 +41,15 @@ rule exists to close.
   `tortoise.session_indexer::main` is the one entry with no census row (it is the instrument's ONE
   `ungated` write path, carried in the census's row-1 prose), so its citation is re-derived by the
   symbol test alone. A reader who wants "re-derivable by `CENSUS_EVIDENCE`" to cover 100% of this
-  file should read it as "by the tests named here and in the `stores` section below" — `reason`
-  and `owner_issue` by
-  `tests/test_embed_writer_register.py::test_every_declaration_cites_a_seam_and_an_owning_issue`,
-  the class AGREEMENT half by
+  file should read it as "by the tests named here and in the `stores` section below" — `reason` by
+  `tests/test_embed_writer_register.py::test_every_declaration_cites_a_seam_and_an_owning_issue`
+  (and `owner_issue` by `load()`'s `_OWNER_ISSUE` format check — an ATTRIBUTION, not a
+  re-derivation: the only test assertion on it is `entry.owner_issue.startswith("#")`), the class
+  AGREEMENT half by
   `::test_the_instrument_and_the_product_declare_the_same_writers`, the label half of `stores` by
-  `::test_every_declared_label_re_derives_at_this_head`, and its `NO_LIVE_VECTOR` half by
-  `::test_a_no_live_vector_declaration_executes_no_store_clause` — rather than as a fixed number of
+  `::test_every_declared_label_re_derives_at_this_head`, its `NO_LIVE_VECTOR` half by
+  `::test_a_no_live_vector_declaration_executes_no_store_clause`, and its `LABELS_AT_RUNTIME` half
+  by `::test_a_runtime_label_declaration_is_named_not_guessed` — rather than as a fixed number of
   tests covering it in equal halves.
 
 **A SECOND question, answered here since `#11492`: WHERE the vector lands.** `#5090` DoD row 2

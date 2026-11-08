@@ -1106,11 +1106,6 @@ NO_STORE_EXEMPTIONS: dict[str, str] = {
         "executes, so it names `set_embedding_clause(` by defining it and `vecf32(` while "
         "building the string — neither is a store in this body"
     ),
-    "tortoise.consistency::_compare_views": (
-        "it COMPARES and returns divergence data; its ONE `vecf32(` occurrence is a code COMMENT "
-        "(tortoise/consistency.py:867) quoting what `replay(journal)` cannot produce, and the body "
-        "executes no write statement"
-    ),
 }
 
 
@@ -1151,9 +1146,12 @@ def _declared_symbol_bodies(key: str) -> list[str]:
 
     One hop because a store clause can be held in a module-level constant the writer executes
     (`_TURN_WRITE_CYPHER`) — the same reader rule `test_every_declared_label_re_derives_at_this_head`
-    applies to its cited needles. ⛔ Comment lines are stripped (`_without_comments`): a docstring or
+    applies to its cited needles. ⛔ Whole-line `#` comments are stripped (`_without_comments`): a
     comment quoting a clause is not a store, and one such comment sits inside the very span this
-    reader returns, which is how a whole-file `in` check stayed green on a mutated source.
+    reader returns, which is how a whole-file `in` check stayed green on a mutated source. ⚠️ The
+    boundary, stated rather than implied: DOCSTRINGS and TRAILING comments are NOT stripped, so a
+    clause quoted in either still satisfies a needle. Closing that needs AST-range blanking of
+    `STRING`/trailing-`COMMENT` tokens, not a line filter; it is a residual, not a claim of coverage.
     """
     module, symbol = key.split("::", 1)
     if "/" in module or module.endswith(".py"):
