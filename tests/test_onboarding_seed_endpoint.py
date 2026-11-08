@@ -688,6 +688,29 @@ class TestDigestExcludesDemo:
                 "#8290: TortoiseSDK.get_session must not serve the demo Session")
             assert _make_sdk(namespace=org_id).get_session(_real_sid) is not None, (
                 "#8290 non-vacuity: the SDK read must still serve a REAL session")
+            # ── #8290 review: the SDK read has TWO lanes, and the FIRST one
+            # serves a raw `AgentSession` Event by session_id/sessionId. The
+            # guard therefore has to sit on `get_session`'s ENTRY; a guard in the
+            # captured arm alone answers `None` for a captured demo Session while
+            # still serving an INDEXED one — the surfaces-disagree defect this
+            # issue exists to close, one arm over. Both halves are asserted: the
+            # demo id stays unreadable even with an Event carrying it, and a REAL
+            # id is still served through that same arm (non-vacuity).
+            _proj(org_id).query(
+                "CREATE (e:Event {eventId:$eid, eventKind:'AgentSession', "
+                "session_id:$sid, sessionId:$sid, name:'indexed'})",
+                eid=f"ev_{uuid.uuid4().hex[:12]}", sid=demo_sid)
+            _real_event_sid = f"session_{uuid.uuid4().hex[:12]}"
+            _proj(org_id).query(
+                "CREATE (e:Event {eventId:$eid, eventKind:'AgentSession', "
+                "session_id:$sid, sessionId:$sid, name:'indexed'})",
+                eid=f"ev_{uuid.uuid4().hex[:12]}", sid=_real_event_sid)
+            assert _make_sdk(namespace=org_id).get_session(demo_sid) is None, (
+                "#8290: an AgentSession Event must not re-open the demo id — "
+                "the guard belongs on get_session's entry, before that arm")
+            assert _make_sdk(namespace=org_id).get_session(_real_event_sid) is not None, (
+                "#8290 non-vacuity: the AgentSession Event arm must still "
+                "serve a REAL indexed session")
             # ...but the digest count EXCLUDES them — still 0
             assert tc.get("/v1/team").json()["point_count"] == 0
             # a real user filing counts normally

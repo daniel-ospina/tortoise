@@ -57,6 +57,30 @@ SESSION_ID_NOT_STR_REFUSAL = (
     "session_id must be a string — got %s; pass None to let Tortoise mint one"
 )
 
+#: A caller-supplied id inside the RESERVED demo/sample namespace (#8290).
+#:
+#: ⛔ This is what makes the demo-Session READ exclusion SOUND. ``#8290`` excludes
+#: the demo ``:Session`` by the prefix :data:`tortoise.session_schema.
+#: DEMO_SESSION_ID_PREFIX`, and a prefix test is only safe if no real capture can
+#: occupy that namespace. ``mint_session_id()`` cannot (``demo_`` is neither hex
+#: nor 12 chars), but the doors are NOT mint-only: ``SessionRequest.session_id``
+#: and the two SDK doors accept a CALLER-SUPPLIED id of any shape. Without this
+#: refusal a genuine capture filed as ``session_demo_…`` would be written, paid
+#: for, and then invisible on ALL THREE read surfaces — the list, the detail
+#: door (404) and the SDK mirror (``None``). A silent disappearance is the exact
+#: class this refusal converts into an audible one, so the prefix is reserved
+#: rather than merely unused.
+#:
+#: The reasoning is shared with the other refusal classes: ONE predicate for
+#: every door (``capture_session``, ``commit_session``, the hosted
+#: ``SessionRequest`` boundary), so the three cannot disagree about which ids
+#: may name a session.
+SESSION_ID_RESERVED_REFUSAL = (
+    "session_id is inside the RESERVED demo/sample namespace (%s) — every "
+    "session read surface excludes that namespace, so a capture filed under it "
+    "would be invisible to its owner; pass None to let Tortoise mint one"
+)
+
 
 def session_id_refusal(session_id: object) -> str | None:
     """The DOOR half of the session-id rule — one predicate, every door (#9599).
@@ -96,6 +120,15 @@ def session_id_refusal(session_id: object) -> str | None:
     422'd them, and the two SDK doors disagreed with each other about
     ``123``/``b"  "``. One order, both doors: diagnose, then mint.
 
+    PRESENT inside the RESERVED demo namespace (``session_demo_…``) IS a
+      refusal, and it is the WATCHDOG for ``#8290``'s read exclusion: the prefix
+      is how all three session read surfaces exclude the demo ``:Session``, so a
+      capture filed under it would be written and then invisible everywhere —
+      the sinkhole the reservation closes (see ``SESSION_ID_RESERVED_REFUSAL``).
+      ⚠️ This class is why the sentence "no real capture can carry the demo
+      prefix" is a FACT rather than a convention about ``mint_session_id``:
+      minted ids cannot collide, AND a caller-supplied one is refused.
+
     PRESENT-but-BLANK (``"   "``, ``"\t"``) IS a refusal. It is truthy, so the
     doors' ``session_id or mint()`` default never fired for it and it went
     straight to the write — where ``MERGE (s:Session {id:$sid})`` could not
@@ -126,9 +159,21 @@ def session_id_refusal(session_id: object) -> str | None:
         return None
     if not isinstance(session_id, str):
         return SESSION_ID_NOT_STR_REFUSAL % type(session_id).__name__
-    if session_id.strip():
-        return None
-    return SESSION_ID_BLANK_REFUSAL
+    if not session_id.strip():
+        return SESSION_ID_BLANK_REFUSAL
+    # #8290: the demo/sample namespace is RESERVED, because the session read
+    # surfaces exclude it by that prefix (see SESSION_ID_RESERVED_REFUSAL).
+    # Checked AFTER the shape/blank classes so each refusal names its own cause.
+    #
+    # Local import: `tortoise.session_schema` is stdlib-only and declares the
+    # prefix ONCE, but it is a higher-layer module than this id helper — importing
+    # it at module scope would make the dependency eager for every `ids` caller
+    # (the same local-import discipline the SDK uses for `session_schema`).
+    from tortoise.session_schema import DEMO_SESSION_ID_PREFIX
+
+    if session_id.startswith(DEMO_SESSION_ID_PREFIX):
+        return SESSION_ID_RESERVED_REFUSAL % DEMO_SESSION_ID_PREFIX
+    return None
 
 
 def session_id_or_absent(value: object) -> str | None:

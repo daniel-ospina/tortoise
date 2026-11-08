@@ -22108,8 +22108,18 @@ async def list_sessions(request: Request, org: dict = Depends(get_current_org_se
         # disagree about whether the sample was the user's own. The prefix is
         # DERIVED (`session_schema.DEMO_SESSION_ID_PREFIX`), never re-spelled,
         # and cannot collide with a mintable id (`mint_session_id()` =
-        # `session_<12 hex>` — `demo_` is neither hex nor 12 chars long).
-        _session_conds = ["NOT s.id STARTS WITH $demo_prefix"]
+        # `session_<12 hex>` — `demo_` is neither hex nor 12 chars long), and
+        # the namespace is RESERVED at the capture doors
+        # (`ids.session_id_refusal`), so a caller cannot file a real capture
+        # into the excluded set either.
+        #
+        # ⛔ The `s.id IS NULL` disjunct is deliberate Cypher three-valued-logic
+        # care, not noise: `NULL STARTS WITH $p` is NULL, and a WHERE drops a
+        # NULL predicate — so the bare `NOT s.id STARTS WITH` form would silently
+        # remove a session that carries NO id at all, which this list served
+        # before #8290. The exclusion must be exactly the demo SET, never also
+        # "every session whose id happens to be null".
+        _session_conds = ["(s.id IS NULL OR NOT s.id STARTS WITH $demo_prefix)"]
         if actor_filter:
             # #2600: actor filter rides a MATCH-level WHERE (before the OPTIONAL
             # CONTAINS so the count(p) grouping semantics hold).

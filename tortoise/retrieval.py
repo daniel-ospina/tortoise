@@ -763,7 +763,8 @@ def session_key_of(hit: dict) -> str:
     every" is load-bearing, not hedging: a stored session whose id is
     ITSELF spelled ``idx:N`` is writer-producible (``_SAFE_SESSION_TAG_RE``
     permits ``:``, and ``ids.session_id_refusal`` refuses only blank /
-    non-``str`` ids), so its real session key can COLLIDE with an unrelated
+    non-``str`` ids and the RESERVED demo namespace of #8290 — ``idx:N`` is
+    none of those), so its real session key can COLLIDE with an unrelated
     hit's ``lme_session_index`` bucket. That is the one shape
     ``_is_real_session_id`` exists to keep out of the splice
     (``tools/longmem_eval/retrieve.py``) and that

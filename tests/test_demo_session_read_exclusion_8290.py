@@ -9,9 +9,11 @@ sessions", while the same sample's Points were excluded one screen away: two
 surfaces disagreeing about whether the sample content was the user's own.
 
 **What is asserted here (and what is not).** This module holds the FAST, DB-free
-half: the prefix test's soundness (a vacuous prefix test would hide *every*
-leak, not one), the ONE-predicate contract, and the source pins that keep the
-three read surfaces bound to that predicate instead of re-spelling it. The
+half: the prefix test's soundness — BOTH halves of it, the minted population AND
+the door reservation (#8290 review: the mint half alone is a lemma about
+``mint_session_id``, not about the capture doors, which accept a
+CALLER-SUPPLIED id) — the ONE-predicate contract, and the source pins that keep
+the three read surfaces bound to that predicate instead of re-spelling it. The
 BEHAVIOURAL half — demo absent, a real session still served, on the list /
 detail / SDK doors — lives in
 ``tests/test_onboarding_seed_endpoint.py::TestDigestExcludesDemo`` because it
@@ -26,6 +28,7 @@ from pathlib import Path
 
 import pytest
 
+from tortoise import ids as ids_mod
 from tortoise import session_schema
 from tortoise.ids import mint_session_id
 
@@ -55,6 +58,65 @@ def test_the_prefix_is_declared_once_and_is_the_demo_derivation():
 ])
 def test_is_demo_session_id_truth_table(sid, expected):
     assert session_schema.is_demo_session_id(sid) is expected
+
+
+# ── the RESERVED namespace: the door half of the soundness argument ──────
+
+
+def test_the_demo_namespace_is_reserved_at_the_one_door_predicate():
+    """#8290 review: the exclusion is a PREFIX test, so the prefix is RESERVED.
+
+    The pre-fix soundness argument was about ``mint_session_id()`` only — and
+    the capture doors are NOT mint-only: ``SessionRequest.session_id`` and the
+    two SDK doors accept a CALLER-SUPPLIED id of any shape. A genuine capture
+    filed as ``session_demo_…`` would then be written, paid for, and invisible
+    on all three read surfaces. The namespace is now closed at the ONE predicate
+    every door shares, so the read exclusion cannot swallow a real capture.
+    """
+    for reserved in (session_schema.DEMO_SESSION_ID_PREFIX,
+                     session_schema.demo_session_id("abcdef123456"),
+                     "session_demo_whatever-a-harness-sent"):
+        reason = ids_mod.session_id_refusal(reserved)
+        assert reason, f"{reserved!r} must be refused at the doors"
+        assert "RESERVED demo/sample namespace" in reason, reason
+        assert session_schema.DEMO_SESSION_ID_PREFIX in reason, reason
+
+    # ...and the ordinary shapes the doors must keep admitting
+    for admitted in ("session_0123456789ab", "sess-legacy", "idx:7",
+                     "  s1  ", "a b"):
+        assert ids_mod.session_id_refusal(admitted) is None, admitted
+
+
+def test_the_exclusion_swallows_exactly_what_the_doors_refuse():
+    """THE LEMMA: exclusion set == reserved set, so no capture can hide in it.
+
+    A prefix exclusion is only sound if the ids it removes are ids NO capture
+    door would admit. This asserts the agreement in BOTH directions over a
+    corpus of every id class the tree produces (minted, harness-supplied,
+    padded, legacy, blank, non-str), so widening either side alone reds here:
+    a door that admits a demo-prefixed id would make a user's capture vanish,
+    and an exclusion narrowed below the reserved set would leak the sample.
+    """
+    corpus: list[object] = [
+        *[mint_session_id() for _ in range(200)],
+        session_schema.demo_session_id("abcdef123456"),
+        session_schema.DEMO_SESSION_ID_PREFIX,
+        "session_demo_x",
+        "sess-legacy", "idx:7", "  s1  ", "s1", "   ", "", None, 0, b"  ",
+    ]
+    for value in corpus:
+        swallowed = session_schema.is_demo_session_id(value)
+        refused = ids_mod.session_id_refusal(value)
+        if swallowed:
+            # what the read surfaces hide MUST be refused by every door
+            assert refused, (
+                f"{value!r} is hidden by the read exclusion but the capture "
+                "doors admit it — a real capture filed under it would be "
+                "written and then invisible on all three surfaces")
+        else:
+            # ...and nothing the doors admit may be hidden as a side effect
+            # (blank/non-str are refused for their OWN reasons, never hidden)
+            assert not session_schema.is_demo_session_id(value), value
 
 
 def test_no_mintable_session_id_can_carry_the_demo_prefix():
@@ -107,6 +169,13 @@ def test_hosted_list_excludes_by_the_derived_prefix():
         "list_sessions lost its demo-Session exclusion")
     assert '"demo_prefix": DEMO_SESSION_ID_PREFIX' in body, (
         "list_sessions must bind the exclusion to the DERIVED prefix constant")
+    # Cypher three-valued logic: `NULL STARTS WITH $p` is NULL and a WHERE drops
+    # a NULL predicate, so the bare `NOT ...` form would ALSO remove a Session
+    # that carries no id — a session this list served before #8290. The
+    # exclusion must be exactly the demo set, so the NULL arm is explicit.
+    assert "(s.id IS NULL OR NOT s.id STARTS WITH $demo_prefix)" in body, (
+        "the null-id arm is missing: a NULL-id Session would now be silently "
+        "dropped, which is not the demo set")
     # the query builds a WHERE from the condition list; a `MATCH ... ` with no
     # WHERE would drop the exclusion on the actor_filter=None path
     assert '"MATCH (s:Session) WHERE "' in body, (
@@ -126,14 +195,29 @@ def test_detail_door_uses_the_shared_predicate():
 
 
 def test_sdk_read_uses_the_shared_predicate():
+    """The guard is on ``get_session``'s ENTRY — it covers BOTH lanes.
+
+    #8290 review: the first lane serves a raw ``AgentSession`` ``Event`` (by
+    ``session_id``/``sessionId``) BEFORE the captured arm runs, so a guard
+    inside ``_read_captured_session`` alone left the SDK answering for a
+    demo-prefixed id that the hosted detail door 404s. The pin is therefore
+    positional: the guard must appear before the Event query.
+    """
     src = _src("tortoise/sdk.py")
-    start = src.index("def _read_captured_session(")
-    body = src[start:start + 5000]
+    start = src.index("def get_session(")
+    body = src[start:src.index("def _read_captured_session(", start)]
     assert "from tortoise.session_schema import is_demo_session_id" in body, (
-        "the SDK mirror must import the ONE predicate")
+        "the SDK read must import the ONE predicate")
     assert "if is_demo_session_id(session_id):" in body
+    guard_at = body.index("if is_demo_session_id(session_id):")
+    # anchor on the QUERY, not the word: the docstring above names the arm too
+    event_at = body.index("MATCH (e:Event {eventKind: 'AgentSession'})")
+    assert guard_at < event_at, (
+        "the demo guard must precede the AgentSession Event query — otherwise "
+        "the SDK serves the demo id through that arm while the hosted detail "
+        "door 404s it (the surfaces-disagree defect one arm over)")
     assert "session_demo_" not in body, (
-        "the SDK mirror must not re-spell the prefix")
+        "the SDK read must not re-spell the prefix")
 
 
 def test_the_session_schema_no_longer_records_the_gap_as_open():
@@ -147,3 +231,42 @@ def test_the_session_schema_no_longer_records_the_gap_as_open():
     assert "The read-side exclusion is NOT implemented" not in src
     assert "is not excluded from any session read surface" not in src.lower()
     assert "is_demo_session_id" in src
+
+
+# ── the DOORS, not just the predicate (a predicate alone pins nothing) ────
+
+
+def test_a_real_capture_cannot_be_filed_under_the_reserved_namespace(tmp_path):
+    """NON-VACUITY for the whole exclusion, at the DOOR the user actually uses.
+
+    Pinning ``session_id_refusal`` alone would leave this green if a door
+    stopped calling it. This drives the REAL SDK doors (embedded lane, no
+    FalkorDB) with a reserved id and asserts the refusal is audible AND that
+    nothing was written — the capture that would otherwise have become
+    invisible on every read surface.
+    """
+    from tortoise.sdk import TortoiseSDK
+
+    reserved = session_schema.demo_session_id("abcdef123456")
+    turns = [{"role": "user", "content": "reserved namespace probe"},
+             {"role": "assistant", "content": "acknowledged"}]
+    client = TortoiseSDK(str(tmp_path / "tortoise.db"),
+                         event_log_path=str(tmp_path / "events" / "sdk.jsonl"))
+    try:
+        for door, res in (
+            ("capture", client.capture_session(turns, session_id=reserved)),
+            ("commit", client.commit_session(turns, session_id=reserved)),
+        ):
+            assert res["ok"] is False, (door, res)
+            errors = [str(e) for e in (res.get("errors") or [])]
+            assert any("RESERVED demo/sample namespace" in e for e in errors), (
+                door, errors)
+        # ⛔ LABEL SCAN, not an equality seek (#9599's lesson): what matters is
+        # that NO :Session was written under the reserved id.
+        written = client._get_proj().g.query(
+            "MATCH (s:Session) RETURN s.id").result_set
+        assert written == [], written
+        # ...and the read mirror agrees the namespace is not readable either
+        assert client.get_session(reserved) is None
+    finally:
+        client.close()

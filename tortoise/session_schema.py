@@ -69,7 +69,10 @@ __all__ = [
 #: declaration: ``hosted_api._seed_demo_graph`` writes the id through
 #: :func:`demo_session_id`, and every READ surface excludes it through
 #: :func:`is_demo_session_id` — the writer and the exclusion cannot drift
-#: because neither re-spells the prefix.
+#: because neither re-spells the prefix. ⛔ It is also a RESERVED id namespace:
+#: the capture doors refuse a caller-supplied id carrying it
+#: (``tortoise.ids.session_id_refusal``), so no real capture can name itself into
+#: the excluded set.
 #:
 #: #8290 (closed): the session read surfaces DID NOT exclude the demo Session,
 #: while #2360's owner-recorded exclusion removed the demo POINTS from the
@@ -80,13 +83,26 @@ __all__ = [
 #: mirrors #2360 on all three session read surfaces: ``GET /v1/sessions``,
 #: ``GET /v1/sessions/{id}`` and ``TortoiseSDK.get_session``.
 #:
-#: ⚠️ The prefix test is sound by CONSTRUCTION, not by convention: every real
-#: capture door mints ``mint_session_id()`` = ``session_<12 hex>``
-#: (``tortoise/ids.py``), and ``demo_`` is neither hex nor 12 chars long, so no
-#: mintable id can ever carry :data:`DEMO_SESSION_ID_PREFIX`.
-#: ``tests/test_demo_session_read_exclusion_8290.py`` pins that (a 1000-mint
-#: population), because a vacuous prefix test would hide every leak instead of
-#: one.
+#: ⚠️ The prefix test is sound by CONSTRUCTION, not by convention, and the
+#: construction has TWO halves — both required, because either alone leaves a
+#: hole the exclusion would silently swallow:
+#:
+#: 1. **Minted ids cannot enter the namespace.** Every capture door MINTS
+#:    ``mint_session_id()`` = ``session_<12 hex>`` (``tortoise/ids.py``), and
+#:    ``demo_`` is neither hex nor 12 chars long, so no minted id can carry
+#:    :data:`DEMO_SESSION_ID_PREFIX`.
+#: 2. **Caller-supplied ids cannot enter it either** — and this half was
+#:    MISSING until the #8290 review: the doors are not mint-only
+#:    (``SessionRequest.session_id`` / the two SDK doors accept a caller's id of
+#:    any shape), so a genuine capture filed as ``session_demo_…`` used to be
+#:    written and then invisible on all three surfaces. The namespace is now
+#:    RESERVED at the doors by ``ids.session_id_refusal`` (the ONE predicate
+#:    every door already shares), so such a capture is refused loudly instead of
+#:    disappearing quietly.
+#:
+#: ``tests/test_demo_session_read_exclusion_8290.py`` pins both halves — a
+#: 1000-mint population for (1), and the door/exclusion agreement for (2) —
+#: because a vacuous prefix test would hide every leak instead of one.
 DEMO_SESSION_ID_PREFIX = "session_demo_"
 
 
