@@ -1124,17 +1124,32 @@ def _names_artifact(token: str, cwd: Path, root: Path) -> tuple[bool, str]:
             # "this pattern names a held artifact", and one held match answers it.
             # A pattern with NO tracked match is still refused.
             untracked_seen = False
+            unrunnable_seen = False
             for match in cwd.glob(text):
                 resolved_match = match.resolve()
                 if not (resolved_match.is_file() and resolved_match.is_relative_to(root)):
                     continue
-                if _is_tracked(resolved_match, root) is True:
+                # ⛔ THREE answers, not two. `None` is "the probe could not RUN", and
+                # folding it in with `False` here told a reader that every file a glob
+                # matches "is untracked by git" when git had never been asked — the same
+                # guess-the-cause defect this change removes from the other two call
+                # sites. A measured "no match is tracked" is still reported as that.
+                verdict = _is_tracked(resolved_match, root)
+                if verdict is True:
                     return True, ""
-                untracked_seen = True
+                if verdict is None:
+                    unrunnable_seen = True
+                else:
+                    untracked_seen = True
             if untracked_seen:
                 return False, (
                     f"every file the glob {text!r} matches is untracked by git, so a "
                     "reader's clone does not have them"
+                )
+            if unrunnable_seen:
+                return False, (
+                    f"cannot be verified: the TRACKED check could not be run here, so no "
+                    f"file the glob {text!r} matches is shown to be in the tree"
                 )
             return False, f"no file of this tree matches the glob {text!r}"
         candidate = Path(text)

@@ -4736,17 +4736,16 @@ def test_an_EMFILE_on_the_ls_files_probe_cannot_manufacture_a_clean_exit(tmp_pat
     # directly instead of through the module attribute, the stub silently stops
     # matching and this assertion is what notices.
     assert fired == ["git ls-files"], fired
+    # ⛔ OUTSIDE the patched window on purpose: with git working, a TRACKED artifact is
+    # ACCEPTED, so this pin is not passing on a tool that refuses everything. (It cannot
+    # be checked inside the window — there `None` is the true answer for every path, and
+    # asserting acceptance there would assert the bug.)
+    ok, why = cl._evidence_is_real("committed.txt", repo)
+    assert ok, why
     # And with git answering, the same artifact is still refused BY NAME — the refusal
     # must name the artifact, not degrade every row into "could not be run".
     ok, why = cl._evidence_is_real("untracked.txt", repo)
     assert not ok and "not TRACKED" in why, why
-    # ⛔ And a TRACKED artifact is not caught by the EMFILE refusal: `None` must not be
-    # readable as "refuse everything", or the pin would pass on a tool that refuses all.
-    ok, why = cl._evidence_is_real("committed.txt", repo)
-    assert ok, why
-    # The committed file is accepted, so the pin is not passing by refusing everything.
-    ok, why = cl._evidence_is_real("committed.txt", repo)
-    assert ok, why
 
 
 def test_the_unrunnable_probe_path_is_not_the_abstention_path(tmp_path):
@@ -4789,3 +4788,48 @@ def test_an_EMFILE_on_the_FOLLOW_UP_probe_also_refuses(tmp_path):
         assert cl._is_tracked(REPO_ROOT / "docs" / "x.md", REPO_ROOT) is None
     finally:
         mp.undo()
+
+
+def test_the_glob_arm_does_not_read_an_UNRUNNABLE_probe_as_a_held_match(monkeypatch):
+    """`None` is not a match. The glob arm is the one place the tri-state is unpinned.
+
+    `if _is_tracked(...) is True:` is what keeps an UNRUNNABLE probe out of the
+    `return True, ""` arm — and nothing exercised it: reverting it to
+    `is not False` (so `None` counts as held) left the whole suite green at 169
+    passed. `None` is falsy, so the mutant is invisible to any plain truthiness test;
+    only an assertion that drives `None` through THIS arm catches it.
+
+    It is a genuine fail-open rather than a wording nit, because it is the arm that
+    can ANSWER "a held artifact exists" from a check that never ran.
+    """
+    monkeypatch.setattr(cl, "_is_tracked", lambda resolved, root: None)
+    ok, why = cl._evidence_is_real("cmd:uv run python docs/evidence/9664-capstone/*.md", REPO_ROOT)
+    assert ok is False, why
+    # ⛔ And it must say nothing was MEASURED — not that git answered "untracked",
+    # which would be the collapsed-cause defect one layer down.
+    assert "could not be run here" in why, why
+    assert "untracked" not in why, why
+
+
+def test_a_glob_mixing_untracked_and_unrunnable_reports_the_measured_refusal(monkeypatch):
+    """One measured "no tracked match" is a verdict; it outranks "could not ask".
+
+    Both causes are refusals, so this cannot change an exit code — it fixes WHICH
+    sentence a reader gets, and pins the precedence so the two never collapse back
+    into one branch.
+    """
+    seen: list[str] = []
+
+    def mixed(resolved, root):
+        seen.append(resolved.name)
+        return None if len(seen) == 1 else False
+
+    monkeypatch.setattr(cl, "_is_tracked", mixed)
+    ok, why = cl._evidence_is_real(
+        "cmd:uv run python docs/evidence/9664-capstone/run-2026-10-26/*.txt", REPO_ROOT
+    )
+    # Two matches are required to exercise precedence at all — with one, only the first
+    # cause is ever produced and the assertion below would pass for the wrong reason.
+    assert len(seen) >= 2, f"needs two matches to exercise precedence, saw {seen}"
+    assert ok is False, why
+    assert "untracked by git" in why, why
