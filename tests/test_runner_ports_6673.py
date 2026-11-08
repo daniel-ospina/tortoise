@@ -660,12 +660,12 @@ def _imports_the_seam(path: Path) -> bool:
     if "_live_utils" not in src:
         return False
     for node in ast.walk(ast.parse(src)):
-        if isinstance(node, ast.Import):
-            if any(a.name.split(".")[-1] == "_live_utils" for a in node.names):
-                return True
-        elif isinstance(node, ast.ImportFrom):
-            if any(a.name == "_live_utils" for a in node.names):
-                return True
+        if isinstance(node, ast.Import) and any(
+                a.name.split(".")[-1] == "_live_utils" for a in node.names):
+            return True
+        if isinstance(node, ast.ImportFrom) and any(
+                a.name == "_live_utils" for a in node.names):
+            return True
     return False
 
 
