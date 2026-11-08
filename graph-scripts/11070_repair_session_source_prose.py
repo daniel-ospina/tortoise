@@ -168,7 +168,8 @@ def open_projection(uri: str, graph_name: str):
     return FalkorProjection.from_uri(uri, graph_name=graph_name)
 
 
-def _merge_probe(before: dict | None, after: dict) -> dict:
+def _merge_probe(before: dict | None, after: dict, *,
+                 wrote: list | None = None) -> dict:
     """Fold the BEFORE and AFTER Source-FTS measurements into ONE verdict.
 
     ⛔ ``certifies`` IS NOT "no leak". A zero from an instrument that measured
@@ -186,6 +187,18 @@ def _merge_probe(before: dict | None, after: dict) -> dict:
     Neither holds ⇒ the zero is UNCORROBORATED and the run must not certify:
     a probe that reads 0 both before and after is a phrase that was never in the
     corpus, and its 0 proves nothing about the repair.
+
+    ⛔ AND (b) IS EVIDENCE ABOUT THE INSTRUMENT, NOT ABOUT THE PROBE (#11536 review
+    round 3, P1). When this run TOOK its own BEFORE reading (the writing arm) and
+    the probe hit NOTHING there, the run holds direct self-evidence that the token
+    was never in the corpus — usually a typo in the operator's ``--probe-phrase``.
+    Certifying that on the control alone printed *"no node still carrying the
+    pre-fix prose is findable"* over a token that was never a probe, which is a
+    PROXY for the Target rather than the property. So on the writing arm the
+    control corroborates only a run that had nothing to repair (``wrote`` empty);
+    otherwise the verdict is ``undiscriminating-probe``. (The dry run has no
+    BEFORE reading at all — see `_report_fts`, which then states exactly what it
+    measured instead of claiming the Target.)
     """
     probes = []
     for index, got in enumerate(after["probes"]):
@@ -227,7 +240,16 @@ def _merge_probe(before: dict | None, after: dict) -> dict:
     elif unclassified or out.get("unresolved"):
         out["certifies"], out["vetoed"] = False, "unclassified"
     elif discriminating or control_ok:
-        out["certifies"], out["vetoed"] = True, None
+        # ⛔ A TYPO MUST NOT CERTIFY (#11536 review round 3, P1). On the writing
+        # arm the run measured the probe BEFORE it wrote, so `residue_before == 0`
+        # is the run's own evidence that the token was never in the corpus: the
+        # control then proves only that the INSTRUMENT answers, and certifying on
+        # it would print the Target's sentence over a probe that was never a probe.
+        if (before is not None and not discriminating and control_ok
+                and wrote):
+            out["certifies"], out["vetoed"] = False, "undiscriminating-probe"
+        else:
+            out["certifies"], out["vetoed"] = True, None
     else:
         out["certifies"], out["vetoed"] = False, "uncorroborated"
     return out
@@ -264,9 +286,10 @@ def _report_fts(fts: dict) -> None:
     control = fts.get("control")
     if control is not None:
         if control.get("mode") == "empty-index":
-            print("          control: EMPTY Source index — no Source carries "
-                  "`_searchText` on this graph, so the probe's 0 is consistent "
-                  "(a stale index entry is what would make it non-empty)")
+            print("          control: EMPTY Source index — no Source over this "
+                  "population carries `_searchText` (the field the index is "
+                  "declared on) and the read ran, so the index is silent because "
+                  "the corpus is empty, not because the read is dead")
         elif control.get("hits") is None:
             print("          control: not available — "
                   f"{control.get('note')}")
@@ -280,8 +303,22 @@ def _report_fts(fts: dict) -> None:
             print(f"          control (one post-fix lexicon token): "
                   f"{control['hits']} hit(s)")
     if fts["certifies"]:
-        print("          ✓ no node still carrying the pre-fix prose is findable "
-              "through the Source FTS index")
+        if any(p.get("discriminating") for p in fts["probes"]):
+            print("          ✓ no node still carrying the pre-fix prose is "
+                  "findable through the Source FTS index, and this run watched "
+                  "the probe's token LEAVE it")
+        else:
+            # ⛔ SAY ONLY WHAT WAS MEASURED (#11536 review round 3, P1). A dry run
+            # has no BEFORE reading, so a token that was never in the corpus and a
+            # token whose sentence has left look IDENTICAL here. The Target's claim
+            # is the conjunctive pair, and this run did not establish it — the
+            # verdict still stands (the token is absent and the index answers), but
+            # the sentence must not be the Target's.
+            print("          ✓ the probe token is absent from the Source FTS index "
+                  "and the index ANSWERS (a known-present token was found) — "
+                  "this run did NOT establish that the token was ever in the "
+                  "corpus; run `--repair --probe-phrase …` for the Target's "
+                  "before/after pair")
         return
     if fts["vetoed"] == "leaked":
         print(f"✗ {len(fts['leaked'])} probe(s) still return a node that CARRIES "
@@ -310,6 +347,14 @@ def _report_fts(fts: dict) -> None:
               f"past the window was never classified. That token is too common "
               f"to be a probe — pass one that appears only in the removed "
               f"sentence.", file=sys.stderr)
+    elif fts["vetoed"] == "undiscriminating-probe":
+        print(f"✗ the probe token(s) {[p['phrase'] for p in fts['probes'] if not p.get('discriminating')]!r} "
+              f"hit NOTHING before this run's own repair, so this run has "
+              f"measured that the token was never in the corpus — the positive "
+              f"control proves only that the INDEX answers, not that the token "
+              f"came from the removed sentence. A typo'd `--probe-phrase` "
+              f"therefore cannot certify. Re-run with a single rare token COPIED "
+              f"from the removed sentence.", file=sys.stderr)
     elif fts["vetoed"] == "unclassified":
         print(f"✗ the probe returned a hit that could NOT BE CLASSIFIED for "
               f"{fts['unclassified']!r} ({fts.get('unresolved') or 0} hit(s) also "
@@ -594,7 +639,15 @@ def main() -> int:
                 for node in found]
         if probes:
             fts_after = probe_fts(proj.g, probes, control=True)
-            report["fts_probe"] = _merge_probe(fts_before, fts_after)
+            # ⛔ `wrote` IS PART OF THE VERDICT (#11536 review round 3, P1): on the
+            # writing arm the BEFORE reading is taken by this run, so a token that
+            # hit NOTHING there is self-evidence that it was never in the corpus,
+            # and the control (evidence about the INSTRUMENT) must not certify the
+            # write anyway. `wrote == []` is the one honest exception: there was
+            # nothing to repair, so there is nothing the probe failed to measure.
+            report["fts_probe"] = _merge_probe(
+                fts_before, fts_after,
+                wrote=list(report.get("written") or ()))
         elif args.repair:
             # ⛔ STATED, not silent: a repair that certifies on the census alone
             # leaves the FTS half of the Target unmeasured, and the operator must

@@ -1406,11 +1406,14 @@ def source_index_is_empty(g, *,
     remedy then pointed the operator at ``--no-fts-probe``, i.e. at the weaker
     evidence this leg exists to stop certifying.
 
-    And the zero on such a graph is NOT vacuous, which is what makes certifying it
-    honest rather than an exception: a stale index entry is exactly what would
-    make the index NON-empty, so "the field holds nothing over this population,
-    and the read ran" is positive evidence for the state the repair is supposed
-    to produce. ``None`` means the read itself failed — unreadable is not empty.
+    And the zero on such a graph is NOT vacuous, and the reason is NOT "a stale
+    entry would have made it non-empty" — a stale entry is the OPPOSITE shape (the
+    pair cleared, so this very property is ABSENT, which contributes 0 to this
+    count; caught instead by the probe's own `stale` bucket). What the count does
+    answer is the smaller, sufficient thing: **no Source over this population
+    carries the field the index is built from, and the read ran** — so the index is
+    silent because the corpus is empty, not because the read is dead. ``None``
+    means the read itself failed — unreadable is not empty.
     """
     try:
         rows = g.query(_SOURCE_INDEX_ENTRIES,
@@ -1522,17 +1525,20 @@ def probe_fts(g, phrases, *, control: bool = True,
             if empty is True:
                 # A graph whose Source population carries no `_searchText` at all
                 # (a clear-only repair): the probe's zero is structurally
-                # consistent, and a stale entry would have made this non-empty —
-                # so the zero IS evidence, and no weaker a one than the token.
+                # consistent, because no Source over this population carries the
+                # field the index is built from — so the index is silent for the
+                # corpus, not dead, and the zero IS evidence. (NOT because a stale
+                # entry would make it non-empty: a stale entry is the absent-pair
+                # shape and contributes 0 here; the probe's `stale` bucket catches
+                # that one.)
                 report["control"] = {
                     "mode": "empty-index", "ok": True, "hits": 0,
                     "ran": True, "degraded": False,
                     "reason": "no_source_search_text",
-                    "note": "no SOURCE on this graph carries `_searchText` (the "
-                            "field the index is declared on), so the index has "
-                            "nothing to return and the probe's 0 is consistent "
-                            "with a repaired graph — a stale entry is exactly "
-                            "what would make it non-empty",
+                    "note": "no SOURCE over this population carries `_searchText` "
+                            "(the field the index is declared on) and the read "
+                            "ran, so the corpus is empty rather than the index "
+                            "being silent",
                 }
             elif empty is None:
                 report["control"] = {

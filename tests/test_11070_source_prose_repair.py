@@ -2494,6 +2494,21 @@ def _install_fts(monkeypatch, mapping, *, leg=None):
     return calls
 
 
+class _ControlAnsweringGraph(_RecordingGraph):
+    """A fake that also answers the CONTROL's one-column lexicon read.
+
+    The base fake projects every read through `COLUMNS` (the census layout), so it
+    cannot answer a one-column read with ONE column — and the control is exactly
+    what the round-3 finding is about: it must ANSWER, so that the veto under test
+    is the probe's own lack of discrimination rather than an absent control.
+    """
+
+    def query(self, cypher, params=None, timeout=None):
+        if "STARTS WITH $prefix" in cypher:
+            return _Result([("migration, plan",)])
+        return super().query(cypher, params=params, timeout=timeout)
+
+
 def test_a_MULTI_token_probe_is_REFUSED_because_the_FTS_read_OR_joins_it():
     """A phrase is not a probe — the read turns it into an OR of its words.
 
@@ -2561,6 +2576,127 @@ def test_a_hit_on_a_PRE_FIX_node_IS_a_leak(monkeypatch):
     report = m.probe_fts(graph, ["zebraquux"], control=False)
     assert report["leaked"] == ["zebraquux"]
     assert report["probes"][0]["residue"] == ["session:pre-fix"]
+
+
+def test_a_TYPOED_probe_cannot_certify_the_write_it_did_not_measure(monkeypatch,
+                                                                  capsys):
+    """#11161 review round 3, P1 (fail-open): the control is about the INSTRUMENT.
+
+    (1) FAILS on the shipped fold: `elif discriminating or control_ok:` certifies
+        on the control ALONE. On the writing arm this run takes its own BEFORE
+        reading, so a token that hit nothing there is self-evidence that it was
+        never in the corpus — the ordinary case being a typo in
+        `--probe-phrase`. The run then printed the Target's own sentence ("no node
+        still carrying the pre-fix prose is findable") and `Repair complete.` over
+        a probe that was never a probe, while `tortoise_fts_query(source)` still
+        returned the node for the sentence's real tokens.
+    (2) REACHABLE: both corroboration arms are available on every graph that has a
+        leak to miss — `mode="probe"` wherever a post-fix lexicon node exists (the
+        record arm's own output) and `mode="empty-index"` on a clear-only graph,
+        which is the population this repair exists for. A typo is ordinary.
+    (3) AND THE HONEST EXCEPTION SURVIVES: a writing run that WROTE NOTHING has no
+        write for the probe to have measured, so the control still certifies it —
+        that is not the same claim.
+    """
+    before = {"ran": True, "probes": [{"phrase": "notaword", "hits": 0,
+                                       "urls": [], "residue": []}]}
+    after = {"ran": True, "entity_type": "source", "limit": 50,
+             "probes": [{"phrase": "notaword", "hits": 0, "urls": [],
+                         "truncated": False, "ran": True, "degraded": False,
+                         "reason": "empty_results", "residue": [], "lexicon": [],
+                         "stale": [], "foreign": [], "unread": []}],
+             "leaked": [], "stale": [], "stem_only": [], "unmeasurable": [],
+             "truncated": [], "unresolved": 0,
+             # an ANSWERING control — the only thing that used to matter
+             "control": {"mode": "probe", "ok": True, "hits": 1}}
+    folded = _cli._merge_probe(before, after, wrote=["session:s-11070"])
+    assert folded["certifies"] is False, (
+        "a typo'd probe certified the write it never measured")
+    assert folded["vetoed"] == "undiscriminating-probe"
+    assert folded["probes"][0]["discriminating"] is False
+
+    # …and the exception is only for a run with nothing to repair.
+    assert _cli._merge_probe(before, after, wrote=[])["certifies"] is True
+
+    # …and the argv path reds: a repair that writes while the token is absent.
+    _export_a_record_dsn(monkeypatch)
+    _install_fts(monkeypatch, {"notaword": [],
+                              "migration": [("session:s-11070", 1.0)]})
+    _install_cli(monkeypatch, _ControlAnsweringGraph([(_session_node(),)]),
+                 ["--repair", "--clear-without-record",
+                  "--probe-phrase", "notaword"])
+    monkeypatch.setattr(_cli, "reconcile_session_source_prose",
+                        lambda *a, **k: {
+                            "candidates": ["session:s-11070"], "repaired": [],
+                            "empty_sessions": [], "no_record": [],
+                            "no_reader": [], "no_session_id": [],
+                            "unaddressable": [], "left_alone": [],
+                            "written": ["session:s-11070"], "notes": {},
+                            "census_before": 1, "census_after": 0,
+                            "dry_run": False})
+    assert _cli.main() == 1, (
+        "a repair certified on a control while its own BEFORE reading showed the "
+        "probe token was never in the corpus")
+    captured = capsys.readouterr()
+    assert "Repair complete." not in captured.out
+    assert "NOTHING before this run's own repair" in captured.err
+
+
+def test_a_DRY_RUN_says_it_could_not_establish_the_PAIR(monkeypatch, capsys):
+    """The other half of round 3's P1: a verdict may stand, a claim may not.
+
+    (1) FAILS on the shipped report: a dry run has no BEFORE reading, so a token
+        that was never in the corpus and a token whose sentence has left are
+        INDISTINGUISHABLE — yet the certify line stated the Target's conjunctive
+        property ("no node still carrying the pre-fix prose is findable").
+    (2) REACHABLE: the runbook's own verify step (`--assert-clean --probe-phrase`)
+        runs on an already-repaired graph, which is exactly the case with no pair
+        available.
+
+    The verdict is KEPT (step 3 must stay runnable on a clear-only graph, which was
+    the previous round's P2); only the sentence narrows to what was measured.
+    """
+    _export_a_record_dsn(monkeypatch)
+    graph = _ControlAnsweringGraph(
+        [(_session_node(url="session:post", summary="",
+                        _searchText="migration, plan",
+                        topics=["migration", "plan"]),)])
+    _install_fts(monkeypatch, {"notaword": [],
+                              "migration": [("session:post", 2.0)]})
+    _install_cli(monkeypatch, graph, ["--dry-run", "--assert-clean",
+                                      "--probe-phrase", "notaword"])
+    assert _cli.main() == 0
+    out = capsys.readouterr().out
+    assert "no node still carrying the pre-fix prose is findable" not in out, (
+        "a dry run stated the Target's conjunctive property on a token it never "
+        "saw in the corpus")
+    assert "did NOT establish that the token was ever in the corpus" in out
+
+
+def test_a_PROVEN_lexicon_needs_no_TOPICS_join(monkeypatch):
+    """#11536 review round 3, P3: the prefix arm had no row that could red.
+
+    (1) FAILS on `_is_proven_lexicon` reduced to `_proves_the_lexicon`: the node
+        the repair WRITES has `summary = PREFIX + locale`, `_searchText = locale`
+        and `topics` UNTOUCHED (the pre-fix word-frequency list) — so the exact
+        join is False and the repair's own output was classified `foreign`, whose
+        printed explanation says the hit is "outside this population".
+    (2) REACHABLE: every record-arm repair, which is the arm the #3518 descriptor
+        belongs to.
+    """
+    from tortoise import session_source_prose_migration as m
+
+    repaired = _session_node(url="session:repaired", sessionId="repaired",
+                             summary=SESSION_SOURCE_SUMMARY_PREFIX + "migration, plan",
+                             _searchText="migration, plan",
+                             topics=["we", "decided", "zebraquux"])
+    assert m._proves_the_lexicon(repaired) is False, (
+        "the fixture proves itself through `topics` too — it could not "
+        "discriminate the prefix arm")
+    split = m.classify_fts_hits(_RecordingGraph([(repaired,)]), ["session:repaired"])
+    assert split["lexicon"] == ["session:repaired"]
+    assert split["foreign"] == [], (
+        "the repair's own output was reported as a Source outside this population")
 
 
 def test_a_hit_on_a_CLEARED_node_is_a_STALE_INDEX_LEAK_not_a_stem_collision(monkeypatch):
@@ -3112,8 +3248,14 @@ def test_an_EMPTY_Source_index_corroborates_a_CLEAR_only_graph(monkeypatch,
         evidence the leg exists to stop certifying.
     (2) REACHABLE: the clear arm (`--clear-without-record`), whose output is
         `summary=''` with `_searchText` ABSENT — the very population this repair
-        exists for. And the zero is NOT vacuous: a stale index entry is exactly
-        what would make the index non-empty.
+        exists for. And the zero is NOT vacuous, but the reason is NOT "a stale
+        index entry would make it non-empty": a stale entry is the ABSENT-pair
+        shape and contributes 0 to this count (the probe's own `stale` bucket
+        catches that one). What it answers is the smaller sufficient thing — no
+        Source over this population carries the field the index is built from,
+        and the read ran, so the index is silent for the corpus, not dead.
+        (#11536 review round 3, P2: the earlier wording here was the inverse of
+        what `_SOURCE_INDEX_ENTRIES` measures.)
 
     (3) AND THE GUARD SURVIVES: an index that DOES hold entries, with no lexicon
         node to probe, still cannot corroborate — the emptiness arm is a
