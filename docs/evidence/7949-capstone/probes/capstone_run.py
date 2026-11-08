@@ -21,10 +21,10 @@ the corrected reading:
    ``_edus_from_conversation`` (S0, ``:12947``) and then ``_arm_extract`` — the
    S1→S2→S2.2 prefix, which it calls twice since `#11002`: the first arm and the
    retry — and that one function drives ``run_s1`` (S1, ``:15456``), ``run_s2``
-   (S2.1, ``:15482``) and ``_run_vet_pass`` (S2.2, ``:15536``).
+   (S2.1, ``:15488``) and ``_run_vet_pass`` (S2.2, ``:15542``).
    ``extract_session_v2`` itself calls ``kind_classifier.classify_items`` (S2.3,
-   ``:13102``), ``_apply_classify_kinds`` (S2.3, ``:13103``), ``search_graph``
-   (S3, ``:13119``), ``run_s4`` (the gap filler, ``:13140``), and
+   ``:13108``), ``_apply_classify_kinds`` (S2.3, ``:13109``), ``search_graph``
+   (S3, ``:13125``), ``run_s4`` (the gap filler, ``:13146``), and
    ``execute_embed`` (S5+S6, ``:13362``). ONE cite per symbol, on the line that symbol is on:
    S2.3 makes TWO calls two lines apart, and the single ``:NNNN`` a
    ``a``/``b`` pair cite could carry is only ever checkable for one of them —
