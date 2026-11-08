@@ -179,7 +179,7 @@ def load_ledger(path: Path) -> dict[str, Any]:
     return data
 
 
-def _is_shallow() -> bool:
+def _is_shallow(root: Path | None = None) -> bool:
     """Is this checkout shallow? The exact signal, not an inference from absence.
 
     `actions/checkout@v4` defaults to `fetch-depth: 1`, so the `test` job's checkout is
@@ -187,11 +187,15 @@ def _is_shallow() -> bool:
     depth-1 clone the boundary commit is a grafted root, so "absent" and "fabricated"
     are INDISTINGUISHABLE here — which is why this question has to be asked separately
     before absence is read as evidence.
+
+    `root` defaults to this tool's repository. It is a parameter so the probe is TESTABLE
+    against both clone shapes — a probe that is mocked out of every test is a probe that
+    a `return True` never reds (#11217 review).
     """
     try:
         proc = subprocess.run(
             ["git", "rev-parse", "--is-shallow-repository"],
-            cwd=str(REPO_ROOT),
+            cwd=str(root or REPO_ROOT),
             capture_output=True,
             text=True,
             check=False,
@@ -228,6 +232,13 @@ def _commit_exists(sha: str) -> bool | None:
             capture_output=True,
             text=True,
             check=False,
+            # ⛔ A PARTIAL clone (`--filter=blob:none`) reports `--is-shallow-repository`
+            # as FALSE, so the probe above does not cover it — and WITHOUT this, an
+            # absent sha triggers a PROMISOR REFETCH against the origin (measured
+            # 2m29s here before returning 128) and then reads as "fabricated". Commit
+            # objects are never blob-filtered, so an absent commit in a partial clone
+            # really is absent: the fetch buys nothing but latency and a false RED.
+            env={**os.environ, "GIT_NO_LAZY_FETCH": "1"},
         )
     except OSError:
         return False
@@ -300,10 +311,22 @@ def validate(data: dict[str, Any], repo_root: Path = REPO_ROOT) -> list[dict[str
         sha = str(measured_at.get("sha") or "")
         if len(sha) != 40 or any(c not in "0123456789abcdef" for c in sha):
             problems.append(f"`measured_at.sha` must be a 40-hex sha, got {sha!r}")
+        elif _commit_exists(sha) is None:
+            # ⛔ NOT SILENT (#11217 review). `render()` prints this sha as provenance
+            # unconditionally, and the module's own premise is that a substitution there
+            # is the harm. Reporting nothing while printing it as fact is the one
+            # outcome this check exists to prevent, so the abstention is ANNOUNCED —
+            # the sibling gate reports UNPROVABLE for the same condition, and this
+            # reports it too instead of staying quiet.
+            print(
+                f"NOTICE: `measured_at.sha` {sha} is UNPROVABLE in this checkout "
+                f"(shallow clone) — NOT verified, and not reported as fabricated "
+                f"either. Fetch full history (`git fetch --unshallow`, or "
+                f"`fetch-depth: 0`) to verify it.",
+                file=sys.stderr,
+            )
         elif _commit_exists(sha) is False:
             # Shape is not existence: a fabricated sha renders as provenance.
-            # `None` (shallow checkout) is NOT a verdict — it is an answer this tree
-            # cannot give, and reporting one would be a false RED (#11217).
             problems.append(f"`measured_at.sha` names no commit in this repository: {sha}")
         if not str(measured_at.get("date") or "").strip():
             problems.append("`measured_at.date` must be set (YYYY-MM-DD)")

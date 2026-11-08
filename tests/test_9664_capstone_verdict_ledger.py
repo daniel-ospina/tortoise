@@ -406,7 +406,7 @@ def test_a_sha_that_names_no_commit_is_invalid(tmp_path):
     data = _ledger([_row("A")])
     data["measured_at"]["sha"] = "deadbeef" * 5
     original = cl._is_shallow
-    cl._is_shallow = lambda: False
+    cl._is_shallow = lambda *a, **k: False
     try:
         with pytest.raises(cl.InvalidLedger) as excinfo:
             cl.validate(data)
@@ -415,29 +415,73 @@ def test_a_sha_that_names_no_commit_is_invalid(tmp_path):
     assert "names no commit" in str(excinfo.value)
 
 
-def test_a_shallow_checkout_ABSTAINS_on_a_sha_it_cannot_resolve(tmp_path):
-    """A shallow clone holds no ancestor, so absence is NOT evidence — abstain.
+def test_a_shallow_checkout_ABSTAINS_on_a_sha_it_cannot_resolve(tmp_path, capsys):
+    """A shallow clone holds no ancestor, so absence is NOT evidence — ABSTAIN.
 
-    The counterpart of the arm above, and why 22 committed-ledger rows stopped going
-    red on every CI shard: the shape of the CLONE is not a defect in the record. The
-    residual is stated rather than hidden — in a shallow checkout a genuinely
-    fabricated sha is not caught, which is the trade `python-ci.yml:489` already made
-    for the gate it describes as reporting UNPROVABLE.
+    The counterpart of the arm above, and why 22 committed-ledger rows stopped going red
+    on every CI shard: the shape of the CLONE is not a defect in the record.
+
+    ⛔ This asserts that the ledger VALIDATES — i.e. that `validate` RETURNS the rows —
+    and not merely that no refusal happens to contain a particular substring. Measured
+    (#11217 review): forbidding `"names no commit"` alone left this test GREEN while a
+    shallow checkout still refused the record under a reworded message, which is exactly
+    the regression it exists to catch.
+
+    The residual is stated, not hidden — in a shallow checkout a genuinely fabricated sha
+    is not caught. The abstention also ANNOUNCES itself, because `render()` prints the
+    sha as provenance either way.
     """
     data = _ledger([_row("A")])
     data["measured_at"]["sha"] = "deadbeef" * 5
     original = cl._is_shallow
-    cl._is_shallow = lambda: True
+    cl._is_shallow = lambda *a, **k: True
     try:
-        try:
-            cl.validate(data)
-        except cl.InvalidLedger as exc:
-            assert "names no commit" not in str(exc), (
-                "a shallow checkout must ABSTAIN rather than red the record for "
-                "history it does not hold: " + str(exc)
-            )
+        rows = cl.validate(data)
     finally:
         cl._is_shallow = original
+    assert [r["id"] for r in rows] == ["A"], (
+        "a shallow checkout must ABSTAIN on the sha and still validate the record"
+    )
+    assert "UNPROVABLE" in capsys.readouterr().err, (
+        "the abstention must be ANNOUNCED — `render()` prints the sha as provenance, "
+        "so staying silent is the substitution this check exists to prevent"
+    )
+
+
+def _git(*args: str, cwd: Path) -> None:
+    subprocess.run(
+        ["git", *args], cwd=cwd, check=True, capture_output=True, text=True
+    )
+
+
+def test_the_shallow_probe_reads_the_checkout_it_is_given(tmp_path):
+    """The REAL probe, on BOTH clone shapes — not mocked out of reach.
+
+    ⛔ Both tests above replace `cl._is_shallow`, which is what makes them work on any
+    checkout — but it also left the probe itself unobserved: measured (#11217 review),
+    `_is_shallow()` returning `True` unconditionally deleted the tool's only
+    anti-forgery check in EVERY checkout, full-history ones included, and the file stayed
+    `58 passed`. The fail-OPEN direction is the one that must be pinned, so this builds
+    a full repository and a depth-1 clone of it and asks the probe about each.
+    """
+    full = tmp_path / "full"
+    full.mkdir()
+    _git("init", "-q", cwd=full)
+    _git("-c", "user.email=t@example.com", "-c", "user.name=t",
+         "commit", "-q", "--allow-empty", "-m", "base", cwd=full)
+    assert cl._is_shallow(full) is False, (
+        "a full-history repository must NOT read as shallow — if it did, the probe "
+        "would abstain everywhere and the provenance check would never run"
+    )
+
+    shallow = tmp_path / "shallow"
+    subprocess.run(
+        ["git", "clone", "-q", "--depth", "1", f"file://{full}", str(shallow)],
+        check=True, capture_output=True, text=True,
+    )
+    assert cl._is_shallow(shallow) is True, (
+        "a depth-1 clone must read as shallow — this is the CI `test` job's shape"
+    )
 
 
 # ── the REAL committed ledger ──────────────────────────────────────────────
