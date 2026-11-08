@@ -2095,11 +2095,27 @@ def test_the_real_machine_record_agrees_with_the_pins():
     # `to` spelling each left the earlier cuts RED and this one GREEN, while a re-staled
     # copy still reds.
     cited_ranges = set(re.findall(r":(\d+-\d+)", read_back))
-    assert cited_ranges == {"275-283", "2713-2715", "2724-2726", "2726-2728"}, (
-        f"the record's cited ranges are {sorted(cited_ranges)}; a range outside this set is "
-        "either a fabricated position or a re-staled one")
-    assert re.search(r"carries :2726-2728\b", read_back), (
-        "the record must name the LIVE census range it cites")
+    _expected_ranges = {"275-283", "2713-2715", "2724-2726", "2726-2728"}
+    assert cited_ranges == _expected_ranges, (
+        "the record's cited ranges are "
+        f"{sorted(cited_ranges)}; missing={sorted(_expected_ranges - cited_ranges)} "
+        f"unexpected={sorted(cited_ranges - _expected_ranges)} — an unexpected range is a "
+        "fabricated or re-staled position, a missing one is a claim that left the record")
+    # ⛔ EACH MOVE PINNED BY ADJACENCY, and the live slot by COUNT rather than by its verb.
+    # A set alone cannot tell the two mentions of `:2724-2726` apart (it is `a1dff7cec8`'s
+    # move TARGET and this branch's move SOURCE), so `:2713-2715 -> :2724-2726` swapped to
+    # `-> :2726-2728` stayed GREEN inside the set while crediting that commit with the final
+    # position — the one thing the field's own last clause denies (measured). With BOTH
+    # moves adjacency-pinned the duplicate can no longer shield a swap. And `carries` was
+    # itself a prose pin (`cites` redded with every number intact), so the live slot is
+    # `count >= 2`: the move supplies one mention and the live cite must supply the other,
+    # so deleting or re-staling the live one leaves 1 and reds.
+    assert re.search(r":2713-2715\s*(?:->|→|to)\s*:2724-2726\b", read_back), (
+        "the record must attribute the FIRST move to a1dff7cec8, at the intermediate "
+        "position it actually reached")
+    assert read_back.count(":2726-2728") >= 2, (
+        f"the record states :2726-2728 {read_back.count(':2726-2728')} time(s): the last "
+        "move supplies one mention and the LIVE cite must supply the other")
     assert re.search(r":2724-2726\s*(?:->|→|to)\s*:2726-2728\b", read_back), (
         "the record must attribute the LAST move of that window to this branch, which "
         "is the half its own +2 comment lines are responsible for")
