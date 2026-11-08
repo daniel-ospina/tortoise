@@ -1754,16 +1754,23 @@ re-cut from the resolved document (§8), and no committed verdict is re-scored.
 too — it is in `probes/capstone_measure.py`'s `DOOR_PINNED_ON` and in `acceptance_arm.pinned_to` at
 `origin/main` `a1dff7cec`, and §10.14 records it there as a bullet. ⛔ `91dbc9a88` (`#11449`) is NOT
 that pin: it introduced the **switch** (`tortoise/extractor_v2.py`, plus `.env.example`,
-`config/v4-mechanisms.yml` and its own test) and touches no file in this bundle. `827141f19` is not
-on `main` at all — and because that commit is reachable from no ref, a fresh clone does not have its
-object, so quote the check with the fetch that makes it answer rather than error:
+`config/v4-mechanisms.yml` and its own test) and touches no file in this bundle.
+`827141f19a031ce0589abc6e9dff8cbe86ad8c4e` is not on `main` at all
+(`git merge-base --is-ancestor … origin/main` → exit 1), and no branch this clone has fetched
+contains it, so a fresh clone of `main` does not have its object either — the check has to ask for
+that exact sha. ⛔ **Spell it in FULL.** `git fetch origin 827141f19` is not a shortened spelling of
+this command, it is a different one that always fails — measured here, it prints `fatal: couldn't
+find remote ref 827141f19`: a CANNOT-VERIFY that reads exactly like the absence this sentence is
+about, produced by nothing but the abbreviation:
 
 ```bash
-git fetch origin 827141f19 && git merge-base --is-ancestor 827141f19 origin/main   # exit 1 = not an ancestor
+git fetch origin 827141f19a031ce0589abc6e9dff8cbe86ad8c4e \
+  && git merge-base --is-ancestor 827141f19a031ce0589abc6e9dff8cbe86ad8c4e origin/main   # exit 1 = not an ancestor
 ```
 
-(Without the fetch, a clone that never had the object prints `fatal: Not a valid object name` — a
-CANNOT-VERIFY read as a verdict, the same defect this sentence is about.) An earlier revision
+(Both remaining outcomes are CANNOT-VERIFYs, not verdicts: a clone that never had the object prints
+`fatal: Not a valid object name` — exit 128, measured — and a full sha the server no longer holds
+fetches as `remote error: upload-pack: not our ref`, also measured.) An earlier revision
 of this paragraph credited that pair with the pin — the same defect class as every other claim in
 this record: stated, plausible, and not what the tree says. What THIS entry records is the part that
 landed here: the **§1.6.2 prose** sentence for the pin, and the roll-call restated **positionally**
