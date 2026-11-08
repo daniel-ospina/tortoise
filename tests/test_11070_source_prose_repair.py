@@ -2856,6 +2856,85 @@ def test_an_IDENTIFIER_SHAPED_token_is_refused_WHATEVER_the_switch_says(
             "a single token with trailing punctuation is ONE indexed term")
 
 
+def test_a_token_the_read_would_ESCAPE_is_REFUSED(monkeypatch, capsys):
+    r"""#11536 review round 7, P0: an escaped literal is not a term the index holds.
+
+    (1) FAILS on the round-6 tree: `build_or_query`'s degenerate single-token
+        branch sends the token through `escape_redisearch_literal`, which
+        backslash-escapes `[\\,;:\-|@~()\[\]{}<>=*%"$]` — and the escaped
+        LITERAL is not a term the index holds, because the index split on that
+        same character. MEASURED on a real FalkorDB at this head, one node whose
+        `_searchText` contains `friday`: probe `friday` -> 1 hit, probe
+        `friday,` -> `friday\\,` -> **0 hits**; `(friday)` and `-friday`
+        likewise. `probe_phrase_rejection` returned None (ACCEPTED) for all of
+        them, so `--dry-run --assert-clean --probe-phrase 'friday,'` exited 0
+        over a still-retrievable sentence — the exact UNDER-match class the
+        whitespace guard closed, one character class wider.
+    (2) REACHABLE: an operator copying the token out of a sentence types the
+        punctuation with it. `Fridays.` passed the round-6 no-false-block control
+        only because `.` is NOT in that escape set.
+    (3) POLARITY THAT MUST NOT GO RED: the bare word still certifies, and a
+        trailing `.`/`!` (not escaped, so it still matches) stays accepted.
+    """
+    from tortoise.session_source_prose_migration import probe_phrase_rejection
+
+    for phrase in ("friday,", "(friday)", '"friday"', "friday;", "-friday",
+                   "friday*", "friday:"):
+        assert probe_phrase_rejection(phrase), (
+            f"{phrase!r} was accepted as a probe — the read escapes it into a "
+            f"literal term the index does not hold, so it reads 0 while the "
+            f"sentence is still findable")
+    for phrase in ("friday", "friday.", "Fridays.", "friday!", "zebraquux"):
+        assert probe_phrase_rejection(phrase) is None, (
+            f"{phrase!r} was refused — it is ONE indexed term, so refusing it "
+            f"would be a false block")
+
+    # The argv arm refuses it too, so the run cannot certify on a dead probe.
+    _export_a_record_dsn(monkeypatch)
+    _install_cli(monkeypatch, _RecordingGraph([(_post_fix_node(),)]),
+                 ["--dry-run", "--assert-clean", "--probe-phrase", "friday,"])
+    assert _cli.main() == 2
+    assert "cannot serve as an FTS probe" in capsys.readouterr().err
+
+
+def test_classify_fts_hits_REQUIRES_the_phrase_so_no_proof_can_be_dropped():
+    """#11536 review round 7, P2: the default silently dropped two of three proofs.
+
+    (1) FAILS on the round-6 tree: `phrase: str | None = None` skipped BOTH
+        `_indexed_text_within_the_displayed_pair` (it early-returns True on absent
+        indexed text) and `_probe_explains_the_lexicon` (`phrase is None`).
+        MEASURED on a node carrying the prefix `summary` and NO `_searchText` — an
+        index entry that outlived the property, i.e. the leak shape —
+        `_hit_node_bucket(props, None)` returned `lexicon` (never vetoes) while
+        `_hit_node_bucket(props, 'friday')` returned `unexplained`. One omitted
+        keyword restored the round-2 P1 that split the bucket.
+    (2) REACHABLE: it is a keyword with a default on a public function; no in-tree
+        caller omits it, so the fix costs nothing and closes the class.
+    (3) POLARITY THAT MUST NOT GO RED: with `phrase` supplied the same node still
+        vetoes, and a healthy post-fix node is still a stem collision.
+    """
+    import pytest
+
+    from tortoise import session_source_prose_migration as m
+
+    with pytest.raises(TypeError):
+        m.classify_fts_hits(_RecordingGraph([(_post_fix_node(),)]),
+                            ["session:s-post"])
+
+    # The shape the default used to certify, now that the probe token is required.
+    orphan = _post_fix_node(url="session:s-orphan", sessionId="s-orphan")
+    orphan.pop("_searchText", None)
+    assert m._hit_node_bucket(orphan, "friday") == "unexplained", (
+        "a hit on a node with NO indexed text was certified as a collision with "
+        "text it does not have")
+    split = m.classify_fts_hits(_RecordingGraph([(orphan,)]),
+                               ["session:s-orphan"], phrase="friday")
+    assert split["lexicon"] == [] and split["unexplained"] == ["session:s-orphan"]
+
+    # (3) the healthy pair is still a stem collision.
+    assert m._hit_node_bucket(_post_fix_node(), "fridays") == "lexicon"
+
+
 def test_a_hit_on_a_PRE_FIX_node_IS_a_leak(monkeypatch):
     """The other polarity, and it is the one that must RED.
 
@@ -2903,7 +2982,8 @@ def test_a_hit_on_a_CLEARED_node_is_a_STALE_INDEX_LEAK_not_a_stem_collision(monk
     graph = _RecordingGraph([(cleared,)])
     _install_fts(monkeypatch, {"zebraquux": [("session:cleared", 1.0)]})
 
-    split = m.classify_fts_hits(graph, ["session:cleared"])
+    split = m.classify_fts_hits(graph, ["session:cleared"],
+                               phrase="zebraquux")
     assert split == {"residue": [], "lexicon": [], "stale": ["session:cleared"],
                      "foreign": [], "unexplained": [], "unread": []}, (
         "a CLEARED node's surviving index entry was classified as the post-fix "
@@ -2933,7 +3013,7 @@ def test_a_hit_on_a_CLEARED_node_is_a_STALE_INDEX_LEAK_not_a_stem_collision(monk
                              summary="", _searchText="friday, rebuild",
                              topics=["friday", "rebuild"])
     split = m.classify_fts_hits(_RecordingGraph([(restored,)]),
-                               ["session:restored"])
+                               ["session:restored"], phrase="friday")
     assert split["lexicon"] == ["session:restored"] and split["stale"] == [], (
         "a record-restored node PROVES the lexicon through `topics` — calling it "
         "stale would red a correct repair")

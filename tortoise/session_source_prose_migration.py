@@ -1359,6 +1359,29 @@ def probe_phrase_rejection(phrase: str) -> str | None:
                 f"FTS index splits on every non-alphanumeric character, so "
                 f"this cannot address ONE indexed term — pass a SINGLE RARE "
                 f"token (no digits, dashes or punctuation inside it)")
+    # ⛔ AND A TOKEN THE READ WILL **ESCAPE** IS NOT A PROBE (#11536 review
+    # round 7, P0). `build_or_query`'s degenerate single-token branch sends the
+    # token through :func:`tortoise.sparse.escape_redisearch_literal`, which
+    # backslash-escapes ``[\\,;:\-|@~()\[\]{}<>=*%"$]`` — and the escaped
+    # LITERAL is not a term the index holds, because the index split on that same
+    # character. MEASURED on a real FalkorDB at this head, one node whose
+    # ``_searchText`` contains ``friday``: probe ``friday`` -> 1 hit, probe
+    # ``friday,`` -> ``friday\,`` -> **0 hits** (``(friday)`` and ``-friday``
+    # likewise). That is the identical UNDER-match class as the whitespace guard
+    # above, one character class wider, and it lands on the arm the module itself
+    # declares has NO contradicting evidence (a dry run, or a ``--repair`` whose
+    # ``written`` is empty) — so `--dry-run --assert-clean --probe-phrase
+    # 'friday,'` certified over a still-retrievable sentence. ``Fridays.`` is
+    # accepted BECAUSE ``.`` is not in that set, which is why the no-false-block
+    # control never caught this.
+    from tortoise.sparse import escape_redisearch_literal
+
+    if escape_redisearch_literal(token) != token:
+        return (f"its punctuation is escaped by the read's literal fallback "
+                f"({escape_redisearch_literal(token)!r}), so the query is ONE "
+                f"literal term the index does not hold — the probe would "
+                f"UNDER-match and a still-findable sentence would read as "
+                f"absent — pass the bare word, without punctuation")
     built = build_or_query(token)
     if len(built.split("|")) != 1:
         return (f"the identifier mechanism expands it into several terms "
@@ -1608,7 +1631,7 @@ def _has_no_text(props: Mapping[str, Any]) -> bool:
     return True
 
 
-def classify_fts_hits(g, urls, *, phrase: str | None = None,
+def classify_fts_hits(g, urls, *, phrase: str,
                       timeout_ms: int = CACHE_READ_TIMEOUT_MS) -> dict:
     """Split *urls* into RESIDUE (still pre-fix prose) and LEXICON (repaired).
 
@@ -1640,12 +1663,20 @@ def classify_fts_hits(g, urls, *, phrase: str | None = None,
     proof is the display PREFIX alone, the INDEXED text must add no token the
     displayed pair lacks (:func:`_indexed_text_within_the_displayed_pair`) — a
     prefix ``summary`` over a still-prose ``_searchText`` is the leak, not a
-    collision; and, when *phrase* is given, the probe token must relate to one of
-    that node's OWN lexicon tokens (:func:`_probe_explains_the_lexicon`). A node
-    can prove the lexicon and still be a stale-index leak, because what matched is
-    the index entry the update was supposed to remove. ``unexplained`` is that
-    shape — neither provably the prose nor provably a stem collision — and it
-    vetoes.
+    collision; and the probe token must relate to one of that node's OWN lexicon
+    tokens (:func:`_probe_explains_the_lexicon`). A node can prove the lexicon and
+    still be a stale-index leak, because what matched is the index entry the
+    update was supposed to remove. ``unexplained`` is that shape — neither
+    provably the prose nor provably a stem collision — and it vetoes.
+
+    ⛔ ``phrase`` IS REQUIRED, NOT DEFAULTED (#11536 review round 7, P2). Third
+    proof is the one that catches the survived-index-entry leak, so an omitted
+    ``phrase`` silently restored the round-2 P1 that split the bucket: measured
+    on a node carrying the prefix ``summary`` and NO ``_searchText`` (an index
+    entry that outlived the property) ``_hit_node_bucket(props, None)`` returned
+    ``lexicon`` while ``_hit_node_bucket(props, 'friday')`` returned
+    ``unexplained``. Every in-tree caller already passes it; making it required
+    means no future one can quietly drop two of the three proofs.
 
     ⛔ ONE URL CAN CARRY SEVERAL NODES, AND EVERY ONE OF THEM IS CLASSIFIED
     (#11536 review round 3, P1): ``:Source`` declares no uniqueness on ``url``, and
@@ -1707,7 +1738,7 @@ def classify_fts_hits(g, urls, *, phrase: str | None = None,
     return out
 
 
-def _hit_node_bucket(props: dict, phrase: str | None) -> str:
+def _hit_node_bucket(props: dict, phrase: str) -> str:
     """One hit-row's bucket — the SAME predicates the census uses.
 
     Split out so the per-node question and the per-url fold cannot drift: the
@@ -1723,7 +1754,7 @@ def _hit_node_bucket(props: dict, phrase: str | None) -> str:
         if (_carries_the_display_prefix(props)
                 and not _indexed_text_within_the_displayed_pair(props)):
             return "unexplained"
-        if phrase is None or _probe_explains_the_lexicon(props, phrase):
+        if _probe_explains_the_lexicon(props, phrase):
             return "lexicon"
         return "unexplained"
     if is_episodic_source_node(props) and _has_no_text(props):
