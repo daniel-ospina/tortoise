@@ -44,6 +44,7 @@ import logging
 import multiprocessing
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -53,6 +54,10 @@ from tortoise import worker_topology as wt
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ENTRYPOINT = REPO_ROOT / "entrypoint.sh"
 HOSTED_API = REPO_ROOT / "tortoise" / "hosted_api.py"
+
+#: Marks the start of the pre-exec admission gate in `entrypoint.sh` — the seam
+#: between the count resolvers (section 5) and the refusal (section 6).
+_GATE_SENTINEL = "# ── #1677: the admission gate, BEFORE exec"
 
 _SHARED = {"TORTOISE_DB_URI": "rediss://tortoise.example.cloud:50317/tortoise"}
 _SHARED_VIA_CLOUD = {"FALKORDB_CLOUD_URI": "rediss://tortoise.example.cloud:50317/tortoise"}
@@ -713,9 +718,13 @@ def _worker_block(source: str) -> str:
     Sourcing the whole entrypoint would run it, and a line-grep is defeated by
     `printf`, an unbraced `$VAR`, or an intermediate variable — so the block is
     lifted verbatim and executed with a real argv.
+
+    ⛔ Ends at the GATE sentinel, not at `exec`: the pre-exec gate spawns an
+    interpreter and can legitimately refuse, and these arms are about the COUNT
+    resolvers agreeing. :func:`_run_gate_block` executes the gate.
     """
     start = source.index("_resolve_requested_workers() {")
-    end = source.index('exec "$@"', start)
+    end = source.index(_GATE_SENTINEL, start)
     assert end > start
     return source[start:end]
 
@@ -737,6 +746,38 @@ def _exported_workers(argv: tuple[str, ...], environ: dict[str, str]) -> int:
     marker = [ln for ln in proc.stdout.splitlines() if ln.startswith("WORKERS=")]
     assert marker, f"the block exported no count: {proc.stdout!r} {proc.stderr!r}"
     return int(marker[-1].split("=", 1)[1])
+
+
+def _gate_tail(source: str) -> str:
+    """Resolution + banner + the #1677 pre-exec gate, i.e. everything before `exec`.
+
+    The real composition, so the gate is tested with the count THIS script
+    exported rather than an injected one.
+    """
+    start = source.index("_resolve_requested_workers() {")
+    end = source.index('exec "$@"', start)
+    assert end > start
+    return source[start:end]
+
+
+def _run_gate_block(argv: tuple[str, ...],
+                    environ: dict[str, str]) -> subprocess.CompletedProcess:
+    """Run the SHIPPED resolution+gate tail in a real shell, with a real argv.
+
+    `python` is pinned to THIS interpreter's directory so the gate cannot resolve
+    a different one, and `PYTHONPATH` is the repo root so the import is the tree
+    under test.
+    """
+    script = "set -euo pipefail\n" + _gate_tail(ENTRYPOINT.read_text())
+    env = {
+        "PATH": f"{Path(sys.executable).parent}:{os.environ.get('PATH', '')}",
+        "PYTHONPATH": str(REPO_ROOT),
+        "_IS_SERVER": "1",
+        **environ,
+    }
+    return subprocess.run(["bash", "-c", script, "entrypoint", *argv],
+                          env=env, cwd=str(REPO_ROOT),
+                          capture_output=True, text=True, check=False)
 
 
 #: ONE table, executed by BOTH resolvers. The app reads the shell's value first
@@ -805,6 +846,14 @@ _AGREEMENT_TABLE: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
     (("uvicorn", "app:app", "--workers", "2", "--workers"), {}),
     (("uvicorn", "app:app", "--workers", "2", "--workers"),
      {"WEB_CONCURRENCY": "4"}),
+    # …and the same divergence through the VALUE, not a trailing flag: the shell
+    # consumes `--workers=` as DATA (it never re-scans the token it just read),
+    # while the Python arm used to re-scan it as the flag form and clear the
+    # value. `_workers_flag_value` now consumes the value token and steps past
+    # it, exactly like the shell loop, so both read this as ONE malformed value.
+    (("uvicorn", "app:app", "--workers", "--workers="), {}),
+    (("uvicorn", "app:app", "--workers", "--workers="),
+     {"WEB_CONCURRENCY": "3"}),
 )
 
 
@@ -1041,3 +1090,57 @@ def test_the_gate_is_imported_at_module_scope():
         "the admission gate is no longer a module-scope import in hosted_api; a "
         "function-local import of it is the #2922 UnboundLocalError class"
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 6. The SHIPPED pre-exec gate — a refusal must EXIT NON-ZERO
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# ⛔ Why the entrypoint gate exists at all as an ENFORCER (uvicorn 0.52.1,
+# measured): a refusal raised from a worker's startup exits **0** through
+# uvicorn's Multiprocess supervisor (`keep_subprocess_alive` sets `should_exit`
+# and returns; only the single-process path raises `SystemExit(3)`). Measured:
+# a raising lifespan with `--workers 3` -> exit 0; one worker -> exit 3. With
+# `fly.toml`'s `restart policy = "on-failure"`, exit 0 is a STOPPED machine with
+# no crash loop (#2850) — precisely in the N>1 case the refusal exists for.
+# The pre-exec gate converts that into `exit 1`, and its STATUS is the property
+# under test.
+
+def test_the_shipped_gate_refuses_n_workers_on_an_embedded_db_with_exit_1():
+    proc = _run_gate_block(
+        ("uvicorn", "tortoise.hosted_api:app", "--workers", "2"), {})
+    assert proc.returncode == 1, (proc.stdout, proc.stderr)
+    assert "admission gate refused this boot" in proc.stderr
+    assert "EMBEDDED" in proc.stderr
+
+
+def test_the_shipped_gate_permits_a_single_worker():
+    proc = _run_gate_block(("uvicorn", "tortoise.hosted_api:app"), {})
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    assert "workers = 1" in proc.stdout
+
+
+def test_the_shipped_gate_refuses_an_unacknowledged_shared_multi_worker():
+    proc = _run_gate_block(("uvicorn", "app:app", "--workers", "2"), dict(_SHARED))
+    assert proc.returncode == 1, (proc.stdout, proc.stderr)
+    assert wt.ACK_ENV in proc.stderr
+
+
+def test_the_shipped_gate_permits_an_acknowledged_shared_multi_worker():
+    proc = _run_gate_block(
+        ("uvicorn", "app:app", "--workers", "2"), {**_SHARED, wt.ACK_ENV: "1"})
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    assert "workers = 2" in proc.stdout
+
+
+def test_the_shipped_gate_refuses_a_count_that_came_from_web_concurrency():
+    """The gate must read the count the SCRIPT resolved, not just the argv."""
+    proc = _run_gate_block(
+        ("uvicorn", "app:app"), {**_SHARED, wt.WEB_CONCURRENCY_ENV: "3"})
+    assert proc.returncode == 1, (proc.stdout, proc.stderr)
+    assert wt.ACK_ENV in proc.stderr
+
+
+def test_the_shipped_gate_sees_the_reload_token_as_one_worker():
+    proc = _run_gate_block(("uvicorn", "app:app", "--reload"), {})
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)

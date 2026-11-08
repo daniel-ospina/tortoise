@@ -618,4 +618,50 @@ if [ "$_IS_SERVER" = "1" ]; then
     fi
 fi
 
+# ── #1677: the admission gate, BEFORE exec — so a refusal EXITS NON-ZERO ─────
+# The block above closes the `--lifespan off` BYPASS. This one closes the
+# ENFORCEMENT hole that remains when the lifespan DOES run: a refusal raised from
+# a worker's startup exits **0**.
+#
+# MEASURED (uvicorn 0.52.1, a lifespan that raises): `--workers 3` -> exit 0;
+# one worker -> exit 3. uvicorn's Multiprocess supervisor handles a worker's
+# STARTUP_FAILURE by setting `should_exit` and RETURNING
+# (`supervisors/multiprocess.py::keep_subprocess_alive`) — it never calls
+# `sys.exit`; only the single-process path raises `SystemExit(3)`. This repo's
+# `fly.toml` is `restart policy = "on-failure"` and records that a stopped
+# machine is ZERO healthy instances (#2850). So the in-app refusal is loud and
+# non-zero exactly when 1 worker runs, and silent-and-zero exactly when N>1
+# runs — inert in the one case it exists for.
+#
+# Running the SAME policy pre-exec fixes that: it is the shipped image's path
+# (`Dockerfile.hosted` ENTRYPOINT), the count is already measured above, and the
+# refusal becomes `exit 1`, which `on-failure` sees. `refusal_reason` is the one
+# policy — this is not a second copy of the rules — and the real uvicorn argv is
+# passed through so `--reload` resolves exactly as the app will resolve it.
+# The in-app gate stays as the backstop for a direct `uvicorn` invocation that
+# bypasses this script.
+if [ "$_IS_SERVER" = "1" ]; then
+    # `|| _gate_rc=$?` is required, not style: this script runs `set -e`, so a
+    # bare `_gate_out="$(…)"` would exit on the refusal BEFORE the diagnosis is
+    # printed — leaving the operator with the policy text and no statement that
+    # the GATE refused.
+    _gate_rc=0
+    _gate_out="$(python - "$@" <<'PY' 2>&1
+import sys
+
+from tortoise.worker_topology import observe, refusal_reason
+
+reason = refusal_reason(observe(argv=sys.argv[1:]))
+if reason:
+    print(reason)
+    raise SystemExit(1)
+PY
+    )" || _gate_rc=$?
+    if [ "$_gate_rc" -ne 0 ]; then
+        echo "tortoise: FATAL — #1677 multi-worker admission gate refused this boot (exit $_gate_rc):" >&2
+        printf '%s\n' "$_gate_out" >&2
+        exit 1
+    fi
+fi
+
 exec "$@"

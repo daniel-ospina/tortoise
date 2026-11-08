@@ -184,7 +184,17 @@ from tortoise.env_truthy import is_truthy
 logger = logging.getLogger(__name__)
 
 #: Set by ``entrypoint.sh``: the worker count uvicorn WILL run, measured with
-#: uvicorn's own precedence. **An output of the boot script — not an input.**
+#: uvicorn's own precedence.
+#:
+#: ⛔ NOT an input to UVICORN — it never reads this name, so hand-setting it
+#: cannot raise the count the server runs. It IS however the FIRST input to
+#: :func:`resolve_effective_workers`, which trusts the boot script's measurement
+#: over re-deriving it, and the pre-exec gate in ``entrypoint.sh`` reads the same
+#: value. So a stale or hand-exported value does not change what uvicorn runs,
+#: but it CAN make this module refuse a boot that is really one worker (the count
+#: it reports is then a declaration the machine contradicts), and on an embedded
+#: DB that refusal is not liftable by :data:`ACK_ENV`. Keep this variable an
+#: output: nothing but ``entrypoint.sh`` should set it.
 WORKERS_ENV = "TORTOISE_WEB_WORKERS"
 
 #: The explicit acknowledgement that this deployment has landed the
@@ -327,18 +337,25 @@ def _workers_flag_value(argv: Sequence[str] | None = None) -> str | None:
     """
     args = list(sys.argv if argv is None else argv)
     found: str | None = None
-    for index, token in enumerate(args):
+    index = 0
+    while index < len(args):
+        token = args[index]
         if token == WORKERS_FLAG:
-            # ⛔ A trailing bare flag CLEARS the value; it must not keep an
-            # earlier occurrence's. The shell arm overwrites unconditionally
-            # (`_count="${_args[$_i]:-}"`, which reads empty past the end and
-            # falls through to `$WEB_CONCURRENCY`), so `--workers 2 --workers`
-            # resolved to 1 there and 2 here — a parser-boundary divergence no
-            # `_AGREEMENT_TABLE` row pinned. click exits 2 on that argv, so no
-            # topology exists to describe; the two resolvers must still agree.
-            found = args[index + 1] if index + 1 < len(args) else None
-        elif token.startswith(WORKERS_FLAG + "="):
+            # ⛔ The NEXT token is the VALUE whatever it looks like, and it is
+            # CONSUMED — never re-scanned as a flag. That is what the shell arm
+            # does (`_count="${_args[$_i]:-}"`, then it steps past), so a
+            # value that itself looks like a flag (`--workers --workers=`) is ONE
+            # malformed value in both resolvers instead of "flag, then flag" in
+            # one. A trailing bare flag reads EMPTY (absent), which is the
+            # shell's `-z` fall-through to `$WEB_CONCURRENCY`. click exits 2 on
+            # both shapes, so no topology exists to describe — but the two
+            # resolvers must still agree, because `_AGREEMENT_TABLE` runs both.
+            found = args[index + 1] if index + 1 < len(args) else ""
+            index += 2
+            continue
+        if token.startswith(WORKERS_FLAG + "="):
             found = token[len(WORKERS_FLAG) + 1:]
+        index += 1
     return found if found else None
 
 

@@ -3634,8 +3634,7 @@ surfaces:
   - test_socket_bound_not_multiplied_2969.py
   - test_boot_regressions.py
   # #1677: the multi-worker admission gate — see the DUAL note on the `api` row
-  # (
-  # near `test_boot_regressions.py` there). `tortoise/worker_topology.py` matches
+  # near `test_boot_regressions.py` there. `tortoise/worker_topology.py` matches
   # no named pattern, so a worker_topology.py-only change falls through to `core`
   # and this row is the only one that selects its evidence.
   - test_worker_topology.py
