@@ -701,20 +701,27 @@ unfirable (block at the top of §10).
 > default arm, keeping everything the `#4899` identifier-only predicate does not fire on (measured:
 > 0 drops of 61 Objects). Judge the fold by that, not by "the flags default OFF"; and presence is not
 > sufficiency, because the fold's **remedy** half is unimplemented in both. VET's **coverage signal**
-> only **detects** (`check_batch`'s `coverage_suspect` — *"reported, never acted on"*, and only for a
+> only **detects** (`check_batch`'s `coverage_suspect` — reported by the gate, **acted on by the
+> PIPELINE** since `#11002` (which is what `in v1` used to defer), and only for a
 > narrative that produced **zero** candidates). `apply_vet` only **removes** — **except** the Layer-1
 > entity RESTORE from `prior` (`vet_gate.py` **Rule 4**), which re-emits an entity an EARLIER pass
 > discarded, needs a surviving candidate to reference it, and never sources a new candidate from the
 > narrative (`OUTCOMES` = KEEP/NOOP/DISCARD/MERGE; `MERGE` is a verdict VET records and S3 applies —
 > `#5006`). CLASSIFY
 > only **labels** (`classify_items` returns a kind per **existing** id; `_apply_classify_kinds` adds no
-> item). So **no stage the design folds S4's purpose into — and no successor stage — can emit a
-> candidate a coverage check found missing** (`run_s4` is today's gap-filler and does exactly that) —
-> removing `run_s4` today DELETES gap-filling instead of relocating it. The universal is scoped to the
+> item). So **no stage the design folds S4's purpose into can emit a candidate a coverage check found
+> missing** — the fold's **remedy** half is unimplemented in both. ✅ **The successor is the bounded
+> S2.2 re-narrate (§4.4, `#11002`)** — `_renarrate_trigger` → `_arm_extract`, the `emphasis` seam in
+> `run_s1`: it fires **once**, re-extracts, and **unions both arms** with `merge_embed_lists` under
+> E4's identity-key rules, so it CAN add a candidate the coverage check found missing and it preserves
+> both arms' items (merges-not-replaces — the owner's ruling on `#11002`). The universal is scoped to the
 > FOLD on purpose: an unqualified "no shipped stage" would deny the very capability the dash clause
 > says is lost, since `run_s4` *is* a shipped stage. The pre-condition for removal is a stage
-> that can ADD; building it is the migration deliverable.
-> (Pinned: `tests/test_extractor_v4_s4_stage_claims.py`.)
+> that can ADD; the successor above is that stage (`tests/test_selection_step.py` pins the ADD proof
+> and the union), and what still stands between it and the deletion is §4.4's **F3** measurement —
+> `_s4_merge_stats`'s `added_by_s4 > 0` **while** `coverage_suspect` is False, i.e. an episode the
+> retry cannot reach — which is an eval-lane run, not a code change.
+> (Pinned: `tests/test_extractor_v4_s4_stage_claims.py`, `tests/test_selection_step.py`.)
 >
 > **On the step *names*:** the code's own stages are **S1–S5** (`[S1] STORY SUMMARY` … `[S5] EMBED`, module
 > docstring), with `S2.2 VET` present in the production path. **`S0` and `S6` have no code
