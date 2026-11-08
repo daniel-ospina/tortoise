@@ -108,7 +108,9 @@ property of the change under test: without the opt-in they skip with a reason
 that names the variable (#11056 — an ambient `$HOME` cache used to run a
 minutes-per-question bench inline in the fast gating shard).
 
-**Strong-model 500-Q config (the toutable benchmark, ready to run):** the
+**Strong-model 500-Q config (strong-reader INTERNAL BASELINE SERIES — name the
+official judge for a number comparable to a published figure; see
+`docs/benchmarks/longmemeval-500q/run-report.md` §1.1):** the
 500-Q LongMemEval-S baseline (run_protocol step 5) with the STRONG reader
 model that reproduced the failing commits (qwen3.8-max, verified 2026-08-30
 on the #2027 evidence):

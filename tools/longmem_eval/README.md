@@ -860,8 +860,10 @@ before loading a question and every run needed an override — which records
 `reader_pinned: false`. The model is unchanged; the transport moved, and with it
 the request shape: the direct DeepSeek lane is served by
 `_ThinkingDisabledTransport`, so every default request also carries
-`thinking:{"type":"disabled"}` — part of the pinned configuration, not a routing
-detail.)
+`thinking:{"type":"disabled"}`. ⛔ That is selected by the ROUTED PROVIDER'S KEY
+ENV, not by the model id (`THINKING_BY_DEFAULT_KEY_ENVS = {"DEEPSEEK_API_KEY"}`):
+re-pointing the SAME model at `openrouter:` drops the guard and returns an empty
+answer inside the 500-token budget, which is the trap this pin moved off.)
 The prompt constants
 (`_SYSTEM_PROMPT`, `_TYPE_FRAGMENTS`) live in the same module. Every report
 records the reader's resolved identity + the verbatim prompt in its

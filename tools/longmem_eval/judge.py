@@ -738,11 +738,12 @@ def build_judge(spec: str | None = None, *, mock: bool = False) -> Judge:
     if not any(os.environ.get(_PROVIDERS[p][1]) for p in _PROVIDER_PRIORITY):
         raise RuntimeError(
             "no LLM provider key configured for the LongMemEval judge. The "
-            "DEFAULT judge is our own pinned model (deepseek-v4-flash), which "
-            "needs DEEPSEEK_API_KEY — set that and re-run, or pass --mock for "
-            "the offline mock judge. Any of OPENROUTER_API_KEY / "
-            "OPENAI_API_KEY / DEEPSEEK_API_KEY / GEMINI_API_KEY will let a "
-            "build run, but the spec decides which is used. To grade with the "
+            "DEFAULT judge is our own pinned model (deepseek-v4-flash), so "
+            "DEEPSEEK_API_KEY is what a default build needs — set that and "
+            "re-run, or pass --mock for the offline mock judge. Another "
+            "provider's key only helps when you ALSO name that provider's "
+            "spec (below the any-key gate, the named provider's key is what "
+            "is checked). To grade with the "
             "OFFICIAL judge (the only configuration whose number may be "
             "compared to a published figure) name it explicitly: "
             "TORTOISE_LME_JUDGE_MODEL=openrouter:openai/gpt-4o-2024-08-06 with "
