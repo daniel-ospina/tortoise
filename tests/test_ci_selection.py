@@ -2314,7 +2314,10 @@ def test_a_bff_only_diff_runs_the_provisioning_server_only_coupling_guard():
     that pins the BFF's half of the server-only contract.
 
     `tests/test_provisioning_edge_function.py` was registered ONLY on `api`, whose
-    SOURCE_PATTERNS hold no dashboard path. `website/apps/dashboard/functions/`
+    SOURCE_PATTERNS hold no path covering `website/apps/dashboard/functions/` or
+    `website/apps/dashboard/src/` (its one dashboard entry is
+    `public/vendor/`, so an `api`-only registration was asleep on the two
+    directories this contract actually lives in). `website/apps/dashboard/functions/`
     and `website/apps/dashboard/src/` are `onboarding` SOURCE_PATTERNS, and a
     named-surface match REPLACES the `core` fallback — so a diff that deleted
     `"origin"` from `provision.ts`'s `STRIP_REQUEST` (or pointed `main.jsx` at the
