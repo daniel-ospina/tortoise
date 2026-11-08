@@ -6243,11 +6243,23 @@ def _install_read_hook_impl(args) -> int:
             for p in cline_paths:
                 if not p.exists():
                     continue
-                if _cline_owns_path(p):
-                    p.unlink()
-                    removed.append(p)
-                else:
+                if not _cline_owns_path(p):
                     skipped.append(p)
+                    continue
+                # #2124 review P2: a delete is BEST-EFFORT, exactly like the
+                # ownership READ above (`_cline_owns_path` returns False on
+                # OSError). An unlink that cannot complete (a root-owned
+                # .cline/hooks, a read-only mount, root-squashed NFS) must not
+                # abort AFTER another path was already removed and report the
+                # run as `Install failed:` — nothing actually left behind would
+                # be named.
+                try:
+                    p.unlink()
+                except OSError as exc:
+                    print(f"Note: could not remove {p}: {exc} — remove it "
+                          "manually.", file=_sys.stderr)
+                    continue
+                removed.append(p)
             if not removed:
                 print(f"No {harness} registration of ours at {target} — "
                       "nothing to remove.")
@@ -6267,12 +6279,26 @@ def _install_read_hook_impl(args) -> int:
             # nothing through the extension, and would double-inject through
             # the SDK/CLI now that the live path exists. Remove OUR OWN old
             # file; a foreign one is left alone and merely reported.
+            #
+            # The delete is BEST-EFFORT (#2124 review P2): the live
+            # registration is already written and reported installed, so an
+            # unlink that cannot complete must not turn a working install into
+            # `Install failed:` + exit 1 while the stale file it meant to retire
+            # keeps double-injecting. Same reasoning as the ownership read above.
             if legacy_target is not None and legacy_target.exists():
                 if _cline_owns_path(legacy_target):
-                    legacy_target.unlink()
-                    print(f"Removed the legacy registration at "
-                          f"{legacy_target} — Cline's VS Code extension never "
-                          "read that path, so it injected nothing there.")
+                    try:
+                        legacy_target.unlink()
+                        print(f"Removed the legacy registration at "
+                              f"{legacy_target} — Cline's VS Code extension "
+                              "never read that path, so it injected nothing "
+                              "there.")
+                    except OSError as exc:
+                        print(f"Note: could not remove the legacy "
+                              f"registration at {legacy_target}: {exc} — it "
+                              "stays in place (Cline's SDK/CLI reads it, its "
+                              "extension does not); remove it manually.",
+                              file=_sys.stderr)
                 else:
                     print(f"Note: {legacy_target} exists and is not a "
                           "tortoise hook — left untouched.", file=_sys.stderr)

@@ -367,6 +367,48 @@ def test_install_cline_leaves_a_FOREIGN_legacy_hook_alone(tmp_path):
     assert "left untouched" in r.stderr
 
 
+def test_install_cline_reports_a_failed_legacy_cleanup_as_a_note(tmp_path,
+                                                               monkeypatch, capsys):
+    """A best-effort cleanup must not turn a WORKING install into
+    `Install failed:` (#2124 review P2).
+
+    The live registration is written and reported installed FIRST; when the
+    legacy file then cannot be unlinked (root-owned `.cline/hooks`, a read-only
+    mount, root-squashed NFS) the run must say so and still exit 0. Aborting
+    with `Install failed:` names nothing that was actually left behind, and is
+    inconsistent with the migration's own ownership READ, which already treats
+    an unreadable legacy file as merely reportable.
+
+    MUTATION: drop the `except OSError` around the legacy unlink → the boundary
+    turns PermissionError into `Install failed:` and exit 1 → RED.
+    """
+    import tortoise.__main__ as tmain
+
+    root = tmp_path / "proj"
+    legacy = root / ".cline" / "hooks" / "UserPromptSubmit"
+    live = root / ".clinerules" / "hooks" / "UserPromptSubmit"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("#!/usr/bin/env bash\n"
+                      "exec /nonexistent/volunteer-turn.sh cline\n")
+
+    real_unlink = Path.unlink
+
+    def _refuse(path, *a, **kw):
+        if path == legacy:
+            raise PermissionError(13, "Permission denied", str(path))
+        return real_unlink(path, *a, **kw)
+
+    monkeypatch.setattr(Path, "unlink", _refuse)
+    rc = tmain._install_read_hook_impl(_read_hook_args(root, harness="cline"))
+    err = capsys.readouterr().err
+
+    assert rc == 0, f"a working install was reported as a failure: {err}"
+    assert "Install failed" not in err
+    assert live.exists(), "the live registration must still be installed"
+    assert "could not remove the legacy registration" in err
+    assert legacy.exists(), "the unremovable path must be named, not dropped"
+
+
 def test_install_cline_uninstall_removes_a_legacy_only_registration(tmp_path):
     """A user whose only registration is the legacy one can still uninstall —
     the `no registration → clean no-op` guard must not fire over a legacy
