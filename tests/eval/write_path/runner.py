@@ -219,7 +219,7 @@ def render_store_lines(session_id: str, conversation: list[dict], harness: str) 
     asserts).
     """
     lines: list[str] = []
-    for turn in conversation:
+    for i, turn in enumerate(conversation):
         role = turn.get("role", "user")
         content = turn.get("content", "")
         if harness == "codex":
@@ -250,6 +250,24 @@ def render_store_lines(session_id: str, conversation: list[dict], harness: str) 
                     "role": role,
                     "content": [{"type": "text", "text": content}],
                 }
+            }
+        elif harness == "openclaw":
+            # #2120: OpenClaw's replay seam is the plugin's OWN spool — one
+            # JSONL record per turn, written by
+            # `tortoise/openclaw-plugin/index.mjs::captureRecords` and filed by
+            # `session_import.parsers.parse_openclaw`.  It is NOT a harness
+            # session-store render (OpenClaw keeps its runtime transcript in
+            # SQLite with no documented file contract): the plugin owns the
+            # format, so the matrix row must render the plugin's shape or it
+            # grades a format nothing writes.
+            # `ts` is the parser's within-session sort key, so it is rendered
+            # monotonically from the turn index — a constant would make the
+            # round-trip order-of-arrival dependent.
+            record = {
+                "session_key": session_id,
+                "role": role,
+                "text": content,
+                "ts": f"2026-01-01T00:00:{i:02d}Z",
             }
         else:
             raise RunError(f"no store render for harness {harness!r}")

@@ -20,6 +20,7 @@ import pytest
 
 from tests.eval.write_path import corpus, generate_corpus, runner, schema
 from tests.eval.write_path.judge import JUDGE_PIN_MECHANICAL
+from tortoise.session_import import parse_openclaw
 
 
 def _tmp_corpus(tmp_path) -> object:
@@ -84,6 +85,49 @@ def test_unknown_harness_render_raises(tmp_path):
 
     with pytest.raises(ValueError):
         parse_transcript(tmp_path / "nope.jsonl", "not-a-harness")
+
+
+def test_openclaw_row_is_in_the_real_seam_matrix(tmp_path):
+    """#2120's scope bullet — "W3 harness seam entry for OpenClaw (ingest +
+    inject graded)", and indicator (5).
+
+    INGEST: a committed corpus conversation renders into the OpenClaw spool
+    shape the SHIPPED plugin writes (``index.mjs::captureRecords``) and the
+    REAL ``parse_openclaw`` files it back byte-identically — so OpenClaw is a
+    row of the replay matrix, not a one-off test beside it.  INJECTION is
+    graded by
+    ``tests/test_openclaw_seam.py::test_real_seam_both_directions_over_a_seeded_graph``.
+
+    Non-vacuity: the row is asserted to be a DIFFERENT store from the ``pi``
+    row that parses to the SAME conversation, and the rendered record's keys
+    are the plugin's own — a ``pi`` render wearing an ``openclaw`` label, or a
+    renderer that quietly fell back to another harness, fails here.
+    """
+    session_id = "wp03_ember_design"
+    conversation = corpus.load_fixture(session_id)["conversation"]
+
+    runner.parse_roundtrip(
+        session_id, conversation, "openclaw", workdir=tmp_path
+    )
+
+    openclaw_render = runner.render_store_lines(session_id, conversation, "openclaw")
+    pi_render = runner.render_store_lines(session_id, conversation, "pi")
+    assert openclaw_render != pi_render, (
+        "the openclaw row rendered the pi store — the matrix row grades a "
+        "format nothing writes"
+    )
+
+    first = json.loads(openclaw_render.splitlines()[0])
+    assert set(first) == {"session_key", "role", "text", "ts"}, (
+        f"the record keys drifted from the plugin's spool contract: {sorted(first)}"
+    )
+    assert first["session_key"] == session_id
+
+    # The spool is the parser's real input, per file (one session per file).
+    spool = tmp_path / f"{session_id}.jsonl"
+    assert parse_openclaw(spool) == [
+        {"role": t.get("role"), "content": t.get("content")} for t in conversation
+    ]
 
 
 # ── Pre-flight ─────────────────────────────────────────────────────────────

@@ -317,16 +317,22 @@ pass:
 | The plugin's hosted leg is `POST /v1/context` (`apiKey` config, the ONLY reflex path for a user with no local CLI) | **It never worked.** `runHosted` posted `{prompt}`; `POST /v1/context` requires `window: [{role, content}]` (`VolunteerContextRequest`, `tortoise/hosted_api.py`), so every hosted turn was a 422 — and the fail-open catch turns that into an empty injection with no signal anywhere. Graded now by `tests/test_openclaw_seam.py::test_hosted_body_is_the_contract_the_server_validates`, which executes the plugin under a stubbed `fetch` and validates the emitted body with the SERVER's own model (a hand-copy of the shape would have re-encoded the bug). |
 | "Cross-turn dedupe" = the plugin's block digest | **Incomplete.** The digest only suppresses an IDENTICAL block; a block that changes by one pointer re-surfaces the rest. The reflex has a stage-5 re-mention suppression that reads `prior_context` — and no CLI seam could supply it, because `tortoise volunteer` had no `--prior-context` (only `--session-id`, which the pipeline validates and never consults). The CLI now takes `--prior-context` (and `prior_context` in its JSON contract dict), and the plugin passes the block it injected last turn. Both polarities are pinned: `tests/test_platform_seams.py::test_volunteer_cli_prior_context_suppresses_a_re_mention`. The sibling seams still do not pass it — Hermes' `--session-id` claim is the same false premise (#8957), and the one-shot shell hooks have nowhere to keep a prior block. |
 
-Note on what remains UNDELIVERED: #2120's scope item "W3 harness seam entry
-(ingest + inject graded)" is not built — `git grep -ln openclaw -- tests/eval/`
-matches nothing, so the W3 harness has no OpenClaw row. It is no longer
-BLOCKED: `tests/eval/harness/corpus.py:33` sets `"reflex": "graded"` (#8125's
+Note on the W3 harness row: #2120's scope item "W3 harness seam entry
+(ingest and inject graded)" is served by TWO graded rows. **Ingest** is a row
+in the replay matrix
+(`tests/eval/write_path/test_write_path_runner.py::test_openclaw_row_is_in_the_real_seam_matrix`):
+a committed corpus conversation renders into the OpenClaw spool shape the
+SHIPPED plugin writes, and the REAL `parse_openclaw` files it back
+byte-identically. **Injection** is
+`tests/test_openclaw_seam.py::test_real_seam_both_directions_over_a_seeded_graph`,
+which drives the shipped handlers through the REAL `tortoise volunteer` over a
+seeded embedded graph. The row was buildable all along:
+`tests/eval/harness/corpus.py:33` sets `"reflex": "graded"` (#8125's
 activation, landed in 8ac79e12f1) and the CI-gating echo lane's baseline
 carries it (`tests/eval/harness/baselines/m2.json:6`). The one lane still on
 the NULL reflex is the llm product lane (`baselines/main.json:6`), and
-re-blessing THAT needs a keyed product-lane run — a different, narrower
-blocker than the sweep this note used to claim. So the row is buildable now;
-only the product lane's blessing still waits on #8125.
+re-blessing THAT needs a keyed product-lane run — a narrower blocker that does
+not gate a per-seam row.
 
 ## Frameworks (#2125) — SDK-level middleware, injection only
 
