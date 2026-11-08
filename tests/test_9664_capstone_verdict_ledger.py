@@ -848,9 +848,53 @@ def test_the_commands_agents_md_hands_a_lane_are_not_false_blocked(tmp_path, com
     "project label" arm, which re-admitted `cmd:make NOT-RUN`. See
     `test_a_NON_PATH_argument_behind_a_runner_is_not_a_citation`. The rest of this
     test pins that the every-segment rule does not start refusing real records.
+
+    ⛔ SCOPE OF THIS CLAIM, corrected after review. This test covers the
+    pytest / ruff / redirection / comment / line-continuation families — NOT every
+    command `AGENTS.md` hands a lane. Four shapes it also hands over are still
+    REFUSED, and are pinned as such by
+    `test_the_agents_md_shapes_this_arm_still_refuses_are_pinned` so the gap is
+    disclosed rather than implied closed.
     """
     proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, command])]))
     assert proc.returncode == cl.EXIT_CLEAN, proc.stdout + proc.stderr
+
+
+def test_the_agents_md_shapes_this_arm_still_refuses_are_pinned(tmp_path):
+    """KNOWN-OPEN: four `AGENTS.md` commands are still REFUSED, and that is disclosed.
+
+    Measured at this head (each `EXIT_INVALID`, and exit 1 prints NO uncovered list,
+    so a lane recording what it actually ran loses the whole report):
+
+        cmd:uv sync --extra embeddings --extra parity
+        cmd:uv lock --check
+        cmd:git fetch origin main && git rev-parse origin/main
+        cmd:git ls-files --others --exclude-standard
+
+    ⛔ WHY THIS IS PINNED AND NOT FIXED. Every one of them needs the arm to know
+    that a flag or a subcommand TAKES A VALUE (`--extra <name>`, `fetch <remote>`),
+    which is the same mechanism that would let `--anything NOT RUN` skip the token
+    saying the work was not run — it would re-open the fail-opens this very review
+    closed (`-cBODY`, the quoted dashed value, and the wrapper head). Trading a
+    disclosed false block for a silent false PASS is the wrong direction for a
+    gate, so the gap is recorded here and on #11520 instead.
+
+    Flipping any of these to ACCEPTED is the deliberate act: move the entry into
+    `test_the_commands_agents_md_hands_a_lane_are_not_false_blocked` in the same
+    commit, and prove the fail-open half still refuses.
+    """
+    for command in (
+        "cmd:uv sync --extra embeddings --extra parity",
+        "cmd:uv lock --check",
+        "cmd:git fetch origin main && git rev-parse origin/main",
+        "cmd:git ls-files --others --exclude-standard",
+    ):
+        proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, command])]))
+        assert proc.returncode == cl.EXIT_INVALID, (
+            f"{command!r} is now ACCEPTED — if `_RUNNER_SUBCOMMANDS`/flag-value "
+            f"handling was added, move this entry to the false-block test and prove "
+            f"`--anything NOT RUN` still refuses.\n{proc.stdout}{proc.stderr}"
+        )
 
 
 def test_a_NON_PATH_argument_behind_a_runner_is_not_a_citation(tmp_path):
