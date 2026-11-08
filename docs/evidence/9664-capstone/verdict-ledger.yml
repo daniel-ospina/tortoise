@@ -410,7 +410,7 @@ criteria:
     # cases" line (taken from `#9340`) lists the four with NO labels, and it is
     # `#9340`'s scope-restatement comment that makes this one the case that must be
     # ACCEPTED: the resolver's order (`id -> namespace -> unique name`, this tree's
-    # `tortoise/mcp_auth.py`) refuses only ambiguous / unknown / deleted /
+    # `tortoise/mcp_auth.py`) refuses a graph that is ambiguous / unknown / deleted /
     # other-workspace. Only the other three ugly cases have a refusal as their
     # outcome (which is why U3 is verified on one).
     # A half-measured criterion has no home in this

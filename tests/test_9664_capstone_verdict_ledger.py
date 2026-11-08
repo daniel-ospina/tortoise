@@ -73,10 +73,12 @@ EXPECTED_IDS = [
 #: **plus a second graph to target**. A pass minted the credential
 #: (`uv run tortoise signup`) and delivered the write over `/mcp`, and graded the
 #: row `verified` off the refusal that came back. That was a FALSE PASS: `#9664`'s
-#: own "ugly cases" line (which it takes from `#9340`) makes an explicit
-#: non-default graph the ACCEPT arm — the resolver's tiers are id -> namespace ->
-#: unique name (`tortoise/mcp_auth.py`) — and a refusal is only the legitimate
-#: outcome for the other three ugly cases (U3's row). The half that is still missing
+#: own "ugly cases" line (taken from `#9340`) lists the four with NO labels, and it
+#: is `#9340`'s scope-restatement comment (refusing only ambiguous / unknown /
+#: deleted / other-workspace) that makes an explicit non-default graph the case
+#: that must be ACCEPTED — the resolver itself lives in `tortoise/mcp_auth.py`.
+#: A refusal is only the legitimate outcome for the other three ugly cases (U3's
+#: row). The half that is still missing
 #: is the second graph, refused `402 "Custom graphs require the Builder plan"` —
 #: the same missing thing U2/U4 record, so moving this row would have graded one
 #: blocker two ways. The
