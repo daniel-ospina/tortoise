@@ -53,11 +53,21 @@ DISTRACTOR_LEAKAGE_TOLERANCE = 1
 
 # ── Enumerations ────────────────────────────────────────────────────────────
 # Harness values mirror the session-capture boundary (hosted_api.py
-# ``_SESSION_HARNESS_VALUES``: claude/claude-desktop/claude-web/codex/cursor/pi).
-# Kept as a literal here (not an import of hosted_api) so the schema stays
-# hermetic and import-light; drift between this set and the capture boundary
-# is a review item at W2-b wiring time.
-HARNESS_VALUES = frozenset({"claude", "claude-desktop", "claude-web", "codex", "cursor", "pi"})
+# ``_SESSION_HARNESS_VALUES``).  Kept as a literal here (not an import of
+# hosted_api) so the schema stays hermetic and import-light; drift between this
+# set and the capture boundary is a review item at W2-b wiring time —
+# ``test_write_path_runner.py::test_harness_values_mirror_the_capture_boundary``
+# IS that review item, executed.
+#
+# #2120/#2121 freshening: ``openclaw`` and ``hermes`` were added to the capture
+# boundary by their own seams and the literal here had not followed, so a
+# fixture could not legally declare either.  Widening the set changes no
+# existing fixture (none declares them) and no committed baseline; it removes a
+# gate that would reject the next corpus row before it could be written.
+HARNESS_VALUES = frozenset({
+    "claude", "claude-desktop", "claude-web", "codex", "cursor", "pi",
+    "openclaw", "hermes",
+})
 ROLE_VALUES = frozenset({"user", "assistant"})
 KIND_VALUES = frozenset({"fact", "idea", "decision", "vibe", "entity"})
 

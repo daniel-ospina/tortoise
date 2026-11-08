@@ -106,7 +106,7 @@ import re
 import sys
 import tempfile
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 # Module root helpers — this file doubles as the CLI entry
@@ -208,6 +208,18 @@ def preflight(root: Path = corpus.WRITE_PATH_DIR, *, posture: str = "llm") -> di
 # ── Store-file render + parser round-trip (S1 real parser seam) ─────────────
 
 
+def _monotonic_ts(turn_index: int) -> str:
+    """A deterministic, lexicographically MONOTONIC ISO-8601 stamp.
+
+    ``parse_openclaw`` sorts a session's records by the raw ``ts`` STRING, so
+    the stamp must sort with the turn index for every index, not just the
+    first hundred: interpolating the index into a seconds field emits invalid
+    times at 60+ and stops sorting at 100 (``00:00:100Z`` < ``00:00:11Z``).
+    """
+    return (datetime(2026, 1, 1, tzinfo=UTC) +
+            timedelta(seconds=turn_index)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def render_store_lines(session_id: str, conversation: list[dict], harness: str) -> str:
     """Deterministic store-format render of the fixture conversation.
 
@@ -260,14 +272,17 @@ def render_store_lines(session_id: str, conversation: list[dict], harness: str) 
             # SQLite with no documented file contract): the plugin owns the
             # format, so the matrix row must render the plugin's shape or it
             # grades a format nothing writes.
-            # `ts` is the parser's within-session sort key, so it is rendered
-            # monotonically from the turn index — a constant would make the
-            # round-trip order-of-arrival dependent.
+            # `ts` is the parser's within-session SORT KEY
+            # (`parse_openclaw` does `sorted(..., key=lambda row: row[0])`), so
+            # it is rendered from a REAL advancing timestamp: length-padded
+            # fields stay lexicographically monotonic past turn 59/99, which a
+            # seconds-only interpolation does not (``00:00:60Z`` is not a time,
+            # and ``00:00:100Z`` sorts before ``00:00:11Z``).
             record = {
                 "session_key": session_id,
                 "role": role,
                 "text": content,
-                "ts": f"2026-01-01T00:00:{i:02d}Z",
+                "ts": _monotonic_ts(i),
             }
         else:
             raise RunError(f"no store render for harness {harness!r}")

@@ -317,22 +317,27 @@ pass:
 | The plugin's hosted leg is `POST /v1/context` (`apiKey` config, the ONLY reflex path for a user with no local CLI) | **It never worked.** `runHosted` posted `{prompt}`; `POST /v1/context` requires `window: [{role, content}]` (`VolunteerContextRequest`, `tortoise/hosted_api.py`), so every hosted turn was a 422 — and the fail-open catch turns that into an empty injection with no signal anywhere. Graded now by `tests/test_openclaw_seam.py::test_hosted_body_is_the_contract_the_server_validates`, which executes the plugin under a stubbed `fetch` and validates the emitted body with the SERVER's own model (a hand-copy of the shape would have re-encoded the bug). |
 | "Cross-turn dedupe" = the plugin's block digest | **Incomplete.** The digest only suppresses an IDENTICAL block; a block that changes by one pointer re-surfaces the rest. The reflex has a stage-5 re-mention suppression that reads `prior_context` — and no CLI seam could supply it, because `tortoise volunteer` had no `--prior-context` (only `--session-id`, which the pipeline validates and never consults). The CLI now takes `--prior-context` (and `prior_context` in its JSON contract dict), and the plugin passes the block it injected last turn. Both polarities are pinned: `tests/test_platform_seams.py::test_volunteer_cli_prior_context_suppresses_a_re_mention`. The sibling seams still do not pass it — Hermes' `--session-id` claim is the same false premise (#8957), and the one-shot shell hooks have nowhere to keep a prior block. |
 
-Note on the W3 harness row: #2120's scope item "W3 harness seam entry
-(ingest and inject graded)" is served by TWO graded rows. **Ingest** is a row
-in the replay matrix
-(`tests/eval/write_path/test_write_path_runner.py::test_openclaw_row_is_in_the_real_seam_matrix`):
-a committed corpus conversation renders into the OpenClaw spool shape the
-SHIPPED plugin writes, and the REAL `parse_openclaw` files it back
-byte-identically. **Injection** is
-`tests/test_openclaw_seam.py::test_real_seam_both_directions_over_a_seeded_graph`,
-which drives the shipped handlers through the REAL `tortoise volunteer` over a
-seeded embedded graph. The row was buildable all along:
-`tests/eval/harness/corpus.py:33` sets `"reflex": "graded"` (#8125's
-activation, landed in 8ac79e12f1) and the CI-gating echo lane's baseline
-carries it (`tests/eval/harness/baselines/m2.json:6`). The one lane still on
-the NULL reflex is the llm product lane (`baselines/main.json:6`), and
-re-blessing THAT needs a keyed product-lane run — a narrower blocker that does
-not gate a per-seam row.
+Note on the W3 harness row: #2120's scope item "W3 harness seam entry (ingest
+and inject graded)" is *partly* delivered. **Injection** is fully graded:
+`tests/test_openclaw_seam.py::test_real_seam_both_directions_over_a_seeded_graph`
+drives the shipped handlers through the REAL `tortoise volunteer` over a
+seeded embedded graph. **Ingest** is graded through the replay matrix's own
+renderer —
+`tests/eval/write_path/test_write_path_runner.py::test_openclaw_ingest_roundtrip_through_the_matrix_renderer`
+renders a committed corpus conversation into the OpenClaw spool shape the
+SHIPPED plugin writes and files it back with the REAL `parse_openclaw` — but it
+is **not yet a corpus ROW**: the matrix iterates committed FIXTURES and renders
+`fixture["harness"]`, and no fixture declares `openclaw`, so `run_benchmark`
+never replays one. A fixture row changes the corpus hash and therefore needs a
+justified re-bless (`schema.bless` refuses an unexplained `fixtures_hash`
+change). What was the real gate — `schema.HARNESS_VALUES` rejecting `openclaw`
+outright, so the fixture could not even be written — is removed and pinned by
+`test_harness_values_mirror_the_capture_boundary`. Nothing about this waits on
+issue 8125: the graded reflex is the harness default
+(`tests/eval/harness/corpus.py:33`, activated by `8ac79e12f1`) and the
+CI-gating echo lane's baseline carries it
+(`tests/eval/harness/baselines/m2.json:6`); only the llm product lane's
+re-bless (`baselines/main.json:6`) needs a keyed run.
 
 ## Frameworks (#2125) — SDK-level middleware, injection only
 

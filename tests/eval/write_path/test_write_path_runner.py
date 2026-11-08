@@ -69,6 +69,24 @@ def test_parser_roundtrip_is_byte_identical(session_id, harness, tmp_path):
     assert {k for t in conversation for k in t} == {"role", "content"}
 
 
+def test_harness_values_mirror_the_capture_boundary():
+    """The drift ``schema.HARNESS_VALUES``' own comment calls "a review item at
+    W2-b wiring time" — executed instead of remembered.
+
+    The literal had fallen behind the capture boundary (#2120 added ``openclaw``,
+    #2121 added ``hermes``), which is what made an OpenClaw fixture illegal
+    before anyone could write one. A future member added to the boundary and not
+    here fails this row rather than silently rejecting a corpus fixture.
+    """
+    from tortoise import hosted_api
+
+    assert frozenset(hosted_api._SESSION_HARNESS_VALUES) == schema.HARNESS_VALUES, (
+        "schema.HARNESS_VALUES has drifted from hosted_api._SESSION_HARNESS_VALUES: "
+        f"missing={sorted(set(hosted_api._SESSION_HARNESS_VALUES) - schema.HARNESS_VALUES)} "
+        f"extra={sorted(schema.HARNESS_VALUES - set(hosted_api._SESSION_HARNESS_VALUES))}"
+    )
+
+
 def test_parse_roundtrip_drift_raises(tmp_path):
     # #2174-lint F841: the old `conversation` fixture was unused — the drift
     # case builds its own `drifted` transcript below.
@@ -87,16 +105,22 @@ def test_unknown_harness_render_raises(tmp_path):
         parse_transcript(tmp_path / "nope.jsonl", "not-a-harness")
 
 
-def test_openclaw_row_is_in_the_real_seam_matrix(tmp_path):
-    """#2120's scope bullet — "W3 harness seam entry for OpenClaw (ingest +
-    inject graded)", and indicator (5).
+def test_openclaw_ingest_roundtrip_through_the_matrix_renderer(tmp_path):
+    """#2120's ingestion half, through the replay matrix's OWN renderer.
 
-    INGEST: a committed corpus conversation renders into the OpenClaw spool
-    shape the SHIPPED plugin writes (``index.mjs::captureRecords``) and the
-    REAL ``parse_openclaw`` files it back byte-identically — so OpenClaw is a
-    row of the replay matrix, not a one-off test beside it.  INJECTION is
-    graded by
-    ``tests/test_openclaw_seam.py::test_real_seam_both_directions_over_a_seeded_graph``.
+    The renderer now supports OpenClaw (the plugin's spool shape, written by
+    ``index.mjs::captureRecords`` and filed by ``parse_openclaw``), and this
+    grades that path: a committed corpus conversation renders into it and the
+    REAL parser files it back byte-identically.
+
+    ⛔ SCOPE, stated exactly: this is NOT yet a CORPUS row.  The matrix iterates
+    committed FIXTURES and renders ``fixture["harness"]``; no committed fixture
+    declares ``openclaw``, so ``run_benchmark`` never replays one.  Adding a
+    fixture changes the corpus hash and therefore needs a justified re-bless
+    (``schema.bless`` refuses an unexplained ``fixtures_hash`` change), which is
+    why it is not done here.  ``schema.HARNESS_VALUES`` is widened and pinned by
+    ``test_harness_values_mirror_the_capture_boundary`` so the fixture row is
+    legal when it is written.
 
     Non-vacuity: the row is asserted to be a DIFFERENT store from the ``pi``
     row that parses to the SAME conversation, and the rendered record's keys
