@@ -4526,9 +4526,9 @@ def _doc_section(text: str, start: str, end: str) -> str:
 # Those need the predicate to know the sentence's SUBJECT, to read a second
 # negation, or to resolve a preposition — scope, not vocabulary — so they are
 # DECLARED and not claimed closed.
-# Window measured at THIS head over all 34 `must_red` rows: 0 and 2 leave the
-# must_red set fully RED (0/34 leak) and keep the real doc a HIT; **3 opens 2 of
-# 34**, starting with "are not missed by the walk". ⛔ Window 0 is not free
+# Window measured at THIS head over all 41 `must_red` rows: 0 and 2 leave the
+# must_red set fully RED (0/41 leak) and keep the real doc a HIT; **3 opens 2 of
+# 41**, starting with "are not missed by the walk". ⛔ Window 0 is not free
 # either, one set over: it wrongly REDS **10** of the 16 `declared_open` rows.
 # And since #11437's round-6 clause-scope rows landed, **window 1 is no longer
 # clean at all** — it wrongly REDS 4 of them: the two PSEUDO-CLEFT rows (`walk` is
@@ -4549,11 +4549,17 @@ def _doc_section(text: str, start: str, end: str) -> str:
 # ⛔ EVERY figure in this paragraph was re-derived by MEASUREMENT at the head that
 # added the round-9/10/11 rows, because the counts above are inputs and a stale
 # input misreports coverage even when the verdict is right (#11437 review, P3).
-# The `must_red` set is **34** at this head, not the 29 those rounds inherited: the
-# four verdicts reproduced unchanged at 34/16/15 — window 0 leaks 0/34 and reds
+# The `must_red` set is **41** at this head, not the 29 those rounds inherited: the
+# four verdicts reproduced unchanged at 41/16/15 — window 0 leaks 0/41 and reds
 # 10/16 `declared_open`; window 1 reds 4/16 (the same four identities named
 # above); window 3 opens exactly the two rows named and wrongly GREENs exactly
 # 1/15 `declared_blocks` (`coverage verb outside the walk/visit/reach/report`).
+# ⛔ Round 12 added SEVEN rows (the six cue-only pseudo-negations and `_DEFEATED`'s
+# `incorrect`, each previously pinned by pattern text alone — see `must_red`) and
+# the sweep was RE-RUN over all four sets at 41/13/16/15: every verdict above is
+# byte-for-byte the same, only the denominators moved (0/34 -> 0/41, 2 of 34 -> 2
+# of 41). Stated because "the rows grew and the verdicts did not" is exactly the
+# kind of claim this paragraph exists to have measured rather than assumed.
 # Re-derive with the substring substitution on `_NEGATION_GOVERNS`'s window
 # (`{0,2}?` -> `{0,N}?`), re-evaluating ALL FOUR sets — never `must_red` alone.
 # ⛔ COST, taken deliberately: window 2 makes "…are never TOUCHED by the walk"
@@ -4594,8 +4600,8 @@ _NEGATION_GOVERNS = re.compile(
     r"(?:walk|visit|reach|report)(?:s|es|ed|ing)?\b")
 # ⛔ `_COVERAGE` is RETAINED DELIBERATELY AND IS CURRENTLY IMPLIED, and saying so
 # is the point (#11437 review, P3). Measured: `_NEGATION_GOVERNS` already requires
-# one of the same four verbs AFTER the negation, so on all 108 candidate sentences
-# (the 78 rows across the four sets — 34 / 13 / 16 / 15 — plus the 30 sentences of
+# one of the same four verbs AFTER the negation, so on all 115 candidate sentences
+# (the 85 rows across the four sets — 41 / 13 / 16 / 15 — plus the 30 sentences of
 # the real §3 under
 # this predicate's own `split(". ")` segmentation) there is no case where the
 # governance test hits and this one does not — dropping the term from
@@ -4856,7 +4862,7 @@ def _residual_sentences(s3: str) -> list[str]:
       visited"` and `"the walk does not, as an earlier draft said, visit …"` both
       red (#11437 review, round 6, P2). Both are ROWS in `declared_blocks` below.
       ⛔ This is the price of the window itself, and widening it to 3 is measured
-      to open 2 of the 34 `must_red` rows (`not` + a non-coverage verb, and `not`
+      to open 2 of the 41 `must_red` rows (`not` + a non-coverage verb, and `not`
       governing an adjective) and to wrongly GREEN 1 `declared_blocks` row, so it
       is declared rather than paid for in the other direction;
     * an HONEST statement stated inside a CONCESSIVE whose cue happens to sit next
@@ -5314,6 +5320,36 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
         "hedge: `might not`":
             "the walk might not visit a nested `def`'s decorators and parameter "
             "defaults",
+        # ⛔ THE OTHER SIX CUES OF THE PSEUDO-NEGATION CLASS, EACH GIVEN ITS OWN
+        # EXECUTOR (#11437 review, round 12, P3). `_AFFIRMED`'s termset carries
+        # nine cues and only THREE of them (`sure`, `always`, `necessarily`) had
+        # a row: `certain`, `certainly`, `clear`, `definitely`, `conclusively` and
+        # `guaranteed` were held up by the pattern-presence literal in
+        # `_unasserted_arms` and by nothing else. Measured before this round: with
+        # `clear` deleted from `_AFFIRMED` AND from that literal, the whole file
+        # stayed GREEN and `"it is not clear the walk reports …"` went back to
+        # being a valid residual — a two-place edit, which is the `ing` /
+        # `decorator`-`default` class this file already reds, one spelling out. The
+        # row set is this class's stated defence and it could not see it, so each
+        # cue now has a row that dies on ITS ablation and no other's.
+        "hedge: `not certain`":
+            "it is not certain the walk visits a nested `def`'s decorators and "
+            "defaults",
+        "hedge: `not certainly`":
+            "the walk does not certainly visit a nested `def`'s decorators and "
+            "defaults",
+        "hedge: `not clear`":
+            "it is not clear the walk reports a nested `def`'s decorators and "
+            "parameter defaults",
+        "hedge: `not definitely`":
+            "the walk does not definitely visit a nested `def`'s decorators and "
+            "defaults",
+        "hedge: `not conclusively`":
+            "the walk does not conclusively report a nested `def`'s decorators "
+            "and defaults",
+        "hedge: `not guaranteed`":
+            "the walk is not guaranteed to visit a nested `def`'s decorators "
+            "and defaults",
         # ⛔ THE CONCESSIVE WORD ORDER WITHOUT `does` (#11437 review, P3, F4's own
         # example, which the rows above did not cover): the arm requires the cue
         # to govern a coverage verb and `not only visits` satisfies it, while
@@ -5336,6 +5372,17 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
         "inverse: CONDITIONAL — the claim is a premise, not an assertion":
             "if the walk does not visit a nested `def`'s decorators and "
             "parameter defaults, the census would under-report",
+        # ⛔ `_DEFEATED`'s `incorrect` MARKER, GIVEN A ROW OF ITS OWN (#11437
+        # review, round 12, P3). The marker loop below asserts each of the four
+        # markers is still IN `_DEFEATED`, so the ONE-place edit was visible — but
+        # the two-place edit (delete the marker AND its presence pin) red nothing
+        # and re-opened `"…, which is incorrect"` as a valid residual. `is false`,
+        # `in fact` and `if` each already carried a row; `incorrect` did not. This
+        # one is red only through `\bincorrect\b`: it carries none of the other
+        # three markers and no `_AFFIRMED` cue, so it cannot pass on a sibling arm.
+        "inverse: quote-and-refute — `which is incorrect`":
+            "an earlier draft of this document said the walk does not visit a "
+            "nested `def`'s decorators and parameter defaults, which is incorrect",
     }
     for label, sentence in must_red.items():
         assert sentence != original, f"row {label!r} merely restates the claim"
@@ -5609,19 +5656,28 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
             f"the `{_set_name}` row set is EMPTY: every loop over it runs zero "
             f"times, so this test asserts nothing. A set that can be deleted is "
             f"a set that cannot pin anything")
-    # A FLOOR, not an exact count — adding rows is free; silently DELETING them is
-    # the failure measured above.
-    assert len(must_red) >= 27, (
-        f"`must_red` has shrunk to {len(must_red)} rows (floor 27). Rows may be "
-        f"added freely, but a row that disappears takes its measured shape's "
-        f"falsifier with it")
+    # A FLOOR WAS HERE (`len(must_red) >= 27`) AND IT IS RETIRED, NOT RENUMBERED
+    # (#11437 review, round 12, P3). It was written when the set held 27 rows;
+    # rounds 9-11 grew the set to 34 and the floor never moved, so it left a 7-row
+    # hole in the middle of the one guard whose stated job is to make a
+    # disappearing falsifier loud. Measured: deleting 7 non-sole-carrier rows AND
+    # re-cutting the three stated figures below left this test GREEN (rc=0) — 20 %
+    # of the falsifiers could go. Its stated licence, "adding rows is free", was
+    # never true either: the figure pins below red on ANY change to the set size,
+    # in both directions, so a row cannot be added without the prose being re-cut
+    # alongside it. A hand-count figure that no executor derives is precisely the
+    # class this file exists to remove, so the floor is deleted rather than
+    # re-numbered: the emptiness loop above still reds on total deletion, and the
+    # figure pins below red on any partial one until each stated figure is re-cut
+    # with it — which is a VISIBLE edit, and visibility is what the pin buys.
 
     # ⛔ THE STATED DENOMINATORS GET AN EXECUTOR (#11437 review, round 11, P3).
-    # The floor above says adding rows is free — and that is exactly why the
-    # PROSE'S figures drift: rounds 9-11 added rows and the paragraph that says
-    # "measured at THIS head over all 29 rows of `must_red`" kept its denominator,
-    # so one file carried TWO sizes for one set (34 here, 29 there) and the
-    # verdicts it reports looked calibrated when they were not. A stated figure
+    # It was the retired floor's licence ("adding rows is free") that let the
+    # PROSE'S figures drift, and it is why the floor is gone: rounds 9-11 added
+    # rows and the paragraph that says "measured at THIS head over all 29 rows of
+    # `must_red`" kept its denominator, so one file carried TWO sizes for one set
+    # (34 there, 29 there) and the verdicts it reports looked calibrated when they
+    # were not. A stated figure
     # whose only executor is a reader is the false-PASS shape this whole file is
     # about, so the two sentences are pinned against the artifact itself: the
     # figures are read out of THIS FILE's own text and compared to the real set
@@ -5791,10 +5847,24 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
         assert _arm in _pinned_affirmed.pattern, (
             f"the unasserted arm `{_arm}` has left `_AFFIRMED`, so the tally "
             f"above now names an arm that does not exist")
-        assert not any(_arm in _ablated for _, _ablated in _affirmed_ablations), (
-            f"`{_arm}` is listed above as UNASSERTED but an ablation entry now "
-            f"covers it — the prose and the loop disagree about which four "
-            f"arms have no executor")
+        # ⛔ THE COVERAGE TEST IS BEHAVIOURAL, NOT A SUBSTRING (#11437 review,
+        # round 12, P2). This asked `_arm in _ablated` — "is the arm's pattern "
+        # text a substring of the ablation's pattern text" — which is the wrong
+        # DIRECTION: an ablation that NEUTRALISES an arm need not contain it.
+        # Measured: changing the `skipped` ablation to `r"\bexcept"` (a PREFIX of
+        # the `\bexcept that\b` arm) left this assert GREEN, and the suite GREEN
+        # with it, while `except that` silently gained an executor and `skipped`
+        # silently lost one — the prose still said "FOUR are unasserted" and
+        # `9 - 5 = 4` still held, so the count could not see it. The test is now
+        # the one the loop below already performs: apply the ablation and ask
+        # whether the arm is still there afterwards.
+        for _abl_name, _ablated in _affirmed_ablations:
+            _after_ablation = _pinned_affirmed.pattern.replace(
+                _ablated, r"\bZZZNEVERMATCH\b")
+            assert _arm in _after_ablation, (
+                f"`{_arm}` is listed above as UNASSERTED but the `{_abl_name}` "
+                f"ablation NEUTRALISES it — the prose and the loop disagree "
+                f"about which four arms have no executor")
     # ⛔ AND THE TWO FIGURES AS WRITTEN — the ones a reader actually reads. The
     # derivation above pins the ARTIFACT; without this the SENTENCE could still
     # say EIGHT/four over a nine/five artifact, which is precisely the round-11
