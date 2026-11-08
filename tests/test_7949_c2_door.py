@@ -1103,6 +1103,20 @@ def test_the_probe_pins_the_lane_and_reads_it_back():
             f"measures (or can, if its sibling switch moves), and is not "
             f"pinned: an inherited value would be measured under a door whose "
             f"log claims it was pinned (#10983 review round 2)")
+    # Cycle 11 (#10360): the census above would ALSO be satisfied by declaring
+    # this one an acknowledged non-seam, which would be the wrong call — it is a
+    # write-path guard, so its OFF arm writes a point the ON arm withholds.
+    # Asserting the CLASSIFICATION, not merely that something accounts for it.
+    assert ("TORTOISE_STATE_VALUE_VERBATIM", "1") in probe.DOOR_PINNED_ON, (
+        "TORTOISE_STATE_VALUE_VERBATIM is #10360's write-path guard and is "
+        "DEFAULT-ON (`extractor_v2._state_value_verbatim_enforced`), so its "
+        "absent state is neutral and an ambient `=0` is the non-neutral state: "
+        "OFF disarms `_refuse_rewritten_value`, and a point whose value the "
+        "model REWROTE is then WRITTEN into the graph the run writes instead of "
+        "withheld. It must be PINNED (to the shipped default), not absorbed by "
+        "`acknowledged_not_a_measurement_seam` — an unclassified read is how an "
+        "inherited shell changes the measured population under a door the log "
+        "says is pinned (#10983 reviews)")
 
 
 class _Unpoppable(dict):
