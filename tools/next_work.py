@@ -26,6 +26,15 @@ WHAT IS A WORK UNIT (mechanically, from records that already exist)
                second copy of the gate), plus a head-bound review attestation
                (``record-review.sh --check-carry``) and a real merge test
                (``git merge-tree --write-tree``, never the ``mergeable`` flag).
+    population  the fleet's ONE work-unit rule: the ``POOL_JQ`` assignment in
+               agent-infra's ``scripts/orchestrator-harness/refresh-candidates.sh``
+               (#10951). It is EXTRACTED and DRIVEN with ``jq``, never restated —
+               a second copy of this predicate is the defect the issue removes. A
+               row it withholds is not a unit of work whatever else is true of it:
+               assigned to a human, DECLARING ``standing-constraint``, or a
+               CONTAINER by title kind (an epic/decision/design/coord/measure/…
+               is where work is TRACKED). An unreadable rule withholds EVERY row
+               and refuses the run — an unmeasured eligibility is not a pass.
     claimable  ``refs/claims/*`` — the holder-authored cross-box registry that
                #8175 established as the answer to "who holds this?" — plus the
                LOCAL branches and worktrees whose slug names the issue, which
@@ -123,6 +132,11 @@ Exit codes
            per-key abstention, not a note beside a pick), the attestation TOOL
            (``record-review.sh`` absent — not a per-PR ``norecord``/``unreadable``
            verdict, which is a real answer and lands the row at ``NEEDS-REVIEW``),
+           the fleet's work-unit rule (``refresh-candidates.sh`` absent, carrying no
+           usable ``POOL_JQ``, or that program refused by ``jq`` — #10951; on a box
+           with neither ``scripts/`` nor ``$AGENT_INFRA_PATH`` this is an ALWAYS-ON
+           exit 2, by design, because a queue whose eligibility was never measured
+           is not a queue that passed),
            the issue search, or the PR list;
          · a SHAPE the door refuses — a decision input, a pull field, an issue
            element, an element of a list, or a value that is the wrong type for
@@ -2055,6 +2069,16 @@ _POOL_JQ_RE = re.compile(r"^POOL_JQ='([^']*)'[ \t]*$", re.M)
 #: NOT-A-UNIT (named, still withheld) rather than mislabelled.
 POPULATION_ARMS = (REASON_ASSIGNED, REASON_DECLARED, REASON_CONTAINER)
 
+#: What each arm must MENTION for the name to be assigned to it. Positional
+#: attribution was measured to be unsafe: joining the same three stages in another
+#: order keeps `len == 3` and the rejoin identity, so a reordered upstream program
+#: made the CONTAINER arm read "its labels DECLARE `standing-constraint`" and the
+#: ASSIGNED arm read "its title kind is a CONTAINER" — confidently, with a normal
+#: provenance line, and `test_the_fixture_rule_mirrors_the_shipped_one` cannot see
+#: it on a runner (that tie is the one test that skips when `scripts/` is absent).
+#: The withhold is unaffected either way; the LABEL must not lie.
+POPULATION_ARM_MARKERS = (".assignees", ".labels", ".title")
+
 
 def _population_script(repo_root: Path) -> str:
     """Where the shipped rule lives — env override, then this checkout, then the tree.
@@ -2151,10 +2175,37 @@ def _top_level_stages(prog: str) -> list[str]:
     return stages
 
 
+def _arm_indexes(stages: list[str]) -> dict[str, int] | None:
+    """Map each REASON to the stage index that PROVES it is that arm — by content.
+
+    Positional attribution was measured to be unsafe: joining the same three stages
+    in another order keeps `len == 3` and the rejoin identity, so a reordered
+    upstream program made the CONTAINER arm read "its labels DECLARE
+    `standing-constraint`" and the ASSIGNED arm read "its title kind is a
+    CONTAINER" — confidently, with a normal provenance line. Each marker must
+    appear in exactly one stage; two stages mentioning `.labels` (or none) is not an
+    attribution but a guess, so it returns None and the rows fall back to
+    NOT-A-UNIT. The withhold is unaffected either way; the LABEL must not lie.
+    """
+    found: dict[str, int] = {}
+    for reason, marker in zip(POPULATION_ARMS, POPULATION_ARM_MARKERS, strict=True):
+        owners = [i for i, stage in enumerate(stages) if marker in stage]
+        if len(owners) != 1:
+            return None
+        found[reason] = owners[0]
+    if len(set(found.values())) != len(POPULATION_ARMS):
+        return None
+    return found
+
+
 def _population_program(prog: str) -> tuple[str, bool]:
     """One jq invocation for every row: what the rule KEEPS, and which arm withheld."""
     stages = _top_level_stages(prog)
-    attributable = len(stages) == len(POPULATION_ARMS) and "|".join(stages) == prog
+    attributable = (
+        len(stages) == len(POPULATION_ARMS)
+        and "|".join(stages) == prog
+        and _arm_indexes(stages) is not None
+    )
     body = "reduce .[] as $r ([]; . + [{n: $r.number, kept: ([$r | " + prog + "]|length)"
     if attributable:
         body += "".join(
@@ -2263,15 +2314,22 @@ def _population_verdicts(repo_root: Path, snap: Snapshot) -> None:
         snap.population_source = "UNREADABLE — jq emitted non-JSON"
         return
 
+    stages = _top_level_stages(prog)
+    by_reason = _arm_indexes(stages) if attributable else None
     for row in verdicts:
         if int(row.get("kept") or 0):
             continue
         reason = REASON_NOT_A_UNIT
-        if attributable:
-            for index, arm_reason in enumerate(POPULATION_ARMS):
-                if not int(row.get(f"a{index}") or 0):
-                    reason = arm_reason
-                    break
+        if by_reason:
+            # The row's FIRST failing stage identifies the arm — but the NAME comes
+            # from that stage's content (`by_reason`), never from its position.
+            for index in range(len(stages)):
+                if int(row.get(f"a{index}") or 0):
+                    continue
+                reason = next(
+                    (r for r, i in by_reason.items() if i == index), REASON_NOT_A_UNIT
+                )
+                break
         snap.population[str(row.get("n"))] = reason
     digest = hashlib.sha256(prog.encode()).hexdigest()[:12]
     snap.population_source = f"{script} · POOL_JQ sha256:{digest}"
@@ -2718,12 +2776,24 @@ def render(
         withholds = sorted(
             {u.reason for u in units if u.withheld_by_population or u.reason in REASONS_WITHHELD}
         )
-        if withholds:
+        # ⛔ TWO VOCABULARIES, TWO SENTENCES (#10951 review, F3). A CLAIMED or
+        # SUPERSEDED row is described by the sentence that belongs to it; putting it
+        # in the population sentence made a fold-only queue read "a queue whose rows
+        # are containers, declared constraints, assigned…", which is not why IT is
+        # not pickable. Only the population reasons get the population parenthetical.
+        population_reasons = {u.reason for u in units if u.withheld_by_population}
+        if withholds and population_reasons:
             out.append(
                 "  NONE — no unit is pickable: every measured one is withheld as "
                 + ", ".join(withholds)
-                + " (a queue whose rows are containers, declared constraints, assigned "
-                "or otherwise not units is an ANSWER, not an error)."
+                + " (a queue whose rows are containers, declared constraints or otherwise "
+                "not units is an ANSWER, not an error)."
+            )
+        elif withholds:
+            out.append(
+                "  NONE — no unit is pickable: every measured one is withheld as "
+                + ", ".join(withholds)
+                + ". That is an answer, not an error."
             )
         else:
             out.append(
@@ -2936,7 +3006,10 @@ def _main(argv: Sequence[str] | None = None) -> int:
             "decision: a claim lease's polarity is decided by claims.sh "
             "when the snapshot is collected and recorded in it, so a replay is exact with no clock "
             "seam to forget.\n\n"
-            "Reads: label listing via search/issues (paginated, never page-capped), the repo's own "
+            "Reads: label listing via search/issues (paginated, never page-capped), the fleet's "
+            "work-unit rule (the POOL_JQ assignment in agent-infra's "
+            "scripts/orchestrator-harness/refresh-candidates.sh, driven through `jq` — the "
+            "`jq` binary is a RUNTIME DEPENDENCY of this tool), the repo's own "
             "queue gate from .mergify.yml (via tools/queue_resweep.py), refs/claims (via "
             "scripts/orchestrator-harness/claims.sh), record-review.sh --check-carry, and "
             "git merge-tree --write-tree (which fetches a PR head it does not have locally into "

@@ -870,3 +870,37 @@ def test_the_footer_names_an_unrecognised_verdict_by_presence(monkeypatch):
     assert pick is None
     assert "STANDING-CONSTRAINT-V2" in text, text
     assert "every measured one is held, superseded, or a duplicate" not in text
+
+
+def test_arm_attribution_is_by_content_not_by_position(monkeypatch, tmp_path):
+    """A reordered upstream program must not mislabel the arm.
+
+    Measured by the reviewer: joining the SAME three stages in another order keeps
+    `len == 3` and the rejoin identity, so positional attribution made the container
+    arm read "its labels DECLARE `standing-constraint`" — confidently, with a normal
+    provenance line, and the mirror-tie test cannot see it on a runner (that is the
+    one test that skips without `scripts/`). The withhold is unaffected; the LABEL
+    must not lie.
+    """
+    prog = _pool_jq(str(FIXTURE_RULE))
+    stages = _top_level_stages(prog)
+    reordered = "|".join([stages[2], stages[1], stages[0]])
+    rule = tmp_path / "reordered.sh"
+    rule.write_text(f"POOL_JQ='{reordered}'\n", encoding="utf-8")
+
+    snap = snap_with(
+        [
+            issue(9500, "epic: a container", labels=[], assignees=[]),
+            issue(9501, "ops(x): declared", labels=["standing-constraint"], assignees=[]),
+            issue(9502, "fix(a): assigned", labels=[], assignees=[{"login": "d"}]),
+        ],
+        monkeypatch,
+        rule=rule,
+    )
+    # The WITHHOLD is unchanged by the reorder …
+    assert set(snap.population) == {"9500", "9501", "9502"}, snap.population
+    # … and the LABELS are still the right ones, because they come from the stage's
+    # CONTENT, not from its index.
+    assert snap.population["9500"] == REASON_CONTAINER
+    assert snap.population["9501"] == REASON_DECLARED
+    assert snap.population["9502"] == REASON_ASSIGNED
