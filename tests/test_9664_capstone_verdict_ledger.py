@@ -2664,7 +2664,13 @@ def test_a_control_builtin_argument_is_graded_not_skipped(tmp_path):
         )
 
 
-def test_the_reader_head_carriage_enumerates_every_decorative_head():
+_SENTINEL_OPERANDS = (
+    "'I did not run this'",
+    "/nonexistent/9664-carriage-probe",
+)
+
+
+def test_the_reader_head_carriage_enumerates_every_decorative_head(tmp_path):
     """The (6) carriage's head set must BE `_DECORATIVE`, split by measured behaviour.
 
     ⛔ MEASURED, review of `b610f0d03`: carriage (6) declared a brace set of TWELVE
@@ -2676,16 +2682,42 @@ def test_the_reader_head_carriage_enumerates_every_decorative_head():
     reads as closed", which makes an enumeration that is narrower than the code the
     same defect by a shorter route.
 
-    Both halves are DERIVED from `_DECORATIVE` rather than hard-coded, so a head
-    added to the code fails here until it is declared in one half or the other:
-    the heads that FAIL on an operand that does not resolve are the false-PASS
-    family (they belong in the (6) set), and the five that succeed whatever they
-    are handed are inert data (carriage (4)).
+    ⛔ AND THE SPLIT IS MEASURED, NOT ASSERTED — the review after that fix caught
+    the first version of this pin classifying `awk` as a false-PASS head on the
+    claim that it "fails on a path that does not exist". It does not: `awk` parses
+    its operand as an awk PROGRAM, and both a bare word and a path are valid ones,
+    so it exits 0 on both shapes and can never short-circuit the `&&`. A hard-coded
+    `inert` set would have shipped that misclassification as a green pin — and the
+    same sentence had already been wrong twice. So the split is DERIVED BY RUNNING
+    bash: each `_DECORATIVE` head is executed with two operand shapes in an empty
+    temp directory, and a head is INERT iff it exits 0 on both. Both halves then
+    come from measurement plus the code, and neither can disagree with reality
+    without this test going red.
     """
-    # The inert five, by MEASURED behaviour, not by naming convention: each exits 0
-    # whatever operand it is given, so it cannot short-circuit the `&&` and its
-    # argument is inert data. Every OTHER `_DECORATIVE` head fails on a bad operand.
-    inert = {":", "echo", "printf", "logger", "true"}
+    # MEASURED, in an empty cwd so no stray file can make a reader succeed: a head is
+    # INERT iff it exits 0 on BOTH a bare-word operand and a path that cannot exist.
+    # (The bare-word shape alone is not a discriminator — `cat "x"`'s rc depends on
+    # whether a file of that name happens to exist in the cwd.)
+    inert = set()
+    for head in sorted(cl._DECORATIVE):
+        rcs = set()
+        for operand in _SENTINEL_OPERANDS:
+            rcs.add(
+                subprocess.run(
+                    ["bash", "-c", f"{head} {operand}"],
+                    cwd=tmp_path,
+                    capture_output=True,
+                    check=False,
+                ).returncode
+            )
+        if rcs == {0}:
+            inert.add(head)
+    # A vacuous measurement would silently put every head in one bucket: assert that
+    # the run actually discriminated, so a box where `bash` is missing cannot pass.
+    assert len(inert) < len(cl._DECORATIVE), (
+        "no `_DECORATIVE` head failed on either operand shape — the measurement did "
+        f"not discriminate (inert={sorted(inert)}); check that bash ran at all"
+    )
     text = LEDGER.read_text(encoding="utf-8")
     declared_match = re.search(r"READER/SINK head `: \{([^}]*)\}`", text)
     assert declared_match, (
@@ -2706,7 +2738,8 @@ def test_the_reader_head_carriage_enumerates_every_decorative_head():
         "carriage (6) enumerates the false-PASS family incompletely: "
         f"missing={sorted(expected - declared)} extra={sorted(declared - expected)}. "
         "An unlisted carriage reads as closed — declare the head (or, if it is "
-        "inert, move it to the inert five) rather than leaving it out"
+        f"inert, move it to the inert set, measured here as {sorted(inert)}) "
+        "rather than leaving it out"
     )
 
 
