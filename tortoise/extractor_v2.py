@@ -13352,12 +13352,21 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                     gap_fill_stats["added_items"] = (
                         after["candidates"] - before["candidates"])
                 else:
-                    # The model was given the spans and found no claim in them —
-                    # the CORRECT answer for a label/date/aside span, and the
-                    # dominant one on the recorded population. Recorded, not
-                    # warned: a run that pays one call and adds nothing is the
-                    # measured cost of this stage, and the evidence record is
-                    # where that is argued, not a per-session warning.
+                    # TWO different runs land here, and ONLY ONE of them is
+                    # "the spans state no claim" — `malformed_sections` above is
+                    # what tells them apart (review round 4, P1):
+                    #   * a WELL-FORMED all-empty answer is the CORRECT answer
+                    #     for a label/date/aside span, and the dominant one on
+                    #     the recorded population — `added_items: 0` priced as
+                    #     the measured cost of one call;
+                    #   * an ALL-MALFORMED answer emitted content this stage
+                    #     then dropped, and it is recorded as such (per-section
+                    #     error + `gap_fill_shape_error` census +
+                    #     `malformed_sections`), never as a legitimate
+                    #     zero-benefit session.
+                    # Recorded, not warned per session: the evidence record is
+                    # where the cost/benefit is argued, not a per-session
+                    # warning.
                     gap_fill_stats["added_items"] = 0
         except Exception as e:  # noqa: BLE001, RUF100 — never block capture (P1)
             errors.append(f"gap-fill failed: {type(e).__name__}: {e} — "

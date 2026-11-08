@@ -733,9 +733,9 @@ unfirable (block at the top of §10).
 > `S2.2b` (`extractor_v2.run_partial_gap_fill`, behind `TORTOISE_PARTIAL_GAP_FILL`, **default OFF**)
 > takes its targets from `vet_gate.partial_gaps` — the statement/clause coverage detector `check_batch`
 > now reports (a char span into the narrative, so a re-extraction has an address to read; it needs no
-> `#2684` span layer). Its reach is **measured on the F3 population, and the measurement is the point**:
-> against the 12 point and 9 operator additions S4 makes across the seven recorded sessions, a coverage
-> trigger reaches **8 of 12 points and 1 of 9 operators**. The operator half is not a tuning problem —
+> `#2684` span layer). The **trigger's** reach is measured on the F3 population, and the measurement is
+> the point: against the 12 point and 9 operator additions S4 makes across the seven recorded
+> sessions, a coverage trigger reaches **8 of 12 points and 1 of 9 operators**. The operator half is not a tuning problem —
 > an operator addition GENERALISES a claim the batch already carries ("a retry path that does not
 > re-establish ownership … defeats any downstream completion check"), so no narrative span is
 > uncovered even though the item is new, and a coverage detector cannot reach it by construction.
