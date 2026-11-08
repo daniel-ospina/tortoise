@@ -160,17 +160,20 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
    `INPUT` 68, `NAND` 14, `aboutObject` 248, `aboutSubject` 21, `extractedFrom` 150, `mitigated_by` 11,
    `references` 7 — with **`hasPart` absent**. Because the query is complete, absence from that list is
    `hasPart = 0`, not "not counted". `git grep -rn -E 'hasPart|hierarchies|decomposesInto'
-   docs/evidence/7949-capstone/` → **0 hits on the pre-diff tree**: A1's leg is not in the census at
-   all. ⚠️ That command is **self-matching** once this record lands — every hit is then this file's own
-   lines — so re-derive it with the file excluded:
+   docs/evidence/7949-capstone/` → **0 hits before `#10982`** (`4e6a3ce612bd^`; **40** at this
+   record's base): A1's leg is not in the census at all. ⚠️ That command is **self-matching** once
+   this record lands — every hit is then this file's own lines — so re-derive it with the file
+   excluded:
    `git grep -rn -E 'hasPart|hierarchies|decomposesInto' -- 'docs/evidence/7949-capstone/' \
    ':!docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md'` → **all 40 hits are the bundle's own registration**
    (#10982 landed it after this record was written) — the bundle CITES the predicate, it does not
-   produce it; the producer claim is the call-shaped grep above, which is still empty. On the
-   **pre-diff tree** the same command was **0 hits** — that is the base the `exit 1` in earlier
-   revisions of this record was taken at, and it no longer holds here. The per-file split is
-   stated once, in the §5 note below; the TOTAL is stated in both places, and the pin binds
-   both to the same derived value rather than to two typed numbers.
+   produce it; the producer claim is the call-shaped grep above, which is still empty. The **0 hits**
+   the `exit 1` in earlier revisions of this record was taken at is the tree *before* `#10982` landed
+   (`4e6a3ce612bd^`; measured there → 0) — at this record's own base the same command is **40**, which
+   is the live number below. A bare "pre-diff" would be false here for the record's own reason: the
+   `#10982` registration is INSIDE this record's base, so only the commit name is a stable operand.
+   The per-file split is stated once, in the §5 note below; the TOTAL is stated in both places, and
+   the pin binds both to the same DERIVED value rather than to two typed numbers.
 4. **The rollup query does not exist.** `git grep -in 'rollup' -- '*.py' '*.md'` over the tree returns
    only unrelated uses (extractor `_rollup_llm`/`_rollup_recovery` stage counters, a CI per-name rollup
    discussion, a plan doc). There is **no** query of the graph shape "which work items serve this goal,

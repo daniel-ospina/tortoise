@@ -10806,8 +10806,8 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # fire first (measured), instructing a fixer to RE-DERIVE the record's line numbers:
     # the wrong repair, aimed at a staleness where the conclusion itself is false.
     #
-    # ⛔ This check is TOKENIZED, not a regex, for TWO measured reasons, and both arms that
-    # came before it were defective in opposite directions:
+    # ⛔ This check is TOKENIZED, not a regex, for THREE measured reasons — the first two
+    # defective in opposite directions, the third a limitation of `re` itself:
     #   1. A dot-ANCHORED pattern (the record's own command shape) missed the unqualified
     #      `return create_operator(payload)` — a real call with no receiver.
     #   2. A dot-EXCLUDING lookbehind then missed the RECEIVER-qualified form
