@@ -10775,12 +10775,22 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     on purpose (`:8880` at `80c912244`, `:9433` at `d69faaf38`); sweeping the whole
     document would either red on those or need a historical marker plus its exact
     cite list, i.e. more pinned surface than the claims this PR touches. This leg
-    binds only what the PR re-derived, and it is discriminating in both directions:
-    re-staling a cite in the RECORD reds it, and an insertion in the CODE above a
-    cited line reds it too — every arm pins its cited line EXACTLY (a 3-line range pins
-    both endpoints AND its middle; a longer one pins both endpoints, which is sufficient
-    because an interior insertion moves the closing endpoint), never a window that a
-    shift can slide inside.
+    binds only what the PR re-derived, and for THOSE cites it is discriminating in
+    both directions: re-staling a cite in the RECORD reds it, and an insertion in
+    the CODE above a cited line reds it too — every arm pins its cited line EXACTLY
+    (a 3-line range pins both endpoints AND its middle; a longer one pins both
+    endpoints, which is sufficient because an interior insertion moves the closing
+    endpoint), never a window that a shift can slide inside.
+
+    ⛔ SCOPE, stated so this docstring does not claim more than the arms bind: the record
+    carries FURTHER live cites this leg does NOT pin — among them
+    `pack_hierarchy.py:59`/`:78`/`:353`/`:447` and `extractor_v2.py:1154`, each stated once
+    or twice and watched by nothing (measured: re-staling any of them leaves this file
+    green). They are recorded on #11173, the open root for capstone cite drift, whose
+    durable fix is putting RECONCILE in a sweep (`_BUNDLE_DOCS`) rather than growing this
+    leg cite by cite. A reviewer who finds another one is finding a TRUE gap in the
+    record's coverage — not a defect in the arms listed here, and not a reason to add a
+    pin to this micro PR.
     """
     record = _REPO / "docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md"
     text = record.read_text(encoding="utf-8")
@@ -10913,7 +10923,10 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # false as written and nothing watched it. Measured: un-excluded at `4e6a3ce612bd^` → 18,
     # excluded there → 0/exit 1, at the record's own base `80c912244` → 0 both ways (`#10982`
     # landed after BOTH bases).
-    _zero_at = text.find("The **0 hits**")
+    # ⛔ Located by the NUMBER TOKEN alone, not by the sentence's leading word: `The **0
+    # hits**` redded on `Its **0 hits**` — a reword that keeps the number and the emphasis —
+    # with a diagnostic asserting the zero was not stated at all (measured, and false).
+    _zero_at = text.find("**0 hits**")
     assert _zero_at > 0, (
         "§1 item 3 must state the pre-#10982 zero, base-qualified")
     assert ":!docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md" in text[max(0, _zero_at - 900):_zero_at], (
@@ -11066,7 +11079,10 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
             "  want: {!r}\n  got:  {!r}".format(
                 _k + 1, _want[_k] if _k < len(_want) else "",
                 _got[_k] if _k < len(_got) else ""))
-    assert f"all {_total} hits" in text, (
+    # ⛔ The number is the claim; the surrounding words are not. `all 40 hits` redded on
+    # `40 hits, all of them the bundle's own registration` — which states the derived total
+    # correctly (measured) — so only the number and its unit are required.
+    assert f"{_total} hits" in text, (
         f"§1 item 3's conclusion must state the DERIVED total ({_total}) — it is the same "
         "`git grep` the block above re-derives")
 
@@ -11136,10 +11152,11 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # must agree; the parenthetical is pinned by its NUMBER because it is the only one
     # that has no `sdk.py:` token or `sed` command for the arms below to catch
     # (measured: re-staling it to `17472` left every arm True).
-    # ⛔ The `)` the old needle ended on was pure punctuation: the claim is the FILE:LINE the
-    # prose cites, and a reword that keeps it (`the capture path is tortoise/sdk.py:17574`)
-    # reds on a needle that carries the sentence's tail (the false-block class above).
-    assert "`tortoise/sdk.py:17574`" in text, (
+    # ⛔ No backticks in the needle: `tortoise/sdk.py:17574` is the citation, and the code
+    # span around it is Markdown styling. The `16516-16530` arm below has always allowed
+    # optional backticks (`r"`?(?:tortoise/)?sdk\.py:16516-16530`?"`); this one arm did not,
+    # so an unstyled citation redded the same way (measured).
+    assert re.search(r"`?tortoise/sdk\.py:17574`?", text), (
         "the record must cite the capture path by its live number")
     # ⛔ Pinned as the BARE occurrence of the NUMBER, not as the sentence around it: the
     # claim is that this paragraph states the same line the prose and the `sed` do.
@@ -11216,6 +11233,13 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
             f"the record must still cite {_cite} — the arm below pins the line it names, "
             "so deleting the citation would leave the pin asserting something no reader is "
             "sent to")
+    # ⛔ `value_gate.py:81` is stated TWICE — the prefixed cite in §2 and the BARE
+    # parenthetical in the §5 reproduction block (`# the default-ON itself
+    # (value_gate.py:81)`). The loop above watches the prefixed one only, so re-staling the
+    # §5 copy shipped GREEN (measured) — the same asymmetry the `275-283` `sed` line had.
+    assert re.findall(r"(?<!tortoise/)value_gate\.py:81", text) == ["value_gate.py:81"], (
+        "the record states `value_gate.py:81` a second time in the §5 reproduction block, "
+        "bare — that copy must name the same line the §2 cite does")
 
     # A2's Object mint: the write seam that routes creation by kind, cited THREE
     # times as a range. Both endpoints are claims — the classifier opens it, the
