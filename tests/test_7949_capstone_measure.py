@@ -4533,15 +4533,14 @@ def test_the_bare_continuation_cites_name_what_they_say():
             ("13182", "if vet_enabled and complete_list:"),
             ("13183", "complete_list, vet_union_stats, _w, _ = _run_vet_pass("),
         )),
-        # the VET block's start; its three lines of keys (13331-13333) close on
-        # line 13334 — DERIVED by content, not by arithmetic: `result["vet"] = {`
-        # opens at 13330 and the block's `}` is 13334. ⚠️ A conflict resolution
-        # here once kept main's numerals (13256/13257-13259/13260 — correct on
-        # main, but in THIS tree 13256 is the `"hold"` key and 13257-13260 is
-        # the whole `chain_enforcer` block) next to the branch's post-refactor
-        # asserts; a comment is not an asserted number and nothing reds on it,
-        # which is why every ASSERTED number in this table is verified by
-        # content instead.
+        # the VET block's start; its three lines of keys (13407-13409) close on
+        # line 13410 — DERIVED by content, not by arithmetic: `result["vet"] = {`
+        # opens at 13406 and the block's `}` is 13410. ⚠️ A conflict resolution
+        # here once kept main's numerals (correct on main AT THAT TIME, but in
+        # THIS tree then the same band was the `"hold"` key and the whole
+        # `chain_enforcer` block) next to the branch's post-refactor asserts; a
+        # comment is not an asserted number and nothing reds on it, which is why
+        # every ASSERTED number in this table is verified by content instead.
         ("docs/00_index.md", "emitted unconditionally at", (
             ("13396", 'result["classify_later"] = {'),
             ("13406", 'result["vet"] = {'),
@@ -4555,8 +4554,8 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # `vet_enabled`/`_run_vet_pass` for S2.3 sent the reader to code that
         # pass never runs"). The two `except` lines are byte-identical, so the
         # anchors are the pair's own gate lines' company rather than the text:
-        # a reader following `:10620` must land in the `classify_later and
-        # complete_list` block, which the row below holds at `:10599`.
+        # a reader following the anchor must land in the `classify_later and
+        # complete_list` block, which the row below sits inside.
         ("docs/00_index.md", "fail-open `except` at", (
             ("13071", "except Exception as e:  # never block capture (P1)"),
             ("13218", "except Exception as e:  # never block capture (P1)"),

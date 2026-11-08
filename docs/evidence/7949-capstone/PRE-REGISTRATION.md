@@ -1700,30 +1700,37 @@ re-cut from the resolved document (§8), and no committed verdict is re-scored.
   moves — unlike §10.10, where the collector sat ABOVE the insert and stayed put. Each cite in the
   §11 block moved **+76** (`:11098`+76 = `:11174`, the `return items`
   that ends the extent at `:11196`, `:12982`+76 = `:13058`, `:13131`+76 = `:13207`, `:12995`+76 =
-  `:13071`, `:13142`+76 = `:13218`) — every cite in §11 itself is +76. ⛔ The one pair this entry
-  re-pointed that is NOT +76 lives in a DIFFERENT document: `docs/00_index.md`'s `#2684` row
-  carries `extractor_v2.py:5286`/`:5287` → `:5354`/`:5355` (**+68**), so the file carries THREE
-  bands, a cite's delta depends on which insert it sits under, and a row's delta must be read
-  from the document that row lives in. Cites ABOVE the first insert did not move at all (`:88-89`,
+  `:13071`, `:13142`+76 = `:13218`) — every cite in §11 itself is +76. ⛔ The block is NOT the
+  bundle: the re-points this entry made outside §11 sit in two OTHER bands — the `#2684` row in
+  `docs/00_index.md` carries `extractor_v2.py:5286`/`:5287` → `:5354`/`:5355` (**+68**), and the
+  sdk.py sites in the inventory below move **+102**. So the file carries THREE bands, a cite's
+  delta depends on which insert it sits under, and a row's delta must be read from the document —
+  and the band — that row lives in. Cites ABOVE the first insert did not move at all (`:88-89`,
   `:296-312`, `:1154`, `:1720` are still correct), which is why the bundled cites were
   re-derived one by one rather than offset in a batch. ⛔ **`RECONCILE-A1-A2-A5.md` sits behind
   NO test at all** — the grading tests sweep `_BUNDLE_DOCS` (README, E1-E5-PROOFS, both probes,
   `docs/00_index.md`, the architecture doc) and `_PREREG_STEP_CITE_DOCS`, and neither names that
   record — so every head-relative cite in it was re-derived by RUNNING its own command, not by
-  arithmetic: `extractor_v2.py:10815`→`:10891` (twice: the prose and the grep annotation beside
-  it), the payload-entity write seam in `tortoise/sdk.py` (`_payload_entity_kind`→`create_entity`)
-  `:16414-16428`→`:16516-16530` (three times: the mint sentence, the routing sentence
-  and the `-A 14` annotation), the capture-path call in `tortoise/sdk.py` (`link_source_to_event`)
-  `:17472`→`:17574` (**+102**, a different band again; twice: the prose and the `sed -n '17574p'`
-  reproduce command), §0's `create_operator` annotation
+  arithmetic: the S2.3 `steps.conditional[0].condition` cite (`extractor_v2.py:11098`→`:11174`,
+  in this document AND in `preregistration.json`'s machine mirror of the same text — no markdown
+  sweep can see the JSON half), `extractor_v2.py:10815`→`:10891` (twice: the prose and the grep
+  annotation beside it), the payload-entity write seam in `tortoise/sdk.py`
+  (`_payload_entity_kind`→`create_entity`) `:16414-16428`→`:16516-16530` (three times: the mint
+  sentence, the routing sentence and the `-A 14` annotation), the capture-path call in
+  `tortoise/sdk.py` (`link_source_to_event`) `:17472`→`:17574` (**+102**, a different band again;
+  three times: the prose cite, the bare "both now read" restatement beside it — the one form a
+  symbol-prefixed re-derivation misses — and the `sed -n '17574p'` reproduce command), §0's
+  `create_operator` annotation
   `:8938/:8956/:8963/:9343`→`:9006/:9024/:9031/:9411`, the census enumeration in
   `probes/capstone_measure.py` `:2238-2243`→`:2713-2716` (stale on `main` too — the number
   described `_seam_cause`, not the `MATCH ()-[r]->()` query), and the two "a live grep cannot do it
   (it prints `:12779` here)" clauses→`:12929`. Every number was verified by CONTENT at this head (the `def`,
   the `return items` that ends it, the two `if items:` gates, the two `except` arms, the two
   result blocks' opening braces and their closing `}`), never by adding an offset.
-- **What moved: nothing else.** No metric, denominator, threshold, class set, corpus pin or `steps`
-  block is touched; the numbers this record exists to freeze are byte-identical. `document_sha256`
+- **What moved: no pin.** No metric, denominator, threshold, class set or corpus pin is touched,
+  and no `steps` member is added, removed or re-worded — only the `_collect_classify_items` cite
+  INSIDE S2.3's `condition` moved, in this document and in `preregistration.json`'s mirror of the
+  same sentence; the numbers this record exists to freeze are byte-identical. `document_sha256`
   is re-cut in this same commit, per §8's rule for *any* edit to this file.
 
 ## 11. The step set V5 gates over — seven unconditional, one conditional (`#10215`)
