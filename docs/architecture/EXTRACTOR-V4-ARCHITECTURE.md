@@ -1090,11 +1090,17 @@ run whose flag can be `True` again (measured: an empty second yield flags `cover
 on both arms) — so counting against the pipeline's published `result["vet"]["s2"]`, which is the
 SECOND arm's block, attributes the wrong arm's verdict to the session. What makes the retry
 unreachable for this count is the `fired is False` RESTRICTION, not any property of the second
-arm's flag. ⛔ **But the record does NOT carry it on this population — which is why this clause is
-still an INFERENCE here.** `stats["renarrate"]` is `{"fired": False}` when the retry did not run
+arm's flag. ⛔ **But the record does NOT carry it on most of this population — which is why this
+clause is still an INFERENCE here.** `stats["renarrate"]` is `{"fired": False}` when the retry did not run
 (`extractor_v2.py`'s `renarrate_stats`, pinned in `tests/test_selection_step.py`), so the first arm's
 own `coverage_suspect` — `stats["renarrate"]["first"]["coverage_suspect"]` — exists only on a run
-that FIRED, and F3's `fired is False` restriction removes exactly those rows. The nearest substitute
+that FIRED **or, since `#11569`'s fail-open guard, on a retry whose tail RAISED**: that record keeps
+`fired: False` and carries `first` beside `retry_failed`. F3's `fired is False` restriction therefore
+removes the fired rows and **keeps** the failed-retry ones — which is the one population inside that
+restriction where the arm A flag is readable at all (measured on that path:
+`{"fired": False, "trigger": "coverage_suspect", "retry_failed": …, "first": {…,
+"coverage_suspect": true}}`). Where the retry never ran, the record is `{"fired": False}` alone and
+there is nothing to read. The nearest substitute
 is **not** the same quantity: `vet_candidates` (`vet_gate.py`) applies `check_batch` to the list AFTER
 the `route_mentions` removal in `extractor_v2.py`, whereas the arm's flag is `check_batch` on the
 PRE-`route_mentions` S2 output — and `route_mentions` can shrink that list to zero, so a session that
