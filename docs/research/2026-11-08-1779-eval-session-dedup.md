@@ -19,8 +19,11 @@ existing cache with.
    `tools/longmem_eval/run.py:7383` all cited it; it traces to
    `docs/plans/2026-08-17-1349-embedder-selection.md:63`, where it was asserted, never measured.
    **Measured:** one pass over the 500-question S split emits **371,095** encode units of which
-   **285,608** are distinct — a **1.299×** reuse factor, i.e. **23.0%** of units are cross-question
-   hits. The asserted figure overstated the real one by 4–8×.
+   **285,608** are distinct — a **1.299×** reuse factor, i.e. **23.0%** of those units are
+   cross-question hits. The asserted figure overstated the real one by 4–8×. The denominator is the
+   **dataset-derivable** set (turn Points + raw chunks): a `v2` run also embeds LLM-derived
+   extraction Point texts (`ingest_v2` → `sdk.create_point`, and `encode_cache` wraps
+   `tortoise.embeddings` process-wide), which no dataset-only census can count — see residual 5 in §6.
 2. **Cross-question sessions DO repeat — 5,403 of 23,867 slots — but every repeated pair is
    re-dated.** 4,375 session contents repeat; of the **6,660** repeated pairs, **0** share a session
    date. The date is prompt-visible: `extractor_v2._date_anchor` (`extractor_v2.py:1455-1471`)
@@ -107,7 +110,9 @@ first place.
 
 Two sanity readings that keep the 1.000× honest rather than an artifact of unique dates: the corpus
 carries **18,360 distinct date values over 23,867 slots** (dates are heavily reused *across*
-different sessions), and 13 duplicate slots are *within* a single question. The re-dating is a
+different sessions) — produced by the census as its own `dates` readout (`distinct` / `slots`), since
+a number cited in prose with no producer is the drift this document exists to retire — and 13
+duplicate slots are *within* a single question. The re-dating is a
 property of the duplication, not of the date population.
 
 ## 4. Verdict — the granularity decision #1779 asked for
@@ -151,6 +156,13 @@ for this issue by its own scope guard ("Out of scope: any parse/retrieval semant
    answers it (2.7 GB download; deliberately not run here).
 4. **A dataset refresh** changes any of the above numbers → the `@slow` pin reds and the docs get
    re-derived, which is the point of pinning them.
+5. **The `v2` extraction leg is outside every share quoted here.** The census counts the texts the
+   ingest renders per session (turn Points + raw chunks) because those are the only units derivable
+   from the dataset. A `v2` run ALSO embeds LLM-derived extraction Point texts (`ingest_v2` →
+   `sdk.create_point`; `encode_cache` wraps `tortoise.embeddings` process-wide), so the true
+   whole-run denominator is larger and the published 23.0% is a SUBSET share. It does not move the
+   verdict: extraction text is a function of (session content, session date), so it cannot be reused
+   across a re-dated repeat either — only the magnitude changes.
 
 ## 7. Research provenance
 

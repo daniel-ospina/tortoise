@@ -7,7 +7,18 @@ units of which 285,608 are distinct — a **1.299x** reuse factor, i.e. **23.0%*
 of units are cross-question cache hits (turn leg 246,750/189,522 = 1.302x;
 chunk leg 124,345/96,086 = 1.294x). This docstring previously claimed "5-10x
 redundant encodes" — that figure was never measured, and the census refuted it,
-so it is not restated anywhere in the tree.
+so no live site restates it. The plan that ORIGINATED it
+(`docs/plans/2026-08-17-1349-embedder-selection.md:63`, and its budget line at
+`:96`) is left standing as the historical record it is; the research write-up
+(`docs/research/2026-11-08-1779-eval-session-dedup.md` §0.1) names exactly
+those two lines as its origin.
+
+The unit counts above are the DATASET-DERIVABLE encode units — turn Points
+plus raw chunks. A `v2` run additionally embeds LLM-derived extraction Point
+texts (`ingest_v2` → `sdk.create_point`, and this module wraps
+`tortoise.embeddings` process-wide), which cannot be counted from the dataset
+and are therefore outside the census; `haystack_overlap.py`'s docstring says
+the same in its own words.
 
 What the cache actually buys, in the measured order of magnitude: (a) ~23% of
 encode units *within one pass*; (b) the much larger share across REPEAT passes

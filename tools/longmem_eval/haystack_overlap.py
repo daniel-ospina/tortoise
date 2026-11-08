@@ -27,11 +27,17 @@ drift):
   * **encode units** — the two texts ``ingest_haystack`` /
     ``ingest_haystack_v2`` embed per session: one turn Point per turn
     (``ingest._turn_text``) and one raw chunk per ``chunk_turns`` window
-    (``ingest._session_chunks``).
+    (``ingest._session_chunks``). The denominator is the **dataset-derivable**
+    set ONLY: a ``v2`` run also embeds LLM-derived extraction Point texts
+    (``ingest_v2`` → ``sdk.create_point``, and ``encode_cache`` wraps
+    ``tortoise.embeddings`` process-wide), and those cannot be computed from
+    the dataset, so they sit OUTSIDE this census. Every published share below
+    is therefore "of the dataset-derivable encode units", not of a whole v2
+    run.
 
 **The measured answer (S split, 500 Q, 2026-11-08):** see ``CENSUS``. In one
-pass: 23,867 session slots, 18,810 distinct session contents (1.269×),
-5,057 duplicate slots — but **0** of the repeated pairs share a session date,
+pass: 23,867 session slots, 18,464 distinct session contents (1.2926×),
+5,403 duplicate slots — but **0** of the repeated pairs share a session date,
 so prompt-identity reuse is exactly 1.000×: a prompt-level response cache —
 and a session-level extraction cache, which has the *same* identity condition
 — would save nothing. The text→embedding cache (already built) is the one
@@ -85,7 +91,7 @@ FINDINGS_DATE = "2026-11-08"
 PROMPT_IDENTITY = "rendered session transcript + session_date"
 
 #: The measured S-split census (2026-11-08, 500 questions, chunk_turns=2).
-#: Pinned by `tests/test_longmem_haystack_overlap.py::test_census_on_real_s_split`
+#: Pinned by `tests/longmem_eval/test_haystack_overlap_1779.py::test_census_on_real_s_split`
 #: (a @slow test — CI has no dataset) so the numbers in the docs cannot rot
 #: silently, and so a dataset refresh surfaces as a red pin rather than as a
 #: quietly re-based published reuse factor. The `decision` block is NOT pinned
@@ -164,6 +170,7 @@ def census_overlap(instances: list[dict],
 
     id_counter: Counter[str] = Counter()
     content_counter: Counter[str] = Counter()
+    date_counter: Counter[str] = Counter()
     prompt_counter: Counter[tuple[str, str]] = Counter()
     content_dates: dict[str, Counter[str]] = {}
     turn_units: Counter[str] = Counter()
@@ -187,6 +194,7 @@ def census_overlap(instances: list[dict],
 
             id_counter[sid] += 1
             content_counter[digest] += 1
+            date_counter[date] += 1
             prompt_counter[(digest, date)] += 1
             content_dates.setdefault(digest, Counter())[date] += 1
             q_contents.add(digest)
@@ -264,6 +272,18 @@ def census_overlap(instances: list[dict],
             "content_reuse_factor": round(slots / distinct_contents, 4)
             if distinct_contents else 0.0,
             "prompt_reuse_factor": prompt_reuse,
+        },
+        # The date population, as its own readout: the 1.000× verdict would be an
+        # ARTEFACT if every session carried a unique date, so the count that
+        # rules that out has to be produced here rather than quoted in prose.
+        # Deliberately OUTSIDE ``CENSUS`` above: the @slow pin compares
+        # ``sessions``/``encode_units`` by equality, and a constant this lane
+        # could not re-derive from the dataset would be a manufactured pin.
+        "dates": {
+            "slots": slots,
+            "distinct": len(date_counter),
+            "reuse_factor": round(slots / len(date_counter), 4)
+            if date_counter else 0.0,
         },
         "encode_units": {
             "turn": turn_leg,

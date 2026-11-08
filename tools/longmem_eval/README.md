@@ -404,7 +404,9 @@ Encode cache (`encode_cache.py`): model-keyed
 (model, prompt) under the cache dir. The cross-question haystack redundancy is
 **measured** (#1779, `haystack_overlap.py`): **1.299×** — 371,095 encode units
 over the 500-Q S split, 285,608 distinct, i.e. **23.0%** of units are hits in
-one pass — and the cache is what makes the 12-45h burn feasible (it also serves
+one pass (the dataset-derivable units — turn Points + raw chunks; a `v2` run's
+LLM-derived extraction texts are outside the census, which cannot see them)
+— and the cache is what makes the 12-45h burn feasible (it also serves
 REPEAT passes with the same `(model, prompt)` ~entirely, and survives a crash).
 Active when `--model` is set. Concurrency model: **sequential workers** (one
 question at a time) — the simplest correct choice; per-question isolated graphs

@@ -63,6 +63,9 @@ def test_identical_content_different_dates_is_not_prompt_reuse():
     assert s["same_date_pairs"] == 0            # ← the one that closes the lever
     assert s["distinct_content_date"] == 2
     assert s["prompt_reuse_factor"] == 1.0
+    # the date population is produced, not asserted in prose: the verdict above
+    # would be an ARTEFACT if every slot carried a unique date
+    assert census["dates"] == {"slots": 2, "distinct": 2, "reuse_factor": 1.0}
     for name in ("session_level_extraction_reuse", "prompt_level_response_cache"):
         row = census["decision"][name]
         assert row["realizable"] is False
@@ -83,6 +86,9 @@ def test_identical_content_and_date_is_prompt_reuse():
     assert s["same_date_pairs"] == 1
     assert s["distinct_content_date"] == 1
     assert s["prompt_reuse_factor"] == 2.0
+    # 2 slots over 1 distinct date — the readout fires in the OTHER arm too, so
+    # a hard-coded 1.0 would be caught
+    assert census["dates"] == {"slots": 2, "distinct": 1, "reuse_factor": 2.0}
     for name in ("session_level_extraction_reuse", "prompt_level_response_cache"):
         row = census["decision"][name]
         assert row["realizable"] is True
