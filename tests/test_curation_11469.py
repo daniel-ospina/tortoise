@@ -607,3 +607,69 @@ def test_bundle_carries_no_deletion():
     body = json.dumps(plan.bundle())
     for verb in ("delete", "DELETE", "retract", "supersede"):
         assert verb not in body
+
+
+# ── round-6 review findings ───────────────────────────────────────────────
+
+
+def test_a_text_result_this_pass_cannot_interpret_is_a_refusal():
+    """Round-6: a str/list result is NOT evidence of a write; `normalise_tool_result`
+    passes it through untouched, so the refusal test must treat it as a refusal."""
+    def call_tool(*a, **k):
+        return '{"error": "ERR_QUOTA"}'  # refusal, but as text
+    with pytest.raises(C.CurationRefused):
+        C.IngestWriter(call_tool).write_sections(
+            "new", {"points": [{"migrationKey": "k", "content": "c"}]})
+
+
+def test_workflow_is_not_a_signal_kind():
+    """`workflow` is an objectKind (pack_registry.CANONICAL_OBJECT_KINDS), so a
+    Point typed with it would be a claim carrying an object kind."""
+    assert "workflow" not in C.SIGNAL_KINDS
+    assert "requirement" not in C.SIGNAL_KINDS
+
+
+def test_a_source_with_an_empty_url_is_not_carried():
+    d = C.classify(row("s", node_type="source", kind="article", content=""), {})
+    assert d.disposition == C.NOT_CARRIED
+
+
+def test_a_carried_event_is_undecidable_not_silently_dropped():
+    """Round-6: an Event has no bundle section, so `carry` would report a row that
+    nothing sends. It must be undecidable until the write path can represent it."""
+    d = C.classify(row("e", node_type="event", kind="deployment", content="shipped"), {})
+    assert d.disposition == C.UNDECIDABLE
+
+
+def test_a_bundle_refuses_a_carried_row_with_no_section():
+    plan = C.Plan(source_graph="old", target_graph="new", decisions=[
+        C.Decision("x", "object", "service", C.CARRY, "manual", None, "k", "svc")])
+    with pytest.raises(ValueError, match="no wire section"):
+        plan.bundle()
+
+
+def test_the_wire_never_carries_a_migration_key_on_a_source():
+    """#3998 drops undeclared :Source props (with a denial log per row)."""
+    seen = {}
+    def call_tool(_name, args):
+        seen.update(args["bundle"])
+        return {"ok": True, "created": 1}
+    C.IngestWriter(call_tool).write_sections(
+        "new", {"sources": [{"url": "https://x/y", "sourceKind": "article",
+                             "migrationKey": "k1"}]})
+    assert seen["sources"] == [{"url": "https://x/y", "sourceKind": "article"}]
+
+
+def test_the_inventory_report_names_the_source_filter():
+    """Round-6: the source listing is a SUBSET (`documentKind IS NULL`), so a
+    consumer of the JSON must be told — the gap cannot live only in a docstring."""
+    import importlib.util
+    import sys as _sys
+    from pathlib import Path
+    path = Path(__file__).resolve().parents[1] / "tools" / "curate_graph.py"
+    spec = importlib.util.spec_from_file_location("curate_graph_11469", path)
+    mod = importlib.util.module_from_spec(spec)
+    _sys.modules["curate_graph_11469"] = mod
+    spec.loader.exec_module(mod)
+    notes = mod.NOT_ENUMERABLE
+    assert "source" in notes and "documentKind IS NULL" in notes["source"]

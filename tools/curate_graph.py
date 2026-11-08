@@ -131,16 +131,29 @@ class MCPReader:
             return res
         return C.normalise_tool_result(self._call("tortoise_graph_overview", args))
 
-    def read_sources(self) -> list[C.Row]:
+    def read_sources(self) -> tuple[list[C.Row], int | None]:
+        """Sources, plus the total the surface reported (or None).
+
+        Two honesty checks ride on the total: the surface's source listing matches
+        `documentKind IS NULL`, so it is a SUBSET of `counts.Source` — the caller
+        reconciles and names the gap rather than reporting a complete census.
+        """
         res = self._section("sources")
+        raw = _rows_from_tool(res)
+        total = None
+        if isinstance(res, dict):
+            for key in ("total", "count", "totalSources"):
+                if isinstance(res.get(key), int):
+                    total = res[key]
+                    break
         out = []
-        for s in _rows_from_tool(res):
+        for s in raw:
             url = str(s.get("url") or "")
             out.append(C.Row(
                 node_id=url, node_type="source", kind=s.get("sourceKind"),
                 content=url, content_hash=None, props=s,
             ))
-        return out
+        return out, (total if total is not None else len(out))
 
     def counts(self) -> dict[str, Any]:
         res = self._section("status")
@@ -177,13 +190,25 @@ def _live_call_tool(name: str, args: dict[str, Any] | None = None) -> Any:
     return mcp_client.call_tool(name, args or {})
 
 
+NOT_ENUMERABLE = {
+    "operator": "tortoise_query excludes operator Points unless an operator kind is "
+                "requested (sdk._operator_scope_clauses, #7108) — count from structure.operators",
+    "object": "no listing surface on the MCP tool set — count from counts.Object",
+    "event": "no listing surface on the MCP tool set — count from counts.Event",
+    "subject": "no listing surface on the MCP tool set — count from counts.Subject",
+    "source": "tortoise_list_sources matches `documentKind IS NULL` (sdk.list_sources), "
+              "so a Document-kind Source is NOT listed — reconcile sources_read against "
+              "counts.Source rather than reading the source count as complete",
+}
+
+
 def cmd_inventory(args: argparse.Namespace) -> int:
     reader = MCPReader(_live_call_tool, args.graph)
     counts = reader.counts()
     structure = reader.structure()
     graphs = reader.graphs()
     points, total = reader.read_points(page=args.page)
-    sources = reader.read_sources()
+    sources, source_total = reader.read_sources()
     audit = reader.audit()
     plan = C.build_plan(points + sources, source_graph=args.graph or "default",
                         target_graph=args.target or "(none: inventory only)")
@@ -193,15 +218,10 @@ def cmd_inventory(args: argparse.Namespace) -> int:
         "points_read": len(points),
         "points_total_reported": total,
         "sources_read": len(sources),
+        "sources_total_reported": source_total,
         "structure": structure,
         "graphs": graphs,
-        "not_enumerable_by_this_read_path": {
-            "operator": "tortoise_query excludes operator Points unless an operator kind is "
-                        "requested (sdk._operator_scope_clauses, #7108) — count from structure.operators",
-            "object": "no listing surface on the MCP tool set — count from counts.Object",
-            "event": "no listing surface on the MCP tool set — count from counts.Event",
-            "subject": "no listing surface on the MCP tool set — count from counts.Subject",
-        },
+        "not_enumerable_by_this_read_path": dict(NOT_ENUMERABLE),
         "read_note": reader.note,
         "audit": {
             "node_count": audit.get("node_count"),
@@ -238,7 +258,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
         return 2
     reader = MCPReader(_live_call_tool, args.graph)
     points, _ = reader.read_points(page=args.page)
-    sources = reader.read_sources()
+    sources, source_total = reader.read_sources()
     graphs = reader.graphs()
     plan = C.build_plan(points + sources, source_graph=args.graph or "default", target_graph=args.target)
     try:
@@ -257,6 +277,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
         print(f"REFUSED: {exc}", file=sys.stderr)
         return 3
     payload = {"census": plan.census(), "run": result.as_dict(),
+               "sources_read": len(sources), "sources_total_reported": source_total,
                # A credential-bound fallback read means the rows came from the
                # credential's own graph, not the one asked for — never silent.
                "read_note": reader.note}

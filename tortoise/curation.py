@@ -76,11 +76,13 @@ DISPOSITIONS = (CARRY, NOT_CARRIED, UNDECIDABLE)
 #: (``decision`` and ``core:decision``).
 SIGNAL_KINDS = frozenset({
     "decision", "option", "finding", "jobToBeDone", "useCase",
-    "workflow", "userJourney",
+    "userJourney",
 })
-#: NOT a pointKind: `requirement` is declared an **objectKind** by the
-#: product-strategy and dev manifests (#7848), so carrying it as a Point would
-#: type a claim with an object kind. Deliberately absent from SIGNAL_KINDS.
+#: NOT pointKinds, so deliberately absent above: `requirement` is declared an
+#: **objectKind** by the product-strategy and dev manifests (#7848), and
+#: `workflow` is in `pack_registry.CANONICAL_OBJECT_KINDS` /
+#: `extractor_v2.CORE_OBJECT_KEYS` (`core:workflow`) and in no pack's pointKind
+#: list. Carrying either as a Point would type a claim with an object kind.
 
 #: Agent-narration markers: a transcript turn, not a claim. Deliberately narrow
 #: and quoted literally — a broad "sounds like narrative" heuristic would put
@@ -392,6 +394,10 @@ def classify_source(row: Row, packs: Mapping[tuple[str, str], str]) -> Decision:
                         "holds 0 rows (#10175), so the graph is the only copy and 'do not "
                         "carry it' would leave the transcript with no home. Needs a decision, "
                         "not a rule", pack, key, row.content)
+    if not str(row.content or "").strip():
+        return Decision(row.node_id, row.node_type, row.kind, NOT_CARRIED,
+                        "empty url — a :Source is keyed by its url, and ingest refuses a "
+                        "source with no url (whole-section refusal)", pack, key, row.content)
     if not row.kind:
         return Decision(row.node_id, row.node_type, row.kind, UNDECIDABLE,
                         "source with no sourceKind — a :Source requires one at ingest, so it "
@@ -408,8 +414,10 @@ def classify_event(row: Row, packs: Mapping[tuple[str, str], str]) -> Decision:
                         "agent-session Event: the raw/episodic tier is supposed to live outside "
                         "the graph (#10000), but the record holds 0 rows for this tenant, so "
                         "dropping it here has no safe destination", pack, key, row.content)
-    return Decision(row.node_id, row.node_type, row.kind, CARRY,
-                    "a domain Event (not a session container)", pack, key, row.content)
+    return Decision(row.node_id, row.node_type, row.kind, UNDECIDABLE,
+                    "a domain Event, but this harness's write path has no `events` section "
+                    "today — counting it as carried while nothing sends it is the silent "
+                    "no-op this pass must not have (follow-up on #11469)", pack, key, row.content)
 
 
 def classify(row: Row, packs: Mapping[tuple[str, str], str], *, duplicate_of: str | None = None) -> Decision:
@@ -465,7 +473,7 @@ class Plan:
         return hashlib.sha256(basis.encode("utf-8")).hexdigest()
 
     def bundle(self) -> dict[str, Any]:
-        """The additive write bundle: points only, each with its ``content``.
+        """The additive write bundle: a ``points`` section and a ``sources`` section.
 
         ``content`` is not optional — ``sdk._check_item_shape`` refuses a point
         item without it (Phase 1, so a whole bundle is rejected, not one row).
@@ -473,6 +481,15 @@ class Plan:
         contract's job (#888 W4), and is NOT built here: the bundle is rows, not
         edges. Never a deletion.
         """
+        representable = {"point", "operator", "source"}
+        strays = sorted({d.node_id for d in self.carry_rows() if d.node_type not in representable})
+        if strays:
+            # Fail closed. A carried row with no wire section reports as migrated and
+            # is never sent — the round-5 defect, one node type over. Counting it is
+            # worse than refusing to build the bundle.
+            raise ValueError(
+                f"carried rows with no wire section: {strays[:5]} — refusing to build a "
+                "bundle that would silently drop them")
         return {
             "migrationKeyPrefix": MIGRATION_KEY_PREFIX,
             "sourceGraph": self.source_graph,
@@ -694,8 +711,12 @@ def _ingest_refused(res: Any) -> str | None:
     ``{"violations": [...]``) rather than by raising, so counting the attempt as a
     success is how a ledger ends up claiming rows that do not exist.
     """
-    if not isinstance(res, dict):
-        return None if res is not None else "no result from the target"
+    if not isinstance(res, Mapping):
+        # `normalise_tool_result` passes str/list/int through untouched, so a result
+        # this pass cannot interpret is NOT evidence of a write — treat it as a
+        # refusal rather than counting the attempt as migrated.
+        return (f"target returned an uninterpretable result ({type(res).__name__}): "
+                "the write is not confirmed")
     for key in ("error", "violations", "detail"):
         val = res.get(key)
         if val:
@@ -746,8 +767,13 @@ class IngestWriter:
                 if not self._armed():
                     return {"written": written, "stopped": "off-switch engaged"}
                 batch = items[i:i + self._batch]
-                self._call_one(target_graph, section, batch, written)
-                written.extend(p["migrationKey"] for p in batch)
+                started = list(batch)
+                if section == "sources":
+                    # The ledger key is OURS: `:Source` accepts only declared props
+                    # (#3998 drops the rest, with a denial log per row).
+                    batch = [{k: v for k, v in p.items() if k != "migrationKey"} for p in batch]
+                self._call_one(target_graph, section, started, written)
+                written.extend(p["migrationKey"] for p in started)
         return {"written": written}
 
     def _call_one(self, target_graph: str, section: str, batch: Sequence[Mapping[str, Any]],
@@ -757,7 +783,8 @@ class IngestWriter:
                 "graph": target_graph,
                 "promotion_policy": "auto",
                 "granularity": "bulk",
-                "bundle": {section: list(batch)},
+                "bundle": {section: [{k: v for k, v in p.items() if k != "migrationKey"}
+                                     for p in batch]},
             })
             # Unwrapping is INSIDE the guard: `normalise_tool_result` raises on the
             # `isError` path, and a refusal there must still report the batches
@@ -899,7 +926,7 @@ def run_plan(
                 # Sources carry no key on the node (#3998), so their ledger key is
                 # derived from the url, which is what the target merges on.
                 key = f"{MIGRATION_KEY_PREFIX}source:-:{item.get('url')}"
-            if key in ledger:
+            if key in ledger or any(k.get("migrationKey") == key for k in keyed):
                 continue
             keyed.append({**item, "migrationKey": key})
         sections[section] = keyed

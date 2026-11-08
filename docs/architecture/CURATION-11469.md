@@ -25,7 +25,7 @@ Two measured facts govern the risk:
   a migration here is moving the only copy of a tenant's data.
 
 Code: `tortoise/curation.py` (classification + guards + additive writer) and
-`tools/curate_graph.py` (the CLI). Tests: `tests/test_curation_11469.py` (51 tests).
+`tools/curate_graph.py` (the CLI). Tests: `tests/test_curation_11469.py` (58 tests).
 
 ## The inventory — measured 2026-11-08 against `live-v4`
 
@@ -43,7 +43,7 @@ Code: `tortoise/curation.py` (classification + guards + additive writer) and
 | · operator (IMPL/NAND/…) | 3,727 | **count only** (`structure.operators`) — the read path excludes operator Points unless an operator kind is requested (`sdk._operator_scope_clauses`, #7108) |
 | **Object** | **5,379** | **count only** (`counts.Object`) — no listing surface on the tool set |
 | **Event** | **4,670** | **count only** — agent-session containers (episodic tier) |
-| **Source** | **1,578** | **enumerated** — **100% `agentSession`, `session:<uuid>` urls**, zero real artifacts |
+| **Source** | **1,578** | **enumerated, but only the `documentKind IS NULL` population** (`sdk.list_sources`) — a Document-kind Source is not listed by this read path, so the report reconciles `sources_read` against `counts.Source` instead of calling it complete. **100% `agentSession`, `session:<uuid>` urls**, zero real artifacts |
 | **Subject** | **26** | **count only** |
 | edges | 7,981 | `audit.edge_count` |
 | **total nodes** | **31,248** | non-episodic cap counter = 19,595 + 5,379 + 26 = **25,000 / 25,000** |
@@ -111,6 +111,7 @@ flagged *not enumerated* rather than presented as measure-and-classify results.
 | the target is only added to | `PlanWriter` is a **single-verb** protocol (`write_sections`, which writes each bundle SECTION — `points` and `sources` — because a carried Source sent as a Point is re-typed, and a bundle that only ever sent `points` reported success while writing none) — additivity is a property of the type, not of the caller's discipline | `test_writer_protocol_declares_no_destructive_verb`, `test_a_carried_source_is_reached_by_the_writer` |
 | **idempotent** | stable `migrationKey` per content hash → target-side dedup (`ingest` folds by content hash + kind) **and** a local ledger that skips a migrated key before it reaches the wire | `test_second_run_writes_nothing`, `test_duplicate_follows_its_keeper` |
 | **off-switch** | `TORTOISE_CURATE_OFF=1` / `--off`, checked before the run **and before each write batch** | `test_explicit_off_switch_writes_nothing`, `test_env_off_switch_writes_nothing` |
+| every carried row reaches the wire | `bundle()` REFUSES to build when a carried row has no wire section (point/operator → `points`, source → `sources`), and an unrepresentable row is `undecidable`, never `carry`; a result the pass cannot interpret (a `str`/`list`, which `normalise_tool_result` passes through) is a REFUSAL, not a write | `test_a_bundle_refuses_a_carried_row_with_no_section`, `test_a_carried_event_is_undecidable_not_silently_dropped`, `test_a_text_result_this_pass_cannot_interpret_is_a_refusal`, `test_a_carried_source_is_reached_by_the_writer`, `test_the_wire_never_carries_a_migration_key_on_a_source` |
 | **source ≠ target** | compared on the CANONICAL id, where every accepted spelling (graph id, `stable_id`, namespace, case-insensitive NAME, and the tenant graph's `org_<id>` / `team_<id>` pair when both spellings are visible as rows) collapses to that graph's id tail — measured against the row shape this server actually returns (namespace strings); a spelling the surface cannot resolve, or an ambiguous name, is a REFUSAL (fail closed) | `test_source_equals_target_refused`, `test_source_equals_target_refused_across_spellings`, `test_the_graph_name_is_the_same_graph_as_its_namespace`, `test_namespace_and_gid_spellings_of_one_graph_are_refused`, `test_no_rows_does_not_fail_open`, `test_unresolvable_target_is_refused_fail_closed`, `test_ambiguous_name_is_refused`, `test_a_name_the_surface_cannot_resolve_is_refused` |
 | dry by default | `--apply` is required; the default run writes nothing | `test_dry_run_writes_nothing` |
 | a refusal is never recorded as a write | the writer unwraps the tool result (a `CallToolResult` OBJECT, not a dict — a dict-only check never sees a refusal), raises on a refusal envelope, and the ledger is written from the ACCEPTED keys only, scoped per target graph; a partial run reports what already landed | `test_a_refused_write_is_never_recorded`, `test_ingest_refusal_envelope_is_not_a_success`, `test_a_calltoolresult_object_is_unwrapped_and_a_refusal_refuses`, `test_a_refused_second_batch_reports_the_first_batch_and_records_it`, `test_ledger_is_scoped_to_its_target` |
