@@ -141,11 +141,13 @@
 #         The target is then quote-unwrapped with `shlex`, so `cd [opts] "dir"` and
 #         `cd [opts] dir` grade alike. ⛔ `cd ""` is a NO-OP, not an unknown cwd —
 #         bash: "A null directory name is the same as the current directory" — so it
-#         is admitted and the cwd is left unchanged. A `cd` with NO directory operand
-#         at all (`cd --` is `$HOME`, `cd -` is `$OLDPWD`) is REFUSED, because that
-#         working directory cannot be known from the record and a later artifact
-#         graded from the unmoved directory would admit a record for a command the
-#         shell runs elsewhere.
+#         is admitted and the cwd is left unchanged, EXCEPT under `-P`: bash's
+#         null-name rule does not survive `-P` (`cd -P ""` exits 1 with
+#         `cd: : No such file or directory`), so that spelling is refused. A `cd`
+#         with NO directory operand at all (`cd --` is `$HOME`, `cd -` is `$OLDPWD`)
+#         is REFUSED, because that working directory cannot be known from the record
+#         and a later artifact graded from the unmoved directory would admit a record
+#         for a command the shell runs elsewhere.
 #         ⛔ This makes the verdict BOX-DEPENDENT for `cd` targets, exactly as it is
 #         for `source`: `cd .venv && …` is `verified` on the authoring box and refuses
 #         in a clone without `.venv`, which flips the ledger to exit 1 and hides the

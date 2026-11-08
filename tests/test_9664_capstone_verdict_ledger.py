@@ -1991,6 +1991,54 @@ def test_a_null_cd_target_is_a_no_op(tmp_path):
             f"{command!r} was ACCEPTED ({proc.returncode}) — `$HOME`/`$OLDPWD` cannot "
             f"be known from the record\n{proc.stdout}{proc.stderr}"
         )
+    # ⛔ `-P` DEFEATS the null-name rule. Measured: `cd ""`, `cd -L ""`, `cd -e ""`
+    # and `cd -- ""` are rc 0, but `cd -P ""` and `cd -Pe ""` are rc 1 with
+    # `cd: : No such file or directory` — so the `&&` short-circuits and no later
+    # segment ran. Admitting the `-P` spelling was a false PASS (tenth review cycle).
+    for opt in ("-P", "-Pe", "-P --"):
+        command = f'cmd:cd {opt} "" && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q'
+        proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, command])]))
+        assert proc.returncode == cl.EXIT_INVALID, (
+            f'{command!r} was ACCEPTED ({proc.returncode}) — `cd -P ""` exits 1 in '
+            f"bash, so the graded command never ran\n{proc.stdout}{proc.stderr}"
+        )
+
+
+def test_an_exit_followed_only_by_inert_segments_is_still_last(tmp_path):
+    """`<cmd> ; exit 0 ; A=1` DID run the command; `A=1` never executes.
+
+    ⛔ MEASURED false block (tenth review cycle): the `exit`-position rule counted
+    every raw segment, so an assignment AFTER the `exit` made it look non-final —
+    while widening `_LEADING_ASSIGNMENT` to end-of-segment was what made that
+    assignment an admitted wrapper in the first place. `origin/main` accepted the
+    record and `bash -c 'echo RAN ; exit 0 ; A=1'` prints RAN. An empty segment, a
+    lone `NAME=value` and a `cd` all execute nothing that is being cited, so none of
+    them may count as a segment "after" the `exit`.
+
+    ⛔ A RUNNER after the `exit` must still be refused — that is the false PASS the
+    guard exists for, pinned below.
+    """
+    for tail in (
+        " ; exit 0 ; A=1",
+        " ; exit 0 ; A=1; B=2",
+        " ; exit 0 ; cd docs",
+        " ; exit 0 ; export FOO=1",
+    ):
+        command = "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q" + tail
+        proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, command])]))
+        assert proc.returncode == cl.EXIT_CLEAN, (
+            f"{command!r} was REFUSED ({proc.returncode}) — only an INERT segment "
+            f"follows the exit, so the exit is still last\n{proc.stdout}{proc.stderr}"
+        )
+    for command in (
+        "cmd:exit 0 ; uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
+        "cmd:exit 0 ; bash I did not run this",
+    ):
+        proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, command])]))
+        assert proc.returncode == cl.EXIT_INVALID, (
+            f"{command!r} was ACCEPTED ({proc.returncode}) — a RUNNER after the exit "
+            f"never ran\n{proc.stdout}{proc.stderr}"
+        )
 
 
 def test_an_exit_that_is_not_the_last_segment_is_refused(tmp_path):

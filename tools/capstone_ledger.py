@@ -386,6 +386,13 @@ _CD_SEGMENT: Final = re.compile(r"^cd\s+(\S[^;|&]*)$")
 #: — the idiom this repo's own install scripts use — and exit 1 hides the whole
 #: uncovered report (seventh review cycle).
 _CONTROL_OPERAND: Final = re.compile(r"^(?:[+-]?\d{1,10}|\$\?|\$\{\?\})$")
+
+#: The shell CONTROL builtins admitted as wrappers. Named separately because the
+#: `exit`-position rule must treat them as non-inert: they terminate rather than
+#: cite, so a later one is not evidence that the graded command ran.
+_CONTROL_BUILTINS: Final[frozenset[str]] = frozenset(
+    {"exit", "return", "shift", "break", "continue"}
+)
 #: A bare NAME — an `export`/`unset` operand that is not an assignment.
 _ENV_NAME: Final = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -420,7 +427,7 @@ def _wrapper_argument_defect(head: str, args: list[str], cwd: Path, root: Path) 
     # WRAPPER half of that root is closed" sentence became false (fifth review
     # cycle). Measured: `export`/`unset`/`umask`/`set` refused the same carriage;
     # only the newly-added builtins admitted it.
-    if head in {"exit", "return", "shift", "break", "continue"}:
+    if head in _CONTROL_BUILTINS:
         # ⛔ AT MOST ONE. `man bash` gives `exit [n]` / `return [n]` / `shift [n]` /
         # `break [n]` / `continue [n]`, and the shell ENFORCES the arity: measured,
         # `bash -c 'exit 0 0 && echo RAN'` prints "exit: too many arguments" and the
@@ -1444,9 +1451,45 @@ def _command_body(raw: str, base: Path, root: Path) -> tuple[str, Path, str]:
     # are accepted. Closing it by grading every runner segment false-blocked
     # `… && git status --short`, so it is tracked rather than bought at that price.
     segments = [segment.strip() for segment in _split_segments(text)]
-    #: Index of the LAST non-empty segment. A TERMINATING control builtin (`exit`)
-    #: is only sound in that position — see the `exit` guard in the loop below.
-    _last_used = max((i for i, seg in enumerate(segments) if seg), default=-1)
+
+    #: Index of the LAST segment that can actually RUN something. A TERMINATING
+    #: control builtin (`exit`) is only sound in that position — see the `exit` guard
+    #: in the loop below. ⛔ IT IS NOT THE LAST *SEGMENT*: an empty segment, a lone
+    #: `NAME=value`, and a `cd` execute nothing that is being cited, so
+    #: `cmd:uv run pytest … ; exit 0 ; A=1` — where the graded command DID run — was
+    #: refused because `A=1` counted as a later segment (tenth review cycle;
+    #: `origin/main` accepted it and bash proves the runner executed).
+    def _runs_nothing(segment: str) -> bool:
+        if not segment:
+            return True
+        if re.match(r"^cd(\s|$)", segment):
+            return True
+        match = _LEADING_ASSIGNMENT.match(segment)
+        if match and not segment[match.end() :].strip():
+            return True
+        # A WRAPPER- or DECORATIVE-headed segment runs nothing that is being cited
+        # (that is the definition of both sets), so it cannot be the segment that
+        # proves the graded command ran — `… ; exit 0 ; export FOO=1` is as inert as
+        # `… ; exit 0 ; A=1`. A RUNNER- or prose-headed segment is NOT inert and
+        # still makes the `exit` non-final, which is the false PASS the guard exists
+        # for.
+        try:
+            tokens = shlex.split(segment)
+        except ValueError:
+            return False
+        if not tokens:
+            return True
+        # ⛔ A CONTROL BUILTIN IS NOT INERT FOR THIS QUESTION. `exit` is a member of
+        # `_WRAPPER_VERBS`, so classifying wrappers as inert made `exit` itself inert
+        # and therefore never last — which refused every trailing `… || exit 1`
+        # (caught by this branch's own tests). The question here is "does a later
+        # segment RUN the cited command?", and a later control builtin is another
+        # terminator, not evidence, so it is treated as non-inert.
+        if tokens[0] in _CONTROL_BUILTINS:
+            return False
+        return tokens[0] in _WRAPPER_VERBS or tokens[0] in _DECORATIVE
+
+    _last_used = max((i for i, seg in enumerate(segments) if not _runs_nothing(seg)), default=-1)
     # The directory the graded command runs in: `cd X && …` moves it, and a later
     # `cd` moves it again. Resolved against `root` only, so a `cd ../../..` cannot
     # walk the check out of the tree.
@@ -1489,19 +1532,29 @@ def _command_body(raw: str, base: Path, root: Path) -> tuple[str, Path, str]:
             # `-[PLe]+` or `--` and groups are SEPARATED BY WHITESPACE; anything else
             # dashed is left in the target and refused below.
             target = re.sub(r"^(?:(?:-[PLe]+|--)\s+)+", "", target).strip()
-            # ⛔ UNWRAP THE QUOTES AFTER the option strip, never before. Stripping
-            # quote characters off the WHOLE target first ran before the options came
-            # off, so `cd -L "tests"` lost only its TRAILING quote and kept a
-            # literal leading one, failing `is_dir()` — a false block on an ordinary
-            # record (eighth review cycle; `origin/main` accepted it and
-            # `bash -c 'cd -L "tests"'` is rc 0). `shlex` yields exactly the ONE word
-            # the shell would hand to `cd`, so `cd [opts] "dir"` and `cd [opts] dir`
-            # now grade identically.
+            # ⛔ `-P` DEFEATS bash's null-directory rule, so the empty-target no-op
+            # below must know whether it was stripped. Measured: `cd ""`, `cd -L ""`,
+            # `cd -e ""` and `cd -- ""` are all rc 0 (a null name is the CURRENT
+            # directory), but `cd -P ""` and `cd -Pe ""` are rc 1 with
+            # `cd: : No such file or directory` — so the `&&` short-circuits and no
+            # later segment ran (tenth review cycle). Admitting the `-P` spelling was
+            # a false PASS.
+            _opts = re.match(r"^(?:(?:-[PLe]+|--)\s+)+", cd.group(1).strip())
+            physical = bool(_opts and "P" in _opts.group(0))
             try:
                 words = shlex.split(target)
             except ValueError:
                 words = [target]
             if words == [""]:
+                if physical:
+                    return (
+                        "",
+                        base,
+                        f"the `cd` segment {segment!r} does not name a directory, and a "
+                        "failing `cd` short-circuits the `&&` — no later segment of "
+                        "this record can have run (`-P` disables bash's null-name "
+                        'rule, so `cd -P ""` exits 1)',
+                    )
                 # ⛔ bash: "A null directory name is the same as the current
                 # directory." `cd ""` is a NO-OP, not an unknowable cwd — measured
                 # `bash -c 'cd ""; echo rc=$?'` → rc 0, cwd unchanged — so the later
