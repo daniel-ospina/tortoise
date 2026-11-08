@@ -79,18 +79,6 @@ the `[embeddings]` extra does not need it either (R3 #1542 D6).
 | `OPENROUTER_API_KEY` / `OPENAI_API_KEY` / `DEEPSEEK_API_KEY` / `GEMINI_API_KEY` | provider keys (existing repo pattern, `tortoise.ingest._PROVIDERS`) | required for non-mock runs |
 | `TORTOISE_LME_READER_MODEL` | reader model spec `<provider>:<model>` or bare | `deepseek:deepseek-v4-flash` (M5 pinned — #1525; transport repointed by #8486 — see "Reader pinning" below) |
 | `TORTOISE_LME_JUDGE_MODEL` | judge model spec | `deepseek:deepseek-v4-flash` (#8486 owner ruling 2026-10-27 — internal baseline series; the receipt records `unpinned:<model>` + `inconclusive` by design) |
-
-> **The OFFICIAL judge (external comparability) is a configuration, not the
-> default.** `gpt-4o-2024-08-06` is the model the benchmark's own
-> `evaluate_qa.py` baseline ran, and the model id is what makes a number
-> comparable to a published figure — the SAME model is served by other
-> configured providers, so it needs no OpenAI key. Name it explicitly:
-> `export TORTOISE_LME_JUDGE_MODEL='openrouter:openai/gpt-4o-2024-08-06'`
-> (provider resolution order: openrouter → deepseek → openai → gemini).
-> The #8486 owner ruling of 2026-10-27 replaced it as the run's *default* —
-> progress against ourselves, not comparability with vendors — and recorded
-> the `OVERRIDES:` line; `judge.OFFICIAL_JUDGE_MODEL` keeps the identity
-> named so this path cannot rot.
 | `TORTOISE_LME_CACHE_DIR` | dataset cache dir (outside the repo) | `~/.cache/tortoise-longmemeval` |
 | `TORTOISE_LME_CHUNK_TURNS` | turns per raw-chunk window (R1 #1540) | `2` (the run protocol step-2 sweep selects the pilot/500-Q value) |
 | `TORTOISE_LME_CONTEXT_CAP` | reader context token budget — rank-interleaved (C1 #1745: points + chunks in true RRF order, the R1 points-first tiering deliberately reversed) bounded by the item cap | `8000` |
@@ -104,6 +92,18 @@ the `[embeddings]` extra does not need it either (R3 #1542 D6).
 | `TORTOISE_LME_RERANK_POOL` | rerank pool depth (R6; the knob can only RAISE the depth — applied pool = `max(pool, baseline, max(k))` with baseline = `TORTOISE_LME_POOL_SIZE` when set (default 120), itself floored at `max(k)`; only read while rerank is on) | `40` |
 | `TORTOISE_LME_RERANK_CAP` | per-session MMR cap (R6; ≥ 1) | `2` |
 | `TORTOISE_LME_RERANK_LAMBDA` | MMR λ in [0,1] (R6; 1.0 = pure rerank, 0.0 = pure similarity; boundary values accepted) | `0.7` |
+
+> **The OFFICIAL judge (external comparability) is a configuration, not the
+> default.** `gpt-4o-2024-08-06` is the model the benchmark's own
+> `evaluate_qa.py` baseline ran, and the model id is what makes a number
+> comparable to a published figure — the SAME model is served by other
+> configured providers, so it needs no OpenAI key. Name it explicitly:
+> `export TORTOISE_LME_JUDGE_MODEL='openrouter:openai/gpt-4o-2024-08-06'`
+> (provider resolution order: openrouter → deepseek → openai → gemini).
+> The #8486 owner ruling of 2026-10-27 replaced it as the run's *default* —
+> progress against ourselves, not comparability with vendors — and recorded
+> the `OVERRIDES:` line; `judge.OFFICIAL_JUDGE_MODEL` keeps the identity
+> named so this path cannot rot.
 
 CLI flags: `--split s|m|oracle`, `--limit N`, `--data <local json/jsonl>`,
 `--k 5,10,20`, `--top-k 20`, `--mock`, `--output <report.json>`,
