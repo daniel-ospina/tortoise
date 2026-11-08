@@ -41,6 +41,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from tortoise import value_gate as vgm
 from tortoise import vet_gate as vg
 from tortoise.commit_schema import validate_payload_dict
 
@@ -67,13 +68,25 @@ def _discard_matching(text: str):
         if c["text"] == text]}
 
 
+_RESOLVED_SEARCH = {
+    # #10997: a COMPLETE lookup — `#2552`'s mint is an identity assertion, so it is
+    # licensed only by a lookup that resolved; `{}` now HOLDS the edge instead.
+    "mode": "real", "degraded": False, "reason": None,
+    "entities": [], "points": [], "events": [], "queries_run": 5,
+    "query_coverage": {"derived": {"object": 1, "event": 1, "point": 1},
+                       "ran": {"object": 1, "event": 1, "point": 1},
+                       "failed": {"object": 0, "event": 0, "point": 0}},
+}
+
+
 def _payload_of(embed_list: dict):
     """Run the downstream S5 embedder over a list — the ONLY way to prove a
     DISCARD actually reached the payload (or was re-minted into it)."""
     import copy
 
     from tortoise.extractor_v2 import execute_embed
-    res = execute_embed(copy.deepcopy(embed_list), {}, session_id="vet-test")
+    res = execute_embed(copy.deepcopy(embed_list), _RESOLVED_SEARCH,
+                        session_id="vet-test")
     return res["payload"], res
 
 
@@ -1374,9 +1387,19 @@ def test_every_discard_carries_a_counterfactual():
 # ── pipeline wiring ────────────────────────────────────────────────────────
 
 class _Model:
-    """Minimal v2 pipeline model: S1 story, S2 list, empty S4."""
+    """Minimal v2 pipeline model: S1 story, S2 list, empty S4.
+
+    ``extra_entities``/``point`` let a test script an emission that DOES carry a
+    droppable (identifier-only) candidate, or one that carries none — the two
+    halves of `#10996`'s V3.
+    """
 
     last_finish_reason = "stop"
+
+    def __init__(self, extra_entities: tuple[str, ...] = (),
+                 point: str = "the plan doc is stale") -> None:
+        self.extra_entities = extra_entities
+        self.point = point
 
     def complete(self, *, system, user, max_tokens=None):
         if "STORY SUMMARIZER" in system:
@@ -1384,13 +1407,16 @@ class _Model:
         if "GAP REVIEWER" in system:
             return ('{"entities": [], "events": [], "operators": [], '
                     '"points": []}')
-        return ('{"entities": ['
-                '{"name": "the plan doc", "kind": "core:document"}, '
-                '{"name": "pytest", "kind": "core:tool"}], '
-                '"points": [{"content": "the plan doc is stale", '
-                '"pointKind": "statement", '
-                '"about_entities": ["the plan doc"]}], '
-                '"events": [], "operators": []}')
+        ents = [{"name": "the plan doc", "kind": "core:document"},
+                {"name": "pytest", "kind": "core:tool"}]
+        ents += [{"name": n, "kind": "core:other"} for n in self.extra_entities]
+        import json as _json
+        return _json.dumps({
+            "entities": ents,
+            "points": [{"content": self.point, "pointKind": "statement",
+                        "about_entities": ["the plan doc"]}],
+            "events": [], "operators": [],
+        })
 
 
 def _conv():
@@ -1410,14 +1436,108 @@ def test_flag_off_is_off_path(monkeypatch):
     # `TORTOISE_S2_DECISION_SEAM`, so a leftover ambient value arms the pass
     # inside the state this test calls OFF. Deleting only `TORTOISE_VET` reds
     # this test for an operator who armed either of the other two.
+    #
+    # `TORTOISE_VALUE_GATE` is set EXPLICITLY to `0` (#10996): it defaults ON now
+    # (it arms the S2.2 mechanical half), so `delenv` no longer produces an OFF
+    # arm — this is the kill-switch, and it is the only test that exercises it.
     monkeypatch.delenv("TORTOISE_VET", raising=False)
-    monkeypatch.delenv("TORTOISE_VALUE_GATE", raising=False)
+    monkeypatch.setenv("TORTOISE_VALUE_GATE", "0")
     monkeypatch.delenv("TORTOISE_S2_DECISION_SEAM", raising=False)
     from tortoise import extractor_v2 as v2
     out = v2.extract_session_v2(_Model(), _conv())
     assert out["vet"] == {"enabled": False, "s2": {}, "union": {}}
     names = [e["name"] for e in out["embed_list"]["entities"]]
     assert "pytest" in names and "the plan doc" in names
+
+
+def test_the_default_arm_arms_the_pass_and_witnesses_it(monkeypatch):
+    """#10996 V3 — the default must ARM and be WITNESSED on the fleet door.
+
+    This is the issue's own detailed E2E case (T11 moved to `#11021` with the
+    referentiality question). Two halves, deliberately separate, because
+    ``enabled: True`` alone is not activity — the ``_pass_ran`` lesson: a switch
+    that reads on while the pass does no work is the inert-enforcer class.
+
+    (a) a scripted emission with **no identifier-only candidate** and **no env**
+        ⇒ the pass reports itself armed, the VET stats witness a non-empty
+        ``by_outcome`` over a positive candidate count, nothing is dropped, and
+        the emitted list is the explicit-``=0`` arm's list line for line.
+    (b) the same door with **one identifier-only candidate** ⇒ exactly that item
+        is gone and the drop names its rule.
+
+    (a) must be a clean emission: asserting list-equality on a corpus that DOES
+    carry a droppable row would red for the correct behaviour.
+    """
+    from tortoise import extractor_v2 as v2
+
+    for env in ("TORTOISE_VET", "TORTOISE_S2_DECISION_SEAM"):
+        monkeypatch.delenv(env, raising=False)
+
+    # (a) default arm — armed AND witnessed, changing nothing
+    monkeypatch.delenv("TORTOISE_VALUE_GATE", raising=False)
+    on = v2.extract_session_v2(_Model(), _conv())
+    assert on["vet"]["enabled"] is True, (
+        "the S2.2 pass is off-path on the default arm, so no selection step "
+        "runs on the door at all (EXTRACTOR-V4-ARCHITECTURE.md §S2.2)")
+    s2 = on["vet"]["s2"]
+    stats = s2["stats"]
+    assert stats["candidates"] > 0, "the pass ran but judged no candidate"
+    assert stats["by_outcome"], "the pass ran and reported no outcome"
+    assert stats["mechanical"]["enabled"] is True, (
+        "the pass is armed and the predicate inside it is not — the "
+        "wrapper-only-flip shape (#10996 Claim 4)")
+    assert stats["discarded"] == 0, "a clean emission was not left alone"
+
+    monkeypatch.setenv("TORTOISE_VALUE_GATE", "0")
+    off = v2.extract_session_v2(_Model(), _conv())
+    assert off["vet"]["enabled"] is False
+    assert on["embed_list"] == off["embed_list"], (
+        "the all-KEEP pass changed the emitted list — the flip must be "
+        "behaviour-identical on a population the predicate keeps entirely")
+
+    # (b) one identifier-only candidate ⇒ exactly one item fewer
+    monkeypatch.delenv("TORTOISE_VALUE_GATE", raising=False)
+    dropping = v2.extract_session_v2(_Model(extra_entities=("#4118",)), _conv())
+    monkeypatch.setenv("TORTOISE_VALUE_GATE", "0")
+    control = v2.extract_session_v2(_Model(extra_entities=("#4118",)), _conv())
+
+    on_names = [e["name"] for e in dropping["embed_list"]["entities"]]
+    off_names = [e["name"] for e in control["embed_list"]["entities"]]
+    assert "#4118" in off_names, "the control did not carry the candidate"
+    assert "#4118" not in on_names, (
+        "the default arm did not drop the identifier-only candidate: the flip "
+        "armed a pass that does no work")
+    assert len(on_names) == len(off_names) - 1, (on_names, off_names)
+    dropped = dropping["vet"]["s2"]
+    mech = dropped["stats"]["mechanical"]
+    assert mech["enabled"] is True
+    assert mech["fired"] == 1
+    assert mech["by_rule"][vgm.RULE_REFERENCE] == 1, mech
+    assert dropped["stats"]["discarded"] == 1
+    (decision,) = [d for d in dropped["decisions"].values()
+                   if d["text"] == "#4118"]
+    assert decision["outcome"] == vg.DISCARD
+    assert decision["rule_id"] == vgm.RULE_REFERENCE
+    assert decision["counterfactual"], "#4899 safeguard 3: no silent discard"
+
+
+def test_an_all_keep_pass_returns_an_equal_list(monkeypatch):
+    """#10996 V4 — an all-KEEP pass must return the SAME list, same key order.
+
+    ``apply_vet`` early-returns ``dict(base)`` when every decision keeps
+    (``vet_gate.py``). That early return is the only reason the default flip can
+    be behaviour-neutral on a population the predicate keeps — a rebuild that
+    re-ordered or re-shaped the sections would change every payload byte on
+    every capture.
+    """
+    monkeypatch.delenv("TORTOISE_VALUE_GATE", raising=False)
+    el = _cand("the plan doc", point="the plan doc is stale")
+    out = vg.vet_candidates(el, narrative="n")
+    assert {d["outcome"] for d in out["decisions"].values()} == {vg.KEEP}
+    new, warnings = vg.apply_vet(el, out["decisions"])
+    assert new == el
+    assert list(new) == list(el), "section key order changed"
+    assert warnings == []
 
 
 def test_the_injected_arbiter_is_the_fourth_off_path_term(monkeypatch):
@@ -1433,10 +1553,27 @@ def test_the_injected_arbiter_is_the_fourth_off_path_term(monkeypatch):
     — every switch off + an arbiter ⇒ the pass RUNS and its verdict is applied;
     (b) the prose — the off-path sentence names the arbiter, so it cannot be
     re-worded back into an exhaustive-sounding three-term list without a red.
+
+    ⛔ THE "OFF" SPELLING (`#10996`). This arm used to DELETE
+    `TORTOISE_VALUE_GATE`, which spelt OFF before the flip and spells ON after it —
+    and `_value_gate_enabled()` is `vet_enabled`'s THIRD disjunct, so the pass was
+    armed by the value gate whether or not the arbiter term existed. Limb (a) was
+    therefore green on the very mutation it exists to catch (deleting
+    `vet_arbiter is not None`), which is the class this PR's R2 closes everywhere
+    else in this file. "Every switch off" now spells the kill switch explicitly.
     """
-    for env in ("TORTOISE_VET", "TORTOISE_VALUE_GATE", "TORTOISE_S2_DECISION_SEAM"):
+    for env in ("TORTOISE_VET", "TORTOISE_S2_DECISION_SEAM"):
         monkeypatch.delenv(env, raising=False)
+    # `#10996`: an UNSET value gate is the ON arm, so OFF must be written.
+    monkeypatch.setenv("TORTOISE_VALUE_GATE", "0")
     from tortoise import extractor_v2 as v2
+
+    # The premise limb (a) rests on, asserted rather than assumed: if the third
+    # disjunct were armed here the arbiter term would be untested and this test
+    # would certify coverage it does not have.
+    assert v2._value_gate_enabled() is False, (
+        '"every switch off" must leave the value gate OFF — an unset value gate '
+        'is the ON arm since `#10996`, and it is this expression\'s third disjunct')
 
     out = v2.extract_session_v2(_Model(), _conv(), vet_arbiter=_discard)
     assert out["vet"]["enabled"] is True, (
@@ -1451,6 +1588,41 @@ def test_the_injected_arbiter_is_the_fourth_off_path_term(monkeypatch):
     assert "Off-path only when ``vet_arbiter`` is ``None``" in flat, (
         "the off-path claim must name the arbiter term (it is what the code "
         "ORs first), not only the three env switches")
+
+
+def test_the_seam_arms_the_pass_when_the_mechanical_half_is_killed(monkeypatch):
+    """`_vet_enabled`'s `or _s2_seam_armed()` is STILL load-bearing (#10996).
+
+    `_s2_seam_armed`'s docstring used to justify that term with "`TORTOISE_VET`
+    unset and no arbiter injected ⇒ `extract_session_v2` would skip the VET
+    passes entirely". Since `#10996` that is NOT the state that skips them: an
+    unset value gate now arms the pass as `vet_enabled`'s third disjunct, so the
+    sentence read as if the term were dead code — and a lane deleting
+    `or _s2_seam_armed()` on that reading restores the `#10072` inert-enforcer
+    regression (an armed seam that no gate consults).
+
+    It is not dead. With the mechanical half explicitly killed
+    (`TORTOISE_VALUE_GATE=0`, this PR's own kill switch), `TORTOISE_VET` unset
+    and no arbiter injected, the seam's term is the ONLY arming left. The three
+    assertions are deliberately separate: the first two are the PREMISE (the
+    other two contributors really are off), the third is the consequence, so the
+    pin cannot pass by leaning on a term it exists to exclude.
+    """
+    monkeypatch.setenv("TORTOISE_VALUE_GATE", "0")
+    monkeypatch.delenv("TORTOISE_VET", raising=False)
+    monkeypatch.setenv("TORTOISE_S2_DECISION_SEAM", "1")
+    from tortoise import extractor_v2 as v2
+
+    assert v2._value_gate_enabled() is False, (
+        "the mechanical half must be KILLED here, or this pin proves nothing "
+        "about the seam's own term")
+    assert v2._s2_seam_armed() is True, (
+        "the seam flag must be armed, or the third assertion cannot be caused "
+        "by it")
+    assert v2._vet_enabled() is True, (
+        "`_vet_enabled` must OR the seam in: with `TORTOISE_VET` unset and the "
+        "value gate killed, deleting `or _s2_seam_armed()` skips every VET pass "
+        "while the seam reports itself as armed (`#10072`)")
 
 
 def test_flag_on_removes_discarded_candidate_before_the_tail(monkeypatch):

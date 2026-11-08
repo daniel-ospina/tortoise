@@ -63,8 +63,16 @@ def _order(placement: str | None = None) -> tuple[list[str], list[str]]:
         [dict(c) for c in POOL], anchors=(), window=WINDOW, limit=LIMIT,
         bucket_cap=1, weight=1.0, date_window=RANGE, **kwargs)
 
-
 # ── the seam exists (RED before the fix: no such parameter / no resolver) ──
+
+def _order_unguarded(placement: str | None = None) -> tuple[list[str], list[str]]:
+    """The PRE-RULING splice (guard off) — placement geometry, not admission."""
+    kwargs = {} if placement is None else {"placement": placement}
+    return temporal_leg_fusion_order(
+        [dict(c) for c in POOL], anchors=(), window=WINDOW, limit=LIMIT,
+        bucket_cap=1, weight=1.0, date_window=RANGE, non_eviction=False,
+        **kwargs)
+
 
 def test_the_eval_lane_call_exposes_the_placement_knob():
     """A ruling of ``ab-head-ab`` must not be blocked on new code."""
@@ -109,9 +117,20 @@ def test_resolver_normalises_case_and_whitespace():
 
 def test_the_two_placements_put_the_picks_in_different_halves():
     """The measured geometry: ``tail`` cannot reach the graded top-5,
-    ``head`` always does — which is the whole content of the open ruling."""
-    tail_order, tail_picks = _order("tail")
-    head_order, head_picks = _order("head")
+    ``head`` always does — the structural fact the ruling rested on.
+
+    ⛔ Both arms here are measured with ``non_eviction=False`` ON PURPOSE
+    (#10538 owner ruling 2026-11-07). This pin is about PLACEMENT GEOMETRY —
+    where a pick lands once it is admitted — and the guard changes admission,
+    not geometry: with the guard on, the shipped tail arm refuses this pool's
+    picks outright (they trade sessions away), which would make the geometry
+    unobservable here. The guarded tail is asserted separately, immediately
+    below, and the head arm is exempt from the guard by construction (it IS
+    the displacement counterfactual), so the two comparisons below stay
+    apples-to-apples.
+    """
+    tail_order, tail_picks = _order_unguarded("tail")
+    head_order, head_picks = _order_unguarded("head")
     assert tail_picks and head_picks
     tail_ranks = [tail_order.index(p) for p in tail_picks]
     head_ranks = [head_order.index(p) for p in head_picks]
@@ -121,6 +140,21 @@ def test_the_two_placements_put_the_picks_in_different_halves():
         "the shipped tail placement must not reach the top-5 (that is why "
         "recall_all@5 is structurally unmovable under it)")
     assert all(i < 5 for i in head_ranks)
+
+    # ⛔ and the GUARDED tail arm on the same pool: the ruling's hard
+    # condition refuses every pick, so the "picks land at 10-11" row is
+    # reachable only on the pre-ruling splice. Both facts are true at once and
+    # that is the point — the geometry did not change, the admission did.
+    g_trace: dict = {}
+    g_order, g_picks = temporal_leg_fusion_order(
+        [dict(c) for c in POOL], anchors=(), window=WINDOW, limit=LIMIT,
+        bucket_cap=1, weight=1.0, date_window=RANGE, placement="tail",
+        guard_trace=g_trace)
+    assert g_picks == [], g_picks
+    assert g_trace["targeting"] == "window" and g_trace["applied"] is True
+    assert g_trace["rejected"], g_trace
+    assert g_order == [c["id"] for c in POOL], (
+        "a fully-refused tail arm must leave the order byte-identical")
 
 
 # ── the DEFAULT path is unchanged (RED if the default is flipped) ──

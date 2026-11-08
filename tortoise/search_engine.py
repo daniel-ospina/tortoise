@@ -1055,13 +1055,18 @@ def classify_query(
 def _trace_entry(leg: str, *, ran: bool, degraded: bool,
                  reason: str | None, count: int,
                  mechanism: str | None = None,
-                 declined: bool = False) -> dict:
+                 declined: bool = False,
+                 provenance: str | None = None) -> dict:
     entry = {"leg": leg, "ran": ran, "degraded": degraded,
              "reason": reason, "count": count}
     if mechanism is not None:
         entry[VECTOR_MECHANISM_KEY] = mechanism
     if declined:
         entry[LEXICAL_DECLINED_KEY] = True
+    if provenance is not None:
+        # #2518: which pass produced this entry, for a leg asked twice in one
+        # read (see LEG_PROVENANCE_KEY).
+        entry[LEG_PROVENANCE_KEY] = provenance
     return entry
 
 
@@ -1113,6 +1118,27 @@ MECHANISM_SCAN = "scan"
 #: fallback #4999 is about, now reportable on the trace rather than only in a
 #: log line.
 MECHANISM_SCAN_FALLBACK = "scan_fallback"
+
+# ── #2518: which PASS produced a leg entry ─────────────────────────────────
+# A leg can now be asked MORE THAN ONCE in one read: the entity/fact-augmented
+# key expansion's dense half runs the vector leg a second time with a composed
+# query (#2518 indicator 2). The two entries were shape-identical — same
+# ``leg``, ``ran``, ``degraded``, ``reason`` and even the same ``mechanism``
+# (``scan``/``index`` from the same branch) — so NOTHING in the trace could say
+# which one was the expansion, and a measurement could not attest that the arm
+# engaged at all.
+#
+# Position and entry count are deliberately not accepted as provenance: a
+# multi-arm read legitimately emits several ``vector`` entries into the same
+# list (``recall_state(object_centric=True)``), which is the reason the
+# ``VECTOR_SCOPE_KEY`` neutral rules exist. So the rule is the #8488 one for
+# ``VECTOR_MECHANISM_KEY``, applied to a second per-entry fact: a consumer reads
+# this value TOGETHER WITH ``entry["leg"]``.
+LEG_PROVENANCE_KEY = "provenance"
+#: The entry is the #2518 dense half of the entity/fact-augmented key expansion.
+#: Absent on every other entry — including the shipped dense leg, whose
+#: provenance is simply "the read asked for it".
+PROVENANCE_ENTITY_KEY_EXPANSION = "entity_key_expansion"
 
 
 # ── #4199: the dense leg's material for the READ's own scope ────────────────
@@ -2156,6 +2182,8 @@ def run_vector_query(
     leg_trace: list[dict] | None = None,
     min_similarity: float | None = None,
     scope_kinds: tuple[str, ...] | None = None,
+    meter: bool = True,
+    provenance: str | None = None,
 ) -> list[tuple[str, float]]:
     """Run vector similarity search via FalkorDB vector index.
 
@@ -2244,6 +2272,12 @@ def run_vector_query(
     must not launder a failed leg into "no declaration at all" (#4199
     review P2).
 
+    ``meter=False`` suppresses the retrieval-tally note while keeping the leg
+    trace, for a caller that runs this leg a SECOND time in the same dense slot
+    (C2's ``#2518`` indicator-2 expansion pass uses it). The read then reports
+    one vector leg — the same composition ``run_bm25_query``'s ``meter`` exists
+    for (``#8488``).
+
     Note: the connection-level `timeout` is passed straight to the FalkorDB
     driver (Graph.query(timeout=...)) so a slow query is killed server-side.
     The post-hoc check remains as a safety net for drivers that ignore the
@@ -2272,7 +2306,19 @@ def run_vector_query(
         # #4489: noted with the RAW ran/degraded the leg reports, BEFORE the
         # opt-in trace's ``_scope_hollow`` re-labelling below — the ledger is a
         # fact about the leg execution, not a derived declaration.
-        _retrieval_metering.note_leg("vector", ran=ran, degraded=degraded)
+        #
+        # ``meter=False`` suppresses the tally while keeping the trace entry:
+        # the read path uses it when it runs this leg a SECOND time in the same
+        # dense slot (C2's #2518 indicator-2 expansion pass). One slot, one
+        # tally — the same composition ``run_bm25_query``'s ``meter`` exists for
+        # (#8488). Without it a read would report two vector legs for one dense
+        # slot, and any measurement folding ``legs["vector"]`` per read would
+        # double overnight. The two entries are only DISTINGUISHABLE because the
+        # caller labels the second one with ``provenance=`` (see
+        # :data:`LEG_PROVENANCE_KEY`): ``meter`` alone suppresses the tally, it
+        # says nothing about which pass an entry came from.
+        if meter:
+            _retrieval_metering.note_leg("vector", ran=ran, degraded=degraded)
         if leg_trace is None:
             return
         if _scope_hollow and ran and not degraded:
@@ -2288,7 +2334,7 @@ def run_vector_query(
                 degraded, reason, count = True, "no_embeddings", 0
         entry = _trace_entry("vector", ran=ran, degraded=degraded,
                              reason=reason, count=count,
-                             mechanism=mechanism)
+                             mechanism=mechanism, provenance=provenance)
         if _scope_empty and not failure:
             # #4199: mark the entry NEUTRAL — the empty-scope rule keeps its
             # ``ok``/degraded record, but the declaration skips it (see

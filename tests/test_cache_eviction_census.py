@@ -30,6 +30,7 @@ from tortoise.cache_eviction import (
     TRUTH_LABELS,
     Assessment,
     CacheReadError,
+    CacheState,
     ParityReport,
     assess,
     classify,
@@ -236,7 +237,11 @@ def test_the_truth_labels_are_never_silently_treated_as_evictable():
         "a proven POPULATION must never make a LABEL eligible: turns are `:Point` "
         "nodes, so this is the licence-to-delete-every-Point regression"
     )
-    assert [e["population"] for e in result.plan["evictable"]] == ["turn (population)"]
+    # ⛔ The LICENCE names the BARE population ("turn"), not the display label
+    # ("turn (population)"): the executor's population gate compares for
+    # equality, so a licence naming the display string refused the sweep it
+    # had just licensed. `label` still carries the display form.
+    assert [e["population"] for e in result.plan["evictable"]] == ["turn"]
     assert "Point" in " ".join(result.problems)
     assert "Object" in " ".join(result.problems)
     assert g.mutated == []
@@ -282,6 +287,29 @@ def test_a_non_clean_verdict_never_proves(verdict):
     assert result.verdict == "REFUSED"
 
 
+def test_a_clean_byte_verdict_still_publishes_the_licence():
+    """⛔ The negative case: `CLEAN` with a PROVEN population must carry the licence.
+
+    This is the state that made the entry bound unenforceable — under the byte ceiling,
+    so `CLEAN`, but the entry budget a consumer enforces may be exceeded by orders of
+    magnitude (many small turn nodes, the shape #10976 describes).
+    """
+    g = _FakeGraph({"Point": 10})
+    c = _FakeClient(used=500, maxmemory=10_000)
+    report = ParityReport(
+        instrument=PARITY_INSTRUMENTS["turn"], verdict="CLEAN",
+        measured_nodes=10, total_nodes=10, graph_name="tortoise",
+    )
+
+    result = assess(c, g, "tortoise", ceiling_bytes=1_000,
+                    parity_reports={PARITY_INSTRUMENTS["turn"]: report})
+
+    assert result.verdict == "CLEAN", result.problems
+    assert [e["population"] for e in result.plan["evictable"]] == ["turn"]
+    assert result.plan["over_by_bytes"] == 0
+    assert g.mutated == []
+
+
 def test_under_the_bound_is_clean_and_proposes_nothing():
     g = _FakeGraph({"Point": 10})
     c = _FakeClient(used=500, maxmemory=10_000)
@@ -289,7 +317,15 @@ def test_under_the_bound_is_clean_and_proposes_nothing():
     result = assess(c, g, "tortoise", ceiling_bytes=1_000)
 
     assert result.verdict == "CLEAN"
-    assert result.plan == {}
+    # ⛔ `CLEAN` IS THE BYTE STATE, NOT "NOTHING TO DO", and the plan now says so on
+    # every verdict. A consumer enforcing an ENTRY budget cannot be gated by the byte
+    # verdict: a cache far over its node budget but under its byte ceiling answered
+    # CLEAN with `plan == {}`, so the entry bound was unenforceable (measured: 1,000,000
+    # nodes against a 20,000-node budget -> REFUSED, 0 deleted). This fake has no proven
+    # population, so the licence is EMPTY and the refusal is as sharp as it was.
+    assert result.plan["evictable"] == []
+    assert result.plan["over_by_bytes"] == 0
+    assert "not_evictable" in result.plan
     assert g.mutated == []
 
 
@@ -1108,7 +1144,11 @@ def test_exit_two_licenses_only_the_listed_populations():
 
     assert result.verdict == "PLAN"
     assert result.plan["not_evictable"] == ["Point", "Object"]
-    assert [e["population"] for e in result.plan["evictable"]] == ["turn (population)"]
+    # ⛔ The LICENCE names the BARE population ("turn"), not the display label
+    # ("turn (population)"): the executor's population gate compares for
+    # equality, so a licence naming the display string refused the sweep it
+    # had just licensed. `label` still carries the display form.
+    assert [e["population"] for e in result.plan["evictable"]] == ["turn"]
 
 
 # --------------------------------------------------------------------------- #
@@ -1846,3 +1886,44 @@ def test_an_unwritable_out_path_is_a_usage_error_not_a_traceback(tmp_path, capsy
     assert code == 1, err
     assert "--out" in err, err
     assert "Traceback" not in err, err
+
+
+def test_the_cli_PRINTS_the_licence_on_a_CLEAN_verdict(monkeypatch, capsys, tmp_path):
+    """⛔ `CLEAN` is the BYTE state, not "nothing to evict".
+
+    The CLI returned on CLEAN before printing the licence it had just published, so an
+    operator following the documented two-step (census, then the executor) read "nothing
+    to evict" from step 1 and then watched thousands of nodes go in step 2. Nothing
+    consumed that print: deleting the whole `LICENSED (byte-clean)` loop left the suite at
+    248 passed. This asserts the line an operator actually reads.
+    """
+    cli = _cli()
+
+    # Drive the CLI to a CLEAN verdict with a PROVEN population, without a store: the
+    # census's own `assess` is replaced, and everything upstream of it is stubbed.
+    class _Endpoint:
+        host, port, username, password, ssl = "h", 1, None, None, False
+        graph_name = "tortoise"
+
+    state = CacheState(
+        graph_name="tortoise", resident_bytes=500, maxmemory_bytes=10_000,
+        maxmemory_policy="noeviction", ceiling_bytes=1_000, ceiling_source="declared",
+        graph_key_ttl_seconds=-1, keys_per_graph=1,
+        graph_memory_usage_mb=None, graph_memory_usage_note=None)
+    census = Assessment(
+        state=state, classes=(), verdict="CLEAN",
+        plan={"evictable": [{"population": "turn", "nodes": 7,
+                             "instrument": PARITY_INSTRUMENTS["turn"]}]})
+
+    monkeypatch.setattr(cli, "_endpoint", lambda uri: _Endpoint())
+    monkeypatch.setattr(cli, "_connection", lambda ep: (object(), object()))
+    monkeypatch.setattr(cli, "_absent_graph_refusal", lambda client, name: None)
+    monkeypatch.setattr(cli, "assess", lambda *a, **k: census)
+
+    code = cli.main(["--graph-uri", "docker://h:1/tortoise", "--graph", "tortoise"])
+
+    err = capsys.readouterr().err
+    assert code == 0
+    assert "LICENSED (byte-clean)" in err, err
+    assert "turn" in err and "7 nodes" in err, err
+    assert "BYTE" in err, err

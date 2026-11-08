@@ -67,7 +67,19 @@
 # constraint claim; its SCAN scope is bounded in its note); `span_link` (1 of 4 gates),
 # `failure_policy` (1 of 3 declared parts) and `sufficiency_router` (the caller)
 # narrow theirs, and each NOTE names the part — so no row's `pins:` line can be
-# read as wider than its note. #10636 is the
+# read as wider than its note.
+#
+# ⛔ WHAT A PIN PROVES, stated so this contract is not read as COVERAGE
+# either (#5064 review P1): the gate checks that the pin EXISTS, that its
+# node is COLLECTABLE, and that the node is not opted out — nothing more.
+# It does NOT check that the pin observes every part a row declares, and
+# it cannot: a valid-but-unrelated node resolves exactly as well as a
+# targeted one. The "narrowed to a named part" allowance above is
+# therefore a DOCUMENTED concession, not an enforcement — the row's own
+# `note` is the only thing bounding a narrowed pin, and no verdict reds if
+# that note understates the part. Read a green gate as "the absence is
+# CITED", never as "the absence is COVERED".
+# #10636 is the
 # measured case: `span_link`'s row asserted an every-point requirement whose real
 # coverage was 1 of 4 gates, with the other three named only in the note's prose
 # ("pinned ELSEWHERE, not by it"). Every `not-implemented` row therefore names
@@ -249,11 +261,32 @@ mechanisms:
     symbols:
       - check_batch
     note: >-
-      Flag-gated (`TORTOISE_VET`), off by default — the gate is off-path until
-      the flag says otherwise. `TORTOISE_S2_DECISION_SEAM` (#5087) is a SECOND
-      switch that also arms this step, overriding even an explicit
-      `TORTOISE_VET=0`: the seam IS the arbiter, and an arbiter no gate consults
-      is the inert-enforcer class.
+      TWO halves, two defaults (since #10996). The MECHANICAL half runs by
+      default: `TORTOISE_VALUE_GATE` unset arms the #4899 identifier-only
+      predicate, which is what §S2.2 requires (*"unset must not mean 'the
+      predicate never runs'"*) now that its rate is measured and committed
+      (`docs/evidence/9889/e1-gate-drops.json`: 0 drops of 61 Objects, 0 of 13
+      bare-definite, positive controls firing) — the residual is the point/event
+      rate, which that artifact does not cover (`#10996` V8). The INSTRUMENT now
+      can cover it: `e1_gate_drops.py --sections` censuses exactly the sections
+      this pass judges (`entities`/`events`/`points` — the instrument spells them
+      `objects`/`events`/`points`, and `PASS_SECTION_OF` maps `objects`→`entities`),
+      defaults to all three, and
+      refuses to print a drop count over a section that yielded no candidates
+      (`measured: false`, `coverage_complete: false`) — but **the points+events
+      number is still NOT taken**: the ON-arm graph is ephemeral, so Step 4's
+      pass condition is now *evaluable* and not yet *evaluated* (`#11201`).
+      The ARBITER half stays OPT-IN. `TORTOISE_VET` runs the pass but supplies
+      NO arbiter, so it adds no spend; the paid network call arrives only with
+      the seam below (or an injected arbiter), which is why arming a
+      decision-only model stays an operator decision and not this default
+      (`docs/architecture/S2-DECISION-SEAM.md` §6): the spend decision is not
+      this default. `TORTOISE_S2_DECISION_SEAM` (#5087) is a THIRD switch that
+      also arms this step, overriding even an explicit `TORTOISE_VET=0`: the
+      seam IS the arbiter, and an arbiter no gate consults is the
+      inert-enforcer class. `TORTOISE_CLASSIFY_LATER` (S2.3) is unchanged and
+      still defaults off. Kill-switch: `TORTOISE_VALUE_GATE=0` (blank/garbage
+      read OFF too — the safe residual for a discard predicate).
 
   - id: source_dedup
     name: "S0a NORMALIZE + HASH → S0b SOURCE DEDUP"
@@ -557,7 +590,18 @@ mechanisms:
       docs/architecture/STORAGE-ARCHITECTURE.md): a three-state verdict with the
       residency precedence (§17.3), a bounded `serve`/`escalate-tier` trigger
       that takes no query class, and a write-back plan whose units carry their
-      span, cannot promote a class and dedupe by identity. ⚠️ The state stays
+      span, cannot promote a class and dedupe by identity. ⭐ The write-back's
+      ATTRIBUTION LOOP now closes ACROSS calls (§12.5b):
+      `plan_writeback(already_written=…)` reports what the cheap tier already
+      holds (`already_persisted`) instead of re-minting it, and the STORE's class
+      is part of the class-conflict guard. That is the module's side only —
+      `unit_key` is what a repeat is recognised BY, and the plan performs no I/O,
+      so LOADING that store and WRITING to it are the caller's. §12.5's
+      persistence seam is therefore still outside this module, and it is still
+      not a writer. ⚠️ The caller owns ONE thing the planner cannot
+      check: `already_written` must be loaded FROM the store — a prior plan's
+      `units` are not evidence of persistence, and passing them reports a closed
+      loop over a unit that was never written. ⚠️ The state stays
       `not-implemented` on purpose: NOTHING ESCALATES YET — no tier walk, no
       Tier-1 store, no read-path caller, and #5009's premise measurement (are
       our queries actually answered badly by a cheap tier?) precedes that
@@ -565,7 +609,8 @@ mechanisms:
       as wider than it is: the pin observes the READ-PATH CALLER only — an AST
       scan for a production module that reaches this one. The tier walk and the
       Tier-1 store stay THIS note's claim (a tier walk added inside
-      `tortoise/sufficiency_router.py` reds nothing). §12.3's tier count is also OPEN (a design fold, not an owner
+      `tortoise/sufficiency_router.py` reds nothing). §12.3's tier count is
+      also OPEN (a design fold, not an owner
       ruling). A row marked `implemented` here would recreate the exact
       declared-implies-present defect this registry exists to catch.
 
@@ -601,6 +646,8 @@ mechanisms:
       - _value_slot_divergence
       - _refuse_rewritten_value
       - _value_slots
+      - _state_value_verbatim_enforced
+      - STATE_VALUE_VERBATIM_SWITCH
     note: >-
       WHAT IS NOW MECHANICAL (neither half is prompt text):
       (1) A NON-VERBATIM VALUE IS NOT SILENTLY WRITTEN. `_refuse_rewritten_value`
@@ -709,7 +756,20 @@ mechanisms:
       `_value_bindings` (the E5/E7 contradiction engine, live) and adds no second
       value CLASSIFIER — the P2 that killed the previous attempt at this row.
       THE DISCRIMINATOR — how the rule tells a droppable identifier from a
-      retainable state value: it never judges identifiers at all. It judges
+      retainable state value: it carries no identifier CLASSIFIER. What it judges
+      is a token's trailing numeric CORE, whatever letters precede it (`x4` reads
+      as `4`, so `x4`/`5` and `x4 ms`/`5000 ms` ARE judged). The identifier's own
+      letters reach the identity through the SUFFIX, which is read as a UNIT with
+      no identifier/unit distinction: a tail that SPELLS a known unit is compared
+      AS that unit (`arr4ms` IS `4 ms`, so `arr4ms` against `4 seconds` REFUSES),
+      and a tail that spells NOTHING in the table leaves the unit UNJUDGEABLE on
+      equal cores — a FAIL-OPEN, so `arr4zz` against `4 hours` TOLERATES. Of those
+      tails, ONLY the `k` one is ADDITIONALLY read as a SCALE, and that happens in
+      TWO shapes: BARE, where the ×1000 is closed by arm (i) with no unit folded
+      (`x4k` against `4000` TOLERATES, and `_composed_identity` DECLINES it
+      because `k` is already a known unit), and over a KNOWN UNIT, which is
+      residual (d2) below (`x4k`+`ms` → `4000 ms`).
+      It judges
       VALUES over the engine's own bindings, in three tolerances (#10360 lane
       record): (i) value identity, not string identity — a numeric core with its
       SIGN and its UNIT kept, so ``4.20``/``4.2``,
@@ -951,6 +1011,28 @@ mechanisms:
       callers
       (pinned by
       `test_an_over_long_side_is_not_judged_so_the_write_path_stays_bounded`).
+      (d2) AN IDENTIFIER-SHAPED value whose TAIL reads as a MAGNITUDE PREFIX
+      over a known unit (`x4k`+`ms` → `kms`) TOLERATES, AND IT DOES SO BY
+      INVENTING A SCALE — not by declining to judge (#10943, which records this
+      clause as `(q2)`; measured at this head): `the see was x4k ms` binds
+      `x4kms`, whose core is `4` with suffix `kms`, and `_composed_identity`
+      folds `k`+`ms` and multiplies it to `4000 ms` — so the pair IS judged, both
+      sides bind slots, and the identifier agrees with a quote it was never a
+      quantity to state. `_NUMERIC_HEAD` blocks only the TOKEN's own prefix peel
+      (`x4k` is not read as 4000 in place); it does not block the GLUED token,
+      which is why this is the composition arm's fail-open and not an identifier
+      exemption. That the digits ARE compared is measured: `x4k ms` against
+      `5000 ms` REFUSES. ⛔ SCOPE, measured: an identifier followed by a PLAIN
+      unit word is judged normally — `x4 ms` against `5000 ms` REFUSES and
+      `arr4 ms` against `9000 ms` REFUSES — so (d2) is the PREFIX-TAIL shape and
+      NOT a blanket identifier tolerance. (d2) does NOT reopen (d)'s ADJACENCY
+      result — the unit word IS fused.
+      ⚠️ Residuals (c) (`4:32` read as a marathon time), (d) (`per <unit>` rates),
+      (d2), the `20k-mile`/`20000 miles` agreement and THE DISCRIMINATOR's
+      identifier-tail UNIT reading (`arr4ms` compared as `4 ms`, `arr4zz` failing
+      open) are PINNED as a battery by
+      `tests/test_state_value_verbatim_10360.py::test_the_registry_rows_measured_disclosures_are_pinned`
+      — a row claim with no pin is the drift this row exists to prevent.
       (i) A `k` SUFFIX IS NOT JUDGED AS A UNIT WORD, AND IS NOT SCALED. `k` is
       SI's x1000 prefix (`5k` IS `5000`) and it is also a unit identity in
       `_UNIT_EQUIV`, because it is a unit `_value_bindings` fuses; the single
@@ -1234,6 +1316,40 @@ mechanisms:
       `_refuse_rewritten_value` + the `_mint_endpoint` guard make a rewritten
       value *unreachable*; and the residual list above is STATED rather than
       absorbed.
+      (p) THE ENFORCEMENT HAS ITS OWN OFF-SWITCH, AND WHAT IT RESTORES IS
+      STATED (2026-11-07 `#10360`). `TORTOISE_STATE_VALUE_VERBATIM` — the
+      module's ONE read of it, `_state_value_verbatim_enforced`, through the
+      `env_truthy` contract — defaults to **ON**, so unset, blank or unparseable
+      resolves ON and a typo can never silently disarm the guarantee. It is read
+      once per POINT at the emit site and handed to the rule as `armed=` (so the
+      hard-cut disclosure and the refusal cannot read two different answers for
+      one point), and the rule reads it itself when a caller passes none — so a
+      future second emit path inherits the switch rather than bypassing it. An
+      explicit falsy spelling (`0`/`false`/`no`/`off`) makes the emit site take
+      NO judgment: no refusal, no hard-cut disclosure, and no
+      `refused_value_contents` / `refused_value_slots` entry, so
+      `_mint_endpoint`'s resurrection guard cannot fire either — a rewritten
+      value is WRITTEN and re-mintable, i.e. the pre-#10513 REFUSAL semantics,
+      which is what a rollback has to mean (a switch that disarmed the refusal
+      while leaving the mint guard armed would be half-armed: it would close one
+      door and not the other). ⚠️ What OFF does NOT restore, so "rollback" is not
+      read as "byte-identical to the old build": the #10513 MINT-site changes are
+      not behind this switch — `_mint_endpoint`'s token-safe content cut and the
+      S5 quote's ABSENT-on-hard-cut behaviour stay as `main` ships them. Neither
+      withholds a memory. What the switch also does NOT move is the JUDGMENT —
+      `_value_slot_divergence` / `_value_slots` keep their verdicts, so flipping
+      it never re-derives a tolerance battery. It exists because this is the one
+      rule in the module that WITHHOLDS a durable memory: an over-blocking
+      refusal in production has to be reversible without a deploy. Pinned on both
+      arms by
+      `test_the_off_switch_defaults_ON_and_restores_the_pre_10513_write`,
+      `test_the_off_switch_leaves_the_MINT_guard_off_too`,
+      `test_the_off_switch_does_not_move_the_JUDGMENT`,
+      `test_the_off_switch_is_read_at_ONE_site`,
+      `test_the_off_switch_is_INTRINSIC_so_a_second_call_site_cannot_bypass_it` and
+      `test_the_off_switch_is_declared_in_the_env_contract`. It is advertised to
+      operators in `.env.example` (this repo's env contract) with its default,
+      its revert trigger and what a revert does NOT undo.
 
 
   - id: atomic_point_write
@@ -1288,7 +1404,36 @@ mechanisms:
       as `Cls.name` — including a tuple target, a subscript target and a NESTED
       class `Outer.Inner.name`, or a class body that GUARDS its binding with
       `if` / `for` / `try` / `with` — or a collection that mixes a complete
-      statement with an incomplete fragment) wherever it is used. What no static
+      statement with an incomplete fragment) wherever it is used — ACROSS MODULES
+      TOO, and not only along an import edge: the taint is the UNION of every scanned
+      file's tainted spellings, so a fragment bound in one module and used in another
+      is refused even when the two modules never import each other — with ONE shape
+      excepted, which this pin does NOT reach: a SUBSCRIPT target (`D["k"] = …`)
+      mints only a receiver-qualified `expr:` key, so `carrier.D["k"]` completed in
+      another module is reported as neither found nor assembled (measured: `found`
+      holds the binding, `assembled` is empty; identical on `main`, which makes it a
+      DETECTOR gap and not a property of this pin — tracked, with two remedies, on
+      #9901). Keying on the
+      SPELLING is what makes that reach, and it is deliberately fail-CLOSED: a
+      coincident name in an unrelated module refuses too (a false block on a name
+      nobody assembled, never a false pass on one that was). A RENAME that hides the
+      spelling — `from a import X as Y` re-exported and used as `Y` — is followed to a
+      fixpoint over the import graph, with a RELATIVE import resolved through
+      `node.level` (its dots live there and not in `node.module`, so a
+      `module.startswith(".")` test never fires). An attribute target also mints its
+      FINAL name FOR THE TAINT TEST, so `self._ddl` bound here and `OBJ._ddl` used
+      there is refused too; the JOIN that names the completed statement keeps the
+      receiver-qualified spelling only (a final name in the join's binding map made a
+      colliding key `rebound` and took the keyword-split join with it — measured, and
+      pinned). That join therefore stays per-module, so a cross-module fragment is
+      reported as an unverifiable USE rather than classified — the refusal polarity,
+      never a reading of absence. The JOIN is the one place that is per-module: a
+      statement SPLIT across two modules, where the keyword half is not itself a
+      fragment the scan recognises (`carrier.PREFIX = "CREATE "` joined with
+      `"CONSTRAINT pt UNIQUE NODE Point"` in another module), is NOT joined and is
+      therefore not reported — measured, identical on main before this change, and no
+      such shape exists under `tortoise/`; it is a detector gap on #9901, not a
+      property of the refusal. What no static
       scan reaches is stated as EXAMPLES rather than as a closed list — a fragment
       whose keyword lives entirely outside the scanned module (handed in by a
       helper or a default argument), a lookup resolved dynamically
@@ -1307,6 +1452,8 @@ mechanisms:
     pins:
       - tests/test_5095_s3_identity_policy.py::TestTheRemainingAbsence::test_an_unresolved_lookup_still_mints
       - tests/test_v4_declared_mechanisms.py::test_the_failure_policy_absence_is_pinned_to_the_mint_not_the_render
+      - tests/test_10997_identity_hold.py::TestTheGate::test_an_unresolved_lookup_holds_the_endpoint_and_its_edge
+      - tests/test_10997_identity_hold.py::TestTheHoldIsDrainable::test_run_1_holds_and_run_2_commits_it_exactly_once
     note: >-
       §4.4 states its own status in its closing paragraph: it *"is a SPEC, not a
       description of what runs"*, and the load-bearing instance is S3. The
@@ -1330,19 +1477,30 @@ mechanisms:
       the empty-conversation early return precedes it, so it emits none — and the
       three are different facts).
       ⛔ **WHAT IS STILL ABSENT — and this is why the row stays
-      `not-implemented`:** nothing suppresses a create. I1's *"never mint it"*
-      needs a CREATE gate inside S5, and NOT `execute_embed({})`: that function
-      is the sole carrier for retractions (whose same-session leg needs no graph
-      lookup), supersessions and chain notes, so a wholesale suppression drops
-      memory I2 forbids dropping (#5095's PLAN-VERIFY round 1 measured it).
-      §4.4's carry-forward store also does not exist. Pinned by
-      `tests/test_5095_s3_identity_policy.py::TestTheRemainingAbsence`, which
-      asserts a CALL that the mint is still UNGATED (`execute_embed` commits a
-      Point and an entity for an unresolved lookup — the day a create gate lands
-      it reds and this row must flip), together with
+      `not-implemented`:** the gate covers the MINTED candidate only. `#10997`
+      landed that half: `extractor_v2._mint_endpoint` no longer fabricates a
+      `statement` Point from a ref on an `unresolved`/`partial` lookup — it HOLDS
+      the edge WITH its endpoint (`#2552`) in `tortoise/identity_hold.py`, a
+      durable per-graph store whose drain commits a held item exactly once on a
+      later run whose lookup RESOLVED (`claim` before the mint, `confirm` binds
+      the id, `hold` never re-arms a resolved key). ⛔ It is NOT the whole create
+      gate: a Point/Entity the MODEL emitted is still created on an unresolved
+      lookup, so duplicates remain mintable through that path (the S5-Job-2 half),
+      and the S3-attach/S5-connect/S6-commit transaction boundary (I3) is
+      untouched. ⛔ Nor is it `execute_embed({})`: that function is the sole
+      carrier for retractions (whose same-session leg needs no graph lookup),
+      supersessions and chain notes, so a wholesale suppression drops memory I2
+      forbids dropping (#5095's PLAN-VERIFY round 1 measured it). Pinned in both
+      directions: `tests/test_10997_identity_hold.py` proves the mint is HELD (and
+      proves non-vacuity by flipping the predicate — a resolved lookup mints
+      again), and
+      `tests/test_5095_s3_identity_policy.py::TestTheRemainingAbsence` still
+      asserts the REMAINING absence with a CALL (`execute_embed` commits a Point
+      and an entity the MODEL emitted for an unresolved lookup — the day the
+      model-emitted half is gated it reds and this row must flip), together with
       `test_the_failure_policy_absence_is_pinned_to_the_mint_not_the_render`,
       which pins the record half's presence and this row's state. #5087 (E1)
-      remains the code-owner of the mint half.
+      remains the code-owner of the rest.
       ⚠️ NOT registered as one mechanism: §4.4 also gives each of the eight
       steps its own direction and transaction boundary. Those are per-step
       policies of THIS mechanism, not eight more mechanisms, and a row per step

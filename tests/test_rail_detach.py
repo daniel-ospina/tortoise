@@ -21,6 +21,7 @@ from __future__ import annotations
 import ast
 import contextlib
 import errno
+import inspect
 import json
 import os
 import re
@@ -160,7 +161,17 @@ def not_merged(state_dir, pr, st, want=rd.MERGED) -> str:
             f"--- rail log tail ---\n{tail}")
 
 
-def wait_field(path: Path, key: str, timeout=10.0) -> str:
+# ⛔ `wait_field` IS THE SAME KIND OF WAIT AND WAS THE LAST BELLOW THE STALL FLOOR.
+# It waits for a FIELD a peer process writes — `CHILD_PID`, which the RAIL records a
+# few instructions after the fork, not the launcher (see the fork-window arms below)
+# — so a stalled box delays it by exactly the seconds `STALL_BUDGET_S` exists to
+# absorb. It carried `10.0`, well below the 42.78 s stall measured above: on such a
+# box it returns `""`, the caller's `int("" or 0)` becomes `0`, and a LIVE rail reads
+# as "no rail" — the durable-wrong verdict this file's fork-window arms exist to
+# refuse. Widened to the shared budget (#10610's conflicted head re-applies this one
+# bound on main's rewrite); every call site below is a POSITIVE wait that returns on
+# the first match, so a healthy run pays none of it.
+def wait_field(path: Path, key: str, timeout=STALL_BUDGET_S) -> str:
     end = time.time() + timeout
     while time.time() < end:
         value = rd.read_field(path.read_text(encoding="utf-8"), key)
@@ -238,6 +249,21 @@ def test_the_wait_budget_exceeds_the_largest_measured_stall(tmp_path, monkeypatc
         f"STALL_BUDGET_S={STALL_BUDGET_S} is at or below the 42.78 s stall measured "
         "on run 42185502189 — a healthy rail on a stalled box reads `waiting` "
         "again, which is the 2026-11-06 `test (h)` red")
+    # ⛔ EVERY state/field-arrival wait in this file takes its default from THAT
+    # budget — the pin above bounds a constant, and a call site that hardcodes a
+    # smaller number beside it is the same red with the pin still green. `wait_field`
+    # is the one that read `10.0` after main's rewrite: it waits for a field a PEER
+    # process writes, so a 10 s cap on a 42 s-stalled box returns `""` and a LIVE
+    # rail is read as "no rail". Both are asserted from their signatures, so a
+    # genuine need for a TIGHTER bound has to say so here rather than by edit.
+    for fn in (wait_state, wait_field):
+        default = inspect.signature(fn).parameters["timeout"].default
+        assert default == STALL_BUDGET_S, (
+            f"{fn.__name__}'s default wait bound is {default!r}, not the shared "
+            f"STALL_BUDGET_S ({STALL_BUDGET_S}). A bound below the 42.78 s stall "
+            "re-creates the 2026-11-06 `test (h)` red for the caller that did not "
+            "pass one explicitly; if a call site needs a tighter bound, pass it "
+            "at that call site and record why here.")
 
 
 def test_merged_state_names_the_sha_the_rail_printed(tmp_path):

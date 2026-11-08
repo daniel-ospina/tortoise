@@ -42,18 +42,202 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   record PLACES, not a whole-graph census, and this trigger deliberately does
   not count or refuse unknown labels: refusing would make every cache
   unreadable (``:Meta`` is always there) and counting would report the
-  declaration as a second writer; (5) **cache-OWNED properties** — the EP and
+  declaration as a second writer; (5) **cache-HELD properties** — every
+  property the cache holds that the partition did not judge, which is a
+  DIFFERENT (larger) set than the one this bullet's earlier title named. Two
+  facts make a name cache-held — it is outside its label's placement, AND the
+  record side does not carry it — so FOUR populations reach it: (a) the EP and
   derived scalars §17.5 places on the cache (``ep_alpha``/``ep_beta``/
   ``ep_dirty``/``content_hash``/``confidence``/…), which the record schema
-  REFUSES by name and so can never hold. They are neither a mismatch nor
-  invisible: :func:`reconcile_record_and_cache` partitions them into a named
-  ``graph_only`` count (the ``form_normalized`` precedent). ⚠️ TWO classes
-  arrive here, and they differ in what repairs them: §17.5's cache-owned scalars,
+  REFUSES by name and so can never hold — the one §17.5 owns. ⚠️ ONE refused
+  name the record's own derivation DOES supply: ``status`` (``Object``/
+  ``Subject``) is refused as a record ``props`` KEY, but ``DERIVED_FROM_RECORD``
+  and ``EVENT_STREAM_FOLDS`` synthesise it on the record side, so wherever the
+  record DERIVES one the name is COMPARED and a mismatch reds; only a
+  ``status`` the record derives NOWHERE reaches this bucket, and that is a
+  lifecycle value, not "nothing to repair". ⛔ Say "derives", not "carries a
+  carrier": ``DERIVED_FROM_RECORD`` reads the supersede columns, but
+  ``EVENT_STREAM_FOLDS`` reads THREE more legs — the ``ObjectRegistered``/
+  ``SubjectAdded`` birth record, an ``EntityMutated`` whose payload carries a
+  STRING ``state.status``, and the connector/pack fold — so a node with no
+  ``supersededBy``/``supersededAt`` can still be corroborated (measured: a
+  carrier-less ``:Object`` with a birth record folds ``status='draft'`` and a
+  disagreeing cache is a ``field_mismatches`` entry, not a bucket occurrence).
+  ⛔ Its FIRST repair is to MINT that carrier, not to clear it: re-assert the
+  value through the write door (``update_entity(…, status=<the value>)``),
+  which journals the ``EntityMutated`` record whose string ``state.status`` the
+  fold above reads — so the name becomes COMPARABLE with the cache's own value
+  and the bucket empties while the value is PRESERVED. Measured: a record-side
+  ``EntityMutated`` carrying ``state.status='archived'`` folds onto the row and
+  ``graph_only`` goes ``(('status', 1),)`` -> ``()``; a mint carrying a
+  DIFFERENT value reds as ``field_mismatches=1``, so a mint cannot launder a
+  disagreement. ⚠️ The mint exists only for a STRING the label's status door
+  ACCEPTS — any string on an ``:Object``, but on a ``:Subject`` only
+  ``_SUBJECT_STATUS_VALUES``, so a ``:Subject`` value outside that set has NO
+  mint and keeps only the clear below (`#11296`). A NON-STRING status (which the
+  ``:Object`` door accepts, it validates nothing) has no USABLE mint either: the
+  state-op leg keeps only a row whose ``payload -> 'state' -> 'status'`` is
+  ``jsonb_typeof`` ``'string'``, so a minted ``5`` is DROPPED — the fold derives
+  nothing, the name STAYS in ``graph_only``, and the pair still reads ``clean``.
+  A non-string mint is a NO-OP for this comparison (``cache_projection``'s R4
+  bound, `#9974`), not a red, so the value remains cache-only.
+  ⛔ A CLEAR is the route only where the value is not trustworthy, and it is
+  LABEL-DEPENDENT: on an ``:Object`` ``update_entity(…, status=None)`` is applied
+  as ``SET n += {status: null}``, a REMOVAL; on a ``:Subject`` the SAME call is
+  REFUSED — ``sdk._update_entity``'s Subject status door validates against
+  ``_SUBJECT_STATUS_VALUES``, and ``None`` is not one of them (the missing SDK
+  door is `#11271`) — so a ``:Subject``'s clear is the graph-side ``REMOVE
+  n.status`` or the wipe below, and it makes a TERMINAL entity read LIVE
+  (``live._terminal_excluded`` reads an absent ``status`` as live). ⛔ Neither is
+  a record-sourced re-projection, which is ADDITIVE (``MERGE … SET n += $props``,
+  no REMOVE pass) and would leave the value in place — and a clear writes
+  ``state.status = null`` into the record, which the state-op leg's
+  ``jsonb_typeof(…) = 'string'`` filter DROPS (a JSON ``null`` is not
+  ``'string'``); a ``:Subject``'s graph-side ``REMOVE`` journals no record row
+  at all. Either way the record cannot re-derive the ABSENCE today
+  (``cache_projection``'s R4 bound, `#9974`).
+  (b) any property a SECOND WRITER put on a placed node, OR on a node the
+  record does not own at all (``scan_cache_view`` fills ``placed`` for every
+  cache node it reads, so such a node's out-of-placement names are bucketed
+  too), which the record does not carry — §17.1's chokepoint signature,
+  DECLARED BY NOTHING and reported rather than detected
+  here (its repair is *find the writer*; measured at `#11184`'s review, filed
+  `#11221`); and the two declared classes below, which the record's TABLE can
+  hold and the record SIDE (this comparison's own projector-built map) omits —
+  which is why they are bucketed here rather than compared. The distinction is
+  load-bearing, not pedantry: a name is withheld from the comparison because
+  ``record_props`` does not carry it, and for these classes that is because the
+  projector declines them, not because the record has nothing to say. ⚠️ It is
+  also PER ROW, not per class: the decline for ``_searchText`` is relaxed on a
+  post-#10000 row (#10965), so the record side then HOLDS that one name, it is
+  compared, and a cache that lost it is a ``field_mismatches`` entry — the
+  residue `#11233` owns on the other instrument. ⛔ The row decides the
+  ``story_arc`` CLASS too, and there it decides whether a clear is
+  DESTRUCTIVE: the record holds it on a row whose ``public.{source,event}.story_arc``
+  or ``public.session_narrative.narrative`` carries the prose, and holds NOTHING
+  on every commit written before `#9555`'s ``SessionNarrated`` carrier — where the
+  graph copy is the ONLY copy, so a per-class reading of this paragraph licenses
+  the one clear that destroys it (see (5)).
+  They are neither a mismatch nor invisible:
+  :func:`reconcile_record_and_cache` partitions them into a named ``graph_only``
+  count (the ``form_normalized`` precedent). ⚠️ THREE DECLARED classes arrive
+  here — (b) is declared by nothing — and the partition BUCKETS every name it
+  cannot judge rather than comparing it (⛔ not "every one reads clean": a
+  property on a node the record does not own is bucketed while the NODE itself
+  is an ``extra_in_cache`` divergence, so that pair reads DIVERGENT), while the
+  three DECLARED ones differ in what repairs them: §17.5's cache-owned scalars,
   which the record schema REFUSES by name (a record read cannot produce them,
-  nothing to repair), and the projection-DECLINED pair an EPISODIC Source's
+  nothing to repair — bar ``status``, which the record's own derivation makes
+  COMPARABLE wherever the record DERIVES one, and a ``status`` the record
+  derives NOWHERE is the form whose carrier can be MINTED — the value is
+  re-asserted through the write door so the fold derives it, preserving it and
+  emptying the bucket — with a DESTRUCTIVE CLEAR kept for an untrustworthy
+  value, label-dependent and, on a ``:Subject`` outside its writable
+  vocabulary, the ONLY route (`#11296`), see (a) above); the
+  projection-DECLINED pair an EPISODIC Source's
   ``summary``/``_searchText`` make
-  (``cache_projection.episodic_source_prose_properties()``) — which the record
-  DOES hold, and which a record-sourced re-projection removes. Counting them as
+  (``cache_projection.episodic_source_prose_properties()``) — which the record's
+  TABLE holds and the record SIDE of this comparison omits, and which
+  ``session_source_prose_migration.reconcile_session_source_prose`` (#11070)
+  releases IN PLACE, ⛔ NOT a record-sourced re-projection: that write is
+  ADDITIVE (``MERGE … SET n += $props``, no REMOVE pass), so a node that already
+  carries the pair keeps it across an incremental projection
+  (``cache_projection``'s own stated bound, #10852 review); and the
+  NOT-PROJECTABLE columns (``cache_projection.CACHE_FORBIDDEN_COLUMNS``, #10394)
+  — which the record's TABLE can hold and which no projection may ever write,
+  because the graph is where they must not live. ⛔ Its repair is a DESTRUCTIVE
+  CLEAR: the graph-side removal of the column itself (``REMOVE n.story_arc``) or
+  ``record-restore`` / ``rebuild_from_record``, which wipe the graph first
+  (``_wipe_all_nodes``, unconditional and whole-graph) and therefore clear a
+  legacy copy too — ⚠️ and that wipe **cannot** be restricted to the rows where the
+  record holds the text (``MATCH (n) DETACH DELETE n``, no label/``WHERE``/
+  ``LIMIT``): a graph holding ANY row whose PROSE neither
+  ``public.{source,event}.story_arc`` nor ``public.session_narrative.narrative``
+  carries must NOT be restored at all — copy that prose out first, because on the
+  pre-``#9555`` population (raw-Cypher write, never journalled;
+  ``session_narrative`` TEXT columns measured NULL) the graph copy is the ONLY
+  copy and the graph-wide wipe DESTROYS it (see (5)'s unit-is-the-GRAPH rule below, `#11325`) — and on a
+  SERVER graph that restore is refused PRE-WIPE unless
+  the graph name starts ``test_``/``tortoise_test`` (``record_restore._ask_the_wipe_guard``
+  → the projection's ``_assert_test_graph``, #2944), and no production name does
+  (``org_<org_id>``, its ``org_<org_id>_<gid>`` child and a legacy
+  ``team_<org_id>`` alike; an embedded ``path=`` DB is exempt from that name
+  check, not from supervision), so on a production cache no shipped route clears
+  the PROPERTY on either ANCHOR while keeping the entity (``tortoise_delete``
+  reaches the node only by REMOVING it, and journals the delete that removes its
+  record row; ``update_entity(…, story_arc=None)`` is REFUSED as server-managed
+  on BOTH anchors (``_SOURCE_SERVER_MANAGED_PROPS`` /
+  ``_EVENT_SERVER_MANAGED_PROPS`` — each raises and the stored value is
+  untouched, measured)) — ⚠️ **but the ``:Point`` half DOES have one, and it is
+  non-destructive**: ``update_point(<id>, story_arc=None)`` clears the property
+  and KEEPS the node (measured — the ``None`` passes
+  ``sdk._refuse_unpaired_narrative``, whose refusal is on a NON-EMPTY narrative,
+  and ``update_point``'s ``SET n += $props`` REMOVES a property set to ``None``;
+  the journal records the ``None``, and the same live door is bound by the MCP
+  tool ``tortoise_update_point``) — ⚠️ **and ONLY on the rows where the record still
+  HOLDS the text** (``public.session_narrative.narrative`` for the session — ⛔ NOT
+  the point's own ``props`` tail): where the narrative row does not carry it the
+  point's copy is the only one NO SHIPPED route can put back on a production graph
+  (the record's KEYED view does not hold it), and NO clear may be applied to it — on a production
+  name the ``rebuild_all`` that would put it back is REFUSED PRE-WIPE, so the clear
+  there deletes the prose rather than repairing the cache. ⛔ **The tail is excluded
+  because the clear's OWN record write consumes it**: ``story_arc`` is no
+  ``public.point`` column, so ``record_projection._split_properties`` sends the key
+  to the tail (it has no null filter) and the record patch is a RIGHT-HAND merge
+  (``props = props || %s::jsonb``) — so ``{"story_arc": null}`` OVERWRITES the prose
+  that tail held, and a row whose only record home is the tail loses the last copy
+  the record's KEYED VIEW holds to the very clear that counting it licensed (the
+  append-only ``journal_event`` payload still carries the pre-clear prose — see the
+  rebuild bound below, whose reach is what decides whether it can be put back). ⚠️ **Its durability is FOLD-DEPENDENT, and the
+  bound is the JOURNAL one**: ``_revise_point``'s SET list is a closed set that
+  names no ``story_arc`` clause, and the creation fold's open-set passthrough
+  (``_persist_extra_props``, which ``_revise_point`` never calls) skips a ``None``
+  by design — so a ``rebuild_all`` over a journal whose CREATION record carried
+  the prose RESTORES it, and that is ``#10429``'s replay half. ⚠️ On a graph the
+  rebuild can REACH: it asks the same L2 name guard as the restore
+  (``_assert_test_graph``, refused PRE-WIPE on every production name), so a
+  production server graph refuses the replay and the clear is durable there. The
+  RECORD→CACHE lane does the opposite (the ``PointRevised`` patch stores
+  ``props.story_arc = null``, ``_props_from_row`` returns it, and
+  ``node_statement`` renders ``SET n += $props``, where a null REMOVES the key),
+  so a record-sourced rebuild keeps it clear. ⚠️ So where a ``:Point``'s record
+  ``props`` tail still CARRIES the prose, ``record-restore`` IS a repair that
+  RESTORES the value — and ``_partition_cache_owned``'s
+  ``keep |= set(record_props)`` makes that population COMPARED rather than
+  bucketed, so it is not a ``graph_only`` occurrence at all. What has no repair
+  that RESTORES the value is the two ANCHORS, not "no label". ⛔ The obstacle on those anchors is the
+  PROHIBITION, not a hole in the schema: ``cache_projection.CACHE_FORBIDDEN_COLUMNS``
+  forbids the RECORD→CACHE projection from writing the column there. ⚠️ **Whether a
+  SOURCE actually holds the value is a PER-ROW fact, not a per-class one — key it
+  on what the record HOLDS for this session (``public.{source,event}.story_arc``
+  OR ``public.session_narrative.narrative``), never on how the prose arrived.**
+  Where the record holds it, the graph copy is a stale duplicate and a clear frees
+  it. ⚠️ Where NEITHER holds it — every commit written before ``#9555``'s
+  ``SessionNarrated`` carrier, whose raw-Cypher ``s.story_arc=$arc`` /
+  ``e.story_arc=$arc`` was NEVER journalled, and whose ``session_narrative`` TEXT
+  columns measured NULL on every live capture (``hosted_api``'s 2b,
+  ``#9567``/D7) — the graph copy is the ONLY copy, so NO clear may be applied
+  THERE. ⛔ And the unit is the GRAPH, not the row: the destructive routes above
+  wipe whole-graph (``MATCH (n) DETACH DELETE n``) and cannot be narrowed to the
+  rows where the record holds the text, so a graph holding ANY row whose PROSE
+  the record does not carry must NOT be restored at all — copy that prose out
+  first. ⛔ Not
+  "no IN-PLACE repair": a targeted ``REMOVE`` IS in place — and destructive, and
+  issued by no instrument — and every targeted CLEAR on those two ANCHORS is
+  REFUSED (``update_entity(…, story_arc=None)`` raises on BOTH); what is missing
+  there is a route that KEEPS the value. ⚠️ No shipped
+  instrument performs that removal for THIS class: ``#10017``'s purge
+  (``tools/purge_legacy_turns.py``) is the precedent on a DIFFERENT population
+  (legacy episodic turn ``:Point``s — a ``DETACH DELETE``) and names no
+  ``story_arc`` at all, so citing it as the purger *for this class* sends an
+  operator to a tool that leaves the divergence in place on either ANCHOR —
+  it DOES clear a turn-shaped legacy ``:Point`` copy carrying the prose, by
+  deleting the node. That is WHERE IT
+  DIFFERS from the declined pair, which does have one, shipped:
+  ``session_source_prose_migration.reconcile_session_source_prose`` (#11070, via
+  ``#11152``) repairs or clears the pair IN PLACE from the record, no wipe, the
+  node's other properties untouched. So the three classes differ in which lane
+  clears them, not only in why the name must be absent. Counting them as
   ``field_mismatches`` would make the clean verdict UNREACHABLE on a
   journal-projected cache — every folded point carries them — which is exactly
   the "a signal indistinguishable from noise is not observability" failure
@@ -288,7 +472,12 @@ def scan_cache_view(g: Any, *, labels: Iterable[str] | None = None,
     # §9.1/D1's narrowed pair, in the CACHE's vocabulary — resolved ONCE per
     # read (it is table-derived, so it must not be a module constant: see
     # `cache_projection._episodic_source_kind_property` for the installed-wheel
-    # reason).
+    # reason). ⚠️ Two DISJOINT sets, not one nested in the other (measured: this
+    # pair is {summary, _searchText} and `cache_forbidden_columns("source")` is
+    # {story_arc}). `placeable` below omits MORE than this set does — a column in
+    # `CACHE_FORBIDDEN_COLUMNS` (§9.1/D1's narrative, #10394) is never projected
+    # either — so it reaches `graph_only` through `projected_properties` rather
+    # than through `declined`.
     declined = episodic_source_prose_properties()
     for label in wanted:
         # The names the record PLACES for this label: the placement table's
@@ -337,8 +526,10 @@ def scan_cache_view(g: Any, *, labels: Iterable[str] | None = None,
             out[declared] = props
             # §9.1/D1 (#10853): the projection DECLINES this pair for an
             # episodic Source, so a cache node that still carries it holds what
-            # the projection will not write — cache-owned, the #9196 precedent,
-            # and counted as `graph_only` instead of as a divergence against a
+            # the projection will not write — CACHE-HELD, not "cache-owned"
+            # (`graph_only_total`'s retraction: the record DOES hold this pair, so
+            # the repair is a record-sourced clear, #11070), counted as
+            # `graph_only` instead of as a divergence against a
             # record that is correct. Without this the reconciler would report
             # every session the current capture writes as divergent forever,
             # which is the "signal indistinguishable from noise" the module's own
@@ -369,11 +560,23 @@ class RecordReconcileResult:
     report: ReconciliationReport
     declaration: ResidencyDeclaration
     not_hot: int = 0
-    #: Properties the CACHE holds that this projection will not judge — §17.5's
-    #: EP/derived scalars (the record schema refuses them by name) PLUS the pair
-    #: the §9.1/D1 narrowing declines for an EPISODIC Source
+    #: Properties the CACHE holds that this projection will not judge — THREE
+    #: DECLARED omission classes PLUS one population no declaration names — as
+    #: ``(name, node count)``. The declared three: §17.5's EP/derived scalars
+    #: (the record schema refuses them by name), the pair the §9.1/D1 narrowing
+    #: declines for an EPISODIC Source
     #: (``cache_projection.episodic_source_prose_properties()``, which the RECORD
-    #: does hold) — as ``(name, node count)``. Kept OUT of ``field_mismatches``
+    #: does hold), and the NOT-PROJECTABLE columns
+    #: (``cache_projection.CACHE_FORBIDDEN_COLUMNS`` — authority the record keeps
+    #: and the cache must not materialise, ``#10394``), PLUS one population no
+    #: declaration names — a property a SECOND WRITER put on a placed node the
+    #: record does not carry, or on a node the record does not own at
+    #: all (``#11221``; the bucket is partitioned OUT of ``field_mismatches``, so
+    #: the placed-node case reads `clean` while a node the record does not own is
+    #: an ``extra_in_cache`` divergence and reads DIVERGENT; either way the
+    #: repair is
+    #: *find the writer*) — as
+    #: ``(name, node count)``. Kept OUT of ``field_mismatches``
     #: (counting them
     #: made the clean verdict unreachable on a journal-projected cache) and kept
     #: as its OWN count (a comparison that declines to judge a field has to say
@@ -383,7 +586,20 @@ class RecordReconcileResult:
 
     @property
     def graph_only_total(self) -> int:
-        """Cache-owned property occurrences the comparison did not judge."""
+        """Properties the CACHE holds that the comparison did not judge.
+
+        ⛔ NOT "cache-owned": `graph_only` carries THREE DECLARED omission
+        classes plus one undeclared population (a second writer's property, which
+        no declaration names — see the field's own declaration comment above,
+        and :meth:`verdict` for how a clean verdict is reached), and `owned` is
+        §17.5's term for only ONE of them — naming the total `owned` sends the
+        operator to the wrong repair
+        for the others, which is why the label :func:`log_result` renders says
+        `cache-held`. This docstring must not keep the term the label retracted.
+        ⚠️ Cited by SYMBOL, not by line: a line number in this module rots the
+        same way a line in a Markdown table does, and the citation that used to
+        be here already pointed one function away from the label it described.
+        """
         return sum(count for _, count in self.graph_only)
 
     @property
@@ -437,31 +653,107 @@ def reconcile_record_and_cache(
     where the cache is the whole graph — so an absent key really is divergence.
 
     ``placed`` is :attr:`CacheScan.placed` — per key, the property names the
-    record PLACES for its label. It enables the **cache-owned partition**: a
+    record PLACES for its label. It enables the **cache-HELD partition** (⛔ not
+    "cache-owned": the partition carries THREE DECLARED omission classes plus one
+    undeclared population (a second writer's property, which no declaration
+    names), only the first of
+    which is §17.5-owned — ``_partition_cache_owned`` keeps its function name
+    for history, but the term in prose is `cache-held`, matching the label
+    :func:`log_result` renders): a
     property the cache holds that the record can neither place nor hold (the
     EP/derived scalars §17.5 assigns to the cache, which the record schema
     refuses by name) is NOT a field mismatch and is reported as its own named
     ``graph_only`` count instead. ⚠️ ``placed`` also omits the pair the §9.1/D1
     narrowing DECLINES for an EPISODIC Source — which the record DOES hold — so
-    a ``graph_only`` name has two possible repairs: none (schema-refused) or a
-    record-sourced re-projection (declined). ⚠️ **What the exclusion CAN and
+    a ``graph_only`` name has one repair per population: none (schema-refused —
+    bar ``status``: where the record DERIVES one the name is COMPARED, and its
+    uncorroborated form is repaired by MINTING that carrier — re-assert the
+    value through the write door (``update_entity(…, status=<the value>)``),
+    which journals the ``EntityMutated`` record the derivation folds, so the
+    name becomes comparable and the bucket empties with the value PRESERVED. The
+    mint exists only for a STRING the label's status door ACCEPTS, so on a
+    ``:Subject`` it is limited to ``SUBJECT_STATUS_VALUES`` and a value outside
+    that set has no USABLE mint (`#11296`); a NON-STRING status has none either
+    — the state-op leg keeps only a row whose ``payload -> 'state' ->
+    'status'`` is a JSON string, so a minted ``5`` is DROPPED, the fold derives
+    nothing, and the name STAYS in ``graph_only`` with the pair still reading
+    ``clean``. A CLEAR is only for an
+    untrustworthy value
+    and is LABEL-DEPENDENT: ``update_entity(…, status=None)``, ``SET n +=
+    {status: null}``, a REMOVAL, on an ``:Object``; on a ``:Subject`` that call
+    is REFUSED (#1423's status door accepts only ``SUBJECT_STATUS_VALUES``, and
+    ``None`` is not one of them), so a Subject's clear is the graph-side
+    ``REMOVE n.status`` — and a clear makes a TERMINAL entity read LIVE. Clear,
+    or the wipe, but ⛔ NOT a record-sourced re-projection, which is ADDITIVE and
+    leaves the value in place — see the module docstring's (5)),
+    a record-sourced clear IN PLACE for the declined pair —
+    ``session_source_prose_migration.reconcile_session_source_prose`` (#11070),
+    ⛔ NOT a re-projection, which is additive and leaves an existing pair on the
+    node, the graph-side ``REMOVE`` for a not-projectable column (below), or *find
+    the writer* for the undeclared second-writer population the partition also
+    counts.
+
+    ⛔ AND A THIRD OMISSION, from `#10394`: `cache_projection.
+    CACHE_FORBIDDEN_COLUMNS` subtracts the NOT-PROJECTABLE class from
+    `projected_properties`, so ``story_arc`` is not placeable either. That is a
+    statement about the CACHE, not about the record — the column is PRIMARY
+    there and §9.1/D1 forbids it only in the graph — so a legacy cache node
+    that still carries the prose reads as a ``graph_only`` occurrence (one
+    property the projection declines to write), NOT as a ``field_mismatches``
+    against a record that is correct. The repair for that occurrence on either
+    ANCHOR is a DESTRUCTIVE CLEAR, and its only RECORD-SOURCED route is a full
+    ``record-restore`` — whose wipe is whole-graph and **cannot** be narrowed to
+    those rows, so a graph holding ANY row whose prose neither
+    ``public.{source,event}.story_arc`` nor ``public.session_narrative.narrative``
+    carries must not be restored at all: copy that prose out first, because the
+    wipe destroys it and the record has nothing to restore it from (the module
+    docstring's (5) states the rule) — measured by
+    `test_the_record_restore_writes_no_story_arc_on_any_node` arm (3), ⚠️ and
+    refused PRE-WIPE on a production server graph name, #2944's L2 guard; or a
+    graph-side ``REMOVE n.story_arc`` that no in-tree instrument issues today;
+    ⚠️ a ``:Point`` copy is repairable in place ON THE ROWS WHERE THE RECORD STILL
+    HOLDS THE TEXT (the module docstring's (5) states the per-row bound and its
+    only-copy edge) —
+    ``update_point(<id>, story_arc=None)`` clears the property and keeps the
+    node (measured; pinned by
+    `test_the_point_clear_removes_the_prose_and_keeps_the_node` — the clear, and
+    the creation FOLD a journal replay routes through; ``rebuild_all``'s routing
+    of that fold is unpinned).
+    ⛔ NOT ``#10017``'s purge: ``tools/purge_legacy_turns.py`` deletes legacy
+    episodic turn ``:Point``s — a different population, though a legacy turn
+    ``:Point`` that carries the prose is cleared by it, by node deletion — and
+    it never matches ``:Source``/``:Event``; what it contributes is durability
+    for those ``:Point`` copies (its journaled turn removals stop a replay
+    resurrecting them), not the clearing of this class. Never a destructive one
+    for the ``:Point`` half — it has the non-destructive route named above, on the
+    rows where the record still holds the text (where it does not, that clear
+    leaves no copy a shipped route can put back on a production graph, and is not a
+    repair at all).
+    Nothing here performs either. ⚠️ **What the exclusion CAN and
     CANNOT hide, stated precisely**: `keep` includes ``record_props``, so a name
     the RECORD side carries is always compared — the exclusion cannot suppress a
-    divergence in a caller-supplied ``props``-tail property. For the DECLINED pair
-    itself it does suppress a VALUE comparison, and that is by construction, not
-    an oversight: on this path the record side is ``read_record_view``, which
-    builds every node through the same projector, so both sides omit the pair and
-    a disagreement inside it surfaces only as the ``graph_only`` occurrence count
-    (a property present in the cache where the projection writes none). An
-    operator who wants the values compared must read the record COLUMNS directly;
+    divergence in a caller-supplied ``props``-tail property. ⚠️ For `summary`,
+    and for a LEGACY row's whole pair, it does suppress a VALUE comparison, and
+    that is by construction, not an oversight: on this path the record side is
+    ``read_record_view``, which builds every node through the same projector, so
+    both sides omit those names and a disagreement inside them surfaces only as
+    the ``graph_only`` occurrence count (a property present in the cache where
+    the projection writes none). ⛔ NOT so for `_searchText` on a POST-#10000
+    row: the projector PROJECTS it there (#10965), so the record side HOLDS it,
+    `keep` includes it, and a cache that lost it is a ``field_mismatches``
+    entry — measured at `#11224`'s review (1 mismatch, ``divergent``). That is
+    the one name in the pair this instrument still compares, and it is why
+    `record_serve.parity_difference`'s declined mirror forgives a real gap on
+    exactly that population (filed `#11233`). An operator who wants the VALUES
+    compared for the omitted names must read the record COLUMNS directly;
     the reconciler does not. Without it, a journal-projected cache — the
     shape production runs — reports a permanent ``field_mismatches`` on every
     point and can never be clean (#9196 review, P1).
 
     ⚠️ The exclusion is deliberately NARROW: a property absent from ``placed``
-    is still compared when the RECORD holds it (the record's ``props`` tail is
-    an open set), so a caller-supplied property the projection failed to write
-    stays visible as divergence. ``placed=None`` (a caller with hand-built
+    is still compared when the record SIDE carries it (the record's ``props``
+    tail is an open set), so a caller-supplied property the projection failed to
+    write stays visible as divergence. ``placed=None`` (a caller with hand-built
     views) means "no placement knowledge" and compares every field exactly.
 
     ⛔ **A vacuous comparison REFUSES.** If either side is non-empty while every
@@ -502,7 +794,13 @@ def _partition_cache_owned(
         truth: Mapping[str, Mapping],
         placed: Mapping[str, frozenset[str]] | None,
         ) -> tuple[dict[str, Any], tuple[tuple[str, int], ...]]:
-    """Split the cache side into what is COMPARED and what is cache-owned.
+    """Split the cache side into what is COMPARED and what is CACHE-HELD.
+
+    ⛔ "cache-held" is the whole not-compared side, and it carries THREE DECLARED
+    omission classes plus one undeclared population — a second writer's property
+    (see the module docstring's (5) and :meth:`verdict`);
+    "cache-owned" is §17.5's term for only ONE of them — the scalars the
+    record CANNOT hold — so it is not the name of this partition.
 
     A cache property is excluded only when it is **both**
 
@@ -579,7 +877,37 @@ def log_result(result: RecordReconcileResult,
         # number it did report reads as covering everything it saw.
         names = ", ".join(name for name, _ in result.graph_only[:4])
         more = ", …" if len(result.graph_only) > 4 else ""
-        line += (f" [graph_only={result.graph_only_total} cache-owned "
+        # ⚠️ "cache-HELD", not "cache-OWNED" (#10394 review, P3). Each of the
+        # THREE DECLARED omission classes is a property the CACHE holds — and
+        # `graph_only` ALSO counts one population NO DECLARATION NAMES (a SECOND
+        # WRITER's property on a placed node the record does not carry, or on a
+        # node the record does not own at all; its repair is *find the writer*),
+        # so the bucket is not the three-name set
+        # this comment's earlier wording implied. "owned" is the §17.5
+        # partition's term for ONE of the three (the EP/derived scalars the
+        # record schema refuses, which only the cache has). The other two are
+        # record-owned: the §9.1/D1 pair the narrowing DECLINES (the record
+        # holds it, its repair is the IN-PLACE reconciler #11070 — ⛔ not a
+        # re-projection, whose write is additive —) and the not-projectable
+        # column (the record holds the text on the rows where it survives and the
+        # graph must NOT — its repair there is a destructive clear: a full
+        # restore's wipe — refused pre-wipe on a
+        # production SERVER graph name, #2944 L2 — or a graph-side
+        # REMOVE n.story_arc that no instrument ships today; ⚠️ on a `:Point` the
+        # clear is `update_point(<id>, story_arc=None)`, which keeps the node and
+        # needs no wipe — though its durability is the JOURNAL's only: a
+        # `rebuild_all` over a journal whose creation record carried the prose
+        # restores it (#10429), while the RECORD→CACHE rebuild replays the stored
+        # null and keeps it clear. ⚠️ That is the bound's REACH, not an absolute:
+        # `rebuild_all` asks the SAME L2 name guard as the restore
+        # (`_assert_test_graph`, "REFUSING to run bulk DETACH DELETE on non-test
+        # graph", applying to every SERVER graph name per #2944 — an embedded
+        # `path=` DB does not face that name check), so on a production server graph the
+        # replay is refused PRE-WIPE and the clear IS durable there); #10017's
+        # purge is a DIFFERENT population — legacy episodic turn
+        # :Points — and names no story_arc. Calling them all "owned" sends the
+        # operator to the wrong repair.
+        line += (f" [graph_only={result.graph_only_total} cache-held "
                  f"property occurrence(s) not compared ({names}{more})]")
     verdict = result.verdict()
     line = f"{line} verdict={verdict}"

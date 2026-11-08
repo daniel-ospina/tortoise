@@ -73,10 +73,11 @@ can always be re-encoded from the name/content that was written; a lost row
 cannot.
 
 **The flag (off by default)** — `TORTOISE_EMBED_GATE`, read through the
-declared truthy contract (`#4097`), matching the `TORTOISE_VALUE_GATE` /
-`TORTOISE_VET` / `TORTOISE_CLASSIFY_LATER` precedent: the rate effect is
-measurable before it is trusted, and every existing write produces the same
-graph until someone turns it on.
+declared truthy contract (`#4097`), matching the `TORTOISE_VET` /
+`TORTOISE_CLASSIFY_LATER` precedent: the rate effect is measurable before it
+is trusted, and every existing write produces the same graph until someone
+turns it on. (`TORTOISE_VALUE_GATE` was the third member of that precedent
+until `#10996` flipped it ON by default — copy this pattern, not that one.)
 
 ⚠️ **NOT implemented here, named rather than left to be inferred:** §12.2a also
 describes a per-kind override block (`embedding.overrides: [{kind: dev:meeting,

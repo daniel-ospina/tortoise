@@ -1114,28 +1114,27 @@ def test_part_c3_tensions_are_read() -> None:
 # artifacts (harmonising by picking one) reds. The 4th column is the sibling tool; the
 # 5th is the determination, and every one must name the sibling as the dissenting
 # source or the divergence is not being reported, only listed.
-C3B_DIVERGENCES_LITERAL: dict[str, tuple[str, str, str]] = {
-    "annotate_operator": ("update_knowledge", "adjust_relationship",
-                          "tortoise_annotate_operator"),
-    "compute_confidence": ("refresh_confidence", "check_confidence",
-                           "tortoise_compute_confidence"),
-    "invalidate_point": ("update_knowledge", "supersede_knowledge",
-                          "tortoise_invalidate"),
-    "list_graphs": ("graph_overview", "tenancy:list_memory_graphs",
-                    "tortoise_list_graphs"),
-    "list_namespaces": ("graph_overview", "list_knowledge", "tortoise_list_namespaces"),
-    "list_sources": ("list_knowledge", "graph_overview", "tortoise_list_sources"),
-    "list_topics": ("graph_overview", "list_knowledge", "tortoise_list_topics"),
-    "org_create": ("UNBACKED", "tenancy:create_memory_graph", "tortoise_org_create"),
-    "paginated_query": ("list_knowledge", "search_knowledge",
-                        "tortoise_paginated_query"),
-    "promote_point": ("update_knowledge", "refresh_confidence", "tortoise_promote_point"),
-    "query": ("list_knowledge", "search_knowledge", "tortoise_query"),
-    "query_points_by_tag": ("list_knowledge", "search_knowledge",
-                            "tortoise_query_points_by_tag"),
-    "set_point_baseline": ("update_knowledge", "refresh_confidence",
-                           "tortoise_set_point_baseline"),
-}
+# NOTE (#10602): a SORTED LIST of (method, Part A dest, bridge dest, bridge tool), not a
+# dict keyed by method. `tortoise_query` and `tortoise_paginated_query` both bind
+# `paginated_query`, so §C3b renders TWO rows for that method (13 rows, 12 methods) —
+# and a `dict[method, …]` collapsed them, silently discarding one. Review round 6
+# reproduced it: rewriting the `tortoise_paginated_query` row's destination, or making it
+# agree so the row disappeared, both left the pinned dict unchanged and the gate green.
+C3B_DIVERGENCES_LITERAL: list[tuple[str, str, str, str]] = [
+    ('annotate_operator', 'update_knowledge', 'adjust_relationship', 'tortoise_annotate_operator'),
+    ('compute_confidence', 'refresh_confidence', 'check_confidence', 'tortoise_compute_confidence'),
+    ('invalidate_point', 'update_knowledge', 'supersede_knowledge', 'tortoise_invalidate'),
+    ('list_graphs', 'graph_overview', 'tenancy:list_memory_graphs', 'tortoise_list_graphs'),
+    ('list_namespaces', 'graph_overview', 'list_knowledge', 'tortoise_list_namespaces'),
+    ('list_sources', 'list_knowledge', 'graph_overview', 'tortoise_list_sources'),
+    ('list_topics', 'graph_overview', 'list_knowledge', 'tortoise_list_topics'),
+    ('org_create', 'UNBACKED', 'tenancy:create_memory_graph', 'tortoise_org_create'),
+    ('paginated_query', 'list_knowledge', 'search_knowledge', 'tortoise_paginated_query'),
+    ('paginated_query', 'list_knowledge', 'search_knowledge', 'tortoise_query'),
+    ('promote_point', 'update_knowledge', 'refresh_confidence', 'tortoise_promote_point'),
+    ('query_points_by_tag', 'list_knowledge', 'search_knowledge', 'tortoise_query_points_by_tag'),
+    ('set_point_baseline', 'update_knowledge', 'refresh_confidence', 'tortoise_set_point_baseline'),
+]
 
 
 C3B_DETERMINATIONS_LITERAL: dict[str, str] = {
@@ -1148,7 +1147,12 @@ C3B_DETERMINATIONS_LITERAL: dict[str, str] = {
     'list_topics': "**Part A is right; the bridge is wrong.** beta's narrow-aliases row names `list_topics` among the aliases absorbed by `graph_overview`, and canonical R6 lists it there too.",
     'org_create': "**Genuinely contested — no owner ruling.** No approved doc places organisation-account creation. `create_memory_graph` (beta row 29) provisions a memory GRAPH, not an account, and beta's tenancy block has no creation row. Part A's `UNBACKED` is the honest record; the bridge asserts a destination no doc states.",
     'promote_point': "**Part A is right; the bridge is wrong — and the map is owner-approved, so it is reported here, not edited.** The owner-approved MCP list absorbs `promote_point` into `revise_knowledge`, whose beta successor is `update_knowledge`; beta names it a FIELD on that update, and promote's incident-operator cascade and approval gate ride with it. The bridge's `refresh_confidence` recomputes confidence and does not cover the cascade.",
-    'query': '**Part A is right; the bridge is wrong.** beta: “`query`, `paginated_query`, `query_points_by_tag` \\| 3 \\| → `list_knowledge`”, and canonical R2 (`list_knowledge`) lists all three. beta row 4 is explicit that `list_knowledge` is the browse-and-filter method.',
+    # #10602: no `query` entry, and `paginated_query`'s bound tool moved to
+    # `tortoise_query`. Both follow from one correction — `tortoise_query`'s declared
+    # `sdk_method` changed `query` → `paginated_query`, the accessor its handler
+    # actually reaches — so the collapse group's disagreement is now keyed by the two
+    # methods that still have a binding and by the tool that binds one of them. The
+    # literal is pinned precisely so a shift like this cannot happen silently.
     'paginated_query': '**Part A is right; the bridge is wrong.** beta: “`query`, `paginated_query`, `query_points_by_tag` \\| 3 \\| → `list_knowledge`”, and canonical R2 (`list_knowledge`) lists all three. beta row 4 is explicit that `list_knowledge` is the browse-and-filter method.',
     'query_points_by_tag': '**Part A is right; the bridge is wrong.** beta: “`query`, `paginated_query`, `query_points_by_tag` \\| 3 \\| → `list_knowledge`”, and canonical R2 (`list_knowledge`) lists all three. beta row 4 is explicit that `list_knowledge` is the browse-and-filter method.',
     'set_point_baseline': "**Part A is right; the bridge is wrong — and the map is owner-approved, so it is reported here, not edited.** Same approved absorption as `promote_point`; beta names the starting belief a FIELD on `update_knowledge`. The bridge's `refresh_confidence` recomputes confidence, which is a different operation.",
@@ -1180,10 +1184,16 @@ def test_part_c3b_bridge_divergences_are_read() -> None:
         r"(.*) \|$",
         c3b, re.M,
     )
-    parsed = {n: (a, b, tool) for n, a, b, tool, _det in rows}
+    # A LIST, not a dict: two tools now bind `paginated_query`, so this section renders
+    # two rows for one method and a method-keyed dict would silently keep only one.
+    parsed = sorted((n, a, b, tool) for n, a, b, tool, _det in rows)
     assert parsed == C3B_DIVERGENCES_LITERAL, (
         "C3b's cross-artifact divergences changed, or the section emptied itself.\n"
         f"  parsed: {parsed}\n  pinned: {C3B_DIVERGENCES_LITERAL}"
+    )
+    assert len(rows) == len(C3B_DIVERGENCES_LITERAL), (
+        f"C3b rendered {len(rows)} rows but the pin holds "
+        f"{len(C3B_DIVERGENCES_LITERAL)} — a row collapsed or was duplicated"
     )
     # P1-2: the DETERMINATION column was read only for the substring "bridge"/"sibling",
     # so all four "Genuinely contested — no owner ruling." rows could be rewritten to
@@ -2352,10 +2362,11 @@ def test_validate_rows_requires_a_determination_for_every_bridge_divergence(
     assert generator_module._validate_rows(rows, targets) == []
 
     trimmed = {k: v for k, v in generator_module.BRIDGE_DETERMINATION.items()
-               if k != "query"}
+               if k != "paginated_query"}
     monkeypatch.setattr(generator_module, "BRIDGE_DETERMINATION", trimmed)
     errs = generator_module._validate_rows(rows, targets)
-    assert any("BRIDGE DIVERGENCE UNDETERMINED" in e and "query" in e for e in errs), (
+    assert any("BRIDGE DIVERGENCE UNDETERMINED" in e and "paginated_query" in e
+               for e in errs), (
         f"an undetermined bridge divergence did not fail the build: {errs}"
     )
 
@@ -2379,21 +2390,25 @@ def test_the_bridge_divergences_are_computed_from_the_sibling_artifact() -> None
     part_a = {r["name"]: row_destination(r) for r in part_a_rows()}
     bridge = ROOT / "docs" / "product" / "bridge-table.md"
     row_re = re.compile(
-        r"^\| \d+ \| `tortoise_[a-z0-9_]+` \| `tool_registry\.py:\d+` \| (.*?) \| "
+        r"^\| \d+ \| `(tortoise_[a-z0-9_]+)` \| `tool_registry\.py:\d+` \| (.*?) \| "
         r"(?:yes|no) \| (.*?) \|$"
     )
-    diverged: dict[str, str] = {}
+    # Keyed by (method, TOOL), not by method: two tools bind `paginated_query`, so §C3b
+    # renders two rows for it and a method-keyed map silently dropped one — review round
+    # 6 reproduced exactly that, with the gate green throughout.
+    diverged: dict[tuple[str, str], str] = {}
     for line in bridge.read_text(encoding="utf-8").splitlines():
         m = row_re.match(line)
         if not m:
             continue
-        cell = m.group(1).strip()
+        tool = m.group(1)
+        cell = m.group(2).strip()
         if not (cell.startswith("`") and cell.endswith("`")):
             continue  # `**none declared**` / a binding that does not resolve
         method = cell.strip("`")
         if method not in part_a:
             continue
-        raw = m.group(2).strip()
+        raw = m.group(3).strip()
         # `bridge-table.md` appends ` ⚠️` to a destination the sibling records as WRONG;
         # the marker is rendering, not part of the destination the row carries — and it
         # must come off BEFORE the backtick strip, or the closing backtick survives.
@@ -2405,15 +2420,17 @@ def test_the_bridge_divergences_are_computed_from_the_sibling_artifact() -> None
             if dest.startswith(ns):
                 dest = dest[len(ns):]
         if dest != part_a[method]:
-            diverged[method] = raw  # the doc lists the sibling's destination VERBATIM
+            # the doc lists the sibling's destination VERBATIM
+            diverged[(method, tool)] = raw
 
     doc = _doc()
     c3b = doc.split("### C3b")[1].split("### C4")[0]
-    listed = {}
+    listed: dict[tuple[str, str], str] = {}
     for line in c3b.splitlines():
-        m = re.match(r"^\| `([a-z_][a-z0-9_]*)` \| `([^`]+)` \| `([^`]+)` \|", line)
+        m = re.match(r"^\| `([a-z_][a-z0-9_]*)` \| `([^`]+)` \| `([^`]+)` \| "
+                     r"`([a-z_]+)` \|", line)
         if m:
-            listed[m.group(1)] = m.group(3)
+            listed[(m.group(1), m.group(4))] = m.group(3)
     assert listed, "C3b rendered no rows"
     assert listed == diverged, (
         "C3b does not equal the divergences recomputed from `bridge-table.md`.\n"

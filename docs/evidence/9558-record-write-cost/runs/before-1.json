@@ -1,0 +1,24 @@
+{
+  "tree": "/tmp/before-9558",
+  "head": "1730570510",
+  "records": 60,
+  "warmup": 5,
+  "wall_s": 1.2066,
+  "records_per_second": 49.72,
+  "per_record_ms": {
+    "mean": 20.102,
+    "median": 18.491,
+    "p95": 26.393,
+    "min": 16.373,
+    "max": 62.76
+  },
+  "per_timed_record": {
+    "connect_calls": 60,
+    "table_columns_calls": 60,
+    "refused_props_calls": 60
+  },
+  "table_columns_isolated_ms": {
+    "mean": 1.582,
+    "median": 1.558
+  }
+}

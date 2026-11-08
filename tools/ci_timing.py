@@ -2335,12 +2335,21 @@ def _joined_note_tail(fragment: str, continuation_lines: list[str]) -> str:
 # rows carry a claim of this shape, which is why the repair is here and not a
 # hand-edit of the three rows a guard happens to name today.
 #
-# The claim is recognised by its VERB (`takes`/`carries`/`holds` … flat … default),
-# never by the bare phrase, because the COUNTERFACTUAL forms are legitimate and must
-# survive: "without this row the file packs at the flat 2.0s default", "its absence
-# packs it at the flat 2.0s default", "a real weight, not the flat 2.0 default".
+# The claim is recognised by its VERB (`takes`/`carries`/`holds`/`stays`/`remains`/
+# `keeps` … flat … default), never by the bare phrase, because the COUNTERFACTUAL
+# forms are legitimate and must survive: "without this row the file packs at the
+# flat 2.0s default", "its absence packs it at the flat 2.0s default", "a real
+# weight, not the flat 2.0 default".
+# ⛔ `stays`/`remains`/`keeps` are in the verb list because the claim is also
+# spelled with the constant's NAME, not `2.0s` — "The weight stays the flat
+# `DEFAULT_FAST_WEIGHT` declaration". That spelling was recognised by NEITHER this
+# cut-then-render path NOR the test-side twin, so a row could assert the flat
+# default while carrying a measured value (review P3 on #11057 at `4727c013a`: two
+# rows on the real map, `test_10602_query_limit_bound.py` and
+# `test_5095_s3_identity_policy.py`). The whole point of the cut is the claim a
+# reader trusts; it cannot depend on one spelling.
 _STALE_FLAT_DEFAULT_CLAIM_RE = re.compile(
-    r"\b(?:takes|carries|holds)\b[^.;]{0,60}?flat\b"
+    r"\b(?:takes|carries|holds|stays|remains|keeps)\b[^.;]{0,60}?flat\b"
     r"|\bis\s+(?:the|only|just|still)\s+(?:\S+\s+){0,2}?flat\s+(?:2\.0s?\s+)?default",
     re.IGNORECASE)
 
@@ -3169,6 +3178,33 @@ def _manifest_of(manifest_text: str) -> dict:
     # callers must therefore MAP this to exit 2, which they do at the CLI
     # boundary — see `refresh_durations` and `paid_vs_selected_cli`.
     try:
+        # ⛔ LENIENT ON PURPOSE — do NOT "harden" this to
+        # `cs.parse_manifest_text` (#10790 merge conflict, resolved toward the
+        # design that SURVIVED on main).
+        #
+        # A duplicate mapping key IS refused on the write path, but by the
+        # COMPOSED walk in `integrity_problems`
+        # (`cs.duplicate_mapping_key_issues(text=manifest_text, …)`), which
+        # names the key in the returned problem list — a RED, not a
+        # could-not-evaluate. Raising here instead was tried on this branch and
+        # is wrong twice over:
+        #
+        #   1. it breaks `validate_refreshed_manifest`'s documented contract:
+        #      that helper reports the DURATION checks and deliberately does
+        #      NOT report the duplicate class — `test_integrity_problems_
+        #      catches_a_duplicate_durations_key`'s second arm ASSERTS that
+        #      leniency is the premise making the composed walk load-bearing
+        #      ("if this ever starts catching the shape, this arm's premise
+        #      changed");
+        #   2. it pre-empts that walk, so `integrity_problems` would raise
+        #      instead of returning its full list — the contract its own
+        #      docstring states ("The FULL problem list `--integrity` composes")
+        #      and that this module's callers map to exit 2 rather than to a
+        #      named red.
+        #
+        # The parse here is therefore the plain loader, and `safe_load` keeps
+        # the LAST of two duplicate rows — which is exactly the silent-collapse
+        # the composed walk above exists to make loud.
         parsed = yaml.safe_load(manifest_text)
     except yaml.YAMLError as exc:
         raise DurationsBridgeError(
@@ -3820,11 +3856,18 @@ def paid_vs_selected_cli(args) -> int:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import ci_selection  # lazy by design
 
-    # `_manifest_of` is this module's existing seam for exactly this — it wraps
-    # `ci_selection._normalize_surfaces(yaml.safe_load(text))`, which is what
-    # `load_manifest()` does for every other consumer. Feeding the raw YAML
-    # straight to `fast_pool` would iterate a scalar surface
-    # character-by-character and raise on a None one.
+    # `_manifest_of` is this module's existing seam for exactly this — and it is
+    # the LENIENT one, BY DESIGN (see its ⛔ note above): it parses with the
+    # plain `yaml.safe_load`, which keeps the LAST of two duplicate keys, and
+    # normalizes with `ci_selection._normalize_surfaces`. It does NOT go through
+    # `ci_selection.parse_manifest_text`, so it does not refuse a duplicate
+    # mapping key — and `--paid-vs-selected` composes no duplicate walk of its
+    # own either, so on this path a union-merged manifest is read SILENTLY
+    # COLLAPSED. That residual is known, not implied: hardening `_manifest_of`
+    # was tried in #10790 and reverted, because raising there pre-empts the NAMED
+    # red `integrity_problems` returns on the WRITE path (#5373). What the seam
+    # is for is the SHAPE: feeding raw YAML straight to `fast_pool` would
+    # iterate a scalar surface character-by-character and raise on a None one.
     try:
         manifest = _manifest_of(Path(args.manifest).read_text())
     except (DurationsBridgeError, OSError) as exc:

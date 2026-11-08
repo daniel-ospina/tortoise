@@ -43,20 +43,42 @@ from .env_truthy import is_truthy
 
 # ── The flag (#4899 safeguard 1) ────────────────────────────────────────────
 
-#: The call-time toggle. Unset/0 ⇒ the predicate never runs and the only result
-#: delta is a zeroed ``mechanical`` stats key — matching the ``TORTOISE_VET``
-#: (``#5005``) and ``TORTOISE_CLASSIFY_LATER`` (``#1695``) precedent, so the
-#: rate effect is measurable before it is trusted.
+#: The call-time kill-switch. **The predicate is ON unless this says otherwise**
+#: (`#10996`): ``0``/``false``/``no``/``off`` — and, deliberately, blank or a
+#: typo — turn it off. The delta is a zeroed ``mechanical`` stats key when some
+#: other switch still arms the pass, and ``vet.enabled``/``vet.s2`` when none
+#: does (with nothing else arming S2.2 the pass never runs, so there is no
+#: ``mechanical`` block to zero). `#4899` shipped the instrument off by default
+#: *"so its rate effect
+#: is measurable before it is trusted"*; that rate is now measured and committed
+#: (``docs/evidence/9889/e1-gate-drops.json``: 0 drops of 61 Objects, 0 of 13
+#: bare-definite rows, positive controls firing), and
+#: ``EXTRACTOR-V4-ARCHITECTURE.md`` §S2.2 requires the mechanical half ON:
+#: *"``TORTOISE_VALUE_GATE`` unset must not mean 'the predicate never runs'"*.
+#: `#4899`'s safeguard is honoured by the per-discard ``rule_id`` +
+#: ``counterfactual`` record instead of by the default.
 ENV_FLAG = "TORTOISE_VALUE_GATE"
 
 
 def value_gate_enabled() -> bool:
-    """Whether the mechanical gate runs. Off unless the flag says otherwise.
+    """Whether the mechanical gate runs. **On** unless the flag says otherwise.
 
-    Read through the declared truthy contract (``#4097``) — the same one every
-    other extractor flag uses, so ``"true"``/``"1"``/``"yes"`` agree here too.
+    This is the *effecting* read: three callers resolve the predicate from it —
+    ``extractor_v2._value_gate_enabled`` (arms the VET pass), and ``vet_gate``'s
+    own guard plus its ``stats["mechanical"]["enabled"]`` witness. A default
+    flipped in the wrapper alone would arm the pass and leave the predicate
+    inert (``enabled: False, fired: 0``), which is the inert-enforcer shape this
+    resolver exists to prevent — so the default lives here, at the one site all
+    three read (`#10996`).
+
+    Read through the declared truthy contract (``#4097``) with an explicit
+    default VALUE, the shape ``env_truthy`` prescribes for a default-ON knob
+    whose typo must read OFF: ``1``/``true``/``yes``/``on`` ⇒ on; unset ⇒ on;
+    blank, garbage and the falsy spellings ⇒ off. For a *discard* predicate
+    whose wrong answer is memory loss, OFF is the safe residual, so the tristate
+    resolver (unset/blank/garbage → ``default``) is the wrong instrument here.
     """
-    return is_truthy(os.environ.get(ENV_FLAG))
+    return is_truthy(os.environ.get(ENV_FLAG, "1"))
 
 
 # ── The rule vocabulary (each id is recorded on every discard —
