@@ -1746,14 +1746,18 @@ re-cut from the resolved document (§8), and no committed verdict is re-scored.
 - **What moved: nothing else.** No metric, denominator, threshold, class set or corpus pin is
   touched: the values this record freezes are unchanged and only line citations move.
   `document_sha256` is re-cut in this same commit, per §8's rule for *any* edit to this file.
+
 ### 10.15 — the door's pin set gains `TORTOISE_STATE_VALUE_VERBATIM` (`#10360`, 2026-11-08)
 
-⛔ **Scope, because §10.14 records the same PIN from the other direction.** `#11449`'s lane
-(`91dbc9a88`, landed as `827141f19`) independently added this switch to the probe's `DOOR_PINNED_ON`
-and to `acceptance_arm.pinned_to`, and §10.14 records it as a bullet. What THIS entry records is the
-part that lane did not make: the **§1.6.2 prose** sentence, and the roll-call restated
-**positionally** instead of counted. Both are in the document below; the merged pin set is one entry,
-not two.
+⛔ **Scope, because §10.14 records the same PIN from the other direction.** `main` pins this switch
+too — it is in `probes/capstone_measure.py`'s `DOOR_PINNED_ON` and in `acceptance_arm.pinned_to` at
+`origin/main` `a1dff7cec`, and §10.14 records it there as a bullet. ⛔ `91dbc9a88` (`#11449`) is NOT
+that pin: it introduced the **switch** (`tortoise/extractor_v2.py`, plus `.env.example`,
+`config/v4-mechanisms.yml` and its own test) and touches no file in this bundle — a comment here
+once credited it with the pin, which is the same defect class as every other claim in this record:
+stated, plausible, and not what the tree says. What THIS entry records is the part that landed here:
+the **§1.6.2 prose** sentence for the pin, and the roll-call restated **positionally** instead of
+counted. The merged pin set is one entry, not two.
 
 **Old value (verbatim).** §1.6.2's pin sentence ended at `TORTOISE_IDENTIFIER_TOKENS`, and its
 roll-call read:
@@ -1798,7 +1802,6 @@ sentence below, the defect this entry was already correcting.
 committed verdict is re-scored: the pin makes the measured population **shell-insensitive** and the
 registered corpus's numbers are untouched. `document_sha256` is re-cut from the resolved document in
 the same commit (§8).
-
 
 ## 11. The step set V5 gates over — seven unconditional, one conditional (`#10215`)
 
