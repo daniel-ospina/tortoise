@@ -911,6 +911,140 @@ class TestConcurrentTeamCreationTOCTOU:
             f"critical sections did not serialize: {order}"
 
 
+class TestAtomicProvisionBackstop:
+    """#1981 — the DB-level backstop for the multi-worker lane.
+
+    `_org_create_lock` is PER PROCESS: every control-plane statement is its own
+    PostgREST transaction, so no application lock can span the read and the
+    write, and a second uvicorn worker / machine has its own lock dict. The
+    check therefore moved INSIDE `provision_team` (migration
+    20261108000001): a cross-process advisory lock, then the SAME predicate
+    re-evaluated in the write's own transaction. Its refusal is the same rule
+    the Python gate enforces, so this file pins that the refusal reaches the
+    client as the SAME structured 402 — a 500 here would be a regression in the
+    one case the backstop exists to handle (the race the Python gate lost).
+
+    What is NOT asserted here: the SQL decision matrix itself (which orgs
+    count, which tiers/statuses gate). That is
+    `supabase/tests/0010_provisioning_rpcs.sql` §8, run by the PGlite harness —
+    a Python fake would only restate the predicate a third time.
+    """
+
+    _BLOCKING = "team-free-racer"
+
+    def _rpc_refusal(self) -> RuntimeError:
+        """The error `supabase_control.rpc` raises for the SQL refusal.
+
+        Shape taken from the TRANSPORT, not invented: `rpc` wraps a >=300
+        response as ``"Supabase control-plane RPC failed (<fn>): HTTP <code>:
+        <body message>"``, and the body message of a RAISE EXCEPTION is its
+        text.
+        """
+        from tortoise.hosted_api import _ONE_FREE_ORG_RPC_MARKER
+        return RuntimeError(
+            "Supabase control-plane RPC failed (provision_team): "
+            f"HTTP 402: {_ONE_FREE_ORG_RPC_MARKER}{self._BLOCKING}")
+
+    def test_rpc_refusal_surfaces_the_structured_402(self, user_client,
+                                                     monkeypatch):
+        import tortoise.supabase_control as sc
+        tc, fake = user_client
+        monkeypatch.setattr(sc, "provision_org",
+                            lambda *a, **kw: (_ for _ in ()).throw(
+                                self._rpc_refusal()))
+        r = tc.post("/v1/organizations", json={"name": "racer-two"})
+        assert r.status_code == 402, r.text
+        # THE #2789 CONTRACT: the dialog is driven by `code`, and `org_id` names
+        # the org the "Upgrade current organization" action targets.
+        _assert_capped(r.json()["detail"], org_id=self._BLOCKING)
+        # the refusal is atomic end-to-end: no org row was minted
+        minted = [o for o in fake.query("organizations")
+                  if o.get("name") == "racer-two"]
+        assert minted == [], minted
+
+    def test_rpc_refusal_drops_the_eagerly_materialized_graph(self, user_client,
+                                                              monkeypatch):
+        """The eager default-graph init runs BEFORE the RPC, so a DB refusal
+        would otherwise strand a namespace for an org that never existed."""
+        import tortoise.hosted_api as ha
+        import tortoise.supabase_control as sc
+        tc, _fake = user_client
+        monkeypatch.setattr(sc, "provision_org",
+                            lambda *a, **kw: (_ for _ in ()).throw(
+                                self._rpc_refusal()))
+        dropped: list[tuple] = []
+        monkeypatch.setattr(ha, "_drop_org_graph",
+                            lambda org_id, graph_name=None: dropped.append(
+                                (org_id, graph_name)))
+        r = tc.post("/v1/organizations", json={"name": "racer-three"})
+        assert r.status_code == 402, r.text
+        assert len(dropped) == 1, dropped
+        assert dropped[0][1] == f"org_{dropped[0][0]}", dropped
+
+    def test_onboarding_lane_maps_the_refusal_to_the_same_402(
+            self, team_client_factory, monkeypatch):
+        """#1981: the onboarding sub-org lane is the same create-org rule, so a
+        cross-worker refusal there must not degrade to its generic 400
+        ("Team create failed: …") — the wizard renders the dialog from `code`.
+        """
+        import tortoise.supabase_control as sc
+        from tortoise.hosted_api import get_current_org_session
+        tc, _fake = team_client_factory
+        monkeypatch.setattr(sc, "provision_org",
+                            lambda *a, **kw: (_ for _ in ()).throw(
+                                self._rpc_refusal()))
+        app.dependency_overrides[get_current_org_session] = lambda: dict(
+            FREE_TEAM, org_id="team-parent-001", tier="free",
+            session_user_id=_USER1)
+        r = tc.post("/v1/onboarding/team", json={"name": "racer-sub"})
+        assert r.status_code == 402, r.text
+        _assert_capped(r.json()["detail"], org_id=self._BLOCKING)
+
+    def test_unrelated_rpc_failure_is_not_laundered_into_a_402(
+            self, user_client, monkeypatch):
+        """Non-vacuity: only the marker becomes a 402. A transport/500 failure
+        must stay a 500 — a shape-only match on "HTTP 4xx" would tell a user at
+        no ceiling that they are capped."""
+        import tortoise.supabase_control as sc
+        tc, _fake = user_client
+        monkeypatch.setattr(sc, "provision_org",
+                            lambda *a, **kw: (_ for _ in ()).throw(RuntimeError(
+                                "Supabase control-plane RPC failed "
+                                "(provision_team): HTTP 500")))
+        r = tc.post("/v1/organizations", json={"name": "doomed"})
+        assert r.status_code == 500, r.text
+
+    def test_marker_absent_yields_no_blocker(self):
+        from tortoise.hosted_api import _one_free_org_blocker_from_rpc
+        assert _one_free_org_blocker_from_rpc(RuntimeError("HTTP 500")) is None
+        # marker with no id: not a 402 naming nothing
+        assert _one_free_org_blocker_from_rpc(
+            RuntimeError("HTTP 402: one_free_org_limit:")) is None
+        # trailing prose after the id is tolerated (PostgREST detail suffixes)
+        assert _one_free_org_blocker_from_rpc(
+            RuntimeError("HTTP 402: one_free_org_limit:org-x\ncontext")) == "org-x"
+
+    def test_the_marker_is_the_one_the_migration_raises(self):
+        """The RAISE text IS the SQL<->Python contract, so pin the two
+        declarations against each other (#1981). The SQL suite
+        (`supabase/tests/0010_provisioning_rpcs.sql` §8) pins the BEHAVIOUR; this
+        pins that the migration carrying it still carries exactly this marker —
+        a rename on either side would otherwise silently degrade the refusal to
+        a 500."""
+        from pathlib import Path
+
+        from tortoise.hosted_api import _ONE_FREE_ORG_RPC_MARKER
+        migration = (Path(__file__).resolve().parent.parent
+                     / "supabase/migrations"
+                     / "20261108000001_one_free_org_atomic_provision.sql")
+        sql = migration.read_text()
+        assert _ONE_FREE_ORG_RPC_MARKER in sql, (
+            f"{migration.name} no longer raises {_ONE_FREE_ORG_RPC_MARKER!r}; "
+            "hosted_api would map its refusal to a 500")
+        # the atomicity mechanism, not just the message
+        assert "pg_advisory_xact_lock" in sql
+
+
 def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
         monkeypatch):
     """#8818: the deterministic refusal pin for this module's client seams.
