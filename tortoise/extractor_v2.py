@@ -15326,9 +15326,9 @@ def _arm_metrics(story: str, batch: dict | None, vet_stats: dict | None,
        that cost?" — and §4.2's hand calibration reads THIS one, because the
        threshold it sets is compared against a rate over shipped candidates.
 
-    When VET did not run (off-path, or fail-open), nothing was removed, so the
-    denominator falls back to `check_batch`'s count and ``discarded`` is 0 — the
-    two lists are the same list on that path.
+    When VET did not run (off-path, or fail-open), nothing was removed *by VET*, so ``discarded`` is 0
+    and the denominator falls back to `check_batch`'s PRE-``route_mentions`` count — that is NOT the same
+    list: a held mention reads as KEPT and the keep-rate arm cannot fire on this path.
 
     ``coverage_suspect`` is read from ``batch`` in both cases, because it is
     defined on the S2 output (see :func:`_renarrate_trigger`).
