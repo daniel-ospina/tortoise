@@ -2064,21 +2064,31 @@ def test_the_tool_carries_the_5128_interpreter_guard_first(tool, capsys, monkeyp
 
         tools/capstone_ledger.py     82 files, census OUT   <- the tools/ surface
         tools/build_site_icons.py    82 files, census OUT
-        tools/edge_census.py          3 files, census OUT   <- even this file out
-        tools/branch_reaper.py        3 files, census OUT   <- both OUT: nothing grades it
         docs/plans/x.md              82 files, census OUT   <- the docs/ surface
         tests/test_x.py             788 files, census IN
         graph-scripts/audit_graph.py 788 files, census IN
+
+    ⛔ `tools/edge_census.py` and `tools/branch_reaper.py` are deliberately NOT
+    rows here, and this paragraph used to carry them as "3 files, census OUT …
+    nothing grades it" — FALSE, and false in the direction that inflated the gap
+    (#11491 review, ISSUE 2): both are `SHARED_MODULES` in `tools/ci_selection.py`
+    (`#4408`, `#4503`), so a diff touching either fails closed to the FULL matrix
+    and DOES run the census. They are named, not tabulated: a re-measured number
+    per tool is this block's own failure mode, and `ci_selection.py`'s own tables
+    are the single owner of which paths fail closed.
 
     So on a `tools/`-only or `docs/`-only diff, every unmirrored arm above is
     ungraded and this pin is the only gate. Measured, both ways: appending a line
     advertising `python3 tools/capstone_ledger.py check` to a tracked DOC leaves
     this file GREEN while the census reds
     `test_no_doc_or_usage_advertises_the_form_the_guard_refuses`; and the same line
-    appended to a SIBLING tool (`tools/edge_census.py`) likewise leaves it GREEN
-    while the census reds. That is a routing gap in `tools/ci_selection.py`, not
-    something a pin in this file can close; it is tracked as #11363 (same root: a
-    diff that never selects the census leaves its #5128 guard unchecked).
+    appended to an UNPINNED sibling tool (`tools/ask_pool_admission_probe.py`, 82
+    files, census OUT — re-measured when the two "3 files" rows above were
+    corrected) likewise leaves it GREEN (206 passed) while the census reds
+    (1 failed, 536 passed, 2 skipped). That is a routing gap in
+    `tools/ci_selection.py`, not something a pin in this file can close; it is
+    tracked as #11363 (same root: a diff that never selects the census leaves its
+    #5128 guard unchecked).
 
     What IS closed by selection is only this: a `tests/` or `graph-scripts/` edit
     selects 788 files INCLUDING the census, so those diffs are graded by the census
@@ -2218,21 +2228,36 @@ def test_the_tool_carries_the_5128_interpreter_guard_first(tool, capsys, monkeyp
     # every PINNED tool must be in the census's table and the demand is stated
     # rather than inferred.
     expected_status = _census_module().REFUSAL_CODES.get(f"tools/{tool.name}")
-    # The expected status is the CENSUS's own pin, not a constant read back from
-    # the module under test: measured, a coordinated edit (`EXIT_INVALID = 3` +
-    # `SystemExit(3)`) kept a self-referential assertion green while the census
-    # reded, and 3 is `EXIT_DISABLED` — a refusal indistinguishable from the
-    # off-switch. Where the census pins NO code for this tool it accepts any
-    # NON-ZERO refusal, so demanding 1 unconditionally would red a census-LEGAL
-    # tool — the false-red class this pin must not add. Parity, not a stricter
-    # local contract: a lane that adds a third tool without a census row gets the
-    # census's own rule, which is what `_channel_is_wrong`'s no-row branch assumes.
-    assert (
-        status == expected_status if expected_status is not None else status != 0
-    ), (
+    # (#11491 review, ISSUE 1) The block above used to be followed by a
+    # `status != 0` PARITY fallback for a missing row, under a second comment that
+    # said so — while the block above it, and this test's own docstring, claimed
+    # the caller REFUSED a rowless pinned tool. It did not: measured, dropping
+    # `build_site_icons.py`'s `REFUSAL_CODES` + `REFUSAL_WHY` rows and downgrading
+    # its guard from `SystemExit(4)` to `SystemExit(1)` left this whole file GREEN
+    # while `_channel_is_wrong`'s `expected_status is not None` short-circuit also
+    # stopped checking the CHANNEL — two gates lost to one edit, on the only
+    # surface a `tools/`-only diff gets. So the demand is now real, not prose.
+    #
+    # This IS a stricter local contract than the census (which accepts any
+    # non-zero for an unpinned tool), and deliberately so: the census's row is what
+    # this pin COMPARES AGAINST, so without one there is nothing to mirror and the
+    # arm silently degrades to "the tool failed somehow". A new tool is not
+    # false-redded by this — it is told to get its row, which is the census's own
+    # registration step, not a demand this file invents. `_channel_is_wrong`'s
+    # `None` branch is therefore unreachable FROM A PINNED TOOL by construction,
+    # exactly as its docstring says; it is kept executable by its own table test.
+    assert expected_status is not None, (
+        f"the census pins no `REFUSAL_CODES` row for `tools/{tool.name}`, so this "
+        f"pin has no status to compare against and would widen to 'any non-zero'"
+        f" — the fail-open measured at the head that added this clause (delete the "
+        f"row, downgrade the guard to `SystemExit(1)`, and both the status and the "
+        f"CHANNEL checks go green). Add `tools/{tool.name}` to `REFUSAL_CODES` and "
+        f"`REFUSAL_WHY` in `tests/test_entry_point_python_guard.py`, or stop "
+        f"pinning the tool here."
+    )
+    assert status == expected_status, (
         f"the refusal must exit the status the census pins for this tool "
-        f"({expected_status!r}; None means the census pins no row for it and accepts "
-        f"any non-zero status), and a coordinated edit of the module's own "
+        f"({expected_status!r}), and a coordinated edit of the module's own "
         f"constant is exactly what this compares against. Got {status}: "
         f"{ast.dump(raise_node)}"
     )
@@ -2348,6 +2373,61 @@ def test_the_tool_carries_the_5128_interpreter_guard_first(tool, capsys, monkeyp
         f"`test_no_doc_or_usage_advertises_the_form_the_guard_refuses` reds on "
         f"it, and that test does not run on a tool-only diff: {offenders}"
     )
+
+
+class _CensusMissingRow:
+    """The REAL census, with one `REFUSAL_CODES` row deleted. Nothing else faked.
+
+    Delegating rather than a `SimpleNamespace(REFUSAL_CODES=...)` on purpose: the
+    arms AFTER the row check (`_advertise_offenders`, `_channel_is_wrong`) read
+    `_BARE_INVOCATION` and friends from this same object, so a stub missing them
+    would red the caller for the WRONG reason and the test below would pass for a
+    reason it does not have.
+    """
+
+    def __init__(self, census, drop: str) -> None:
+        self._census = census
+        self.REFUSAL_CODES = {
+            k: v for k, v in census.REFUSAL_CODES.items() if k != drop
+        }
+
+    def __getattr__(self, name):  # every other census attribute stays LIVE
+        return getattr(self._census, name)
+
+
+def test_a_pinned_tool_with_NO_census_row_is_a_REFUSAL_not_a_licence(capsys, monkeypatch):
+    """#11491 review ISSUE 1 (P2): the row demand is EXECUTED, not just documented.
+
+    The measured fail-open this closes: delete `tools/build_site_icons.py`'s
+    `REFUSAL_CODES` + `REFUSAL_WHY` rows and downgrade its guard from
+    `SystemExit(4)` to `SystemExit(1)`. With the old `status != 0` fallback this
+    whole file stayed GREEN (the census's own parametrization just loses the row,
+    and on a `tools/`-only diff it is not selected), so a tool whose refusal wears
+    1 — indistinguishable from "the interpreter is too old" — shipped with the pin
+    that exists to catch exactly that.
+
+    NON-VACUITY: on the pre-fix code this test FAILS — `pytest.raises` sees the
+    caller complete instead of refusing, because `expected_status is None` took the
+    parity fallback. Re-measured by reverting the `assert expected_status is not
+    None` clause: `1 failed` (the `DID NOT RAISE` path), and green again with it.
+    """
+    module = importlib.import_module(
+        test_the_tool_carries_the_5128_interpreter_guard_first.__module__
+    )
+    census = _census_module()
+    assert "tools/build_site_icons.py" in census.REFUSAL_CODES, (
+        "this arm's premise is main's #11507 row; if it was dropped, the row "
+        "deletion is itself the regression and every pinned tool is ungradeable"
+    )
+    monkeypatch.setattr(
+        module,
+        "_census_module",
+        lambda: _CensusMissingRow(census, "tools/build_site_icons.py"),
+    )
+    with pytest.raises(AssertionError, match="pins no `REFUSAL_CODES` row"):
+        test_the_tool_carries_the_5128_interpreter_guard_first(
+            REPO_ROOT / "tools" / "build_site_icons.py", capsys, monkeypatch
+        )
 
 
 @pytest.mark.parametrize("tool", PINNED_TOOLS)
