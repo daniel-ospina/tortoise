@@ -714,6 +714,22 @@ unfirable (block at the top of §10).
 > FOLD on purpose: an unqualified "no shipped stage" would deny the very capability the dash clause
 > says is lost, since `run_s4` *is* a shipped stage. The pre-condition for removal is a stage
 > that can ADD; building it is the migration deliverable.
+>
+> ⚠️ **THAT BUILD IS `#11534`'s, AND IT COVERS ONE OF THE TWO GAP CLASSES — not both.**
+> `S2.2b` (`extractor_v2.run_partial_gap_fill`, behind `TORTOISE_PARTIAL_GAP_FILL`, **default OFF**)
+> takes its targets from `vet_gate.partial_gaps` — the statement/clause coverage detector `check_batch`
+> now reports (a char span into the narrative, so a re-extraction has an address to read; it needs no
+> `#2684` span layer). Its reach is **measured on the F3 population, and the measurement is the point**:
+> against the 12 point and 9 operator additions S4 makes across the seven recorded sessions, a coverage
+> trigger reaches **8 of 12 points and 1 of 9 operators**. The operator half is not a tuning problem —
+> an operator addition GENERALISES a claim the batch already carries ("a retry path that does not
+> re-establish ownership … defeats any downstream completion check"), so no narrative span is
+> uncovered even though the item is new, and a coverage detector cannot reach it by construction.
+> **So the pre-condition above is met for ADD-from-an-uncovered-span and is NOT met for
+> ADD-by-generalisation**, and `run_s4`'s removal therefore stays gated on the second half. The
+> detector's own cost is measured too — 8.3% of 844 segments flagged, with non-claims (headings, date
+> fragments, asides) the dominant class — which is why the stage is armed OFF. Evidence and the full
+> table: `docs/evidence/11534-partial-gap/README.md`.
 > (Pinned: `tests/test_extractor_v4_s4_stage_claims.py`.)
 >
 > **On the step *names*:** the code's own stages are **S1–S5** (`[S1] STORY SUMMARY` … `[S5] EMBED`, module

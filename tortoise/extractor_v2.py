@@ -152,6 +152,7 @@ import unicodedata
 import warnings
 import weakref
 from collections import Counter
+from collections.abc import Mapping, Sequence
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -3638,6 +3639,178 @@ def run_s4(model, story: str, search: dict, embed_list: dict,
                             "Complete the embed list.",
                             max_tokens=_stage_cap(_S2_S4_MAX_TOKENS),
                             stats=stats, seam="s4")
+
+
+# ── S2.2b — the ADD-capable PARTIAL-GAP FILL (#11534) ────────────────────
+#
+# ⛔ WHY THIS STAGE EXISTS, IN ONE PARAGRAPH. `run_s4` is the only stage in the
+# shipped pipeline that can ADD a candidate (measured, F3 — see
+# `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md` §4.4 and the F3 record on
+# `#11002`), so deleting it deletes gap-filling instead of relocating it. The
+# precondition for its removal is an ADD-capable successor, and the successor
+# needs a detector that can name WHICH narrative statement has no candidate —
+# `vet_gate.check_batch`'s `coverage_suspect` fires solely on `total == 0`, so a
+# PARTIAL gap (some candidates, one statement uncovered) is invisible to every
+# instrument in the tree. `vet_gate.partial_gaps` is that detector
+# (`#11534`-additive, reported-never-acted-on); this stage is its consumer.
+#
+# ⚠️ THE MEASUREMENT THAT CONSTRAINS THIS STAGE — read it before believing the
+# stage recovers S4's additions. On the F3 population (7 recorded sessions,
+# `docs/evidence/1789-s4-reeemit-tax/`) the detector reaches only 5 of the 12
+# items S4 added, because the other 7 are not uncovered prose at all: they are
+# RE-SHAPED items (a point restating a statement the batch already carries) and
+# GENERALISATIONS (0 of S4's 5 operator additions restate any narrative span).
+# So this stage targets ONE class of gap — a claim no candidate accounts for —
+# and it is NOT a like-for-like replacement for `run_s4`. The full measurement
+# and its consequences are in `docs/evidence/11534-partial-gap/README.md`; the
+# `run_s4` removal stays gated (`#11534`'s target 3).
+#
+# ⛔ DEFAULT OFF (`TORTOISE_PARTIAL_GAP_FILL`), and that is a MEASURED position,
+# not caution: the detector's flag rate is 16.1% of segments over the recorded
+# population and the dominant flag classes are non-claims (markdown labels, date
+# fragments, parenthetical asides), so an always-on stage would pay a model call
+# on most sessions to be told, correctly, that the spans are not claims. Arm it
+# to MEASURE it; the recall/precision numbers above are what a default-ON
+# decision has to beat.
+
+PARTIAL_GAP_TMPL = """You are the COVERAGE REVIEWER for the Tortoise epistemic memory.
+
+The extraction stage already ran. A deterministic coverage check compared the
+session narrative against the items it produced and found the spans below that
+no item accounts for. Emit the embed-list items those spans state — and NOTHING
+else.
+
+WHAT YOU MAY EMIT, AND WHAT YOU MAY NOT
+- Emit ONLY what the UNCOVERED SPANS state, in their own words and at the
+  session's own granularity. Do not infer, extend or generalise beyond them.
+- Do NOT re-emit, restate, split or "improve" anything in EXISTING ITEMS.
+- ⛔ MOST UNCOVERED SPANS ARE NOT CLAIMS. A heading, a button label, a date
+  fragment, a parenthetical aside and a rhetorical sentence all survive the
+  lexical check without stating anything durable. When a span states nothing
+  durable, emit NOTHING for it. An empty result is the CORRECT answer here, and
+  inventing an item to fill a span that was never a claim is the failure this
+  stage is scored on.
+- Emit no operator unless both of its endpoints are items in your own output or
+  in EXISTING ITEMS.
+
+{output_contract}
+{date_anchor}
+UNCOVERED SPANS
+{gap_spans}
+
+EXISTING ITEMS — for deduplication only, never for re-emission
+{existing_items}
+"""
+
+#: How many existing-item texts the dedup block carries per section. The block
+#: exists so the model does not re-emit what it already said; a cap keeps the
+#: prompt bounded on a 49-item session (the population's largest is 49).
+_GAP_EXISTING_CAP = 60
+
+
+def _partial_gap_fill_enabled() -> bool:
+    """``TORTOISE_PARTIAL_GAP_FILL`` — DEFAULT OFF. See the block comment above:
+    the default is a measured position (flag rate + dominant non-claim classes),
+    not caution. Blank/garbage resolves to the default via ``env_flag``."""
+    return env_flag("TORTOISE_PARTIAL_GAP_FILL", False)
+
+
+def _render_existing_items(embed_list: dict) -> str:
+    """The dedup block: what the batch already carries, per section.
+
+    A POSITIVE list, never a negative one: telling the model "do not repeat
+    these" is the same information as "here they are", and a model handed the
+    items it may not emit has a far smaller space to be wrong in than one asked
+    to remember a summary. Rendered as an untrusted region — the texts are
+    session-derived.
+    """
+    lines: list[str] = []
+    for section, _field, _kind, _family in _vet_gate.SECTIONS:
+        texts = [str(_vet_gate._item_text(section, item))
+                 for item in (_section_list(embed_list, section))
+                 if isinstance(item, dict)]
+        texts = [t for t in texts if t][:_GAP_EXISTING_CAP]
+        if texts:
+            lines.append(f"[{section}] " + json.dumps(texts))
+    return _render_untrusted_block("EXISTING ITEMS", "\n".join(lines))
+
+
+def _section_list(embed_list: object, section: str) -> list:
+    """The section's item list, or ``[]`` for any malformed shape."""
+    if not isinstance(embed_list, Mapping):
+        return []
+    value = embed_list.get(section)
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        return list(value)
+    return []
+
+
+def render_partial_gap_prompt(narrative: str, spans: dict, embed_list: dict, *,
+                              session_date: str | None = None,
+                              core_only: bool | None = None) -> str:
+    """Render the #11534 gap-fill prompt for the FLAGGED spans only.
+
+    ``spans`` is a ``vet_gate.partial_gaps`` result. The spans ride as an
+    untrusted region (a narrative is verbatim session text — the same envelope
+    rule S1's story and S4's story slot obey, `#10311`), addressed by their index
+    in the flagged list so a model's item can be traced back to the span it
+    claims to cover.
+    """
+    if core_only is None:
+        core_only = _classify_later_enabled()
+    flagged = spans.get("flagged") if isinstance(spans, Mapping) else None
+    rendered_spans = "\n".join(
+        f"[{i}] {str(entry.get('text') or '').strip()}"
+        for i, entry in enumerate(flagged or []))
+    return _fill_template(PARTIAL_GAP_TMPL, {
+        "output_contract": _prompt_contract(core_only=core_only),
+        "date_anchor": _date_anchor(session_date, include_emission_rules=True),
+        "gap_spans": _render_untrusted_block("UNCOVERED SPANS", rendered_spans),
+        "existing_items": _render_existing_items(embed_list),
+    })
+
+
+def run_partial_gap_fill(model, narrative: str, embed_list: dict, *,
+                         spans: dict | None = None,
+                         stats: dict | None = None,
+                         session_date: str | None = None,
+                         core_only: bool | None = None) -> dict:
+    """S2.2b — emit candidates for the narrative spans no candidate covers.
+
+    Returns an embed-list fragment (the same shape ``run_s4`` returns) for
+    :func:`merge_embed_lists` to union into the S2 list, or ``{}`` when there is
+    nothing to do.
+
+    **No call when nothing is flagged.** ``spans=None`` runs
+    :func:`vet_gate.partial_gaps` itself; if the detector flags no segment the
+    function returns ``{}`` WITHOUT a model call, so a fully-covered session
+    pays nothing. That is the boundedness the issue asks for (research question
+    3: "whether ADD even needs a new pass") — it needs one only on a session that
+    demonstrably has an uncovered span.
+
+    **One call, bounded.** ``_complete_parsed`` is the S2/S4 ladder — one
+    error-informed re-prompt, the ``#2134`` length escalation — and it raises
+    ``_ParseError`` on a residual failure, which the CALL SITE catches and
+    records (fail-open: the run keeps the S2 list; the gap is loud in the
+    census, never silent). There is no loop here: a gap-fill that retried until
+    it produced something would be the oscillation §4.4's re-narrate bound
+    exists to prevent.
+    """
+    if core_only is None:
+        core_only = _classify_later_enabled()
+    gaps = spans if spans is not None else _vet_gate.partial_gaps(
+        embed_list, narrative)
+    if not gaps.get("flagged"):
+        return {}
+    return _complete_parsed(
+        model,
+        render_partial_gap_prompt(narrative, gaps, embed_list,
+                                  session_date=session_date,
+                                  core_only=core_only),
+        "Emit the items the uncovered spans state. Emit nothing when they "
+        "state no claim.",
+        max_tokens=_stage_cap(_S2_S4_MAX_TOKENS),
+        stats=stats, seam="gap_fill")
 
 
 # ── E4 (#1536): S4 merges-not-replaces — programmatic union (S2 ∪ S4) ──────
@@ -13045,6 +13218,77 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
             embed_list, story, arbiter=vet_arbiter)
         vet_warnings.extend(_w)
 
+    # ── S2.2b: the ADD-capable PARTIAL-GAP FILL (#11534) ────────────────────
+    # The coverage question S2.2 Level 2 asks ("did we account for everything the
+    # narrative said?") had no INSTRUMENT until `vet_gate.partial_gaps`: the
+    # reported `coverage_suspect` fires only on a zero-candidate batch, so a
+    # narrative that yielded 44 candidates and left one statement uncovered was
+    # invisible. This block reads that instrument and — only when
+    # `TORTOISE_PARTIAL_GAP_FILL` is armed — spends ONE bounded model call on the
+    # flagged spans.
+    #
+    # ⛔ POSITION, deliberately here and nowhere else. AFTER S2.2 (the gate has
+    # judged the S2 batch — a stage that ADDED before the gate would put
+    # candidates in front of VET that VET never saw) and BEFORE S3 (an added
+    # candidate needs identity resolution like any other, §4.4 I1: a candidate
+    # that skips the lookup is the duplicate manufacturer). It does NOT need its
+    # own VET pass: the post-S4 union pass below re-vets the WHOLE list, so the
+    # added items are gated there exactly as S4's own additions are.
+    #
+    # FAIL-OPEN, loudly: a detector that raises, a model that raises and a parse
+    # that fails all leave `embed_list` untouched and record the reason in
+    # `errors`/`vet_warnings`. Nothing is ever dropped because this stage could
+    # not run (I2: silent absence is never an outcome).
+    gap_fill_stats: dict = {}
+    if _partial_gap_fill_enabled() and story and embed_list:
+        try:
+            gaps = _vet_gate.partial_gaps(embed_list, story)
+            gap_fill_stats = {
+                "armed": True,
+                "segments": gaps["segments"],
+                "flagged_total": gaps["flagged_total"],
+                "coverage_floor": gaps["coverage_floor"],
+                "fired": False,
+            }
+            if gaps["flagged"]:
+                gap_stage_stats: dict = {}
+                added = run_partial_gap_fill(model, story, embed_list,
+                                             spans=gaps,
+                                             stats=gap_stage_stats,
+                                             session_date=session_date,
+                                             core_only=classify_later)
+                _rollup_llm(llm_stats, gap_stage_stats, "gap_fill")
+                _rollup_recovery(recovery_stats, gap_stage_stats)
+                if gap_stage_stats.get("partial"):
+                    errors.append("gap-fill output partial — truncated tail "
+                                  "dropped (gap unclosed)")
+                    _bump_census_class(error_census, "partial_parse")
+                gap_fill_stats["fired"] = True
+                if isinstance(added, dict) and any(
+                        _s4_section_is_content(k, v) for k, v in added.items()):
+                    before = _vet_gate.check_batch(embed_list, story)
+                    embed_list = merge_embed_lists(embed_list, added)
+                    after = _vet_gate.check_batch(embed_list, story)
+                    gap_fill_stats["flagged_before"] = before["partial_gaps"][
+                        "flagged_total"]
+                    gap_fill_stats["flagged_after"] = after["partial_gaps"][
+                        "flagged_total"]
+                    gap_fill_stats["added_items"] = (
+                        after["candidates"] - before["candidates"])
+                else:
+                    # The model was given the spans and found no claim in them —
+                    # the CORRECT answer for a label/date/aside span, and the
+                    # dominant one on the recorded population. Recorded, not
+                    # warned: a run that pays one call and adds nothing is the
+                    # measured cost of this stage, and the evidence record is
+                    # where that is argued, not a per-session warning.
+                    gap_fill_stats["added_items"] = 0
+        except Exception as e:  # noqa: BLE001, RUF100 — never block capture (P1)
+            errors.append(f"gap-fill failed: {type(e).__name__}: {e} — "
+                          "kept S2 output")
+            _bump_census(error_census, e)
+            gap_fill_stats["error"] = f"{type(e).__name__}: {e}"
+
     # ── classify(S2) (#1695 Task 5): the first classify pass — the pack-
     # domain items the core-only S2 emitted as "unclassified" get their
     # kinds BEFORE S3 so the graph search + S4 see final kinds (typed refs
@@ -13576,6 +13820,13 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     # compliance flag. Absent-when-false for the two signals (the
     # ``s4_full_rescues`` precedent — a 0 write would fabricate a shape).
     result["stats"]["s4_delta"] = s4_delta
+    if gap_fill_stats:
+        # #11534: armed-state + detector counts + whether the call fired and
+        # whether it closed anything. Written only when the stage is ARMED, so
+        # an unarmed run's stats stay byte-identical to pre-#11534 (an
+        # always-present `armed: false` block would change every session's
+        # stats for a stage that did not run).
+        result["stats"]["partial_gap_fill"] = gap_fill_stats
     if s4_delta_empty:
         result["stats"]["s4_delta_empty"] = s4_delta_empty
     if s4_delta_reemit_suspect:

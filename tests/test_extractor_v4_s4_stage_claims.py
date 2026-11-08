@@ -450,6 +450,12 @@ class _StageScan(ast.NodeVisitor):
         self.s4_guards: list[ast.expr] = []
         self.merge_call: ast.Call | None = None
         self.merge_target: str | None = None
+        #: EVERY `merge_embed_lists` site, in source order. There is more than
+        #: one since #11534 (the partial-gap fill unions its additions into the
+        #: S2 base before S3, which is a different union from the E4 one this
+        #: file pins), so the E4 site is selected by WHICH VALUE it consumes —
+        #: the one that mentions S4's result — not by being the only one.
+        self.merges: list[tuple[ast.Call, str | None]] = []
         self.result_embed_list: ast.expr | None = None
         self.result_embed_list_lineno: int | None = None
         self.assignments: dict[str, ast.expr] = {}
@@ -493,9 +499,8 @@ class _StageScan(ast.NodeVisitor):
                 self.s4_call = node.value
                 self.s4_guards = list(self.guard_stack)
                 self.s4_result = targets[0] if targets else None
-            elif called == "merge_embed_lists" and self.merge_call is None:
-                self.merge_call = node.value
-                self.merge_target = targets[0] if targets else None
+            elif called == "merge_embed_lists":
+                self.merges.append((node.value, targets[0] if targets else None))
         self.generic_visit(node)
 
 
@@ -503,6 +508,14 @@ def _scan(source: str | None = None) -> _StageScan:
     text = EXTRACTOR.read_text(encoding="utf-8") if source is None else source
     scan = _StageScan()
     scan.visit(_function(ast.parse(text), "extract_session_v2"))
+    # The E4 union is the merge that CONSUMES S4's output (#11534 added a
+    # second, earlier merge that does not). Selected by value, not by order: a
+    # merge whose arguments mention the S4 result. Falling back to the first
+    # site keeps the diagnostics working on a tree whose S4 call moved.
+    chosen = next((site for site in scan.merges
+                   if scan.s4_result and _mentions_name(site[0], scan.s4_result)),
+                  scan.merges[0] if scan.merges else (None, None))
+    scan.merge_call, scan.merge_target = chosen
     return scan
 
 
@@ -1291,7 +1304,16 @@ CONCLUSION_SCOPE = "folds S4's purpose into"
 #: is satisfied by every spelling it does not name.
 BATCH_SIGNAL_ALLOW = frozenset({
     "narrative_statements", "candidates", "by_section",
-    "coverage_ratio", "coverage_suspect",
+    "coverage_ratio", "coverage_suspect", "partial_gaps",
+    # #11534: the PARTIAL-gap detector's report — the segments no candidate
+    # accounts for, each with a char span into the narrative. It is a REPORT by
+    # the same test the others are: `check_batch` performs no action on it, and
+    # nothing in `vet_gate` can emit a candidate. The ACTION it enables lives in
+    # a separate stage (`extractor_v2.run_partial_gap_fill`, `TORTOISE_PARTIAL_
+    # GAP_FILL`, DEFAULT OFF), which is why the G5 record's "no successor can
+    # emit a candidate" universal was reconciled rather than left standing: that
+    # stage CAN add, its measured reach is 8/12 point additions and 1/9 operator
+    # additions, and the record now states both halves of that.
 })
 #: `classify_items`' documented return keys. A key carrying ITEMS would make
 #: classify a candidate producer — the successor under another name.

@@ -142,6 +142,7 @@ exactly what produces that 422.
 """
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Callable, Iterable, Mapping, MutableMapping, Sequence
 from typing import Any
@@ -354,6 +355,252 @@ def _narrative_statements(narrative: str) -> int:
                if part and part.strip())
 
 
+# ── #11534 — the PARTIAL-gap detector (statement + clause spans) ──────────
+#
+# ``coverage_suspect`` above answers ONE question — "did prose go in and
+# nothing come out?" (``total == 0``) — and that is the only coverage failure
+# it can see. A narrative that yielded 44 candidates while missing one
+# statement's claim is INVISIBLE to every instrument in the tree, which is what
+# #11534 exists to fix: an ADD-capable stage cannot be built on a detector that
+# can only count.
+#
+# ⛔ WHAT THIS DETECTOR IS, AND WHAT IT IS NOT. It is a **lexical, deterministic
+# coverage proxy**: a segment is *covered* when the content words it carries are
+# found in the candidate set, weighted by how DISCRIMINATING each word is in
+# this batch (idf over the batch's own item texts). It decides nothing — it
+# reports segments, an address for each, and what it thinks is missing — and it
+# never triggers a write by itself (`check_batch`'s contract is "reported, never
+# acted on", and #11534's own indicator 3 requires the detector to be SCORED
+# before it drives anything).
+#
+# ⚠️ Its measured limits, from the F3 population (#11534's evidence record,
+# ``docs/evidence/11534-partial-gap/``): on the 7 recorded sessions in
+# ``docs/evidence/1789-s4-reeemit-tax/`` it flags 16.1% of segments and overlaps
+# 5 of the 12 items S4 added. It catches clause-level elisions (a claim the
+# narrative made in a clause no candidate carries) and it MISSES the two shapes
+# this proxy cannot see by construction: (a) a **generalisation** — an operator
+# or point that restates a covered statement at a higher abstraction, so no
+# narrative span is uncovered even though the item is new (0 of S4's 5 operator
+# additions), and (b) a **re-shaped** item whose content the candidates already
+# lexically carry. Read a low ``coverage`` as evidence of missing prose, never as
+# a claim that a model should emit something.
+#
+# ⚠️ The ADDRESS is a char span into the NARRATIVE — not into a source turn, and
+# not a graph span. #11534's body worried that the target needed `#2684`'s span
+# layer (point→source, `state: not-implemented`); it does not: a re-extraction
+# that reads the flagged span needs the span in the text it was given, which is
+# computed from the narrative string in hand. `#2684` remains a separate,
+# unbuilt mechanism and is not a precondition for this one.
+
+#: Marks a segment as *not accounted for* when its idf-weighted coverage falls
+#: below this floor. Measured, not chosen in the dark: the recorded population's
+#: per-segment coverage is bimodal (median 0.85, p10 0.40), and 0.55 sits in the
+#: trough between "this statement is here" and "this statement is absent".
+GAP_COVERAGE_FLOOR = 0.55
+
+#: Segments carrying fewer content words than this are not claims — markdown
+#: headings and bold labels (``**Root cause (preserved exactly).**``) are the
+#: population's dominant flag class without it (measured: 11 of 37 flags at a
+#: 2-token floor were labels or date fragments).
+GAP_MIN_CONTENT_TOKENS = 4
+
+#: How many flagged segments ride ``stats["batch"]``. The full count is always
+#: reported in ``flagged_total``; the cap keeps a session's stats JSON bounded.
+GAP_MAX_FLAGGED = 20
+
+#: A word is a content word when it is at least this long and not in the stop
+#: set. Kept LOW on purpose — the vocabulary here is technical prose, and the
+#: idf weighting (not this length) is what keeps common words quiet.
+_GAP_MIN_WORD = 3
+
+_GAP_WORD = re.compile(r"[a-z0-9][a-z0-9\-]{1,}")
+
+#: Clause boundaries. ``,``/``:``/``—`` are the narrative's own separators;
+#: the conjunctions are included because the population writes a claim as
+#: "<covered clause>, though <the elided one>" — the elision is a CLAUSE, and a
+#: sentence-level detector never reaches it.
+_GAP_CLAUSE = re.compile(
+    r",|—|--|:|\bbut\b|\bso\b|\bthough\b|\bwhile\b|\bwhich\b|\bbecause\b"
+    r"|\band\b")
+
+_GAP_STOP = frozenset("""
+ a an and are as at be been being both but by can could did do does doesn done
+ each even ever every few for from had has have he her here his how if in into
+ is it its just may me might more most much must never no nor not now of off on
+ once one only or other our out over own per same she should since so some such
+ than that the their them then there these they this those through to too two
+ under until up us very was we were what when where which while who whom why
+ will with within without would yet you your also although because though still
+ three four five six seven eight nine ten does doesn nothing else what's dont
+ isn't""".split())
+
+#: Suffix stripping — deliberately the CRUDEST possible stemmer (longest match
+#: wins, one pass). It exists so "shares"/"shared"/"sharing" meet; a real
+#: stemmer would need a dependency this module may not take (it is stdlib-only by
+#: contract — see the module docstring). Over-stemming is the safe direction here:
+#: a token that collides wrongly makes coverage look HIGHER, i.e. it hides a gap
+#: rather than inventing one, which is the same fail direction as the gate.
+_GAP_SUFFIXES = sorted(
+    ("ations", "ation", "ments", "ment", "ings", "ing", "ies", "ied",
+     "ers", "er", "ed", "es", "s", "ly", "al"),
+    key=len, reverse=True)
+
+
+def _gap_stem(word: str) -> str:
+    for suffix in _GAP_SUFFIXES:
+        if len(word) > len(suffix) + 3 and word.endswith(suffix):
+            return word[:-len(suffix)]
+    return word
+
+
+def _gap_tokens(text: object) -> set[str]:
+    """The content tokens of `text` — markdown punctuation stripped, stemmed.
+
+    Deliberately NOT :func:`_norm`: that one is the *identity* transform shared
+    with ``extractor_v2`` (operators, removals), and widening it here would
+    change what the gate means by "the same item". This is a coverage lens, not
+    an identity, and the two must stay separable.
+    """
+    cleaned = re.sub(r"[`*#_>|]+", " ", str(text or "").lower())
+    return {_gap_stem(w) for w in _GAP_WORD.findall(cleaned)
+            if len(w) >= _GAP_MIN_WORD and w not in _GAP_STOP}
+
+
+def _gap_mask(narrative: str) -> str:
+    """`narrative` with markdown HEADINGS blanked, SAME LENGTH.
+
+    Same length is the contract: every offset the detector reports is an offset
+    into the ORIGINAL narrative, so a caller can slice it back out. Headings are
+    blanked because a ``## Narrative: …`` line is a title, not a statement, and
+    the population's own headings produced the dominant false-positive class.
+    """
+    chars = list(narrative)
+    for match in re.finditer(r"(?m)^[ \t]*#+[^\n]*$", narrative):
+        for i in range(match.start(), match.end()):
+            chars[i] = " "
+    return "".join(chars)
+
+
+def narrative_segments(narrative: str) -> list[dict]:
+    """The narrative's CLAUSE spans, each with a statement AND clause index.
+
+    Every entry is ``{"statement": i, "clause": j, "start": s, "end": e,
+    "text": t}`` where ``s``/``e`` index the ORIGINAL narrative, so the caller
+    can re-read exactly the bytes the detector judged. ``statement`` is the
+    :func:`_narrative_statements` sentence index it belongs to; ``clause``
+    orders the segments within that statement.
+
+    The statement index is derived from the same character class
+    :func:`_narrative_statements` splits on (``[.!?;\n\r]``), except that the
+    split runs on the heading-blanked mask so a heading's own ``.`` cannot open a
+    phantom statement — the two therefore agree only up to the headings, and this
+    function's ``statement`` is an ADDRESS, not the reported
+    ``narrative_statements`` count.
+    """
+    text = str(narrative or "")
+    if not text:
+        return []
+    masked = _gap_mask(text)
+    out: list[dict] = []
+    statement = -1
+    for sentence in re.finditer(r"[^.!?;\n\r]+", masked):
+        chunk = sentence.group(0)
+        if not chunk.strip():
+            continue
+        statement += 1
+        base = sentence.start()
+        separators = list(_GAP_CLAUSE.finditer(chunk))
+        starts = [0] + [m.end() for m in separators]
+        ends = [m.start() for m in separators] + [len(chunk)]
+        for clause, (a, b) in enumerate(zip(starts, ends)):
+            if b <= a:
+                continue                        # adjacent separators
+            piece = chunk[a:b]
+            if not piece.strip():
+                continue
+            out.append({"statement": statement, "clause": clause,
+                        "start": base + a, "end": base + b,
+                        "text": text[base + a:base + b].strip()})
+    return out
+
+
+def partial_gaps(embed_list: object, narrative: str, *,
+                 coverage_floor: float = GAP_COVERAGE_FLOOR,
+                 min_content_tokens: int = GAP_MIN_CONTENT_TOKENS,
+                 max_flagged: int = GAP_MAX_FLAGGED) -> dict:
+    """Which narrative SEGMENTS does this batch not account for? (#11534)
+
+    For every clause span, the share of its content tokens (idf-weighted, over
+    this batch's own item texts) that no candidate carries. A segment below
+    ``coverage_floor`` with at least ``min_content_tokens`` content words is
+    **flagged**: it is prose the batch did not account for.
+
+    Returns::
+
+        {"segments": N, "coverage_floor": f, "min_content_tokens": k,
+         "flagged_total": K, "flagged": [ {...segment, "coverage": c,
+         "missing": [tokens]} ], "truncated": bool}
+
+    ``flagged_total`` is the TRUE count; ``flagged`` holds at most
+    ``max_flagged`` entries so a session's stats stay bounded. Entries are
+    ordered by ASCENDING coverage — the least accounted-for segment first, which
+    is the order a re-extraction wants.
+
+    **Total on every malformed shape** (fail-open): a non-str narrative yields
+    no segments, a malformed ``embed_list`` yields the empty candidate set (so
+    every content-bearing segment is flagged, which is the honest answer — with
+    no candidates nothing is accounted for), and no exception escapes.
+
+    ⚠️ idf is computed over the ITEM TEXTS, not a corpus: a word the batch uses
+    everywhere ("stage", "lease") is near-worthless as evidence of coverage,
+    and one it does not use at all scores highest — which is exactly the
+    "nothing here accounts for this word" signal. ``log((N+1)/(df+0.5))`` never
+    divides by zero and never returns a non-positive weight for a token in the
+    union.
+    """
+    segments = narrative_segments(narrative)
+    empty = {"segments": 0, "coverage_floor": coverage_floor,
+             "min_content_tokens": min_content_tokens,
+             "flagged_total": 0, "flagged": [], "truncated": False}
+    if not segments:
+        return empty
+
+    candidate_tokens = [_gap_tokens(_item_text(section, item))
+                        for section, _i, item in _iter_items(embed_list)]
+    candidate_tokens = [toks for toks in candidate_tokens if toks]
+    df: dict[str, int] = {}
+    for toks in candidate_tokens:
+        for token in toks:
+            df[token] = df.get(token, 0) + 1
+    n_items = len(candidate_tokens)
+
+    def _idf(token: str) -> float:
+        return math.log((n_items + 1) / (df.get(token, 0) + 0.5))
+
+    union = set(df)
+    flagged: list[dict] = []
+    for segment in segments:
+        toks = _gap_tokens(segment["text"])
+        if len(toks) < min_content_tokens:
+            continue
+        total = sum(_idf(t) for t in toks)
+        if total <= 0:                          # impossible for a non-empty set
+            continue
+        covered = sum(_idf(t) for t in toks if t in union)
+        coverage = covered / total
+        if coverage >= coverage_floor:
+            continue
+        flagged.append({**segment, "coverage": round(coverage, 3),
+                        "missing": sorted(t for t in toks if t not in union)})
+    flagged.sort(key=lambda entry: entry["coverage"])
+    return {"segments": len(segments),
+            "coverage_floor": coverage_floor,
+            "min_content_tokens": min_content_tokens,
+            "flagged_total": len(flagged),
+            "flagged": flagged[:max_flagged],
+            "truncated": len(flagged) > max_flagged}
+
+
 # ── Level 2 — the batch checks (mechanical, unique to VET) ─────────────────
 
 def check_batch(embed_list: object, narrative: str) -> dict:
@@ -389,6 +636,11 @@ def check_batch(embed_list: object, narrative: str) -> dict:
         "coverage_ratio": (round(ratio, 3) if ratio is not None else None),
         # The ONE unambiguous coverage failure: prose in, nothing out.
         "coverage_suspect": bool(statements and total == 0),
+        # #11534: WHICH prose. ``coverage_suspect`` above can only fire on a
+        # zero-candidate batch, so a partial gap — a narrative that yielded
+        # candidates and still left a statement uncovered — is invisible to it.
+        # Additive key, same "reported, never acted on" contract.
+        "partial_gaps": partial_gaps(embed_list, narrative),
     }
 
 
