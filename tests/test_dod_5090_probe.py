@@ -677,6 +677,44 @@ def test_a_PARTIAL_measurement_cannot_be_narrowed_by_a_declaration(monkeypatch):
         )
 
 
+def test_the_two_label_DERIVATION_carries_the_partial_prefix(tmp_path):
+    """The `partial` hold above is reached by a `startswith(PARTIAL_LABEL_PREFIX)` test — so the
+    DERIVATION must produce a label carrying that prefix, and nothing else pinned it.
+
+    ⛔ THE HOLE THIS CLOSES (`#11495`'s review, measured). Every fixture that exercises the
+    `partial` hold — the one above, `::test_a_gated_writer_with_an_UNSINGLE_label_is_NAMED_not_just_held`,
+    and the unreadable-register fixtures — INJECTS the literal `"UNKNOWN(two labels: …)"` rather
+    than deriving it, while `PARTIAL_LABEL_PREFIX` was a HAND-RETYPED copy of the literal the
+    derivation built. Nothing tied the two together: retyping the derivation to
+    `"UNKNOWN(2 labels: "` left **194 passed, 2 skipped** across
+    `tests/test_dod_5090_probe.py` + `tests/test_embed_writer_register.py` — the whole suite green
+    while a two-label MEASUREMENT silently stopped being held, so a declaration could narrow it
+    before the served-set comparison and read `MET` on a stored unserved label. The derivation is
+    now BUILT from the constant (making the drift structurally impossible); this pin is what
+    catches a future restructure that stops deriving from it.
+
+    Drives the REAL discovery over a scratch tree, so it exercises `_embedding_writers` itself —
+    not an injected label map, which is the blind spot that let the drift ship.
+    """
+    (tmp_path / "tortoise").mkdir(parents=True)
+    # The seam module is skipped by discovery; it only has to EXIST for the import to be real.
+    (tmp_path / "tortoise" / "embeddings.py").write_text("", encoding="utf-8")
+    (tmp_path / "tortoise" / "two_labels.py").write_text(
+        "from tortoise.embeddings import encode_for_row\n"
+        "\n"
+        "def _two_labels():\n"
+        "    EVENT = 'MERGE (e:Event {id:$i}) SET e.embedding = $emb'\n"
+        "    BATCH = 'MERGE (b:Batch {id:$b}) SET b.embedding = $emb'\n"
+        "    return encode_for_row(EVENT + BATCH)\n",
+        encoding="utf-8")
+    entry = probe._embedding_writers(tmp_path)["tortoise.two_labels::_two_labels"]
+    assert entry["label"].startswith(probe.PARTIAL_LABEL_PREFIX), (
+        "the derivation's two-label label does NOT carry PARTIAL_LABEL_PREFIX, so row 2's "
+        f"`partial` hold can never match it: {entry['label']!r} vs "
+        f"{probe.PARTIAL_LABEL_PREFIX!r}")
+    assert "Batch" in entry["label"] and "Event" in entry["label"], entry["label"]
+
+
 def test_a_gated_writer_with_an_UNSINGLE_label_is_NAMED_not_just_held(monkeypatch):
     """The `unexplained` note needs its own falsifier, or a `PARTIAL` can name nobody.
 
@@ -3237,8 +3275,17 @@ def test_the_census_note_names_the_population_it_counted(monkeypatch):
     which the same line falsifies: `exempt` is defined as "the function is NOT a
     producer of a stored vector", so `... PRODUCERS ... exempt=8` says "8 of
     these producers are not producers" in output quoted into `#5090`'s body.
-    The note now names the LABEL the population is keyed on, which no class on
-    the line can contradict.
+    The note now names the PROPERTY the population is keyed on.
+
+    ⛔ AND IT MAY NOT NAME ONE LABEL FOR A POPULATION THAT CARRIES TWO
+    (`#11495`'s review, measured). `unresolved_writers` is
+    `kind == "unresolved_write" and fn in unknown`, and `scored_labels()` puts a
+    writer declared `labels-at-runtime` into `unknown` with `AT_RUNTIME_LABEL`. The
+    header said `STILL labelled UNKNOWN(unresolved producer)`, and on the LIVE tree
+    BOTH of its two subjects carried `UNKNOWN(labels decided at runtime)` — so the
+    row's own published evidence contradicted the runtime note four cells to its
+    left. The old fixture carried only `UNKNOWN(unresolved producer)`, which is why
+    it could not see the fold; this one carries one of each.
     """
     writers = {
         "tortoise.consistency::_compare_views": {
@@ -3250,24 +3297,38 @@ def test_the_census_note_names_the_population_it_counted(monkeypatch):
             "callee": probe.SEAM_CALL, "at": "tortoise/y.py:2",
             "kind": "duplicate", "label": "UNKNOWN(duplicate writer name)",
         },
+        # ⛔ THE FOLD: an `unresolved_write` writer the register declares
+        # `labels-at-runtime`, so its census label is `AT_RUNTIME_LABEL` — a census
+        # subject that does NOT carry `UNKNOWN(unresolved producer)`.
+        **_unresolved_writer("tortoise.y::_at_runtime_store"),
     }
     monkeypatch.setattr(probe, "embedding_writers", lambda: writers)
-    # ⛔ `#11492`: `_compare_views` IS declared in the live register, so row 2 would resolve it
-    # and the population this test is about would be empty. Neutralised for the reason
-    # `_no_register` states — an injected writer map must not inherit the tree's declarations.
-    _no_register(monkeypatch)
+    # ⛔ The register is REPLACED, not merely neutralised: `_compare_views` IS declared in
+    # the live register, so row 2 would resolve it and shrink the population this test is
+    # about — and the at-runtime subject needs a declaration or it is just an unresolved one.
+    monkeypatch.setattr(
+        probe, "declared_writers",
+        lambda: {"tortoise.y::_at_runtime_store": _store_declared(
+            "tortoise.y::_at_runtime_store", LABELS_AT_RUNTIME)})
     row = probe.score_path_bullet()
     census = [n for n in row.notes if n.startswith("#10541 census")]
     assert len(census) == 1, row.notes
-    # It states how many of the UNKNOWN-labelled writers it actually counted.
-    assert "1 of 2 UNKNOWN-labelled" in census[0], census[0]
-    # ...and names the population by the LABEL, not by a class it cannot hold.
-    # `#11492`: the header now says STILL — row 2 resolves writers from the product register, so
+    # It states how many of the UNKNOWN-labelled writers it actually counted: the two
+    # `unresolved_write` subjects, out of all three UNKNOWN-labelled writers (the
+    # `duplicate` identity is never a census subject, which is what `N of M` exposes).
+    assert "2 of 3 UNKNOWN-labelled" in census[0], census[0]
+    # ...and names the population by the PROPERTY, not by a label it may not carry.
+    # `#11492`: the header says STILL — row 2 resolves writers from the product register, so
     # the census covers the ones whose label neither the derivation NOR a declaration resolved.
-    assert "writers STILL labelled UNKNOWN(unresolved producer)" in census[0], census[0]
+    assert "writers whose label is STILL UNKNOWN" in census[0], census[0]
     assert "PRODUCERS" not in census[0], (
         "the note claims a population the same line contradicts: `exempt` is "
         f"defined as NOT being a producer of a stored vector: {census[0]}")
+    # ⛔ THE PIN FOR WHICH THIS FIXTURE EXISTS: the population carries TWO labels, so a
+    # header naming one of them is false about the other — which is exactly what shipped.
+    assert "UNKNOWN(unresolved producer)" not in census[0], (
+        "the census header names ONE label while its population carries two: the "
+        f"`labels-at-runtime` subject carries {probe.AT_RUNTIME_LABEL!r}: {census[0]}")
 
 
 # ── The two verdicts that had no falsifier (fresh-context review, P2-1) ──────

@@ -917,7 +917,16 @@ def _embedding_writers(root: Path) -> dict[str, dict]:
             elif len(labels) > 1:
                 # Two labels in one writer's Cypher: picking one would report a
                 # stored label as covered while the other may be unserved.
-                label = "UNKNOWN(two labels: " + ",".join(sorted(labels)) + ")"
+                # ⛔ BUILT FROM `PARTIAL_LABEL_PREFIX`, never a hand-retyped copy of it
+                # (`#11495`'s review, measured). This line used to spell the literal out, and
+                # `:1892`'s `label.startswith(PARTIAL_LABEL_PREFIX)` is its ONLY consumer — so
+                # drifting the two apart left the WHOLE suite green (retyping just this line to
+                # `"UNKNOWN(2 labels: "` kept 194 passed, 2 skipped) while a two-label
+                # MEASUREMENT silently stopped being held, and a declaration could then narrow it
+                # before the served-set comparison and read `MET`. That is the false PASS this
+                # row's comment above exists to forbid. Deriving from the constant makes that
+                # drift impossible rather than merely tested.
+                label = f"{PARTIAL_LABEL_PREFIX}: " + ",".join(sorted(labels)) + ")"
                 _put(f"{module}::{node.name}", {
                     "callee": callee, "at": f"{rel}:{node.lineno}",
                     "kind": kind, "label": label,
@@ -2277,9 +2286,18 @@ def score_path_bullet() -> Row:
             by_class.setdefault(cls, []).append(fn)
     if unresolved_writers:
         notes.append(
-            "#10541 census over the writers STILL labelled UNKNOWN(unresolved "
-            f"producer) — {len(unresolved_writers)} of {len(unknown)} "
-            "UNKNOWN-labelled writers: "
+            # ⛔ THE HEADER NAMES THE PROPERTY, NEVER ONE LABEL (`#11495`'s review, measured).
+            # `unresolved_writers` is `kind == "unresolved_write" and fn in unknown`, and
+            # `scored_labels()` puts a writer declared `labels-at-runtime` into `unknown` with
+            # `AT_RUNTIME_LABEL` — so a census SUBJECT can carry `UNKNOWN(unresolved producer)`
+            # OR `UNKNOWN(labels decided at runtime)`. The header used to say the former, and on
+            # the LIVE tree BOTH of its two subjects carried the latter, i.e. the note
+            # contradicted the runtime note four cells to its left inside one published row.
+            # "whose label is STILL UNKNOWN" is exactly the predicate the population is built
+            # from, so no segment on the line can falsify it.
+            "#10541 census over the writers whose label is STILL UNKNOWN (neither "
+            f"the derivation nor a declaration resolved it) — {len(unresolved_writers)} of "
+            f"{len(unknown)} UNKNOWN-labelled writers: "
             # A middle dot, not `" | "`: `Row.observed` joins these notes into
             # ONE markdown table cell, and a pipe there used to split a
             # 4-column row into seven. `_table` now escapes the character at

@@ -321,13 +321,13 @@ assertion measures.
 ```text
 $ uv run python tools/test_lane.py run -- tests/test_dod_5090_probe.py -q
 121 passed, 1 skipped in 42.50s   # the #11088 transcript this row was cut from
-                                 # this tree: 164 collected, 163 passed, 1 skipped
+                                 # this tree: 165 collected, 164 passed, 1 skipped
 ```
 
-(115 collected before #11088's round 7; the file collects **164 in the tree this document sits in** —
+(115 collected before #11088's round 7; the file collects **165 in the tree this document sits in** —
 nine added by #11337 over the then-122 baseline, nineteen by `#11444`'s writer-register falsifiers, one
-by `#11471`'s GATED-writer bypass arm, and thirteen by `#11492` — so `main` collects `122 + 9 + 19 + 1 = 151`
-and this tree `151 + 13 = 164`): seven
+by `#11471`'s GATED-writer bypass arm, and fourteen by `#11492` — so `main` collects `122 + 9 + 19 + 1 = 151`
+and this tree `151 + 14 = 165`): seven
 row-2 resolution pins (register resolves every writer; the unserved-label falsifier; the
 derived-label-wins arm; the runtime-label hold; the unreadable register holding as `UNMEASURED`; the
 malformed-`stores` hold; the register's own `bypass` hold), one that holds the row on a census
@@ -336,14 +336,16 @@ malformed-`stores` hold; the register's own `bypass` hold), one that holds the r
 one that pins the LIVE reader's `stores` plumbing (the product-register → reader seam every injected
 fixture skipped), one that pins the `unexplained` note itself so a `PARTIAL` cannot name nobody,
 and one that drives row 2's `ungated` candidate arm (whether a DECLARED `ungated` writer is scored
-from its declaration or blamed as an undeclared one) —
+from its declaration or blamed as an undeclared one), one that drives the two-label **DERIVATION**
+itself (every other `partial`-hold fixture injects the sentinel string, so nothing tied the
+derivation to `PARTIAL_LABEL_PREFIX` — see the note below) —
 and
-reads 163 passed, 1 skipped on the docker lane. The
-skip is the `<3.12` re-derive. ⛔ The SPLIT is lane-bound, and the same tree reads **162 passed,
+reads 164 passed, 1 skipped on the docker lane. The
+skip is the `<3.12` re-derive. ⛔ The SPLIT is lane-bound, and the same tree reads **163 passed,
 2 skipped** under `TORTOISE_TEST_CARVE_OUT=1` with no `TORTOISE_DB_URI` — the second skip is
 `tests/_live_utils.py`'s live-graph fixture, which only the docker lane satisfies. Both splits add
-to the same `164` the pin re-derives, so **neither is a stale figure**: a carve-out run that
-"corrects" 163/1 to 162/2 rewrites a true record into a false one, and the pin deliberately does
+to the same `165` the pin re-derives, so **neither is a stale figure**: a carve-out run that
+"corrects" 164/1 to 163/2 rewrites a true record into a false one, and the pin deliberately does
 not cover the split for exactly that reason. ⚠️ The COUNT is bound to THIS TREE, never to a branch
 head: a figure
 stated as *"at #11337's head"* is stale against the same tree it sits in as soon as one more test is
