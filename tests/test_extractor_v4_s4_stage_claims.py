@@ -1300,11 +1300,11 @@ def test_an_else_branch_call_reds_the_off_switch_check():
 # test's fold is correct. Both turn on a fact the record above did not state:
 # has the successor the design promises actually LANDED?
 #
-# It has not, and the trap is that the fold's two stages DO exist in the shipped
+# It had not — and the trap was that the fold's two stages DID exist in the shipped
 # tree (`_vet_gate.apply_vet` and `kind_classifier.classify_items`), so "the
 # fold's stages are present" reads as "the successor landed" — and a lane then
 # deletes `run_s4` believing gap-filling moved. What decided it WAS the REMEDY
-# half: neither fold stage can ADD an item a coverage check found missing.
+# half: neither fold stage could ADD an item a coverage check had found missing.
 # ⛔ #11002 resolved that half — the bounded re-narrate can ADD — so the record's
 # verdict is now "the successor HAS landed" and the ordering obligation's
 # pre-condition is MET. ⛔ §4.4's F3 was MEASURED on 2026-11-08 and it FIRES
