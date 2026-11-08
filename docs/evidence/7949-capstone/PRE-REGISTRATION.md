@@ -1443,9 +1443,11 @@ place a machine reads it.
   CONTENT at the merged head (`_collect_classify_items` at `:10169`, its `return items` at `:10191`,
   the two `if items:` gates at `:10736`/`:10868`, the two fail-open `except` arms at
   `:10749`/`:11973`), never by adding an offset.
-- **What moved: nothing else.** No metric, denominator, threshold, class set, corpus pin or `steps`
-  block is touched; the numbers this record exists to freeze are byte-identical. `document_sha256`
-  is re-cut in this same commit, per §8's rule for *any* edit to this file.
+- **What moved: nothing but line-cites.** No metric, denominator, threshold, class set, corpus pin or
+  step declaration changes; the only text change inside the `steps` block is the same line-cite in
+  `steps.conditional[0].condition` (`:11098` → `:11174`), which names no metric. The numbers this
+  record exists to freeze are byte-identical. `document_sha256` is re-cut in this same commit, per
+  §8's rule for *any* edit to this file.
 
 ### 10.8 — the §11 cite block re-pointed again after `#10997`'s hold/reclaim insert (2026-11-06, `#10997`)
 
@@ -1460,9 +1462,11 @@ place a machine reads it.
   Each number was verified by CONTENT at this head (the `def`, the `return items` that ends it,
   the two `if items:` gates, the two `except` arms), never by adding an offset — the failure this
   section has already recorded twice.
-- **What moved: nothing else.** No metric, denominator, threshold, class set, corpus pin or `steps`
-  block is touched; the numbers this record exists to freeze are byte-identical. `document_sha256`
-  is re-cut in this same commit, per §8's rule for *any* edit to this file.
+- **What moved: nothing but line-cites.** No metric, denominator, threshold, class set, corpus pin or
+  step declaration changes; the only text change inside the `steps` block is the same line-cite in
+  `steps.conditional[0].condition` (`:11098` → `:11174`), which names no metric. The numbers this
+  record exists to freeze are byte-identical. `document_sha256` is re-cut in this same commit, per
+  §8's rule for *any* edit to this file.
 
 ### 10.9 — the §11 cite block re-pointed after `main`'s S5 inserts moved `extractor_v2.py` (2026-11-07, `#11205`/`#11242`/`#11288` then `#11264`/`#11361`)
 
@@ -1499,9 +1503,11 @@ place a machine reads it.
   gates, the two `except` arms), never by adding an offset — the failure this section has already
   recorded twice, and this round it was the whole bundle's cites (README, both probes, the E-row
   audit, `docs/00_index.md` and the architecture doc) that had to be re-derived the same way.
-- **What moved: nothing else.** No metric, denominator, threshold, class set, corpus pin or `steps`
-  block is touched; the numbers this record exists to freeze are byte-identical. `document_sha256`
-  is re-cut in this same commit, per §8's rule for *any* edit to this file.
+- **What moved: nothing but line-cites.** No metric, denominator, threshold, class set, corpus pin or
+  step declaration changes; the only text change inside the `steps` block is the same line-cite in
+  `steps.conditional[0].condition` (`:11098` → `:11174`), which names no metric. The numbers this
+  record exists to freeze are byte-identical. `document_sha256` is re-cut in this same commit, per
+  §8's rule for *any* edit to this file.
 
 ### 10.10 — the §11 cite block re-pointed after `#11368`'s mention-builder consolidation (2026-11-07, `#11368`)
 
@@ -1519,9 +1525,11 @@ place a machine reads it.
   while `_collect_classify_items` (`:11098`), which sits **above** it, does not move at all. The
   `+0` on the collector and the `+74` on the four cites below it are one measurement, and quoting
   only one of them is how the next re-derivation anchors on the wrong number.
-- **What moved: nothing else.** No metric, denominator, threshold, class set, corpus pin or `steps`
-  block is touched; the numbers this record exists to freeze are byte-identical. `document_sha256`
-  is re-cut in this same commit, per §8's rule for *any* edit to this file.
+- **What moved: nothing but line-cites.** No metric, denominator, threshold, class set, corpus pin or
+  step declaration changes; the only text change inside the `steps` block is the same line-cite in
+  `steps.conditional[0].condition` (`:11098` → `:11174`), which names no metric. The numbers this
+  record exists to freeze are byte-identical. `document_sha256` is re-cut in this same commit, per
+  §8's rule for *any* edit to this file.
 
 ⚠️ §10.8's own **New value** is deliberately left at `:10397`/`:11849`/`:11862` — the state
 `#10997` left — because it is the ANCHOR §10.9 re-derives from ("must anchor on the measured
