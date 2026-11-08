@@ -1795,8 +1795,9 @@ def test_the_tool_carries_the_5128_interpreter_guard_first(tool, capsys, monkeyp
 
     That census cannot be the only pin, and the reason is a measured ASYMMETRY
     in `tools/ci_selection.py`: for a PR that touches only one tool,
-    `select(['tools/capstone_ledger.py'], 'pull_request', load_manifest())`
-    returns 82 files that INCLUDE `test_9664_capstone_verdict_ledger.py` (it is
+    `select(['tools/capstone_ledger.py'], 'pull_request', load_manifest())["test_files"]`
+    returns 82 file names (basenames, no `tests/` prefix) that INCLUDE
+    `test_9664_capstone_verdict_ledger.py` (it is
     `tier1`-registered in `config/ci-surfaces.yml` — the
     `- test_9664_capstone_verdict_ledger.py` row whose comment begins `# #9664:`,
     dual-registered with `core`; located by that quote, never by a line number,
@@ -1933,7 +1934,10 @@ def test_the_tool_carries_the_5128_interpreter_guard_first(tool, capsys, monkeyp
     assert _run_guard(guard, monkeypatch, (3, 12, 0, "final", 0)) == "", (
         "the guard must be INERT at the floor — it refused on a 3.12 interpreter"
     )
-    assert len(raises) == 1, "the guard must refuse on an old interpreter"
+    # NO separate `len(raises) == 1` assertion here: `shapes_ok` above admits
+    # exactly two bodies, each carrying exactly one `Raise`, so such an assertion
+    # is entailed and can never fire. Measured — it is the vacuous-arm class this
+    # pin's own `_refusal_exit_status` docstring removed rather than mirrored.
     raise_node = raises[0]
     exc = raise_node.exc
     assert isinstance(exc, ast.Call), (
@@ -2030,8 +2034,9 @@ def test_the_tool_carries_the_5128_interpreter_guard_first(tool, capsys, monkeyp
     # above: it greps `python3 <path>` for a tool that IS guarded, because the
     # reader copies the advertised form and meets a refusal the doc never
     # predicted. Measured on a tool-only diff —
-    # `select(['tools/capstone_ledger.py'])` returns 82 files, INCLUDING this
-    # test's file and EXCLUDING `tests/test_entry_point_python_guard.py` — so
+    # `select(['tools/capstone_ledger.py'])['test_files']` returns 82 names,
+    # INCLUDING this test's file and EXCLUDING
+    # `tests/test_entry_point_python_guard.py` — so
     # this pin is the only gate there and must not be narrower than the sweep.
     # (Not hypothetical: `tools/build_site_icons.py` merged advertising
     # `python3 tools/build_site_icons.py`, and the sweep is what caught it.)
