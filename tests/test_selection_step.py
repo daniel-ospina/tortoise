@@ -260,6 +260,93 @@ def test_the_second_narrative_prompt_differs_and_names_the_gap(monkeypatch):
     assert "RE-NARRATE" in second
 
 
+def test_the_union_pass_may_add_the_mentions_union_key(monkeypatch):
+    """The arm keys are a FLOOR, not the whole set: the post-S4 pass adds `union`.
+
+    `route_mentions` runs AGAIN on the union after S4 and folds its counters into
+    `mention_s2_stats["union"]`, so a set-equality assertion on `{first, second}`
+    passes only because the fixture holds no mention — it would fail on correct
+    code (review round 3, P2). This pins the floor and the documented extra key.
+    """
+    monkeypatch.setenv("TORTOISE_REFERENTIALITY", "1")
+    s2 = json.dumps({
+        "entities": [{"name": "Northwind", "kind": "core:org",
+                      "lifecycle": "created"}],
+        "events": [], "operators": [],
+        "points": [{"content": "the Northwind rollout moves to Q3",
+                    "pointKind": "statement",
+                    "mentions": [{"surface": "it",
+                                  "quote": "it ships in Q3"}]}],
+        "chain_notes": [], "link_before_create": [],
+    })
+    _, result = _run(monkeypatch, ["Alice set a budget."], [s2])
+    stats = (result.get("mentions") or {}).get("stats") or {}
+    assert {"first", "second"} <= set(stats), (
+        "the arm keys are present regardless of what the union pass adds"
+    )
+    assert set(stats) <= {"first", "second", "union"}, (
+        f"no key beyond the documented three — got {sorted(stats)!r}"
+    )
+    assert "union" in stats, (
+        "non-vacuity: this fixture DOES hold a mention, so the post-S4 pass ran "
+        "and the third key is the one the set-equality pin would have broken on"
+    )
+
+
+def test_a_failed_second_arm_does_not_empty_the_vet_surface(monkeypatch):
+    """Arm B's S2 raising must not publish `vet.s2 = {}` about a pass that ran.
+
+    The pick took the SECOND arm's `vet_stats` unconditionally, so a retry whose
+    S2 raised published an EMPTY `result["vet"]["s2"]` while the shipped list was
+    the first arm's and arm A's VET pass had in fact run and decided. That is
+    the false "the gate did not run" the vet surface exists to avoid (review
+    round 3, P2).
+
+    Non-vacuity: on the pre-fix code `result["vet"]["s2"]` is `{}` here.
+    """
+    monkeypatch.setattr(extractor_v2.time, "sleep", lambda _s: None)
+    triggers = {"n": 0}
+
+    class _SecondArmS2Down(_Scripted):
+        def complete(self, *, system, user, max_tokens=None):
+            if "STORY SUMMARIZER" in system:
+                return super().complete(system=system, user=user,
+                                        max_tokens=max_tokens)
+            if "GAP REVIEWER" in system:
+                return super().complete(system=system, user=user,
+                                        max_tokens=max_tokens)
+            triggers["n"] += 1
+            if triggers["n"] > 1:
+                raise RuntimeError("provider exploded on the retried arm")
+            return super().complete(system=system, user=user,
+                                    max_tokens=max_tokens)
+
+    model = _SecondArmS2Down(
+        ["Alice and Bob met.", "Alice met Bob about the budget."],
+        [_embed("FirstOnly"), _embed("SecondOnly")],
+    )
+    result = extract_session_v2(model, list(CONVERSATION), sdk=None,
+                                session_id="11002-test",
+                                session_date="2026-11-08",
+                                vet_arbiter=_renarrate_arbiter)
+    renarrate = result["stats"]["renarrate"]
+    assert renarrate["fired"] is True, "the arbiter fired the retry"
+    assert renarrate["trigger"] == "arbiter_renarrate"
+    assert renarrate["second"]["candidates"] == 0, (
+        "the retried arm produced nothing — its S2 raised"
+    )
+    assert result["vet"]["s2"] != {}, (
+        "the vet surface must not claim the gate did not run: arm A's pass ran "
+        "and decided, and the union IS arm A's list here"
+    )
+    assert _entity_names(result) >= {"FirstOnly"}, (
+        "arm A's items ship, which is why its VET record is the accurate one"
+    )
+    assert any("S2 failed" in e for e in result["errors"]), (
+        "the failed retried arm is still recorded loudly"
+    )
+
+
 def test_each_trigger_states_its_own_premise():
     """The emphasis must not tell the model a false premise about its input.
 
@@ -526,8 +613,13 @@ def test_the_mentions_surface_keeps_ONE_shape(monkeypatch):
                                        ("retried", retried, False)):
         stats = (res.get("mentions") or {}).get("stats")
         assert isinstance(stats, dict), f"{label}: mentions.stats must be a dict"
-        assert set(stats) == {"first", "second"}, (
-            f"{label}: ONE shape — got {sorted(stats)!r}"
+        # ⛔ MEMBERSHIP, not set equality: the post-S4 union pass adds a `union`
+        # key on any run that holds a mention (`route_mentions` on
+        # `complete_list`), so `== {"first", "second"}` would pass only on a
+        # mention-free fixture and FAIL ON CORRECT CODE (review round 3, P2).
+        assert {"first", "second"} <= set(stats), (
+            f"{label}: the ARM keys must be present on both returns — got "
+            f"{sorted(stats)!r}"
         )
         assert isinstance(stats["first"], dict), f"{label}: first arm is a dict"
         assert (stats["second"] is None) is second_is_none, (
