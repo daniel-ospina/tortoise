@@ -2148,10 +2148,14 @@ class _RefusalOnALaterPage:
     On the `verify=False` path neither existing guard can see it: the shortfall check has
     no total to compare against, and the page re-check re-reads the last page that
     SUCCEEDED (a refusal returns no rows, so the loop breaks before the fingerprint is
-    updated), so they compare like with like and agree. The DEFAULT path is caught by a
-    DIFFERENT guard — `_fingerprint_walk` starts at offset 0 and raises on its own
-    refusal — so the two paths are distinct witnesses, not one guarantee seen twice
-    (measured; a previous revision of this docstring said they "agree", which was false).
+    updated), so they compare like with like and agree. At head the DEFAULT path is caught
+    by the SAME page-refusal gate, before any verification walk starts — measured: both
+    arms raise `read refused at offset 2 … refusing a partial census`. WITH THAT GATE
+    REMOVED, the default path is caught instead by `_fingerprint_walk`, which walks from
+    offset 0 and raises on its own refusal, while `verify=False` would return a short
+    census silently (also measured). So the second witness is real but it sits BEHIND the
+    gate, not beside it — do not weaken the gate on the belief that the walk covers it,
+    because on `--no-verify-read` the gate is the only guard there is.
     """
 
     def __init__(self):
@@ -2258,9 +2262,13 @@ def test_two_rows_sharing_an_id_and_a_hash_cannot_hide_the_second_text(tmp_path)
 
     # Non-vacuity: the same id with the SAME text is a genuine duplicate and must still
     # fold, so this is an identity guard and not a blanket refusal to detect duplicates.
+    # ⛔ These rows pass `kind="decision"` (default is UNDECIDABLE) precisely so the fold is
+    # REACHED: with the plan default both rows are undecidable, the branch never runs, and a
+    # blanket-withhold mutant leaves this arm green — the sibling
+    # `test_a_stale_hash_never_claims_a_row_of_record_for_another_text` is what reddens then.
     same = C.build_plan(
-        [row("dup", content="A durable claim", content_hash="H"),
-         row("dup", content="A durable claim", content_hash="H")],
+        [row("dup", kind="decision", content="A durable claim", content_hash="H"),
+         row("dup", kind="decision", content="A durable claim", content_hash="H")],
         source_graph="old", target_graph="new", packs={},
     )
     assert len(same.decisions) == 2, [d.content for d in same.decisions]

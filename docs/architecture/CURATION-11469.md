@@ -27,7 +27,7 @@ Two measured facts govern the risk:
 Code: `tortoise/curation.py` (classification + guards + additive writer) and
 `tools/curate_graph.py` (the CLI). Tests: `tests/test_curation_11469.py` — ⛔ no case count is quoted
 here on purpose: the file gains cases in every review round, and a hand-written count re-stales on the
-next one (inside this PR alone it went stale six times). `tools/ci_selection.py --integrity` is the
+next one. `tools/ci_selection.py --integrity` is the
 authority, matching the policy stated on this suite's own `durations` row in `config/ci-surfaces.yml`.
 
 ## The inventory — measured 2026-11-08 against `live-v4`
