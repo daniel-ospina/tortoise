@@ -1569,12 +1569,14 @@ def _refusal_exit_status(exc: ast.expr | None) -> int | None:
     all leave the process at **0**, so a bare `code != 0` would report a guard
     that prints the full refusal and then exits CLEAN as passing.
 
-    The argument is RESOLVED, not pattern-matched on `ast.Constant`. `ast.parse`
-    does no constant folding, so `-256`, `0 + 0`, `2 ** 8` and `0 * 7` arrive as
-    `UnaryOp` / `BinOp` nodes that all leave the process at **0** while a
-    Constant-only check calls them "a message" and returns 1 — the same
-    fail-open, one node type over. A bare `Name` is deliberately NOT resolved
-    (see below) — the guard's position makes that shape unrepresentable.
+    The argument is RESOLVED with `ast.literal_eval`, not pattern-matched on
+    `ast.Constant`. That resolves an int LITERAL and a unary-signed one (`-256`),
+    which is where a Constant-only check would have called the `UnaryOp` a
+    "message" and returned 1. It does NOT fold `BinOp`: `0 + 0`, `2 ** 8` and
+    `0 * 7` all raise in `literal_eval`, so they fall to the unresolvable branch
+    below (`None`) rather than being resolved — fail-CLOSED, and measured, not
+    assumed. A bare `Name` is likewise not resolved (see below): the guard's
+    position makes that shape unrepresentable.
 
     Returns ``None`` when the argument cannot be resolved statically. The CALLER
     must treat that as a FAILURE rather than as non-zero: this pin is the only
@@ -1731,6 +1733,20 @@ def test_the_tool_carries_the_5128_interpreter_guard_first():
         and isinstance(body_nodes[1], ast.Raise)
     )
     if print_shape:
+        # The census (`test_the_refusal_exit_code_is_the_one_the_tool_can_spare`)
+        # requires the refusal to stay ATTRIBUTABLE ON STDERR — a `print` with no
+        # `file=sys.stderr` writes to stdout, so the census reds on
+        # `">= 3.12" in probe.stderr and rel in probe.stderr` while a pin that
+        # only checked `func.id == "print"` stays green. Measured.
+        keywords = body_nodes[0].value.keywords
+        assert any(
+            kw.arg == "file" and isinstance(kw.value, ast.Attribute) and kw.value.attr == "stderr"
+            for kw in keywords
+        ), (
+            f"a `print` refusal must name `file=sys.stderr` — the census requires "
+            f"the refusal on stderr, and a bare `print` goes to stdout: "
+            f"{ast.dump(body_nodes[0])}"
+        )
         message = body_nodes[0].value.args[0]
     # The raise itself is validated in BOTH shapes. This arm exists because the
     # census does not run on a tool-only diff, so it must not be weaker than the
@@ -1755,8 +1771,9 @@ def test_the_tool_carries_the_5128_interpreter_guard_first():
     status = _refusal_exit_status(exc)
     assert status is not None, (
         f"cannot statically resolve the refusal's exit code, so its status is "
-        f"UNPROVEN — use an int literal, an arithmetic expression over ints, or "
-        f"an f-string message; got {ast.dump(raise_node)}"
+        f"UNPROVEN — use an int literal (optionally unary-signed, e.g. `-1`), or "
+        f"an f-string message (`raise SystemExit(0 * 7)` does NOT resolve: "
+        f"`ast.literal_eval` folds no `BinOp`); got {ast.dump(raise_node)}"
     )
     assert status != 0, (
         f"the guard refused but the PROCESS exits {status} — a refusal that "
