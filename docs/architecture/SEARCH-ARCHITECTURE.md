@@ -75,11 +75,11 @@ quality change. **Live before private-beta:**
    fewer results than exist;
 5. the **`null`-not-0.5 rule** for absent belief state (§6.3) — a live defect today, independent of windows.
 
-**Cost during private-beta, plainly:** a complete graph costs **$11.01/tenant** at the 40-tenants-per-instance
-density — RAM $8.75 + shared project line $2.13 + record $0.13 (§8.1) — against a `$5.70` storage budget, i.e.
-193 % of it. ⚠️ **It is also above the product's older recorded constraint** (*"a $19 price with < $9 total
-cost per user"*, `STORAGE-ARCHITECTURE.md` §1), because $11.01 > $9 — and at beta-scale density it is higher
-still (a 1 GB instance holds ~6 complete solo tenants, so the RAM line alone is ~$12). **This is a knowing,
+**Cost during private-beta, plainly:** a complete graph costs **\$11.01/tenant** at the 40-tenants-per-instance
+density — RAM \$8.75 + shared project line \$2.13 + record \$0.13 (§8.1) — against a `$5.70` storage budget, i.e.
+193 % of it. ⚠️ **It is also above the product's older recorded constraint** (*"a \$19 price with < \$9 total
+cost per user"*, `STORAGE-ARCHITECTURE.md` §1), because \$11.01 > \$9 — and at beta-scale density it is higher
+still (a 1 GB instance holds ~6 complete solo tenants, so the RAM line alone is ~\$12). **This is a knowing,
 bounded overspend on a small, known tenant count**, taken because the alternative — arming a window nobody has
 measured — risks the quality this document ranks first. §7 records both ceilings so neither is mistaken for
 the other.
@@ -102,9 +102,9 @@ walk: the walk stays a graph query in FalkorDB, reading nodes and edges, and onl
 candidates* come from Postgres. Two systems are already in the path either way.
 
 **The price multiple decides the rest** (§17.4.1; vendor pages verified 2026-10-10): FalkorDB rents
-**provisioned RAM at $43.75/GB-month on the 8 GB tier ($73 on the 1 GB STARTUP tier)**, and a graph may occupy
-**75 %** of it ⇒ **$58.33 per GB of graph data at the 8 GB tier** (the 1 GB tier's equivalent is $97.33 — the 778.7×
-`STORAGE-ARCHITECTURE.md` §17.4 prints; 584× is the pure RATE ratio there). Postgres disk is **$0.125/GB**.
+**provisioned RAM at \$43.75/GB-month on the 8 GB tier (\$73 on the 1 GB STARTUP tier)**, and a graph may occupy
+**75 %** of it ⇒ **\$58.33 per GB of graph data at the 8 GB tier** (the 1 GB tier's equivalent is \$97.33 — the 778.7×
+`STORAGE-ARCHITECTURE.md` §17.4 prints; 584× is the pure RATE ratio there). Postgres disk is **\$0.125/GB**.
 **~467× at the 8 GB tier.** An embedding's *bytes* are the same size in either store — which is
 the point, not a defence: at these rates **every** byte of payload is 467× dearer in RAM, so the payload moves
 with the index and is the bulk of the saving, not a rounding error beside it.
@@ -226,15 +226,15 @@ the ranker refuses to order on.
 
 ## 7. The window — what the graph holds once it must be bounded
 
-**Why the window exists at all:** a *complete* graph costs **$8.75/tenant** against a **$5.70** budget
-(30 % of $19). Density does not fix it — `$58.33` is already the DENSEST tier's per-GB rate, and density cannot
+**Why the window exists at all:** a *complete* graph costs **\$8.75/tenant** against a **\$5.70** budget
+(30 % of \$19). Density does not fix it — `$58.33` is already the DENSEST tier's per-GB rate, and density cannot
 shrink a tenant's own graph bytes; it only spreads the *fixed* lines. **The window is what makes the pricing work at scale.**
 
-⚠️ **Where the $5.70 comes from, because the document it amends records a different ceiling.** `STORAGE-ARCHITECTURE.md` §1
-records the product constraint as *"a $19 price with < $9 total cost per user"*, and its M2 row prices against a
-"$9 → $19 budget"; the **30 %-of-price** target here is the owner's 2026-11-07 sizing rule for the **storage line**,
-and it is **strictly tighter** than that ceiling ($5.70 < $9). Both are quoted so neither is mistaken for the other:
-against the older **$9 total-cost ceiling** a complete graph's **RAM line** is **~97 % of it** and its **total is ~122 %** (above it), while against the **$5.70 storage target** the RAM line is **154 %** and the total **193 %** — and
+⚠️ **Where the \$5.70 comes from, because the document it amends records a different ceiling.** `STORAGE-ARCHITECTURE.md` §1
+records the product constraint as *"a \$19 price with < \$9 total cost per user"*, and its M2 row prices against a
+"\$9 → \$19 budget"; the **30 %-of-price** target here is the owner's 2026-11-07 sizing rule for the **storage line**,
+and it is **strictly tighter** than that ceiling (\$5.70 < \$9). Both are quoted so neither is mistaken for the other:
+against the older **\$9 total-cost ceiling** a complete graph's **RAM line** is **~97 % of it** and its **total is ~122 %** (above it), while against the **\$5.70 storage target** the RAM line is **154 %** and the total **193 %** — and
 the target is what governs the window. **The rule's recorded home is §8**, which quotes it verbatim (*"the storage offered becomes what can be afforded
 with 0.3 × tier price"*, owner, 2026-11-07) and derives every threshold from it — so the target is no longer an
 unhomed figure, and §2.0's marker cites that derivation.
@@ -243,7 +243,7 @@ unhomed figure, and §2.0's marker cites that derivation.
 literature measures latency and hit rate, not answer quality, and the best trace-aware policy reached ~54 %
 hit rate for 2-hop expansions — so arming it on a guess is exactly the quality risk this document ranks
 first. Private-beta therefore runs **complete** and **above the 30 % target, knowingly** — **193 % of it on the
-total per-tenant basis, §8.1** (the RAM line alone is 154 %, and it is also above the older <$9 total-cost
+total per-tenant basis, §8.1** (the RAM line alone is 154 %, and it is also above the older <\$9 total-cost
 ceiling) — bounded by a small known tenant count, and the window is armed when M2 says it is safe. **The guardrails that make it
 safe ship before private-beta regardless**, so the eventual switch is a configuration change with measured
 justification, not a redesign in front of customers.
@@ -273,8 +273,8 @@ window is trusted, and why **private-beta** runs the graph **complete** (§1.5).
 ## 8. Cost — per tier, derived from the 30 % rule
 
 Rates per §17.4.1 (vendor pages, **verified 2026-10-10 — re-check before a published tier; a rate move moves
-every number here proportionally**): FalkorDB **$43.75/GB-month provisioned** at the 8 GB tier, and a graph
-may occupy **75 %** of it ⇒ **$58.33 per GB of graph data**; Postgres disk **$0.125/GB**; plan `$25` +
+every number here proportionally**): FalkorDB **\$43.75/GB-month provisioned** at the 8 GB tier, and a graph
+may occupy **75 %** of it ⇒ **\$58.33 per GB of graph data**; Postgres disk **\$0.125/GB**; plan `$25` +
 compute `$60` per project.
 
 **The rule (owner, 2026-11-07):** *"the storage offered becomes what can be afforded with 0.3 × tier price."*
@@ -288,12 +288,12 @@ graph window               = 0.75 · p                       # a graph may occup
 tenants per 8 GB instance   = 8000 ÷ p                      # this also sets the shared project line
 ```
 
-| tier | price | 30 % budget | provisioned / tenant | **window target** | tenants per 8 GB instance | RAM $ | shared $ | record $ | **total** | **% of price** |
+| tier | price | 30 % budget | provisioned / tenant | **window target** | tenants per 8 GB instance | RAM \$ | shared \$ | record \$ | **total** | **% of price** |
 |---|---|---|---|---|---|---|---|---|---|---|
-| **solo** | $19 | $5.70 | 103 MB | **≈77 MB** | 78 | $4.49 | $1.09 | $0.13 | **$5.71** | **30.0 %** |
-| **pro** | $25 | $7.50 | 136 MB | ≈102 MB | 59 | $5.93 | $1.44 | $0.13 | **$7.50** | **30.0 %** |
-| **team** | $149 | $44.70 | 820 MB | ≈615 MB | 10 | $35.87 | $8.71 | $0.13 | **$44.71** | **30.0 %** |
-| free / anon | $0 | **$0** | — | **0** | — | — | — | — | — | funded from paid margin, or no cache |
+| **solo** | \$19 | \$5.70 | 103 MB | **≈77 MB** | 78 | \$4.49 | \$1.09 | \$0.13 | **\$5.71** | **30.0 %** |
+| **pro** | \$25 | \$7.50 | 136 MB | ≈102 MB | 59 | \$5.93 | \$1.44 | \$0.13 | **\$7.50** | **30.0 %** |
+| **team** | \$149 | \$44.70 | 820 MB | ≈615 MB | 10 | \$35.87 | \$8.71 | \$0.13 | **\$44.71** | **30.0 %** |
+| free / anon | \$0 | **\$0** | — | **0** | — | — | — | — | — | funded from paid margin, or no cache |
 
 ⚠️ **The basis, because the two earlier figures in this section do not count the same components.** Every
 cell above is a **TOTAL per tenant** — RAM **plus** the shared project line **plus** the record — because a
@@ -304,7 +304,7 @@ ESTIMATE** from `GRAPH.MEMORY USAGE` — a sampling instrument that under-report
 (`STORAGE-ARCHITECTURE.md` §2.1) — so it is a dated estimate whose error runs **both ways**, not a bound.
 
 **The record allowance is not a trade — it is a rounding choice.** The record is **467× cheaper per byte**
-($58.33 ÷ $0.125 = 466.7), so **1 GB costs $0.13 — 2.2 % of solo's $5.70 budget — and displaces only ≈2 MB of
+(\$58.33 ÷ \$0.125 = 466.7), so **1 GB costs \$0.13 — 2.2 % of solo's \$5.70 budget — and displaces only ≈2 MB of
 window.** Set it by what the product wants to promise and state it beside the window.
 
 ### 8.1 The two states, on the same basis
@@ -314,9 +314,9 @@ window.** Set it by what the product wants to promise and state it beside the wi
 | graph per solo tenant | ~150 MB — **an estimate**, see the basis note above | ~77 MB — the **target** the formula above yields |
 | provisioned per tenant | 200 MB | 103 MB |
 | tenants per 8 GB instance | 40 | 78 |
-| RAM + shared + record | $8.75 + $2.13 + $0.13 = **$11.01** | $4.49 + $1.09 + $0.13 = **$5.71** |
-| vs the $5.70 budget | **193 %** — above, and accepted knowingly | **100 %** — the budget, exactly |
-| the same, RAM line alone | $8.75 = **154 %** of the budget | $4.49 = **79 %** of it |
+| RAM + shared + record | \$8.75 + \$2.13 + \$0.13 = **\$11.01** | \$4.49 + \$1.09 + \$0.13 = **\$5.71** |
+| vs the \$5.70 budget | **193 %** — above, and accepted knowingly | **100 %** — the budget, exactly |
+| the same, RAM line alone | \$8.75 = **154 %** of the budget | \$4.49 = **79 %** of it |
 
 ⛔ **The last row is the one that misleads, and it is here deliberately.** The **RAM line alone** already
 exceeds the whole budget for a complete graph (154 %), and the earlier text quoted that as if it were the
@@ -328,7 +328,7 @@ mistaken for the stronger one.
 nobody has measured (§17.4.6). Everything above is the storage lines and says so.
 
 ⚠️ **These are derived thresholds, not published prices.** `product/pricing.json` is the price artifact of
-record and currently carries **solo = $9**, so nothing here is live until that changes.
+record and currently carries **solo = \$9**, so nothing here is live until that changes.
 
 ---
 

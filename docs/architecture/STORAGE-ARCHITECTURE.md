@@ -125,13 +125,13 @@ The cause is not that we store a lot. **It is that we pay for the *total* rather
 > `docs/architecture/SEARCH-ARCHITECTURE.md`, which also **resolves V1** (§14.3).
 >
 > **NARROWED — "keep the limit in falkor high":** the cache stays **complete through private-beta**, and becomes a **bounded
-> window only after the search doc's M2 measures retrieval quality, windowed vs complete** (`docs/architecture/SEARCH-ARCHITECTURE.md` §1.5, §9 — a DIFFERENT M2 from §15's invoice measurement), sized by the tier's 30 %-of-price cost budget (a complete graph is $8.75/tenant against a
-> $5.70 budget, and density cannot shrink a tenant's own graph bytes — `$58.33` is already the densest tier's per-GB rate). So the full cache is retained *temporarily*, not
+> window only after the search doc's M2 measures retrieval quality, windowed vs complete** (`docs/architecture/SEARCH-ARCHITECTURE.md` §1.5, §9 — a DIFFERENT M2 from §15's invoice measurement), sized by the tier's 30 %-of-price cost budget (a complete graph is \$8.75/tenant against a
+> \$5.70 budget, and density cannot shrink a tenant's own graph bytes — `$58.33` is already the densest tier's per-GB rate). So the full cache is retained *temporarily*, not
 > indefinitely.
 >
-> **OVERRIDES:** §2.0's *"keep the limit in falkor high"* — the 30 %-of-price storage target ($5.70 of a $19 price, strictly tighter than §1's
-> < $9 total-cost ceiling — `SEARCH-ARCHITECTURE.md` §7 states both) makes a complete cache unaffordable at any density, and the
-> vector index is 467× cheaper per byte on disk *at the 8 GB tier's $43.75/GB-month, after the 75 % rule, against Postgres disk at $0.125/GB — the same
+> **OVERRIDES:** §2.0's *"keep the limit in falkor high"* — the 30 %-of-price storage target (\$5.70 of a \$19 price, strictly tighter than §1's
+> < \$9 total-cost ceiling — `SEARCH-ARCHITECTURE.md` §7 states both) makes a complete cache unaffordable at any density, and the
+> vector index is 467× cheaper per byte on disk *at the 8 GB tier's \$43.75/GB-month, after the 75 % rule, against Postgres disk at \$0.125/GB — the same
 > comparison §17.4 states as 584× (pure RATE) and 778.7× (with that density headroom); 467× is the 8 GB tier's basis*, so the cache is bounded by a
 > budget-derived window only after the search doc's M2 measures retrieval quality (`docs/architecture/SEARCH-ARCHITECTURE.md` §1.5, §9).
 
