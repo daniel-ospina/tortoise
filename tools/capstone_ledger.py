@@ -142,7 +142,7 @@ EXIT_ADVISORY: Final[int] = 4
 #: Argparse's own outcomes were colliding with two verdict codes: `--help` exits 0
 #: (indistinguishable from CLEAN) and a usage error exits 2 (indistinguishable from
 #: UNCOVERED). Both mean "no verdict was computed", so both get their own code and
-#: the other four keep one meaning each.
+#: the other five keep one meaning each.
 EXIT_USAGE: Final[int] = 5
 
 

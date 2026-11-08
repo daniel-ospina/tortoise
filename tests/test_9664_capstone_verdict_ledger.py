@@ -541,11 +541,12 @@ def test_an_unknown_version_is_invalid(tmp_path):
 def test_a_sha_that_names_no_commit_is_invalid(monkeypatch):
     """Shape is not existence: a fabricated 40-hex sha rendered as provenance.
 
-    Asserted on the WIRING, with the state machine pinned as `absent`, because a
-    fleet worktree is a SHALLOW clone and cannot tell a fabricated sha from an
-    ancestor it does not carry — see the next test. The end-to-end version of this
-    arm genuinely cannot fire here, and a test that pretended otherwise would be
-    green for the wrong reason.
+    Asserted on the WIRING, with the state machine pinned as `absent`, because this
+    fleet worktree is a SHALLOW clone (`git rev-parse --is-shallow-repository` ->
+    true) and so cannot tell a fabricated sha from an ancestor it does not carry.
+    The end-to-end form of this arm IS reachable, and the test below takes it —
+    against a temp FULL clone, not against this checkout, where the answer is
+    necessarily `unprovable`.
     """
     monkeypatch.setattr(cl, "_commit_state", lambda sha, repo_root: "absent")
     data = _ledger([_row("A")])
@@ -555,6 +556,55 @@ def test_a_sha_that_names_no_commit_is_invalid(monkeypatch):
     assert "names no commit" in str(excinfo.value)
 
 
+def test_a_fabricated_sha_is_refused_end_to_end_in_a_full_clone(tmp_path):
+    """HERMETIC, and the arm the wiring pin above cannot reach by itself.
+
+    `test_a_sha_that_names_no_commit_is_invalid` pins `validate`'s DECISION with the
+    state machine stubbed, because this checkout is shallow. That leaves the real
+    path — a full clone, a forged sha, `validate` calling `_commit_state` — with no
+    end-to-end pin at all. `_commit_state` honouring `repo_root` is what makes this
+    reachable: a temp FULL clone answers `absent`, so the refusal fires for real
+    rather than by stubbing.
+
+    The cited artifact is committed in that same temp repo, so the ONLY defect is
+    the sha — otherwise this would pass on the tracked rule instead, for the wrong
+    reason.
+    """
+    import subprocess as sp
+
+    repo = tmp_path / "fullrepo"
+    repo.mkdir()
+    (repo / "held.txt").write_text("held\n", encoding="utf-8")
+    git = ["git", "-C", str(repo)]
+    sp.run([*git, "init", "-q"], check=True)
+    sp.run([*git, "add", "held.txt"], check=True)
+    sp.run(
+        [
+            *git,
+            "-c",
+            "user.email=t@example.com",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "seed",
+        ],
+        check=True,
+    )
+    assert sp.run(
+        [*git, "rev-parse", "--is-shallow-repository"], capture_output=True, text=True
+    ).stdout.strip() == "false", "this fixture must be a FULL clone, or `absent` is unreachable"
+
+    data = _ledger([_row("A", evidence=["held.txt"])])
+    data["measured_at"]["sha"] = "deadbeef" * 5
+    with pytest.raises(cl.InvalidLedger) as excinfo:
+        cl.validate(data, repo_root=repo)
+    # The refusal is the SHA, not a tracked-artifact complaint.
+    assert "names no commit" in str(excinfo.value), str(excinfo.value)
+    assert "TRACKED" not in str(excinfo.value), str(excinfo.value)
+
+
 def test_an_unprovable_sha_is_not_a_defect(monkeypatch):
     """The other half of the shallow-clone fix, and the half that had no pin.
 
@@ -562,11 +612,9 @@ def test_an_unprovable_sha_is_not_a_defect(monkeypatch):
     LEGITIMATE ancestor sha unresolvable, so `python-ci-gate` redded on a good
     record. `_commit_state`'s third outcome is what stops that — but a pin on the
     state MACHINE never asserts the DECISION: `validate` could go back to
-    appending a problem for `unprovable` and every other test in this file would
-    still pass, because a full clone resolves the real ledger's sha to `exists`
-    and the shallow test SKIPS here (this checkout is not shallow). Asserted on
-    the wiring, for the same reason the `absent` arm is: a shallow clone cannot
-    produce the input that decides it.
+    appending a problem for `unprovable` and the shallow test would still pass,
+    because it drives `_commit_state` DIRECTLY and never asks `validate`. Asserted
+    on the wiring, for the same reason the `absent` arm is.
     """
     monkeypatch.setattr(cl, "_commit_state", lambda sha, repo_root: "unprovable")
     data = _ledger([_row("A")])
@@ -813,8 +861,9 @@ def test_a_shallow_checkout_is_unprovable_never_absent(tmp_path):
     ledger (#9075 r4 P1), so the third outcome has to exist.
 
     Built as a REAL depth-1 clone rather than skipped. The previous version ran
-    against the live checkout and skipped whenever it was not shallow — which is
-    every developer box and most CI legs — so it asserted nothing on the path that
+    against the live checkout and skipped whenever that checkout was NOT shallow —
+    while a fleet worktree is shallow and a depth-1 clone cannot distinguish
+    `unprovable` from a hardcoded answer, so it pinned nothing on the path that
     decides. This also pins `_commit_state`'s `repo_root` argument: the same sha is
     `unprovable` in the shallow clone and `exists` in the full one, so a function
     that ignored the tree it was asked about could not return both.
