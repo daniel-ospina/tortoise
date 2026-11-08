@@ -1184,7 +1184,7 @@ def _names_artifact(token: str, cwd: Path, root: Path) -> tuple[bool, str]:
             if unrunnable_seen:
                 # ⛔ "did not answer", NOT "could not be RUN": `None` now carries two
                 # causes — a probe that could not be SPAWNED and a probe that ran and
-                # FAILED (exit 128 on an unreadable index). The per-path REFUSED line
+                # FAILED (exit 128 on an unreadable index). The per-path UNMEASURED line
                 # names which; this row-level sentence must not pick one, or it
                 # borrows a cause it did not measure (the defect this PR removes).
                 return False, (
@@ -1199,7 +1199,7 @@ def _names_artifact(token: str, cwd: Path, root: Path) -> tuple[bool, str]:
             if tracked is None:
                 # "did not answer", not "could not be RUN" — `None` carries both a
                 # probe that could not be spawned and one that ran and failed; the
-                # per-path REFUSED line names which. See the glob arm above.
+                # per-path UNMEASURED line names which. See the glob arm above.
                 return False, (
                     f"{text!r} cannot be verified: the TRACKED check did not answer here"
                 )
@@ -1456,7 +1456,11 @@ def _tracked_dir_unanswered(returncode: int, rel: Path) -> None:
     The third refusal, kept distinct for the reason `_tracked_dir_unrunnable` is: the
     cause is git present, having answered for the TREE, failing to answer for this
     path — and rendering it as "holds no TRACKED file" is the guess-the-cause defect.
-    Only exit 1 is a `no`; every other non-zero is a failure to answer. The marker is
+    ⛔ THIS FUNCTION IS NOW REACHED BY rc 1 (#11474 review). This form's (`ls-files --
+    ':(literal)<rel>'`, no `--error-unmatch`) ONLY measured miss is **rc 0 with empty
+    stdout**; every non-zero, 1 included, is a failure to answer, because
+    `man git-ls-files` documents a single `return 1` and it belongs to
+    `--error-unmatch` — the FILE arm's form, not this one. The marker is
     `UNMEASURED` for the reason stated on `_tracked_dir_unrunnable`.
     """
     print(
@@ -1850,7 +1854,7 @@ def _evidence_is_real(
         )
     if tracked is None:
         # Nothing was measured. Do NOT report this as "not TRACKED": the file may be
-        # tracked and present in every clone, and the REFUSED line on stderr already
+        # tracked and present in every clone, and the UNMEASURED line on stderr already
         # names the real cause.
         return False, (
             f"evidence path cannot be verified: the TRACKED check did not answer here: {entry}"
@@ -2250,7 +2254,7 @@ def _is_tracked(resolved: Path, root: Path) -> bool | None:
     (`_tracked_unrunnable`), or git RAN and failed to answer for the path
     (`_tracked_unanswered` — exit 128 on an unreadable index). It is one value because
     the decision is the same — nothing was measured, so the row may not be called
-    tracked — and the per-path REFUSED line is where the cause is named.
+    tracked — and the per-path UNMEASURED line is where the cause is named.
 
     ⛔ `False` covers TWO measured facts, and only the first is git's own answer: git
     said "no", OR the path is not under `root` at all (the `ValueError` arm below) —

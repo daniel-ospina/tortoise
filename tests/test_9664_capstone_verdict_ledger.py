@@ -5659,7 +5659,10 @@ def test_an_EMFILE_on_the_DIRECTORY_FOLLOW_UP_probe_also_refuses(tmp_path, capsy
     fired: list[str] = []
 
     class _LsFilesRan:
-        returncode = 1  # the documented "nothing matched" -> the follow-up is reached
+        returncode = 1  # non-matching exit -> the follow-up probe is reached (rc 1 is
+        # NOT a "nothing matched" for this form: measured on git 2.43.0, the plain
+        # `ls-files -- ':(literal)<rel>'` miss is rc 0, and the sole documented
+        # `return 1` belongs to `--error-unmatch`. Any non-zero falls through here.)
         stdout = ""
         stderr = ""
 
