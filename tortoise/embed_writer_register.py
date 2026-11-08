@@ -712,10 +712,12 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
             # The label is its CALLER's: the door EXECUTES the caller's statement
             # (`proj.g.query(statement, params={"embedding": …})`), so the store is real and the
             # label is not the door's to name. ⛔ `no-live-vector` would be false — that is the exact
-            # mistake `#11492`'s review caught in this entry. ⚠️ The FIVE call sites today
-            # (`session_indexer.py:822` and `sdk.py:36087/36163/36232/36258`) all name an
+            # mistake `#11492`'s review caught in this entry. ⚠️ All FIVE call sites today
+            # (`tortoise.session_indexer::main` and `tortoise.sdk::ingest_corpus`'s four) name an
             # `(e:Event …)` clause, but only three of them pass an `embedding` at all, and a label
             # tuple here would be a claim about CALLERS that nothing in this field re-derives.
+            # Cited by SYMBOL, never by line — this file's own rule, for the reason the census
+            # learned.
             stores=LABELS_AT_RUNTIME,
         ),
     ),

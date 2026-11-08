@@ -560,6 +560,43 @@ def test_a_census_bypass_holds_row_two_even_when_the_register_RESOLVES_the_write
     assert any("tortoise.y::_store_event" in n for n in row.notes if "BYPASS" in n), row.notes
 
 
+def test_a_declaration_that_CONTRADICTS_a_measured_label_holds_row_two(monkeypatch):
+    """A declared label the writer's own Cypher does not name is a HOLD, never a silent skip.
+
+    ⛔ `#11492`'s last review measured the false pass: the candidate filter admits only writers
+    whose derivation FAILED, so a declaration on a successfully-derived writer was never read at
+    all — a live-register writer declared `stores=("Event", "Batch")` (accepted by
+    `register.load()`) left `Batch` out of the served-set comparison and the row read `MET`.
+    Both sides are now reported: the row holds, names the writer, and shows the two label sets, so
+    a reviewer can rule on which side is wrong (part of the derivation is a heuristic, so the
+    declaration is not assumed wrong either).
+    """
+    writers = {
+        "tortoise.x::_upsert_point": {
+            "callee": probe.SEAM_CALL, "at": "tortoise/x.py:1",
+            "kind": "gated", "label": "Point", "callees": frozenset(),
+        },
+    }
+    monkeypatch.setattr(probe, "embedding_writers", lambda: writers)
+    assert "Batch" not in probe.served_labels()
+    for stores in (("Point", "Batch"), NO_LIVE_VECTOR):
+        monkeypatch.setattr(
+            probe, "declared_writers",
+            lambda stores=stores: {"tortoise.x::_upsert_point": _store_declared(
+                "tortoise.x::_upsert_point", stores)})
+        row = probe.score_path_bullet()
+        assert row.verdict == "PARTIAL", (stores, row.observed)
+        note = [n for n in row.notes if "CONTRADICT" in n]
+        assert note, (stores, row.notes)
+        assert "tortoise.x::_upsert_point" in note[0], note
+    # …and the AGREEING declaration is not a hold: the check reports disagreement, not difference.
+    monkeypatch.setattr(
+        probe, "declared_writers",
+        lambda: {"tortoise.x::_upsert_point": _store_declared(
+            "tortoise.x::_upsert_point", ("Point",))})
+    assert probe.score_path_bullet().verdict == "MET"
+
+
 def test_a_PARTIAL_measurement_cannot_be_narrowed_by_a_declaration(monkeypatch):
     """A two-label `UNKNOWN` is a MEASUREMENT, not a gap — a declaration may not replace it.
 
@@ -619,6 +656,13 @@ def test_a_DERIVED_label_beats_a_declaration(monkeypatch):
     A `gated` writer's label is derived from its own Cypher, so a declaration that disagreed with
     it must not be able to move the row: otherwise the register could overwrite what the tree
     MEASURES, which is the second-rule-set failure §12.2a forbids.
+
+    ⛔ …and it must not be DISCARDED either (`#11492`'s last review, P2): the first version of this
+    behaviour skipped any declaration on a successfully-derived writer, so a live-register writer
+    declared `stores=("Event", "Batch")` — a shape `register.load()` accepts — reached the
+    served-set comparison with `Batch` never mentioned, and the row could read `MET` over a
+    declared unserved label. Measured is still not overwritten (the label shown to the comparison is
+    the DERIVED one), and the disagreement is now the row's finding.
     """
     monkeypatch.setattr(probe, "embedding_writers", _row_two_population)
     monkeypatch.setattr(
@@ -628,8 +672,14 @@ def test_a_DERIVED_label_beats_a_declaration(monkeypatch):
             "tortoise.x::_upsert_point": _store_declared(
                 "tortoise.x::_upsert_point", ("Batch",))}))
     row = probe.score_path_bullet()
-    assert row.verdict == "MET", row.observed
-    assert "Batch" not in " ".join(row.notes), row.notes
+    assert "written labels: ['Event', 'Point']" in " ".join(row.notes), (
+        f"the MEASURED label must still be what the row compares (this fixture also carries the "
+        f"resolved `Event` and the no-live-vector writer): {row.notes}")
+    assert "tortoise.x::_upsert_point=Point" not in " ".join(row.notes), (
+        f"the declaration must NOT replace the measured label: {row.notes}")
+    assert row.verdict == "PARTIAL", row.observed
+    assert any("CONTRADICT" in n for n in row.notes), row.notes
+    assert any("tortoise.x::_upsert_point" in n for n in row.notes if "CONTRADICT" in n), row.notes
 
 
 def test_an_UNREADABLE_register_is_UNMEASURED_not_a_green_row_two(monkeypatch):
@@ -708,7 +758,9 @@ def test_a_malformed_stores_declaration_holds_row_two(monkeypatch):
         assert row.verdict == "PARTIAL", (bad, row.observed)
         assert any("malformed stores declarations" in n for n in row.notes), (bad, row.notes)
         assert any("tortoise.y::_store_event" in n for n in row.notes), (bad, row.notes)
-        monkeypatch.undo()
+        # ⛔ NOT `monkeypatch.undo()`: that also reverts the autouse fixture and every hermetic
+        # patch for the remaining iterations (broader than this test's subject). `setattr` below
+        # simply replaces the previous value, which is all the loop needs.
 
 
 # ── Bullet 3 — the fallback announces itself ───────────────────────────────

@@ -1868,7 +1868,8 @@ def resolved_stored_labels(written: dict[str, str] | None = None,
     writers = embedding_writers() if writers is None else writers
     written = written_labels(writers) if written is None else written
     out: dict = {"labels": {}, "no_vector": [], "at_runtime": [], "undeclared": [],
-                 "violations": {}, "classes": {}, "partial": [], "error": None}
+                 "violations": {}, "classes": {}, "partial": [], "contradictions": [],
+                 "error": None}
     # ⛔ A PARTIAL measurement is NOT an unresolved one. `UNKNOWN(two labels: Event, Batch)` is the
     # derivation REPORTING TWO LABELS it did measure — one of which may be unserved — so a
     # declaration must never replace it: narrowing it to `("Event",)` (or erasing it with
@@ -1908,6 +1909,30 @@ def resolved_stored_labels(written: dict[str, str] | None = None,
             out["at_runtime"].append(writer)
         else:
             out["labels"][writer] = reading
+    # ⛔ A declaration is read for EVERY declared writer, not only for the ones whose derivation
+    # failed. Where the derivation SUCCEEDED, a declaration that disagrees with the measured label
+    # is a CONTRADICTION — never overwrite the measurement, and never drop the claim either: the
+    # contradiction itself is the finding. `#11492`'s last review measured the false pass this
+    # closes: a live-register writer declared `stores=("Event", "Batch")` (a shape
+    # `register.load()` accepts) was skipped as "derivation already won", so `Batch` never reached
+    # the served-set comparison and the row could read `MET` over a declared unserved label.
+    # Neither side is assumed right — part of the derivation is a heuristic (module-label stem, a
+    # documented override) — so the row reports both sides instead of picking a winner.
+    for writer, entry in sorted(declared.items()):
+        if writer in candidates or writer in out["violations"]:
+            continue
+        measured = {label.strip() for label in written.get(writer, "").split(",") if label.strip()}
+        if not measured or written.get(writer, "").startswith("UNKNOWN"):
+            continue  # no concrete label on this row's side to disagree with
+        reading, _violation = _store_reading(writer, entry.get("stores"), dispositions)
+        if reading == dispositions["no_vector"]:
+            out["contradictions"].append(
+                f"{writer}: declares {dispositions['no_vector']!r} but its own Cypher measures "
+                f"{sorted(measured)}")
+        elif isinstance(reading, tuple) and not set(reading) <= measured:
+            out["contradictions"].append(
+                f"{writer}: declares {sorted(reading)} but its own Cypher measures "
+                f"{sorted(measured)}")
     return out
 
 
@@ -1988,7 +2013,16 @@ def scored_labels(
     * a writer declared `LABELS_AT_RUNTIME` stays unresolved, named by its own disposition;
     * a writer nothing declares, or one whose declaration does not answer, stays unresolved;
     * a `duplicate` identity stays unresolved regardless of any declaration — its label was
-      overwritten, which no declaration can repair.
+      overwritten, which no declaration can repair;
+    * ⛔ **a declaration that CONTRADICTS a measured label HOLDS the row** (not "is ignored"). The
+      derivation is still never overwritten, but a declared label the writer's own Cypher does not
+      name is a disagreement between the product and the measurement — and silently discarding it
+      was a FALSE PASS `#11492`'s last review measured: a live-register writer declared
+      `stores=("Event", "Batch")` (a shape `register.load()` accepts) was dropped because its
+      derivation had succeeded, so `Batch` never reached the served-set comparison and the row could
+      read `MET` over a declared unserved label. Neither side is assumed right — the derivation is a
+      heuristic in part (module-label stem, a documented override), the declaration is product
+      judgement — so the row reports the contradiction instead of picking a winner.
     """
     writers = embedding_writers() if writers is None else writers
     written = written_labels(writers) if written is None else dict(written)
@@ -2128,6 +2162,12 @@ def score_path_bullet() -> Row:
         notes.append(
             "unresolved writers (hold this row at PARTIAL — nothing in the product says which "
             f"label they store on): {unresolved_undeclared}"
+        )
+    if resolved["contradictions"]:
+        notes.append(
+            "declarations that CONTRADICT the writer's own Cypher (hold this row at PARTIAL — the "
+            "declaration is not ignored and the measurement is not overwritten; the disagreement "
+            f"is the finding): {'; '.join(resolved['contradictions'])}"
         )
     if resolved["partial"]:
         notes.append(
@@ -2289,7 +2329,7 @@ def score_path_bullet() -> Row:
         )
     verdict = "NOT MET" if orphans else (
         "PARTIAL" if (unknown or unparsed or duplicates or real_bypasses or register_bypasses
-                      or resolved["partial"]
+                      or resolved["partial"] or resolved["contradictions"]
                       or resolved["at_runtime"] or resolved["violations"]
                       or resolved["error"])
         else "MET")
