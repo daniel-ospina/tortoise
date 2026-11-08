@@ -201,9 +201,18 @@ test("an inert verdict is LATCHED — one probe per process, not per turn", asyn
 
 test("the reflex chain shares ONE deadline across candidates", async () => {
   // Review finding 5: Pi counts as busy while `before_agent_start` runs, so a
-  // budget PER candidate made the turn's wait N × timeoutMs. A chain that runs
-  // out of budget is a TIMEOUT (no injection, install fine) — never `inert`,
-  // which writes a "reinstall" breadcrumb over a working install.
+  // budget PER candidate made the turn's wait N × timeoutMs.
+  //
+  // ⛔ SCOPE, stated rather than implied (#11584 review, round 7). This row
+  // proves the SHARED-DEADLINE arithmetic: two failing candidates cannot spend
+  // the budget twice. It does NOT reach `resolveBlock`'s `remaining <= 0`
+  // branch (the exit-at-budget race), and mutating THAT branch's `timeout` to
+  // `inert` leaves the suite green (measured 24/24). So the claim that an
+  // exhausted chain is a TIMEOUT and never `inert` is correct in the code and
+  // UNPROVEN by any row — a KNOWN RESIDUAL with no owner, recorded here rather
+  // than vouched for. Closing it needs an injectable clock or per-attempt
+  // runner seam plus a row asserting no `install-inert` breadcrumb on that
+  // path; it is not worth a new seam today, but it must not read as covered.
   const home = tmpHome();
   // ⛔ NON-TIMEOUT failures, on purpose (#11584 review, round 6). The first
   // version of this row used a `sleep 5` first candidate, which ABORTS the
