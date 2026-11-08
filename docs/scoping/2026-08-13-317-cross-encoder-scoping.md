@@ -19,6 +19,14 @@ created: 2026-08-13
 **Research brief:** `docs/research/2026-08-13-317-cross-encoder-reranking.md` (5 source-tagged findings, persisted via `_research_append.sh`).
 **Gate-locked problem definition:** `/tmp/317-gate-definition-v5.md` (authoritative; supersession clauses for routing>0 noted inline).
 
+**Document status (re-measured 2026-11-08, `main` @ `e66450bb`):** #317 closed **superseded** on 2026-09-10. The general-path two-stage reranker planned below never shipped — 0 hits in `tortoise/ tools/ tests/ config/` for `tortoise/cross_encoder.py`, `rerank_cross_encoder`, `CrossEncoderRanker`, `TORTOISE_CROSS_ENCODER_ENABLED`. What shipped is the **ask-lane** reranker (`tortoise/rerank.py`: same model `cross-encoder/ms-marco-MiniLM-L6-v2`, same `RERANK_MAX_LENGTH = 512` content contract, gate `TORTOISE_ASK_RERANK` fail-safe OFF) from #2070 via merged #2078. Read the plan below as the record of a gate that fired; #317's remaining recall work is owned by #2513/#2518.
+
+**Encryption carve-out (#1165).** The reranker consumes point **content** as input (the CE-input truncation contract, Task 6 below), so for a client-side-encrypted team (ADR-008, `encryptionVersion>=1`) the server holds ciphertext and a rerank over it is meaningless. **Pre-registered v1 disposition: skip rerank for `encryptionVersion>=1` teams with the result-parity impact disclosed**; alternatives are a client-side rerank or a route through the #265 MCP encrypt-proxy. The controlling text is `docs/scoping/2026-08-13-265-content-encryption-scoping.md:128`, restated in that doc's wiring table (`:203`); the runtime mode would be pinned in `tortoise/rerank.py`'s degrade contract, which owns the one scorer that shipped.
+
+**Precondition state (measured 2026-11-08):** not live. ADR-008 is **Accepted, implementation gated post-GA**, and #265 closed `not_planned` (2026-08-13), so there are **0** `encryptionVersion` symbols in `tortoise/ tools/ tests/ config/` — all six hits in the tree are under `docs/`. No code change follows from this note today: it records the disposition where a #265 revival reads it, which is the note #265's scoping asked for (`carve-out note filed (extra issue E2 = #1165)`, `265` scoping:128).
+
+**Why skip is the v1 default (external check, 2026-11-08):** the converged practice for encrypted retrieval is to reduce the candidate set cheaply on the server and rerank the small list **on the client** — Spruce (arXiv 2609.03376) has the client reconstruct secret-shared candidates and rerank locally — because a cross-encoder is only practical over a top-20→top-5 window (Microsoft Learn, *Implement Cross-Encoder Reranking*). A server holding ciphertext has nothing to score, and a client rerank needs content the v1 encrypt path does not carry, so a disclosed skip is the honest v1 arm rather than a silent recall loss.
+
 ---
 
 ## Confirmed Problem
