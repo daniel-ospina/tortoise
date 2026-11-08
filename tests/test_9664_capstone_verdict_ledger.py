@@ -1681,12 +1681,15 @@ def test_the_refusal_status_resolver_matches_cpython(argument, expected):
     """The resolver's OWN table, executed.
 
     Without this row set the resolver was covered only by the two pinned guards,
-    and BOTH are f-string shaped — so everything after the `ast.JoinedStr` early
-    return had no coverage at all, and the fail-closed `None` (UNPROVEN) return
-    could be mutated to `1` with the whole file GREEN. Measured: that mutation
-    left `assert status is not None` untouched, because no pinned guard can reach
-    it. A table is the only way to execute those arms; the resolver's docstring
-    already asserts this table, so it is now executed rather than described.
+    and those reach exactly TWO arms — the f-string one
+    (`capstone_ledger.py`'s `SystemExit(f"…")`) and the small-int one
+    (`build_site_icons.py`'s `SystemExit(4)`) — so the `None`, `bool` and
+    trailing-`return 1` arms had no coverage at all, and the fail-closed `None`
+    (UNPROVEN) return could be mutated to `1` with the whole file GREEN. Measured:
+    that mutation left `assert status is not None` untouched, because no pinned
+    guard reaches the `except`. A table is the only way to execute those arms; the
+    resolver's docstring already asserts this table, so it is now executed rather
+    than described.
 
     The table carries BOTH terminal arms, which is why the `3.5` / `[1, 2]` rows
     exist: they reach the trailing `return 1` (CPython's `else` arm — print the
@@ -2040,9 +2043,9 @@ def test_the_tool_carries_the_5128_interpreter_guard_first(tool, capsys, monkeyp
     DECLARED BOUND — what this pin mirrors, and what is UNGRADED instead.
 
     It MIRRORS these census arms over the two tools' OWN files: preamble order,
-    floor, guard shape, inertness at the floor, both refusal shapes, the RENDERED
-    message, the derived process status, the census `REFUSAL_CODES` row that
-    status must match, and the invocation the refusal names RESOLVING — executed
+    floor, guard shape, both refusal shapes, the RENDERED message, the derived
+    process status, the census `REFUSAL_CODES` row that status must match, and
+    the invocation the refusal names RESOLVING — executed
     PER TOOL: the named form is run and its stderr is read for argparse's own
     `usage:`/`error:` pair, not for one tool's exit code, since
     `capstone_ledger.py`'s 2 is its UNCOVERED verdict — and the
@@ -2071,8 +2074,9 @@ def test_the_tool_carries_the_5128_interpreter_guard_first(tool, capsys, monkeyp
     ⛔ `tools/edge_census.py` and `tools/branch_reaper.py` are deliberately NOT
     rows here, and this paragraph used to carry them as "3 files, census OUT …
     nothing grades it" — FALSE, and false in the direction that inflated the gap
-    (#11491 review, ISSUE 2): both are `SHARED_MODULES` in `tools/ci_selection.py`
-    (`#4408`, `#4503`), so a diff touching either fails closed to the FULL matrix
+    (#11491 review, ISSUE 2): both are `TOOL_CARVEOUTS` entries in
+    `tools/ci_selection.py` (`#4408`, `#4503`) — not `SHARED_MODULES`, which holds
+    no `tools/` path — so a diff touching either fails closed to the FULL matrix
     and DOES run the census. They are named, not tabulated: a re-measured number
     per tool is this block's own failure mode, and `ci_selection.py`'s own tables
     are the single owner of which paths fail closed.
@@ -2179,9 +2183,10 @@ def test_the_tool_carries_the_5128_interpreter_guard_first(tool, capsys, monkeyp
     # node above is pinned to exactly `sys.version_info < (3, 12)`, and
     # `(3, 12, 0, "final", 0) < (3, 12)` is False on every run, so the body
     # provably cannot execute and the probe's `""` is entailed — the assertion can
-    # never fire. Inertness at the floor stays enforced by the node, floor and
-    # `orelse` pins above and behaviourally by the 3.9/3.10 probes below, so no
-    # coverage is lost. Same class as the `len(raises) == 1` arm removed below.
+    # never fire. Inertness at the floor stays entailed by the node, floor and
+    # `orelse` pins above; the 3.9/3.10 probes below assert the refusal TEXT, not
+    # inertness at 3.12, so they are not what grades it. No coverage is lost.
+    # Same class as the `len(raises) == 1` arm removed below.
     # NO separate `len(raises) == 1` assertion here: `shapes_ok` above admits
     # exactly two bodies, each carrying exactly one `Raise`, so such an assertion
     # is entailed and can never fire. Measured — it is the vacuous-arm class this
