@@ -399,7 +399,7 @@ def test_extract_census_aggregates_stage_failures(monkeypatch):
         raise _HTTPError(429)
 
     out = v2.extract_session_v2(_model(model_complete), _conv())
-    assert out["error_census"]["transient_429_rate_limit"] == 3  # S2 x2 (retry) + S4
+    assert out["error_census"]["transient_429_rate_limit"] == 2  # S2 + S4
     assert any("S2 failed" in e for e in out["errors"])
     assert any("S4 failed" in e for e in out["errors"])
     llm = out["stats"]["llm"]
@@ -422,7 +422,7 @@ def test_extract_census_parse_error(monkeypatch):
         return "this is not JSON at all"
 
     out = v2.extract_session_v2(_model(model_complete), _conv())
-    assert out["error_census"]["parse_error"] == 3  # S2 x2 (retry) + S4
+    assert out["error_census"]["parse_error"] == 2  # S2 + S4
     assert any("S2 failed" in e for e in out["errors"])
     assert out["embed_list"] == {}
 
@@ -451,9 +451,9 @@ def test_extract_census_truncated_parse_error(monkeypatch):
             return "this is not JSON at all"
 
     out = v2.extract_session_v2(_TruncGarbage(), _conv())
-    assert out["error_census"]["truncated_parse_error"] == 3  # S2 x2 (retry) + S4
+    assert out["error_census"]["truncated_parse_error"] == 2  # S2 + S4
     assert "parse_error" not in out["error_census"]
-    assert out["stats"]["llm"]["truncated"] == 3  # #11002: S2 x2 (coverage retry) + S4
+    assert out["stats"]["llm"]["truncated"] == 2
 
 
 def test_census_equality_mixed_errors(monkeypatch):
@@ -491,7 +491,7 @@ def test_census_equality_mixed_errors(monkeypatch):
     assert len(out1["errors"]) == sum(out1["error_census"].values())
     assert out1["error_census"]["s1_chunk_summary"] == 1
     assert out1["error_census"]["empty_embed_list"] == 1
-    assert out1["error_census"]["parse_error"] == 3  # #11002: S2 x2 (coverage retry)
+    assert out1["error_census"]["parse_error"] == 2
     assert any("S1 chunks failed" in e for e in out1["errors"])
 
     # ── scenario 2: S2 + S4 succeed → entity resolution + S5 both raise

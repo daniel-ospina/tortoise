@@ -12956,8 +12956,19 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                 # relations" from "the key is missing".
                 "relations": [],
                 "warnings": ["empty conversation — nothing extracted"],
-                "minted_kinds": [], "stats": {"llm": llm_stats,
-                                                "recovery": recovery_stats},
+                "minted_kinds": [],
+                # #11002 review (F2): `renarrate` is an EVIDENCE SURFACE about
+                # whether a mechanism acted — the same class as `vet` /
+                # `classify_later` (#1695, #5005, #10999), not a per-run counter
+                # like `failed_chunks`/`edus` — so it obeys the always-present
+                # rule on this hand-enumerated return too. Nothing could have
+                # re-narrated here (no conversation → no S1, no S2, no batch), so
+                # the honest record is the disarmed shape, not a missing key:
+                # a consumer reading `stats["renarrate"]["fired"]` must never
+                # have to tell "did not fire" from "this build has no retry".
+                "stats": {"llm": llm_stats,
+                          "recovery": recovery_stats,
+                          "renarrate": {"fired": False}},
                 "errors": errors, "error_census": error_census,
                 # #1695 Task 5: the evidence surfaces are always present
                 # (additive keys, empty when the flag is off)
@@ -13010,7 +13021,8 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     # ⛔ Placement is load-bearing: the retry sits BEFORE the classify(S2) pass,
     # so the labelling pass runs once, on the selected arm(s) — not once per arm.
     trigger = _renarrate_trigger(arm["batch"], arm["metrics"],
-                                 _renarrate_threshold())
+                                 _renarrate_threshold(),
+                                 s2_failed=arm.get("s2_failed", False))
     if trigger is not None:
         emphasis = _renarrate_emphasis(trigger)
         second = _arm_extract(model, edus, master=master,
@@ -15264,21 +15276,38 @@ def _arm_metrics(story: str, batch: dict | None, vet_stats: dict | None) -> dict
 
 
 def _renarrate_trigger(batch: dict | None, metrics: dict | None,
-                       threshold: float | None) -> str | None:
+                       threshold: float | None, *,
+                       s2_failed: bool = False) -> str | None:
     """The ONE pure decision: does this arm's outcome trigger the retry?
 
     Three signals, in the order the design names them:
 
     1. ``coverage_suspect`` — prose in, ZERO candidates out. Unambiguous, no
-       threshold, armed by construction.
+       threshold, armed by construction — **when S2 actually answered**.
     2. A batch-level ``RENARRATE`` from an injected arbiter — the token
        `vet_gate.BATCH_OUTCOMES` has always carried and nothing consumed.
     3. A keep-rate below a CONFIGURED threshold — disarmed unless set by hand.
 
+    ⛔ ``s2_failed`` is not a fourth signal — it is a HARD STOP on the first
+    one. `check_batch` reads `(embed_list, story)`, and a failed S2 call leaves
+    ``embed_list`` empty *without* saying anything about the narrative's yield,
+    so the batch is byte-identical to a genuinely empty one ("prose in, nothing
+    out"). The two are DIFFERENT classes and belong to different layers: a
+    failed call is a transport-class failure, retried and escalated INSIDE
+    :func:`run_s2` (``_PARSE_RETRIES`` + the one-shot escalation), while a
+    successful call that returns nothing is what warrants a content
+    regeneration. Merging them spends the one content-level retry on a
+    transport outage — a second S1+S2 band on every session for the duration of
+    the outage, buying nothing — and it makes this docstring's
+    "*unambiguous*, armed by construction" false on exactly the path where the
+    instrument, not the narrative, was poor. Same class as an empty ``story``
+    (a failed S1), which is already silent here because `check_batch` sees no
+    statements to be uncovered.
+
     Returns the trigger's name, or ``None``. Pure: no I/O, no model call.
     """
     b = batch if isinstance(batch, dict) else {}
-    if b.get("coverage_suspect"):
+    if b.get("coverage_suspect") and not s2_failed:
         return "coverage_suspect"
     if str(b.get("outcome") or "").strip().upper() == _vet_gate.RENARRATE:
         return "arbiter_renarrate"
@@ -15335,6 +15364,14 @@ def _arm_extract(model, edus, *, master, session_date, chunk_size,
 
     # ── S2: map to embed ───────────────────────────────────────────────────
     embed_list: dict = {}
+    # #11002 review (F1): a FAILED S2 is not a poor batch. ``coverage_suspect``
+    # is a fact about the NARRATIVE's yield ("prose in, zero candidates out");
+    # a call that raised produced no such fact, and its empty list is
+    # indistinguishable from one that did. Recorded separately so
+    # `_renarrate_trigger` can refuse the retry — the same way a failed S1
+    # (empty story) already does — instead of paying a second S1+S2 band for a
+    # transport failure `run_s2` has already retried and escalated.
+    s2_failed = False
     if story:
         stage_stats = {}
         try:
@@ -15343,6 +15380,7 @@ def _arm_extract(model, edus, *, master, session_date, chunk_size,
                                 stats=stage_stats,
                                 core_only=classify_later)
         except Exception as e:
+            s2_failed = True
             errors.append(f"S2 failed: {type(e).__name__}: {e}")
             _bump_census(error_census, e)
         # D4 (#1746): a schema-validated PARTIAL accept (truncated tail
@@ -15410,6 +15448,9 @@ def _arm_extract(model, edus, *, master, session_date, chunk_size,
         "metrics": _arm_metrics(story, batch, vet_s2_stats),
         "chunks": chunks,
         "failed_chunks": failed_chunks,
+        # A failed S2 call, so the retry's decision can tell "the instrument
+        # broke" from "the narrative yielded nothing" (#11002 review, F1).
+        "s2_failed": s2_failed,
     }
 
 
@@ -15455,7 +15496,9 @@ def _renarrate_pick(first: dict, second: dict) -> dict:
     narrative"* — retired by that ruling, because a successor that discards the
     first arm's items is a replacement, not a merge. What it overrode is named
     here so the next lane reading §4.4 finds the ruling instead of re-deriving
-    it.
+    it. ⚠️ The marker ALSO lives in §4.4 itself (the document a lane reads
+    before it reads this function): a marker only in a private helper's
+    docstring is invisible to the reader holding the spec.
 
     **The narrative: §4.4's tie-break, verbatim.** There is exactly ONE narrative
     in a run (`story`/`story_arc` reach S4's prompt and `execute_embed`), so
@@ -15485,6 +15528,17 @@ def _renarrate_pick(first: dict, second: dict) -> dict:
         # The S2 pass's stats are the SECOND arm's — the retried pass, whose
         # list the union is recorded against. ⛔ Nothing is hidden by that
         # choice: both arms' full numbers ride `stats["renarrate"]`.
+        # ⛔ SCOPE OF THAT CHOICE (review note, not a finding): these are the
+        # NUMBERS only. The VERDICT half does not ride this arm — the shipped
+        # union is re-vetted wholesale in the `prior=vet_s2_pool` pass, which
+        # re-asks the arbiter over the list that actually ships, so a first-arm
+        # MERGE flag is not lost, it is re-derived. The residual is that
+        # `stats["vet"]["s2"]["decisions"]` and `_merge_flagged_contents(...)`
+        # describe the second arm's candidate list even when the FIRST narrative
+        # wins the tie-break — a mismatch reachable only on the first-wins path
+        # (an arbiter batch RENARRATE, which `s2_decision_seam` never emits, or
+        # a hand-armed `TORTOISE_RENARRATE_KEEP_RATE`), never on the
+        # `coverage_suspect` path where the first arm is empty by definition.
         "vet_stats": second["vet_stats"],
         "vet_pool": _merge_arm_pools(first.get("vet_pool") or {},
                                      second.get("vet_pool") or {}),
