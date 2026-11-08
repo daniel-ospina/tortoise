@@ -802,15 +802,20 @@ def test_the_content_floor_s_removal_class_is_measured_not_asserted():
                 sub_floor += 1
                 if "**" in segment["text"]:
                     bold += 1
-    # (a) headings are masked out before segmentation, so no flag can be one
-    assert flagged_at_one == 103, "flags at min_content_tokens=1, shipped floor"
+    # ⛔ ASSERTION ORDER IS PART OF THE GUARD (review round 7, mutation leg).
+    # Each row below is the FIRST to fail under its OWN mutant: the mask, then
+    # the segmentation, then the removal class, then the flag count. Asserting
+    # the flag count first made three later rows unreachable — `narrative_segments
+    # -> []` and the mask both reddened the count instead of the behaviour they
+    # revert, which is a proof of the wrong thing. `bold * 2 < sub_floor` was dropped: it
+    # is implied by `bold == 68` against the pinned 212 and no mutant of the diff
+    # moves it, so it would have looked like coverage while guarding nothing.
     assert heading_flags == 0, (
         "a heading reached the flag list — the mask is applied after segmentation")
-    # (b) the removal class is a plurality at most (one recording = 422 segments)
     assert segments == 422
     assert sub_floor == 212
     assert bold == 68, "68 of 212 = 32.1%: a plurality, not a dominant class"
-    assert bold * 2 < sub_floor, "'dominant' is a majority claim; this is not one"
+    assert flagged_at_one == 103, "flags at min_content_tokens=1, shipped floor"
 
 
 def test_the_heading_mask_does_not_eat_issue_numbered_lines(monkeypatch):
