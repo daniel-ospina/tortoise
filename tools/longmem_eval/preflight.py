@@ -166,8 +166,9 @@ def ping_model(model: Any, *, what: str) -> dict[str, Any]:
 def check_judge_key(judge: Any) -> dict[str, Any]:
     """Explicit judge-key presence check (config-only, no network).
 
-    Resolves the judge's provider from its model spec (default
-    ``openai:gpt-4o-2024-08-06`` → ``OPENAI_API_KEY``) and verifies the env
+    Resolves the judge's provider from its model spec (e.g.
+    ``openai:gpt-4o-2024-08-06`` → ``OPENAI_API_KEY``,
+    ``deepseek:deepseek-v4-flash`` → ``DEEPSEEK_API_KEY``) and verifies the env
     var is set. The detail message names the expected key env var verbatim
     (E2E-2's "judge key absent → pre-flight aborts with a clear message").
     """

@@ -5,7 +5,9 @@ histories) against Tortoise as an external comparability measurement: ingest
 each question's chat history into the graph → hybrid retrieval (graph points
 
 + raw session transcripts) → reader LLM answers from retrieved context →
-official GPT-4o answer-check judge. Reports overall + per-category accuracy,
+answer-check judge (our own pinned model by default since the #8486 owner
+ruling of 2026-10-27; the **official GPT-4o** judge is one explicit override
+away — see the env table below). Reports overall + per-category accuracy,
 retrieval recall@k, context tokens and latency, with the full methodology in
 a provenance JSON. **No "#1" claims — published numbers carry their
 methodology** (design-locked 2026-08-15, issue #1144 axis 2).
@@ -75,16 +77,8 @@ the `[embeddings]` extra does not need it either (R3 #1542 D6).
 | Var | Purpose | Default |
 |---|---|---|
 | `OPENROUTER_API_KEY` / `OPENAI_API_KEY` / `DEEPSEEK_API_KEY` / `GEMINI_API_KEY` | provider keys (existing repo pattern, `tortoise.ingest._PROVIDERS`) | required for non-mock runs |
-| `TORTOISE_LME_READER_MODEL` | reader model spec `<provider>:<model>` or bare | `openrouter:deepseek/deepseek-v4-flash` (M5 pinned — #1525) |
-| `TORTOISE_LME_JUDGE_MODEL` | judge model spec | `openai:gpt-4o-2024-08-06` (the official judge model) |
-
-> **Judge via OpenRouter (no OpenAI key needed).** The official judge is
-> OpenAI's `gpt-4o-2024-08-06` — the model id is what makes it official
-> (external comparability), and the SAME model is served by other
-> configured providers. With only `OPENROUTER_API_KEY` set, run the sealed
-> benchmark with:
-> `export TORTOISE_LME_JUDGE_MODEL='openrouter:openai/gpt-4o-2024-08-06'`
-> (provider resolution order: openrouter → deepseek → openai → gemini).
+| `TORTOISE_LME_READER_MODEL` | reader model spec `<provider>:<model>` or bare | `deepseek:deepseek-v4-flash` (M5 pinned — #1525; transport repointed by #8486 — see "Reader pinning" below) |
+| `TORTOISE_LME_JUDGE_MODEL` | judge model spec | `deepseek:deepseek-v4-flash` (#8486 owner ruling 2026-10-27 — internal baseline series; the receipt records `unpinned:<model>` + `inconclusive` by design) |
 | `TORTOISE_LME_CACHE_DIR` | dataset cache dir (outside the repo) | `~/.cache/tortoise-longmemeval` |
 | `TORTOISE_LME_CHUNK_TURNS` | turns per raw-chunk window (R1 #1540) | `2` (the run protocol step-2 sweep selects the pilot/500-Q value) |
 | `TORTOISE_LME_CONTEXT_CAP` | reader context token budget — rank-interleaved (C1 #1745: points + chunks in true RRF order, the R1 points-first tiering deliberately reversed) bounded by the item cap | `8000` |
@@ -98,6 +92,18 @@ the `[embeddings]` extra does not need it either (R3 #1542 D6).
 | `TORTOISE_LME_RERANK_POOL` | rerank pool depth (R6; the knob can only RAISE the depth — applied pool = `max(pool, baseline, max(k))` with baseline = `TORTOISE_LME_POOL_SIZE` when set (default 120), itself floored at `max(k)`; only read while rerank is on) | `40` |
 | `TORTOISE_LME_RERANK_CAP` | per-session MMR cap (R6; ≥ 1) | `2` |
 | `TORTOISE_LME_RERANK_LAMBDA` | MMR λ in [0,1] (R6; 1.0 = pure rerank, 0.0 = pure similarity; boundary values accepted) | `0.7` |
+
+> **The OFFICIAL judge (external comparability) is a configuration, not the
+> default.** `gpt-4o-2024-08-06` is the model the benchmark's own
+> `evaluate_qa.py` baseline ran, and the model id is what makes a number
+> comparable to a published figure — the SAME model is served by other
+> configured providers, so it needs no OpenAI key. Name it explicitly:
+> `export TORTOISE_LME_JUDGE_MODEL='openrouter:openai/gpt-4o-2024-08-06'`
+> (provider resolution order: openrouter → deepseek → openai → gemini).
+> The #8486 owner ruling of 2026-10-27 replaced it as the run's *default* —
+> progress against ourselves, not comparability with vendors — and recorded
+> the `OVERRIDES:` line; `judge.OFFICIAL_JUDGE_MODEL` keeps the identity
+> named so this path cannot rot.
 
 CLI flags: `--split s|m|oracle`, `--limit N`, `--data <local json/jsonl>`,
 `--k 5,10,20`, `--top-k 20`, `--mock`, `--output <report.json>`,
@@ -474,10 +480,20 @@ path via `--data` skips the download. Split S = `longmemeval_s_cleaned.json`
    (verbatim from LongMemEval `evaluate_qa.py`: contains-answer, temporal
    off-by-one exemption, knowledge-update updated-answer, preference rubric,
    abstention), label = `'yes' in response.lower()`; default
-   `gpt-4o-2024-08-06` at temperature 0. The judge API call replicates
+   `deepseek-v4-flash` at temperature 0 (the #8486 owner ruling of 2026-10-27;
+   `OFFICIAL_JUDGE_MODEL` = `openai:gpt-4o-2024-08-06` remains the named,
+   servable comparability configuration). The judge API call replicates
    `evaluate_qa.py` exactly: a single user message (no system message),
    `n=1, temperature=0, max_tokens=10`, no `response_format` (JSON mode
-   would deviate from the official protocol). `--mock` = containment/
+   would deviate from the official protocol). ⚠️ ONE deliberate deviation
+   under the shipped default: the judge shares the reader's transport
+   declaration (`judge.py` → `disables_thinking = api_key_env in
+   reader.THINKING_BY_DEFAULT_KEY_ENVS`), so a `deepseek:` spec — which is
+   what the default is — adds a top-level `thinking: {"type": "disabled"}`
+   to each grading call. Without it the 10-token budget is spent on hidden
+   reasoning and `content` returns empty, which the label rule grades as
+   "no". It is **always absent for the OFFICIAL judge**, whose request stays
+   byte-identical to `evaluate_qa.py`. `--mock` = containment/
    abstention keyword judge.
 5. **Report** (`report.py`) — overall + task-averaged accuracy, the five
    paper categories (Information Extraction, Multi-Session Reasoning,
@@ -661,8 +677,12 @@ uv run python -m tools.longmem_eval.run_protocol smoke --mock
 
 - The dataset (~tens of MB; auto-downloaded to the cache dir — needs
   network) and
-- provider keys (reader: e.g. `OPENROUTER_API_KEY`; official judge:
-  `OPENAI_API_KEY`).
+- provider keys. **A default run needs `DEEPSEEK_API_KEY` and nothing else** —
+  the reader (`READER_MODEL`) and the judge (`DEFAULT_JUDGE_MODEL`) are both
+  `deepseek-v4-flash` under the #8486 ruling. An override needs its OWN
+  provider's key (`OPENROUTER_API_KEY`, `OPENAI_API_KEY`, …), and
+  `OPENAI_API_KEY` alone selects nothing: name `OFFICIAL_JUDGE_MODEL`
+  explicitly to grade with the official judge.
 
 The full 500-question run is `@pytest.mark.slow` (never in CI); the
 committed mini fixture + `--mock --skip-preflight` exercises the entire
@@ -832,8 +852,24 @@ the gate health of the (possibly cached) graph it retrieved from.
 
 The reader model + prompt are **pinned constants for the run**: the code
 default (`READER_MODEL` in `tools/longmem_eval/reader.py`) is
-`openrouter:deepseek/deepseek-v4-flash` — the model the V2 runs actually
-used — so a default-config run is a pinned run. The prompt constants
+`deepseek:deepseek-v4-flash` — the model the V2 runs actually used, on the
+transport the #8486 ruling names — so a default-config run is a pinned run.
+(#8486, 2026-11-07: the pin named `openrouter:deepseek/…`, and the box the
+credential audit was taken on had no `OPENROUTER_API_KEY`, so the *default*
+raised at the named-provider check before loading a question and a run there
+needed an override — which records
+`reader_pinned: false`. The model is unchanged; the transport moved, and with it
+the request shape: the direct DeepSeek lane is served by
+`_ThinkingDisabledTransport`, so every default request also carries
+`thinking:{"type":"disabled"}`. ⛔ That is selected by the ROUTED PROVIDER'S KEY
+ENV, not by the model id (`THINKING_BY_DEFAULT_KEY_ENVS = {"DEEPSEEK_API_KEY"}`):
+re-pointing the SAME model at `openrouter:` drops the guard, so the request no
+longer carries the field. Whether an empty answer follows depends on that route
+reasoning by default — the starved-answer measurement (11,352 prompt tokens, 500
+completion tokens, `content=''`, recorded `valid: True`, scored 0) is on
+`api.deepseek.com`, NOT on OpenRouter, and that difference is exactly why this
+pin names the transport as well as the model.)
+The prompt constants
 (`_SYSTEM_PROMPT`, `_TYPE_FRAGMENTS`) live in the same module. Every report
 records the reader's resolved identity + the verbatim prompt in its
 methodology (`reader_model_spec`, `reader_provider`, `reader_pinned`,
