@@ -1389,10 +1389,14 @@ def test_a_torn_ledger_tail_does_not_swallow_the_next_key(tmp_path):
     path.write_text('{"target": "new", "migrationKey": "k-tor')   # torn write
     with pytest.raises(C.CurationRefused, match=r"damaged"):
         C.Ledger(path, target="new")                               # the tear is not silently skipped
-    path.write_text('{"target": "new", "migrationKey": "k1"}\n')    # repaired by truncation
+    # repair by truncation, but leave the last RECORD without a trailing newline (the
+    # torn-tail shape the append path must survive) — a file ending in "\n" would let a
+    # regression in `record()` pass unnoticed
+    path.write_text('{"target": "new", "migrationKey": "k1"}')
     led = C.Ledger(path, target="new")
     led.record(["k2"])
-    assert "k2" in C.Ledger(path, target="new")
+    reloaded = C.Ledger(path, target="new")
+    assert "k1" in reloaded and "k2" in reloaded, "a torn tail must not swallow either key"
 
 
 def test_a_disarmed_run_is_not_reported_as_a_failure(monkeypatch, tmp_path, capsys):
@@ -1410,3 +1414,25 @@ def test_a_disarmed_run_is_not_reported_as_a_failure(monkeypatch, tmp_path, caps
                    "--ledger", str(tmp_path / "l.jsonl"), "--out", str(tmp_path / "p.json")])
     assert rc == 0
     assert "disarmed" in capsys.readouterr().err
+
+
+def test_a_disarmed_run_with_an_unresolvable_target_is_still_disarmed(tmp_path):
+    """Round-23: the identity guard ran BEFORE the off switch, so a run the operator
+    explicitly disarmed reported `REFUSED: cannot resolve the target graph` (exit 3) —
+    the round-22 defect one arm over."""
+    plan = C.build_plan([row("p1", kind="decision", content="c")],
+                        source_graph="old", target_graph="g_unreachable")
+    res = C.run_plan(plan, writer=CountingWriter(),
+                     ledger=C.Ledger(tmp_path / "l.jsonl", target="g_unreachable"),
+                     apply=True, off=True, graph_rows=ROWS)
+    assert res.off is True and res.refused == "off-switch active"
+
+
+def test_a_ledger_line_that_is_json_but_not_an_object_is_reported_as_damage(tmp_path):
+    """Round-23: `null` / `[1,2]` raised TypeError out of `Ledger.__init__` and escaped
+    `cmd_plan`'s CurationRefused handler as a traceback."""
+    for bad in ("null", "[1, 2]", '"x"'):
+        path = tmp_path / f"{bad[0]}.jsonl"
+        path.write_text(bad + "\n")
+        with pytest.raises(C.CurationRefused, match=r"damaged"):
+            C.Ledger(path, target="new")

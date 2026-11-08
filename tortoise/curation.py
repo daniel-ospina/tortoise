@@ -954,7 +954,8 @@ class Ledger:
                     try:
                         row = json.loads(line)
                         self._keys.add((row["target"], row["migrationKey"]))
-                    except (json.JSONDecodeError, KeyError) as exc:
+                    except (json.JSONDecodeError, KeyError, TypeError, AttributeError,
+                            ValueError) as exc:
                         # NOT "skip and continue": a damaged line means the keys it held
                         # (and any appended after a torn tail) are unknowable, and a row
                         # the target ACCEPTED would be silently re-sent — the exact
@@ -1106,6 +1107,14 @@ def run_plan(
     # rows already landed owes nothing, and saying "N pending" would be wrong.
     _sections_all, skipped_all, dups_all = _pending_sections(plan.bundle(), ledger)
     pending_all = sum(len(v) for v in _sections_all.values())
+    if off_switch_active(off):
+        # BEFORE the identity guard: a disarmed run writes nothing, so it owes no
+        # identity proof — and reporting "REFUSED: cannot resolve the target graph"
+        # for a run the operator explicitly disarmed is the round-22 defect one arm
+        # over (a driver pages on a deliberate no-op).
+        return RunResult(False, True, skipped_all, 0, plan.target_graph, plan.digest(),
+                         refused="off-switch active", duplicate_rows=dups_all,
+                         pending=pending_all)
     try:
         assert_distinct_graphs(plan.source_graph, plan.target_graph, graph_rows=graph_rows)
     except CurationRefused as exc:
@@ -1115,10 +1124,6 @@ def run_plan(
         # A dry run writes nothing, so an unproven identity is reported rather than
         # blocking the plan — the guard is strict exactly where a write can happen.
         identity_note = str(exc)
-    if off_switch_active(off):
-        return RunResult(False, True, skipped_all, 0, plan.target_graph, plan.digest(),
-                         refused="off-switch active", duplicate_rows=dups_all,
-                         pending=pending_all)
     if not apply:
         # Accounting happens BEFORE this return: a dry run over a ledger that already
         # holds rows must not report 0 written / 0 skipped, which cannot be
