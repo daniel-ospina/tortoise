@@ -54,8 +54,9 @@ item below implying either has found a defect in this document, not a proposal.
 > *"the narrative is not something we're suggesting to store in the graph (same as raw) but store in
 > supabase."*
 >
-> **§12.1c — the vector question is OPEN, and it is the owner's.**
-> *"⚠️ NOT DECIDED — owner's call."* (§14.3 **V1**.)
+> **§12.1c — the vector question was decided on 2026-11-07: the vector index does NOT live in FalkorDB.**
+> *"✅ DECIDED 2026-11-07 — the vector index does NOT live in FalkorDB."* (§14.3 **V1**;
+> `docs/architecture/SEARCH-ARCHITECTURE.md`.)
 >
 > **§14 — vendor.**
 > *"The vendor — **Supabase Postgres** is the owner's recorded choice for the system of record (local
@@ -63,13 +64,14 @@ item below implying either has found a defect in this document, not a proposal.
 
 ### 0.1 Contradiction test — run first, and its result
 
-Three items a naive prerequisite list would contain **would each reverse a recorded decision**, so
-they are excluded as prerequisites and recorded as such:
+Two items a naive prerequisite list would contain **would each reverse a recorded decision**, so
+they are excluded as prerequisites and recorded as such. (A third — moving embeddings to pgvector — was
+on this list while the question was open; V1 was **decided in its favour** on 2026-11-07, so it is no
+longer a contradiction and it is carried as N2 below.)
 
 | candidate prerequisite | the decision it would contradict | verdict |
 |---|---|---|
 | **"serve reads from Postgres / cut over the read path"** | §2.0, verbatim: *"we keep the limit in falkor high so we don't need to rush with enabling our queries to parse both falkor and postgres."* | **Deferred by the ruling** — `#7970` is OPEN and *"DEFERRED by §2.0"*. Not a first-customer gate. |
-| **"put embeddings in pgvector"** | §12.1c: *"✅ DECIDED 2026-11-07 — the vector index does NOT live in FalkorDB."* §14.3 V1, `docs/architecture/SEARCH-ARCHITECTURE.md`. | **A decision, not a prerequisite — and now DECIDED.** Embeddings are already durable without it (item A5). |
 | **"backfill the existing FalkorDB graph into Postgres"** | Owner scope ruling 2026-10-10: *"there are no existing customers. No migration-safety apparatus is designed or claimed here."* | **Not designed, on purpose.** The dual-write already exists by construction (§3/§17.1; item R1 arms it); a backfill is not it. |
 
 ---
@@ -165,9 +167,11 @@ raised) and §17.1-correct (record after the append, before the cache fold).
 
 `embedding jsonb` on `source` (`…01:175`), `event` (`…01:233`), `point` (`…03:66`). **No migration and no module uses `pgvector`** — `grep -riE 'pgvector|vector\('` over all 79
 migrations returns **0**, and `git grep -il pgvector -- 'tortoise/*'` is **0**. The word itself
-appears in prose only — e.g. this document, §12.1c's open question, this epic's
+appears in prose only — e.g. this document, §12.1c's (now resolved) question, this epic's
 `03-schema.md`, and the competitor notes. So the record is a **durability carrier** for vectors, not a retrieval index — which is
-exactly right while §2.0 keeps the cache fully populated and **V1 is undecided** (§12.1c/§14.3).
+exactly right while §2.0 keeps the cache fully populated — and **V1 is no longer undecided**: since
+2026-11-07 the record is where the vectors live (`docs/architecture/SEARCH-ARCHITECTURE.md`), so the
+`jsonb` -> `pgvector` column work is open WORK rather than an open question (§12.1c/§14.3).
 
 ### A6. Metering / billing — **EXISTS and is live, org-scoped**
 
@@ -933,7 +937,7 @@ calibrates after beta from measured consumption.
 | # | what | why it is not on the list |
 |---|---|---|
 | **N1** | **The read path and its cutover** (`#7970`, **OPEN**) | §2.0 defers it in the owner's own words (§0.1). The instruments exist and are off. |
-| **N2** | **`pgvector` / moving the vector index into Postgres** (`#4997`, **CLOSED 2026-10-05** — its analysis is what this item rests on; §12.1c **V1**, §14.3) | **DECIDED 2026-11-07 — ADOPTED** (`docs/architecture/SEARCH-ARCHITECTURE.md`): the vector index and its payload move to Postgres (`pgvector`). What is not decided is WHEN — not on this epic's critical path. Embeddings are already durable as `jsonb` (A5). Note the settled blocker if it is decided: **`pgvectorscale` is unavailable on Supabase** (§14), so it would be `pgvector` proper. |
+| **N2** | **`pgvector` / moving the vector index into Postgres** (`#4997`, **CLOSED 2026-10-05** — its analysis is what this item rests on; §12.1c **V1**, §14.3) | **DECIDED 2026-11-07 — ADOPTED** (`docs/architecture/SEARCH-ARCHITECTURE.md`): the vector index and its payload move to Postgres (`pgvector`). What is not decided is WHEN — not on this epic's critical path. Embeddings are already durable as `jsonb` (A5). Note the settled blocker, now that it is decided: **`pgvectorscale` is unavailable on Supabase** (§14), so it would be `pgvector` proper. |
 | **N3** | **A FalkorDB → Postgres backfill / migration-safety apparatus** | Owner scope ruling 2026-10-10: no customers, no apparatus designed. The dual-write is journal-first by construction (§3/§17.1). |
 | **N4** | **Journal completeness** (`#5089`) | A **precondition owned by another epic** (this epic's *blocked-by (soft)*) — ⚠️ **and that epic CLOSED COMPLETED on 2026-10-12**, so the soft block is discharged *as a ticket*. What is not discharged is the measurement: §17.1's surface (**387 mutating sites / 211 functions / 32 files**) is quoted here, not re-verified by this lane. Named, not re-filed: a projection replayed from an unfaithful journal is faithfully wrong. |
 | **N5** | **The record's failure counter has no alert** | Real (§A3: fail-soft, counted only on `monitoring.metrics()`), but **not** a gate while the cache is fully populated — a lost record is healed by replay. Becomes a gate if the cache is ever allowed to go partial. |
@@ -1030,7 +1034,7 @@ meter → allowance wiring — gates the first *allowance*, not the first custom
   repo. The questions the external leg would have asked, left unasked and unanswered: Supabase's
   pooler connection limits and their interaction with session-level `SET` (R6 makes the GUC
   session-scoped, and a transaction-mode pooler is where that breaks), PITR retention by plan tier
-  (R9), and `pgvector` index-build behaviour at our size (**only if V1 is decided**).
+  (R9), and `pgvector` index-build behaviour at our size (**V1 is decided — this is now real work**).
 - **No product code changed.** No migration, no module, no test. The **three runs in §G** (two pytest runs plus the
   PGlite validation) were run and reported; none of their files was modified.
 - **No issue filed.** An item that names an issue **as its home** gives that issue's state and its

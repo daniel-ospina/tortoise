@@ -79,7 +79,8 @@ quality change. **Live before private-beta:**
 density — RAM $8.75 + shared project line $2.13 + record $0.13 (§8.1) — against a `$5.70` storage budget, i.e.
 193 % of it. ⚠️ **It is also above the product's older recorded constraint** (*"a $19 price with < $9 total
 cost per user"*, `STORAGE-ARCHITECTURE.md` §1), because $11.01 > $9 — and at beta-scale density it is higher
-still (a 1 GB instance holds ~6 complete solo tenants, so the RAM line alone is ~$12). **This is a knowing,
+still (a 1 GB instance holds **5** complete solo tenants at the 75 % rule — 5 x 200 MB provisioned =
+750 MB of 1000 — so the RAM line alone is ~$14.60). **This is a knowing,
 bounded overspend on a small, known tenant count**, taken because the alternative — arming a window nobody has
 measured — risks the quality this document ranks first. §7 records both ceilings so neither is mistaken for
 the other.
@@ -226,8 +227,8 @@ the ranker refuses to order on.
 
 ## 7. The window — what the graph holds once it must be bounded
 
-**Why the window exists at all:** a *complete* graph costs **$8.75/tenant** against a **$5.70** budget
-(30 % of $19). Density does not fix it — `$58.33` is already the DENSEST tier's per-GB rate, and density cannot
+**Why the window exists at all:** a *complete* graph costs **$11.01/tenant** — the RAM line alone is
+**$8.75** — against a **$5.70** budget (30 % of $19). Density does not fix it — `$58.33` is already the DENSEST tier's per-GB rate, and density cannot
 shrink a tenant's own graph bytes; it only spreads the *fixed* lines. **The window is what makes the pricing work at scale.**
 
 ⚠️ **Where the $5.70 comes from, because the document it amends records a different ceiling.** `STORAGE-ARCHITECTURE.md` §1
@@ -243,8 +244,8 @@ unhomed figure, and §2.0's marker cites that derivation.
 literature measures latency and hit rate, not answer quality, and the best trace-aware policy reached ~54 %
 hit rate for 2-hop expansions — so arming it on a guess is exactly the quality risk this document ranks
 first. Private-beta therefore runs **complete** and **above the 30 % target, knowingly** — **193 % of it on the
-total per-tenant basis, §8.1** (the RAM line alone is 154 %, and it is also above the older <$9 total-cost
-ceiling) — bounded by a small known tenant count, and the window is armed when M2 says it is safe. **The guardrails that make it
+total per-tenant basis, §8.1** (the RAM line alone is 154 %, and the **total** is also above the older <$9
+total-cost ceiling, at 122 %) — bounded by a small known tenant count, and the window is armed when M2 says it is safe. **The guardrails that make it
 safe ship before private-beta regardless**, so the eventual switch is a configuration change with measured
 justification, not a redesign in front of customers.
 
