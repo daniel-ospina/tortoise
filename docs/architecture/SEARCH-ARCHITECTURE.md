@@ -20,8 +20,10 @@ aboutObjects: tortoise
 3. **Traversal, writes and EP stay in FalkorDB.** The Cypher surface — an order-of-magnitude **~1,900 statements**, an estimate rather than a census — is untouched.
 4. **The graph stays complete for private-beta and becomes a bounded window only after M2 measures it**, sized by the tier's cost budget — §1.5, §7. The cost during private-beta is **knowingly above** the 30 % target (§8).
 
-**The product goal:** *"a high quality search system with manageable cost, speed matters but is not the
-top criterion"* (owner). Every ordering below follows that sentence.
+**The product goal, as this document records it:** a high quality search system with manageable cost, where
+speed matters but is **not** the top criterion. That ranking is **this document's rationale, not a quoted
+owner ruling** (no artefact carries the sentence), and every ordering below follows it; §5 states it as Q1–Q5
+so a reader can disagree with the ranking explicitly rather than inherit it.
 
 **Sibling documents:** `STORAGE-ARCHITECTURE.md` owns authority per layer (§2.0/§3) and the cost model
 (§17.4); `CONSUMPTION-MODEL.md` owns metering; **this document owns where each search leg executes, and
@@ -44,15 +46,21 @@ under-reports the vector bytes, while `INFO memory`'s `used_memory` counts them;
 interchangeable and a figure from one is not comparable to a figure from the other). A published FalkorDB breakdown
 puts non-index structure at **41 %**. **Our own share is unmeasured** — the earlier 17 % figure is deleted, the 41 % is a vendor-published breakdown of a *different* population (a graph without our label mix), and **no range we could state would be ours**. It is not an input to anything here.
 
-**⚠️ PROVENANCE — the EXTERNAL figures this document leans on.** Each of the following is a **third-party published measurement, not ours and not reproduced here**: the **41 %** non-index structure; the **0.0015 nDCG@10** spread at 381,559 vectors; the **0-of-10** filtered-ANN result and its **0.975/0.847** relax-order recall; the **8–23 nDCG@10** Postgres-FTS-vs-BM25 gap; the cache studies behind §7's policy table (**62.4 %** naive-pinning miss vs **60.2 %** LRU, and 1-/2-hop closure prefetch raising hit ratio); the **4.9–5.9×** rebuild-peak range; and the **~54 %** hit rate the best trace-aware policy reached for 2-hop expansions. They are cited by RESULT — their specific citations are **owed before this document is quoted as measurement evidence**, and the fix is to attach them, not to drop the claims. **Anything that reads as *our* measurement names its pin inline**, and a figure with neither a citation nor a pin is not evidence yet.
+**⚠️ PROVENANCE — the EXTERNAL figures this document leans on.** Each of the following is a **third-party published measurement, not ours and not reproduced here**: the **41 %** non-index structure; the **0.0015 nDCG@10** spread at 381,559 vectors; the **0-of-10** filtered-ANN result and its **0.975/0.847** relax-order recall; the **8–23 nDCG@10** Postgres-FTS-vs-BM25 gap; the cache studies behind §7's policy table (**62.4 %** naive-pinning miss vs **60.2 %** LRU, and 1-/2-hop closure prefetch raising hit ratio); the **4.9–5.9×** rebuild-peak range; and the **~54 %** hit rate the best trace-aware policy reached for 2-hop expansions; the engine's **no per-graph
+memory cap** and its **`NODE_CREATION_BUFFER` of 16 384 slots** (§7's #1-risk row). They are cited by RESULT — their specific citations are **owed before this document is quoted as measurement evidence**, and the fix is to attach them, not to drop the claims. **Anything that reads as *our* measurement names its pin inline**, and a figure with neither a citation nor a pin is not evidence yet.
 
 ---
 
 ## 1.5 The phases, named — because "beta" was doing two jobs
 
-The owner's two constraints are both in force and they sequence differently:
+The two constraints that sequence the work differ in kind, and only the second is quoted:
 
-> *"we won't launch until all this is done"* · *"then we'll measure and optimise after beta launch"*
+> *"then we'll measure and optimise after beta launch"* (`#4051` comment
+> [`6713312036`](https://github.com/daniel-ospina/tortoise/issues/4051#issuecomment-6713312036))
+
+and, as **this document's** sequencing obligation rather than a quotation: **nothing ships to private-beta until
+the guardrails in §1.5 are in place**, because a window armed without them is a redesign performed in front of
+customers.
 
 So the phases are separate, and each carries its own graph state:
 
@@ -100,7 +108,8 @@ A hot copy can buy only three things:
 
 **"Inside one engine" ≠ "in RAM".** That is why the vector index can move to Postgres without losing the
 walk: the walk stays a graph query in FalkorDB, reading nodes and edges, and only the *similarity
-candidates* come from Postgres. Two systems are already in the path either way.
+candidates* come from Postgres. Two systems **will be** in the path either way — on the read side once the
+vector move lands, and on the write side already.
 
 **The price multiple decides the rest** (§17.4.1; vendor pages verified 2026-10-10): FalkorDB rents
 **provisioned RAM at \$43.75/GB-month on the 8 GB tier (\$73 on the 1 GB STARTUP tier)**, and a graph may occupy
@@ -193,8 +202,10 @@ vector-only** on all three datasets.
 
 **What this does and does not claim about our own scorer.** The FalkorDB leg is RediSearch's **TF-IDF**
 scorer, whose behaviour `tortoise/sparse.py` documents as *"the BM25-style rank behavior the epic's scope
-prescribes"* — so it is the thing the 8–23-point gap is measured against, and this document does **not**
-assert that its ranking is BM25-grade. The repo's own measurement of a lexical leg (`tortoise/bm25.py`,
+prescribes"*. ⚠️ **The 8–23-point gap is measured against a BM25 implementation, and how far our hosted
+`db.idx.fulltext` leg sits from that baseline is *unmeasured* — that is what M3's score distributions are
+for.** So this document does **not** claim our leg *is* the comparator. The repo's own measurement of a lexical
+leg (`tortoise/bm25.py`,
 `#8488`) found **neither rarity nor length** priced into the scoring, measured on the **embedded
 (falkordblite) lane** — not on the hosted `db.idx.fulltext` leg, which is unmeasured here. What the move
 decisively breaks is the **absolute magnitude**: `db.idx.fulltext` returns scores on a scale this product
@@ -276,7 +287,7 @@ makes EP recomputation exact (§6.3).
 | **retain closed components / 2-hop closures** | closure is what makes a walk and an EP recompute correct; measured cache studies show 1-/2-hop closure prefetch raises hit ratio for **every** policy tested |
 | **cap the pin: count, bytes, AND a degree ceiling** | unconditional hub pinning is a *measured* anti-pattern ("they can thrash each other"; naive pinning scored 62.4 % miss vs LRU at 60.2 %). Degree is **U-shaped** — helpful mid-tail, harmful at the head; a single huge hub can eat a 77 MB window |
 | **window-local touch counters + admission control** | recency beats static degree ranking, and adaptive policies beat every static one measured; eviction must be budget-triggered, not per-request, or the cycle "demote a leaf → the next query needs it → re-materialise → evict another leaf" becomes a storm. ⚠️ **The counter is WINDOW-LOCAL cache state — a different artifact from `tortoise/read_ledger.py`.** That ledger is TENANT-WIDE and is explicitly not a product input: `STORAGE-ARCHITECTURE.md` §17.4.6 states that reading it for any product decision *"would be a violation"* (it exists to measure `f`). Wiring it as the eviction signal is exactly the violation it names. |
-| **reserve ≈6× the window in provisioned RAM for rebuild peaks** | **third-party measurement — citation owed (§1)**: re-materialising into FalkorDB peaks at **4.9–5.9× the resting size** — a 77 MB window can transiently demand ~380–455 MB, and the engine has **no per-graph memory cap**. This is the #1 production risk. Do not shard the window into many small graphs (`NODE_CREATION_BUFFER` costs 16 384 slots each) |
+| **reserve ≈6× the window in provisioned RAM for rebuild peaks** | **third-party measurement — citation owed (§1)**: re-materialising into FalkorDB peaks at **4.9–5.9× the resting size** — a 77 MB window can transiently demand ~380–455 MB, and the engine has **no per-graph memory cap** (**vendor-internal claim — citation owed (§1)**). This is the #1 production risk. Do not shard the window into many small graphs (`NODE_CREATION_BUFFER` costs 16 384 slots each **— vendor-internal, citation owed (§1)**) |
 | **a walk materialises its seeds first** | search returns ids from Postgres; a non-resident seed must be written into the graph before traversing — a write on the query path, which is why the headroom above is mandatory |
 | **label what was truncated** | a confidence within 2 hops of a truncated boundary is **refused**; beyond that it may be returned as degraded. ⚠️ **The two reason strings this rule needs are OWED, not shipped** — `degraded: "insufficient_graph"` / `degraded: "truncated_boundary"` appear nowhere in the tree at this head, and `STORAGE-ARCHITECTURE.md` §17.3 records `degraded` as one of four terms whose ONE home, `tortoise/status_vocabulary.py`, forbids a fifth, so the *reason* has to attach to `degraded` rather than mint a term. **Required before private-beta (§1.5).** What DOES exist is the marker's on/off mechanism (`residency.py`, `not-hot`, `TORTOISE_RESIDENCY`) and it is currently OFF |
 
@@ -322,7 +333,7 @@ tenants per 8 GB instance   = 8000 ÷ p                      # this also sets th
 |---|---|---|---|---|---|---|---|---|---|---|
 | **solo** | \$19 | \$5.70 | 103 MB | **≈77 MB** | 78 | \$4.49 | \$1.09 | \$0.13 | **\$5.71** | **30.0 %** |
 | **pro** | \$25 | \$7.50 | 136 MB | ≈102 MB | 59 | \$5.93 | \$1.44 | \$0.13 | **\$7.50** | **30.0 %** |
-| **team** | \$149 | \$44.70 | 820 MB | ≈615 MB | 10 | \$35.87 | \$8.71 | \$0.13 | **\$44.71** | **30.0 %** |
+| **team** | \$149 | \$44.70 | 820 MB | ≈615 MB | 9.76 | \$35.87 | \$8.71 | \$0.13 | **\$44.71** | **30.0 %** |
 | free / anon | \$0 | **\$0** | — | **0** | — | — | — | — | — | funded from paid margin, or no cache |
 
 ⚠️ **The basis, because the two earlier figures in this section do not count the same components.** Every
@@ -330,8 +341,10 @@ cell above is a **TOTAL per tenant** — RAM **plus** the shared project line **
 per-byte cost compared against the whole budget is an error this document has already had to fix. The
 **window target** column is a **budget-derived target, not a measurement**: no windowed graph exists, and the
 window is armed only after M2 (§1.5, §7). And **the 150 MB graph figure those targets scale from is an
-ESTIMATE** from `GRAPH.MEMORY USAGE` — a sampling instrument that under-reports the vector bytes
-(`STORAGE-ARCHITECTURE.md` §2.1) — so it is a dated estimate whose error runs **both ways**, not a bound.
+ESTIMATE** from `GRAPH.MEMORY USAGE` — a sampling instrument — so it is a dated estimate, not a bound. ⚠️ **Its
+known omissions bias ONE way:** `STORAGE-ARCHITECTURE.md` §2.1 records that it is blind to the HNSW `vectorset`
+(measured 8.5×–21.7× under-report on the index share, ~2× on the total) and excludes per-graph/Redis-key
+overhead, so the real graph is larger than measured; only the SAMPLING error itself runs both ways.
 
 **The record allowance is not a trade — it is a rounding choice.** The record is **467× cheaper per byte**
 (\$58.33 ÷ \$0.125 = 466.7), so **1 GB costs \$0.13 — 2.2 % of solo's \$5.70 budget — and displaces only ≈2 MB of

@@ -120,9 +120,11 @@ The cause is not that we store a lot. **It is that we pay for the *total* rather
 > ⛔ **SPLIT 2026-11-07 (owner): one clause adopted, one clause narrowed.**
 >
 > **ADOPTED — "so we don't need to rush with enabling our queries to parse both falkor and postgres":** the dual-store
-> read path is now the design. The **vector index and the embedding payload move to Postgres** (`pgvector`), while
-> traversal, writes and EP stay in FalkorDB, so a query reads seeds from Postgres and walks them in the graph. See
-> `docs/architecture/SEARCH-ARCHITECTURE.md`, which also **resolves V1** (§14.3).
+> read path **in the SEARCH doc's sense** is now the design — the **vector index and the embedding payload move to Postgres**
+> (`pgvector`), while traversal, writes and EP stay in FalkorDB, so a **search** query reads similarity candidates from
+> Postgres and walks them in the graph. ⚠️ **This is NOT `#7970`'s anchored-read cutover, which stays DEFERRED by §2.0**
+> (see the epic's `08-hosted-prerequisites.md` §0.1 and N1): serving record-backed reads from Postgres on the ordinary
+> read path is a separate, still-deferred change. See `docs/architecture/SEARCH-ARCHITECTURE.md`, which also **resolves V1** (§14.3).
 >
 > **NARROWED — "keep the limit in falkor high":** the cache stays **complete through private-beta**, and becomes a **bounded
 > window only after the search doc's M2 measures retrieval quality, windowed vs complete** (`docs/architecture/SEARCH-ARCHITECTURE.md` §1.5, §9 — a DIFFERENT M2 from §15's invoice measurement), sized by the tier's 30 %-of-price cost budget (a complete graph's **total** is \$11.01/tenant — 193 %, and its RAM line **alone** is \$8.75 — against a
@@ -132,7 +134,8 @@ The cause is not that we store a lot. **It is that we pay for the *total* rather
 > **OVERRIDES:** §2.0's *"keep the limit in falkor high"* — the 30 %-of-price storage target (\$5.70 of a \$19 price, strictly tighter than §1's
 > < \$9 total-cost ceiling — `SEARCH-ARCHITECTURE.md` §7 states both) makes a complete cache unaffordable at any density, and the
 > vector index is 467× cheaper per byte on disk *at the 8 GB tier's \$43.75/GB-month, after the 75 % rule, against Postgres disk at \$0.125/GB — the same
-> comparison §17.4 states as 584× (pure RATE) and 778.7× (with that density headroom); 467× is the 8 GB tier's basis*, so the cache is bounded by a
+> comparison §17.4.4 prints for **this** tier as 466.7× (density-adjusted) and 350× (pure rate); the 778.7×/584× pair in §17.4.4's table
+> is the **1 GB STARTUP** tier's basis, not this one*, so the cache is bounded by a
 > budget-derived window only after the search doc's M2 measures retrieval quality (`docs/architecture/SEARCH-ARCHITECTURE.md` §1.5, §9).
 
 **This is the governing decision for this document.** Everything below is either (a) the reasoning behind it, or (b) the work that remains.
