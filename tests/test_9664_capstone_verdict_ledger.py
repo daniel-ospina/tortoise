@@ -808,6 +808,15 @@ def test_a_cmd_target_that_names_no_held_artifact_is_invalid(tmp_path):
         "cmd:uv run ruff check tools/capstone_ledger.py",
         "cmd:uv run ruff format --check tools/capstone_ledger.py",
         "cmd:uv run ruff check tools/",
+        # ⛔ SHELL COMMENTS (#11506 review, cycle 2). An unquoted `#` at a word
+        # boundary ends the command; everything after it is a comment, so a `;` or
+        # `&` inside one must not split. Both of the first two were ACCEPTED on
+        # `origin/main` and REFUSED at the cycle-1 head, where the tail came back
+        # as a prose segment, exit 1, and no uncovered list at all. The third is a
+        # quoted `#` and was never a comment.
+        "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q  # ran; 194 passed",
+        "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q  # see PR #11506 & #11520",
+        "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -k 'issue#123' -q",
     ],
 )
 def test_the_commands_agents_md_hands_a_lane_are_not_false_blocked(tmp_path, command):
@@ -911,6 +920,26 @@ def test_prose_on_EITHER_side_of_a_real_command_is_refused(tmp_path):
     ):
         proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, legitimate])]))
         assert proc.returncode == cl.EXIT_CLEAN, (legitimate, proc.stdout + proc.stderr)
+
+
+def test_a_COMMENT_cannot_smuggle_a_disclaimer(tmp_path):
+    """A comment ends the command, so nothing hidden in one is graded.
+
+    The comment rule must not become a hiding place: `NOT RUN # && uv run pytest
+    …` is the prose `NOT RUN` followed by a comment, and prose before the command
+    is still refused because the segment that reaches the grader is `NOT RUN`.
+    Stated as a test because "the tail is a comment, so it is ignored" is one
+    refactor away from "the tail is a comment, so skip the whole segment".
+
+    A `cmd:` entry that is ALL comment names no command at all and stays refused —
+    the comment rule shortens the line, it does not invent one.
+    """
+    for entry in (
+        "cmd:NOT RUN # && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
+        "cmd:# NOT RUN - I did not run this",
+    ):
+        proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, entry])]))
+        assert proc.returncode == cl.EXIT_INVALID, (entry, proc.stdout + proc.stderr)
 
 
 @pytest.mark.parametrize(

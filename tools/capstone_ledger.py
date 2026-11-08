@@ -383,6 +383,17 @@ def _split_segments(text: str) -> list[str]:
     entire uncovered list. Only a separator the SHELL would treat as one splits
     here.
 
+    ⛔ An unquoted `#` at a WORD BOUNDARY ends the command line (#11506 review,
+    cycle 2). The shell starts a comment there, so nothing after it is a
+    separator — but the scanner used to keep splitting, so a legitimate record
+    carrying a comment was torn into prose segments and REFUSED: measured,
+    `… -q  # ran; 194 passed` came back as the segment `194 passed`, exit 1, and NO
+    uncovered list. `origin/main` ACCEPTED both of this class's spellings, so the
+    every-segment rule had introduced another false block, and the per-segment
+    whitespace-preceded-hash retry further down could never undo a split already
+    taken here. `a#b` is NOT a comment (the `#` must follow whitespace, start, or a
+    separator), and a quoted `#` is not either — `-k 'issue#123'` still parses.
+
     A backslash escapes only inside DOUBLE quotes, and it must take the escaped
     character with it — otherwise `bash -c "echo \\" && echo x"` ends the quote
     early and the command is split at the wrong place. (Ported from the peer lane's
@@ -406,6 +417,13 @@ def _split_segments(text: str) -> list[str]:
         elif char in "\"'`":
             quote = char
             current.append(char)
+        elif char == "#" and (index == 0 or text[index - 1] in " \t\n;&|"):
+            # A shell COMMENT starts here: the rest of the line is not a command,
+            # so no separator after it may split. Breaking (rather than appending
+            # the tail) keeps the comment out of the returned segments, which is
+            # what the per-segment `\s+#` retry could not do once the split had
+            # already happened (#11506 review, cycle 2).
+            break
         elif any(text.startswith(op, index) for op in _TWO_CHAR_SEPARATORS):
             segments.append("".join(current))
             current = []
