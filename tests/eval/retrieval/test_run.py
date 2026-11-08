@@ -135,9 +135,9 @@ def test_model_flag_injects_before_query_vecs_and_records_provenance(tmp_path):
         calls.append("inject")
         return _fake_state(name)
 
-    def _spy_query_vecs(oracle, queries, seed):
+    def _spy_query_vecs(oracle, queries, seed, **kwargs):
         calls.append("query_vecs")
-        return real_query_vecs(oracle, queries, seed)
+        return real_query_vecs(oracle, queries, seed, **kwargs)
 
     with patch.object(run_module, "inject_model", side_effect=_fake_inject), \
          patch.object(run_module, "_query_vecs", side_effect=_spy_query_vecs), \
@@ -387,3 +387,165 @@ def test_benchmark_query_prompt_without_model_is_argparse_error(capsys):
                     "--quiet"])
     assert exc.value.code == 2
     assert "--query-prompt requires --model" in capsys.readouterr().err
+
+
+# ── the ONE-SPACE invariant (the vector/fused arm's soundness) ─────────────
+#
+# Measured 2026-11-08 on unmodified code, canonical dev env
+# (`uv sync --extra embeddings`): the query side encoded with the ambient bge
+# model while the seeded corpus kept the oracle's SYNTHETIC topic-centroid
+# embeddings — two different spaces. vector nDCG@10 collapsed 0.855 -> 0.108,
+# fused 0.835 -> 0.462, and the pre-registered gate reported BLOCK
+# (ΔnDCG -37.3 points) on a tree nobody had changed. The tests below pin the
+# three halves of the fix: the space is chosen from the CORPUS, the corpus is
+# re-embedded when the space is the model's, and the gate refuses a
+# cross-space comparison instead of calling it a regression.
+
+class _StubModel:
+    """Deterministic 384-d stand-in embedder — no download, no HF cache."""
+
+    def __init__(self, calls: list | None = None):
+        self.calls = calls if calls is not None else []
+
+    def encode(self, texts):
+        import hashlib
+        import math
+
+        from tortoise.embeddings import EMBEDDING_DIM
+        out = []
+        for t in texts:
+            self.calls.append(t)
+            raw = hashlib.sha256(t.encode()).digest()
+            vec = [raw[i % len(raw)] / 255.0 + 1e-6 for i in range(EMBEDDING_DIM)]
+            norm = math.sqrt(sum(x * x for x in vec)) or 1.0
+            out.append([x / norm for x in vec])
+        return out
+
+
+def test_gate_refuses_a_cross_space_comparison():
+    """A model-space run vs a synthetic-space baseline measures the
+    INSTRUMENT, not the change — INCOMPARABLE, never a BLOCK."""
+    import random
+
+    per_query = {"q1": {"fused": {"ndcg@10": 0.90, "p@5": 0.90}}}
+    baseline = {"q1": {"fused": {"ndcg@10": 0.10, "p@5": 0.10}}}
+
+    cross = run_module._gate_vs_baseline(
+        per_query, baseline, random.Random(0),
+        space=run_module.EMBED_SPACE_MODEL,
+        baseline_space=run_module.EMBED_SPACE_SYNTHETIC,
+    )
+    assert cross["verdict"] == "INCOMPARABLE"
+    assert "re-baseline" in cross["reason"].lower()
+    assert cross["space"] == run_module.EMBED_SPACE_MODEL
+    assert cross["baseline_space"] == run_module.EMBED_SPACE_SYNTHETIC
+
+    same = run_module._gate_vs_baseline(
+        per_query, baseline, random.Random(0),
+        space=run_module.EMBED_SPACE_MODEL,
+        baseline_space=run_module.EMBED_SPACE_MODEL,
+    )
+    assert same["verdict"] == "SHIP", \
+        "same-space runs must reach the pre-registered gate, not a refusal"
+
+    # no space information at all (legacy callers) keeps the old behaviour
+    blind = run_module._gate_vs_baseline(per_query, baseline, random.Random(0))
+    assert blind["verdict"] == "SHIP"
+
+
+def test_baseline_embedding_space_reads_legacy_baselines():
+    """Schema-1 baselines predate the field; their provenance still answers."""
+    legacy = {"schema_version": 1, "provenance": {"timestamp_utc": "2026-08-17"}}
+    assert (run_module._baseline_embedding_space(legacy)
+            == run_module.EMBED_SPACE_SYNTHETIC), \
+        "no embedding_model recorded == no embedder == the synthetic space"
+    assert (run_module._baseline_embedding_space(
+        {"provenance": {"embedding_model": "unavailable"}})
+        == run_module.EMBED_SPACE_SYNTHETIC)
+    assert (run_module._baseline_embedding_space(
+        {"provenance": {"embedding_model": "BAAI/bge-small-en-v1.5"}})
+        == run_module.EMBED_SPACE_MODEL)
+    declared = {"provenance": {"corpus_embedding_space": "model",
+                               "embedding_model": "unavailable"}}
+    assert run_module._baseline_embedding_space(declared) == run_module.EMBED_SPACE_MODEL, \
+        "an explicit declaration wins over the derived legacy reading"
+
+
+def test_query_vecs_never_borrow_the_model_in_the_synthetic_space():
+    """The regression itself: a synthetic corpus must NOT get model-encoded
+    queries, however loadable the ambient model is."""
+    oracle = run_module.build_topic_oracle(42)
+    queries = [{"id": "q001", "query": "pricing tiers enterprise"}]
+    stub = _StubModel()
+
+    with patch.object(run_module, "_loaded_embedding_model", return_value=stub):
+        vecs, use_model = run_module._query_vecs(
+            oracle, queries, 42, space=run_module.EMBED_SPACE_SYNTHETIC,
+        )
+
+    assert use_model is False
+    assert stub.calls == [], "model.encode must never run in the synthetic space"
+    assert vecs["q001"] == oracle.query_vector_for("pricing tiers enterprise", 42)
+
+
+def test_query_vecs_use_the_model_in_the_model_space():
+    oracle = run_module.build_topic_oracle(42)
+    queries = [{"id": "q001", "query": "pricing tiers enterprise"}]
+    stub = _StubModel()
+
+    with patch.object(run_module, "_loaded_embedding_model", return_value=stub):
+        vecs, use_model = run_module._query_vecs(
+            oracle, queries, 42, space=run_module.EMBED_SPACE_MODEL,
+        )
+
+    assert use_model is True
+    assert stub.calls == ["pricing tiers enterprise"]
+    assert vecs["q001"] == stub.encode(["pricing tiers enterprise"])[0]
+
+
+def test_corpus_embedding_space_follows_the_corpus_not_the_environment():
+    with patch.object(run_module, "_loaded_embedding_model", return_value=None):
+        assert (run_module._corpus_embedding_space(seeded_synthetic=True)[0]
+                == run_module.EMBED_SPACE_SYNTHETIC)
+        # --no-seed-corpus: the graph's vectors came from the product, so with
+        # no model the space cannot be established at all (never silently
+        # assumed synthetic — that would grade the real graph against centroids)
+        assert (run_module._corpus_embedding_space(seeded_synthetic=False)[0]
+                == run_module.EMBED_SPACE_UNKNOWN)
+    stub = _StubModel()
+    with patch.object(run_module, "_loaded_embedding_model", return_value=stub):
+        assert (run_module._corpus_embedding_space(seeded_synthetic=True)
+                == (run_module.EMBED_SPACE_MODEL, stub))
+
+
+@pytest.mark.skipif(not _has_embedded(), reason="embedded FalkorDBLite unavailable")
+def test_run_reembeds_the_seeded_corpus_into_the_query_space(tmp_path):
+    """Whole-run: model space ⇒ the corpus is re-encoded, and provenance
+    states both facts (the re-embed count and the space)."""
+    stub = _StubModel()
+    with patch.object(run_module, "_loaded_embedding_model", return_value=stub):
+        report = run_eval(_args(str(tmp_path / "eval-space.db"), corpus_size=60))
+
+    prov = report["provenance"]
+    assert prov["corpus_embedding_space"] == run_module.EMBED_SPACE_MODEL
+    assert prov["synthetic_query_vectors"] is False
+    assert prov["corpus_reembedded"] == report["seeded_points"] > 0, \
+        "every seeded point must be re-encoded, or the corpus stays in the old space"
+    assert stub.calls, "the model must actually encode the corpus"
+    # the corpus fingerprint must be taken AFTER the re-embed (it hashes the
+    # stored vectors), or provenance would describe a corpus nobody measured
+    assert prov["corpus_fingerprint"]["embeddings_hash"], \
+        "embeddings_hash must be present so the space change is detectable"
+
+
+@pytest.mark.skipif(not _has_embedded(), reason="embedded FalkorDBLite unavailable")
+def test_run_without_a_model_stays_in_the_synthetic_space(tmp_path):
+    """No model ⇒ documented degraded fallback: synthetic queries AND the
+    seeded centroid corpus — one space, nothing re-encoded."""
+    with patch.object(run_module, "_loaded_embedding_model", return_value=None):
+        report = run_eval(_args(str(tmp_path / "eval-synth.db"), corpus_size=60))
+
+    prov = report["provenance"]
+    assert prov["corpus_embedding_space"] == run_module.EMBED_SPACE_SYNTHETIC
+    assert prov["synthetic_query_vectors"] is True
+    assert prov["corpus_reembedded"] == 0

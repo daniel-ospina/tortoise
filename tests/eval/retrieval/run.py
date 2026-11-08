@@ -156,6 +156,8 @@ def _capture_provenance(proj, is_embedded: bool, extras: dict) -> dict:
         "limit": extras.get("limit", DEFAULT_LIMIT),
         "elevated_timeout_ms": ELEVATED_TIMEOUT_MS,
         "synthetic_query_vectors": extras.get("synthetic_query_vectors", False),
+        "corpus_embedding_space": extras.get("corpus_embedding_space", EMBED_SPACE_UNKNOWN),
+        "corpus_reembedded": extras.get("corpus_reembedded", 0),
         "judge_labels": extras.get("judge_labels", "none"),
     }
     if is_embedded:
@@ -431,34 +433,124 @@ def _inject_probe_model(args) -> None:
     inject_model(model, query_prompt=getattr(args, "query_prompt", None))
 
 
-def _query_vecs(oracle, queries, seed: int) -> dict[str, list[float]]:
-    """Precompute one query vector per query (outside the measured window).
+EMBED_SPACE_MODEL = "model"
+EMBED_SPACE_SYNTHETIC = "oracle-synthetic"
+EMBED_SPACE_UNKNOWN = "unknown"
 
-    Embedded mode: synthetic semantic stand-ins derived from the oracle
-    topic structure (see TopicOracle.query_vector_for). Docker mode: the
-    real embedding model when available (tortoise.embeddings.EmbeddingModel),
-    else the same synthetic stand-in (flagged in provenance). When --model
-    was passed, _inject_probe_model already loaded the candidate, so
-    EmbeddingModel.get() returns the candidate here.
-    """
-    use_model = False
+
+def _loaded_embedding_model():
+    """The loaded embedder singleton, or None (no `embeddings` extra / no cache)."""
     try:
         from tortoise.embeddings import EmbeddingModel
-        use_model = EmbeddingModel.get() is not None
     except Exception:
-        use_model = False
+        return None
+    try:
+        return EmbeddingModel.get()
+    except Exception:  # noqa: BLE001 — an unloadable model is "no model"
+        return None
+
+
+def _corpus_embedding_space(*, seeded_synthetic: bool):
+    """Decide ONCE per run the ONE vector space corpus and queries share.
+
+    The seeded corpus carries the oracle's SYNTHETIC topic-centroid embeddings
+    (`benchmarks/synthetic_corpus.py`, ``ORACLE_EMBED_ALPHA``). Encoding the
+    QUERY side with a real model compares bge text vectors against centroid
+    vectors — two different spaces — so the vector arm stops measuring
+    retrieval at all. That is not hypothetical: in the canonical dev env
+    (``uv sync --extra embeddings``) the ambient model made the vector arm
+    collapse from nDCG@10 0.855 to 0.108 and drove the pre-registered gate to
+    **BLOCK on an unmodified tree** (measured 2026-11-08), which makes the
+    loop's quality gate unable to pass anything.
+
+    So the space is chosen from the CORPUS side, never from ambient model
+    availability:
+
+    * model loaded + this run seeded the synthetic corpus → re-embed the
+      corpus with that same model; both sides are ``model``.
+    * no model → both sides are the oracle's ``oracle-synthetic`` space (the
+      documented degraded fallback).
+    * ``--no-seed-corpus`` → the graph's embeddings were written by the
+      PRODUCT, so only ``model`` can serve it; with no model the space cannot
+      be established (``unknown``) and the gate must refuse to compare.
+    """
+    model = _loaded_embedding_model()
+    if model is not None:
+        return EMBED_SPACE_MODEL, model
+    if seeded_synthetic:
+        return EMBED_SPACE_SYNTHETIC, None
+    return EMBED_SPACE_UNKNOWN, None
+
+
+def _reembed_corpus(graph, points: list[dict], model, *, batch_size: int = 200) -> int:
+    """Re-encode the seeded corpus into ``model``'s space (batched, vecf32).
+
+    Mirrors ``seed_corpus``'s write path exactly (clear-then-set guard +
+    ``vecf32``) so the stored vectors keep the production shape on embedded
+    and docker alike. Labels are untouched — the oracle grades from HIDDEN
+    topics, never from embeddings, so re-encoding cannot move a relevance
+    judgment. Returns points re-encoded.
+    """
+    from tortoise.vector_write import (  # noqa: I001
+        clear_then_set_prefix, set_embedding_clause,
+    )
+    written = 0
+    for start in range(0, len(points), batch_size):
+        batch = points[start:start + batch_size]
+        encoded = model.encode([p["content"] for p in batch])
+        rows = graph.query(
+            "UNWIND $batch AS row "
+            "MERGE (n:Point {id: row.id}) "
+            + clear_then_set_prefix("n", "row.embedding")
+            + "SET "
+            + set_embedding_clause("n", "row.embedding", preserve_on_null=False)
+            + " RETURN count(n) AS n",
+            params={"batch": [
+                {"id": p["id"], "embedding": [float(x) for x in vec]}
+                for p, vec in zip(batch, encoded)
+            ]},
+        ).result_set
+        if rows:
+            written += int(rows[0][0])
+    return written
+
+
+def _query_vecs(oracle, queries, seed: int, space: str | None = None):
+    """Precompute one query vector per query, in the CORPUS's space.
+
+    ``space`` is the single space ``_corpus_embedding_space`` resolved for this
+    run — the query side must never pick a space of its own, or the arm
+    compares two spaces (the defect below). ``None`` resolves it ambiently for
+    callers that do not own a corpus decision (``task0_probe.py``, test spies).
+
+    When ``--model`` was passed, ``_inject_probe_model`` already loaded the
+    candidate, so the loaded singleton IS the candidate.
+    """
+    if space is None:
+        space, _ = _corpus_embedding_space(seeded_synthetic=True)
+    if space == EMBED_SPACE_MODEL:
+        model = _loaded_embedding_model()
+        if model is None:
+            raise RuntimeError(
+                "embedding space is 'model' but no model is loaded — the "
+                "corpus would be model-embedded and the queries synthetic"
+            )
+    else:
+        model = None
     vecs: dict[str, list[float]] = {}
     for q in queries:
-        text = q["query"]
-        if use_model:
-            from tortoise.embeddings import EmbeddingModel
+        if model is not None:
             try:
-                vecs[q["id"]] = EmbeddingModel.get().encode([text])[0].tolist()
+                vecs[q["id"]] = [float(x) for x in model.encode([q["query"]])[0]]
                 continue
             except Exception:
-                pass
-        vecs[q["id"]] = oracle.query_vector_for(text, seed)
-    return vecs, use_model
+                if vecs:
+                    # a mid-run failure would leave the arm half in each space
+                    raise
+                # first query failed: degrade the WHOLE arm, never per-query
+                model = None
+        vecs[q["id"]] = oracle.query_vector_for(q["query"], seed)
+    return vecs, model is not None
 
 
 # ── Aggregation ─────────────────────────────────────────────────────────────
@@ -520,9 +612,51 @@ def _rerank_verdict(per_query, rng) -> dict | None:
     return out
 
 
-def _gate_vs_baseline(per_query, baseline_per_query, rng) -> dict | None:
+def _baseline_embedding_space(base: dict) -> str:
+    """The space a baseline measured, derived when the field predates it.
+
+    Schema-1 baselines carry no ``corpus_embedding_space``; their
+    ``embedding_model`` of ``unavailable``/absent is the record that the run had
+    no embedder, i.e. the synthetic space.
+    """
+    prov = base.get("provenance") or {}
+    declared = prov.get("corpus_embedding_space")
+    if declared:
+        return str(declared)
+    model = prov.get("embedding_model")
+    if model in (None, "", "unavailable"):
+        return EMBED_SPACE_SYNTHETIC
+    return EMBED_SPACE_MODEL
+
+
+def _gate_vs_baseline(
+    per_query, baseline_per_query, rng,
+    *, space: str | None = None, baseline_space: str | None = None,
+) -> dict | None:
+    """The pre-registered SHIP/WARN/BLOCK gate, refusing cross-space compares.
+
+    Paired deltas are only meaningful when both runs measured the same vector
+    space: a model-space run against a synthetic-space baseline differs by the
+    instrument, not by the change under test, and the paired CI then reports a
+    regression that no code produced (measured 2026-11-08: BLOCK, ΔnDCG −37.3
+    points, on an unmodified tree). Cross-space returns ``INCOMPARABLE`` — a
+    refusal that names the remedy (re-baseline in this space), never a BLOCK.
+    """
     if not baseline_per_query:
         return None
+    if space is not None and baseline_space is not None and space != baseline_space:
+        return {
+            "verdict": "INCOMPARABLE",
+            "reason": (
+                f"run measured the '{space}' embedding space but the baseline "
+                f"measured '{baseline_space}' — paired deltas compare the "
+                f"instrument, not the change. Re-baseline in this space "
+                f"(commit a run of unmodified code with the same "
+                f"corpus_embedding_space) before gating."
+            ),
+            "space": space,
+            "baseline_space": baseline_space,
+        }
     ndcg_deltas = []
     p5_deltas = []
     for qid in sorted(per_query):
@@ -632,7 +766,14 @@ def _run_with_sdk(args, sdk) -> dict:
         authored_set = load_authored_queries()
 
     all_queries = oracle_set["queries"] + authored_set["queries"]
-    vecs, use_model = _query_vecs(oracle, all_queries, args.seed)
+    space, model = _corpus_embedding_space(seeded_synthetic=not args.no_seed_corpus)
+    reembedded = 0
+    if space == EMBED_SPACE_MODEL and not args.no_seed_corpus:
+        reembedded = _reembed_corpus(proj.g, points, model)
+        if not args.quiet:
+            print(f"[corpus] re-embedded {reembedded} points in the "
+                  f"'{space}' space (queries and points share one space)")
+    vecs, use_model = _query_vecs(oracle, all_queries, args.seed, space=space)
     tfidf_points = _tfidf_snapshot(proj.g)
     # #1348: ACTIVE strategies tuple — fused_rerank added only when the arm is
     # ON (default runs stay shape-identical to the v1 baseline). k_sweep is a
@@ -739,6 +880,7 @@ def _run_with_sdk(args, sdk) -> dict:
                   f"{SCHEMA_VERSION} — gating anyway (older baseline always gates)")
         gate = _gate_vs_baseline(
             oracle_per_query, base.get("per_query", {}), rng,
+            space=space, baseline_space=_baseline_embedding_space(base),
         )
 
     # 6. Authored pool emission (top-50/strategy/query, deduped per query).
@@ -823,6 +965,8 @@ def _run_with_sdk(args, sdk) -> dict:
             "graph_ranker_arm": graph_ranker_arm,
             "corpus_variant": getattr(args, "corpus_variant", "plain"),
             "synthetic_query_vectors": not use_model,
+            "corpus_embedding_space": space,
+            "corpus_reembedded": reembedded,
             "embedding_model": _resolved_embedding_model(
                 use_model, getattr(args, "model", None) is not None),
             "judge_labels": args.judge_labels or "none",
@@ -838,10 +982,19 @@ def _run_with_sdk(args, sdk) -> dict:
             "On embedded, fused RRF is NOT vector alone — per-query data shows "
             "FTS populated 40/100 queries and fused != vector on 17/100 "
             "(fused-vs-vector nDCG@10 delta CI -3.25..-0.83, excludes 0).",
-            "Query vectors on embedded are SYNTHETIC SEMANTIC stand-ins "
-            "(topic-centroid sums from the oracle structure + seeded noise) "
-            "because no embedding model is loaded — same information a real "
-            "embedding model encodes (token semantics), not oracle labels.",
+            "Embedding space (provenance.corpus_embedding_space): corpus and "
+            "query vectors are ALWAYS produced in ONE space. No model loaded "
+            "→ 'oracle-synthetic' (topic-centroid sums from the oracle "
+            "structure + seeded noise; the documented degraded fallback). "
+            "Model loaded → 'model', and the seeded corpus is RE-EMBEDDED "
+            "with that same model (provenance.corpus_reembedded) so the arm "
+            "is real semantic retrieval. Never one side each: that compared "
+            "bge text vectors against centroid vectors and reported a "
+            "37-point nDCG 'regression' on unmodified code.",
+            "The gate REFUSES a cross-space comparison (verdict "
+            "INCOMPARABLE) — paired deltas across two embedding spaces "
+            "measure the instrument, not the change. Baseline files carry "
+            "their own space; re-baseline in the space you measure.",
             "R@10 uses the oracle denominator = the grade-2 target set "
             "(~77-84 points at corpus 2000/24 topics) — the ceiling is "
             "10/|target| (~12%), so compare R@10 RELATIVELY across "
