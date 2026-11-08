@@ -6,7 +6,7 @@ date: 2026-08-13
 status: scoped
 method: issue-scoping v5.1 — double diamond + integrated verification gates (5 problem-verify cycles, 5 solution-verify cycles, coherence check)
 domain: capability
-doc_status: live
+doc_status: superseded
 subjects.team: epistemic-team
 created: 2026-08-13
 ---
@@ -14,7 +14,7 @@ created: 2026-08-13
 # Scope — Cross-Encoder Reranking / Two-Stage Retrieval (#317)
 
 **Issue:** daniel-ospina/tortoise#317 — "feat: cross-encoder reranking — two-stage retrieval"
-**Status:** BLOCKED/GATED on #316 benchmark (2026-08-13 triage). This scope defines the decision gate, the conditional implementation slice, and the close criteria.
+**Status (2026-08-13, historical — superseded 2026-09-10; read the Document status note below):** BLOCKED/GATED on #316 benchmark (2026-08-13 triage). This scope defines the decision gate, the conditional implementation slice, and the close criteria.
 **Method:** issue-scoping v5.1 full double diamond — problem-diverge (2 agents) → problem-converge (2 agents, 82/82) → Phase 1.5 external research (6 queries post-dedup, persisted) → problem-verify (5 cycles) → Codebase Explorer → solution-diverge (3 approaches) → solution-converge → solution-verify (5 cycles) → coherence check → wiring check.
 **Research brief:** `docs/research/2026-08-13-317-cross-encoder-reranking.md` (5 source-tagged findings, persisted via `_research_append.sh`).
 **Gate-locked problem definition:** `/tmp/317-gate-definition-v5.md` (authoritative; supersession clauses for routing>0 noted inline).
@@ -23,7 +23,7 @@ created: 2026-08-13
 
 **Encryption carve-out (#1165).** The reranker consumes point **content** as input (the CE-input truncation contract, Task 6 below), so for a client-side-encrypted team (ADR-008, `encryptionVersion>=1`) the server holds ciphertext and a rerank over it is meaningless. **Pre-registered v1 disposition: skip rerank for `encryptionVersion>=1` teams with the result-parity impact disclosed**; alternatives are a client-side rerank or a route through the #265 MCP encrypt-proxy. The controlling text is `docs/scoping/2026-08-13-265-content-encryption-scoping.md:128`, restated in that doc's wiring table (`:203`); the runtime mode would be pinned in `tortoise/rerank.py`'s degrade contract, which owns the one scorer that shipped.
 
-**Precondition state (measured 2026-11-08):** not live. ADR-008 is **Accepted, implementation gated post-GA**, and #265 closed `not_planned` (2026-08-13), so there are **0** `encryptionVersion` symbols in `tortoise/ tools/ tests/ config/` — all six hits in the tree are under `docs/`. No code change follows from this note today: it records the disposition where a #265 revival reads it, which is the note #265's scoping asked for (`carve-out note filed (extra issue E2 = #1165)`, `265` scoping:128).
+**Precondition state (measured 2026-11-08):** not live. ADR-008 is **Accepted, implementation gated post-GA**, and #265 closed `not_planned` (2026-08-13), so there are **0** `encryptionVersion` occurrences in `tortoise/ tools/ tests/ config/` — every occurrence in the tree is under `docs/` (8 files, 28 occurrences). No code change follows from this note today: it records the disposition where a #265 revival reads it, which is the note #265's scoping asked for (`carve-out note filed (extra issue E2 = #1165)`, `265` scoping:128).
 
 **Why skip is the v1 default (external check, 2026-11-08):** the converged practice for encrypted retrieval is to reduce the candidate set cheaply on the server and rerank the small list **on the client** — Spruce (arXiv 2609.03376) has the client reconstruct secret-shared candidates and rerank locally — because a cross-encoder is only practical over a top-20→top-5 window (Microsoft Learn, *Implement Cross-Encoder Reranking*). A server holding ciphertext has nothing to score, and a client rerank needs content the v1 encrypt path does not carry, so a disclosed skip is the honest v1 arm rather than a silent recall loss.
 
