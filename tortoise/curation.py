@@ -886,14 +886,13 @@ class IngestWriter:
                     return {"written": written, "stopped": "off-switch engaged"}
                 batch = items[i:i + self._batch]
                 started = list(batch)
-                if section == "sources":
-                    # The ledger key is OURS: `:Source` accepts only declared props
-                    # (#3998 drops the rest, with a denial log per row).
-                    batch = [{k: v for k, v in p.items() if k != "migrationKey"} for p in batch]
-                # …so the accounting keys are captured BEFORE the strip: reading them
-                # back off `started` after the target accepted the write would turn a
-                # real success into a crash (a caller may legally pass a source item
-                # with no `migrationKey`, which is what `plan.bundle()` emits).
+                # The accounting keys come from the PRE-strip list: reading them back
+                # off the item after the target accepted the write would turn a real
+                # success into a crash (a caller may legally pass a source item with no
+                # `migrationKey`, which is what `plan.bundle()` emits). The strip that
+                # reaches the wire lives in `_call_one`, which is why nothing here
+                # rewrites `batch` — a dead copy there read as the live strip and invited
+                # exactly that regression.
                 keys = [str(p.get("migrationKey") or _fallback_key(section, p)) for p in started]
                 self._call_one(target_graph, section, started, written)
                 written.extend(keys)

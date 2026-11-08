@@ -25,7 +25,7 @@ Two measured facts govern the risk:
   a migration here is moving the only copy of a tenant's data.
 
 Code: `tortoise/curation.py` (classification + guards + additive writer) and
-`tools/curate_graph.py` (the CLI). Tests: `tests/test_curation_11469.py` (101 tests).
+`tools/curate_graph.py` (the CLI). Tests: `tests/test_curation_11469.py` (103 tests).
 
 ## The inventory — measured 2026-11-08 against `live-v4`
 
@@ -148,8 +148,9 @@ Environment: `TORTOISE_MCP_URL` + `TORTOISE_MCP_API_KEY`; `TORTOISE_CURATE_OFF=1
 
 ⚠️ **Known operational limitation, measured 2026-11-08:** `tortoise.mcp_client.call_tool` opens a
 fresh HTTP session per call (by design — the credential is resolved per request, #10605), so a full
-`plan` read is ~32 sequential calls and the hosted endpoint can answer `429 Too Many Requests`
-part-way. The run then fails loudly rather than reporting a partial census (the reader raises), and
+`plan` read is ~32 page reads for the 15,842 points — and **~68 calls with the default
+verification pass** (the second full walk plus the two page re-reads), which is the number to
+schedule against: the hosted endpoint can answer `429 Too Many Requests` part-way. The run then fails loudly rather than reporting a partial census (the reader raises), and
 nothing is written — but a production run should be scheduled rather than fired in parallel with a
 busy fleet.
 

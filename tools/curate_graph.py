@@ -206,7 +206,10 @@ class MCPReader:
                         "the totals); refusing a census that may hold a tombstone and omit a row")
         if verify:
             second = tuple(self._fingerprint_walk(page=page))
-            first = tuple(f"{r.get('id') or ''}\x00{r.get('content') or ''}" for r in rows)
+            # `rows` are C.Row dataclasses, not dicts — reading them with `.get`
+            # raised AttributeError on EVERY successful walk, so the second pass
+            # aborted every run instead of comparing anything.
+            first = tuple(f"{r.node_id}\x00{r.content}" for r in rows)
             if second != first:
                 raise RuntimeError(
                     "a second read of the same graph returned a DIFFERENT row sequence — the "

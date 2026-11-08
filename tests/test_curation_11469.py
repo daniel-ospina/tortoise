@@ -1343,3 +1343,37 @@ def test_a_source_is_written_once_because_the_ledger_key_is_the_same_one(tmp_pat
     assert (second.written, second.skipped_known, second.pending) == (0, 1, 0), \
         (second.written, second.skipped_known, second.pending)
     assert len(sent) == 1, "the source must be sent exactly once across two applies"
+
+
+def test_a_stable_walk_with_verification_on_succeeds():
+    """Round-21 BLOCKING: the verification pass read `C.Row` objects with `.get`,
+    so with the DEFAULT flags every walk raised AttributeError — and no test walked a
+    stable surface with verification on."""
+    mod = _tool_module()
+    pop = [{"id": f"r{i}", "kind": "decision", "content": f"c{i}"} for i in range(6)]
+
+    def call(_name, args):
+        off = int(args.get("offset") or 0)
+        lim = int(args.get("limit") or 2)
+        return {"result": pop[off:off + lim], "total": len(pop)}
+    rows, total = mod.MCPReader(call, None).read_points(page=2)   # verify=True default
+    assert len(rows) == 6 and total == 6
+
+
+def test_a_content_change_only_the_second_pass_can_see_is_refused():
+    """A row UPDATED in place (same ids, same total, nothing re-served, first and last
+    pages intact) is visible only to the full second pass."""
+    mod = _tool_module()
+    pop = [{"id": f"r{i}", "kind": "decision", "content": f"c{i}"} for i in range(6)]
+    state = {"calls": 0}
+
+    def call(_name, args):
+        state["calls"] += 1
+        if state["calls"] == 7:      # during the SECOND pass, rewrite a middle row
+            pop[2]["content"] = "rewritten"
+        off = int(args.get("offset") or 0)
+        lim = int(args.get("limit") or 2)
+        return {"result": pop[off:off + lim], "total": len(pop)}
+
+    with pytest.raises(RuntimeError, match=r"DIFFERENT row sequence|second read"):
+        mod.MCPReader(call, None).read_points(page=2)
