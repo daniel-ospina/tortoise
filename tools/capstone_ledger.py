@@ -412,11 +412,33 @@ _ENV_ARRAY_ELEMENT: Final = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\[[^\]]+\]$")
 #: CLEAN. That is a false PASS, which is worse than a false block.
 _SET_OPTION_NAMES: Final[frozenset[str]] = frozenset(
     {
-        "allexport", "braceexpand", "emacs", "errexit", "errtrace", "functrace",
-        "hashall", "histexpand", "history", "ignoreeof", "interactive-comments",
-        "keyword", "monitor", "noclobber", "noexec", "noglob", "nolog", "notify",
-        "nounset", "onecmd", "physical", "pipefail", "posix", "privileged",
-        "verbose", "vi", "xtrace",
+        "allexport",
+        "braceexpand",
+        "emacs",
+        "errexit",
+        "errtrace",
+        "functrace",
+        "hashall",
+        "histexpand",
+        "history",
+        "ignoreeof",
+        "interactive-comments",
+        "keyword",
+        "monitor",
+        "noclobber",
+        "noexec",
+        "noglob",
+        "nolog",
+        "notify",
+        "nounset",
+        "onecmd",
+        "physical",
+        "pipefail",
+        "posix",
+        "privileged",
+        "verbose",
+        "vi",
+        "xtrace",
     }
 )
 
@@ -472,8 +494,21 @@ def _fails_before_a_chain(head: str, args: list[str]) -> bool:
 
     So a control builtin is TERMINATING unless it can succeed at script level,
     which for `shift` means an explicit `0` operand and for `break`/`continue` is
-    always. DECLARED RESIDUAL (#11520): `set -o <invalid-option>` fails the same
-    way and is NOT covered here — refusing it needs the closed set of bash option
+    always.
+
+    ⛔ THE GUARD IS SEPARATOR-BLIND, AND THAT IS A DECLARED FALSE BLOCK (#11520).
+    Only a `&&` short-circuits a failure: measured, `bash -c 'return 0 ; echo RAN'`
+    and `bash -c 'return 0 || echo RAN'` both print RAN, rc 0. `_split_segments`
+    discards the operator it split on, so this predicate cannot see which one
+    follows, and a `;`/`||` record bash really executes with is refused too (exit 1
+    prints no report, so it loses that row's uncovered list). Telling them apart
+    needs the splitter to hand the operator through; the refusal is kept on the
+    conservative side until it does, because a fail-OPEN here is the P1 this guard
+    was written for. The message therefore names the CONDITION, not a `&&` the
+    record may not contain.
+
+    DECLARED RESIDUAL (#11520 root 6): `set -o <invalid-option>` fails the same way
+    and is NOT covered here — refusing it needs the closed set of bash option
     NAMES, which is flag-VALUE knowledge this module deliberately does not carry.
     """
     if head in {"exit", "return"}:
@@ -1400,32 +1435,42 @@ def _evidence_is_real(
                 # ⛔ THE ATTACHED-SCRIPT ARM RUNS **FIRST**, BEFORE the whitespace
                 # deferral (review cycle 5, P1). `-c'NOT RUN - see <path>'` is ONE
                 # shlex token that CONTAINS whitespace, so the prose test below
-                # matched it and `continue`d — the grading at the end of this block
-                # was never reached for exactly the bodies that carry a sentence.
-                # Measured at the previous head, `cmd:bash -c'NOT RUN - see
-                # tools/capstone_ledger.py' tests/…py` reported `verified: 1
-                # uncovered: 0` / CLEAN / exit 0, while the SAME value WITHOUT the
-                # trailing path was refused: the deferred prose was then CLEARED by
-                # the artifact token. Bash proves the body cannot run at all
-                # (`bash -c "bash -c'NOT RUN - see x' y"` → `-N: invalid option`,
-                # rc 2). Ordering is the whole fix: a body behind a script flag is a
-                # SCRIPT whatever characters it contains.
+                # matched it and `continue`d — the arm was never reached for exactly
+                # the bodies that carry a sentence. Measured at the previous head,
+                # `cmd:bash -c'NOT RUN - see tools/capstone_ledger.py' tests/…py`
+                # reported `verified: 1 uncovered: 0` / CLEAN / exit 0, while the
+                # SAME value WITHOUT the trailing path was refused: the deferred
+                # prose was then CLEARED by the artifact token.
                 #
-                # ⛔ `-cBODY` / `--eval=BODY` is ONE shlex token, so
-                # `token in _SCRIPT_FLAGS` was False and the body was skipped as a
-                # plain flag — the one-word bypass the `-c` arm exists to close,
-                # one spelling over. Split the attached value off and grade it
-                # exactly as the next-token arm does.
+                # ⛔ AND THE ARM REFUSES — it does NOT grade — because an ATTACHED
+                # body is a command bash CANNOT EXECUTE (review cycle 6, P2; the
+                # primary source, measured on this box):
+                #
+                #   bash -c'echo hi'   -> `bash: - : invalid option`, rc 1, no output
+                #   bash -c 'echo hi'  -> prints `hi`, rc 0
+                #   sh   -c'echo hi'   -> `Illegal option -h`, rc 2
+                #
+                # With no space, `-cecho hi` is ONE argv word and bash reads what
+                # follows `-c` as MORE OPTION LETTERS. So no attached spelling was
+                # ever a runnable command, and grading the body (the previous form of
+                # this arm) recorded a `verified` row for a command that cannot have
+                # executed — the same false-PASS class as the disclaimer it refuses.
+                # Refusing is also what makes the verdict independent of the cluster
+                # split: `-cmake x`, `-cec x`, `-cverified` and `--eval=…` are ALL
+                # refused, so a mis-split can neither admit a body nor drop a prefix.
+                # The SPACED form (`bash -c '<script>'`, body in the NEXT token) is
+                # the only runnable spelling and is graded by the `consumed_script`
+                # arm below.
                 flag, attached = _split_flag(token)
                 if flag in _SCRIPT_FLAGS and attached:
-                    if depth >= _MAX_SCRIPT_DEPTH:
-                        return False, ("`cmd:` evidence nests `-c` scripts too deeply to grade")
-                    ok, why = _evidence_is_real(
-                        f"{_CMD_PREFIX}{attached}", repo_root, depth + 1, cmd_cwd
+                    return False, (
+                        f"`cmd:` evidence attaches {_short(attached)} to {flag!r} in ONE "
+                        "token — the shell reads what follows the flag as more OPTION "
+                        "letters, so this spelling cannot execute at all (measured: "
+                        "`bash -c'echo hi'` answers `- : invalid option`, rc 1). Put "
+                        "the script in its OWN token (`bash -c '<script>'`), which is "
+                        "the only runnable form and IS graded"
                     )
-                    if ok:
-                        return True, ""
-                    return False, f"`cmd:` evidence script {attached!r} is not a command: {why}"
                 # ⛔ A dashed token WITHOUT a script flag is a FLAG only when it is
                 # ONE WORD. A token that CONTAINS whitespace was quoted by the
                 # author — `shlex` preserves whitespace only INSIDE a quote — so it
@@ -1871,9 +1916,11 @@ def _command_body(raw: str, base: Path, root: Path) -> tuple[str, Path, str]:
                     return (
                         "",
                         base,
-                        f"the `{head}` segment {segment!r} FAILS at script level, so a "
-                        "`&&` after it SHORT-CIRCUITS and no later segment of this "
-                        "record can have run — it may only be the LAST segment",
+                        f"the `{head}` segment {segment!r} FAILS at script level, so no "
+                        "later segment of this record can be shown to have run — it "
+                        "may only be the LAST segment (a `&&` after a failed builtin "
+                        "short-circuits; refusing the `;`/`||` spelling too is a "
+                        "known-open false block, #11520)",
                     )
                 # ⛔ The HEAD alone is not enough: read the wrapper's own arguments
                 # (see `_wrapper_argument_defect` for the measured bypass this

@@ -1798,8 +1798,7 @@ def test_the_assignment_carriage_is_open_and_declared(tmp_path):
     the code cannot drift apart silently in either direction.
     """
     command = (
-        'cmd:A="I did not run this" && uv run pytest '
-        "tests/test_9664_capstone_verdict_ledger.py -q"
+        'cmd:A="I did not run this" && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q'
     )
     proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, command])]))
     assert proc.returncode == cl.EXIT_CLEAN, (
@@ -1923,28 +1922,36 @@ _UNREAD_TOKEN_BYPASSES = [
 ]
 
 
-def test_an_attached_script_body_is_graded_whatever_it_contains(tmp_path):
-    """An attached `-cBODY`/`--eval=BODY` is a SCRIPT, not prose — always.
+def test_an_attached_script_body_is_refused_whatever_it_contains(tmp_path):
+    """An attached `-cBODY`/`--eval=BODY` cannot execute, so it is REFUSED.
 
     ⛔ MEASURED false PASS (fifth review cycle, P1). The whitespace deferral ran
-    BEFORE the `_split_flag` grading, so every body that carried a SENTENCE was
-    parked as `unread_prose` and `continue`d — the grading was never reached for
-    exactly the bodies it exists for. With a held artifact token after the entry the
-    parked prose was then CLEARED by `_names_artifact`, and:
+    BEFORE the `_split_flag` arm, so every body that carried a SENTENCE was parked
+    as `unread_prose` and `continue`d — the arm was never reached for exactly the
+    bodies it exists for. With a held artifact token after the entry the parked
+    prose was then CLEARED by `_names_artifact`, and:
 
         cmd:bash -c'NOT RUN - see tools/capstone_ledger.py' tests/…py
 
-    reported `verified: 1 uncovered: 0` / `CAPSTONE-LEDGER-RESULT: CLEAN` / exit 0,
-    while the SAME value WITHOUT the trailing path was refused. Bash proves the
-    command cannot have run: `bash -c "bash -c'NOT RUN - see x' y"` answers
-    `-N: invalid option`, rc 2.
+    reported `verified: 1 uncovered: 0` / `CAPSTONE-LEDGER-RESULT: CLEAN` / exit 0.
 
-    ⛔ AND THE FIX MUST NOT BUY IT WITH A FALSE BLOCK. Routing every whitespace
-    body through `_split_flag` only works because THAT function now stops scanning
-    at the end of the leading flag cluster; while it scanned the whole token it split
-    `-c'uv run pytest tools/capstone_ledger.py'` on the `e` of "ledger", graded
-    `'r.py'` as the script and REFUSED the legitimate record. Both directions are
-    pinned here so neither can be spelled as the other's bypass.
+    ⛔ AND GRADING THE BODY WAS ITSELF THE WRONG FIX (sixth review cycle, P2; the
+    primary source measured on this box):
+
+        bash -c'echo hi'   -> `bash: - : invalid option`, rc 1, NO output
+        bash -c 'echo hi'  -> prints `hi`, rc 0
+
+    With no space, `-cecho hi` is ONE argv word, so bash reads what follows `-c` as
+    more OPTION LETTERS and the body never runs. EVERY attached spelling is
+    therefore a command that cannot have executed — grading it recorded `verified`
+    for a command bash refuses. Refusing also makes the verdict independent of the
+    cluster split, so `-cmake x` / `-cec x` / `-cverified` / `--eval=…` are all
+    refused and a mis-split can neither admit a body nor silently drop a PREFIX
+    (measured before this: `bash -c'ec uv run pytest <path>'` graded the remainder
+    CLEAN, inventing a command that does not exist).
+
+    The SPACED form — the only runnable spelling — must stay ACCEPTED, and is
+    pinned here so the refusal cannot be widened into a false block.
     """
     for entry in (
         "cmd:bash -c'NOT RUN - see tools/capstone_ledger.py' "
@@ -1953,22 +1960,30 @@ def test_an_attached_script_body_is_graded_whatever_it_contains(tmp_path):
         "tests/test_9664_capstone_verdict_ledger.py",
         "cmd:bash -e'NOT RUN - see tools/capstone_ledger.py' "
         "tests/test_9664_capstone_verdict_ledger.py",
+        # Attached bodies that NAME an artifact are refused too — not because the
+        # intent is dishonest, but because the spelling cannot run.
+        "cmd:bash -c'uv run pytest tools/capstone_ledger.py'",
+        'cmd:bash -c"uv run pytest tools/capstone_ledger.py"',
+        # A body whose PREFIX is dropped by a mis-split would otherwise be graded
+        # as a command that does not exist (`ec` is not a command).
+        "cmd:bash -c'ec uv run pytest tools/capstone_ledger.py'",
+        "cmd:bash -c'make tools/capstone_ledger.py'",
     ):
         proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, entry])]))
         assert proc.returncode == cl.EXIT_INVALID, (
-            f"{entry!r} was ACCEPTED ({proc.returncode}) — an attached script body is "
-            f"graded as a script, so a disclaimer in it cannot carry the verdict\n"
+            f"{entry!r} was ACCEPTED ({proc.returncode}) — an attached script body "
+            f"cannot execute at all, so it cannot carry the verdict\n"
             f"{proc.stdout}{proc.stderr}"
         )
-    # The same spelling, with a body that really names an artifact, must be ACCEPTED.
+    # The SPACED spelling is the only runnable form and must stay ACCEPTED.
     for entry in (
-        "cmd:bash -c'uv run pytest tools/capstone_ledger.py'",
-        'cmd:bash -c"uv run pytest tools/capstone_ledger.py"',
+        "cmd:bash -c 'uv run pytest tools/capstone_ledger.py'",
+        'cmd:bash -c "uv run pytest tools/capstone_ledger.py"',
     ):
         proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, entry])]))
         assert proc.returncode == cl.EXIT_CLEAN, (
-            f"{entry!r} was REFUSED ({proc.returncode}) — an attached body that names "
-            f"an artifact is a legitimate record, and refusing it is the false block "
+            f"{entry!r} was REFUSED ({proc.returncode}) — the SPACED form is the "
+            f"only spelling bash actually runs, and refusing it is the false block "
             f"this fix must not introduce\n{proc.stdout}{proc.stderr}"
         )
 
@@ -2068,13 +2083,14 @@ def test_an_attached_script_body_is_never_trusted(tmp_path):
     shlex token. Treating every remainder as "more flags" would restore exactly the
     fail-open `_UNREAD_TOKEN_BYPASSES` closes.
 
-    ⛔ CORRECTED CLAIM (fourth review cycle): these are REFUSED, and for TWO
-    different reasons that must not be conflated. A body containing whitespace is
-    caught as an unread quoted token BEFORE `_split_flag` runs, and refusing it is
-    right — real bash parses `bash -c'echo F'` as an invalid option cluster and
-    "echo F" never runs, so grading the body would ACCEPT a record for a command
-    that cannot have executed. An attached body with NO whitespace is graded as a
-    script. Both end in a refusal for prose, which is the property that matters.
+    ⛔ KEPT CORRECT AT THIS HEAD (sixth review cycle): the claim above is the
+    REASON the arm now REFUSES every attached body instead of grading it. A body
+    containing whitespace is refused by the attached-script arm, and so is one with
+    NO whitespace — both spellings are commands bash cannot execute, because
+    `-cBODY` makes the body read as more OPTION LETTERS (measured: `bash -c'echo
+    hi'` -> `- : invalid option`, rc 1). Grading a body would ACCEPT a record for a
+    command that cannot have executed, which is the fail-open class this whole arm
+    exists to close.
 
     The lowercase cases are the regression pin: "all lowercase" is NOT "an option
     cluster", and treating it as one admitted `cmd:bash -cverified` to `verified` /

@@ -131,13 +131,23 @@
 #         `… && echo PASS`. FIVE carriages, all tracked in #11520 and all pinned —
 #         the list is enumerated because an unlisted carriage reads as closed;
 #       - a `-c`/`-e` script body is never TRUSTED, and the ATTACHED spelling is
-#         graded: `bash -c'uv run pytest tools/x.py'` is a legitimate record (the body
-#         names an artifact) and `bash -c'NOT RUN - see tools/x.py'` is REFUSED, with
-#         or without an artifact token after it. An earlier head claimed the
-#         whitespace form was refused while the code DEFERRED it as prose and let a
-#         later artifact token clear it — `bash -c'NOT RUN - see tools/capstone_ledger.py'
-#         <tracked path>` exited 0. Fixed at this head and pinned; the `_split_flag`
-#         cluster scan is what makes the legitimate spelling survive the fix;
+#         REFUSED: `bash -c'uv run pytest tools/x.py'` AND
+#         `bash -c'NOT RUN - see tools/x.py'` are both invalid, with or without an
+#         artifact token after them. The primary reason is that the spelling is not
+#         runnable at all — `-cBODY` in one word makes bash read the body as more
+#         OPTION LETTERS, measured as `bash -c'echo hi'` -> `bash: - : invalid
+#         option`, rc 1, no output, while `bash -c 'echo hi'` prints `hi`. Grading
+#         the body would therefore record `verified` for a command that cannot have
+#         executed. The SPACED form (`bash -c '<script>'`) IS the runnable spelling
+#         and IS graded; an earlier head deferred the whitespace form as prose and
+#         let a later artifact token clear it, so `bash -c'NOT RUN - see
+#         tools/capstone_ledger.py' <tracked path>` exited 0 — fixed and pinned.
+#       - a control builtin that FAILS at script level (`return 0`, `shift 5`) is
+#         refused anywhere but last, because a `&&` after it short-circuits. The
+#         guard is SEPARATOR-BLIND, so the `;`/`||` spelling — which bash really
+#         executes past — is refused too. That is a known-open FALSE BLOCK (#11520),
+#         declared rather than silent, and kept on the conservative side because a
+#         fail-OPEN there is the class the guard exists to close;
 #       - a NON-RUNNER program heading a segment (`mkdir -p out && …`, `rm -rf
 #         .pytest_cache && …`, `sleep 2 && …`) is REFUSED as prose, although the
 #         record is shell-valid and `origin/main` accepted it. This is a known-open
