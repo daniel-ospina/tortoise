@@ -3482,6 +3482,65 @@ def test_the_certify_line_states_ONLY_what_the_run_measured(monkeypatch, capsys)
         "claim it had earned")
 
 
+def test_a_PARTIAL_repair_does_not_state_the_POPULATION_claim_from_one_token(
+        capsys):
+    """#11536 review round 8, P2: a token-scoped measurement cannot carry a
+    population claim.
+
+    (1) FAILS on the shipped green: it printed "no node still carrying the pre-fix
+        prose is findable through the Source FTS index" whenever ANY probe was
+        `discriminating` — and `discriminating` is built from ONE token's
+        before/after pair, so a PARTIAL repair satisfied it while another pre-fix
+        node still carried prose. MEASURED on a real FalkorDB: two pre-fix nodes,
+        only one repaired → `certifies=True`, `discriminating=True`,
+        `census_after == 1`, and `query 'greenhouse'` still returned the
+        UNREPAIRED node while the ✓ line claimed none was findable.
+    (2) REACHABLE: any `--repair` whose probe token appears in only SOME of the
+        pre-fix nodes, which is the ordinary case on a real graph — the token is
+        one word of one sentence.
+    (3) POLARITY THAT MUST NOT GO RED: with the census at 0 (a COMPLETE repair)
+        the categorical line is still printed, and with no census supplied the
+        pinned round-1 decision (`test_the_certify_line_states_ONLY_what_the_run_
+        measured`) still holds. Only the case the census CONTRADICTS narrows.
+    """
+    from tortoise import session_source_prose_migration as m
+
+    class _LexiconGraph(_RecordingGraph):
+        def query(self, cypher, params=None, timeout=None):
+            if "STARTS WITH $prefix" in cypher:
+                return _Result([("migration, plan, friday",)])
+            return super().query(cypher, params=params, timeout=timeout)
+
+    hit_before = {"ran": True, "probes": [{"phrase": "zebraquux", "hits": 1,
+                                            "urls": ["session:s-post"],
+                                            "residue": ["session:s-post"]}]}
+    after = m.probe_fts(_LexiconGraph([(_post_fix_node(),)]), ["zebraquux"],
+                        control=True)
+    folded = _cli._merge_probe(hit_before, after, wrote=True)
+
+    # (3) a COMPLETE repair — the census this run measured is 0 — keeps the claim.
+    _cli._report_fts(folded, 0)
+    assert ("no node still carrying the pre-fix prose is findable"
+            in capsys.readouterr().out), (
+        "a complete repair lost the categorical claim it had earned")
+
+    # (3) and the pinned no-census call is unchanged.
+    _cli._report_fts(folded)
+    assert ("no node still carrying the pre-fix prose is findable"
+            in capsys.readouterr().out), (
+        "the round-1 pinned polarity went red — a caller that supplies no census "
+        "still gets the categorical line")
+
+    # (1)+(2) a PARTIAL repair: the census lists a node this token never covered.
+    _cli._report_fts(folded, 1)
+    out = capsys.readouterr().out
+    assert "no node still carrying the pre-fix prose is findable" not in out, (
+        "a partial repair claimed that NO pre-fix node is findable while its own "
+        "census still listed one: " + out)
+    assert "the census still lists 1 node(s)" in out, (
+        "the narrowed line did not say what the census DID measure: " + out)
+
+
 def test_the_green_does_not_claim_a_BEFORE_reading_that_did_not_MEASURE(monkeypatch,
                                                                        capsys):
     """#11536 review round 5, P2: the new BEFORE clause was not the four-state one.

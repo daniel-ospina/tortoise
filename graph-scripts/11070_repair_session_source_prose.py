@@ -408,7 +408,7 @@ def _before_leg_state(probes) -> str:
                      for sentence, phrases in said.items())
 
 
-def _report_fts(fts: dict) -> None:
+def _report_fts(fts: dict, census_after: int | None = None) -> None:
     """Print the FTS leg, and REFUSE on stderr when it did not certify."""
     print(f"Source FTS probe (entity_type={fts['entity_type']}):")
     for probe in fts["probes"]:
@@ -504,8 +504,38 @@ def _report_fts(fts: dict) -> None:
                   f"{control['hits']} hit(s)")
     if fts["certifies"]:
         if any(p.get("discriminating") for p in fts["probes"]):
-            print("          ✓ no node still carrying the pre-fix prose is findable "
-                  "through the Source FTS index")
+            # ⛔ A TOKEN-SCOPED MEASUREMENT CANNOT CARRY A POPULATION CLAIM
+            # (#11536 review round 8, P2). `discriminating` is built from ONE
+            # token's before/after pair (`hits_before > 0` and no residue/stale/
+            # unexplained/unread on that probe), so a PARTIAL repair — the token's
+            # hits gone while another pre-fix node still carries prose — satisfied
+            # it and the line below then asserted that NO node carrying the pre-fix
+            # prose is findable, which this run had not established and which the
+            # same run's census contradicts. MEASURED: two pre-fix nodes, one
+            # repaired, gives `certifies=True`, `discriminating=True`, and
+            # `census_after == 1` — while `query 'greenhouse'` still returned the
+            # unrepaired node. The categorical sentence is now printed ONLY when
+            # the census this run measured is 0, which is the same conjunction
+            # #11070's Target names.
+            # ⛔ AND THE PINNED POLARITY IS PRESERVED, deliberately: when the
+            # caller supplies NO census (`None`) this keeps the categorical line,
+            # because `test_the_certify_line_states_ONLY_what_the_run_measured`
+            # is the recorded decision that "a probe that matched pre-fix prose
+            # BEFORE the writes STILL earns the categorical line" (#11536 round 1,
+            # P1). That decision was taken before `census_after` existed, so it
+            # could not speak to the PARTIAL-repair case; narrowing there is not a
+            # reversal of it, and narrowing on `None` WOULD be. The CLI always
+            # supplies the measured value, so production never relies on the
+            # default.
+            if census_after is None or census_after == 0:
+                print("          ✓ no node still carrying the pre-fix prose is "
+                      "findable through the Source FTS index")
+            else:
+                print(f"          ✓ the probe's pre-fix hits are gone from the "
+                      f"Source FTS index — but this run measured ONE token and "
+                      f"the census still lists {census_after} node(s) carrying "
+                      f"the pre-fix prose, so it does NOT establish that no such "
+                      f"node is findable")
         else:
             # ⛔ NARROWED TO WHAT WAS MEASURED — AND ONLY TO WHAT WAS MEASURED
             # (#11536 review rounds 3, 4 and 5). Three claims that were NOT
@@ -1122,7 +1152,7 @@ def main() -> int:
     for url, note in (report.get("notes") or {}).items():
         print(f"          ⚠️ {url}: {note}")
     if fts:
-        _report_fts(fts)
+        _report_fts(fts, report.get("census_after"))
     if args.repair:
         print(f"census AFTER:  {report['census_after']}")
         if report["census_after"]:

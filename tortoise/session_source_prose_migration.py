@@ -1189,10 +1189,12 @@ def reconcile_after_replay(projection, *, engine: str,
 #    P2), MEASURED on a real FalkorDB: querying a label with NO fulltext index
 #    does not raise — it returns an EMPTY RESULT SET, so the trace records
 #    ``ran=True, degraded=False, reason='empty_results'``, indistinguishable from
-#    a clean miss. So a missing/dropped Source index is caught by the positive
-#    CONTROL below (a known-present lexicon token must still be findable), NOT by
-#    ``unmeasurable``. The two guard different failure classes and neither is a
-#    substitute for the other.
+#    a clean miss. So of the three causes named in the line above, ``leg_trace``
+#    catches TWO (an open breaker, a failed query) and NOT the third (a dropped
+#    index) — that one is caught by the positive CONTROL below, because a
+#    known-present lexicon token stops being findable when the index is gone.
+#    The two guard different failure classes and neither substitutes for the
+#    other.
 #    The positive CONTROL is the second half of the same guard: one token taken
 #    from a POST-fix lexicon node's own ``_searchText`` must still be findable,
 #    because that proves the index answers at all.
@@ -2000,17 +2002,25 @@ def probe_fts(g, phrases, *, control: bool = True,
                 # (a clear-only repair): nothing here is left for the index to
                 # build on, so the probe's zero is structurally consistent. ⛔ A
                 # stale entry does NOT appear in this count — it is the node with
-                # the field ABSENT (#11536 review). The arm is sound because the
-                # probe's own `stale` veto catches a surviving entry and
-                # `leg_trace` catches a dead read, not because of the count.
-                # ⛔ THIS ARM CARRIES NO `ran`/`degraded` (#11536 review round 7,
-                # P2). They were LITERAL constants here — `"ran": True,
+                # the field ABSENT (#11536 review).
+                # ⛔ AND NOT ``leg_trace`` (#11536 review round 8, P2 — this
+                # clause SURVIVED that round's sweep and is corrected here): the
+                # arm is sound because when no Source over `documentKind IS NULL`
+                # carries `_searchText`, the index has nothing to hold, so a dead
+                # read cannot hide a sentence there. A dead read is caught by the
+                # positive CONTROL — never by ``leg_trace``, which MEASURED on a
+                # real FalkorDB reports ``ran=True, degraded=False,
+                # reason='empty_results'`` for a label with NO fulltext index, so
+                # it cannot tell a dead read from a clean miss.
+                # ⛔ THIS ARM CARRIES NO `ran`/`degraded` (#11536 review
+                # round 7, P2). They were LITERAL constants here — `"ran": True,
                 # "degraded": False` — and the note said "and the read RAN", on
                 # the ONE arm that runs NO FTS read: what is measured is
                 # `source_index_is_empty`, a NODE-PROPERTY count. The arm is still
                 # sound, but for the reasons stated above — the probe row's own
-                # `stale` veto catches a surviving entry and `leg_trace` catches a
-                # dead read — NOT because of anything this arm claims to have read.
+                # `stale` veto catches a surviving entry, and a dead read is the
+                # CONTROL's job — NOT because of anything this arm claims to have
+                # read.
                 report["control"] = {
                     "mode": "empty-index", "ok": True, "hits": 0,
                     "measured": "node-property",
