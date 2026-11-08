@@ -180,7 +180,7 @@ def load_ledger(path: Path) -> dict[str, Any]:
     anyone — including this validator — ever sees. That is precisely the
     "ambiguity is a refusal" rule this module advertises, and MEASURED it was
     unenforced: a duplicate `reason:` block left by a copy-paste edit passed
-    `check` (exit 2, all 44 tests green) while being invalid YAML per any strict
+    `check` (exit 2, the whole suite green) while being invalid YAML per any strict
     reader. The default parser is therefore replaced, not trusted.
     """
     try:
@@ -193,21 +193,28 @@ def load_ledger(path: Path) -> dict[str, Any]:
 
         def construct_mapping(self, node, deep=False):
             # Merge keys (`<<: *anchor`) are legal YAML and a natural way to share
-            # a verdict across rows. They must be flattened BEFORE the duplicate
-            # scan, or the anchor's tag has no constructor and the file is reported
-            # as "not parseable YAML" — blaming the parser for our own check.
+            # a verdict across rows. They are REFUSED rather than flattened — see
+            # the rule below — so there is no flatten step for this scan to run
+            # after. (An earlier comment here said they must be flattened FIRST;
+            # that described a design this code does not implement.)
             seen: set[Any] = set()
             for key_node, _ in node.value:
                 # ⛔ MERGE KEYS ARE REFUSED BY NAME. `<<` is not "just another key":
                 # `SafeConstructor.construct_mapping` splices the merged pairs in
-                # WITHOUT constructing that node, so this scan never sees them and
-                # a duplicate inside a merge value is silently last-wins. Measured:
-                # a row written as `<<: { …verdict: not-covered, verdict: verified}`
-                # loaded as `verified` and emptied the uncovered list — a false PASS
-                # reached through the one place the duplicate rule could not look.
-                # Refusing the tag is also the honest reading of this ledger's rule:
-                # every row states its OWN verdict, so a shared anchor that can carry
-                # a verdict the row does not say is not a shape this record accepts.
+                # WITHOUT constructing that node, so any scan over THIS node's pairs
+                # cannot see them — the duplicate rule included. The refusal is a
+                # deliberate NARROWING: every row states its OWN verdict, so a shared
+                # anchor that can carry a verdict the row does not say is not a shape
+                # this record accepts.
+                #
+                # ⚠️ Stated precisely, because an earlier revision of this note
+                # overclaimed a false PASS. With THIS `SafeLoader` subclass an
+                # unrefused `<<` still fails to load (`could not determine a
+                # constructor for the tag`), so the tag alone did not yield a green
+                # row here; what it yielded was a scan blind to the merged pairs, in
+                # a shape a future constructor would silently make green. The refusal
+                # closes the SHAPE and names the defect instead of leaving the parser
+                # to blame itself. It is not a reproduction of a demonstrated pass.
                 if key_node.tag == "tag:yaml.org,2002:merge":
                     raise InvalidLedger(
                         f"{path} line {key_node.start_mark.line + 1} uses a YAML merge "
@@ -308,6 +315,44 @@ _LEADING_ASSIGNMENT: Final = re.compile(
 #: normalised, only the plain `cd X && …` this repo's own recipes use).
 _CD_SEGMENT: Final = re.compile(r"^cd\s+(\S[^;|&]*)$")
 
+#: A `-c`/`-e` script may itself contain a `-c`. Bounded so a crafted record cannot
+#: recurse the validator; anything past this is a refusal, not a hang.
+_MAX_SCRIPT_DEPTH: Final[int] = 3
+
+
+def _split_chains(text: str) -> list[str]:
+    """Split a command on UNQUOTED `&&`  only.
+
+    A plain `text.split("&&")` splits inside quotes too, so `bash -c 'a && b'` —
+    the only way the docstring says a script can be recorded — came back as
+    `bash -c 'a` and was refused as unparseable, which is exit 1, which hides the
+    entire uncovered list. Quotes are tracked here so the script survives intact.
+    """
+    segments: list[str] = []
+    buf: list[str] = []
+    quote: str | None = None
+    i = 0
+    while i < len(text):
+        char = text[i]
+        if quote:
+            if char == quote:
+                quote = None
+            buf.append(char)
+        elif char in "'\"`":
+            quote = char
+            buf.append(char)
+        elif text.startswith("&&", i):
+            segments.append("".join(buf))
+            buf = []
+            i += 2
+            continue
+        else:
+            buf.append(char)
+        i += 1
+    segments.append("".join(buf))
+    return segments
+
+
 #: Flags whose VALUE is a SCRIPT BODY, not an artifact path: `bash -c '<script>'`,
 #: `sh -c '<script>'`, `python -c '<code>'`, `node -e '<code>'`. The value cannot be
 #: graded as a citation — it is not a path — so the entry is a RECORD and the held
@@ -390,15 +435,27 @@ def _names_artifact(token: str, cwd: Path, root: Path) -> tuple[bool, str]:
                     "it names everything and therefore no artifact (a bare `*`/`*.yml`/"
                     "`./*` is not a citation)"
                 )
+            # ⛔ A glob is satisfied by ANY tracked match, not by the FIRST one.
+            # Returning False on the first untracked match made the verdict depend on
+            # ENUMERATION ORDER: a tree holding one tracked and one untracked file
+            # under the same pattern was accepted or refused depending on which name
+            # `Path.glob` yielded first (measured with `docs/aaa_scratch.md` +
+            # `docs/zzz_tracked.md` → refused, reversed names → accepted). The rule is
+            # "this pattern names a held artifact", and one held match answers it.
+            # A pattern with NO tracked match is still refused.
+            untracked_seen = False
             for match in cwd.glob(text):
                 resolved_match = match.resolve()
-                if resolved_match.is_file() and resolved_match.is_relative_to(root):
-                    if not _is_tracked(resolved_match, root):
-                        return False, (
-                            f"the file {text!r} matches is not TRACKED by git, so a "
-                            "reader's clone does not have it"
-                        )
+                if not (resolved_match.is_file() and resolved_match.is_relative_to(root)):
+                    continue
+                if _is_tracked(resolved_match, root):
                     return True, ""
+                untracked_seen = True
+            if untracked_seen:
+                return False, (
+                    f"every file the glob {text!r} matches is untracked by git, so a "
+                    "reader's clone does not have them"
+                )
             return False, f"no file of this tree matches the glob {text!r}"
         candidate = Path(text)
         resolved = (candidate if candidate.is_absolute() else cwd / text).resolve()
@@ -470,7 +527,12 @@ def _commit_state(sha: str, repo_root: Path = REPO_ROOT) -> str:
     return "unprovable" if shallow.stdout.strip() == "true" else "absent"
 
 
-def _evidence_is_real(entry: str, repo_root: Path = REPO_ROOT) -> tuple[bool, str]:
+def _evidence_is_real(
+    entry: str,
+    repo_root: Path = REPO_ROOT,
+    depth: int = 0,
+    run_cwd: Path | None = None,
+) -> tuple[bool, str]:
     """A path must be a TRACKED FILE inside the tree; a `cmd:` entry must be a COMMAND.
 
     ⛔ This is the anti-forgery rule and the reason the tool is worth having: a
@@ -516,11 +578,14 @@ def _evidence_is_real(entry: str, repo_root: Path = REPO_ROOT) -> tuple[bool, st
     or cites what it does not hold.
     """
     root = repo_root.resolve()
+    # The directory the command is recorded as having RUN in: the repo root, or the
+    # `cd` target of the script that invoked it. Never outside the tree.
+    base = run_cwd if run_cwd is not None and run_cwd.is_relative_to(root) else root
     if entry.startswith(_CMD_PREFIX):
         raw = entry[len(_CMD_PREFIX) :].strip()
         if not raw:
             return False, "`cmd:` evidence names no command"
-        command, cmd_cwd = _command_body(raw, root)
+        command, cmd_cwd = _command_body(raw, base, root)
         if not command:
             return False, f"`cmd:` evidence names no command: {raw!r}"
         try:
@@ -544,11 +609,23 @@ def _evidence_is_real(entry: str, repo_root: Path = REPO_ROOT) -> tuple[bool, st
         consumed_script = False
         for token in tokens[1:]:
             if consumed_script:
-                # The value of a `-c`/`-e` flag is a SCRIPT BODY, not a path: there
-                # is nothing here to grade as a citation. (`bash -c '…'` is the only
-                # way to write a script, so refusing it would be a false block.)
+                # ⛔ The value of a `-c`/`-e` flag is a SCRIPT BODY. It is not a
+                # citation, so it cannot be graded as a path — but LEAVING IT
+                # UNGRADED was a one-word bypass of the whole gate: measured,
+                # `cmd:bash -c 'NOT RUN - see tools/capstone_ledger.py'` and
+                # `cmd:uv run python -c 'nothing was executed'` both returned True,
+                # i.e. the exact prose this arm refuses naked was accepted in a
+                # wrapper. The script is therefore graded as a command in its own
+                # right: `bash -c 'uv run pytest tests/x.py'` names an artifact,
+                # `bash -c 'NOT RUN - see …'` is a claim. Depth is bounded because a
+                # script may contain another `-c`.
                 consumed_script = False
-                continue
+                if depth >= _MAX_SCRIPT_DEPTH:
+                    return False, ("`cmd:` evidence nests `-c` scripts too deeply to grade")
+                ok, why = _evidence_is_real(f"{_CMD_PREFIX}{token}", repo_root, depth + 1, cmd_cwd)
+                if ok:
+                    return True, ""
+                return False, f"`cmd:` evidence script {token!r} is not a command: {why}"
             if token.startswith("-"):
                 # A flag (and the `--` separator). A flag's VALUE may still be the
                 # artifact; it is reached on the next iteration.
@@ -613,7 +690,7 @@ def _evidence_is_real(entry: str, repo_root: Path = REPO_ROOT) -> tuple[bool, st
     return True, ""
 
 
-def _command_body(raw: str, root: Path) -> tuple[str, Path]:
+def _command_body(raw: str, base: Path, root: Path) -> tuple[str, Path]:
     """The part of a `cmd:` entry that has to be a RUNNABLE command, and the
     directory it runs in.
 
@@ -652,11 +729,11 @@ def _command_body(raw: str, root: Path) -> tuple[str, Path]:
     # `&& echo PASS` tail), and grading the first segment false-blocked
     # `cd tools && uv run …`; scanning for the first RUNNER-shaped segment accepts
     # both and still refuses prose, which never contains one at all.
-    segments = [segment.strip() for segment in text.split("&&")]
+    segments = [segment.strip() for segment in _split_chains(text)]
     # The directory the graded command runs in: `cd X && …` moves it, and a later
     # `cd` moves it again. Resolved against `root` only, so a `cd ../../..` cannot
     # walk the check out of the tree.
-    cwd = root
+    cwd = base
     for segment in segments:
         if not segment:
             continue
@@ -863,11 +940,27 @@ def validate(data: dict[str, Any], repo_root: Path = REPO_ROOT) -> list[dict[str
             "`criteria_expected` is required — it pins the denominator, so a row "
             "cannot be dropped without the count moving with it"
         )
-    elif isinstance(declared, bool) or not isinstance(declared, int):
+    elif isinstance(declared, (bool, float)):
         # `True` IS an int in Python, and `int(1.9)` truncates to 1, so a coercion
-        # would accept a boolean and a float as a passing one-row pin. A quoted
-        # `"22"` is refused too: the pin is a COUNT, and accepting its string form
-        # means the same value has two spellings and only one of them is a count.
+        # would accept a boolean and a float as a passing one-row pin.
+        problems.append(
+            f"`criteria_expected` must be an INTEGER, got {type(declared).__name__} {declared!r}"
+        )
+    elif isinstance(declared, str):
+        # A QUOTED count is the same count: `criteria_expected: "22"` and
+        # `criteria_expected: 22` parse to the same integer, so refusing the quoted
+        # spelling is friction that buys no protection against a false pass. This is
+        # main's behaviour and it is KEPT — tightening it would reverse a decision
+        # for no gain. A non-numeric string is still refused.
+        stripped = declared.strip()
+        if not stripped.isdigit():
+            problems.append(
+                f"`criteria_expected` must be a COUNT, got {declared!r} — a pin that "
+                "is not a number cannot pin anything"
+            )
+        else:
+            declared_count = int(stripped)
+    elif not isinstance(declared, int):
         problems.append(
             f"`criteria_expected` must be an INTEGER, got {type(declared).__name__} {declared!r}"
         )

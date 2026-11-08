@@ -164,8 +164,6 @@ def _row(cid, verdict="verified", **extra):
 
 
 def _run_cli(tmp_path, data, env=None):
-    import os
-
     ledger = tmp_path / "ledger.yml"
     ledger.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
     environment = dict(os.environ)
@@ -352,8 +350,6 @@ def test_advisory_reports_but_does_not_enforce_with_its_OWN_exit_code(tmp_path):
         "cmd:cat /etc/hostname",
         # Cycle-2 attack: prose that MENTIONS a real file used to pass a token
         # scan, including prose that says the work was NOT done.
-        "cmd:verified manually by reading pyproject.toml",
-        "cmd:NOT RUN - see tools/capstone_ledger.py for the intended command",
         "cmd:we did not run this; the suite lives in tests/test_9664_capstone_verdict_ledger.py",
         # Cycle-3 attack (measured, all exited 0 before the argument-position rule):
         # prepend ONE runner word to the cycle-2 prose and the token scan found the
@@ -375,9 +371,8 @@ def test_advisory_reports_but_does_not_enforce_with_its_OWN_exit_code(tmp_path):
         "cmd:sh */../*",
         # An absolute glob cannot be resolved against the tree at all.
         "cmd:sh /tmp/*",
-        # A `..` AT OR AFTER the first wildcard climbs back out to the root: this
-        # expands to 1085 files and every one is root-level (the `./*` class, one
-        # wildcard deep).
+        # A `..` AT OR AFTER the first wildcard climbs back out to the root: every
+        # match is root-level (the `./*` class, one wildcard deep).
         "cmd:sh docs/*/../../*",
         "cmd:sh tests/*/../../*",
         "cmd:sh docs/[a-z]*/../../*",
@@ -405,7 +400,7 @@ def test_a_cmd_entry_cannot_alone_satisfy_verified(tmp_path, command):
 
 
 def test_a_cmd_entry_is_accepted_alongside_a_held_artifact(tmp_path):
-    """The record may keep the command it ran; the HELD artifact is what counts."""
+    """A real command survives the wrapper; the HELD artifact is what carries it."""
     proc = _run_cli(
         tmp_path,
         _ledger(
@@ -414,17 +409,42 @@ def test_a_cmd_entry_is_accepted_alongside_a_held_artifact(tmp_path):
                     "A",
                     evidence=[
                         REAL_EVIDENCE,
-                        "cmd:bash -c 'verified manually by reading pyproject.toml'",
+                        "cmd:bash -c 'uv run pytest tests/test_9664_capstone_verdict_ledger.py -q'",
                     ],
                 )
             ]
         ),
     )
-    # ⛔ The `-c` VALUE is a SCRIPT, not a citation: `bash -c '<body>'` is the only
-    # way to record a script, so grading its body as an artifact path would be a
-    # false block on a real record. It confers nothing either — the held artifact
-    # carries the verdict — so this must be CLEAN, not INVALID.
     assert proc.returncode == cl.EXIT_CLEAN, proc.stdout + proc.stderr
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "cmd:bash -c 'verified manually by reading pyproject.toml'",
+        "cmd:bash -c 'NOT RUN - see tools/capstone_ledger.py'",
+        "cmd:uv run python -c 'nothing was executed'",
+        "cmd:sh -c 'see docs/evidence/9664-capstone/README.md'",
+    ],
+)
+def test_prose_wrapped_in_a_shell_script_is_refused(tmp_path, script):
+    """⛔ THE `-c` SCRIPT IS GRADED AS A COMMAND IN ITS OWN RIGHT.
+
+    Leaving it ungraded made the shape gate ONE WORD WIDE: the prose this arm
+    refuses naked was accepted as soon as it was wrapped in `bash -c`. Measured
+    at the previous head — `cmd:bash -c 'NOT RUN - see tools/capstone_ledger.py'`
+    beside a held artifact validated the row, `uncovered: 0`, exit 0.
+
+    The script is therefore required to start with a program that RUNS something,
+    exactly like the outer command. That rule is fail-closed on purpose: a
+    legitimate `bash -c 'echo hi'` is also refused, because `echo` cannot be
+    admitted to `RUNNERS` without re-admitting `cmd:echo NOT RUN …` in its
+    cheapest form. A false block costs a re-recorded entry; a false pass costs the
+    artifact's whole purpose.
+    """
+    proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, script])]))
+    assert proc.returncode == cl.EXIT_INVALID, (script, proc.stdout + proc.stderr)
+    assert "must START with a program that runs something" in proc.stderr, proc.stderr
 
 
 @pytest.mark.parametrize(
@@ -469,7 +489,7 @@ def test_a_cmd_entry_must_start_with_a_runner(tmp_path, runnerless):
 
 
 def test_a_cmd_entry_that_names_a_real_script_is_accepted(tmp_path):
-    """The rule must not be so tight that the committed ledger's own rows fail."""
+    """The rule must not be so tight that a real script record fails."""
     proc = _run_cli(
         tmp_path,
         _ledger(
@@ -478,7 +498,7 @@ def test_a_cmd_entry_that_names_a_real_script_is_accepted(tmp_path):
                     "A",
                     evidence=[
                         REAL_EVIDENCE,
-                        "cmd:bash -c 'verified manually by reading pyproject.toml'",
+                        "cmd:bash -c 'uv run pytest tests/test_9664_capstone_verdict_ledger.py -q'",
                     ],
                 )
             ]
@@ -630,8 +650,8 @@ def test_a_cmd_entry_naming_an_absolute_path_outside_the_tree_is_invalid(tmp_pat
     The suite's only absolute-path case is a bare `"/etc/hostname"`, so it pins the
     PATH arm and never `_names_artifact`. MEASURED: deleting `_names_artifact`'s
     `resolved.is_relative_to(root)` accepted `cmd:sh <abs path outside>` as
-    `verified` — exit 0, `UNCOVERED LIST: empty — the only clean exit` — while all
-    103 tests stayed green.
+    `verified` — exit 0, `UNCOVERED LIST: empty — the only clean exit` — while the
+    whole suite stayed green.
 
     The target is built in `tmp_path` (which is outside this checkout on every box),
     not `/etc/hostname`, so the pin cannot go vacuous on a host that lacks it.
@@ -652,7 +672,7 @@ def test_a_cmd_target_that_is_not_a_regular_file_is_invalid(tmp_path):
 
     The glob half is pinned (`test_a_glob_whose_matches_are_all_directories_…`),
     but `_names_artifact`'s `is_file()` is a SEPARATE clause for bare paths, and
-    nothing pinned it: changing it to `exists()` left the suite 105/105 green while
+    nothing pinned it: changing it to `exists()` left the whole suite green while
     a one-row `verified` ledger citing `cmd:sh docs` exited **0** with
     `UNCOVERED LIST: empty — the only clean exit` — a directory (or a FIFO) counted
     as held evidence. That is the false PASS this artifact exists to refuse.
@@ -713,8 +733,8 @@ def test_a_glob_whose_matches_are_all_directories_names_no_artifact(tmp_path):
     refusing a glob whose in-tree matches are all DIRECTORIES.
 
     MEASURED: deleting `resolved_match.is_file()` accepted `cmd:sh .github/w*`
-    (-> `.github/workflows`) as `verified` with an EMPTY uncovered list, and all
-    103 tests stayed green — the over-long/NUL entries and the symlink test never
+    (-> `.github/workflows`) as `verified` with an EMPTY uncovered list, and the
+    whole suite stayed green — the over-long/NUL entries and the symlink test never
     produce a directory-only match.
     """
     tree = tmp_path / "tree"
@@ -731,7 +751,7 @@ def test_a_glob_whose_only_match_resolves_outside_the_tree_is_invalid(tmp_path):
     The glob arm's per-match `is_relative_to(root)` reads like belt-and-braces next
     to the literal-prefix check, but it is the ONLY thing refusing a glob whose
     PREFIX is a genuine in-tree directory while every match under it is a symlink
-    pointing outside. MEASURED: deleting that one clause left the suite 102/102
+    pointing outside. MEASURED: deleting that one clause left the whole suite
     green and let `cmd:sh pure/*` (a directory holding one symlink pointing out of
     the tree) validate as `verified` with an EMPTY uncovered list — a false PASS on
     a citation that names no artifact of this tree.
@@ -797,14 +817,32 @@ def test_an_omitted_denominator_pin_is_invalid(tmp_path):
     assert "criteria_expected" in proc.stderr
 
 
-@pytest.mark.parametrize("coerced", [True, False, 1.9, "1"])
+@pytest.mark.parametrize("coerced", [True, False, 1.9])
 def test_a_non_integer_denominator_is_invalid_not_coerced(tmp_path, coerced):
     """`True` IS an int in Python and `int(1.9)` truncates to 1: either would pass
-    as a one-row pin against a one-row ledger, which is the shrink this pins."""
+    as a one-row pin against a one-row ledger, which is the shrink this pins.
+
+    ⚠️ The QUOTED string `"1"` used to be in this list and is deliberately NOT any
+    more: a quoted count is the same count, main accepted it, and refusing it was a
+    fail-closed regression that bought no protection (`test_a_quoted_count_is_…`).
+    """
     data = _ledger([_row("A")], criteria_expected=coerced)
     proc = _run_cli(tmp_path, data)
     assert proc.returncode == cl.EXIT_INVALID, proc.stdout + proc.stderr
     assert "INTEGER" in proc.stderr
+
+
+@pytest.mark.parametrize("quoted", ["1", " 1 "])
+def test_a_quoted_count_is_the_same_count(tmp_path, quoted):
+    """`criteria_expected: "1"` pins the same denominator as `criteria_expected: 1`.
+
+    Main `810eb838c` accepted it; an earlier revision of this branch refused it,
+    which was a gratuitous fail-closed regression (exit 1 also hides every
+    uncovered row). Kept permissive, and pinned so it cannot silently re-tighten.
+    """
+    data = _ledger([_row("A")], criteria_expected=quoted)
+    proc = _run_cli(tmp_path, data)
+    assert proc.returncode == cl.EXIT_CLEAN, (quoted, proc.stdout + proc.stderr)
 
 
 def test_a_shallow_checkout_is_unprovable_never_absent(tmp_path):
@@ -940,6 +978,96 @@ def test_a_prose_cmd_is_refused_beside_a_held_artifact(tmp_path):
         assert "must START with a program that runs something" in proc.stderr, proc.stderr
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        # ⛔ These pin `_command_body`'s NORMALISATIONS, each of which was
+        # mutation-tested as UNPINNED: reverting the backtick unwrap, the leading
+        # `NAME=value` strip, or the `cd`-aware cwd each left the whole suite green
+        # while the shape gate false-blocked a real record. A false block is exit 1,
+        # and exit 1 computes NOTHING — it hides every uncovered row.
+        "cmd:`uv run pytest tests/test_9664_capstone_verdict_ledger.py -q`",
+        "cmd:TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
+        "cmd:TORTOISE_DB_URI='docker://:f@localhost:6379/x' uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
+        # `cd` moves the cwd: `../tests/...` only resolves INSIDE tools/, so a
+        # validator that dropped the `cd` and resolved at the root refuses it.
+        "cmd:cd tools && uv run pytest ../tests/test_9664_capstone_verdict_ledger.py -q",
+        "cmd:cd tools && uv run python capstone_ledger.py check",
+    ],
+)
+def test_a_wrapped_command_is_not_a_false_block(tmp_path, command):
+    """The shell WRAPPER around a real command must not invalidate the record."""
+    proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, command])]))
+    assert proc.returncode == cl.EXIT_CLEAN, (command, proc.stdout + proc.stderr)
+
+
+def test_a_script_containing_a_quoted_and_channel_is_accepted(tmp_path):
+    """`&&` INSIDE a quoted `-c` script must not be split.
+
+    A plain `text.split('&&')` cuts inside the quotes, so the record came back as
+    `bash -c 'uv run pytest …` — unparseable, therefore INVALID, therefore exit 1,
+    which computes NOTHING and hides the whole uncovered list. Mutation-verified:
+    reverting `_split_chains` to `split("&&")` reddens this test.
+    """
+    proc = _run_cli(
+        tmp_path,
+        _ledger(
+            [
+                _row(
+                    "A",
+                    evidence=[
+                        REAL_EVIDENCE,
+                        "cmd:bash -c 'uv run pytest "
+                        "tests/test_9664_capstone_verdict_ledger.py -q && echo done'",
+                    ],
+                )
+            ]
+        ),
+    )
+    assert proc.returncode == cl.EXIT_CLEAN, proc.stdout + proc.stderr
+
+
+def test_a_glob_whose_matches_are_all_untracked_is_refused(monkeypatch):
+    """A glob is satisfied by a TRACKED match, not by whatever `glob` yields first.
+
+    Two halves, both mutation-verified: (a) the tracked rule reaches the glob arm at
+    all, and (b) it looks for ANY tracked match rather than refusing on the first
+    untracked one — the order-dependent verdict that made the same tree accepted or
+    refused depending on the filenames.
+    """
+    # (a) every match untracked -> refused
+    monkeypatch.setattr(cl, "_is_tracked", lambda resolved, root: False)
+    ok, why = cl._evidence_is_real("cmd:uv run python docs/evidence/9664-capstone/*.md", REPO_ROOT)
+    assert ok is False, why
+    assert "untracked" in why, why
+
+    # (b) ONE tracked match is enough, whatever the enumeration order
+    monkeypatch.setattr(
+        cl,
+        "_is_tracked",
+        lambda resolved, root: resolved.name == "README.md",
+    )
+    ok, why = cl._evidence_is_real("cmd:uv run python docs/evidence/9664-capstone/*.md", REPO_ROOT)
+    assert ok is True, why
+
+
+def test_a_cd_that_would_leave_the_tree_is_refused(tmp_path):
+    """Honouring `cd` must not let a record walk the check out of the checkout."""
+    proc = _run_cli(
+        tmp_path,
+        _ledger(
+            [
+                _row(
+                    "A",
+                    evidence=[REAL_EVIDENCE, "cmd:cd ../../.. && uv run pytest tests/x.py"],
+                )
+            ]
+        ),
+    )
+    assert proc.returncode == cl.EXIT_INVALID, proc.stdout + proc.stderr
+    assert "names no artifact of this tree" in proc.stderr, proc.stderr
+
+
 def test_a_cmd_target_that_is_not_tracked_is_refused(monkeypatch):
     """The TRACKED rule applies to a `cmd:` target, not only to a bare path entry.
 
@@ -998,10 +1126,12 @@ def test_an_unmeasurable_sha_is_a_defect(monkeypatch):
     assert "cannot be verified" in str(excinfo.value)
 
 
-# --- Ported from #11476 (main) so its B-arm and forgery pins are not lost in
-# the rebase. Every one below pins an arm this branch did NOT have before the
-# rebase (the tracked-path rule, the merge-key refusal, the reserved report
-# token, the printed-field flattening, NUL/ENAMETOOLONG handling).
+# --- Ported VERBATIM from #11476 (main) at 810eb838c, so its B-arm and forgery
+# pins are not lost in the rebase. These are not new tests: every one below is
+# byte-identical to main and pins an arm that existed on main and that THIS
+# branch (before the rebase) did not have — the tracked-path rule, the merge-key
+# refusal, the reserved report token, the printed-field flattening, NUL and
+# ENAMETOOLONG handling.
 
 
 def test_an_absolute_wildcard_is_refused_not_crashed(tmp_path):
@@ -1061,16 +1191,14 @@ def test_an_untracked_artifact_is_invalid(tmp_path):
     resolver would have stayed green in CI while a gitignored lane artifact counted
     as held evidence.
     """
-    import subprocess as sp
-
     repo = tmp_path / "treerepo"
     repo.mkdir()
     (repo / "committed.txt").write_text("held\n", encoding="utf-8")
     (repo / "untracked.txt").write_text("not in any clone\n", encoding="utf-8")
     git = ["git", "-C", str(repo)]
-    sp.run([*git, "init", "-q"], check=True)
-    sp.run([*git, "add", "committed.txt"], check=True)
-    sp.run(
+    subprocess.run([*git, "init", "-q"], check=True)
+    subprocess.run([*git, "add", "committed.txt"], check=True)
+    subprocess.run(
         [
             *git,
             "-c",

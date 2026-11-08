@@ -19,11 +19,17 @@
 #     so the ledger cannot silently drift from the thing being accepted.
 #     For the issue's `The run` TABLE (rows S1-S10) the criterion is the ROW, whose
 #     `Do` and `Observe` cells are joined with " — ": quoting `Do` alone would drop
-#     the observable, and quoting `Observe` alone would drop the action. That join is
-#     the ONLY transformation applied; both cells appear in full. The ONE exception is
-#     step 5 (S5), whose `Do` cell in the issue's table is the placeholder "—" because
-#     the step is a server-side observation: there is no action to join, so S5's row is
-#     the `Observe` cell alone. `tests/test_9664_
+#     the observable, and quoting `Observe` alone would drop the action. Both cells
+#     appear in full. TWO stated exceptions, so the rule is checkable rather than a
+#     claim of purity:
+#       - step 5 (S5): its `Do` cell in the issue's table is the placeholder "—"
+#         because the step is a server-side observation, so there is no action to
+#         join and S5's row is the `Observe` cell alone;
+#       - step 4 (S4): the row carries its SURFACE cell (`ChatGPT`) as a prefix,
+#         `"ChatGPT: <Do> — <Observe>"`, because the step is the one that runs in a
+#         different product and the row is unreadable without saying so. The `Do`
+#         and `Observe` halves are still verbatim and complete.
+#     `tests/test_9664_
 #     capstone_verdict_ledger.py::EXPECTED_TEXT_NEEDLES` pins a distinctive fragment
 #     of each row's source cell, so a truncated or rewritten cell fails the suite
 #     (this is how the S2 row was caught dropping its `Observe` half).
