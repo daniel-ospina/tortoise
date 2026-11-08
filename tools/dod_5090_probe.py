@@ -919,7 +919,8 @@ def _embedding_writers(root: Path) -> dict[str, dict]:
                 # stored label as covered while the other may be unserved.
                 # ⛔ BUILT FROM `PARTIAL_LABEL_PREFIX`, never a hand-retyped copy of it
                 # (`#11495`'s review, measured). This line used to spell the literal out, and
-                # `:1892`'s `label.startswith(PARTIAL_LABEL_PREFIX)` is its ONLY consumer — so
+                # `scored_labels()`'s `out["partial"]` arm —
+                # `label.startswith(PARTIAL_LABEL_PREFIX)` — is its ONLY consumer, so
                 # drifting the two apart left the WHOLE suite green (retyping just this line to
                 # `"UNKNOWN(2 labels: "` kept 194 passed, 2 skipped) while a two-label
                 # MEASUREMENT silently stopped being held, and a declaration could then narrow it

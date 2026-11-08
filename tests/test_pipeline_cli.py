@@ -137,8 +137,9 @@ def test_a_foreign_threads_construction_never_decides_this_verdict(
     real, on worker threads, with the same SHAPE a leaked hosted-api sweep
     produces — a temp-rooted non-canonical file for the `__init__` arm (**not**
     `tempfile.gettempdir()/tortoise.db` itself: that is what
-    `_resolve_embedded_db_path()` falls back to when /data is unwritable,
-    `tortoise/hosted_api.py:1345-1351`, and the CI `TMPDIR` is the session root,
+    `_resolve_embedded_db_path()` falls back to when /data is unwritable
+    (`tortoise/hosted_api.py` — cited by symbol, because that file's fallback
+    moved under this comment once already), and the CI `TMPDIR` is the session root,
     so this pin uses its own `tmp_path` file — the assertion is about WHOSE
     construction is recorded, never about the path's prefix), and a `redis://`
     URI for the `from_uri` arm. Before the thread guards these overwrote `seen`
