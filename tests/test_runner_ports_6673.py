@@ -775,6 +775,17 @@ def test_the_mocked_seam_is_really_mocked_and_needs_no_exemption():
     members = {p.relative_to(ROOT).as_posix() for p in _seam_files()}
     refusal = _membership_refusal(rel, members, SEAM_FILES_WITH_ALLOWED_LITERALS)
     assert refusal is None, refusal
+    # ⛔ NON-MEMBERSHIP COSTS THE SCAN, and this file DOES reach the seam at runtime (it
+    # `exec`s the fixture's body, which binds the real helper, and stubs it after). It left
+    # the population when `#11492` reworded the prose, so the split-brain guard now scans it
+    # by nothing — and re-entering would red the pin above instead of re-arming the guard.
+    # Restore the COVERAGE here, where the exemption used to be: the deliberate stub must
+    # remain the file's ONLY port literal, so a real lane DSN added there is still caught.
+    literals = _port_literals_in_code(ROOT / rel)
+    assert [line for _, line in literals] == ["docker_port=lambda: 6379,"], (
+        f"{rel} is outside the scanned population, so this pin is the only guard over its "
+        f"port literals — expected exactly the deliberate stub, found {literals!r}. A second "
+        "literal here is a candidate split-brain offender the census can no longer see.")
 
 
 def test_the_exemption_remedy_actually_clears_the_membership_rule():

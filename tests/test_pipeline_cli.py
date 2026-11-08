@@ -130,17 +130,17 @@ def test_run_uses_embedded_path_when_no_uri(monkeypatch, tmp_path):
 
 def test_a_foreign_threads_construction_never_decides_this_verdict(
         monkeypatch, tmp_path):
-    """The pin for the hold above: a `FalkorProjection` built by a thread this
-    test does not own must not enter `seen`.
+    """The pin for the hold above: a `FalkorProjection` built — or routed — by a
+    thread this test does not own must not enter `seen`.
 
-    Driving it, not asserting a shape: the foreign construction is made for
-    real, on a worker thread, with the SAME path a leaked hosted-api sweep
-    uses (``_resolve_embedded_db_path()`` — `tempfile.gettempdir()`-rooted
-    when /data is unwritable). Before the thread guard this overwrote
-    `seen["path"]` and `test_run_uses_embedded_path_when_no_uri`'s assertion
-    was made about it; with the guard the recorded path is the one `cmd_run`
-    resolved. Deliberately constructed BEFORE the assertion, so the pin needs
-    no sleep and no scheduling luck to fire.
+    Driving it, not asserting a shape: the foreign constructions are made for
+    real, on worker threads, with the SAME values a leaked hosted-api sweep
+    uses (``_resolve_embedded_db_path()`` for the path arm —
+    `tempfile.gettempdir()`-rooted when /data is unwritable — and a URI for the
+    `from_uri` arm). Before the thread guards these overwrote `seen` and each
+    sibling test's assertion was made about them; with the guards the recorded
+    values are the ones `cmd_run` resolved. Deliberately constructed BEFORE the
+    assertions, so the pin needs no sleep and no scheduling luck to fire.
     """
     monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
     monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
@@ -154,6 +154,7 @@ def test_a_foreign_threads_construction_never_decides_this_verdict(
     pipeline_cli.cmd_run("t3")
 
     foreign = str(tmp_path / "foreign-thread-store.db")
+    foreign_uri = "redis://:pw@foreign.example.com:6379/foreign"
     errors: list[BaseException] = []
 
     def _construct_elsewhere():
@@ -162,13 +163,29 @@ def test_a_foreign_threads_construction_never_decides_this_verdict(
         except BaseException as exc:  # pragma: no cover - reported, not raised
             errors.append(exc)
 
-    t = threading.Thread(target=_construct_elsewhere, name="foreign-ctor",
-                         daemon=True)
-    t.start()
-    t.join(30)
+    def _route_elsewhere():
+        try:
+            FalkorProjection.from_uri(foreign_uri)
+        except BaseException as exc:  # pragma: no cover - reported, not raised
+            errors.append(exc)
 
-    assert not t.is_alive(), "the foreign construction thread did not finish"
+    for target in (_construct_elsewhere, _route_elsewhere):
+        t = threading.Thread(target=target, name=getattr(target, "__name__", "foreign"),
+                             daemon=True)
+        t.start()
+        t.join(30)
+        assert not t.is_alive(), f"the foreign {target.__name__} thread did not finish"
+
     assert not errors, errors
+    # ⛔ BOTH recorders, because the leak is symmetric: a stray thread reaching
+    # `_make_sdk` while `TORTOISE_DB_URI` is set constructs through `from_uri`,
+    # which would false-red `test_run_routes_supported_uri_through_from_uri`'s
+    # `assert "uri" not in seen` exactly as the path arm did. Guarding only one
+    # leaves the other deletable with the suite green (measured: removing the
+    # `_from_uri` guard alone left this file at `3 passed`).
     assert seen.get("path") == DEFAULT_DB_PATH, (
         "a construction this test did not make was recorded as its verdict: "
+        f"{seen!r}")
+    assert "uri" not in seen, (
+        "a from_uri this test did not call was recorded as its verdict: "
         f"{seen!r}")
