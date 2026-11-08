@@ -79,7 +79,15 @@ clause is held in a module-level constant the per-writer scan does not open (`_w
 executes `_TURN_WRITE_CYPHER`); or it is a property-map merge over a constant tuple
 (`_update_entity`'s `_CANONICAL_ENTITY_ID_PROPS`); or the store is delegated to another writer; or
 the writer only BUILDS a clause; or — one of them — the statement belongs to its caller
-(`_event_raw_write_door`). Note the two-label pair is NOT in this list: `_event_plain_merge` and
+(`_event_raw_write_door`). ⛔ Those six are a SAMPLE, NOT the set — the other NINE of the fifteen
+fail for reasons none of them names, and a list of six presented as complete leaves the majority
+unexplained: a carrier whose value a later pass stores (`add_point`, `_journal_event_raw_write`), a
+writer whose body issues no store at all — a read, a read into a dict, comment prose
+(`_compare_views`, `_graph_fingerprint`, `turn_prior_vectors`, `_index_gate_read`, `_apply_one`), a
+WIPE (`_prewipe_synthetic_write_scope`'s `SET n.embedding = NULL`), and a label interpolated at
+runtime (`restore_graph`'s `(n:{safe_labels})`) — which is why the `NO_LIVE_VECTOR` /
+`LABELS_AT_RUNTIME` dispositions below exist at all. Note the two-label pair is NOT in this list:
+`_event_plain_merge` and
 `_rebuild_all_replay` keep their `MERGE`s in their own bodies, which is why they derive two labels
 instead of none. A second derivation in the grader would be a second owner of one fact; the field is
 that fact, declared once (the policy-as-data shape `#11444` applies to row 1).
@@ -336,7 +344,13 @@ CLASSES: tuple[str, ...] = (RECOGNISED_PRODUCER, EXEMPT)
 #: `set_embedding_clause("e")`), a store clause held in a module constant (`_write_capture_turns`
 #: executing `_TURN_WRITE_CYPHER`), a property-map merge over a constant tuple
 #: (`_update_entity`'s `_CANONICAL_ENTITY_ID_PROPS`), a store delegated to another writer, a writer
-#: that only BUILDS a clause, and one whose statement is its caller's (`_event_raw_write_door`). A
+#: that only BUILDS a clause, and one whose statement is its caller's (`_event_raw_write_door`).
+#: ⛔ Those six are a SAMPLE, NOT the set — the other NINE fail for none of them: a carrier whose
+#: value a later pass stores (`add_point`, `_journal_event_raw_write`), a writer whose body issues no
+#: store at all — a read, a read into a dict, comment PROSE (`_compare_views`, `_graph_fingerprint`,
+#: `turn_prior_vectors`, `_index_gate_read`, `_apply_one`), a WIPE
+#: (`_prewipe_synthetic_write_scope`'s `SET n.embedding = NULL`), and a label interpolated at
+#: runtime (`restore_graph`'s `(n:{safe_labels})`). A
 #: second derivation in the grading instrument would be a second owner of the same fact; the field
 #: below makes the fact ONE declaration that every consumer reads (the policy-as-data shape `#11444`
 #: already applies to row 1, and the shape OPA's *Philosophy* states: policy is decoupled from the

@@ -1766,7 +1766,14 @@ def score_rule_bullet() -> Row:
 #: module constant (`_write_capture_turns` executing `_TURN_WRITE_CYPHER`), a property-map merge over
 #: a constant tuple (`_update_entity`'s `_CANONICAL_ENTITY_ID_PROPS`), a store delegated to another
 #: writer, a writer that only BUILDS a clause, and one whose statement is its caller's
-#: (`_event_raw_write_door`). The two-label pair is NOT among them: `_event_plain_merge` and
+#: (`_event_raw_write_door`). ⛔ Those six are a SAMPLE, NOT the set — the other NINE fail for none
+#: of them: a carrier whose value a later pass stores (`add_point`, `_journal_event_raw_write`), a
+#: writer whose body issues no store at all — a read, a read into a dict, comment PROSE
+#: (`_compare_views`, `_graph_fingerprint`, `turn_prior_vectors`, `_index_gate_read`, `_apply_one`),
+#: a WIPE
+#: (`_prewipe_synthetic_write_scope`'s `SET n.embedding = NULL`), and a label interpolated at runtime
+#: (`restore_graph`'s `(n:{safe_labels})`) — which is why `NO_LIVE_VECTOR` / `LABELS_AT_RUNTIME`
+#: exist. The two-label pair is NOT among them: `_event_plain_merge` and
 #: `_rebuild_all_replay` keep their `MERGE`s in their own bodies, which is why they derive two.
 #:
 #: So the register now DECLARES it (`WriterClass.stores`: a label tuple, or `NO_LIVE_VECTOR` /

@@ -437,7 +437,13 @@ def test_every_embedded_label_has_a_query_path():
 #: outside-gate writers name no USABLE label in their own Cypher, and they fail for SEVERAL
 #: different reasons — a `MATCH` the derivation does not credit, a module constant, a property-map
 #: merge over a constant tuple, a delegated store, a clause builder, or ONE carrying the caller's
-#: statement — so no single one of them may be named as "the" reason). So the product DECLARES it
+#: statement, and those six are a SAMPLE rather than the set: the other NINE are a carrier a later
+#: pass stores (`add_point`, `_journal_event_raw_write`), a body that issues no store at all — a
+#: read, a read into a dict, comment PROSE (`_compare_views`, `_graph_fingerprint`,
+#: `turn_prior_vectors`, `_index_gate_read`, `_apply_one`), a WIPE (`_prewipe_synthetic_write_scope`),
+#: and a runtime-interpolated label
+#: (`restore_graph`) — so no single one of them may be named as "the" reason). So the product
+#: DECLARES it
 #: (`WriterClass.stores`) and this row reads that declaration. The tests below pin the three
 #: falsifiers the issue names, and the two guards implementation made necessary.
 def _store_declared(name: str, stores, *, cls: str = probe.CENSUS_EXEMPT) -> dict:

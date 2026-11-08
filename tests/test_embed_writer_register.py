@@ -844,7 +844,11 @@ def test_a_stores_declaration_that_does_not_answer_is_refused():
     needs — WHERE the vector lands — cannot be derived for most writers (a store is not always a
     `MERGE|CREATE (:Label` in the writer's own body: the label may sit in a `MATCH` the derivation
     does not credit, in a module-level constant, behind a property-map merge, in another writer, or
-    in the caller's own statement), so it is DECLARED. The refusals below are what keeps that
+    in the caller's own statement — and those are a SAMPLE: the body may hold no store at all (a
+    read, a read into a dict, or comment prose — `_compare_views`, `_graph_fingerprint`,
+    `turn_prior_vectors`, `_index_gate_read`, `_apply_one`), carry a value a later pass stores
+    (`add_point`), be a WIPE (`_prewipe_synthetic_write_scope`), or interpolate the label at runtime
+    (`restore_graph`)), so it is DECLARED. The refusals below are what keeps that
     declaration from degrading into a default: an empty tuple ("unspecified") and a missing field
     would both read to the grader as *nothing to compare*, i.e. a silent pass for the one writer
     nobody checked.
