@@ -321,6 +321,27 @@ the reader-model/retrieval upgrade.
 > (`max(2, len(gold_words)//2)` on UNIQUE words) is REMOVED from the live
 > path and demoted to the key-free CI (MockJudge) substitute only.
 
+> **ERRATA (2026-11-08, #8486)** — the decision above stands; two of its
+> *statements of the code* no longer describe the code, and this block is an
+> annotation rather than a rewrite of the 2026-08-31 record:
+>
+> 1. **`build_judge()` → `build_judge(_judge_spec())`.** A bare `build_judge()`
+>    now resolves `judge.DEFAULT_JUDGE_MODEL`, which the #8486 owner ruling of
+>    2026-10-27 re-pinned to **DeepSeek**. A bare call is therefore precisely
+>    the defect #8486 spent a review cycle pinning: the key pre-flight checks
+>    the official judge's key while a different model grades. All three legs
+>    (`ask_spotcheck`, `ask_spotcheck_probe`, `ask_spotcheck_consistency`)
+>    pass `_judge_spec()` — ONE resolver for the pre-flight and the grader —
+>    and `tests/test_ask_spotcheck_judge.py` pins it by AST over every call
+>    site.
+> 2. **"the same judge the graded eval uses" is no longer true by default.**
+>    The graded LongMemEval run defaults to the ruled DeepSeek model
+>    (`judge.py::DEFAULT_JUDGE_MODEL`); the spot-check's judge is the official
+>    one, named explicitly via `OFFICIAL_JUDGE_MODEL`. The two lanes now
+>    diverge **deliberately**, which is why the spot-check must name its spec
+>    rather than inherit it. The I2 harness still passes **one** judge object
+>    to both legs, so its agreement-by-construction property is unchanged.
+
 **Why:** the lexical bar was structurally unreachable for rubric-style
 long-gold SSP questions — d6233ab6 (79w gold: ≥28/56-unique-word overlap),
 1d4e3b97 (68w: ≥23/47), b0479f84 (63w: ≥24/49) — so a correct-but-
@@ -330,8 +351,9 @@ published benchmark numbers were never produced by the broken bar).
 
 **What changed (files):**
 
-- `tools/ask_spotcheck.py::_grade` — every question routes to `build_judge()`
-  (official gpt-4o anscheck, benchmark-identical); the word-overlap bar is
+- `tools/ask_spotcheck.py::_grade` — every question routes to
+  `build_judge(_judge_spec())` (official gpt-4o anscheck, named explicitly —
+  see the 2026-11-08 ERRATA above; benchmark-identical); the word-overlap bar is
   gone from the live path; the `_abs` marker path is unchanged (precedes
   the judge call). **No-key runtime contract:** fail-fast pre-flight in
   `main()` verifies the judge provider key (default `OPENAI_API_KEY`;

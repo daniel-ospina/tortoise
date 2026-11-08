@@ -119,7 +119,9 @@ OFFICIAL_JUDGE_MODEL = "openai:gpt-4o-2024-08-06"
 #: never "the LongMemEval number". R12 is untouched by this: only an
 #: officially-graded completed run still records `pass`.
 #:
-#: The snapshot-id half of the ruling is served by the id itself. The only dated
+#: The snapshot-id half of the ruling is **NOT met** — `deepseek-v4-flash` is
+#: undated. Recorded as a deliberate departure on `#8486` (amendment comment,
+#: 2026-11-08), not as an oversight. The only dated
 #: id in this family the repo records is `deepseek-v4-flash-0731`, a TEST
 #: FIXTURE (`tests/test_analyze.py`) with no `PRICING_MAP` row — pinning it would
 #: make `spend_guard.arm()` refuse the run before its first call with no partial
@@ -735,13 +737,17 @@ def build_judge(spec: str | None = None, *, mock: bool = False) -> Judge:
     # RuntimeError, regardless of what the spec names (locked by tests).
     if not any(os.environ.get(_PROVIDERS[p][1]) for p in _PROVIDER_PRIORITY):
         raise RuntimeError(
-            "no LLM provider key configured for the LongMemEval judge "
-            "(set OPENROUTER_API_KEY / OPENAI_API_KEY / DEEPSEEK_API_KEY / "
-            "GEMINI_API_KEY). The official judge model is gpt-4o-2024-08-06; "
-            "OpenRouter serves it — with only OPENROUTER_API_KEY set, point "
-            "the spec there via "
-            "TORTOISE_LME_JUDGE_MODEL=openrouter:openai/gpt-4o-2024-08-06. "
-            "Or pass --mock for the offline mock judge.")
+            "no LLM provider key configured for the LongMemEval judge. The "
+            "DEFAULT judge is our own pinned model (deepseek-v4-flash), which "
+            "needs DEEPSEEK_API_KEY — set that and re-run, or pass --mock for "
+            "the offline mock judge. Any of OPENROUTER_API_KEY / "
+            "OPENAI_API_KEY / DEEPSEEK_API_KEY / GEMINI_API_KEY will let a "
+            "build run, but the spec decides which is used. To grade with the "
+            "OFFICIAL judge (the only configuration whose number may be "
+            "compared to a published figure) name it explicitly: "
+            "TORTOISE_LME_JUDGE_MODEL=openrouter:openai/gpt-4o-2024-08-06 with "
+            "OPENROUTER_API_KEY, or openai:gpt-4o-2024-08-06 with "
+            "OPENAI_API_KEY.")
     if provider is not None and not os.environ.get(_PROVIDERS[provider][1]):
         hint = ("" if provider != "openai" else
                 " — the SAME official model is served by OpenRouter; set "
