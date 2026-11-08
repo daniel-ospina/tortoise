@@ -4680,9 +4680,14 @@ def test_the_bare_continuation_cites_name_what_they_say():
             ("13853", "execute_embed("),
             ("13633", "run_s4("),
         )),
-        # The chain's LAST line carries only `execute_embed` — the row pins what
-        # its phrase line carries, and the seven earlier calls are pinned by the
-        # README rows above (same numbers, same symbols).
+        # The chain's LAST line carries only `execute_embed`; the row pins what
+        # its PHRASE LINE carries, and the eight earlier cites are covered by
+        # pins that already exist rather than by "the README rows above" — a
+        # claim this comment made until it was measured false (the README step
+        # table pins six of them, `docs/00_index.md`'s `each VET pass is gated on
+        # the LIST` row pins `:13369`, `probes/capstone_measure.py`'s `follows
+        # at` row pins `:13246`, and `:13595` is pinned by
+        # `test_the_probes_line_citations_resolve_too` alone).
         ("probes/capstone_run.py", "(S5+S6,", (
             ("13853", "execute_embed("),
         )),

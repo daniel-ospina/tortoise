@@ -13502,8 +13502,8 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                 # or a bare item `_parse_json_robust` unwrapped) that is a SHAPE
                 # error, not nothing: `_OUTPUT_SCHEMA` + `mention_held` == the
                 # merge's KEEP-SET, pinned by `test_the_census_whitelist...`
-                # (round 6, made bidirectional in the #11554 review), so a
-                # section added to one set and not the other reds that row.
+                # in ONE direction only (census ⊆ merge-kept); the reverse is
+                # unreadable from a test (see `_MERGE_KEPT_EXTRA_SECTIONS`).
                 # ⛔ The keep-set is NOT `_OUTPUT_SCHEMA` alone — the merge also
                 # keeps `mention_held` (see `_MERGE_KEPT_EXTRA_SECTIONS`), and
                 # asking only the schema classified that channel as malformed.

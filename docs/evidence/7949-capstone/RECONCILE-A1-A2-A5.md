@@ -306,7 +306,7 @@ mechanical half now defaults ON — the composition is the `vet_enabled = (vet_a
 _vet_enabled() or _value_gate_enabled())` assignment (`extractor_v2.py:11731-11732` at `80c912244`;
 **`:12302-12303` at `d69faaf38`**), and the default-ON itself lives at `tortoise/value_gate.py:81`
 (`is_truthy(os.environ.get(ENV_FLAG, "1"))`).
-`extractor_v2.py:1154` is the **`TORTOISE_VET` toggle**, still OFF by default — cite it for that and
+`extractor_v2.py:1178` is the **`TORTOISE_VET` toggle** (`:1154` on the pinned bases below), still OFF by default — cite it for that and
 nothing else. ⚠️ **A line cite is pinned to a base, and cites drift SITE BY SITE.** Three points, each
 named by the sha it is true at, so every delta has a reproducible operand: `:11351-11352` / `:1153` at
 **`aa414b4d5`** (the `#11211` landing — ⚠️ the immediate parent of the next point, `80c912244^`, holds
