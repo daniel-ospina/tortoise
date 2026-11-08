@@ -29,8 +29,8 @@ Citing by NAME is the recorded convention, not this file's invention:
     line number, and never by row **ordinal**. Both go stale the same way".
   * `docs/evidence/7949-capstone/E1-E5-PROOFS.md:137` — "cited **by title, never
     by line**: a line number ROTS".
-  * `docs/epics/2026-08-03-tortoise-hosted-platform/.../08-hosted-prerequisites.md:133`
-    — "cited by SYMBOL, never by line".
+  * `tortoise/hosted_api.py:5006` — "Cited by SYMBOL, never by line number (line
+    numbers re-stale)".
 
 Sphinx's cross-reference guidance converges on the same rule from outside this
 repo: explicit labels (`:ref:`) are preferred over fragile direct links because
@@ -76,9 +76,15 @@ STATED LIMITS — deliberate, and measured rather than guessed:
   * A bare ``:NN`` continuation (``(`:203`)``) carries no document name, so it
     cannot be resolved in isolation and is NOT checked. A citation meant to
     survive should carry its own name instead of leaning on a preceding one.
+  * The CITING side is `docs/**/*.md` only (`docs.rglob`). This instrument never
+    reads a pointer written inside a `.py` docstring or comment — including one
+    of the three policy quotes above, which lives in `tortoise/hosted_api.py` — so
+    "the citation graph" here means the graph BETWEEN documents, not every
+    citation in the tree.
   * The guard is scoped to those two directories ON PURPOSE. `docs/` outside them
-    held **10** further dead citations when this landed (ONTOLOGY.md ×3,
-    `ops/registry-backup-dr.md` ×2, `infra/embedded-reaper-cron.md`,
+    held **10** further dead citations when this landed (ONTOLOGY.md ×4 — three
+    blank lines plus one PAST-EOF cite, which is a different repair from a blank
+    one — `ops/registry-backup-dr.md` ×2, `infra/embedded-reaper-cron.md`,
     `architecture/STORAGE-ARCHITECTURE.md`, `plans/7714-data-model.md`,
     `epics/1402-eval-battery/01-align.md`), all pre-existing and none of them a
     target of #1165. A guard that shipped red would be disabled within a day, and
