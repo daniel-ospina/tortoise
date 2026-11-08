@@ -110,11 +110,10 @@ import sys
 # ImportError from a later edit. The status is 1 and that is DELIBERATE: the set
 # 0-4 below is CLOSED and fully spent, so there is no spare code, and
 # `EXIT_INVALID` is the fail-closed neighbour a refusal can share.
-if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+if sys.version_info < (3, 12):  # noqa: UP036
     raise SystemExit(
-        f"tools/capstone_ledger.py requires Python >= 3.12 (got "
-        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
-        f"`uv run python tools/capstone_ledger.py`"
+        f"tools/capstone_ledger.py requires Python >= 3.12 (got 3.9) — "
+        f"run it as `uv run python tools/capstone_ledger.py`"
     )
 
 import argparse
