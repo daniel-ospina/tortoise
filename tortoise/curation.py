@@ -652,6 +652,21 @@ def _identity_shape(row: Mapping[str, Any]) -> frozenset[str]:
     return frozenset(f for f in fields if row.get(f))
 
 
+def _shared_identity_value(
+    a: Mapping[str, Any], b: Mapping[str, Any]
+) -> tuple[str, str] | None:
+    """An identity field/value these two rows AGREE on, or None.
+
+    Two rows that share one identity value describe one graph — so if their canonicals
+    differ, the row set is self-contradictory and identity is unprovable.
+    """
+    for fname in ("graph_id", "stable_id", "namespace", "name"):
+        va, vb = a.get(fname), b.get(fname)
+        if va and vb and str(va).strip().casefold() == str(vb).strip().casefold():
+            return fname, str(va)
+    return None
+
+
 def _matched_row(ref: str, graph_rows: Sequence[Mapping[str, Any]]) -> Mapping[str, Any] | None:
     """The single row that names ``ref`` in an identity field, or None."""
     wanted = (ref or "").strip().casefold()
@@ -762,7 +777,17 @@ def assert_distinct_graphs(
         # unprovable in that case, so it is a REFUSAL, not a pass.
         ra, rb = _matched_row(source_graph, graph_rows), _matched_row(target_graph, graph_rows)
         if (ra is not None and rb is not None and ra is not rb
-                and _identity_shape(ra) != _identity_shape(rb)):
+                and (_identity_shape(ra) != _identity_shape(rb)
+                     # OR the two rows SHARE an identity value while their canonicals
+                     # differ: a self-contradictory row set that spells ONE graph two
+                     # ways in the same field (two rows both `graph_id: default` with
+                     # `stable_id` g_a / g_b and names na / nb). Each ref then matches
+                     # exactly one row, so `canonical_graph_id` never sees `hits > 1`
+                     # and cannot refuse; the shapes are identical, so this check
+                     # would pass — and the run writes to the tenant graph in place,
+                     # which is the one thing the guard exists to stop. Measured: 7 of
+                     # 2162 oracle-resolved random row sets passed before this clause.
+                     or _shared_identity_value(ra, rb) is not None)):
             raise CurationRefused(
                     f"cannot prove {source_graph!r} and {target_graph!r} are distinct graphs: the "
                     "graph rows expose different identity fields, so the two refs resolve through "

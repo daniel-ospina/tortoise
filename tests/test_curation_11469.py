@@ -1574,3 +1574,52 @@ def test_apply_without_graph_is_refused_before_any_read(monkeypatch, capsys):
                         lambda *a, **k: pytest.fail("must not read (or write) a graph"))
     assert mod.main(["plan", "--target", "org_x_g_new", "--apply"]) == 2
     assert "--graph" in capsys.readouterr().err
+
+
+def test_a_self_contradictory_row_set_cannot_prove_two_graphs_distinct():
+    """Round-27: two rows that spell ONE graph two ways in the SAME field (both
+    `graph_id: default`, `stable_id` g_a / g_b, names na / nb) let each ref match
+    exactly one row, so no `hits > 1` refusal fires and the shapes are identical —
+    the guard passed and the write went to the tenant graph in place."""
+    rows = [
+        {"graph_id": "default", "stable_id": "g_a", "name": "na", "namespace": "team_o1"},
+        {"graph_id": "default", "stable_id": "g_b", "name": "nb", "namespace": "team_o1"},
+    ]
+    with pytest.raises(C.CurationRefused, match=r"cannot prove"):
+        C.assert_distinct_graphs("na", "nb", graph_rows=rows)
+    # …and a row set that does NOT share an identity value is still allowed
+    ok = [
+        {"graph_id": "g_a", "stable_id": "g_a", "name": "na", "namespace": "org_x_g_a"},
+        {"graph_id": "g_b", "stable_id": "g_b", "name": "nb", "namespace": "org_x_g_b"},
+    ]
+    C.assert_distinct_graphs("na", "nb", graph_rows=ok)
+
+
+def test_the_wire_carries_the_sources_section_not_only_points(tmp_path):
+    """Round-27: the round-5 test could not fail for its stated reason — its writer
+    echoed every key back and ignored `sections`. This one drives the REAL
+    `IngestWriter` and inspects the bundles that reached the wire."""
+    plan = C.build_plan([row("p1", kind="decision", content="a decision"),
+                         row("s1", node_type="source", kind="article", content="https://x/y")],
+                        source_graph="old", target_graph="new", packs={})
+    sent: list[dict] = []
+
+    def call(name, args):
+        sent.append(dict(args.get("bundle") or {}))
+        return {"ok": True, "created": 1}
+    res = C.run_plan(plan, writer=C.IngestWriter(call),
+                     ledger=C.Ledger(tmp_path / "l.jsonl", target="new"),
+                     apply=True, graph_rows=ROWS)
+    assert res.written == 2
+    sections = [k for bundle in sent for k in bundle]
+    assert "points" in sections and "sources" in sections, sections
+
+
+def test_the_suite_pins_the_ambient_off_switch_fixture():
+    """Round-27: the round-25 test was vacuous — the autouse fixture had already
+    cleared the variable, so it could not fail for the reason it named. This one is
+    red if the fixture is removed while `TORTOISE_CURATE_OFF` is exported."""
+    import os
+    assert C.OFF_SWITCH_ENV not in os.environ, (
+        "an inherited TORTOISE_CURATE_OFF reached a test: the autouse "
+        "_curation_off_switch_unset fixture is what keeps the suite hermetic")
