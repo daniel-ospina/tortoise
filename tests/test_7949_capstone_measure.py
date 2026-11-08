@@ -10709,20 +10709,26 @@ def test_the_control_arm_definition_names_the_frozen_records_divergence():
 def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     """`RECONCILE-A1-A2-A5.md`'s LIVE cites, which no sweep reads.
 
-    Rule 3 of agent-infra#3442: this leg pins six cites in this record — four
+    Rule 3 of agent-infra#3442: this leg pins the record's LIVE cites — the four
     #11509 re-pointed (`extractor_v2.py:10815`->`:10891`, `sdk.py:17472`->`:17574`,
     `sdk.py:16414-16428`->`:16516-16530` x3, `probes/capstone_measure.py:2238-2243`
-    ->`:2724-2726`), `extractor_v2.py:1720` unchanged, and the `create_operator`
+    ->`:2724-2726`), `extractor_v2.py:1720` unchanged, the `create_operator`
     reproduction quote this PR re-derived (`:8938 :8956 :8963 :9343` ->
     `:9006 :9024 :9031 :9411`, drifted +68 unnoticed since #11449 — the neighbouring
-    #11376 did not move these lines) — and, measured before this pin existed, re-staling ANY of them
+    #11376 did not move these lines), the `:12929` `vet_enabled` live-cite, and the
+    bundle's `hasPart`/`hierarchies` split — and, measured before this pin existed,
+    re-staling ANY of them
     left every suite green: the record is in no `_BUNDLE_DOCS` entry and
     `grep -ln RECONCILE-A1-A2-A5 -- tests/ ':!tests/test_7949_capstone_measure.py'`
     printed nothing at the base this pin was added — note the self-match, the same trap
     as the `hasPart` grep below: this file names the record, so an unexcluded search
     returns itself. The bare `RECONCILE` token matches 10 unrelated files
     (`_BILLING_RECONCILE_INFLIGHT` and friends), so the record's NAME, excluded, is the
-    claim. A record whose whole thesis is
+    claim. ⚠️ No numeral is stated for the count: a typed count is this bundle's
+    recurring defect, and every one written so far undercounted the cites a later
+    commit added (`five` here went stale the moment the `create_operator` quote and
+    the `vet_enabled` cite landed). The enumeration above is the claim; the asserts
+    below are what bind it. A record whose whole thesis is
     that "a claim nothing re-checks can rot silently" cannot leave its own numbers
     unwatched.
 
@@ -10779,15 +10785,19 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # the record's line numbers — the wrong repair, aimed at a staleness where the
     # conclusion itself is false (measured: the call arm could never be reached).
     assert not re.search(
-        r"(?<![\w.`])(create_edge|create_about_edge|create_operator)\(",
+        r"(?<![\w`])(?:[\w.]*\.)?(create_edge|create_about_edge|create_operator)\(",
         "\n".join(ext)), (
         "the record's load-bearing half is the CALL count (0) — a production call "
         "site makes its 'no producer' conclusion FALSE, not merely stale, so this "
         "reds before the line-number arm below can misdirect the repair")
-    # ⚠️ NOT anchored on a leading dot and NOT allowing whitespace before the paren: a
-    # production call needs no receiver (`return create_operator(payload)`), and prose that
-    # names the identifier before a parenthesis is not a call. Both were measured — the
-    # dot-anchor let the unqualified call through, and `\s*\(` turned a trailing prose
+    # ⚠️ The receiver chain is OPTIONAL but PRESENT-OR-ABSENT is not a free choice: the
+    # record's own command is dot-anchored (`\.(create_edge|…)\(`) and the unqualified
+    # form needs no receiver either (`return create_operator(payload)`), so the arm must
+    # cover BOTH or it pins the complement of the claim. Measured: a dot-EXCLUDING arm
+    # (the previous one) stayed green with `_sdk.create_operator(payload)` substituted for
+    # the comment at :9006 AND with `sdk.create_edge(payload)` appended — the record's own
+    # command printed a hit in both, so its conclusion was false while this leg passed.
+    # ⚠️ Still NOT allowing whitespace before the paren: `\s*\(` turned a trailing prose
     # mention into a red claiming the conclusion was false when nothing was called.
     assert re.findall(
         r"git grep -n 'create_operator' -- tortoise/extractor_v2\.py\s+# (.*)",
