@@ -47,7 +47,7 @@ re-check would be the wrong seam. Both fail — see §2.
 
 | Call site | What it does after this change |
 |---|---|
-| `tortoise/supabase_control.py:3823` `owned_free_org_ids` | Unchanged; **its predicate is now duplicated inside the RPC** and pinned against it by the SQL suite. Any future edit must move both. |
+| `tortoise/supabase_control.py:3823` `owned_free_org_ids` | Unchanged; **its predicate is now duplicated inside the RPC**, and the pair is pinned by `test_the_sql_predicate_is_the_python_predicate` — the exclusion set is BUILT FROM `_BILLING_ACTIVE_STATUSES` / `_PENDING_PAYMENT_STATUS`, so a constant change in either direction reddens it. Any future edit must move both. |
 | `tortoise/hosted_api.py:24881` `_create_org_supabase_lane` | Maps the RPC marker onto the same structured 402 and drops the eagerly materialized graph namespace. |
 | `tortoise/hosted_api.py:37815` `_create_onboarding_org_lane` | Maps the marker onto the same 402 instead of its generic 400. |
 | `tortoise/hosted_api.py:44989` `_provision_new_org_from_checkout` | Unaffected by construction: it passes the purchased (paid) tier, and the gate only fires for `COALESCE(p_tier,'free') = 'free'`. |
@@ -74,7 +74,9 @@ re-check would be the wrong seam. Both fail — see §2.
 - **R1** the backstop refuses a create the product rule ALLOWS (fails closed on legitimate use) →
   caught by the SQL §8 matrix: paid tier, identity path, self-replay, collaborator-only,
   paid/`pending_payment`/`past_due`/`trialing` orgs, and the `canceled` acceptance all assert
-  **allowed**; predicate parity with `owned_free_org_ids` is asserted in the same block.
+  **allowed**; predicate parity with `owned_free_org_ids` is asserted by
+  `test_the_sql_predicate_is_the_python_predicate` (a separate test, because the SQL §8 matrix
+  pins today's statuses and cannot see a change to the Python constants).
 - **R2** the refusal reaches a client as a 500/400 instead of the structured 402 → caught by
   `TestAtomicProvisionBackstop` on both Supabase lanes.
 - **R3** a non-entitlement RPC failure is laundered into a 402 (telling an uncapped user they are

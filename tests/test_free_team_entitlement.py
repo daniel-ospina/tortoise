@@ -1059,6 +1059,89 @@ class TestAtomicProvisionBackstop:
             f"{migration.name} no longer PERFORMs the cross-process advisory "
             "lock; the entitlement would be a read-then-write again")
 
+    def _gate_block(self) -> str:
+        """The migration's #1981 gate region — code only, from its own banner
+        comment to the first write it guards.
+
+        Sliced rather than grepped over the whole file on purpose: the header
+        DISCUSSES the predicate (it names the statuses, and the parity rule),
+        so a match anywhere in the file could be satisfied by that prose and
+        stay green under a change to the SQL — the vacuity class
+        `agent-infra#3442` measures. The banner and the `organizations` insert
+        are unique to their two sites.
+        """
+        from pathlib import Path
+
+        sql = (Path(__file__).resolve().parent.parent
+               / "supabase/migrations"
+               / "20261108000001_one_free_org_atomic_provision.sql").read_text()
+        head = "-- \u2500\u2500 #1981: the one-free-org entitlement, ATOMIC"
+        assert sql.count(head) == 1, (
+            "the migration's #1981 banner moved or was duplicated; this pin "
+            "cannot find the gate it grades")
+        block = sql.split(head, 1)[1]
+        tail = "-- \u2500\u2500 organizations row"
+        assert tail in block, (
+            "the write that follows the gate is gone; the gate block cannot be "
+            "delimited, so this pin would grade the rest of the file")
+        return block.split(tail, 1)[0]
+
+    def test_the_sql_predicate_is_the_python_predicate(self):
+        """#1981 — the SQL gate and `owned_free_org_ids` must not drift.
+
+        The backstop REPLACES the Python gate in the multi-worker lane, so the
+        duplicated predicate is load-bearing in both directions:
+
+        * a status ADDED to `_BILLING_ACTIVE_STATUSES` (Python stricter) leaves
+          SQL counting that org as free → the DB stops refusing what the gate
+          refuses, and in the racing lane it is the only guard;
+        * a status REMOVED (Python looser) makes the backstop STRICTER than the
+          gate it backs — the failure the migration header calls "worse than
+          the race it closes".
+
+        Neither drift reddens the behaviour matrix in
+        `supabase/tests/0010_provisioning_rpcs.sql` §8: that suite pins today's
+        statuses, not the Python constants. The expected set is therefore built
+        FROM THE CONSTANTS, which is what makes a change on either side red
+        here. The clauses are matched as SQL STATEMENTS (never as bare tokens),
+        so this cannot be satisfied by the migration's own prose.
+        """
+        from tortoise.supabase_control import (
+            _BILLING_ACTIVE_STATUSES,
+            _PENDING_PAYMENT_STATUS,
+        )
+
+        block = self._gate_block()
+        # the exclusion set, read from the gate's own SQL, compared to Python's
+        excluded = set(re.findall(
+            r"o\.subscription_status\s*<>\s*'([^']*)'", block))
+        assert excluded == (set(_BILLING_ACTIVE_STATUSES)
+                            | {_PENDING_PAYMENT_STATUS}), (
+            "the SQL gate excludes " + repr(sorted(excluded)) + " but the "
+            "Python twin excludes " + repr(sorted(set(_BILLING_ACTIVE_STATUSES)
+                                                   | {_PENDING_PAYMENT_STATUS}))
+            + " — move both declarations together")
+        # NULL counts as free on BOTH sides (a property-less org is not paying)
+        assert re.search(r"o\.subscription_status\s+IS\s+NULL", block), (
+            "the SQL gate lost its IS NULL arm; a NULL subscription_status "
+            "would stop counting as free (Python's `not in _BILLING_ACTIVE_"
+            "STATUSES` still does), silently making the backstop stricter")
+        # ...and the three ownership clauses the Python twin applies
+        for pattern, why in (
+            (r"m\.status\s*=\s*'active'", "active"),
+            (r"m\.role\s*=\s*'owner'", "owner"),
+            (r"m\.org_id\s*<>\s*''", "org_id<>''"),
+            (r"ORDER\s+BY\s+m\.created_at", "oldest-first"),
+        ):
+            assert re.search(pattern, block), (
+                f"the SQL gate stopped applying the {why} clause its Python "
+                "twin (`owned_free_org_ids`) applies")
+        # ...and the exemption that keeps a self-replay allowed (deliberately
+        # ABSENT from the Python twin, so it is pinned here as the known delta)
+        assert re.search(r"m\.org_id\s*<>\s*p_org_id", block), (
+            "the SQL gate lost `m.org_id <> p_org_id`: a retry of an org's own "
+            "provision would be refused")
+
 
 def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
         monkeypatch):
