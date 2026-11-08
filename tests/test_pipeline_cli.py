@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 import types
 from unittest import mock  # noqa: F401
 
@@ -51,19 +52,46 @@ def _register_connector(monkeypatch, module_name, ingested=1):
 
 
 def _patch_projection(monkeypatch, seen):
-    """Record whether cmd_run uses from_uri (URI) or __init__ (path)."""
+    """Record whether cmd_run uses from_uri (URI) or __init__ (path).
+
+    ⛔ ONLY this thread's constructions are recorded, and that is load-bearing.
+    ``FalkorProjection.__init__`` is patched process-globally, so a background
+    retention sweep left running by an earlier test in the same shard
+    (``hosted_api._event_retention_sweep`` -> ``_org_sdk(...)._get_proj()``,
+    lines 2032-2033) also constructs one — and THAT site resolves through the
+    server policy ``_resolve_embedded_db_path`` (``/data/tortoise.db``, falling
+    back to ``tempfile.gettempdir()/tortoise.db`` when ``/data`` is unwritable),
+    never ``config.resolve_db_path``. A last-write-wins recorder then reports
+    the SWEEP's path instead of the routing under test.
+
+    Measured (#11481, shard ``f``): `test_run_uses_embedded_path_when_no_uri`
+    recorded ``/tmp/tt_68bkv982/tortoise.db`` against
+    ``DEFAULT_DB_PATH=/home/runner/.tortoise/tortoise.db``, and its own captured
+    log carried the sweeper's tell six times over — "event retention sweep
+    skipped for <org>: 'FalkorProjection' object has no attribute 'g'" (the
+    sweep hitting this no-op ``__init__``). The same race reds
+    `test_run_routes_supported_uri_through_from_uri`, whose ``"path" not in
+    seen`` a sweep-constructed instance would falsify.
+    """
     from tortoise.projection import FalkorProjection
+
+    call_thread = threading.get_ident()
+
+    def _mine() -> bool:
+        return threading.get_ident() == call_thread
 
     class _FakeProj:
         def close(self):
             pass
 
     def _from_uri(cls, u, graph_name=None):
-        seen["uri"] = u
+        if _mine():
+            seen["uri"] = u
         return _FakeProj()
 
     def _init_path(self, path, *a, **k):
-        seen["path"] = path
+        if _mine():
+            seen["path"] = path
         return None
 
     monkeypatch.setattr(FalkorProjection, "from_uri", classmethod(_from_uri))
