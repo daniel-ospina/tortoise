@@ -406,12 +406,16 @@ measured_at:
 #       (125 `def test_`, up from 114; `c5dbd28971`, #11491), taking it 255 -> 297. So every
 #       number below is RE-MEASURED at this head rather than carried forward from (b)'s.
 #       ⛔ AND "THIS HEAD" IS NOT `measured_at.sha`, which is the tree the ROWS were graded
-#       on. The 297 exists only here: at `measured_at.sha` (`5ef5805f0`) the same pin file
-#       collects 165 (71 `def test_`), so the seven files collect 295 + 165 = 460 THERE and
-#       592 here — a 132-test gap, and it is the one #11491 landed after the baseline. Both
-#       readings are true of their own tree; a reader re-deriving this tally must use the
-#       head of the RUN, not `measured_at`. The only graded row that quotes this tally is
-#       S4's, and it quotes it for the two consent files' own 124.
+#       on. The 297 does not exist at `measured_at.sha`: the same pin file collects 165 (71
+#       `def test_`) there, so the seven files collect 295 + 165 = 460 THERE and 592 here.
+#       The 132-test gap decomposes along `origin/main` into THREE landings — measured by
+#       collecting the pin file at each sha, and NOT one landing, which an earlier cut of
+#       this paragraph claimed: +1 at `8f28254ff8` (the #11217 merge), +89 at `844cf46b4b`
+#       (#11506), +42 at `c5dbd28971` (#11491). Both readings are true of their own tree, and
+#       a reader re-deriving this tally must use the head of the RUN, not `measured_at`.
+#       Two graded S4-row clauses quote this tally rather than one: the two consent files'
+#       own 124, AND the seven-file `587 passed / 5 failed` split — so moving this tally
+#       moves S4 twice.
 #       So the tally at THIS head is a COLLECTION count, and only that:
 #           per-file collection, summed: 295 (the six contract files: 66 / 54 / 9 / 42 / 65 / 59)
 #                                      + 297 (`test_9664_capstone_verdict_ledger.py`, the ledger pin suite)
