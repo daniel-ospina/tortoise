@@ -323,8 +323,6 @@ def purge_stale(proj, *, now: datetime | None = None,
             "WITH w LIMIT 5000 DELETE w RETURN count(*)",
             params={"cutoff": cutoff},
         ).result_set
-    except DirectCacheWriteRefused:
-        raise                     # the purge never landed — not "purged 0"
     except Exception as e:  # noqa: BLE001, RUF100
         logger.warning("why_snapshot: stale purge failed: %s", e)
         return 0
