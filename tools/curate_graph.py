@@ -17,10 +17,22 @@ Env:
 
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter BEFORE the imports below — a module-level
+# 3.12-only import would fail first, and the failure would not say what to do.
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    print(
+        f"curate-graph: requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/curate_graph.py`",
+        file=sys.stderr,
+    )
+    raise SystemExit(3)  # usage, not a data error
+
 import argparse
 import json
 import os
-import sys
 from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -127,6 +139,11 @@ class MCPReader:
             res, reason = None, reason
         else:
             reason = _error_of(res)
+            if reason and not _looks_like_graph_refusal(reason):
+                # An error envelope is the NORMAL delivery shape on this surface, so
+                # the gate has to be here too: a quota/DB error must not re-read a
+                # different graph and label the artifact with the requested one.
+                raise RuntimeError(f"read of section {section!r} failed: {reason[:300]}")
         if reason:
             self._note(f"section {section!r}: the explicit graph argument was refused "
                        f"({reason[:160]}); read from the credential's own graph instead")
@@ -219,16 +236,25 @@ def _live_call_tool(name: str, args: dict[str, Any] | None = None) -> Any:
 
 
 #: A fallback to the credential's own graph is only legitimate when the refusal is
-#: ABOUT the graph argument. Deliberately narrow: a transport failure must raise.
-_GRAPH_REFUSAL_MARKERS = (
-    "graph", "unknown graph", "not found", "no such", "denied", "permission",
-    "forbidden", "unauthor", "not allowed", "scope", "binding",
-)
+#: ABOUT the graph argument — the message must name the graph AND a refusal. A
+#: quota/budget/DB error ("ERR_QUOTA", "budget exceeded") matches neither, so it
+#: RAISES instead of quietly reading a different graph under the same identity.
+_GRAPH_SUBJECTS = ("graph", "tenant", "binding", "scope")
+_REFUSAL_WORDS = ("refus", "denied", "deny", "forbidden", "forbid", "unauthor",
+                  "not allowed", "not permitted", "unknown", "not found", "no such",
+                  "does not exist", "invalid", "permission", "cannot access",
+                  "not visible", "not accessible")
+_GRAPH_REFUSAL_CODES = ("GRAPH_WRITE_REFUSED", "GRAPH_NOT_FOUND", "GRAPH_FORBIDDEN",
+                        "GRAPH_SCOPE", "GRAPH_BINDING")
 
 
 def _looks_like_graph_refusal(reason: str) -> bool:
     low = (reason or "").lower()
-    return any(m in low for m in _GRAPH_REFUSAL_MARKERS)
+    if any(code.lower() in low for code in _GRAPH_REFUSAL_CODES):
+        return True
+    if not any(sub in low for sub in _GRAPH_SUBJECTS):
+        return False
+    return any(word in low for word in _REFUSAL_WORDS)
 
 
 def _source_gap(counts: Any, read: int) -> int | None:
@@ -264,10 +290,12 @@ def cmd_inventory(args: argparse.Namespace) -> int:
     points, total = reader.read_points(page=args.page)
     sources, source_total = reader.read_sources()
     audit = reader.audit()
-    plan = C.build_plan(points + sources, source_graph=args.graph or "default",
+    plan = C.build_plan(points + sources, source_graph=args.graph or "(credential-bound)",
                         target_graph=args.target or "(none: inventory only)")
     report = {
-        "graph": args.graph or "default",
+        # NEVER "default": an omitted `graph` reads the CREDENTIAL's own graph
+        # (#10084), so a field saying "default" would state the opposite.
+        "graph": args.graph or "(credential-bound)",
         "node_counts": counts.get("counts") if isinstance(counts.get("counts"), dict) else counts,
         "points_read": len(points),
         "points_total_reported": total,
@@ -316,7 +344,8 @@ def cmd_plan(args: argparse.Namespace) -> int:
     points, _ = reader.read_points(page=args.page)
     sources, source_total = reader.read_sources()
     graphs = reader.graphs()
-    plan = C.build_plan(points + sources, source_graph=args.graph or "default", target_graph=args.target)
+    plan = C.build_plan(points + sources, source_graph=args.graph or "(credential-bound)",
+                        target_graph=args.target)
     try:
         result = C.run_plan(
             plan,

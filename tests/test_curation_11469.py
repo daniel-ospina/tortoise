@@ -795,3 +795,60 @@ def test_an_iserror_result_without_an_error_key_is_a_refusal():
             self.structuredContent = {"result": {"created": 3}}
     with pytest.raises(C.CurationRefused):
         C.normalise_tool_result(Result())
+
+
+def test_a_quota_envelope_does_not_re_read_a_different_graph():
+    """Round-9 blocking: the ENVELOPE arm of `_section` had no refusal gate, so a
+    quota error made the census come from the bound graph while the report named
+    the requested one."""
+    mod = _tool_module()
+    calls = []
+
+    def call(_name, args):
+        calls.append(args)
+        return {"error": "ERR_QUOTA: budget exceeded", "code": "QUOTA"}
+    reader = mod.MCPReader(call, "org_x_g_aaa")
+    with pytest.raises(RuntimeError, match="QUOTA"):
+        reader.read_sources()
+    assert len(calls) == 1, "a quota error must not trigger an unbound read"
+
+
+def test_the_entry_point_reader_refuses_a_zero_or_short_point_read():
+    """No test reached `read_points`, so reverting either guard left 66 green."""
+    mod = _tool_module()
+
+    def zero(_name, args):
+        return {"result": [], "total": 19595}
+    with pytest.raises(RuntimeError, match="0 points"):
+        mod.MCPReader(zero, None).read_points()
+
+    def short(_name, args):
+        one = {"id": "p1", "kind": "decision", "content": "c"}
+        return {"result": [one], "total": 19595}
+    with pytest.raises(RuntimeError, match="incomplete"):
+        mod.MCPReader(short, None).read_points()
+
+
+def test_an_unqualified_read_is_never_labelled_default(monkeypatch):
+    """Round-9: an omitted `graph` reads the CREDENTIAL's own graph (#10084), so a
+    report saying "default" states the opposite — and the inventory and the plan
+    must use the SAME label, or one artifact contradicts itself."""
+    mod = _tool_module()
+
+    def call(name, args):  # a graph-bound surface: everything answers, nothing writes
+        if name == "tortoise_query":
+            return {"result": [{"id": "p1", "kind": "decision", "content": "c"}], "total": 1}
+        if name == "tortoise_graph_overview" and args.get("section") == "sources":
+            return {"result": [{"url": "https://x/y", "sourceKind": "article"}]}
+        return {"result": []}
+    monkeypatch.setattr(mod, "_live_call_tool", call)
+    rc = mod.main(["inventory", "--out", "/dev/null"])
+    assert rc == 0
+
+
+def test_the_unqualified_label_is_credential_bound_everywhere():
+    import inspect
+    mod = _tool_module()
+    src = inspect.getsource(mod)
+    assert "args.graph or \"(credential-bound)\"" in src
+    assert 'args.graph or "default"' not in src

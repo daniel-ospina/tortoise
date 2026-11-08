@@ -25,7 +25,7 @@ Two measured facts govern the risk:
   a migration here is moving the only copy of a tenant's data.
 
 Code: `tortoise/curation.py` (classification + guards + additive writer) and
-`tools/curate_graph.py` (the CLI). Tests: `tests/test_curation_11469.py` (66 tests).
+`tools/curate_graph.py` (the CLI). Tests: `tests/test_curation_11469.py` (70 tests).
 
 ## The inventory — measured 2026-11-08 against `live-v4`
 
@@ -118,7 +118,7 @@ flagged *not enumerated* rather than presented as measure-and-classify results.
 | dry by default | `--apply` is required; the default run writes nothing | `test_dry_run_writes_nothing` |
 | a refusal is never recorded as a write | the writer unwraps the tool result (a `CallToolResult` OBJECT, not a dict — a dict-only check never sees a refusal), raises on a refusal envelope, and the ledger is written from the ACCEPTED keys only, scoped per target graph; a partial run reports what already landed | `test_a_refused_write_is_never_recorded`, `test_ingest_refusal_envelope_is_not_a_success`, `test_a_calltoolresult_object_is_unwrapped_and_a_refusal_refuses`, `test_a_refused_second_batch_reports_the_first_batch_and_records_it`, `test_ledger_is_scoped_to_its_target` |
 | the bundle is ingest-valid | every point item carries `content` (ingest Phase-1 refuses a bundle otherwise) **and** the bundle mints **no** bundle-local `ref` at all — a ref is expanded wherever it appears as a field value, so any ref can collide with a row's own content/id and make the whole bundle uncanonicalisable (`ref == migrationKey` did exactly that) | `test_bundle_items_carry_content`, `test_bundle_survives_the_ingest_canonicaliser`, `test_a_row_whose_content_looks_like_a_bundle_ref_cannot_cycle` |
-| no silent zero | a read that returns 0 rows, or fewer than the reported total, **fails** — an empty census must never look like "nothing to migrate" | `MCPReader.read_points` raises |
+| no silent zero | a read that returns 0 rows, or fewer than the reported total, **fails** — an empty census must never look like "nothing to migrate"; a refusal delivered as an error ENVELOPE (this surface's normal shape) also fails rather than re-reading a different graph | `test_the_entry_point_reader_refuses_a_zero_or_short_point_read`, `test_an_error_envelope_is_never_reported_as_zero_rows`, `test_a_quota_envelope_does_not_re_read_a_different_graph` |
 
 ## How to run
 

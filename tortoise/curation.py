@@ -795,9 +795,11 @@ class IngestWriter:
                 "graph": target_graph,
                 "promotion_policy": "auto",
                 "granularity": "bulk",
-                # `migrationKey` travels on a POINT (it is a declared point prop and
-                # is what makes a migrated row identifiable in the target without a
-                # local ledger); a :Source accepts only its declared props (#3998),
+                # `migrationKey` travels on a POINT because the target KEEPS it —
+                # `_sanitize_props` has no declared-prop whitelist for Points, so
+                # `migrationKey`/`sourceNodeId`/`pack` all land on the migrated node
+                # (measured), which is what makes a migrated row identifiable after
+                # the fact. A :Source DOES have one (#3998 drops undeclared props),
                 # so the key is stripped from that section alone.
                 "bundle": {section: ([{k: v for k, v in p.items() if k != "migrationKey"}
                                       for p in batch] if section == "sources" else list(batch))},
