@@ -3173,7 +3173,8 @@ def _one_time_embedder_load_in_progress() -> bool:
     the wait is not setup we are still waiting on) and it must be OWNED by this
     request (the owner token is minted per request inside
     ``WaitBoundMiddleware`` and never leaves that task, so it is not reachable
-    from here). It also re-arms at most ONCE, where this loop polls.
+    from here). It also re-arms at most ONCE, where this helper grants a single
+    deferral and then rolls it forward one poll at a time (see the helper).
 
     The width is acceptable HERE and only here: the warm-up issues ONE request
     at a time on one client, and a background pre-warm stamps nothing
@@ -3262,28 +3263,40 @@ async def _warm_up_paying_the_cold_phases(ac, label: str, handler: str,
     """
     task = asyncio.create_task(ac.request(**request_kwargs))
     budget = time.monotonic() + bound
-    #: Granted at most ONCE, and frozen to the load's OWN deadline plus one
-    #: ``bound`` — a second load inside the same warm-up does NOT extend it, and
-    #: the check below runs on EVERY poll, so the wait cannot be extended by a
-    #: flag that never clears.
+    #: Granted at most ONCE and FROZEN to the load's OWN deadline plus one
+    #: ``bound``, so a second load — or a flag that never clears — cannot extend
+    #: the wait past that cap. Within the cap the ceiling is rolled forward ONE
+    #: POLL at a time, so it follows the load's LIFETIME rather than its BUDGET:
+    #: a load observed on one poll and gone on the next buys one ``bound``, not
+    #: ``_LOAD_TIMEOUT_S``. (Measured on the first version of this helper, which
+    #: anchored to the budget instead: with ``bound=0.05`` an instantly-failing
+    #: attempt moved the breach from 0.05 s to 0.65 s — 13x.)
     deferral: float | None = None
+    #: The last poll that OBSERVED a load in flight. Read by the message below,
+    #: and what makes the lifetime anchor legible in a failure: the ceiling the
+    #: loop last granted is this stamp plus one ``bound``.
+    last_in_flight: float | None = None
     try:
         while True:
             await asyncio.wait({task}, timeout=_WARM_UP_POLL_S)
             if task.done():
                 return task.result()
-            if deferral is None and _one_time_embedder_load_in_progress():
+            now = time.monotonic()
+            if _one_time_embedder_load_in_progress():
                 # The cold phase is SETUP: do not judge it by a bound that was
                 # never meant to cover it. The drain is bounded by the load's
                 # OWN join timeout, not by this loop.
-                load_deadline = _one_time_embedder_load_deadline()
-                deferral = ((load_deadline if load_deadline is not None
-                             else time.monotonic()) + bound)
-                budget = max(budget, deferral)
-            if time.monotonic() >= budget:
-                _state = ("a one-time embedder load was in flight and the "
-                          "deferral granted for it has EXPIRED"
-                          if deferral is not None
+                last_in_flight = now
+                if deferral is None:
+                    load_deadline = _one_time_embedder_load_deadline()
+                    deferral = ((load_deadline if load_deadline is not None
+                                 else now) + bound)
+                budget = max(budget, min(deferral, now + bound))
+            if now >= budget:
+                _state = ("a one-time embedder load was in flight (last seen "
+                          f"{now - last_in_flight:.2f}s before this breach) and "
+                          "the deferral granted for it has EXPIRED"
+                          if last_in_flight is not None
                           else "no one-time embedder load is in flight")
                 raise AssertionError(
                     f"[{label}] the WARM-UP {handler} request did not answer "
@@ -3316,7 +3329,12 @@ def test_the_warm_up_does_NOT_judge_a_one_time_load_by_the_cold_open_bound(
        never clears cannot extend the wait, which is what "granted at most
        once, against the load's own deadline" has to mean;
     3. with NO load in flight there is no free pass at all: the same slow
-       request breaches at ``bound``.
+       request breaches at ``bound``;
+    4. ⛔ the deferral follows the load's LIFETIME, not its BUDGET: an attempt
+       observed on ONE poll and gone on the next buys one ``bound``, not the
+       whole ``_LOAD_TIMEOUT_S``. The first version of the helper anchored to
+       the budget and this arm is what says so — it is the mutant the review
+       measured (a 0.05 s bound breaching at 0.65 s).
     """
     module = sys.modules[__name__]
 
@@ -3345,9 +3363,12 @@ def test_the_warm_up_does_NOT_judge_a_one_time_load_by_the_cold_open_bound(
     assert slow.calls == 1, f"the warm-up issued {slow.calls} requests, not 1"
 
     # (2) BOUNDED: the load's deadline passes, the flag never clears, and the
-    # wait still ends — with the route named and the state described.
+    # wait still ends — with the route named and the state described. The
+    # deadline is a FIXED instant (not a per-call lambda), so this arm cannot
+    # re-arm itself.
+    fixed_deadline = time.monotonic() + 0.05
     monkeypatch.setattr(module, "_one_time_embedder_load_deadline",
-                        lambda: time.monotonic() + 0.05)
+                        lambda: fixed_deadline)
     started = time.monotonic()
     with pytest.raises(AssertionError) as exc:
         asyncio.run(_warm_up_paying_the_cold_phases(
@@ -3371,9 +3392,36 @@ def test_the_warm_up_does_NOT_judge_a_one_time_load_by_the_cold_open_bound(
     assert "no one-time embedder load is in flight" in str(exc.value), (
         f"with no load in flight the breach must not blame one: {exc.value}")
 
+    # (4) ⛔ ANCHORED TO THE LIFETIME, NOT THE BUDGET. The load is seen on ONE
+    # poll and gone on the next, and its deadline is deliberately 60 s out: if
+    # the ceiling were anchored to that budget the request would sit for a
+    # minute; anchored to the lifetime it is named about one `bound` later.
+    polls: list[float] = []
+
+    def _one_poll_then_clear() -> bool:
+        polls.append(time.monotonic())
+        return len(polls) <= 1
+
+    monkeypatch.setattr(module, "_one_time_embedder_load_in_progress",
+                        _one_poll_then_clear)
+    monkeypatch.setattr(module, "_one_time_embedder_load_deadline",
+                        lambda: time.monotonic() + 60.0)
+    started = time.monotonic()
+    with pytest.raises(AssertionError) as exc:
+        asyncio.run(_warm_up_paying_the_cold_phases(
+            _Client(60.0), "search", "search_route", {}, 0.05))
+    elapsed = time.monotonic() - started
+    assert elapsed < 2.0, (
+        f"the deferral is anchored to the load's BUDGET, not its LIFETIME — a "
+        f"load observed on one poll and gone on the next held the wait for "
+        f"{elapsed:.1f}s instead of about one bound")
+    assert "EXPIRED" in str(exc.value), (
+        f"the breach must still name the load state: {exc.value}")
+
 
 @pytest.mark.parametrize("label,handler,request_kwargs", _PROJECTION_READ_CASES)
-def test_the_cold_projection_open_rides_the_construction_lane(        client, monkeypatch, label, handler, request_kwargs):
+def test_the_cold_projection_open_rides_the_construction_lane(
+        client, monkeypatch, label, handler, request_kwargs):
     """#10602 review cycle 2, P1: the cold open must NOT be inside the read bound.
 
     The read lane's bound is 8 s because what it measures is a HOT query against
@@ -3558,12 +3606,15 @@ def test_the_read_path_answers_while_the_default_executor_is_stalled(client):
     nothing (`EmbeddingModel.background_load`); the helper's docstring says the
     same, so this cannot be read as a claim that the two bounds are identical.
 
-    A WEDGED route still breaches `warm_up_bound` and still says so — but only
-    after any in-flight load it overlaps has cleared, which is disclosed rather
-    than hidden: the deferral is bounded by that load's own deadline, and in the
-    test lane that deadline is 270 s inside `pytest-timeout`'s 300 s item, so a
-    load consuming its whole budget leaves the ITEM to report the timeout. That
-    is the outcome `tests/conftest.py` chose the 270 s budget for.
+    A WEDGED route still breaches and still says so — ONE `warm_up_bound` after
+    the load it overlaps was LAST OBSERVED in flight (the ceiling is rolled
+    forward per poll, so it follows the load's lifetime rather than its budget),
+    and the breach message says how long ago that was. Disclosed rather than
+    hidden: while a load IS in flight the deferral is capped by the load's own
+    deadline, and in the test lane that deadline is 270 s inside
+    `pytest-timeout`'s 300 s item, so a load consuming its whole budget leaves
+    the ITEM to report the timeout. That is the outcome `tests/conftest.py`
+    chose the 270 s budget for.
 
     It cannot mask the defect it pins: on the pre-#10602 shape the warm-up
     succeeds too (the shared pool is free), and the MEASURED request still has to
