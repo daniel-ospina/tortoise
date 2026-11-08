@@ -1497,14 +1497,19 @@ exec {self.gh} "$@"
         d.mkdir(exist_ok=True)
         self._write_exec(d / "python3", (
             "#!/bin/bash\n"
-            "# a 3.9 interpreter: EVALUATES the real probe against a faked version\n"
-            "if [ \"$1\" = \"-V\" ]; then echo 'Python 3.11.9'; exit 0; fi\n"
+            "# a 3.11 interpreter, one patch below the floor: EVALUATES the real probe\n"
+            "if [ \"$1\" = \"-V\" ]; then echo 'Python 3.11.99'; exit 0; fi\n"
             "if [ \"$1\" = \"-c\" ]; then\n"
-            # ⛔ THE FAKE IS THE VERSION IMMEDIATELY BELOW THE FLOOR (#11202 review
-            # round 11). 3.9 pinned the bound only over the range (3,9,6]..host: a
-            # bound lowered to >= (3, 10) or >= (3, 11) — the ambient `python3` on
-            # Ubuntu 22.04 / Debian 12 — still shipped green. 3.11.9 is the boundary.
-            f'  exec "{PYTHON}" -c \'import sys; sys.version_info = (3, 11, 9, "final", 0);'
+            # ⛔ THE FAKE IS *BELOW* THE FLOOR, AT A POINT NO REAL BOUND CAN SIT ABOVE
+            # (#11202 review rounds 11-12). 3.9 pinned the bound only over
+            # (3,9,6]..host, so `>= (3, 10)` / `>= (3, 11)` shipped green. 3.11.9 fixed
+            # those but was itself a SINGLE POINT: `>= (3, 11, 10)` still shipped green
+            # (3.11.10 is a real release), which would take the fast path on a genuine
+            # 3.11 and land in the module's own guard -> exit 1, the owner-Mac failure.
+            # 3.11.99 sits above every real 3.11 patch, so any bound that would accept
+            # a real 3.11 fails this probe.
+            f'  exec "{PYTHON}" -c \'import sys; '
+            'sys.version_info = (3, 11, 99, "final", 0);'
             ' exec(sys.argv[1])\' "$2"\n'
             "fi\n"
             "exit 1\n"
@@ -1539,7 +1544,7 @@ exec {self.gh} "$@"
         self.assertIn("Python >= 3.12", proc.stderr)
         self.assertIn("uv", proc.stderr)
         # It must NAME the interpreter it found, not just assert one is missing.
-        self.assertIn("3.11.9", proc.stderr)
+        self.assertIn("3.11.99", proc.stderr)
 
     def test_a_312_python3_is_preferred_and_uv_is_never_reached(self):
         """The FAST PATH: a >=3.12 `python3` wins, and `uv` must not run at all.
@@ -1551,50 +1556,57 @@ exec {self.gh} "$@"
         gone the wrapper falls through to the refusal, whose message says there is
         "neither" a 3.12 python3 nor `uv` on a box that plainly has one — a
         self-contradicting rc 2 for the verb AGENTS.md documents.
+
+        ⛔ AND IT IS DRIVEN AT TWO ABOVE-FLOOR POINTS (#11202 review round 12). One
+        point AT the floor pinned only that `>= (3, 12)` accepts (3,12,0); two
+        plausible tightenings — `sys.version_info[:2] == (3, 12)` and
+        `(3, 12) <= sys.version_info < (3, 13)` — then shipped green, and on a 3.13
+        host they lose the fast path and hand back the same self-contradicting refusal
+        ("neither a 3.12+ python3 nor uv", from an interpreter that IS 3.13). Faking
+        (3,12,0) and (3,13,0) pins "at the floor is accepted" AND "above it still is".
         """
-        d = self.tmp / "interp-fast"
-        d.mkdir(exist_ok=True)
-        ran = self.tmp / "py-args.txt"
-        uv_ran = self.tmp / "uv-ran.txt"
-        self._write_exec(d / "python3", (
-            "#!/bin/bash\n"
-            f'printf \'%s\\n\' "$@" >> "{ran}"\n'
-            "if [ \"$1\" = \"-V\" ]; then echo 'Python 3.12.0'; exit 0; fi\n"
-            # ⛔ AND THIS PROBE IS PINNED TOO, NOT RUN UNDER THE HOST INTERPRETER
-            # (#11202 review round 11). Delegating to the real interpreter made this
-            # arm a function of the host's version: on a box at >= 3.13 a bound raised
-            # to >= (3, 13) exited 0, the fast path was taken, `uv` was never reached,
-            # and the test stayed green — a raise above the floor shipping green, the
-            # direction this round exists to close. Faked at exactly (3, 12, 0): it
-            # accepts >= (3, 12) and rejects any raise, on every host.
-            f'if [ "$1" = "-c" ]; then exec "{PYTHON}" -c \'import sys; '
-            'sys.version_info = (3, 12, 0, "final", 0); exec(sys.argv[1])\' "$2"; fi\n'
-            "exit 0\n"
-        ))
-        self._write_exec(d / "uv", (
-            "#!/bin/bash\n"
-            f'echo ran > "{uv_ran}"\n'
-            "exit 7\n"          # loud if the fast path fails to short-circuit
-        ))
-        for name in ("bash", "dirname"):
-            link = d / name
-            if not link.exists():
-                link.symlink_to(shutil.which(name))
-        proc = subprocess.run(
-            ["bash", str(WRAPPER), str(ISSUE), "--repo", str(self.repo)],
-            capture_output=True, text=True, timeout=120,
-            env={**self._env(), "PATH": str(d)},
-        )
-        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        self.assertFalse(uv_ran.exists(),
-                         "uv must not be reached when a 3.12 python3 exists")
-        args = ran.read_text().splitlines()
-        # The FIRST call is the version probe (`-c …`), never the module…
-        self.assertEqual(args[0], "-c")
-        # …and somewhere after it, the module is executed from THIS tree.
-        modules = [a for a in args if a.endswith("who_is_on.py")]
-        self.assertTrue(modules, args)
-        self.assertEqual(Path(modules[0]).resolve(), TOOL.resolve())
+        for version, text in (((3, 12, 0), "3.12.0"), ((3, 13, 0), "3.13.0")):
+            with self.subTest(python=text):
+                d = self.tmp / f"interp-fast-{text}"
+                d.mkdir(exist_ok=True)
+                ran = self.tmp / f"py-args-{text}.txt"
+                uv_ran = self.tmp / f"uv-ran-{text}.txt"
+                self._write_exec(d / "python3", (
+                    "#!/bin/bash\n"
+                    f'printf \'%s\\n\' "$@" >> "{ran}"\n'
+                    f"if [ \"$1\" = \"-V\" ]; then echo 'Python {text}'; exit 0; fi\n"
+                    # ⛔ THE PROBE IS PINNED, NOT RUN UNDER THE HOST INTERPRETER
+                    # (#11202 review round 11): delegating to the real interpreter made
+                    # this arm host-version dependent, so a raise above the floor
+                    # shipped green on a newer host.
+                    f'if [ "$1" = "-c" ]; then exec "{PYTHON}" -c \'import sys; '
+                    f'sys.version_info = {version!r}; exec(sys.argv[1])\' "$2"; fi\n'
+                    "exit 0\n"
+                ))
+                self._write_exec(d / "uv", (
+                    "#!/bin/bash\n"
+                    f'echo ran > "{uv_ran}"\n'
+                    "exit 7\n"      # loud if the fast path fails to short-circuit
+                ))
+                for name in ("bash", "dirname"):
+                    link = d / name
+                    if not link.exists():
+                        link.symlink_to(shutil.which(name))
+                proc = subprocess.run(
+                    ["bash", str(WRAPPER), str(ISSUE), "--repo", str(self.repo)],
+                    capture_output=True, text=True, timeout=120,
+                    env={**self._env(), "PATH": str(d)},
+                )
+                self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+                self.assertFalse(uv_ran.exists(),
+                                 f"uv must not be reached with a {text} python3")
+                args = ran.read_text().splitlines()
+                # The FIRST call is the version probe (`-c …`), never the module…
+                self.assertEqual(args[0], "-c")
+                # …and somewhere after it, the module is executed from THIS tree.
+                modules = [a for a in args if a.endswith("who_is_on.py")]
+                self.assertTrue(modules, args)
+                self.assertEqual(Path(modules[0]).resolve(), TOOL.resolve())
 
     def test_the_wrapper_falls_back_to_uv_with_the_repo_project(self):
         """`uv` is the fallback, and `--project` must select THIS repo's environment.
