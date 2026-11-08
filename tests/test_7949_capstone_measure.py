@@ -4143,10 +4143,33 @@ _BUNDLE_SOURCES = {
     "sdk": _REPO / "tortoise/sdk.py",
     "edges": _REPO / "tortoise/projection/edges.py",
     "extractor_v2": _REPO / "tortoise/extractor_v2.py",
+    # The two `projection/` modules the bundle also cites by number. They are NOT
+    # reachable through `_BUNDLE_CITE` (`__init__`/`entities` are not in its
+    # alternation), so they get `_BUNDLE_SIBLING_CITE` below — a cite no pattern
+    # can even SEE is verified by nothing (round-4 review, F4).
+    "projection_init": _REPO / "tortoise/projection/__init__.py",
+    "projection_entities": _REPO / "tortoise/projection/entities.py",
+}
+
+# `projection/__init__.py` and `projection/entities.py` are cited by NUMBER in the
+# bundle, and the sweep above could not see either: `_BUNDLE_CITE` matches
+# `sdk|edges|extractor_v2` and a basename of `__init__`/`entities` is not in that
+# alternation. That invisibility is exactly how `__init__.py:13613-13615` sat on a
+# `# ── :Batch marker` comment while every gate stayed green — the cite had even
+# been RE-DERIVED in the commit that broke it (round-4 review, F4: `main` said
+# `:13591-13593`, also wrong, off by −9). `(tortoise/)?projection/<mod>.py:<n>` is
+# now a cite the sweep resolves, with the module mapped to its own source key.
+_BUNDLE_SIBLING_CITE = re.compile(
+    r"(?<![\w.])(?:tortoise/)?projection/(__init__|entities)\.py:(\d+)(?:-(\d+))?")
+_BUNDLE_SIBLING_SOURCES = {
+    "__init__": "projection_init",
+    "entities": "projection_entities",
 }
 
 # The GATE the bundle audits, which the bundle also cites by number. Kept OUT of
-# `_BUNDLE_SOURCES` on purpose: `_BUNDLE_CITE` matches `sdk|edges|extractor_v2`
+# `_BUNDLE_SOURCES` on purpose: neither pattern reaches `tools/capstone_verdict_
+# check.py` (`_BUNDLE_CITE` matches `sdk|edges|extractor_v2`, the sibling pattern
+# matches `projection/__init__|entities`), so putting a key here would imply the
 # only, so putting a key here would imply the sweep proper reads it when it
 # cannot. These are read by `test_the_bare_continuation_cites_name_what_they_say`
 # instead, by phrase — the same mechanism the bare `:NNNN` continuations need.
@@ -4280,6 +4303,36 @@ _BUNDLE_RULES = (
      "extractor_v2", ("run_s2(model, story, master",),
      ("run_s2(model, story, master,", "edus=edus,"), "span",
      ("contains", "core_only=classify_later)")),
+    # The two `projection/` cites the bundle prints (round-4 review, F4 — the
+    # class the sweep could not see). Each names the doc phrase beside it, so the
+    # rule is chosen by DISTANCE like every other, and the anchors are the code
+    # the sentence says is there — a blank-`pointKind` synthesis in the #548
+    # rebuild path, and the live write that leaves the property ABSENT.
+    ("the #548 rebuild's blank-pointKind synthesis", "projection_init",
+     ("#548 rebuild SNAPSHOT synthesis",),
+     ("# Ensure pointKind is present (operators often lack it)",
+      'clean["pointKind"] = ""'), "span",
+     ("contains", 'clean["pointKind"] = ""')),
+    ("the live write that leaves pointKind ABSENT", "projection_entities",
+     ("the live write is",),
+     ("n.pointKind=coalesce($pk, n.pointKind)",), "line", None),
+    # Two more `entities.py` cites the sibling pattern made VISIBLE (they were
+    # invisible before it, like the `__init__.py` one): the alias derivation the
+    # write path reads the identifier flag through, and the Object writer's
+    # `objectKind` default that the edge-kind query must read instead of `kind`.
+    ("the alias derivation the write path reads the flag through",
+     "projection_entities", ("read through",),
+     ("identifier_tokens_enabled()",), "line", None),
+    ("the Object writer's objectKind default", "projection_entities",
+     ("the writer stamps",),
+     ("o.objectKind=coalesce($ok",), "line", None),
+    # A THIRD `entities.py` cite the pattern surfaced, and its rule must be its
+    # own: `:2740` is the `is_episodic` write, not the `pointKind` one `:2602`
+    # carries, so a shared "the live write" phrase would bind it to the wrong
+    # rule and red on CORRECT code.
+    ("the is_episodic write that makes an explicit false a claim",
+     "projection_entities", ("really writes the property",),
+     ('set_clauses.append("n.is_episodic=$episodic")',), "line", None),
 )
 
 
@@ -4388,7 +4441,13 @@ def _bundle_sweep(docs, sources) -> dict:
         text = doc_path.read_text(encoding="utf-8")
         doc_lines = text.splitlines()
         paragraphs = _paragraph_spans(text)
-        for match in _BUNDLE_CITE.finditer(text):
+        # Both patterns feed ONE pass, in document order: `_BUNDLE_CITE` carries
+        # its source in group 1, the sibling pattern maps its module. Group 2/3
+        # are the start/end in both, which is what keeps this a single loop.
+        matches = [(m, m.group(1)) for m in _BUNDLE_CITE.finditer(text)]
+        matches += [(m, _BUNDLE_SIBLING_SOURCES[m.group(1)])
+                    for m in _BUNDLE_SIBLING_CITE.finditer(text)]
+        for match, source in sorted(matches, key=lambda pair: pair[0].start()):
             paragraph = next((s, e) for s, e in paragraphs
                              if s <= match.start() < e)
             line_no = text.count("\n", 0, match.start()) + 1
@@ -4400,7 +4459,7 @@ def _bundle_sweep(docs, sources) -> dict:
             if marker:
                 skipped.setdefault(marker, []).append(match.group(0))
                 continue
-            source, start, end = match.group(1), int(match.group(2)), match.group(3)
+            start, end = int(match.group(2)), match.group(3)
             rule = _bundle_rule(source, text[paragraph[0]:paragraph[1]],
                                 paragraph[0], match.start())
             cite = f"{doc_name}:{line_no} `{match.group(0)}`"
@@ -4424,12 +4483,14 @@ def _bundle_sweep(docs, sources) -> dict:
 def test_the_bundles_cites_resolve_where_the_bundle_says_they_do():
     """Every live `file.py:line` cite that names its file → the code it names there.
 
-    Covers all three sources the bundle prints numbers for (`sdk.py`, `edges.py`,
-    `extractor_v2.py`) across `README.md`, both probes, the E-row audit
+    Covers all the sources the bundle prints numbers for (`sdk.py`, `edges.py`,
+    `extractor_v2.py`, and — through the sibling pattern — `projection/__init__.py`
+    and `projection/entities.py`) across `README.md`, both probes, the E-row audit
     (`E1-E5-PROOFS.md`), the `docs/00_index.md` rows that are the bundle's entry
     point, and the `docs/architecture/
-    EXTRACTOR-V4-ARCHITECTURE.md` S2.1 FINDING row this bundle owns — 50 cites at
-    this head (`#10108` added the sixth document; the count is MEASURED, and it
+    EXTRACTOR-V4-ARCHITECTURE.md` S2.1 FINDING row this bundle owns — 47 cites at
+    this head, four of them the `projection/*.py` ones the sibling pattern made
+    visible (`#10108` added the sixth document; the count is MEASURED, and it
     moves with the documents, so re-read `checked` rather than trusting this line).
 
     The architecture doc was the LAST unread one, and it hid a false PASS: its D3
