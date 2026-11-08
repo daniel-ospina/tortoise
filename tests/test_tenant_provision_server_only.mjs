@@ -27,8 +27,9 @@
 //
 // Runs under `node --experimental-strip-types` (the same floor as the other
 // edge-function harnesses). The relative/remote imports are rewritten into a
-// transient gitignored copy under `tests/.server-only-tmp-*/` because node's
-// type stripping resolves relative imports from the importing file's own path.
+// transient gitignored copy under `tests/.server-only-tmp-*/`, because ESM
+// resolves the subject's relative imports from the COPY's own path — and the copy
+// is imported below by a specifier relative to this file, so it sits beside it.
 
 import assert from "node:assert";
 import { createHash, createHmac } from "node:crypto";

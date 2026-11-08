@@ -7230,6 +7230,20 @@ surfaces:
   - test_onboarding_w6_capture_disclosure.py  # #2002 (W6): docker-lane first-capture disclosure + Settings view/delete (DE2E-11)
   - test_onboarding_w6_member_authz.py  # #2002 (W6): dual-auth member-authz on the Settings view/delete leg (lane-agnostic)
   - test_pi_capture_hooks.py
+  # #1120 review (P1, inert enforcer): DUAL-REGISTERED with `api` (see the entry
+  # there). `website/apps/dashboard/functions/` is a SOURCE_PATTERN of THIS
+  # surface, and a named-surface match REPLACES the `core` fallback — so an
+  # `api`-only registration left this file asleep on the one diff that can break
+  # what it pins: `test_edge_function_only_caller_is_the_same_origin_bff` reads
+  # the BFF's `STRIP_REQUEST` (`functions/api/provision.ts`) and the dashboard's
+  # caller (`src/main.jsx`), and deleting `"origin"` from that set 403s every
+  # signup at the server-only gate while `dashboard-js-tests` and the `api` leg
+  # both stay green. Selection is pinned by
+  # tests/test_ci_selection.py::test_a_bff_only_diff_runs_the_provisioning_server_only_coupling_guard.
+  # The edge-function half needs no arm here: ci.yml's `flip` predicate
+  # (`startswith("supabase/")`) runs `.github/scripts/verify-cutover`, which
+  # names this file.
+  - test_provisioning_edge_function.py
   - test_store_sync_worker.py  # #3515: the store-sync backstop (spool + Pi log) and its per-file cursor
   - test_retention_promise.py  # #4179: website/privacy.html horizon + canonical-doc link
   - test_signup_form_safety.py

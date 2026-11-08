@@ -44,8 +44,7 @@ that would make it work.
 
 ### tenant-provision required secrets (#1121)
 
-Beyond `AUTH_HOOK_SECRET` — which no longer exists (#1120 deleted the hook
-path) — the success (201) path reads these secrets, and the deploy workflow
+The success (201) path reads these secrets, and the deploy workflow
 (`.github/workflows/supabase-deploy.yml`) verifies the three app-managed
 ones exist before shipping (hard fail); `SUPABASE_SERVICE_ROLE_KEY` is a
 platform-reserved secret auto-injected into edge functions (warn-only in

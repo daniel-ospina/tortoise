@@ -574,7 +574,7 @@ def test_edge_function_hook_path_is_gone():
     fail-closed, unverifiable branch alive only invites someone to
     "re-enable" a path the platform can never call.
 
-    WHY A SHAPE PIN AND NOT ONLY THE NAMES BELOW: the three name assertions are
+    WHY A SHAPE PIN AND NOT ONLY THE NAMES BELOW: the two name assertions are
     satisfiable by a WORKING re-add — one that spells the secret as a plain
     literal (`Deno.env.get("AUTH_HOOK_SECRET")`) instead of the deleted
     `AUTH_HOOK_SECRET_ENV` constant needs no `standardwebhooks` import to read a
@@ -592,7 +592,6 @@ def test_edge_function_hook_path_is_gone():
     assert "AUTH_HOOK_SECRET_ENV" not in src, (
         "the hook-secret constant must be gone with the hook path"
     )
-    assert "Deno.env.get(AUTH_HOOK_SECRET_ENV)" not in src
     # A hook signature is no longer an authentication path: the ONLY path is a
     # user JWT, whose identity must match the provisioning target (#802).
     assert "authenticateCaller(req)" in src, (
@@ -757,6 +756,24 @@ def test_edge_function_hook_path_is_gone():
             )
     assert 'req.headers.get("authorization")' in auth_body, (
         "the one header authenticateCaller reads must be Authorization"
+    )
+    # ⛔ And no SECRET is read in there either — as an ALLOW-LIST of env names,
+    # not a name. The pins above look for the deleted `AUTH_HOOK_SECRET_ENV`
+    # CONSTANT, so a plain-literal re-add (`Deno.env.get("AUTH_HOOK_SECRET")`) is
+    # invisible to them; this is the pin that sees it. It replaces a
+    # strictly-subsumed line (`assert "Deno.env.get(AUTH_HOOK_SECRET_ENV)" not in
+    # src` — a string that CONTAINS the name the assertion above already rejects,
+    # so it could not fail on its own; PR #11553 review, ISSUE 2). A SUBSET, not
+    # an equality, so extracting the client helper is not a false block; the
+    # auth path actually executing is the runtime harness's job, not this pin's.
+    # Non-vacuous: inserting that literal into authenticateCaller reds here.
+    auth_envs = set(re.findall(r'Deno\.env\.get\("([A-Z0-9_]+)"\)', auth_body))
+    assert auth_envs <= {"SUPABASE_URL", "SUPABASE_ANON_KEY"}, (
+        "authenticateCaller may read only the Supabase client's two env vars "
+        "(SUPABASE_URL, SUPABASE_ANON_KEY) — any other is a secret-reading "
+        "authentication path beside the user JWT, which is what the deleted "
+        "Standard-Webhooks branch was: "
+        f"{sorted(auth_envs - {'SUPABASE_URL', 'SUPABASE_ANON_KEY'})}"
     )
 
 

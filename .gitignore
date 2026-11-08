@@ -10,11 +10,15 @@ premise-labs/.wrangler/
 # Runtime artifacts
 .coverage
 # The edge-function runtime harnesses rewrite their subject's imports and import
-# the copy, which needs a directory inside `tests/` (a tmpdir import hits
-# ERR_INVALID_TYPESCRIPT_SYNTAX). A harness killed at its step timeout cannot
-# run its own cleanup, so the prefix MUST be ignored — otherwise the residue is
-# an untracked copy of a function under `tests/` and every dirty-state gate in
-# this repo sees a dirty worktree.
+# the copy by a specifier RELATIVE TO THE HARNESS'S OWN DIRECTORY
+# (`await import("./.server-only-tmp-…/index-under-test.ts")`), so the copy lives
+# beside it under `tests/`. A tmpdir is not what fails here: measured on node
+# v24.21.0, a `.ts` module under /tmp imports fine by an absolute specifier (and
+# by one relative to /tmp) — only a specifier that does not resolve fails, with
+# ERR_MODULE_NOT_FOUND, not ERR_INVALID_TYPESCRIPT_SYNTAX. A harness killed at
+# its step timeout cannot run its own cleanup, so the prefix MUST be ignored —
+# otherwise the residue is an untracked copy of a function under `tests/` and
+# every dirty-state gate in this repo sees a dirty worktree.
 .server-only-tmp-*/
 tortoise.db
 *.db

@@ -215,8 +215,9 @@ export const onRequest: PagesFunction<Env> = async ({ request, env }) => {
   const outHeaders = new Headers();
   for (const [k, v] of upstreamRes.headers) {
     const name = k.toLowerCase();
-    // Same-origin only: never advertise a cross-origin capability, even if the
-    // upstream (which speaks CORS to its own direct browser callers) sets one.
+    // Same-origin only: never advertise a cross-origin capability. The upstream
+    // has no browser caller at all (#1120 made tenant-provision server-only), so
+    // an `access-control-*` header on its response can only be stray.
     if (STRIP_RESPONSE.has(name) || name.startsWith("access-control-")) continue;
     outHeaders.set(k, v);
   }

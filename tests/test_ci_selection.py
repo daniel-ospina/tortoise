@@ -2309,6 +2309,39 @@ def test_the_cross_surface_grid_guard_runs_for_each_side_of_its_declaration():
         )
 
 
+def test_a_bff_only_diff_runs_the_provisioning_server_only_coupling_guard():
+    """#1120 review (P1, inert enforcer): the BFF's own diff must select the guard
+    that pins the BFF's half of the server-only contract.
+
+    `tests/test_provisioning_edge_function.py` was registered ONLY on `api`, whose
+    SOURCE_PATTERNS hold no dashboard path. `website/apps/dashboard/functions/`
+    and `website/apps/dashboard/src/` are `onboarding` SOURCE_PATTERNS, and a
+    named-surface match REPLACES the `core` fallback — so a diff that deleted
+    `"origin"` from `provision.ts`'s `STRIP_REQUEST` (or pointed `main.jsx` at the
+    Edge Function directly) selected `onboarding`, ran NONE of that file, and left
+    `test_edge_function_only_caller_is_the_same_origin_bff` asleep on the exact
+    change it exists to catch. Silent in production: the handler refuses an
+    origin-bearing request with 403, so every signup fails.
+
+    Asserts the SELECTION, not the registration, so it reds on the pre-fix
+    manifest. The edge-function half needs no arm here: it is selected by ci.yml's
+    `flip` path predicate (`startswith("supabase/")`), whose job runs
+    `.github/scripts/verify-cutover` — and that script names this same test file,
+    so any edit to the leg re-runs the guard it carries.
+    """
+    for subject in (
+        "website/apps/dashboard/functions/api/provision.ts",
+        "website/apps/dashboard/src/main.jsx",
+    ):
+        sel = _sel([subject])
+        assert "test_provisioning_edge_function.py" in sel["test_files"], (
+            f"{subject} selects {sel['surfaces']} but does NOT run "
+            "tests/test_provisioning_edge_function.py, so the coupling pin that "
+            "keeps the BFF stripping Origin (and the dashboard off the Edge "
+            "Function directly) cannot fire on the change that breaks it (#1120)"
+        )
+
+
 def test_every_named_guard_runs_for_its_own_source():
     """The reverse of `test_every_source_pattern_is_selectable`: path -> selected.
 
