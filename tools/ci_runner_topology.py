@@ -179,11 +179,20 @@ import sys
 # the floor. 4 is free: `EXIT_OK` / `EXIT_FAILED` / `EXIT_USAGE` /
 # `EXIT_OWNER_GATED` below are the verdicts a wrapper branches on, and a refusal
 # that exited 1 would read to a caller as "the write failed".
+#
+# ⛔ `--help` IS PART OF THE NAMED INVOCATION ON PURPOSE. `verb` is a REQUIRED
+# positional (`census`/`check`/`apply`), so the bare path exits 2 with
+# "the following arguments are required: verb" — measured, and it is argparse's
+# own usage-error status, not this tool running. A refusal that names a command
+# which itself dies is the SECOND unattributed error this guard exists to
+# prevent. The census's `_expected_invocation` returns the bare path and its
+# assertion is a SUBSTRING test, so `--help` satisfies it while being the one
+# form that always resolves and needs no token. Do not trim it back.
 if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     print(
         f"tools/ci_runner_topology.py requires Python >= 3.12 (got "
         f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
-        f"`uv run python tools/ci_runner_topology.py`",
+        f"`uv run python tools/ci_runner_topology.py --help`",
         file=sys.stderr,
     )
     raise SystemExit(4)
