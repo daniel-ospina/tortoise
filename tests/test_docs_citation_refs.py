@@ -367,6 +367,31 @@ def test_the_guard_reports_a_pointer_that_lands_on_whitespace(tmp_path: Path):
     assert all("line 2 is BLANK" in p for p in problems), problems
 
 
+def test_the_guard_reports_an_in_scope_target_that_does_not_exist(tmp_path: Path):
+    """The third defect class — a citation to a file that is GONE — is pinned.
+
+    The dead-path arm is the one branch no other test reached (measured on this
+    PR's first revision: deleting it from `_citation_problems` left all eight
+    tests green), so a guard whose docstring claims three covered classes could
+    lose one silently. The target is IN scope (`docs/scoping/`) and absent; the
+    sibling pointer at an existing target beside it must not be reported.
+    """
+    (tmp_path / "docs" / "scoping").mkdir(parents=True)
+    (tmp_path / "docs" / "scoping" / "2026-01-01-999-live-scoping.md").write_text(
+        "first line\nsecond line\n", encoding="utf-8")
+    (tmp_path / "docs" / "citing.md").write_text(
+        "gone: `docs/scoping/2026-01-01-999-deleted-scoping.md:3`\n"
+        "fine: `docs/scoping/2026-01-01-999-live-scoping.md:2`\n",
+        encoding="utf-8",
+    )
+
+    problems = _citation_problems(docs=tmp_path / "docs")
+
+    assert len(problems) == 1, problems
+    assert "(no such file)" in problems[0], problems
+    assert "2026-01-01-999-deleted-scoping.md:3" in problems[0], problems
+
+
 def test_the_past_eof_arm_handles_an_inverted_range_without_crashing():
     """An INVERTED range (`:9-3`) puts the START past EOF and the END inside it.
 
