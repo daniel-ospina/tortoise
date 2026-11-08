@@ -16,7 +16,8 @@
     "hierarchies": 6,
     "declared": 42,
     "restated_hierarchy_rows": 4,
-    "distinct_connections": 38
+    "distinct_connections": 38,
+    "note": "the join is ORDERED (pack_hierarchy._matching_row: the same (fromKind, toKind) in that order, plus the same predicate or the same semantics); an inverse-spelling row is NOT counted, so the ordered join's answer is stated here and a direction-agnostic one would read one lower"
   },
   "probe": {
     "store": "a throwaway embedded store (`TORTOISE_DB_URI` is deliberately NOT read)",

@@ -142,8 +142,6 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 
 ---
 
----
-
 > **Changelog v3.31 (2026-10-26 — issue #9202 — the END's state is SETTLED, and the write door SHAPES or REFUSES):**
 >
 > **Owner rulings, 2026-10-26 (Daniel Ospina): the spec text approved verbatim, then the STRUCTURE of where it

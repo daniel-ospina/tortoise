@@ -397,6 +397,25 @@ def build_census(packs_dir: Path | str = REPO_ROOT / "packs", *,
             # subtracted in a paragraph a reader cannot check.
             "restated_hierarchy_rows": restated,
             "distinct_connections": relations_total + hierarchies_total - restated,
+            # ⛔ The join's SCOPE, stated where a reader of the artifact meets it.
+            # `_matching_row` is the authority; its match is ORDERED, and that is
+            # load-bearing rather than incidental: venture's hierarchies[]
+            # `Investment → Program` (hasPart) states the same FACT as its
+            # relations[] `partOf` (program → investment) in the INVERSE
+            # direction, so the ordered join does not count it and
+            # `distinct_connections` is 38, not 37. Counting inverse-named ranks
+            # needs a predicate-inversion table — a second parser this artifact
+            # deliberately does not have — so the rule is stated instead of the
+            # number being widened. (This cell is compared by `--check`; the
+            # README named it while it did not exist, which is the defect class
+            # `layers.written` produced twice.)
+            "note": (
+                "the join is ORDERED (pack_hierarchy._matching_row: the same "
+                "(fromKind, toKind) in that order, plus the same predicate or the "
+                "same semantics); an inverse-spelling row is NOT counted, so the "
+                "ordered join's answer is stated here and a direction-agnostic "
+                "one would read one lower"
+            ),
         },
         # `None` on a hermetic re-derivation (no graph was touched); the measured
         # cleanup contract when `--write-probe` ran. Never compared by `--check`:

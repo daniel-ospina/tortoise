@@ -85,10 +85,12 @@ def _section(doc: str, heading: str) -> str:
 
 
 def _changelog() -> str:
-    """The contiguous blockquote run that holds the changelog entries.
+    """EVERY contiguous blockquote block of the changelog, concatenated.
 
-    Every changelog line is a blockquote line (blank separators are a bare
-    ``>``), so the run ends at the first line that is not prefixed with ``>``.
+    Not the first run only: a newest-first entry PREPENDED above the older build
+    records pushes them into a later block, so a first-run reader silently loses
+    the per-field records it is asked about (`#5142`'s among them). Reading every
+    block makes prepending safe, which is how a changelog is written.
     The entries live in `docs/ONTOLOGY-CHANGELOG.md` since #8745 moved them out
     of the model.
     """
