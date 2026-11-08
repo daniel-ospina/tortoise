@@ -986,11 +986,24 @@ class TestOthersBranchFailClosedRecheck1879:
 
         spy = _Spy(reg)
 
+        orig_make_sdk = ha._make_sdk
+
         class _StubSDK:
+            """The REGISTRY SDK surrogate: the spy for the registry, a real SDK for anything else.
+
+            ⛔ A one-method stub is a trap: `_make_sdk(namespace="registry")` returns this
+            object, and ANY other attribute the endpoint reaches on it (`_get_proj`, on a
+            code path that only some ambient states take) becomes an `AttributeError` that
+            reads like a product bug. That is exactly how this test went red in a CI shard
+            while passing in isolation (#11510 `test (e)`), so every unmodelled attribute
+            delegates to a REAL registry SDK instead of missing.
+            """
+
             def _get_registry(self):
                 return spy
 
-        orig_make_sdk = ha._make_sdk
+            def __getattr__(self, name):
+                return getattr(orig_make_sdk(namespace="registry"), name)
 
         def _make_sdk_spy(*a, **kw):
             ns = kw.get("namespace") or (a[0] if a else None)
