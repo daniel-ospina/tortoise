@@ -76,8 +76,8 @@ quality change. **Live before private-beta:**
 5. the **`null`-not-0.5 rule** for absent belief state (§6.3) — a live defect today, independent of windows.
 
 **Cost during private-beta, plainly:** a complete graph costs **$11.01/tenant** at the 40-tenants-per-instance
-density — RAM $8.75 + shared project line $2.13 + record $0.13 (§8.1) — against a **$5.70** storage budget, i.e.
-**193 % of it**. ⚠️ **It is also above the product's older recorded constraint** (*"a $19 price with < $9 total
+density — RAM $8.75 + shared project line $2.13 + record $0.13 (§8.1) — against a `$5.70` storage budget, i.e.
+193 % of it. ⚠️ **It is also above the product's older recorded constraint** (*"a $19 price with < $9 total
 cost per user"*, `STORAGE-ARCHITECTURE.md` §1), because $11.01 > $9 — and at beta-scale density it is higher
 still (a 1 GB instance holds ~6 complete solo tenants, so the RAM line alone is ~$12). **This is a knowing,
 bounded overspend on a small, known tenant count**, taken because the alternative — arming a window nobody has
@@ -235,8 +235,9 @@ records the product constraint as *"a $19 price with < $9 total cost per user"*,
 "$9 → $19 budget"; the **30 %-of-price** target here is the owner's 2026-11-07 sizing rule for the **storage line**,
 and it is **strictly tighter** than that ceiling ($5.70 < $9). Both are quoted so neither is mistaken for the other:
 against the older **$9 total-cost ceiling** a complete graph's **RAM line** is **~97 % of it** and its **total is ~122 %** (above it), while against the **$5.70 storage target** the RAM line is **154 %** and the total **193 %** — and
-the target is what governs the window. **The target's own recorded home is owed**; until it is recorded, this section
-and §2.0's marker cite it as an owner ruling of that date rather than as a derived figure.
+the target is what governs the window. **The rule's recorded home is §8**, which quotes it verbatim (*"the storage offered becomes what can be afforded
+with 0.3 × tier price"*, owner, 2026-11-07) and derives every threshold from it — so the target is no longer an
+unhomed figure, and §2.0's marker cites that derivation.
 
 **⚠️ Why it is nonetheless NOT armed at private-beta (§1.5):** it is unmeasured. The bounded-cache
 literature measures latency and hit rate, not answer quality, and the best trace-aware policy reached ~54 %
