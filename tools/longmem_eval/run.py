@@ -7190,8 +7190,8 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="reader model spec <provider>:<model> "
                         "(env TORTOISE_LME_READER_MODEL; default "
                         "deepseek:deepseek-v4-flash — the M5 pinned "
-                        "reader, #1525, on the transport the fleet runs "
-                        "#8486; an override records reader_pinned=false + "
+                        "reader, #1525, on the transport the #8486 "
+                        "ruling names; an override records reader_pinned=false + "
                         "warns on stderr)")
     p.add_argument("--judge-model", default=None,
                    help="judge model spec (env TORTOISE_LME_JUDGE_MODEL; "

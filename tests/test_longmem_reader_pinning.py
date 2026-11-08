@@ -28,11 +28,12 @@ from tortoise.ingest import _PROVIDERS
 
 
 def test_reader_model_is_pinned_constant():
-    # #8486 (2026-11-07): the pin names the transport we actually run. The model
+    # #8486 (2026-11-07): the pin names the transport the ruling names. The model
     # is unchanged (deepseek-v4-flash); the OPENROUTER transport the pin used to
-    # name is absent on every box we hold, so the DEFAULT raised at the
-    # named-provider check before a question loaded, and every run needed an
-    # override that recorded `reader_pinned: false`.
+    # name was absent on the box the 2026-11-02 credential audit measured (not a
+    # fleet census), so the DEFAULT raised at the named-provider check before a
+    # question loaded there, and a run on that box needed an override that
+    # recorded `reader_pinned: false`.
     assert READER_MODEL == "deepseek:deepseek-v4-flash"
 
 

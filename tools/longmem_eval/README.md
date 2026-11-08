@@ -853,10 +853,10 @@ the gate health of the (possibly cached) graph it retrieved from.
 The reader model + prompt are **pinned constants for the run**: the code
 default (`READER_MODEL` in `tools/longmem_eval/reader.py`) is
 `deepseek:deepseek-v4-flash` — the model the V2 runs actually used, on the
-transport the fleet actually runs — so a default-config run is a pinned run.
+transport the #8486 ruling names — so a default-config run is a pinned run.
 (#8486, 2026-11-07: the pin named `openrouter:deepseek/…`, and the box the
 credential audit was taken on had no `OPENROUTER_API_KEY`, so the *default*
-raised at the named-provider check before loading a question and every run
+raised at the named-provider check before loading a question and a run there
 needed an override — which records
 `reader_pinned: false`. The model is unchanged; the transport moved, and with it
 the request shape: the direct DeepSeek lane is served by

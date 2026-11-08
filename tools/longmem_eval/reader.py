@@ -101,16 +101,17 @@ __all__ = [
 # (reader_pinned=false) + warned on stderr — never silent.
 #
 # TRANSPORT (#8486, 2026-11-07): the pin named `openrouter:deepseek/...`, which
-# made the DEFAULT unservable on the boxes we run — `OPENROUTER_API_KEY` is
-# absent on the box the audit was taken on (#8486 credential audit, 2026-11-02:
+# made the DEFAULT unservable on the box the credential audit was taken on —
+# `OPENROUTER_API_KEY` is absent there (#8486 credential audit, 2026-11-02:
 # "ABSENT: OPENAI_API_KEY, OPENROUTER_API_KEY, GEMINI_API_KEY", measured on that
-# box and worktree only — not a fleet-wide census), so `build_reader()` raised at
-# the named-provider check before a single question loaded (also observed
-# 2026-10-23). Every run therefore needed an env override, and an override
+# box and worktree only — not a fleet-wide census) — so `build_reader()` raised
+# at the named-provider check before a single question loaded (also observed
+# 2026-10-23). Every run there therefore needed an env override, and an override
 # records `reader_pinned: false` — i.e. the pin read as DRIFT exactly when it WAS
 # the ruling. The pin's own contract is "the code default equals what runs use";
 # the MODEL is unchanged (`deepseek-v4-flash`), only the transport is now the one
-# the audit measured as available.
+# the ruling names and the audit measured as available. The scope of that claim
+# is the MEASURED box: the ruling, not a census, is what makes this the default.
 #
 # OVERRIDES: the OpenRouter-transport reader pin (M5 #1525's literal spec) — the
 # owner's decision recorded on #8486 (2026-11-03) is that the model is DeepSeek,

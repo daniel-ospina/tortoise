@@ -132,9 +132,9 @@ Provider wiring already in place: `openrouter` is in
 the spec `openrouter:qwen/qwen3.8-max` parses via `_parse_model_spec`, and
 the override records `reader_pinned=false` + warns on stderr (the M5 default
 is `deepseek:deepseek-v4-flash` — #1525, with the TRANSPORT repointed off
-`openrouter:` by #8486 on 2026-11-07: no box the fleet runs holds
-`OPENROUTER_API_KEY`, so the openrouter-named default raised before loading a
-question). Requires an
+`openrouter:` by #8486 on 2026-11-07: the box the 2026-11-02 credential audit
+measured holds no `OPENROUTER_API_KEY`, so the openrouter-named default raised
+before loading a question there). Requires an
 `OPENROUTER_API_KEY` **for the reader override** and a `DEEPSEEK_API_KEY` **for
 the run's default judge** (the judge needs no `OPENAI_API_KEY` unless the official
 judge is named explicitly, because the run default is our own pinned model
