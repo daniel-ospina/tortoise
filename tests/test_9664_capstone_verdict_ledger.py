@@ -1399,7 +1399,7 @@ def test_a_glob_whose_only_match_resolves_outside_the_tree_is_invalid(tmp_path):
         cl.validate(_ledger([_row("B", evidence=["pure/evil.md"])]), repo_root=tree)
 
 
-def test_usage_outcomes_never_borrow_a_verdict_code(tmp_path):
+def test_usage_outcomes_never_borrow_a_verdict_code():
     """`--help` exited 0 (== CLEAN) and a bad flag exited 2 (== UNCOVERED).
 
     A caller branching on the exit status read "a help screen was printed" as "the
@@ -3300,33 +3300,12 @@ def test_an_untracked_artifact_is_invalid(tmp_path):
     the refusal it claims to pin was unpinned there: deleting `_is_tracked` from the
     resolver would have stayed green in CI while a gitignored lane artifact counted
     as held evidence.
+
+    The repository setup lives in `_hermetic_repo` — it was duplicated here verbatim,
+    and the signed-commit-proof flag (`-c commit.gpgsign=false`) only has to be right
+    in ONE place (#11474 review).
     """
-    repo = tmp_path / "treerepo"
-    repo.mkdir()
-    (repo / "committed.txt").write_text("held\n", encoding="utf-8")
-    (repo / "untracked.txt").write_text("not in any clone\n", encoding="utf-8")
-    git = ["git", "-C", str(repo)]
-    subprocess.run([*git, "init", "-q"], check=True)
-    subprocess.run([*git, "add", "committed.txt"], check=True)
-    subprocess.run(
-        [
-            *git,
-            "-c",
-            "user.email=t@example.com",
-            "-c",
-            "user.name=t",
-            # Hermetic: a box whose GLOBAL config sets `commit.gpgsign = true` would
-            # otherwise fail this SETUP with "cannot run gpg" before the property is
-            # ever exercised.
-            "-c",
-            "commit.gpgsign=false",
-            "commit",
-            "-q",
-            "-m",
-            "seed",
-        ],
-        check=True,
-    )
+    repo = _hermetic_repo(tmp_path)
 
     ok, why = cl._evidence_is_real("committed.txt", repo_root=repo)
     assert ok, why
@@ -4665,7 +4644,7 @@ def test_capstone_ledgers_refusal_code_is_the_one_the_census_pins():
 # one committed and one untracked file, never the lane-only `WORKTREE-REPORT.md`.
 
 
-def _hermetic_repo(tmp_path) -> object:
+def _hermetic_repo(tmp_path) -> Path:
     """A throwaway git repo with exactly `committed.txt` tracked. Signed-commit-proof."""
     import subprocess as sp
 
@@ -4748,7 +4727,7 @@ def test_an_EMFILE_on_the_ls_files_probe_cannot_manufacture_a_clean_exit(tmp_pat
     assert not ok and "not TRACKED" in why, why
 
 
-def test_the_unrunnable_probe_path_is_not_the_abstention_path(tmp_path):
+def test_the_unrunnable_probe_path_is_not_the_abstention_path():
     """The two OSError causes must not share a return value — that sharing WAS the bug.
 
     `_tracked_unprovable()` is a MEASURED answer ("git says this is not a work tree");
@@ -4759,16 +4738,22 @@ def test_the_unrunnable_probe_path_is_not_the_abstention_path(tmp_path):
     assert cl._tracked_unprovable() is True
 
 
-def test_an_EMFILE_on_the_FOLLOW_UP_probe_also_refuses(tmp_path):
+def test_an_EMFILE_on_the_FOLLOW_UP_probe_also_refuses():
     """The SECOND `OSError` site, which had no pin at all.
 
     `_is_tracked` calls `git ls-files`, and then — only when that exits non-zero — a
     follow-up `git rev-parse --is-inside-work-tree`. Both calls can fail to SPAWN, and
     both were folded into the abstention, so reverting only the follow-up guard back
-    to the shipped fail-open left the whole suite green — measured at the head BEFORE
-    this pin was added: **168 passed, 0 failed**. With this pin present the same revert
-    is red (`1 failed, 168 passed`), which is the point: the number 168 is the tell that
-    the pin is the only thing standing between that guard and deletion as dead code.
+    to the shipped fail-open left the whole suite green at the head BEFORE this pin was
+    added. With this pin present the same revert is red and NAMES this test — which is
+    the point: the pin is the only thing standing between that guard and deletion as
+    dead code.
+
+    ⛔ No absolute pass count is quoted, and that is deliberate: a count goes stale
+    within one commit (this file gains pins every round), so a reader can never
+    reproduce it and the number becomes a claim nobody measured. The failure SHAPE —
+    "green before the pin, red naming this test after it" — is the part that is
+    checkable, and it is the part the claim rests on.
     """
     import types
 
@@ -4795,9 +4780,9 @@ def test_the_glob_arm_does_not_read_an_UNRUNNABLE_probe_as_a_held_match(monkeypa
 
     `if _is_tracked(...) is True:` is what keeps an UNRUNNABLE probe out of the
     `return True, ""` arm — and nothing exercised it: reverting it to
-    `is not False` (so `None` counts as held) left the whole suite green at 169
-    passed. `None` is falsy, so the mutant is invisible to any plain truthiness test;
-    only an assertion that drives `None` through THIS arm catches it.
+    `is not False` (so `None` counts as held) left the whole suite green at the head
+    this pin was added to. `None` is falsy, so the mutant is invisible to any plain
+    truthiness test; only an assertion that drives `None` through THIS arm catches it.
 
     It is a genuine fail-open rather than a wording nit, because it is the arm that
     can ANSWER "a held artifact exists" from a check that never ran.
@@ -4822,10 +4807,14 @@ def test_the_bare_path_arm_does_not_read_an_UNRUNNABLE_probe_as_a_held_match(mon
     whose TRACKED probe never ran, accepted as a held artifact of the tree. That is
     the same fail-open this change closes at the other two sites, one arm over.
 
-    ⛔ IT CANNOT BE PINNED END TO END, which is why this one drives the seam. A
-    `cmd:` entry reaches `_names_artifact` AND `_evidence_is_real`, and only the
-    latter has to refuse for the CLI to exit INVALID — so a ledger-level assertion
-    stays green under the mutant and would have read as coverage that is not there.
+    ⛔ THE BLANKET `lambda …: None` STUB IN THIS PIN CANNOT REACH THE LEDGER'S EXIT
+    CODE — it refuses EVERY path, so a `cmd:` row goes INVALID even with this arm
+    reverted and the assertion would read as coverage that is not there. The
+    END-TO-END consequence IS pinnable with a stub that answers `None` for the target
+    only, and the pin below does exactly that: for a bare-path `cmd:` target,
+    `_names_artifact` is the ONLY decider (the `-c` script-body arm is the one that
+    also reaches `_evidence_is_real`), so this arm is all that stands between an
+    unmeasured probe and a CLEAN exit.
     """
     monkeypatch.setattr(cl, "_is_tracked", lambda resolved, root: None)
     ok, why = cl._names_artifact(REAL_EVIDENCE, REPO_ROOT, REPO_ROOT)
@@ -4835,6 +4824,35 @@ def test_the_bare_path_arm_does_not_read_an_UNRUNNABLE_probe_as_a_held_match(mon
     # guess-the-cause defect this function exists to remove.
     assert "could not be run here" in why, why
     assert "not TRACKED" not in why, why
+
+
+def test_a_cmd_target_behind_an_UNRUNNABLE_probe_is_REFUSED_end_to_end(monkeypatch):
+    """The same arm's USER-VISIBLE consequence: the record may not exit CLEAN.
+
+    The seam pin above drives `_names_artifact` directly; this one pins what the
+    RECORD does with the answer — a one-row `verified` ledger citing a `cmd:` target
+    whose TRACKED probe never ran is INVALID. MEASURED with the arm reverted (`if
+    tracked is None:` -> `if False:`): the row is ACCEPTED, so the ledger prints the
+    only clean exit for a file git was never asked about. That is the fail-open this
+    change exists to close, in the one call site a plain truthiness test cannot see.
+
+    The stub is SELECTIVE on purpose: blanket-`None` would also silence the arms that
+    run for every other path, and the row would be refused for the wrong reason — the
+    `asked == []` assertion below is what proves the failure came from THIS arm.
+    """
+    asked: list[str] = []
+
+    def only_the_command_target_is_unmeasurable(resolved, root):
+        asked.append(resolved.name)
+        return None if resolved.name.endswith("README.md") else True
+
+    monkeypatch.setattr(cl, "_is_tracked", only_the_command_target_is_unmeasurable)
+    entry = f"cmd:uv run python {REAL_EVIDENCE}"
+    with pytest.raises(cl.InvalidLedger) as excinfo:
+        cl.validate(_ledger([_row("A", evidence=[entry])]), repo_root=REPO_ROOT)
+    message = str(excinfo.value)
+    assert "TRACKED check could not be run here" in message, message
+    assert asked and asked[0] == "README.md", asked
 
 
 def test_a_glob_mixing_untracked_and_unrunnable_reports_the_measured_refusal(monkeypatch):
@@ -4899,3 +4917,82 @@ def test_a_glob_accepted_by_a_later_match_does_not_announce_the_rows_fate(monkey
         "the probe cannot know the row's fate — a later tracked match accepted it, so "
         f"the per-path line must not claim the row was refused: {err}"
     )
+
+
+def test_an_ABSTAINING_tree_is_accepted_and_prints_the_NOTE(tmp_path, monkeypatch, capsys):
+    """The `return _tracked_unprovable()` CALL SITE, end to end — it had no pin at all.
+
+    `test_the_unrunnable_probe_path_is_not_the_abstention_path` asserts the HELPER's
+    return value (`_tracked_unprovable() is True`) and nothing asserted that
+    `_is_tracked` still RETURNS it: MEASURED at this head, reverting that call site to
+    `return False` left the suite green at **173 passed**, so the whole abstention arm
+    could be deleted as dead code and no row would notice (#11474 review).
+
+    Real git, not a stub: a BARE repo over `GIT_DIR` makes `ls-files --error-unmatch`
+    exit 1 and `rev-parse --is-inside-work-tree` answer `false` with rc 0 — git is
+    present, ran, and answered "this is not a work tree", which is the abstention's own
+    trigger.
+
+    ⛔ THIS PINS #11503 OPTION 1, WHICH IS THE RECORDED DECISION — "the probe could not
+    RUN refuses; 'git answered no' / 'git cannot tell' abstains with the NOTE". It is
+    pinned rather than left implicit because the REOPEN ARGUMENT filed on that issue
+    (2026-11-08T04:21Z) measures the cost of the abstention in exactly this shape: the
+    sha arm can answer `exists` while the tracked arm abstains, so an artifact in no
+    index reaches a CLEAN exit. That amendment is NOT adopted in this PR (it would
+    reverse the ruling quietly); when it is decided, this pin flips with it — and the
+    `_commit_state` stub below is what makes the shape reachable, exactly as the
+    reopen's ledger did.
+
+    ⛔ What must NOT change silently either way is the CAUSE. `not TRACKED by git` is
+    git's MEASURED answer and is not what happened here, so no refusal on this path may
+    say it — that is the guess-the-cause defect this whole change removes.
+    """
+    bare = tmp_path / "bare.git"
+    subprocess.run(["git", "init", "--bare", "-q", str(bare)], check=True)
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    (tree / "held.txt").write_text("held\n", encoding="utf-8")
+    monkeypatch.setenv("GIT_DIR", str(bare))
+    monkeypatch.setattr(cl, "_commit_state", lambda sha, repo_root=None: "exists")
+
+    # The call site itself: anything but `True` here means the abstention was dropped.
+    assert cl._is_tracked(tree / "held.txt", tree) is True
+    ok, why = cl._evidence_is_real("held.txt", repo_root=tree)
+    assert ok is True, why
+    # And the ROW consequence, which is what the helper's value is FOR.
+    cl.validate(_ledger([_row("A", evidence=["held.txt"])]), repo_root=tree)
+    err = capsys.readouterr().err
+    assert "git is unavailable here" in err, err
+    assert "not TRACKED" not in err, (
+        "git answered (it is present and said 'not a work tree'), so no line may claim "
+        f"it measured this path as untracked: {err}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("site", "call"),
+    [
+        ("evidence", lambda: cl._evidence_is_real(REAL_EVIDENCE, REPO_ROOT)),
+        ("artifact", lambda: cl._names_artifact(REAL_EVIDENCE, REPO_ROOT, REPO_ROOT)),
+    ],
+    ids=["_evidence_is_real", "_names_artifact_bare_path"],
+)
+def test_a_truthy_non_True_TRACKED_answer_is_not_read_as_tracked(site, call, monkeypatch):
+    """The FOURTH answer: `is False … is None … return True` ACCEPTED everything else.
+
+    `_is_tracked` is annotated `bool | None`, so `1` / `"yes"` cannot arrive today — and
+    that is precisely why the guard is the wrong shape: it reads every future truthy
+    return as the measurement "this artifact is in the tree". MEASURED at the pre-fix
+    shape, `_is_tracked -> 1` made `_evidence_is_real` answer `(True, '')` AND
+    `_names_artifact`'s bare-path arm answer `(True, '')` — both call sites were open,
+    so both are pinned, each by its own row (deleting either guard alone reddens only
+    its own parameter).
+
+    A refusal, not a crash: the value is NAMED, because "not a measurement" is the
+    truth and "not TRACKED by git" would be a cause nobody measured.
+    """
+    monkeypatch.setattr(cl, "_is_tracked", lambda resolved, root: 1)
+    ok, why = call()
+    assert ok is False, f"a truthy non-True answer is not 'tracked' on the {site} arm"
+    assert "not a measurement" in why, why
+    assert "not TRACKED" not in why, why

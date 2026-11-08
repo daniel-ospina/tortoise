@@ -1176,6 +1176,18 @@ def _names_artifact(token: str, cwd: Path, root: Path) -> tuple[bool, str]:
                 return False, (
                     f"{text!r} is not TRACKED by git, so a reader's clone does not have it"
                 )
+            if tracked is not True:
+                # ⛔ `False` and `None` are the two MEASURED answers; anything else is
+                # not one. `_is_tracked` is annotated `bool | None`, so this is
+                # unreachable today — and it must stay unreachable rather than be
+                # READ as tracked: an `is False … is None … return True` shape accepts
+                # every future truthy return (`1`, `"yes"`) as the measurement "this
+                # artifact is in the tree", which is a fail-open waiting for a caller
+                # change (#11474 review).
+                return False, (
+                    f"{text!r} cannot be verified: the TRACKED check answered "
+                    f"{tracked!r}, which is not a measurement that it is in the tree"
+                )
             return True, ""
         if resolved.is_dir() and resolved.is_relative_to(root) and resolved != root:
             # ⛔ A DIRECTORY IS A LEGITIMATE TARGET, and refusing it was a measured
@@ -1653,6 +1665,15 @@ def _evidence_is_real(
         # names the real cause.
         return False, (
             f"evidence path cannot be verified: the TRACKED check could not be run here: {entry}"
+        )
+    if tracked is not True:
+        # ⛔ The same fourth answer as `_names_artifact`'s bare-path arm: only `True`
+        # is the measurement "tracked", and an `is False … is None … return True`
+        # shape reads every other truthy value as one. Unreachable under the declared
+        # `bool | None` return, pinned so it stays that way (#11474 review).
+        return False, (
+            f"evidence path cannot be verified: the TRACKED check answered {tracked!r}, "
+            f"which is not a measurement that the file is tracked: {entry}"
         )
     return True, ""
 
