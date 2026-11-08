@@ -398,33 +398,36 @@ measured_at:
 #       a previous revision of this block recorded. (b) the merge of `origin/main` then
 #       landed 89 more parametrized tests in the same file (114 `def test_`, up from 72),
 #       taking it 166 -> 255.
+#       (c) the merge of `origin/main` at THIS head added 42 more to that same file
+#       (125 `def test_`, up from 114; `c5dbd28971`, #11491), taking it 255 -> 297. So every
+#       number below is RE-MEASURED at this head rather than carried forward from (b)'s.
 #       So the tally at THIS head is a COLLECTION count, and only that:
 #           per-file collection, summed: 295 (the six contract files: 66 / 54 / 9 / 42 / 65 / 59)
-#                                      + 255 (`test_9664_capstone_verdict_ledger.py`, the ledger pin suite)
-#                                      = 550 COLLECTED at this head.   Counted, not estimated.
+#                                      + 297 (`test_9664_capstone_verdict_ledger.py`, the ledger pin suite)
+#                                      = 592 COLLECTED at this head.   Counted, not estimated.
 #       ⛔ THE SPLIT IS MEASURED, NOT DERIVED, AND IT DOES NOT CARRY ACROSS HOSTS.
-#       `550 - 5` happens to equal 545 on THIS host, but nothing about the split follows
+#       `592 - 5` happens to equal 587 on THIS host, but nothing about the split follows
 #       from the collection count: the 5 are docker-lane-only (S2's ACL group) and do not
 #       reproduce on a carve-out host, so the inference is unsound even when it happens to
 #       land. It was MEASURED at this head, twice, one run each:
-#           env -u TORTOISE_API_KEY … -q   ->  545 passed, 5 failed   (550 collected)
-#           (ambient, a key is set)        ->  544 passed, 6 failed   (550 collected)
-#       So the tally at this head is 545 + 5 = 550, and the line above (`456 passed, 5
+#           env -u TORTOISE_API_KEY … -q   ->  587 passed, 5 failed   (592 collected)
+#           (ambient, a key is set)        ->  586 passed, 6 failed   (592 collected)
+#       So the tally at this head is 587 + 5 = 592, and the line above (`456 passed, 5
 #       failed`) is that EARLIER RUN's own output at ITS OWN head — reported, not
 #       re-quoted as this one's.
 #       ⛔ `env -u TORTOISE_API_KEY` IS PART OF THE COMMAND, not noise: with a key in the
 #       environment the MCP stdio transport refuses BY DESIGN (it cannot carry the token),
 #       so `test_cross_tenant_read_isolation.py::test_negative_control_graph_listing_scoping_is_detected`
 #       errors `Authentication required. The MCP stdio transport cannot carry auth tokens…`
-#       and the SAME command measures **544 passed, 6 failed** at this head. Both readings
+#       and the SAME command measures **586 passed, 6 failed** at this head. Both readings
 #       are true of their environment, so the environment is named rather than left to the
 #       reader; the `9 passed` this file records for that unit is the keyless reading, and
 #       it is the one the contract-layer claim rests on.
 #       the 5 are 5 of the 8 `TestCreateGraphWithPacks` tests, refused by the PRIVATE lane container's ACL layer — see S2.
 #       $ TORTOISE_TEST_CARVE_OUT=1 uv run python -m pytest tests/test_7949_c2_door.py tests/test_7949_capstone_measure.py -q
-#       302 passed                                 # 24 (the door census, its pinned-ON/refusal arms
-#                                                  # and the one-hop ledger pins) + 278 (the #7949
-#                                                  # cite, idle and registration pins) = 302. These
+#       303 passed                                 # 24 (the door census, its pinned-ON/refusal arms
+#                                                  # and the one-hop ledger pins) + 279 (the #7949
+#                                                  # cite, idle and registration pins) = 303. These
 #                                                  # are the two files this change EDITS, so the
 #                                                  # contract-layer claim above is not carried by
 #                                                  # the seven-file run alone.
@@ -632,7 +635,7 @@ criteria:
     reason: >-
       Server half is green at this head, measured in this pass: the two consent
       files collect 65 + 59 = **124** tests and all 124 passed (within this pass's
-      seven-file run, `545 passed / 5 failed`; the 5 being S2's ACL group, and none
+      seven-file run, `587 passed / 5 failed`; the 5 being S2's ACL group, and none
       of them in these two files) - a previous draft of this row claimed "190 passed"
       for these two files, which their collection denies. Live `/auth` serves the
       `/api/consent/start` return route, matching main's public/signup.html.
