@@ -858,9 +858,11 @@ def test_each_arm_records_its_own_coverage_verdict(monkeypatch):
     §4.4's F3 — the gate on removing `run_s4` — is defined over the pre-retry
     arm: "S4 added items while `coverage_suspect` is False". The pipeline's
     published `result["vet"]["s2"]` is the SECOND arm's block, and on a retried
-    run the second arm's flag is False BY CONSTRUCTION (the first arm's True is
-    what fired the retry). A reader counting F3 against it would therefore score
-    exactly the sessions the retry DID reach as ones it cannot reach.
+    run that arm is an INDEPENDENT S2 run whose flag can be True again (measured
+    on `_EMPTY_EMBED` twice: BOTH arms flag) — it is the `fired` flag, not any
+    property of the second arm's verdict, that makes a retried run unreachable
+    for F3. A reader counting F3 against the second arm's block would therefore
+    attribute the wrong arm's verdict to the session.
 
     ⛔ NON-VACUITY: this dies if `_arm_metrics` stops recording the flag (the
     key is missing), if it records the PIPELINE's flag for both arms (then
@@ -877,5 +879,6 @@ def test_each_arm_records_its_own_coverage_verdict(monkeypatch):
         "the arm that fired the retry lost everything — F3's pre-retry arm"
     )
     assert renarrate["second"]["coverage_suspect"] is False, (
-        "the retried arm emitted candidates; False here is by construction"
+        "this fixture's second arm emitted candidates, so ITS flag is False — a "
+        "fixture property, NOT a mechanism one: an empty second yield flags too"
     )

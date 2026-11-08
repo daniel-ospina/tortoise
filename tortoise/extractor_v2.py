@@ -15321,11 +15321,11 @@ def _arm_metrics(story: str, batch: dict | None, vet_stats: dict | None) -> dict
         "keep_rate": _keep_rate(candidates, discarded),
         # The arm's OWN coverage verdict, recorded because §4.4's F3 is defined
         # over the PRE-retry arm only (review round 3, P2). On a retried run the
-        # SECOND arm's flag is False by construction (the first arm's True is
-        # what fired the retry), so a reader counting "S4 added items while
-        # coverage_suspect is False" against the pipeline's published
-        # `result["vet"]["s2"]` — which is the second arm's block — would count
-        # exactly the sessions the retry DID reach as ones it cannot.
+        # SECOND arm is an INDEPENDENT S2 run whose flag can be True again
+        # (measured: an empty second yield flags coverage_suspect on both arms),
+        # so a reader counting "S4 added items while coverage_suspect is False"
+        # against the pipeline's published `result["vet"]["s2"]` — the second
+        # arm's block — would attribute the wrong arm's verdict to the session.
         "coverage_suspect": bool(b.get("coverage_suspect")),
     }
 

@@ -727,10 +727,12 @@ unfirable (block at the top of §10).
 > `delta` arm, which is DEFAULT-ON** (`_s4_delta_enabled` resolves `env_flag(…, True)`), so
 > `run_s4` **stays** on both readings and the removal (and the partial-gap stage it needs)
 > moved to **#11534**. ⛔ **The arm must be named, because the number is arm-specific:** the
-> two artifacts are one replay holding both arms, and their `added_by_s4` is not comparable
-> across arms — the committed corpus input is maximally gap-suppressing for both, and
-> `docs/evidence/1789-s4-reeemit-tax/README.md` states that neither sign is established
-> (neither a ceiling nor a floor), so a count without its arm is a claim about neither.
+> two artifacts are one replay holding both arms, and the arms are different CONTRACTS (`legacy`
+> re-emits, `delta` emits only what is missing), so their `added_by_s4` counts are not the same
+> quantity. `docs/evidence/1789-s4-reeemit-tax/README.md` compares them as evidence about the gap
+> channel (12/9 legacy vs 6/6 delta gap additions) and states that **neither arm's sensitivity to
+> the real geometry is measured, so the token-saving RATIO — which is the saving — is undetermined
+> in both signs**. A count without its arm is therefore a claim about neither.
 > Not satisfiable by reasoning about the code: the artifacts are the instrument.
 > (Pinned: `tests/test_extractor_v4_s4_stage_claims.py`, `tests/test_selection_step.py`.)
 >
@@ -1049,13 +1051,29 @@ New entities + connections + **metadata**. The metadata includes **lifecycle eve
 
 **The removal's falsifier — F3, defined here because two places cite it by that name.**
 `run_s4`'s removal (the `#8500` migration deliverable, executed under `#11002`) was gated on **one**
-measurement — an eval-lane run, not a code change. It was run on 2026-11-08 over the two committed
-`docs/evidence/1789-s4-reeemit-tax/` artifacts (7 real sessions each) and it **FIRES**: 4/7
-primary, 3/7 re-run, 5/7 across the union on the **`legacy` arm** (`TORTOISE_S4_DELTA=0`), and
-2/7 on either run of the **`delta` arm** — which is DEFAULT-ON. Both are above zero, so
-`run_s4` **stays** and the removal moved to **#11534**; the definition below is kept as the
-instrument that decided it and the one a successor must re-run. ⛔ **Name the arm whenever this
-number is quoted** — see the note on the two arms two paragraphs up.
+measurement — an eval-lane run, not a code change. **WHAT THAT INSTRUMENT ACTUALLY MEASURES, and
+what it does not** — stated because the gap matters for an irreversible deletion. The two committed
+`docs/evidence/1789-s4-reeemit-tax/` artifacts (7 real sessions each) record, per arm and per
+session, `s2_items` / `s4_items` / `merged_items` / `added_by_s4` / `corrected_by_s4` and the
+added/corrected item lists. They record **no `check_batch` block and no `stats["renarrate"]`**, and
+that is structural rather than an omission: the instrument (`tools/s4_reeemit_tax.py`) replays
+`run_s4` directly over each session's recorded S2 list and never calls `extract_session_v2`, so the
+pipeline's coverage flag and its retry counter do not exist on those rows. So of F3's three clauses
+**one is measured and two are not:** `added_by_s4 > 0` is measured — **4/7 primary, 3/7 re-run,
+5/7 across the union on the `legacy` arm** (`TORTOISE_S4_DELTA=0`), and **2/7 on either run of the
+`delta` arm**, which is DEFAULT-ON — while the flag clause is an INFERENCE from the artifacts'
+own S2 item counts (29–49 in every one of the 28 session-runs) and the retry clause is a property
+of the instrument's construction (no pipeline run ⇒ no retry). ⚠️ The inference is not free: the
+artifact stores COUNTS, and `check_batch`'s `candidates` applies a stricter predicate (a `Mapping`
+item with non-empty `name or content`), so the counts do not by themselves pin the flag. Both
+readings being above zero is what the decision rests on, so `run_s4` **stays** and the removal
+moved to **#11534** — where the pipeline-level half (`stats["renarrate"]["first"]
+["coverage_suspect"]` and `fired` over a real `extract_session_v2` run) is recorded as the
+measurement a successor owes. ⛔ **Name the arm whenever this number is quoted:** the two arms are
+DIFFERENT CONTRACTS (`legacy` re-emits, `delta` emits only what is missing), so their `added_by_s4`
+counts are not the same quantity — the evidence README compares them as evidence about the gap
+channel (12/9 legacy vs 6/6 delta gap additions) and states that **neither arm's sensitivity to the
+real geometry is measured, so the token-saving RATIO is undetermined in both signs**.
 
 On the frozen corpus, count the sessions
 where `_s4_merge_stats`'s `added_by_s4 > 0` **while the FIRST (pre-retry) arm's `coverage_suspect` is
