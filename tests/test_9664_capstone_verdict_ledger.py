@@ -1683,7 +1683,7 @@ def test_the_refusal_status_resolver_matches_cpython(argument, expected):
     Without this row set the resolver was covered only by the two pinned guards,
     and those reach exactly TWO arms — the f-string one
     (`capstone_ledger.py`'s `SystemExit(f"…")`) and the small-int one
-    (`build_site_icons.py`'s `SystemExit(4)`) — so the `None`, `bool` and
+    (`build_site_icons.py`'s `SystemExit(4)`) — so the `str`, `None`, `bool` and
     trailing-`return 1` arms had no coverage at all, and the fail-closed `None`
     (UNPROVEN) return could be mutated to `1` with the whole file GREEN. Measured:
     that mutation left `assert status is not None` untouched, because no pinned
