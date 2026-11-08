@@ -1327,6 +1327,51 @@ def test_a_timed_out_read_names_the_timeout_not_a_corrupt_payload(monkeypatch) -
     assert "no parsable JSON" not in rows.error
 
 
+def test_a_real_kill_reaches_the_reader_as_a_timeout(monkeypatch) -> None:
+    """⛔ THE `TimeoutExpired` ARM ITSELF IS PINNED (#11202 review round 14).
+
+    Every other case in this block stubs `_capture`, so the CLASSIFICATION could be
+    deleted — `except subprocess.TimeoutExpired` folded back into the generic
+    "could not be run" arm below it — and the whole suite stayed green. That fold IS
+    the defect #11202 was filed for (a slow read reported as a missing binary, then
+    rendered as "returned no parsable JSON"), so a revert would reinstate the bug
+    with no red. Measured before this case existed: reverting only that arm gave
+    `600 passed, 239 subtests passed`.
+
+    The stub therefore sits BELOW `_capture` — `fs.subprocess` itself — so the real
+    `except` clause is what the assertion observes and no `_capture` stand-in can
+    satisfy it. Hermetic: no sleep, no real process.
+    """
+    monkeypatch.delenv(fs.GH_READ_BOUND_ENV, raising=False)
+
+    class _KilledSubprocess:
+        """A `subprocess` stand-in whose every call is a kill."""
+
+        class TimeoutExpired(Exception):
+            def __init__(self, cmd, timeout):
+                super().__init__(cmd, timeout)
+
+        @staticmethod
+        def run(cmd, **kwargs):
+            raise _KilledSubprocess.TimeoutExpired(cmd, kwargs.get("timeout", 1))
+
+    monkeypatch.setattr(fs, "subprocess", _KilledSubprocess)
+
+    out, rc, err = fs._capture(["gh", "issue", "list"], timeout=5)
+    assert (out, rc) == ("", fs.GH_READ_TIMEOUT_RC)
+    assert "timed out after 5s" in err
+    # The other arm must NOT be what caught it.
+    assert "could not be run" not in err
+
+    rows = fs.gh_json(["issue", "list", "--limit", "2000"], timeout=100,
+                      retries=1, what="gh issue list")
+
+    assert rows.measured is False          # fail-closed: a kill is never an answer
+    assert "TIMED OUT after 100s" in rows.error
+    assert "no parsable JSON" not in rows.error
+    assert "could not be run" not in rows.error
+
+
 def test_a_refused_read_carries_the_commands_own_cause(monkeypatch) -> None:
     """A 403 says WHY. Discarding stderr is how three causes became one."""
     monkeypatch.setattr(
