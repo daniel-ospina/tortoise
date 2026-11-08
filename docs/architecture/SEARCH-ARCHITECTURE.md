@@ -12,7 +12,10 @@ aboutObjects: tortoise
 
 # Search architecture — where the vector index lives, and what the graph engine keeps
 
-**Decision (owner, 2026-11-07):**
+**Decision (owner, 2026-11-07)** — items 1–3 are the owner's; **item 4 is the phase correction recorded in `#4051`
+comment [`6714119028`](https://github.com/daniel-ospina/tortoise/issues/4051#issuecomment-6714119028)** (§1.5), because
+comment [`6713838871`](https://github.com/daniel-ospina/tortoise/issues/4051#issuecomment-6713838871)'s own item 4 said
+*"before launch":*
 
 1. **The vector index and the embedding payload move to Postgres** (`pgvector`). This **resolves V1**
    (`#4997` / `STORAGE-ARCHITECTURE.md` §14.3): the vector index does **not** live in FalkorDB.
@@ -102,7 +105,8 @@ quality change. **Live before private-beta:**
 **Cost during private-beta, plainly:** a complete graph costs **\$11.01/tenant** at the 40-tenants-per-instance
 density — RAM \$8.75 + shared project line \$2.13 + record \$0.13 (§8.1) — against a \$5.70 storage budget, i.e.
 193 % of it — the honest per-tenant total (comment [`6714119028`](https://github.com/daniel-ospina/tortoise/issues/4051#issuecomment-6714119028), the phase
-split, states the **RAM line's** 154 % — §8.1's *"the same, RAM line alone"* row, against that section's 193 % total). ⚠️ **It is also above the product's older recorded constraint** (*"a \$19 price with < \$9 total
+split, states 154 % as the beta cost; on this section's own basis that figure is the **RAM line alone** — §8.1's *"the
+same, RAM line alone"* row — against the 193 % total). ⚠️ **It is also above the product's older recorded constraint** (*"a \$19 price with < \$9 total
 cost per user"*, `STORAGE-ARCHITECTURE.md` §1), because \$11.01 > \$9 — and at beta-scale density it is higher
 still (a 1 GB instance holds ~5 complete solo tenants at the §8.1 basis of 200 MB provisioned each, so the RAM
 line alone is ~\$14.60 at the 1 GB tier's \$73). **This is a knowing,
@@ -214,7 +218,7 @@ fewer. A recall-only test passes while the product under-returns.
 
 ### 6.2 Text ranking — why the text index does NOT move yet
 
-`ts_rank`/`ts_rank_cd` have **no IDF and no length normalisation**; independent measurement at 381k
+`ts_rank`/`ts_rank_cd` have **no IDF and no length normalisation**; independent measurement
 vectors puts Postgres full-text **8–23 nDCG@10 points behind BM25**, with its hybrid scoring **below
 vector-only** on all three datasets.
 
