@@ -281,8 +281,9 @@ surface, not hand-listed beside it. That list grew one review round at a time �
 `TORTOISE_IDENTIFIER_TOKENS` in cycle 9, then `TORTOISE_SUBJECT_TAU_HI`/`_LO` in cycle 10 (each of those
 four found by a measured mutation that left the previous derivation green), then
 `TORTOISE_STATE_VALUE_VERBATIM` in cycle 11, which the **CENSUS** found rather than a mutation: the switch
-landed inside `path_modules` and red that suite (§10.15). Named positionally and never as a count — this
-paragraph said "the last four" over five rounds until §10.15 corrected it — which is the honest reason to state
+landed inside `path_modules` and red that suite (§10.15). Named positionally and never as a count:
+"the last four" WAS correct over the four rounds it then listed, and adding cycle 11 without restating it is
+the drift §10.15 corrected — which is the honest reason to state
 it as a CLOSURE over the reads INSIDE those modules rather than as a list somebody curated — not
 a closure over everything the path reaches, which is the gap #11410 records. Every one is written in-process, **read back**, and a run whose read-back
 disagrees is **refused** (`probes/capstone_measure.py`); the measurement switches were
@@ -1753,11 +1754,12 @@ re-cut from the resolved document (§8), and no committed verdict is re-scored.
 too — it is in `probes/capstone_measure.py`'s `DOOR_PINNED_ON` and in `acceptance_arm.pinned_to` at
 `origin/main` `a1dff7cec`, and §10.14 records it there as a bullet. ⛔ `91dbc9a88` (`#11449`) is NOT
 that pin: it introduced the **switch** (`tortoise/extractor_v2.py`, plus `.env.example`,
-`config/v4-mechanisms.yml` and its own test) and touches no file in this bundle — a comment here
-once credited it with the pin, which is the same defect class as every other claim in this record:
-stated, plausible, and not what the tree says. What THIS entry records is the part that landed here:
-the **§1.6.2 prose** sentence for the pin, and the roll-call restated **positionally** instead of
-counted. The merged pin set is one entry, not two.
+`config/v4-mechanisms.yml` and its own test) and touches no file in this bundle. `827141f19` is not
+on `main` at all (`git merge-base --is-ancestor 827141f19 origin/main` is false). An earlier revision
+of this paragraph credited that pair with the pin — the same defect class as every other claim in
+this record: stated, plausible, and not what the tree says. What THIS entry records is the part that
+landed here: the **§1.6.2 prose** sentence for the pin, and the roll-call restated **positionally**
+instead of counted. The merged pin set is one entry, not two.
 
 **Old value (verbatim).** §1.6.2's pin sentence ended at `TORTOISE_IDENTIFIER_TOKENS`, and its
 roll-call read:
@@ -1784,14 +1786,16 @@ non-seam**, because its absent state is already ON and its only non-neutral stat
 into the graph the run writes instead of withheld — the pre-`#10513` semantics, already pinned by
 `tests/test_state_value_verbatim_10360.py::test_the_off_switch_defaults_ON_and_restores_the_pre_10513_write`.
 Pinning it to its shipped default **equals today's behaviour on a clean shell** and closes only the
-inherited-`=0` hole, which is the `TORTOISE_IDENTIFIER_TOKENS` precedent (§10, cycle 9).
+inherited-`=0` hole, which is the `TORTOISE_IDENTIFIER_TOKENS` precedent (§1.6.2, cycle 9).
 
-**A SECOND roll-call in the same subsection carried the same two defects, and this entry corrects it
+**A SECOND roll-call in the same subsection needed the same restatement, and this entry makes it
 too.** §1.6.2's later paragraph said "the last four are … `TORTOISE_SUBJECT_TAU_HI`/`_LO` in cycle 10,
-each found by a measured mutation that left the previous derivation green", which — once cycle 11 joins
-that list — (a) counts four over the five rounds 7–11 and omits cycle 11 entirely, and (b) attributes
-every member to a measured mutation, which is **false for cycle 11**: the **CENSUS** found it, not a
-mutation (the "Why" above and `acceptance_arm.read_back` both say so — *"It was found by the CENSUS,
+each found by a measured mutation that left the previous derivation green". That count was right over the
+four rounds it then named — **it is adding cycle 11 to the list, above, that makes it stale**, which is
+why the two edits belong together: once cycle 11 joins, the sentence (a) counts four over the five rounds
+7–11 and omits cycle 11 entirely, and (b) attributes every member to a measured mutation, which is
+**false for cycle 11**: the **CENSUS** found it, not a mutation (the "Why" above and
+`acceptance_arm.read_back` both say so — *"It was found by the CENSUS,
 not by hand: the switch landed inside path_modules and red that suite"*). It is now restated
 positionally, with the mutation attribution scoped to the four rounds it is true of and cycle 11's
 actual discovery mechanism named. A paragraph that states the count and the discovery method of a list
