@@ -1245,6 +1245,17 @@ surfaces:
   # comment exists to prevent. DB-free: a fake control plane and a recording
   # fake SDK, no graph writes, no server.
   - test_10047_record_every_lane.py
+  # #8290: the demo/sample `:Session` is excluded from all three session read
+  # surfaces (list / detail / SDK). DUAL-REGISTERED (`api` + `core`) for the
+  # #2938/#3554 reason: `session_schema.py` matches no SOURCE_PATTERNS entry
+  # (so it falls to the `core` fallback), while two of the three surfaces this
+  # module pins by source (`list_sessions`, `get_session_detail`) live in
+  # `tortoise/hosted_api.py`, which SELECTS `api` — and a named-surface match
+  # REPLACES the fallback, so a core-only entry would never run this guard. No
+  # graph lane here: the behavioural half is on
+  # `test_onboarding_seed_endpoint.py` (docker), which would not be selected by
+  # a `session_schema.py` diff.
+  - test_demo_session_read_exclusion_8290.py
   # #3554: the `:Session` write-schema declaration (tortoise/session_schema.py)
   # and its writer inventory + D9 retrofit instrument
   # (tools/session_retrofit_audit.py). DUAL-REGISTERED (`api` + `core`), same
@@ -4088,6 +4099,9 @@ surfaces:
   - test_10046_two_tenants_never_share_a_credential_tenant.py  # #10046: two orgs live in one process — no credential resolves into the OTHER tenant (and the tenantless arm never names one); dual: api
   - test_10047_record_every_lane.py  # #10047: the seed runners + background index jobs install the DEFAULT-graph tenant; dual: api (core is load-bearing for record_writer.py, which matches no SOURCE_PATTERN)
   - test_10017_backfill_census.py  # #10017: the pre-delete turn census is per-session — core ONLY (the census drives a raw falkordb client, never the hosted API, so unlike the 3551/10000 rows above it has no api leg)
+  # #8290: the demo `:Session` read exclusion; dual: api (two of the three
+  # pinned surfaces live in hosted_api.py).
+  - test_demo_session_read_exclusion_8290.py
   # #3554: the `:Session` write-schema declaration + its writer inventory/D9
   # retrofit instrument; dual: api (the inventory predicate scans hosted_api.py).
   - test_session_schema_3554.py

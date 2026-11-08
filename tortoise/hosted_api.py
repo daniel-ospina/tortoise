@@ -264,7 +264,11 @@ from tortoise.session_projection import (  # #5498: the ONE session projection
     SESSION_LIST_FIELDS,
     session_extraction_status,  # #3520: the ONE extraction-status derivation
 )
-from tortoise.session_schema import demo_session_id  # #3554: the ONE demo-session id derivation
+from tortoise.session_schema import (  # #3554 / #8290: ONE demo-session derivation + exclusion
+    DEMO_SESSION_ID_PREFIX,
+    demo_session_id,
+    is_demo_session_id,
+)
 from tortoise.supabase_control import _service_key  # #3677
 
 # #4179: the team-account and user-account restore windows derive from the ONE
@@ -22097,14 +22101,24 @@ async def list_sessions(request: Request, org: dict = Depends(get_current_org_se
     # issuecomment-6305730612 (DECISION RELAY).
     sdk = await _data_sdk_offloaded(org)
     try:
-        # #2600: actor filter rides a MATCH-level WHERE (before the OPTIONAL
-        # CONTAINS so the count(p) grouping semantics hold); the appended
-        # RETURN columns (actor_user_id/harness) sit AFTER count(p) so the
-        # existing r[0..3] mapping is untouched.
-        # #2599: machine_id and model appended after harness — r[6]/r[7].
+        # #8290: the demo/sample Session is EXCLUDED from the list. "Captured
+        # sessions" is the user's OWN filings, and #2360's owner-recorded
+        # exclusion already removes the demo POINTS from the count-of-record
+        # digest — leaving the container visible here made two surfaces
+        # disagree about whether the sample was the user's own. The prefix is
+        # DERIVED (`session_schema.DEMO_SESSION_ID_PREFIX`), never re-spelled,
+        # and cannot collide with a mintable id (`mint_session_id()` =
+        # `session_<12 hex>` — `demo_` is neither hex nor 12 chars long).
+        _session_conds = ["NOT s.id STARTS WITH $demo_prefix"]
+        if actor_filter:
+            # #2600: actor filter rides a MATCH-level WHERE (before the OPTIONAL
+            # CONTAINS so the count(p) grouping semantics hold).
+            _session_conds.insert(0, "s.actor_user_id = $uid")
+        _query_params: dict = {"demo_prefix": DEMO_SESSION_ID_PREFIX}
+        if actor_filter:
+            _query_params["uid"] = actor_filter
         query = (
-            "MATCH (s:Session) "
-            + ("WHERE s.actor_user_id = $uid " if actor_filter else "")
+            "MATCH (s:Session) WHERE " + " AND ".join(_session_conds) + " "
             + "OPTIONAL MATCH (s)-[:CONTAINS]->(p:Point) "
             # #3555: the NON-TURN filter, matching get_session_detail (both its
             # count and its points list, added under #822). It replaces the
@@ -22140,8 +22154,7 @@ async def list_sessions(request: Request, org: dict = Depends(get_current_org_se
         # #3718 residual 2: sync FalkorDB read off the loop (see list_points).
         rows = await asyncio.to_thread(
             lambda: sdk._get_proj().g.query(
-                query,
-                params={"uid": actor_filter} if actor_filter else None,
+                query, params=_query_params,
             ).result_set)
     except Exception:
         import logging
@@ -22441,6 +22454,14 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
     _session_user_org (?org_id= → non-member 403); keys are org-scoped.
     """
     _require_scope(org, "graphs:read", "get_session_detail")
+    # #8290: the demo/sample Session is not readable by id either — the
+    # exclusion must be the SAME set on every session read surface or the
+    # surfaces disagree about whether the sample is the user's own (the exact
+    # defect #8290 reported, one door over). 404 is the not-found shape this
+    # route already serves, so a demo id is indistinguishable from an id that
+    # was never captured — which is what it is: the user never captured it.
+    if is_demo_session_id(session_id):
+        raise HTTPException(status_code=404, detail="Session not found")
     # #3718: the construction is off the loop (see list_points).
     #
     # CONTRACT, scoped: `#1591` covers a MISSING/BROKEN org graph — a STORE

@@ -45617,7 +45617,21 @@ class TortoiseSDK:
         'statement']`` filter reported 0 for them until #3555 unified the two.
 
         Returns ``None`` when no ``:Session`` carries the id.
+
+        #8290: a DEMO/sample Session id returns ``None`` without touching the
+        graph — the exclusion has to be the SAME set on every session read
+        surface (list / detail / this SDK mirror) or they disagree about
+        whether the sample content is the user's own. The predicate is the
+        shared `session_schema.is_demo_session_id`, never a local prefix test,
+        so the SDK cannot exclude a different set than the hosted door.
         """
+        # Local import: `session_schema` carries import-time asserts and this
+        # module keeps its optional deps out of the import path (the file's own
+        # style — 60 other local imports).
+        from tortoise.session_schema import is_demo_session_id
+
+        if is_demo_session_id(session_id):
+            return None
         rows = proj.g.query(
             "MATCH (s:Session {id:$sid}) RETURN s.id, s.created_at, "
             "s.turn_count, s.actor_user_id, s.harness, "
