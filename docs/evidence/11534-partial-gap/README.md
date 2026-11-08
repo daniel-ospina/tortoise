@@ -108,7 +108,13 @@ precision figure (the labels above cannot produce one):
   failure mode"; wp07 "leaving a window where two workers could claim one
   batch", "per-service flags let each service's flag be pulled independently".
   Every one of these is a claim the batch does not carry, and S4 independently
-  added an item for four of them.
+  added items that reach some of them — **read §3's `reached` column for the
+  count, not this bullet**: the bullets are a worklist of what the flags ARE, and
+  a numeral restated here would be a number nothing re-checks (it was, until
+  review round 8: the sentence said "four of them", while the primary run's
+  additions reach three of the seven spans listed above — wp03 ×2, wp05 ×1 — with
+  the fourth DISTINCT span reached landing on wp07's lease span, which this list
+  does not classify).
 * **non-claims that pass the lexical check** — wp05 "A retro room is booked for
   Friday morning…", wp07 "The on-call handoff was smooth with no pages
   overnight", wp03 "(The on-call room has been quiet lately…", wp02 "the team had
