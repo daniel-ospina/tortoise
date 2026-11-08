@@ -1220,6 +1220,21 @@ FTS_PROBE_ENTITY_TYPE = "source"
 #: :func:`probe_fts` marks that as ``truncated`` instead of certifying.
 _FTS_PROBE_LIMIT = 50
 
+#: The buckets that DISQUALIFY a probe from ``stem_only`` — every
+#: :func:`classify_fts_hits` bucket EXCEPT ``lexicon``. It exists because the same
+#: defect recurred three times as an enumerated predicate shortened one term at a
+#: time (round 3 ``unresolved``, round 7 ``foreign``, round 8 ``truncated``), and
+#: the round-8 comment claimed the predicate was "stated as the INVARIANT …
+#: rather than as another name on a list" while the code was still a list — the
+#: fourth occurrence was a comment asserting a shape the code did not have
+#: (#11536 review round 9, P2).
+#:
+#: The tuple is not decorative: ``test_stem_only_EXCLUDES_every_bucket_the_
+#: classifier_can_emit`` asserts that this set plus ``lexicon`` is EXACTLY the
+#: classifier's key set, so adding a seventh bucket to :func:`classify_fts_hits`
+#: reds the suite instead of silently restoring the over-claim.
+_STEM_ONLY_FORBIDDEN = ("residue", "stale", "foreign", "unexplained", "unread")
+
 #: The SAME columns as :data:`_SOURCE_ROWS` (so :func:`_row_props` decodes both),
 #: filtered to the urls the FTS read returned — one read for the whole hit set,
 #: so the classifier costs one query per probe, not one per hit.
@@ -1861,6 +1876,17 @@ def probe_fts(g, phrases, *, control: bool = True,
               timeout_ms: int = CACHE_READ_TIMEOUT_MS) -> dict:
     """Measure the Source FTS index for every probe phrase, plus the control.
 
+    ⛔ PRECONDITION — EACH PHRASE MUST TOKENISE TO EXACTLY ONE TERM (#11536 review
+    round 9, P2). This is enforced here, not only at the CLI's ARGV: the read goes
+    through :func:`tortoise.sparse.build_or_query`, which OR-joins a multi-token
+    input, so a phrase returns rows for ANY of its words and a CORRECT repair
+    reads as ``leaked`` — the operator's likely response to which is to clear the
+    post-fix lexicon, i.e. destroy the ``#3518`` descriptor. A library caller
+    reaching this exported verb directly used to get that false ``leaked`` with no
+    guard at all; :func:`probe_phrase_rejection` now gates it and a rejected
+    phrase raises ``ValueError`` (fail closed, loudly) rather than measuring
+    something the caller did not ask for.
+
     Returns::
 
         {"ran": bool,                # at least one probe was MEASURED — a
@@ -1935,6 +1961,11 @@ def probe_fts(g, phrases, *, control: bool = True,
     """
     measured: list[dict] = []
     for phrase in phrases:
+        rejection = probe_phrase_rejection(phrase)
+        if rejection is not None:
+            raise ValueError(
+                f"probe phrase {phrase!r} cannot measure the Source FTS index: "
+                f"{rejection}")
         got = source_fts_probe(g, phrase, timeout_ms=timeout_ms)
         split = classify_fts_hits(g, got["urls"], phrase=phrase,
                                   timeout_ms=timeout_ms)
@@ -1965,36 +1996,10 @@ def probe_fts(g, phrases, *, control: bool = True,
         # on a proven-lexicon node whose own tokens do NOT explain the probe is
         # the stale-entry candidate, not a benign collision.
         "stem_only": [p["phrase"] for p in measured
-                      if p["hits"] and not p["residue"] and not p["stale"]
-                      and not p["unread"] and not p["unexplained"]
-                      # ⛔ AND NOT AN UNRESOLVED HIT (#11536 review round 3, P2):
-                      # `stem_only` documents "hits, but every one is a lexicon
-                      # node". A probe whose only hit had no addressable url has an
-                      # EMPTY `lexicon` bucket, so without this term it reported the
-                      # hit as a benign stem collision in `--json` — the same
-                      # "nothing examined" shape the verdict already vetoes.
-                      # ⛔ AND NOT A FOREIGN HIT (#11536 review round 7, P2):
-                      # `foreign` is a hit on a `:Source` outside this episodic
-                      # session's own urls — an EXAMINED, bucketed node that is
-                      # NOT a lexicon node, so the contract this list documents
-                      # ("hits, but every one is a lexicon node") is false for it.
-                      # Round 3 closed the same shape for `unresolved` and left
-                      # this one in place: a probe whose only hit was foreign had
-                      # an EMPTY `lexicon` bucket and still read as a benign stem
-                      # collision to every `--json` consumer.
-                      and not p["foreign"]
-                      # ⛔ AND NOT A TRUNCATED ONE (#11536 review round 8, P2):
-                      # the window FILLED, so the hits this probe returned are a
-                      # FLOOR — residue could be hiding past it and was never
-                      # examined. The contract is "every one is a lexicon node",
-                      # and "every one I happened to see" is not that. This is
-                      # the third instance of one defect (round 3 `unresolved`,
-                      # round 7 `foreign`): the predicate was being grown one
-                      # bucket at a time, so the term below is stated as the
-                      # INVARIANT — no other bucket populated and the window not
-                      # filled — rather than as another name on a list.
-                      and not p["truncated"]
-                      and not p.get("unresolved")],
+                      if p["hits"] and not p["truncated"]
+                      and not p.get("unresolved")
+                      and not any(p[bucket] for bucket in
+                                  _STEM_ONLY_FORBIDDEN)],
         "unexplained": [p["phrase"] for p in measured if p["unexplained"]],
         "unmeasurable": [p["phrase"] for p in measured
                          if not p["ran"] or p["degraded"]],

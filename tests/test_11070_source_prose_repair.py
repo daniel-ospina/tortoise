@@ -4970,3 +4970,146 @@ def test_a_FAILED_control_read_is_not_an_EMPTY_control_window(monkeypatch):
     # do not need the distinction.
     assert m.lexicon_control_read(_ControlReadRaises())[1] is not None
     assert m.lexicon_control_token(_ControlReadRaises()) is None
+
+
+# ── #11536 review round 9: four gaps the round-8 fixes left ──────────────────
+
+
+def test_stem_only_EXCLUDES_every_bucket_the_classifier_can_emit():
+    """The predicate must be STRUCTURALLY complete, not enumerated by hand.
+
+    (1) FAILS the moment `classify_fts_hits` grows a bucket: `_STEM_ONLY_FORBIDDEN`
+        plus `lexicon` is asserted to be EXACTLY the classifier's key set, so a
+        seventh bucket cannot silently restore the over-claim "hits, but every
+        one is a lexicon node". The defect recurred three times as a hand-kept
+        list shortened one term at a time (round 3 `unresolved`, round 7
+        `foreign`, round 8 `truncated`), and the round-8 comment CLAIMED the
+        predicate was stated as an invariant while the code was still a list —
+        so the claim and the shape are pinned separately here.
+    (2) REACHABLE: `classify_fts_hits` is exported and is the single place that
+        decides what a hit means, so its key set is the contract this predicate
+        has to cover.
+    (3) POLARITY THAT MUST NOT GO RED: the classifier still emits six buckets and
+        `lexicon` is still the only benign one.
+    """
+    from tortoise import session_source_prose_migration as m
+
+    split_keys = {"residue", "lexicon", "stale", "foreign", "unexplained", "unread"}
+    assert set(m._STEM_ONLY_FORBIDDEN) | {"lexicon"} == split_keys, (
+        "`_STEM_ONLY_FORBIDDEN` no longer covers every non-lexicon bucket "
+        "`classify_fts_hits` can emit — a hit in an unlisted bucket would be "
+        "reported as a benign stem collision")
+    assert "lexicon" not in m._STEM_ONLY_FORBIDDEN
+
+
+def test_a_TRUNCATED_BEFORE_read_cannot_certify(monkeypatch, capsys):
+    """A BEFORE window that FILLED is a floor, not a measurement of absence.
+
+    (1) FAILS on the shipped fold (#11536 review round 9, P1): `_merge_probe`
+        carried only hits/ran/degraded/reason/unread/unresolved from the BEFORE
+        row, dropping `truncated`. A BEFORE read that returned a FULL window of
+        lexicon hits therefore became `clean-zero`, the green asserted "the
+        BEFORE reading this run took returned no pre-fix node either", and the
+        run CERTIFIED — measured end-to-end: 50-hit BEFORE, 0 after, answering
+        control → exit 0, "Repair complete." Residue could have been sitting
+        past the window, so both the claim and the verdict were unearned.
+    (2) REACHABLE: `_FTS_PROBE_LIMIT` is 50 and any common token fills it.
+    (3) POLARITY THAT MUST NOT GO RED: a genuine discriminating BEFORE (a real
+        pre-fix hit, then 0) still certifies.
+    """
+    from tortoise import session_source_prose_migration as m
+
+    class _ControlGraph(_RecordingGraph):
+        def query(self, cypher, params=None, timeout=None):
+            if "STARTS WITH $prefix" in cypher:
+                return _Result([("migration, plan, friday",)])
+            return super().query(cypher, params=params, timeout=timeout)
+
+    filling = [("session:s-post", 2.0)] * m._FTS_PROBE_LIMIT
+    _install_fts(monkeypatch, {"plan": filling,
+                               "migration": [("session:s-post", 2.0)]})
+    before = m.probe_fts(_ControlGraph([(_post_fix_node(),)]), ["plan"],
+                         control=True)
+    assert before["truncated"] == ["plan"]
+
+    _install_fts(monkeypatch, {"plan": [], "migration": [("session:s-post", 2.0)]})
+    after = m.probe_fts(_ControlGraph([(_post_fix_node(),)]), ["plan"],
+                        control=True)
+    assert after["truncated"] == []
+
+    folded = _cli._merge_probe(before, after)
+    assert folded["probes"][0]["before"]["truncated"] is True, (
+        "the BEFORE row's `truncated` was dropped in the fold")
+    assert folded["certifies"] is False and folded["vetoed"] == "before-truncated", (
+        "a BEFORE read whose window FILLED certified: its residue count is a "
+        "floor, so 'no pre-fix node either' was never measured")
+    capsys.readouterr()
+    _cli._report_fts(folded)
+    err = capsys.readouterr().err
+    assert "window FILLED" in err, "the refusal did not name the truncated BEFORE leg" + err
+
+    # (3) a real discriminating BEFORE still certifies.
+    hit_before = {"ran": True, "truncated": False,
+                  "probes": [{"phrase": "plan", "hits": 1,
+                              "urls": ["session:s-post"],
+                              "residue": ["session:s-post"]}]}
+    assert _cli._merge_probe(hit_before, after)["certifies"] is True
+
+
+def test_an_EMPTY_probe_set_cannot_certify(monkeypatch, capsys):
+    """A ✓ over zero probes is earned by the control alone.
+
+    (1) FAILS on the shipped fold (#11536 review round 9, P2): with no probes the
+        ladder reached arm (b) (`control_ok and not wrote`) and certified, and
+        `_report_fts` printed a ✓ with a dangling "— and ; its zero therefore …"
+        clause. Unreachable from the CLI today (`if probes:` guards both arms),
+        so this is a latent gate gap — but the fold is exported and nothing in
+        its contract said a non-empty set was a precondition.
+    (2) REACHABLE: a direct caller of the exported `_merge_probe`, or any future
+        arm that forwards an empty list.
+    (3) POLARITY THAT MUST NOT GO RED: one real probe still certifies.
+    """
+    from tortoise import session_source_prose_migration as m
+
+    class _ControlGraph(_RecordingGraph):
+        def query(self, cypher, params=None, timeout=None):
+            if "STARTS WITH $prefix" in cypher:
+                return _Result([("migration, plan, friday",)])
+            return super().query(cypher, params=params, timeout=timeout)
+
+    _install_fts(monkeypatch, {"migration": [("session:s-post", 2.0)]})
+    empty = m.probe_fts(_ControlGraph([(_post_fix_node(),)]), [], control=True)
+    assert empty["probes"] == [] and empty["control"]["ok"] is True
+    folded = _cli._merge_probe(None, empty)
+    assert folded["certifies"] is False and folded["vetoed"] == "no-probes", (
+        "a ✓ was earned over an EMPTY probe set, on the control alone")
+    capsys.readouterr()
+    _cli._report_fts(folded)
+    err = capsys.readouterr().err
+    assert "NO probe phrase" in err, err
+    assert "no-probes" not in capsys.readouterr().out
+
+
+def test_probe_fts_REFUSES_a_multi_token_phrase(monkeypatch):
+    """The OR-join hazard is guarded at the library verb, not only at ARGV.
+
+    (1) FAILS on the shipped verb (#11536 review round 9, P2): `probe_fts` is
+        exported and validated nothing, so a caller passing "the weekly rebuild"
+        got `build_or_query`'s OR-join, a hit on any ordinary word, and a FALSE
+        `leaked` — whose likely remedy is clearing the post-fix lexicon, i.e.
+        destroying the `#3518` descriptor.
+    (2) REACHABLE: `probe_fts` is in `__all__`; only the CLI ran the guard.
+    (3) POLARITY THAT MUST NOT GO RED: a single token still measures normally.
+    """
+    from tortoise import session_source_prose_migration as m
+
+    _install_fts(monkeypatch, {"plan": [("session:s-post", 2.0)],
+                               "migration": [("session:s-post", 2.0)]})
+    graph = _RecordingGraph([(_post_fix_node(),)])
+    with pytest.raises(ValueError, match="cannot measure the Source FTS index"):
+        m.probe_fts(graph, ["the weekly rebuild"])
+    # whitespace-only is not one token either
+    with pytest.raises(ValueError):
+        m.probe_fts(graph, ["   "])
+    got = m.probe_fts(graph, ["plan"])
+    assert got["probes"][0]["phrase"] == "plan"

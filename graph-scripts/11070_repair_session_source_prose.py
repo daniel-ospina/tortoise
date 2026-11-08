@@ -272,6 +272,16 @@ def _merge_probe(before: dict | None, after: dict, *,
             "reason": before_row.get("reason"),
             "unread": list(before_row.get("unread") or ()),
             "unresolved": before_row.get("unresolved") or 0,
+            # ⛔ AND WHETHER ITS WINDOW FILLED (#11536 review round 9, P1).
+            # Dropping `truncated` made a BEFORE read whose count is a FLOOR
+            # indistinguishable from one that examined every hit: the state was
+            # read as `clean-zero`, the green asserted "the BEFORE reading
+            # returned no pre-fix node either", and the run CERTIFIED — measured
+            # end-to-end on a 50-hit BEFORE leg (EXIT 0, "Repair complete"). The
+            # section header already says a truncated leg "cannot certify" and
+            # that was enforced for the AFTER leg and for `unread`/`unresolved`
+            # on the BEFORE leg; truncation was the one state left out.
+            "truncated": bool(before_row.get("truncated")),
         }
         # ⛔ RESIDUE, not raw hits: the index STEMS, so a repaired node's lexicon
         # can still answer a probe token (measured: `fridays` matches the lexicon
@@ -300,6 +310,17 @@ def _merge_probe(before: dict | None, after: dict, *,
     # copy of the same reasoning here.
     out["undiscriminating"] = [p["phrase"] for p in probes
                                if not p["discriminating"]]
+    # ⛔ AN EMPTY PROBE SET MEASURED NOTHING (#11536 review round 9, P2). The
+    # ladder below would reach arm (b) — `control_ok and not wrote` — and certify
+    # on the control alone while `undiscriminating` and every bucket were empty,
+    # printing a ✓ with a dangling "— and ; its zero therefore …" clause. The CLI
+    # never calls this with no probes today (`if probes:` guards both arms), so
+    # this is a latent gap rather than a live false PASS — but the fold is an
+    # exported contract and nothing in it said a non-empty set was a
+    # precondition. Veto it here so no future caller can earn a ✓ over nothing.
+    if not probes:
+        out["certifies"], out["vetoed"] = False, "no-probes"
+        return out
     if out["leaked"]:
         out["certifies"], out["vetoed"] = False, "leaked"
     elif out.get("stale"):
@@ -324,6 +345,14 @@ def _merge_probe(before: dict | None, after: dict, *,
         out["certifies"], out["vetoed"] = False, "unexplained"
     elif discriminating:
         out["certifies"], out["vetoed"] = True, None
+    elif any(_before_leg_kind(p) == "truncated" for p in probes):
+        # ⛔ A BEFORE WINDOW THAT FILLED IS NOT A ZERO (#11536 review round 9,
+        # P1). Its count is a FLOOR, so "returned no pre-fix node" was never
+        # measured — residue could be sitting past the edge. The AFTER leg has
+        # its own `truncated` veto; this is the BEFORE half, and it sits ABOVE
+        # arm (b) because that arm's whole evidence is the claim this state
+        # cannot make.
+        out["certifies"], out["vetoed"] = False, "before-truncated"
     elif control_ok and not wrote:
         # Arm (b). Nothing was REMOVED by this run, so an answering instrument is
         # the evidence: a dry run, or a writing arm whose census was already 0.
@@ -365,6 +394,12 @@ def _before_leg_kind(probe: dict) -> str:
         return "unknown"
     if before.get("ran") is False or before.get("degraded"):
         return "unmeasured"
+    if before.get("truncated"):
+        # ⛔ FIFTH STATE (#11536 review round 9, P1): the read ran and what it
+        # returned was classified, but the window FILLED — so `residue_before` is
+        # a floor, not a count, and "no pre-fix node" is not something this leg
+        # measured. It is NOT `clean-zero` and must not be reported as one.
+        return "truncated"
     if before.get("unread") or before.get("unresolved"):
         return "unclassified"
     return "clean-zero"
@@ -396,6 +431,12 @@ def _before_leg_state(probes) -> str:
             sentence = ("the BEFORE reading's own verdict was not carried "
                         "through, so this run cannot say whether the token "
                         "matched a pre-fix node before the repair")
+        elif kind == "truncated":
+            sentence = ("the BEFORE reading's window FILLED "
+                        f"({before.get('hits')} hit(s), the read's limit), so "
+                        "its count is a FLOOR and it did not establish that "
+                        "the token matched no pre-fix node — re-measure with a "
+                        "rarer token")
         else:
             sentence = ("it returned no PRE-FIX node BEFORE the repair either "
                         f"(its {before.get('hits')} BEFORE hit(s) were all on "
@@ -665,6 +706,11 @@ def _report_fts(fts: dict, census_after: int | None = None) -> None:
               f"they carry (a repaired twin beside one that is not). Inspect the "
               f"`_searchText` of EVERY node at that url against its index entry "
               f"before signing off.", file=sys.stderr)
+    elif fts["vetoed"] == "no-probes":
+        print("✗ the Source FTS leg was asked to certify with NO probe phrase "
+              "at all, so nothing was measured — a ✓ here would be earned by "
+              "the control alone. Pass --probe-phrase TOKEN, or skip the leg "
+              "BY NAME with --no-fts-probe.", file=sys.stderr)
     elif fts["vetoed"] == "undiscriminating-probe":
         # ⛔ THE SAME RULE AS THE `uncorroborated` REFUSAL (#11536 review round 3,
         # P2): "it matched no pre-fix prose even BEFORE the writes" is a fact only
