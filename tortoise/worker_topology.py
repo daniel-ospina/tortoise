@@ -298,16 +298,36 @@ def _uri_names_a_shared_backend(value: str | None) -> bool:
 def db_is_shared(environ: Mapping[str, str] | None = None) -> bool:
     """True when a shared (server) DB is resolvable, i.e. NOT embedded mode.
 
-    ``entrypoint.sh`` promotes ``FALKORDB_CLOUD_URI`` to ``TORTOISE_DB_URI``
-    before exec, so on the sanctioned boot path ``TORTOISE_DB_URI`` alone
-    answers it. The second arm exists for a direct ``uvicorn`` invocation (and
-    for tests) where that promotion has not run.
+    ⛔ This MIRRORS THE BOOT PRECEDENCE CHAIN, it is not a disjunction over the
+    two variables. ``entrypoint.sh`` picks ONE source, in order:
+
+        if [ -n "${TORTOISE_DB_URI:-}" ]; then …        # explicit wins, whatever it is
+        elif [ -n "${FALKORDB_CLOUD_URI:-}" ]; then export TORTOISE_DB_URI=…
+
+    So a set-but-non-URI ``TORTOISE_DB_URI`` (``/data/tortoise.db``, i.e. an
+    embedded file per ``config.py``'s backward-compat rule) SKIPS the promotion
+    and the app opens that file — even while a stale ``FALKORDB_CLOUD_URI`` is
+    still in the environment (a promoted-then-overridden Fly secret is exactly
+    how that state arises). An ``or`` over both variables answered "shared"
+    there, which is fail-OPEN in the worst place: ``shared_db`` is the single
+    load-bearing boolean between the acknowledgement and a permitted
+    multi-worker boot, so a false "shared" lets ``TORTOISE_MULTI_WORKER`` reach
+    the embedded arm it is documented as never reaching — N workers on N
+    divergent copies. The cloud arm is therefore a FALLBACK (for a direct
+    ``uvicorn`` invocation, where no promotion ran), consulted only when
+    ``TORTOISE_DB_URI`` is unset/empty.
+
+    The emptiness test is the shell's ``-n`` (null = the empty string), NOT
+    ``str.strip()``: ``TORTOISE_DB_URI=" "`` is non-null to ``-n``, so the boot
+    path keeps it as the source and opens an embedded file — a stripped test
+    would fall through to the cloud URI and reintroduce the same fail-open for
+    a whitespace-only value.
     """
     env = os.environ if environ is None else environ
-    return (
-        _uri_names_a_shared_backend(env.get("TORTOISE_DB_URI"))
-        or _uri_names_a_shared_backend(env.get("FALKORDB_CLOUD_URI"))
-    )
+    explicit = env.get("TORTOISE_DB_URI")
+    if explicit:  # shell `-n`: unset or EMPTY falls through; " " does not
+        return _uri_names_a_shared_backend(explicit)
+    return _uri_names_a_shared_backend(env.get("FALKORDB_CLOUD_URI"))
 
 
 def ack_is_set(environ: Mapping[str, str] | None = None) -> bool:
@@ -501,5 +521,17 @@ if __name__ == "__main__":
         observe({**_shared, ACK_ENV: "1"}, supervised=False, argv=_argv2)) is None
     # a supervised child whose count reads 1 still refuses (programmatic workers).
     assert refusal_reason(observe({**_shared}, supervised=True, argv=[])) is not None
+
+    # The DB source is a PRECEDENCE chain (as entrypoint.sh picks it), not an
+    # `or`: an explicit embedded TORTOISE_DB_URI keeps the app embedded even
+    # with a stale cloud URI present, and the acknowledgement cannot lift that.
+    assert not db_is_shared({"TORTOISE_DB_URI": "/data/tortoise.db",
+                              "FALKORDB_CLOUD_URI": _shared["TORTOISE_DB_URI"]})
+    assert db_is_shared({"TORTOISE_DB_URI": "",
+                         "FALKORDB_CLOUD_URI": _shared["TORTOISE_DB_URI"]})
+    assert refusal_reason(observe(
+        {"TORTOISE_DB_URI": "/data/tortoise.db",
+         "FALKORDB_CLOUD_URI": _shared["TORTOISE_DB_URI"], ACK_ENV: "1"},
+        supervised=False, argv=_argv2)) is not None
 
     print("✅ worker_topology")

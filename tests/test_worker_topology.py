@@ -190,6 +190,42 @@ def test_the_cloud_uri_arm_answers_before_the_entrypoint_promotes_it():
     assert wt.db_is_shared(_SHARED_VIA_CLOUD) is True
 
 
+def test_an_explicit_embedded_uri_masks_a_stale_cloud_uri():
+    """⛔ The boot path is a PRECEDENCE chain, not a disjunction over both vars.
+
+    `entrypoint.sh:444-447` keeps an explicit `TORTOISE_DB_URI` WHATEVER its
+    shape, and promotes `FALKORDB_CLOUD_URI` only when that variable is empty —
+    so an explicit `/data/tortoise.db` opens an EMBEDDED file even while a
+    leftover `FALKORDB_CLOUD_URI` is still in the environment (a
+    promoted-then-overridden Fly secret looks exactly like this). Answering the
+    two variables as an `or` reported "shared" for that state, which handed
+    `TORTOISE_MULTI_WORKER` the one refusal it must never lift.
+    """
+    stale_cloud = _SHARED_VIA_CLOUD["FALKORDB_CLOUD_URI"]
+    both_set = {
+        "TORTOISE_DB_URI": "/data/embedded/tortoise.db",
+        "FALKORDB_CLOUD_URI": stale_cloud,
+    }
+    assert wt.db_is_shared(both_set) is False, (
+        "an explicit non-URI TORTOISE_DB_URI keeps the app on embedded mode; the "
+        "cloud URI is only a FALLBACK and must not answer over it"
+    )
+
+    # The fallback still answers when the explicit source is UNSET or EMPTY —
+    # that is the direct-`uvicorn` case this arm exists for.
+    assert wt.db_is_shared({"TORTOISE_DB_URI": "", "FALKORDB_CLOUD_URI": stale_cloud}) is True
+    assert wt.db_is_shared({"FALKORDB_CLOUD_URI": stale_cloud}) is True
+
+    # The emptiness test is the shell's `-n` (null == the empty string), NOT a
+    # strip: `TORTOISE_DB_URI=" "` is non-null to `-n`, so the boot path keeps
+    # it and opens an embedded file.
+    assert wt.db_is_shared({"TORTOISE_DB_URI": " ",
+                            "FALKORDB_CLOUD_URI": stale_cloud}) is False
+
+    # The explicit source still wins when it IS a server URI.
+    assert wt.db_is_shared({**_SHARED, "FALKORDB_CLOUD_URI": "rediss://other:1/db"}) is True
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 3. The policy — a pure function of a measured topology
 # ─────────────────────────────────────────────────────────────────────────────
@@ -265,6 +301,38 @@ def test_an_embedded_database_refuses_n_workers_and_the_ack_must_not_lift_it():
         _topology(workers=2, supervised=True, shared_db=False, acked=True))
     assert still_refused is not None, "the acknowledgement must NOT reach this arm"
     assert still_refused == refused
+
+
+def test_a_stale_cloud_uri_cannot_hand_the_ack_the_embedded_arm():
+    """The measured path, end to end: precedence decides, then the policy refuses.
+
+    Same inputs as the `db_is_shared` precedence arm, but driven through the
+    PRODUCTION `observe()`/`refusal_reason()` pair, so a regression that fixes
+    only the helper (or only the policy) still reds here.
+    """
+    measured = wt.observe(
+        {
+            "TORTOISE_DB_URI": "/data/embedded/tortoise.db",
+            "FALKORDB_CLOUD_URI": _SHARED_VIA_CLOUD["FALKORDB_CLOUD_URI"],
+            wt.ACK_ENV: "1",
+            wt.WEB_CONCURRENCY_ENV: "4",
+        },
+        supervised=False,
+        argv=["uvicorn", "tortoise.hosted_api:app"],
+    )
+    assert measured.workers == 4
+    assert measured.acknowledged is True
+    assert measured.shared_db is False, (
+        "a stale cloud URI must not reclassify an explicitly EMBEDDED run as shared"
+    )
+    assert measured.is_multi_worker is True
+
+    reason = wt.refusal_reason(measured)
+    assert reason is not None, (
+        "N>=4 on the embedded DB the boot script actually selects must be refused"
+    )
+    assert "EMBEDDED" in reason
+    assert "does not lift" in reason
 
 
 def test_unlanded_guards_refuse_n_workers_and_the_message_names_every_one():
