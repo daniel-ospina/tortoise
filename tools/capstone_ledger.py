@@ -1198,8 +1198,12 @@ def _names_artifact(token: str, cwd: Path, root: Path) -> tuple[bool, str]:
                     f"{text!r} is not TRACKED by git, so a reader's clone does not have it"
                 )
             if tracked is not True:
-                # ⛔ `False` and `None` are the two MEASURED answers; anything else is
-                # not one. `_is_tracked` is annotated `bool | None`, so this is
+                # ⛔ `False` and `None` are the two answers `_is_tracked` DECLARES
+                # below `True` (`True` is handled above); anything else is not one of
+                # them. They do NOT share a cause — `False` is a MEASUREMENT by git,
+                # `None` is nothing measured at all — which is why each has its own
+                # renderer and this guard only decides "in neither shape".
+                # `_is_tracked` is annotated `bool | None`, so this is
                 # unreachable today — and it must stay unreachable rather than be
                 # READ as tracked: an `is False … is None … return True` shape accepts
                 # every future truthy return (`1`, `"yes"`) as the measurement "this
