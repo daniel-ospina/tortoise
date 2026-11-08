@@ -36,9 +36,9 @@ doc_status: draft
 | deck-view          | Gated deck view capture (#8732) | false (anon POST) |
 
 `verify_jwt=false` on tenant-provision stays, because the caller is verified
-**inside** the function: the dashboard's same-origin BFF mints the signed-in
-user's access token (`website/apps/dashboard/functions/api/provision.ts`,
-#3501/#4054) and the JWT's identity must match the provisioning target (#802).
+**inside** the function: the dashboard's same-origin BFF (#3501/#4054) mints the
+signed-in user's access token (`website/apps/dashboard/functions/api/provision.ts`)
+and the JWT's identity must match the provisioning target (#802).
 Bare anon-key calls → 401. There is no CORS surface left (#1120): the browser
 caller is gone, the allowlist/preflight/`Access-Control-*` headers are deleted,
 and an origin-bearing request is refused 403. The `after_user_created` hook path
