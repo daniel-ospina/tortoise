@@ -152,8 +152,13 @@
 #         half is open
 #         because requiring shell-shaped arguments from
 #         `echo`/`printf`/… must first be measured against the accepted
-#         `… && echo PASS`. FIVE carriages, all tracked in #11520 and all pinned —
-#         the list is enumerated because an unlisted carriage reads as closed;
+#         `… && echo PASS`. SIX carriages, (1)–(6) above, all tracked in #11520 and
+#         all pinned — the list is enumerated because an unlisted carriage reads as
+#         closed. (The SIX count is the list's own numbering: (6) was added after a
+#         review measured that a reader/sink head is a FALSE PASS, not inert data.
+#         `test_the_known_residual_false_PASSes_are_pinned_as_OPEN` numbers the same
+#         territory by ROOT, where root 6 (`set -o <invalid>`) is now CLOSED and
+#         "FIVE carriages remain open" — a different axis, not a contradiction.)
 #       - a `-c`/`-e` script body is never TRUSTED, and the ATTACHED spelling is
 #         REFUSED: `bash -c'uv run pytest tools/x.py'` AND
 #         `bash -c'NOT RUN - see tools/x.py'` are both invalid, with or without an
