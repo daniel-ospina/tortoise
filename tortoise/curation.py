@@ -587,6 +587,15 @@ class Plan:
             "points": [
                 {
                     "migrationKey": d.stable_key,
+                    # VERBATIM, including a pack-namespaced spelling (`core:decision`) and
+                    # an undeclared kind (`finding`). Deliberate, and RECORDED rather than
+                    # re-shaped (round-33 review follow-up 2): ingest accepts both — it
+                    # WARNS on an unrecognised pointKind, it does not refuse — so a strip
+                    # here would silently re-type rows the source declared namespaced, on
+                    # a write path whose whole contract is fidelity. `bare_kind` is used
+                    # for the RULES (a rule must not depend on the namespace), not for the
+                    # wire. What the clean target's kind vocabulary should accept is the
+                    # clean graph's decision (#10175 step 2), not this pass's.
                     "kind": d.kind or "statement",
                     "content": d.content,
                     "sourceNodeId": d.node_id,
@@ -709,6 +718,16 @@ def _tail(g: str) -> str:
       before it … both spellings are the calling org's own graph"), so the
       identity is ``<id>``. Missing this made ``--graph org_<id> --target
       team_<id>`` pass the guard and run in place.
+
+    ⚠️ The ``_g_`` split is on the LAST occurrence, so a graph id that itself contains
+    ``_g_`` is TRUNCATED (``org_o1_g_x_g_y`` and ``g_x_g_y`` both yield ``y``). That
+    truncation is fail-closed by construction, not by accident: it collapses every
+    spelling of one id to the SAME tail (so the guard never splits one graph in two),
+    and its only failure direction is that two DIFFERENT graphs whose ids share that
+    tail compare equal — which refuses a correct run, and can never pass an in-place
+    write (round-33 review follow-up 3, recorded rather than re-shaped: the split is
+    what makes the two spellings of one graph collapse, and narrowing it would have to
+    know which ids may contain ``_g_`` — which no surface here guarantees).
     """
     g = (g or "").strip().lower()
     if not g:
@@ -775,16 +794,16 @@ def _shared_identity_value(
 def _namespace_shaped(value: Any) -> bool:
     """Does this value look like a graph NAMESPACE rather than a bare name?
 
-    Accepts the three spellings the product uses — ``org_<id>_g_<gid>``, ``g_<gid>``,
-    ``org_<id>``/``team_<id>`` — plus an id tail. A bare name (``live-v4``) does NOT
-    qualify: `MCPReader.graphs()` wraps every string the surface returns as
-    ``{"namespace": s}``, so a name delivered in the namespace field is
-    indistinguishable from a namespace VALUE, and the row set then maps two spellings
-    of ONE graph to two rows with disjoint values — the last-clause check cannot see it
-    (the shapes are identical and nothing is shared) and the guard passes an in-place
-    write. Measured: `rows = [{"namespace": "org_o1_g_old"},
-    {"namespace": "live-v4"}]` with `--graph live-v4 --target org_o1_g_old --apply`
-    returned 0 and wrote once.
+    Accepts the three PREFIXED spellings the product uses — ``org_<id>_g_<gid>``
+    (anything containing ``_g_``), ``g_<gid>``, ``org_<id>``/``team_<id>``. A bare id
+    tail, and a bare name (``live-v4``), are deliberately NOT accepted: `MCPReader.graphs()`
+    wraps every string the surface returns as ``{"namespace": s}``, so a name in the
+    namespace field is indistinguishable from a namespace VALUE, and a row set holding
+    one would map two spellings of ONE graph to two rows with disjoint values — the
+    last-clause check cannot see it (the shapes are identical and nothing is shared)
+    and the guard passes an in-place write. Measured: `rows = [{"namespace":
+    "org_o1_g_old"}, {"namespace": "live-v4"}]` with `--graph live-v4 --target
+    org_o1_g_old --apply` returned 0 and wrote once.
     """
     text = str(value or "").strip()
     if not text:
@@ -868,6 +887,12 @@ def canonical_graph_id(ref: str, graph_rows: Sequence[Mapping[str, Any]] | None)
         if len(hits) > 1:
             # Two rows describe the ref and disagree about WHICH graph it is: never
             # pick one, because picking wrong is how an in-place write happens.
+            # ⛔ This refusal (and the ambiguous-name one below) is REDUNDANT TODAY
+            # with the `return None` catch-all at the end of this block, and that is
+            # deliberate defence in depth, not dead code (round-33 review follow-up 5):
+            # it cannot be pinned by a test — deleting it is behaviour-neutral — but
+            # its whole point is to survive the day the catch-all is refactored, when
+            # falling through would first-match and become the in-place fail-open.
             return None
         # Names are matched SEPARATELY so an ambiguous name is a refusal, not a
         # first-match: two graphs with one name must never resolve to whichever
@@ -1211,6 +1236,18 @@ class Ledger:
 
 @dataclass
 class RunResult:
+    """What a run did, as the JSON a scripted driver reads.
+
+    ``applied`` is True only when the apply leg actually TOOK: either something was
+    accepted, or the plan owed the target nothing at all (``pending == 0``, an
+    idempotent re-run). A FULLY-refused apply — nothing accepted, everything still
+    pending — reports ``applied: False`` with ``refused`` set, because the exit code
+    alone is not what a driver reads: `"applied": true, "written": 0` over a refusal
+    is how a migration that wrote nothing reads as done (round-33 review follow-up
+    1). A partial refusal keeps ``applied: True`` and reports the accepted keys in
+    ``written``.
+    """
+
     applied: bool
     off: bool
     skipped_known: int
@@ -1375,9 +1412,14 @@ def run_plan(
         # attempt is not. A partial run reports what landed.
         accepted_partial = list(getattr(exc, "written_keys", ()) or [])
         ledger.record(accepted_partial)
-        return RunResult(True, False, skipped, len(accepted_partial), plan.target_graph,
-                         plan.digest(), refused=str(exc), duplicate_rows=duplicate_rows,
-                         pending=pending_count)
+        # `applied` follows what the target ACCEPTED, not the fact that --apply was
+        # given: a batch refused before the first key landed wrote nothing, and
+        # reporting it as applied is the field a driver actually reads
+        # (`"applied": true, "written": 0`) lying about a refused migration.
+        # Round-33 review follow-up 1; the exit code was already right (3).
+        return RunResult(bool(accepted_partial), False, skipped, len(accepted_partial),
+                         plan.target_graph, plan.digest(), refused=str(exc),
+                         duplicate_rows=duplicate_rows, pending=pending_count)
     accepted = [k for k in (result.get("written") or [])]
     ledger.record(accepted)
     return RunResult(True, False, skipped, len(accepted), plan.target_graph, plan.digest(),

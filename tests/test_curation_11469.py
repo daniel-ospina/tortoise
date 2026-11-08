@@ -474,8 +474,36 @@ def test_a_refused_second_batch_reports_the_first_batch_and_records_it(tmp_path)
     res = C.run_plan(plan, writer=C.IngestWriter(call_tool, batch_size=1), ledger=led,
                      apply=True, graph_rows=ROWS)
     assert res.written == 1, "the accepted batch is reported"
+    assert res.applied is True, "a partial run DID apply — the accepted batch landed"
     assert res.refused and "ERR_QUOTA" in res.refused
     assert len(led) == 1, "only the accepted batch is recorded"
+
+
+def test_a_fully_refused_apply_is_not_reported_as_applied(ledger):
+    """Round-33 review follow-up 1 — the exit code was right (3) and the JSON a
+    driver actually reads was not: a fully-refused apply reported
+    `"applied": true, "written": 0`, so a run that wrote NOTHING read as migrated.
+    `applied` follows what the target ACCEPTED: no accepted key, no apply.
+    """
+
+    class RefuseFirstBatch:
+        def write_sections(self, target_graph, sections):
+            exc = C.CurationRefused("ingest refused the batch")
+            exc.written_keys = []
+            raise exc
+
+    plan = C.build_plan([row("a", kind="decision", content="Use the graph.")],
+                        source_graph="old", target_graph="new", packs={})
+    # non-vacuity: there was something to write, so `applied: False` is a statement
+    # about the refusal and not about an empty plan
+    assert [d.disposition for d in plan.decisions] == [C.CARRY]
+    res = C.run_plan(plan, writer=RefuseFirstBatch(), ledger=ledger, apply=True,
+                     graph_rows=ROWS)
+    assert res.written == 0
+    assert res.refused and "refused the batch" in res.refused
+    assert res.applied is False, "nothing was accepted, so the run did not apply"
+    assert res.pending == 1, "the refused row is still owed to the target"
+    assert len(ledger) == 0, "a refused batch is never recorded as migrated"
 
 
 def test_a_transport_failure_mid_run_reports_what_landed(tmp_path):
@@ -1707,7 +1735,7 @@ def test_a_ledger_path_that_cannot_be_read_is_a_refusal_not_a_traceback(tmp_path
         C.Ledger(tmp_path, target="new")          # a directory, not a file
 
 
-def test_the_cli_exit_codes_pin_every_failure_arm(monkeypatch, tmp_path):
+def test_the_cli_exit_codes_pin_every_failure_arm(monkeypatch, tmp_path, capsys):
     """Round-26: returning 0 from any of the three failure arms left the suite green."""
     mod = _tool_module()
     state = {"graphs": [{"graph_id": "g_a", "stable_id": "g_a", "namespace": "org_x_g_a"}]}
@@ -1750,7 +1778,15 @@ def test_the_cli_exit_codes_pin_every_failure_arm(monkeypatch, tmp_path):
         # (skipped_known=1, pending=0) and the writer is never reached
         args = [*base[:-4], "--ledger", str(tmp_path / f"l{i}.jsonl"),
                 "--out", str(tmp_path / f"p{i}.json"), "--apply"]
+        capsys.readouterr()   # drain the previous arm's stderr, so the check is per-arm
         assert mod.main(args) == 3, f"{needle} must be a failure exit"
+        if needle == "REFUSED":
+            # Round-33 follow-up 1: the refusal above accepted NO key, so the run must
+            # not be announced as a mid-run refusal (that message means "some of it
+            # landed") — a driver reading stderr would be told a partial migration
+            # happened when nothing did. Pre-fix this arm printed "REFUSED mid-run".
+            err = capsys.readouterr().err
+            assert "REFUSED:" in err and "mid-run" not in err
 
 
 def test_apply_without_graph_is_refused_before_any_read(monkeypatch, capsys):
