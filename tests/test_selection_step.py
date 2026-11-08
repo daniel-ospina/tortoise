@@ -1315,10 +1315,17 @@ def test_a_retry_that_raises_after_the_re_bind_keeps_the_first_arms_capture(
     nothing at all. Planting it here is what makes the restore load-bearing.
 
     ⛔ NON-VACUITY: on the pre-guard tree this test does not assert — the run
-    raises out of `extract_session_v2`. Deleting any single line of the restore
-    block reds on the assertion that names it (`story`, `embed_list`,
-    `mention_s2_stats`), which is the "restores only some bindings" mutant this
-    exists to catch.
+    raises out of `extract_session_v2`. Deleting a restore line reds on the
+    assertion that names it — `story`, `story_arc`, `embed_list`,
+    `mention_s2_stats`, `vet_s2_stats`, `vet_s2_pool`, `chunks`/`failed_chunks`,
+    the warning truncation, `fired`, `trigger`, `retry_failed`, `emphasis`,
+    `"first"`, `errors` and the census bump were each measured that way, one
+    mutant at a time — which is the "restores only some bindings" mutant this
+    exists to catch. ⛔ **No exception.** An earlier version of this docstring
+    and an earlier version of the fixture both declared `vet_s2_pool`
+    UNOBSERVABLE here; that declaration was WRONG and is falsified by
+    measurement, not by argument — see the fixture's own comment below for the
+    call log that settles it.
 
     ⛔ AND THE TWO ARM COUNTERS MUST DISAGREE (review round 2, P3). The first
     fixture chunked the transcript ONCE per arm and neither chunk failed, so
