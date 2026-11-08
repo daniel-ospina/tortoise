@@ -380,11 +380,16 @@ def test_one_judge_spec_serves_the_preflight_and_the_judge(monkeypatch):
                     else getattr(fn, "id", None))
             if name != "build_judge":
                 continue
-            # The spec must BE the owner's: the first positional argument has to
-            # be a CALL to `_judge_spec()`, not a literal, a name, or `None`.
-            first = node.args[0] if node.args else None
-            if (isinstance(first, ast.Call)
-                    and getattr(first.func, "id", None) == "_judge_spec"):
+            # The spec must BE the owner's: the `spec` argument — positional,
+            # or the keyword form `spec=_judge_spec()` — has to be a CALL to
+            # `_judge_spec()`, not a literal, a name, or `None`.
+            spec_arg = node.args[0] if node.args else None
+            if spec_arg is None:
+                for k in node.keywords:
+                    if k.arg == "spec":
+                        spec_arg = k.value
+            if (isinstance(spec_arg, ast.Call)
+                    and getattr(spec_arg.func, "id", None) == "_judge_spec"):
                 continue
             # `mock=True` is the one other explicit form; `mock=False` is the
             # default judged by a real model, so it still has to name its spec.
@@ -435,14 +440,34 @@ def test_one_judge_spec_serves_the_preflight_and_the_judge(monkeypatch):
     # narrower than its claim is how the #2071 split survived two rounds, so
     # the shapes that INHERIT the default — or that pass a spec the pre-flight
     # did not resolve — are asserted directly.
-    assert _bare_build_judge_calls(
-        "build_judge()\nbuild_judge(None)\nbuild_judge(mock=False)\n"
-        "build_judge(spec=None)\nbuild_judge('')\n"
-        "build_judge(OFFICIAL_JUDGE_MODEL)\nbuild_judge(spec)\n",
-        "mutant") != []
-    assert _bare_build_judge_calls(
-        "build_judge(_judge_spec())\nbuild_judge(mock=True)\n",
-        "explicit") == []
+    #
+    # ⛔ AND THE ASSERTION PINS THE SET, NOT ITS SIZE (review finding): asserting
+    # `!= []` only asked that SOME shape be flagged, so a helper mutated back to
+    # "any argument counts as explicit" still passed on the argument-less shapes
+    # while silently losing the four "who decides the spec" cases. Every shape is
+    # on its own line and every line number is required, so a rule that stops
+    # firing is a red row naming the shape it stopped firing on.
+    inheriting = [
+        "build_judge()",                      # 1 — no spec at all
+        "build_judge(None)",                  # 2 — falsy positional
+        "build_judge('')",                    # 3 — falsy constant
+        "build_judge(mock=False)",            # 4 — falsy `mock` judges for real
+        "build_judge(spec=None)",             # 5 — falsy keyword spec
+        "build_judge(OFFICIAL_JUDGE_MODEL)",  # 6 — a spec that is not the owner's
+        "build_judge(spec)",                  # 7 — a name, not the owner's call
+        "build_judge(other_spec())",          # 8 — some OTHER resolver
+    ]
+    assert _bare_build_judge_calls("\n".join(inheriting) + "\n", "mutant") == [
+        f"mutant:{i}" for i in range(1, len(inheriting) + 1)], (
+        "the guard stopped flagging an inheriting shape — see the list above; a "
+        "narrower helper passes `!= []` and re-opens the #8486 split")
+    explicit = [
+        "build_judge(_judge_spec())",
+        "build_judge(spec=_judge_spec())",
+        "build_judge(mock=True)",
+    ]
+    assert _bare_build_judge_calls("\n".join(explicit) + "\n", "explicit") == [], (
+        "the guard flags a call that DOES name its spec through the owner")
 
 
 def test_probe_live_path_builds_the_judge_it_preflighted(monkeypatch, capsys):
