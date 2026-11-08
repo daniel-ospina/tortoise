@@ -10804,6 +10804,50 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     value_gate = (_REPO / "tortoise/value_gate.py").read_text(
         encoding="utf-8").splitlines()
 
+    # ⛔ The CALL-shaped arm comes FIRST, because it is the only one that can report the
+    # true failure. A production `create_operator(` call necessarily contains the bare
+    # token, so a token-scanning arm below would fire too — and an earlier revision's DID
+    # fire first (measured), instructing a fixer to RE-DERIVE the record's line numbers:
+    # the wrong repair, aimed at a staleness where the conclusion itself is false.
+    #
+    # ⛔ This check is TOKENIZED, not a regex, for THREE measured reasons — the first two
+    # defective in opposite directions, the third a limitation of `re` itself:
+    #   1. A dot-ANCHORED pattern (the record's own command shape) missed the unqualified
+    #      `return create_operator(payload)` — a real call with no receiver.
+    #   2. A dot-EXCLUDING lookbehind then missed the RECEIVER-qualified form
+    #      (`sdk.create_edge(payload)`), i.e. it pinned the COMPLEMENT of the claim while
+    #      its message asserted the claim.
+    #   3. Any `re` arm also reads a COMMENT or a STRING that names the verb as a call, so
+    #      a prose mention claimed the record's conclusion was FALSE when nothing was called.
+    # `_call_sites` matches a NAME/`(` token PAIR, so it covers both receivers and the
+    # unqualified form, and COMMENT/STRING tokens cannot match by construction.
+    _calls = _call_sites("\n".join(ext) + "\n")
+    assert _calls == [], (
+        f"the record's load-bearing half is the CALL count (0) — a production call site "
+        f"makes its 'no producer' conclusion FALSE, not merely stale (found {_calls}); this "
+        "reds before the line-number arm below can misdirect the repair")
+    # The helper's own two degenerate cases, so the detector cannot go inert silently: a call at the
+    # FIRST token of the source (which a `zip(toks, toks[1:], toks[2:])` form missed — measured),
+    # and a DEFINITION, which is not a call site.
+    assert _call_sites("create_operator(payload)\n") == [(1, "create_operator")], (
+        "`_call_sites` must see a call at the FIRST token of the source — a triple-zip over "
+        "`(toks, toks[1:], toks[2:])` cannot, and answered `[]` there")
+    assert _call_sites("def create_operator(payload):\n    pass\n") == [], (
+        "a `def` is not a call site — counting it tells a fixer the record's conclusion is FALSE "
+        "when only the function's own definition is present")
+    # The four shapes the comment above claims the arm separates, each asserted rather than described:
+    # the docstring's own two false readings (a receiver-qualified call missed by a dot-EXCLUDING
+    # lookbehind, a comment read as a call) were UNBOUND — reintroducing either left the suite green
+    # (measured), because the live tree has neither shape.
+    assert _call_sites("sdk.create_edge(payload)\n") == [(1, "create_edge")], (
+        "a RECEIVER-qualified call is a call site")
+    assert _call_sites("return create_operator(x)\n") == [(1, "create_operator")], (
+        "an UNQUALIFIED call is a call site")
+    assert _call_sites("# call create_operator(payload)\n") == [], (
+        "a COMMENT naming the verb is not a call site")
+    assert _call_sites('_X = "create_operator(payload)"\n') == [], (
+        "a STRING naming the verb is not a call site")
+
     # A1: #11205's channel is TRANSPORT ONLY — the schema line that spells the
     # predicate allowlist, and the comment saying nothing in `tortoise/` consumes it.
     assert "`hasPart`" in text and "`tortoise/extractor_v2.py:1720`" in text, (
@@ -10883,49 +10927,6 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # (`de72cfd45` → `:8892 :8910 :8917 :9231`, `80c912244` → 0) are deliberately NOT
     # pinned: they are claims about those commits, and they verify there.
     #
-    # ⛔ The CALL-shaped arm comes FIRST, because it is the only one that can report the
-    # true failure. A production `create_operator(` call necessarily contains the bare
-    # token, so a token-scanning arm below would fire too — and an earlier revision's DID
-    # fire first (measured), instructing a fixer to RE-DERIVE the record's line numbers:
-    # the wrong repair, aimed at a staleness where the conclusion itself is false.
-    #
-    # ⛔ This check is TOKENIZED, not a regex, for THREE measured reasons — the first two
-    # defective in opposite directions, the third a limitation of `re` itself:
-    #   1. A dot-ANCHORED pattern (the record's own command shape) missed the unqualified
-    #      `return create_operator(payload)` — a real call with no receiver.
-    #   2. A dot-EXCLUDING lookbehind then missed the RECEIVER-qualified form
-    #      (`sdk.create_edge(payload)`), i.e. it pinned the COMPLEMENT of the claim while
-    #      its message asserted the claim.
-    #   3. Any `re` arm also reads a COMMENT or a STRING that names the verb as a call, so
-    #      a prose mention claimed the record's conclusion was FALSE when nothing was called.
-    # `_call_sites` matches a NAME/`(` token PAIR, so it covers both receivers and the
-    # unqualified form, and COMMENT/STRING tokens cannot match by construction.
-    _calls = _call_sites("\n".join(ext) + "\n")
-    assert _calls == [], (
-        f"the record's load-bearing half is the CALL count (0) — a production call site "
-        f"makes its 'no producer' conclusion FALSE, not merely stale (found {_calls}); this "
-        "reds before the line-number arm below can misdirect the repair")
-    # The helper's own two degenerate cases, so the detector cannot go inert silently: a call at the
-    # FIRST token of the source (which a `zip(toks, toks[1:], toks[2:])` form missed — measured),
-    # and a DEFINITION, which is not a call site.
-    assert _call_sites("create_operator(payload)\n") == [(1, "create_operator")], (
-        "`_call_sites` must see a call at the FIRST token of the source — a triple-zip over "
-        "`(toks, toks[1:], toks[2:])` cannot, and answered `[]` there")
-    assert _call_sites("def create_operator(payload):\n    pass\n") == [], (
-        "a `def` is not a call site — counting it tells a fixer the record's conclusion is FALSE "
-        "when only the function's own definition is present")
-    # The four shapes the comment above claims the arm separates, each asserted rather than described:
-    # the docstring's own two false readings (a receiver-qualified call missed by a dot-EXCLUDING
-    # lookbehind, a comment read as a call) were UNBOUND — reintroducing either left the suite green
-    # (measured), because the live tree has neither shape.
-    assert _call_sites("sdk.create_edge(payload)\n") == [(1, "create_edge")], (
-        "a RECEIVER-qualified call is a call site")
-    assert _call_sites("return create_operator(x)\n") == [(1, "create_operator")], (
-        "an UNQUALIFIED call is a call site")
-    assert _call_sites("# call create_operator(payload)\n") == [], (
-        "a COMMENT naming the verb is not a call site")
-    assert _call_sites('_X = "create_operator(payload)"\n') == [], (
-        "a STRING naming the verb is not a call site")
     # The LIVE run is the LEADING `:NNNN` group, not the whole comment: #11519's landing
     # appends the PROVENANCE of the four numbers (`(`62248db88` printed :8938 …; #11449,
     # moved all four +68)`), which is a claim about two other bases and must not be read as
@@ -10975,7 +10976,9 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # `test_the_records_zero_is_rederived_at_the_bases_it_names`. It is not here on purpose: it
     # READS TWO HISTORICAL BASES, and `pytest.skip` ABORTS the test function, so on CI's
     # `fetch-depth: 1` checkout a skip there would have killed every assert below it in THIS one
-    # (23 of them, measured) — including arms that need no history at all.
+    # (an earlier revision of this comment typed that count; it has grown since — a typed count is
+    # this bundle's recurring defect, so the tail is named, not counted) — including arms that need
+    # no history at all.
     live_mentions = [i for i, line in enumerate(ext, 1) if "create_operator" in line]
     assert live_mentions == [9006, 9024, 9031, 9411], (
         f"extractor_v2.py's create_operator mentions are at {live_mentions}, not the "
@@ -11017,7 +11020,11 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
                        # plain `\s+` cannot cross the `# `, so the continuation is named.
                        r"that is (\d+) on\s+#\s+origin/main"):
         _found = re.findall(_count_pat, text, re.IGNORECASE)
-        assert _found and all(_v in (str(_n), _words[_n]) for _v in _found), (
+        # ⛔ `.lower()` on the MATCH, not just `re.IGNORECASE` in the pattern: the flag makes the
+        # pattern match `Four`, but `_found` returns the raw text, so a case-sensitive membership
+        # test redded a number-preserving reword (`in four comments` -> `in Four comments`) with a
+        # message asserting the count disagreed when `Four == 4` (measured).
+        assert _found and all(_v.lower() in (str(_n), _words[_n]) for _v in _found), (
             f"the record states the create_operator mention count as {_n}, but "
             f"{_count_pat!r} yields {_found} — EVERY occurrence must agree with the derived "
             "count (a typed count that nothing re-checks is what rotted here)")
@@ -11322,7 +11329,8 @@ def test_the_records_zero_is_rederived_at_the_bases_it_names():
         yet registered the predicate;
       * `80c912244` — this record's own base.
 
-    A skip inside the cite pin therefore killed every assert BELOW it — 23 of them, measured,
+    A skip inside the cite pin therefore killed every assert BELOW it — the whole tail of that
+    function, measured,
     including arms that need no history at all. Here a skip costs exactly this leg, and says so.
 
     The claim itself: `measured at each → 0, exit 1`. Both halves are re-derived, because a typed
