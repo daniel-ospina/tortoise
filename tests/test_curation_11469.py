@@ -216,21 +216,21 @@ def test_org_and_team_spellings_of_the_tenant_graph_are_one_graph():
                                  "team_3326a01ea34ae595d84de5d8f9", graph_rows=tenant)
 
 
-def test_a_dry_run_with_an_unproven_identity_plans_instead_of_refusing():
+def test_a_dry_run_with_an_unproven_identity_plans_instead_of_refusing(tmp_path):
     """The guard is strict where a WRITE can happen; a plan-only run reports."""
     plan = C.build_plan([row("a", content="Let me look.")], source_graph="live-v4",
                         target_graph="new", packs={})
-    res = C.run_plan(plan, writer=CountingWriter(), ledger=C.Ledger("/tmp/nonexistent-11469", target="new"),
+    res = C.run_plan(plan, writer=CountingWriter(), ledger=C.Ledger(tmp_path / "led.jsonl", target="new"),
                      apply=False, graph_rows=[{"namespace": "org_x_g_deadbeefdeadbeef"}])
     assert res.identity and "cannot resolve" in res.identity
     assert res.written == 0
 
 
-def test_a_ledger_for_another_target_is_refused():
+def test_a_ledger_for_another_target_is_refused(tmp_path):
     plan = C.build_plan([row("a", content="Let me look.")], source_graph="old",
                         target_graph="new", packs={})
     with pytest.raises(C.CurationRefused):
-        C.run_plan(plan, writer=CountingWriter(), ledger=C.Ledger("/tmp/nonexistent-11469b", target="A"),
+        C.run_plan(plan, writer=CountingWriter(), ledger=C.Ledger(tmp_path / "led.jsonl", target="A"),
                    apply=False, graph_rows=ROWS)
 
 
@@ -1042,18 +1042,18 @@ def test_a_shifted_pagination_is_refused_not_silently_partial():
         reader.read_points(page=2)
 
 
-def test_a_refused_run_still_reports_what_the_plan_owes():
+def test_a_refused_run_still_reports_what_the_plan_owes(tmp_path):
     """Round-13 follow-up: the pre-write refusal paths returned pending=0, the same
     "reads as nothing to migrate" shape the dry run had."""
     plan = C.build_plan([row("p1", kind="decision", content="a"),
                          row("p2", kind="decision", content="b")],
                         source_graph="old", target_graph="new", packs={})
     off = C.run_plan(plan, writer=CountingWriter(),
-                     ledger=C.Ledger("/tmp/curate-off-11469.jsonl", target="new"),
+                     ledger=C.Ledger(tmp_path / "off.jsonl", target="new"),
                      apply=True, off=True, graph_rows=ROWS)
     assert off.pending == 2 and off.written == 0
     refused = C.run_plan(plan, writer=CountingWriter(),
-                         ledger=C.Ledger("/tmp/curate-ref-11469.jsonl", target="new"),
+                         ledger=C.Ledger(tmp_path / "ref.jsonl", target="new"),
                          apply=True, graph_rows=[{"namespace": "org_9_g_aaa"}])
     assert refused.pending == 2 and refused.refused
 
@@ -1179,7 +1179,7 @@ def test_the_bundle_passes_ingests_phase1_validator():
     assert sdk._validate_bundle(plan.bundle(), promotion_policy="auto") == []
 
 
-def test_a_write_flag_on_inventory_is_refused_not_ignored(monkeypatch, capsys):
+def test_a_write_flag_on_inventory_is_refused_not_ignored(monkeypatch, capsys, tmp_path):
     """Round-16: `inventory --apply --ledger --rows` exited 0 having silently ignored
     every one of them."""
     mod = _tool_module()
@@ -1187,7 +1187,7 @@ def test_a_write_flag_on_inventory_is_refused_not_ignored(monkeypatch, capsys):
     assert mod.main(["inventory", "--apply"]) == 2
     assert "apply only to `plan`" in capsys.readouterr().err
     # EVERY write flag, not just the one that happened to be checked first
-    for flag in (["--ledger", "/tmp/x.jsonl"], ["--target", "org_x_g_new"]):
+    for flag in (["--ledger", str(tmp_path / "x.jsonl")], ["--target", "org_x_g_new"]):
         assert mod.main(["inventory", *flag]) == 2
         assert "apply only to `plan`" in capsys.readouterr().err
 
