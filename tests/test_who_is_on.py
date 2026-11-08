@@ -1526,6 +1526,52 @@ exec {self.gh} "$@"
         # It must NAME the interpreter it found, not just assert one is missing.
         self.assertIn("3.9.6", proc.stderr)
 
+    def test_a_312_python3_is_preferred_and_uv_is_never_reached(self):
+        """The FAST PATH: a >=3.12 `python3` wins, and `uv` must not run at all.
+
+        ⛔ AND IT IS THE ARM THAT RUNS ON EVERY NORMAL BOX (#11202 review round 9).
+        Both tests above use a shim whose version probe FAILS, so they drive only the
+        two fallback arms — deleting the `python3` fast path outright left this suite
+        green (measured: 61 passed). That mutation is not cosmetic: with the fast path
+        gone the wrapper falls through to the refusal, whose message says there is
+        "neither" a 3.12 python3 nor `uv` on a box that plainly has one — a
+        self-contradicting rc 2 for the verb AGENTS.md documents.
+        """
+        d = self.tmp / "interp-fast"
+        d.mkdir(exist_ok=True)
+        ran = self.tmp / "py-args.txt"
+        uv_ran = self.tmp / "uv-ran.txt"
+        self._write_exec(d / "python3", (
+            "#!/bin/bash\n"
+            f'printf \'%s\\n\' "$@" >> "{ran}"\n'
+            "if [ \"$1\" = \"-V\" ]; then echo 'Python 3.12.7'; exit 0; fi\n"
+            "exit 0\n"          # the >=3.12 probe PASSES
+        ))
+        self._write_exec(d / "uv", (
+            "#!/bin/bash\n"
+            f'echo ran > "{uv_ran}"\n'
+            "exit 7\n"          # loud if the fast path fails to short-circuit
+        ))
+        for name in ("bash", "dirname"):
+            link = d / name
+            if not link.exists():
+                link.symlink_to(shutil.which(name))
+        proc = subprocess.run(
+            ["bash", str(WRAPPER), str(ISSUE), "--repo", str(self.repo)],
+            capture_output=True, text=True, timeout=120,
+            env={**self._env(), "PATH": str(d)},
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertFalse(uv_ran.exists(),
+                         "uv must not be reached when a 3.12 python3 exists")
+        args = ran.read_text().splitlines()
+        # The FIRST call is the version probe (`-c …`), never the module…
+        self.assertEqual(args[0], "-c")
+        # …and somewhere after it, the module is executed from THIS tree.
+        modules = [a for a in args if a.endswith("who_is_on.py")]
+        self.assertTrue(modules, args)
+        self.assertEqual(Path(modules[0]).resolve(), TOOL.resolve())
+
     def test_the_wrapper_falls_back_to_uv_with_the_repo_project(self):
         """`uv` is the fallback, and `--project` must select THIS repo's environment.
 
