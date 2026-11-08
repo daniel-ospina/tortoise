@@ -2044,12 +2044,14 @@ def test_the_real_machine_record_agrees_with_the_pins():
     """The record pins its document AND the code lines it cites.
 
     Round-14 review: this PR added two comment lines inside `DOOR_PINNED_ON`,
-    which moved the `TORTOISE_STATE_VALUE_VERBATIM` entry `:504` -> `:506`, and
+    which moved the `TORTOISE_STATE_VALUE_VERBATIM` entry `:504` -> `:506` (`:518` once
+    main's own insert landed above it), and
     the record's `door.acceptance_arm.read_back` was left quoting `:504` - a
     comment line. The field's OWN prose warns that this entry "is NOT
     cite-neutral" for exactly this reason, and nothing reddened: the checker
     (`tools/capstone_preregistration_check.py`) never reads `read_back`, and
-    `grep -rn ':506' tests/ tools/` was empty. A field that warns about cite
+    no test or tool cited `capstone_measure.py:506` (the two `:506` matches in
+    `tests/` are a sha256 fragment and an unrelated `sdk.py:506` in a transcript). A field that warns about cite
     drift cannot be the one place drift goes unwatched, so its
     `capstone_measure.py` cites are pinned here EXACTLY - the entry line, and the
     census range's own opening and closing lines - never as a window a shift can
@@ -2073,15 +2075,15 @@ def test_the_real_machine_record_agrees_with_the_pins():
         "door"]["acceptance_arm"]["read_back"]
     probe = (PREREG_DIR / "probes" / "capstone_measure.py").read_text().splitlines()
 
-    # ⛔ A NEGATIVE LOOKAHEAD, not containment: `":506" in read_back` is satisfied by
+    # ⛔ A NEGATIVE LOOKAHEAD, not containment: `":518" in read_back` is satisfied by
     # `:5060` — a line the 4,349-line probe does not have — so containment certified a
     # cite pointing at nothing (measured: re-staling the field to `:5060` left this row
     # GREEN until this regex was written).
-    assert re.search(r"probes/capstone_measure\.py:506(?!\d)", read_back), (
+    assert re.search(r"probes/capstone_measure\.py:518(?!\d)", read_back), (
         "the record must name the line the TORTOISE_STATE_VALUE_VERBATIM entry is on, "
         "as a complete number")
-    assert probe[506 - 1].strip() == '("TORTOISE_STATE_VALUE_VERBATIM", "1"))', (
-        f"capstone_measure.py:506 reads {probe[506 - 1].strip()!r}, not the pinned entry")
+    assert probe[518 - 1].strip() == '("TORTOISE_STATE_VALUE_VERBATIM", "1"))', (
+        f"capstone_measure.py:518 reads {probe[518 - 1].strip()!r}, not the pinned entry")
 
     # ⛔ A SET OVER THE RANGES CITED, not a count and not a phrase. The first cut of this
     # arm asserted `count(":2726-2728") == 2`, which false-failed a CORRECT additive edit
@@ -2095,7 +2097,7 @@ def test_the_real_machine_record_agrees_with_the_pins():
     # `to` spelling each left the earlier cuts RED and this one GREEN, while a re-staled
     # copy still reds.
     cited_ranges = set(re.findall(r":(\d+-\d+)", read_back))
-    _expected_ranges = {"275-283", "2713-2715", "2724-2726", "2726-2728"}
+    _expected_ranges = {"275-283", "2713-2715", "2724-2726", "2726-2728", "2738-2740"}
     assert cited_ranges == _expected_ranges, (
         "the record's cited ranges are "
         f"{sorted(cited_ranges)}; missing={sorted(_expected_ranges - cited_ranges)} "
@@ -2118,8 +2120,8 @@ def test_the_real_machine_record_agrees_with_the_pins():
     assert re.search(r"a1dff7cec8[^:]{0,40}:2713-2715\s*(?:->|→|to)\s*:2724-2726\b", read_back), (
         "the record must attribute the FIRST move to a1dff7cec8 — the SHA in the same clause "
         "as the ranges — at the intermediate position it actually reached")
-    assert read_back.count(":2726-2728") >= 2, (
-        f"the record states :2726-2728 {read_back.count(':2726-2728')} time(s): the last "
+    assert read_back.count(":2738-2740") >= 2, (
+        f"the record states :2738-2740 {read_back.count(':2738-2740')} time(s): the last "
         "move supplies one mention and the LIVE cite must supply the other")
     assert re.search(r":2724-2726\s*(?:->|→|to)\s*:2726-2728\b", read_back), (
         "the record must place the LAST move of that window at its final position "
@@ -2130,13 +2132,13 @@ def test_the_real_machine_record_agrees_with_the_pins():
     # never reached it (measured, agent-infra#3442 rule 3: an assertion that can never be
     # the row that reds is not attribution, it is dead weight). The set pin's message
     # already names the missing range, so nothing is lost by deleting it.
-    assert probe[2726 - 1].strip() == "for name, count, anchored in projection.g.query(", (
-        f"capstone_measure.py:2726 reads {probe[2726 - 1].strip()!r}, not the census call")
+    assert probe[2738 - 1].strip() == "for name, count, anchored in projection.g.query(", (
+        f"capstone_measure.py:2738 reads {probe[2738 - 1].strip()!r}, not the census call")
     # Equality, like its two siblings above: a substring let the closing line's SHAPE
     # change while the row stayed green (measured: renaming the `AS anchored` alias broke
     # the very unpacking this arm consumes, and nothing reddened).
-    assert probe[2728 - 1].strip() == '"count(r.sourceVersion) AS anchored ORDER BY t").result_set:', (
-        f"capstone_measure.py:2728 reads {probe[2728 - 1].strip()!r}, not the "
+    assert probe[2740 - 1].strip() == '"count(r.sourceVersion) AS anchored ORDER BY t").result_set:', (
+        f"capstone_measure.py:2740 reads {probe[2740 - 1].strip()!r}, not the "
         "anchored count that closes the query")
 
 

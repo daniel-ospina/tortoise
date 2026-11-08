@@ -13,7 +13,7 @@ B7 reports. The names were not wholly unknown in-repo: **9 of the 25** appear in
 Objects — **3 definite descriptions**, **3 pointers** (`PR #465`, `issue #3775`,
 `§24`) and **3 references** — but unlabelled: no class, no verdict, no reason.
 The path below is the one the repo *already* names
-(`docs/research/2026-09-23-pipeline-stage-ordering/research-brief.md:227`), and
+(`docs/research/2026-09-23-pipeline-stage-ordering/research-brief.md:230`), and
 landing it executes #4917 §3.2 item 1.
 
 ⚠️ **Four of the 25 names carry a SECOND, LATER owner label — and it is not a
