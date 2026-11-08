@@ -10965,7 +10965,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # ⛔ THE ADJACENCY IS DELIBERATELY NOT PINNED — recorded here, which is what the review of
     # the forward merge (#11519) asked for as the alternative to restoring it. Three forms were
     # measured, and each one that binds the mention to the cite in ONE assertion is a
-    # false-BLOCK generator: side1's literal redded on a em-dash reword of the same clause;
+    # false-BLOCK generator: side1's literal redded on an em-dash reword of the same clause;
     # `[^.\n]{0,80}` redded on `` `hasPart`, i.e. `cite` `` and on the reversed order
     # (`` the allowlist at `cite` includes `hasPart` ``), while still passing a two-CLAUSE
     # rewrite. `#11546` (de1e2c9b2) removed exactly this needle class by name — *"needles whose
@@ -11304,21 +11304,37 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         # things a wording cannot dodge: the LIVE number never appears in these regions at all, and
         # every `:12929` there carries the base it was true at within 60 characters — the same
         # idiom the neighbouring `:12779` arm already uses for its own number.
-        # ⛔ THE LIVE-NUMBER ARM IS DELIBERATELY ABSENT — see the residual below. Three forms were
+        # ⛔ THE LIVE-NUMBER ARM IS DELIBERATELY ABSENT FROM THIS LOOP — and the hole is stated
+        # here because nothing else in this file catches it: a re-stale of any number OTHER than
+        # `:12929` to the live/HEAD shape (`:13011` at HEAD, in §2 or in the §5 block) reds
+        # NOTHING (measured: whole file green). Three forms were
         # measured and every one of them was wrong in a direction: a single-number deny-list
         # (`":12944" not in`) under-blocked every other HEAD-relative number and over-blocked a
         # sha-qualified read; a qualifier regex under-blocked a BARE `:12944` and over-blocked
         # ordinary prose (`HEAD` unanchored matches "ahead"/"header", and "in this tree" read as a
         # citation); a finite number list is a word list by another name. What DOES hold, and is
         # asserted: the cited number itself must carry its base (the loop below), so re-staling
-        # `:12929` reds. What does NOT hold is a general "no live number here" rule — that needs a
-        # rule the record's own base-qualified and file-qualified cites can both satisfy, which is
-        # a separate piece of work on this record's citation grammar.
+        # `:12929` reds, and the §5 block keeps main's own `at`-word arm (restored below, block-scoped). What does NOT
+        # exist is a general "no live number" rule for §2 (A2) — that region's mixture of
+        # base-qualified and file-qualified cites needs a citation grammar the record does not
+        # have yet, which is a separate piece of work.
         for _m in re.finditer(r":12929", _region):
             _near = _region[max(0, _m.start() - 60):_m.end() + 60]
             assert "a1dff7cec8" in _near, (
                 f"{_label}: `:12929` at offset {_m.start()} does not name the base it was true at "
                 "— an unqualified occurrence is a re-stale presented as live")
+        # ⛔ main's own arm, kept where it WORKS (#11519 review). `_found == ["12929"]` was green
+        # on the §5 block and RED on §2 (main's record re-cut §2's cite, so the arm and the text
+        # disagreed there) — which is why it could not be kept verbatim. But dropping it wholesale
+        # took a WORKING, discriminating watch off the block the record calls its reproduction
+        # path: measured, `:13011 at HEAD` injected into that block left the whole file GREEN after
+        # the removal, while main's arm reds it (`['12929','13011']`). Restored block-scoped, where
+        # it is green on the record as shipped and adds no false-block class.
+        if _label == "the §5 reproduction block":
+            _at_word = re.findall(r":(\d+)`? at (?!`?\d)[\w][\w -]{0,12}", _region)
+            assert _at_word == ["12929"], (
+                f"{_label} carries a cite whose qualifier is not a base ({_at_word}) — `<n> at "
+                "HEAD` is the shape `#11555` retired")
     # The SYMBOL is what the record cites, so the invariant that survives any later insertion is
     # that `vet_enabled = (` is unique IN THE FILE. A rename or a second assignment is what makes
     # the citation ambiguous; the line it happens to sit on is not the claim.
