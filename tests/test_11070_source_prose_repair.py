@@ -5129,8 +5129,13 @@ def test_stem_only_EXCLUDES_every_bucket_the_classifier_can_emit():
     """
     from tortoise import session_source_prose_migration as m
 
-    split_keys = {"residue", "lexicon", "stale", "foreign", "unexplained", "unread"}
-    assert set(m._STEM_ONLY_FORBIDDEN) | {"lexicon"} == split_keys, (
+    # ⛔ CONSULT THE CLASSIFIER, DO NOT SPELL ITS KEYS (#11536 review round 10,
+    # P2). This used to compare `_STEM_ONLY_FORBIDDEN` against a LITERAL set in
+    # the test file — two constants, so it could never fail, while its own
+    # docstring claimed it reds when `classify_fts_hits` grows a bucket. The
+    # empty-url path returns the full bucket dict, which IS the contract.
+    split = m.classify_fts_hits(_RecordingGraph([]), [], phrase="zebraquux")
+    assert set(split) == set(m._STEM_ONLY_FORBIDDEN) | {"lexicon"}, (
         "`_STEM_ONLY_FORBIDDEN` no longer covers every non-lexicon bucket "
         "`classify_fts_hits` can emit — a hit in an unlisted bucket would be "
         "reported as a benign stem collision")
@@ -5182,6 +5187,18 @@ def test_a_TRUNCATED_BEFORE_read_cannot_certify(monkeypatch, capsys):
     _cli._report_fts(folded)
     err = capsys.readouterr().err
     assert "window FILLED" in err, "the refusal did not name the truncated BEFORE leg" + err
+    # ⛔ AND IT MUST NOT ASSERT CAUSES THIS RUN DID NOT HAVE (#11536 review round
+    # 10, P1). With no `before-truncated` branch the veto fell through to the
+    # `uncorroborated` arm, whose message says the control did not corroborate
+    # (it did — printed on stdout one line above) and tells the operator to run
+    # `--repair --probe-phrase`, the command they had just run. The old
+    # assertion here checked only the phrase above, so both false clauses passed.
+    assert "cannot be corroborated" not in err, (
+        "the refusal told the operator the zero was never corroborated, but the "
+        "control answered: " + err)
+    assert "did not corroborate" not in err, err
+    assert "RARER token" in err, (
+        "the refusal did not name the remedy that applies (a rarer token): " + err)
 
     # (3) a real discriminating BEFORE still certifies.
     hit_before = {"ran": True, "truncated": False,

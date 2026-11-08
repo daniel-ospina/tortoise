@@ -678,6 +678,22 @@ def _report_fts(fts: dict, census_after: int | None = None) -> None:
               f"did not run returns no hits, exactly as a clean miss does, so "
               f"its 0 is NOT evidence — fix the read (the index, or the circuit "
               f"breaker) and re-measure.", file=sys.stderr)
+    elif fts["vetoed"] == "before-truncated":
+        # ⛔ ITS OWN BRANCH (#11536 review round 10, P1). With no branch here the
+        # veto fell through to the `else:` arm and printed the `uncorroborated`
+        # causes: that "the control did not corroborate the zero" — while the
+        # control HAD answered, printed with its hit count one line above on
+        # stdout — and it told the operator to run `--repair --probe-phrase`,
+        # which is the command they had just run. The verdict was fail-closed
+        # but the diagnosis was false in every clause.
+        print(f"✗ the BEFORE reading's window FILLED "
+              f"({(fts['probes'][0].get('before') or {}).get('hits')} hit(s) is "
+              f"the read's limit), so that leg's residue count is a FLOOR: it "
+              f"did NOT establish that the token matched no pre-fix node, and "
+              f"residue could be sitting past the edge. This is NOT an "
+              f"uncorroborated zero — the control answered — so the fix is a "
+              f"RARER token, not another run. Re-run with a token that appears "
+              f"only in the removed sentence.", file=sys.stderr)
     elif fts["vetoed"] == "truncated":
         print(f"✗ the probe filled the read's window for {fts['truncated']!r} "
               f"({fts['limit']} hits), so its count is a FLOOR and any residue "
