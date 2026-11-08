@@ -799,6 +799,15 @@ def test_a_cmd_target_that_names_no_held_artifact_is_invalid(tmp_path):
         "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q | tee pytest.log",
         "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q | logger -t pytest",
         "cmd:bash -c 'uv run pytest tests/test_9664_capstone_verdict_ledger.py -q 2>&1'",
+        # ⛔ A runner's own SUBCOMMAND verb is not an artifact. `ruff check <path>`
+        # is a record this repo's lint gate really produces (`.github/workflows/
+        # main-lint.yml` runs `ruff check .`), and it was REFUSED at `0c259a39f3`
+        # with `'check' is not a file in this tree` — exit 1, so the whole uncovered
+        # list disappeared. `ruff` was already in `RUNNERS`, so the entry was inert.
+        "cmd:ruff check tools/capstone_ledger.py",
+        "cmd:uv run ruff check tools/capstone_ledger.py",
+        "cmd:uv run ruff format --check tools/capstone_ledger.py",
+        "cmd:uv run ruff check tools/",
     ],
 )
 def test_the_commands_agents_md_hands_a_lane_are_not_false_blocked(tmp_path, command):
@@ -942,6 +951,65 @@ def test_the_known_residual_false_PASSes_are_pinned_as_OPEN(tmp_path, disclaimer
         "#11520 may have been fixed — invert this pin to EXIT_INVALID rather "
         "than deleting it: " + proc.stdout + proc.stderr,
     )
+
+
+def test_a_subcommand_verb_is_admitted_per_runner_and_nowhere_else(tmp_path):
+    """A subcommand word is a NON-ARTIFACT argument, so it is admitted PER RUNNER.
+
+    ⛔ Measured false block at `0c259a39f3` AND on `origin/main` at `5ef5805f0`: the
+    artifact rule reads the first token in argument position, so
+    `cmd:ruff check tools/capstone_ledger.py` was refused with `'check' is not a
+    file in this tree`, and `cmd:uv run ruff check …` / `cmd:uv run ruff format
+    --check …` with it. Exit 1 prints NO report, so a lane recording the lint gate
+    it actually ran lost the entire uncovered list — the P2 harm this PR exists to
+    remove. `ruff` being in `RUNNERS` made the entry look supported while buying
+    nothing, because the only shape it helped was a LATER segment, which is not
+    graded at all (#11520).
+
+    ⛔ The fix is NOT a global subcommand word set. That is the `_CHAIN_WORDS` hole
+    in a different hat: it would skip `check`/`format` after ANY runner and
+    re-admit `cmd:uv run not run - see tools/capstone_ledger.py`, the
+    sentence-with-a-file-in-it this arm exists to refuse. Keyed by the runner
+    ACTUALLY invoked — so `uv run ruff check` resolves the subcommand to `ruff` —
+    and scoped to the runners this repo writes down. One subcommand token, once,
+    immediately after its runner.
+    """
+    for legitimate in (
+        "cmd:ruff check tools/capstone_ledger.py",
+        "cmd:ruff format --check tools/capstone_ledger.py",
+        "cmd:uv run ruff check tools/capstone_ledger.py",
+        "cmd:uv run ruff format --check tests/test_9664_capstone_verdict_ledger.py",
+    ):
+        proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, legitimate])]))
+        assert proc.returncode == cl.EXIT_CLEAN, (legitimate, proc.stdout + proc.stderr)
+
+    for attack in (
+        # No map entry for these runners: a bare word behind them is prose.
+        "cmd:git NOT-RUN",
+        "cmd:make check",
+        "cmd:docker format",
+        "cmd:bash check NOT-RUN",
+        # `ruff`'s map holds no such word, so the prose this arm exists to refuse
+        # is still refused behind the runner that HAS a map.
+        "cmd:ruff not - see tools/capstone_ledger.py",
+        # ONE subcommand token, immediately after its runner: a second bare word is
+        # back in artifact position and must name something a clone holds.
+        "cmd:ruff check format NOT-RUN",
+    ):
+        proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, attack])]))
+        assert proc.returncode == cl.EXIT_INVALID, (attack, proc.stdout + proc.stderr)
+
+    # …and the shapes that already worked must keep working: a LATER runner
+    # segment is not graded (#11520), so these are accepted for the same reason
+    # they were accepted before — pinned so the subcommand map cannot start
+    # refusing a compound record.
+    for unchanged in (
+        "cmd:uv run pytest tests/ -q && git status --short",
+        "cmd:uv run pytest tests/ -q && git log --oneline",
+        "cmd:uv run pytest tests/ -q && ruff check tools/capstone_ledger.py",
+    ):
+        proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, unchanged])]))
+        assert proc.returncode == cl.EXIT_CLEAN, (unchanged, proc.stdout + proc.stderr)
 
 
 @pytest.mark.parametrize(

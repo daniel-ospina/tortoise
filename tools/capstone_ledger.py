@@ -318,6 +318,28 @@ RUNNERS: Final[frozenset[str]] = frozenset(
 #: artifact exists to refuse, and that trade is not close.
 _CHAIN_WORDS: Final[frozenset[str]] = frozenset({"run", "exec", "x"})
 
+#: The ONE way a subcommand verb is admitted: **per runner**, never as a global
+#: word set. `ruff check <path>` / `ruff format --check <path>` are records this
+#: repo's own lint gate produces (`.github/workflows/main-lint.yml` runs
+#: `ruff check .`), and refusing them was a measured FALSE BLOCK that loses the whole
+#: uncovered list — exit 1 prints no report — measured at `0c259a39f3`
+#: (`'check' is not a file in this tree`) and on `origin/main` at `5ef5805f0`.
+#:
+#: ⛔ It was not fixable by skipping subcommand verbs generally, which is the
+#: `_CHAIN_WORDS` hole in a different hat: a global set skips `check` after ANY
+#: runner and re-admits `cmd:uv run not run - see tools/capstone_ledger.py`, the
+#: sentence-with-a-file-in-it this whole arm exists to refuse. Keyed by the runner
+#: ACTUALLY being invoked (the last RUNNER token in the chain, so `uv run ruff …`
+#: resolves to `ruff`), `git NOT-RUN`, `make check` and `ruff not - see <path>` stay
+#: refused.
+#:
+#: ⛔ SCOPED TO THE RUNNERS THIS REPO WRITES DOWN — one entry, added because a real
+#: record was refused without it. A subcommand word is a NON-ARTIFACT argument, so
+#: every entry weakens the arm slightly; extend by measurement, never by analogy.
+_RUNNER_SUBCOMMANDS: Final[dict[str, frozenset[str]]] = {
+    "ruff": frozenset({"check", "format", "rule", "config", "linter", "clean"}),
+}
+
 #: A runner's own non-artifact arguments, which must not be mistaken for the target:
 #: a bare duration (`timeout 300 …`) and an environment assignment (`env FOO=1 …`).
 #: Both are literal by construction, so allowing them costs no strictness.
@@ -812,6 +834,11 @@ def _evidence_is_real(
                 f"({sorted(RUNNERS)}), got {tokens[0]!r} in {command!r}"
             )
         consumed_script = False
+        #: The runner actually being invoked: the LAST RUNNER token in the chain
+        #: (`uv run ruff check <path>` → `ruff`), because a subcommand verb belongs
+        #: to that runner and to nothing else (see `_RUNNER_SUBCOMMANDS`).
+        current_runner = Path(tokens[0]).name
+        subcommand_allowed = True
         for token in tokens[1:]:
             if consumed_script:
                 # ⛔ The value of a `-c`/`-e` flag is a SCRIPT BODY. It is not a
@@ -838,6 +865,15 @@ def _evidence_is_real(
                 continue
             if token in _CHAIN_WORDS or Path(token).name in RUNNERS:
                 # Still inside the runner chain: `uv` `run` `python` `-m` `pytest`.
+                if Path(token).name in RUNNERS:
+                    current_runner = Path(token).name
+                subcommand_allowed = True
+                continue
+            if subcommand_allowed and token in _RUNNER_SUBCOMMANDS.get(current_runner, frozenset()):
+                # ⛔ PER RUNNER, never a global word set — see `_RUNNER_SUBCOMMANDS`.
+                # ONE subcommand verb, immediately after its runner: a second bare
+                # word is back in artifact position and must name something.
+                subcommand_allowed = False
                 continue
             if _NUMBER_ARG.match(token) or _ENV_ASSIGNMENT.match(token):
                 # `timeout 300 …`, `env FOO=1 …` — a runner's own literal argument.
