@@ -236,6 +236,17 @@ def test_provision_attaches_server_held_credential_and_forwards_body(stack):
     )
     # Our session handle must not be forwarded upstream — it is ours, not theirs.
     assert seen["cookieLeaked"] is False, "the session cookie leaked upstream"
+    # And no `Origin` may be forwarded: the Edge Function is SERVER-ONLY since
+    # #1120 and refuses an origin-bearing request 403 before it even verifies
+    # the token, so a forwarded Origin would 403 EVERY live signup. The gateway
+    # records the header it received for exactly this assertion — the static pin
+    # in tests/test_provisioning_edge_function.py checks the BFF's STRIP_REQUEST
+    # source, this is the end-to-end half.
+    assert seen["origin"] is None, (
+        f"the BFF forwarded an Origin header upstream ({seen['origin']!r}) — the "
+        "server-only Edge Function would refuse the request 403 and every "
+        "signup would fail"
+    )
     # The request body is forwarded verbatim.
     forwarded = json.loads(seen["body"])
     assert forwarded == VALID_PAYLOAD, f"body was not forwarded verbatim: {forwarded}"
