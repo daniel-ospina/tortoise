@@ -115,13 +115,24 @@ export const DEFAULT_API_URL = "https://api.premiselabs.co";
  *
  * ⛔ It does NOT cover a COLD model build, and an earlier version of this
  * comment claimed it did ("sits below `_LOAD_TIMEOUT_S = 90 s` … so a cold
- * machine still fits"). 30 s does not fit inside the ~57 s cold load the same
- * sentence cites — the conclusion was inverted relative to its own number. What
- * actually happens on a cold machine is correct and is NOT an error: the turn
- * times out (`status: "timeout"`), injects nothing, and stays silent — no
- * breadcrumb, no latch — while the reflex keeps building the model in the
- * background, so the NEXT turn is warm. That is the honest bound: one turn
- * without injection on a cold start, never a wrong report about the install.
+ * machine still fits"). 30 s does not fit inside the ~57 s cold load that same
+ * sentence cites — the conclusion was inverted relative to its own number.
+ *
+ * ⛔ AND NOTHING WARMS UP (#11584 review, round 3's correction of this
+ * paragraph). The reflex is bounded with `execFile(..., {timeout})`, which
+ * SIGTERMs the child — the very kill this file reads as `timedOut` — and the
+ * embedder load is PER PROCESS (see above). So a machine whose reflex exceeds
+ * this budget gets a silent no-injection on EVERY turn, forever: each turn
+ * starts a fresh process, kills it mid-load, and keeps nothing. There is no
+ * "one turn without injection on a cold start", and an earlier revision of
+ * this comment claimed exactly that in place of the claim it had just removed.
+ * A prewarm would have to be real — spawn detached, `unref()`, abandon the wait
+ * instead of killing — and measured before this comment may describe it.
+ *
+ * What IS true: a timeout is a clean no-injection (`status: "timeout"`), it
+ * neither latches the seam nor writes the `install-inert` breadcrumb, and the
+ * turn costs one bounded wait. The remedy for a machine that exceeds it is to
+ * raise `{"volunteer": {"timeoutMs": N}}` — not to reinstall anything.
  * `_LOAD_TIMEOUT_S` is the reflex's own model-load ceiling (90 s, above this
  * one); it is not a promise that this budget covers the load.
  *

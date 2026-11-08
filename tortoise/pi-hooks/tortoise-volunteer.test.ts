@@ -623,6 +623,49 @@ test("a TRANSIENT CLI failure does not latch, and writes no install breadcrumb",
   assert.match(String(second?.message?.content ?? ""), /Memory surfaced this turn/);
 });
 
+test("a THROW out of the resolver is `refused`, not an `inert` latch", async () => {
+  // #11584 review, second issue: the CLI-leg row above covers one half of the
+  // finding; this covers the resolver's CATCH-ALL. Reverting
+  // `{status: "refused"}` to `{status: "inert"}` here used to leave the whole
+  // suite green (measured: 22/22), so the change was unguarded on one of its
+  // two paths.
+  //
+  // A command carrying a NUL byte makes `execFile` reject SYNCHRONOUSLY
+  // (`ERR_INVALID_ARG_VALUE`), so the rejection surfaces out of `resolveBlock`
+  // and lands in the factory's catch-all. Measured against node 24.
+  const home = tmpHome();
+  const crumbs = join(home, "capture-errors");
+  const pi = mockPi();
+  tortoiseVolunteer(pi as never, {
+    env: { PATH: "", TORTOISE_COMMAND: "bad\u0000cmd" },
+    home,
+    configPath: join(home, "absent.json"),
+    breadcrumbDir: crumbs,
+  });
+  assert.equal(
+    await pi.handlers.before_agent_start({ messageType: "user", prompt: "q" }, SESSION_CTX()),
+    undefined,
+    "a throwing resolver is fail-open",
+  );
+  assert.equal(
+    existsSync(join(crumbs, "pi-install.json")),
+    false,
+    "a bug in THIS seam is not evidence about the install: no `install-inert` " +
+      "breadcrumb, or the operator is told to reinstall a working install",
+  );
+  // …and the seam is NOT latched: a second turn reaches the resolver again
+  // rather than short-circuiting on `inertLatched`.
+  assert.equal(
+    await pi.handlers.before_agent_start({ messageType: "user", prompt: "q" }, SESSION_CTX()),
+    undefined,
+  );
+  assert.equal(
+    existsSync(join(crumbs, "pi-install.json")),
+    false,
+    "still no breadcrumb after a second turn",
+  );
+});
+
 test("runReflexCommand reports a timeout as a TIMEOUT, a non-zero exit as a failure", async () => {
   const home = tmpHome();
   const slow = await runReflexCommand(fakeCli(join(home, "a"), "sleep 5"), "q", "", 250);
