@@ -277,7 +277,9 @@ re-scoping upward (inventing children the neighbours already own).
 
 1. The embedding rule is operative on the shipped default, with the measured rate recorded (scope S1).
 2. The exemption register has a production home, and DoD rows 1–2 are re-scored as a recorded decision (S2).
-3. **The unretrievable vectors are censused and their removal carried with its surface-approval request**, and `#10976`/`#7879` are reconciled to **"pending V1"** (S3). **V1 itself is §14.3's and is NOT this epic's acceptance.**
+3. **The unretrievable vectors are censused and their removal carried with its surface-approval request**, and `#10976`/`#7879` are reconciled to the ruled wording at `S3-VECTOR-CENSUS.md` §6 — **V1 was answered
+2026-11-07** (the index moves to Postgres), so the target is *"location decided; the work is `#4051`'s"*, not
+"pending V1" (S3). **V1 itself is §14.3's and is NOT this epic's acceptance.**
 4. The store reports its vector contract positively, not only when deficient (S4).
 5. The test-design map and the capstone exist and pass (S5).
 

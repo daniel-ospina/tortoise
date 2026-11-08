@@ -45,13 +45,14 @@ ruling quoted here was not, and §1.5's phase split is recorded in comment
 [`6714119028`](https://github.com/daniel-ospina/tortoise/issues/4051#issuecomment-6714119028).
 
 ⇒ **No decision below rests on a measured proportion of the graph.** The share a hot cache would hold is
-an **output** we measure from real tenants, never an input. An earlier draft sized the split from an
-estimated "structure ≈ 17% of the graph"; that figure was a subtraction across three measurements and two
-different tenants, taken from a total the vendor's own field list shows is incomplete (FalkorDB's `GRAPH.MEMORY USAGE`
-readout is blind to the HNSW `vectorset` module — `#5331`, `docs/evidence/10000-turns-bytes/README.md` — so it
-under-reports the vector bytes, while `INFO memory`'s `used_memory` counts them; the two instruments are not
-interchangeable and a figure from one is not comparable to a figure from the other). A published FalkorDB breakdown
-puts non-index structure at **41 %**. **Our own share is unmeasured** — the earlier 17 % figure is deleted, the 41 % is a vendor-published breakdown of a *different* population (a graph without our label mix), and **no range we could state would be ours**. It is not an input to anything here.
+an **output** we measure from real tenants, never an input. **No proportion of OUR graph is a valid input:** the
+vendor's own field list shows the readout is incomplete (FalkorDB's `GRAPH.MEMORY USAGE` is blind to the HNSW
+`vectorset` module — `#5331`, `docs/evidence/10000-turns-bytes/README.md` — so it under-reports the vector bytes,
+while `INFO memory`'s `used_memory` counts them; the two instruments are not interchangeable, and a figure from
+one is not comparable to a figure from the other), so a proportion computed from one is a subtraction across
+instruments and tenants rather than a measurement. A published FalkorDB breakdown puts non-index structure at
+**41 %**, and it is a vendor-published breakdown of a *different* population (a graph without our label mix), so
+**no range we could state would be ours**. It is not an input to anything here.
 
 **⚠️ PROVENANCE — the EXTERNAL figures this document leans on.** Each of the following is a **third-party published measurement, not ours and not reproduced here**: the **41 %** non-index structure; the **0.0015 nDCG@10** spread at 381,559 vectors; the **0-of-10** filtered-ANN result and its **0.975/0.847** relax-order recall; the **8–23 nDCG@10** Postgres-FTS-vs-BM25 gap; the cache studies behind §7's policy table (**62.4 %** naive-pinning miss vs **60.2 %** LRU, and 1-/2-hop closure prefetch raising hit ratio); the **4.9–5.9×** rebuild-peak range; and the **~54 %** hit rate the best trace-aware policy reached for 2-hop expansions; the engine's **no per-graph
 memory cap** and its **`NODE_CREATION_BUFFER` of 16 384 slots** (§7's #1-risk row). They are cited by RESULT — their specific citations are **owed before this document is quoted as measurement evidence**, and the fix is to attach them, not to drop the claims. **Anything that reads as *our* measurement names its pin inline**, and a figure with neither a citation nor a pin is not evidence yet.
@@ -98,7 +99,8 @@ quality change. **Live before private-beta:**
 
 **Cost during private-beta, plainly:** a complete graph costs **\$11.01/tenant** at the 40-tenants-per-instance
 density — RAM \$8.75 + shared project line \$2.13 + record \$0.13 (§8.1) — against a \$5.70 storage budget, i.e.
-193 % of it. ⚠️ **It is also above the product's older recorded constraint** (*"a \$19 price with < \$9 total
+193 % of it — the honest per-tenant total (comment [`6714119028`](https://github.com/daniel-ospina/tortoise/issues/4051#issuecomment-6714119028), the phase
+split, states the **RAM line's** 154 %, which is the same three lines read one row up in §8.1). ⚠️ **It is also above the product's older recorded constraint** (*"a \$19 price with < \$9 total
 cost per user"*, `STORAGE-ARCHITECTURE.md` §1), because \$11.01 > \$9 — and at beta-scale density it is higher
 still (a 1 GB instance holds ~5 complete solo tenants at the §8.1 basis of 200 MB provisioned each, so the RAM
 line alone is ~\$14.60 at the 1 GB tier's \$73). **This is a knowing,
@@ -404,7 +406,7 @@ record and currently carries **solo = \$9**, so nothing here is live until that 
 | **M2** | **retrieval quality under a windowed vs complete graph**, on a fixed query set | the gate that ARMS §7 (post-measurement) — the literature has no answer |
 | **M3** | text ranking: a BM25-capable Postgres option vs the current `db.idx.fulltext` scores, **score distributions** + the `#8933` identifier fixture | whether the text index ever moves (§6.2) |
 | **M4** | rebuild peak memory and latency per tenant at the real window size | the 6× headroom (§7), the #1 risk |
-| **M5** | the **miss rate** per tenant (a DIFFERENT M5 from `STORAGE-ARCHITECTURE.md` §14.3's, which asks where the vector index lives and was answered 2026-11-07) | the compute/IOPS/egress tier |
+| **M5** | the **miss rate** per tenant (a DIFFERENT M5 from `STORAGE-ARCHITECTURE.md` §15's, which asks where the vector index lives and was answered 2026-11-07) | the compute/IOPS/egress tier |
 
 ---
 

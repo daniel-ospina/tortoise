@@ -375,10 +375,15 @@ lane holding either issue's body is not collided with:
   *"vectors out"* → *"the vector layer — its census and surface request; where the vectors live is
   pending V1"*.
 
-The contradiction they are qualified against, verbatim from `STORAGE-ARCHITECTURE.md` §12.1c:
+⚠️ **SUPERSEDED 2026-11-07.** §12.1c now reads *"✅ DECIDED 2026-11-07 — the vector index does NOT live in
+FalkorDB"* (`docs/architecture/SEARCH-ARCHITECTURE.md`), so the *"pending V1"* qualification on the two
+comments above is discharged: the location is decided (Postgres). **The reconciled wording those comments
+should carry is therefore "the vector layer — its census and surface request; its location is decided and the
+WORK is #4051's", not "pending V1".** The sentence below is the state those comments were qualified against, kept
+as the record of it and **not** as current text:
 
-> **⚠️ NOT DECIDED — owner's call.** It is an open decision (§14.3 V1), because it changes what the
-> graph holds.
+> > **⚠️ NOT DECIDED — owner's call.** It is an open decision (§14.3 V1), because it changes what the
+> > graph holds.
 
 ---
 

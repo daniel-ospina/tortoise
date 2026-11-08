@@ -67,8 +67,9 @@ item below implying either has found a defect in this document, not a proposal.
 
 ### 0.1 Contradiction test — run first, and its result
 
-Three items a naive prerequisite list would contain **would each reverse a recorded decision** — or, for the one
-the 2026-11-07 ruling has since decided, **would have reversed the decision that then stood** — so they are excluded as prerequisites and recorded as such:
+Two of the three items a naive prerequisite list would contain **would each reverse a recorded decision**, and the
+third was **a decision rather than a prerequisite** — which §12.1c now ADOPTS (2026-11-07). All three are therefore
+excluded as prerequisites, and recorded as such:
 
 | candidate prerequisite | the decision it would contradict | verdict |
 |---|---|---|

@@ -88,7 +88,9 @@ self-hosting (**owner: not now**), and compression (§15: no engine to apply it 
 **This epic owns the vector layer's RULE and its INSTRUMENTATION. It does not own the layer's PLACEMENT.**
 That cut is not tidiness — it is what stops a consumer epic spending an architecture decision by accretion,
 which is already happening: **`#10976`'s body says the vector index *"belongs in Postgres per §12.1c
-(#5090)"* and `#7879`'s body says *"vectors out"*, while §12.1c says `NOT DECIDED — owner's call`.** Two
+(#5090)"* and `#7879`'s body says *"vectors out"*, while §12.1c said `NOT DECIDED — owner's call` (it now says
+the location is DECIDED — Postgres, 2026-11-07 — so the reconcile target is `S3-VECTOR-CENSUS.md` §6, not
+"pending V1").** Two
 issues answering a question a third calls open, and nothing errors. Reconciling that is **S3's** stated
 work; deciding it is not.
 

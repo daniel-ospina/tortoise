@@ -2205,7 +2205,9 @@ one that was open.
 
 ## 2026-11-07 — V1 RESOLVED, and §2.0's 2026-10-08 ruling SPLIT (owner)
 
-**The decision, in the owner's own words** (`#4051` comment `6713838871`, §"What is decided"): **(1)** the
+**The decision as the lane relayed it** (`#4051` comment `6713838871`, §"What is decided", items 1–3; **item 4 is
+the phase correction in comment `6714119028`**, which supersedes that comment's own *"a budget-derived window
+before launch"*): **(1)** the
 **vector index and the embedding payload move to Postgres** (`pgvector`), which **resolves V1 (`#4997`)** — the
 vector index does not live in FalkorDB; **(2)** the **text index stays** in FalkorDB, because moving it is a
 measured regression (M3 defers it); **(3)** **traversal, writes and EP stay** in the graph, so the Cypher
