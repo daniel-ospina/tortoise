@@ -492,17 +492,26 @@ _resolve_requested_workers() {
     if [ -z "$_count" ]; then
         _count="${WEB_CONCURRENCY:-1}"
     fi
-    # Strip whitespace BEFORE the digit test: uvicorn parses `$WEB_CONCURRENCY`
-    # with `int(...)`, which tolerates it, so `WEB_CONCURRENCY=' 2 '` really does
-    # start 2 workers. Without this the measured value would be 1 while uvicorn
-    # ran 2 — the measurement lying about the thing it exists to measure.
-    _count="$(printf '%s' "$_count" | tr -d '[:space:]')"
-    # `0` and a non-numeric value are not ours to reinterpret: uvicorn treats
-    # `workers > 1` as the supervisor's switch (so `0` runs in-process) and would
-    # raise on garbage. Normalise both to 1, so this measurement can never
-    # DISAGREE with the server that actually starts.
+    # Trim ENDS only (never interior whitespace — `1 2` is not 12, it is a value
+    # uvicorn's `int()` REJECTS), then drop a leading `+`.
+    #
+    # Both are required for this measurement to agree with the server that
+    # actually starts: uvicorn parses the flag and `$WEB_CONCURRENCY` through
+    # `int()`, whose grammar is an optional sign, then digits, with surrounding
+    # whitespace tolerated. Measured on the pinned uvicorn (0.52.1): `--workers +2` starts
+    # TWO children and `WEB_CONCURRENCY=' 2 '` starts two as well. A digit-only
+    # test rejected both and reported 1 — the measurement lying about the very
+    # topology it exists to report, in the direction that reads as "safe".
+    _count="$(printf '%s' "$_count" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
     case "$_count" in
-        ''|0|*[!0-9]*) _count=1 ;;
+        +*) _count="${_count#+}" ;;
+    esac
+    # `0`, a negative and a non-numeric value are not ours to reinterpret:
+    # uvicorn treats `workers > 1` as the supervisor's switch (so `0` and `-2`
+    # run in-process) and would raise on the non-numeric. Normalise them to 1 so
+    # this measurement can never DISAGREE with the server that starts.
+    case "$_count" in
+        ''|*[!0-9]*) _count=1 ;;
     esac
     # `00`-style zero is still zero.
     if [ "$_count" -eq 0 ] 2>/dev/null; then _count=1; fi

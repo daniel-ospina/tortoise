@@ -3,14 +3,14 @@
 WHY THIS MODULE EXISTS
 ======================
 `Dockerfile.hosted` passes no `--workers`, so production runs ONE uvicorn
-worker today. That is not a decision the engine can see: **uvicorn resolves
+worker. That is not a decision the engine can see: **uvicorn resolves
 `--workers` as `CLI flag -> $WEB_CONCURRENCY -> 1`** (uvicorn settings docs), so
 any actor that can set one Fly env var moves the deployment to N workers with
 no code change, no review, and no signal. The issue this module answers
 (#1677) measured what breaks at N >= 2, and all of it is silent:
 
 * the ``_lifespan`` BackupWatcher (files GitHub issues, sends Telegram) and the
-  hourly event-retention loop run **once per worker** — non-idempotent external
+  hourly event-retention loop arm **once per worker** — non-idempotent external
   side effects, N times (P1-2);
 * ``_GITHUB_STATES`` — the GitHub OAuth CSRF register — is an in-memory dict, so
   onboarding CSRF-400s intermittently depending on which worker the callback
@@ -23,7 +23,7 @@ no code change, no review, and no signal. The issue this module answers
 * each worker opens its own FalkorDB Cloud pool and its own JWKS cache — N x an
   external client budget.
 
-Under``multiprocessing``'s **spawn** start method (uvicorn's supervisor does not
+Under ``multiprocessing``'s **spawn** start method (uvicorn's supervisor does not
 fork) the ~85 s model pre-warm also re-executes in full per worker, so the
 memory envelope is ~N x, not "1 x + copy-on-write pages" — and uvicorn has no
 ``--preload`` (that is a Gunicorn flag), so there is no COW mitigation.
@@ -40,22 +40,30 @@ than a mystery — and it is the ledger a later lane edits when a guard lands.
 
 TWO FACTS, MEASURED — NOT INFERRED
 ==================================
-1. **The count.** ``entrypoint.sh`` measures it exactly as uvicorn will
-   (``--workers N`` / ``--workers=N`` over the CMD argv, else
-   ``$WEB_CONCURRENCY``, else 1) and exports it as ``TORTOISE_WEB_WORKERS``.
-   ⚠️ That variable is an **OUTPUT of the boot script**, never an operator
-   input: setting it by hand cannot raise the count (uvicorn never reads it),
-   so it cannot be used to defeat this gate.
+Both were measured against the pinned uvicorn (0.52.1) by booting a probe app
+under each shape.
 
-2. **Whether this process IS one of N.** ``multiprocessing.parent_process()``
-   is not ``None`` **iff** uvicorn's multi-worker supervisor spawned us —
-   verified against the pinned uvicorn (0.52.1): workers=1 boots in-process
-   with ``parent_process() is None``, while workers=2 yields
-   ``parent_process() = <MainProcess>`` and ``SpawnProcess-{1,2}``. This is what
-   closes the bypass: ``uvicorn tortoise.hosted_api:app --workers 2`` run
-   directly (skipping the entrypoint) still refuses. It is deliberately NOT
-   derived from ``WEB_CONCURRENCY``, which is only the flag's *default source*
-   and can read 1 while the process is worker 3 of 8.
+1. **The count.** uvicorn's own precedence: a CLI ``--workers N`` (either token
+   form, and ``int()``-tolerant of ``+N``/whitespace) beats ``$WEB_CONCURRENCY``,
+   which beats 1. Measured: ``--workers 2`` -> 2; ``--workers=5`` -> 5;
+   ``--workers +2`` -> 2; ``WEB_CONCURRENCY=3`` -> 3; both together -> the CLI.
+
+2. **Whether this process is SUPERVISED — and, separately, how.** Under spawn,
+   ``multiprocessing`` restores the parent's ``sys.argv`` in the child (measured:
+   the child's ``sys.argv`` is the full uvicorn command line, ``--workers 2`` and
+   ``--reload`` included), so a worker can resolve its own count from argv. And
+   ``multiprocessing.parent_process()`` is non-``None`` for **every** uvicorn
+   supervisor child — the multi-worker supervisor **and** the ``--reload``
+   reloader (measured: ``--reload`` -> ``parent_process()`` = the reloader,
+   ``SpawnProcess-1``, argv ending in ``--reload``).
+
+⛔ The second measurement is why this module does NOT treat "has a supervisor
+parent" as "is one of N". uvicorn forbids ``--workers`` with ``--reload``, so a
+reload child is ALWAYS exactly one worker — and an earlier revision of this
+module refused it as N>=2, which made ``uvicorn … --reload`` unstartable on an
+embedded DB with **no** escape hatch (the acknowledgement deliberately does not
+lift the embedded arm). The reload child is therefore identified positively from
+its own argv and exempted.
 
 REFUSAL IS FATAL, ON PURPOSE
 ============================
@@ -86,22 +94,26 @@ THE ESCAPE HATCHES, STATED EXACTLY
   *divergent* copies of it. That is silent data divergence, not a degraded
   feature, so ``TORTOISE_MULTI_WORKER`` does not reach it.
 
-RESIDUAL, NAMED RATHER THAN IMPLIED
-===================================
-The spawned-worker probe recognises **uvicorn's** supervisor. A different
-process manager that pre-forks before importing the app (Gunicorn +
-``UvicornWorker``) leaves ``parent_process() is None``, so on that (not
-deployed, not supported) topology only the ``TORTOISE_WEB_WORKERS`` arm of the
-gate would speak. Closing it properly would need a per-manager adapter; doing
-that for a manager this repo does not run would be machinery with no measured
-failure behind it.
+RESIDUALS, NAMED RATHER THAN IMPLIED
+====================================
+* A process manager that pre-forks before importing the app (Gunicorn +
+  ``UvicornWorker``) leaves ``parent_process() is None``, so on that (not
+  deployed, not supported) topology only the count arm speaks.
+* ``uvicorn.run(workers=N)`` from a script — no ``--workers`` token and no
+  ``$WEB_CONCURRENCY`` — is caught only by the supervised-parent arm, whose
+  message then says the SERVED count was not readable rather than inventing one.
+* The reload exemption is keyed on the ``--reload`` token. ``uvicorn.run(reload=True)``
+  called from a script leaves no token, so a programmatic reload child would be
+  read as a supervised multi-worker and refused (fail-closed). Nothing in this
+  repo launches the app that way.
 """
 from __future__ import annotations
 
 import logging
 import multiprocessing
 import os
-from collections.abc import Mapping
+import sys
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from tortoise.config import SUPPORTED_URI_SCHEMES
@@ -120,6 +132,15 @@ ACK_ENV = "TORTOISE_MULTI_WORKER"
 #: ``WEB_CONCURRENCY`` is uvicorn's *default source* for ``--workers``. It is
 #: read here only to RECOGNISE a topology, never to authorise one.
 WEB_CONCURRENCY_ENV = "WEB_CONCURRENCY"
+
+#: ``--workers`` is uvicorn's CLI spelling. Two token forms, because a
+#: hand-edited CMD usually carries ``--workers=N``.
+WORKERS_FLAG = "--workers"
+
+#: uvicorn's reload flag. ``--reload`` and ``--workers`` are mutually exclusive
+#: (uvicorn raises when both are given), so its presence means the supervisor
+#: parent is the RELOADER and the worker count is 1.
+RELOAD_FLAG = "--reload"
 
 #: Every guard #1677 identifies as unlanded. This tuple IS the ledger: a lane
 #: that lands one deletes its row, and the deletion is the review artifact.
@@ -149,45 +170,85 @@ class MultiWorkerRefused(RuntimeError):
 def _positive_int(raw: object) -> int | None:
     """``raw`` as a positive int, or None when it does not parse as one.
 
-    None — never a default — so a malformed value cannot be silently read as 1
-    (or as anything else). Callers that need a count fall through to the next
-    source only on None.
+    Deliberately ``int()``'s own grammar (leading/trailing whitespace and an
+    optional ``+`` sign are accepted) because that is EXACTLY what uvicorn does
+    with ``$WEB_CONCURRENCY`` — ``int(' 2 ')`` and ``int('+2')`` both start two
+    workers, so a resolver that rejected them would report a topology nobody is
+    running. None — never a default — so a malformed value cannot be silently
+    read as 1; callers fall through to the next source only on None.
     """
     if raw is None:
         return None
     try:
-        value = int(str(raw).strip())
+        value = int(str(raw))
     except (TypeError, ValueError):
         return None
     return value if value > 0 else None
 
 
-def resolve_effective_workers(environ: Mapping[str, str] | None = None) -> int:
+def workers_from_argv(argv: Sequence[str] | None = None) -> int | None:
+    """The ``--workers`` value on a uvicorn command line, or None if absent.
+
+    Handles both token forms (``--workers N`` and ``--workers=N``) and tolerates
+    a repeated flag the way a CLI last-wins parse does. Returns None — not 1 —
+    when the flag is absent, so a caller can tell "not requested" from
+    "requested 1".
+    """
+    args = list(sys.argv if argv is None else argv)
+    found: str | None = None
+    for index, token in enumerate(args):
+        if token == WORKERS_FLAG:
+            if index + 1 < len(args):
+                found = args[index + 1]
+        elif token.startswith(WORKERS_FLAG + "="):
+            found = token[len(WORKERS_FLAG) + 1:]
+    return None if found is None else _positive_int(found)
+
+
+def resolve_effective_workers(environ: Mapping[str, str] | None = None,
+                              argv: Sequence[str] | None = None) -> int:
     """The worker count uvicorn will run, by uvicorn's own precedence.
 
-    ``TORTOISE_WEB_WORKERS`` (measured by ``entrypoint.sh`` from the CMD argv,
-    which is authoritative and already accounts for a CLI ``--workers``) wins;
-    then ``$WEB_CONCURRENCY`` (uvicorn's default source); then 1.
+    ``TORTOISE_WEB_WORKERS`` (measured by ``entrypoint.sh`` from the CMD argv —
+    authoritative, and already folded the CLI in) wins; then a CLI ``--workers``
+    on this process's own argv; then ``$WEB_CONCURRENCY`` (uvicorn's default
+    source); then 1.
 
     ⚠️ Returns a **recognition** of the topology, not an authorisation: see
     :func:`refusal_reason` for the policy.
     """
     env = os.environ if environ is None else environ
-    for name in (WORKERS_ENV, WEB_CONCURRENCY_ENV):
-        count = _positive_int(env.get(name))
-        if count is not None:
-            return count
-    return 1
+    declared = _positive_int(env.get(WORKERS_ENV))
+    if declared is not None:
+        return declared
+    from_argv = workers_from_argv(argv)
+    if from_argv is not None:
+        return from_argv
+    return _positive_int(env.get(WEB_CONCURRENCY_ENV)) or 1
 
 
-def is_spawned_worker() -> bool:
-    """True iff this process was spawned by uvicorn's multi-worker supervisor.
+def reload_is_requested(argv: Sequence[str] | None = None) -> bool:
+    """True when this process's argv carries uvicorn's ``--reload``.
 
-    Verified against the pinned uvicorn: ``workers=1`` runs the server in the
-    current process (``parent_process() is None``); ``workers>=2`` spawns
-    children through ``multiprocessing``'s spawn context, so each child has a
-    parent process. This is the arm that catches a direct
-    ``uvicorn ... --workers N`` invocation that never ran ``entrypoint.sh``.
+    Matched as an exact token: ``--reload-dir`` / ``--reload-include`` /
+    ``--reload-exclude`` / ``--reload-delay`` are modifiers that only mean
+    anything alongside ``--reload`` itself, so a substring test would report a
+    reload for a run that is not one.
+
+    Under spawn the child's ``sys.argv`` is the parent's command line
+    (multiprocessing restores it), so this answers for the child too — measured.
+    """
+    args = sys.argv if argv is None else argv
+    return RELOAD_FLAG in list(args)
+
+
+def has_supervisor_parent() -> bool:
+    """True iff SOME uvicorn supervisor spawned this process.
+
+    ⛔ That includes the ``--reload`` reloader, which is always ONE worker. This
+    is therefore evidence of "I am supervised", never of "I am one of N" — the
+    multi-worker verdict requires the count or the absence of ``--reload``. Read
+    :func:`is_multi_worker` rather than this predicate directly.
     """
     return multiprocessing.parent_process() is not None
 
@@ -238,28 +299,38 @@ class Topology:
     """The measured worker topology of THIS process, plus this deployment's facts."""
 
     workers: int
-    spawned: bool
+    supervised: bool
+    reloading: bool
     shared_db: bool
     acknowledged: bool
 
     @property
     def is_multi_worker(self) -> bool:
-        """True when this process is one of N>1 workers, by either measurement.
+        """True when this process is one of N>1 workers.
 
-        ``spawned`` is checked independently of ``workers`` on purpose: an
-        unresolved count with a real supervisor parent is exactly the
-        ``WEB_CONCURRENCY`` case (it can read 1 while the process is worker 3),
-        so the probe must not be able to contradict the observation.
+        ``workers > 1`` is the direct answer. The supervised-parent arm exists
+        for the case the count cannot express — ``uvicorn.run(workers=N)`` from a
+        script, where neither argv nor ``$WEB_CONCURRENCY`` carries N — and is
+        suppressed for a ``--reload`` child, which uvicorn guarantees is exactly
+        one worker.
         """
-        return self.spawned or self.workers > 1
+        if self.workers > 1:
+            return True
+        return self.supervised and not self.reloading
 
 
 def observe(environ: Mapping[str, str] | None = None,
-            *, spawned: bool | None = None) -> Topology:
-    """Measure the topology. ``spawned`` is injectable so the policy is testable."""
+            *, supervised: bool | None = None,
+            argv: Sequence[str] | None = None) -> Topology:
+    """Measure the topology.
+
+    ``supervised`` and ``argv`` are injectable so the policy is testable without
+    forking the test process; production reads the live ones.
+    """
     return Topology(
-        workers=resolve_effective_workers(environ),
-        spawned=is_spawned_worker() if spawned is None else spawned,
+        workers=resolve_effective_workers(environ, argv),
+        supervised=has_supervisor_parent() if supervised is None else supervised,
+        reloading=reload_is_requested(argv),
         shared_db=db_is_shared(environ),
         acknowledged=ack_is_set(environ),
     )
@@ -280,8 +351,14 @@ def refusal_reason(topology: Topology) -> str | None:
     if not topology.shared_db:
         # NOT reachable by TORTOISE_MULTI_WORKER, deliberately: divergent
         # embedded copies are corruption, not a degraded feature.
+        # The count is named only when it was actually observed — the
+        # supervised-with-count-1 shape must not be described as "N>=2".
+        if topology.workers > 1:
+            observed = f"N>={topology.workers} uvicorn workers"
+        else:
+            observed = "more than one uvicorn worker (a supervisor child was detected)"
         return (
-            "Refusing to run N>=2 uvicorn workers on an EMBEDDED database.\n"
+            f"Refusing to run {observed} on an EMBEDDED database.\n"
             "No shared TORTOISE_DB_URI/FALKORDB_CLOUD_URI resolves, so each "
             "worker would open its own embedded redislite file and the copies "
             "would DIVERGE — silent data divergence, not a degraded feature, so "
@@ -291,18 +368,19 @@ def refusal_reason(topology: Topology) -> str | None:
             f"{WEB_CONCURRENCY_ENV} / drop --workers)."
         )
     if not topology.acknowledged:
-        # `spawned` can be true while the count resolves to 1 — that is the
-        # `WEB_CONCURRENCY`-is-not-an-identity-signal case, and the message must
-        # not claim a worker count it never observed.
+        # `supervised` can be true while the count resolves to 1 — that is the
+        # programmatic-`workers=N` case, and the message must not claim a count
+        # it never observed.
         if topology.workers > 1:
-            observed = f"N>={topology.workers} "
+            observed = f"N>={topology.workers} uvicorn workers"
         else:
             observed = (
-                "a uvicorn supervisor parent (the SERVED count was not readable "
-                "here — only that this process is one of several) "
+                "a uvicorn supervisor child whose SERVED worker count is not "
+                "readable here (no --workers token, no $WEB_CONCURRENCY) — so it "
+                "is treated as N>=2"
             )
         return (
-            f"Refusing to run {observed}uvicorn workers: this "
+            f"Refusing to run {observed}: this "
             "topology is not supported yet and its guards are unlanded (#1677).\n"
             f"{_guard_list()}\n"
             f"Set {ACK_ENV}=1 to acknowledge these residuals and run anyway "
@@ -314,7 +392,8 @@ def refusal_reason(topology: Topology) -> str | None:
 
 
 def assert_multi_worker_admissible(environ: Mapping[str, str] | None = None,
-                                   *, spawned: bool | None = None) -> Topology:
+                                   *, supervised: bool | None = None,
+                                   argv: Sequence[str] | None = None) -> Topology:
     """Fail closed unless THIS process may be one of N>1 workers.
 
     Returns the measured :class:`Topology` on the permitted path (so a caller
@@ -322,7 +401,7 @@ def assert_multi_worker_admissible(environ: Mapping[str, str] | None = None,
     startup half of ``_lifespan`` that is a uvicorn ``STARTUP_FAILURE``, which
     terminates the whole parent rather than leaving a machine that half-works.
     """
-    topology = observe(environ, spawned=spawned)
+    topology = observe(environ, supervised=supervised, argv=argv)
     reason = refusal_reason(topology)
     if reason is not None:
         raise MultiWorkerRefused(reason)
@@ -342,21 +421,37 @@ def assert_multi_worker_admissible(environ: Mapping[str, str] | None = None,
 if __name__ == "__main__":
     _shared = {"TORTOISE_DB_URI": "rediss://host:1/db"}
     _embedded: dict[str, str] = {}
+    # The probe app's real command line, so argv is exercised for real.
+    _argv2 = ["uvicorn", "app:app", "--host", "0.0.0.0", "--workers", "2"]
 
-    # uvicorn precedence: entrypoint measurement beats WEB_CONCURRENCY beats 1.
-    assert resolve_effective_workers({}) == 1
-    assert resolve_effective_workers({"WEB_CONCURRENCY": "3"}) == 3
-    assert resolve_effective_workers({"WEB_CONCURRENCY": "3", WORKERS_ENV: "2"}) == 2
-    assert resolve_effective_workers({"WEB_CONCURRENCY": "oops"}) == 1
+    # uvicorn precedence: the entrypoint's measurement beats argv beats
+    # WEB_CONCURRENCY beats 1.
+    assert resolve_effective_workers({}, []) == 1
+    assert resolve_effective_workers({"WEB_CONCURRENCY": "3"}, []) == 3
+    assert resolve_effective_workers({"WEB_CONCURRENCY": "3"}, _argv2) == 2
+    assert resolve_effective_workers({"WEB_CONCURRENCY": "3", WORKERS_ENV: "2"}, _argv2) == 2
+    assert resolve_effective_workers({"WEB_CONCURRENCY": "oops"}, []) == 1
+    # int()'s grammar, because that is what uvicorn applies.
+    assert resolve_effective_workers({}, ["uvicorn", "a:a", "--workers", "+2"]) == 2
+    assert resolve_effective_workers({"WEB_CONCURRENCY": " 2 "}, []) == 2
+    assert workers_from_argv(["uvicorn", "a:a"]) is None
+
+    # reload is ONE worker even though it is supervised.
+    assert reload_is_requested(["uvicorn", "a:a", "--reload"])
+    assert not reload_is_requested(["uvicorn", "a:a", "--reload-dir", "src"])
 
     # embedded + N>=2 is refused and NOT liftable by the acknowledgement.
-    assert refusal_reason(observe(_embedded, spawned=False)) is None
-    assert refusal_reason(observe({**_embedded, ACK_ENV: "1"}, spawned=True)) is not None
-    # shared + N>=2 needs the acknowledgement.
-    assert refusal_reason(observe({**_shared, WORKERS_ENV: "2"}, spawned=False)) is not None
+    assert refusal_reason(observe(_embedded, supervised=False, argv=[])) is None
     assert refusal_reason(
-        observe({**_shared, WORKERS_ENV: "2", ACK_ENV: "1"}, spawned=False)) is None
-    # a spawned child refuses even when the count reads 1.
-    assert refusal_reason(observe({**_shared, WORKERS_ENV: "1"}, spawned=True)) is not None
+        observe({**_embedded, ACK_ENV: "1"}, supervised=True, argv=[])) is not None
+    # A --reload child on an embedded DB is a ONE-worker topology: not gated.
+    assert refusal_reason(
+        observe(_embedded, supervised=True, argv=["uvicorn", "a:a", "--reload"])) is None
+    # shared + N>=2 needs the acknowledgement.
+    assert refusal_reason(observe({**_shared}, supervised=False, argv=_argv2)) is not None
+    assert refusal_reason(
+        observe({**_shared, ACK_ENV: "1"}, supervised=False, argv=_argv2)) is None
+    # a supervised child whose count reads 1 still refuses (programmatic workers).
+    assert refusal_reason(observe({**_shared}, supervised=True, argv=[])) is not None
 
     print("✅ worker_topology")
