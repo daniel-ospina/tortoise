@@ -45,18 +45,18 @@
 #       - its first argument position must NAME an artifact of this tree — a
 #         TRACKED file, a directory holding tracked files, a pytest node-id, or a
 #         glob over a named directory (a bare `*` names everything, so nothing);
-#       - the FIRST `&&` segment is the command, so prose cannot be chained in
-#         FRONT of a real one (`NOT RUN && uv run pytest …` is refused); a segment
-#         AFTER it is decoration and is ignored;
+#       - EVERY shell separator splits the record — `&&`, `||`, `;`, `|`, `&`,
+#         newline — and EVERY segment is graded, so a disclaimer is refused on
+#         either side of the command (`NOT RUN && uv run pytest …` and
+#         `uv run pytest … && I did not run this` are both refused);
 #       - a `-c`/`-e` script body is graded as a command in its own right, never
 #         trusted;
 #       - a runner with NO target at all (`cmd:make`) is a record and confers
 #         nothing; a runner with a NON-PATH argument is refused, because a bare
 #         word (`make test`, `make NOT-RUN`) is a claim and not an artifact;
-#       - EVERY `&&` segment is graded: a record may carry commands, shell
-#         wrappers (`cd`, `NAME=value`, `set`/`export`/`source`) and decorative
-#         printers (`echo`/`printf`/`true`), but not prose on either side of the
-#         command.
+#       - shell WRAPPERS (`cd`, `NAME=value`, `set`/`export`/`source`) and
+#         DECORATIVE segments (a printer or a reader: `echo`, `tail`, `cat`,
+#         `grep`) are allowed and cite nothing.
 #   * `criteria_expected` (top level, REQUIRED) pins the denominator, so dropping a
 #     row without moving the count is a refusal.
 #   * YAML merge keys (`<<`) are refused: every row states its own verdict, and a

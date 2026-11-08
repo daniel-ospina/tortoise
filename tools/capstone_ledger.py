@@ -341,8 +341,19 @@ _CD_SEGMENT: Final = re.compile(r"^cd\s+(\S[^;|&]*)$")
 _MAX_SCRIPT_DEPTH: Final[int] = 3
 
 
-def _split_chains(text: str) -> list[str]:
-    """Split a command on UNQUOTED `&&` only.
+#: ⛔ EVERY shell separator splits a record, not just `&&`. Splitting only on `&&`
+#: left the whole false-PASS class reachable one separator over: measured at the
+#: round-2 head, `cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q;
+#: NOT RUN` (and the `||`, `|`, `&` and newline spellings, and the same text inside
+#: a `bash -c` body) were ACCEPTED, and a 22-row ledger relabelled that way
+#: reported `verified: 22  uncovered: 0`, `CAPSTONE-LEDGER-RESULT: CLEAN`, exit 0.
+#: Two-character operators are matched before their one-character prefixes.
+_TWO_CHAR_SEPARATORS: Final[tuple[str, ...]] = ("&&", "||")
+_ONE_CHAR_SEPARATORS: Final[frozenset[str]] = frozenset({";", "|", "&", "\n"})
+
+
+def _split_segments(text: str) -> list[str]:
+    """Split a compound command line on every UNQUOTED shell separator.
 
     A plain `text.split("&&")` splits inside quotes too, so `bash -c 'a && b'` —
     the only way the docstring says a script can be recorded — came back as
@@ -373,11 +384,14 @@ def _split_chains(text: str) -> list[str]:
         elif char in "\"'`":
             quote = char
             current.append(char)
-        elif text.startswith("&&", index):
+        elif any(text.startswith(op, index) for op in _TWO_CHAR_SEPARATORS):
             segments.append("".join(current))
             current = []
             index += 2
             continue
+        elif char in _ONE_CHAR_SEPARATORS:
+            segments.append("".join(current))
+            current = []
         else:
             current.append(char)
         index += 1
@@ -410,11 +424,34 @@ _SCRIPT_FLAGS: Final[frozenset[str]] = frozenset({"-c", "-e", "--command", "--ev
 #: `origin/main` and REFUSED once only `cd`/`NAME=value` were normalised.
 _WRAPPER_VERBS: Final[frozenset[str]] = frozenset({"set", "export", "source", "umask", "unset"})
 
-#: DECORATIVE printers: a tail like `… && echo PASS` announces the result and cites
-#: nothing. Refusing it was a measured false block, and exit 1 computes NOTHING, so
-#: an over-block loses the whole uncovered list. Kept deliberately tiny — every name
-#: here is one that cannot be read as a claim about the work.
-_DECORATIVE: Final[frozenset[str]] = frozenset({"echo", "printf", "true", ":"})
+#: DECORATIVE segments: a tail like `… && echo PASS`, or a reader that shows the run
+#: (`… | tail -20 log`, `… && grep -E "passed" out.txt`). They cite nothing; they
+#: announce or display what the real command produced. Refusing them was a measured
+#: false block — `… && tail -20 .pytest.log` and `… && cat .pytest.log` were
+#: ACCEPTED on `origin/main` and REFUSED by the every-segment rule, and exit 1
+#: computes NOTHING, so the whole uncovered list disappeared. Every name here is a
+#: read or a print; none can be read as a claim that the work was done.
+_DECORATIVE: Final[frozenset[str]] = frozenset(
+    {
+        ":",
+        "awk",
+        "cat",
+        "cut",
+        "echo",
+        "grep",
+        "head",
+        "jq",
+        "ls",
+        "printf",
+        "sed",
+        "sort",
+        "tail",
+        "tr",
+        "true",
+        "uniq",
+        "wc",
+    }
+)
 
 _WILDCARDS: Final = "*?["
 
@@ -683,11 +720,11 @@ def _evidence_is_real(
     defeated the whole record. A command entry must now be COMMAND-SHAPED — its
     first token is a program that runs something, and its FIRST argument position
     names a tracked artifact (a file, a directory holding tracked files, a pytest
-    node-id, or a glob over a named directory). Three shapes are deliberately
+    node-id, or a glob over a named directory). TWO shapes are deliberately
     admitted and confer nothing on their own: a runner with NO argument
     (`cmd:make`), and a `-c` script body, which is graded as a command in its own
-    right rather than trusted. Every `&&` segment is graded, so a record cannot
-    carry a disclaimer on either side of the command.
+    right rather than trusted. Every segment is graded, on every shell separator,
+    so a record cannot carry a disclaimer on either side of the command.
 
     ⛔ These two arms are one rule seen from two sides, and NEITHER alone is
     enough — both were measured as fail-open on their own:
@@ -899,11 +936,14 @@ def _command_body(raw: str, base: Path, root: Path) -> tuple[str, Path, str]:
     # skip with "prose … never contains one at all", which is false the moment prose
     # can be chained in FRONT of a command — and it can.
     #
-    # Prose therefore cannot be dropped and cannot precede the command: either makes
-    # the record say something it did not do. A segment AFTER the graded one is
-    # still decoration and is ignored (`… && echo PASS` was a measured false block,
-    # and exit 1 computes NOTHING, so an over-block loses the whole uncovered list).
-    segments = [segment.strip() for segment in _split_chains(text)]
+    # Prose therefore cannot be dropped, and it cannot sit on EITHER side of the
+    # command: any of those makes the record say something it did not do. Every
+    # segment is graded, so a disclaimer after the `&&` (`… && I did not run this`)
+    # is refused exactly as one before it is, and so is the same thing spelled with
+    # `;`, `||`, `|`, `&` or a newline — those were measured ACCEPTED at the round-2
+    # head and produced the same clean 22-row exit. Wrappers and decorative
+    # segments are still admitted (`… && echo PASS`, `… | tail -20 log`).
+    segments = [segment.strip() for segment in _split_segments(text)]
     # The directory the graded command runs in: `cd X && …` moves it, and a later
     # `cd` moves it again. Resolved against `root` only, so a `cd ../../..` cannot
     # walk the check out of the tree.

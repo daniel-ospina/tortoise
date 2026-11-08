@@ -755,12 +755,12 @@ def test_a_cmd_target_that_names_no_held_artifact_is_invalid(tmp_path):
 @pytest.mark.parametrize(
     "command",
     [
-        # Shapes a lane ACTUALLY records. Only the three directory-target forms
-        # (`pytest tests/`, `-m pytest tests/`) were measured FALSE BLOCKS on
-        # origin/main; the rest were already accepted there and are pinned so the
-        # every-segment rule cannot start refusing them. Naming this precisely
-        # matters: an earlier revision of this comment claimed all of them were
-        # blocked, which five of them were not.
+        # Shapes a lane ACTUALLY records. Only TWO were measured FALSE BLOCKS on
+        # origin/main — `pytest tests/ -v` and `-m pytest tests/ -q`, both refused
+        # because a directory is not a file. The other ten were ACCEPTED there and
+        # are pinned here so the every-segment rule cannot start refusing them (it
+        # did, for the `tail`/`cat` tails, which is why the reader family is in the
+        # decorative set).
         "cmd:uv run pytest tests/ -v",
         "cmd:uv run python -m pytest tests/ -q",
         "cmd:TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
@@ -779,6 +779,13 @@ def test_a_cmd_target_that_names_no_held_artifact_is_invalid(tmp_path):
         "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q && echo PASS",
         "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q "
         "&& ruff check tools/capstone_ledger.py",
+        # Readers — how a run is normally recorded. All three were measured false
+        # blocks against the every-segment rule (ACCEPTED on main, REFUSED here).
+        "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q && tail -20 log.txt",
+        "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q && cat .pytest.log",
+        "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q "
+        '&& grep -E "passed" out.txt',
+        "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q | tail -20 log",
     ],
 )
 def test_the_commands_agents_md_hands_a_lane_are_not_false_blocked(tmp_path, command):
@@ -853,6 +860,17 @@ def test_prose_on_EITHER_side_of_a_real_command_is_refused(tmp_path):
     for attack in (
         "cmd:NOT RUN && uv run pytest tests/test_9664_capstone_verdict_ledger.py",
         "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py && I did not run this",
+        # ⛔ The same class, one SEPARATOR over. Measured at the round-2 head, which
+        # split only on `&&`: every one of these was ACCEPTED, and a 22-row ledger
+        # relabelled that way reported `verified: 22 uncovered: 0`,
+        # `CAPSTONE-LEDGER-RESULT: CLEAN`, exit 0 — including the same text inside a
+        # `bash -c` body, which inherits the splitter.
+        "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q; NOT RUN",
+        "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q || NOT RUN",
+        "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q | NOT RUN",
+        "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q & NOT RUN",
+        "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q\nNOT RUN",
+        "cmd:bash -c 'uv run pytest tests/test_9664_capstone_verdict_ledger.py -q; NOT RUN'",
     ):
         proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, attack])]))
         assert proc.returncode == cl.EXIT_INVALID, (attack, proc.stdout + proc.stderr)
@@ -866,6 +884,8 @@ def test_prose_on_EITHER_side_of_a_real_command_is_refused(tmp_path):
         "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q && echo PASS",
         "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q "
         "&& ruff check tools/capstone_ledger.py",
+        # A pipeline into a reader — the separator set must not cost this.
+        "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q | tail -20 log",
     ):
         proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, legitimate])]))
         assert proc.returncode == cl.EXIT_CLEAN, (legitimate, proc.stdout + proc.stderr)
