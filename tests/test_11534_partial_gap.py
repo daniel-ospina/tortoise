@@ -1196,3 +1196,61 @@ def test_the_heading_mask_does_not_eat_issue_numbered_lines(monkeypatch):
         "with the round-7 mask the issue-numbered claim is swallowed, which is the "
         "regression this row exists to catch — if this arm fails, the arm above "
         "proves nothing")
+
+
+# ── review round 9: the two gaps a fresh reviewer found ────────────────────
+
+
+def test_the_dedup_block_renders_the_operators_the_batch_carries():
+    """`operators` must reach EXISTING ITEMS, or the prompt invites its destruction.
+
+    ``_vet_gate.SECTIONS`` carries only entities/events/points (an operator has no
+    ``name``/``content``, so ``_item_text`` answers ""), so a loop over that table
+    alone left the section **entirely absent from the prompt** — measured before
+    the fix: a batch carrying one operator rendered an EMPTY dedup block. That is
+    the opposite of what the block exists for, against a prompt that forbids
+    re-emission ("Do NOT re-emit, restate, split or 'improve' anything in
+    EXISTING ITEMS") and permits an operator whose endpoints sit "in EXISTING
+    ITEMS" — and the collision it invites is destructive: ``_merge_key``'s
+    operator identity carries NO ``claim``, so a re-emitted operator matches the
+    S2 one and ``merge_embed_lists`` lets the gap-fill version WIN.
+    """
+    op = {"src": "wire stage", "dst": "hydrate stage", "op_type": "IMPL",
+          "claim": "the wire stage must not hand off before the lease lands"}
+    rendered = v2._render_existing_items(
+        {"entities": [{"name": "wire stage", "kind": "core:workflow"}],
+         "events": [], "points": [], "operators": [op]})
+    assert "[operators]" in rendered, (
+        "the section the prompt names must not be invisible — before this fix the "
+        "block rendered nothing at all for an operator-only batch")
+    assert "wire stage -[IMPL]-> hydrate stage" in rendered
+
+
+def test_an_operator_only_batch_is_skipped_with_no_model_call(monkeypatch):
+    """The skip predicate must be the DETECTOR's, not a broader structural one.
+
+    ``_batch_has_candidates`` walks four sections (``operators`` included) while
+    ``check_batch``/``partial_gaps`` count through three, so on an operator-only
+    batch the two disagreed in the fatal direction — measured: ``candidates: 0``,
+    ``coverage_suspect: True``, ``flagged_total: 1``, yet the helper said True and
+    the arm took the FIRING path over a fully-flagged narrative, spending a billed
+    call on exactly the population it documents as excluded (S4's rescue).
+    """
+    operator_only = {"entities": [], "events": [], "points": [],
+                     "operators": [{"src": "wire stage", "dst": "hydrate stage",
+                                    "op_type": "IMPL", "claim": "x"}]}
+    batch = v2._vet_gate.check_batch(operator_only, NARRATIVE)
+    assert batch["candidates"] == 0 and batch["coverage_suspect"] is True, (
+        "the fixture must be the zero-candidate shape the detector reports")
+    assert batch["partial_gaps"]["flagged_total"] > 0, (
+        "…and a fully-flagged narrative, which is why firing here is inverted")
+    assert v2._batch_has_candidates(operator_only) is True, (
+        "the old predicate is True on this shape — that divergence IS the defect")
+
+    model = _Model(s2_answer=operator_only)
+    out = _run(monkeypatch, model)
+    assert "gap_fill" not in model.calls
+    stats = out["stats"]["partial_gap_fill"]
+    assert stats["skipped"] == "empty embed_list"
+    assert stats["fired"] is False
+    assert "llm" not in stats
