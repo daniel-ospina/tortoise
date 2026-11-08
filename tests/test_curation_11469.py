@@ -2233,12 +2233,18 @@ def test_a_refusal_on_a_later_page_is_never_a_complete_census():
     consulted in the `not rows` arm, so a mid-walk refusal left a SHORT walk behind
     that the caller returned as a complete census (`total` fell back to `len(rows)`)."""
     mod = _tool_module()
-    with pytest.raises(RuntimeError, match=r"429|refused"):
+    # ⛔ `match` names the GATE's message, not just "a refusal". `r"429|refused"` also
+    # matches `_fingerprint_walk`'s `verification pass was refused: …`, so it could not
+    # tell the two guards apart: deferring the gate behind the verification pass
+    # (`if page_refusal and not verify:`) left this test GREEN while the default path was
+    # protected by something else (measured; the class docstring above claims this test
+    # witnesses the shared gate, and this is what makes that claim true).
+    with pytest.raises(RuntimeError, match=r"read refused at offset 2"):
         mod.MCPReader(_RefusalOnALaterPage(), None).read_points(page=2, verify=False)
     # …and the DEFAULT (verification-pass) path reaches the SAME page gate and raises
     # there — it is not a second chance that "agrees with the first": both arms fail at
-    # the refusal, before any verification walk is started.
-    with pytest.raises(RuntimeError, match=r"429|refused"):
+    # the gate, before any verification walk is started.
+    with pytest.raises(RuntimeError, match=r"read refused at offset 2"):
         mod.MCPReader(_RefusalOnALaterPage(), None).read_points(page=2)
 
 
@@ -2319,10 +2325,12 @@ def test_two_rows_sharing_an_id_and_a_hash_cannot_hide_the_second_text(tmp_path)
 
     # Non-vacuity: the same id with the SAME text is a genuine duplicate and must still
     # fold, so this is an identity guard and not a blanket refusal to detect duplicates.
-    # ⛔ These rows pass `kind="decision"` (default is UNDECIDABLE) precisely so the fold is
-    # REACHED: with the plan default both rows are undecidable, the branch never runs, and a
-    # blanket-withhold mutant leaves this arm green — the sibling
-    # `test_a_stale_hash_never_claims_a_row_of_record_for_another_text` is what reddens then.
+    # ⛔ These rows pass `kind="decision"` (default is UNDECIDABLE) so the fold is REACHED
+    # through the CARRIED branch (`duplicate_of == CARRY` → not-carried), which the
+    # default kind cannot exercise — it folds an undecidable row instead, down a different
+    # branch. The discrimination against a blanket-withhold mutant comes from the PHRASE
+    # pinned below, not from the kind (measured: without the phrase pin that mutant leaves
+    # this arm green).
     same = C.build_plan(
         [row("dup", kind="decision", content="A durable claim", content_hash="H"),
          row("dup", kind="decision", content="A durable claim", content_hash="H")],
