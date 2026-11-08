@@ -5235,20 +5235,45 @@ def test_the_pre_registration_cites_the_classify_sites_the_tree_actually_has():
         # carriers to the BLOCK precisely so re-wrapping cannot red this pin — but
         # with a line test it made the pin MISS instead, measured: a wrapped
         # `…was formerly \`:11098-11120\`` appended to the §11.1 carrier left this
-        # leg `PASSES (NOT caught)`. So a bare range counts on ANY line of the carrier
-        # EXCEPT one that attributes it to another file — the §9 block legitimately
-        # spells a second log cite bare (`capstone-measured-9152448d.log:271` …
-        # `:299-309`), and block-scoping without this predicate REDS the document.
-        _other_file = re.compile(r"[\w./-]+\.(?:log|md|json|jsonl|py|yml|yaml|txt|csv):\d")
+        # leg `PASSES (NOT caught)`.
+        # ⛔ AND IT BELONGS TO THE NEAREST *PRECEDING* FILE CITE, NOT TO "THE LINE HAS
+        # ONE" (round 8, P2). A per-line `is another file cited on this line?` test is
+        # order-blind, so `was formerly \`:11098-11120\` per \`README.md:44\`` still
+        # escaped — measured `PASSES (NOT caught)` — while the same token placed BEFORE
+        # the range correctly excluded it. Both of these bundles cross-cite heavily, so
+        # that is a shape a re-derivation produces. A bare range is therefore attributed
+        # to the last `file:line` token that precedes it ON ITS LINE, and counted when
+        # that token is `extractor_v2.py:` or when nothing precedes it (a wrapped
+        # continuation line). That keeps the §9 row's legitimate bare log cite
+        # (`capstone-measured-9152448d.log:271` … `:299-309`) out of the extractor's
+        # numbers, and it fixes the over-block the line test caused on a row citing the
+        # extent AND a log range.
+        # ACCEPTED RESIDUAL, declared rather than chased: a bare range that FOLLOWS
+        # another file's cite on the same line (`per \`README.md:44\`, was formerly
+        # \`:11098-11120\``) is unattributable without semantics — the same shape that
+        # keeps §9's `:299-309` out — so it is not counted and not caught. Closing that
+        # needs the doc to spell the file on every cite, which it does not.
+        _file_tok = re.compile(
+            r"[\w./-]+\.(?:log|md|json|jsonl|py|yml|yaml|txt|csv):\d+")
 
-        def _carries_extractor_cite(line: str) -> bool:
-            return "extractor_v2.py:" in line
+        def _bare_ranges(
+            line: str,
+            _rng: re.Pattern[str] = _bare_range,
+            _tok: re.Pattern[str] = _file_tok,
+        ) -> list[tuple[str, str]]:
+            """Bare `:lo-hi` ranges this line attributes to `extractor_v2.py`."""
+            kept: list[tuple[str, str]] = []
+            for match in _rng.finditer(line):
+                preceding = list(_tok.finditer(line[: match.start()]))
+                if preceding and not preceding[-1].group(0).startswith("extractor_v2.py:"):
+                    continue
+                kept.append((match.group(1), match.group(2)))
+            return kept
 
         def _extent_numbers(
             block: str,
             _re: re.Pattern[str] = _extent_cite,
             _bare: re.Pattern[str] = _bare_range,
-            _other: re.Pattern[str] = _other_file,
         ) -> list[int]:
             numbers: list[int] = []
             for lo, hi in _re.findall(block):
@@ -5256,21 +5281,17 @@ def test_the_pre_registration_cites_the_classify_sites_the_tree_actually_has():
                 if hi:
                     numbers.append(int(hi))
             for line in block.splitlines():
-                if _carries_extractor_cite(line) or not _other.search(line):
-                    for lo, hi in _bare.findall(line):
-                        numbers.extend((int(lo), int(hi)))
+                for lo, hi in _bare_ranges(line):
+                    numbers.extend((int(lo), int(hi)))
             return numbers
 
         def _reversed_ranges(
             block: str,
             _re: re.Pattern[str] = _extent_cite,
-            _bare: re.Pattern[str] = _bare_range,
-            _other: re.Pattern[str] = _other_file,
         ) -> list[str]:
             pairs = [(lo, hi) for lo, hi in _re.findall(block) if hi]
             for line in block.splitlines():
-                if _carries_extractor_cite(line) or not _other.search(line):
-                    pairs.extend(_bare.findall(line))
+                pairs.extend(_bare_ranges(line))
             return [f"{lo}-{hi}" for lo, hi in pairs if int(lo) >= int(hi)]
 
         ranged = [block for block in extent_carriers if len(_extent_numbers(block)) >= 2]
