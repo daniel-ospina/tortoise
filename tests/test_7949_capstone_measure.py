@@ -5235,12 +5235,16 @@ def test_the_pre_registration_cites_the_classify_sites_the_tree_actually_has():
         # form (`:11098 to :11120`) escaped: measured, appending each of those to a live
         # carrier left this leg `PASS (escaped)`. The span markers and the spaces
         # between them are punctuation, not meaning, so they are absorbed; the second
-        # endpoint's leading `:` is optional for the same reason. A CONNECTOR is still
-        # required, which is what keeps bare SINGLE cites (the extremely common
+        # endpoint's leading `:` is optional for the same reason. An ELLIPSIS is in the
+        # connector set for the same reason (round 11): it is a punctuation spelling of
+        # "to", and the live documents contain no `:A` … `:B` at all, so admitting it
+        # costs nothing and closes the shape instead of declaring it. A CONNECTOR is
+        # still required, which is what keeps bare SINGLE cites (the extremely common
         # `at `:13058`` form, making no extent claim) out, and `[ \t]` rather than `\s`
         # keeps a cross-line dash from being read as one extent.
         _bare_range = re.compile(
-            r"(?<![A-Za-z0-9_.]):(\d+)[` \t]*(?:[-\u2013\u2014]|to)[` \t]*:?(\d+)")
+            r"(?<![A-Za-z0-9_.]):(\d+)[` \t]*(?:[-\u2013\u2014]|to|\u2026|\.\.\.)"
+            r"[` \t]*:?(\d+)")
         # ⛔ THE BARE RANGE BELONGS TO THE CARRIER'S SENTENCE, NOT TO ITS LINE
         # (round 7, P2). Line-scoping the bare-range rule above was one re-wrap away
         # from blind: the document wraps at ~103 columns and `_live_blocks` scopes
@@ -5270,15 +5274,17 @@ def test_the_pre_registration_cites_the_classify_sites_the_tree_actually_has():
         #      basename fix above is in, that one IS counted and would red. The
         #      document avoids it by spelling the log token on that row, so nothing
         #      live reds; closing it needs the file named on every cite.
-        #   3. a stale extent whose two endpoints carry NO CONNECTOR AT ALL — spelled
-        #      as two bare singles joined by an ellipsis or a bare `and` (`:11098` …
-        #      `:11120`). Undeclared until round 10, where it was measured to escape.
-        #      It cannot be closed by punctuation: a pair of bare singles IS the
-        #      `at `:13058`` form this rule deliberately exempts, so counting it would
-        #      red every carrier that cites two single positions. Closing it needs the
-        #      extent recognised SEMANTICALLY ("these two endpoints describe one span")
-        #      or the document to spell every extent with a connector — which round 10's
-        #      widening now enforces on every OTHER spelling.
+        #   3. a stale extent whose endpoints are joined by a WORD rather than a
+        #      connector glyph (`:11098` and `:11120`). Declared because it CANNOT be
+        #      closed by punctuation, and that was measured, not assumed (round 11):
+        #      admitting `and` reds the live §9 row (`PRE-REGISTRATION.md:1121`), whose
+        #      `:13058` and `:13207` are two SINGLE cites enumerated under the extractor
+        #      owner — exactly the `at `:13058`` form this rule exempts. (The ELLIPSIS
+        #      half of this residual is GONE: round 11 put `…`/`...` in the connector
+        #      set, which reds the stale spelling while the live documents stay green —
+        #      they contain no `:A` … `:B` at all.) Closing what is left needs the
+        #      extent recognised semantically ("these two endpoints describe one span")
+        #      or the document to spell every extent with a connector glyph.
         _file_tok = re.compile(
             r"[\w./-]+\.(?:log|md|json|jsonl|py|yml|yaml|txt|csv):\d+")
 
@@ -5318,7 +5324,7 @@ def test_the_pre_registration_cites_the_classify_sites_the_tree_actually_has():
                 if hi:
                     numbers.append(int(hi))
             for line in block.splitlines():
-                for lo, hi in _bare_ranges(line):
+                for lo, hi in _bare_ranges(line, _bare):
                     numbers.extend((int(lo), int(hi)))
             return numbers
 
