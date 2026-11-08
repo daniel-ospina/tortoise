@@ -5326,6 +5326,13 @@ def test_a_git_that_COULD_NOT_ANSWER_is_not_read_as_a_measured_untracked(
     # `None` causes either — "could not be RUN" is false here, the check DID run.
     assert "did not answer here" in why, why
     assert "not TRACKED" not in why, why
+    # ⛔ AND THE OTHER CAUSE, NOT JUST THE OTHER RENDERER (#11474 review). A delta
+    # REPLACED this negative with the `not TRACKED` one above and left the suite
+    # green: measured at `445cf2cd3af`, making `_evidence_is_real`'s `None` branch
+    # print "… did not answer here; the check could not be run here: …" — a cause
+    # nobody measured, for a check that DID run — left **184 passed**. The two
+    # negatives guard different borrowings and neither substitutes for the other.
+    assert "could not be run here" not in why, why
 
 
 def test_a_PATTERN_shaped_filename_does_not_inherit_its_tracked_SIBLING(tmp_path):
