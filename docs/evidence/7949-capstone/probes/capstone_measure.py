@@ -1625,6 +1625,21 @@ def check_corpus(prereg: dict) -> str:
     from tests.eval.write_path.corpus import compute_fixtures_hash
 
     frozen = (prereg.get("corpus") or {}).get("fixtures_hash") or ""
+    # ⛔ `A`-rows score on the SAME corpus the `E`-rows pin (`#10982` review, F3). §3.7
+    # registers ONE corpus for both row families — "the record's corpus pin is a single
+    # `fixtures_hash` and two corpora would make the two row families incomparable on one
+    # run" — and the record's own `a_corpus.pinned_by` says a different corpus is REFUSED by
+    # G1. Nothing read `a_corpus` at all, so a record whose `a_corpus.path` pointed elsewhere
+    # still passed G1 and the claim was prose. It is checked here, before any model call.
+    a_corpus = (prereg.get("a_corpus") or {}).get("path")
+    corpus = (prereg.get("corpus") or {}).get("path")
+    if a_corpus is not None and a_corpus != corpus:
+        raise SystemExit(
+            f"capstone-measure: REFUSED — the pre-registration's a_corpus.path is "
+            f"{a_corpus!r} but corpus.path is {corpus!r}. §3.7 registers ONE corpus for "
+            "both row families (a single fixtures_hash), so a second corpus makes the "
+            "A-rows and the E-rows incomparable on one run: the run is refused, never "
+            "scored")
     actual = compute_fixtures_hash()
     if not frozen:
         raise SystemExit("capstone-measure: REFUSED — the pre-registration freezes "
@@ -2735,6 +2750,490 @@ def census(uri: str) -> dict:
     }
 
 
+# ── the A-row census (#10982) ─────────────────────────────────────────────
+#
+# The object-layer rows `#7949` was extended with on 2026-11-04 (`A1`–`A5`). They are REGISTERED
+# in the pinned record (`PRE-REGISTRATION.md` §3.7) and REPORTED here; this probe compares none of
+# them to a bar, because the bar is the record's and applying it is the gate's job, and no A-row has
+# a scored run yet (`#10984`–`#10988` own those). The point of emitting them from the ONE existing
+# instrument is that a reported number is produced by a tool and never hand-transcribed — the
+# owner's 2026-11-04 `live-v4` table was read by hand on the hosted graph, has no committed artifact
+# and is not re-derivable from this repository (`docs/epics/2026-11-05-5087-extractor-v4/01-align.md`).
+#
+# ⛔ A population this census cannot measure emits ``UNMEASURED(<what would measure it>)``, never a
+# zero: a zero is a NUMBER, it reads as a measured absence, and three of these five rows are about
+# populations no committed artifact has ever counted.
+
+#: The registered object-layer rows, in the order the record lists them.
+A_CRITERIA = ("A1", "A2", "A3", "A4", "A5")
+
+#: ⛔ `A1`'s bar is "at least one edge for EACH relation family the A-corpus's pack declares", and
+#: an unpinned set makes that bar unfalsifiable — a scorer could read 1, 2, 9 or 36 (#10982 review
+#: cycle 2, finding 6). The set is therefore PINNED to the **labels the WRITER stamps**, and that
+#: distinction is the whole point (#10982 review round 2):
+#:
+#:   ⛔ `decomposesInto` is a DECLARED PREDICATE, never a stored relationship label. The dev pack
+#:   declares two hierarchy entries — `Theme -> Epic` and `Epic -> Issue`
+#:   (`packs/dev/manifest.yaml`, `hierarchies:`) — and BOTH carry `type: hasPart`; the seam writes the
+#:   hierarchy entry's `type` (`tortoise/pack_hierarchy.py`, `_binding`: "the edge this function would
+#:   write carries ``decomposesInto``, which ``create_edge`` refuses"), and the operator writers fold
+#:   `composedOf`/`decomposesInto`/`contains`/`wraps` onto `hasPart`
+#:   (`tortoise/projection/edges.py`, the `op_type`->label map). `hasPart` IS in `create_edge`'s own
+#:   predicate set and `decomposesInto` is NOT (`edges.py`, `_VALID_EDGE_PREDICATES`).
+#:   ⚠️ Cited by SYMBOL and not by line: this bundle's own citation guard refuses a line number no
+#:   rule can verify, and an unverifiable number drifts silently (#10982 review round 3).
+#:
+#:   So a pin on `decomposesInto` names a label that occurs ZERO times on every graph this repo can
+#:   write, which made the registered bar "≥ 1 edge for EACH of the two families" **unsatisfiable** —
+#:   `#10984` (C3) would have scored A1 RED forever on a correct product. The pin is the one written
+#:   family; the declared spellings that fold onto it are named beside it so a reader can still see
+#:   which pack declarations the row is about.
+A1_RELATION_FAMILIES = ("hasPart",)
+
+#: The pack-declared predicates that are WRITTEN as the label in `A1_RELATION_FAMILIES` above. This
+#: map is documentation, not a measurement: `by_pinned_family` counts `type(r)`, and `type(r)` is
+#: never a declared spelling. A future pin that adds a written label must add its declared
+#: spellings here in the same reviewed edit.
+A1_RELATION_FAMILY_FOLD = {
+    "hasPart": ("hasPart", "decomposesInto", "composedOf", "contains", "wraps"),
+}
+
+#: The four subject-edge families (`#10987`). Counted PER FAMILY so that one wired family cannot
+#: read as "Subjects are populated" — the failure the owner's assertion exists to catch.
+SUBJECT_EDGE_FAMILIES = ("aboutSubject", "memberOf", "ownedBy", "managedBy")
+
+#: `A3`'s chain-join definition is over these two relations — the pair the owner's 2026-11-04
+#: reading counted, and the pair the registered bar names. `SUPPORTS`/`MITIGATES`/`NEGATE`/
+#: `SUPERSEDE` are claim-to-claim edges too; they are **NOT** in this count and this block emits no
+#: figure for them, because a wider relation set is a different definition and widening it silently
+#: is how a bar stops meaning what it says. Adding them is a #10986 registration question.
+CHAIN_RELATIONS = ("IMPL", "NAND")
+
+#: ⚠️ `TAGGED` is emitted WITH this annotation and is **not a target** (`#7949` plan §2 R7): it is
+#: written only by `_sync_tags` from an explicit `tags` value and no extraction path sets one, so a
+#: zero here says nothing about the run's quality.
+TAGGED_NOTE = "no carrier — no extraction path sets a `tags` value (#7949 R7); NOT a target"
+
+
+def unmeasured(what: str) -> str:
+    """The explicit non-number a population that cannot be measured emits."""
+    return f"UNMEASURED({what})"
+
+
+def census_reason(exc: BaseException) -> str:
+    """A caught exception rendered for a COMMITTED artefact (`#10982` review, F1).
+
+    ⛔ The log this block travels in is committed to a public repository, and
+    ``TORTOISE_DB_URI`` is a credential-bearing string — ``docker://:pw@host:6379/g``,
+    and for the hosted ``live-v4`` graph the URI carries host, port, user and
+    password (``from_uri`` semantics). An exception raised by a driver or a
+    projection routinely echoes the URI it failed to reach, so ``f"{exc}"`` is a
+    credential path into ``capstone-measured-<sha>.log``.
+
+    The scrub is the repo's OWN rule, not a second one: ``tortoise.security``
+    carries the URI-userinfo pattern ``://[^@\\s]*@ -> ://***@`` and
+    ``redact_error`` is its public form (class name + redacted message). It is
+    stdlib-only by design, so importing it here costs the probe nothing.
+    """
+    from tortoise.security import redact_error
+
+    return redact_error(exc)
+
+
+def _a1_object_edges(projection) -> dict:
+    """`object→object` edges BY TYPE and BY ENDPOINT KIND (`A1`)."""
+    by_type = [
+        {"relation": str(row[0]), "edges": int(row[1] or 0)}
+        for row in projection.g.query(
+            "MATCH (a:Object)-[r]->(b:Object) RETURN type(r) AS t, count(*) AS n "
+            "ORDER BY n DESC, t").result_set
+    ]
+    by_kind = [
+        {"relation": str(row[0]),
+         "from_kind": str(row[1]) if row[1] is not None else "NULL",
+         "to_kind": str(row[2]) if row[2] is not None else "NULL",
+         "edges": int(row[3] or 0)}
+        for row in projection.g.query(
+            # ⛔ `objectKind`, NOT `kind`: the writer stamps `o.objectKind=coalesce($ok,'other')`
+            # (tortoise/projection/entities.py:4699) and the pack declares `fromKind`/`toKind`
+            # (packs/dev/manifest.yaml:144-149). Reading `a.kind` returned NULL on every real graph
+            # — the "by endpoint kind" half reported as measured while measuring nothing (#10982
+            # review, finding 3).
+            "MATCH (a:Object)-[r]->(b:Object) RETURN type(r) AS t, a.objectKind AS ak, "
+            "b.objectKind AS bk, count(*) AS n ORDER BY n DESC, t, ak, bk").result_set
+    ]
+    counts = {entry["relation"]: entry["edges"] for entry in by_type}
+    # ⛔ A1's registered denominator is *"`:Object` nodes in the scored graph (floor 30)"*, and the
+    # floor `a1_objects` is pinned — so the block must CARRY that population. It did not, which
+    # left the floor consumed by no field and no arm: a floor nothing can be checked against is a
+    # floor that cannot refuse. This is the rule A5's block already states for `a5_points` /
+    # `a2_candidates` (#11331 review, P2-4b), applied to the row that was left out of it.
+    objects = projection.g.query("MATCH (n:Object) RETURN count(n)").result_set
+    objects = int(objects[0][0] or 0) if objects else 0
+    return {"by_type": by_type,
+            "by_endpoint_kind": by_kind,
+            "objects": objects,
+            "edges_total": sum(entry["edges"] for entry in by_type),
+            # per PINNED family, so the logged numbers map onto the registered bar. The keys are
+            # WRITTEN labels (`type(r)`), which is what the two queries above count.
+            "by_pinned_family": {name: counts.get(name, 0)
+                                 for name in A1_RELATION_FAMILIES},
+            # the declared spellings each written family folds, so a reader can map the row onto
+            # the pack's own declarations without mistaking one for a stored label.
+            "pinned_family_declared_spellings": {
+                name: list(A1_RELATION_FAMILY_FOLD.get(name, (name,)))
+                for name in A1_RELATION_FAMILIES}}
+
+
+def _a3_chain_join(projection) -> dict:
+    """`A3`'s chain-join rate under the REGISTERED definition, with the cheap one beside it.
+
+    ⛔ The registered definition is *an incident `IMPL`/`NAND` **and** at least one such edge
+    crossing a batch boundary (a different `Event` root)*. "Member of a connected component of
+    >= 2" is NOT a third definition — any incident edge already makes a component of two — so it
+    collapses into the cheap one and is rejected for exactly the reason it looks attractive.
+
+    ⛔ The cross-batch test requires an `eventId` on **BOTH** ends. Comparing
+    ``coalesce(eventId,'')`` counted a statement with no `eventId` at all as "crossing a boundary"
+    against one that has an id — an unanchored row is not a second batch, and 170 of the committed
+    run's 354 Points carry no stamp (`capstone-measured-9152448d.log:63`), so the fail-open was not
+    theoretical (#10982 review, finding 5). Where the population carries no stamp at all, the leg
+    is ``UNMEASURED`` rather than a number nobody can reach.
+    """
+    pattern = "|".join(CHAIN_RELATIONS)
+    statements = projection.g.query(
+        "MATCH (n:Point) WHERE n.pointKind = 'statement' RETURN count(n)"
+    ).result_set
+    statements = int(statements[0][0] or 0) if statements else 0
+    # An incident edge is INCIDENT — the neighbour is any node, not only a `:Point`, because the
+    # registered definition says "at least one incident IMPL/NAND edge" and does not restrict the
+    # far end (#10982 review, finding 5).
+    cheap_rows = projection.g.query(
+        f"MATCH (n:Point)-[r:{pattern}]-() "
+        "WHERE n.pointKind = 'statement' RETURN count(DISTINCT n)").result_set
+    cheap = int(cheap_rows[0][0] or 0) if cheap_rows else 0
+    stamped_rows = projection.g.query(
+        "MATCH (n:Point) WHERE n.pointKind = 'statement' AND n.eventId IS NOT NULL "
+        "RETURN count(n)").result_set
+    stamped = int(stamped_rows[0][0] or 0) if stamped_rows else 0
+    strict = 0
+    if stamped:
+        strict_rows = projection.g.query(
+            f"MATCH (n:Point)-[r:{pattern}]-(m) WHERE n.pointKind = 'statement' "
+            "AND n.eventId IS NOT NULL AND m.eventId IS NOT NULL "
+            "AND n.eventId <> m.eventId RETURN count(DISTINCT n)").result_set
+        strict = int(strict_rows[0][0] or 0) if strict_rows else 0
+    return {
+        "statements": statements,
+        "statements_with_an_event_root": stamped,
+        "cheap_joined": cheap,
+        "cheap_rate": (cheap / statements) if statements else unmeasured(
+            "a statement population with pointKind='statement'"),
+        "cross_batch_joined": strict if stamped else unmeasured(
+            "an eventId stamp on the statement population — no statement carries one, so no "
+            "'different Event root' can be established"),
+        # ⛔ The rate's denominator is the STAMPED subpopulation, not all statements: a statement
+        # with no `eventId` can never be counted as crossing, so dividing by every statement would
+        # report "0% join chains" as a measurement of stamp coverage (#10982 review cycle 2,
+        # finding 7). The coverage is emitted beside it and the row REFUSES below its floor.
+        "event_root_coverage": (stamped / statements) if statements else unmeasured(
+            "a statement population"),
+        "cross_batch_rate": (strict / stamped) if stamped else unmeasured(
+            "a statement population carrying an eventId on both ends of an IMPL/NAND edge"),
+        "relations": list(CHAIN_RELATIONS),
+    }
+
+
+def _a4_pointkind(projection) -> dict:
+    """`A4`'s `pointKind` histogram over CLAIMS, split typed / `statement` / `NULL`.
+
+    ⛔ `NULL` is a THIRD reported state, never folded into `statement`: 19% of the owner's
+    population carried no `pointKind` at all, and folding it in reports a typing win nobody made.
+
+    ⛔ Two further folds that would have manufactured that same win (#10982 review, finding 4):
+    a **blank** `pointKind` (`''` is what the #548 rebuild SNAPSHOT synthesis writes for an operator
+    with no kind — `tortoise/projection/__init__.py:13591-13593`, `# Ensure pointKind is present
+    (operators often lack it)` / `clean["pointKind"] = ""`; the live write is
+    `projection/entities.py:2602`, which leaves the property ABSENT instead) is ABSENT, not typed;
+    and **capture rows** are
+    not claims — turn rows carry `pointKind='event'`: the row dict is written with `"k": "event"`
+    and lands through the capture path's turn writer `_TURN_WRITE_CYPHER` (`tortoise/sdk.py:2455`)
+    inside `_write_capture_turns` — and 159 of
+    the committed run's 354 Points are turn rows (`capstone-measured-9152448d.log:73`), so counting
+    them read ~45% "typed" against the owner's 0.6% ceiling. The excluded populations are COUNTED
+    and reported, never silently dropped.
+    """
+    # ⛔ TRUTHINESS, not `IS NULL`: `create_point(is_episodic=False)` really writes the property
+    # (`projection/entities.py:2740`), so an explicit `false` is a CLAIM — `IS NULL` dropped it
+    # from the denominator while the capture count reported it as a turn row it is not. The same
+    # predicate the file's own `POINT_COMPOSITION_CYPHER` uses; ⛔ NOT `tortoise/quota.py:1133`,
+    # which tests `is_episodic` ALONE and would count an operator Point as a claim (#10982 review
+    # round 2).
+    capture = projection.g.query(
+        "MATCH (n:Point) WHERE coalesce(n.is_episodic, false) OR coalesce(n.is_operator, false) "
+        "RETURN count(n)").result_set
+    capture = int(capture[0][0] or 0) if capture else 0
+    rows = projection.g.query(
+        "MATCH (n:Point) WHERE NOT coalesce(n.is_episodic, false) "
+        "AND NOT coalesce(n.is_operator, false) "
+        "RETURN coalesce(n.pointKind, 'NULL') AS k, count(*) AS n "
+        "ORDER BY n DESC").result_set
+    by_kind: dict[str, int] = {}
+    for row in rows:
+        key = str(row[0])
+        # a blank kind is the ABSENT state, not a typed one — ACCUMULATED into the NULL bucket,
+        # because assigning would overwrite the real NULL row's count instead of adding to it.
+        key = "NULL" if key in ("NULL", "") else key
+        by_kind[key] = by_kind.get(key, 0) + int(row[1] or 0)
+    total = sum(by_kind.values())
+    null_count = by_kind.pop("NULL", 0)
+    statement = by_kind.pop("statement", 0)
+    typed = sum(by_kind.values())
+    return {"claim_points": total, "excluded_capture_rows": capture,
+            "statement": statement, "null": null_count,
+            "typed": typed, "typed_by_kind": dict(sorted(by_kind.items())),
+            "typed_share": (typed / total) if total else unmeasured(
+                "a claim-point population (is_episodic and is_operator both absent)")}
+
+
+def _a5_subjects(projection) -> dict:
+    """`A5`: the `:Subject` count and the four subject-edge families, PER FAMILY.
+
+    ⛔ Both queries are UNDIRECTED, but only the CARRYING leg is claim-filtered — and that is the
+    registered shape, not an oversight: §3.1 A5 pins the four subject-edge families as
+    `count(DISTINCT r)` over the graph with no claim filter, so the family count and the
+    "statements carrying one" count are NOT required to agree about the same edges, and adding a
+    filter to the family query would silently move the pinned denominator. What the direction
+    clause buys (#10982 review, finding 7) is that a forwards-only family count beside a
+    direction-agnostic point count cannot let a turn row satisfy the registered bar while zero
+    statements carried an edge.
+    """
+    subjects = projection.g.query("MATCH (n:Subject) RETURN count(n)").result_set
+    subjects = int(subjects[0][0] or 0) if subjects else 0
+    pattern = "|".join(SUBJECT_EDGE_FAMILIES)
+    # ⛔ `count(DISTINCT r)`, NOT `count(*)`: an UNDIRECTED multi-rel-type pattern is traversed in
+    # both orientations, so `count(*)` reports 2x the edges (measured on falkordb-server:v4.20.6:
+    # two `aboutSubject` edges -> count(*)=4, count(DISTINCT r)=2). `tortoise/taxonomy.py:40` already
+    # records that these patterns are unreliable across versions (#10982 review cycle 2, finding 1).
+    rows = projection.g.query(
+        f"MATCH ()-[r:{pattern}]-() RETURN type(r) AS t, count(DISTINCT r) AS n "
+        "ORDER BY t").result_set
+    families = {str(row[0]): int(row[1] or 0) for row in rows}
+    carrying = projection.g.query(
+        f"MATCH (n:Point)-[r:{pattern}]-() WHERE n.pointKind = 'statement' "
+        "RETURN count(DISTINCT n)").result_set
+    carrying = int(carrying[0][0] or 0) if carrying else 0
+    # ⛔ A5's registered denominator promises the `:Subject` count *"and the `Point` population
+    # reported beside them, never used as the actor denominator"* — so the block must carry the
+    # Point population too. It was missing, which left the pinned floors `a5_points` and
+    # `a2_candidates` consumed by NO field and no arm: a floor nothing can be checked against is a
+    # floor that cannot refuse (#11331 review round 8, P2-4b). The count is a COMPLETE enumeration,
+    # so an absent population reads as a measured 0 here — not as the `UNMEASURED` a zero
+    # denominator gets, because 0 Points is a real (and REFUSED-by-floor) measurement, not silence.
+    point_population = projection.g.query("MATCH (n:Point) RETURN count(n)").result_set
+    point_population = int(point_population[0][0] or 0) if point_population else 0
+    return {"subjects": subjects,
+            # ⛔ A5's BAR divides by the distinct actors the A-corpus NAMES, so the census must carry
+            # that population or the bar is not producible from the block (review cycle 2, finding 8).
+            # ⛔ NOT a pending landing: `#10983` (C2) CLOSED on 2026-11-07 WITHOUT registering an actor
+            # list, and the record now says so (`a_corpus.requires` — "the requirement is on the
+            # CORPUS's content, not on a pending landing"). Pointing this gap at that issue would
+            # aim a scoring child (`#10984`–`#10988`) at closed work — the stale-pointer shape V12
+            # refuses for `blocked_by`, reachable here in prose where nothing reddens.
+            "named_actors": unmeasured(
+                "the distinct actors the A-corpus names — the corpus carries no registered actor "
+                "list yet (#10983 closed without one), so this is a CORPUS-content gap; the "
+                "`:Subject` count is NOT it, or the bar would be satisfied by the run's own writes"),
+            "point_population": point_population,
+            "families": {name: int(families.get(name, 0))
+                         for name in SUBJECT_EDGE_FAMILIES},
+            "statements_with_a_subject_edge": carrying}
+
+
+def _tagged_edges(projection) -> int:
+    rows = projection.g.query(
+        "MATCH ()-[r:TAGGED]->() RETURN count(r)").result_set
+    return int(rows[0][0] or 0) if rows else 0
+
+
+def a_row_census(uri: str) -> dict:
+    """The `A1`–`A5` census, over the RUN'S OWN graph, on the ONE existing instrument.
+
+    Every number here is produced by a query; nothing is transcribed. **Each row is measured in its
+    own ``try``**, so one broken query costs that row and nothing else — the other rows still report
+    their measured numbers, and the failed one carries ``unmeasured(<the error>)``. A whole-block
+    failure was fail-closed but it discarded four measured rows for one bad query, which is the
+    opposite of what this block is for (#10982 review, finding 11).
+    """
+    from tortoise.projection import FalkorProjection
+
+    projection = FalkorProjection.from_uri(uri)
+    # ⛔ NO `uri` KEY (`#10982` review, F1). This dict is `json.dumps`-ed WHOLE into the
+    # committed machine record, and the URI carries the graph's credentials — so the
+    # block must not carry it even redacted. The E-census keeps a `uri` internally
+    # (`census()`) but the machine record PROJECTS six keys out of it and never emits
+    # it; traceability for THIS block is `run.graph`, which the record already states.
+    result: dict = {"criteria": list(A_CRITERIA)}
+
+    def row(name: str, fn, empty: dict) -> dict:
+        try:
+            return fn(projection)
+        except Exception as exc:  # the row is named; the rest of the census still reports
+            # ⛔ `census_reason`, never `{exc}`: an infra exception can echo the
+            # credential-bearing URI, and this block is committed (review F1).
+            reason = unmeasured(f"{name}'s queries could not run — {census_reason(exc)}")
+            # ⛔ NOT the zero skeleton: a numeric `0` under a key a real measurement also occupies
+            # reads as a MEASURED ABSENCE and scores the row RED on an infrastructure failure —
+            # the exact number this block exists to not print (#10982 review cycle 2, finding 2).
+            block: dict = {"error": reason}
+            for key, value in empty.items():
+                block[key] = ({name_: reason for name_ in value}
+                              if isinstance(value, dict) else reason)
+            return block
+
+    # A1 — the object→object graph, plus the rollup half.
+    result["A1"] = row("A1", _a1_object_edges,
+                       {"by_type": [], "by_endpoint_kind": [], "edges_total": 0,
+                        "objects": 0,
+                        "by_pinned_family": {name: 0 for name in A1_RELATION_FAMILIES},
+                        "pinned_family_declared_spellings": {
+                            name: list(A1_RELATION_FAMILY_FOLD.get(name, (name,)))
+                            for name in A1_RELATION_FAMILIES}})
+    # ⛔ The rollup half of A1 is NOT the edge count: A1's real criterion is a query ANSWERING, and
+    # no pack-declared rollup query is registered for this corpus yet (`#10984` owns both). An edge
+    # count with no query behind it is the shape this row exists to refuse, so it is named.
+    result["A1"]["rollup_queries"] = unmeasured(
+        "a pack-declared part-whole rollup query for this corpus — #10984 (C3) owns "
+        "registering it and asking it")
+
+    # A2 — attach vs mint. No counter exists anywhere on the write path yet.
+    # ⛔ THE BLOCK CARRIES EVERY PART THE REGISTRATION NAMES, not just the two the decision reads.
+    # The metric's THIRD arm is `held` — "each held candidate named with its reason" — and the
+    # threshold's RED leg is "a run that holds candidates without naming them is **RED**". The bar
+    # divides by DECIDED candidates, which the denominator fixes against the all-candidate count:
+    # "the all-candidate count is reported beside it, never used as the floor". Emitting only
+    # attach/mint left a consumer unable to tell "zero held" from "the held arm was never
+    # measured", so the registered RED leg could not be evaluated from the one block §3.7
+    # designates as the place a scoring child reads — the silence `a_row_census_lines` refuses
+    # everywhere else, and the exact omission the issue's Target forbids (#11331 review round 8).
+    _a2_counter = ("an S3 RESOLVE attach/mint/held counter on the run's own receipt — no writer "
+                   "stamps one today; #10985 (C4) owns it")
+    result["A2"] = {
+        "attach": unmeasured(_a2_counter),
+        "mint": unmeasured("the same counter's mint arm — #10985 (C4)"),
+        "held": unmeasured(
+            "the same counter's held arm, each held candidate NAMED with its reason — the "
+            "registration makes an unnamed held candidate RED; #10985 (C4)"),
+        "candidates": unmeasured(
+            "the all-candidate count the run decided over — reported BESIDE the floor, never "
+            "used as it; #10985 (C4)"),
+        "decided_candidates": unmeasured(
+            "the decided-candidate population A2's bar divides by — the population the pinned "
+            "floor a2_decided_candidates guards; #10985 (C4)"),
+        "attach_share": unmeasured(
+            "attach_share = attach / decided_candidates — a zero denominator is REFUSED, never "
+            "rendered as 0/0; #10985 (C4)"),
+    }
+
+    result["A3"] = row("A3", _a3_chain_join, {"statements": 0,
+                                              "statements_with_an_event_root": 0,
+                                              "event_root_coverage": unmeasured("a statement population"),
+                                              "cheap_joined": 0, "cheap_rate": unmeasured("a statement population"),
+                                              "cross_batch_joined": unmeasured("an eventId stamp"),
+                                              "cross_batch_rate": unmeasured("an eventId stamp"),
+                                              "relations": list(CHAIN_RELATIONS)})
+    result["A4"] = row("A4", _a4_pointkind,
+                       {"claim_points": 0, "excluded_capture_rows": 0, "statement": 0,
+                        "null": 0, "typed": 0, "typed_by_kind": {},
+                        "typed_share": unmeasured("a claim-point population")})
+    result["A5"] = row("A5", _a5_subjects,
+                       {"subjects": 0, "named_actors": 0, "point_population": 0,
+                        "families": {name: 0 for name in SUBJECT_EDGE_FAMILIES},
+                        "statements_with_a_subject_edge": 0})
+    tagged: dict = {"note": TAGGED_NOTE}
+    try:
+        tagged["edges"] = _tagged_edges(projection)
+    except Exception as exc:  # the row is named; the rest of the census still reports
+        tagged["edges"] = unmeasured(
+            f"TAGGED's query could not run — {census_reason(exc)}")
+    result["TAGGED"] = tagged
+    return result
+
+
+def a_row_census_lines(census_a: dict | None) -> list[str]:
+    """The rendered `A`-row block. Absent, failed or incomplete census renders a NAMED gap.
+
+    ⛔ A census that RAISED is not a census of zeros (#10982): the failure is named with its own
+    exception text, because an ``A1 edges=0`` line produced by a broken query is exactly the number
+    this block exists to not print.
+    """
+    if not census_a:
+        return ["a-rows: UNMEASURED(the A-row census did not run in this pass)"]
+    if census_a.get("error"):
+        return ["a-rows: UNMEASURED(the A-row census could not run — "
+                f"{census_a['error']})"]
+    if "A1" not in census_a:
+        return ["a-rows: UNMEASURED(the A-row census block is incomplete — no A1 entry)"]
+    lines: list[str] = []
+    add = lines.append
+    add("## A-row census — the object layer (#10982; REPORTED, not scored here)")
+    add("a-rows: registered in PRE-REGISTRATION.md §3.7; the bar is the record's and the "
+        "gate's, and no A-row has a scored run yet (#10984-#10988 own those)")
+
+    a1 = census_a["A1"]
+    add(f"a1 objects={a1['objects']} object_object_edges={a1['edges_total']} "
+        f"by_type={a1['by_type'] or '[]'} "
+        f"by_pinned_family={a1['by_pinned_family']}"
+        + (f" error={a1['error']}" if a1.get("error") else ""))
+    add(f"a1 by_endpoint_kind={a1['by_endpoint_kind'] or '[]'}")
+    # ⛔ The pinned families are WRITTEN labels (`type(r)`); the pack's declared spellings that fold
+    # onto them are named beside the counts so no reader takes `decomposesInto` for a stored label
+    # (#10982 review round 2).
+    add("a1 pinned_family_declared_spellings="
+        f"{a1.get('pinned_family_declared_spellings') or '{}'}")
+    add(f"a1 rollup_queries={a1['rollup_queries']}")
+
+    a2 = census_a["A2"]
+    # ⛔ EVERY part the registration names, in the order the decision reads them: the two arms it
+    # compares, the held arm whose silence is RED, the floor population, the count reported beside
+    # it, and the rate. A renderer that emits a subset makes the block's contents invisible in the
+    # artefact a scorer actually reads (#11331 review round 8, P2-1).
+    add(f"a2 attach={a2['attach']} mint={a2['mint']} held={a2['held']} "
+        f"candidates={a2['candidates']} decided_candidates={a2['decided_candidates']} "
+        f"attach_share={a2['attach_share']}")
+
+    a3 = census_a["A3"]
+    add(f"a3 statements={a3['statements']} "
+        f"statements_with_an_event_root={a3['statements_with_an_event_root']} "
+        f"event_root_coverage={a3['event_root_coverage']} "
+        f"cheap_joined={a3['cheap_joined']} cheap_rate={a3['cheap_rate']} "
+        f"cross_batch_joined={a3['cross_batch_joined']} "
+        f"cross_batch_rate={a3['cross_batch_rate']} relations={a3['relations']}"
+        + (f" error={a3['error']}" if a3.get("error") else ""))
+    add("a3 note: the CHEAP rate is reported for contrast and is NOT the bar; the registered "
+        "definition requires a cross-batch link with an eventId on BOTH ends (§3.7)")
+
+    a4 = census_a["A4"]
+    add(f"a4 claim_points={a4['claim_points']} "
+        f"excluded_capture_rows={a4['excluded_capture_rows']} "
+        f"typed={a4['typed']} statement={a4['statement']} null={a4['null']} "
+        f"typed_share={a4['typed_share']} typed_by_kind={a4['typed_by_kind'] or '{}'}"
+        + (f" error={a4['error']}" if a4.get("error") else ""))
+    add("a4 note: NULL (and a blank kind) is a THIRD state, never folded into statement; turn rows "
+        "and operator Points are EXCLUDED and counted, because they are capture rows and not "
+        "claims; the bar is UNMEASURED by registration (D3 fork, #10988/#1022)")
+
+    a5 = census_a["A5"]
+    add(f"a5 subjects={a5['subjects']} named_actors={a5['named_actors']} "
+        f"point_population={a5['point_population']} families={a5['families']} "
+        f"statements_with_a_subject_edge={a5['statements_with_a_subject_edge']}"
+        + (f" error={a5['error']}" if a5.get("error") else ""))
+
+    tagged = census_a["TAGGED"]
+    add(f"a-rows TAGGED_edges={tagged['edges']} note: {tagged['note']}")
+    return lines
+
+
 # ── E4 / E5 / E1+E2 ───────────────────────────────────────────────────────
 
 def _same_corpus(a: object, b: object) -> bool:
@@ -3273,6 +3772,7 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
                e1b_out: dict, e2a_out: dict, e2b_out: dict, e3: dict,
                e3_out: dict, e4: dict, e4_out: dict, e5: dict, e5_out: dict,
                rows: list[dict], out_path: str,
+               a_census: dict | None = None,
                required: list[str] | None = None,
                accounts: list[dict] | None = None,
                steps_gap: str = "",
@@ -3463,6 +3963,13 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
         add("e5 incomplete receipts (disclosed, not silently averaged): " +
             " | ".join(e5["partial_receipts"]))
     add("")
+    # #10982: the A-row census, rendered from the SAME pass as the E-row census so a reader cannot
+    # be served two different graphs in one log, and emitted at a REAL section boundary — ⛔ it used
+    # to be spliced in right after the E3 note, which put the block INSIDE E3's section and left the
+    # `e1-aux objects_in_graph=…` line under the A-row heading, so a reader attributed an E1 floor
+    # reading to the A-row census (#10982 review round 2).
+    lines.extend(a_row_census_lines(a_census))
+    add("")
     add("## verdict table")
     add("criterion | verdict | measured | evidence | blocked_by")
     for row in rows:
@@ -3521,6 +4028,9 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
                 "relationship_anchored": census_data["relationship_anchored"],
                 "relationship_counts": census_data["relationship_counts"],
             },
+            # #10982: the A-row census travels in the machine record too, so a consumer
+            # reads the same numbers the human log prints.
+            "a_row_census": a_census,
             "e4_receipt": {
                 "numerator": e4["edge_correct"],
                 "denominator": e4["planted"],
@@ -3668,6 +4178,14 @@ def main(argv: list[str] | None = None) -> int:
     require_door_entered(runs)
     failed = [run["session_id"] for run in runs if not run["ok"]]
     census_data = census(graph_uri(os.environ["TORTOISE_DB_URI"], graph))
+    # #10982: the A-row census runs against the SAME graph and the SAME pass. A failure here must
+    # not silently vanish: a census that could not run renders as a NAMED gap, never as zeros.
+    try:
+        a_census = a_row_census(graph_uri(os.environ["TORTOISE_DB_URI"], graph))
+    except Exception as exc:  # the E-rows must still be scored and the gap named
+        # ⛔ `census_reason`, not the raw exception: `from_uri` failures quote the URI
+        # they were handed, and this string lands in the COMMITTED record (review F1).
+        a_census = {"error": census_reason(exc), "criteria": list(A_CRITERIA)}
     observed, unobserved = observe_steps(runs, census_data)
     # #10215: the same split the run probe's G5 emits, read from the SAME frozen
     # record — so a GREEN row from this probe is no longer refused for S2.3.
@@ -3800,6 +4318,7 @@ def main(argv: list[str] | None = None) -> int:
                       e2a_out=e2a_result, e2b_out=e2b_result, e3=e3,
                       e3_out=e3_result, e4=receipt, e4_out=e4_result, e5=e5,
                       e5_out=e5_result, rows=rows, out_path=out_path,
+                      a_census=a_census,
                       required=required, accounts=accounts, steps_gap=steps_gap,
                       arm=arm, door=arm)
 

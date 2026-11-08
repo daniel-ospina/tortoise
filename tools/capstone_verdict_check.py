@@ -132,7 +132,17 @@ from datetime import datetime
 from pathlib import Path
 
 SCHEMA = "capstone-verdict-v1"
+#: The rows the epic CLOSES on. V2 demands one row per member, so this tuple may only grow when
+#: the epic's own closing rule grows (#7949: "5/5").
 CRITERIA = ("E1", "E2", "E3", "E4", "E5")
+#: The object-layer rows `#10982` registered (`PRE-REGISTRATION.md` §3.7). They are RECOGNISED but
+#: NOT REQUIRED, and the distinction is load-bearing: a required row cannot be inferred from the
+#: rest (V2), so adding them to ``CRITERIA`` would red every verdict table that predates their
+#: scoring runs — including the committed `capstone-measured-9152448d.log` — for five rows nobody
+#: has run yet. `#10984`–`#10988` own those runs. A table that carries one is checked by V1–V12
+#: exactly as an `E`-row is, `V12`'s CLOSED-``blocked_by`` refusal included.
+A_CRITERIA = ("A1", "A2", "A3", "A4", "A5")
+RECOGNISED_CRITERIA = CRITERIA + A_CRITERIA
 STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", "S5", "S6")
 #: The two states a CONDITIONAL step may be accounted in (#10215). ``observed``
 #: means the pass did work; ``idle`` means its flag was ON, it did no work, and
@@ -158,13 +168,20 @@ BLOCKER_STATES_DEFAULT = Path("docs/evidence/7949-capstone/blocker-states.json")
 BLOCKER_STATES_SCHEMA = "capstone-blocker-states-v1"
 BLOCKER_STATE_WORDS = ("OPEN", "CLOSED")
 
-#: The RUN-block keys that carry a MEASUREMENT, as the emitter writes them
+#: The RUN-block keys that carry a MEASUREMENT
 #: (``docs/evidence/7949-capstone/probes/capstone_measure.py``). `_blocker_exempt`
 #: refuses the exemption when ANY of these is present and non-empty, so a table
 #: cannot hide a real run behind `evidence_kind: "refusal"` by nulling one or two
 #: cells. The shipped REFUSAL record (``capstone.log``) carries NONE of them;
 #: a record emptied of every one is a fabricated file, which is the residual
 #: limit stated in `_record_carries_a_measurement`.
+#:
+#: ⛔ TWO MEMBERS ARE NOT RUN-BLOCK TOP-LEVEL KEYS, and the distinction is
+#: load-bearing for the drift arm that reads the emitter's ``"run": {`` literal:
+#: `errors` rides INSIDE each ``sessions[]`` entry and `corpus_sha256` inside
+#: `e1_e2_artifact`. They stay in this set (a record carrying only them DOES carry
+#: a measurement, which is what the exemption turns on), and the arm excludes them
+#: from its phantom check by that nesting path, not by an anonymous literal.
 _MEASUREMENT_RUN_KEYS = (
     "sessions",
     "step_witnesses",
@@ -175,7 +192,82 @@ _MEASUREMENT_RUN_KEYS = (
     "e1_e2_artifact",
     "errors",
     "corpus_sha256",
+    # #10982: the A-row census is written INTO the run block by the emitter
+    # (`capstone_measure.py:4019`), beside `e3_census`/`e4_receipt`. Omitting it
+    # here reopened the exact construction #10601 review round 2 closed: a
+    # `REFUSED` table with every other key nulled and a CLOSED blocker named was
+    # EXEMPTED from V12 while `a_row_census` still held produced numbers
+    # (`edges_total`, `by_type`, the `pointKind` histogram, the subject-family
+    # counts). A key set derived from the emitter may not grow without this one.
+    "a_row_census",
 )
+
+#: The RUN-block keys that carry NO measureMENT: the run's identity, its graph name,
+#: the step DECLARATION it was gated over, and the reasons for steps it did not take.
+#: Declared so that a NEW measurement key on the emitter reds
+#: ``tests/test_7949_capstone_verdict_check.py``'s drift arm INSTEAD of silently
+#: escaping the set above — which is exactly how ``a_row_census`` (#10982) reopened
+#: the construction #10601 review round 2 closed. A hand-listed pin cannot see a key
+#: nobody hand-listed; this list is the other half of that pin.
+#:
+#: ⛔ ``door`` IS ``arm``'s SIBLING, not a measurement (#11298 merge, #11331). ``arm``
+#: was already parked here because it is the arm's ATTESTATION — the seam values
+#: ``measured_arm()`` forced and then read back — and ``door`` is that same block for
+#: the lane pins: ``door_record()`` carries ``measured``/``lane``/``lane_env``/
+#: ``pinned_off``/``source``, i.e. WHICH door the run took, not a produced number. Its
+#: one counted cell, ``door.captures`` (``door_witness()``'s ``entered``/``bypassed``),
+#: is a ROUTING witness and NO RECORD CAN VARY IT: ``main`` calls
+#: ``require_door_entered(runs)`` BEFORE it reaches ``render_log``
+#: (``capstone_measure.py:4164`` vs ``:4299``), and that function raises on any bypass,
+#: so ``bypassed`` is always ``[]`` and ``entered`` is always ``sessions`` re-counted.
+#: A constant carries no number of its own — ⛔ and NOT for the reason a witness like
+#: ``steps_observed`` would give: that key is itself a MEASUREMENT member of the set
+#: above, so it is not a precedent for parking anything here. ``arm`` is.
+#: Declaring ``door`` a measurement is the direction that cannot work: ``door`` is a
+#: non-empty dict on EVERY emitted record, so ``_record_carries_a_measurement`` would
+#: return ``True`` unconditionally and V12's exemption would be unreachable. Parking
+#: it here is therefore the only REACHABLE side — and this list is the PERMISSIVE
+#: side, never the fail-closed one: for a real measurement key the fail-closed
+#: direction is the set above, which is where the drift arm's refusal sends you.
+#: Parking a REAL measurement key here is still the residual this list states below.
+#:
+#: ⛔ RESIDUAL, stated so no reader treats this pin as complete: membership in one list or
+#: the other is the ONLY question the drift arm asks, so a REAL measurement key PARKED in
+#: this list silences it — measured, `"e6_receipt"` added to the emitter AND declared here
+#: leaves the arm green while the exemption still fails open for that record shape. The
+#: stale-entry and double-declaration arms bound the hole (a phantom name reds, and a key
+#: declared in BOTH lists is refused at import) but neither can tell a measurement key
+#: from an identity one. Parking one here is therefore a REVIEWABLE act in a diff, not a
+#: silent one — which is the most a hand-listed pin can promise, and why the behavioural
+#: remedy ((key, reason) pairs asserting a non-measurement value carries no number) is
+#: recorded as open rather than claimed here (#10982 review).
+_NON_MEASUREMENT_RUN_KEYS = (
+    "status",
+    "kind",
+    "probe",
+    "graph",
+    "arm",
+    # #11298 (merged at #11331): the door block is the arm block's sibling — the
+    # lane pins' read-back, not a scored number. See this list's header.
+    "door",
+    "steps_required",
+    "steps_conditional",
+    "steps_unobserved",
+)
+
+#: The two lists above answer OPPOSITE questions about one emitter block, so a key
+#: declared in BOTH would make the drift arm in
+#: ``tests/test_7949_capstone_verdict_check.py`` accept it either way while
+#: ``_record_carries_a_measurement`` still counted it — a silent disagreement no
+#: reader of either list can see. Refused at import: this module is a tool whose
+#: verdict CI reads, so a self-contradictory table must fail loudly at its own
+#: definition rather than produce a verdict.
+if set(_MEASUREMENT_RUN_KEYS) & set(_NON_MEASUREMENT_RUN_KEYS):
+    raise AssertionError(
+        "_MEASUREMENT_RUN_KEYS and _NON_MEASUREMENT_RUN_KEYS disagree about "
+        f"{sorted(set(_MEASUREMENT_RUN_KEYS) & set(_NON_MEASUREMENT_RUN_KEYS))} — a key is "
+        "either a measurement (fail closed) or it is not; declaring both hides the fact "
+        "that the exemption and the drift arm read differently")
 
 #: The nested blocks ``check()`` reads as OBJECTS. Declared so the type guard is
 #: derived from one list rather than repeated per call site.
@@ -808,18 +900,26 @@ def check(record: dict, *, repo: Path,
     seen = [r.get("criterion") for r in rows
             if isinstance(r, dict)
             and isinstance(r.get("criterion"), HASHABLE_SCALARS)]
+    # ⛔ MISSING is over `CRITERIA` (the epic closes on 5/5, so only those five can be demanded);
+    # `DECIDED-ONCE` is over `RECOGNISED_CRITERIA` — an A-row a table chooses to carry is decided
+    # once exactly as an E-row is. Running the duplicate half over `CRITERIA` alone meant two
+    # contradictory `A1` rows were accepted with no finding, while `[E1, E1]` red: the widening of
+    # the recognised vocabulary (#10982) removed an accidental protection (an A-row used to be
+    # REFUSED as unknown) without replacing it (#10982 review round 2).
     for criterion in CRITERIA:
-        n = seen.count(criterion)
-        if n == 0:
+        if seen.count(criterion) == 0:
             f.add("V2", f"rows[{criterion}]", "row is MISSING — the epic closes "
                                               "on 5/5, so an absent row can "
                                               "never be inferred from the rest")
-        elif n > 1:
+    for criterion in RECOGNISED_CRITERIA:
+        n = seen.count(criterion)
+        if n > 1:
             f.add("V2", f"rows[{criterion}]", f"{n} rows — a criterion is "
                                               "decided once, not voted on")
     for criterion in seen:
-        if criterion not in CRITERIA:
-            f.add("V2", f"rows[{criterion}]", "not an E1–E5 criterion")
+        if criterion not in RECOGNISED_CRITERIA:
+            f.add("V2", f"rows[{criterion}]",
+                  "not an E1–E5 or A1–A5 criterion")
 
     # A block that is `[]`/`"x"`/`5` is REPORTED here and read as empty below.
     # `.get` on a non-object raised AttributeError and escaped as exit 1 on a
