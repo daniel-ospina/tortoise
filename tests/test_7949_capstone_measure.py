@@ -10859,8 +10859,17 @@ def _cite_qualifiers(region: str) -> list[tuple[str, str]]:
     inert here" — never as "there is nothing to check".
     """
     out: list[tuple[str, str]] = []
-    for n, raw in re.findall(r":(\d+)`?\s*(?:\bat\b\s*|\()\s*([^\s,;)\]]{0,24})", region):
-        q = raw.strip("*`().,;")
+    # ⛔ The `at` branch and the parenthesised branch are SEPARATE captures because their
+    # terminators differ: an `at` cite's qualifier ends at a word boundary, a parenthesised one
+    # must CLOSE. Folding them into ONE capture group (as this line first did) made any
+    # parenthesised aside after a cite a "qualifier" — measured: `:9021 (see the note above)`
+    # reds as `[('9021', 'see')]` and `(line 3)` as `('9021', 'line')`, i.e. an ordinary
+    # sentence reported as "a LIVE shape came back" (#11517 review). The connector gap is
+    # `[^\S\n]*` so an aside on the NEXT line is not read as this cite's qualifier either.
+    for n, at_q, paren_q in re.findall(
+            r":(\d+)`?[^\S\n]*(?:\bat\b\s*([^\s,;)\]]{0,24})|\([^\S\n]*([^\s,;)\]]{0,24})\))",
+            region):
+        q = (at_q or paren_q).strip("*`().,;")
         if q:
             out.append((n, q))
     return out
@@ -10992,6 +11001,12 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         "§2's own spelling wraps the base in a newline and bold — typography, not the claim")
     assert _cite_qualifiers("the comment at :10906 and 40 lines") == [], (
         "a BARE cite has no qualifier — it is the grammar gap stated beside the arm, not a hit")
+    assert _cite_qualifiers(":9021 (see the note above)") == [], (
+        "an ordinary PARENTHESISED ASIDE after a cite is not a qualifier — only a CLOSED,"
+        " single-token parenthetical is a parenthesised cite (#11517 review: 'see' was read"
+        " as the qualifier and reported as a live shape)")
+    assert _cite_qualifiers(":9021\n(entry one) -> nothing") == [], (
+        "nor is a parenthetical on the NEXT line — the connector gap cannot cross a newline")
 
     # A1: #11205's channel is TRANSPORT ONLY — the schema line that spells the
     # predicate allowlist, and the comment saying nothing in `tortoise/` consumes it.
@@ -11397,9 +11412,12 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
             _base = {(_n, _q) for _n, _q in _quals if re.fullmatch(r"[0-9a-f]{7,40}", _q)}
             _not_base = [(_n, _q) for _n, _q in _quals if (_n, _q) not in _base]
             assert not _not_base, (
-                f"the §5 block qualifies a cite with something that is not a base ({_not_base}) "
-                "— `<n> at HEAD` and `<n> (HEAD)` are the LIVE shapes `#11555` retired; a cite "
-                "carries either the sha it was true at or no qualifier")
+                f"the §5 block qualifies a cite with something that is SHA-SHAPED but not a "
+                f"base ({_not_base}) — `<n> at HEAD` and `<n> (HEAD)` are the LIVE shapes "
+                "`#11555` retired. What this predicate measures is only the SHAPE (7–40 "
+                "lowercase hex); base CORRECTNESS is not tested here — it is carried by the "
+                "`:12929`/`:12779` arms beside this one, and a sha-shaped qualifier for the "
+                "wrong base stays green (#11517 review)")
     # The SYMBOL is what the record cites, so the invariant that survives any later insertion is
     # that `vet_enabled = (` is unique IN THE FILE. A rename or a second assignment is what makes
     # the citation ambiguous; the line it happens to sit on is not the claim.

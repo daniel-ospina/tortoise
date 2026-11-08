@@ -1096,6 +1096,56 @@ def test_the_pick_hands_the_union_pool_to_the_post_s4_pass():
     )
 
 
+def test_the_narrative_and_the_union_are_two_different_choices():
+    """The ITEMS are the union; the NARRATIVE is ONE arm's. Both at once, bound.
+
+    `run_s4` receives `picked["story"]` and `picked["embed_list"]` — so this
+    function hands S4 a union of both arms' items completed against a narrative
+    that may not mention the other arm's. That interaction was UNSTATED and
+    UNTESTED (#11002 review, P3): the pool test next door covers the removals and
+    the tie-break test covers the rate comparison, but nothing asserted the two
+    outputs come from DIFFERENT arms.
+
+    ⛔ NON-VACUITY: this dies if the pick stops unioning (then `first-only` is
+    gone from `embed_list`), if the narrative stops following the strict `>`
+    (then the tie case would flip), and if the pick returns one arm's bundle
+    wholesale instead of merging the two choices (then one of the four assertions
+    below inverts). It is asserted in BOTH directions — second strictly better,
+    and an exact tie — because a rule that only kept the first would pass the
+    tie half.
+    """
+    def _arm(story, item, rate):
+        return {"story": story,
+                "embed_list": {"entities": [{"name": item, "kind": "Thing"}]},
+                "metrics": {"keep_rate": rate}, "vet_pool": {},
+                "vet_stats": {}, "mention_stats": {}, "warnings": [],
+                "batch": {}, "chunks": 1, "failed_chunks": 0, "s2_failed": False}
+
+    def _names(picked):
+        return {e["name"] for e in picked["embed_list"]["entities"]}
+
+    first = _arm("first narrative", "first-only", 0.5)
+    second = _arm("second narrative", "second-only", 0.9)
+    picked = extractor_v2._renarrate_pick(first, second)
+    assert picked["story"] == "second narrative", (
+        "a STRICTLY better keep-rate takes the narrative")
+    assert picked["narrative"] == "second" and picked["items"] == "union", (
+        "both decisions are named separately, because they are different choices")
+    _ids = _names(picked)
+    assert _ids == {"first-only", "second-only"}, (
+        f"the items are STILL the union of both arms — got {_ids}. The losing "
+        "arm's narrative is dropped; its ITEMS are not")
+
+    # The tie half: equal rates keep the FIRST narrative, and the union is
+    # unchanged from the case above.
+    tie = extractor_v2._renarrate_pick(first, _arm("second narrative", "second-only", 0.5))
+    assert tie["story"] == "first narrative" and tie["narrative"] == "first", (
+        "a tie keeps the FIRST — keeping the second would let a coin flip lower "
+        "the accepted keep-rate")
+    assert _names(tie) == {"first-only", "second-only"}, (
+        "and the union does not depend on which narrative won")
+
+
 def test_each_arm_records_its_own_coverage_verdict(monkeypatch):
     """F3's predicate reads the PRE-retry arm, so each arm records its OWN flag.
 
