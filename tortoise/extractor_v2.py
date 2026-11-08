@@ -3747,16 +3747,26 @@ def _section_list(embed_list: object, section: str) -> list:
     return []
 
 
-def render_partial_gap_prompt(narrative: str, spans: dict, embed_list: dict, *,
+def render_partial_gap_prompt(spans: dict, embed_list: dict, *,
                               session_date: str | None = None,
                               core_only: bool | None = None) -> str:
     """Render the #11534 gap-fill prompt for the FLAGGED spans only.
 
-    ``spans`` is a ``vet_gate.partial_gaps`` result. The spans ride as an
-    untrusted region (a narrative is verbatim session text — the same envelope
-    rule S1's story and S4's story slot obey, `#10311`), addressed by their index
-    in the flagged list so a model's item can be traced back to the span it
-    claims to cover.
+    ``spans`` is a ``vet_gate.partial_gaps`` result. The flagged span texts ride
+    as an untrusted region — they are verbatim session text, the same envelope
+    rule S1's story and S4's story slot obey (`#10311`).
+
+    ⚠️ The spans are numbered `[i]` in the rendered block for the reader's
+    orientation only: nothing downstream reads an index back, so an emitted item
+    is **not** traceable to the span it claims to cover. An earlier version of
+    this docstring claimed that traceability, which no code and no test
+    implemented (review round 4); the contract would need a span-index field and
+    a call site that records it, and neither exists.
+
+    ``narrative`` is deliberately NOT a parameter — the prompt carries the
+    flagged spans, not the whole narrative, and a signature implying the
+    narrative were spliced in would invite an author to add a region the
+    envelope rule has to be re-argued for.
     """
     if core_only is None:
         core_only = _classify_later_enabled()
@@ -3806,7 +3816,7 @@ def run_partial_gap_fill(model, narrative: str, embed_list: dict, *,
         return {}
     return _complete_parsed(
         model,
-        render_partial_gap_prompt(narrative, gaps, embed_list,
+        render_partial_gap_prompt(gaps, embed_list,
                                   session_date=session_date,
                                   core_only=core_only),
         "Emit the items the uncovered spans state. Emit nothing when they "
@@ -13297,6 +13307,39 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                     errors.append("gap-fill output partial — truncated tail "
                                   "dropped (gap unclosed)")
                     _bump_census_class(error_census, "partial_parse")
+                # ⛔ MALFORMED ≠ EMPTY (review round 4, P1). This stage is the
+                # SAME shape of code as S4 — same `_complete_parsed` (which
+                # returns parsed JSON unvalidated), same embed-list consumer —
+                # and S4 has carried `_s4_malformed_sections` since #1789's
+                # Task 3, which found this exact silent loss there. The gap-fill
+                # path did not call it, so two failure modes were recorded as
+                # successes:
+                #   * ALL-malformed (`{"points": "oops"}`, `[42]`, `[{}]`) —
+                #     `_s4_section_is_content` is False for a truthy-but-garbage
+                #     section, so the run fell to the `else` below and recorded
+                #     `added_items: 0`, which is defined there as "the model
+                #     found no claim in the spans". False: the model DID emit
+                #     content, and it was dropped. That corrupts the benefit
+                #     side of the A/B whose cost side is `stats["llm"]` — a
+                #     garbage answer scores as a legitimate zero-benefit session.
+                #   * PARTLY-malformed (valid `points` + `"entities":
+                #     "garbage"`) — `any(...)` is True, the merge runs, and
+                #     `merge_embed_lists` FILTERS the garbage section out: no
+                #     error, no census, section silently gone.
+                # The guard runs PER SECTION before the gate, exactly as S4's
+                # does: each bad section is recorded (error + census, the
+                # deterministic-append pairing) and DROPPED, while valid
+                # sections still merge — no whole-reject, no silent loss.
+                bad_sections = _s4_malformed_sections(added)
+                for _sec in bad_sections:
+                    errors.append(f"gap-fill output malformed section {_sec!r} — "
+                                  "dropped (gap unclosed for it)")
+                    _bump_census_class(error_census, "gap_fill_shape_error")
+                if bad_sections:
+                    gap_fill_stats["malformed_sections"] = bad_sections
+                    added = ({k: v for k, v in added.items()
+                              if k not in set(bad_sections)}
+                             if isinstance(added, dict) else {})
                 if isinstance(added, dict) and any(
                         _s4_section_is_content(k, v) for k, v in added.items()):
                     before = _vet_gate.check_batch(embed_list, story)

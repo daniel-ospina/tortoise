@@ -344,6 +344,53 @@ def test_the_stage_is_off_by_default(monkeypatch):
     assert "partial_gap_fill" not in out["stats"]
 
 
+def test_a_malformed_gap_fill_answer_is_not_scored_as_no_claim(monkeypatch):
+    """MALFORMED ≠ EMPTY, on the STAGE's answer (review round 4, P1).
+
+    `_s4_section_is_content` is False for a truthy-but-garbage section, exactly
+    as for an absent one — so before this guard an all-malformed answer fell to
+    the "the model found no claim in the spans" branch and the run recorded
+    `added_items: 0`. That is a false statement about a run whose model DID emit
+    content, and it corrupts the benefit side of the A/B whose cost side is
+    `stats["llm"]`. S4 has carried `_s4_malformed_sections` since #1789 Task 3,
+    which found this same silent loss there; this stage did not call it.
+    """
+    model = _Model(gap_answer=json.dumps({"points": "oops"}))
+    out = _run(monkeypatch, model)
+    stats = out["stats"]["partial_gap_fill"]
+    assert stats["malformed_sections"] == ["points"]
+    assert out["error_census"].get("gap_fill_shape_error") == 1
+    assert any("malformed section 'points'" in e for e in out["errors"])
+    # the garbage section cannot be scored as a legitimate zero-benefit session
+    assert stats["added_items"] == 0
+    assert "flagged_before" not in stats, (
+        "nothing valid arrived, so the union was never re-scored — that is the "
+        "state the census above distinguishes from 'the spans state no claim'")
+
+
+def test_a_partly_malformed_gap_fill_answer_still_merges_the_valid_section(
+        monkeypatch):
+    """The per-section half: a garbage `entities` must not take the valid
+    `points` down with it, and must not vanish without a census.
+
+    Before the guard `any(...)` was True (the valid points), the merge ran, and
+    `merge_embed_lists` filtered the garbage section out — no error, no census.
+    """
+    answer = json.dumps({"points": [{"content": _MISSING_POINT,
+                                     "pointKind": "statement"}],
+                         "entities": "garbage"})
+    model = _Model(gap_answer=answer)
+    out = _run(monkeypatch, model)
+    stats = out["stats"]["partial_gap_fill"]
+    assert stats["malformed_sections"] == ["entities"]
+    assert out["error_census"].get("gap_fill_shape_error") == 1
+    # the VALID section still reached the union
+    assert stats["added_items"] >= 1
+    assert stats["flagged_after"] < stats["flagged_before"]
+    assert any(_MISSING_POINT[:40] in (p.get("content") or "")
+               for p in out["embed_list"]["points"])
+
+
 def test_an_all_empty_s2_batch_is_skipped_without_a_model_call(monkeypatch):
     """THE ZERO-CANDIDATE POPULATION IS SKIPPED, AND THE SKIP IS RECORDED.
 
@@ -608,6 +655,23 @@ def test_the_coverage_floor_is_justified_by_the_measured_distribution():
     assert sum(1 for v in values if v >= 1.0) == 147
     assert sum(1 for v in values if v < vet_gate.GAP_COVERAGE_FLOOR) == 35
     assert sum(1 for v in values if 0.5 <= v < 0.6) == 4
+    # ⛔ AND THE PLACEMENT CLAIM IS PINNED, NOT MERELY QUOTED (round 4, P2).
+    # The code comment and the evidence record both used to call [0.5, 0.6) "the
+    # THINNEST band between the two"; that was FALSE — [0.2, 0.3) holds 3 and
+    # [0.8, 0.9) holds 4 — and the pin only counted the band, so the sentence
+    # stayed green while it was wrong. What IS true and is asserted here: the
+    # band is the LOCAL MINIMUM of the three straddling the floor, and one of its
+    # four values sits ABOVE the floor, so 0.55 cuts three of the four.
+    bands = [sum(1 for v in values if lo <= v < lo + 0.1)
+             for lo in (0.4, 0.5, 0.6)]
+    assert bands == [6, 4, 14], bands
+    assert bands[1] == min(bands), (
+        "the floor's band must be the local minimum of the three straddling it — "
+        "this is the whole placement argument")
+    straddling = [v for v in values if 0.5 <= v < 0.6]
+    assert sum(1 for v in straddling if v >= vet_gate.GAP_COVERAGE_FLOOR) == 1, (
+        "the band is a shallow minimum, not a clean separation: 0.586 is above "
+        "the floor, so the record must not call the floor a gap between modes")
     # ... and the 35 below the floor IS the pinned flag count for one run
     # (70 over both runs), so the distribution and the flag rate cannot drift
     # apart: one number, two independent readings.

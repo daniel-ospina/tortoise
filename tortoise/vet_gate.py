@@ -402,9 +402,23 @@ def _narrative_statements(narrative: str) -> int:
 #: here only gives the next reader a number to re-quote).
 #: Over the 7 committed sessions the population is a full-coverage MASS with a
 #: low TAIL: of the 210 segments that clear ``GAP_MIN_CONTENT_TOKENS``, **147 sit
-#: at exactly 1.0** and **35 fall below this floor**, and ``[0.5, 0.6)`` is the
-#: THINNEST band between the two (4 segments) — the trough 0.55 sits in
-#: (median 1.0, p10 0.355, p25 0.736).
+#: at exactly 1.0** and **35 fall below this floor** (median 1.0, p10 0.355, p25
+#: 0.736).
+#:
+#: ⛔ WHERE THE FLOOR SITS, SAID SO THAT IT IS TRUE (review round 4, P2). An
+#: earlier version of this comment called ``[0.5, 0.6)`` "the THINNEST band
+#: between the two", and that is FALSE on the population it cites: measured in
+#: 0.1-wide bands, ``[0.2, 0.3)`` holds 3 segments and ``[0.8, 0.9)`` holds 4, so
+#: the band the floor sits in is neither the thinnest nor uniquely thin. What the
+#: data does support is narrower and is what the pin asserts: across the three
+#: bands straddling the floor (``[0.4, 0.5)`` 6 · ``[0.5, 0.6)`` 4 · ``[0.6, 0.7)``
+#: 14) this one is the LOCAL MINIMUM, and it is a shallow one — of its four values
+#: (0.508 · 0.511 · 0.528 · 0.586) ONE sits above the floor, so 0.55 cuts three of
+#: the four. The floor's defensible justification is the mass/tail split above;
+#: the local minimum is corroboration, not a separation. Pinned by
+#: ``test_the_coverage_floor_is_justified_by_the_measured_distribution`` (which
+#: re-derives the bands), so the next reader cannot re-quote a claim nothing
+#: measures.
 GAP_COVERAGE_FLOOR = 0.55
 
 #: Segments carrying fewer content words than this are not claims — markdown

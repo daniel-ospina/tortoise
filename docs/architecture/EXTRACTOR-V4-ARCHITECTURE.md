@@ -715,13 +715,19 @@ unfirable (block at the top of §10).
 > the very capability the dash clause says is lost, since `run_s4` *is* a shipped stage. The
 > pre-condition for removal is a stage that can ADD; building it is the migration deliverable.
 >
-> ⛔ **THE FOLD NOW HAS SUCH A STAGE AND ITS REACH IS MEASURED — the present tense is stated here, not
-> assumed above.** `#11534` ships `S2.2b` (`run_partial_gap_fill`, armed OFF) inside S2.2: on the F3
-> population it emits a candidate for **8 of the 12 point** additions `run_s4` makes, and for only
-> **1 of the 9 operator** additions — because an operator addition GENERALISES an already-covered
-> statement at a higher abstraction, survives the coverage gate, and is unreachable by a coverage
-> detector by construction. So the precondition is met for the coverage class only; the measurement,
-> the flag rate and the bounds are `docs/evidence/11534-partial-gap/README.md`.
+> ⛔ **WHAT `#11534` MEASURED IS THE TRIGGER, NOT THE STAGE — do not read the next number as a stage
+> yield.** The PR ships two pieces inside S2.2: the DETECTOR `vet_gate.partial_gaps`, and its consumer
+> `S2.2b` (`run_partial_gap_fill`, armed OFF). On the F3 population the **detector** flags a span
+> whose tokens overlap **8 of the 12 `points`** and **1 of the 9 `operators`** that `run_s4` adds —
+> and the operator misses are not uncovered prose: an operator addition GENERALISES an
+> already-covered statement at a higher abstraction, survives the coverage gate, and is unreachable by
+> a coverage detector by construction. So a coverage **trigger** reaches the coverage half of S4's
+> additions and structurally cannot reach the generalisation half.
+> **`S2.2b`'s own yield is NOT measured**: it depends on whether a model handed a flagged span emits
+> the right item, which needs live sessions and a key. The precondition for removing `run_s4` is
+> therefore met for the *coverage class* of gap only, by a trigger — not by a demonstrated stage. The
+> flag rate, the per-session read-through and the explicit bounds are
+> `docs/evidence/11534-partial-gap/README.md` §4.
 >
 > ⚠️ **THAT BUILD IS `#11534`'s, AND IT COVERS ONE OF THE TWO GAP CLASSES — not both.**
 > `S2.2b` (`extractor_v2.run_partial_gap_fill`, behind `TORTOISE_PARTIAL_GAP_FILL`, **default OFF**)
