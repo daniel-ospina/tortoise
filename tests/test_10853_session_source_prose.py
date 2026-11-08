@@ -1486,10 +1486,16 @@ def test_the_10852_obligation_quotes_the_authority_AS_IT_NOW_READS():
         if beyond:
             raise AssertionError(
                 "the narrowing's citation IS present, but "
-                f"{beyond[0].start()} characters after the anchor {ANCHOR!r} — "
-                f"beyond this pin's {WINDOW}-character tether. The quotation does "
-                "not need restoring; either move the citation back beside the "
-                "anchor or widen WINDOW, so the pin can see the shape it grades")
+                f"{beyond[0].start()}-{beyond[0].end()} characters after the anchor "
+                f"{ANCHOR!r} — its match runs past this pin's {WINDOW}-character "
+                "window edge, so the windowed search never sees it. (Reported as a "
+                "SPAN, not a start offset: the arm is decided by whether the match "
+                "FITS, so a start inside the window with a tail past it lands here "
+                "too, and naming only the start would call a 534-character gap "
+                "\"beyond the 600-character tether\" — #11481 review round 11.) The "
+                "quotation does not need restoring; either move the citation back "
+                "beside the anchor or widen WINDOW, so the pin can see the shape "
+                "it grades")
     # ⚠️ EXACTLY ONE, because two is AMBIGUOUS and ambiguity must be loud: nothing
     # here can tell which of two citations the narrowing rests on, so resolving
     # either silently certifies a coin flip.
