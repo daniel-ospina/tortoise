@@ -3369,13 +3369,18 @@ def test_an_UNCORROBORATED_zero_does_not_certify(monkeypatch, capsys):
         a typo is the ordinary case.
     """
     _export_a_record_dsn(monkeypatch)
-    graph = _RecordingGraph([(_post_fix_node(),)])   # no lexicon node ⇒ no control
+    graph = _RecordingGraph([(_post_fix_node(),)])
     _install_fts(monkeypatch, {"zebraquux": []})
     _install_cli(monkeypatch, graph, ["--dry-run", "--assert-clean",
                                       "--probe-phrase", "zebraquux"])
+    # ⛔ PATCH THE VERB `probe_fts` ACTUALLY CALLS (#11536 review round 5): it
+    # reads `lexicon_control_read`, so patching the `lexicon_control_token`
+    # wrapper left this row's control reached by accident (via the fake's row
+    # shape) instead of by the seam it names — and a change to that shape would
+    # have moved the row to a different arm without reddening anything.
     monkeypatch.setattr(
-        "tortoise.session_source_prose_migration.lexicon_control_token",
-        lambda g, **k: None)
+        "tortoise.session_source_prose_migration.lexicon_control_read",
+        lambda g, **k: (None, None))
 
     assert _cli.main() == 1, (
         "an uncorroborated zero certified the verification")
@@ -3957,6 +3962,14 @@ def test_the_documented_report_contracts_are_the_ones_the_run_RETURNS(monkeypatc
         assert key in probe_doc, (
             f"a probe ROW carries {key!r} but the documented row shape never "
             f"names it")
+    # ⛔ AND THE CONTROL BLOCK (#11536 review round 5): it is the one sub-dict the
+    # contract used to undersell — `mode` is emitted on every arm and is what
+    # separates a corroborating probe from a structurally empty index.
+    assert report["control"] is not None
+    for key in report["control"]:
+        assert key in probe_doc, (
+            f"the control block carries {key!r} but the documented contract "
+            f"never names it")
     split = m.classify_fts_hits(_LexiconGraph([(_post_fix_node(),)]),
                                 ["session:s-post"], phrase="migration")
     split_doc = " ".join((m.classify_fts_hits.__doc__ or "").split())

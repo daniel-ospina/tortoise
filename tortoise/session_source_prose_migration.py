@@ -1672,7 +1672,21 @@ def probe_fts(g, phrases, *, control: bool = True,
          "truncated": [phrase, ...],       # the window filled — a FLOOR, not a 0
          "unresolved": int,                # summed hits whose url was not
                                            # ADDRESSABLE — examined by no bucket
-         "control": {"ok", "hits", "note"} | None}
+         "control": {"mode": "probe" | "empty-index" | "unavailable",
+                     # `probe`:      a known-present lexicon token was measured
+                     #               (carries ran/degraded/reason too)
+                     # `empty-index`: no Source carries `_searchText` at all and
+                     #               the read RAN — structurally consistent, and
+                     #               the ONLY arm where ok=True with hits=0
+                     # `unavailable`: nothing corroborates the probe's zero
+                     "ok", "hits",          # hits is None when not measured
+                     "note",
+                     "ran", "degraded", "reason"} | None}
+    # ⛔ ``mode`` IS LOAD-BEARING, not decoration (#11536 review round 5): the
+    # three arms are distinguishable ONLY by it — a `probe` control can be ok True
+    # or False, `empty-index` is ok True with hits 0, `unavailable` carries
+    # hits None — so a `--json` consumer that read only {ok, hits, note} could not
+    # tell a corroborating control from a structurally empty index.
 
     ⛔ EVERY KEY ABOVE IS RETURNED, and every returned key is listed here (#11536
     review round 3, P2). This docstring used to describe five of them: it omitted
