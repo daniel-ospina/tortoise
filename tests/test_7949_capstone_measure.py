@@ -10808,12 +10808,35 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # predicate allowlist, and the comment saying nothing in `tortoise/` consumes it.
     assert "`hasPart`" in text and "`tortoise/extractor_v2.py:1720`" in text, (
         "the record must cite the relations schema where `hasPart` is spelled")
-    # The A1 proof command must be receiver-AGNOSTIC. The dot-anchored `'\.(create_edge|…)\('` form
-    # exits 1 on an unqualified `return create_operator(payload)` (measured), so it cannot prove the
-    # sentence it sits under — and the tokenized arm below already names that shape.
-    assert r"(^|[^[:alnum:]_.])(create_edge|create_about_edge|create_operator)[[:space:]]*\(" in text, (
-        "the record's A1 proof command must catch an UNQUALIFIED call as well as a receiver-qualified "
-        "one — a dot-anchored form exits 1 on `return create_operator(payload)`, so it proves nothing")
+    # The A1 proof command must match BOTH shapes its sentence covers, and must stay on ONE line WITH
+    # its pathspec. Two measured ways to pin the COMPLEMENT instead: a dot-ANCHORED `'\.(verb)\('`
+    # exits 1 on an unqualified `return create_operator(payload)`, and a `[^[:alnum:]_.]` class
+    # EXCLUDES the dot so it exits 1 on `sdk.create_edge(payload)` — the exact false reading the
+    # tokenized arm below was written for. Wrapped, the command loses its pathspec and greps the whole
+    # tree (measured: 133 hits, exit 0, where the record states no output). The pattern is READ OUT of
+    # the record and proved on both samples, so a future tidy cannot re-install the complement.
+    _a1_cmd = re.search(
+        r"git grep -nE '([^']*create_edge[^']*)' tortoise/extractor_v2\.py", text)
+    assert _a1_cmd is not None, (
+        "§1 item 2 must print its A1 proof command on ONE line with its pathspec — split across two "
+        "lines it drops `tortoise/extractor_v2.py` and greps the whole tree")
+    _a1 = _a1_cmd.group(1)
+    # ⚠️ Structural BEFORE behavioural: the class that decides both halves is the dotted one. A `[^…_.]`
+    # class excludes the `.` that precedes a receiver, so it is blind to `sdk.create_edge(payload)`;
+    # dropping the `(^|…)` alternation and anchoring on `\.` is blind to the bare call instead.
+    assert "[^[:alnum:]_]" in _a1 and "[^[:alnum:]_.]" not in _a1, (
+        f"the A1 proof command's class reads {_a1!r} — a dot-EXCLUDING class is blind to a "
+        "receiver-qualified call, which is the false reading the tokenized arm exists to catch")
+    # …and BEHAVIOUR, through `grep -E` itself: `re` does not speak POSIX classes, so proving this
+    # pattern with `re` would prove nothing about the command the record hands the reader.
+    _probe = Path(tempfile.mkdtemp()) / "a1_probe.py"
+    _probe.write_text(
+        "return create_operator(payload)\nsdk.create_edge(payload)\n", encoding="utf-8")
+    _hit = subprocess.run(["grep", "-nE", _a1, str(_probe)], capture_output=True, text=True)
+    assert _hit.returncode == 0 and len(_hit.stdout.splitlines()) == 2, (
+        f"the A1 proof command matches {len(_hit.stdout.splitlines())} of the two call shapes (an "
+        "UNQUALIFIED and a RECEIVER-qualified call) — it must match both, or it certifies a tree "
+        f"that calls the verb; grep said {_hit.stdout!r} exit {_hit.returncode}")
     assert "hasPart" in ext[1720 - 1] and '"predicate":' in ext[1720 - 1], (
         f"extractor_v2.py:1720 reads {ext[1720 - 1].strip()[:90]!r}, not the schema "
         "line that spells the predicate allowlist")

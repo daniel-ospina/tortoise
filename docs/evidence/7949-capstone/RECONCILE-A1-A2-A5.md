@@ -139,12 +139,13 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
    **CLOSED**; its remainder is **`#11237`**, OPEN).
 2. **`extractor_v2.py` calls none of the three edge-creating verbs**, so it cannot be the producer of any
    Object→Object edge, including the declared `hasPart` pairs:
-   `git grep -nE '(^|[^[:alnum:]_.])(create_edge|create_about_edge|create_operator)[[:space:]]*\('
-   tortoise/extractor_v2.py` → **no output**, exit 1. This is `#10984`'s own third bullet, still true
-   after the merge. ⚠️ **The receiver-AGNOSTIC form is the one printed here on purpose:** the earlier
-   `'\.(create_edge|…)\('` spelling exits 1 on an UNQUALIFIED `return create_operator(payload)`
-   (measured), so it cannot prove the sentence it sits under — the tokenized pin in
-   `tests/test_7949_capstone_measure.py` is the complete check, and this command is its
+   `git grep -nE '(^|[^[:alnum:]_])(create_edge|create_about_edge|create_operator)[[:space:]]*\(' tortoise/extractor_v2.py` → **no output**, exit 1. This is `#10984`'s own third bullet, still true
+   after the merge. ⚠️ **This spelling is the one printed here on purpose**, and it must stay on ONE
+   line: the earlier `'\.(create_edge|…)\('` form exits 1 on an UNQUALIFIED
+   `return create_operator(payload)`, while a `[^[:alnum:]_.]` class (which EXCLUDES the dot) exits 1
+   on the receiver-qualified `sdk.create_edge(payload)` — each is blind to one half (both measured), and
+   a wrap across two lines drops the pathspec and greps the whole tree. The tokenized pin in
+   `tests/test_7949_capstone_measure.py` is the complete check; this command is its
    hand-reproducible form.
    ⛔ **Do not use the bare token count.** `grep -c -E 'create_edge|create_about_edge|create_operator'`
    printed **0** at this record's base and prints **4** on `origin/main`, because `#11205`'s explanation
@@ -642,11 +643,11 @@ git grep -n 'create_operator' -- tortoise/extractor_v2.py                 # :900
 .venv/bin/python3 -m tortoise pack validate packs/dev      # 6 declared hierarchies, exit 0
 git grep -n apply_hierarchy_edges                          # 9 in the test file + __all__ + def
 git grep -n plan_hierarchy_edges                           # 9 in the test file + :59/:78/:353/:447
-git grep -nE '(^|[^[:alnum:]_.])(create_edge|create_about_edge|create_operator)[[:space:]]*\(' \
-  tortoise/extractor_v2.py                                 # no output, exit 1 — receiver-QUALIFIED
-                                                          # or bare: the old dot-anchored form exits 1
-                                                          # on an unqualified call (measured), so it
-                                                          # could not prove the sentence above
+git grep -nE '(^|[^[:alnum:]_])(create_edge|create_about_edge|create_operator)[[:space:]]*\(' \
+  tortoise/extractor_v2.py                                 # no output, exit 1 — the class must NOT
+                                                          # exclude `.`: a dot-EXCLUDING one exits 1 on
+                                                          # `sdk.create_edge(payload)`, a dot-ANCHORED
+                                                          # one on the bare call (both measured)
                                                           # ⛔ NOT the bare token count: that is 4 on
                                                           # origin/main since #11205 (four COMMENTS naming
                                                           # sdk.create_operator) and 0 at this base — a
