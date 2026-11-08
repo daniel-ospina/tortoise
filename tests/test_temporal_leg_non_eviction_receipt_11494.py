@@ -86,8 +86,9 @@ GEOMETRY = {"tr_top_k": 12, "temporal_leg_limit": 2, "temporal_leg_weight": 1.0,
             "temporal_leg_placement": "tail"}
 
 #: The reader window every slice below indexes, DERIVED from the geometry above
-#: rather than restated as a literal: a `tr_top_k` edit then moves one row, not
-#: seven. A geometry change still reddens loudly (`ceiling == 10`, and the
+#: rather than restated as a literal: a `tr_top_k` edit then moves this one row
+#: instead of every slice site (measured: ten slice occurrences, on nine lines).
+#: A geometry change still reddens loudly (`ceiling == 10`, and the
 #: `base_sessions` fixture self-check), so deriving cannot hide a bad geometry.
 WINDOW = GEOMETRY["tr_top_k"]
 
