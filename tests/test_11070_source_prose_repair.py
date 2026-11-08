@@ -3727,7 +3727,7 @@ def test_an_UNMEASURABLE_probe_VETOES_even_when_the_CONTROL_answers(monkeypatch)
         "the fixture did not degrade the PROBE's read: "
         + repr(report["probes"][0]))
     assert (report["control"] or {}).get("ok") is True, (
-        # ⛔ THE REASON IS NOT "uncorroborated" (cycle-6 review, P2, MEASURED):
+        # ⛔ THE REASON IS NOT "uncorroborated" (#11536 review P2, MEASURED):
         # the `unmeasurable` arm sits ABOVE every control arm, so the veto is the
         # same whatever the control reports (`ok=True`, `ok=False` and `None` all
         # fold to `vetoed="unmeasurable"`). This premise matters for a different
