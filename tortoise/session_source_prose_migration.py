@@ -1167,7 +1167,13 @@ def reconcile_after_replay(projection, *, engine: str,
 #    nothing. That is what the BEFORE/AFTER pair is for: a probe with
 #    ``hits_before > 0`` that now reads 0 is the discriminating evidence, and a
 #    probe whose before was ALSO 0 is reported as undiscriminating rather than
-#    counted as a pass.
+#    counted as a pass. ⛔ THE SCOPE OF THAT SENTENCE (#11536 review round 7,
+#    P2): it describes the arm that TOOK a before reading, i.e. the writing arm.
+#    A dry run takes none, so on that arm the control is the only evidence
+#    available and a zero-before probe DOES certify — the run's printed claim is
+#    narrowed to "the read answers" (see ``_report_fts``), and `--json` still
+#    names the token in `undiscriminating` for a machine consumer. Stating the
+#    rule without its arm made this paragraph broader than its measurement.
 # 2. **The index read itself returned nothing** — an FTS circuit breaker that is
 #    open, an index dropped, or a query that failed all surface to
 #    ``run_fts_query`` as ``[]``. ``leg_trace`` is therefore read on EVERY probe
@@ -1871,6 +1877,16 @@ def probe_fts(g, phrases, *, control: bool = True,
                       # EMPTY `lexicon` bucket, so without this term it reported the
                       # hit as a benign stem collision in `--json` — the same
                       # "nothing examined" shape the verdict already vetoes.
+                      # ⛔ AND NOT A FOREIGN HIT (#11536 review round 7, P2):
+                      # `foreign` is a hit on a `:Source` outside this episodic
+                      # session's own urls — an EXAMINED, bucketed node that is
+                      # NOT a lexicon node, so the contract this list documents
+                      # ("hits, but every one is a lexicon node") is false for it.
+                      # Round 3 closed the same shape for `unresolved` and left
+                      # this one in place: a probe whose only hit was foreign had
+                      # an EMPTY `lexicon` bucket and still read as a benign stem
+                      # collision to every `--json` consumer.
+                      and not p["foreign"]
                       and not p.get("unresolved")],
         "unexplained": [p["phrase"] for p in measured if p["unexplained"]],
         "unmeasurable": [p["phrase"] for p in measured

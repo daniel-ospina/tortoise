@@ -222,6 +222,29 @@ def _merge_probe(before: dict | None, after: dict, *,
     the control is the best evidence available — the same footing as a dry run,
     which takes no BEFORE reading at all and therefore NARROWS its printed claim
     instead of asserting the Target's conjunctive property (see ``_report_fts``).
+
+    Returns the ``probe_fts`` report with its ``probes`` rows REPLACED by merged
+    rows, plus the keys the verdict is read by — this dict IS ``--json``'s
+    ``fts_probe`` and the only input to :func:`fts_gate`, so a key added here and
+    not listed is a contract change nothing documents (#11536 review round 7,
+    P2; ``test_the_documented_report_contracts_are_the_ones_the_run_RETURNS``
+    holds the sibling reports to the same rule). Every key of *after* is carried
+    through — ``"ran"``, ``"entity_type"``, ``"limit"``, ``"probes"``,
+    ``"leaked"``, ``"stale"``, ``"stem_only"``, ``"unexplained"``,
+    ``"unmeasurable"``, ``"truncated"``, ``"unresolved"``, ``"control"`` —
+    and these are added::
+
+        {"unclassified": [phrase, ...],     # a hit nothing examined — vetoes
+         "undiscriminating": [phrase, ...], # did not HIT before and reads 0
+                                            # after (a dry run has no BEFORE)
+         "certifies": bool,                 # the leg's verdict — see above
+         "vetoed": str | None}              # the veto that decided it
+
+    Per ``probes`` row it also adds ``residue_before`` (int | None), ``before``
+    (the BEFORE row's own state, or None) and ``discriminating`` (bool); the row
+    otherwise keeps the ``probe_fts`` shape — {phrase, hits, urls, unresolved,
+    truncated, ran, degraded, reason, residue, lexicon, stale, foreign,
+    unexplained, unread}.
     """
     probes = []
     for index, got in enumerate(after["probes"]):
@@ -908,6 +931,19 @@ def main() -> int:
             # one instrument that scans every Source — it is an int, so it
             # carries no utterance, and the operator's verification run is the
             # only place a duplicate-`:Session` population would ever be seen.
+            #
+            # ⛔ ONE NAMED EXCEPTION, STATED HERE RATHER THAN IN THE PRINT SITE
+            # (#11536 review round 7, P2): the ``--probe-phrase`` tokens ARE
+            # echoed (``_report_fts``), and a probe token is transcript text —
+            # the runbook tells the operator to take "a SINGLE RARE token that
+            # appears only in the pre-fix summary". The exception is deliberate:
+            # the token is the run's own INPUT (the operator typed it on this
+            # command line), so echoing it discloses nothing they did not already
+            # supply, while the CONTROL token — which this tool DERIVES from the
+            # record — is never printed, only its hit count. The rule the
+            # whitelist enforces is therefore about text the TOOL derives, not
+            # text the operator supplies; stating it at the print site alone left
+            # this doctrine reading as an absolute.
             found = find_session_sources_carrying_prose(proj.g)
             report = reconcile_session_source_prose(
                 proj.g, read_transcript=read_transcript, dry_run=True,

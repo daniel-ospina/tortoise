@@ -2085,6 +2085,44 @@ def test_the_printed_and_json_detail_never_carries_the_utterance(monkeypatch,
         "a node reached by ONE `:Session` reports a duplicate row")
 
 
+def test_the_PROBE_PHRASE_is_echoed_ON_PURPOSE_and_the_pair_is_not(monkeypatch,
+                                                                    capsys):
+    """The one NAMED exception to "no piece of the utterance reaches stdout".
+
+    (1) FAILS if the exception is silently widened or silently revoked. The
+        redaction doctrine in this script is a WHITELIST over text the tool
+        DERIVES from the record (the census pair, the control token); the probe
+        phrase is the operator's own INPUT — the runbook tells them to take "a
+        SINGLE RARE token that appears only in the pre-fix summary", so the
+        token IS transcript text. Printing it discloses nothing the operator did
+        not type, and NOT printing it makes a failed verification
+        undiagnosable.
+    (2) REACHABLE: every `--assert-clean` verification passes `--probe-phrase`,
+        so this is the ordinary reporting path, not a corner.
+    (3) THE DEMONSTRATED GAP (#11536 review round 7, P2): the previous guard
+        asserted only `PROSE not in out` — the WHOLE sentence — so no test would
+        have noticed a future change printing a longer span. Both directions are
+        pinned here: the token MAY appear, the sentence never does, and neither
+        the control token nor the derived pair gains a print path.
+    """
+    _export_a_record_dsn(monkeypatch)
+    graph = _RecordingGraph([(_session_node(),)])
+    # `Fridays` is one token OF the utterance — exactly the documented exception.
+    _install_cli(monkeypatch, graph,
+                 ["--dry-run", "--assert-clean", "--probe-phrase", "Fridays"])
+
+    _cli.main()
+    out = capsys.readouterr().out
+    assert "Fridays" in out, (
+        "the probe phrase is the operator's own INPUT and is echoed on purpose "
+        "— if this stops being true, the exception in the redaction doctrine "
+        "must be removed with it")
+    assert PROSE not in out, (
+        "the DERIVED pair reached stdout: echoing the probe token is the "
+        "documented exception, echoing the sentence is the leak the whitelist "
+        "exists to stop")
+
+
 # ── #11176: the census counts NODES, not rows — and the mark is the STRONGEST ──
 
 
@@ -3076,6 +3114,67 @@ def test_an_EMPTY_STRING_url_is_UNRESOLVED_and_cannot_certify(monkeypatch):
     assert "COULD NOT BE CLASSIFIED for []" not in said, (
         "the refusal named an empty phrase list and a classification-read "
         "failure that did not happen: " + said)
+
+
+def test_a_FOREIGN_only_hit_is_NOT_reported_as_a_stem_collision(monkeypatch):
+    """``stem_only`` documents "hits, but every one is a lexicon node".
+
+    (1) FAILS on the shipped fold (#11536 review round 7, P2): ``stem_only``
+        excluded residue/stale/unread/unexplained/unresolved and NOT ``foreign``
+        — a hit on a ``:Source`` outside the episodic population. That is an
+        EXAMINED, bucketed node that is NOT a lexicon node, so the probe was
+        summarised as a benign stem collision while its ``lexicon`` bucket was
+        EMPTY. Round 3 closed this exact shape for ``unresolved`` and left this
+        one in place, one predicate short.
+    (2) REACHABLE: every ``--json`` report carries ``stem_only``, and a consumer
+        reading it concludes the token matched a REPAIRED node. Nothing had been.
+    (3) POLARITY THAT MUST NOT GO RED: a genuine lexicon hit still reports
+        ``stem_only`` — asserted here, so the fix cannot over-exclude and turn a
+        real stem collision into a veto.
+    """
+    from tortoise import session_source_prose_migration as m
+
+    _install_fts(monkeypatch, {
+        "zebraquux": [("https://example.com/page", 1.0)],
+        "migration": [("session:s-post", 2.0)],
+    })
+
+    class _ControlGraph(_RecordingGraph):
+        """A lexicon node the CONTROL can read, so the zero is corroborated."""
+
+        def query(self, cypher, params=None, timeout=None):
+            if "STARTS WITH $prefix" in cypher:
+                return _Result([("migration, plan, friday",)])
+            return super().query(cypher, params=params, timeout=timeout)
+
+    # A non-episodic Source with its own `_searchText`: `_hit_node_bucket` labels
+    # it `foreign` (not residue, not a proven lexicon, not a cleared episodic
+    # node), which is the shape the fold was dropping into `stem_only`.
+    foreign = _post_fix_node(url="https://example.com/page", sourceKind="web",
+                             sessionId=None, is_episodic=False, summary="",
+                             _searchText="zebraquux page")
+    report = m.probe_fts(_ControlGraph([(_post_fix_node(),), (foreign,)]),
+                         ["zebraquux"], control=True)
+    assert report["probes"][0]["foreign"] == ["https://example.com/page"], (
+        "the fixture did not exercise the `foreign` bucket: "
+        + repr(report["probes"][0]))
+    assert report["probes"][0]["lexicon"] == []
+    assert report["stem_only"] == [], (
+        "`stem_only` documents 'hits, every one a lexicon node' — this probe's "
+        "`lexicon` bucket is EMPTY and its only hit is `foreign`, so reporting "
+        "it as a benign stem collision contradicts its own documented meaning")
+
+    # (3) the polarity that must not go red: a REAL lexicon hit still reports.
+    _install_fts(monkeypatch, {
+        "fridays": [("session:s-post", 2.0)],
+        "migration": [("session:s-post", 2.0)],
+    })
+    lexicon = m.probe_fts(_ControlGraph([(_post_fix_node(),)]), ["fridays"],
+                          control=True)
+    assert lexicon["probes"][0]["lexicon"] == ["session:s-post"]
+    assert lexicon["stem_only"] == ["fridays"], (
+        "a genuine stem collision must still be summarised as `stem_only` — the "
+        "fix for the foreign case must not swallow the benign one")
 
 
 def test_a_BREAKER_OPEN_read_is_UNMEASURABLE_not_a_clean_zero(monkeypatch):
@@ -4262,6 +4361,27 @@ def test_the_documented_report_contracts_are_the_ones_the_run_RETURNS(monkeypatc
             f"it")
     assert set(split) == {"residue", "lexicon", "stale", "foreign",
                           "unexplained", "unread"}
+
+    # ⛔ AND THE FOLD ITSELF (#11536 review round 7, P2). `_merge_probe`'s dict is
+    # `--json`'s `fts_probe` AND the only input to `fts_gate`, so a key it emits
+    # and does not document is a contract change nothing records — the same rule
+    # the two functions above are held to. It was the one report in the chain
+    # left out, on the branch whose head commit is "the repair's contract names
+    # the keys its verdict is read by".
+    _install_fts(monkeypatch, {"zebraquux": [],
+                              "migration": [("session:s-post", 2.0)]})
+    folded = _cli._merge_probe(None, m.probe_fts(_LexiconGraph(
+        [(_post_fix_node(),)]), ["zebraquux"], control=True))
+    merge_doc = " ".join((_cli._merge_probe.__doc__ or "").split())
+    for key in folded:
+        assert f'"{key}"' in merge_doc, (
+            f"`_merge_probe` RETURNS {key!r} but its documented contract never "
+            f"lists it — and that dict is the `--json` surface the verdict is "
+            f"read from")
+    for key in folded["probes"][0]:
+        assert key in merge_doc, (
+            f"a merged probe row carries {key!r} but the documented row shape "
+            f"never names it")
 
     # (1)+(2) the breaker-open leg: "measured" must not survive a read that never
     # ran — `bool(phrases)` reported exactly that.
