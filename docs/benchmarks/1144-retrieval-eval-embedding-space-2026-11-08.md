@@ -90,7 +90,7 @@ measured, and never from ambient availability:
 |---|---|---|
 | a model is loaded, this run seeded the synthetic corpus | `model` | `_reembed_corpus()` re-encodes every seeded point with that same model (production write shape: clear-then-set guard + `vecf32`); queries encode with it too |
 | no model | `oracle-synthetic` | the documented degraded fallback on BOTH sides |
-| `--no-seed-corpus` and no model | `unknown` | the graph's vectors were written by the product; a centroid is not a substitute |
+| `--no-seed-corpus` (any environment) | `unknown` | the vectors already in the graph were not written by this run (an earlier eval seed's centroids and product embeddings are indistinguishable); no space can be claimed, and a loaded model does not launder one |
 
 Labels are untouched: the oracle grades from HIDDEN topics and per-topic live
 ids, never from embeddings, so re-encoding cannot move a relevance judgment.
@@ -102,9 +102,13 @@ in both spaces, so it could not detect the change it exists to detect.
 `_gate_vs_baseline` refuses a cross-space comparison with a new verdict,
 `INCOMPARABLE`, naming the remedy (commit a run of unmodified code in this
 space) instead of reporting a regression the change did not cause. A
-baseline's space comes from its own provenance; for a schema-1 baseline, which
-predates the field, it is derived from `embedding_model` (`unavailable` →
-`oracle-synthetic`).
+baseline's space comes from its own provenance; when it declares none, it is
+read from `embedding_model` as a record of what that run DID: absent or
+`unavailable` → `oracle-synthetic` (no embedder, so both sides came from the
+oracle), and a real model id → `unknown`, because a run that predates this fix
+re-embedded nothing and therefore measured the MIXED corpus-synthetic /
+query-model arm — `unknown` makes the gate refuse rather than certify the
+instrument change as a ~+70-point improvement.
 
 ## 4. After — and what the number now means
 

@@ -454,7 +454,8 @@ def test_gate_refuses_a_cross_space_comparison():
 
 
 def test_baseline_embedding_space_reads_legacy_baselines():
-    """Schema-1 baselines predate the field; their provenance still answers."""
+    """Baselines that predate the field; their provenance still answers — and
+    a pre-fix baseline WITH an embedder is `unknown`, not `model`."""
     legacy = {"schema_version": 1, "provenance": {"timestamp_utc": "2026-08-17"}}
     assert (run_module._baseline_embedding_space(legacy)
             == run_module.EMBED_SPACE_SYNTHETIC), \
@@ -462,9 +463,16 @@ def test_baseline_embedding_space_reads_legacy_baselines():
     assert (run_module._baseline_embedding_space(
         {"provenance": {"embedding_model": "unavailable"}})
         == run_module.EMBED_SPACE_SYNTHETIC)
+    # A schema-2 baseline written BEFORE this fix carries `embedding_model` but
+    # no declared space, and that run re-embedded nothing: it measured a MIXED
+    # corpus-synthetic / query-model arm. Labelling it `model` would compare a
+    # fixed run against it as comparable and report the instrument change as a
+    # ~+70-point SHIP; `unknown` makes the gate refuse instead.
     assert (run_module._baseline_embedding_space(
-        {"provenance": {"embedding_model": "BAAI/bge-small-en-v1.5"}})
-        == run_module.EMBED_SPACE_MODEL)
+        {"schema_version": 2,
+         "provenance": {"embedding_model": "BAAI/bge-small-en-v1.5"}})
+        == run_module.EMBED_SPACE_UNKNOWN), \
+        "a pre-fix baseline with an embedder is mixed-space, in no single space"
     declared = {"provenance": {"corpus_embedding_space": "model",
                                "embedding_model": "unavailable"}}
     assert run_module._baseline_embedding_space(declared) == run_module.EMBED_SPACE_MODEL, \
@@ -507,15 +515,63 @@ def test_corpus_embedding_space_follows_the_corpus_not_the_environment():
     with patch.object(run_module, "_loaded_embedding_model", return_value=None):
         assert (run_module._corpus_embedding_space(seeded_synthetic=True)[0]
                 == run_module.EMBED_SPACE_SYNTHETIC)
-        # --no-seed-corpus: the graph's vectors came from the product, so with
-        # no model the space cannot be established at all (never silently
-        # assumed synthetic — that would grade the real graph against centroids)
+        # --no-seed-corpus: the graph's vectors were NOT written by this run, so
+        # the space cannot be established at all — never silently assumed (a
+        # centroid corpus graded against model queries is the original defect,
+        # and an eval db keeps its centroids across runs)
         assert (run_module._corpus_embedding_space(seeded_synthetic=False)[0]
                 == run_module.EMBED_SPACE_UNKNOWN)
     stub = _StubModel()
     with patch.object(run_module, "_loaded_embedding_model", return_value=stub):
         assert (run_module._corpus_embedding_space(seeded_synthetic=True)
                 == (run_module.EMBED_SPACE_MODEL, stub))
+        # ...and a LOADED model does not make an existing corpus's space known:
+        # `--no-seed-corpus` means the vectors on disk were written by someone
+        # else, so the answer stays `unknown` (and no re-embed of a point list
+        # this run never seeded).
+        assert (run_module._corpus_embedding_space(seeded_synthetic=False)[0]
+                == run_module.EMBED_SPACE_UNKNOWN), \
+            "an ambient model must not launder an unverified corpus's space"
+
+
+def test_query_vecs_refuse_to_degrade_the_queries_in_the_model_space():
+    """In the model space the corpus is ALREADY re-embedded, so a query-encode
+    failure must raise: falling back to oracle vectors here rebuilds the
+    two-space arm while provenance still says 'model'."""
+    oracle = run_module.build_topic_oracle(42)
+    queries = [{"id": "q001", "query": "pricing tiers enterprise"},
+               {"id": "q002", "query": "pricing tiers team"}]
+
+    class _FailingModel:
+        def encode(self, texts):
+            raise RuntimeError("model call stalled")
+
+    with (patch.object(run_module, "_loaded_embedding_model",
+                       return_value=_FailingModel()),
+          pytest.raises(RuntimeError, match="stalled")):
+        run_module._query_vecs(
+            oracle, queries, 42, space=run_module.EMBED_SPACE_MODEL,
+        )
+
+
+def test_query_vecs_degrade_the_whole_arm_in_the_synthetic_space():
+    """The documented fallback survives where it is sound: no corpus has been
+    model-embedded, so ALL queries take the oracle's vectors."""
+    oracle = run_module.build_topic_oracle(42)
+    queries = [{"id": "q001", "query": "pricing tiers enterprise"}]
+
+    class _FailingModel:
+        def encode(self, texts):
+            raise RuntimeError("model call stalled")
+
+    with patch.object(run_module, "_loaded_embedding_model",
+                      return_value=_FailingModel()):
+        vecs, use_model = run_module._query_vecs(
+            oracle, queries, 42, space=run_module.EMBED_SPACE_SYNTHETIC,
+        )
+
+    assert use_model is False
+    assert vecs["q001"] == oracle.query_vector_for("pricing tiers enterprise", 42)
 
 
 @pytest.mark.skipif(not _has_embedded(), reason="embedded FalkorDBLite unavailable")
@@ -568,3 +624,44 @@ def test_the_fingerprint_is_taken_after_the_reembed(tmp_path):
         "identical embeddings_hash across the two spaces means the fingerprint "
         "was taken BEFORE the re-embed"
     )
+
+
+@pytest.mark.skipif(not _has_embedded(), reason="embedded FalkorDBLite unavailable")
+def test_run_reusing_existing_corpus_claims_no_space(tmp_path):
+    """--no-seed-corpus + a LOADED model: the vectors already in the graph were
+    not written by this run, so the space is `unknown` and nothing is re-encoded
+    (re-encoding the freshly GENERATED point list would MERGE points this run
+    never seeded into the graph). The gate then refuses instead of gating an
+    unverified corpus against a model-space baseline."""
+    db = str(tmp_path / "eval-reuse.db")
+    stub = _StubModel()
+    with patch.object(run_module, "_loaded_embedding_model", return_value=None):
+        first = run_eval(_args(db, corpus_size=60))
+    assert first["provenance"]["corpus_embedding_space"] == run_module.EMBED_SPACE_SYNTHETIC
+
+    with patch.object(run_module, "_loaded_embedding_model", return_value=stub):
+        reused = run_eval(_args(db, corpus_size=60, no_seed_corpus=True))
+
+    prov = reused["provenance"]
+    assert prov["corpus_embedding_space"] == run_module.EMBED_SPACE_UNKNOWN, (
+        "an ambient model must not launder the space of a corpus this run did "
+        "not write"
+    )
+    assert prov["corpus_reembedded"] == 0, \
+        "the no-seed path must not re-encode (it would MERGE unseeded points)"
+    assert stub.calls == [], "nothing to encode in the unknown space"
+
+    # ...and gating it against the committed MODEL-space baseline must REFUSE
+    # (INCOMPARABLE), never report the instrument difference as a quality delta.
+    baseline_path = (Path(__file__).resolve().parent / "baseline"
+                     / "baseline-embedded-model-2026-11-08.json")
+    with patch.object(run_module, "_loaded_embedding_model", return_value=stub):
+        gated = run_eval(_args(db, corpus_size=60, no_seed_corpus=True,
+                               baseline=str(baseline_path)))
+    gate = gated["gate_vs_baseline"]
+    assert gate is not None, "the baseline must reach the gate"
+    assert gate["verdict"] == "INCOMPARABLE", (
+        "an unverified corpus must never be scored as comparable against a "
+        "model-space baseline"
+    )
+    assert gate["space"] == run_module.EMBED_SPACE_UNKNOWN

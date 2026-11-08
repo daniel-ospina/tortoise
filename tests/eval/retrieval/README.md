@@ -80,7 +80,7 @@ So the space is decided from the CORPUS side, once per run
 |---|---|---|
 | no embedder (`uv sync`, CI offline) | `oracle-synthetic` | queries = topic-centroid sums (documented degraded fallback) |
 | embedder loaded (`uv sync --extra embeddings`) | `model` | the seeded corpus is RE-EMBEDDED with that model (`corpus_reembedded` in provenance), queries too |
-| `--no-seed-corpus`, no embedder | `unknown` | the graph's vectors came from the product; nothing can be assumed |
+| `--no-seed-corpus` (any environment) | `unknown` | the vectors already in the graph were not written by this run — an earlier eval seed's centroids and product embeddings are indistinguishable — so no space is claimed and the gate refuses |
 
 `provenance.corpus_embedding_space` names which one a report used. **It is not
 cosmetic.** Before this rule existed the query side silently took the ambient
@@ -121,8 +121,10 @@ does not block.
 different embedding spaces differ by the INSTRUMENT, so `_gate_vs_baseline`
 returns `INCOMPARABLE` (naming the remedy: commit a run of unmodified code in
 that space) instead of a BLOCK. A baseline's space comes from its own
-provenance — and for a schema-1 baseline, which predates the field, it is
-derived from `embedding_model` (`unavailable` → `oracle-synthetic`).
+provenance — and when it declares none, `embedding_model` records what that run
+DID: absent/`unavailable` → `oracle-synthetic`; a real model id → `unknown`,
+because a pre-fix run re-embedded nothing and measured the mixed
+corpus-synthetic / query-model arm (so the gate refuses instead of scoring it).
 
 ## Judges + adjudication (authored set)
 

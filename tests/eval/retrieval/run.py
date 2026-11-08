@@ -446,7 +446,7 @@ def _loaded_embedding_model():
         return None
     try:
         return EmbeddingModel.get()
-    except Exception:  # noqa: BLE001 — an unloadable model is "no model"
+    except Exception:  # an unloadable model is "no model"
         return None
 
 
@@ -470,16 +470,20 @@ def _corpus_embedding_space(*, seeded_synthetic: bool):
       corpus with that same model; both sides are ``model``.
     * no model → both sides are the oracle's ``oracle-synthetic`` space (the
       documented degraded fallback).
-    * ``--no-seed-corpus`` → the graph's embeddings were written by the
-      PRODUCT, so only ``model`` can serve it; with no model the space cannot
-      be established (``unknown``) and the gate must refuse to compare.
+    * ``--no-seed-corpus`` → the vectors already in the graph were not written
+      by THIS run, so their space cannot be established — the graph may hold
+      an earlier eval seed's centroids (the db file keeps them across runs)
+      or embeddings the PRODUCT wrote. ``unknown``, model loaded or not, and
+      the gate must refuse to compare: assuming ``model`` there re-creates the
+      two-space arm on the first ``--no-seed-corpus`` reuse of an eval db,
+      labelled as sound.
     """
     model = _loaded_embedding_model()
+    if not seeded_synthetic:
+        return EMBED_SPACE_UNKNOWN, None
     if model is not None:
         return EMBED_SPACE_MODEL, model
-    if seeded_synthetic:
-        return EMBED_SPACE_SYNTHETIC, None
-    return EMBED_SPACE_UNKNOWN, None
+    return EMBED_SPACE_SYNTHETIC, None
 
 
 def _reembed_corpus(graph, points: list[dict], model, *, batch_size: int = 200) -> int:
@@ -507,7 +511,7 @@ def _reembed_corpus(graph, points: list[dict], model, *, batch_size: int = 200) 
             + " RETURN count(n) AS n",
             params={"batch": [
                 {"id": p["id"], "embedding": [float(x) for x in vec]}
-                for p, vec in zip(batch, encoded)
+                for p, vec in zip(batch, encoded, strict=True)
             ]},
         ).result_set
         if rows:
@@ -544,10 +548,18 @@ def _query_vecs(oracle, queries, seed: int, space: str | None = None):
                 vecs[q["id"]] = [float(x) for x in model.encode([q["query"]])[0]]
                 continue
             except Exception:
-                if vecs:
-                    # a mid-run failure would leave the arm half in each space
+                if vecs or space == EMBED_SPACE_MODEL:
+                    # A mid-run failure would leave the arm half in each space.
+                    # And in the MODEL space the corpus is ALREADY model-encoded
+                    # (`_reembed_corpus` runs before this), so falling back to
+                    # oracle query vectors here would rebuild the exact
+                    # two-space defect this function exists to prevent — while
+                    # provenance still reported `corpus_embedding_space: model`
+                    # and the gate compared it as sound (measured shape: BLOCK
+                    # on unmodified code, plus a false one-space claim).
                     raise
-                # first query failed: degrade the WHOLE arm, never per-query
+                # first query failed in the SYNTHETIC space: degrade the WHOLE
+                # arm, never per-query
                 model = None
         vecs[q["id"]] = oracle.query_vector_for(q["query"], seed)
     return vecs, model is not None
@@ -615,9 +627,19 @@ def _rerank_verdict(per_query, rng) -> dict | None:
 def _baseline_embedding_space(base: dict) -> str:
     """The space a baseline measured, derived when the field predates it.
 
-    Schema-1 baselines carry no ``corpus_embedding_space``; their
-    ``embedding_model`` of ``unavailable``/absent is the record that the run had
-    no embedder, i.e. the synthetic space.
+    A baseline that DECLARES ``corpus_embedding_space`` is taken at its word.
+    Otherwise the field predates this rule, and ``embedding_model`` is the only
+    witness — read as the record of what that run DID, never as a statement
+    about what was installed:
+
+    * absent / ``""`` / ``"unavailable"`` → no embedder in that run, so BOTH
+      sides came from the oracle → ``oracle-synthetic``.
+    * anything else → the run had an embedder, and before this rule existed
+      nothing ever re-embedded the corpus (``_reembed_corpus`` did not exist),
+      so the run measured a MIXED corpus-synthetic / query-model arm. That is
+      in no single space: ``unknown``, which makes the gate refuse
+      (INCOMPARABLE) instead of scoring the instrument change as a ~+70-point
+      "improvement".
     """
     prov = base.get("provenance") or {}
     declared = prov.get("corpus_embedding_space")
@@ -626,7 +648,7 @@ def _baseline_embedding_space(base: dict) -> str:
     model = prov.get("embedding_model")
     if model in (None, "", "unavailable"):
         return EMBED_SPACE_SYNTHETIC
-    return EMBED_SPACE_MODEL
+    return EMBED_SPACE_UNKNOWN
 
 
 def _gate_vs_baseline(
@@ -729,7 +751,7 @@ def _run_with_sdk(args, sdk) -> dict:
     # the change it exists to detect).
     space, model = _corpus_embedding_space(seeded_synthetic=not args.no_seed_corpus)
     reembedded = 0
-    if space == EMBED_SPACE_MODEL and not args.no_seed_corpus:
+    if space == EMBED_SPACE_MODEL:  # never --no-seed-corpus: that is `unknown`
         reembedded = _reembed_corpus(proj.g, points, model)
         if not args.quiet:
             print(f"[corpus] re-embedded {reembedded} points in the "
@@ -995,7 +1017,11 @@ def _run_with_sdk(args, sdk) -> dict:
             "with that same model (provenance.corpus_reembedded) so the arm "
             "is real semantic retrieval. Never one side each: that compared "
             "bge text vectors against centroid vectors and reported a "
-            "37-point nDCG 'regression' on unmodified code.",
+            "37-point nDCG 'regression' on unmodified code. "
+            "--no-seed-corpus → 'unknown': the vectors already in the graph "
+            "were not written by this run (an earlier eval seed's centroids "
+            "and product embeddings are indistinguishable here), so no space "
+            "can be claimed and the gate refuses to compare.",
             "The gate REFUSES a cross-space comparison (verdict "
             "INCOMPARABLE) — paired deltas across two embedding spaces "
             "measure the instrument, not the change. Baseline files carry "
