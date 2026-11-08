@@ -85,26 +85,68 @@ def test_duplicate_follows_its_keeper():
     Same content hash, different content (a stale hash): the keeper is not carried,
     so its duplicate must not be carried either — and must say so.
 
-    Round-29 review finding 2: this asserted `"a" in reason` where the ids were
-    literally `"a"` and `"b"`, and the reason then interpolated the keeper's
-    DISPOSITION — so it passed on the letter `a` inside `not-carried`, and would
-    still have passed with the keeper reference deleted entirely. Ids are now
-    unmistakable and the assertion names the keeper's identity.
+    Round-29 review finding 2 fixed a vacuous assertion here (`"a" in reason` passed
+    on the letter inside `not-carried`). Round-30 review finding 2 then found that
+    the fix asserted a FALSEHOOD in this very fixture: the reason named the empty
+    row as "the row of record for this content" while the only copy of the text sat
+    in the other row, and `plan --rows` cannot show that (Decision.as_dict carries
+    no `content`). The promotion loop now lets the content-holding row BE the
+    keeper, so the claim is true and the empty row inherits a truthful
+    `undecidable` rather than a confident `not-carried`.
     """
     plan = C.build_plan(
-        [row("keeper-node", content="", content_hash="H"),
-         row("duplicate-node", content="A durable claim", content_hash="H")],
+        [row("empty-node", content="", content_hash="H"),
+         row("content-node", content="A durable claim", content_hash="H")],
         source_graph="old", target_graph="new", packs={},
     )
     by_id = {d.node_id: d for d in plan.decisions}
-    assert by_id["keeper-node"].disposition == C.NOT_CARRIED     # empty content
-    # follows the keeper, not its own rule
-    assert by_id["duplicate-node"].disposition == C.NOT_CARRIED
-    reason = by_id["duplicate-node"].reason
-    assert "keeper-node" in reason, f"the reason must name the keeper, not its disposition: {reason!r}"
-    # …and it must not be the disposition wearing a keeper's name: the substring
-    # that made the old assertion vacuous is now impossible to satisfy by accident.
-    assert "not-carried" in reason, "the keeper's disposition is still reported"
+    # The row that HOLDS the content is the row of record — not the empty one that
+    # merely arrived first.
+    assert by_id["content-node"].disposition == C.UNDECIDABLE, (
+        "the row holding the only copy of the text is undecidable, never silently 'not-carried'")
+    assert by_id["empty-node"].disposition == C.UNDECIDABLE
+    reason = by_id["empty-node"].reason
+    assert "content-node" in reason, f"the reason must name the keeper: {reason!r}"
+    assert "empty-node" not in reason, f"the reason must not name the duplicate as keeper: {reason!r}"
+    assert "row of record" not in reason or "content" in reason
+    # Nothing is carried — the content has no ruling yet, which is the honest state.
+    assert plan.carry_rows() == []
+
+
+def test_a_content_holding_row_displaces_an_empty_keeper():
+    """Round-30 review finding 2: the round-7 invariant only held when the
+    content-bearing row's own rule CARRYed. When it did not, an empty keeper
+    survived and the artifact claimed the content was accounted for.
+
+    A row that holds content must displace an incumbent that holds none, whatever
+    that row's own disposition is — and the disposition the empty row inherits must
+    not assert the claim is safely left behind.
+    """
+    plan = C.build_plan(
+        [row("empty-keeper", content="", content_hash="H"),
+         row("real-keeper", content="Let me check the schema.", content_hash="H")],
+        source_graph="old", target_graph="new", packs={},
+    )
+    by_id = {d.node_id: d for d in plan.decisions}
+    # The row that HOLDS the content is the one of record, so it must never be
+    # reported as somebody else's duplicate…
+    assert "duplicate" not in by_id["real-keeper"].reason, (
+        f"the content-holding row must not be labelled a duplicate: "
+        f"{by_id['real-keeper'].reason!r}")
+    # …and the row holding nothing must never be presented as the row of record.
+    assert "row of record" not in by_id["empty-keeper"].reason, (
+        f"an empty row cannot be the row of record for content it does not hold: "
+        f"{by_id['empty-keeper'].reason!r}")
+    assert by_id["empty-keeper"].disposition != C.CARRY
+    assert by_id["real-keeper"].disposition in (C.UNDECIDABLE, C.NOT_CARRIED), (
+        "its own rule decides its disposition — here the narrative marker does")
+
+
+def test_the_promotion_loop_does_not_reorder_a_single_row_plan():
+    """Guard: the keeper-promotion pass must not perturb an order it has no work for."""
+    plan = C.build_plan([row("solo", kind="decision", content="a claim")],
+                        source_graph="old", target_graph="new", packs={})
+    assert [d.node_id for d in plan.decisions] == ["solo"]
 
 
 def test_duplicate_of_an_undecidable_keeper_stays_undecidable():
@@ -1002,9 +1044,51 @@ def test_a_total_pack_catalog_failure_is_visible_in_the_census(monkeypatch):
     "visible in the census", but `census()` had no pack dimension at all — a run
     where EVERY manifest failed to load built a fully pack-less plan, stamped
     `pack: null` on every carried row, and reported a census byte-identical to a
-    healthy run's. The destination is the pack-FILED graph, so unobservable
-    pack loss is the failure this pins.
+    healthy run's. The destination is the pack-FILED graph, so unobservable pack
+    loss is the failure this pins.
+
+    Round-30 review finding 1 fixed two ways the first version of this test did not
+    actually pin it. (a) `rows_without_pack` counted EVERY decision, so its value was
+    set by the population left behind rather than by pack loss — measured with the
+    real catalog, only the strategy kinds resolve, so a healthy run over the
+    documented carry set read 125 unfiled of 127. It now counts CARRIED rows only.
+    (b) the healthy arm used `core`, a namespace this same file asserts does not
+    exist (see `test_an_unknown_kind_prefix_is_not_pack_ownership`), so it never
+    proved a healthy arm at all. It now uses a REAL pack for a REAL carried kind.
+    **The two arms must differ in the VALUE, not merely in key presence.**
     """
+    # `jobToBeDone` is a carried strategy kind, and the installed catalog files it
+    # under `product-strategy` — so this is a healthy arm in the true sense.
+    healthy_mapping, healthy_note = C.load_pack_kind_map()
+    assert healthy_note is None, f"this test needs a loadable catalog, got: {healthy_note!r}"
+    assert C.pack_for("jobToBeDone", "point", healthy_mapping) == "product-strategy"
+
+    def plan_row():
+        # The fixture MUST carry non-carried rows that also have no pack, or
+        # "carried rows only" and "every decision" compute the SAME number and the
+        # test cannot tell them apart (measured: the single-row version passed with
+        # the buggy `every decision` form). The narrative statements below are
+        # not-carried and unfiled — they are exactly the population that made the
+        # old field read ~the same in both catalog states.
+        return C.build_plan(
+            [row("p1", kind="jobToBeDone", content="a durable job"),
+             row("n1", content="Let me look."),
+             row("n2", content="Let me check that.")],
+            source_graph="old", target_graph="new",
+        )
+
+    healthy = plan_row()
+    assert len(healthy.carry_rows()) == 1, (
+        f"the fixture must carry exactly the filed row; got "
+        f"{[d.node_id for d in healthy.carry_rows()]}")
+    healthy_census = healthy.census()
+    assert healthy.pack_catalog_note is None
+    assert healthy_census["carried_rows"] == 1
+    assert healthy_census["rows_without_pack"] == 0, (
+        "a healthy catalog files every CARRIED row; non-carried rows must not be counted, "
+        f"or the field tracks the population left behind: {healthy_census}")
+
+    # ── now make the catalog unreadable, and require the reported state to CHANGE ──
     import tortoise.pack_registry as reg
 
     def boom(*_a, **_kw):
@@ -1017,20 +1101,16 @@ def test_a_total_pack_catalog_failure_is_visible_in_the_census(monkeypatch):
     assert note and "pack catalog unavailable" in note
     assert "OSError" in note, "the note names the cause, not just the symptom"
 
-    plan = C.build_plan([row("p1", kind="decision", content="a claim")],
-                        source_graph="old", target_graph="new")
-    census = plan.census()
-    assert plan.pack_catalog_note == note
-    assert census["pack_catalog_note"] == note
-    assert census["rows_without_pack"] == 1, (
-        "the aggregate report must be able to say that NO row is filed")
-
-    # A supplied mapping is healthy, and says so by carrying no note.
-    healthy = C.build_plan([row("p1", kind="decision", content="a claim")],
-                           source_graph="old", target_graph="new",
-                           packs={("pointKind", "decision"): "core"})
-    assert healthy.pack_catalog_note is None
-    assert healthy.census()["rows_without_pack"] == 0
+    broken = plan_row()
+    broken_census = broken.census()
+    assert broken.pack_catalog_note == note
+    assert broken_census["pack_catalog_note"] == note
+    assert broken_census["carried_rows"] == healthy_census["carried_rows"], (
+        "the same plan: only the pack dimension changed")
+    assert broken_census["rows_without_pack"] == broken_census["carried_rows"]
+    # THE ASSERTION THAT MATTERS: the state is distinguishable by value.
+    assert broken_census["rows_without_pack"] != healthy_census["rows_without_pack"], (
+        "a total pack loss must MOVE this field — otherwise it reports nothing")
 
 
 def test_an_unknown_kind_prefix_is_not_pack_ownership():

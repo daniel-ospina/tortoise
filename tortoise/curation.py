@@ -347,9 +347,20 @@ def classify_point(
     if duplicate_of is not None:
         # The keeper was not carried: neither is its duplicate, and the reason names
         # the keeper rather than claiming a carry that did not happen.
+        body = (
+            f"exact content duplicate of a row that was not carried ({duplicate_of})"
+        )
+        if str(row.content or "").strip():
+            # Only claim the keeper is the ROW OF RECORD when it actually holds the
+            # content. The promotion loop guarantees it does for a content-bearing
+            # duplicate, but an all-empty duplicate group has no holder at all, and
+            # asserting one would be the round-30 finding 2 lie in the other
+            # direction.
+            body = f"{body}; the keeper {who} is the row of record for this content"
+        else:
+            body = f"{body}; this row carries no content either"
         return Decision(row.node_id, row.node_type, row.kind, NOT_CARRIED,
-                        f"exact content duplicate of a row that was not carried ({duplicate_of}); "
-                        f"the keeper {who} is the row of record for this content", pack, key, row.content)
+                        body, pack, key, row.content)
 
     if not (row.content or "").strip():
         return Decision(row.node_id, row.node_type, row.kind, NOT_CARRIED,
@@ -497,8 +508,17 @@ class Plan:
         It also carries the PACK dimension the pack routing can fail on, because
         without it a total pack-catalog failure was unreportable: every row came
         out with ``pack: None`` and the census was byte-identical to a healthy
-        run's (round-29 review finding 3). ``rows_without_pack`` is the signal an
-        operator can actually see in the aggregate report.
+        run's (round-29 review finding 3).
+
+        ``rows_without_pack`` counts **CARRIED** rows only, and that population is
+        the whole point: it is the set that will actually be WRITTEN, so it is the
+        set a pack loss can damage. Counting every decision made the field a
+        function of the population that is deliberately left behind instead —
+        measured against the real catalog, a HEALTHY plan over the documented
+        carry set reported 125 unfiled of 127 (only the strategy kinds resolve to
+        ``product-strategy``), so "the catalog is gone" and "the catalog is fine"
+        differed by 1.6% and the field reported nothing (round-30 review finding
+        1).
         """
         by: dict[str, dict[str, int]] = {}
         for d in self.decisions:
@@ -509,13 +529,15 @@ class Plan:
         for slot in by.values():
             for k, v in slot.items():
                 totals[k] = totals.get(k, 0) + v
-        unfiled = sum(1 for d in self.decisions if not d.pack)
+        carried = self.carry_rows()
+        unfiled = sum(1 for d in carried if not d.pack)
         return {
             "source_graph": self.source_graph,
             "target_graph": self.target_graph,
             "total_rows": len(self.decisions),
             "totals": totals,
             "by_class": dict(sorted(by.items())),
+            "carried_rows": len(carried),
             "rows_without_pack": unfiled,
             "pack_catalog_note": self.pack_catalog_note,
         }
@@ -621,15 +643,36 @@ def build_plan(
     # A keeper that carries NOTHING cannot be "the row of record" for the content:
     # preferring a keeper whose own disposition carries means a real-content row is
     # never dropped in favour of an empty one that happens to share its hash.
+    #
+    # Round-30 review finding 2: that invariant only held when the real-content
+    # row's OWN rule carried. When it returned UNDECIDABLE the empty keeper
+    # survived, and the duplicate's reason then asserted "the keeper <id> is the row
+    # of record for this content" about a row holding no content — while the only
+    # copy of the text was left behind and `plan --rows` (which does not carry
+    # `content`) could not reveal it. So a row that HOLDS content displaces an
+    # incumbent that holds none, whatever that row's own disposition is; the
+    # duplicate then inherits a TRUE disposition (``undecidable`` — we cannot say
+    # this content is safely left behind, which R8 requires) instead of a
+    # confident `not-carried`.
     for row in rows:
         key = row.stable_key
-        if first_pass[key].disposition == CARRY or first_pass[key].node_id == row.node_id:
+        incumbent = first_pass[key]
+        if incumbent.node_id == row.node_id:
             continue
-        if keepers.get(key) != row.node_id and str(row.content or "").strip():
-            candidate = classify(row, mapping)
-            if candidate.disposition == CARRY:
-                keepers[key] = row.node_id
-                first_pass[key] = candidate
+        if not str(row.content or "").strip():
+            continue
+        if not str(incumbent.content or "").strip():
+            # The incumbent witnesses nothing: this row becomes the row of record.
+            keepers[key] = row.node_id
+            first_pass[key] = classify(row, mapping)
+            continue
+        # The incumbent holds the content: only a CARRYing candidate improves on it.
+        if incumbent.disposition == CARRY:
+            continue
+        candidate = classify(row, mapping)
+        if candidate.disposition == CARRY:
+            keepers[key] = row.node_id
+            first_pass[key] = candidate
 
     for row in rows:
         key = row.stable_key
