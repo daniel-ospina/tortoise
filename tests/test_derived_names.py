@@ -359,27 +359,21 @@ _ROUTED_FROM_URI_SITES: dict[str, list[str]] = {
     # `test_from_uri_sites_resolve_test_prefixed` skips a site whose block
     # carries `graph_name=`, so a declaration for that file would be inert and
     # would assert about call shapes the file no longer has.
-    # CLI routing unit — from_uri is stubbed by the test (never connects).
-    # #10170 review round 3 REMOVED a row here: the module then had NO `from_uri(`
-    # call at all (its only mentions were docstrings and strings), and a row that
-    # can never be consulted is the defect that issue closes. `#11495` then added a
-    # REAL one — `FalkorProjection.from_uri(foreign_uri)` in
-    # `test_a_foreign_threads_construction_never_decides_this_verdict` — so the row
-    # is back, and it is NOT inert: `test_no_declared_route_or_pin_is_inert` proves
-    # that against the census's own detector, and the `test (b)` shard reds without
-    # it (`test_from_uri_sites_resolve_test_prefixed`, measured at `cbb2c1181eac`).
-    # SAFETY IS NOT "the handle is declared": that test's `_patch_projection`
-    # replaces `from_uri` with a recording stub on the CLASS (and `__init__` with a
-    # path recorder), so this site returns a `_FakeProj` and reaches no graph at
-    # all. Its URI is a `redis://:pw@foreign.example.com:6379/foreign` one chosen
-    # precisely so nothing may ever connect to it — the pin is that a FOREIGN
-    # thread's construction/routing must not enter `seen`, and the foreign
-    # `from_uri` shape is the point of the arm.
-    # ⛔ Deliberately narrow, and deliberately NOT `graph_name=`: an explicit graph
-    # name would short-circuit this census at `_from_uri_violations` while naming a
-    # graph that does not exist — the "reads as coverage, asserts nothing" defect
-    # in the other direction. A second, differently-shaped `from_uri(` here reds.
-    "test_pipeline_cli.py": [r"from_uri\(foreign_uri\)"],
+    # CLI routing unit — from_uri is stubbed by the test (never connects)
+    # (#10170 review round 3, found by the strengthened check: a
+    # `"test_pipeline_cli.py": [r"from_uri\\("]` row lived here. The module has
+    # NO `from_uri(` call at all — it defines a stub `_from_uri` and
+    # `monkeypatch.setattr`s it, and its only mentions are in docstrings and
+    # strings. A row that can never be consulted is the defect this issue closes.)
+    # Still deliberately ABSENT, now for the OTHER reason: #11495 gave the module
+    # a LIVE `from_uri(foreign_uri)` site (the foreign-thread arm of the
+    # thread-identity pin) and wrote it with an explicit
+    # `graph_name=test_pipeline_cli_foreign`. That is the same outcome this map
+    # demands — `test_from_uri_sites_resolve_test_prefixed` skips a site whose
+    # block carries `graph_name=`, so a row here would be INERT and
+    # `test_no_declared_route_or_pin_is_inert` would flag it. The site shipped
+    # without its `graph_name=` and reddened `test (c)`; the fix belonged at the
+    # CALL, not in a declaration arguing the URI is foreign.
     # #3301: module live-FalkorDB availability probe over candidate URIs
     # (construct + RETURN 1 + close, never DETACHs) — the same shape as
     # test_search_engine_gaps.py above. Every DETACH DELETE in the file
