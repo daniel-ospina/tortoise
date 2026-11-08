@@ -100,7 +100,7 @@ quality change. **Live before private-beta:**
 **Cost during private-beta, plainly:** a complete graph costs **\$11.01/tenant** at the 40-tenants-per-instance
 density — RAM \$8.75 + shared project line \$2.13 + record \$0.13 (§8.1) — against a \$5.70 storage budget, i.e.
 193 % of it — the honest per-tenant total (comment [`6714119028`](https://github.com/daniel-ospina/tortoise/issues/4051#issuecomment-6714119028), the phase
-split, states the **RAM line's** 154 %, which is the same three lines read one row up in §8.1). ⚠️ **It is also above the product's older recorded constraint** (*"a \$19 price with < \$9 total
+split, states the **RAM line's** 154 % — §8.1's *"the same, RAM line alone"* row, against that section's 193 % total). ⚠️ **It is also above the product's older recorded constraint** (*"a \$19 price with < \$9 total
 cost per user"*, `STORAGE-ARCHITECTURE.md` §1), because \$11.01 > \$9 — and at beta-scale density it is higher
 still (a 1 GB instance holds ~5 complete solo tenants at the §8.1 basis of 200 MB provisioned each, so the RAM
 line alone is ~\$14.60 at the 1 GB tier's \$73). **This is a knowing,

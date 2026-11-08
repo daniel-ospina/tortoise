@@ -73,7 +73,7 @@ excluded as prerequisites, and recorded as such:
 
 | candidate prerequisite | the decision it would contradict | verdict |
 |---|---|---|
-| **"serve reads from Postgres / cut over the read path"** | §2.0, verbatim: *"we keep the limit in falkor high so we don't need to rush with enabling our queries to parse both falkor and postgres."* | **Deferred by the ruling** — `#7970` is OPEN and *"DEFERRED by §2.0"*. Not a first-customer gate. |
+| **"serve reads from Postgres / cut over the read path"** | §2.0, verbatim: *"we keep the limit in falkor high so we don't need to rush with enabling our queries to parse both falkor and postgres."* | **Deferred by the ruling** — `#7970` is **CLOSED COMPLETED (2026-10-25)** and its *CUTOVER* is what stays *"DEFERRED by §2.0"*. Not a first-customer gate. |
 | **"put embeddings in pgvector"** | §12.1c **ADOPTS it** (decided 2026-11-07: *"the vector index does NOT live in FalkorDB"*) — so there is no contradiction left; what remains is **sequencing**, not a reversed decision. | **A decision, not a prerequisite — and now DECIDED, in favour.** It is off this epic's critical path (N2), and embeddings are already durable without it (item A5). |
 | **"backfill the existing FalkorDB graph into Postgres"** | Owner scope ruling 2026-10-10: *"there are no existing customers. No migration-safety apparatus is designed or claimed here."* | **Not designed, on purpose.** The dual-write already exists by construction (§3/§17.1; item R1 arms it); a backfill is not it. |
 
@@ -939,7 +939,7 @@ calibrates after beta from measured consumption.
 
 | # | what | why it is not on the list |
 |---|---|---|
-| **N1** | **The read path and its cutover** (`#7970`, **OPEN**) | §2.0 defers it in the owner's own words (§0.1). The instruments exist and are off. |
+| **N1** | **The read path and its cutover** (`#7970` — **CLOSED COMPLETED 2026-10-25**; the *cutover* is what is deferred) | §2.0 defers the cutover in the owner's own words (§0.1). The instruments exist and are off (`TORTOISE_RECORD_SERVE` unset). |
 | **N2** | **`pgvector` / moving the vector index into Postgres** (`#4997`, **CLOSED 2026-10-05** — its analysis is what this item rests on; §12.1c **V1**, §14.3) | **DECIDED 2026-11-07 — ADOPTED** (`docs/architecture/SEARCH-ARCHITECTURE.md`): the vector index and its payload move to Postgres (`pgvector`). What is not decided is WHEN — not on this epic's critical path. Embeddings are already durable as `jsonb` (A5). Note the settled blocker now that it is decided: **`pgvectorscale` is unavailable on Supabase** (§14), so it would be `pgvector` proper. |
 | **N3** | **A FalkorDB → Postgres backfill / migration-safety apparatus** | Owner scope ruling 2026-10-10: no customers, no apparatus designed. The dual-write is journal-first by construction (§3/§17.1). |
 | **N4** | **Journal completeness** (`#5089`) | A **precondition owned by another epic** (this epic's *blocked-by (soft)*) — ⚠️ **and that epic CLOSED COMPLETED on 2026-10-12**, so the soft block is discharged *as a ticket*. What is not discharged is the measurement: §17.1's surface (**387 mutating sites / 211 functions / 32 files**) is quoted here, not re-verified by this lane. Named, not re-filed: a projection replayed from an unfaithful journal is faithfully wrong. |

@@ -229,7 +229,7 @@ Ontology low · Accessibility low · Library-deps none.
 | # | previous | now | why |
 |---|---|---|---|
 | 1 | S3 = "decide V1: keep vs move, and implement" | **S3 = census the unretrievable vectors; removal carried with its surface-approval request** | V1's home is §14.3 and its architecture owner is `#4333`; the changelog records `#5090` as a **consumer**, and corrects a wrong owner. |
-| 2 | **E1** = filtered-ANN recall measurement | **removed** — parked with V1 | It is evidence *for a move*. No move is planned, so it has no consumer; measuring it now is work for a decision that is not being taken. |
+| 2 | **E1** = filtered-ANN recall measurement | **removed** — parked with V1 | It is evidence *for a move*. No move is **scheduled**, so it has no consumer yet — the location is decided (2026-11-07), the implementation is not; measuring it now is work for a decision that is not being taken. |
 | 3 | Architecture **high on branch 2** | **low** | The branch is gone from scope. Flagged explicitly so `low` is not misread. |
 | 4 | Profit chain: "removable bytes ⇒ $1.32/tenant/month" | **deleted** | **Wrong model twice**: retained bytes are revenue (billing ruling), and the bill is provisioned RAM (§16.1). |
 | 5 | 6 items + 9 exclusions | **5 items + 12 exclusions** | Self-hosting, quantization, the recall measurement and V1 itself are now explicitly out, each with its home. |
