@@ -476,6 +476,12 @@ path via `--data` skips the download. Split S = `longmemeval_s_cleaned.json`
    on every retrieved chunk (temporal-reasoning questions are structurally
    unanswerable without the dates), and the API call disables JSON mode
    (`response_format=None`) with `max_tokens=500` — the official call shape.
+   ⚠️ **Except on a reasoning-by-default provider** (the new default,
+   `api.deepseek.com`): the transport then adds ONE field,
+   `thinking: {"type": "disabled"}` (`_ThinkingDisabledTransport`, keyed off
+   `THINKING_BY_DEFAULT_KEY_ENVS`), because without it the completion budget is
+   spent on hidden reasoning and `content` comes back empty. The official
+   reader on OpenAI/OpenRouter sends no such field.
 4. **Judge** (`judge.py`) — the official `get_anscheck_prompt` templates
    (verbatim from LongMemEval `evaluate_qa.py`: contains-answer, temporal
    off-by-one exemption, knowledge-update updated-answer, preference rubric,
@@ -485,7 +491,14 @@ path via `--data` skips the download. Split S = `longmemeval_s_cleaned.json`
    servable comparability configuration). The judge API call replicates
    `evaluate_qa.py` exactly: a single user message (no system message),
    `n=1, temperature=0, max_tokens=10`, no `response_format` (JSON mode
-   would deviate from the official protocol). `--mock` = containment/
+   would deviate from the official protocol). ⚠️ **"Exactly" holds only on a
+   non-reasoning transport** — on a reasoning-by-default provider (the new
+   default, `api.deepseek.com`) the body additionally carries
+   `thinking: {"type": "disabled"}` (`OfficialJudgeModel.disables_thinking`,
+   keyed off `reader.THINKING_BY_DEFAULT_KEY_ENVS`); without it the 10-token
+   budget is spent on hidden reasoning, `content` returns empty, and
+   `'yes' in ''` grades every question wrong. The official judge sends no such
+   field. `--mock` = containment/
    abstention keyword judge.
 5. **Report** (`report.py`) — overall + task-averaged accuracy, the five
    paper categories (Information Extraction, Multi-Session Reasoning,

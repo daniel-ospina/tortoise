@@ -5,7 +5,9 @@
 Pipeline per question (fresh isolated graph per question — the benchmark's
 independent-memory protocol, no cross-question contamination):
     ingest haystack sessions → hybrid retrieval (graph + raw sessions) →
-    reader LLM answers from context → official answer-check judge scores.
+    reader LLM answers from context → judge scores (our own pinned model by
+    default since the #8486 owner ruling of 2026-10-27; the OFFICIAL GPT-4o
+    judge is an explicit `--judge-model` spec, see judge.OFFICIAL_JUDGE_MODEL).
 
 Resilience (per-question error isolation): each question is wrapped in its
 own try/except — a transient LLM error is retried with exponential backoff
@@ -23,7 +25,10 @@ Run modes:
 
 Full run needs: the dataset (~tens of MB, auto-downloaded to
 ``~/.cache/tortoise-longmemeval`` or ``TORTOISE_LME_CACHE_DIR``) and provider
-keys (OPENROUTER_API_KEY / OPENAI_API_KEY / …) — never committed, never
+keys. A DEFAULT run needs ``DEEPSEEK_API_KEY`` (reader and judge both resolve
+the DeepSeek transport under the #8486 ruling); ``OPENROUTER_API_KEY`` /
+``OPENAI_API_KEY`` are needed only when a spec names those providers —
+including the OFFICIAL judge. Keys are never committed and never
 hardcoded. The committed MINI fixture + ``--mock`` exercises the whole
 pipeline offline; the pinned embedder is still REQUIRED (#4718), so a CI
 lane that runs these paths provisions it up front (the main test job's

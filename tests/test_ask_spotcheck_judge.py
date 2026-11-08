@@ -433,13 +433,18 @@ def test_one_judge_spec_serves_the_preflight_and_the_judge(monkeypatch):
 
     # ⛔ THE GUARD'S OWN COVERAGE (#8486 review). A source pin whose scope is
     # narrower than its claim is how the #2071 split survived two rounds, so
-    # the shapes that INHERIT the default — or that pass a spec the pre-flight
-    # did not resolve — are asserted directly.
+    # the EXACT set it flags is asserted, not merely "something": ``!= []``
+    # proved only that ONE of the seven shapes was caught, so a guard that
+    # regressed to flagging bare calls alone stayed green.
+    #
+    # All seven ARE caught, because the guard requires the first positional
+    # argument to be a CALL to `_judge_spec()` — so a literal, a bare name, or
+    # `None` fails just as a zero-argument call does. Measured, not assumed.
     assert _bare_build_judge_calls(
         "build_judge()\nbuild_judge(None)\nbuild_judge(mock=False)\n"
         "build_judge(spec=None)\nbuild_judge('')\n"
         "build_judge(OFFICIAL_JUDGE_MODEL)\nbuild_judge(spec)\n",
-        "mutant") != []
+        "mutant") == [f"mutant:{i}" for i in range(1, 8)]
     assert _bare_build_judge_calls(
         "build_judge(_judge_spec())\nbuild_judge(mock=True)\n",
         "explicit") == []

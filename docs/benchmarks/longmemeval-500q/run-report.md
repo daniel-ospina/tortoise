@@ -273,7 +273,7 @@ digest).
 | failure_origin | PENDING |
 | commit | PENDING |
 | corpus_hash | sha256:d6f21ea9…3a442 (seal verified, gates 1-4) |
-| judge_pin | `unpinned:deepseek-v4-flash` under the 2026-10-27 ruling (§1.1) — derives from the judge that graded, so it cannot be pre-filled; the `longmemeval-official-anscheck-gpt4o-2024-08-06-v1` pin is minted only for a run the OFFICIAL judge graded |
+| judge_pin | PENDING — `unpinned:<model>`, copied from the receipt. It DERIVES from the judge that graded, so it cannot be pre-filled (§1.1); under the 2026-10-27 ruling the default judge is `deepseek-v4-flash`, which will record `unpinned:deepseek-v4-flash`. The `longmemeval-official-anscheck-gpt4o-2024-08-06-v1` pin is minted only for a run the OFFICIAL judge graded |
 | cost_usd | PENDING |
 
 `w7a-500q.receipt.json` / `w7a-500q.report.json` / `w7a-500q.seal.json`
