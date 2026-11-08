@@ -3668,8 +3668,8 @@ def test_an_UNMEASURABLE_probe_VETOES_even_when_the_CONTROL_answers(monkeypatch)
         reports a byte-identical control block, because THIS fixture's control
         reads — the lexicon read and the index-entry read — go through `g.query`,
         and it never reaches the control's `mode="probe"` arm (which DOES read
-        through the patched `run_fts_query`, `session_source_prose_migration.py`:
-        2140 → `source_fts_probe`). With
+        through the patched `run_fts_query` — `source_fts_probe` is called at
+        `session_source_prose_migration.py:2138`). With
         `control_ok` False the fold falls through to `uncorroborated` — the WRONG
         VETO FOR THE RIGHT OUTCOME — so none of them pins "the probe's own read did
         not run".
