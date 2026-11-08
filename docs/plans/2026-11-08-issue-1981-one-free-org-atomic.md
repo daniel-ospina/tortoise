@@ -69,7 +69,7 @@ re-check would be the wrong seam. Both fail — see §2.
 
 **Class:** gate-enforcement (a correctness guard over a write path)
 
-**Risk surface**
+**Risk surface** — what this change can break, each with the check that would catch it:
 
 - **R1** the backstop refuses a create the product rule ALLOWS (fails closed on legitimate use) →
   caught by the SQL §8 matrix: paid tier, identity path, self-replay, collaborator-only,
