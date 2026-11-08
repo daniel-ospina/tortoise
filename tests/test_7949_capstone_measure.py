@@ -1487,6 +1487,50 @@ def test_the_scores_probe_refuses_a_denominator_off_the_frozen_fourteen(
     assert "froze 14" in capsys.readouterr().err
 
 
+def test_an_overflowing_SHARE_FLOOR_refuses_instead_of_tracebacking(
+        tmp_path, capsys):
+    """#10610 review at `ec7b5e7fe` (P2): the third arm of the refusal contract.
+
+    Every floor this driver reads is a number out of JSON, and `json.loads` returns
+    an UNBOUNDED Python int for any integer literal. `_parse_bars` converted only
+    `ValueError`, so `denominator_floors.e1_min_before_share = 10**400` reached
+    `capstone_measure.share_floor`'s `float(value)` and raised
+    `OverflowError: int too large to convert to float` — exit **1** with a traceback,
+    from the one loader whose sibling `_count` converts the IDENTICAL value into an
+    exit-2 refusal ("AN ARBITRARY-PRECISION INTEGER IS THE INTEGER SIBLING OF
+    `Infinity`"). The asymmetry sat inside a single record's floor map.
+
+    Non-vacuity: measured at the pre-fix head (`.venv/bin/python
+    docs/evidence/7949-capstone/probes/e1_e2_scores.py --repo <mutated>`) the run
+    exited **1** with that traceback; post-fix it exits 2.
+
+    ⛔ WHICH GUARD ANSWERS IT MOVED (#10610 self-audit of the guards at `ec7b5e7fe` and
+    `380a2b7a2`; no review at either head raised it — the review recorded at `380a2b7a2`
+    returned CLEAN).
+    After the non-finite-floor guard landed, an unbounded-magnitude share floor is
+    refused in `frozen_denominators` BEFORE `_parse_bars` is reached — so this pin
+    now exercises the FLOOR guard and asserts ITS message, because a pin that keeps
+    asserting the older wording would be asserting a path this input no longer
+    takes. `_parse_bars`'s `OverflowError` arm is kept as defence in depth for a
+    bar path or a floor that is added to the parse without the floor validation,
+    and its comment says so rather than claiming coverage this pin does not give it.
+    """
+    repo = _copied_bundle(tmp_path)
+    path = repo / "docs/evidence/7949-capstone/preregistration.json"
+    prereg = json.loads(path.read_text())
+    assert "e1_min_before_share" in prereg["denominator_floors"], (
+        "E1's share floor moved — this pin's subject is gone, move the pin with it")
+    prereg["denominator_floors"]["e1_min_before_share"] = 10 ** 400
+    path.write_text(json.dumps(prereg))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "e1_min_before_share" in err, err
+    assert "no float can hold" in err, err
+    assert "too large to convert to float" in err, err
+
+
 def test_the_scores_probe_refuses_an_after_arm_on_another_graph(tmp_path, capsys):
     """#10610 review issue 4: the invariant's other half, actually implemented.
 
@@ -1494,15 +1538,33 @@ def test_the_scores_probe_refuses_an_after_arm_on_another_graph(tmp_path, capsys
     the E2a<->gate-drops pair. The ON run's own `# graph:` line was parsed for
     nothing, so an after share from graph A beside E2a counts from graph B passed
     every check: the head is equal, and both before graphs still name it.
+
+    ⛔ THE GRAPH MUST DIFFER BY ITS EPOCH, NOT BY A NON-NUMERIC TAIL (`#10996`
+    review). The fixture used `capstone_on_54922a800_other`, whose HEAD TOKEN is
+    still the right one — but `_names_head` requires the last segment to be a
+    numeric epoch, so `other` fails the shape test and `score()`'s
+    graph-names-its-own-head guard (`#10996`, `e1_e2_scores.py:1773`) refused it
+    FIRST. With `pass` in place of that guard the earlier mutation runs showed
+    it, and with the guard live the assertion below was satisfied by ITS message
+    — which also contains the graph string. So this pin was measuring the wrong
+    guard, and deleting the identity check it is named for left the suite green.
+    An epoch-differing graph (`…_1793378319` vs the log's `…_1793378318`) passes
+    the head guard and can ONLY be refused by the identity check, which is what
+    the assertion now keys on.
     """
     repo = _copied_bundle(tmp_path)
     log = repo / "docs/evidence/9889/on-arm.log"
-    log.write_text(re.sub(r"^# graph: \S+", "# graph: capstone_on_54922a800_other",
+    other = "capstone_on_54922a800_1793378319"
+    log.write_text(re.sub(r"^# graph: \S+", f"# graph: {other}",
                           log.read_text(), count=1, flags=re.MULTILINE))
     with pytest.raises(SystemExit) as refused:
         scores_probe.score(repo)
     assert refused.value.code == 2, refused.value
-    assert "capstone_on_54922a800_other" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert other in err, err
+    assert "come from different runs" in err, (
+        "the refusal came from another guard — this pin is about the graph "
+        f"IDENTITY check (`after[\"graph\"] != e2a_record[\"graph\"]`): {err}")
 
 
 def test_the_scores_probe_refuses_a_record_that_does_not_name_the_on_head(
@@ -1709,6 +1771,7 @@ def test_a_graph_names_the_head_in_the_heads_own_position(tmp_path, capsys):
     head = record["graph"].split("_")[-2]
     assert head.startswith("54922a800"), head
     record["graph"] = "capstone_off_9152448d_" + head[:8]
+    _shipped_arm(record)          # …so the ONLY defect is the graph's position
     path.write_text(json.dumps(record))
     with pytest.raises(SystemExit) as refused:
         scores_probe.score(repo)
@@ -1949,14 +2012,68 @@ def test_the_renderer_renders_a_log_from_the_committed_record(monkeypatch):
     assert "e1_min_before_share 0.35" in render(moved)
 
 
-def test_the_committed_score_record_is_what_the_probe_produces():
+def _record_matches(produced, committed: bytes) -> tuple[bool, bool]:
+    """The committed-record pin's comparison, factored — ``(VALUE, BYTES)``.
+
+    Factored out so the non-vacuity arm inside the pin below drives the SAME
+    expression the pin does. ⛔ An arm that re-states the comparison (a
+    ``json.dumps``/``json.loads`` round-trip beside it) is evidence about the
+    ``json`` module, not about this pin: the review at `8bc8be1e7` found exactly
+    that — the arm could not fail if the byte half were deleted (#10610).
+    """
+    return (
+        produced == json.loads(committed),
+        (json.dumps(produced, indent=1) + "\n").encode() == committed,
+    )
+
+
+def test_the_committed_score_record_is_what_the_probe_produces(tmp_path):
     """P2-10: the committed record may not drift from its own inputs.
 
     Without this, `e1b`, `e2b`, `gate_drops` and `denominators` could be
     hand-edited (or fall behind a probe change) while every other pin stayed
     green — the artifact would then be a claim, not a measurement.
+
+    ⛔ The claim this pin is CITED for is byte-level — `config/ci-surfaces.yml`'s
+    `durations` note, item 72: *"reproduce `e1-e2-scores.json` byte-for-byte"* —
+    and `==` over two parsed values does not establish it: key order and
+    formatting are not preserved by value equality, so a reformat or a
+    renumbered-key hand edit passed the value pin while a maintainer reading the
+    note believed the bytes had been checked (#10610 review at `48187660a`). The
+    producer writes `json.dumps(record, indent=1) + "\n"` in its `main()`
+    (`probes/e1_e2_scores.py`, the `Path(args.out).write_text(...)` line — sited by
+    its expression rather than by a line number, because that number moved three
+    times during this PR's review rounds and nothing sweeps it: #10610 review at
+    `fe77fb13f`, P3), so the byte property is exactly that expression.
+
+    The comparison is over BYTES, not `read_text()`: universal-newline
+    translation would make a CRLF-rewritten record read back identical to the
+    producer's LF output, which is precisely the serialization drift this half
+    exists to refuse. Do not "simplify" it back to `read_text()`.
+
+    VALUE is asserted first and separately, because a drifted number should name
+    the region that moved instead of printing a whole-file diff.
     """
-    assert scores_probe.score(_REPO) == json.loads(SCORES.read_text())
+    produced = scores_probe.score(_REPO)
+    committed = SCORES.read_bytes()
+    value_matches, bytes_match = _record_matches(produced, committed)
+    assert value_matches
+    assert bytes_match, (
+        "the committed record is value-equal but NOT byte-equal to what the "
+        "probe writes — its serialization (indent=1, one trailing newline) "
+        "drifted, which the value half cannot see")
+
+    # Non-vacuity, measured through the SAME expression the pin uses: a
+    # VALUE-equal / BYTE-different copy is exactly what the value half cannot
+    # refuse (a reformat to `indent=2`), and the byte half can. Deleting the
+    # byte half of `_record_matches` reds THIS assertion — an arm that re-stated
+    # the comparison could not, which is the state the review found (#10610).
+    reformatted = tmp_path / SCORES.name
+    reformatted.write_text(json.dumps(produced, indent=2) + "\n")
+    assert _record_matches(produced, reformatted.read_bytes()) == (True, False), (
+        "the byte half of the pin accepts a record the producer would not have "
+        "written — the `indent=1` + single-trailing-newline serialization claim "
+        "is then unprotected, however green the value half looks")
 
 
 def test_the_e1b_note_claims_only_the_arm_the_record_carries():
@@ -2381,8 +2498,11 @@ def test_the_measured_arm_is_forced_in_process_and_restored():
         with measure.measured_arm() as arm:
             assert arm["TORTOISE_VET"] == "1", arm
             assert arm["TORTOISE_CLASSIFY_LATER"] == "1", arm
-            # pinned OFF so the arm is a function of the probe, not the shell
-            assert arm["TORTOISE_VALUE_GATE"] is None, arm
+            # pinned OFF so the arm is a function of the probe, not the shell —
+            # and pinned to "0", not to absence: since #10996 an UNSET value gate
+            # is the ON arm, so a pop would print a header that denies the arm
+            # (#10996 review P2). The shell held "1" and it must not survive.
+            assert arm["TORTOISE_VALUE_GATE"] == "0", arm
             assert os.environ["TORTOISE_VET"] == "1"
         assert os.environ["TORTOISE_VET"] == "0"
         assert os.environ["TORTOISE_CLASSIFY_LATER"] == "0"
@@ -3993,7 +4113,7 @@ def test_no_document_quotes_the_superseded_runs_e1_aux_numbers_as_current():
 # (two row-scoped documents, not whole: the index routes 142 table rows and the
 # architecture doc carries ~15 cites belonging to other epics, so another epic's
 # `sdk.py` cite must not be told to add a phrase for a line it is not about). A bare `:NNNN`
-# continuation (the docs write `` `extractor_v2.py:8596` and `:8616` ``) is NOT a
+# continuation (the docs write `` `extractor_v2.py:8816` and `:8616` ``) is NOT a
 # cite this leg can resolve, because the file is named only once for several
 # numbers; the README's bare `` `symbol` `:NNN` `` step table is owned by
 # `test_7949_capstone_verdict_check.py`. `extractor_v2.py` was the first gap: its
@@ -4185,7 +4305,7 @@ def _bundle_rule(source: str, paragraph: str, base: int, cite_pos: int):
     """The rule whose naming phrase sits NEAREST this cite — distance, not order.
 
     A document names a line with the phrase right beside it (`` `vet_enabled` is
-    computed at `extractor_v2.py:8596` ``), so the closest phrase is the one that
+    computed at `extractor_v2.py:8816` ``), so the closest phrase is the one that
     names THIS cite. Table order cannot decide it: `docs/00_index.md`'s #7949 row
     names the CLASSIFY pass and then the VET flag on one line, and taking the first
     table match bound the VET cite to the classify phrase ~40 characters away (a
@@ -4338,7 +4458,7 @@ def test_the_bundles_cites_resolve_where_the_bundle_says_they_do():
     (the entry point, the classify flag, the vet flag — named by SYMBOL, never by
     a number: a number quoted here would be the very drift this paragraph is
     about, and it was, twice). They bite: with the README's vet-flag cite moved
-    to `7913`, `the vet flag` reds with `extractor_v2.py:7913 reads 'continue',
+    to `7913`, `the vet flag` reds with `extractor_v2.py:7953 reads 'continue',
     which carries none of ['vet_enabled = (']` (measured at a head on which 7913
     was that comment; an earlier round quoted an older read of it, which the
     extractor's own growth had since moved).
@@ -4374,7 +4494,7 @@ def test_the_bare_continuation_cites_name_what_they_say():
     """A BARE `:NNNN` continuation is invisible to the sweep above — pin it here.
 
     `_BUNDLE_CITE` requires a cite to NAME ITS FILE, so the docs' house style —
-    `` `extractor_v2.py:9056` … `:9060` ``, where the file is named once for
+    `` `extractor_v2.py:9276` … `:9060` ``, where the file is named once for
     several numbers — produces cites the sweep neither resolves NOR reports
     `unmatched`. They are simply invisible, which is how SIX wrong numbers
     survived three review rounds in a bundle whose thesis is "a claim nothing
@@ -4408,39 +4528,55 @@ def test_the_bare_continuation_cites_name_what_they_say():
     rows = (
         # `each VET pass is gated on the LIST` — the gate AND its call, twice.
         ("docs/00_index.md", "each VET pass is gated on the LIST", (
-            ("10462", "if vet_enabled and embed_list:"),
-            ("10463", "embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass("),
-            ("10584", "if vet_enabled and complete_list:"),
-            ("10585", "complete_list, vet_union_stats, _w, _ = _run_vet_pass("),
+            ("12967", "if vet_enabled and embed_list:"),
+            ("12968", "embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass("),
+            ("13106", "if vet_enabled and complete_list:"),
+            ("13107", "complete_list, vet_union_stats, _w, _ = _run_vet_pass("),
         )),
-        # the VET block's start; its three lines of keys (10587-10589) close on
-        # line 10590 — DERIVED by content, not by arithmetic: `result["vet"] = {`
-        # opens at 10586 and the block's `}` is 10590. ⚠️ The base head's number
-        # was 9446, which pointed at an unrelated comment about
-        # `_value_verbatim_span`, so a mechanical +1101 lands on `try:`; a COMMENT
-        # is not an asserted number and nothing reds on it, which is why the two
-        # sides' bump disagreed here and why every ASSERTED number in this table
-        # is verified by content instead.
+        # the VET block's start; its three lines of keys (13331-13333) close on
+        # line 13334 — DERIVED by content, not by arithmetic: `result["vet"] = {`
+        # opens at 13330 and the block's `}` is 13334. ⚠️ A conflict resolution
+        # here once kept main's numerals (13256/13257-13259/13260 — correct on
+        # main, but in THIS tree 13256 is the `"hold"` key and 13257-13260 is
+        # the whole `chain_enforcer` block) next to the branch's post-refactor
+        # asserts; a comment is not an asserted number and nothing reds on it,
+        # which is why every ASSERTED number in this table is verified by
+        # content instead.
         ("docs/00_index.md", "emitted unconditionally at", (
-            ("10743", 'result["classify_later"] = {'),
-            ("10753", 'result["vet"] = {'),
+            ("13320", 'result["classify_later"] = {'),
+            ("13330", 'result["vet"] = {'),
+        )),
+        # ⛔ THE CLASSIFY PASS'S OWN FAIL-OPEN PAIR (#10833 review, P2). The
+        # `+33` shift the fold applied to this row moved the first member to
+        # `:10490` and left the second at its PRE-shift value, so `:10453` —
+        # `vet_warnings.extend(_w)` inside the VET block — was printed as the
+        # classify pass's second fail-open `except`. The same sentence one
+        # clause earlier condemns exactly that defect ("a cause citing
+        # `vet_enabled`/`_run_vet_pass` for S2.3 sent the reader to code that
+        # pass never runs"). The two `except` lines are byte-identical, so the
+        # anchors are the pair's own gate lines' company rather than the text:
+        # a reader following `:10620` must land in the `classify_later and
+        # complete_list` block, which the row below holds at `:10599`.
+        ("docs/00_index.md", "fail-open `except` at", (
+            ("12995", "except Exception as e:  # never block capture (P1)"),
+            ("13142", "except Exception as e:  # never block capture (P1)"),
         )),
         # `_IDLE_CITES["vet"]`: the early return and the surface it emits
         ("probes/capstone_measure.py", "its vet surface", (
-            ("10371", "if not edus:"),
-            ("10387", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
+            ("12857", "if not edus:"),
+            ("12877", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
         )),
         # ...and the same claim in the rule's own docstring
         ("probes/capstone_measure.py", "with the flag ON", (
-            ("10387", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
+            ("12877", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
         )),
         ("probes/capstone_measure.py", "follows at", (
-            ("10370", "edus = _edus_from_conversation(conversation)"),
+            ("12856", "edus = _edus_from_conversation(conversation)"),
         )),
         # the S2.2/S2.3 block this probe names as the #9116 seam's subject
         ("probes/capstone_measure.py", 'result["vet"]`` at', (
-            ("10753", 'result["vet"] = {'),
-            ("10757", ("exact", "}")),
+            ("13330", 'result["vet"] = {'),
+            ("13334", ("exact", "}")),
         )),
         # The E-row audit's cites on the GATE ITSELF. `_BUNDLE_CITE` matches only
         # `sdk|edges|extractor_v2`, so a `tools/*.py` number is invisible to the
@@ -4452,12 +4588,27 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # refusal. A hand-recheck did not hold across one commit, so the numbers
         # are pinned here instead. The sentence wraps over three lines and a row
         # scopes to ONE line, so the claim takes three rows.
+        # ⛔ RE-DERIVED at `#10982`, not offset: the A-row emitter-key drift arm added
+        # above `STEPS` moved it `:136` -> `:146`, and the same commit's additions
+        # inside the accounting block moved `_step_accounting` `:607` -> `:675` —
+        # TWO different deltas from one commit, which is why the numbers are read
+        # off the tree (`grep -n '^STEPS = ('` / `'^def _step_accounting('`) and
+        # never carried forward as an offset.
+        #
+        # ⛔ AND A THIRD DELTA, from the `origin/main` carry (#11331): `#11298`'s
+        # `door` run-block key registered in `_NON_MEASUREMENT_RUN_KEYS` put 15
+        # lines above the accounting block and moved `_step_accounting`
+        # `:675` -> `:690`. Measured off the tree again, not offset: 675 now reads
+        # `block = record.get(RECORD_STEPS_KEY)` and `grep -n '^def _step_accounting('
+        # tools/capstone_verdict_check.py` -> 690. The comment block above the tuple
+        # is where that reasoning has to live, so the shift cannot be avoided by
+        # shortening it — a line count above a cite moves the cite.
         ("E1-E5-PROOFS.md", 'declares `STEPS = ("S0"', (
-            ("136", 'STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", '
+            ("146", 'STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", '
                     '"S5", "S6")'),
         ), "capstone_verdict_check"),
-        ("E1-E5-PROOFS.md", "_step_accounting` (`:607`) refuses a GREEN row whose", (
-            ("607", "def _step_accounting("),
+        ("E1-E5-PROOFS.md", "_step_accounting` (`:699`) refuses a GREEN row whose", (
+            ("699", "def _step_accounting("),
         ), "capstone_verdict_check"),
         # ⛔ A SECOND DOCUMENT PRINTS THE SAME DECLARATION (#10601 review round 2).
         # `docs/00_index.md`'s capstone row cites this gate too, and it moved
@@ -4467,9 +4618,68 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # and the rows above covered ONE document. Every doc that prints a
         # `tools/*.py` number needs its own row here, not just the first one.
         ("docs/00_index.md", "declares the eight steps", (
-            ("136", 'STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", '
+            ("146", 'STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", '
                     '"S5", "S6")'),
         ), "capstone_verdict_check"),
+        # ⛔ THE VET BLOCK'S OWN "BEFORE" CLAIM (#10833 review, P2 — the SECOND
+        # time this file's early-return cite went stale). `_BUNDLE_CITE` resolves
+        # the NAMED `extractor_v2.py:10626`, but the `(:NNNNN)` one clause later
+        # is a bare continuation — invisible to the sweep — and the fold's `+33`
+        # shift moved it from `:10371` to `:10237`, a line inside
+        # `_run_vet_pass`'s BODY. The sentence then asserted that `:10367` is
+        # BEFORE `:10237` (impossible), and sent the reader 150 lines below the
+        # return it names, while every gate reported OK. Two rows because the
+        # claim wraps over two lines and a row scopes to ONE line.
+        ("README.md", "i.e. BEFORE the", (
+            ("12853", "vet_enabled = (vet_arbiter is not None or _vet_enabled()"),
+        )),
+        ("README.md", "early return (`", (
+            ("12857", "if not edus:"),
+        )),
+        # ⛔ The #2684 row's cite (#10833 review, P2): the fold rewrote a CORRECT
+        # `5042-5043` into `4948-4949` — inside `_refuse_rewritten_value`, an
+        # unrelated #10360 function — on a file BYTE-IDENTICAL to `origin/main`,
+        # so no drift can explain it. A full `file:line` cite is not a pin:
+        # `_BUNDLE_CITE` resolves that the number exists and lands on a code
+        # line, never that it is the code the sentence names. Held by content.
+        # ⛔ THE VET PASS'S FAIL-OPEN PAIR (#10997 review round 5, P3): a bare
+        # range inside a paragraph whose LIVE half says "here" — the paragraph is
+        # `_BUNDLE_HISTORICAL`, so the named cite is excluded from the sweep AND
+        # the bare one sat in no row, which is how a `+N` insert left it on a
+        # docstring in an unrelated helper while every neighbour moved.
+        ("README.md", "on its fail-open path", (
+            ("12732", "except Exception as e:  # noqa: BLE001, RUF100"),
+            ("12735", '"(fail-open)"], {}'),
+        )),
+        # ⛔ AND THE PROBE'S OWN COPY (#10997 review round 5, P2): the same range
+        # is baked into `_IDLE_CITES["vet"]`, i.e. into the cause a future run
+        # PRINTS to a reader — and it sat on a line the neighbouring row does not
+        # scope to, so a move would ship a stale number in machine-emitted prose.
+        ("probes/capstone_measure.py", "on its fail-open path", (
+            ("12732", "except Exception as e:  # noqa: BLE001, RUF100"),
+            ("12735", '"(fail-open)"], {}'),
+        )),
+        ("docs/00_index.md", "refuses a value-free point at", (
+            ("5286", "if not _carries_value(content, quote):"),
+            ("5287", "return None"),
+        )),
+        # ⛔ THE S5 CONNECT CALL, IN BOTH DOCUMENTS (#11368 rebase review, P2). The
+        # `+74` re-derivation matched `execute_embed` by SYMBOL and landed on its
+        # `def` 3,849 lines ABOVE the caller, while the table's own column header is
+        # "call site" and every sibling row in it cites a call inside
+        # `extract_session_v2`. Nothing red-ed: the cite is BARE, so `_BUNDLE_CITE`
+        # cannot see it, and no row scoped to it — which is exactly the invisibility
+        # this pin exists for. Both rows hold the CALL, not the definition.
+        ("README.md", "gap filler", (
+            ("13237", "result = execute_embed(complete_list, search, "
+                      "session_id=session_id,"),
+        )),
+        # ...and the probe's own copy of the same number, which sits in prose a
+        # reader is sent to rather than in a table.
+        ("probes/capstone_run.py", "ONE cite per symbol", (
+            ("13237", "result = execute_embed(complete_list, search, "
+                      "session_id=session_id,"),
+        )),
     )
     # The SAME document states two of its claims as the RULE's own text rather than a
     # line number — a quoted rule cannot drift by an insertion above it, which is why
@@ -4538,6 +4748,60 @@ def test_the_bare_continuation_cites_name_what_they_say():
     assert not failures, (
         "a bare `:NNNN` continuation names code it does not name — re-derive the "
         "number from the tree before changing this pin:\n  " + "\n  ".join(failures))
+
+
+def test_a_cite_that_names_a_directory_names_a_file_that_exists():
+    """The path a cite PRINTS must resolve on disk — `_BUNDLE_CITE` never reads it.
+
+    ⛔ WHY (#10833 review round 6, P2). `_BUNDLE_CITE` makes BOTH directory
+    prefixes optional AND uncaptured (`(?:tortoise/)?(?:projection/)?`) and then
+    resolves the line by the captured BASENAME (`group(1)` against
+    `_BUNDLE_SOURCES`), so the printed path is never used for resolution. That
+    is what let the fold's own cite-repair commit rewrite a CORRECT path into a
+    fabricated one — `tortoise/edges.py`, which does not exist — in four places
+    across `README.md` and `probes/capstone_measure.py`, while the sweep went on
+    reporting every one of them green: the NUMBER was right, the line was
+    resolved through `_BUNDLE_SOURCES["edges"]`, and the file the reader is told
+    to open was never on disk. One of the four is inside `E3_RULE`, which is
+    stamped into the machine record of every future scored run, so the defect
+    was being written into committed evidence.
+
+    A cite that prints NO directory is the bundle's house style for a
+    continuation (`` `edges.py:747` `` after the full path has been named once),
+    and it is resolved by basename on purpose — so this leg binds only the cites
+    that DO name a directory, and asks the one question the sweep cannot: is the
+    path this sentence prints a path in this tree?
+
+    Non-vacuity: measured on this head's parent, where the four cites read
+    `tortoise/edges.py:774-782` / `:2832-2857` and `git ls-tree HEAD
+    tortoise/edges.py` is empty — all four red with `does not exist in the tree`
+    and the `assert seen >= 10` floor still holds (the surviving
+    `tortoise/projection/edges.py` and `tortoise/extractor_v2.py` cites keep the
+    population well above it), so the test is neither vacuous nor a red-on-red.
+    """
+    seen, missing = 0, []
+    for doc_name, doc_path in _BUNDLE_DOCS:
+        text = doc_path.read_text(encoding="utf-8")
+        doc_lines = text.splitlines()
+        for match in _BUNDLE_CITE.finditer(text):
+            printed = match.group(0).split(":", 1)[0]
+            if "/" not in printed:
+                continue
+            line_no = text.count("\n", 0, match.start()) + 1
+            if not _bundle_in_scope(doc_name, doc_lines[line_no - 1]):
+                continue
+            seen += 1
+            if not (_REPO / printed).is_file():
+                missing.append(
+                    f"{doc_name}:{line_no} prints `{printed}`, which does not "
+                    f"exist in the tree")
+    assert not missing, (
+        "a cite names a directory path that is not in this tree — the sweep "
+        "resolves these by BASENAME, so it reports them green and the reader is "
+        "sent to a file that does not exist:\n  " + "\n  ".join(missing))
+    assert seen >= 10, (
+        f"only {seen} directory-prefixed cites were read — this leg is not "
+        f"reaching the bundle's documents")
 
 
 def test_every_readme_line_cite_carries_the_sentence_it_quotes():
@@ -4725,7 +4989,7 @@ def _cited_spans(doc_name: str, path: Path) -> set[str]:
     """Every `:N` / `:N-M` this bundle's rows cite, bare OR prefixed.
 
     Prefixed cites are normalised to the same ``:N`` shape so one assertion can
-    read both: the prose writes `extractor_v2.py:8683` and `:8703` in the same
+    read both: the prose writes `extractor_v2.py:8903` and `:8703` in the same
     sentence, and the question here is only WHICH LINES the document names.
     """
     text = path.read_text(encoding="utf-8")
@@ -4752,12 +5016,12 @@ def test_the_per_surface_prose_cites_are_the_probe_tables_own_numbers():
     `extractor_v2.py` moves the prose with it, and nothing enforced it: the table
     was re-derived for the flag-on cause while the paragraph around it kept the
     pre-insertion numbers, so the bundle argued from `vet_enabled` at `:8683` and
-    then cited `:8684`/`:8940` for gates that had moved to `:8771`/`:8893`.
+    then cited `:8684`/`:8806` for gates that had moved to `:8771`/`:8893`.
 
     Each site is read out of the TREE by `_EXTRACTOR_SITES` (`_extractor_cite` /
     `_extractor_items_gate`), so this is a cross-artifact check between two things
     that must agree — never a third typed table. Non-vacuity, measured at
-    `7b6b2180f`: the pre-fix README carried `:8565`/`:8616`/`:8684`/`:8940` and
+    `7b6b2180f`: the pre-fix README carried `:8565`/`:8616`/`:8684`/`:8806` and
     `:8965`/`:8975`, and this leg reds on every one of them, because the derived
     numbers (`:8652`, `:8703`, `:8771`, `:8893`, `:9052`, `:9062`) appear nowhere
     in it. It also reds if a site is cited by its RANGE START only while the
@@ -4804,6 +5068,48 @@ _PREREG_STEP_CITE_DOCS = (
 )
 
 
+def _without_change_history(text: str) -> str:
+    """The document minus every `### 10.x` change-control entry.
+
+    §11's cites are LIVE claims about the tree at this head. A §10.x entry records a
+    value the document held in the PAST — its "New value" line quotes the number a
+    re-derivation moved TO. A whole-document ``in text`` check cannot tell the two
+    apart, so a §10.x entry naming the current number satisfies the pin while the
+    live sentence still cites the stale one: the gate is green over exactly the
+    claim it exists to guard. Measured at `6c7a15f2a5` — reverting BOTH live §11
+    sentences (the `if items:` pair at `PRE-REGISTRATION.md:1145` AND the fail-open
+    pair at `:1189`) to the numbers §10.9's "Original value" records left this leg
+    `1 passed`, because §10.9's "New value" names all four current numbers.
+
+    Stripping the history is the general fix: it binds each live claim to live
+    prose by construction, instead of to a hand-picked carrier line. It is also the
+    shape `#11262`'s earlier round landed and the rebase onto `main` dropped, since
+    `main` re-derived the CITES but kept the whole-document check.
+    """
+    out: list[str] = []
+    skipping = False
+    for line in text.splitlines(keepends=True):
+        if re.match(r"^### 10\.", line):
+            skipping = True
+            continue
+        if skipping and re.match(r"^#{1,3} ", line):
+            skipping = False        # the next `## 11.` (or any outer heading)
+        if not skipping:
+            out.append(line)
+    return "".join(out)
+
+
+def _live_blocks(text: str) -> list[str]:
+    """Blank-line-delimited blocks — markdown paragraphs and tables.
+
+    A carrier is scoped to its BLOCK rather than its line so that re-wrapping a
+    sentence cannot red this pin. `PRE-REGISTRATION.md` wraps at ~100 columns, so a
+    line-scoped check would make correctness a property of where a sentence happens
+    to break.
+    """
+    return re.split(r"\n[ \t]*\n", text)
+
+
 def test_the_pre_registration_cites_the_classify_sites_the_tree_actually_has():
     """§11's five code sites are DERIVED from the tree, never typed twice.
 
@@ -4824,6 +5130,34 @@ def test_the_pre_registration_cites_the_classify_sites_the_tree_actually_has():
     `:9209`/`:9341` while the tree carried `:9767`/`:9767-9789`/`:10310`/`:10442`,
     and at `c3612c299` it still cited `:9223`/`:9353` for the fail-open `except`
     arms the tree carries at `:10323`/`:10453` — this leg reds on every one of them.
+
+    ⛔ HISTORY IS STRIPPED, AND THE GATES ARE BOUND PER CARRIER. Both bypasses were
+    live at `6c7a15f2a5` and both were measured, and both are the same shape — a
+    whole-document check satisfied by a mention that is not the claim:
+
+    1. §10.9's "New value" quotes all four current numbers, so reverting BOTH live
+       §11 sentences stayed GREEN (`1 passed`, measured). `_without_change_history`
+       fixes it.
+    2. Even with history stripped, `` `if items:` `` has TWO live carriers — the §9
+       provenance row (`:757`) and §11.1's prose sentence (`:1145`) — so reverting
+       the prose alone still left the row satisfying the pin. Every live carrier is
+       now bound to both gates, which is why `_live_blocks` exists.
+
+       The section labels here were wrong in an earlier round of this PR and are
+       pinned to the document's own headings rather than to a memory of it: `## 9.
+       Provenance of every number in this file` opens at `:744` (so the table row at
+       `:757` is §9, not §7 — §7 ends at `:703`, where `## 8.` opens), and `### 11.1`
+       opens at `:1141` (so `:1145` is §11.1, not §11.3 — §11.3 opens at `:1173`). The
+       other §11.3 reference in this docstring, the fail-open pair at `:1189-1195`,
+       IS §11.3 and is unchanged. A wrong label is not cosmetic here: the whole point
+       of this leg is that a reader can go and LOOK at the carrier.
+
+    The fail-open pair needs no per-carrier loop, and that is measured rather than
+    assumed: after the strip, `:12921` and `:13068` each occur in exactly ONE live
+    block (`:1189-1195`, the §11.3 sentence that pairs them), so the whole-document
+    check below binds to that sentence. (`classify(S2) failed` also appears in the
+    frozen YAML corpus pin at `:604-699`, which is why the carriers are located by
+    the `` `if items:` `` phrase and not by the arms' own marker text.)
     """
     collector = _extractor_lineno("def _collect_classify_items(")
     # The collector's EXTENT is read, not assumed: the cited end is a claim too, and
@@ -4843,7 +5177,10 @@ def test_the_pre_registration_cites_the_classify_sites_the_tree_actually_has():
         _extractor_fail_open_except('errors.append(f"classify(union) failed'),
     )
     for doc_name, path in _PREREG_STEP_CITE_DOCS:
-        text = path.read_text(encoding="utf-8")
+        # §10.x change-control entries quote numbers the document no longer claims,
+        # so they are not live prose and cannot satisfy a live cite. See
+        # `_without_change_history` for the measurement that made this load-bearing.
+        text = _without_change_history(path.read_text(encoding="utf-8"))
         assert f"tortoise/extractor_v2.py:{collector}" in text, (
             f"{doc_name} does not cite the collector at "
             f"tortoise/extractor_v2.py:{collector} — §11's argument rests on "
@@ -4858,11 +5195,26 @@ def test_the_pre_registration_cites_the_classify_sites_the_tree_actually_has():
             f"tortoise/extractor_v2.py:{collector}-{end} (the `def` through "
             f"`return items`) — a range that runs past the body names the next "
             "function's lines")
-        for gate in gates:
-            assert f"`{gate}`" in text, (
-                f"{doc_name} does not cite the `if items:` gate at {gate} — the "
-                f"classify passes are gated on the collector's list being "
-                f"non-empty, which is the whole of S2.3's conditionality")
+        # ⛔ EVERY LIVE CARRIER MUST NAME BOTH GATES, not just one of them anywhere
+        # in the file. With two live carriers (the §9 provenance row and §11.1's prose)
+        # a single whole-document check is satisfied by whichever one is correct,
+        # so a stale prose cite rode the row's numbers (measured: reverting the
+        # prose alone left this leg `1 passed` at `6c7a15f2a5`).
+        gate_blocks = [b for b in _live_blocks(text) if "`if items:`" in b]
+        assert gate_blocks, (
+            f"{doc_name} no longer cites `if items:` anywhere — S2.3's "
+            "conditionality is stated by that phrase, so this leg cannot find what "
+            "it guards. Re-word the pin if the prose legitimately moved off it")
+        for block in gate_blocks:
+            for gate in gates:
+                assert f"`{gate}`" in block, (
+                    f"{doc_name}: the live `if items:` passage "
+                    f"{block.strip()[:90]!r} does not cite the gate at {gate} — "
+                    f"every live carrier of that phrase must name BOTH gates "
+                    f"({gates[0]}, {gates[1]}), because the classify passes are "
+                    f"gated on the collector's list being non-empty, which is the "
+                    f"whole of S2.3's conditionality. A §10.x history entry does "
+                    f"NOT satisfy this: history is stripped before the check")
         for fail_open in fail_opens:
             assert f"`{fail_open}`" in text, (
                 f"{doc_name} does not cite the fail-open `except` at {fail_open} — "
@@ -5169,12 +5521,18 @@ _RETRACTED_E2_RENDER_ABSENCE = (
 )
 
 
-#: The BOLD verdict token the `#9080` row states E2 under. The WORD is
-#: artifact-owned — a verdict moves by re-running the probe, not by editing this
-#: regex — so a selector keyed on one literal (`BLOCKED`) drops the row out of its
-#: own leg's subject the moment the re-run moves it, and the leg stayed green
-#: because the same line still carries E1's `BLOCKED`. Reading the token rather than
-#: the word keeps the leg's subject alive across a verdict change.
+#: The BOLD verdict token the `#9080` row states E2 under. The selector reads the
+#: TOKEN (`**E2 <WORD>**`), not one literal word, because the word is the part that
+#: MOVES: `#9889`'s record scores this row RED (8 of 14), and `docs/00_index.md` says
+#: in the same breath that "the row is not moved here, because a row moves only by
+#: re-running the probe". So the index still reads `**E2 BLOCKED**` at this head and
+#: a `BLOCKED`-keyed selector would drop the row out of this leg's subject the moment
+#: the re-run moves the token — the leg would then pass over nothing, which is the
+#: exact failure `assert e2_verdict_rows` below is written to refuse.
+#: (#10610 review cycle 2, P3: an earlier revision said review issue 1 HAD moved the
+#: row to `E2 RED`. Measured false — every branch revision of that file at this head
+#: reads `**E2 BLOCKED**`, and `origin/main` reads the same — so the sentence is
+#: restored to the hypothetical it can support.)
 _E2_VERDICT_ROW = re.compile(r"\*\*E2 (?:BLOCKED|RED|GREEN)\*\*")
 
 
@@ -5236,11 +5594,13 @@ def test_the_bundle_names_the_live_e2_blocker_and_no_closed_render_absence():
     #    that states E2's verdict must name the live blocker and must not name the
     #    closed one, whichever words it uses to do it — AND whichever verdict word
     #    it uses. The selector below reads the BOLD verdict token (`**E2 <WORD>**`),
-    #    not one literal: the word is artifact-owned (`**E2 BLOCKED**` at this head,
-    #    and the `#9889` record scores the row, so a re-run may move it), and a
-    #    selector keyed on `BLOCKED` would drop the row out of this leg's subject the
-    #    moment it moved while the leg went on passing on E1's own verdict word in the
-    #    same line.
+    #    not one literal: `#9889`'s record scores this row RED, and `docs/00_index.md`
+    #    states that "the row is not moved here, because a row moves only by
+    #    re-running the probe". So the row reads `E2 BLOCKED` today and will read
+    #    `E2 RED` after that re-run, and a selector keyed on `BLOCKED` would drop it
+    #    out of this leg's subject on the day the verdict legitimately moves —
+    #    quietly, since E1's token (`**E1 REFUSED as shipped**`) sits in the same
+    #    line and the leg would still find a row to assert over.
     e2_verdict_rows = [line for line in index.splitlines()
                        if _E2_VERDICT_ROW.search(line)]
     assert e2_verdict_rows, (
@@ -5351,15 +5711,24 @@ def test_the_three_routes_to_the_e1_e2_verdict_state_the_records_verdict():
     """A document that routes a reader to E1/E2 must state the verdict the record gives.
 
     #10610 review issue 1 (P2): the change re-pointed both rows at
-    `docs/evidence/9889/e1-e2-scores.json`, and the two documents a reader is routed to kept
-    asserting the superseded reading IN THE PRESENT TENSE — `docs/00_index.md`'s `#9080` row
-    (`3 RED + 2 BLOCKED`, "E1 … its only artifact is 25 Objects … with no before arm", "E2 …
-    carried by no committed artifact") and `E1-E5-PROOFS.md`'s E2a/E2b rows ("the bundle's
-    README marks the row BLOCKED because the frozen 14-unit denominator is carried by no
-    committed artifact"), whose `README.md:69` pointer now lands on a row that NAMES the
-    re-run reading (`RED 8/14`) while its committed verdict cell still reads
+    `docs/evidence/9889/e1-e2-scores.json` — so a RE-RUN now scores E2 `RED 8/14`
+    where the committed row still reads `BLOCKED` (a row moves only by re-running
+    the probe; the correction on `_E2_VERDICT_ROW` above records that an earlier
+    revision of THIS docstring wrongly said the change had already moved it) — and
+    the two documents a reader is routed to kept asserting the superseded reading
+    IN THE PRESENT TENSE — `docs/00_index.md`'s `#9080` row (`3 RED + 2 BLOCKED`, "E1 … its only artifact
+    is 25 Objects … with no before arm", "E2 … carried by no committed artifact") and
+    `E1-E5-PROOFS.md`'s E2a/E2b rows ("the bundle's README marks the row BLOCKED because
+    the frozen 14-unit denominator is carried by no committed artifact"), whose
+    `README.md:69` pointer now lands on a row that NAMES the re-run reading
+    (`RED 8/14`) while its committed verdict cell still reads
     `⛔ **BLOCKED** (#10360)`. Nothing read that prose, so the suite stayed green while the
     bundle's own entry point told a reader the opposite of the table beside it.
+    The cite is now held by `test_the_e2_routing_claim_cites_the_row_it_describes`
+    below, which takes the LINE NUMBER from this docstring: review at `7c03efc1d`
+    found the previous revision had re-pointed it at `README.md:65`, which is `>` — a
+    blank blockquote line above the table header on `:66` — while quoting a reading
+    that appears in neither bundle README.
 
     Every leg is DERIVED, and each document is held to the ARTIFACT IT DESCRIBES — which
     after the 2026-11-02 re-measure is two different artifacts, deliberately:
@@ -5737,6 +6106,80 @@ def test_the_three_routes_to_the_e1_e2_verdict_state_the_records_verdict():
                 f"{name} still asserts the frozen 14-unit denominator is {phrase!r}, which "
                 f"{e2a['artifact']} refutes — the row it describes reads "
                 f"{table['E2']} ({survived})")
+
+
+def test_the_e2_routing_claim_cites_the_row_it_describes():
+    """The leg's own `README.md:<line>` cite must land on the row it names.
+
+    ⛔ WHY (#10610 review at `7c03efc1d`, item 2). The docstring of
+    `test_the_three_routes_to_the_e1_e2_verdict_state_the_records_verdict` cites the
+    bundle README by LINE NUMBER and quotes the reading that line carries. A merge
+    resolution carried this branch's older revision of that sentence over `main`'s
+    corrected one, so the cite went to `README.md:65` — a table-header line — while
+    quoting a reading (`RED (8 of 14)`) that appears in NEITHER bundle README
+    (`grep -c` = 0 in both), so the numbered claim resolved to nothing. Nothing
+    redded: `test_every_readme_line_cite_carries_the_sentence_it_quotes` resolves
+    only the cites inside `E1-E5-PROOFS.md` — the four it carries at this head are
+    all DOCUMENT cites, none of them in a test docstring — so no pin read the cite
+    in the sentence above. (An earlier revision of this paragraph said that document
+    "carries none at this head", which its own pin refutes: that pin asserts the
+    OPPOSITE, `assert found, "E1-E5-PROOFS.md carries no README.md line cite — pin is
+    moot"`. The load-bearing half — no pin reads a test's own docstring — was and is
+    true; #10610 review at `fdff8f432`, P3.)
+
+    Derivation, not duplication: the line NUMBER and the quoted readings are both
+    taken from the docstring, so this pin carries no count of its own — it holds the
+    prose to the artifact the prose points at, and moving either side alone reds.
+
+    Non-vacuity: at the pre-fix head this reds, because `README.md:65` is `>` — a blank
+    blockquote line; the header the old sentence called a table header is on `:66` — so
+    nothing the docstring attributes to the row appears there. Measured by re-pointing
+    this docstring's cite back to 65: the pin reds with `cites README.md:65 for [...]
+    but that line reads '>'`.
+    """
+    docstring = (test_the_three_routes_to_the_e1_e2_verdict_state_the_records_verdict
+                 .__doc__ or "")
+    lines = docstring.splitlines()
+    at = next((i for i, ln in enumerate(lines) if "README.md:" in ln), None)
+    assert at is not None, (
+        "the E2 routing leg no longer cites the bundle README by line — if that claim "
+        "moved, move this pin with it rather than leaving the cite unwatched")
+    cite = re.search(r"README\.md:(\d+)", lines[at])
+    assert cite is not None, f"unparseable README cite: {lines[at]!r}"
+    cited_line = int(cite.group(1))
+    # The window is the citing line plus the next three: the sentence wraps, and the
+    # readings it attributes to the row are quoted on the following line(s).
+    window = " ".join(lines[at:at + 4])
+    quoted = [re.sub(r"[*`]", "", tok).strip()
+              for tok in re.findall(r"`([^`]+)`", window)]
+    # A cite to a FILE, a symbol or an issue is not a reading quoted FROM the line.
+    cite_shaped = re.compile(r"[A-Za-z_][\w./-]*(?::[\d-]+)?")
+    readings = [tok for tok in quoted
+                if len(tok) >= 6 and not cite_shaped.fullmatch(tok)]
+    assert readings, (
+        f"the cite at {lines[at].strip()!r} quotes no reading, so it holds the row to "
+        "nothing — re-state the sentence it points at")
+    readme = (_REPO / "docs/evidence/7949-capstone/README.md").read_text(
+        encoding="utf-8").splitlines()
+    assert 1 <= cited_line <= len(readme), (
+        f"the docstring cites README.md:{cited_line}, past the end of the "
+        f"{len(readme)}-line README")
+    cited = re.sub(r"[*`]", "", readme[cited_line - 1])
+    # ⛔ EVERY quoted reading, not "any one of them" (#10610 review at `ec7b5e7fe`,
+    # P3). The assertion here was `names_something` — a SINGLE match satisfied it —
+    # and this window happens to quote TWO readings, `RED 8/14` and
+    # `⛔ BLOCKED (#10360)`. So editing `RED 8/14` to `RED 9/14` left the pin GREEN
+    # on the strength of the second quote: the load-bearing number, the one the row
+    # exists to state, was the half nothing held. The docstring above claims "moving
+    # either side alone reds", and with an any-match test that was measurably false
+    # for one of the two sides it names — a pin whose subject can be falsified while
+    # it stays green is the class this whole bundle exists to refuse.
+    missing = [tok for tok in readings if tok not in cited]
+    assert not missing, (
+        f"the docstring cites README.md:{cited_line} for {readings}, but {missing} "
+        f"appear on no such line — that line reads {cited[:160]!r} — the cite and the "
+        "row it describes have drifted apart, and the numbered claim resolves to "
+        "nothing")
 
 
 # ── the header's import claim, MEASURED (#10525 review P3) ───────────────────────────────────
@@ -6709,6 +7152,20 @@ def test_the_frozen_records_stale_E4_sentence_is_disclosed_and_not_edited():
 
     Non-vacuity: the pre-fix README carries no disclosure at all, so the README
     assertions red.
+
+    ⛔ AND THE `#11298` DISCLOSURE IS A SEPARATE ARM, because it was SILENTLY LOST once
+    (#11331). The `origin/main` carry resolved the conflicted record as "ours' blob
+    plus main's new TOP-LEVEL sections" — a method that, by construction, cannot
+    carry a change main made INSIDE an existing key. `#11298` appended a suffix to
+    `criteria[E4].post_registration_measurement` recording that **5 of 15** is the
+    row's figure at this head, read from the FROZEN-corpus receipt the probe SELECTS,
+    and the merge dropped it: the cell came out byte-identical to the pre-merge base
+    while `corpus_rows.E4.reconciles_with` and `PRE-REGISTRATION.md` §1.6.3 both went
+    on asserting the 5-of-15 figure. Nothing redded — arm (a) below only asserts the
+    2/15 sentence is PRESENT, which is true either way. Measured, then fixed, so this
+    arm pins the half that was lost: the frozen receipt the selector picks, the figure
+    it reads, and the cross-reference. It reds on the pre-fix cell (verified: that
+    cell carries neither `5 OF 15` nor `w2b-operator-2026-10-24-8503-b`).
     """
     doc = (PREREG.parent / "PRE-REGISTRATION.md").read_text()
     record = json.loads(PREREG.read_text())
@@ -6720,6 +7177,25 @@ def test_the_frozen_records_stale_E4_sentence_is_disclosed_and_not_edited():
         "discloses; re-cut the disclosure, do NOT edit the hash-pinned record")
     e4 = next(c for c in record["criteria"] if c["id"] == "E4")
     assert "edge_correct=2 of 15" in e4["post_registration_measurement"], e4
+
+    # (a2) …AND it carries the current-head disclosure `#11298` appended (#11331).
+    # A cell that satisfies (a) alone is the state a union merge produced by dropping
+    # this suffix, which is why the two halves are asserted apart.
+    cell = e4["post_registration_measurement"]
+    assert "5 OF 15" in cell, (
+        "criteria[E4].post_registration_measurement no longer names 5 of 15 as the "
+        "row's figure at this head — `corpus_rows.E4.reconciles_with` and "
+        "PRE-REGISTRATION.md §1.6.3 both assert that figure, so the record and the "
+        "document now describe different numbers. Restore the `#11298` disclosure "
+        "(do not delete the 2/15 sentence it sits beside) (#11331)")
+    assert "w2b-operator-2026-10-24-8503-b.json" in cell, (
+        "the E4 disclosure must name the FROZEN-corpus receipt the probe SELECTS by "
+        "corpus_hash (`select_e4_receipt()`), not only the non-frozen one whose 2/15 "
+        "it is disclosing — a figure with no receipt behind it is what the "
+        "reconciliation exists to prevent (#11331)")
+    assert "corpus_rows.E4.reconciles_with" in cell, (
+        "the E4 disclosure must point at the reconciliation record that explains why "
+        "2/15 and 5/15 are both true of different corpus revisions (#11331)")
 
     # (b) the bundle discloses it, in the section a reader of that E4 row lands in.
     section = readme.split("## E4 — the committed operator receipt", 1)[1]
@@ -7367,6 +7843,20 @@ def _bundle(tmp_path: Path) -> Path:
     return repo
 
 
+def _shipped_arm(record: dict) -> dict:
+    """Give a mutated before record the arm the SHIPPED probe writes.
+
+    ⛔ SINCE `#10996` AN ABSENT `TORTOISE_VALUE_GATE` IS THE ON SPELLING (`#10996`
+    review cycle 2, P1), and the driver refuses it on its own — before the guard a
+    test below is about can speak. `e1_paired_arm.off_arm_readback` therefore
+    PINs the key to `"0"` and reads it back, so that is what a record produced by
+    the shipped probe carries. Setting it here keeps each fixture to exactly ONE
+    defect, which is what these pins are written to discriminate.
+    """
+    record["arm"]["TORTOISE_VALUE_GATE"] = "0"
+    return record
+
+
 @pytest.mark.parametrize("key", ["TORTOISE_VET", "TORTOISE_CLASSIFY_LATER",
                                   "TORTOISE_VALUE_GATE",
                                   "TORTOISE_S2_DECISION_SEAM"])
@@ -7479,6 +7969,202 @@ def test_a_before_arm_missing_one_arm_key_is_refused(key, tmp_path, capsys):
     record["arm"][key] = None
     path.write_text(json.dumps(record))
     assert scores_probe.score(repo)["e1"]["outcome"] in ("REFUSED", "PASS", "FAIL")
+
+
+def test_a_falsifier_block_that_is_not_an_object_is_refused(tmp_path, capsys):
+    """#10610 review cycle 3 (P2): a block of the WRONG TYPE was a traceback, not a refusal.
+
+    The only test applied to `with_anchor` / `as_written` was truthiness
+    (`if "with_anchor" in falsifier and not (falsifier.get("with_anchor") or {})`),
+    and a non-empty STRING is truthy, so `"none"` was handed straight to
+    `.get(...)` — `AttributeError`, exit **1** with a traceback, which an operator
+    cannot tell from a crash and which is not the exit-**2** refusal this module's
+    docstring promises. Measured on a copy of the shipped bundle BEFORE the guard:
+    both arms exit 1 at `with_anchor.get("injected_anchor")` / `.get("value_units")`.
+
+    Non-vacuity: the shipped bundle scores (asserted at the end), so the arm
+    discriminates a wrong-typed block from the well-formed one rather than
+    refusing the form.
+    """
+    for field in ("with_anchor", "as_written"):
+        repo = _bundle(tmp_path / field)
+        path = repo / "docs/evidence/9889/e2a-value-units-falsifier.json"
+        record = json.loads(path.read_text())
+        assert isinstance(record[field], dict), field      # the shipped shape
+        record[field] = "none"                             # …not a block any more
+        path.write_text(json.dumps(record))
+        with pytest.raises(SystemExit) as refused:
+            scores_probe.score(repo)
+        assert refused.value.code == 2, (field, refused.value)
+        err = capsys.readouterr().err
+        assert f"carries a {field} that is not a JSON object" in err, err
+        assert "str: 'none'" in err, err
+    assert scores_probe.score(_bundle(tmp_path / "intact"))["e2"]["outcome"] in (
+        "PASS", "FAIL", "REFUSED")
+
+
+def test_a_record_whose_top_level_is_not_an_object_is_refused(tmp_path, capsys):
+    """#10610 review cycle 3 (P2): a list-valued record was a traceback, not a refusal.
+
+    `_read_json` returned `json.loads(...)` unchecked, so a file holding `[]` (or a
+    number, or a string) reached `.get(...)` as an `AttributeError` — exit **1**.
+    Guarding the READ covers every record this driver opens, rather than one arm
+    per field.
+
+    Non-vacuity: at the pre-fix head this bundle exits 1 with
+    `AttributeError: 'list' object has no attribute 'get'` (measured).
+    """
+    repo = _bundle(tmp_path)
+    path = repo / "docs/evidence/9889/e2a-value-units.json"
+    path.write_text("[]")
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "at the top level, not a JSON object" in err, err
+    assert "list" in err, err
+
+
+def test_a_fixtures_hash_that_is_not_a_string_is_refused(tmp_path, capsys):
+    """#10610 review cycle 3 (P2): the frozen corpus PIN was never type-checked.
+
+    `if not corpus.get("fixtures_hash")` accepts `12345`, `{"a": 1}`, `[1, 2]` and
+    `true`, and each then reached `normalise_pin`'s `value.startswith` — an
+    `AttributeError`, exit **1**. Every other member of that pre-registration
+    family (`denominator_floors.e1_objects` / `e1_min_before_share` /
+    `e2b_surviving_units`, `corpus.value_bearing_units`) refuses BY TYPE, so the pin
+    every E1 corpus comparison rests on was the one nobody typed.
+
+    Non-vacuity: at the pre-fix head each value below exits 1 with
+    `AttributeError: '<type>' object has no attribute 'startswith'` (measured).
+    """
+    path = Path("docs/evidence/7949-capstone/preregistration.json")
+    for value in (12345, {"a": 1}, [1, 2], True):
+        repo = _bundle(tmp_path / str(abs(hash(json.dumps(value, sort_keys=True)))))
+        prereg_path = repo / path
+        prereg = json.loads(prereg_path.read_text())
+        assert isinstance(prereg["corpus"]["fixtures_hash"], str)
+        prereg["corpus"]["fixtures_hash"] = value
+        prereg_path.write_text(json.dumps(prereg))
+        with pytest.raises(SystemExit) as refused:
+            scores_probe.score(repo)
+        assert refused.value.code == 2, (value, refused.value)
+        err = capsys.readouterr().err
+        assert "corpus.fixtures_hash is a" in err, err
+        assert "not a string" in err, err
+
+
+def test_a_prereg_sub_object_that_is_not_an_object_is_refused(tmp_path, capsys):
+    """#10610 review cycle 4 (P2): `(value or {})` one level UP was the same traceback.
+
+    `frozen_denominators` defaulted `denominator_floors` and `corpus` with
+    `prereg.get(...) or {}`, so a truthy non-dict reached `"e1_objects" not in
+    floors` as `TypeError: argument of type 'int' is not iterable`, and
+    `corpus.get(...)` as `AttributeError` — exit **1**, before any refusal. Cycle 3
+    fixed this shape for the falsifier's blocks; the parent record's two
+    sub-objects were the same read one level up.
+
+    Non-vacuity: at the pre-fix head both arms exit 1 (measured). `None` and an
+    ABSENT key are still the "missing" case, reported by the named-key refusals —
+    asserted here so the shape guard cannot quietly swallow that wording.
+    """
+    path = Path("docs/evidence/7949-capstone/preregistration.json")
+    for field, value, name in (("denominator_floors", 7, "int"),
+                               ("denominator_floors", ["e1_objects"], "list"),
+                               ("corpus", "sha256:dead", "str"),
+                               ("corpus", [1, 2], "list")):
+        repo = _bundle(tmp_path / f"{field}-{name}")
+        prereg_path = repo / path
+        prereg = json.loads(prereg_path.read_text())
+        assert isinstance(prereg[field], dict), field     # the shipped shape
+        prereg[field] = value
+        prereg_path.write_text(json.dumps(prereg))
+        with pytest.raises(SystemExit) as refused:
+            scores_probe.score(repo)
+        assert refused.value.code == 2, (field, value, refused.value)
+        err = capsys.readouterr().err
+        assert f"carries a {field} that is not a JSON object" in err, err
+        assert f"{name}:" in err, err
+
+    # `null` is still "missing": the refusal names the KEY, not the shape, which is
+    # the message a reader with a stripped pre-registration needs.
+    repo = _bundle(tmp_path / "null-floors")
+    prereg_path = repo / path
+    prereg = json.loads(prereg_path.read_text())
+    prereg["denominator_floors"] = None
+    prereg_path.write_text(json.dumps(prereg))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    assert "carries no denominator_floors.e1_objects" in capsys.readouterr().err
+
+
+def test_a_record_that_is_not_utf8_is_refused_not_tracebacked(tmp_path, capsys):
+    """#10610 review cycle 4 (P2): corrupt BYTES were a traceback, next to the JSON arm.
+
+    `_read_json` called `read_text()` inside its `try` but caught only
+    `json.JSONDecodeError`, and `read_on_arm` called it with no handler at all — so a
+    truncated or UTF-16 record raised `UnicodeDecodeError` and exited **1**, while the
+    `is not JSON` branch beside it exists to turn corrupt input into the exit-2
+    refusal. Same contract, one line earlier in the same function.
+
+    Non-vacuity: at the pre-fix head both arms exit 1 with `UnicodeDecodeError`.
+    """
+    repo = _bundle(tmp_path / "json")
+    (repo / "docs/evidence/9889/e2a-value-units.json").write_bytes(
+        b'\xff\xfe{"value_units": 14}\n')
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "is not UTF-8 text" in err, err
+
+    # …and the LOG path (`read_on_arm`), which had no handler at all.
+    repo = _bundle(tmp_path / "log")
+    (repo / "docs/evidence/9889/on-arm.log").write_bytes(
+        b'\xff\xfe# head: deadbeef\ne1-aux objects_in_graph=1 bare_definite=1 '
+        b'share=1.0\n')
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    assert "is not UTF-8 text" in capsys.readouterr().err
+
+
+def test_a_count_at_float_overflowing_magnitude_is_refused(tmp_path, capsys):
+    """#10610 review cycle 5 (P2): an unbounded JSON integer was a traceback, not a refusal.
+
+    `json.loads` returns an arbitrary-precision `int`, and both `math.isfinite(10**400)`
+    (`_count`) and `float(10**400)` (`_consistent_share`) raise
+    `OverflowError: int too large to convert to float`. Neither site caught it, so the
+    guard whose whole job is to refuse rather than crash exited **1** with a traceback
+    — the integer sibling of the `Infinity` case `_count`'s own docstring says it
+    closed. Measured at the pre-fix head: both arms exit 1.
+
+    Non-vacuity: the shipped bundle still scores at the end, so the arms discriminate a
+    hostile magnitude from the counts the producers write.
+    """
+    huge = 10 ** 400
+    for record, field, where in (
+            ("e2a-value-units.json", "value_units", "_count"),
+            ("e2a-value-units.json", "value_survived", "_count"),
+            ("e1-paired-off-arm-1.json", "objects", "_consistent_share"),
+            ("e1-paired-off-arm-1.json", "bare_definite", "_consistent_share")):
+        repo = _bundle(tmp_path / f"{record.split('.')[0]}-{field}")
+        path = repo / "docs/evidence/9889" / record
+        data = json.loads(path.read_text())
+        data[field] = huge
+        path.write_text(json.dumps(data))
+        with pytest.raises(SystemExit) as refused:
+            scores_probe.score(repo)
+        assert refused.value.code == 2, (record, field, where, refused.value)
+        err = capsys.readouterr().err
+        assert "magnitude no float can hold" in err or "is not a share" in err, err
+        # The exception TEXT, not its class name: `_refuse` prints the message, and
+        # what matters is that the OverflowError was converted rather than escaping.
+        assert "too large to convert to float" in err, err
+
+    assert scores_probe.score(_bundle(tmp_path / "intact"))["e2"]["outcome"] in (
+        "PASS", "FAIL", "REFUSED")
 
 
 def test_the_after_arm_is_witnessed_by_the_gate_drops_record(tmp_path, capsys):
@@ -7738,6 +8424,42 @@ def test_the_census_is_a_partition_not_four_lengths(tmp_path, capsys):
         assert expected in capsys.readouterr().err, (marker,)
 
 
+def test_a_census_member_that_is_not_a_unit_id_is_refused(tmp_path, capsys):
+    """#10610 review at `ef4c448d7` (P2): the set operations trusted their members.
+
+    `len(set(ids))` / `set(kept) <= set(ids)` ran over whatever JSON held, so a census
+    member that was a list or an object escaped as `TypeError: unhashable type` — exit
+    **1** with a traceback, which an operator cannot tell from a crash, and not the exit
+    **2** refusal this module's docstring promises. `_count`, `_float_token` and
+    `_consistent_share` all convert-and-refuse for exactly this reason; the guard the
+    whole E2a partition rests on was the one that skipped it.
+
+    Non-vacuity: at the pre-fix head each of these mutations raises `TypeError` out of
+    `set(...)`, so the `pytest.raises(SystemExit)` arm reds instead of passing.
+    """
+    for marker, field, offending, mutate in (
+            ("ids", "value_ids", ["a"],
+             lambda row: row.__setitem__("value_ids", [["a"], row["value_ids"][0]])),
+            ("survived", "value_survived", {"k": 1},
+             lambda row: row.__setitem__("value_survived", [{"k": 1}])),
+            ("lost", "value_lost", ["a"],
+             lambda row: row.__setitem__("value_lost", [["a"]])),
+    ):
+        repo = _bundle(tmp_path / marker)
+        path = repo / "docs/evidence/9889/e2a-value-units.json"
+        record = json.loads(path.read_text())
+        row = record["per_session"]["wp04_aurora_perf"]
+        assert row["value_ids"] and not row["value_survived"], row
+        mutate(row)
+        path.write_text(json.dumps(record))
+        with pytest.raises(SystemExit) as refused:
+            scores_probe.score(repo)
+        assert refused.value.code == 2, (marker, refused.value)
+        err = capsys.readouterr().err
+        assert "REFUSED" in err and "is not a unit id" in err, (marker, err)
+        assert f"{field}={offending!r}" in err, (marker, err)
+
+
 def test_the_e1b_numerator_is_bounded_by_its_own_printed_bar(tmp_path, capsys):
     """#10610 review at `f12471075` (P3): E1b had no ceiling, and its bar was unread.
 
@@ -7801,6 +8523,263 @@ def test_a_re_stamped_copy_of_one_before_arm_is_still_one_realization(tmp_path, 
     assert "n=1" in err, err
 
 
+def test_a_RE_ORDERED_copy_of_one_before_arm_is_still_one_realization(
+        tmp_path, capsys):
+    """#10610 review at `ec7b5e7fe` (P1): the identity is the POPULATION, not its ORDER.
+
+    The re-stamp guard compared `object_names` with `==`, i.e. as an ORDERED LIST, so
+    it was still one cheap edit wide. Copying arm 2 over arm 1, giving it arm 1's
+    graph stamp (so the graph-equality guard legitimately passes — it IS a different
+    name) and REVERSING the name list left every later reconciliation green, because
+    `objects == len(names)` and the bare-definite count are both order-independent:
+
+        E1 PASS decidable=True (before spread 0.0 pp)
+           before 0.5652 -> bound 0.2826 vs after 0.2131 = PASS
+           before 0.5652 -> bound 0.2826 vs after 0.2131 = PASS
+        EXIT=0
+
+    — a DECIDED row asserted from the replication the design requires and never got,
+    with `before_spread_pp: 0.0` reading as perfect agreement rather than as the
+    absent replication it is. That is the exact state `read_off_arms` documents this
+    guard to refuse, reached by `list(reversed(...))` instead of by a one-second epoch
+    bump — the pseudoreplication #9889's own O/I/T forbids.
+
+    Non-vacuity: measured at the pre-fix head (`git show HEAD:e1_e2_scores.py` run over
+    the same mutated bundle) the run exited **0** and wrote that DECIDED record; at
+    this head it exits 2. `assert attack["object_names"] != arm2["object_names"]`
+    keeps the pin honest — if reversing ever became a no-op the pin would be inert.
+    """
+    repo = _bundle(tmp_path)
+    first = repo / "docs/evidence/9889/e1-paired-off-arm-1.json"
+    second = repo / "docs/evidence/9889/e1-paired-off-arm-2.json"
+    arm1 = json.loads(first.read_text())
+    arm2 = json.loads(second.read_text())
+    assert arm1["object_names"] != arm2["object_names"], (
+        "the SHIPPED before arms already carry one population — re-derive this pin")
+    attack = json.loads(json.dumps(arm2))
+    attack["graph"] = arm1["graph"]
+    attack["object_names"] = list(reversed(attack["object_names"]))
+    assert attack["object_names"] != arm2["object_names"], (
+        "reversing the list must CHANGE it, or this pin cannot tell an "
+        "order-insensitive identity from an order-sensitive one")
+    assert attack["object_names"] != arm1["object_names"], (
+        "the reversal must differ from arm 1's order too — otherwise the ordered "
+        "comparison would refuse for the wrong reason")
+    first.write_text(json.dumps(attack))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "SAME `object_names`" in err, err
+    assert "re-ordering the list" in err, err
+
+
+def test_a_before_arm_census_with_a_DUPLICATED_name_is_refused(tmp_path, capsys):
+    """#10610 self-audit of the guards at `380a2b7a2` (P1): a census has no duplicates.
+
+    ⚠️ No review comment raised this: the review recorded at that head returned
+    CLEAN, so this finding and its three siblings came from this lane's own audit
+    of the pre-fix guards.
+
+    The identity guard added above reasons about multiplicity ACROSS arms; nothing
+    read it WITHIN one. `e1_paired_arm.py` writes one row per `:Object` node, so a
+    name can appear once — and a duplicated population is self-consistent for EVERY
+    guard on the block: `objects == len(names)` (a duplicate is still a member),
+    `bare_in_names`, `_consistent_share` and `label_counts["Object"]` all reconcile.
+    Measured at the pre-fix head, replacing arm 1's 78 names with 78 copies of one
+    name and reconciling `bare_definite: 78, share: 1.0, label_counts: 78`:
+
+        E1 PASS decidable=True (before spread 43.5 pp)
+           before 1.0000 -> bound 0.5000 vs after 0.2131 = PASS
+           before 0.5652 -> bound 0.2826 vs after 0.2131 = PASS
+        EXIT=0
+
+    — a DECIDED row computed over a census no producer can write. The E2a census
+    beside this one has refused the same shape since `f12471075`
+    (`len(set(ids)) != len(ids)`); this is that rule on the population E1's share
+    is computed over. Non-vacuity: measured, pre-fix exit 0 and this same bundle
+    post-fix exit 2.
+    """
+    repo = _bundle(tmp_path)
+    first = repo / "docs/evidence/9889/e1-paired-off-arm-1.json"
+    record = json.loads(first.read_text())
+    names = record["object_names"]
+    assert len(set(names)) == len(names), (
+        "the SHIPPED before arm already carries a duplicate — re-derive this pin")
+    record["object_names"] = ["the same object"] * len(names)
+    record["bare_definite"] = len(names)
+    record["share"] = 1.0
+    record.setdefault("label_counts", {})["Object"] = len(names)
+    first.write_text(json.dumps(record))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "lists the same `object_names` member twice" in err, err
+    assert "CENSUS" in err, err
+
+
+def test_a_before_arm_census_member_of_another_type_is_refused(tmp_path, capsys):
+    """#10610 self-audit at `380a2b7a2` (P3): the refusal must NAME the field, not a session.
+
+    The member type-check was borrowed from `_unit_id_members`, whose message says
+    "session" — but a BEFORE ARM HAS NO SESSIONS, so it reported the graph name as a
+    session id and (with `{field}={member!r}`) the offending member as if it were the
+    whole population. A message that misnames the field is a defect in the one string
+    an operator uses to find the bad record, so it is pinned here.
+
+    The check itself matters as much as the wording: without it the member reaches
+    `sorted(...)`, which raises `TypeError` — exit 1 with a traceback, beside a guard
+    whose failure mode must be the exit-2 refusal.
+    """
+    repo = _bundle(tmp_path)
+    first = repo / "docs/evidence/9889/e1-paired-off-arm-1.json"
+    record = json.loads(first.read_text())
+    record["object_names"] = [{"not": "a name"}, *record["object_names"][1:]]
+    first.write_text(json.dumps(record))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "`object_names` member" in err, err
+    assert "not an object name" in err, err
+    assert "session" not in err, (
+        "a before arm has no sessions — the refusal must not report the graph name "
+        f"as one: {err}")
+
+
+@pytest.mark.parametrize("value,label", [
+    (float("nan"), "nan"),
+    (float("inf"), "inf"),
+    (0, "zero"),
+    ("0.2", "string"),
+    (True, "bool"),
+])
+def test_a_frozen_share_floor_that_is_not_a_floor_is_refused(
+        value, label, tmp_path, capsys):
+    """#10610 self-audit at `380a2b7a2` (P2): a floor that binds nothing is not a floor.
+
+    `frozen_denominators` read the three floors RAW and used them as comparison
+    thresholds. JSON carries the `NaN`/`Infinity` literals, so
+    `e1_min_before_share = NaN` made E1's floor describe nothing — every `share < nan`
+    is False — and a control arm too flat to measure E1 was accepted. Composed with a
+    zero-share before arm (legal under `_consistent_share` when `bare_definite: 0`)
+    the inert floor let the pairing through and the ratio at
+    `after["share"] / arm["share"]` raised `ZeroDivisionError: float division by
+    zero` — exit **1** with a traceback, the contract violation the two
+    `OverflowError` arms in this file close, one function over. `inf` was refused only
+    incidentally (`share < inf` happens to be True), which is luck and not a rule.
+
+    `0` is the third arm: `share < 0` is unreachable for a share, so a zero floor
+    refuses nothing and re-opens the division from the other side. A string and a
+    bool are the type arms — `bool` is an `int` in Python, and `float("0.2")` would
+    accept the string and hand the raw value to the comparison.
+
+    Non-vacuity, MEASURED and stated per arm rather than as one blanket claim (the
+    first cut of this docstring said "all of these exited 0", which the measurement
+    refutes): `nan` and `0` both exited **0** and wrote a record at the pre-fix head,
+    so those two are NEW coverage. `inf`, the string and the bool were ALREADY
+    refused there — `inf` incidentally (`share < inf` happens to be True), the other
+    two by `_parse_bars`' own type checks — so those three arms are regression
+    protection for a refusal that exists for the wrong reason, which is why they are
+    kept rather than dropped.
+    """
+    repo = _copied_bundle(tmp_path)
+    path = repo / "docs/evidence/7949-capstone/preregistration.json"
+    prereg = json.loads(path.read_text())
+    prereg["denominator_floors"]["e1_min_before_share"] = value
+    path.write_text(json.dumps(prereg))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, (label, refused.value)
+    err = capsys.readouterr().err
+    assert "e1_min_before_share" in err, err
+
+
+@pytest.mark.parametrize("key,value,label", [
+    ("e1_objects", 0, "zero"),
+    ("e1_objects", -5, "negative"),
+    ("e2b_surviving_units", 0, "zero"),
+    ("e2b_surviving_units", -1, "negative"),
+])
+def test_a_frozen_COUNT_floor_that_binds_nothing_is_refused(
+        key, value, label, tmp_path, capsys):
+    """#10610 review at `120381532` (P2): the positivity arm covered the SHARE floor only.
+
+    The loop above the share-floor arm validated all three `denominator_floors`
+    entries for TYPE and FINITENESS, and then required `> 0` of `e1_min_before_share`
+    alone — on the reasoning that `0` is not a floor because `share < 0` is
+    unreachable for a share. That reasoning holds verbatim for the two COUNT floors,
+    which was the point: `count < 0` is equally unreachable, so `e1_objects: 0` and
+    `e2b_surviving_units: 0` were accepted and then bound nothing at their consumers.
+
+    Measured end-to-end at the pre-fix head rather than argued: with
+    `e2b_surviving_units = 0` the shipped bundle still scores, and an ON arm edited to
+    `fused = 0` yields a DECIDED verdict at exit **0** where the frozen floor of `30`
+    correctly REFUSES it as an unmeasurable population (`E2 REFUSED … E2b fused 0/3`).
+    `e1_objects: 0` likewise disables both the under-floor refusal in `read_off_arms`
+    and the BLOCKED-vs-decided split in `e1_pairings`.
+
+    So each arm here is NEW coverage, not regression protection: all four exited **0**
+    and wrote a record at the pre-fix head (asserted below by construction — the pin
+    is on exit 2, and the pre-fix head reached exit 0).
+    """
+    repo = _copied_bundle(tmp_path)
+    path = repo / "docs/evidence/7949-capstone/preregistration.json"
+    prereg = json.loads(path.read_text())
+    prereg["denominator_floors"][key] = value
+    path.write_text(json.dumps(prereg))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, (key, value, label, refused.value)
+    err = capsys.readouterr().err
+    assert key in err, err
+
+
+def test_an_ABSENT_value_lost_is_refused_and_is_not_an_empty_list(tmp_path, capsys):
+    """#10610 self-audit at `380a2b7a2` (P2): the field a forger DELETES switched the rule off.
+
+    `_census_reconcile`'s partition rule was gated on `lost is not None`, so the one
+    field a forger removes was the one that disabled the check. Measured on the
+    shipped bundle — delete `value_lost` from every `per_session` row, set
+    `value_survived = value_ids` and mirror the falsifier's `as_written` block —
+    the run wrote **`E2 PASS — E2a 14/14`, exit 0**, which is the identical forgery
+    that block's own docstring records having measured and closed for the
+    row-present case ("the census `kept = ids` with `value_lost` untouched wrote
+    `E2 PASS`").
+
+    An absent field is a REFUSAL, not an empty list: `e2a_value_units.py` writes
+    `value_lost` on every row and all 21 rows across the three shipped records carry
+    it, so absence is an edit. This is the rule the rest of the file already applies
+    ("an absent provenance is not a default one").
+    """
+    repo = _copied_bundle(tmp_path)
+    for name in ("e2a-value-units.json", "e2a-value-units-falsifier.json"):
+        path = repo / "docs/evidence/9889" / name
+        record = json.loads(path.read_text())
+
+        def _strip(block):
+            for row in block["per_session"].values():
+                assert "value_lost" in row, (
+                    "the SHIPPED record already omits value_lost — re-derive this pin")
+                row.pop("value_lost")
+                row["value_survived"] = list(row["value_ids"])
+            block["value_survived"] = block["value_units"]
+
+        if "per_session" in record:
+            _strip(record)
+        for key in ("with_anchor", "as_written"):
+            if isinstance(record.get(key), dict) and "per_session" in record[key]:
+                _strip(record[key])
+        path.write_text(json.dumps(record))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "carries no value_lost" in err, err
+    assert "PARTITION" in err, err
+
+
 def test_the_before_arms_counts_are_the_population_they_count(tmp_path, capsys):
     """#10610 review at `75bfd9c6` (P2): a count that disagrees with the census.
 
@@ -7831,6 +8810,117 @@ def test_the_before_arms_counts_are_the_population_they_count(tmp_path, capsys):
         assert refused.value.code == 2, (marker, refused.value)
         err = capsys.readouterr().err
         assert expected in err, (marker, err)
+
+
+@pytest.mark.parametrize("marker,mutate,expected", (
+    ("absent", lambda rec: rec.pop("label_counts"),
+     "carries no `label_counts` census"),
+    ("str", lambda rec: rec.__setitem__("label_counts", "x"),
+     "carries no `label_counts` census"),
+    ("list", lambda rec: rec.__setitem__("label_counts", [1, 2]),
+     "carries no `label_counts` census"),
+    ("object-str", lambda rec: rec["label_counts"].__setitem__("Object", "78"),
+     "is not a node count"),
+    ("object-bool", lambda rec: rec["label_counts"].__setitem__("Object", True),
+     "is not a node count"),
+    ("object-absent", lambda rec: rec["label_counts"].pop("Object"),
+     "reports 0 `:Object`"),
+))
+def test_a_before_arms_label_census_cannot_be_omitted_away(marker, mutate, expected, tmp_path, capsys):
+    """#10610 review at `2ffc5db19` (P2): `isinstance(counts, dict)` WAS the guard.
+
+    Every other census arm in this file reconciles `objects` / `bare_definite` /
+    `share` against `object_names`, and `label_counts` is the run's SECOND census of
+    the same population. But the whole check was wrapped in `if isinstance(counts,
+    dict):`, so an ABSENT or wrong-typed `label_counts` skipped it silently and the
+    record still scored — the `isinstance(...)`-as-a-no-op shape the sibling
+    `gate_names` guard had already closed one field over.
+
+    Measured at the pre-fix head on copies of `e1-paired-off-arm-1.json`: replacing
+    `label_counts` with `"x"`, and deleting the field, both exited **0** and wrote a
+    record. A label map that does not list `Object` means the run counted none, so
+    an absent `Object` is 0 rather than "unchecked", and 0 beside a positive
+    `objects` is the refusal along with the rest.
+    """
+    repo = _bundle(tmp_path / marker)
+    path = repo / "docs/evidence/9889/e1-paired-off-arm-1.json"
+    record = json.loads(path.read_text())
+    assert isinstance(record["label_counts"], dict) and record["label_counts"]["Object"] == 78, (
+        "the SHIPPED before arm no longer carries label_counts.Object — re-derive this pin")
+    mutate(record)
+    path.write_text(json.dumps(record))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, (marker, refused.value)
+    err = capsys.readouterr().err
+    assert expected in err, (marker, err)
+
+    # …and the SHIPPED bundle still scores, so the guard discriminates a record whose
+    # second census was removed from the one that ships rather than refusing the form.
+    # ⛔ Asserted against the ACTUAL outcome, not a membership test: every return
+    # value satisfies `in ("REFUSED", "PASS", "FAIL")`, so a tautology there would
+    # only prove `score()` did not raise (#10610 review at `bde94f89d`, P3).
+    shipped = _bundle(tmp_path / "shipped")
+    assert scores_probe.score(shipped)["e1"]["outcome"] == "REFUSED"
+
+
+def test_a_gate_drops_census_member_of_another_type_is_refused(tmp_path, capsys):
+    """#10610 review at `2ffc5db19` (P3): the ON run's only independent witness.
+
+    `gate_bare` counts `_is_bare_definite(item)`, and that helper stringifies, so a
+    list or dict member silently counted as NON-bare. `object_names: [0..60]` was
+    refused only INCIDENTALLY — its bare count came out 0 against the log's 13 — and
+    a member of another type orchestrated to the right count would have scored. The
+    before arms and `_unit_id_members` already refuse a member of another type; this
+    is the same rule on the census `e1-gate-drops.json` is cited as witness FOR.
+    """
+    repo = _bundle(tmp_path / "gate")
+    path = repo / "docs/evidence/9889/e1-gate-drops.json"
+    record = json.loads(path.read_text())
+    names = record["object_names"]
+    assert names and all(isinstance(n, str) for n in names), (
+        "the SHIPPED gate-drops census is not all strings — re-derive this pin")
+    record["object_names"] = [i for i in range(len(names))]
+    path.write_text(json.dumps(record))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "is not an object name" in err, err
+    assert "e1-gate-drops.json" in err, err
+
+
+def test_a_gate_drops_census_that_lists_a_member_twice_is_refused(tmp_path, capsys):
+    """#10610 review at `bde94f89d` (P2): the ON witness census is a POPULATION.
+
+    The before arms refuse a duplicated `object_names` member ("a census no producer
+    can write") and the E2a census gets the same rule through its partition check, but
+    `e1-gate-drops.json`'s census had neither. Measured at the pre-fix head: replacing
+    the 61 names with the 13 bare ones plus 48 COPIES of one non-bare name kept
+    `len(gate_names) == after["objects"]` (61) and `gate_bare ==
+    after["bare_definite"]` (13), and `score()` wrote a record at exit 0 over a
+    population no producer can emit — which is exactly the coupled multi-field
+    forgery this witness exists to refuse.
+
+    Non-vacuity: removing the `len(set(...))` rule makes this case score instead of
+    refusing (measured).
+    """
+    repo = _bundle(tmp_path / "dup")
+    path = repo / "docs/evidence/9889/e1-gate-drops.json"
+    record = json.loads(path.read_text())
+    names = record["object_names"]
+    bare = [n for n in names if scores_probe._is_bare_definite(n)]
+    assert len(set(names)) == len(names), (
+        "the SHIPPED gate-drops census already carries a duplicate — re-derive this pin")
+    assert bare and len(bare) < len(names), (len(bare), len(names))
+    non_bare = next(n for n in names if n not in bare)
+    record["object_names"] = bare + [non_bare] * (len(names) - len(bare))
+    path.write_text(json.dumps(record))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "lists the same `object_names` member twice" in err, err
 
 
 def test_the_bare_definite_shape_is_the_repos_own_predicate():
@@ -7927,6 +9017,7 @@ def test_a_before_arm_with_no_graph_is_refused(tmp_path, capsys):
     record = json.loads(path.read_text())
     assert record["graph"] == "capstone_off_54922a800_1793379347"   # ships with one
     record.pop("graph")
+    _shipped_arm(record)          # …so the ONLY defect is the absent graph
     path.write_text(json.dumps(record))
     with pytest.raises(SystemExit) as refused:
         scores_probe.score(repo)
@@ -7969,6 +9060,7 @@ def test_a_before_arm_that_names_another_pin_is_refused(tmp_path, capsys):
         record = json.loads(path.read_text())
         assert field not in record, (label, "the shipped arm predates the pin")
         record[field] = value
+        _shipped_arm(record)      # …so the ONLY defect is the pin it names
         path.write_text(json.dumps(record))
         with pytest.raises(SystemExit) as refused:
             scores_probe.score(repo)
@@ -8001,6 +9093,7 @@ def test_a_blank_before_corpus_pin_is_not_an_absent_one(blank, tmp_path, capsys)
     path = repo / "docs/evidence/9889/e1-paired-off-arm-2.json"
     record = json.loads(path.read_text())
     record["fixtures_hash"] = blank
+    _shipped_arm(record)          # …so the ONLY defect is the blank pin
     path.write_text(json.dumps(record))
     with pytest.raises(SystemExit) as refused:
         scores_probe.score(repo)
@@ -8073,6 +9166,7 @@ def test_a_before_arm_that_carries_the_frozen_pin_reads_pin_checked(tmp_path):
         path = repo / f"docs/evidence/9889/e1-paired-off-arm-{index + 1}.json"
         record = json.loads(path.read_text())
         record["fixtures_hash"] = value
+        _shipped_arm(record)      # a re-recorded pair pins the gate explicitly too
         path.write_text(json.dumps(record))
     scored = scores_probe.score(repo)
     block = scored["before_arm_provenance"]
@@ -8082,6 +9176,272 @@ def test_a_before_arm_that_carries_the_frozen_pin_reads_pin_checked(tmp_path):
         assert "fixtures_hash" in arm["pin_fields_present"], arm
         assert arm["fixtures_hash"] is not None, arm
     assert block["limitation"].startswith("closed:"), block["limitation"]
+
+
+def test_the_default_on_key_set_is_the_one_whose_default_moved():
+    """`_DEFAULT_ON_VARS` is DERIVED from the resolvers, never restated.
+
+    ⛔ THE WHOLE FIX TURNS ON WHICH KEY MOVED (`#10996` review cycle 2, P1). The
+    driver stops reading ABSENCE as an OFF spelling for exactly the switches whose
+    UNSET value is now ON — no more (that would refuse genuine control arms whose
+    switches still default off) and no fewer (that would leave the hole open for
+    the one key that moved). So the literal is pinned against the real resolvers:
+    with the flags CLEARED, `value_gate.value_gate_enabled()` must be True and
+    `s2_decision_seam.seam_enabled()` must be False, and the tuple must be the set
+    that reads ON. If a future flag joins the default-ON family, the producer
+    sets move and this reds instead of the driver silently keeping the old one.
+    """
+    from tortoise import s2_decision_seam, value_gate
+
+    cleared = {key: os.environ.pop(key, None)
+               for key in scores_probe._ARM_OFF_VARS}
+    try:
+        assert value_gate.value_gate_enabled() is True, (
+            "the S2.2 mechanical half must read ON with the flag unset — that is "
+            "the default this driver's absence rule is about")
+        assert s2_decision_seam.seam_enabled() is False, (
+            "the seam is a paid call and still defaults OFF, so absence remains a "
+            "genuine OFF spelling for it")
+        reads_on_when_unset = {
+            key for key, arm in (("TORTOISE_VALUE_GATE",
+                                  value_gate.value_gate_enabled()),
+                                 ("TORTOISE_S2_DECISION_SEAM",
+                                  s2_decision_seam.seam_enabled()))
+            if arm}
+    finally:
+        for key, value in cleared.items():
+            if value is not None:
+                os.environ[key] = value
+    assert reads_on_when_unset == set(scores_probe._DEFAULT_ON_VARS), (
+        scores_probe._DEFAULT_ON_VARS, reads_on_when_unset)
+    assert set(scores_probe._DEFAULT_ON_VARS) <= set(scores_probe._ARM_OFF_VARS), (
+        "a switch this driver does not check cannot need the absence rule")
+
+
+def test_a_before_arm_that_expresses_the_value_gate_by_absence_is_refused(
+        tmp_path, capsys):
+    """A record the SHIPPED producer could write may not say OFF by leaving it out.
+
+    ⛔ `#10996` review cycle 2, P1: `_is_truthy(None)` is False, so an absent
+    `TORTOISE_VALUE_GATE` certified the before arm OFF — while the post-flip
+    reader resolves absence to ON and runs the predicate inside it. The pair this
+    driver scores (`after <= 0.50 x before`) could then be TWO gate-armed arms and
+    still be reported as a decided E1. `e1_paired_arm.off_arm_readback` pins the
+    key explicitly now, so a record carrying a pin field and spelling the gate as
+    absent is not a shipped shape and is refused.
+
+    Non-vacuity, run rather than reasoned: the SAME record with the shipped `"0"`
+    scores (`read_off_arms` returns it), so the refusal is caused by the absence
+    and not by some other defect in the fixture.
+    """
+    repo = _bundle(tmp_path)
+    path = repo / "docs/evidence/9889/e1-paired-off-arm-1.json"
+    record = json.loads(path.read_text())
+    assert scores_probe._is_absent_pin(record["arm"]["TORTOISE_VALUE_GATE"])
+    record["head"] = scores_probe._PRE_FLIP_HEAD     # the shipped probe's pin field
+    path.write_text(json.dumps(record))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "CARRIES" not in err, err
+    assert ("records TORTOISE_VALUE_GATE as ABSENT" in err
+            or "`arm` block records TORTOISE_VALUE_GATE as ABSENT" in err), err
+    assert "TORTOISE_VALUE_GATE=0" in err, err
+
+    # …and the same record, shipped-shaped, is ACCEPTED: the refusal is the absence.
+    _shipped_arm(record)
+    path.write_text(json.dumps(record))
+    assert scores_probe.score(repo)["e1"]["decidable"] is False
+
+
+def test_a_before_arm_at_another_head_cannot_express_the_value_gate_by_absence(
+        tmp_path, capsys):
+    """The legacy licence is a HEAD, so removing the pin fields is not enough.
+
+    The two committed arms predate the pin fields AND name the pre-`#10996`
+    campaign head, and both halves are required: a record that merely LOOKS old
+    (no `head`/`fixtures_hash`/… because someone stripped them) but names another
+    head was measured by code that could be post-flip, so its absent value gate
+    cannot be read as OFF. Without this half the licence degenerates into a
+    spelling rule anyone can satisfy by deleting four keys.
+    """
+    repo = _bundle(tmp_path)
+    path = repo / "docs/evidence/9889/e1-paired-off-arm-1.json"
+    record = json.loads(path.read_text())
+    assert scores_probe._is_absent_pin(record["arm"]["TORTOISE_VALUE_GATE"])
+    # Legacy SHAPE (no pin fields), a head from after the flip's campaign.
+    record["graph"] = "capstone_off_9152448d_1793378986"
+    path.write_text(json.dumps(record))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "records TORTOISE_VALUE_GATE as ABSENT" in err, err
+    assert scores_probe._PRE_FLIP_HEAD[:9] in err, err
+
+
+def test_the_after_arm_at_another_head_cannot_express_the_value_gate_by_absence(
+        tmp_path, capsys):
+    """`<unset>` on the ON log is a legacy spelling too, and bound to the same head.
+
+    `capstone_measure.measured_arm` now writes `TORTOISE_VALUE_GATE=0` and reads it
+    back, so the committed `<unset>` is an artifact of the pre-flip producer. A log
+    from ANY OTHER head that still spells it absent is refused: its pinned-OFF
+    switch was in fact armed, so the ON half of the pair is the value-gate arm —
+    the easier side of E1's bar under a label that never declared it.
+    """
+    repo = _bundle(tmp_path)
+    log = repo / "docs/evidence/9889/on-arm.log"
+    text = log.read_text()
+    assert "TORTOISE_VALUE_GATE=<unset>" in text, text[:400]
+    other = "9f3c1d7e8a2b4c5d6e7f8091a2b3c4d5e6f70819"
+    text = re.sub(r"^# head: \S+", f"# head: {other}", text, count=1,
+                  flags=re.MULTILINE)
+    text = re.sub(r"^# graph: \S+", f"# graph: capstone_on_{other[:8]}_1793378318",
+                  text, count=1, flags=re.MULTILINE)
+    log.write_text(text)
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "arm readback records TORTOISE_VALUE_GATE as ABSENT" in err, err
+
+
+def test_the_on_log_graph_must_name_its_own_head(tmp_path, capsys):
+    """The legacy licence reads the LOG's head, so the log's graph must agree.
+
+    ⛔ `#10996` review (blocking finding on the first cut): the licence, the
+    before-arm graph check and the after arm's own `# graph:`/`# head:` pair all
+    key off the log's `# head:` line, so a log whose `# graph:` named a DIFFERENT
+    run would sail through every later check on a head it merely shares — the
+    head would be `54922a800` while the after share came from another graph. That
+    is the same class of hole `_names_head` was hardened for at `#10610`
+    (`75bfd9c6`), one level out.
+
+    The guard had no pin when it landed: deleting it left this file green. This
+    is that pin, and it is one defect per fixture — the head is untouched, only
+    the graph moves.
+    """
+    repo = _bundle(tmp_path)
+    log = repo / "docs/evidence/9889/on-arm.log"
+    text = log.read_text()
+    assert "# head: 54922a800" in text, text[:400]
+    other = "9152448d"
+    text = re.sub(r"^# graph: capstone_on_(\w+)_",
+                  f"# graph: capstone_on_{other}_", text, count=1,
+                  flags=re.MULTILINE)
+    log.write_text(text)
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "does not name its own `# head:` line" in err, err
+    assert other in err, err
+
+
+def test_the_committed_legacy_absence_is_disclosed_in_the_record(tmp_path):
+    """The licence is READ, not trusted: every arm that needed it is named.
+
+    A residual that lives only in the driver is one a reader of
+    `e1-e2-scores.json` cannot see, and that file is what the row builder
+    consumes. So the record says, beside the numbers, which arms were read as OFF
+    on the campaign-head licence and what closes it.
+    """
+    record = scores_probe.score(_bundle(tmp_path))
+    block = record["value_gate_pin"]
+    assert block["default_on_keys"] == list(scores_probe._DEFAULT_ON_VARS), block
+    assert block["legacy_head"] == scores_probe._PRE_FLIP_HEAD, block
+    assert block["after"]["pin"] == "legacy-absent", block["after"]
+    assert scores_probe._PRE_FLIP_HEAD[:9] in block["after"]["basis"], block
+    assert [arm["pin"] for arm in block["before"]] == [
+        "legacy-absent", "legacy-absent"], block["before"]
+    assert [arm["artifact"] for arm in block["before"]] == [
+        "docs/evidence/9889/e1-paired-off-arm-1.json",
+        "docs/evidence/9889/e1-paired-off-arm-2.json",
+    ], block["before"]
+    assert "#7949" in block["limitation"], block["limitation"]
+    assert "TORTOISE_VALUE_GATE=0" in block["limitation"], block["limitation"]
+    # No number moves: the licensed pair still scores the outcome it shipped with.
+    assert record["e1"]["outcome"] == "REFUSED", record["e1"]
+    # …and a re-recorded pair needs no licence, so the disclosure cannot survive it.
+    repo = _bundle(tmp_path / "pinned")
+    for index in (1, 2):
+        path = repo / f"docs/evidence/9889/e1-paired-off-arm-{index}.json"
+        arm_record = json.loads(path.read_text())
+        _shipped_arm(arm_record)
+        path.write_text(json.dumps(arm_record))
+    log = repo / "docs/evidence/9889/on-arm.log"
+    log.write_text(log.read_text().replace(
+        "TORTOISE_VALUE_GATE=<unset>", "TORTOISE_VALUE_GATE=0", 1))
+    pinned = scores_probe.score(repo)["value_gate_pin"]
+    assert pinned["after"]["pin"] == "explicit", pinned
+    assert [arm["pin"] for arm in pinned["before"]] == ["explicit", "explicit"], (
+        pinned["before"])
+
+
+def test_the_legacy_head_really_predates_the_flip():
+    """The licence's PREMISE, checked at the commit it licences.
+
+    `_PRE_FLIP_HEAD` is admitted as "a head where absence really was OFF". That is
+    a claim about the code AT THAT COMMIT, so it is read there — `git show` the
+    resolver, not the working tree — and the flip's own default is required to be
+    ABSENT from it. A test that read today's file would prove nothing about the
+    records; one that hardcoded the answer would be the inert trust token this
+    whole change removes. If the campaign head ever turns out to carry the flip,
+    this reds and the licence has to be narrowed instead of silently widening.
+
+    ⛔ READABLE-IN-THIS-CLONE IS NOT THE PREMISE. CI's `test` job checks this repo
+    out with a bare `actions/checkout@v4` (`python-ci.yml`, default
+    `fetch-depth: 1`), where an ANCESTOR commit does not exist by construction —
+    so a hard failure here would red every CI run for the checkout alone, reported
+    as a defect in the change. It SKIPS in that case, naming what is unchecked,
+    exactly as `test_no_legacy_token_path.py` does for the same `git show <sha>:…`
+    read. A skip is not a pass: the licence premise is UNCHECKED on a shallow
+    clone, and this says so rather than passing silently as if it had checked.
+
+    ⛔ BUT "UNREADABLE" IS NOT ONE STATE (`#10996` review). Catching the failed
+    `git show` alone cannot tell a SHALLOW checkout — where the ancestor is
+    absent by construction — from a WRONG `_PRE_FLIP_HEAD`, where the sha this
+    licence rests on does not exist at all. The first is a skip; the second is a
+    defect in the pin, and it would skip forever. So the skip is licensed by
+    `git rev-parse --is-shallow-repository` itself, and an unreadable head in a
+    FULL clone FAILS: the premise is then underivable, not merely unchecked.
+    """
+    head = scores_probe._PRE_FLIP_HEAD
+    try:
+        shown = subprocess.run(
+            ["git", "show", f"{head}:tortoise/value_gate.py"],
+            cwd=_REPO, capture_output=True, text=True)
+    except FileNotFoundError:  # no `git` on this host at all
+        pytest.skip("`git` is not installed here, so no commit can be read")
+    if shown.returncode != 0:
+        shallow = subprocess.run(
+            ["git", "rev-parse", "--is-shallow-repository"],
+            cwd=_REPO, capture_output=True, text=True).stdout.strip()
+        if shallow == "true":
+            pytest.skip(
+                f"{head[:9]} (the licensed pre-flip head) is not in this "
+                "clone's history — a `fetch-depth: 1` checkout cannot contain "
+                "an ancestor, so the licence premise is UNCHECKED here, not "
+                "disproved. Re-derive it on a full clone: "
+                "`git fetch --unshallow origin` (or the worktree this branch "
+                "was written in).")
+        pytest.fail(
+            f"{head[:9]} (the licensed pre-flip head) is not readable in a FULL "
+            "clone, so the sha this licence rests on is WRONG rather than "
+            "merely unreachable — a skip here would license an absence reading "
+            "at a head nobody can verify. "
+            f"git: {shown.stderr.strip()}")
+    source = shown.stdout
+    assert 'os.environ.get(ENV_FLAG, "1")' not in source, (
+        f"{head[:9]} already carries the post-`#10996` default — the legacy "
+        "licence for an ABSENT value gate no longer holds at this head")
+    assert "os.environ.get(ENV_FLAG)" in source, (
+        f"{head[:9]} does not read the flag the way the licence assumes")
+    # …and the flip is what changed it, so the two heads genuinely differ.
+    assert 'os.environ.get(ENV_FLAG, "1")' in (_REPO / "tortoise/value_gate.py"
+                                               ).read_text()
 
 
 def test_the_arm_key_sets_are_the_producers():
@@ -8204,6 +9564,10 @@ def test_the_readmes_floor_provenance_claim_matches_the_code(monkeypatch,
     monkeypatch.setattr(probe, "backend_ready", lambda: (True, "ok"))
     for key in (*probe.ARM_KEYS, probe.SEAM_KEY):
         monkeypatch.delenv(key, raising=False)
+    # #10996: the OFF arm's value gate is EXPLICIT — an unset default-ON switch is
+    # refused by the driver now, and that refusal would pre-empt the floor refusal
+    # this test is about.
+    monkeypatch.setenv("TORTOISE_VALUE_GATE", "0")
     monkeypatch.setenv("TORTOISE_DB_URI", "docker://:@127.0.0.1:1/tortoise_test")
     with pytest.raises(SystemExit) as refused:
         probe.main(["--graph", "g", "--out", str(tmp_path / "off.json")])
@@ -8567,3 +9931,588 @@ def test_a_graph_naming_the_head_under_the_producers_eight_chars_scores(tmp_path
     with pytest.raises(SystemExit) as refused:
         scores_probe.score(repo)
     assert refused.value.code == 2, refused.value
+
+
+# ── the last unguarded count, and the switch that stringified (#10610 review at `2ffc5db19`) ──
+
+@pytest.mark.parametrize("value", ["Infinity", "-Infinity", "NaN", "61.5",
+                                   '"61"', "true", "null", "62", "-1"])
+def test_gate_drops_total_is_a_count_or_a_refusal(value, tmp_path, capsys):
+    """P2: `drops_total` is the ONE count the record emitted without `_count`.
+
+    Every sibling count passes `_count` (`objects`/`bare_definite` in the head loop,
+    E2a's denominators, `e1b real_facts`), and `predicate_alive` is `is not True`
+    -checked — but the gate-drops block emitted `drops_total` as a bare `.get()`.
+    So it was the one count a caller could set to `Infinity` (or a string, or a
+    negative) and still get a RECORD back. Measured at this head, one arm per value
+    below: each scored and exited 0, and `Infinity` wrote a record that is not valid
+    STRICT JSON (`json.loads(..., parse_constant=… )` rejects it; the record is read
+    by tools that do).
+
+    Not cosmetic either: `capstone_measure.py` reads this field into
+    `gate_drops_total` and renders it into the scored E1 note as
+    `reports value_gate drops <N> of <M> Objects with its positive controls alive`
+    — a mechanism claim nothing measured. The ceiling is the same run's `objects`
+    (`e1_gate_drops.py`'s `measure` writes `drops_total` as `len(drops)` over a dict keyed by object name).
+
+    Non-vacuity, measured rather than assumed: ALL NINE arms exit 0 at this head's
+    predecessor and exit 2 here. The two JSON-literal arms are `true`/`null` and NOT
+    `True`/`None` — the uppercase spellings make the DOCUMENT invalid JSON, so they
+    would exercise the parser rather than the coercion and would pass at BOTH heads,
+    which is a pin that discriminates nothing (a first cut of this pin did exactly
+    that, and the pre-fix run is what caught it).
+    """
+    repo = _bundle(tmp_path / "drops")
+    path = repo / "docs/evidence/9889/e1-gate-drops.json"
+    text = path.read_text()
+    record = json.loads(text)
+    assert record["drops_total"] == 0, (
+        "the SHIPPED gate-drops record no longer reads 0 drops — re-derive this pin")
+    # Splice the RAW token, so the non-standard constants (`Infinity`, `NaN`) reach
+    # the reader instead of being rejected by `json.dumps` on the way out.
+    record["drops_total"] = "__DROPSTOTAL__"
+    path.write_text(json.dumps(record).replace('"__DROPSTOTAL__"', value))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "drops_total" in err, err
+
+    # …and the shipped 0 still scores, so the guard refuses the edited count rather
+    # than the whole record.
+    path.write_text(text)
+    # ⛔ Asserted against the ACTUAL outcome, not a membership test: every return
+    # value `capstone_measure.outcome()` can produce satisfies
+    # `in ("REFUSED", "PASS", "FAIL")`, so a tautology there would only prove
+    # `score()` did not raise — the over-block half of this pin would be no pin
+    # at all (#10610 review at `05761cf29`, P3; same class fixed at `bde94f89d`).
+    assert scores_probe.score(repo)["e1"]["outcome"] == "REFUSED"
+
+
+@pytest.mark.parametrize("value", ["[]", '{"a": 1}', "[1, 2]"])
+def test_a_before_arm_switch_value_of_another_type_is_refused(value, tmp_path, capsys):
+    """P3: `_is_truthy` stringifies, so a list or object certified a before arm.
+
+    `_is_truthy` is `str(raw).strip().lower() in _TRUTHY`, so `[]` and `{"a": 1}`
+    both stringify to something outside the truthy set and read FALSY — and the
+    before-arm guard only refuses a TRUTHY value. A non-string switch therefore
+    passed as "the pass was OFF", which is the one thing the comment above it says
+    the guard establishes: the arm's provenance is the environment it was measured
+    in, and a list is not an environment value.
+
+    Measured at this head's predecessor: setting arm 1's `TORTOISE_VET` to `[]` and
+    to `{"a": 1}` each exited 0 with a byte-identical score. No producer writes
+    either shape (`e1_paired_arm.py` writes `os.environ` strings and `null`), so
+    both are edited provenance. Non-vacuity: all three arms exit 0 pre-fix, exit 2
+    here.
+    """
+    repo = _bundle(tmp_path / "switch")
+    path = repo / "docs/evidence/9889/e1-paired-off-arm-1.json"
+    text = path.read_text()
+    record = json.loads(text)
+    assert record["arm"]["TORTOISE_VET"] is None     # the shipped arm is OFF
+    record["arm"]["TORTOISE_VET"] = "__SWITCH__"
+    path.write_text(json.dumps(record).replace('"__SWITCH__"', value))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "which is not a switch value" in err, err
+
+    # …and the shipped `null` still scores.
+    path.write_text(text)
+    # ⛔ Asserted against the ACTUAL outcome, not a membership test: every return
+    # value `capstone_measure.outcome()` can produce satisfies
+    # `in ("REFUSED", "PASS", "FAIL")`, so a tautology there would only prove
+    # `score()` did not raise — the over-block half of this pin would be no pin
+    # at all (#10610 review at `05761cf29`, P3; same class fixed at `bde94f89d`).
+    assert scores_probe.score(repo)["e1"]["outcome"] == "REFUSED"
+
+
+# ── the drop census, and a bar that binds nothing (#10610 review at `6e28a20e1f`) ─────────────
+
+def test_drops_total_must_equal_its_own_drop_census(tmp_path, capsys):
+    """P2: `drops_total` was BOUNDED by the Object population, never reconciled.
+
+    `_count(..., ceiling=gate_objects)` refuses a total above the 61-Object
+    population, which is necessary and not sufficient: the SAME record carries the
+    drop census itself (`e1_gate_drops.py`'s `measure` writes `value_gate_drops` as a
+    name-keyed dict and `drops_total` as `len(drops)` beside it) and nothing read it — so
+    the field was a trusted integer anywhere inside `[0, objects]`.
+
+    Measured at the pre-fix head, on a copied bundle whose shipped pair is
+    `value_gate_drops: {} / drops_total: 0`: setting `drops_total: 61` (equal to the
+    ceiling, while `62` is refused) exited 0 and emitted `drops_total: 61`. That is
+    the harm the bound exists to prevent, because `capstone_measure.py` renders the
+    number into the scored E1 note as `reports value_gate drops 61 of 61 Objects
+    with its positive controls alive` — a mechanism claim the artifact contradicts.
+
+    Non-vacuity: measured, exit 0 pre-fix and exit 2 here; the shipped `{}`/`0` pair
+    still scores. TWO arms, because the fix has two directions and only the EQUALITY
+    check can see either of them — a ceiling cannot, in the direction below it:
+
+    * a total ABOVE the census (`61` against the shipped empty census) is refused by
+      the EQUALITY check (`drops_total != len(census)`), NOT by a ceiling sized to
+      the census — `_count(ceiling=gate_objects)` bounds it by the 61-Object
+      population, and 61 is inside that bound. ⛔ The ceiling is deliberately NOT
+      `len(census)`: that was the P1 at `05761cf29`, where a census is
+      ATTACKER-SIZED, so it bound nothing while DROPPING the population bound
+      (62 and 100 fabricated keys were ACCEPTED beside `objects: 61`). A lane that
+      "restores" `ceiling=len(gate_census)` here does NOT by itself re-open that
+      forgery — the `len(census) > objects` check and the `object_names` membership
+      check already refuse those censuses — and saying so would be the same
+      claim-outruns-the-code defect this file exists to catch. What the restore does
+      is move ARM 1's refusal onto `_count`, which is why the assertion below names
+      the EQUALITY guard's own message;
+    * a total BELOW the census (`0` against a one-name census) passes every bound
+      and is refused only by the equality check — the direction a ceiling can never
+      see, and the one that keeps a real drop from vanishing out of the note.
+    """
+    repo = _bundle(tmp_path / "census")
+    path = repo / "docs/evidence/9889/e1-gate-drops.json"
+    text = path.read_text()
+    record = json.loads(text)
+    assert record["value_gate_drops"] == {} and record["drops_total"] == 0, (
+        "the SHIPPED gate record's drop census is not `{}`/0 — re-derive this pin")
+
+    # ARM 1 — the reviewer's measurement: a total inside the OBJECT population but
+    # outside the drop census. It was `61` of 61 Objects, emitted and exit 0.
+    record["drops_total"] = record["objects"]
+    path.write_text(json.dumps(record))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    # ⛔ The EQUALITY check is the one that must refuse this, and the assertion says
+    # so by quoting its message: `_count` also names `drops_total` in its own
+    # refusal, so a bare `"drops_total" in err` stayed green when the ceiling was
+    # `len(gate_census)`. MEASURED, with that mutant in place: this arm then refuses
+    # through `_count` (`carries drops_total=61 of a population of 0`) while the
+    # fabricated-census forgeries stay refused by the `len(census) > objects` check
+    # — so the restore is a PIN defect and a docstring defect, not a fresh
+    # fail-open, and the assertion's job is to keep the pin pointing at the guard
+    # that actually binds here.
+    assert "value_gate_drops` census holds 0" in capsys.readouterr().err, (
+        "a drops_total above the census was not refused by the EQUALITY check — "
+        "a refusal from `_count`'s population message means the ceiling was "
+        "re-sized to the census, which is the attacker-sized bound "
+        "`05761cf29` removed")
+
+    # ARM 2 — the opposite direction, which only the equality check can refuse: one
+    # REAL Object in the census, zero claimed in the total. The name must be one of
+    # this run's `object_names`, or the census-identity arm added at `05761cf29`
+    # refuses it first and this arm would no longer be about the equality check.
+    record["value_gate_drops"] = {record["object_names"][0]: "value.identifier_only.path"}
+    record["drops_total"] = 0
+    path.write_text(json.dumps(record))
+    with pytest.raises(SystemExit) as refused2:
+        scores_probe.score(repo)
+    assert refused2.value.code == 2, refused2.value
+    err = capsys.readouterr().err
+    assert "census holds 1" in err, err
+
+    # …and the shipped pair still scores, so the guard refuses an edited count
+    # rather than the field.
+    path.write_text(text)
+    # ⛔ Asserted against the ACTUAL outcome, not a membership test: every return
+    # value `capstone_measure.outcome()` can produce satisfies
+    # `in ("REFUSED", "PASS", "FAIL")`, so a tautology there would only prove
+    # `score()` did not raise — the over-block half of this pin would be no pin
+    # at all (#10610 review at `05761cf29`, P3; same class fixed at `bde94f89d`).
+    assert scores_probe.score(repo)["e1"]["outcome"] == "REFUSED"
+
+
+def test_a_drop_census_that_is_not_an_object_is_refused(tmp_path, capsys):
+    """The census is now READ, so its shape matters: a non-object is a refusal.
+
+    `_object_block` is the helper `with_anchor`/`as_written` already go through —
+    `(value or {})` is not a guard, because a non-empty string is truthy and hands
+    the value on to a `.get` that raises `AttributeError` (exit 1). Reading this
+    field for the first time is what makes that relevant at this site.
+    """
+    repo = _bundle(tmp_path / "census-shape")
+    path = repo / "docs/evidence/9889/e1-gate-drops.json"
+    text = path.read_text()
+    record = json.loads(text)
+    record["value_gate_drops"] = "none"
+    path.write_text(json.dumps(record))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value            # NOT exit 1/AttributeError
+    err = capsys.readouterr().err
+    assert "value_gate_drops" in err, err
+
+    path.write_text(text)
+    # ⛔ Asserted against the ACTUAL outcome, not a membership test: every return
+    # value `capstone_measure.outcome()` can produce satisfies
+    # `in ("REFUSED", "PASS", "FAIL")`, so a tautology there would only prove
+    # `score()` did not raise — the over-block half of this pin would be no pin
+    # at all (#10610 review at `05761cf29`, P3; same class fixed at `bde94f89d`).
+    assert scores_probe.score(repo)["e1"]["outcome"] == "REFUSED"
+
+
+def _prereg_with_threshold(tmp_path: Path, bar: str, new: str) -> Path:
+    """A bundle whose frozen pre-registration states `bar`'s threshold as `new`."""
+    repo = _bundle(tmp_path / f"bar-{bar}")
+    path = repo / "docs/evidence/7949-capstone/preregistration.json"
+    prereg = json.loads(path.read_text())
+    hits = [c for c in prereg["criteria"] if c["id"] == bar]
+    assert len(hits) == 1, f"preregistration no longer carries exactly one {bar} row"
+    hits[0]["threshold"] = new
+    path.write_text(json.dumps(prereg))
+    return repo
+
+
+@pytest.mark.parametrize("bar,new", [
+    # a COUNT bar: `n == 0` never fails, `n > m` never passes — neither binds
+    ("E2a", "`>= 0 of 14`"),
+    ("E2a", "`>= 20 of 14`"),
+    ("E1b", "`>= 0 of 90`"),
+    # E2b is a SHARE over surviving units, so `t >= 1.0` accepts every reading
+    ("E2b", "`<= 1.0`"),
+    # E1 is a REDUCTION: at `m >= 1` the null result satisfies it
+    ("E1", "`after_share <= 1.0 × before_share`"),
+    ("E1", "`after_share <= 100 × before_share`"),
+])
+def test_a_frozen_bar_that_binds_nothing_is_refused(bar, new, tmp_path, capsys):
+    """P2: the `criteria` bars were parse-checked, never BINDING-checked.
+
+    Three statements above them, `denominator_floors` got a positivity arm for
+    exactly this reason — *"a floor of zero or less binds nothing: … every reading
+    would clear it and the guard it feeds would pass everything"*. The four bars are
+    read from the SAME frozen record one statement later and only E2a's `of` was
+    reconciled, so each of these edits moved a VERDICT:
+
+        E1  `<= 0.50 ×` -> `<= 100 ×`   exit 0, E1=PASS, decided=True (was REFUSED)
+        E2a `>= 13 of 14` -> `>= 0 of 14` exit 0, E2=PASS (its own detail: 8/14)
+        E2b `<= 0.05` -> `<= 1.0`       exit 0, accepted
+
+    The rules are provable from each bar's population rather than a policy about
+    how strict a pre-registration should be: a `>= n of m` count binds iff
+    `0 < n <= m`; E2b's share is in `[0, 1]`, so it binds iff `0 <= t < 1`; E1's
+    multiplier is relative and binds iff `0 <= m < 1` (at `m == 0` only a zero
+    after-share passes, so the strict end of the window is INCLUSIVE, exactly as
+    E2b's is).
+
+    Non-vacuity: measured, all six exit 0 at the pre-fix head and exit 2 here. The
+    SHIPPED bars (0.50, 90/90, 13/14, 0.05) are all inside those windows, which the
+    byte-pin above proves independently — that is the over-block check.
+    """
+    repo = _prereg_with_threshold(tmp_path, bar, new)
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert f"criteria[{bar}]" in err, err
+
+    # …and the SHIPPED bar for that same row still scores, so the rule refuses the
+    # inert value rather than the row.
+    shipped = _bundle(tmp_path / f"shipped-{bar}")
+    # ⛔ Asserted against the ACTUAL outcome, not a membership test: every return
+    # value `capstone_measure.outcome()` can produce satisfies
+    # `in ("REFUSED", "PASS", "FAIL")`, so a tautology there would only prove
+    # `score()` did not raise — the over-block half of this pin would be no pin
+    # at all (#10610 review at `05761cf29`, P3; same class fixed at `bde94f89d`).
+    assert scores_probe.score(shipped)["e1"]["outcome"] == "REFUSED"
+
+
+def test_a_forged_drop_census_cannot_size_its_own_ceiling(tmp_path, capsys):
+    """P1: the census must not size the bound it is checked against.
+
+    The first cut of the census fix passed `ceiling=len(gate_census)`: the census is
+    ATTACKER-SIZED, so that ceiling bound nothing while DROPPING the population bound
+    the previous head had. Measured at that head, with a matching `drops_total`,
+    **62 and 100 fabricated keys were ACCEPTED** and the record emitted
+    `drops_total: 100` beside `objects: 61` — a numerator 1.64x its own population,
+    which is the class `_count(ceiling=…)` exists for (E1b's `real_facts=100000`
+    beside `bar=90 of 90` was a finding earlier in this PR).
+
+    Four checks now hold the census to the record's OTHER statements, so it can no
+    longer vouch for itself: a census larger than `objects`; a key that is not one of
+    the run's `object_names`; a non-string `rule_id`; and
+    `drops_among_bare_definite` — the record's second statement of the same drops,
+    written by the producer on every run whose Objects census is non-empty and
+    read by nothing before this.
+    """
+    repo = _bundle(tmp_path / "forged")
+    path = repo / "docs/evidence/9889/e1-gate-drops.json"
+    text = path.read_text()
+    record = json.loads(text)
+
+    # ARM 1 — the P1 itself: a census big enough to carry the bound past the population.
+    for n in (62, 100):
+        record["value_gate_drops"] = {f"forged-{i}": "r" for i in range(n)}
+        record["drops_total"] = n
+        path.write_text(json.dumps(record))
+        with pytest.raises(SystemExit) as refused:
+            scores_probe.score(repo)
+        assert refused.value.code == 2, refused.value
+        err = capsys.readouterr().err
+        assert "cannot be larger than the population" in err, err
+
+    # ARM 2 — a census that FITS but names an Object this run never wrote.
+    record["value_gate_drops"] = {"not an object of this run": "r"}
+    record["drops_total"] = 1
+    path.write_text(json.dumps(record))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "not one of this run's `object_names`" in err, err
+
+    # ARM 3 — a real name, a value the producer cannot write.
+    real = record["object_names"][0]
+    record["value_gate_drops"] = {real: {"nested": 1}}
+    record["drops_total"] = 1
+    path.write_text(json.dumps(record))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    assert "the verdict's `rule_id` string" in capsys.readouterr().err
+
+    # ARM 4 — the record's SECOND statement of the same drops, contradicted: a
+    # bare-definite Object is dropped while `drops_among_bare_definite` says none was.
+    bare = next(n for n in record["object_names"]
+                if scores_probe._is_bare_definite(n))
+    record["value_gate_drops"] = {bare: "r"}
+    record["drops_total"] = 1
+    record["drops_among_bare_definite"] = []
+    path.write_text(json.dumps(record))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    assert "drops_among_bare_definite" in capsys.readouterr().err
+
+    # ARM 5 — OVER-BLOCK: a legitimate drop of one real Object, with the second
+    # statement agreeing, must SCORE. Without this the arms above are satisfied by
+    # refusing every non-empty census.
+    record["value_gate_drops"] = {real: "value.identifier_only.path"}
+    record["drops_total"] = 1
+    record["drops_among_bare_definite"] = ([real]
+                                           if scores_probe._is_bare_definite(real)
+                                           else [])
+    path.write_text(json.dumps(record))
+    scored = scores_probe.score(repo)
+    assert scored["gate_drops"]["drops_total"] == 1, scored["gate_drops"]
+
+    # …and the shipped record still scores, byte-identically (checked by the
+    # file's reproduction pin, which passes independently).
+    path.write_text(text)
+    assert scores_probe.score(repo)["e1"]["outcome"] == "REFUSED"
+
+
+def test_a_MAXIMALLY_strict_E1_bar_is_accepted(tmp_path):
+    """P3: `0 < m < 1` refused `0.0`, a bar that binds as hard as a bar can.
+
+    The rule's own proof covers `m >= 1` (satisfied by the null result) and says
+    nothing about `m == 0`: `after_share <= 0.0 x before_share` is satisfied only by a
+    zero after-share, so it fails every non-zero reading. Measured at the pre-fix
+    head — `0.0` REFUSED while the equally strict sibling E2b `<= 0` was ACCEPTED, an
+    asymmetry between two rules that must agree at the strict end. The shipped 0.50
+    sits inside the window either way, so this arm is over-block only.
+    """
+    repo = _prereg_with_threshold(tmp_path, "E1",
+                                  "`after_share <= 0.0 × before_share`")
+    # No exit: only the AFTER share is compared, and the rule must not refuse the bar.
+    record = scores_probe.score(repo)
+    assert record["e1"]["outcome"] in ("FAIL", "REFUSED"), record["e1"]["outcome"]
+
+    # …and the strict-but-legal sibling on E2b is accepted for the same reason.
+    repo2 = _prereg_with_threshold(tmp_path, "E2b", "`<= 0`")
+    assert scores_probe.score(repo2)["e1"]["outcome"] == "REFUSED"
+
+
+def test_the_rules_block_states_the_boundary_the_code_enforces():
+    """P3: the block that JUSTIFIES E1's rule is prose, and nothing read it.
+
+    The round at `52d7173d5` corrected this block's E1 bullet back to the inclusive
+    window and corrected the same stale sentence in
+    `test_a_frozen_bar_that_binds_nothing_is_refused`'s docstring — but a comment is
+    unread by every pin in this file, so the drift can come straight back: the review's
+    own diagnosis was that a lane taking `0 < m < 1` at its word "fixes" the
+    enforcement back to `0 <` and re-opens the `0.0` over-block, with the suite green.
+    This pin is the reading that was missing.
+
+    The expected window is derived from the CODE (the AST of the guard comparison),
+    never restated here, so it reds in BOTH directions: code inclusive-at-zero with
+    prose that says `0 <`, and prose that claims the inclusive window while the code
+    reverts to `0 <`.
+    """
+    source = SCORES_PROBE.read_text(encoding="utf-8")
+
+    # The enforced window, read off the guard itself rather than copied into this test.
+    guard = next((n for n in ast.walk(ast.parse(source))
+                  if isinstance(n, ast.Compare)
+                  and isinstance(n.left, ast.Constant) and n.left.value == 0
+                  and len(n.ops) == 2
+                  and isinstance(n.comparators[0], ast.Name)
+                  and n.comparators[0].id == "multiplier"
+                  and isinstance(n.comparators[-1], ast.Constant)
+                  and n.comparators[-1].value == 1), None)
+    assert guard is not None, (
+        "INSTRUMENT FOUND NOTHING: no `0 <op> multiplier <op> 1` comparison in "
+        f"{SCORES_PROBE.name} — the E1 bar rule this block justifies is gone or "
+        "re-spelled, so re-derive what it enforces before trusting the prose.")
+    inclusive_at_zero = isinstance(guard.ops[0], ast.LtE)
+
+    # The bullet, wrap-joined: the block is a comment block, so its continuation
+    # lines are the `#    ` lines directly under the `* E1 is a REDUCTION` marker.
+    lines = source.splitlines()
+    start = next((i for i, ln in enumerate(lines)
+                  if "* E1 is a REDUCTION" in ln), None)
+    assert start is not None, (
+        "INSTRUMENT FOUND NOTHING: the rules block's `* E1 is a REDUCTION` bullet "
+        "is gone — this pin has no subject on this tree.")
+    block = [lines[start]]
+    for ln in lines[start + 1:]:
+        if not ln.startswith("    #    "):
+            break
+        block.append(ln)
+    bullet = re.sub(r"\s+", " ", " ".join(
+        re.sub(r"^\s*#\s*", "", ln) for ln in block))
+
+    assert ("0 <= m < 1" in bullet) is inclusive_at_zero, (
+        "the E1 bullet states the WRONG window for the code beside it: the guard is "
+        f"`{'0 <= multiplier < 1' if inclusive_at_zero else '0 < multiplier < 1'}` "
+        f"(inclusive_at_zero={inclusive_at_zero}) while the bullet reads {bullet!r}. "
+        "`0 <` refuses `0.0`, which is MAXIMALLY strict rather than inert — see "
+        "`test_a_MAXIMALLY_strict_E1_bar_is_accepted`.")
+    assert ("0 < m < 1" in bullet) is not inclusive_at_zero, (
+        "the E1 bullet argues BOTH sides of the boundary — it still carries the "
+        "pre-fix window `0 < m < 1` beside the guard it justifies "
+        f"(inclusive_at_zero={inclusive_at_zero}): {bullet!r}")
+
+
+# ── the bundle's re-run recipe states the arm the PROBE now sets ──────────────
+#
+# `#10996` changed what `capstone_measure.measured_arm()` writes: the two OFF
+# switches are set to an EXPLICIT `"0"` instead of being popped, because an unset
+# `TORTOISE_VALUE_GATE` is now the ON arm. `docs/evidence/9889/README.md` was
+# updated with its producer; this bundle's README was not, so the two bundles
+# taught opposite contracts and this one still said the probe pins the switches
+# "unset" — the exact pre-fix behaviour, and an invitation for the next lane to
+# restore the pop. The committed log's `<unset>` is HISTORY (it predates the
+# flip); the RECIPE must not reproduce it.
+
+_RE_RUN_RECIPE_STALE_ARM = (
+    "`TORTOISE_VALUE_GATE` **and** `TORTOISE_S2_DECISION_SEAM` unset",
+    "pins TORTOISE_VALUE_GATE and TORTOISE_S2_DECISION_SEAM unset",
+    "TORTOISE_VALUE_GATE=<unset> TORTOISE_S2_DECISION_SEAM=<unset>",
+)
+
+
+def test_the_re_run_recipe_states_the_arm_the_probe_actually_sets():
+    """One contract for both bundles: OFF means `"0"`, not absence (#10996).
+
+    Red-first by construction — all three phrases were present when this pin was
+    written — and the failure it exists to catch is a READER following the recipe
+    and measuring the ON arm under a log that declares OFF.
+    """
+    readme = README_DOC.read_text()
+
+    for phrase in _RE_RUN_RECIPE_STALE_ARM:
+        assert phrase not in readme, (
+            f"the bundle's re-run recipe still says the probe pins the switches "
+            f"UNSET ({phrase!r}) — since #10996 absence is the ON arm, so a "
+            "reader following this recipe measures the treatment under the "
+            "control's label. The committed log's `<unset>` is history; the "
+            "recipe must say `=0`")
+
+    assert 'to an EXPLICIT `"0"`' in readme, (
+        "the README must STATE that capstone_measure pins the two OFF switches "
+        "to an explicit \"0\" — a corrected recipe whose reason is not written "
+        "down is the one the next lane reverts")
+
+
+#: ⛔ THE FOURTH COPY (#11298 review, P2). The guard above scans the README; the
+#: arm definition a re-run operator reads FIRST is the PROBE'S OWN module
+#: docstring, and nothing read it. So the stale sentence survived the `#10996`
+#: flip in the file that defines the arm: it still said ``TORTOISE_VALUE_GATE``
+#: was "pinned UNSET" while ``measured_arm()`` sets an explicit ``"0"`` through
+#: ``ARM_OFF``. A phrase list over one document pins that DOCUMENT, not the class.
+_PROBE_DOCSTRING_STALE_ARM = (
+    "pinned UNSET",
+    "pinned unset",
+    "pinned to UNSET",
+    "pinned to an unset",
+)
+
+
+def test_the_probe_docstring_states_the_arm_the_probe_actually_sets():
+    """The probe's own prose must not teach the pre-`#10996` arm.
+
+    Red-first by construction: at the reviewed head the docstring read
+    "``TORTOISE_VALUE_GATE`` is pinned UNSET", so this test FAILED before the fix
+    and passes only once the prose states the explicit ``"0"`` pin AND names
+    ``ARM_OFF`` — the constant that holds the truth — so the next lane that pops
+    it reds here instead of in a re-take.
+    """
+    doc = ast.get_docstring(ast.parse(PROBE.read_text())) or ""
+    flat = " ".join(doc.split())
+    assert flat, (
+        f"no module docstring resolved from {PROBE.name} — the derivation is "
+        "broken, so this pin would pass over anything")
+
+    for phrase in _PROBE_DOCSTRING_STALE_ARM:
+        assert phrase not in flat, (
+            f"the probe's module docstring still says the OFF switches are "
+            f"{phrase!r} — since #10996 an ABSENT `TORTOISE_VALUE_GATE` IS the "
+            "ON arm, so the doc describes the pre-fix behaviour while "
+            "`measured_arm()` sets an explicit \"0\". A re-run operator reads "
+            "THIS docstring first (the README guard above cannot see it)")
+
+    assert 'pinned to an' in flat and '``"0"``' in flat and "ARM_OFF" in flat, (
+        "the probe docstring must state the pin the code actually sets — an "
+        "explicit ``\"0\"`` performed by ``ARM_OFF`` — or a reader cannot tell "
+        "the current arm from the pre-#10996 one")
+
+
+def test_the_control_arm_definition_names_the_frozen_records_divergence():
+    """The frozen pre-registration and this bundle must not silently disagree.
+
+    Review cycle 4 (P2): `PRE-REGISTRATION.md` §3 still defines CONTROL as "the
+    selection flags unset … their default is OFF". Since `#10996` an unset
+    `TORTOISE_VALUE_GATE` is the TREATMENT, so that bullet is the PRE-flip
+    definition — and this bundle's README now says the opposite (`"0"`, not
+    `<unset>`), leaving two definitions of one arm in the same bundle.
+
+    The frozen record is NOT amended here: editing a registered arm definition
+    after an evidence log exists is §8's owner decision, and the committed
+    artifacts genuinely ran OFF at their pre-flip heads. What a lane owes is that
+    the divergence is STATED where the arm is read — this pin holds the statement
+    in place, and holds the frozen bullet itself un-rewritten, so neither side can
+    drift into quiet agreement with the other.
+    """
+    bundle = (_REPO / "docs" / "evidence" / "7949-capstone")
+    doc = (bundle / "E1-E2.md").read_text()
+    prereg = (bundle / "PRE-REGISTRATION.md").read_text()
+
+    for phrase in (
+        "`PRE-REGISTRATION.md` §3 still DEFINES the control arm as the flags ABSENT",
+        "definition is now the pre-`#10996` one",
+        "left unamended here on purpose",
+        "a re-take sets `TORTOISE_VALUE_GATE=0`",
+    ):
+        assert phrase in doc, (
+            f"E1-E2.md no longer states the frozen record's divergence "
+            f"({phrase!r}) — without it the bundle carries two definitions of "
+            "the control arm and a reader takes whichever one they read first")
+
+    assert "their default is OFF" in prereg, (
+        "PRE-REGISTRATION.md §3 no longer carries the pre-#10996 CONTROL "
+        "definition — if it WAS amended, this pin and the E1-E2.md disclosure "
+        "must move together (and the amendment needs a §8 Deviations entry plus "
+        "a re-cut `document_sha256`, which is the owner's call, not a silent edit)")
+
+    # ⛔ The disclosure is inside a BLOCKQUOTE, and the paragraph it was added to
+    # was mid-sentence here (review-cycle-4's staging caught it: the insertion
+    # split "…even against an explicit" from "`TORTOISE_VET=0`…", leaving a
+    # truncated claim above and an orphaned fragment below — merge-damage prose in
+    # the one artifact this round exists to make readable). Both halves must stay
+    # adjacent and quoted.
+    assert ("> `TORTOISE_S2_DECISION_SEAM` would arm the pass even against an explicit\n"
+            "> `TORTOISE_VET=0`") in doc, (
+        "the arm-table paragraph was broken across the disclosure — the sentence "
+        "ends mid-clause and a fragment resumes after the blockquote")
+    assert ">\n> ⛔ **`PRE-REGISTRATION.md`" in doc, (
+        "the disclosure must be a separate quoted paragraph, not wedged into a "
+        "sentence")

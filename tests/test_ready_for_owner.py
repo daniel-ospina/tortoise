@@ -14,7 +14,13 @@ The modes, one test each:
 
 * a required check concluded ``cancelled``           → NOT-READY   (``test_cancelled_*``)
 * a required check concluded ``null``                → NOT-READY   (``test_null_*``)
-* a required check never scheduled                   → NOT-READY   (``test_missing_*``)
+* a required **entry** check never scheduled          → NOT-READY   (``test_missing_*``)
+  (a ``merge_conditions`` check is DEFERRED and PASSES **only** when no PR-triggered run
+  of its emitting workflow is on the head —
+  ``test_a_head_carrying_no_merge_time_check_is_READY_not_NOT_READY``; when its workflow
+  DID run here, absence is ``MISSING`` and NOT-READY, because a ``needs``-gated aggregate
+  is absent until its prerequisites finish —
+  ``test_a_pending_merge_time_aggregate_is_a_FAIL_not_a_deferral``)
 * a required check still in flight                   → NOT-READY   (``test_in_flight_*``)
 * a required check ``skipped``/``neutral``           → NOT-READY   (``test_skipped_*``)
 * a red that a cancellation re-ran over              → NOT-READY   (``test_voided_red_*``)
@@ -29,6 +35,7 @@ The modes, one test each:
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import subprocess
@@ -47,6 +54,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from tools import ci_verdict  # noqa: E402
 from tools import ready_for_owner as rfo  # noqa: E402
+from tools import required_set as rfo_required  # noqa: E402
 
 REPO = "daniel-ospina/tortoise"
 HEAD = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"
@@ -63,6 +71,29 @@ REQUIRED = (
     "python-ci-gate",
     "test-isolation",
 )
+
+#: The ENTRY/MERGE split `.mergify.yml` clause 1 fixes: `queue_conditions` gate entry
+#: against the PR head, `merge_conditions` gate the merge and are re-evaluated by Mergify
+#: on `mergify/merge-queue/<sha>`. `tools/required_set` derives BOTH from the config, so
+#: the tool sees the split that a flat branch-protection payload cannot express.
+MERGE_TIME_REQUIRED: tuple[str, ...] = ("python-ci-gate",)
+ENTRY_REQUIRED: tuple[str, ...] = tuple(n for n in REQUIRED if n not in MERGE_TIME_REQUIRED)
+
+
+def _check_runs_for(jobs: tuple[str, ...] | list[str]) -> list[dict[str, Any]]:
+    """Completed-success check-runs for `jobs`, in the canonical payload shape."""
+    return [
+        {
+            "id": 1000 + i,
+            "name": job,
+            "status": "completed",
+            "conclusion": "success",
+            "app": {"slug": "github-actions"},
+            "details_url": f"https://github.com/{REPO}/actions/runs/5/job/{1000 + i}",
+            "started_at": "2026-11-04T11:40:00Z",
+        }
+        for i, job in enumerate(jobs)
+    ]
 
 
 # ── fixture builders ────────────────────────────────────────────────────────
@@ -222,7 +253,12 @@ def test_null_conclusion_required_check_is_not_ready() -> None:
 
 
 def test_missing_required_check_is_not_ready() -> None:
-    # #10962's live shape: no `python-ci-gate` run exists at all on the head.
+    # An ENTRY context with no run at all on the head. `_assert_fails` builds a FLAT
+    # pre-split fixture (`required` carries every name, `required_deferred` is `()`), so
+    # `python-ci-gate` is treated as an entry check here — which is the only sense in which
+    # this is "#10962's live shape".
+    # ⛔ The LIVE head shape — zero `python-ci-gate` runs, with it being MERGE-TIME — is
+    # DEFERRED and PASSES: see test_a_head_carrying_no_merge_time_check_is_READY_not_NOT_READY.
     groups = [
         _group(job, check_id=1000 + i) for i, job in enumerate(REQUIRED) if job != "python-ci-gate"
     ]
@@ -298,6 +334,39 @@ def test_in_flight_rerun_does_not_hide_the_measured_red_behind_it() -> None:
     assert check.passed is False
     assert "red:failure:ai-review-gate" in check.reason, check.reason
     assert "in-flight:ai-review-gate" in check.reason, check.reason
+
+
+def test_an_unrecognised_group_state_cannot_fall_through_to_success() -> None:
+    """★ `_gate_token`'s STATE whitelist is a fail-closed arm, and NOTHING pinned it.
+
+    `probe_from_dict` copies a group's `state` verbatim, so a value outside
+    `ci_verdict`'s four groups reaches `_gate_token` carrying whatever string the caller
+    wrote — and this PR makes the arm load-bearing for a SECOND call site, the
+    merge-time contexts, which previously never routed through it. If the arm is
+    deleted, an unknown state falls through to the `conclusion` check below and PASSES
+    on `conclusion=success` — the unrecognised-value-falls-through-the-gap defect the
+    polarity rule forbids, and the module's own comment asserts it is closed.
+
+    Measured on a `/tmp` copy: reverting the arm (returning `""` for every `state:`
+    token) left all 320 tests green. So the guard the comment describes was pinned by
+    nothing, and this test is that pin — for BOTH call sites.
+    """
+    # ENTRY context.
+    groups = [_group(job, check_id=1000 + i) for i, job in enumerate(REQUIRED)]
+    groups[0] = _group(REQUIRED[0], state="greenish", conclusion="success", check_id=2000)
+    check = _assert_fails("gates", f"state:greenish:{REQUIRED[0]}", groups=groups)
+    assert f"state:greenish:{REQUIRED[0]}" in check.reason, check.reason
+
+    # MERGE-TIME context — the call site this PR adds. A green-looking aggregate whose
+    # state this module has never seen is not a pass just because `conclusion` is green.
+    fixture = _fixture_with_head_runs({"head_runs": []})
+    fixture["groups"] = [
+        *fixture["groups"],  # type: ignore[misc]
+        _group(MERGE_TIME_REQUIRED[0], state="greenish", conclusion="success", check_id=9000),
+    ]
+    gates = next(c for c in rfo.evaluate(rfo.probe_from_dict(fixture)).checks if c.name == "gates")
+    assert gates.passed is False, gates.raw
+    assert f"state:greenish:{MERGE_TIME_REQUIRED[0]}" in gates.reason, gates.reason
 
 
 # ── condition 1: the tree (merge-tree, never the flag) ──────────────────────
@@ -388,7 +457,11 @@ def test_a_malformed_timeout_knob_is_caught_in_a_FRESH_PROCESS() -> None:
     """
     env = {**os.environ, "READY_GATE_GH_TIMEOUT": "1m", "READY_GATE_GIT_TIMEOUT": "2m"}
     proc = subprocess.run(
-        [sys.executable, "-c", "import tools.ready_for_owner as m; print(m.GH_TIMEOUT, m.GIT_TIMEOUT)"],
+        [
+            sys.executable,
+            "-c",
+            "import tools.ready_for_owner as m; print(m.GH_TIMEOUT, m.GIT_TIMEOUT)",
+        ],
         cwd=str(REPO_ROOT),
         env=env,
         capture_output=True,
@@ -1257,7 +1330,6 @@ def test_a_code_formatted_verdict_is_a_verdict() -> None:
         assert "last-clear=2" in check.raw, f"{body!r}: {check.raw}"
 
 
-
 def test_issues_verdict_is_a_blocking_record() -> None:
     comments = [
         {
@@ -2123,38 +2195,54 @@ class _FakeGh:
         return self._match("pulls/{n}")
 
 
+def _workflow_run(
+    workflow_file: str,
+    *,
+    event: str = "pull_request",
+    status: str = "in_progress",
+    run_id: int = 5,
+) -> dict[str, Any]:
+    """One `workflow_runs[]` entry, in the shape attribution reads.
+
+    `path` is the handle `emitters` records (`python-ci.yml`); `event` is what separates a
+    PR run (evidence the aggregate was created) from a `push` run of the same sha (not).
+    """
+    return {
+        "id": run_id,
+        "workflow_id": 7,
+        "path": f".github/workflows/{workflow_file}",
+        "event": event,
+        "status": status,
+        "conclusion": None if status != "completed" else "success",
+    }
+
+
 def _gh_payloads(
-    *, check_runs: list[dict[str, Any]] | None = None, body: str = ""
+    *,
+    check_runs: list[dict[str, Any]] | None = None,
+    body: str = "",
+    runs: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Canned `gh` payloads, ordered SPECIFIC → GENERAL (first substring match wins)."""
-    crs = (
-        check_runs
-        if check_runs is not None
-        else [
-            {
-                "id": 1000 + i,
-                "name": job,
-                "status": "completed",
-                "conclusion": "success",
-                "app": {"slug": "github-actions"},
-                "details_url": f"https://github.com/{REPO}/actions/runs/5/job/{1000 + i}",
-                "started_at": "2026-11-04T11:40:00Z",
-            }
-            for i, job in enumerate(REQUIRED)
-        ]
-    )
+    crs = check_runs if check_runs is not None else _check_runs_for(REQUIRED)
+    # No `path`/`event` by default: the run listing exists to ATTRIBUTE a merge-time
+    # context's absence, and the green fixture never has one absent. Cases that do
+    # exercise attribution pass `runs=` explicitly (see `_workflow_run`).
+    workflow_runs = runs if runs is not None else [{"id": 5, "workflow_id": 7}]
     return {
         "/files?per_page": [
             {"filename": "tortoise/sdk.py"},
             {"filename": "tools/ready_for_owner.py"},
         ],
-        "branches/main/protection": {
-            "required_status_checks": {"checks": [{"context": c} for c in REQUIRED]}
-        },
+        # ⛔ NO `branches/main/protection` PAYLOAD. The required set is DERIVED from
+        # `.mergify.yml` (`tools/required_set.py`) and this read is deliberately gone, so a
+        # canned response for it would be dead fixture data pointing at a call that no
+        # longer exists — and `_FakeGh` fails loudly on an unexpected endpoint, which is the
+        # signal that the derivation path was silently replaced by an API read again.
         "check-runs": {"total_count": len(crs), "check_runs": crs},
         "actions/runs": {
-            "total_count": 1,
-            "workflow_runs": [{"id": 5, "workflow_id": 7}],
+            "total_count": len(workflow_runs),
+            "workflow_runs": workflow_runs,
         },
         "commits/": {"commit": {"committer": {"date": "2026-11-04T11:30:00Z"}}},
         "/comments": [],
@@ -2175,12 +2263,29 @@ def _gh_payloads(
     }
 
 
-def _collect(monkeypatch: pytest.MonkeyPatch, payloads: dict[str, Any], fail: str | None = None):
+def _collect(
+    monkeypatch: pytest.MonkeyPatch,
+    payloads: dict[str, Any],
+    fail: str | None = None,
+    derive=None,
+):
     fake = _FakeGh(payloads, fail=fail)
     monkeypatch.setattr(rfo, "Gh", lambda repo, **kw: fake)
     monkeypatch.setattr(rfo, "_read_tree", lambda gh, pr, head, workdir: (True, "merge-tree ok"))
     monkeypatch.setattr(
         rfo, "_read_review", lambda *a, **kw: ("head", 0, "token=head exit=0", "clean")
+    )
+    # The required set is read from the PROTECTED ref in production (so a branch cannot
+    # shrink the set that judges it). A unit test has no fetched `origin/main` to read and
+    # must not depend on one, so the derivation is pinned to the workdir here — the
+    # ref-vs-workdir distinction has its own cases in `tests/test_required_set.py` and in
+    # `test_the_required_set_is_read_from_the_protected_ref` below.
+    monkeypatch.setattr(
+        rfo,
+        "derive_from_ref",
+        derive
+        if derive is not None
+        else (lambda cwd, ref=None, **kw: rfo_required.derive_from_config(REPO_ROOT)),
     )
     return rfo.collect_probe(10999, REPO, REPO_ROOT, now=NOW), fake
 
@@ -2190,11 +2295,391 @@ def test_collect_probe_wires_a_green_world_into_a_READY_verdict(
 ) -> None:
     """The read layer, end to end: a green world must produce READY-FOR-OWNER."""
     probe = _collect(monkeypatch, _gh_payloads())[0]
-    assert probe.required == tuple(sorted(REQUIRED))
+    # The required set is DERIVED from `.mergify.yml`, so it arrives SPLIT: its
+    # `queue_conditions` gate entry at the head, its `merge_conditions` are merge-time.
+    assert set(probe.required or ()) == set(REQUIRED) - set(MERGE_TIME_REQUIRED)
+    assert probe.required_deferred == MERGE_TIME_REQUIRED
     assert all(g.conclusion == "success" for g in probe.groups or ())
     verdict = rfo.evaluate(probe)
     assert verdict.ready is True, [(c.name, c.reason, c.raw) for c in verdict.checks]
     assert verdict.line() == f"READY-FOR-OWNER(10999, {HEAD})"
+
+
+def test_a_head_carrying_no_merge_time_check_is_READY_not_NOT_READY(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DEFERRED is decided by EVIDENCE, not by absence: no run of `python-ci.yml` here.
+
+    Mergify evaluates `merge_conditions` on `mergify/merge-queue/<sha>`, so a head where
+    the emitting workflow NEVER RAN is the queue working as designed. Against a FLAT
+    required set (the protection API's shape, which has no entry/merge split) that absence
+    can only read as `FAIL(missing)` — NOT-READY for every PR forever, which is the class
+    of disagreeing readiness verdict this instrument exists to end (#10962).
+
+    ⛔ THE PREMISE OF THIS CASE WAS CORRECTED (#10991 review, issue 1). It used to assert
+    that absence ALONE is deferral, citing "0 of 6 sampled heads carried python-ci-gate"
+    — a sample taken while the matrix was still running. Re-measured 2026-11-05 the
+    aggregate reports on author heads (`queued` 11097, `success` 11100, `failure` 11096),
+    and a `needs`-gated job that has not started has NO check-run at all. So this fixture
+    must also carry the run listing, and it now asserts the reason the answer is DEFERRED:
+    nothing from `python-ci.yml` ran on this head.
+    """
+    probe = _collect(
+        monkeypatch,
+        _gh_payloads(
+            check_runs=_check_runs_for(ENTRY_REQUIRED),
+            runs=[_workflow_run("docs.yml", event="pull_request")],
+        ),
+    )[0]
+    assert probe.required_deferred == MERGE_TIME_REQUIRED
+    assert probe.merge_emit_files == {MERGE_TIME_REQUIRED[0]: ("python-ci.yml",)}
+    verdict = rfo.evaluate(probe)
+    gates = next(c for c in verdict.checks if c.name == "gates")
+    assert gates.passed is True, gates.raw
+    assert "DEFERRED(merge-time)" in gates.raw
+    assert "no python-ci.yml run on this head" in gates.raw
+    assert verdict.ready is True, [(c.name, c.reason, c.raw) for c in verdict.checks]
+
+
+def test_a_pending_merge_time_aggregate_is_a_FAIL_not_a_deferral(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★ ISSUE 1 (P1, fail-open): `python-ci.yml` ran here, so the aggregate is PENDING.
+
+    A `needs`-gated job has no check-run until its prerequisites finish (GitHub Actions
+    workflow syntax), so a pending aggregate is INDISTINGUISHABLE from an absent one in
+    `groups`. Grading that absence DEFERRED returned `PASS` / exit 0 on a head where the
+    required suite had not concluded — while the very same state one moment later (the
+    check-run created as `queued`) FAILS as in-flight. The verdict depended on scheduling
+    timing, not on evidence.
+
+    On the pre-fix code (`seen.append(f"{context}={DEFERRED}"); continue`) this case reads
+    `gates.passed is True` and REDs — that mutation is the fix, and it is the only one
+    this test permits.
+    """
+    probe = _collect(
+        monkeypatch,
+        _gh_payloads(
+            check_runs=_check_runs_for(ENTRY_REQUIRED),
+            runs=[_workflow_run("python-ci.yml", status="in_progress")],
+        ),
+    )[0]
+    verdict = rfo.evaluate(probe)
+    gates = next(c for c in verdict.checks if c.name == "gates")
+    assert gates.passed is False, gates.raw
+    assert "missing:python-ci-gate" in gates.reason
+    assert "MISSING" in gates.raw and "pending creation" in gates.raw
+    assert verdict.ready is False, [(c.name, c.reason, c.raw) for c in verdict.checks]
+
+
+def test_the_measured_false_READY_shape_reds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★ The CONCRETE head the review measured: PR 11113 `92299555219e`.
+
+    All six ENTRY contexts green, `test (g)` `completed/failure` on the same head, and
+    `python-ci-gate` absent because its `needs` were unsatisfied. The pre-fix gate
+    reported `READY-FOR-OWNER` on that head. A red leg inside the required suite's own
+    workflow must never be invisible to the readiness answer.
+    """
+    legs = _check_runs_for((*ENTRY_REQUIRED, "test (g)"))
+    for run in legs:
+        if run["name"] == "test (g)":
+            run["conclusion"] = "failure"
+    probe = _collect(
+        monkeypatch,
+        _gh_payloads(
+            check_runs=legs,
+            runs=[_workflow_run("python-ci.yml")],
+        ),
+    )[0]
+    verdict = rfo.evaluate(probe)
+    gates = next(c for c in verdict.checks if c.name == "gates")
+    assert gates.passed is False, gates.raw
+    assert "missing:python-ci-gate" in gates.reason
+    assert verdict.ready is False, [(c.name, c.reason, c.raw) for c in verdict.checks]
+
+
+def test_a_push_run_of_the_same_sha_is_not_evidence_the_aggregate_was_created(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`head_sha` lists `push` runs too, and a push run is not a PR run.
+
+    Attributing it would fail a genuinely deferred merge-time context on any head that was
+    also pushed — a false NOT-READY bought with no evidence. The event filter is the ONLY
+    difference between this case and the pending-aggregate case above.
+    """
+    probe = _collect(
+        monkeypatch,
+        _gh_payloads(
+            check_runs=_check_runs_for(ENTRY_REQUIRED),
+            runs=[_workflow_run("python-ci.yml", event="push")],
+        ),
+    )[0]
+    gates = next(c for c in rfo.evaluate(probe).checks if c.name == "gates")
+    assert gates.passed is True, gates.raw
+    assert "DEFERRED(merge-time)" in gates.raw
+
+
+def test_an_unattributable_merge_time_context_is_a_FAIL_not_a_deferral(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★ No emitter recorded => "did its workflow run here?" cannot be ASKED.
+
+    The record carries `emitters` for every effective check-run name; a name the config
+    requires but the record cannot attribute leaves the absence unexplained. Falling
+    through to DEFERRED there would restore the exact fail-open this fix closes, so it is
+    a FAIL with the remedy named (`--recut` rewrites `emitters`).
+    """
+    probe = _collect(
+        monkeypatch,
+        _gh_payloads(check_runs=_check_runs_for(ENTRY_REQUIRED)),
+    )[0]
+    probe.merge_emit_files = {}
+    gates = next(c for c in rfo.evaluate(probe).checks if c.name == "gates")
+    assert gates.passed is False, gates.raw
+    assert "unattributable:python-ci-gate" in gates.reason
+    assert "--recut" in gates.raw
+
+
+def test_an_unreadable_run_listing_cannot_turn_absence_into_a_deferral(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A HALF-READ surface must not defer: no run listing, no attribution, no PASS.
+
+    The groups and the runs come from one call, so this state is not reachable through
+    `collect_probe` — which is exactly why it is pinned here rather than left to a
+    comment: `Probe` is a plain dataclass and every condition is a pure function of it.
+    """
+    probe = _collect(monkeypatch, _gh_payloads(check_runs=_check_runs_for(ENTRY_REQUIRED)))[0]
+    probe.head_runs = None
+    gates = next(c for c in rfo.evaluate(probe).checks if c.name == "gates")
+    assert gates.passed is False, gates.raw
+    assert "unattributable:python-ci-gate" in gates.reason
+
+
+def test_a_merge_time_check_that_ran_and_red_here_still_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deferral is about WHERE a check is authoritative, not a licence to ignore a red.
+
+    A `merge_conditions` name that DID run on this head is real evidence about the
+    tree: a measured red must fail the gate, exactly as it would for an entry check.
+    """
+    runs = _check_runs_for(REQUIRED)
+    for run in runs:
+        if run["name"] == "python-ci-gate":
+            run["conclusion"] = "failure"
+    probe = _collect(monkeypatch, _gh_payloads(check_runs=runs))[0]
+    verdict = rfo.evaluate(probe)
+    gates = next(c for c in verdict.checks if c.name == "gates")
+    assert gates.passed is False
+    assert "python-ci-gate" in gates.reason
+    assert verdict.ready is False
+
+
+def test_the_required_set_is_read_from_the_protected_ref(monkeypatch: pytest.MonkeyPatch) -> None:
+    """⛔ A GATE THAT READS ITS OWN SUBJECT IS DEFEATABLE BY ITS SUBJECT.
+
+    Both inputs are tracked files, so a branch that edits `.mergify.yml` and
+    `docs/ci/required-contexts.json` together can shrink the set that judges it. The read
+    must therefore go to the PROTECTED ref. Asserting the exact ref — rather than only
+    that a set came back — is what makes this discriminating: point the read at the
+    workdir and this reds.
+    """
+    seen: list[str] = []
+
+    def _spy(cwd, ref=None, **kw):
+        seen.append("" if ref is None else ref)
+        return rfo_required.derive_from_config(REPO_ROOT)
+
+    _collect(monkeypatch, _gh_payloads(), derive=_spy)
+    assert seen == ["origin/main"], seen
+
+
+def test_every_required_check_being_merge_time_refuses_with_the_right_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A readable config whose entry gate is EMPTY decides nothing at the head.
+
+    That is a configuration fact, not a read failure, and the check must say which it is
+    rather than reusing the unreadable arm's wording.
+    """
+    probe = _collect(
+        monkeypatch,
+        _gh_payloads(check_runs=_check_runs_for(MERGE_TIME_REQUIRED)),
+        derive=lambda *a, **k: rfo_required.RequiredSet(
+            names=MERGE_TIME_REQUIRED,
+            source="test",
+            queue_names=(),
+            merge_names=MERGE_TIME_REQUIRED,
+        ),
+    )[0]
+    gates = next(c for c in rfo.evaluate(probe).checks if c.name == "gates")
+    assert gates.passed is False
+    assert "every required check is merge-time" in gates.reason
+    # …and the raw carries the SET'S PROVENANCE, which is what a lane debugging
+    # NOT-READY needs in order to know which set it was judged against.
+    assert "source=" in gates.raw, gates.raw
+
+
+def test_the_required_set_verb_labels_a_config_error_as_one(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Exit 2 either way, but a reader comes here to learn WHY — so the LABEL must say
+    which it is. A config error reported as `UNREADABLE` sends them to the wrong place."""
+    from tools.mergify_config_guard import MERGIFY_REL, RECORD_REL
+
+    (tmp_path / MERGIFY_REL).write_text(
+        "queue_rules:\n"
+        "  - name: main\n"
+        "    queue_conditions: ['base=main', 'check-success=docs']\n"
+        "    branch_protection_injection_mode: merge\n"
+        "    merge_conditions: []\n",
+        encoding="utf-8",
+    )
+    record = tmp_path / RECORD_REL
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_text(json.dumps({"required_contexts": ["docs", "vanished"]}), encoding="utf-8")
+    # `ref=None` is the in-process workdir diagnostic; an EMPTY `--ref` from the CLI is
+    # refused (see the test below), so this cannot be reached by a caller passing a ref.
+    code = rfo.report_required_set(tmp_path, None)
+    out = capsys.readouterr().out
+    assert code == 2
+    assert "REQUIRED-SET-CONFIG-ERROR" in out
+    assert "REQUIRED-SET-UNREADABLE" not in out
+
+
+def test_the_required_set_verb_labels_a_DIVERGED_live_read_as_a_config_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """⛔ THE REFUSAL HAS TO REACH THE VERB, not just the library.
+
+    `required_set._live_attestation` is pinned at the DERIVATION level (six tests in
+    `tests/test_required_set.py`), and the test above pins the verb's CONFIG-ERROR label
+    for the record↔config EQUALITY shapes only. Neither covers the shape this PR's fix
+    added: a record whose `required_contexts` still matches the config — so every equality
+    check passes — while its own `live_result` says the live read DIVERGED.
+
+    That gap matters because the two labels are different REMEDIES: `UNREADABLE` means
+    "could not be read, re-run it", while this state is not going to change on a re-run —
+    it needs `--live` re-attestation under a credential that can read branch protection.
+    A refusal that lands on the wrong label sends the reader to the wrong subsystem, which
+    is what this file's existing verb test exists to prevent.
+
+    The fixture is deliberately the FAIL-OPEN shape the fix removed: `live_observed_contexts`
+    EQUALS `required_contexts` and both equal the derived union, so the payload is a perfect
+    match. Only the verdict disagrees — and before the fix it certified the set.
+    """
+    from tools.mergify_config_guard import MERGIFY_REL, RECORD_REL
+
+    union = ["docs"]
+    (tmp_path / MERGIFY_REL).write_text(
+        "queue_rules:\n"
+        "  - name: main\n"
+        "    queue_conditions: ['base=main', 'check-success=docs']\n"
+        "    branch_protection_injection_mode: merge\n"
+        "    merge_conditions: []\n",
+        encoding="utf-8",
+    )
+    record = tmp_path / RECORD_REL
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_text(
+        json.dumps(
+            {
+                "required_contexts": union,
+                "emitters": {},
+                "live_result": "DIVERGED",
+                "live_observed_contexts": union,
+                "live_checked_at": "2026-11-01T00:00:00Z",
+                "live_verified_at": "2026-10-01T00:00:00Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+    code = rfo.report_required_set(tmp_path, None)
+    out = capsys.readouterr().out
+    assert code == 2
+    assert "REQUIRED-SET-CONFIG-ERROR" in out, out
+    assert "REQUIRED-SET-UNREADABLE" not in out, out
+    # The remedy that WORKS must be named: `--recut` rewrites only gate_digest/emitters/
+    # verified_at and cannot make a DIVERGED live read SATISFIED.
+    assert "--live" in out, out
+
+
+def test_the_required_set_verb_refuses_an_empty_ref(capsys: pytest.CaptureFixture[str]) -> None:
+    """An empty `--ref` (an unset `$BRANCH` in `--ref "$BRANCH"`) must be REFUSED with a
+    message that names the problem.
+
+    ⛔ THIS GUARD BUYS A DIAGNOSIS, NOT A BYPASS FIX, and the difference matters for the
+    next reader: the fall-back to the workdir was already closed by branching on `ref is
+    not None`, so without this guard an empty ref fails closed through
+    `git rev-parse --verify ''` -> `fatal: Needed a single revision` — correct, but an
+    opaque message from the wrong subsystem, on the one verb a human runs to learn WHY.
+
+    Revert the guard and this reds on the message assertions (it still exits 2).
+    """
+    code = rfo.main(["--required-set", "--workdir", str(REPO_ROOT), "--ref", ""])
+    out = capsys.readouterr().out
+    assert code == 2
+    assert "REQUIRED-SET-UNREADABLE(--ref must name a ref" in out
+    assert "queue_conditions" not in out
+
+
+def test_the_gates_raw_discloses_the_required_set_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The source (and the sha it resolved to) must appear on EVERY gates arm.
+
+    The required set is read from a local ref that is never fetched by that read, so the
+    sha is the only honest statement about provenance. It used to appear on the two
+    unreadable arms only, leaving a PASS — the verdict a merge rests on — silent about
+    what set it certified. Revert to `{raw}` alone and this reds.
+    """
+    probe = _collect(monkeypatch, _gh_payloads())[0]
+    gates = next(c for c in rfo.evaluate(probe).checks if c.name == "gates")
+    assert gates.passed is True, gates.raw
+    assert "source=" in gates.raw
+    assert ".mergify.yml" in gates.raw
+
+
+def test_the_gates_raw_discloses_the_source_on_the_FAILING_arm_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The provenance must survive on a FAIL, not only on a PASS.
+
+    The only older pin used a green probe, so removing `[{source}]` from the failed arm
+    stayed green. A lane debugging NOT-READY reads exactly this line, and needs to know
+    WHICH set it was judged against.
+    """
+    runs = _check_runs_for(REQUIRED)
+    for run in runs:
+        if run["name"] == "docs":
+            run["conclusion"] = "failure"
+    probe = _collect(monkeypatch, _gh_payloads(check_runs=runs))[0]
+    gates = next(c for c in rfo.evaluate(probe).checks if c.name == "gates")
+    assert gates.passed is False
+    assert "source=" in gates.raw, gates.raw
+    assert ".mergify.yml" in gates.raw
+
+
+def test_the_gates_raw_discloses_the_source_when_every_check_is_merge_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The entry-empty arm also judges the SET, so it must name the set's provenance."""
+    probe = _collect(
+        monkeypatch,
+        _gh_payloads(check_runs=_check_runs_for(MERGE_TIME_REQUIRED)),
+        derive=lambda *a, **k: rfo_required.RequiredSet(
+            names=MERGE_TIME_REQUIRED,
+            source="test-source at origin/main (abc123abc123)",
+            queue_names=(),
+            merge_names=MERGE_TIME_REQUIRED,
+        ),
+    )[0]
+    gates = next(c for c in rfo.evaluate(probe).checks if c.name == "gates")
+    assert gates.passed is False
+    assert "source=" in gates.raw, gates.raw
 
 
 def test_collect_probe_marks_an_unreadable_declared_union(
@@ -2771,7 +3256,7 @@ def _open_blocking_fixture() -> dict[str, Any]:
 
 
 def _unreadable_fixture() -> dict[str, Any]:
-    return {"required": None, "required_raw": "branches/main/protection: 404"}
+    return {"required": None, "required_raw": "required-set: .mergify.yml unreadable"}
 
 
 MUTATION_CASES = [
@@ -2834,8 +3319,9 @@ def test_the_retraction_rule_source_is_the_same_text_in_both_forms() -> None:
     vocabulary may never be windowed at all. So every fragment must be graded SOMEWHERE, and the
     two exclusions must be exactly those two.
     """
-    assert (rfo._R1_NO_LONGER + rfo._R2_ATTRIBUTED + rfo._R3_EXCEPTION + rfo._R4_WORDS) == \
-        rfo._RETRACTION_RULES_1_TO_3
+    assert (
+        rfo._R1_NO_LONGER + rfo._R2_ATTRIBUTED + rfo._R3_EXCEPTION + rfo._R4_WORDS
+    ) == rfo._RETRACTION_RULES_1_TO_3
     # …and the detached form is exactly that minus rule (3) and minus rule (4), not some other
     # subset…
     assert rfo._R3_EXCEPTION not in rfo._NEXT_PARA_RETRACTION_RE.pattern
@@ -2938,7 +3424,6 @@ def test_the_zero_count_and_the_noun_qualifier_clear_spellings_still_clear() -> 
         "**Verdict: CLEAN.**\n\nI fixed the P1 and the P2 in 4f450ae81.",
     ):
         assert rfo.asserts_a_clear(body) is True, body
-
 
 
 def test_a_negation_that_reaches_a_completion_verb_does_not_clear_the_finding() -> None:
@@ -3079,3 +3564,877 @@ def test_the_word_arm_declares_its_own_gap_rather_than_carrying_it_silently() ->
     ):
         caught = (rfo.asserts_a_clear(body) is False) or rfo._grades_as_blocking(body, {})
         assert caught, body
+
+
+def test_a_truncated_run_listing_fails_closed_before_attribution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A malformed `workflow_runs` page is a READ FAILURE, so the gates are UNREADABLE.
+
+    `ci_verdict.collect_items` refuses a listing it could not fully read, and that must win
+    over attribution: grading "no run matched" against a surface that refused would read a
+    broken read as a deferral. `unreadable` (not a plain FAIL) is right here because the
+    read can be retried — unlike a config fact.
+    """
+    probe = _collect(
+        monkeypatch,
+        _gh_payloads(
+            check_runs=_check_runs_for(ENTRY_REQUIRED),
+            runs=["not-a-run", None, 17],  # type: ignore[list-item]
+        ),
+    )[0]
+    gates = next(c for c in rfo.evaluate(probe).checks if c.name == "gates")
+    assert gates.passed is False
+    assert gates.unreadable is True
+    assert "TRUNCATED" in gates.raw
+
+
+def test_a_malformed_run_entry_is_refused_by_the_fixture_door_not_a_traceback() -> None:
+    """★ The `--fixture` door validates the run listing's SHAPE, so nothing malformed
+    reaches attribution — and the verdict it produces is still FAIL(unattributable).
+
+    ⛔ This test used to claim a malformed entry "can reach attribution without passing
+    `collect_items`". It cannot: `probe_from_dict` refuses a listing whose entries are not
+    mappings (`_fixture_head_runs`), so the entry arrives as "not read". What is pinned
+    here is therefore the DOOR, and the two things it must not do are the ones that
+    matter:
+
+    * an AttributeError escaping `check_gates` exits **1** through the CLI, which a caller
+      reads as "a required check is red" rather than "I could not read the runs" — the
+      mis-attribution earlier rounds fixed for a non-integer run `id`;
+    * a listing with unreadable entries is NOT a reading. "Not evidence the workflow ran"
+      is not "evidence it did not run", so it may not reach the DEFERRED (PASS) arm —
+      that is the same conflation `958b235db` retracts for the omitted key, one shape over.
+
+    `_run_emits`' own `Mapping` guard covers the remaining construction (a hand-built
+    `Probe`, which both collect doors cannot produce) and is pinned directly by
+    `test_the_malformed_entry_guard_holds_on_a_hand_built_probe`.
+    """
+    probe = rfo.probe_from_dict(
+        {
+            "pr": 10999,
+            "head": HEAD,
+            "tree": True,
+            "required": list(ENTRY_REQUIRED),
+            "required_deferred": list(MERGE_TIME_REQUIRED),
+            "merge_emit_files": {MERGE_TIME_REQUIRED[0]: ["python-ci.yml"]},
+            "head_runs": ["not-a-run", None, 17],
+            "groups": [
+                {
+                    "job": job,
+                    "state": ci_verdict.GROUP_GREEN,
+                    "status": "completed",
+                    "conclusion": "success",
+                    "check_id": 1000 + i,
+                }
+                for i, job in enumerate(ENTRY_REQUIRED)
+            ],
+        }
+    )
+    assert probe.head_runs is None, probe.head_runs
+    gates = next(c for c in rfo.evaluate(probe).checks if c.name == "gates")
+    # A partially-readable listing is UNATTRIBUTABLE — a verdict, not a crash, not a deferral.
+    assert gates.passed is False, gates.raw
+    assert f"unattributable:{MERGE_TIME_REQUIRED[0]}" in gates.reason, gates.reason
+
+
+def test_the_malformed_entry_guard_holds_on_a_hand_built_probe() -> None:
+    """★ `_run_emits`' `Mapping` guard is live, and its arm is UNATTRIBUTABLE — not a deferral.
+
+    Both collect doors refuse a non-mapping run entry, so this input is reachable only by
+    building the `Probe` directly — which the module's own "every condition is a pure
+    function of the Probe" contract documents as supported. Two outcomes are forbidden and
+    this pins both: an `AttributeError` escaping `check_gates` (the CLI reports exit 1,
+    "a required check is red") and the DEFERRED PASS arm ("no run of the emitter exists"
+    is not a measurement when an entry could not be read).
+    """
+    probe = dataclasses.replace(
+        rfo.probe_from_dict(_fixture_with_head_runs({"head_runs": []})),
+        # `_run_emits` takes a Mapping; this IS the type-confused input the guard exists
+        # for, and `Probe` is a documented pure-function-of-the-Probe construction.
+        head_runs=("not-a-run",),  # type: ignore[arg-type]
+    )
+    assert rfo._run_emits("not-a-run", ("python-ci.yml",)) is False  # type: ignore[arg-type]
+    gates = next(c for c in rfo.evaluate(probe).checks if c.name == "gates")
+    # A verdict, not a traceback — and not a deferral: a listing with an unreadable entry
+    # is not a reading, so it takes the same UNATTRIBUTABLE arm as the fixture door.
+    assert gates.passed is False, gates.raw
+    assert f"unattributable:{MERGE_TIME_REQUIRED[0]}" in gates.reason, gates.reason
+
+
+def _fixture_with_head_runs(extra: dict[str, object]) -> dict[str, object]:
+    """The smallest fixture that reaches the merge-time ABSENCE arm."""
+    return {
+        "pr": 10999,
+        "head": HEAD,
+        "tree": True,
+        "required": list(ENTRY_REQUIRED),
+        "required_deferred": list(MERGE_TIME_REQUIRED),
+        "merge_emit_files": {MERGE_TIME_REQUIRED[0]: ["python-ci.yml"]},
+        # ⛔ THE REF'S WORKFLOW LISTING (#11175). A recorded emitter is UNATTRIBUTABLE when it
+        # names a file the protected ref does not carry, so a fixture exercising the
+        # MISSING/DEFERRED arms must state that the emitter still EXISTS — omission is the
+        # fail-closed "not read" arm. `python-ci.yml` is the real emitter here and the real
+        # `.github/workflows/python-ci.yml` exists at this repo's `origin/main`.
+        "base_workflow_files": ["python-ci.yml"],
+        "groups": [
+            {
+                "job": job,
+                "state": ci_verdict.GROUP_GREEN,
+                "status": "completed",
+                "conclusion": "success",
+                "check_id": 1000 + i,
+            }
+            for i, job in enumerate(ENTRY_REQUIRED)
+        ],
+        **extra,
+    }
+
+
+def test_an_omitted_head_runs_is_unattributable_not_a_deferral() -> None:
+    """★ Omission is "not read", never "read it, zero runs" — the PASS arm.
+
+    `()` is not a neutral default for `head_runs`: it asserts a MEASUREMENT (the listing
+    was read and carried no matching run), which is exactly the DEFERRED/PASS arm. A
+    fixture that never spoke about attribution must therefore land on the fail-closed
+    arm, or the door by which tests construct this state silently exercises the pass.
+    """
+    probe = rfo.probe_from_dict(_fixture_with_head_runs({}))
+    assert probe.head_runs is None, probe.head_runs
+    gates = next(c for c in rfo.evaluate(probe).checks if c.name == "gates")
+    assert gates.passed is False, gates.raw
+    assert f"unattributable:{MERGE_TIME_REQUIRED[0]}" in gates.reason, gates.reason
+    assert "UNATTRIBUTABLE" in gates.raw
+
+
+def test_a_type_confused_head_runs_is_unattributable_not_a_deferral() -> None:
+    """★ A listing's SHAPE is validated, not just its presence.
+
+    `tuple(...)` accepts any iterable, so a string becomes a tuple of CHARACTERS and a bare
+    mapping becomes its KEYS — neither matches an emitter, and both therefore graded
+    `DEFERRED` / PASS, i.e. "read it, no run of the emitter exists". The live path cannot
+    produce either shape (`collect_items` yields mappings only), so this is the fixture door,
+    but it is the same conflation the omitted-key pin above closes: an unreadable surface is
+    not a reading.
+    """
+    for shape in (
+        "python-ci.yml",
+        {"path": ".github/workflows/python-ci.yml", "event": "pull_request"},
+        ({"path": ".github/workflows/python-ci.yml"}, "not-a-run"),
+    ):
+        probe = rfo.probe_from_dict(_fixture_with_head_runs({"head_runs": shape}))
+        assert probe.head_runs is None, (shape, probe.head_runs)
+        gates = next(c for c in rfo.evaluate(probe).checks if c.name == "gates")
+        assert gates.passed is False, (shape, gates.raw)
+        assert f"unattributable:{MERGE_TIME_REQUIRED[0]}" in gates.reason, (shape, gates.reason)
+
+
+def test_a_type_confused_emitter_projection_is_unattributable_not_a_deferral() -> None:
+    """★ `merge_emit_files` VALUES are shape-validated, one field over from the run listing.
+
+    An emitter spelled as a bare string becomes a tuple of CHARACTERS, and one spelled as a
+    bare mapping becomes its KEYS; neither can ever match a run, so each graded the
+    context `DEFERRED`/PASS — **at a head where the emitting workflow really ran**. That is
+    the same fail-open the `head_runs` shape pin above closes, one field over. Measured at
+    `caa4d7e6f`: the correct list yields `missing:<ctx>`/FAIL, both slips yield PASS.
+
+    A malformed value collapses to `()`, which the absence arm reads as UNATTRIBUTABLE
+    (FAIL) — never as "read it, no emitter".
+    """
+    ran = [{"path": ".github/workflows/python-ci.yml", "event": "pull_request"}]
+    for shape in (
+        "python-ci.yml",
+        {"workflow": "python-ci.yml"},
+        ["python-ci.yml", 17],
+        [],
+    ):
+        probe = rfo.probe_from_dict(
+            _fixture_with_head_runs(
+                {"merge_emit_files": {MERGE_TIME_REQUIRED[0]: shape}, "head_runs": ran}
+            )
+        )
+        assert probe.merge_emit_files.get(MERGE_TIME_REQUIRED[0]) == (), (
+            shape,
+            probe.merge_emit_files,
+        )
+        gates = next(c for c in rfo.evaluate(probe).checks if c.name == "gates")
+        assert gates.passed is False, (shape, gates.raw)
+        assert f"unattributable:{MERGE_TIME_REQUIRED[0]}" in gates.reason, (shape, gates.reason)
+
+
+def test_a_well_formed_emitter_projection_still_attributes_the_absence() -> None:
+    """The counterpart: a correctly-shaped projection keeps deciding MISSING and DEFERRED.
+
+    Without this, the pin above could be satisfied by collapsing every projection to `()`,
+    which would trade the fail-open for a permanent FAIL on every merge-time context.
+    """
+    ran = [{"path": ".github/workflows/python-ci.yml", "event": "pull_request"}]
+    probe = rfo.probe_from_dict(_fixture_with_head_runs({"head_runs": ran}))
+    assert probe.merge_emit_files == {MERGE_TIME_REQUIRED[0]: ("python-ci.yml",)}
+    gates = next(c for c in rfo.evaluate(probe).checks if c.name == "gates")
+    assert gates.passed is False, gates.raw
+    assert f"missing:{MERGE_TIME_REQUIRED[0]}" in gates.reason, gates.reason
+
+    deferred = rfo.probe_from_dict(_fixture_with_head_runs({"head_runs": []}))
+    assert deferred.merge_emit_files == {MERGE_TIME_REQUIRED[0]: ("python-ci.yml",)}
+    gates = next(c for c in rfo.evaluate(deferred).checks if c.name == "gates")
+    assert gates.passed is True, gates.raw
+    assert "DEFERRED(merge-time)(no python-ci.yml run" in gates.raw, gates.raw
+
+
+def test_an_emitter_recorded_with_its_full_path_still_attributes_the_absence() -> None:
+    """★ The EMITTER side of the comparison is reduced to a basename, like the run side.
+
+    `_run_file` reduces an Actions run's `path` (`.github/workflows/python-ci.yml`) to its
+    basename before comparing, so an emitter value must be read the same way.
+    `_snapshot_emitters` said "Basename only" in a comment and did NOT do it, and nothing
+    normalised the value at the comparison either — so a record naming the FULL PATH matched
+    no run at all, the match set came back empty, and `_merge_time_absence` answered
+    `DEFERRED(merge-time)` — a **PASS** — on a head where the emitting workflow had really
+    run. Measured at `995594919`, with a real PR-triggered `python-ci.yml` run on the head:
+
+        emitter as "python-ci.yml"                     -> missing:<ctx>   FAIL (correct)
+        emitter as ".github/workflows/python-ci.yml"   -> reason=''       PASS  ← the hole
+
+    An unmatchable emitter spelling is the record-side twin of `_readable_run`'s `path`
+    guard: "no run of the emitter exists" may not be concluded from evidence that could
+    never match. It is also the shape a RENAMED emitter produces while the record still
+    names the old file — the drift the record's own `gate_digest` leg forces a `--recut`
+    for in CI, but not in this gate.
+    """
+    ran = [{"path": ".github/workflows/python-ci.yml", "event": "pull_request"}]
+    probe = rfo.probe_from_dict(
+        _fixture_with_head_runs(
+            {
+                # The `--fixture` door is the one that can carry a full path today; it
+                # must reach the same verdict the record's own spelling would.
+                "merge_emit_files": {MERGE_TIME_REQUIRED[0]: [".github/workflows/python-ci.yml"]},
+                "head_runs": ran,
+            }
+        )
+    )
+    gates = next(c for c in rfo.evaluate(probe).checks if c.name == "gates")
+    # The aggregate ran here, so its absence is MISSING (a FAIL) — never a deferral.
+    assert gates.passed is False, gates.raw
+    assert f"missing:{MERGE_TIME_REQUIRED[0]}" in gates.reason, gates.reason
+
+    # The same normalisation must NOT turn an unattributable projection into a pass: with
+    # no run on the head at all, this emitter still means DEFERRED.
+    deferred = rfo.probe_from_dict(
+        _fixture_with_head_runs(
+            {
+                "merge_emit_files": {MERGE_TIME_REQUIRED[0]: [".github/workflows/python-ci.yml"]},
+                "head_runs": [],
+            }
+        )
+    )
+    gates = next(c for c in rfo.evaluate(deferred).checks if c.name == "gates")
+    assert gates.passed is True, gates.raw
+    assert "DEFERRED(merge-time)" in gates.raw, gates.raw
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        # The exact JSON slip `_fixture_merge_emit_files` exists for. Iterated as
+        # CHARACTERS by the basename comparison, it matched nothing → DEFERRED (PASS).
+        "python-ci.yml",
+        # A bare mapping becomes its KEYS, none of which is a workflow file name.
+        {"workflow": "python-ci.yml"},
+        # A non-`str` element escaped as an AttributeError, not a verdict.
+        ("python-ci.yml", None),
+        # A TRUTHY NON-ITERABLE: the shape rule is not a total function unless the
+        # container itself is materialised, and iterating this raises `TypeError` out of
+        # `check_gates` — read by a caller as "a required check is red".
+        17,
+        # A ONE-SHOT ITERATOR: `all(...)` in the shape check used to EXHAUST it, so the
+        # later comparison saw an empty sequence. Empty, it must be UNATTRIBUTABLE (no
+        # emitters) — not "recorded, nothing matched" → DEFERRED, which is what an empty
+        # TUPLE is graded as. (The non-empty case needs a run on the head to be observable
+        # at all; see `test_a_one_shot_emitter_projection_still_attributes_a_measured_run`.)
+        (f for f in ()),
+    ],
+)
+def test_a_type_confused_emitter_on_a_hand_built_probe_is_unattributable(shape: Any) -> None:
+    """★ The projection's SHAPE is checked where the verdict is decided, not just at a door.
+
+    `Probe.merge_emit_files` is an ANNOTATION, and this module documents a hand-built
+    `Probe` as supported, so a projection that is not a sequence of file names is an input
+    the verdict code must survive. Measured at `980e5131e` with only the `--fixture` door
+    guarded:
+
+        "python-ci.yml"                 -> PASS (iterated as characters, matched nothing)
+        ("python-ci.yml", None)        -> AttributeError out of `check_gates`
+
+    The bare string is a REGRESSION the basename normalisation introduced: pre-fix,
+    `"python-ci.yml" in "python-ci.yml"` was `True`, so the arm said MISSING (a FAIL).
+    Both now land on UNATTRIBUTABLE — a verdict, and never a deferral.
+    """
+    probe = dataclasses.replace(
+        rfo.probe_from_dict(_fixture_with_head_runs({"head_runs": []})),
+        merge_emit_files={MERGE_TIME_REQUIRED[0]: shape},
+    )
+    gates = next(c for c in rfo.evaluate(probe).checks if c.name == "gates")
+    assert gates.passed is False, (shape, gates.raw)
+    assert f"unattributable:{MERGE_TIME_REQUIRED[0]}" in gates.reason, (shape, gates.reason)
+
+
+def test_a_non_mapping_emitter_projection_is_unattributable_not_a_traceback() -> None:
+    """★ The FIELD itself is checked, not only the value's shape.
+
+    `probe.merge_emit_files.get(context)` raises `AttributeError` for a non-`Mapping`
+    field, and `check_gates` converts every unreadable input into a VERDICT — an exception
+    escaping to the CLI exits 1, which a caller reads as "a required check is red" rather
+    than "I could not read the projection". Measured at `08fab8605`: `merge_emit_files=[]`
+    and `merge_emit_files=None` both raised `AttributeError: 'list' object has no attribute
+    'get'` from `_merge_time_absence`.
+    """
+    for field in ([("python-ci.yml",)], None, 17):
+        probe = dataclasses.replace(
+            rfo.probe_from_dict(_fixture_with_head_runs({"head_runs": []})),
+            merge_emit_files=field,  # type: ignore[arg-type]
+        )
+        gates = next(c for c in rfo.evaluate(probe).checks if c.name == "gates")
+        assert gates.passed is False, (field, gates.raw)
+        assert f"unattributable:{MERGE_TIME_REQUIRED[0]}" in gates.reason, (field, gates.reason)
+
+
+def test_a_one_shot_run_listing_is_unattributable_not_a_deferral() -> None:
+    """★ The LISTING is materialised too, for the same reason the projection is.
+
+    `head_runs` is a `tuple` on every live path and via both fixture doors, but `Probe`
+    documents a hand-built construction. A one-shot iterator was exhausted by the
+    readability `all(...)`, leaving the match loop nothing to iterate: the gate then read
+    "no run of the emitter exists" from a listing it had itself consumed, and answered
+    DEFERRED — a PASS. Measured at `08fab8605` for `iter(...)`, `map(...)` and a generator.
+    """
+    ran = [{"path": ".github/workflows/python-ci.yml", "event": "pull_request"}]
+    for listing in (iter(ran), map(lambda r: r, ran), (r for r in ran)):
+        probe = dataclasses.replace(
+            rfo.probe_from_dict(_fixture_with_head_runs({"head_runs": []})),
+            head_runs=listing,  # type: ignore[arg-type]
+        )
+        gates = next(c for c in rfo.evaluate(probe).checks if c.name == "gates")
+        # The emitter's workflow DID run here, so the absence is MISSING — a FAIL either
+        # way; what may never happen is DEFERRED (a PASS) on a listing nobody finished.
+        assert gates.passed is False, (listing, gates.raw)
+
+
+def test_a_one_shot_emitter_projection_still_attributes_a_measured_run() -> None:
+    """★ A consumed projection is the case that made the one-shot defect a PASS.
+
+    The shape check walked the projection, and the match loop then walked whatever was left
+    of it. With a run of the emitting workflow ON THE HEAD, the exhausted projection matched
+    nothing and the absence answered `DEFERRED` — a PASS on a head where the aggregate was
+    pending or never posted. Measured at `08fab8605`: `iter(...)`, `map(...)` and a generator
+    all returned PASS where the materialised tuple returns `missing:` (a FAIL).
+    """
+    ran = [{"path": ".github/workflows/python-ci.yml", "event": "pull_request"}]
+    for projection in (
+        iter(("python-ci.yml",)),
+        map(lambda f: f, ("python-ci.yml",)),
+        (f for f in ("python-ci.yml",)),
+    ):
+        probe = rfo.probe_from_dict(
+            _fixture_with_head_runs(
+                {"head_runs": ran, "merge_emit_files": {MERGE_TIME_REQUIRED[0]: ["python-ci.yml"]}}
+            )
+        )
+        probe = dataclasses.replace(probe, merge_emit_files={MERGE_TIME_REQUIRED[0]: projection})
+        gates = next(c for c in rfo.evaluate(probe).checks if c.name == "gates")
+        assert gates.passed is False, (projection, gates.raw)
+        assert f"missing:{MERGE_TIME_REQUIRED[0]}" in gates.reason, (projection, gates.reason)
+
+
+def test_a_non_iterable_run_listing_is_unattributable_not_a_traceback() -> None:
+    """The counterpart on the listing side: `17` is truthy and not iterable."""
+    probe = dataclasses.replace(
+        rfo.probe_from_dict(_fixture_with_head_runs({"head_runs": []})),
+        head_runs=17,  # type: ignore[arg-type]
+    )
+    gates = next(c for c in rfo.evaluate(probe).checks if c.name == "gates")
+    assert gates.passed is False, gates.raw
+    assert f"unattributable:{MERGE_TIME_REQUIRED[0]}" in gates.reason, gates.reason
+
+
+def test_an_explicit_empty_head_runs_still_defers() -> None:
+    """The counterpart: a fixture that DOES state "read it, zero runs" keeps DEFERRED.
+
+    Without this, the pin above could be satisfied by deleting the deferred arm.
+    """
+    probe = rfo.probe_from_dict(_fixture_with_head_runs({"head_runs": []}))
+    assert probe.head_runs == ()
+    gates = next(c for c in rfo.evaluate(probe).checks if c.name == "gates")
+    assert gates.passed is True, gates.raw
+    assert "DEFERRED(merge-time)" in gates.raw
+
+
+# ── round-12 review (P3): the deferred COUNT, and a config error's LABEL ────
+
+
+def _two_merge_time_fixture(*, aggregate_reports: bool) -> dict[str, Any]:
+    """Two DECLARED merge-time contexts, at most one of them measured on this head."""
+    groups: list[dict[str, Any]] = [
+        {
+            "job": "docs",
+            "state": ci_verdict.GROUP_GREEN,
+            "status": "completed",
+            "conclusion": "success",
+            "check_id": 1000,
+        }
+    ]
+    if aggregate_reports:
+        groups.append(
+            {
+                "job": "aggregate",
+                "state": ci_verdict.GROUP_GREEN,
+                "status": "completed",
+                "conclusion": "success",
+                "check_id": 1001,
+            }
+        )
+    return {
+        "pr": 10999,
+        "head": HEAD,
+        "tree": True,
+        "required": ["docs"],
+        "required_deferred": ["aggregate", "nightly"],
+        # `aggregate` is emitted by `python-ci.yml`; `nightly` by a workflow that never
+        # ran on this head, so `nightly` is the only context that can be DEFERRED.
+        "merge_emit_files": {
+            "aggregate": ["python-ci.yml"],
+            "nightly": ["nightly.yml"],
+        },
+        # Both spellings must exist at the ref, or the absence is UNATTRIBUTABLE (#11175).
+        "base_workflow_files": ["python-ci.yml", "nightly.yml"],
+        "head_runs": [{"path": ".github/workflows/python-ci.yml", "event": "pull_request"}],
+        "groups": groups,
+    }
+
+
+def test_the_ready_line_counts_the_deferrals_it_made_not_the_declared_contexts() -> None:
+    """★ ISSUE 1 (P3): `deferred=` must count DEFERRALS, not declared merge-time contexts.
+
+    `len(probe.required_deferred)` is how many `merge_conditions` names the config
+    DECLARES. That is not how many deferrals the verdict MADE: when a merge-time check
+    also reported on this head it is measured, and the READY line then asserted a
+    deferral of a check the same line reports as `completed/success#…`. The raw is the
+    provenance a lane debugging NOT-READY reads, so a count that misstates what the PASS
+    rests on is the one thing this raw exists not to do.
+
+    The fixture declares TWO merge-time contexts and measures one, so `len(...)` and the
+    real count differ — the only shape that separates them. The converse below pins that
+    the count can reach 0, so a constant cannot satisfy this test.
+    """
+    probe = rfo.probe_from_dict(_two_merge_time_fixture(aggregate_reports=True))
+    assert probe.required_deferred == ("aggregate", "nightly")
+    gates = next(c for c in rfo.evaluate(probe).checks if c.name == "gates")
+    assert gates.passed is True, gates.raw
+    # The evidence, side by side: one context measured green, one genuinely deferred.
+    assert "aggregate=completed/success#1001" in gates.raw, gates.raw
+    assert "nightly=DEFERRED(merge-time)" in gates.raw, gates.raw
+    # Declared = 2. Deferred = 1. Pre-fix this line read `deferred=2`.
+    assert "deferred=1 " in gates.raw, gates.raw
+    assert "deferred=2" not in gates.raw, gates.raw
+
+    # Converse: nothing is absent, so nothing is deferred — `deferred=0`, not `1`/`2`.
+    measured = rfo.probe_from_dict(_two_merge_time_fixture(aggregate_reports=True))
+    measured = dataclasses.replace(measured, required_deferred=("aggregate",))
+    gates = next(c for c in rfo.evaluate(measured).checks if c.name == "gates")
+    assert gates.passed is True, gates.raw
+    assert "deferred=0 " in gates.raw, gates.raw
+
+    # Converse the other way: neither context reported, and neither emitter's workflow
+    # ran here ("read it, zero runs"), so BOTH are deferred — the count tracks the
+    # verdict, not a constant 0.
+    both_deferred = dataclasses.replace(
+        rfo.probe_from_dict(_two_merge_time_fixture(aggregate_reports=False)),
+        head_runs=(),
+    )
+    gates = next(c for c in rfo.evaluate(both_deferred).checks if c.name == "gates")
+    assert gates.passed is True, gates.raw
+    assert "deferred=2 " in gates.raw, gates.raw
+
+
+def test_a_required_set_config_error_is_a_FAIL_not_a_retryable_read_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★ ISSUE 2 (P3): a CONFIG error must not be labelled `FAIL(unreadable)` ("retry").
+
+    `RequiredSetConfigError` is a VERDICT about the repo's contract — the committed
+    record names a context `.mergify.yml` no longer derives, or the record's own
+    `live_result` is `DIVERGED` (the #3016 regression this module exists to catch).
+    `_read_required_contexts` collapsed it into a plain `ReadError`, so `check_gates`
+    reported `FAIL(unreadable)` — this module's token for "could not be read, RETRY",
+    which sends a lane to re-run a read that no retry can fix. The same file keeps the
+    split 20 lines below (`every required check is merge-time` ⇒ `FAIL`, not
+    `FAIL(unreadable)`) and `--required-set` keeps it too
+    (`REQUIRED-SET-CONFIG-ERROR` vs `REQUIRED-SET-UNREADABLE`).
+    """
+
+    def diverged(cwd: Any, ref: Any = None, **kw: Any) -> Any:
+        raise rfo_required.RequiredSetConfigError(
+            "required-contexts record names 'python-ci-gate' and .mergify.yml no longer derives it"
+        )
+
+    probe, _ = _collect(monkeypatch, _gh_payloads(), derive=diverged)
+    # Both still REFUSE — the set is unread, and nothing guesses it.
+    assert probe.required is None
+    assert probe.required_deferred is None
+    assert probe.required_config_error, "the class must survive the read boundary"
+    gates = next(c for c in rfo.evaluate(probe).checks if c.name == "gates")
+    assert gates.passed is False, gates.raw
+    assert gates.unreadable is False, f"pre-fix this was {gates.status}"
+    assert gates.status == "FAIL"
+    assert gates.reason.startswith("required-set-config-error:"), gates.reason
+    assert "no longer derives it" in gates.reason, gates.reason
+
+    # The `--fixture` door carries the same field, so a fixture can express the state.
+    fixture = _check(
+        "gates",
+        required=None,
+        required_deferred=None,
+        required_config_error="record and config disagree",
+    )
+    assert fixture.unreadable is False and fixture.status == "FAIL", fixture.status
+    assert fixture.reason.startswith("required-set-config-error:"), fixture.reason
+
+
+def test_an_unreadable_required_set_still_reads_FAIL_unreadable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The counterpart: a set that could not be READ keeps the retryable label.
+
+    Without this, the fix above could be satisfied by deleting the `unreadable` arm —
+    trading a wrong label for a lost distinction, since "I could not read it" IS
+    retryable and a lane does need to be told so.
+    """
+
+    def unreadable(cwd: Any, ref: Any = None, **kw: Any) -> Any:
+        raise rfo_required.RequiredSetUnreadable(".mergify.yml could not be read")
+
+    probe, _ = _collect(monkeypatch, _gh_payloads(), derive=unreadable)
+    assert probe.required is None
+    assert probe.required_config_error == ""
+    gates = next(c for c in rfo.evaluate(probe).checks if c.name == "gates")
+    assert gates.passed is False
+    assert gates.unreadable is True, gates.status
+    assert gates.status == "FAIL(unreadable)", gates.status
+    assert not gates.reason.startswith("required-set-config-error:"), gates.reason
+
+
+# ── an entry WITHOUT `path` is not a readable run (#10991 review, P2 fail-open) ─
+
+
+def test_a_run_entry_without_a_path_is_unattributable_not_a_deferral() -> None:
+    """★ P2 fail-open measured at `b45af8abd`: a run entry lacking `path` graded DEFERRED.
+
+    `_run_file` maps a missing `path` to `""`, which matches no emitter — so an entry that
+    merely OMITTED the field fell through to "no run of the emitter exists", the DEFERRED
+    (PASS) arm, on a listing nobody could actually read. The `event` field already fails
+    closed this way (`_run_emits`); `path` is the other half of the same attribution and
+    did not.
+
+    Measured on the pre-fix code at that head: `head_runs=({"event": "pull_request"},)` →
+    `python-ci-gate=DEFERRED(merge-time)` and the gate **PASSed**, while the same entry
+    WITH its `path` → `MISSING` / FAIL. Reverting `_readable_run` to
+    `isinstance(run, Mapping)` reds every shape below, at both doors.
+    """
+    shapes = (
+        {"event": "pull_request"},  # the field is simply absent
+        {"path": "", "event": "pull_request"},  # present and empty
+        {"path": None, "event": "pull_request"},  # present and null
+        {"path": 7, "event": "pull_request"},  # present and not a string
+        {"path": "   ", "event": "pull_request"},  # present and blank
+    )
+    for shape in shapes:
+        # Door 1 — the fixture: an unreadable entry is not a reading, so the listing is
+        # "not read" and the absence lands on UNATTRIBUTABLE.
+        via_fixture = rfo.probe_from_dict(_fixture_with_head_runs({"head_runs": [shape]}))
+        assert via_fixture.head_runs is None, (shape, via_fixture.head_runs)
+        gates = next(c for c in rfo.evaluate(via_fixture).checks if c.name == "gates")
+        assert gates.passed is False, (shape, gates.raw)
+        assert f"unattributable:{MERGE_TIME_REQUIRED[0]}" in gates.reason, (shape, gates.reason)
+
+        # Door 2 — a hand-built Probe, which this module documents as supported.
+        hand_built = dataclasses.replace(
+            rfo.probe_from_dict(_fixture_with_head_runs({"head_runs": []})),
+            head_runs=(shape,),  # type: ignore[arg-type]
+        )
+        gates = next(c for c in rfo.evaluate(hand_built).checks if c.name == "gates")
+        assert gates.passed is False, (shape, gates.raw)
+        assert f"unattributable:{MERGE_TIME_REQUIRED[0]}" in gates.reason, (shape, gates.reason)
+
+
+# ── #11175: a STALE `emitters` PROJECTION IS NOT AN ABSENT RUN ─────────────
+#
+# The record's `emitters` map is rewritten only by `mergify_config_guard --recut` (a weekly
+# cron). Rename or delete the emitting workflow, land it on `main` without a re-cut, and the
+# record still names the OLD file — which matches no run on any head, so `_run_emits` finds
+# nothing, `matched` is empty, and the arm answers DEFERRED … a PASS while the required
+# heavy suite never ran. Measured on the reproduction below (one `pull_request` run of
+# `python-suite.yml` on the head, the entry checks green):
+#
+#   record emitter     verdict (PRE-FIX)          verdict (now)
+#   python-ci.yml      PASS, deferred=1            FAIL unattributable:python-ci-gate
+#   python-suite.yml   FAIL missing:python-ci-gate FAIL missing:python-ci-gate
+#
+# The two spellings are the SAME head evidence, so only the record can distinguish them —
+# which is exactly why the ref's own workflow listing has to be part of the probe.
+
+#: A minimal `.mergify.yml` with the live ENTRY/MERGE split: two cheap entry checks and the
+#: heavy aggregate in `merge_conditions`, which is the shape whose absence is attributed.
+_STALE_EMITTER_MERGIFY = """\
+queue_rules:
+- name: main
+  queue_conditions:
+  - base=main
+  - -draft
+  - check-success=docs
+  - check-success=test-isolation
+  merge_conditions:
+  - check-success=python-ci-gate
+  branch_protection_injection_mode: merge
+merge_protections_settings: {}
+"""
+
+#: A workflow file GitHub would load. Its CONTENT is irrelevant — every assertion below is
+#: about whether the recorded spelling names a file that EXISTS at the ref.
+_TRIVIAL_WORKFLOW = """\
+name: suite
+on: pull_request
+jobs:
+  python-ci-gate:
+    runs-on: ubuntu-latest
+    steps:
+    - run: 'true'
+"""
+
+
+def _stale_emitter_repo(tmp_path: Path, *, recorded_emitter: str) -> Path:
+    """A tree whose record names `recorded_emitter`, while `python-suite.yml` is what exists.
+
+    Models the landed rename: the emitting workflow is `python-suite.yml` at the protected
+    ref, and the committed record still carries whatever `--recut` last wrote.
+    """
+    workflows = tmp_path / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "python-suite.yml").write_text(_TRIVIAL_WORKFLOW, encoding="utf-8")
+    (tmp_path / ".mergify.yml").write_text(_STALE_EMITTER_MERGIFY, encoding="utf-8")
+    record = tmp_path / "docs" / "ci" / "required-contexts.json"
+    record.parent.mkdir(parents=True)
+    required = ["docs", "python-ci-gate", "test-isolation"]
+    record.write_text(
+        json.dumps(
+            {
+                "required_contexts": required,
+                "emitters": {"python-ci-gate": [[recorded_emitter, "python-ci-gate"]]},
+                "live_result": "SATISFIED",
+                "live_observed_contexts": required,
+                "live_verified_at": "2026-11-03T02:35:26Z",
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return tmp_path
+
+
+def _stale_emitter_gates(
+    monkeypatch: pytest.MonkeyPatch, *, recorded_emitter: str, runs: list[dict[str, Any]]
+) -> Any:
+    """Drive the WHOLE path — `collect_probe` → derivation → record → emitter → run listing.
+
+    ⛔ `collect_probe`, not a hand-built `Probe` (#11175's DoD): the defect is that the
+    record's spelling is compared against the head's runs, so a fixture that sets
+    `merge_emit_files` directly would assume away the very link that is wrong.
+    """
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix="stale-emitter-") as tmp:
+        repo = _stale_emitter_repo(Path(tmp), recorded_emitter=recorded_emitter)
+        probe = _collect(
+            monkeypatch,
+            _gh_payloads(check_runs=_check_runs_for(["docs", "test-isolation"]), runs=runs),
+            derive=lambda cwd, ref=None, **kw: rfo_required.derive_from_config(repo),
+        )[0]
+        assert probe.required_deferred == ("python-ci-gate",), probe.required_raw
+        assert probe.required == ("docs", "test-isolation"), probe.required_raw
+        # The listing the live path carries from the SAME derivation, asserted so a revert to
+        # "list the temp root" (which answers `()` for every repo) cannot pass silently.
+        assert probe.base_workflow_files == ("python-suite.yml",), probe.base_workflow_files
+        return next(c for c in rfo.evaluate(probe).checks if c.name == "gates")
+
+
+def test_a_stale_emitter_spelling_is_unattributable_not_a_deferral(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★ ISSUE #11175 (P2 fail-open): a STALE projection must not buy a DEFERRED (PASS).
+
+    The control below uses the SAME head evidence and only changes the record's spelling, so
+    this pair is the defect stated as a table: `python-suite.yml` (the file that exists)
+    reads `FAIL missing` because it ran here, while the renamed-away `python-ci.yml` read
+    PASS before this arm existed. Revert the arm and this reds on `gates.passed is False`.
+
+    The refusal is deliberately FLEET-WIDE (stated in `_merge_time_absence`'s docstring, per
+    the issue's DoD): until a human re-cuts the record, EVERY PR reads
+    `NOT-READY(unattributable)`. That is the safe direction — the alternative is a false
+    READY — and it is also the true state, because with the emitting workflow gone the
+    required aggregate can never be produced and branch protection deadlocks merges anyway.
+    """
+    gates = _stale_emitter_gates(
+        monkeypatch,
+        recorded_emitter="python-ci.yml",
+        runs=[_workflow_run("python-suite.yml")],
+    )
+    assert gates.passed is False, gates.raw
+    assert "unattributable:python-ci-gate" in gates.reason, gates.reason
+    assert "python-ci.yml" in gates.raw and "STALE" in gates.raw, gates.raw
+    assert "--recut" in gates.raw, gates.raw  # the remedy is NAMED, not implied
+
+
+def test_the_recorded_emitter_that_DOES_exist_still_attributes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The counterpart — and the #11175 table's second row, on the SAME head evidence.
+
+    Without this, the pin above could be satisfied by refusing every projection, which would
+    trade the fail-open for a permanent FAIL on every merge-time context (and `--recut`
+    could never clear it).
+    """
+    gates = _stale_emitter_gates(
+        monkeypatch,
+        recorded_emitter="python-suite.yml",
+        runs=[_workflow_run("python-suite.yml")],
+    )
+    assert gates.passed is False, gates.raw
+    assert "missing:python-ci-gate" in gates.reason, gates.reason
+    assert "unattributable" not in gates.reason, gates.reason
+
+
+def test_a_stale_emitter_on_a_head_with_no_run_at_all_is_still_not_a_deferral(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The stale spelling is UNATTRIBUTABLE even when NOTHING ran on the head.
+
+    This is the half a run-matching heuristic cannot reach: with no runs at all there is no
+    "absent because pending" signal to trip, so the DEFERRED arm is the only place a stale
+    spelling can land — and it lands there as a PASS. Attribution must be decided by the
+    projection's own validity first, or the verdict depends on what GitHub happened to
+    schedule.
+    """
+    gates = _stale_emitter_gates(monkeypatch, recorded_emitter="python-ci.yml", runs=[])
+    assert gates.passed is False, gates.raw
+    assert "unattributable:python-ci-gate" in gates.reason, gates.reason
+
+
+def test_the_deferral_arm_survives_a_valid_projection_with_no_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """⛔ AND THE PASS ARM MUST STILL BE REACHABLE — or the fix is a permanent refusal.
+
+    A correctly-spelled emitter that simply did not run on this head IS the queue working as
+    designed (Mergify settles `merge_conditions` on `mergify/merge-queue/<sha>`), so this
+    case must stay READY.
+    """
+    gates = _stale_emitter_gates(monkeypatch, recorded_emitter="python-suite.yml", runs=[])
+    assert gates.passed is True, gates.raw
+    assert "python-ci-gate=DEFERRED" in gates.raw, gates.raw
+
+
+def test_a_run_entry_that_carries_its_path_still_attributes() -> None:
+    """The counterpart: the guard must not reject the WELL-FORMED listing.
+
+    Without this, the pin above could be satisfied by refusing every listing — which would
+    trade the fail-open for a permanent FAIL on every merge-time context.
+    """
+    ran = [{"path": ".github/workflows/python-ci.yml", "event": "pull_request"}]
+    probe = rfo.probe_from_dict(_fixture_with_head_runs({"head_runs": ran}))
+    assert probe.head_runs is not None
+    gates = next(c for c in rfo.evaluate(probe).checks if c.name == "gates")
+    assert gates.passed is False, gates.raw
+    assert f"missing:{MERGE_TIME_REQUIRED[0]}" in gates.reason, gates.reason
+
+
+# ── `--repo` does not scope the DERIVATION, and the raw says so ─────────────
+
+
+def test_the_required_sets_raw_discloses_which_repo_it_was_derived_from(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """★ `--repo` parameterises the GitHub reads, NOT the required-set derivation.
+
+    Both inputs (`.mergify.yml`, the committed record) come from `origin/main` of the
+    checkout the tool runs in, so a foreign `--repo` is judged against THIS repo's
+    contract. The mismatch cannot produce a false READY — `_read_tree` fetches
+    `refs/pull/<n>/head` from the local `origin` and refuses when the fetched sha ≠ the live
+    head of the named repo — but a residual that lives only in prose is one nobody reads,
+    and the required set's provenance is supposed to be on every arm. So the raw names it.
+
+    ⛔ HERMETIC — review round 7, P3 note 1. This case used to read the AMBIENT `origin` of
+    `REPO_ROOT`: in a `.git`-less extraction, or any checkout whose remote is named
+    `upstream` (or a source-tarball build), it failed with
+    `repo-scope=UNDETERMINED(required set read from …'s origin/main)` for a reason that has
+    nothing to do with the change — while the other 360 cases passed. It is green under
+    `actions/checkout` only because that action creates `origin`. The workdir is now a
+    throwaway repo whose remote is set HERE, the shape
+    `test_the_origin_slug_is_normalised_however_the_remote_url_is_spelled` already uses.
+    """
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env["GIT_CONFIG_SYSTEM"] = os.devnull
+    workdir = tmp_path / "checkout"
+    subprocess.run(["git", "init", "-q", str(workdir)], check=True, env=env)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(workdir),
+            "remote",
+            "add",
+            "origin",
+            f"https://github.com/{REPO}.git",
+        ],
+        check=True,
+        env=env,
+    )
+    monkeypatch.setattr(
+        rfo,
+        "derive_from_ref",
+        lambda cwd, ref=None, **kw: rfo_required.derive_from_config(REPO_ROOT),
+    )
+    _, same = rfo._read_required_contexts(workdir, REPO)
+    assert "repo-scope=origin(" in same, same
+    _, foreign = rfo._read_required_contexts(workdir, "someone-else/another-repo")
+    assert "repo-scope=MISMATCH" in foreign, foreign
+    assert "someone-else/another-repo" in foreign, foreign
+
+
+@pytest.mark.parametrize(
+    ("remote", "expected"),
+    (
+        ("https://github.com/daniel-ospina/tortoise.git", "daniel-ospina/tortoise"),
+        ("https://github.com/daniel-ospina/tortoise.git/", "daniel-ospina/tortoise"),
+        ("https://github.com/daniel-ospina/tortoise/", "daniel-ospina/tortoise"),
+        ("git@github.com:daniel-ospina/tortoise.git", "daniel-ospina/tortoise"),
+        ("/absolute/local/path", ""),
+    ),
+)
+def test_the_origin_slug_is_normalised_however_the_remote_url_is_spelled(
+    tmp_path: Path, remote: str, expected: str
+) -> None:
+    """★ `repo-scope=` must not cry wolf on a legal remote spelling.
+
+    A remote may be spelled `…/tortoise.git/` — `.git` and a trailing slash, in that order.
+    Normalising `.git` FIRST made the suffix strip a no-op and left `tortoise.git` as the
+    slug, so an exactly-matching checkout printed `repo-scope=MISMATCH(… from
+    daniel-ospina/tortoise.git's origin/main, judging daniel-ospina/tortoise …)`. The whole
+    value of the token is that a reader can trust it, and a false MISMATCH teaches them to
+    ignore it. Swapping the two calls back reds this.
+    """
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull}
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, env=env)
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "remote", "add", "origin", remote], check=True, env=env
+    )
+    assert rfo._origin_slug(tmp_path) == expected

@@ -4,7 +4,7 @@ type: plan
 domain: planning
 doc_status: draft
 created: 2026-11-05
-updated: 2026-11-05
+updated: 2026-11-06
 subjects.team: epistemic-team
 aboutSubjects: Tortoise memory graph
 aboutObjects: "epic #5090, child issues, MECE decomposition, test-design, capstone"
@@ -71,11 +71,11 @@ claim and not an assertion:
 
 - **O:** move the authority for *"this writer is legitimately exempt"* out of a read-only measurement script
   and into the product, so "no silent bypass" is a property of the system rather than of a report.
-- **I:** a runtime-resolvable register in `tortoise/` keyed `module::symbol`; **three** writers that today
-  carry **no declared exemption** classified (`hosted_backup::restore_graph`,
+- **I:** a runtime-resolvable register in `tortoise/` keyed `module::symbol`; **three** writers that
+  carried **no declared exemption** classified (`hosted_backup::restore_graph`,
   `projection.entities::_event_plain_merge`, `projection::_rebuild_all_replay`); **zero** `bypass`; a
   duplicated key **raises**.
-- **T:** a check that **must change** when this lands (the "zero unclassified" condition is **already true at HEAD** — `tools/dod_5090_probe.py` reports 15 of 15 writers classified, 6 recognised producers / 9 exempt / 0 bypasses, so it cannot distinguish completion from a no-op): the **three writers with no declared exemption** (`hosted_backup::restore_graph`, `projection.entities::_event_plain_merge`, `projection::_rebuild_all_replay`) resolve to a register entry **imported from `tortoise/`**, and the probe's own declaration table is **no longer the only source** — i.e. the probe reads the product's register instead of owning one. DoD rows 1–2 are
+- **T:** a check that **must change** when this lands (the "zero unclassified" condition is **already true at HEAD** — at the plan head `641e5f1b37` the probe reported **15 of 15** UNKNOWN-labelled writers classified, 6 recognised producers / 9 exempt / 0 bypasses, so it could not distinguish completion from a no-op; since `#11274` widened discovery to the container-key shape the same census reads **19 of 19** UNKNOWN-labelled writers, 6 recognised producers / 13 exempt / 0 bypasses — the `N of M` denominator is the instrument's own: it counts the writers it LABELLED, not every writer discovery walks): the **three writers that carried no declared exemption** (`hosted_backup::restore_graph`, `projection.entities::_event_plain_merge`, `projection::_rebuild_all_replay`) now resolve to a register entry **imported from `tortoise/`** — **landed**, `#11085` — and the check's second half is still open: the probe's own declaration table must stop being **the only source**, i.e. the probe must read the product's register instead of owning one. DoD rows 1–2 are
   re-scored with the reading stated; the register is a leaf module with a cycle-safety note.
 - **Complexity:** standard · **Blocked by:** none · **Blocks:** **C3** (arming the gate before the register
   exists would make three undeclared writers bypass silently — that ordering is the reason this is not one issue).
@@ -101,29 +101,37 @@ claim and not an assertion:
 
 - **O:** make which labels the vector leg searches and which the store indexes a fact the system states,
   instead of one reconstructed by hand.
-- **I:** `_record_vector_index_inventory` (`projection/__init__.py:18491`) emits the pair for **every** served
-  label; today `if gap:` (`:18577`) gates the **warning only**, and the served set is never retained.
+- **I:** `_record_vector_index_inventory` (in `projection/__init__.py`) emits the pair for **every** served
+  label; today the `if gap:` inside `_record_vector_index_inventory` gates the **warning only**, and the served set is never retained.
 - **T:** a store with **no** gap reports the pair; a store **with** a gap still warns; a raising/malformed
   catalogue leaves `Projection.__init__` healthy (fail-open preserved); **no second label declaration** —
   the served set stays `security.ENTITY_TYPE_LABELS`.
 - **Complexity:** micro · **Blocked by:** none · **Blocks:** none.
 - ⚠️ **Deliberate test change:** `tests/test_4997_vector_index_parity.py::test_a_store_with_no_gap_does_not_warn`
   — its *warning* claim stands, its *silence* claim is what this ends. Stated so it is not read as a regression.
-- ⚠️ **Corrected premise, and it changes the size of this child.** `_vector_indexed_labels` is assigned **unconditionally** (`:18570`); `if gap:` (`:18577`) gates only the **`log.warning`**, and `tests/test_4997_vector_index_parity.py:415` already asserts the attribute for a no-gap store. **What is missing is the SERVED set** — it is never retained — so this needs **new state**, not one un-gated emit. It is still **not** a second inventory: it extends the one function that already reads the catalogue.
+- ⚠️ **Corrected premise, and it changes the size of this child.** `_vector_indexed_labels` is assigned **unconditionally** (`self._vector_indexed_labels = measured & served`); the `if gap:` inside `_record_vector_index_inventory` gates only the **`log.warning`**, and `test_a_store_with_no_gap_does_not_warn` (in `tests/test_4997_vector_index_parity.py`) already asserts the attribute for a no-gap store. **What is missing is the SERVED set** — it is never retained — so this needs **new state**, not one un-gated emit. It is still **not** a second inventory: it extends the one function that already reads the catalogue.
 
 ### C5 — **#11088** `census the unretrievable vectors, and carry the surface call for removing them`
 
 - **O:** quantify the stored vectors that no index and no efficient query path can serve, and put the
   consequence of removing them in front of the owner — because removal is a **surface change**.
 - **I:** a **read-only** dry-run census naming every label whose stored vectors have no vector index, with
-  vector count and bytes, and **exactly which `entity_type` values would return zero rows** afterwards.
+  vector count and bytes, and **exactly which `entity_type` values would change** afterwards. ⚠️ **Corrected
+  2026-11-06 (`#11088`, measured):** this read "would return zero rows". That holds only for a query that
+  matched *only* by meaning — a lexically-matching query keeps answering from the FTS leg — so the
+  delivered census names the affected `entity_type` SET and the loss as **semantic recall**. Evidence and
+  the `:Source` caveat: `S3-VECTOR-CENSUS.md` §3.1/§7.
 - **T:** the census runs without writing; it exits non-zero on an unreadable catalogue rather than reporting
   an empty population; the affected query paths are enumerated; **the removal is requested, not performed**.
 - **Complexity:** standard · **Blocked by:** none (the census half) · **Blocks:** none.
 - ⛔ **Why the removal is not in this child's authority:** `entity_type='object'` / `'event'` vector search
-  **returns rows today** by full scan. (`Source`/`Subject` carry no vector index; the 2026-09-24 count found
-  no vectors there either, though both labels' writers do store `embedding` — so what the census finds on them is
-  a measurement, not an assumption.) Removing the vectors removes that answer —
+  **returns rows today** by full scan — and the census widened the affected population to **FOUR labels /
+  FIVE `entity_type` values** (`event`, `object`, `document`, `source`, `subject`) **on the population it
+  measured** (the set is whatever `--census` prints for the graph a removal applies to), because `:Source`
+  maps to `document`+`source` (`S3-VECTOR-CENSUS.md` §4.1/§7). `Source`/`Subject` carry no vector **INDEX** — an index
+  fact, not a claim about the property: both labels' writers DO store `embedding`, and the 2026-09-24 inventory
+  reports no per-label vector count for them at all, so what they hold is what `--census` measures, never
+  something inferred from the inventory (`S3-VECTOR-CENSUS.md` §5). Removing the vectors removes that answer —
   an MCP/SDK surface change, which `AGENTS.md` requires **Daniel's approval for before implementation**.
   The census is the evidence for that request; acting on it is not a lane's.
 - ⚠️ **Contradiction test, recorded:** **no recorded decision authorises** this removal. The 2026-09-24
@@ -180,7 +188,7 @@ requests; its census half is not.
 | **ingress** | **`#10000`** (`P0-blocker`). |
 | **record authority** | **`#7879`** / **`#9548`**. |
 | **`_upsert_document` retired-text embed** | **`#8419`** (OPEN) — root is the **D10 fold** (`#5088`). |
-| **the `M1–M4` measurement ids** | Denote **two disjoint sets** across two live docs; §15 (`STORAGE-ARCHITECTURE.md:1541`) records three of `#4333`'s four as *not worth measuring*. Recorded in `03-scope.md` §7.3 (the review-gate notes) rather than re-filed. |
+| **the `M1–M4` measurement ids** | Denote **two disjoint sets** across two live docs; §15 (`STORAGE-ARCHITECTURE.md:1553`) records three of `#4333`'s four as *not worth measuring*. Recorded in `03-scope.md` §7.3 (the review-gate notes) rather than re-filed. |
 
 ---
 

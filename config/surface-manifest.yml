@@ -58,9 +58,25 @@
 # docs/product/canonical-mcp-tools.md and docs/product/beta-sdk-surface.md; compliance
 # with it is checked by tools/surface-target-check.py, which reads those docs rather than
 # a constant here.
+#
+# `cut_at_commit` IS a DEFAULT-BRANCH COMMIT, never a lane one (#11057 review F1). It names
+# the `main` commit this baseline was cut AGAINST, so `cut --commit <sha-in-main>` — not the
+# worktree HEAD it happened to run in. This repo squash-merges and deletes the source
+# branch, so a lane SHA resolves in the PR's own CI (which fetches every head) and exists
+# NOWHERE once it lands; a required provenance check that accepted one would red `main`
+# permanently. `check` therefore requires the record to be an ANCESTOR of the default
+# branch, not merely present in the clone.
+#
+# ⛔ ONE ROW ONLY. A forward merge can leave this key TWICE (the merge of `origin/main` did
+# exactly that: this branch's line and #10914's sat adjacent) and a YAML loader SILENTLY
+# last-wins — the file then reads as ONE value while the diff shows two. The value must be a
+# commit of `main`: measured with `gh api repos/<owner>/<repo>/compare/<sha>...main`,
+# `status=ahead, behind=0` is an ancestor and `status=diverged` is a lane commit that will
+# exist nowhere once its branch is deleted (a lane SHA still RESOLVES today, so a check that
+# only asks that question calls it fine — which is why this record also asks about ancestry).
 manifest_version: 1
 issue: 3863
-cut_at_commit: 911a1e240c2415b094b370f32a2a24f88a5fb1ea
+cut_at_commit: 277a559b1a69390e1439717224072d5d650e60f1
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -511,8 +527,15 @@ response_fields:
     route that does revise a dead claim deliberately. The journaled provenance retrofit (#7704) still folds, so
     an evidence-bearing re-run keeps its source. All of these codes ride the SAME key on the dedup-hit return, so
     a re-run reports them together rather than dropping one'
-  unchanged_when_off: n/a — not flag-gated; the key is ABSENT on a sourced or word-bearing write, and on every write
-    whose fold actually applied, so that response stays byte-identical
+  unchanged_when_off: n/a — not flag-gated; the key is PRESENT on EVERY one of the FOUR codes `emitted_when` lists
+    above, and each is a presence condition in its own right rather than a single "no source" rule — (1) `no_source` —
+    the write carries no source and no authored word (a materialized `extractedFrom`, or an authored `credibility=`,
+    makes it absent); (2) `temporal_not_applied` — a temporal prop arrived on a dedup target that is already a
+    TERMINAL claim, which reports REGARDLESS of source and of an authored word, because the whole fold is dropped and
+    nothing was applied; (3) `kind_other_layer` — the declared kind is declared only on another layer; (4)
+    `terminal_fold_refused` — the fold DEDUP-hits a TERMINAL claim and would write anything else (a caller prop and/or
+    an authored word) with NO temporal prop, which is why a word-bearing write is not absent by itself. A write that
+    trips none of the four codes keeps its byte-identical response
 - response: tortoise_check_structure
   field: _meta.tortoise_error
   emitted_when: 'only for the transport wait-bound refusal — the ONE producer whose failure payload is a `{code,
@@ -807,7 +830,7 @@ retired:
   http_policy: true
   approval: null
 - name: tortoise_query_points_by_tag
-  use_instead: tortoise_query(tag=...)
+  use_instead: tortoise_query(tag=..., offset=..., limit=...)
   sdk_method: query_points_by_tag
   http_policy: true
   approval: null
@@ -838,22 +861,27 @@ retired:
   approval: null
 rows:
 - name: tortoise_query
-  served_from: tortoise/mcp_server.py:605301512e1ee70d
+  served_from: tortoise/mcp_server.py:e745fd4824243d93
   served_attributes: 7a717e4e60ce3bfa
   family: memory
   family_rank: 1
   served: http
-  sdk_method: query
+  sdk_method: paginated_query
   group_source: mapped
   keyword: fetch
   keyword_rank: 1
   cluster: query
   canonical: true
   job: 'Query points by pointKind and/or property filters — structural exact-match retrieval for known shapes (Epic
-    #888: paginated_query + query_points_by_tag merged in). Pagination via offset=/limit= (or 1-based page=); tag=
-    filters Points by TAGGED edge; include_retracted=True surfaces tombstones. For semantic relevance use tortoise_search;
-    for a single known ID use tortoise_get_point.'
-  dependency: declares TortoiseSDK.query (resolves)
+    #888: paginated_query + query_points_by_tag merged in). BOTH the structural read and the `tag=` arm return at
+    most `limit` rows — default 100, or 20 when you page (`offset=`/`page=`) without an explicit `limit`. The RESPONSE
+    is what is bounded (and a truncated answer is not distinguishable from a complete one): on the structural read,
+    walk offset=/limit= — or 1-based page= — until hasMore is false when you need every row; a bare `limit=` bounds
+    the answer but gives you no hasMore/total. On the `tag=` arm that walk is NOT lossless yet — its accessor has
+    no total order (#5346/#11062) — so treat a walked tag as approximate, not as the complete set. The `tag=` read
+    itself still scans the whole tagged population before slicing, so a very large tag can still be slow. include_retracted=True
+    surfaces tombstones. For semantic relevance use tortoise_search; for a single known ID use tortoise_get_point.'
+  dependency: declares TortoiseSDK.paginated_query (resolves)
   lifecycle: active
   used_by: agents, tooling, docs
   recommendation: keep
@@ -4607,16 +4635,16 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.link_entities.
-  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
+  dependency: 'reached by no registered MCP tool; caller categories: engine'
   lifecycle: active
   used_by: tooling, docs
   recommendation: review
-  reason: no MCP tool binds it, and no caller outside tests was found
+  reason: 'no MCP tool binds it; callers: engine'
   recommended_family: null
   proposed: false
   exemption: false
   approval: null
-  class: no-caller-found
+  class: internal
 - name: sdk:link_source_to_entity
   method: link_source_to_entity
   approved: false
@@ -5228,11 +5256,11 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.paginated_query.
-  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_paginated_query (retired)'
+  dependency: 'reached by 1 registered tool(s) and 1 retired name(s): tortoise_paginated_query (retired), tortoise_query'
   lifecycle: active
   used_by: tooling, docs
   recommendation: keep
-  reason: reached by 0 registered tool(s) and 1 retired name(s)
+  reason: reached by 1 registered tool(s) and 1 retired name(s)
   recommended_family: null
   proposed: false
   exemption: false
@@ -5343,11 +5371,12 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.query.
-  dependency: 'reached by 1 registered tool(s): tortoise_query'
+  dependency: 'reached by no registered MCP tool; caller categories: cli, documentation, engine, eval-harness, other-tooling,
+    tenant-rest'
   lifecycle: active
-  used_by: eval-harness, tooling, skill-docs, docs
-  recommendation: keep
-  reason: reached by 1 registered tool(s)
+  used_by: eval-harness, tooling, docs
+  recommendation: review
+  reason: 'no MCP tool binds it; callers: cli, documentation, engine, eval-harness, other-tooling, tenant-rest'
   recommended_family: null
   proposed: false
   exemption: false

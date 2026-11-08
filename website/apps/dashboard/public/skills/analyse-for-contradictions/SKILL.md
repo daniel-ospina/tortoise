@@ -55,7 +55,15 @@ deliberate act through `how-to-use-tortoise`.
      words the same idea differently. Annotates EP confidence but does not
      filter, so low-confidence neighbours stay visible.
    - `tortoise_query(kind="decision")` — the committed decisions, when the claim
-     touches a choice the graph has recorded as decided.
+     touches a choice the graph has recorded as decided. ⚠️ **This read is
+     bounded and newest-first** — one call returns at most `limit` rows (100 by
+     default) and does not tell you what it left behind, so on a graph holding
+     more decisions than that it is a *subset*, not the committed-decision set.
+     When the verdict turns on completeness, walk it: `offset=0&limit=100`, then
+     `offset=100`, … until `hasMore` is `false`, and say which pages you covered.
+     (`hasMore`/`total` come from the `offset=`/`page=` form; a bare `limit=`
+     bounds the answer without giving you either — a truncated page and a
+     complete one look identical there.)
 3. **Test for contradiction.** A contradiction is one of:
    - **Edge-level** — `tortoise_review_connections(mode="prune",
      scope=<topic>)` flags illogical/stale IMPL/NAND connections with

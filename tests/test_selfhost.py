@@ -727,7 +727,10 @@ class TestHealth:
             assert first.status_code == 503, (
                 "the transient fault did not take effect — this test cannot "
                 f"prove the wait retries: {first.status_code} {first.text!r}")
-            r = _wait_for_ready(tc, timeout=15.0)
+            # The retry is immediate; what the budget pays for is the cold DB
+            # behind it, so it is the file's tolerance — not a 15 s literal a
+            # cold start can outrun on a loaded runner (#10790).
+            r = _wait_for_ready(tc)
             assert r.status_code == 200
             assert r.json()["status"] == "ready"
 

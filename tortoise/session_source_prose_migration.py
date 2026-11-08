@@ -4,7 +4,7 @@ WHAT THIS EXISTS FOR
 ====================
 #10852 stopped the capture writing the transcript's first substantive utterance
 into ``Source.summary`` (and deriving ``_searchText`` from it). It deliberately
-did NOT heal the nodes that already hold the pair, and no route reaches them:
+did NOT heal the nodes that already hold the pair, and no OTHER route reaches them:
 
 * a **re-capture** of the same ``session_id`` is the #1727 no-op replay — the
   only production caller of ``_materialize_session_source`` sits inside the
@@ -116,6 +116,7 @@ the next whole-journal replay or a CLI census.
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Callable, Mapping
 from typing import Any
 
@@ -165,6 +166,26 @@ _TIMEOUT_CAP_ERR = "TIMEOUT parameter value cannot exceed"
 #: The REAL test is structural, in :func:`record_turn_reader`.
 _TAIL_WITNESS_HINT = "the tail is missing"
 
+#: OFF-SWITCH for the census's NODE-IDENTITY dedupe (#11176). `=1` restores the
+#: PRE-FIX path EXACTLY: one record per ROW ``_SOURCE_ROWS`` returns, carrying
+#: that row's ``turn_max_index`` — so a ``:Source`` reached by two ``:Session``
+#: rows is counted TWICE, the tail witness is whatever row arrived first, and
+#: ``duplicate_session_rows`` is ABSENT (no count was taken).
+#:
+#: ⛔ NARROW BY DESIGN — only the exact string ``1`` disables it, and the site is
+#: declared in ``tests/test_env_truthy.py``'s ``_KNOWN_NARROW_READS`` ledger with
+#: its ``OVERRIDES`` reason (#4097/#4128). A `=true` written for legibility would
+#: silently leave the FIXED census running, i.e. an operator believing they
+#: re-measured with the old instrument would get a number taken by the new one.
+#:
+#: ⛔ WHY A SWITCH EXISTS ON A BUG FIX. This dedupe changes the NUMBER the whole
+#: repair is verified BY (``census_after``, i.e. #10000 criterion 2), so an
+#: operator holding a census recorded with the old instrument must be able to
+#: re-measure with the OLD instrument — without reverting the module — before
+#: concluding that a population grew. It is a kill switch, not a preference:
+#: the default is the fixed path, and only the exact string ``1`` turns it off.
+_CENSUS_DEDUPE_DISABLED = "TORTOISE_11070_CENSUS_DEDUPE_DISABLED"
+
 #: The property names this repair reads. ⛔ It WRITES only the pair — see
 #: :data:`_REPAIR_PAIR`.
 _KIND = "sourceKind"
@@ -178,6 +199,13 @@ _NODE_ID = "node_id"
 #: Only the properties the predicate READS. `properties(s)` would drag every
 #: Source's dense `embedding` across the wire — one vector per document on a
 #: corpus — and this read runs on every replay engine's trailing sweep.
+#:
+#: ⛔ ONE ROW PER MATCHING `:Session`, NOT ONE PER `:Source` (#11176). `:Session.id`
+#: carries a plain INDEX and no UNIQUE constraint (``CREATE CONSTRAINT`` count is
+#: 0 in this repo), so two `:Session` nodes can carry one ``sessionId`` and this
+#: OPTIONAL MATCH then fans one `:Source` out into one row per session. The
+#: census dedupes those rows on ``id(s)`` — see
+#: :func:`find_session_sources_carrying_prose`.
 _SOURCE_ROWS = (
     "MATCH (s:Source) "
     "OPTIONAL MATCH (sess:Session {id: s.sessionId}) "
@@ -455,19 +483,75 @@ def _read_source_rows(g, timeout_ms: int) -> list[dict]:
     return out
 
 
+def _census_dedupe_enabled() -> bool:
+    """Read the #11176 off-switch AT CALL TIME.
+
+    Read per call, never cached at import: the switch exists so one measurement
+    can be taken with the old instrument and the next with the new one, and a
+    module-level cache would make the second the same as the first.
+    """
+    return os.environ.get(_CENSUS_DEDUPE_DISABLED) != "1"
+
+
+def _strongest_mark(first: Any, second: Any) -> int | None:
+    """The STRONGER (higher) of two ``turn_max_index`` marks, ``None`` if neither.
+
+    ⛔ THE STRONGEST, NOT THE FIRST — this is the safety-relevant half of
+    #11176. The mark is handed to ``record_read.session_turns`` as the tail
+    witness: a mark BELOW the session's true id-space end serves a truncated
+    transcript as COMPLETE, and the lexicon derived from half a transcript is
+    the fabricated descriptor this module refuses to write everywhere else. A
+    mark ABOVE the end has its own named cause (:func:`_no_record_note` names
+    the cache as the suspect), so taking the maximum loses nothing — while
+    taking the first row's value makes REFUSE-vs-WRITE depend on FalkorDB's row
+    order. A non-``int`` mark is not a mark: the other side wins.
+    """
+    marks = [value for value in (first, second)
+             if isinstance(value, int) and not isinstance(value, bool)]
+    return max(marks) if marks else None
+
+
 def find_session_sources_carrying_prose(
         g, *, timeout_ms: int = CACHE_READ_TIMEOUT_MS) -> list[dict]:
-    """READ-ONLY: every node this repair would touch, with its byte sizes.
+    """READ-ONLY: every NODE this repair would touch, with its byte sizes.
 
     The dry-run/audit surface. Writes nothing of any kind.
+
+    ⛔ ONE RECORD PER ``id(s)``, NOT ONE PER ROW (#11176). ``_SOURCE_ROWS`` fans
+    a `:Source` out into one row per `:Session` at its ``sessionId``, and
+    ``:Session.id`` has no uniqueness constraint — so without this dedupe a
+    single node is counted TWICE, which inflates the very number #10000
+    criterion 2 is measured by, and hands the tail witness to whichever row
+    arrived first. The dedupe keeps the FIRST position (so the report's order
+    stays the ``url`` sort) and the STRONGEST mark among the node's rows (:func:
+    `_strongest_mark`). The duplicate ROW count is kept on the record as
+    ``duplicate_session_rows`` — a census that silently collapses rows hides the
+    duplicate-`:Session` signal, and that is a graph-health fact its caller is
+    entitled to see.
+
+    A row with no ``int`` node identity is appended AS-IS: there is nothing to
+    dedupe on, and it cannot be addressed by the write either — it is reported
+    under ``unaddressable`` by the reconciler, never silently merged into a peer.
+
+    The record carries ``duplicate_session_rows`` (rows beyond the first) ONLY
+    where the dedupe MEASURED it: under the off-switch the key is ABSENT, because
+    no count was taken and ``0`` would read as a measurement.
+
+    ``TORTOISE_11070_CENSUS_DEDUPE_DISABLED=1`` restores the pre-fix path
+    exactly (one record per row, first-row mark, no duplicate count); see
+    :data:`_CENSUS_DEDUPE_DISABLED`.
     """
     out: list[dict] = []
+    #: ``id(s)`` -> the record already emitted for that node, so the second row
+    #: of a duplicated `:Session` updates a mark instead of appending a record.
+    seen: dict[int, dict] = {}
+    dedupe = _census_dedupe_enabled()
     for props in _read_source_rows(g, timeout_ms):
         if not carries_pre_lexicon_prose(props):
             continue
         summary = props.get(_SUMMARY)
         search_text = props.get(_SEARCH_TEXT)
-        out.append({
+        record = {
             "url": props.get("url"),
             "session_id": _session_id(props),
             # The session's LIVE id-space end, read in the SAME scan. It is the
@@ -496,7 +580,25 @@ def find_session_sources_carrying_prose(
             _NODE_ID: props.get(_NODE_ID),
             _SUMMARY: summary,
             _SEARCH_TEXT: search_text,
-        })
+        }
+        node_id = record.get(_NODE_ID)
+        if dedupe and isinstance(node_id, int) and not isinstance(node_id, bool):
+            #: Rows this NODE contributed beyond the first. ⛔ SET ONLY WHERE IT WAS
+            #: MEASURED — inside the dedupe branch, never on the record's initial
+            #: shape. Under the off-switch no de-duplication happens, so the count is
+            #: not a `0`, it was never taken; emitting `0` there would report a graph
+            #: with two `:Session` rows at one `sessionId` as "no duplicates" — the
+            #: exact signal this field exists to carry, hidden as a measurement
+            #: (#11176 review P2).
+            record["duplicate_session_rows"] = 0
+            already = seen.get(node_id)
+            if already is not None:
+                already["turn_max_index"] = _strongest_mark(
+                    already.get("turn_max_index"), record.get("turn_max_index"))
+                already["duplicate_session_rows"] += 1
+                continue
+            seen[node_id] = record
+        out.append(record)
     out.sort(key=lambda n: str(n["url"]))
     return out
 

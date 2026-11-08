@@ -12,6 +12,12 @@ aboutObjects: "epic #5090, the vector layer, decision V1, embed gate, STORAGE-AR
 
 # Strategy alignment — epic #5090
 
+> **Citation convention:** a pointer to a **code** location names the **symbol or the literal**, and does
+> not carry a `path:line`. Four line-number citations in this file went stale by 30–70 lines within two
+> days of being written (`#11261`), because ordinary edits above them move the target. Grep the named
+> symbol; where a bare literal is the anchor, grep the literal. Document citations (`docs/…:line`) are
+> out of this convention's scope.
+
 **Stage:** 1 of 6 (`epic-workflow` → `epic-align`). **Epic:** #5090 — *the vector layer — what earns an
 embedding, and where it lives.* **Measured at head `641e5f1b37`.** **Review gate:** verifier (fresh
 context) — **two cycles**, and **cycle 2 changed the decision from PROCEED to REPOINT**. The verdict log,
@@ -30,7 +36,7 @@ Recorded first, because the scope is wrong if they are taken on trust. Each was 
 
 | lane brief says | measured at this head |
 |---|---|
-| *"the runtime warns on every search"* | **The warning is SETUP-time, not per-search.** `_record_vector_index_inventory` (`projection/__init__.py:18491`) emits `log.warning` **once per (endpoint, graph) per process**, from `_ensure_indexes`, guarded by `_VECTOR_INDEX_GAP_WARNED`. The **query-time** fallback logs at **info/debug** (source comment cites #1359 for *"not warning"*). It *looks* per-search on any short-lived CLI process (each `goal-state.py --line` invocation is a fresh process); it is not per query. **The full-scan defect is real and is paid on every query — the warning framing is what is wrong.** |
+| *"the runtime warns on every search"* | **The warning is SETUP-time, not per-search.** `_record_vector_index_inventory` (`projection/__init__.py`, reached from `_ensure_indexes` via `_ensure_indexes_declared`) emits `log.warning` **once per (endpoint, graph) per process**, guarded by `_VECTOR_INDEX_GAP_WARNED`. The **query-time** fallback logs at **info/debug** (source comment cites #1359 for *"not warning"*). It *looks* per-search on any short-lived CLI process (each `goal-state.py --line` invocation is a fresh process); it is not per query. **The full-scan defect is real and is paid on every query — the warning framing is what is wrong.** |
 | *"$73/GB"* as a per-byte cost of the *whole* graph | Correct as the recorded basis (`billing.cost_basis.falkordb_per_gb = 73.0`), but it must be applied to the **removable payload**, not to 195 MB. See §3. |
 | the epic is *"3 of 4 DoD bullets met"* | **1 of 4 is MET.** `uv run python tools/dod_5090_probe.py` at this head: **`PARTIAL / PARTIAL / MET / NOT MET`**. Rows 1 and 2 are PARTIAL, row 4 NOT MET. |
 
@@ -45,7 +51,7 @@ Recorded first, because the scope is wrong if they are taken on trust. Each was 
 | 141 MB graph, 45 MB indices, 25k nodes | **195 MB, 93 MB indices (48 %), 68,526 nodes** | `#10976` body, measured 2026-11-04 on graph `live-v4`; same figures as the lane brief |
 | ≈50 MB of stored vector properties | **19.4 MB removable** (12,657 × 1,536 B = 19,441,152 B) — the ≈50 MB is the whole vector class, including the `Point` leg that *is* indexed; the unindexed `Object`+`Event` subset is what removal can reclaim | the epic's own 2026-10-08 comment (a scope correction over the 2026-09-24 measurement, not a new reading) |
 | "no rule says what earns an embedding" | **the rule exists**; it is off by default | `embed_gate.RULE_SET is value_gate.RULES` → `True`; `embed_gate_enabled()` reads `TORTOISE_EMBED_GATE`, unset in the **4** shipped config surfaces that exist (the instrument walks 6; `docker-compose.yaml` and `Dockerfile` are *absent* from this tree) |
-| "12,657 embeddings stored and unindexed" | **still true in substance** — index creation covers `Point` only | `projection/__init__.py:19765` (`createNodeIndex('Point',…)`), `:19783` (`CREATE VECTOR INDEX FOR (p:Point)`); no other label's vector DDL in `tortoise/`, `graph-scripts/`, `tools/`. (`graph_key_restore.py:452` **replays** a dumped catalogue; it never decides.) |
+| "12,657 embeddings stored and unindexed" | **still true in substance** — index creation covers `Point` only | `_ensure_vector_index_api` in `projection/__init__.py` — the `CALL db.idx.vector.createNodeIndex('Point', 'embedding', …)` procedure literal and its Cypher fallback `CREATE VECTOR INDEX FOR (p:Point) ON (p.embedding)`; no other label's vector DDL in `tortoise/`, `graph-scripts/`, `tools/`. (the `create_cypher()` renderer in `graph_key_restore.py` **replays** a dumped catalogue; it never decides.) |
 | a fallback query reports the fallback | **MET** | `#4999` / PR #5159 added `mechanism: index \| scan \| scan_fallback` |
 
 **The labels, precisely.** The served/written set is `{Event, Object, Point, Source, Subject}`
@@ -57,7 +63,7 @@ means **four further resident HNSW structures**, not three. ⚠️ `STORAGE-ARCH
 
 | # | alternative | verdict |
 |---|---|---|
-| **A1** | **Discharge the epic as complete.** | **Rejected — on one reason, and it is the only one that survives checking.** Not *"closing would orphan `#4333`"* (that issue is independent; closing a parent removes a link, not the issue). Not *"it abandons row 4"* (V1 is carried OPEN by `STORAGE-ARCHITECTURE.md` §12.1c/§14.3, not by the epic). Not *"no capstone exists"* (a capstone is a Stage-6 artifact and cannot exist for an epic still in Stage 1 — its absence proves nothing). **The reason is `§14.3 V3`, whose row reads *"Rides on V1"*: the epic is the only ACTIONABLE record of that deferral.** ⚠️ **Cycle-2 withdrawal: the earlier wording claimed the epic was the *only* artifact binding `#4997` to V1. That is false** — `STORAGE-ARCHITECTURE.md:1520` states it, and so does the runtime warning text at `projection/__init__.py:18583-18586` (*"This is the gap that decision V1 … governs; indexing those labels is NOT done here"*). The epic is not the only *record*; it is the only one that can be **closed, reassigned or repointed** — a doc row and a log string cannot. Discharge it and the unindexed-label defect keeps its prose and loses its work item, which is how a deferred defect becomes an accepted one. **What follows is REPOINT (§7), not PROCEED and not discharge.** |
+| **A1** | **Discharge the epic as complete.** | **Rejected — on one reason, and it is the only one that survives checking.** Not *"closing would orphan `#4333`"* (that issue is independent; closing a parent removes a link, not the issue). Not *"it abandons row 4"* (V1 is carried OPEN by `STORAGE-ARCHITECTURE.md` §12.1c/§14.3, not by the epic). Not *"no capstone exists"* (a capstone is a Stage-6 artifact and cannot exist for an epic still in Stage 1 — its absence proves nothing). **The reason is `§14.3 V3`, whose row reads *"Rides on V1"*: the epic is the only ACTIONABLE record of that deferral.** ⚠️ **Cycle-2 withdrawal: the earlier wording claimed the epic was the *only* artifact binding `#4997` to V1. That is false** — `STORAGE-ARCHITECTURE.md:1532` states it, and so does the runtime warning text in `_record_vector_index_inventory` (`projection/__init__.py`) (*"This is the gap that decision V1 … governs; indexing those labels is NOT done here"*). The epic is not the only *record*; it is the only one that can be **closed, reassigned or repointed** — a doc row and a log string cannot. Discharge it and the unindexed-label defect keeps its prose and loses its work item, which is how a deferred defect becomes an accepted one. **What follows is REPOINT (§7), not PROCEED and not discharge.** |
 | **A2** | **Index the four unindexed labels in FalkorDB.** | **Rejected, and the brief forbids it without a stated non-reversal.** It is V1's content; it commits **four** further permanently-resident HNSW structures on a store billed at provisioned RAM with no eviction; and it deepens the thing the epic exists to undo. Measured benefit at today's volume: **~6 ms** (`2.74 ms` indexed vs `9.26 ms` full scan of 7,859 `:Object` vectors). |
 | **A3** | **Answer V1 = move the vectors to Postgres now.** | **Rejected as premature, and the facts are worse for it than the epic assumes.** Verified: **no `pgvector` anywhere** (`grep -E 'pgvector\|vector(\|hnsw\|create extension' supabase/migrations/ tortoise/record_*.py` → zero); embeddings live in `embedding jsonb` on `point`/`source`/`event`; **`public.object`/`public.subject` have no embedding column and a CHECK forbidding one.** So branch 2 is build-from-nothing at the schema layer. ⚠️ **And the owner's earlier postponement of the hosted setup was SUPERSEDED, not ignored**: arming `TORTOISE_RECORD_DSN` was authorised on 2026-11-03T19:06Z, and `#9548` is OPEN on its **write path** — the DSN **is armed** (`record.armed: true` in the `/health` payload, `fetched_at` 2026-11-05T15:07Z) but hosted writes are rejected `22P02` (`#10593`, OPEN) and no hosted session is evidenced as projected. (`BLOCKED-CRED` in that lane is the *backup* credential gating a MIGRATION, not the arming.) That is a **write-path/evidence wall**, not a scheduling signal — which makes it a *transient* blocker, and makes the sequencing argument (record before vectors) sharper, not softer. |
 | **A4** | **Fold #5090 into `#10976` / `#7879`.** | **Rejected.** Three different claims: the cache's *egress*, the record's *authority*, the vector layer's *shape*. `#10976` names `#5090` as related, not parent; neither epic's acceptance covers *"what earns an embedding / where the index lives"*. |
@@ -75,11 +81,18 @@ means **four further resident HNSW structures**, not three. ⚠️ `STORAGE-ARCH
   owned is motion, not progress.
 
 **The counter-case, and why it wins:** two of the four DoD rows are PARTIAL on *the same population*
-(the 15 embedding writers with no recognised producer call), `#10541` — the issue that was to resolve
+(the embedding writers with no recognised producer call — **15 when this was written** (2026-11-04);
+**19 measured 2026-11-07**, of a 20-writer outside-gate population), `#10541` — the issue that was to resolve
 them — closed **COMPLETED** on 2026-11-04T00:49Z and **both rows are still PARTIAL at this head**. That is
 a genuine, currently-unfiled gap: an issue closed as complete whose own remainder outlived it. Proceeding
 is justified **only** to the extent the work either (a) makes V1 answerable, or (b) closes a genuinely
 unfiled gap. Both are in scope; nothing else is.
+
+⚠️ **Corrected 2026-11-07 (`#11444`, measured): the "same population" premise no longer holds for row 1.**
+Row 1's scorer reads `tortoise/embed_writer_register.py`, so all 20 writers discovery finds outside the gate
+are **credited** (13 `exempt`, 7 `recognised_producer`, owner issues cited per entry) and row 1 is `PARTIAL`
+on the shipped gate default alone. Row 2 is still `PARTIAL` on its own unresolved-label population. The
+argument above stands on row 2's half; it must not be quoted as "both rows hold on the writer population".
 
 ---
 
@@ -223,7 +236,7 @@ Result: **2 P0, 4 P1, 3 P2, 1 P3**. All incorporated:
 
 | sev | finding | disposition |
 |---|---|---|
-| **P1** | **A1's sole surviving reason is falsified** — *"the epic is the only artifact binding `#4997` to V1"*; the doc row at `:1520` and the runtime warning at `projection/__init__.py:18583-18586` both state it | A1 re-argued on *actionability*, and **the decision changed from PROCEED to REPOINT** (§5, §7) |
+| **P1** | **A1's sole surviving reason is falsified** — *"the epic is the only artifact binding `#4997` to V1"*; the doc row at `:1520` and the runtime warning in `_record_vector_index_inventory` (`projection/__init__.py`) both state it | A1 re-argued on *actionability*, and **the decision changed from PROCEED to REPOINT** (§5, §7) |
 | **P1** | the `§14.3` register correction was *recorded as incorporated* while no artifact carried it — the named target, scope §3.2, does not exist | **delivered for real in §7**, and both files corrected |
 | P3 | §6 cited *"§0-preamble"*, where `#9548` appears nowhere | the claim lives in §1.2 A3 and §2; the pointer now names them, and the §0 attribution is gone |
 
@@ -239,13 +252,23 @@ labels; *4 surfaces exist / 6 walked*.
 ### 7.1 Why REPOINT rather than PROCEED
 
 PROCEED would have implied the epic's existing acceptance still describes its work. It does not: one of
-four DoD rows is MET, one is an owner decision, and **both PARTIAL rows hold on the 15 embedding writers
-with no recognised producer call** (§1.3) — row 1 additionally on the gate being `set ON in: none` on the
-shipped default and one write path embedding outside it. **The instrument says re-classing that population
-moves neither verdict** (`tools/dod_5090_probe.py:1264-1270`: *"the census CLASSIFIES the unresolved set;
+four DoD rows is MET, one is an owner decision, and **both PARTIAL rows hold on the embedding writers
+with no recognised producer call** (§1.3 — 15 when this was written, 19 measured 2026-11-07) — row 1 additionally on the gate being `set ON in: none` on the
+shipped default and one write path embedding outside it. ⚠️ **Corrected 2026-11-07 (`#11444`, measured):
+the row-1 half of that sentence is superseded.** Row 1's scorer reads the product register, so the writer
+population and the one ungated path are **credited** (#5008) and row 1 is `PARTIAL` on the shipped gate
+default alone; row 2 is unchanged. The conclusion below is unaffected, and the decision it records is
+what later made row 1's scoring legible — but do not quote the superseded clause as current.
+**The instrument says re-classing that population
+moves neither verdict** (the `#10541` census comment in `tools/dod_5090_probe.py`: *"the census CLASSIFIES the unresolved set;
 it does not license moving this verdict … flipping this is a decision, not a cleanup"*), so rows 1–2 are
 closed by the **re-score decision** S2 carries (`03-scope.md:64`; `#11085`) — not by arming the gate and
-not by the register. **REPOINT** is option **C** from `#7879`'s own
+not by the register. ⚠️ **Corrected 2026-11-07 (`#11444`, measured):** that sentence is now true of row 2
+ONLY. Row 1's scorer reads the product register, so **row 1 does move on a re-classing** — its hold is
+`undeclared` (a writer the gate never sees and the product does not name), and row 1 reaches `MET` once
+every outside-gate writer is gated or named while the shipped gate default is ON. Row 2 is unchanged: the
+`#10541` census still classifies without licensing a verdict move there, because its question is which
+LABELS are query-servable, not who wrote the vector. **REPOINT** is option **C** from `#7879`'s own
 re-measurement comments — retire completed scope from the acceptance, keep the epic open on exactly what
 remains, and let the owner close it when the decision lands. It is neither discharge (§1.2 A1) nor
 re-scoping upward (inventing children the neighbours already own).
@@ -271,7 +294,7 @@ so the next lane does not repeat it.
 |---|---|---|---|
 | **D11 — stay on hosted FalkorDB; the optimisation is DEFERRED** | 2026-09-24 | **#4333** decision record | No engine migration. Self-hosting, if ever, is **priced first** — same engine, SSPLv1, no rewrite. ⚠️ **Owner, 2026-11-05: *"we're not self-hosting flakorDB [sic] now. we have a lot of work that needs doing first"*** (ruling relayed at [#5090 comment 6669523691](https://github.com/daniel-ospina/tortoise/issues/5090#issuecomment-6669523691), per the DECISION RELAY rule) ⇒ **self-hosting is OUT of the option set, not deferred-and-available.** |
 | **The billing model** | 2026-10-08 | graph `1a11c902dac` | Tiers are **capped, priced per feature**, not sized by volume; over cap = **overage**, not upgrade. Two metered units: **storage per byte**, **compute per extraction**. ⇒ *"fix the billing unit"* is no longer a candidate. **Corollary: because we charge per stored byte, retained bytes are REVENUE — so "store less" is NOT a strategy.** |
-| **The unit** | 2026-10-25 | **#4333** | Cost is reported in exactly three things, all bytes/usage: **graph RAM bytes** (rows + indices + **the vector index**), **Postgres bytes**, **extraction usage**. *"we're moving away form [sic] nodes instead of using the tokens to actually implement the design I already requested"* |
+| **The unit** | 2026-10-25 | **#4333** | Cost is reported in exactly three things, all bytes/usage: **graph RAM bytes** (rows + indices + **the vector index**), **Postgres bytes**, **extraction usage**. Owner, verbatim: *"i alreayd said no cost in nodes (we kepe the old design untilw e can replace it ... we're moving away form nodes instead of using the tokens to actually implement the design I already requested)"* — `alreayd`, `kepe`, `untilw` and `form` are the source's own spellings and the `...` is the source's own elision; all are kept and **named here**, outside the quotation, so the quoted bytes stay identical to the source — whereas a silently repaired typo inside quotation marks would not be. Where this epic instead marks a typo with an **inline** `[sic]`, that is the standard editorial marker and **not** a defect: this row forgoes it only because the ruling is restored in full, so every misspelling can be enumerated rather than annotated. |
 | **The engine's ROLE** | 2026-10-08 | §14.2 | FalkorDB **stays and is DEMOTED** to a derived hot cache. **"Shall we migrate to Postgres?" is not an open question and a lane must not re-open it.** |
 | **V1's own framing** | amended 2026-10-08 | §14.3 | ⚠️ **"The hybrid makes V1 more urgent, not less"** — under the hybrid every cache byte is rent on something Postgres already stores. **V1 is a CACHE-TIER question, not a data-cost question.** |
 | **V1 has a named measurement** | — | §15 **M5** | *"Where should the vector index live? — our query latency with the index resident, against a real `GRAPH.MEMORY USAGE` read"*. The latency half was measured 2026-09-24 (§12.1d). |

@@ -36,9 +36,12 @@
 #              raises 401 "Missing session token" with zero network I/O when
 #              the Authorization header is absent). 2xx and 401 both mean "the
 #              app answered"; only 000/5xx mean it did not.
-#              TWO PRODUCTION TARGETS (#3628). The Fly API probe is the default;
-#              the workflow adds a SECOND step for the Cloudflare Pages auth
-#              surface (`GET /auth/start`). During the #3616 sign-in outage only
+#              THREE PRODUCTION TARGETS (#3628, #10892). The Fly API probe is
+#              the default; the workflow adds a SECOND step for the Cloudflare
+#              Pages auth surface (`GET /auth/start`) and a THIRD for the
+#              served-request liveness surface (`GET /liveness` — see
+#              LIVENESS_PROBE_URL below, whose bound is the instrument). During
+#              the #3616 sign-in outage only
 #              /auth/start revealed it: /welcome answered 302 and /api/session
 #              answered 401 the whole time, so a bare liveness probe of either
 #              was GREEN while nobody could sign in. That step is a DEDICATED
@@ -51,7 +54,7 @@
 #                  PKCE flow row was actually written; a 302 without it is an
 #                  ANSWERED-BUT-WRONG (UNEXPECTED) verdict, not an outage.
 #                * its own PROBE_HOST_LABEL — the incident TITLE is the dedupe
-#                  key, so two production targets with one label would fight
+#                  key, so production targets sharing one label would fight
 #                  over a single issue.
 #              The auth target is in PROD_PROBE_URLS (so it files a PROD-titled
 #              incident and pages) but NOT in RESTARTABLE_PROBE_URLS: it has no
@@ -59,6 +62,13 @@
 #              restart cannot fix (`disarmed:no_machine`). `is_prod` is decided
 #              by SET MEMBERSHIP (fail closed: an unrecognised URL stays a
 #              DRILL), never by a boolean flag.
+#              ⛔ `disarmed:no_machine` is the ARM's verdict, NOT a claim about
+#              machine presence — the liveness target reaches the same arm
+#              WHILE BEING that machine (hard-disarmed so one wedged machine
+#              cannot spend MAX_RESTARTS_PER_HOUR twice). So every site that
+#              DESCRIBES this disarm must ask `is_machine_backed_url` first:
+#              telling on-call "no Fly machine, check the Pages deploy" during a
+#              wedged-machine outage sends them to the wrong subsystem.
 #              KNOWN BLIND SPOTS: each probe covers ONE route, and the API
 #              probe only its UNAUTHENTICATED branch — an outage that leaves
 #              /v1/organizations answering while other routes fail reads as UP,
@@ -206,12 +216,18 @@
 #     (its body carries the cooldown/cap ledger), and never close one. Without
 #     that separate identity a typo'd drill host files a MISLABELLED production
 #     incident (and the next production run would then "recover" it).
-#   * A PRODUCTION URL with no Fly machine behind it (the Pages auth surface) is
-#     ALWAYS restart-disarmed (`disarmed:no_machine` on a DOWN verdict,
+#   * A PRODUCTION URL that is NOT in `RESTARTABLE_PROBE_URLS` is ALWAYS
+#     restart-disarmed (`disarmed:no_machine` on a DOWN verdict,
 #     `disarmed:unexpected` on a DEGRADED one — the DEGRADED disarm is set
-#     first): a 503 there means a missing binding, and restarting the API app
-#     would restart an unrelated service. This is a property of the URL SET,
-#     not of the failure class, so no per-run misconfiguration can arm it.
+#     first): for the Pages auth surface a 503 means a missing binding, and
+#     restarting the API app would restart an unrelated service. This is a
+#     property of the URL SET, not of the failure class, so no per-run
+#     misconfiguration can arm it. ⛔ Membership is the ONLY criterion, and
+#     `disarmed:no_machine` is the ARM's verdict — NOT a claim about machine
+#     presence: the liveness target IS that machine (#10892) and reaches this
+#     same arm, hard-disarmed so one wedged machine cannot spend
+#     MAX_RESTARTS_PER_HOUR twice. Ask `is_machine_backed_url` before
+#     DESCRIBING this disarm (see the header).
 #   * A failed issue SEARCH refuses to file (never duplicate) and fails the
 #     run; a non-numeric issue id is refused the same way. The monitor cannot
 #     go silently deaf in the alerting direction.
@@ -286,6 +302,28 @@ DEFAULT_PROBE_URL="https://api.premiselabs.co/v1/organizations"
 # 404 for /auth/start BY DESIGN, so probing it watched a route no user path
 # touches — the same blindness #3628 was filed to end, one host to the left.
 AUTH_PROBE_URL="https://app.premiselabs.co/auth/start"
+# The SERVED-REQUEST liveness surface (#10892): `GET /liveness` on the hosted
+# API (`tortoise/hosted_api.py`). During the 2026-11-04 outage (`api.`
+# unusable for ~2 h, 09:22Z-11:02Z and again 13:17Z-19:35Z) BOTH Fly checks read
+# `passing` the whole time, because both are liveness-shaped: `tcp_8000` is a
+# KERNEL handshake (a hung app passes it) and `loop_liveness` reads state the
+# loop last wrote from a listener on ANOTHER thread. `/health` itself cannot be
+# answered while the loop is blocked — but nothing we RAN had a bound on
+# absence, so a request that never returned was indistinguishable from a slow
+# one and no alarm existed.
+#
+# `PROBE_TIMEOUT_S` is overridden to 5 s for this URL in the workflow, which is
+# the whole point of a THIRD target rather than re-pointing the API probe: a
+# request that must return is bounded by the CLIENT's patience, not by the
+# server's eventual answer. The primary API probe keeps its generous 25 s (it
+# must not page on one slow origin fetch); this one pages when a request that
+# does NO I/O of its own — one loop yield and one counter increment, no DB, no
+# network, no disk — takes longer than 5 s, which is the latency arm the
+# incident measured missing (`loop_lag_p99_ms: 14871` alongside every check
+# green). ⛔ That is a claim about the HANDLER'S STRUCTURE (verifiable by
+# reading it), not a measured latency: no artifact pins "~50 ms", and
+# `PROBE_TIMEOUT_S=5` is a DESIGN bound, so do not restate it as a measurement.
+LIVENESS_PROBE_URL="https://api.premiselabs.co/liveness"
 # The SET of production probe URLs. `is_prod` is decided by SET MEMBERSHIP, not
 # by a boolean flag: an unrecognised URL is ALWAYS a drill, so a typo'd or
 # forgotten flag can never arm self-heal against an unexpected host (fail
@@ -294,22 +332,43 @@ AUTH_PROBE_URL="https://app.premiselabs.co/auth/start"
 # operator who neutralises the set by setting it to "" gets the FAIL-CLOSED
 # direction (everything is a drill) rather than `:-`'s opposite — the default
 # set with self-heal ARMED. The default applies only when the variable is UNSET.
-PROD_PROBE_URLS="${PROD_PROBE_URLS-$DEFAULT_PROBE_URL $AUTH_PROBE_URL}"
-# Which production URLs have a Fly machine behind them and may therefore arm
-# the restart leg. The auth surface is PRODUCTION for alerting and incident
-# identity, but it is served by Cloudflare Pages: a 503 there means a missing
-# binding, and `flyctl machine restart` on the API app cannot repair it — it
-# would restart an unrelated service. Membership again (fail closed): a new
-# production URL is non-restartable until explicitly added here — and an
-# explicit EMPTY value stays empty (single-dash), so the kill-intent cannot
-# fail OPEN into an armed restart (the `:-` form substituted the default).
+PROD_PROBE_URLS="${PROD_PROBE_URLS-$DEFAULT_PROBE_URL $AUTH_PROBE_URL $LIVENESS_PROBE_URL}"
+# Which production URLs have a Fly machine behind them at all. This is a
+# DIFFERENT question from `RESTARTABLE_PROBE_URLS` (#10892 review round 3): a
+# surface can be backed by the machine and still be forbidden to restart it.
+# The incident BODY is keyed on REMEDIATION, so it has to tell these apart —
+# before this set existed, every non-restartable production target was described
+# as "served by Cloudflare Pages", which was true for the auth surface and FALSE
+# for the liveness one: its DOWN page sent the on-call to check a Pages deploy
+# while the Fly machine was the thing not answering.
+# ⛔ EVERY machine-backed production target MUST be listed here. The exclusion is
+# exactly one surface — the Pages-served auth probe — and nothing else. A
+# machine-backed target left out regresses to the Pages prose (see
+# `is_machine_backed_url`).
+FLY_MACHINE_PROBE_URLS="${FLY_MACHINE_PROBE_URLS-$DEFAULT_PROBE_URL $LIVENESS_PROBE_URL}"
+# Which production URLs may arm the restart leg. The auth surface is PRODUCTION
+# for alerting and incident identity, but it is served by Cloudflare Pages: a 503
+# there means a missing binding, and `flyctl machine restart` on the API app
+# cannot repair it — it would restart an unrelated service. The liveness surface
+# (#10892) IS the same Fly machine as the primary API probe, so it is
+# deliberately NOT restartable either: its incident issue is its own rate-limit
+# ledger, so a second restart arm would let one wedged machine restart itself up
+# to `MAX_RESTARTS_PER_HOUR` on EACH issue — double the velocity cap the
+# AWS-remediation guidance this file follows is built to bound. The primary API
+# probe owns restarting that machine (it is in BOTH sets; the liveness one is
+# machine-backed but not restartable, so its body names the machine without
+# claiming an arm of its own).
+# Membership again (fail closed): a new production URL is non-restartable until
+# explicitly added here — and an explicit EMPTY value stays empty (single-dash),
+# so the kill-intent cannot fail OPEN into an armed restart (the `:-` form
+# substituted the default).
 RESTARTABLE_PROBE_URLS="${RESTARTABLE_PROBE_URLS-$DEFAULT_PROBE_URL}"
 PROBE_URL="${PROBE_URL:-$DEFAULT_PROBE_URL}"
 # Display name in titles/logs. Deliberately NOT derived from PROBE_URL: the
 # title is the dedupe key and must not move when a drill overrides the URL.
-# TWO production targets MUST pass DIFFERENT labels (the workflow's auth step
-# sets its own) — a shared label shares ONE dedupe key, and the two surfaces
-# would then fight over a single incident issue.
+# Production targets MUST pass DIFFERENT labels (each step sets its own) — a
+# shared label shares ONE dedupe key, and the surfaces would then fight over a
+# single incident issue.
 PROBE_HOST_LABEL="${PROBE_HOST_LABEL:-api.premiselabs.co}"
 # OPTIONAL per-target expectation knobs (both empty = the built-in API
 # contract below, so the existing target is byte-for-byte unchanged).
@@ -814,7 +873,8 @@ header_satisfied() { # <file> <needle>
 
 # ── production-target classification ────────────────────────────────────────
 # SET MEMBERSHIP, deliberately not a boolean flag (#3628). The workflow drives
-# TWO production targets (the Fly API and the Pages auth surface); a
+# THREE production targets (the Fly API, the Pages auth surface and the
+# served-request liveness surface); a
 # forgotten/typo'd `IS_PROD=1` on a new target would arm self-heal against an
 # unexpected host. With membership an unrecognised URL is ALWAYS a drill — the
 # failure direction is "no restart, [DRILL]-titled incident", never "restart an
@@ -828,14 +888,42 @@ is_production_url() { # <url>
   return 1
 }
 
-# Which production targets may arm the restart leg. A target that is production
-# for alerting but has no Fly machine (the Pages auth surface) must NEVER
-# restart; membership again keeps a new production URL non-restartable until it
-# is explicitly listed here.
+# Which production targets may arm the restart leg. MEMBERSHIP IS THE ONLY
+# CRITERION, and it cuts both ways: the Pages auth surface (no Fly machine) is
+# absent, and so is the liveness target — which IS the machine, held
+# non-restartable so one wedged machine cannot spend MAX_RESTARTS_PER_HOUR
+# twice (#10892). ⛔ Absence here is NOT "has no Fly machine": that premise is
+# refuted by this file's own sets (`FLY_MACHINE_PROBE_URLS` holds the liveness
+# URL, `RESTARTABLE_PROBE_URLS` does not), and the header forbids describing the
+# disarm without asking `is_machine_backed_url`. Membership also keeps a new
+# production URL non-restartable until it is explicitly listed here.
 is_restartable_url() { # <url>
   local u p
   u="${1%/}"
   for p in $RESTARTABLE_PROBE_URLS; do
+    if [ "$u" = "${p%/}" ]; then return 0; fi
+  done
+  return 1
+}
+
+# Is a Fly MACHINE the thing that answers this URL? Distinct from
+# `is_restartable_url` (#10892 review round 3): the incident body's remediation
+# prose must not offer a machine restart where none can exist, NOR describe a
+# machine-backed surface as a static/Pages deploy. Membership, fail closed.
+# ⛔ THE FAIL-CLOSED DIRECTION IS NOT THE SAFE ONE — read it before extending a
+# set. An unlisted URL falls into the body's `else` arm, which POSITIVELY asserts
+# "This surface has **no Fly machine** behind it (it is served by Cloudflare
+# Pages)". So an unlisted URL does not claim less; it asserts the ABSENCE of a
+# machine, which it cannot prove either. The default below is correct only
+# because it lists every machine-backed production target, so adding a
+# machine-backed target to `PROD_PROBE_URLS` without adding it HERE silently
+# sends on-call to a Pages deploy during a machine outage (#10892 review round
+# 4). `docs/infra-runbook.md` §7.1c and §7.7 name this set for exactly that
+# reason (⚠️ NOT §7.2 — that is the operator's "How to read a failure" page).
+is_machine_backed_url() { # <url>
+  local u p
+  u="${1%/}"
+  for p in $FLY_MACHINE_PROBE_URLS; do
     if [ "$u" = "${p%/}" ]; then return 0; fi
   done
   return 1
@@ -911,6 +999,23 @@ probe() {
     PROBE_EVIDENCE="${PROBE_EVIDENCE}"$'\n'
 
     v="$(classify_code "$code")"
+    # ⛔ (#10892 review round 6, P1) A STATUS LINE IS NOT AN ANSWER. curl prints
+    # `-w '%{http_code}'` as soon as the RESPONSE HEADERS arrive, so a response
+    # that stalls MID-BODY yields a healthy-looking code with a NON-ZERO exit
+    # and a truncated body. Measured on this box against a server that writes
+    # `200 OK` + `{"served":` then sleeps:
+    #     curl -sS -o body -w '%{http_code} %{time_total}' --max-time 3 <url>
+    #     → "200 3.002614", exit 28, "10 out of 40 bytes received"
+    # Grading that UP is a false PASS on the ONE property these probes exist to
+    # prove — that the request RETURNED — and it is precisely the shape a
+    # wedged-but-flushing process takes. An UP from the status code is therefore
+    # CONDITIONAL on curl completing the transfer; no completion falls through
+    # to the same DOWN/retry class as `000` (and keeps the failure LAYER that
+    # `classify_failure` already recorded, so restart eligibility is unchanged).
+    if [ "$v" = "UP" ] && [ "$rc" -ne 0 ]; then
+      PROBE_EVIDENCE="${PROBE_EVIDENCE}transfer did NOT complete (curl_exit=${rc}, layer=${PROBE_FAILURE_CLASS}) although the status line was ${code} — the BODY never arrived, so this is not an answer (#10892 review round 6, P1)"$'\n'
+      v="DOWN"
+    fi
     # An EXPLICIT header requirement turns an otherwise-UP answer into an
     # ANSWERED-BUT-WRONG verdict: the status looked healthy but the flow did
     # not initialise. Deterministic (a missing header will not appear on a
@@ -1657,9 +1762,16 @@ render_body() { # <kind> <kindlabel> <selfheal-note>
   # The assertion paragraph is per-target: the API probe's contract and the
   # Pages auth probe's contract are different, and an incident body that
   # describes the WRONG contract sends the operator looking in the wrong place.
-  # The "no Fly machine" clause is keyed on RESTARTABILITY (not on the presence
-  # of PROBE_EXPECT_STATUS): setting an expectation knob on a restartable target
-  # must not make the public body claim nothing will restart when it could.
+  # ⛔ REMEDIATION is a THREE-way question, not two (#10892 review round 3). It
+  # used to be "restartable? yes/no", and the "no" arm hard-coded "no Fly machine
+  # behind it (served by Cloudflare Pages)" — true for the Pages auth surface and
+  # FALSE for the liveness surface, which is the SAME machine as the API probe.
+  # That arm's DOWN page sent the on-call to check a Pages deployment while the
+  # Fly machine was the thing not answering. So the clause is keyed on
+  # `is_machine_backed_url` (a NEW, separate set), and neither clause is keyed on
+  # the presence of PROBE_EXPECT_STATUS: setting an expectation knob on a
+  # restartable target must not make the public body claim nothing will restart
+  # when it could.
   if [ -n "$PROBE_EXPECT_STATUS" ]; then
     assertion="The probe asserts a **specific contract**, not just that a socket is
 open: \`GET $(redact_url "$PROBE_URL")\` must answer one of \`$(probe_up_contract)\`"
@@ -1671,7 +1783,20 @@ initialise."
     else
       assertion="${assertion}."
     fi
-    if ! is_restartable_url "$PROBE_URL"; then
+    if is_restartable_url "$PROBE_URL"; then
+      : # the restart leg's own prose covers remediation
+    elif is_machine_backed_url "$PROBE_URL"; then
+      assertion="${assertion} This surface is served by the **same Fly machine** as the
+primary API probe (it is a machine-backed route, not a static/Pages one), but its
+own restart leg is deliberately DISARMED: the primary API probe owns restarting
+that machine, and a second arm would spend \`MAX_RESTARTS_PER_HOUR\` twice on one
+wedged machine. So do not go looking for a CDN or a Pages deploy — check the
+machine (\`flyctl logs\`/\`flyctl checks list\`). If the primary API probe is
+ALSO red, its automated restart owns the remediation — but do not wait for that
+page before acting: this arm's tolerance is 35 s while the primary probe's
+budget is 95 s, so at page time the primary may not have paged (a deploy window
+is exactly that case)."
+    else
       assertion="${assertion} This surface has **no Fly machine** behind it (it is served by
 Cloudflare Pages): an automated restart is not a possible remediation here and
 is hard-disarmed. This is the #3616 class, where only \`/auth/start\` revealed
@@ -2166,7 +2291,16 @@ The service failed ${STATE_DOWN_RUNS} probe run(s), starting $(fmt_iso "$STATE_F
     # 302-with-missing-header (review P3 — the runbook used to claim this
     # target always logs `no_machine`).
     restart_mode="disarmed:no_machine"
-    log "probe target is a production surface with no Fly machine — NOT restartable; the incident will be reported without a restart"
+    # #10892 review round 3 (residual): the ARM is "no_machine" for TWO targets
+    # with OPPOSITE remediations — the Pages auth surface (no Fly machine at all)
+    # and the liveness surface (the SAME machine as the primary probe,
+    # hard-disarmed). The run log is the FIRST artifact an operator reads, so it
+    # must not tell a wedged-machine outage that no machine exists.
+    if is_machine_backed_url "$PROBE_URL"; then
+      log "probe target is a MACHINE-BACKED production surface whose restart leg is deliberately disarmed — NOT restartable; the incident will be reported without a restart (the primary API probe owns restarting that machine)"
+    else
+      log "probe target is a production surface with no Fly machine — NOT restartable; the incident will be reported without a restart"
+    fi
   elif ! restartable_failure "$PROBE_FAILURE_CLASS"; then
     # No machine restart repairs a name-resolution or certificate problem; it
     # would only spend the restart budget and add noise. The incident is still
@@ -2515,7 +2649,16 @@ A restart is a **symptom fix** — if this recurs, the root cause is still live 
         transition_kind="disarmed"
         ;;
       disarmed:no_machine)
-        heal_note="🔒 **No restart attempted — this is a production surface with NO Fly machine behind it.** \`$(redact_url "$PROBE_URL")\` is served by Cloudflare Pages; the automated restart leg targets the Fly API app (\`${FLY_APP}\`), so restarting it would restart an unrelated service and could not repair this failure. A \`503\` on the Pages auth surface usually means a missing/renamed binding (D1/KV) or a Pages routing change — check the Cloudflare Pages deployment, its bindings, and the last deploy (the deploy gate added in #3618 prevents deploying this class of fault; this probe catches the fault appearing AFTER a deploy). Runbook § *Out-of-band availability watchdog*."
+        if is_machine_backed_url "$PROBE_URL"; then
+          # #10892 review round 3: a MACHINE-BACKED target whose restart leg is
+          # deliberately disarmed (the liveness surface). The old note claimed
+          # this class had no Fly machine and pointed at a Pages deployment —
+          # false for this target, and it sent the on-call to the wrong
+          # subsystem during the very outage the arm exists for.
+          heal_note="🔒 **No restart attempted — and the machine IS the target.** \`$(redact_url "$PROBE_URL")\` is served by the same Fly machine as the primary API probe, but this arm's restart leg is deliberately disarmed: the primary probe owns restarting that machine, and a second arm would spend \`MAX_RESTARTS_PER_HOUR\` twice on one wedged machine. So a machine-level fault here is the SAME fault the primary target reports — cross-check that incident rather than opening a second remediation. To look by hand: \`flyctl checks list -a ${FLY_APP}\`, \`flyctl logs -a ${FLY_APP}\`, then \`flyctl machine list -a ${FLY_APP}\`. Do NOT go looking for a Cloudflare Pages deploy: this route is not served by Pages. Runbook § *Out-of-band availability watchdog*."
+        else
+          heal_note="🔒 **No restart attempted — this is a production surface with NO Fly machine behind it.** \`$(redact_url "$PROBE_URL")\` is served by Cloudflare Pages; the automated restart leg targets the Fly API app (\`${FLY_APP}\`), so restarting it would restart an unrelated service and could not repair this failure. A \`503\` on the Pages auth surface usually means a missing/renamed binding (D1/KV) or a Pages routing change — check the Cloudflare Pages deployment, its bindings, and the last deploy (the deploy gate added in #3618 prevents deploying this class of fault; this probe catches the fault appearing AFTER a deploy). Runbook § *Out-of-band availability watchdog*."
+        fi
         transition_kind="disarmed"
         ;;
       disarmed:unexpected)
@@ -2523,13 +2666,24 @@ A restart is a **symptom fix** — if this recurs, the root cause is still live 
           heal_note="⛔ **No restart attempted** — the app ANSWERED, so a process restart is not the remediation. The failure is in the **PKCE flow**, not a wedged process: the redirect came back with an allowed status but without the required \`$(scrub_output "$PROBE_REQUIRE_HEADER" 120)\` header, which is the proof the flow row was written. Check the PKCE state written to D1/KV behind the auth route — the \`code_challenge\`/\`code_challenge_method\` pair, the D1 binding, and the last deploy of the auth function — NOT the route table or the deployed revision of the API app. Runbook § *Out-of-band availability watchdog*."
         elif is_restartable_url "$PROBE_URL"; then
           heal_note="⛔ **No restart attempted** — the app ANSWERED (an unexpected status, not silence), so a process restart is not the remediation. An unexpected \`404\`/\`3xx\` on an authenticated API route usually means a bad deploy or a moved route, not a wedged process: check the deployed revision and the route."
+        elif is_machine_backed_url "$PROBE_URL"; then
+          # #10892 review round 3: a machine-backed target whose restart leg is
+          # deliberately disarmed. Its "unexpected answer" is almost always a
+          # DEPLOY that does not carry the route yet (the liveness endpoint is
+          # brand new), not a Pages binding — so do not send the reader to Pages.
+          heal_note="⛔ **No restart attempted** — the app ANSWERED (an unexpected status, not silence), so a process restart is not the remediation. An unexpected \`HTTP ${PROBE_CODE}\` on the probed production route \`$(redact_url "$PROBE_URL")\` — a route served by the Fly machine, whose restart leg is deliberately disarmed for this arm — usually means a bad deploy, or a deploy that does not carry this route yet, not a wedged process: check the deployed revision (that it is ahead of the release which added the route) and the route itself."
         else
           # Target-aware (review P3): this sibling branch used to call EVERY
           # surface "an authenticated API route", but the runbook tells
           # operators the incident body is the primary diagnostic — and the
           # auth target is a Cloudflare Pages route, not an API route. Keyed
-          # on RESTARTABILITY (the same discriminator render_body uses), not on
-          # the presence of an expectation knob. The status example is the
+          # on NEITHER restartability NOR machine-backing — this is the THIRD
+          # arm of the same three-way split `render_body` uses (restartable →
+          # machine-backed → neither), not the second. ⛔ A future
+          # machine-backed surface added to the production set lands in the
+          # MIDDLE arm; read `render_body` before adding a branch here.
+          # Not keyed on the presence of an expectation knob. The status
+          # example is the
           # ACTUAL observed code, not a hardcoded class: `/auth/start` EXPECTS a
           # 302, so a `3xx` there is the NORMAL case and a `404` cannot occur —
           # the old `404`/`3xx` enumeration contradicted the evidence line above

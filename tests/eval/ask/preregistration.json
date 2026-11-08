@@ -40,6 +40,15 @@
     ],
     "kind": "paired within-run comparison + product gate; NO pre-set quality threshold",
     "pass": "the corpus verifies, the config matches this pre-registration, every case ran in both arms, and neither regression clause fired",
+    "per_category": {
+      "mechanism_dependency": "#2516 (seal per-category, type-stratified gates). Declared, not absorbed: this record fixes the row surface and the requirement that each class is legible; the enforcement mechanism is #2516's",
+      "rows": [
+        "knowledge-update \u2014 the D8 gate: rendered_live / seen / n over the planted superseded claims, plus the current-state rate REPORTED (never thresholded)",
+        "verbatim \u2014 the no-regression half: raw.committed vs distilled.committed per case, with the regressed case ids listed"
+      ],
+      "threshold": "NONE is pre-set per class either. The knowledge-update rate is reported, the verbatim comparison is a regression, and neither needs an absolute to be read",
+      "verdict_per_class": "each class is read against the clauses that APPLY to it (the D8 gate for knowledge-update, the paired comparison for verbatim). A class with no clause in this bar is reported as not graded, never as a pass, and on a run whose bar is `inconclusive` EVERY class reports `inconclusive` rather than a class green under an inconclusive headline; the per-class GATE MECHANISM (a verdict sealed per class) is #2516's and is not claimed to be implemented here"
+    },
     "regression": [
       "D8: any superseded claim RENDERED LIVE on the distilled arm",
       "D8: any planted claim not OBSERVED (seen < n) on the distilled arm",
@@ -52,10 +61,35 @@
   "gate_arm": "distilled",
   "issue": "9097",
   "judge": {
-    "model_spec": "openai:gpt-4o-2024-08-06",
-    "pin": "ask-exit-anscheck-official-v1",
+    "model_spec": "deepseek:deepseek-v4-pro",
+    "pin": "unpinned:deepseek:deepseek-v4-pro",
     "rubric_id": "longmemeval-official",
     "rubric_id_hash": "82d07b0de05daa48"
+  },
+  "measurement": {
+    "exclusion_rule": "there is none. A case is never dropped to make the bar clean: a run that misses a pre-registered case, class, or arm is `inconclusive` (a subset run is not this measurement), and a case that failed to run in either arm is `inconclusive` too \u2014 an unmeasured case is never a pass and is never excluded. The only legitimate way to change the population is to re-register (a new commit of this file), BEFORE a run exists",
+    "falsifier": [
+      "any superseded claim RENDERED LIVE to the reader on the gate arm falsifies the target",
+      "any planted superseded claim NOT OBSERVED on the gate arm falsifies the target (an unobserved claim is never a pass)",
+      "any verbatim-class case committed on the raw arm and LOST by the distilled arm falsifies the target \u2014 a KU win with a verbatim loss is a FAIL, not a trade",
+      "a corpus that plants no superseded claim, carries no verbatim case, or a raw arm that committed no verbatim case: the clauses would be satisfied vacuously, so such a run is `inconclusive` \u2014 a bar that cannot fail is not evidence",
+      "a corpus whose manifest does not verify, or whose hash is not this record's hash, makes every reading INCONCLUSIVE rather than green",
+      "a run graded by a judge / reader / pin / rubric / seed / arm set other than this record's is INCONCLUSIVE (`config_mismatch`), never a pass"
+    ],
+    "metric": {
+      "gate": "superseded_live@<gate_arm> \u2014 per planted superseded claim: seen / rendered_live / flagged, attributed by the validity window",
+      "no_regression": "verbatim_no_regression \u2014 per verbatim case: raw.committed vs distilled.committed, and the list of cases the gate arm lost",
+      "not_a_metric": "the judge's semantic grade is never THRESHOLDED and never enters an absolute/comparability claim. It enters `metrics` as the per-arm `committed` count, which the report PRINTS as the knowledge-update rate (reported, no pass threshold) and reads as the paired within-run comparison \u2014 see `scoring.two_number_split`",
+      "reported_not_thresholded": "current_state@<arm> \u2014 the knowledge-update current-state rate; reported, never gated (D8)"
+    },
+    "not_claimed": "no rate is claimed as a THRESHOLDED benchmark result and no absolute or cross-benchmark accuracy is claimed. The published claim is the two mechanical clauses above; the D8 rate is PRINTED as a reported number (\u00a73 of the report) with no pass threshold attached to it, and the judge's reading is never presented as an absolute",
+    "pass_line": "PASS iff the corpus verifies, the config matches this record, every pre-registered case ran in both arms, the VACUITY FLOORS did not fire (the scored corpus plants at least one superseded claim, carries at least one verbatim case, and the raw arm committed at least one \u2014 with none of them the clauses above would hold over a measurement that was never made, which is `inconclusive`, never a pass), `superseded_live@<gate_arm>.rendered_live == 0`, `superseded_live@<gate_arm>.seen == superseded_live@<gate_arm>.n`, and `verbatim_no_regression.regressions == []`. No other number is compared against any threshold",
+    "population": {
+      "cases": "every case this record's `corpus.cases` names, in BOTH arms inside ONE invocation",
+      "classes": "every class `corpus.classes` names \u2014 the knowledge-update class IS the D8 gate and the verbatim class IS the no-regression half, so a run that covers one of them measured half a bar",
+      "denominator": "cases per class per arm, and planted superseded claims for the D8 gate. The denominators are read from the corpus (`n_cases`, `seen`/`n`, `verbatim.n`), never assumed: a zero denominator is `inconclusive`, not a pass"
+    },
+    "target": "the ask lane commits the CURRENT state on the knowledge-update class, and does not regress on the verbatim class, when the product's own reader answers over a distilled + planted-supersession corpus"
   },
   "reader": {
     "lane": "run_ask_lane (the eval-only ask lane, EVAL-ONLY per #3849) \u2014 the product's own retrieval + render + reader path, not a re-implementation",
@@ -72,8 +106,14 @@
   },
   "schema": "ask-distilled-preregistration/v1",
   "scoring": {
-    "committed": "the official anscheck semantic judge (build_judge) grades the reader's answer against the SEALED gold answer, per case per arm, using the official template the sealed gold names (knowledge-update | single-session-user)",
+    "committed": "the anscheck semantic judge built from THIS record's `judge.model_spec` (build_judge) grades the reader's answer against the SEALED gold answer, per case per arm, using the official TEMPLATE the sealed gold names (knowledge-update | single-session-user). \u26d4 The TEMPLATE stays official; the JUDGE is this record's (`deepseek:deepseek-v4-pro`, pin `unpinned:`), never the official model \u2014 the pin is what says so",
     "superseded_live": "the assembled READER EVIDENCE is searched for the superseded claim's own text (ask_spotcheck._superseded_live_state): seen / rendered_live / flagged, attribution by the validity window so a raw turn is never mistaken for a distilled claim",
+    "two_number_split": {
+      "d14_5085_shape": "the write-path harness keeps the judged arm entirely out of `metrics` (`tests/eval/write_path/runner.py`); this benchmark cannot \u2014 its `committed` IS the judge's grade \u2014 so the equivalent guarantee is pre-registered explicitly instead: no THRESHOLD and no comparability claim for the judge-labelled rate (it IS printed as a REPORTED number, \u00a73), and that half is only ever a paired comparison between the two arms of one run",
+      "judge_labelled": "`committed` \u2014 whether the reader's answer matched the sealed gold \u2014 is the anscheck judge's grade. It feeds the knowledge-update rate (REPORTED, never thresholded) and the paired verbatim/raw comparison. Both arms are graded by the SAME judge inside ONE run, so a SYSTEMATIC judge bias cancels across the arms; a PERMISSIVE judge does not, which is why no THRESHOLD and no comparability claim are published for that rate (it is printed as a REPORTED number, \u00a73) and why the judge is pinned",
+      "mechanical_and_authoritative": "corpus verification (manifest + hashes) and the D8 supersession gate (seen / rendered_live / flagged, from the validity window) need NO judge and are AUTHORITATIVE",
+      "what_it_does_not_mean": "the judge-free D8 half is NOT a makeshift substitute for a judge that was skipped \u2014 it is the bar's authoritative half, and the judge-labelled half is declared as such"
+    },
     "verbatim_regression": "for a verbatim-class case: raw.committed AND NOT distilled.committed"
   },
   "seed": {

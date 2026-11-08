@@ -1335,6 +1335,9 @@ def _approved_readings(
                         # the SDK method `invalidate_point`, and the evidence line quotes
                         # the row — so it must name the token that row actually contains.
                         "matched": sorted(aliases & menu[h]["members"]),
+                        # The row's own tokens, for the case where NO alias is one of
+                        # them: the line still needs a name the QUOTE contains.
+                        "members": sorted(menu[h]["members"]),
                     }
                     for h in homes
                 ],
@@ -1377,8 +1380,43 @@ def _approved_evidence_lines(approved: list[dict]) -> list[str]:
             )
             continue
         matched = a["homes_detail"][0]["matched"]
-        named = ", ".join(f"`{m}`" for m in matched) if matched else f"`{a['method']}`"
-        sdk = f" (SDK `{a['method']}`)" if a["method"] and a["method"] not in matched else ""
+        quote = a["homes_detail"][0]["quote"]
+        # #10602: the line must name a token its own QUOTE contains — that is what makes
+        # the claim checkable against the evidence printed directly beneath it.
+        #
+        # Two defects are closed here, both measured by review round 3:
+        #  (1) `m in quote` is a SUBSTRING test, so `query` was "found" in a quote whose
+        #      only occurrence is `paginated_query`. The test is token-bounded now.
+        #  (2) `... or matched` reproduced the old behaviour whenever NO alias was in the
+        #      quote — e.g. `tortoise_paginated_query`, whose matched token is
+        #      `paginated_query` over a quote reading `| 2 | list_knowledge | query |`. It
+        #      now falls back to a token the QUOTE carries (the row's own member) and lets
+        #      the `(SDK …)` slot carry the method, so the line is never a token the quote
+        #      lacks.
+        qtok = set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", quote))
+        named_tokens = [m for m in matched if m in qtok]
+        if not named_tokens:
+            row_members = a["homes_detail"][0].get("members") or []
+            # Prefer the row member a MATCHED token CONTAINS — the doc's own shorthand
+            # for that method (`query` inside `paginated_query`). Alphabetical order is
+            # NOT a relation: on a home row carrying several quote-visible members it
+            # would attribute one of them to a tool that does not carry it, and the
+            # owner verifying the line would confirm a mis-attribution (review round 4).
+            related = [m for m in row_members
+                       if m in qtok and m != a["home"]
+                       and any(m != tok and (m in tok or tok in m) for tok in matched)]
+            named_tokens = sorted(related)[:1]
+        named = ", ".join(f"`{m}`" for m in named_tokens)
+        sdk = (f" (SDK `{a['method']}`)"
+               if a["method"] and a["method"] not in named_tokens else "")
+        if not named:
+            # No token the quote carries could be named — say so rather than asserting a
+            # claim the quoted row cannot support.
+            out.append(f"- **`{a['tool']}`** — the approved row quoted below names no token "
+                       f"this tool carries; SDK `{a['method'] or a['tool']}` is absorbed by "
+                       f"`{a['home']}`:")
+            out.append(f"  > {a['quote']}")
+            continue
         out.append(f"- **`{a['tool']}`** — {named}{sdk} is absorbed by `{a['home']}`:")
         out.append(f"  > {a['quote']}")
     return out

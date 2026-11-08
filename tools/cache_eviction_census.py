@@ -46,7 +46,10 @@ and `turn_parity_census.py` both use ``2`` for a REFUSAL; here ``2`` is the LICE
 populations may go". Never share one exit-code table across the pipeline — read
 ``plan["evictable"]``, not the code alone.
 
-    0  CLEAN     measured; the cache is within its bound — nothing to evict
+    0  CLEAN     measured; the cache is within its declared BYTE ceiling.
+                 ⛔ This is the BYTE state, not "nothing to do": `plan["evictable"]`
+                 is still published (read it, as the note below insists) and a
+                 consumer enforcing an ENTRY budget may still have work to do.
     2  PLAN      over the bound, and `plan["evictable"]` names the ONLY populations
                  that are proven record-served
     3  REFUSED   over the bound and NOTHING is proven — nothing may be evicted, and
@@ -451,6 +454,16 @@ def main(argv: list[str] | None = None) -> int:
               file=sys.stderr)
         return CACHE_EVICTION_EXIT_UNBOUNDED
     if census.verdict == "CLEAN":
+        # ⛔ `CLEAN` IS THE BYTE STATE, NOT "NOTHING TO EVICT". The licence is published
+        # on every verdict, and a consumer enforcing an ENTRY budget (`tools/cache_evict.py`,
+        # `TORTOISE_CACHE_MAX_NODES`) can still have work to do on a byte-clean cache.
+        # Printing nothing here let an operator read "nothing to evict" from step 1 and
+        # then watch step 2 sweep thousands of nodes.
+        for entry in census.plan.get("evictable", []):
+            print(f"  LICENSED (byte-clean): {entry['population']} "
+                  f"({entry['nodes']} nodes, via {entry['instrument']}) — the BYTE "
+                  f"verdict is CLEAN; a NODE budget may still be exceeded",
+                  file=sys.stderr)
         return CACHE_EVICTION_EXIT_CLEAN
     if census.verdict == "PLAN":
         for entry in census.plan.get("evictable", []):

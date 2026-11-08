@@ -3,6 +3,10 @@
 No network, no Docker, no FalkorDB. The GitHub surfaces are driven by a stub
 `gh` binary that reads JSON fixtures from $GH_STUB_DIR; the git surfaces use a
 real temp git repo (branches, a remote-tracking ref, real `git worktree add`).
+The PROCESS CENSUS — the third host input, and the one that decides whether a
+branch may be DEMOTED — is SERVED by a stub `ps` (see `_write_ps_stub`), never
+read from the host: on a box that hosts lanes the answer would depend on what
+that box happens to be running (#10823).
 
 Run standalone:      python3 tests/test_collision_preflight.py
 Run under pytest:    python3 -m pytest tests/test_collision_preflight.py -q
@@ -568,6 +572,63 @@ def _write_exec(path: Path, body: str) -> Path:
     return path
 
 
+def _write_ps_stub(directory: Path, rows: list[str]) -> Path:
+    """A `ps` stub serving the PROCESS TABLE from `rows` — one census, no host.
+
+    ⛔ THE PROCESS CENSUS IS A HOST INPUT, NOT A FIXTURE INPUT (#10823).
+    `collision_preflight` decides whether a local branch/worktree may be demoted
+    from `fleet_state.pi_processes()` (the bare `ps` from `PATH`) and
+    `fleet_state.process_cwds()` (`/proc/<pid>/cwd`). On any box that HOSTS lanes
+    that table holds live `pi` processes — and one whose worktree was REAPED under
+    it reads back as `… (deleted)`, which `_usable_cwd` refuses, so the census is
+    a GAP and EVERY demotion fails closed. The answer then depends on what the host
+    happens to be running: measured 2026-11-03 on a cell, `pid 4077833 →
+    /home/cmux/tortoise/.worktrees/worktree-cost (deleted)` and `pid 4185686 →
+    …/graph-mcp-provision (deleted)` reddened the five demotion tests in `test (h)`
+    both locally and on the fleet's own runner, on a PR that touched neither file.
+
+    The GATE is right to fail closed; the FIXTURE was under-specified. Stubbing the
+    table is the same PATH-shadowing technique `failing_rebuild_path` already uses
+    for `gh`/`cmux`, and the fail-closed half stays pinned by
+    `test_a_live_pi_with_an_unreadable_cwd_never_demotes`, which serves a REAL
+    deleted-cwd row through this same stub.
+
+    `fleet_state` makes two `ps` calls, so the stub answers both shapes: the
+    `command=` census and the `time=` table (`process_table`, read on a board
+    REBUILD — the `0 0 00:00:00` row is the harmless placeholder a fresh, no-pi
+    table needs).
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "rows").write_text("".join(f"{row}\n" for row in rows))
+    stub = directory / "ps"
+    stub.write_text(
+        "#!/usr/bin/env bash\n"
+        "# Stub process table — see the module docstring's HERMETICITY note.\n"
+        'case "$*" in\n'
+        '  *command=*) cat "$PS_STUB_ROWS" ;;\n'
+        '  *time=*)    printf \'0 0 00:00:00\\n\' ;;\n'
+        "  *)          exit 1 ;;\n"
+        "esac\n")
+    stub.chmod(stub.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    return stub
+
+
+def _wait_for_deleted_cwd(pid: int, timeout: float = 10.0) -> None:
+    """Block until `/proc/<pid>/cwd` reads back with the ` (deleted)` suffix."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            raw = os.readlink(f"/proc/{pid}/cwd")
+        except OSError:
+            raw = ""
+        if raw.endswith(" (deleted)"):
+            return
+        time.sleep(0.02)
+    raise AssertionError(
+        f"`/proc/{pid}/cwd` never read back as deleted — the fixture cannot model "
+        "a live `pi` whose cwd is unreadable, so this run proves nothing")
+
+
 #: A `ps` that hides the BOX's UNATTRIBUTABLE `pi` rows from this suite.
 #:
 #: ⛔ THE PROCESS CENSUS IS AMBIENT STATE, THE SAME CLASS AS `HOME`. The tool asks
@@ -599,6 +660,13 @@ def _write_exec(path: Path, body: str) -> Path:
 #: `{real_ps}` and `{root}` are substituted at write time: the real `ps` is resolved
 #: BEFORE the shim is on `PATH` (so the shim cannot exec itself), and `root` is the
 #: checkout the reader is imported from.
+#:
+#: ⚠️ ON THE TOOL PATH THIS SHIM IS THE FALLBACK, NOT THE FIRST `ps`: `run_tool`
+#: prepends the SERVED stub (`_write_ps_stub`, `tool_subprocess_env`) ahead of it, so
+#: the child's `ps` is `psstub/ps` on every tool launch and this shim is what answers
+#: only if no table was served. It remains the suite's own whole-machine read in
+#: `_run_census_shim`, and it remains FIRST in `tool_env()` — those are two different
+#: environments, pinned separately (see `test_the_tool_subprocess_resolves_ps_to_the_served_stub`).
 CENSUS_PS_SHIM = r'''#!{python}
 """`ps` with this BOX's unattributable `pi` rows removed (see CENSUS_PS_SHIM)."""
 import os
@@ -881,6 +949,19 @@ class CollisionPreflightTest(unittest.TestCase):
         # called, so a test can prove the rebuild ran through THIS path and not
         # the network (see `failing_rebuild_path`).
         self.rebuild_stub_log = self.tmp / "rebuild-stub-calls.log"
+        # ⛔ THE PROCESS CENSUS IS SERVED, NEVER INHERITED (`_write_ps_stub`).
+        # `fleet_state.pi_processes()` runs the bare `ps` from `PATH`, so on a box
+        # that hosts lanes the demotion family's answer would depend on the HOST —
+        # and a live lane whose worktree was reaped under it reads `… (deleted)`,
+        # which `_usable_cwd` refuses, making the census a GAP and failing every
+        # demotion closed (measured 2026-11-03: two such pids reddened the five
+        # demotion tests on a PR that touched neither this file nor the tool).
+        # `setUp` serves ONE non-`pi` row, so what may be demoted is decided by
+        # THIS fixture; a test with a live lane serves its row through
+        # `add_process_row`, and the fail-closed half is pinned by
+        # `test_a_live_pi_with_an_unreadable_cwd_never_demotes`.
+        self.ps_dir = self.tmp / "psstub"
+        self.set_process_table(f"1 0 {os.getuid()} /sbin/init")
         # Default: every GitHub surface is queryable and empty.
         self.gh_fixtures(open_prs=[], closed_prs=[], issue=self.issue_payload())
         # #8560: the landed surface's timeline is queryable by default (one empty
@@ -1150,6 +1231,33 @@ class CollisionPreflightTest(unittest.TestCase):
         env["PATH"] = f"{self.census_dir}{os.pathsep}{env.get('PATH', '')}"
         return env
 
+    def tool_subprocess_env(self, env_extra: dict | None = None) -> dict:
+        """THE env a TOOL SUBPROCESS receives — `run_tool`'s ONE composition, in one place.
+
+        ⛔ THE SERVED PROCESS TABLE OUTRANKS THE CENSUS SHIM. `tool_env` puts
+        main's `ps` census shim first on `PATH` (it drops the BOX's
+        unattributable `pi` rows); a test that SERVES a table
+        (`set_process_table` / `add_process_row`) needs ITS rows to win, because
+        it models a live lane the shim could never invent. The stub therefore
+        goes ahead of the shim and `PS_STUB_ROWS` names the rows. Both stubs
+        neutralise the SAME ambient surface — whichever is first, the child's
+        `ps` is a stub and never the box's — so neither arm's guarantee is
+        weakened by the other; the order is what lets a test INJECT a row
+        (#10823) and still keep the census shim on the child's `PATH` behind it.
+
+        ⚠️ TWO LAYERS, TWO PINS, because they are different environments:
+        `tool_env()` is the BASE (census shim first) and this is what every tool
+        launch actually gets (served stub first). A pin that asserted the stub
+        order on `tool_env()` — or the shim order on this — would be green about
+        an environment no subprocess runs in (review round 9, P3), so
+        `test_the_tool_subprocess_resolves_ps_to_the_served_stub` pins THIS one by
+        running `which ps` in it via `run_tool`.
+        """
+        env = self.tool_env(env_extra)
+        env["PATH"] = f"{self.ps_dir}{os.pathsep}{env['PATH']}"
+        env["PS_STUB_ROWS"] = str(self.ps_dir / "rows")
+        return env
+
     def failing_rebuild_path(self) -> str:
         """A `PATH` on which a REBUILD's own reads fail locally (review P2).
 
@@ -1192,7 +1300,10 @@ class CollisionPreflightTest(unittest.TestCase):
                  extra_args: list[str] | None = None,
                  repo_arg: object = "__default__", cwd: Path | None = None,
                  gh_bin: Path | None = None):
-        env = self.tool_env(env_extra)
+        # The child's env comes from ONE place — never re-inline it here (see
+        # `tool_subprocess_env`): a second composition is how the pin whose subject
+        # is "what the TOOL runs with" stays green about an env nothing runs in.
+        env = self.tool_subprocess_env(env_extra)
         cmd = [PYTHON, str(TOOL), str(issue)]
         if repo_arg == "__default__":
             cmd += ["--repo", str(self.repo)]
@@ -8669,6 +8780,10 @@ class CollisionPreflightTest(unittest.TestCase):
         shutil.copy("/bin/sleep", pi)
         proc = subprocess.Popen([str(pi), "120"], cwd=str(wt),
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # The census the TOOL reads is the STUBBED table (`_write_ps_stub`), so the
+        # lane this test really spawned must be SERVED to it — otherwise the tool
+        # would see no owner and the assertion below would fail on a fixture gap.
+        self.add_process_row(f"{proc.pid} 1 {os.getuid()} pi")
         try:
             # Precondition: the census the tool uses can SEE it, so a green
             # assertion below cannot be a subprocess race.
@@ -8930,23 +9045,10 @@ class CollisionPreflightTest(unittest.TestCase):
         branch = f"fix/{ISSUE}-empty-busy"
         ref = self.empty_branch(branch)
         wt = self.checked_out_worktree(branch, f"empty-busy-{ISSUE}")
-        fake_bin = self.tmp / "fakebin-empty"
-        fake_bin.mkdir(exist_ok=True)
-        # ⛔ A COPY OF A REAL BINARY, NOT A SHELL SCRIPT: `fleet_state.pi_processes`
-        # matches `basename(argv[0]) == "pi"`, and the kernel rewrites argv[0] to the
-        # interpreter for a `#!` script (the trap the stale-holder test documents).
-        #
-        # ⛔ AND IT IS INVOKED BY NAME THROUGH `PATH`, so argv[0] is exactly `pi`. Launched
-        # as an absolute path, its first token is 60+ characters in the `command` column,
-        # and `ps`'s default output width truncates that column — the census then reads a
-        # basename that is not `pi` and the lane is invisible (`fleet_state.pi_processes`
-        # passes `-ww` for exactly this reason; a test must not depend on its fixture's
-        # path length to be seen).
-        pi = fake_bin / "pi"
-        shutil.copy("/bin/sleep", pi)
-        env = {**os.environ, "PATH": f"{fake_bin}:{os.environ.get('PATH', '')}"}
-        proc = subprocess.Popen(["pi", "120"], cwd=str(wt), env=env,
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # `_start_fake_pi` owns the binary's SHAPE (a copy of a real binary, invoked
+        # by NAME, so `basename(argv[0]) == "pi"` at a width-safe length) and serves
+        # its row to the stubbed process table the TOOL reads — see `_write_ps_stub`.
+        proc = self._start_fake_pi(wt)
         try:
             self._wait_for_pi_cwd(wt)
             rc, out = self.run_tool()
@@ -9106,6 +9208,50 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("1 commit(s) ahead", self.hit(out, ref))
         self.assertNotIn("ADVISORY", self.hit(out, ref))
 
+    @unittest.skipUnless(Path("/proc/self/cwd").exists(),
+                         "the census fixture needs /proc (the kernel's own cwd read)")
+    def test_a_live_pi_with_an_unreadable_cwd_never_demotes(self):
+        """⛔ THE STUBBED CENSUS STILL FAILS CLOSED (#10823's rule, applied here).
+
+        `setUp` serves a table with no `pi` row so the demotion family is decided by
+        the fixture rather than by the host. That must not degrade into an
+        unconditional "nobody is there": a LIVE `pi` whose cwd cannot be resolved
+        (`_usable_cwd` refuses the kernel's ` (deleted)` suffix — the shape a lane
+        leaves when its worktree is REAPED under it) is a GAP, and a gap means the
+        census could not ANSWER, so the ref is NOT demoted and the row says
+        UNREADABLE. The row is served through the same stub, from a real process
+        whose directory is really gone.
+
+        This is the honest half of the stub. Without it a future edit that made
+        `_census_complete` answer from a gap would leave every other demotion test
+        green, because none of them serves a `pi` row at all.
+        """
+        self.gh_fixtures(closed_prs=[])
+        ref = self.empty_branch(f"fix/{ISSUE}-empty-census")
+        gone = self.tmp / "reaped-worktree"
+        gone.mkdir()
+        # A real process standing in a directory that is then REMOVED: the kernel
+        # appends ` (deleted)` to its `/proc/<pid>/cwd`, which is exactly the
+        # unreadable-cwd shape the census must not read as "no lane there".
+        proc = subprocess.Popen(
+            ["/bin/sh", "-c", 'cd "$0" && rmdir "$0" && exec sleep 120', str(gone)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            _wait_for_deleted_cwd(proc.pid)
+            self.add_process_row(f"{proc.pid} 1 {os.getuid()} pi")
+            rc, out = self.run_tool()
+        finally:
+            proc.terminate()
+            proc.wait(timeout=10)
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        line = self.hit(out, ref)
+        self.assertNotIn("ADVISORY", line)
+        self.assertIn("UNREADABLE", line)
+        self.assertIn("could not resolve the cwd", line)
+        self.assertIn(str(proc.pid), line,
+                      "the refusal must name WHICH process it could not read")
+
     def test_a_zero_ahead_remote_ref_is_never_an_empty_claim(self):
         """CONDITION 1's scope, pinned in the direction that matters (review, 2026-10-24).
 
@@ -9233,18 +9379,60 @@ class CollisionPreflightTest(unittest.TestCase):
             "census GAP that refuses every demotion on a busy box (see CENSUS_PS_SHIM)"
         ))
 
-    def test_the_tool_subprocess_runs_with_the_census_shim_first_on_path(self):
-        """The wiring, pinned: a shim that exists but is not on the child's `PATH` is inert."""
+    def test_the_census_shim_is_first_on_the_BASE_tool_env_path(self):
+        """`tool_env()`'s composition: the census shim is FIRST in the BASE env.
+
+        This pins the BASE layer only, and says so in its name: `run_tool` then puts
+        the SERVED `ps` stub ahead of it (`tool_subprocess_env`), so the shim is never
+        the child's first `ps` on a tool launch. The subprocess's own resolution is
+        pinned by `test_the_tool_subprocess_resolves_ps_to_the_served_stub` — a pin
+        named for the tool path has to RUN it (#9889's rule), and this one does not.
+        """
         env = self.tool_env()
         self.assertEqual(env["PATH"].split(os.pathsep)[0], str(self.census_dir),
-                         "the census shim must be FIRST on the tool's `PATH`")
+                         "the census shim must be FIRST on the BASE tool `PATH`")
         which = subprocess.run(["which", "ps"], capture_output=True, text=True, env=env,
                                check=False)
         self.assertEqual(which.stdout.strip(), str(self.census_dir / "ps"),
-                         "`ps` in the tool's environment must BE the shim")
+                         "`ps` in the BASE tool environment must BE the shim")
         # And the shim is only on the CHILD's path: this process keeps the real one, so
         # the decision-level pins above still mock the reader rather than the box.
         self.assertNotEqual(shutil.which("ps"), str(self.census_dir / "ps"))
+
+    def test_the_tool_subprocess_resolves_ps_to_the_served_stub(self):
+        """The env the TOOL actually receives — captured from the LAUNCH and RUN.
+
+        `tool_subprocess_env` puts the served stub ahead of the census shim, so on a
+        real tool launch the child's `ps` is `psstub/ps` and `CENSUS_PS_SHIM` never
+        executes. That is the ordering every other stub test depends on, and it was
+        previously unpinned on the path it describes.
+
+        Non-vacuity, both halves: if `run_tool` reverts to composing its env itself
+        (the pre-fix shape, `env = self.tool_env(env_extra)`), the spy is never called
+        and the first assertion fails; if the stub stops being prepended, `which ps`
+        resolves to the shim and the second fails.
+        """
+        seen: dict = {}
+        base = self.tool_subprocess_env
+
+        def spy(env_extra=None):
+            seen["env"] = env = base(env_extra)
+            return env
+
+        self.tool_subprocess_env = spy
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("env", seen, (
+            "run_tool must compose the child's env through tool_subprocess_env — "
+            "an inlined composition is the env this pin cannot see"
+        ))
+        env = seen["env"]
+        which = subprocess.run(["which", "ps"], capture_output=True, text=True, env=env,
+                               check=False)
+        self.assertEqual(which.stdout.strip(), str(self.ps_dir / "ps"),
+                         "the TOOL SUBPROCESS's `ps` must be the SERVED stub (#10823)")
+        self.assertIn(str(self.census_dir), env["PATH"].split(os.pathsep),
+                      "the census shim stays on the child's `PATH` behind the stub")
 
     @staticmethod
     def _write_fake_ps(path: Path, table: str) -> str:
@@ -9354,6 +9542,65 @@ class CollisionPreflightTest(unittest.TestCase):
         mod = _tool_module()
         return mod.StaleHolder("git", str(self.repo), ISSUE, 60, [])
 
+    @staticmethod
+    def _census_file_row(row: str) -> str:
+        """One served row, rewritten in the FILE seam's own shape: `pid ppid command`.
+
+        ⛔ THE TWO SEAMS DO NOT SHARE A COLUMN SHAPE (review P2, #10833). The rows this
+        fixture serves are `pid ppid uid command`, because that is what
+        `fleet_state.pi_processes()` reads (`ps -ww -axo pid=,ppid=,uid=,command=` — the uid
+        is how it drops OTHER users' processes). The file seam is read by the tool's
+        `_process_rows`, whose documented shape is `ps -ww -Ao pid=,ppid=,command=` — THREE
+        columns, split `line.split(None, 2)`, so `parts[2]` is the WHOLE command.
+
+        Writing the four-column string into that file therefore put the UID where the
+        command belongs, and `_argv0_pi` read `1000` as argv[0]: an injected `pi` row was
+        invisible through the file seam while plainly visible through the `ps` stub. That
+        is exactly the "two censuses could disagree" defect `set_process_table` exists to
+        remove, one layer down — it stayed green only because every current case asserts
+        on the worktree-demotion surface, which reads the stub.
+
+        The uid is DROPPED, not reordered: the file seam has no such column and the tool
+        never reads one, so a row that kept it (however reordered) would still be the
+        wrong shape for this seam.
+        """
+        fields = row.split(None, 3)
+        assert len(fields) == 4, (
+            f"a served process row must be `pid ppid uid command`, got {row!r} — both "
+            "seam shapes are derived from THIS one, so a short row would mis-parse in "
+            "one of them and the fixture would disagree with itself again"
+        )
+        pid, ppid, _uid, command = fields
+        return f"{pid} {ppid} {command}"
+
+    def set_process_table(self, *rows: str) -> None:
+        """Replace the stubbed process table — `pid ppid uid command` rows.
+
+        ⛔ ONE LIST, TWO SEAMS, ONE ANSWER (#10833 merge). This fixture serves the census
+        through a shadowed `ps` on the child's `PATH` (`PS_STUB_ROWS`), while `main`'s
+        cases serve the SAME surface through `COLLISION_PREFLIGHT_PROCESS_TABLE` — a FILE
+        the tool reads INSTEAD of running `ps` (`_process_rows`). Keeping the served rows
+        in `self.ps_rows` collided with this class's own `PATH` attribute of that name: the
+        env value became a LIST REPR (`str(self.ps_rows)` → `"['1 0 1000 /sbin/init']"`),
+        every scan reported `process-table-unreadable` → INCOMPLETE (exit 2), and 109 cases
+        red. The rows live in `ps_stub_rows`, and the table file is rewritten beside them,
+        so a test that injects a lane sees it through EITHER seam rather than one — a
+        fixture whose two censuses could disagree is the defect this resolves, not a
+        preference between them.
+
+        The two writes are NOT the same string: each seam gets its own column shape via
+        `_census_file_row`. `test_the_fixture_serves_each_seam_its_own_shape` pins it.
+        """
+        self.ps_stub_rows = list(rows)
+        _write_ps_stub(self.ps_dir, self.ps_stub_rows)
+        self.ps_rows.write_text(
+            "".join(f"{self._census_file_row(row)}\n" for row in self.ps_stub_rows),
+            encoding="utf-8")
+
+    def add_process_row(self, row: str) -> None:
+        """Serve ONE more row (a fixture's own fake lane) beside the default."""
+        self.set_process_table(*self.ps_stub_rows, row)
+
     def _start_fake_pi(self, cwd: Path) -> subprocess.Popen:
         """A process the census will see as `pi`, standing in `cwd` (see test (c2) above).
 
@@ -9367,8 +9614,15 @@ class CollisionPreflightTest(unittest.TestCase):
         if not pi.exists():
             shutil.copy("/bin/sleep", pi)
         env = {**os.environ, "PATH": f"{fake_bin}:{os.environ.get('PATH', '')}"}
-        return subprocess.Popen(["pi", "120"], cwd=str(cwd), env=env,
+        proc = subprocess.Popen(["pi", "120"], cwd=str(cwd), env=env,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # ⛔ The census the TOOL reads is the STUBBED table, so the fixture's own
+        # lane must be SERVED to it as well (`_write_ps_stub`). Without this the
+        # lane is invisible to the tool and every test built on it — the (c2)
+        # window, the moved-checkout case, the foreign-repository precision arm —
+        # would pass VACUOUSLY: nothing would be standing anywhere.
+        self.add_process_row(f"{proc.pid} 1 {os.getuid()} pi")
+        return proc
 
     # ── helpers ─────────────────────────────────────────────────────────────
 
@@ -9563,6 +9817,70 @@ exec {real} "$@"
         self.assertIn("pid:777001", out)
         self.assertIn("command line names #3061", out)
         self.assertIn("live `pi` process(es) enumerated", out)
+
+    def test_the_fixture_serves_each_seam_its_own_column_shape(self):
+        """⛔ ONE LIST, TWO SEAMS, ONE ANSWER — pinned on the SHAPES (review P2, #10833).
+
+        `set_process_table` promises that a test injecting a lane sees it through EITHER
+        seam. The seams do not share a column shape: `fleet_state.pi_processes()` reads
+        `ps -ww -axo pid=,ppid=,uid=,command=` (FOUR columns, `fleet_state._pi_pids_from_ps`
+        splits with maxsplit=3 and filters on the uid), while the tool's `_process_rows`
+        reads `ps -ww -Ao pid=,ppid=,command=` (THREE columns, `parts[2]` is the whole
+        command). Before the fix the fixture wrote the four-column string into the file
+        seam too, so `_argv0_pi` read the UID as argv[0] and the injected `pi` row was
+        invisible there while visible through the stub.
+
+        This asserts each seam with ITS OWN reader, so a future edit that unifies the
+        strings again cannot be green: `_argv0_pi("1000 pi")` is False.
+        """
+        mod = _tool_module()
+        pid, ppid, uid = 4321, 1, os.getuid()
+        self.set_process_table(f"{pid} {ppid} {uid} pi")
+
+        # The FILE seam, read by the tool's own parser — the reader that was wrong.
+        with mock.patch.dict(os.environ, {mod.PROCESS_TABLE_ENV: str(self.ps_rows)}):
+            rows, why = mod._process_rows("ps", str(self.tmp), 5.0)
+        self.assertEqual(why, "", "the served table must be readable")
+        self.assertIsNotNone(rows)
+        self.assertIn(
+            (pid, ppid, "pi"), rows,
+            "the FILE seam must carry `pid ppid command` — the uid column is not "
+            "part of this seam's shape, and putting it there hides every injected "
+            f"lane from the tool's live-lane census (parsed rows: {rows})",
+        )
+        self.assertTrue(
+            mod._argv0_pi("pi"),
+            "precondition: the command column of the row above really is a `pi`",
+        )
+
+        # The STUB seam, read by `fleet_state`'s own parser — unchanged, and it must
+        # stay four-column or the demotion census loses its uid filter.
+        stub_text = (self.ps_dir / "rows").read_text(encoding="utf-8")
+        self.assertEqual(
+            [r["pid"] for r in mod.fleet_state._pi_pids_from_ps(stub_text)],
+            [pid],
+            "the STUB seam must keep `pid ppid uid command` — `fleet_state` reads the "
+            "uid to exclude other users' processes",
+        )
+
+    def test_an_injected_lane_row_is_visible_through_the_file_seam(self):
+        """The same claim END TO END: the TOOL's live-lane surface names the pid.
+
+        `tool_env` always points `COLLISION_PREFLIGHT_PROCESS_TABLE` at `self.ps_rows`, and
+        a set seam WINS over `ps` by design (`_process_rows`), so this is the census every
+        tool launch actually reads. Pre-fix this row was parsed as
+        `(777001, 1, "1000 pi -p …")`, `_argv0_pi` saw `1000`, no `pi` row existed, and the
+        surface reported no live lane — a silently vacuous case for the first test that
+        injects a lane and asserts on `[live lane processes]`.
+        """
+        self.set_process_table(
+            f"777001 1 {os.getuid()} pi -p dispatch-3061-brief")
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 1, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn("[live lane processes]", out)
+        self.assertIn("pid:777001", out)
+        self.assertIn("command line names #3061", out)
 
     def test_a_live_harness_lane_for_an_attributed_pr_blocks(self):
         """The `prd-<owner>-<repo>-<PR>` case: a lane launched BY a PR number.

@@ -22,7 +22,13 @@ each printing PASS/FAIL with the RAW VALUE it read:
   1. ``tree``             ``git merge-tree --write-tree origin/main <head>`` — never the
                           ``mergeable`` flag (a stale flag is not evidence).
   2. ``gates``            the newest attempt per ``(app.slug, workflow, job)`` for every
-                          required context, and ``success`` is the ONLY pass.
+                          required ENTRY context, and ``success`` is the ONLY pass.
+                          ``merge_conditions`` names are DEFERRED at a PR head ONLY
+                          when no PR-triggered run of the emitting workflow is on that
+                          head (then Mergify settles them on the queue branch). A name
+                          whose workflow DID run here is graded `MISSING` (pending or
+                          never posted — absence is not deferral) unless it is green, and
+                          an unattributable absence is a FAIL. See ``check_gates``.
   3. ``review``           ``record-review.sh --check-carry`` bound to the LIVE head.
   4. ``coverage``         the CI selection covers the union of the touched files; a
                           hand-picked subset of a declared union is refused.
@@ -36,6 +42,17 @@ Output is exactly one of::
     READY-FOR-OWNER(<PR>, <full head sha>)      # exit 0, all six PASS
     NOT-READY(<PR>, failed=<condition,...>)     # exit 1, with each failing raw value
                                                 # printed on its own check line above
+
+``--required-set`` is the ONE exception, and it is a different QUESTION ("what is required
+here?", not "is this PR ready?"), so it is a different output shape by design::
+
+    source: … / mode: … / queue_conditions: … / merge_conditions: … / union (N): …
+                                                # exit 0, the derived set
+    REQUIRED-SET-CONFIG-ERROR(...)              # exit 2, the two sources disagree
+    REQUIRED-SET-UNREADABLE(...)                # exit 2, could not be read
+
+It takes no PR number and needs no credential, and it never emits either of the two lines
+above — a caller grepping for READY/NOT-READY cannot mistake one for the other.
 
 ⛔ **It must never print READY on a partial read.** An input that could not be read is
 ``FAIL(unreadable)`` — never assumed, never skipped, never defaulted to green. That is
@@ -52,11 +69,21 @@ rather than assumed:
   read as a pass"*. A queue entry gate weaker than the queue it gates is a false PASS.
 * The owner does not review. A required check that CONCLUDED WITHOUT EXERCISING CODE
   (``skipped``/``neutral``) or was CANCELLED measured nothing, so it is not evidence
-  that the tree is sound. Absence is not a pass — the fail-closed rule this file shares
-  with ``/v1``-style convergence (see ``docs``/``AGENTS.md`` check-run polarity).
+  that the tree is sound. Absence is not a pass **for an ENTRY context** — the
+  fail-closed rule this file shares with ``/v1``-style convergence (see ``docs``/
+  ``AGENTS.md`` check-run polarity). A ``merge_conditions`` name absent at the head is a
+  different case, and it is DEFERRED **only when nothing shows the emitting workflow ran
+  here** — see condition 2 above for the attributed cases.
 
-The divergence is deliberate and it is the strict direction: this tool can only refuse
-a merge the queue would have allowed, never allow one the queue would refuse.
+The strict direction holds for a MEASURED result, and it is worth stating its edge
+precisely rather than absolutely: this tool never treats ``skipped``/``neutral``/
+``cancelled``/an unknown conclusion as a pass where ``.mergify.yml``'s ``check-success``
+would refuse, so it cannot allow a merge for a reason the queue would reject. What it does
+NOT claim is that the queue will accept the merge: a ``merge_conditions`` check whose
+emitting workflow did not run on the author head is DEFERRED there and settled by Mergify on
+``mergify/merge-queue/<sha>`` (one whose workflow DID run here must be green — absence is a
+FAIL). READY therefore means *every ENTRY context passed here, and every merge-time context
+was either measured green here or genuinely deferred* — never *the queue will merge this*.
 
 Grouping is NOT re-derived here
 -------------------------------
@@ -73,13 +100,15 @@ Live use::
     python tools/ready_for_owner.py 10962
     python tools/ready_for_owner.py 10962 --json
     python tools/ready_for_owner.py 10962 --repo daniel-ospina/tortoise
+    python tools/ready_for_owner.py --required-set              # what is REQUIRED here
+    python tools/ready_for_owner.py --required-set --ref HEAD   # …as this BRANCH's last commit declares
 
-⛔ ONE RESIDUAL IN THE GATE READ, NAMED RATHER THAN HIDDEN: the required-context read
-keeps each `checks[].context` NAME and drops its `app_id`, and `ci_verdict`'s
-``GroupVerdict`` carries the app SLUG (not its numeric id), so a context that protection
-scopes to one app is satisfied by a same-named ``success`` from another. Inert in this repo
-— GitHub Actions is the only publisher of all seven contexts — and closing it needs an
-``app.id`` on ``GroupVerdict``, i.e. a change to the ONE check-run reading (#5042) rather
+⛔ ONE RESIDUAL IN THE GATE READ, NAMED RATHER THAN HIDDEN: the required set is DERIVED
+from `.mergify.yml` and carries check NAMES only, while `ci_verdict`'s ``GroupVerdict``
+carries the app SLUG (not its numeric id), so a required name is satisfied by a
+same-named ``success`` from another app. Inert in this repo — GitHub Actions is the only
+publisher of all seven names — and closing it needs an ``app.id`` on ``GroupVerdict``, i.e.
+a change to the ONE check-run reading (#5042) rather
 than a second grouping here.
 
 ⛔ ONE KNOWN LIMITATION, NAMED RATHER THAN HIDDEN: condition 3 asks
@@ -126,6 +155,18 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from tools import ci_verdict  # noqa: E402  (path set up above)
+from tools.mergify_config_guard import (  # noqa: E402  (path set up above)
+    # One definition of the PR-scoped triggers, never a second copy that could drift.
+    PR_TRIGGERS,
+    GuardUnreadable,
+)
+from tools.required_set import (  # noqa: E402  (path set up above)
+    RequiredSet,
+    RequiredSetConfigError,
+    RequiredSetUnreadable,
+    derive_from_config,
+    derive_from_ref,
+)
 
 # ── the contract's constants ────────────────────────────────────────────────
 
@@ -140,6 +181,17 @@ CONDITIONS: tuple[str, ...] = (
 
 #: The ONLY conclusion that passes a required context. See the module docstring.
 REQUIRED_CONCLUSION = "success"
+
+#: A ``merge_conditions`` name is DEFERRED at a PR head **only when there is no evidence
+#: its emitting workflow ran here** — Mergify settles those on ``mergify/merge-queue/<sha>``.
+#: ⛔ NOT "absent is deferred": ``python-ci-gate`` DOES report on author PR heads, and a
+#: ``needs``-gated job has no check-run until its prerequisites finish, so an absent
+#: aggregate is indistinguishable from a PENDING one. The 2026-11-04 "every sampled PR head
+#: carried ZERO runs" reading is RETRACTED (`tools/required_set.py`: it was taken while the
+#: matrix was still running) — do not restore the unconditional deferral from it, that was
+#: the fail-open `_merge_time_absence` now closes. Absence with a run of the emitter on this
+#: head is ``MISSING`` (a FAIL); absence with no attribution at all is a FAIL.
+DEFERRED = "DEFERRED(merge-time)"
 
 #: A head younger than this is still settling: CI may not have been scheduled, the
 #: review record may not have been minted, and the queue has not seen it. Opening the
@@ -388,9 +440,7 @@ _SUFFIX_RETRACTION_RE = re.compile(
 #: the fourth-newline spelling blocked. That body NAMES a severity token, and the per-token
 #: severity arm below is graded over the WHOLE suffix (never windowed), so both spellings still
 #: block, for the reason that actually applies. A token is a token wherever it sits.
-_NEXT_PARA_RETRACTION_RE = re.compile(
-    r"(?i)(?:" + _R1_NO_LONGER + _R2_ATTRIBUTED + r")"
-)
+_NEXT_PARA_RETRACTION_RE = re.compile(r"(?i)(?:" + _R1_NO_LONGER + _R2_ATTRIBUTED + r")")
 #: ⛔ IT MAY NOT CROSS A CONTRASTIVE, A CLAUSE BREAK, OR A COMMA (review cycle 8). A plain
 #: character window reached from `fixed` in `the earlier P2 was fixed, but the P1 is still
 #: there` all the way to the P1 and exempted the very finding the sentence warns about; the
@@ -615,15 +665,17 @@ def _retracted_from(text: str, end: int) -> bool:
         # `Not all of the P1 findings were fixed.` asserts at least one is still open.
         if _SEVERITY_UNIVERSAL_NEGATION_BEFORE_RE.search(left):
             return True
-        if _SEVERITY_NEGATED_BEFORE_RE.search(left) or \
-                _SEVERITY_ABSOLUTE_NEGATION_BEFORE_RE.search(left):
+        if _SEVERITY_NEGATED_BEFORE_RE.search(left) or _SEVERITY_ABSOLUTE_NEGATION_BEFORE_RE.search(
+            left
+        ):
             if _SEVERITY_COMPLETION_NEGATED_AFTER_RE.match(suffix, token.end()):
                 return True
             continue
         if _SEVERITY_ZERO_COUNT_RE.match(suffix, token.end()):
             continue
-        if _SEVERITY_COMPLETED_BEFORE_RE.search(left) and not \
-                _SEVERITY_PREDICATE_AFTER_RE.match(suffix, token.end()):
+        if _SEVERITY_COMPLETED_BEFORE_RE.search(left) and not _SEVERITY_PREDICATE_AFTER_RE.match(
+            suffix, token.end()
+        ):
             continue
         if _SEVERITY_COMPLETED_AFTER_RE.match(suffix, token.end()):
             continue
@@ -706,6 +758,7 @@ def asserts_a_clear(text: str) -> bool:
             continue
         return True
     return False
+
 
 #: A CAPPED / ABORTED / DECLARED-NEGATIVE review exit. ⛔ THE VOCABULARY IS COPIED FROM
 #: `scripts/record-review.sh`, NOT INVENTED HERE: it is that script's arms (1) and (1b) —
@@ -890,11 +943,7 @@ ONE_OPEN_COUNT_RE = re.compile(
     + r"\b(?:\s+\w+){0,2}\s+"
     + SEV
     + r"\b"
-    r"|\b(?:1|one)\b(?:\s+\w+){0,2}\s+"
-    + SEV
-    + r"\b(?:\s+\w+){0,2}\s+"
-    + _ONE_OPEN_CUE
-    + r"\b"
+    r"|\b(?:1|one)\b(?:\s+\w+){0,2}\s+" + SEV + r"\b(?:\s+\w+){0,2}\s+" + _ONE_OPEN_CUE + r"\b"
 )
 #: ⛔ THE CUE-BEFORE-COUNT SPELLING — the one a reviewer writes when SUMMARISING, and the one
 #: the two arms above cannot take: they require the cue BETWEEN count and token or AFTER the
@@ -909,8 +958,7 @@ ONE_OPEN_COUNT_RE = re.compile(
 #: token (`remaining: 1 P1 was fixed`) is a CLOSED finding, not an open one, and must stay
 #: certifiable — the same rule `_fixed_after_token` encodes for the sibling arms.
 _ONE_OPEN_CUE_BEFORE = (
-    _ONE_OPEN_CUE
-    + r"|apart\s+from|except(?:ing|ed)?(?:\s+for)?|other\s+than|aside\s+from|besides"
+    _ONE_OPEN_CUE + r"|apart\s+from|except(?:ing|ed)?(?:\s+for)?|other\s+than|aside\s+from|besides"
 )
 ONE_OPEN_CUE_BEFORE_COUNT_RE = re.compile(
     r"(?i)(?<![\w-])(?:"
@@ -1009,6 +1057,7 @@ REVIEW_OK_TOKENS = frozenset({"head", "carry"})
 #: ready, however the `--check-carry` token reads.
 CLEAN_REVIEW_VERDICTS = frozenset({"clean", "clean-micro", "clean-low"})
 
+
 def _env_int(name: str, default: int) -> int:
     """A bounded knob from the environment, parsed WITHOUT risking the verdict contract.
 
@@ -1062,6 +1111,24 @@ GIT_TIMEOUT = _env_int("READY_GATE_GIT_TIMEOUT", 180)
 
 class ReadError(RuntimeError):
     """An input could not be read. NEVER a verdict, and never green."""
+
+
+class RequiredConfigReadError(ReadError):
+    """The required set was not derivable because the repo's CONTRACT is wrong.
+
+    A subclass of `ReadError` so every existing handler still REFUSES, and its own class
+    so the distinction survives the read boundary: `tools.required_set.RequiredSetConfigError`
+    says the repo's two sources of truth disagree (a `check-success=` line dropped while
+    the committed record still names the context, or a record whose own `live_result` is
+    `DIVERGED`) — the #3016 regression this module exists to catch. That is a VERDICT
+    about configuration, never an I/O failure: `FAIL(unreadable)` means "could not be
+    read, RETRY" in this module's vocabulary, and retrying will not change a config.
+
+    ⛔ The `RequiredSetConfigError` docstring states the same rule from the other side:
+    *"What must never happen is that this class is caught and treated as a retryable read
+    failure."* Collapsing it into `ReadError` at `_read_required_contexts` is exactly that
+    collapse, one frame later.
+    """
 
 
 class RateLimited(ReadError):
@@ -1161,8 +1228,48 @@ class Probe:
     #: Newest attempt per ``(app, workflow, job)`` — ``None`` = the surface was unreadable.
     groups: tuple[ci_verdict.GroupVerdict, ...] | None = None
     groups_raw: str = ""
-    #: Required contexts from branch protection — ``None`` = unreadable.
+    #: The WORKFLOW RUNS on this head (``actions/runs?head_sha=``), read by the same call
+    #: that produced ``groups`` — ``None`` = unreadable. Carried because a merge-time
+    #: context's ABSENCE has two causes and only the run listing separates them: a job
+    #: with unmet ``needs`` has no check-run yet, so "not created YET" and "this workflow
+    #: never ran here" look identical in ``groups``.
+    head_runs: tuple[Mapping[str, Any], ...] | None = None
+    #: Required ENTRY contexts — must be green at the PR head. ``None`` = unreadable.
+    #: Derived from ``.mergify.yml``'s ``queue_conditions`` (see `tools.required_set`).
     required: tuple[str, ...] | None = None
+    #: Required MERGE-TIME contexts (``merge_conditions``). Mergify settles them on
+    #: ``mergify/merge-queue/<sha>``, so an author head that carries no run of the
+    #: emitting workflow leaves them DEFERRED rather than missing. ⛔ DEFERRED is decided
+    #: by that EVIDENCE, never by absence alone: re-measured 2026-11-05, ``python-ci-gate``
+    #: DOES report on author heads (``queued``, ``success`` and ``failure`` all observed),
+    #: and a ``needs``-gated job that has not started has no check-run at all — so
+    #: absence is also what a PENDING aggregate looks like, which is a FAIL here.
+    #: ``None`` = unreadable, and it is kept SEPARATE from ``required`` because
+    #: conflating the two is the permanent false NOT-READY this split exists to end.
+    required_deferred: tuple[str, ...] | None = None
+    #: Set only when the required set was not derivable because the repo's CONTRACT is
+    #: wrong (a ``RequiredSetConfigError``: the committed record and ``.mergify.yml``
+    #: disagree, or the record's own ``live_result`` is not clean). ``check_gates`` turns
+    #: it into a plain ``FAIL`` — never ``FAIL(unreadable)``, which means "could not be
+    #: read, RETRY" and would point a lane at the wrong subsystem. Empty = no config error.
+    required_config_error: str = ""
+    #: ``merge-time context -> workflow FILES that emit it`` (the record's ``emitters``
+    #: projection, via `tools.required_set.RequiredSet.emit_files`). An empty answer for a
+    #: required name means the emission is UNATTRIBUTABLE, which fails the gate rather than
+    #: falling through to DEFERRED.
+    merge_emit_files: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    #: The workflow FILE names that EXIST in the tree the required set was derived from
+    #: (`.github/workflows/*.yml` at the protected ref, via
+    #: `tools.required_set.RequiredSet.workflow_files`). ``None`` = not read.
+    #:
+    #: ⛔ WHY THE PROJECTION ABOVE IS NOT ENOUGH ON ITS OWN (#11175): `emit_files` is a
+    #: COMMITTED projection, rewritten only by `mergify_config_guard --recut` (a weekly
+    #: cron) and by `--live`. Rename or delete the emitting workflow and land it on `main`
+    #: without a recut, and the record still names the OLD file — which matches no run on
+    #: any head, so "the emitter did not run here" (DEFERRED, a PASS) becomes
+    #: indistinguishable from "the recorded spelling is stale" (#11175's false READY).
+    #: Comparing the projection against the files that actually exist separates them.
+    base_workflow_files: tuple[str, ...] | None = None
     required_raw: str = ""
     #: ``record-review.sh --check-carry`` verdict token and exit code.
     review_token: str | None = None
@@ -1265,16 +1372,318 @@ def _gate_token(group: ci_verdict.GroupVerdict) -> str:
     return ""
 
 
+def _merge_time_absence(probe: Probe, context: str) -> tuple[str, str]:
+    """Explain an ABSENT merge-time context: ``(failure token or "", seen note)``.
+
+    A ``merge_conditions`` name is authoritative on the QUEUE branch, so an author head
+    that carries no trace of it is genuinely DEFERRED. The trap is that the two causes of
+    absence are invisible in `groups`:
+
+      * the workflow never ran on this head — the check does not exist by design here;
+      * the workflow DID run and this job's `needs` are not satisfied yet — GitHub has
+        created **no check-run at all** for a dependent job, so a PENDING aggregate looks
+        exactly like an absent one (vendor behaviour, `needs`, GitHub Actions workflow
+        syntax).
+
+    Those two need OPPOSITE verdicts, and this module's own rule decides which: *"In-flight
+    is a FAIL here, not a wait: a head whose checks have not concluded is not ready now."*
+    So a head that carries a PR-triggered run of the emitting workflow is a FAIL — the
+    aggregate is pending, or its legs already concluded and it never posted — and only a
+    head with no such run defers.
+
+    ⛔ THE MEASUREMENT THAT DROVE THIS: `python-ci-gate` reports on author heads
+    (`queued` 11097, `completed/success` 11100, `completed/failure` 11096), and head
+    `92299555219e` of PR 11113 carried `test (g)` RED with the aggregate absent. An
+    unconditional DEFERRED graded that head PASS over a red required suite.
+
+    ⛔ UNATTRIBUTABLE IS A FAIL, NOT A DEFER. If the committed record carries no emitter
+    for a required name, "did that workflow run here?" cannot be asked at all, and the
+    DEFERRED arm would be a PASS built on no evidence. The remedy is the one the guard
+    already documents for this projection: `tools/mergify_config_guard.py --recut`
+    rewrites `emitters`.
+
+    ⛔ AND THE PROJECTION ITSELF IS VALIDATED AGAINST THE PROTECTED REF (#11175). A
+    recorded emitter that names NO workflow file present at the ref is a STALE SPELLING —
+    a workflow was renamed/removed and landed without a re-cut — and "no run of that file
+    exists on this head" is then true of EVERY head for a reason that says nothing about
+    the aggregate. Matched against runs alone, that reads DEFERRED (a PASS) while the
+    required heavy suite never ran: measured on the #11175 reproduction, the SAME head
+    evidence (one `pull_request` run of `python-suite.yml`) reads PASS with the stale
+    spelling `python-ci.yml` and FAIL `missing` with the real one. So the spelling is
+    checked first, and a stale one is UNATTRIBUTABLE.
+
+    ⛔ THE OVER-BLOCK DIRECTION IS DECIDED HERE, NOT DISCOVERED LATER (#11175 DoD). After
+    such a rename this arm reports `NOT-READY(unattributable)` for EVERY PR, not just the
+    ones touching the emitter, until a human re-cuts the record — that is a FLEET-WIDE
+    refusal, and it is the safe direction deliberately: the alternative (deferring on a
+    spelling that matches nothing) is a false READY, which this module may never produce.
+    The state it reports is also TRUE rather than pessimistic — with the emitting workflow
+    gone, the required aggregate can never be produced, so branch protection deadlocks
+    every merge anyway (`mergify_config_guard --static` already reports `DIGEST-DIVERGED`
+    in that state). The remedy is `tools/mergify_config_guard.py --recut`, whose whole job
+    is rewriting this projection.
+    """
+    # ⛔ THE FIELD ITSELF AND THEN THE MATERIALISATION, because a shape rule that is not a
+    # TOTAL function of the input is not a shape rule. `Probe.merge_emit_files` is an
+    # annotation and `Probe` is a documented hand-buildable construction, so three classes
+    # have to land on a VERDICT rather than on a traceback or a PASS:
+    #   * a non-`Mapping` field  → the `.get` below would raise `AttributeError`;
+    #   * a truthy NON-ITERABLE  (`17`, `1.0`, `True`) → iterating it raises `TypeError`;
+    #   * a ONE-SHOT ITERATOR    (`iter`, `map`, a generator) → `all()` below EXHAUSTS it,
+    #     so the later `_run_emits` comparison sees an empty sequence, matches nothing, and
+    #     answers DEFERRED — a PASS on an absent aggregate whose workflow ran on the head.
+    #     The empty-generator case is the worse half: it must be UNATTRIBUTABLE (no
+    #     emitters), and read as "recorded, nothing matched" instead.
+    # Measured at `08fab8605` for all three. Normalising ONCE, here, means every consumer
+    # below sees a tuple — the materialisation is what makes the rule total.
+    if not isinstance(probe.merge_emit_files, Mapping):
+        return "unattributable", (
+            f"{context}=UNATTRIBUTABLE(the emitter projection is a "
+            f"{type(probe.merge_emit_files).__name__}, not a mapping of context to workflow "
+            "file names, so 'no run of the emitter' is not a measurement; re-cut with "
+            "`tools/mergify_config_guard.py --recut`)"
+        )
+    files = probe.merge_emit_files.get(context) or ()
+    if not files:
+        return "unattributable", (
+            f"{context}=UNATTRIBUTABLE(no emitter recorded for {context} — the committed "
+            "record's `emitters` cannot say which workflow should have posted it, so its "
+            "absence cannot be read as DEFERRED; re-cut with "
+            "`tools/mergify_config_guard.py --recut`)"
+        )
+    # ⛔ A PROJECTION THAT IS NOT A SEQUENCE OF FILE NAMES CANNOT ATTRIBUTE ANYTHING, and
+    # reading "no run of the emitter exists" out of it is the same conflation the
+    # `head_runs` shape guard closes on the listing side. `Probe.merge_emit_files` is an
+    # ANNOTATION, not an enforced type, and this module documents a hand-built `Probe` as
+    # supported — so the shape is checked HERE, at the one place that turns the projection
+    # into a verdict.
+    #
+    # Measured at `980e5131e` before this guard existed: a BARE STRING
+    # (`"python-ci.yml"`, the exact JSON slip `_fixture_merge_emit_files` was added for)
+    # was iterated as CHARACTERS by the basename comparison in `_run_emits`, matched
+    # nothing, and answered DEFERRED — a PASS while the aggregate was absent and its
+    # workflow had run on the head. That was a REGRESSION the basename normalisation
+    # introduced (pre-fix, `"python-ci.yml" in "python-ci.yml"` matched, so the arm said
+    # MISSING); and a non-`str` element (`None`, `17`) escaped as an `AttributeError`
+    # instead of a verdict. One shape rule closes both.
+    if isinstance(files, (str, Mapping)):
+        return "unattributable", (
+            f"{context}=UNATTRIBUTABLE(the recorded emitter projection is a "
+            f"{type(files).__name__}, not a sequence of workflow FILE names, so 'no run of "
+            "the emitter' is not a measurement; re-cut with "
+            "`tools/mergify_config_guard.py --recut`)"
+        )
+    try:
+        files = tuple(files)
+    except TypeError:
+        return "unattributable", (
+            f"{context}=UNATTRIBUTABLE(the recorded emitter projection is a "
+            f"{type(files).__name__} and cannot be enumerated, so 'no run of the emitter' "
+            "is not a measurement; re-cut with "
+            "`tools/mergify_config_guard.py --recut`)"
+        )
+    # A projection that is EMPTY once materialised is the "no emitter recorded" state, and
+    # it takes the same arm a literal `()` does. Without this an empty GENERATOR read as
+    # "recorded, nothing matched" → DEFERRED (PASS) while an empty TUPLE read as
+    # UNATTRIBUTABLE — the same state graded two ways depending on its container.
+    if not files:
+        return "unattributable", (
+            f"{context}=UNATTRIBUTABLE(the recorded emitter projection is empty for "
+            f"{context} — its absence cannot be read as DEFERRED; re-cut with "
+            "`tools/mergify_config_guard.py --recut`)"
+        )
+    if not all(isinstance(f, str) and f for f in files):
+        return "unattributable", (
+            f"{context}=UNATTRIBUTABLE(the recorded emitter projection carries an entry "
+            "that is not a workflow FILE name, so its absence cannot be attributed; "
+            "re-cut with `tools/mergify_config_guard.py --recut`)"
+        )
+    # ⛔ THE SPELLING IS VALIDATED AGAINST THE PROTECTED REF'S OWN WORKFLOW FILES (#11175),
+    # BEFORE any run is matched — see the docstring's third paragraph. Same discipline as
+    # the shape guards above: "not read" and "read, and it is empty" are different answers,
+    # and neither may fall through to the DEFERRED (PASS) arm.
+    if probe.base_workflow_files is None:
+        return "unattributable", (
+            f"{context}=UNATTRIBUTABLE(the workflow files at the protected ref were not "
+            "read, so a recorded emitter that matches no run cannot be told apart from a "
+            "stale projection)"
+        )
+    if isinstance(probe.base_workflow_files, (str, bytes, Mapping)):
+        return "unattributable", (
+            f"{context}=UNATTRIBUTABLE(the protected ref's workflow listing is a "
+            f"{type(probe.base_workflow_files).__name__}, not a sequence of file names, so "
+            "'the recorded emitter still exists' is not a measurement)"
+        )
+    try:
+        present_files = tuple(probe.base_workflow_files)
+    except TypeError:
+        return "unattributable", (
+            f"{context}=UNATTRIBUTABLE(the protected ref's workflow listing is a "
+            f"{type(probe.base_workflow_files).__name__} and cannot be enumerated, so "
+            "'the recorded emitter still exists' is not a measurement)"
+        )
+    if not all(isinstance(f, str) and f for f in present_files):
+        return "unattributable", (
+            f"{context}=UNATTRIBUTABLE(the protected ref's workflow listing carries an "
+            "entry that is not a file name, so 'the recorded emitter still exists' is not "
+            "a measurement)"
+        )
+    # Basenames on BOTH sides: the record may carry `python-ci.yml` or
+    # `.github/workflows/python-ci.yml` (both spellings are in the wild, and `_run_emits`
+    # reduces the same way), so the comparison must not depend on which one this record uses.
+    present = {f.rsplit("/", 1)[-1] for f in present_files}
+    stale = sorted({f.rsplit("/", 1)[-1] for f in files} - present)
+    if stale:
+        return "unattributable", (
+            f"{context}=UNATTRIBUTABLE(the record's `emitters` project onto "
+            f"{', '.join(stale)} — no such workflow file exists at the protected ref "
+            f"({len(present)} workflow file(s) known), so the projection is STALE and 'no "
+            "run of the emitter on this head' is not evidence of deferral; re-cut with "
+            "`tools/mergify_config_guard.py --recut`)"
+        )
+    if probe.head_runs is None:
+        return "unattributable", (
+            f"{context}=UNATTRIBUTABLE(the head's workflow runs could not be read, so "
+            "absence cannot be told apart from a pending aggregate)"
+        )
+    # The same materialisation on the LISTING side: a one-shot iterator would be exhausted
+    # by the `all(...)` below, leaving the match loop with nothing to iterate and reporting
+    # "no run of the emitter exists" from a listing nobody finished reading.
+    if isinstance(probe.head_runs, (str, bytes, Mapping)):
+        return "unattributable", (
+            f"{context}=UNATTRIBUTABLE(the head's run listing is a "
+            f"{type(probe.head_runs).__name__}, not a sequence of run entries, so 'no run "
+            "of the emitter' is not a measurement)"
+        )
+    try:
+        head_runs = tuple(probe.head_runs)
+    except TypeError:
+        return "unattributable", (
+            f"{context}=UNATTRIBUTABLE(the head's run listing is a "
+            f"{type(probe.head_runs).__name__} and cannot be enumerated, so 'no run of "
+            "the emitter' is not a measurement)"
+        )
+    # A listing with an unreadable ENTRY is not a reading of the listing — the same rule
+    # the fixture door enforces (`_fixture_head_runs`). "No run matched" is a MEASUREMENT
+    # only when every entry was readable, so a hand-built `Probe` carrying a malformed
+    # entry must land on the same FAIL, never on the DEFERRED (PASS) arm.
+    if not all(_readable_run(run) for run in head_runs):
+        return "unattributable", (
+            f"{context}=UNATTRIBUTABLE(the head's run listing carries an entry that is not "
+            "a READABLE run — not a mapping, or carrying no workflow `path` — so 'no run "
+            "of the emitter' is not a measurement)"
+        )
+    matched = [_run_file(run) for run in head_runs if _run_emits(run, files)]
+    if matched:
+        return "missing", (
+            f"{context}=MISSING(its workflow {matched[0]!r} ran on this head, so the "
+            "aggregate is pending creation or never posted — absence is not deferral)"
+        )
+    return "", f"{context}={DEFERRED}(no {'/'.join(files)} run on this head)"
+
+
+def _run_path(run: Mapping[str, Any]) -> str:
+    """The workflow FILE PATH a run entry carries, or ``""`` when it carries none.
+
+    ``path`` is the handle ``emitters`` is matched against, so an entry that does not
+    carry a non-empty one is not attributable at all — see `_readable_run`.
+    """
+    path = run.get("path")
+    return path.strip() if isinstance(path, str) else ""
+
+
+def _run_file(run: Mapping[str, Any]) -> str:
+    """`.github/workflows/python-ci.yml` -> `python-ci.yml` (what `emitters` records)."""
+    return _run_path(run).rsplit("/", 1)[-1]
+
+
+def _readable_run(run: Any) -> bool:
+    """Is this entry a run attribution can READ — a mapping carrying a workflow path?
+
+    ⛔ ``path`` IS LOAD-BEARING, exactly like ``event`` in `_run_emits`. `_run_file` maps a
+    missing ``path`` to ``""``, which matches no emitter, so an entry that merely OMITS the
+    field falls through to "no run of the emitter exists" — the DEFERRED (PASS) arm — on a
+    listing nobody could actually read. Measured at `b45af8abd`: a hand-built
+    ``head_runs=({"event": "pull_request"},)`` graded ``python-ci-gate=DEFERRED(merge-time)``
+    and the gate **PASSed**, while the same entry WITH its ``path`` graded ``MISSING``
+    (a FAIL). Both doors that can produce a listing must land such an entry on
+    UNATTRIBUTABLE: ``_fixture_head_runs`` (a fixture) and `_merge_time_absence`' own guard
+    (a hand-built ``Probe``, which this module documents as supported).
+    """
+    return isinstance(run, Mapping) and bool(_run_path(run))
+
+
+def _run_emits(run: Mapping[str, Any], files: tuple[str, ...]) -> bool:
+    """Did this run come from one of the workflows that emit the context, on a PR?
+
+    The event filter is load-bearing in the other direction: `head_sha` also lists
+    `push`/`workflow_dispatch` runs, and a `push` run of the same sha is NOT evidence
+    that the PR-triggered aggregate was created. An absent `event` is not filtered out —
+    the documented API always returns it, so a payload without one must not silently
+    downgrade a FAIL to a DEFER.
+    """
+    if not isinstance(run, Mapping):
+        # A malformed entry is not evidence that the workflow ran, and it must not be a
+        # traceback either: `check_gates` converts every unreadable input into a VERDICT,
+        # and an AttributeError escaping to the CLI exits 1 — which a caller reads as
+        # "a required check is red" rather than "I could not read the runs".
+        return False
+    # ⛔ BOTH SIDES ARE REDUCED TO A BASENAME HERE, and this is the ONE place that does it.
+    # `_run_file` already reduces the RUN side; the EMITTER side arrives either from the
+    # committed record (`required_set._snapshot_emitters`, which stores the value verbatim)
+    # or from the `--fixture` door, and nothing guarantees those spell the same thing. A
+    # record naming `.github/workflows/python-ci.yml` used to match no run at all, leaving
+    # the match set empty so `_merge_time_absence` answered DEFERRED — a PASS on a head
+    # where the emitting workflow really ran. That is the record-side twin of the
+    # `_readable_run` `path` guard: an emitter value that cannot match is not evidence that
+    # nothing emitted it. Normalising at the comparison keeps it fail-closed for every door.
+    if _run_file(run) not in {f.rsplit("/", 1)[-1] for f in files if isinstance(f, str) and f}:
+        return False
+    event = run.get("event")
+    return not isinstance(event, str) or event in PR_TRIGGERS
+
+
 def check_gates(probe: Probe) -> Check:
-    """Every required context must have a newest attempt concluded ``success``.
+    """Every required ENTRY context must have a newest attempt concluded ``success``.
+
+    ``merge_conditions`` names are a different case, and the difference is ATTRIBUTION,
+    not tolerance: an absent merge-time name is ``DEFERRED(merge-time)`` (a PASS) **only**
+    when nothing shows its emitting workflow ran on this head — then Mergify settles it on
+    ``mergify/merge-queue/<sha>``. When a PR-triggered run of that workflow IS on the head,
+    the aggregate is pending or never posted and the absence is ``MISSING`` (a FAIL); when
+    the attribution or the run listing cannot be read, it is ``UNATTRIBUTABLE`` (also a
+    FAIL, never a deferral). A merge-time check that ran here and is red fails too, because
+    a measured red is evidence about this tree wherever it is judged. See
+    ``_merge_time_absence`` for the three arms.
 
     In-flight is a FAIL here, not a wait: a head whose checks have not concluded is not
     ready *now*, and the answer the owner needs is about now.
     """
-    if probe.required is None or not probe.required:
+    # ⛔ THE REQUIRED SET'S PROVENANCE IS PART OF THE VERDICT ON EVERY ARM THAT JUDGES THE
+    # SET, including the failing and the refuses-because-empty ones. The set is read from a
+    # local ref that the read never fetches, so the sha in `required_raw` is the ONLY honest
+    # statement about what was certified — and it used to reach output only through the two
+    # unreadable arms, leaving a READY (and any named-check failure) silent about provenance.
+    # Every arm below carries it, the check-runs-unreadable one included.
+    source = probe.required_raw or "required-set: not read"
+    if probe.required is None or probe.required_deferred is None:
+        if probe.required_config_error:
+            # The repo's own contract is violated (record ↔ config divergence, or a record
+            # whose `live_result` is not clean). This is a CONFIGURATION fact, so it refuses
+            # as `FAIL`, NOT `FAIL(unreadable)`: `unreadable` means "could not be read,
+            # RETRY" here, and no retry repairs a config. Same split the every-required-
+            # check-is-merge-time arm below states, and the same split `--required-set`
+            # keeps (`REQUIRED-SET-CONFIG-ERROR` vs `REQUIRED-SET-UNREADABLE`).
+            return Check(
+                "gates",
+                False,
+                probe.required_raw or "required context set is empty",
+                f"required-set-config-error:{probe.required_config_error}",
+            )
         # An EMPTY required set is not "nothing is required" — it is a set that was not
-        # read. Zero protection contexts, a truncated payload, or a hand-written fixture
-        # must never read as an unconditional pass.
+        # read. Zero contexts, a truncated payload, or a hand-written fixture must never
+        # read as an unconditional pass. (`is None` is the UNREADABLE case precisely so
+        # the empty-but-read configurations below can be diagnosed as what they are.)
         return Check(
             "gates",
             False,
@@ -1282,17 +1691,43 @@ def check_gates(probe: Probe) -> Check:
             "unreadable",
             unreadable=True,
         )
+    if not probe.required and not probe.required_deferred:
+        return Check(
+            "gates",
+            False,
+            probe.required_raw or "required context set is empty",
+            "unreadable",
+            unreadable=True,
+        )
+    if not probe.required:
+        # A READABLE config whose every check is merge-time: nothing is decided at the
+        # head, so PASS would be a claim about nothing. This is a CONFIGURATION fact, not a
+        # read failure — so it refuses as `FAIL`, NOT `FAIL(unreadable)`: `unreadable`
+        # means "could not be read, RETRY" in this module's vocabulary, and retrying will
+        # not change a config.
+        return Check(
+            "gates",
+            False,
+            f"entry=0 merge-time={len(probe.required_deferred)} [{source}]",
+            "every required check is merge-time, so nothing is evaluated against the PR head",
+        )
     if probe.groups is None:
-        return Check("gates", False, probe.groups_raw or "-", "unreadable", unreadable=True)
-    # ⛔ The BUCKET is the check's JOB NAME, because that is what branch protection
-    # names: `checks[].context` IS the job name (`python-ci-gate`, `docs`, `ai-review-gate`).
-    # Matching anything else would leave a required context unmatched forever. What is NOT
-    # re-derived here is the GROUPING — whether two check-runs are the same workflow's next
-    # attempt, and which attempt is newest, is `ci_verdict`'s (`(app.slug, workflow, job)`,
-    # latest by `id`). Two workflows may therefore publish one job name and land in one
-    # bucket: every group in it must then pass, which is the fail-CLOSED direction (a bad
-    # attempt in either workflow fails the context) and is why the spread below is over all
-    # matching groups rather than the newest only.
+        return Check(
+            "gates",
+            False,
+            f"{probe.groups_raw or '-'} [grouping from ci_verdict; {source}]",
+            "unreadable",
+            unreadable=True,
+        )
+    # ⛔ The BUCKET is the check's JOB NAME, because that is what `.mergify.yml` names:
+    # `check-success=python-ci-gate` IS the job name (`python-ci-gate`, `docs`,
+    # `ai-review-gate`). Matching anything else would leave a required context unmatched
+    # forever. What is NOT re-derived here is the GROUPING — whether two check-runs are
+    # the same workflow's next attempt, and which attempt is newest, is `ci_verdict`'s
+    # (`(app.slug, workflow, job)`, latest by `id`). Two workflows may therefore publish
+    # one job name and land in one bucket: every group in it must then pass, which is the
+    # fail-CLOSED direction (a bad attempt in either workflow fails the context) and is
+    # why the spread below is over all matching groups rather than the newest only.
     by_job: dict[str, list[ci_verdict.GroupVerdict]] = {}
     for group in probe.groups:
         by_job.setdefault(group.job, []).append(group)
@@ -1302,8 +1737,9 @@ def check_gates(probe: Probe) -> Check:
     for context in probe.required:
         groups = by_job.get(context) or []
         if not groups:
-            # A required check that is ABSENT is a FAIL, never a skip. #10962 currently
-            # has no `python-ci-gate` run at all.
+            # A required check that is ABSENT is a FAIL, never a skip — for an ENTRY
+            # context. (`merge_conditions` absence is attributed, not deferred on sight —
+            # see `_merge_time_absence` below.)
             failed.append(f"missing:{context}")
             seen.append(f"{context}=MISSING(no check-run on this head)")
             continue
@@ -1323,13 +1759,59 @@ def check_gates(probe: Probe) -> Check:
             if token:
                 failed.append(f"{token}:{context}")
 
+    # ── MERGE-TIME contexts (`.mergify.yml` `merge_conditions`) ─────────────
+    # ABSENCE AT THE HEAD IS NOT AUTOMATICALLY "DEFERRED". Mergify evaluates these on
+    # the queue branch, but that says nothing about whether the check was CREATED here
+    # yet — and an Actions job with unmet `needs` has no check-run at all, so a PENDING
+    # aggregate and a workflow that never ran on this head are indistinguishable from
+    # `groups` alone. Re-measured 2026-11-05: `python-ci-gate` DOES report on author
+    # heads (`queued` on PR 11097, `success` on 11100, `failure` on 11096), and PR
+    # 11113's head had `test (g)` red with the aggregate absent. Grading that "absent"
+    # as DEFERRED is a PASS arm over evidence nobody read, and it contradicts this
+    # function's own rule that an in-flight check is a FAIL, not a wait — the verdict
+    # would depend on whether GitHub had created the check-run object yet.
+    #
+    # So absence is attributed with `_merge_time_absence`: DEFERRED only when no
+    # PR-triggered run of the EMITTING WORKFLOW happened on this head; a FAIL when it
+    # did (its aggregate is pending or never posted — both are non-green), and a FAIL
+    # when the emission cannot be attributed at all.
+    deferred = 0
+    for context in probe.required_deferred or ():
+        groups = by_job.get(context) or []
+        if not groups:
+            token, note = _merge_time_absence(probe, context)
+            seen.append(note)
+            if token:
+                failed.append(f"{token}:{context}")
+            else:
+                # `_merge_time_absence` answers `("", …)` on exactly one arm: DEFERRED.
+                deferred += 1
+            continue
+        for group in sorted(groups, key=lambda g: g.check_id or 0, reverse=True):
+            seen.append(f"{context}={group.status}/{(group.conclusion or 'null')}#{group.check_id}")
+            token = _gate_token(group)
+            if token:
+                failed.append(f"{token}:{context}")
+
     raw = "; ".join(seen) if seen else "no check-runs on this head"
     if failed:
-        return Check("gates", False, f"required={len(probe.required)} {raw}", ",".join(failed))
+        return Check(
+            "gates",
+            False,
+            f"entry={len(probe.required)} {raw} [{source}]",
+            ",".join(failed),
+        )
     return Check(
         "gates",
         True,
-        f"required={len(probe.required)} all/{REQUIRED_CONCLUSION} {raw}",
+        # `deferred=` is a count of the DEFERRALS THIS VERDICT ACTUALLY MADE, not of the
+        # declared merge-time contexts: those are two different numbers whenever a
+        # merge-time check also reported on this head, and printing the declared count
+        # asserted a deferral of a check the same line reports as measured green. The
+        # declared count is still visible — one `seen` note per context below — so nothing
+        # is hidden by counting the real thing.
+        f"entry={len(probe.required)} all/{REQUIRED_CONCLUSION} "
+        f"deferred={deferred} {raw} [{source}]",
     )
 
 
@@ -2000,45 +2482,129 @@ def _read_head_commit_date(gh: Gh, head: str) -> str:
     raise ReadError(f"commits/{head}: no committer date")
 
 
-def _read_required_contexts(gh: Gh) -> tuple[tuple[str, ...], str]:
-    """Required status-check contexts from branch protection. Unreadable ⟹ ReadError.
+def _origin_slug(workdir: Path) -> str:
+    """``owner/name`` of the workdir's ``origin`` remote, or ``""`` when undeterminable.
 
-    ``checks[].context`` and the legacy ``contexts[]`` are unioned: a ruleset-era repo
-    populates one and a classic-protection repo the other, and reading only one would
-    silently drop a required check (a false PASS, the one failure this tool exists for).
+    Used only to DISCLOSE that the required set was derived from this checkout rather than
+    from the repo being judged — never to gate on it.
     """
-    raw = gh.api(f"branches/{PROTECTED_BRANCH}/protection")
-    if not isinstance(raw, Mapping):
-        raise ReadError(f"branches/{PROTECTED_BRANCH}/protection: unexpected payload")
-    block = raw.get("required_status_checks")
-    if not isinstance(block, Mapping):
-        raise ReadError(
-            f"branches/{PROTECTED_BRANCH}/protection carries no required_status_checks "
-            "(no protection configured, or a token without admin read) — the required "
-            "set is UNKNOWN, so no gate can be certified"
-        )
-    contexts: list[str] = []
-    for entry in block.get("checks") or []:
-        if isinstance(entry, Mapping) and entry.get("context"):
-            contexts.append(str(entry["context"]))
-    for entry in block.get("contexts") or []:
-        if isinstance(entry, str) and entry:
-            contexts.append(entry)
-    if not contexts:
-        raise ReadError(f"branches/{PROTECTED_BRANCH}/protection declares no required context")
-    deduped = tuple(sorted(dict.fromkeys(contexts)))
-    return deduped, f"required={len(deduped)} {list(deduped)}"
+    try:
+        proc = _run(["git", "remote", "get-url", "origin"], GIT_TIMEOUT, cwd=workdir)
+    except ReadError:
+        return ""
+    if proc.returncode != 0:
+        return ""
+    # ⛔ ORDER MATTERS: strip the trailing slash BEFORE the `.git` suffix. A remote
+    # spelled `https://github.com/owner/name.git/` (a trailing slash is legal) ends in
+    # `/`, so `removesuffix(".git")` would be a no-op and the slug would keep `.git` —
+    # printing `repo-scope=MISMATCH(… from owner/name.git's origin/main, judging
+    # owner/name …)` on a checkout that is exact. A disclosure that cries wolf is a
+    # disclosure readers learn to skip.
+    url = proc.stdout.strip().rstrip("/").removesuffix(".git")
+    # `git@github.com:owner/name` (scp-like) and `https://host/owner/name`.
+    slug = url.rsplit(":", 1)[-1] if "://" not in url else "/".join(url.split("/")[-2:])
+    return slug if slug.count("/") == 1 else ""
+
+
+def _repo_scope_note(workdir: Path, repo: str) -> str:
+    """One token saying WHICH REPO the required set was derived from.
+
+    ⛔ `--repo` parameterises the GitHub reads but NOT the derivation: both inputs
+    (``.mergify.yml`` and the committed record) come from ``origin/main`` of the checkout the
+    tool runs in, so a genuinely foreign ``--repo`` is judged against the LOCAL repo's
+    contract. The mismatch is not reachable as a false READY in practice — `_read_tree`
+    fetches ``refs/pull/<n>/head`` from the LOCAL ``origin`` and refuses when the fetched sha
+    ≠ the live head of the named repo, so the ``tree`` condition fails closed first — but a
+    residual that only exists in a comment is one nobody reads, and the required set's
+    provenance is supposed to be on every arm. So it is stated in the raw instead: a
+    mismatch is VISIBLE in the same line that discloses the sha.
+    """
+    origin = _origin_slug(workdir)
+    if not origin:
+        return f"repo-scope=UNDETERMINED(required set read from {workdir}'s origin/main)"
+    if origin.lower() == repo.lower():
+        return f"repo-scope=origin({origin})"
+    return (
+        f"repo-scope=MISMATCH(required set read from {origin}'s origin/main, judging "
+        f"{repo}; `--repo` does not scope the derivation)"
+    )
+
+
+def _read_required_contexts(workdir: Path, repo: str) -> tuple[RequiredSet, str]:
+    """The required set, DERIVED from the repo — never read from the protection API.
+
+    ``gh api repos/<o>/<r>/branches/main/protection`` needs repository **Administration:
+    Read**. This repo's lane credential is a fine-grained PAT without it, so that read
+    returns ``HTTP 403 {"message":"Resource not accessible by personal access token"}``
+    — which reaches ``Gh.api`` as ``RateLimited`` and is RE-RAISED by ``_try``, aborting
+    the run. Condition 2 therefore could not even be attempted on the credential the
+    fleet actually uses, and lanes improvised differently (#10962).
+
+    ``.mergify.yml`` clause 1 already states the invariant it was being read for
+    (``live required contexts == queue_conditions union merge_conditions``), so the set
+    is a pure function of a tracked file and needs NO credential at all. Deriving it
+    also recovers the ENTRY/MERGE split that a flat protection payload cannot express —
+    and without that split, ``python-ci-gate`` (a ``merge_conditions`` name) is absent at
+    every PR head, which a flat set can only read as ``FAIL(missing)``: NOT-READY forever.
+
+    ``docs/ci/required-contexts.json`` remains the committed witness of the LIVE
+    protection read (clause 2), and ``tools.required_set`` refuses when the two DISAGREE in
+    either direction — a record naming a context the config no longer derives is the #3016
+    regression, and a config deriving one the record does not confirm is the same EQUALITY
+    violated (the CI guard's `_clause_iv` treats both as `EXIT_DIVERGED`). The API is
+    deliberately not called here: it IS the credential dependency this removes, and its
+    recorded answer is already in the tree.
+
+    ⛔ A GATE THAT READS ITS OWN SUBJECT IS DEFEATABLE BY ITS SUBJECT, so the bytes come
+    from the PROTECTED ref (``origin/main``), never from the workdir being judged. Both
+    inputs are tracked files: a PR that deletes a ``check-success=`` line AND the matching
+    ``required_contexts`` entry in the same diff would otherwise have the snapshot certify
+    the set it just shrank. See ``tools.required_set.derive_from_ref``.
+
+    ⛔ A set that cannot be SPLIT is not evaluated: guessing which names are merge-time
+    re-creates the false NOT-READY, so it is a refusal rather than a verdict.
+    """
+    try:
+        required = derive_from_ref(workdir, f"origin/{PROTECTED_BRANCH}", timeout=GIT_TIMEOUT)
+    except RequiredSetConfigError as exc:
+        # A config error is a VERDICT about the repo's contract, an unreadable config is
+        # "I could not read it". Both REFUSE; neither may fall back to a guessed set.
+        # ⛔ They are carried as DIFFERENT classes across this boundary, because the
+        # caller has to LABEL them differently: `FAIL(unreadable)` tells a lane to retry
+        # the read, and no retry repairs a config/record divergence.
+        raise RequiredConfigReadError(str(exc)) from None
+    except (GuardUnreadable, RequiredSetUnreadable) as exc:
+        # A config error is a VERDICT about the repo's contract, and an unreadable
+        # config is "I could not read it". Both REFUSE; neither may fall back to a
+        # guessed set.
+        raise ReadError(str(exc)) from None
+    raw = (
+        # `required.source` already ends with `at <ref> (<sha12>)` — derive_from_ref
+        # discloses what it READ, so the ref must not be appended a second time here
+        # (`… at origin/main (abc)@origin/main` was the shape that bug produced).
+        f"source={required.source} "
+        f"entry={len(required.queue_names)} "
+        f"merge-time={len(required.merge_names)} mode={required.mode} "
+        f"snapshot_agrees={required.snapshot_agrees}"
+    )
+    raw = f"{raw} {_repo_scope_note(workdir, repo)}"
+    return required, raw
 
 
 def _read_check_groups(
     gh: Gh, head: str, repo: str
-) -> tuple[tuple[ci_verdict.GroupVerdict, ...], str]:
+) -> tuple[tuple[ci_verdict.GroupVerdict, ...], tuple[Mapping[str, Any], ...], str]:
     """Newest attempt per ``(app, workflow, job)`` — delegated to ``ci_verdict``.
 
     The FETCH goes through this module's bounded, cached ``Gh`` reader; the GROUPING and
     the completeness check (``collect_items`` refuses a truncated listing) stay in
     ``ci_verdict``, which is the repo's single authoritative check-run reading (#5042).
     Nothing about what counts as a group or an attempt is re-derived here.
+
+    The RUNS are returned as well as the groups, from the SAME read: they are what lets a
+    consumer tell a merge-time context's absence-with-a-pending-aggregate from
+    absence-because-the-workflow-never-ran, and a second, independent run read could
+    disagree with the check-run payload it is paired with.
     """
     check_url = ci_verdict.CHECK_RUNS_URL.format(repo=repo, sha=head)
     run_url = ci_verdict.RUNS_URL.format(repo=repo, sha=head)
@@ -2060,7 +2626,7 @@ def _read_check_groups(
         f"in-flight={counts.get(ci_verdict.GROUP_IN_FLIGHT, 0)} "
         f"absent={counts.get(ci_verdict.GROUP_ABSENT, 0)}) commit-verdict={verdict.verdict}"
     )
-    return verdict.groups, raw
+    return verdict.groups, tuple(runs), raw
 
 
 def _read_tree(gh: Gh, pr: int, head: str, workdir: Path) -> tuple[bool | None, str]:
@@ -2471,11 +3037,63 @@ def collect_probe(
         # NOT evidence about the tree, so it must not be written into `tree_raw`.
         probe.head_committed_at = ""
 
-    probe.required, probe.required_raw = _try(gh, _read_required_contexts)
-    probe.groups, probe.groups_raw = _try(
-        gh, lambda g: _read_check_groups(g, head, repo), surface="check-runs"
-    )
+    # ⛔ ORDER MATTERS: the required set is read from `origin/main`, and `_try_tree` is
+    # what FETCHES it (`git fetch --no-tags origin main`). Reading the derived set first
+    # would use whatever `origin/main` the worktree happened to hold — a stale protected
+    # ref is exactly the "stale list is a silent deadlock" `.mergify.yml` clause 2 warns
+    # about.
+    #
+    # ⛔ WHAT THIS ORDER DOES *NOT* BUY, stated so nobody re-derives it as a guarantee:
+    # `derive_from_ref` does not fetch, and `git show` succeeds on any ref that EXISTS,
+    # stale or not — so ordering alone cannot prove freshness. What holds is narrower:
+    # a run that reaches **READY** has `tree=True`, which requires that same run's base
+    # fetch to have succeeded. (Two `_read_tree` failure paths — a failed base fetch and a
+    # failed `merge-tree` — do run after it, so "every failing path fails before the fetch"
+    # is NOT true; they simply cannot reach READY.) Anything weaker than that is disclosed
+    # rather than assumed: the derived `source` carries the sha it actually read, and
+    # `check_gates` puts that source in its raw on every arm.
     probe.tree, probe.tree_raw = _try_tree(gh, pr, head, workdir)
+    try:
+        required, probe.required_raw = _read_required_contexts(workdir, repo)
+    except RequiredConfigReadError as exc:
+        # A CONFIGURATION verdict, not a read failure: the set is still unread (so the
+        # gate still REFUSES), but the class is carried through so `check_gates` can label
+        # it `FAIL` instead of `FAIL(unreadable)`. Must be caught BEFORE `ReadError`, of
+        # which it is a subclass.
+        probe.required = None
+        probe.required_deferred = None
+        probe.required_config_error = str(exc)
+        probe.required_raw = f"required-set: {exc}"
+    except ReadError as exc:
+        # `_read_required_contexts` touches no `Gh`: it shells `git` and converts every
+        # failure to `ReadError` (a `RateLimited` is a `ReadError` too, so it would land
+        # here). A read that could not be made is NOT evidence about the gates, so the set
+        # is left unread and `check_gates` says so.
+        probe.required = None
+        probe.required_deferred = None
+        probe.required_raw = f"required-set: {exc}"
+    else:
+        probe.required = required.queue_names
+        probe.required_deferred = required.merge_names
+        # Only the MERGE-TIME names need attribution: an entry context's absence is
+        # already a FAIL(missing), so its emitter file would never be consulted.
+        probe.merge_emit_files = {
+            name: required.emit_workflows(name) for name in required.merge_names
+        }
+        # ⛔ THE PROJECTION IS ONLY READABLE AGAINST THE FILES THAT EXIST (#11175). Carried
+        # from the SAME derivation, so the spelling and the files it is validated against
+        # come from one read of one commit.
+        probe.base_workflow_files = required.workflow_files
+    try:
+        probe.groups, probe.head_runs, probe.groups_raw = _read_check_groups(gh, head, repo)
+    except RateLimited:
+        raise
+    except (ReadError, ci_verdict.SurfaceReadError) as exc:
+        # One failed read means BOTH are unknown: the groups and the run listing come from
+        # the same call, and an absence graded against a half-read surface is how a
+        # pending aggregate would read as a deferral.
+        probe.groups, probe.head_runs = None, None
+        probe.groups_raw = f"check-runs: {exc}"
     (
         probe.review_token,
         probe.review_exit,
@@ -2571,7 +3189,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         nargs="?",
         default=None,
-        help="pull request number (omit only with --fixture)",
+        help="pull request number (omit only with --fixture or --required-set)",
     )
     parser.add_argument("--repo", default=DEFAULT_REPO, help=f"owner/name (default {DEFAULT_REPO})")
     parser.add_argument("--json", action="store_true", help="emit the verdict as JSON")
@@ -2585,14 +3203,90 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="evaluate a Probe JSON fixture instead of reading the live world (tests)",
     )
+    parser.add_argument(
+        "--required-set",
+        action="store_true",
+        help=(
+            "print the REQUIRED status-check set as `.mergify.yml` declares it "
+            "(queue=ENTRY, merge=merge-time) and exit; no PR number and no credential"
+        ),
+    )
+    parser.add_argument(
+        "--ref",
+        default="origin/main",
+        help=(
+            "ref the required set is DERIVED from for --required-set (default "
+            "origin/main, the ref that governs the merge). ⛔ `HEAD` reads the last "
+            "COMMIT on this branch — `git show`, not the working tree — so an "
+            "UNCOMMITTED edit to `.mergify.yml` is not seen; commit it, or rely on the "
+            "default protected-ref read"
+        ),
+    )
     return parser
+
+
+def report_required_set(workdir: Path, ref: str | None = "origin/main") -> int:
+    """Print the derived required set. Exit 0 PASS · 2 unusable (with the REASON labelled).
+
+    A REPORTING verb, and it is deliberately a separate output shape from the
+    READY/NOT-READY contract: it answers "what is required here?", not "is this PR
+    ready?". Exit ``2`` on an unusable set so "I could not read it" is never mistaken
+    for "nothing is required", which is the fail-open this whole module refuses.
+
+    ⛔ A CONFIG ERROR IS LABELLED AS ONE. Both are exit 2, but a reader comes to this
+    verb to find out WHY, and `REQUIRED-SET-UNREADABLE(<the config is wrong>)` points at
+    the wrong subsystem — the body would say the contract is violated while the label
+    says I/O failed.
+
+    ⛔ AN EMPTY `--ref` IS REFUSED, and the guard buys a DIAGNOSIS rather than a bypass
+    guard: the fallback to the workdir was already closed by branching on `ref is not
+    None`, so an empty ref would have failed closed through `git rev-parse --verify ''`
+    (`fatal: Needed a single revision`) — an opaque message from the wrong subsystem, on a
+    verb a human runs to learn WHY. The refusal names the problem and the reason instead.
+    The workdir read stays available only as `ref=None`, an in-process diagnostic (tests),
+    which no CLI flag can reach.
+    """
+    if ref is not None and not ref.strip():
+        print(
+            "REQUIRED-SET-UNREADABLE(--ref must name a ref; an empty value is not "
+            "'read this worktree', because a branch must never certify its own "
+            "required set)"
+        )
+        return 2
+    try:
+        required = derive_from_ref(workdir, ref) if ref is not None else derive_from_config(workdir)
+    except RequiredSetConfigError as exc:
+        print(f"REQUIRED-SET-CONFIG-ERROR({exc})")
+        return 2
+    except (GuardUnreadable, RequiredSetUnreadable) as exc:
+        print(f"REQUIRED-SET-UNREADABLE({exc})")
+        return 2
+    except Exception as exc:
+        # Same backstop discipline as `main()`: a reporting verb must always emit a
+        # labelled line and a documented exit code. Every reader is meant to convert its
+        # own failure, but a case nobody foresaw (a blob that will not decode, a vendor
+        # surprise) must not become a traceback with an exit code that reads as a verdict.
+        print(f"REQUIRED-SET-UNREADABLE({type(exc).__name__}: {exc})")
+        return 2
+    # `source` already carries the ref AND the sha it resolved to (derive_from_ref
+    # discloses what it actually read), so do not append the ref a second time.
+    print(f"source: {required.source}")
+    print(f"mode: {required.mode}")
+    print(f"queue_conditions (ENTRY, at the PR head): {', '.join(required.queue_names)}")
+    print(f"merge_conditions (MERGE-time, deferred here): {', '.join(required.merge_names)}")
+    print(f"OVERLAP: {', '.join(required.overlap) if required.overlap else '(none)'}")
+    print(f"union ({len(required.names)}): {', '.join(required.names)}")
+    print(f"snapshot_agrees: {required.snapshot_agrees}")
+    return 0
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.required_set:
+        return report_required_set(Path(args.workdir).resolve(), args.ref)
     if args.fixture is None and args.pr is None:
-        parser.error("a pull request number is required unless --fixture is used")
+        parser.error("a pull request number is required unless --fixture or --required-set is used")
     workdir = Path(args.workdir).resolve()
     try:
         if args.fixture:
@@ -2659,6 +3353,101 @@ def _failure_output(args: argparse.Namespace, reason: str) -> str:
     return f"NOT-READY({pr}, failed={','.join(CONDITIONS)})"
 
 
+def _fixture_head_runs(data: Mapping[str, Any]) -> tuple[Mapping[str, Any], ...] | None:
+    """A fixture's run listing, or ``None`` when the fixture does not carry a READABLE one.
+
+    The run listing and the emitter projection are what decide a merge-time context's
+    ABSENCE, so the fixture door must be able to express both — a door that could not would
+    force every absent-merge-time fixture into the UNATTRIBUTABLE arm and make the DEFERRED
+    arm unreachable from ``--fixture``.
+
+    ``None`` is the fail-closed "not read" arm — the value the live path sets when
+    ``ci_verdict.collect_items`` refuses a truncated listing — and BOTH an omitted key and an
+    explicit null land there. ⛔ Not the ``labels`` idiom: ``()`` is not a neutral default, it
+    ASSERTS "read it, zero runs exist", which is the DEFERRED (PASS) arm, so a fixture that
+    never spoke about attribution must not silently exercise the pass arm. A legitimate
+    DEFERRED is spelled ``"head_runs": []``.
+
+    The SHAPE is validated, not just presence: only a sequence whose every entry is a mapping
+    THAT CARRIES a workflow ``path`` is a listing. ``"python-ci.yml"`` (a string, which would
+    become a tuple of characters), a bare mapping, a listing with unreadable entries, and an
+    entry without ``path`` (which ``_run_file`` maps to ``""``, matching no emitter) are all
+    type-confused or partially-read surfaces; the live path refuses each of them, so the
+    fixture door must not turn any of them into "read it, no run of the emitter exists".
+    """
+    if "head_runs" not in data or data["head_runs"] is None:
+        return None
+    raw = data["head_runs"]
+    if not isinstance(raw, (list, tuple)):
+        return None
+    if not all(_readable_run(run) for run in raw):
+        return None
+    return tuple(raw)
+
+
+def _fixture_merge_emit_files(data: Mapping[str, Any]) -> Mapping[str, tuple[str, ...]]:
+    """A fixture's ``emitters`` projection, shape-validated like the run listing.
+
+    The emitter map is what makes an absent merge-time context ATTRIBUTABLE, so a value
+    that is not a list of workflow FILE NAMES is not a reading of it. Two plausible JSON
+    slips are type-confused rather than merely empty:
+
+    * ``{"python-ci-gate": "python-ci.yml"}`` (a bare string) becomes a tuple of
+      CHARACTERS, so ``_run_file`` can never match it;
+    * ``{"python-ci-gate": {"workflow": "python-ci.yml"}}`` (a bare mapping) becomes its
+      KEYS.
+
+    Neither matches an emitter, so each graded the absence ``DEFERRED`` — a PASS over an
+    emitter that IS recorded and that DID run on the head (measured at ``caa4d7e6f``: the
+    correct list yields ``missing:python-ci-gate``/FAIL, both slips yield PASS). The live
+    path cannot produce either shape (``RequiredSet.emit_workflows`` yields tuples), so
+    this is the fixture door — and the door must not turn a type-confused value into the
+    pass arm.
+
+    A malformed value collapses to ``()``, which `_merge_time_absence` reads as
+    **UNATTRIBUTABLE** (FAIL), never as "read it, no emitter". An OMITTED or null
+    projection stays ``{}`` — also UNATTRIBUTABLE for any required merge-time name — so
+    every unreadable shape fails closed.
+    """
+    raw = data.get("merge_emit_files")
+    if not isinstance(raw, Mapping):
+        return {}
+    out: dict[str, tuple[str, ...]] = {}
+    for name, files in raw.items():
+        if (
+            isinstance(files, (list, tuple))
+            and files
+            and all(isinstance(f, str) and f for f in files)
+        ):
+            out[str(name)] = tuple(files)
+        else:
+            out[str(name)] = ()
+    return out
+
+
+def _fixture_workflow_files(data: Mapping[str, Any]) -> tuple[str, ...] | None:
+    """A fixture's protected-ref workflow listing, or ``None`` when it did not state one.
+
+    ⛔ SAME DOCTRINE AS `_fixture_head_runs` (#11175): the listing decides whether a
+    recorded `emitters` spelling still exists, and a spelling that matches no workflow file
+    is UNATTRIBUTABLE (FAIL) — while ``()` would ASSERT "read it, the ref has no workflow
+    files", a measurement a fixture that never spoke about it did not make. So an omitted
+    key lands on the fail-closed ``None``, and a legitimate empty ref lists
+    ``"base_workflow_files": []`` explicitly.
+
+    Shape is validated, not just presence: a bare string would become a tuple of
+    CHARACTERS, which matches no file name and would make every emitter look stale.
+    """
+    if "base_workflow_files" not in data or data["base_workflow_files"] is None:
+        return None
+    raw = data["base_workflow_files"]
+    if isinstance(raw, (str, bytes, Mapping)) or not isinstance(raw, (list, tuple)):
+        return None
+    if not all(isinstance(f, str) and f for f in raw):
+        return None
+    return tuple(raw)
+
+
 def probe_from_dict(data: Mapping[str, Any]) -> Probe:
     """Build a Probe from a fixture dict (used by tests and ``--fixture``)."""
     groups = data.get("groups")
@@ -2710,7 +3499,19 @@ def probe_from_dict(data: Mapping[str, Any]) -> Probe:
         tree_raw=str(data.get("tree_raw", "")),
         groups=parsed_groups,
         groups_raw=str(data.get("groups_raw", "")),
+        head_runs=_fixture_head_runs(data),
+        merge_emit_files=_fixture_merge_emit_files(data),
+        base_workflow_files=_fixture_workflow_files(data),
         required=None if data.get("required") is None else tuple(data["required"]),
+        # Same absent-vs-null idiom as `labels` above: a fixture that OMITS the key is a
+        # pre-split fixture whose flat set was all entry checks (so `()` is faithful),
+        # while an explicit null is "the READ was unreadable" and must refuse.
+        required_deferred=(
+            None
+            if "required_deferred" in data and data["required_deferred"] is None
+            else tuple(data.get("required_deferred") or ())
+        ),
+        required_config_error=str(data.get("required_config_error") or ""),
         required_raw=str(data.get("required_raw", "")),
         review_token=data.get("review_token"),
         review_exit=data.get("review_exit"),

@@ -6,7 +6,7 @@ WHAT IS BROKEN (measured, not reasoned)
 A capture that ran BEFORE #10852 wrote the transcript's first substantive
 utterance into ``Source.summary`` and derived ``_searchText`` from that same
 value. #10852 stopped the writer doing it again; it deliberately did not heal
-the nodes already holding the pair, and no route reaches them:
+the nodes already holding the pair, and no OTHER route reaches them:
 
 * a re-capture is the #1727 no-op replay (the mint gate), pinned in
   ``tests/test_10000_source_prose.py``;
@@ -50,6 +50,7 @@ module is built from those two declarations and the legs below pin both.
 from __future__ import annotations
 
 import importlib.util as _ilu
+import itertools
 import json
 import sys
 from pathlib import Path
@@ -60,6 +61,9 @@ from tortoise.session_source_display import SESSION_SOURCE_SUMMARY_PREFIX
 
 #: The transcript slice a pre-fix capture left on the node.
 PROSE = "We decided the weekly rebuild happens on Fridays."
+
+#: The fake's `id(s)` allocator — see `_session_node` (#11176).
+_NODE_IDS = itertools.count(1)
 
 
 # ── fakes ──────────────────────────────────────────────────────────────────
@@ -146,7 +150,13 @@ class _RecordingGraph:
 
 def _session_node(**overrides):
     props = {
-        "node_id": 1,
+        # ⛔ A PER-CALL IDENTITY, NOT A CONSTANT (#11176). `_SOURCE_ROWS` fans a
+        # `:Source` out into one row per `:Session` at its `sessionId`, and the
+        # census dedupes on `id(s)` — so a fake that gave every `:Source` the SAME
+        # `id(s)` would make two DISTINCT nodes look like one node's two rows and
+        # silently collapse them. A test that wants two rows of ONE node
+        # (`node_id=41`, twice) overrides this by name.
+        "node_id": next(_NODE_IDS),
         "url": "session:s-11070",
         "sourceKind": "agentSession",
         "sessionId": "s-11070",
@@ -1913,6 +1923,19 @@ def test_a_HEALTHY_SIBLING_at_the_same_url_is_never_written():
                       username=endpoint.username, password=endpoint.password,
                       ssl=endpoint.ssl)
     proj = SimpleNamespace(graph_name=endpoint.graph_name, db=client)
+    # Epic #1647 (T7, cycle-6 P1-3 / cycle-8 P2-2): a raw client bypasses
+    # `_assert_test_graph` AND the per-test wipe scope. The `test_`-prefixed
+    # per-run name above makes the handle UNIQUE and OWNED; `_journal_append` is
+    # the third half of that one contract — the record that tells a live PEER's
+    # `scope=None` sweep this graph is in use. Without it the graph is UNOWNED and
+    # a peer session may `GRAPH.DELETE` it MID-TEST (the cross-session flake
+    # #3074/#3214); the `finally: drop_test_graph` below covers only this lane's
+    # own teardown. Pinned by
+    # `tests/test_derived_names.py::test_raw_falkordb_client_detach_uses_per_test_unique_graph`
+    # (which reds on main — #11182 — while this half is missing).
+    from tests._embedded import _journal_append
+
+    _journal_append(endpoint.graph_name)
     g = client.select_graph(endpoint.graph_name)
     url = "session:dup-11152"
 
@@ -2015,5 +2038,385 @@ def test_the_printed_and_json_detail_never_carries_the_utterance(monkeypatch,
         "transcript")
     detail = payload["candidate_detail"][0]
     assert set(detail) == {"url", "session_id", "turn_max_index",
-                           "summary_bytes", "search_text_bytes"}, detail
+                           "summary_bytes", "search_text_bytes",
+                           # #11176: an INT graph-health counter, whitelisted on
+                           # purpose — a dedupe nobody can see hides the
+                           # duplicate-`:Session` signal.
+                           "duplicate_session_rows"}, detail
     assert detail["summary_bytes"] == len(PROSE)
+    assert detail["duplicate_session_rows"] == 0, (
+        "a node reached by ONE `:Session` reports a duplicate row")
+
+
+# ── #11176: the census counts NODES, not rows — and the mark is the STRONGEST ──
+
+
+def _two_rows_one_node(*, marks=(3, 7), node_id=41, session_id="dup"):
+    """Two `:Session` rows for ONE `:Source` — the shape `_SOURCE_ROWS` fans out.
+
+    `:Session.id` carries a plain INDEX and no UNIQUE constraint (this repo has
+    zero `CREATE CONSTRAINT` statements; every writer is a `MERGE`), so a second
+    `:Session` node at one id is schema-permitted, and the OPTIONAL MATCH then
+    yields one row per session for a single `:Source`.
+    """
+    return [
+        (_session_node(node_id=node_id, sessionId=session_id,
+                       url=f"session:{session_id}", turn_max_index=marks[0]),),
+        (_session_node(node_id=node_id, sessionId=session_id,
+                       url=f"session:{session_id}", turn_max_index=marks[1]),),
+    ]
+
+
+def test_ONE_source_reached_by_two_session_rows_is_ONE_census_record():
+    """#11176: the census doubled a node, inflating the number #10000 is measured by.
+
+    (1) FAILS on the un-deduped census: `_SOURCE_ROWS` yields one row per
+        matching `:Session`, `find_session_sources_carrying_prose` appended one
+        record per ROW, and nothing deduped on the `id(s)` the module already
+        carried — `census()` returned 2 for ONE node.
+    (2) REACHABLE: two `:Session` nodes at one `sessionId`, which the schema
+        permits (no `CREATE CONSTRAINT`; `:Session(id)` is a plain index).
+    """
+    from tortoise import session_source_prose_migration as m
+
+    graph = _RecordingGraph(_two_rows_one_node())
+
+    found = m.find_session_sources_carrying_prose(graph)
+
+    assert len(found) == 1, (
+        f"ONE node was counted {len(found)} times — `census_after` is the number "
+        f"#11070's repair is verified by, so an inflated census is a wrong "
+        f"verification, not a cosmetic duplicate")
+    assert found[0]["node_id"] == 41
+    assert found[0]["duplicate_session_rows"] == 1, (
+        "the duplicate-`:Session` signal is hidden, not reported")
+    assert m.census(graph) == 1
+
+
+def test_the_mark_handed_to_the_reader_is_the_STRONGEST_not_the_FIRST():
+    """#11176, the safety-relevant half: REFUSE-vs-WRITE must not be row order.
+
+    A `turn_max_index` BELOW the session's true end makes `record_read` serve a
+    truncated transcript AS COMPLETE, and the lexicon derived from half a
+    transcript is the fabricated descriptor this module refuses to write. A mark
+    ABOVE the end has its own named cause (`_no_record_note` blames the cache),
+    so the strongest mark loses nothing.
+    """
+    from tortoise import session_source_prose_migration as m
+
+    seen: list[int | None] = []
+
+    def reader(session_id, turn_max_index=None):
+        seen.append(turn_max_index)
+        return "User: the friday rebuild plan"
+
+    for marks in ((3, 7), (7, 3)):
+        seen.clear()
+        report = m.reconcile_session_source_prose(
+            _RecordingGraph(_two_rows_one_node(marks=marks)),
+            read_transcript=reader, dry_run=True)
+        assert seen == [7], (
+            f"rows {marks} handed the reader {seen} — the tail witness is chosen "
+            f"by ROW ORDER, so a mark BELOW the true end can serve a truncated "
+            f"transcript as COMPLETE")
+        assert report["candidates"] == ["session:dup"]
+
+
+def test_a_duplicated_node_reports_ONE_write_and_no_self_contradicting_note():
+    """The report must not contradict its own writes (#11176, report half).
+
+    Before the dedupe, the SECOND row of an already-written node emitted a
+    compare-and-set miss note — *"the write matched NO :Source at this url …
+    so NOTHING was written; re-run"* — beside a `written` entry for the same
+    node, and offered a re-run that finds ZERO candidates (the node is already
+    cleared). Two of the three symptoms are the "report contradicts its own
+    writes" class.
+    """
+    from tortoise import session_source_prose_migration as m
+
+    graph = _RecordingGraph(_two_rows_one_node())
+    report = m.reconcile_session_source_prose(
+        graph, read_transcript=_reader("User: the friday rebuild plan"),
+        dry_run=False)
+
+    assert report["candidates"] == ["session:dup"], (
+        "the same url listed twice is the inflated census again")
+    assert report["repaired"] == ["session:dup"]
+    assert report["written"] == ["session:dup"]
+    assert len(graph.writes) == 1, "ONE node, ONE write"
+    assert "NOTHING was written" not in report["notes"].get("session:dup", ""), (
+        "the report says a node it just wrote was not written")
+
+
+def test_a_mark_that_is_absent_on_one_row_is_recovered_from_the_other():
+    """A non-`int` mark is not a mark — the other row's mark wins, never `None`.
+
+    `_read_source_rows` maps a missing / non-int `turn_max_index` to `None`,
+    which makes the tail arm unreachable and degrades the witness silently. A
+    duplicate row that DOES carry the mark is the stronger evidence, so the
+    dedupe must not keep the degraded `None` merely because it arrived first.
+    """
+    from tortoise import session_source_prose_migration as m
+
+    for rows in (_two_rows_one_node(marks=(None, 7)),
+                 _two_rows_one_node(marks=(7, None))):
+        found = m.find_session_sources_carrying_prose(_RecordingGraph(rows))
+        assert found[0]["turn_max_index"] == 7, (
+            "the usable mark was dropped in favour of the degraded one")
+
+
+def test_the_OFF_SWITCH_restores_the_pre_fix_census_exactly(monkeypatch):
+    """The off-switch is part of the fix, not decoration.
+
+    This dedupe changes the NUMBER the repair is verified by, so an operator
+    comparing a fresh census with a recorded one must be able to re-measure with
+    the OLD instrument. `=1` restores it EXACTLY: one record per ROW, first-row
+    mark, no duplicate count.
+    """
+    monkeypatch.setenv("TORTOISE_11070_CENSUS_DEDUPE_DISABLED", "1")
+    from tortoise import session_source_prose_migration as m
+
+    assert m._census_dedupe_enabled() is False
+
+    graph = _RecordingGraph(_two_rows_one_node(marks=(3, 7)))
+    found = m.find_session_sources_carrying_prose(graph)
+    assert [n["turn_max_index"] for n in found] == [3, 7], (
+        "the old path must keep ROW ORDER — that is what 'the old instrument' means")
+    assert m.census(graph) == 2
+    assert all("duplicate_session_rows" not in n for n in found), (
+        "the off-switch reported a duplicate count it never took — `0` is a "
+        "measurement, and this run did not take one (#11176 review P2)")
+
+    reversed_graph = _RecordingGraph(_two_rows_one_node(marks=(7, 3)))
+    assert [n["turn_max_index"]
+            for n in m.find_session_sources_carrying_prose(reversed_graph)] == [7, 3]
+
+    monkeypatch.delenv("TORTOISE_11070_CENSUS_DEDUPE_DISABLED")
+    assert m._census_dedupe_enabled() is True
+    assert m.census(graph) == 1, "clearing the switch did not restore the fix"
+
+
+def test_the_duplicate_session_signal_reaches_the_OPERATOR_report(monkeypatch,
+                                                                 capsys):
+    """The census settles #11176's open question: it REPORTS, it does not hide.
+
+    A dedupe nobody can see is the same silence #11070 exists to end: the
+    duplicate `:Session` is graph-health, and the census (which scans every
+    `:Source`) is the only instrument that meets it for free. So the count
+    reaches BOTH operator surfaces — `--json` (`candidate_detail`) and the
+    human-readable line — and stays an INT, so no utterance rides along.
+
+    (1) FAILS if the whitelist drops the key (the JSON arm) or the print line
+        omits it (the human arm).
+    (2) REACHABLE: the shape `_SOURCE_ROWS` produces for a duplicated
+        `:Session`, through the real CLI entry point.
+    """
+    _export_a_record_dsn(monkeypatch)
+    graph = _RecordingGraph(_two_rows_one_node())
+    _install_cli(monkeypatch, graph, ["--dry-run", "--json"])
+
+    assert _cli.main() == 0
+    payload = json.loads(capsys.readouterr().out)
+    detail = payload["candidate_detail"]
+    assert len(detail) == 1, f"one node reported {len(detail)} times"
+    assert detail[0]["duplicate_session_rows"] == 1, (
+        "`--json` deduped the node and hid the duplicate-`:Session` signal")
+
+    # ── the human arm: same run, no `--json` ───────────────────────────────
+    _install_cli(monkeypatch, _RecordingGraph(_two_rows_one_node()),
+                 ["--dry-run"])
+    assert _cli.main() == 0
+    out = capsys.readouterr().out
+    assert "duplicate_session_rows=1" in out, (
+        "the human report collapsed the duplicate silently")
+
+
+def test_a_clean_census_report_carries_NO_duplicate_marker(monkeypatch, capsys):
+    """The counter must not appear on a clean run — noise is how a signal dies.
+
+    (1) FAILS if the print suffix is unconditional: every ordinary census then
+        reads `duplicate_session_rows=0`, which trains the operator to ignore it.
+    (2) REACHABLE: the ordinary one-row-per-node census.
+    """
+    _export_a_record_dsn(monkeypatch)
+    _install_cli(monkeypatch, _RecordingGraph([(_session_node(),)]),
+                 ["--dry-run"])
+
+    assert _cli.main() == 0
+    out = capsys.readouterr().out
+    assert "duplicate_session_rows" not in out, out
+
+
+def test_a_duplicate_Session_row_does_not_double_the_census_on_a_REAL_graph():
+    """#11176 against a real FalkorDB: the fan-out is the SERVER's, not the fake's.
+
+    The unit legs above hand `find_session_sources_carrying_prose` the rows the
+    fan-out is *assumed* to produce. This leg makes the server produce them: one
+    `:Source` whose `sessionId` is carried by two `:Session` nodes — the shape
+    `#11176` measured — so a fix that relied on the fake's arrangement, or on
+    `OPTIONAL MATCH` collapsing the rows, cannot pass here.
+
+    (1) FAILS on the un-deduped census: `census()` returns 2 for ONE node and the
+        reported mark is one of `(3, 7)` picked by row order.
+    (2) REACHABLE: two `:Session` nodes at one `sessionId`, which the schema
+        permits (no `CREATE CONSTRAINT`; `:Session(id)` is a plain index).
+    """
+    import os
+    from types import SimpleNamespace
+
+    from tests import _live_utils
+
+    _live_utils._skip_unless_live_uri()
+    from falkordb import FalkorDB
+
+    from tests._embedded import _journal_append
+    from tortoise import session_source_prose_migration as m
+    from tortoise.projection import resolve_db_endpoint
+
+    # PER-RUN name: `drop_test_graph` refuses any other shape, and a fixed name
+    # would sit on the shared instance for the whole session (#8746).
+    graph_name = f"test_11070_dupsess_{os.urandom(4).hex()}"
+    endpoint = resolve_db_endpoint(os.environ["TORTOISE_DB_URI"], graph_name)
+    client = FalkorDB(host=endpoint.host, port=endpoint.port,
+                      username=endpoint.username, password=endpoint.password,
+                      ssl=endpoint.ssl)
+    proj = SimpleNamespace(graph_name=endpoint.graph_name, db=client)
+    # Epic #1647: a raw client bypasses `_assert_test_graph` and the per-test
+    # wipe scope, so the graph must be OWNED before a peer can sweep it.
+    _journal_append(endpoint.graph_name)
+    g = client.select_graph(endpoint.graph_name)
+    url = "session:dup-sessions"
+
+    def seed(marks):
+        g.query("MATCH (n) DETACH DELETE n")
+        g.query(
+            "CREATE (:Source {url:$u, sourceKind:'agentSession', sessionId:'dup',"
+            " summary:$p, _searchText:$p, topics:['friday','rebuild']})",
+            {"u": url, "p": PROSE})
+        for mark in marks:
+            g.query("CREATE (:Session {id:'dup', turn_max_index:$t})", {"t": mark})
+
+    try:
+        for marks in ((3, 7), (7, 3)):
+            seed(marks)
+            found = m.find_session_sources_carrying_prose(g)
+            assert len(found) == 1, (
+                f"the server fanned ONE `:Source` into {len(found)} rows "
+                f"(sessions seeded {marks}) and the census counted each — "
+                f"`census_after` is the number this repair is verified by")
+            assert found[0]["turn_max_index"] == 7, (
+                f"sessions seeded {marks}: the tail witness was "
+                f"{found[0]['turn_max_index']}, not the session's end — a mark "
+                f"below the end serves a truncated transcript as COMPLETE")
+            assert m.census(g) == 1
+    finally:
+        _live_utils.drop_test_graph(proj)
+
+
+def test_the_off_switch_reports_the_ROW_level_census_against_a_REAL_graph():
+    """The kill switch on the server's own fan-out, not only on the fake's.
+
+    An operator re-measuring with the OLD instrument must get the OLD number, and
+    'the old number' is defined by what the SERVER returns — not by what a fake
+    was arranged to return. ``=1`` ⇒ one record per row, so ONE node counts twice
+    and the mark is the first row's.
+
+    (1) FAILS if the switch is read at import time, cached, or applied to only
+        part of the loop: any of those leaves the fixed path (or a half-fixed
+        one) in place.
+    (2) REACHABLE: the same duplicate-`:Session` shape the repair meets live.
+    """
+    import os
+    from types import SimpleNamespace
+
+    from tests import _live_utils
+
+    _live_utils._skip_unless_live_uri()
+    from falkordb import FalkorDB
+
+    from tests._embedded import _journal_append
+    from tortoise import session_source_prose_migration as m
+    from tortoise.projection import resolve_db_endpoint
+
+    graph_name = f"test_11070_dupoff_{os.urandom(4).hex()}"
+    endpoint = resolve_db_endpoint(os.environ["TORTOISE_DB_URI"], graph_name)
+    client = FalkorDB(host=endpoint.host, port=endpoint.port,
+                      username=endpoint.username, password=endpoint.password,
+                      ssl=endpoint.ssl)
+    proj = SimpleNamespace(graph_name=endpoint.graph_name, db=client)
+    _journal_append(endpoint.graph_name)
+    g = client.select_graph(endpoint.graph_name)
+
+    previous = os.environ.pop("TORTOISE_11070_CENSUS_DEDUPE_DISABLED", None)
+    try:
+        g.query("MATCH (n) DETACH DELETE n")
+        g.query(
+            "CREATE (:Source {url:$u, sourceKind:'agentSession', sessionId:'dup',"
+            " summary:$p, _searchText:$p, topics:['friday','rebuild']})",
+            {"u": "session:dup-sessions-off", "p": PROSE})
+        for mark in (3, 7):
+            g.query("CREATE (:Session {id:'dup', turn_max_index:$t})", {"t": mark})
+
+        assert m.census(g) == 1, "precondition: the fixed instrument counts one node"
+
+        os.environ["TORTOISE_11070_CENSUS_DEDUPE_DISABLED"] = "1"
+        assert m.census(g) == 2, (
+            "the off-switch did not restore the OLD number: an operator comparing "
+            "a fresh census against a recorded one cannot re-measure with the "
+            "instrument that recorded it")
+        rows = m.find_session_sources_carrying_prose(g)
+        assert sorted(n["turn_max_index"] for n in rows) == [3, 7]
+        assert all("duplicate_session_rows" not in n for n in rows), (
+            "the off-switch reported a duplicate count it never took on a real "
+            "graph (#11176 review P2)")
+
+        del os.environ["TORTOISE_11070_CENSUS_DEDUPE_DISABLED"]
+        assert m.census(g) == 1, "clearing the switch did not restore the fix"
+    finally:
+        if previous is not None:
+            os.environ["TORTOISE_11070_CENSUS_DEDUPE_DISABLED"] = previous
+        else:
+            os.environ.pop("TORTOISE_11070_CENSUS_DEDUPE_DISABLED", None)
+        _live_utils.drop_test_graph(proj)
+
+
+def test_the_off_switch_never_reports_an_UNMEASURED_zero(monkeypatch, capsys):
+    """#11176 review P2: a count that was never taken must not print as `0`.
+
+    Under `TORTOISE_11070_CENSUS_DEDUPE_DISABLED=1` no de-duplication happens, so
+    `duplicate_session_rows` was never measured. Emitting `0` there is worse than
+    emitting nothing: a duplicate-`:Session` population reads as "no duplicates"
+    in `--json`, which is the graph-health signal this field exists to carry —
+    the same silence, wearing the shape of a measurement.
+
+    (1) FAILS if the key is initialised on the record's base shape (reported as
+        `0` on every row of a two-`:Session` node) instead of inside the dedupe
+        branch.
+    (2) REACHABLE: the off-switch on the duplicate-`:Session` fixture, through
+        the module API and through the CLI's `--json` payload.
+    """
+    from tortoise import session_source_prose_migration as m
+
+    monkeypatch.setenv("TORTOISE_11070_CENSUS_DEDUPE_DISABLED", "1")
+    found = m.find_session_sources_carrying_prose(
+        _RecordingGraph(_two_rows_one_node()))
+    assert len(found) == 2, "precondition: the old instrument sees both rows"
+    assert [n.get("duplicate_session_rows") for n in found] == [None, None], (
+        "the un-deduped run reported a duplicate count it never measured")
+
+    # …and the operator surface must not manufacture one either.
+    _export_a_record_dsn(monkeypatch)
+    _install_cli(monkeypatch, _RecordingGraph(_two_rows_one_node()),
+                 ["--dry-run", "--json"])
+    assert _cli.main() == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert [d["duplicate_session_rows"] for d in payload["candidate_detail"]] \
+        == [None, None], (
+        "`--json` said `0` duplicates on a run that never counted them")
+
+    # With the switch OFF the same fixture IS measured (so `None` is the absence
+    # of a measurement, not a bug in the field).
+    monkeypatch.delenv("TORTOISE_11070_CENSUS_DEDUPE_DISABLED")
+    row = m.find_session_sources_carrying_prose(
+        _RecordingGraph(_two_rows_one_node()))[0]
+    assert row["duplicate_session_rows"] == 1

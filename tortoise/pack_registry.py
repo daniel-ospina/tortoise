@@ -471,6 +471,39 @@ SEMANTICS_TRANSITION: dict[str, str] = {
 # *declared*, and this check was never a shape gate (warn-not-block, #1934).
 CORE_OPERATOR_LABELS = CORE_PREDICATES | SEMANTICS_VALUES
 
+
+def declared_relation_predicates() -> frozenset[str] | None:
+    """The declared relation-predicate vocabulary, in ONE home.
+
+    ``CORE_OPERATOR_LABELS`` (§3.9's mechanism pair plus §8's closed semantics
+    vocabulary) UNIONED with every predicate a loaded pack declares (#7551).
+    Both the write path (``sdk.create_operator``'s warn-not-block declaredness
+    check) and the extraction path (``extractor_v2._assemble_relations``' S5
+    gate) answer from this call rather than each deriving the set — that second
+    derivation is the defect #2766 records: *"the declared registry, the
+    writer, the validator and the discoverable API each derived the relation
+    vocabulary independently, and an edge no surface constrained was the only
+    one that got through."*
+
+    ``None`` means the union could not be read (registry unreadable). A caller
+    must fail OPEN on it — keep its item and warn — because the destructive
+    direction is dropping data this module could not judge. Never raises.
+
+    Lazy import: ``domain_loader`` imports this module, so a module-level
+    import would be a cycle.
+    """
+    try:
+        from .domain_loader import _get_registry
+
+        declared: set[str] = set(CORE_OPERATOR_LABELS)
+        reg = _get_registry()
+        if reg is not None:
+            declared |= {r.get("predicate") for r in reg.list_relations()
+                         if isinstance(r, dict) and r.get("predicate")}
+        return frozenset(declared)
+    except Exception:  # noqa: BLE001, RUF100 — never raise into a caller's gate
+        return None
+
 # ── Layer 3 — the relation write-path verdict (#2766) ─────────────────────
 # A pack `ontology.relations[]` entry is only *real* if some runtime surface
 # accepts its predicate. This is the ONE place that decides which declared
@@ -1023,6 +1056,17 @@ class PackManifest:
     # [{id, name?, description?, steps[], enforcement?, edges?}]
     chains: list[dict] = dataclasses.field(default_factory=list)
 
+    # The pack's DECLARED business hierarchy: [{path: 'Theme → Epic', type: hasPart}].
+    #
+    # ⛔ Carried, not just validated (#11001). `_validate` has shape-checked this
+    # list since R6, and until #11001 the parsed value was DROPPED here — the
+    # declaration reached no producer, so `hierarchies` was config that could not
+    # change the graph. The read is `tortoise.pack_hierarchy.declared_hierarchy`,
+    # which resolves each entry to a namespaced (from_kind, predicate, to_kind)
+    # and binds it to a write path from `relation_write_paths`. Nothing infers a
+    # hierarchy that is not written here.
+    hierarchies: list[dict] = dataclasses.field(default_factory=list)
+
     # Manifest v3 (R6 §3.4): extraction activation + enforcement config,
     # normalized — always present with defaults (backward compat: absent in
     # v2 manifests → active: true, sourceTypes: [], enforcement default warn).
@@ -1477,6 +1521,7 @@ class PackRegistry:
             relations=ont.get("relations", []),
             kind_defs=ont.get("kindDefs", {}),
             chains=ont.get("chains", []),
+            hierarchies=ont.get("hierarchies", []),
             extraction=self._normalize_extraction(raw.get("extraction")),
             kind_subclasses=ont.get("subclassOf", {}),
             kind_equivalences=ont.get("equivalentTo", {}),

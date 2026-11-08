@@ -87,6 +87,78 @@ it is quoted with the repo's one identifier rule
 read-only verb makes "this module stores nothing" the engine's rule instead of
 this file's memory.
 
+### …and WHICH `entity_type` values stop answering (`#11088`)
+
+A row's `unindexed` count is not the surface consequence. The consequence is a
+**set of `entity_type` values**, and the label→type relation is not one-to-one:
+`security.entity_label` sends `document`+`source` to `:Source` and
+`point`+`operator` to `:Point`. So every row carries
+`affected_entity_types` (derived from `VALID_ENTITY_TYPES` through that one
+translation) and `removal_changes_query_results`, and the census carries a
+top-level `surface_consequence` naming the MCP tools and REST route that can
+hand `entity_type` to the vector leg — **derived from
+`tool_registry.TOOL_REGISTRY` AND the handlers' own bodies (an AST scan of
+`tortoise/mcp_server.py`), not listed here**, so the consequence tracks the
+surface instead of a copy of it. ⛔ Both sources are load-bearing and neither is
+redundant: the registry binding alone names one tool where the surface has two
+(`tortoise_query` binds `paginated_query` yet forwards a `text=` argument into the
+same method).
+
+⛔ `surface_consequence["requested_not_performed"]` is `True` because this
+instrument **reports**; the removal is an MCP/SDK surface change and needs the
+owner's approval BEFORE it is implemented (`AGENTS.md`). There is no flag on
+this tool that removes anything.
+
+⛔ **Row 1 reads the PRODUCT'S DECLARED WRITER REGISTER (`#11444`).**
+`tortoise/embed_writer_register.py` (`#11085`) is where an exception to "every
+embedding write routes through the gate" is NAMED with an owning issue —
+reading (b), recorded on `#11085`. Until `#11444` this instrument only mentioned
+that file in comments, so a named `exempt` writer and a real `bypass` were the
+same string to it and DoD row 1 could never reach `MET`.
+
+What the register IS for here: it CLASSIFIES the population, it does not replace
+it. The over-inclusive AST enumeration is still printed in full. What the
+register is NOT: the measurement. A different question — *does every writer
+route through the gate?* — is still answered from source, because a declaration
+is the product ACCEPTING an exception, never the instrument proving there is
+none.
+
+⛔ **EXACTLY WHAT A REGISTER EDIT BUYS — the precise contract, because the loose
+version of this paragraph was false for the case that matters.**
+
+* A name with **no writer behind it in the population row 1 scores** is STALE and
+  HOLDS the row (the same "unused suppression" contract ESLint enforces with a
+  non-zero exit). That is what a name for a writer **the product does not have**
+  always is — and it is also what a name becomes once that writer is FIXED to
+  route through the gate, so a declaration does not quietly accumulate: delete
+  it then, because an unused exemption is a stale one. It is NOT what naming a
+  LIVE outside-gate writer is — that is the next bullet, and it greens the row.
+* A `bypass` class, any class outside the vocabulary, or a declaration carrying
+  no owning issue (`#<n>`) HOLDS the row: the first two are a DEFECT, and an
+  acceptance with no owner behind it is not an acceptance. An unreadable or
+  malformed register holds it as `UNMEASURED`.
+* A `recognised_producer` claim is CORROBORATED against the writer's own body
+  (the seams `route_calls()` reads from the register, matched **by callee
+  NAME** — the register exports names, not objects), and every `reason` must
+  cite the writer ITSELF rather than another function's evidence.
+* ⛔ **Naming a LIVE writer that discovery DOES find outside the gate greens the
+  row — `exempt` included.** That is reading (b) doing its job: *"a named,
+  accepted exception in the product"* IS the acceptance. Nothing corroborates an
+  `exempt` entry beyond its citation, because "this writer stores no live
+  vector" (or "stores one under a ruling") needs data flow to falsify, which
+  this instrument refuses to guess at. **So `MET` on this row means** *every
+  writer discovery finds outside the gate is gated or NAMED* — **never** *no
+  writer bypasses*. `tortoise/embed_writer_register.py` is PRODUCT CODE that
+  needs review; it is not a suppression file anyone may append to.
+
+⛔ And the residual on the other side of the same row, which the register's own
+docstring refuses to let `MET` absorb: a writer discovery classes `gated`
+(`tortoise.sdk::create_point`, `::update_point`) may still store a caller-supplied
+`embedding` VERBATIM by a recorded decision (PR `#3018` review P2). This row
+measures the WRITER population; it never claims every stored vector was decided
+by the rule. `ROW_SCOPE_NOTE` carries that sentence into the row's evidence, so a
+reader quoting the verdict cannot read it as a closure proof.
+
 Usage::
 
     uv run python tools/dod_5090_probe.py                     # the four rows
@@ -214,6 +286,70 @@ _EMBED_WRITE = re.compile(
     r"(?:\w+\.embedding|(?<![\w.])embedding)\s*=|set_embedding_clause\("
 )
 
+#: The SECOND write shape: a CONTAINER KEY, `record["embedding"] = …` /
+#: `p['embedding'] = …`. It puts a vector into a props/journal dict rather than
+#: onto a graph property, so every alternate in `_EMBED_WRITE` misses it.
+#: ⛔ It was INVISIBLE until `#11274` (found by `#11085`'s review, P2): a new
+#: writer using this shape added NOTHING to the population, so the register's
+#: "an undeclared writer cannot bypass silently" guard stayed green — the exact
+#: hole `#11085` exists to close. The live instances it was missing are the
+#: four named in `tortoise/embed_writer_register.py`'s container-key bullet
+#: (`api::add_point`, `consistency::_graph_fingerprint`, `sdk::_index_gate_read`,
+#: `sdk::_write_capture_turns`). ⚠️ `sdk._journal_event_raw_write` uses the same
+#: container key but was ALREADY in the population for a different reason (the
+#: `embedding=None` in its SIGNATURE matches `_EMBED_WRITE`), so it is not
+#: evidence that the shape was seen.
+#: Decided on the AST (`_writes_an_embedding`), NOT as an `_EMBED_WRITE`
+#: alternate: a regex reads raw SOURCE, so `["embedding"] =` as a pattern also
+#: matches PROSE quoting the shape, and this shape is exact enough to decide.
+#: The MAP-MERGE shape (`SET n += $p`) stays deliberately OUT: whether the merged
+#: map carries a vector is DATA FLOW, not syntax — 60 functions merge props and
+#: almost none can carry one, so a syntactic rule here would force dozens of
+#: declarations that assert nothing. That residual is named instead of guessed
+#: (`UNDECIDABLE_WRITE_SHAPES`) and is why `sdk._update_entity` carries the NAMED
+#: `#4094` exemption rather than being read as "no write".
+_EMBED_CONTAINER_KEY = "embedding"
+
+#: Write shapes discovery CANNOT decide, with the reason — named so the
+#: register's claim can be scoped to the mechanism rather than wider than it
+#: (`tests/test_embed_writer_register.py::test_the_register_names_the_shapes_its_discovery_cannot_see`).
+UNDECIDABLE_WRITE_SHAPES: dict[str, str] = {
+    "map-merge (`SET n += $p`)": (
+        "whether the merged map carries an `embedding` is DATA FLOW, not syntax: "
+        "60 functions in `tortoise/` merge a props map and almost none can carry a "
+        "vector, so a syntactic rule would force dozens of declarations that assert "
+        "nothing. The live instance is `sdk._update_entity`, which is DECLARED as an "
+        "exempt writer under the NAMED `#4094` exemption instead"
+    ),
+}
+
+
+def _writes_an_embedding(node, source: str) -> bool:
+    """Whether ``node`` writes a vector — by clause, by clause helper, or into a
+    CONTAINER KEY (:data:`_EMBED_CONTAINER_KEY`).
+
+    ``source`` is the function's own text (by line range); the AST pass is what
+    sees the container-key shape `_EMBED_WRITE` cannot.
+    """
+    if _EMBED_WRITE.search(source):
+        return True
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Assign):
+            targets = sub.targets
+        elif isinstance(sub, (ast.AugAssign, ast.AnnAssign)):
+            targets = [sub.target]
+        else:
+            continue
+        for target in targets:
+            for part in ast.walk(target):
+                if (
+                    isinstance(part, ast.Subscript)
+                    and isinstance(part.slice, ast.Constant)
+                    and part.slice.value == _EMBED_CONTAINER_KEY
+                ):
+                    return True
+    return False
+
 #: ── The RESOLVED census (#10541) ────────────────────────────────────────────
 #: A three-name callee vocabulary cannot tell a legitimate exemption from a
 #: bypass, so bullet 2 used to be held at `PARTIAL` over every function the
@@ -239,11 +375,18 @@ _EMBED_WRITE = re.compile(
 #: six calls it, so under #10541's literal class-1 wording ("route it through
 #: `encode_for_row`") none of them is a CONVERSION.
 #: Why each of the six is nonetheless legitimate is stated PER ENTRY, not as a
-#: blanket: the ONLY declaration here is #5008, which covers the session chain
+#: blanket: the declaration #5008 owns covers the session chain
 #: (`_session_event_write`, `ingest_corpus`, `_embedding_repair_attempt`) and
 #: nothing else. The other three (`restore_graph`, `_event_plain_merge`,
-#: `_rebuild_all_replay`) carry NO declared exemption — they store a vector
-#: computed or backed up UPSTREAM, through the canonical builder.
+#: `_rebuild_all_replay`) carried NO declared exemption in the PRODUCT until
+#: `#11085` — they store a vector computed or backed up UPSTREAM, through the
+#: canonical builder, and that reading now has a runtime home in
+#: `tortoise/embed_writer_register.py` (`#11085` owns those three declarations).
+#: ⛔ This census is a READ-ONLY INSTRUMENT and licenses nothing: the product
+#: declaration, not this table, is what an exemption is ALLOWED to point at.
+#: From `#11444` row 1 READS that declaration (`declared_writers()`), and this
+#: census stays what it always was — the over-inclusive MEASUREMENT the register
+#: classifies. The two are not one population and neither replaces the other.
 #: The name also inverts this file's own `kind == "producer"`, which means
 #: "computes a vector another function writes"; that is a wart, kept because
 #: #10541 names the class.
@@ -258,6 +401,27 @@ CENSUS_BYPASS = "bypass"
 CENSUS_CLASSES = (CENSUS_RECOGNISED, CENSUS_EXEMPT, CENSUS_BYPASS)
 
 WRITER_CENSUS: dict[str, tuple[str, str]] = {
+    "tortoise.api::add_point": (
+        CENSUS_EXEMPT,
+        "`tortoise/api.py::add_point` — discovered by the CONTAINER-KEY shape "
+        "(`p[\"embedding\"] = fields[\"embedding\"]`, `_EMBED_WRITE` cannot see it; "
+        "`#11274`). It writes a CALLER-supplied vector OVER the server one into the "
+        "journal payload, and that is the `#5004` contract rather than a producer: "
+        "the key stays PRESENT so an explicit `None` means \"this id has no "
+        "vector\", and a foreign vector is CARRIED (restored verbatim on replay) "
+        "with NO attestation, because its origin is not ours to vouch for. The "
+        "server vector is stamped by `_point` (a different function, under its own "
+        "seam). ⛔ A caller-supplied `embedding` is NOT refused by the SDK: `create_point`/"
+        "`update_point` store one VERBATIM by a recorded decision (PR `#3018` review P2), so a "
+        "TENANT can supply one on those paths — but not through THIS function. Here the branch "
+        "guards a vector a DIRECT `EventAPI` caller hands to `add_point(fields=…)` "
+        "(`tests/test_write_path_unreachable_seam_5148.py` pins that the key is CARRIED — under "
+        "its unimportable seam it cannot tell this branch from `p.update(fields)`); the tenant "
+        "doors' journal half lives in `tortoise.sdk` "
+        "(`_journal_snapshot_from_create_map` → `_emit_event`'s "
+        "`clean.setdefault(\"embedding\", None)`, and `update_point`'s `emit_props` on the "
+        "`PointRevised` record). Their gate-side half is `gated` and lies outside this "
+        "census's population"),
     "tortoise.consistency::_compare_views": (
         CENSUS_EXEMPT,
         "issues no write; the only WRITE-SHAPED text is a COMMENT in "
@@ -265,6 +429,14 @@ WRITER_CENSUS: dict[str, tuple[str, str]] = {
         "cannot produce (`n.embedding=vecf32($embedding)`). The function reads "
         "`\"embedding\"` off both sides and APPENDS it to a divergence field "
         "list — reads and appends, never a write clause"),
+    "tortoise.consistency::_graph_fingerprint": (
+        CENSUS_EXEMPT,
+        "`tortoise/consistency.py::_graph_fingerprint` — discovered by the "
+        "CONTAINER-KEY shape (`view[\"embedding\"] = props[\"embedding\"]`, "
+        "`#11274`). It copies a vector READ OFF THE GRAPH (`props` comes from "
+        "`graph_view`) into a comparison view dict, so the write target is an "
+        "in-memory view and not a stored vector — a READ, the same direction as "
+        "`turn_prior_vectors`"),
     "tortoise.hosted_backup::restore_graph": (
         CENSUS_RECOGNISED,
         "`tortoise/hosted_backup.py::restore_graph` writes through the canonical "
@@ -323,6 +495,13 @@ WRITER_CENSUS: dict[str, tuple[str, str]] = {
         "an already-computed `embedding` into `query_params` and executes the "
         "statement inside `_live_write_scope` (the §17.1 sanctioned live-write "
         "lane); it never computes one"),
+    "tortoise.sdk::_index_gate_read": (
+        CENSUS_EXEMPT,
+        "`tortoise/sdk.py::_index_gate_read` — discovered by the CONTAINER-KEY "
+        "shape (`g[\"embedding\"] = rows[0][0]`, `#11274`). It is the fast-path "
+        "ROUTER READ: every statement it issues is a `MATCH … RETURN`, and the "
+        "container it fills is its own `g` dict — the vector is read off a "
+        "returned row and never written, the `turn_prior_vectors` direction"),
     "tortoise.sdk::_index_process_unit": (
         CENSUS_EXEMPT,
         "`tortoise/sdk.py::_index_process_unit` — the instrument's match is the "
@@ -356,6 +535,16 @@ WRITER_CENSUS: dict[str, tuple[str, str]] = {
         "`point_props = dict(props)` keeps a caller-supplied `embedding` through "
         "the map-merge (`SET n += $p`). `_EMBED_WRITE` cannot see a map-merge. "
         "Exempt on the NAMED #4094 exemption, not on absence of a write"),
+    "tortoise.sdk::_write_capture_turns": (
+        CENSUS_EXEMPT,
+        "`tortoise/sdk.py::_write_capture_turns` — discovered by the "
+        "CONTAINER-KEY shape (`_turn_snapshot[\"embedding\"] = turn_embs[i] …`, "
+        "`#11274`). The vector is `turn_embs[i]` (or the already-stored one) and is "
+        "never computed here: no `encode_for_row`, no `set_embedding_clause` in the "
+        "body. Exempt as the SANCTIONED TURN-RECORD carrier of the `#5008` session "
+        "chain — the same direction, and for the same reason, as "
+        "`_journal_event_raw_write`: its record IS what the rebuild reads the "
+        "vector back from (`#8488`), not a store reached around the gate"),
     "tortoise.sdk::ingest_corpus": (
         CENSUS_RECOGNISED,
         "`tortoise/sdk.py::ingest_corpus` — `self._session_embedding(...)` + "
@@ -379,9 +568,15 @@ WRITER_CENSUS: dict[str, tuple[str, str]] = {
 #: union of `WRITER_CENSUS` and `WRITER_LABEL_OVERRIDES`, so a new entry cannot
 #: be added without evidence and evidence cannot outlive its entry.
 CENSUS_EVIDENCE: dict[str, tuple[tuple[str, str, str], ...]] = {
+    "tortoise.api::add_point": (
+        ("tortoise/api.py", "add_point",
+         'p["embedding"] = fields["embedding"]'),),
     "tortoise.consistency::_compare_views": (
         ("tortoise/consistency.py", "_compare_views",
          "n.embedding=vecf32($embedding)"),),
+    "tortoise.consistency::_graph_fingerprint": (
+        ("tortoise/consistency.py", "_graph_fingerprint",
+         'view["embedding"] = props["embedding"]'),),
     "tortoise.hosted_backup::restore_graph": (
         ("tortoise/hosted_backup.py", "restore_graph",
          "set_embedding_clause("),),
@@ -409,6 +604,8 @@ CENSUS_EVIDENCE: dict[str, tuple[tuple[str, str, str], ...]] = {
          "set_embedding_clause("),),
     "tortoise.sdk::_event_raw_write_door": (
         ("tortoise/sdk.py", "_event_raw_write_door", "_live_write_scope"),),
+    "tortoise.sdk::_index_gate_read": (
+        ("tortoise/sdk.py", "_index_gate_read", 'g["embedding"] = rows[0][0]'),),
     "tortoise.sdk::_index_process_unit": (
         ("tortoise/sdk.py", "_index_process_unit",
          "indexed with embedding=None"),),
@@ -423,6 +620,9 @@ CENSUS_EVIDENCE: dict[str, tuple[tuple[str, str, str], ...]] = {
     "tortoise.sdk::_update_entity": (
         ("tortoise/sdk.py", "_update_entity", "point_props = dict(props)"),
         ("tortoise/sdk.py", "_update_entity", "SET n +="),),
+    "tortoise.sdk::_write_capture_turns": (
+        ("tortoise/sdk.py", "_write_capture_turns",
+         '_turn_snapshot["embedding"] ='),),
     "tortoise.sdk::ingest_corpus": (
         ("tortoise/sdk.py", "ingest_corpus", "self._session_embedding("),
         ("tortoise/sdk.py", "ingest_corpus", "set_embedding_clause("),),
@@ -546,12 +746,15 @@ _OVERRIDDEN_BY_ROOT: dict[Path, frozenset[str]] = {}
 def embedding_writers() -> dict[str, dict]:
     """Every function that produces a stored vector, and what it writes.
 
-    ``{writer: {"callee", "at", "kind", "label"}}`` where ``kind`` is
+    ``{writer: {"callee", "at", "kind", "label", "callees"}}`` where ``kind`` is
     ``gated`` (reaches ``encode_for_row``), ``ungated`` (produces a vector the
-    gate never sees) or ``producer`` (a function that computes a vector a
+    gate never sees), ``producer`` (a function that computes a vector a
     DIFFERENT function writes — `encode_for_store`'s read/backfill callers, and
-    the journal stampers). ``writer`` is ``<dotted module>::<function>``, so two
-    writers in different modules can never share a key.
+    the journal stampers), ``unresolved_write`` (writes one with no recognised
+    producer call), ``duplicate`` (two same-named defs in one module) or
+    ``unparsed`` (the module would not parse — keyed by PATH, one per module).
+    ``writer`` is ``<dotted module>::<function>``, so two writers in different
+    modules can never share a key.
 
     **The label is derived from the Cypher, not from the writer's name.** That
     matters: a name-derived map draws from the same small vocabulary as the
@@ -564,6 +767,12 @@ def embedding_writers() -> dict[str, dict]:
     2. the writer's name stem against the labels its MODULE's Cypher names
        (`_upsert_event` -> `Event`), which is two sources agreeing, not a guess;
     3. otherwise ``UNKNOWN`` — reported, and it holds bullet 2 at `PARTIAL`.
+
+    ``callees`` is the writer's own callee-name set, recorded because a
+    declaration's class can be a claim about a ROUTE and a route claim is
+    re-derivable from the seam (``declaration_violations``, `#11444`). `#11444`
+    adds only this key: `kind`, `label`, `callee` and `at` are unchanged, so
+    every existing consumer reads exactly what it read before.
     """
 
     return _embedding_writers(REPO_ROOT)
@@ -621,6 +830,7 @@ def _embedding_writers(root: Path) -> dict[str, dict]:
                 "at": entry["at"],
                 "kind": "duplicate",
                 "label": DUPLICATE_LABEL,
+                "callees": entry.get("callees", frozenset()),
             }
             # The override's label did not survive the collision, so it must
             # not be REPORTED as one used (`score_path_bullet` prints
@@ -644,7 +854,7 @@ def _embedding_writers(root: Path) -> dict[str, dict]:
             # locate and the rest were unreported (this tool's own review, P3).
             writers.setdefault(f"UNPARSEABLE:{rel}", {
                 "callee": "", "at": rel, "kind": "unparsed",
-                "label": "UNKNOWN",
+                "label": "UNKNOWN", "callees": frozenset(),
             })
             continue
         module_labels = {lab for _v, lab in _NODE_LABEL.findall(_strings(tree))}
@@ -663,12 +873,13 @@ def _embedding_writers(root: Path) -> dict[str, dict]:
             elif set(UNGATED_CALLS) & called:
                 callee = sorted(set(UNGATED_CALLS) & called)[0]
                 kind = "ungated"
-                # The write clause is a CALL (`set_embedding_clause("n")`), so
-                # this reads the function's SOURCE, not its string literals —
+                # The write clause is a CALL (`set_embedding_clause("n")`) or a
+                # CONTAINER KEY (`record["embedding"] = …`), so this reads the
+                # function's SOURCE *and* its AST, not its string literals —
                 # measured: reading only literals classed
                 # `session_indexer.main` (which does write) as a producer and
                 # hid a real ungated write path.
-                if not _EMBED_WRITE.search(source):
+                if not _writes_an_embedding(node, source):
                     kind = "producer"  # computes it; another function writes it
             else:
                 # No recognised producer call: if it still WRITES an embedding,
@@ -676,12 +887,16 @@ def _embedding_writers(root: Path) -> dict[str, dict]:
                 # otherwise report `OUTSIDE the gate: 1` for a tree with three
                 # (review round 5, P2 — measured: 17 functions carry an
                 # embedding-write clause, 9 of them were absent from this map).
-                if kind is None and _EMBED_WRITE.search(source):
+                if kind is None and _writes_an_embedding(node, source):
                     _put(f"{module}::{node.name}", {
                         "callee": "unrecognised",
                         "at": f"{rel}:{node.lineno}",
                         "kind": "unresolved_write",
                         "label": "UNKNOWN(unresolved producer)",
+                        # The writer's OWN callee names — recorded so a
+                        # declaration's ROUTE claim can be re-derived from the
+                        # seam instead of taken on the register's word (#11444).
+                        "callees": frozenset(called),
                     })
                 continue
             own = _strings(node)
@@ -696,6 +911,7 @@ def _embedding_writers(root: Path) -> dict[str, dict]:
                 _put(f"{module}::{node.name}", {
                     "callee": callee, "at": f"{rel}:{node.lineno}",
                     "kind": kind, "label": label,
+                    "callees": frozenset(called),
                 })
                 continue
             else:
@@ -724,6 +940,7 @@ def _embedding_writers(root: Path) -> dict[str, dict]:
                 "at": f"{rel}:{node.lineno}",
                 "kind": kind,
                 "label": label,
+                "callees": frozenset(called),
             })
     _OVERRIDDEN_BY_ROOT[root] = frozenset(overridden)
     return writers
@@ -740,9 +957,12 @@ def _write_seams_that_embed() -> dict[str, str]:
 
 
 #: Where a "shipped default" for a flag would live. Searched, not assumed:
-#: `measure()` clears the ambient env so a lane's own shell cannot make a
-#: default-off gate read as enforced, which also means the ambient value can
-#: NEVER answer "is this shipped on" (review round 3, P2).
+#: `measure()` clears the ambient env so a lane's own shell cannot make a gate
+#: read as enforced, which also means the ambient value can NEVER answer "is
+#: this shipped on" (review round 3, P2). `#10996`: the clearing now writes the
+#: explicit OFF value instead of unsetting, because `TORTOISE_VALUE_GATE`
+#: defaults ON — a distinction this surface has to make, since "unset" is no
+#: longer an OFF spelling.
 CONFIG_SURFACES: tuple[str, ...] = (
     ".env.example",
     "docker-compose.yml",
@@ -982,6 +1202,282 @@ def flag_in_shipped_configs(flag: str) -> dict:
             "surfaces": list(CONFIG_SURFACES)}
 
 
+#: ── The product's declared writer register (#11444) ───────────────────────
+#: `#11085` (PR `#11269`) landed `tortoise/embed_writer_register.py` and RECORDED reading (b)
+#: on `#11085`: *"Every embedding writer must route through the gate or be a named, accepted
+#: exception in the product; the register is what makes (b) true rather than stated."* This
+#: instrument could not see it: it named the register in three comments and never read it, so
+#: every writer the product had CLASSIFIED was still reported as *"no recognised producer
+#: call"* — a named `exempt` writer and a real `bypass` were the same string to the grader, and
+#: `#5090` DoD row 1 was structurally unreachable at `MET`.
+#:
+#: The fix is the field's settled shape, not a bespoke one: **policy as declared data, read by
+#: the instrument** (OPA, *Philosophy*: policy must be decoupled from the service "so that the
+#: people responsible for policy can read, write, analyze, version, distribute, and in general
+#: manage policy separate from the service itself"). The register is that declaration, and the
+#: field's second half is respected too: a declaration is a SUPPLEMENT to the engine's own
+#: derivation, never a replacement, so the over-inclusive AST enumeration is still printed.
+#:
+#: ⛔ **WHAT A REGISTER EDIT CAN AND CANNOT BUY — the exact contract, because the loose version
+#: of this paragraph was a lie for the case that matters.**
+#:
+#: * A name with **no writer behind it in the scored population** is STALE and HOLDS the row
+#:   (same contract ESLint's *Bulk Suppressions* enforces with a non-zero exit on an unused
+#:   suppression). A name for a writer **the product does not have** is stale; so is a name
+#:   whose writer has since been FIXED to route through the gate, or that discovery classes
+#:   `gated`/`producer`/`duplicate` — all of them outside the population a declaration is OWED
+#:   for, so delete the entry then: an unused exemption is a stale one. Naming a LIVE
+#:   outside-gate writer is a different case — the LAST bullet — and that one greens the row.
+#: * A name with **no admissible class** (``bypass``, or a class outside the vocabulary) HOLDS
+#:   the row as a DEFECT, and so does one carrying no owning issue.
+#: * A `recognised_producer` claim is CORROBORATED: the writer's own body must reach one of the
+#:   seams the register exports (`route_calls()`), matched **by callee NAME** — the register
+#:   exports names, not objects, the same qualifier the register's own docstring carries for its
+#:   `gated` class — or the claim is refused and the writer stays unrecognised.
+#: * A `reason` must cite the writer ITSELF, not another function's evidence.
+#: * ⛔ **Naming a LIVE writer that discovery does find outside the gate DOES green the row — by
+#:   class choice, `exempt` included.** That is reading (b): *"a named, accepted exception in
+#:   the product"* IS the acceptance, so an instrument that refused it would be reopening the
+#:   owner's recorded decision. Nothing here corroborates an `exempt` entry beyond its citation,
+#:   because "this writer does not store a live vector" (or "stores one under a ruling") is a
+#:   product judgement the instrument cannot re-derive. **Consequence a reader must carry:**
+#:   `MET` on this row means *"every writer discovery finds outside the gate is gated or
+#:   NAMED"* — never *"no writer bypasses"*. `tortoise/embed_writer_register.py` is product code
+#:   that needs review; it is not a suppression file anyone may append to.
+#:
+#: ⛔ What this does NOT close, stated rather than implied: an `exempt` declaration for a writer
+#: that stores a live vector through a shape discovery cannot decide (data flow —
+#: `UNDECIDABLE_WRITE_SHAPES`) is indistinguishable to this instrument from a correct one. That
+#: residual is the register's own declared scope and `#11086`'s seam. ⛔ And a residual on the
+#: OTHER side of this row, which the register's own docstring refuses to let `MET` absorb: a
+#: writer discovery classes `gated` (`tortoise.sdk::create_point`, `::update_point`) may still
+#: store a caller-supplied `embedding` VERBATIM by a recorded decision (PR `#3018` review P2).
+#: This row measures the WRITER population; it never claims every stored vector was decided by
+#: the rule. `ROW_SCOPE_NOTE` carries that sentence into the row's own evidence.
+REGISTER_MODULE = "tortoise.embed_writer_register"
+
+#: An owning issue reference — the register's `load()` enforces `^#\d+$`; `fullmatch` here accepts
+#: the same set minus a trailing newline, i.e. it is STRICTER (fail-closed: the entry is simply not
+#: credited), and the instrument re-checks it rather than inheriting an invariant it does not test.
+_OWNER_ISSUE_RE = re.compile(r"#\d+")
+
+#: The residual a `MET` on this row does NOT absorb — emitted with the row, so a reader quoting
+#: the verdict cannot read it as "no vector is stored that the rule did not decide".
+ROW_SCOPE_NOTE = (
+    "scope: this row measures the WRITER population, not every stored vector — a "
+    "`gated` writer may still store a caller-supplied vector VERBATIM "
+    "(`tortoise.sdk::create_point` / `::update_point`, the recorded `#5004`/PR #3018 "
+    "decision), which no register declaration closes"
+)
+
+
+def route_calls() -> tuple[str, ...]:
+    """The recognised-producer SEAMS, read from the register that DEFINES the class.
+
+    ⛔ Not a tuple held here. `recognised_producer` is a claim about a ROUTE, and the register
+    exports the seams that claim means (`RECOGNISED_PRODUCER_SEAMS`). A copy in this file would
+    be a second spelling of the class's own definition, and it drifts in the FALSE-HOLD
+    direction: a seam added to the register would leave every correct declaration reading as
+    uncorroborated, holding a row on a correct tree — the opposite of the defect `#11444` fixes.
+    """
+    from tortoise import embed_writer_register as register
+
+    return tuple(register.RECOGNISED_PRODUCER_SEAMS)
+
+
+def _normalise_seam(module: str) -> str:
+    """A citation's module in ONE spelling: `tortoise.projection`.
+
+    The register keys a writer by its DOTTED module while its prose cites the
+    file (`tortoise/projection/__init__.py`). Both name the same module —
+    `_module_name` in this file already decides that a package's module **is**
+    the package — so BOTH sides are normalised: the citation (`_cited_seams`) and
+    the declared KEY (`_normalise_declared_keys`). Normalising only the citation made a key
+    written in the path spelling report as `stale` AND as `undeclared` at once, i.e.
+    blamed the product for declaring a writer it had declared.
+    """
+    return module.removesuffix(".py").replace("/", ".").removesuffix(".__init__")
+
+
+def _cited_seams(reason: str) -> set[tuple[str, str]]:
+    """Every `module::symbol` citation in ``reason`` — LINEAR in the text's length.
+
+    ⛔ Deliberately not a regex over the whole string: `[\\w./]+?\\.py|…::\\w+` backtracks
+    quadratically on text with no `::` at all (measured on the earlier pattern: 0.30 s at
+    5 kB, 5.1 s at 20 kB), and `reason` is a hand-written field with no bound. This walks the
+    separators once, so a pasted log in a `reason` costs its own length and nothing more.
+    """
+    seams: set[tuple[str, str]] = set()
+    index = reason.find("::")
+    while index >= 0:
+        start = index
+        while start > 0 and (reason[start - 1].isalnum() or reason[start - 1] in "_./"):
+            start -= 1
+        end = index + 2
+        while end < len(reason) and (reason[end].isalnum() or reason[end] == "_"):
+            end += 1
+        module, symbol = reason[start:index], reason[index + 2:end]
+        if module and symbol and (module[0].isalpha() or module[0] == "_"):
+            seams.add((_normalise_seam(module), symbol))
+        index = reason.find("::", index + 2)
+    return seams
+
+
+def declared_writers() -> dict[str, dict]:
+    """The PRODUCT's declaration, read from `tortoise/embed_writer_register.py`.
+
+    ``{module::symbol: {"cls", "owner_issue", "reason"}}``, the fields COERCED to text so a
+    malformed entry becomes a NAMED violation instead of a `TypeError` that aborts all four
+    rows (which `main()`'s exit contract could not tell from "a row was NOT MET"). Keys are
+    normalised by :func:`_normalise_declared_keys`, one layer up.
+
+    Imported LAZILY and read-only: the register is a leaf module (standard library only, pinned
+    by its own `test_the_register_imports_without_entering_the_projection_cycle`), so this read
+    cannot enter the `projection → pack_state → sdk → projection` import cycle.
+
+    ⛔ This function READS a declaration; it never derives one. A writer's class is a product
+    decision with an owning issue — an instrument that guessed it would be the second rule set
+    §12.2a forbids. It must never answer `{}` for a register it could not read: an empty mapping
+    renders every outside-gate writer `undeclared` and blames the product for the instrument's
+    own failure.
+    """
+    from tortoise import embed_writer_register as register
+
+    return {
+        str(key): {
+            "cls": str(getattr(record, "cls", "") or ""),
+            "owner_issue": str(getattr(record, "owner_issue", "") or ""),
+            "reason": str(getattr(record, "reason", "") or ""),
+        }
+        for key, record in register.EMBED_WRITER_CLASSES.items()
+    }
+
+
+def _normalise_declared_keys(raw: dict[str, dict]) -> dict[str, dict]:
+    """Every declaration keyed by the NORMALISED `module::symbol` — one key per writer.
+
+    ⛔ The register admits two spellings for a seam (`tortoise.projection::_apply_one` and
+    `tortoise/projection/__init__.py::_apply_one`) because `_cited_seams` does. Normalising
+    only the CITATION side — the first version — made a key written in the path spelling report
+    as `stale` AND as `undeclared` at once, for the SAME live function: the row blamed the
+    product for not declaring a writer it had declared, and named two symptoms of one spelling.
+
+    Two keys that normalise to one writer RAISE rather than let the later one silently win — the
+    register's `load()` refuses a duplicate string key, and this is the same refusal one
+    normalisation later. `register_audit` turns it into a named UNMEASURED hold.
+    """
+    out: dict[str, dict] = {}
+    spelled: dict[str, str] = {}
+    for key, entry in raw.items():
+        module, _, symbol = str(key).partition("::")
+        if not module or not symbol:
+            raise ValueError(f"{key!r} is not a `module::symbol` key")
+        normalised = f"{_normalise_seam(module)}::{symbol}"
+        if normalised in out:
+            raise ValueError(
+                f"{key!r} and {spelled[normalised]!r} both name {normalised!r} — two "
+                "spellings of ONE writer, so a lookup keyed by the normalised form would "
+                "silently keep one of them"
+            )
+        spelled[normalised] = str(key)
+        out[normalised] = entry
+    return out
+
+
+def register_audit(outside_gate: dict[str, dict]) -> dict:
+    """Everything row 1 reports about the register, behind ONE failure boundary.
+
+    ``outside_gate`` is the population a declaration is owed for (`unresolved_write` ∪
+    `ungated`). Three sets partition it and cannot overlap; a fourth is disjoint from it:
+
+    * ``undeclared`` — outside the gate, not named (HOLDS);
+    * ``violations`` — named, but a claim it does not support (HOLDS): an inadmissible class, no
+      owning issue, a `reason` that does not cite the writer, or a route the body does not make;
+    * ``credited`` — named and corroborated, or named as `exempt` (reading (b));
+    * ``stale`` — named but NOT in the outside-gate population at all (HOLDS: the writer is
+      gone or renamed, its module is one the walk skips, its module would not parse, or it now
+      ROUTES THROUGH THE GATE — the fix landing, or `gated`/`producer`/`duplicate` to discovery —
+      any of which means the declaration is no longer owed and must be deleted, because an
+      unused exemption is a stale one).
+
+    A malformed register raises rather than answering, so the caller can hold the row as
+    UNMEASURED; the alternative — a partial answer — reads as the product declaring nothing.
+    """
+    declared = _normalise_declared_keys(declared_writers())
+    undeclared = sorted(set(outside_gate) - set(declared))
+    stale = sorted(set(declared) - set(outside_gate))
+    violations: dict[str, list[str]] = {}
+    for writer in sorted(set(declared) & set(outside_gate)):
+        why = declaration_violations(writer, declared[writer], outside_gate[writer])
+        if why:
+            violations[writer] = why
+    return {
+        "declared": declared,
+        "undeclared": undeclared,
+        "stale": stale,
+        "violations": violations,
+        "credited": sorted((set(declared) & set(outside_gate)) - set(violations)),
+        "bypass_declarations": sorted(
+            w for w, entry in declared.items() if entry["cls"] == CENSUS_BYPASS
+        ),
+    }
+
+
+def declaration_violations(
+    writer: str, entry: dict, writer_info: dict | None = None
+) -> list[str]:
+    """Why ``writer``'s declaration is NOT credited — empty list = credited.
+
+    ⛔ The register's entries are HAND-WRITTEN names (`_DECLARATIONS`). Four things are
+    checked, and it is worth being exact about what each one buys, because the loose version of
+    this docstring claimed corroboration for an `exempt` entry that nothing corroborates:
+
+    1. **self-citation** — the `reason` must cite the writer itself (`module::symbol`). The
+       register's own test requires only *a* resolvable citation, so an entry parked on another
+       function's evidence passes there and is refused here. This checks that the author
+       LOOKED at this writer, not that the claim is true.
+    2. **route corroboration, `recognised_producer` ONLY** — that class claims the writer reaches
+       the canonical clause builder or the `#5008` session producer (`route_calls()`). If its own
+       body makes no such call **by callee NAME** (the register exports names, not objects — the
+       same qualifier its own docstring carries for the `gated` class), the claim is contradicted
+       and the writer stays unrecognised.
+       ⛔ There is NO equivalent for `exempt`, by construction: "stores no live vector" or
+       "stores one under a ruling" is a product judgement that needs data flow to falsify, which
+       this instrument refuses to guess at (`UNDECIDABLE_WRITE_SHAPES`). An `exempt` declaration
+       is accepted BY NAME — that is reading (b), and the reason the register is product code.
+    3. **an admissible class** — `bypass` (or anything outside the vocabulary) is a defect the
+       instrument can NAME, never an exemption. `#11085`'s `load()` refuses to build one.
+    4. **an owning issue** — a declaration with no `#<n>` is an acceptance with nothing behind it
+       (reading (b) says *"a named, accepted exception"*; the `owner_issue` is the recorded
+       acceptance). `load()` enforces the shape too.
+       ⛔ Checks 3 and 4 fire on an injected or tampered register as well: the row must not assume
+       the register is well-formed.
+    """
+    out: list[str] = []
+    cls = entry.get("cls")
+    if cls == CENSUS_BYPASS:
+        out.append("declares `bypass` — a DEFECT, never an exemption")
+    elif cls not in CENSUS_CLASSES:
+        out.append(f"class {cls!r} is outside {CENSUS_CLASSES}")
+    if not _OWNER_ISSUE_RE.fullmatch(entry.get("owner_issue") or ""):
+        out.append(
+            "carries no owning issue (`#<n>`) — an acceptance with no owner behind it is "
+            "not an acceptance"
+        )
+    module, _, symbol = writer.partition("::")
+    if (_normalise_seam(module), symbol) not in _cited_seams(entry.get("reason") or ""):
+        out.append("does not cite its own `module::symbol` seam in `reason`")
+    if cls == CENSUS_RECOGNISED:
+        seams = route_calls()
+        callees = set((writer_info or {}).get("callees") or ())
+        if not callees.intersection(seams):
+            out.append(
+                "claims a route to a recognised producer "
+                f"({', '.join(seams)}) that its own body does not call, by callee NAME"
+            )
+    return out
+
+
 def score_rule_bullet() -> Row:
     """Bullet 1 — the rule is stated, is ONE rule set, and is enforced."""
     import tortoise.embed_gate as embed_gate
@@ -1020,6 +1516,71 @@ def score_rule_bullet() -> Row:
     ambient = embed_gate.embed_gate_enabled()
     shipped = flag_in_shipped_configs(embed_gate.ENV_FLAG)
     on_by_default = ambient or shipped["on"]
+    # ⛔ The population a DECLARATION is owed for: every writer the rule never sees,
+    # `unresolved_write` AND `ungated` — the same tuple
+    # `tests/test_embed_writer_register.py::NEEDS_A_DECLARATION` spells, and the
+    # population the register's own two-direction test measures.
+    outside_gate = {**unresolved_writes, **ungated}
+    # ⛔ UNMEASURED is not "nothing is declared": an unreadable or malformed register must
+    # HOLD the row. Reading it as an empty mapping would render every writer `undeclared` and
+    # blame the product for the instrument's own failure — the misattribution shape this file
+    # refuses elsewhere. ONE boundary: `register_audit` raises for a register that cannot be
+    # read OR shaped, so a corrupted entry becomes a named hold instead of a traceback that
+    # aborts all four rows (which `main()`'s exit contract could not tell from "a row NOT MET").
+    register_error: str | None = None
+    try:
+        audit = register_audit(outside_gate)
+    except Exception as exc:  # noqa: BLE001, RUF100 — fail-closed, and NAMED
+        audit = {"declared": {}, "undeclared": [], "stale": [],
+                 "violations": {}, "credited": [], "bypass_declarations": []}
+        register_error = f"{type(exc).__name__}: {exc}"
+    declared = audit["declared"]
+    undeclared = audit["undeclared"]
+    stale = audit["stale"]
+    violations = audit["violations"]
+    credited = audit["credited"]
+    bypass_declarations = audit["bypass_declarations"]
+
+    def _note_classes(credited_keys: list[str]) -> str:
+        """The class histogram of the CREDITED population — the one the note is about.
+
+        ⛔ Over ``credited``, not over ``declared ∩ outside_gate``: counting an uncredited
+        declaration made the line read *"0 of 1 … (recognised_producer=1)"* — asserting a
+        class was credited in the same sentence that said none was. Declared-but-not-credited
+        is counted SEPARATELY, so the line reconciles either way.
+        """
+        buckets: dict[str, int] = {}
+        for writer in credited_keys:
+            # `str(...)`: an entry's class is coerced at the read boundary, and a caller that
+            # injects one directly must not turn a histogram into an unhashable-key TypeError.
+            cls = str(declared[writer].get("cls") or "?")
+            buckets[cls] = buckets.get(cls, 0) + 1
+        text = " · ".join(f"{cls}={n}" for cls, n in sorted(buckets.items())) or "none"
+        uncredited = len(set(declared) & set(outside_gate)) - len(credited_keys)
+        return text + (f" (+{uncredited} declared but NOT credited)" if uncredited else "")
+
+    if register_error:
+        register_note = (
+            f"#11444 — writers credited from the product register "
+            f"({REGISTER_MODULE}): UNMEASURED ({register_error}) — the register "
+            "could not be read, so NOTHING is credited and nothing is blamed on "
+            "the product"
+        )
+    else:
+        register_note = (
+            f"#11444 — writers credited from the product register "
+            f"({REGISTER_MODULE}): {len(credited)} of {len(outside_gate)} "
+            f"outside-gate writers ({_note_classes(credited)})"
+        )
+        if credited:
+            owners = ", ".join(
+                f"{w}={declared[w].get('owner_issue')}" for w in credited
+            )
+            register_note += f"; owners: {owners}"
+        # ⛔ The row's OWN scope, carried WITH the verdict: `MET` here means every writer
+        # discovery finds outside the gate is gated or NAMED — never "no vector is stored
+        # that the rule did not decide".
+        register_note += f"; {ROW_SCOPE_NOTE}"
     # ⛔ Built as locals, never nested inside another f-string: nesting a
     # `'`-delimited f-string inside a `"`-delimited one is PEP 701 **syntax**
     # (`Python-Version: 3.12`), so it cannot be tokenized by the older
@@ -1028,6 +1589,9 @@ def score_rule_bullet() -> Row:
     ungated_at = ", ".join(f"{w} @ {d['at']}" for w, d in sorted(ungated.items()))
     unresolved_at = ", ".join(
         f"{w} @ {d['at']}" for w, d in sorted(unresolved_writes.items())
+    )
+    violations_at = ", ".join(
+        f"{w}: {'; '.join(why)}" for w, why in sorted(violations.items())
     )
     notes = [
         f"stated: {stated} (predicate in embed_gate: {stated_in_gate}; "
@@ -1038,7 +1602,13 @@ def score_rule_bullet() -> Row:
         f"({', '.join(sorted(gated)) or 'none'})",
         f"write paths that embed OUTSIDE the gate: {len(ungated)} "
         f"({ungated_at or 'none'})"
-        + (" — the session/Turn writers #5008 declares as exempt"
+        # ⛔ Not a verdict and not a claim about the register: this note reports the
+        # PATH. Whether the writer holds the row is decided below, from the register,
+        # and says so in its own note (`undeclared` / `credited`).
+        + (" — path(s) the gate never sees; each holds this row unless the "
+           "product register CREDITS it (a name alone is not enough: the class must "
+           "be admissible, the entry must carry an owning issue `#<n>`, the `reason` must "
+           "cite the writer, and a `recognised_producer` claim must be corroborated)"
            if ungated else ""),
         f"gate enabled by default: {on_by_default} (ambient "
         f"{embed_gate.ENV_FLAG}={os.environ.get(embed_gate.ENV_FLAG, '')!r}; "
@@ -1053,9 +1623,11 @@ def score_rule_bullet() -> Row:
         # (this tool's own review, P2).
         f"unparseable modules (hold this row): {sorted(unparsed) or 'none'}",
         # ⛔ A function that writes an embedding with NO recognised producer
-        # call is reported, not assumed clean: the session/Event chain calls
-        # the primitive through `self._session_embedding`, so a three-name
-        # callee vocabulary cannot see it (review round 5, P2).
+        # call is STILL reported: the register is a SUPPLEMENT to this
+        # enumeration, never a replacement (`#11444`: *What the fix must
+        # preserve*, third bullet — counted/classified, not replaced — and its
+        # third Verification checkbox). The register answers *which class* each
+        # one is in; it does not remove the population from the evidence.
         f"functions writing an embedding with no recognised producer call: "
         f"{len(unresolved_writes)} — deliberately OVER-INCLUSIVE (it also lists "
         f"repair/backfill helpers and the clause builder itself, because a "
@@ -1063,15 +1635,62 @@ def score_rule_bullet() -> Row:
         f"bypass that reads as exempt is the failure this row exists to "
         f"prevent): "
         f"{unresolved_at or 'none'}",
+        register_note,
         f"duplicate writer names (hold this row): {sorted(duplicates) or 'none'}",
     ]
+    if undeclared:
+        notes.append(
+            "undeclared writers (hold this row at PARTIAL — a writer the gate "
+            f"never sees that the product does not name): {undeclared}"
+        )
+    if stale:
+        notes.append(
+            "stale declarations (hold this row at PARTIAL — a name the outside-gate "
+            "population no longer contains: the writer is gone or renamed, its module "
+            "is one the walk skips (`tortoise/embeddings.py`), its module would not "
+            "parse, or it now ROUTES THROUGH THE GATE (the fix landing) / discovery "
+            "classes it `gated`/`producer`/`duplicate` — an unused exemption is a "
+            f"stale one, so delete the entry): {stale}"
+        )
+    if bypass_declarations:
+        notes.append(
+            "REAL BYPASSES (hold this row at PARTIAL — a bypass is a DEFECT, "
+            f"never an exemption): {bypass_declarations}"
+        )
+    if violations:
+        notes.append(
+            "uncorroborated declarations (hold this row at PARTIAL — a claim the "
+            "entry does not support: an inadmissible class, no owning issue, a "
+            "`reason` that does not cite the writer, or a route the body does not "
+            "make): "
+            f"{violations_at}"
+        )
+    if register_error:
+        notes.append(
+            "writer register UNREADABLE or MALFORMED (hold this row at PARTIAL — "
+            f"UNMEASURED, never 'nothing declared'): {register_error}"
+        )
     if not stated or not shared or not gated:
         verdict = "NOT MET"
-    elif not on_by_default or ungated or unparsed or unresolved_writes or duplicates:
+    elif (not on_by_default or undeclared or unparsed or duplicates
+          or stale or bypass_declarations or violations or register_error):
         # EITHER condition alone means the rule is not the write path's
-        # operative rule: the flag is the operator's, and an ungated writer is
-        # a path the rule never sees. Turning the flag ON does not fix the
-        # second — which is why it must hold the row, not be masked by it.
+        # operative rule: the flag is the operator's, and a writer the gate
+        # never sees is a path the rule never reaches.
+        # ⛔ `#11444`: an OUTSIDE-GATE writer no longer holds the row BY ITSELF.
+        # Reading (b) — recorded on `#11085` — accepts a writer that is *"a named,
+        # accepted exception in the product"*, and `tortoise.session_indexer::main`
+        # is exactly that (declared there, owner `#5008`). It holds whenever the
+        # product does NOT name it (`undeclared`), which is the same falsifier with
+        # the decision applied.
+        # ⛔ And this is the honest limit, not a gap to be closed here: naming a LIVE
+        # undeclared writer (as `exempt`, or as `recognised_producer` when its body
+        # really does route) DOES green the row — that naming IS the acceptance
+        # reading (b) asks for. What a register edit CANNOT do is green it with a
+        # name that has no writer behind it (`stale`). Everything else that can be
+        # wrong with a name lands in `violations` and holds too: an inadmissible class
+        # (`bypass`), no owning issue, a `reason` that does not cite the writer, or a
+        # route the body does not make.
         verdict = "PARTIAL"
     else:
         verdict = "MET"
@@ -1915,6 +2534,697 @@ def _cypher_label(label: str) -> str:
     return _quote_identifier(str(label))
 
 
+# ── `entity_type` ← label, and the callers that reach it (#11088) ───────────
+
+#: The ONE SDK method the vector leg is reachable through. Named, not derived:
+#: it is the function `degradation_chain` is called FROM (sdk.py's
+#: `tortoise_fts_query`), and a rename there must red
+#: `tests/test_dod_5090_probe.py`'s caller pin rather than silently make this
+#: census name a method that no longer exists.
+VECTOR_LEG_SDK_METHOD = "tortoise_fts_query"
+
+#: The module-level runner the leg itself lives in — the second half of the
+#: path, so a reader can walk it without searching.
+VECTOR_LEG_RUNNER = "tortoise.search_engine.run_vector_query"
+
+#: How many stored vectors the width probe samples. A label can hold vectors of
+#: MORE THAN ONE width (an `EMBEDDING_DIM` rotation), and `stored × width` is a
+#: figure only while every sampled row agrees — so the probe samples a handful
+#: and REFUSES on disagreement instead of extrapolating one row across the label.
+WIDTH_PROBE_SAMPLES = 5
+
+
+def affected_entity_types(label: str) -> list[str]:
+    """The ``entity_type`` values a vector-leg query for ``label`` answers.
+
+    ⛔ The mapping is NOT one-to-one and that is exactly why this is not
+    bookkeeping (#11088): ``security.entity_label`` sends **two** entity types
+    to `:Source` (``document``, ``source``) and **two** to `:Point`
+    (``point``, ``operator``). A census that names only labels therefore names
+    the wrong population for the surface question it exists to answer — a
+    reader would remove `:Object`'s vectors believing one query changes when it
+    is one, or believe `:Source`'s vectors serve one caller when they serve two.
+
+    Derived from :data:`tortoise.security.VALID_ENTITY_TYPES` through the
+    product's ONE translation (:func:`tortoise.security.entity_label`) — never
+    a second table here, so a type added to the vocabulary appears without an
+    edit to this file.
+    """
+    from tortoise.security import VALID_ENTITY_TYPES, entity_label
+
+    return sorted(
+        et for et in VALID_ENTITY_TYPES
+        if entity_label(et) == label
+    )
+
+
+def vector_leg_surface() -> list[dict]:
+    """Every MCP tool / REST route that can hand `entity_type` to the vector leg.
+
+    ⛔ DERIVED from :data:`tortoise.tool_registry.TOOL_REGISTRY`, the ONE
+    declaration of the MCP/REST surface — never a list written here. A
+    hardcoded list would be a second declaration of the surface, and the whole
+    point of this half of #11088 is that the consequence is stated for *the
+    tools that exist now*: a tool added tomorrow (or removed today) is named by
+    this function without an edit, and one retired here cannot linger as a
+    claim about a surface that no longer exists.
+
+    The binding is `sdk_method`, not the tool NAME: `tortoise_search` and
+    `tortoise_query` are two MCP tools, and neither a name match nor a
+    `sdk_method`-only filter names both (see the ⛔ paragraph below).
+
+    `takes_entity_type` is read from the SDK method's SIGNATURE — a fact, not a
+    prose sniff on a description. ⛔ It is a fact about the METHOD, not about a
+    given handler: the SDK signature has `entity_type`, so this field reads
+    `True` for every entry bound to it whether or not that handler forwards the
+    argument. What pins a handler's FORWARDING is `named_by` — `handler forwards
+    entity_type into the hybrid engine` appears only for a handler whose body
+    does (review round 2, P3: the earlier wording claimed this field catches a
+    stopped-forwarding handler, which it does not and cannot).
+
+    ⛔ A `sdk_method` filter ALONE IS INCOMPLETE, and incompleteness here is a
+    false claim rather than an omission: `tortoise_query`'s registry binding is
+    `paginated_query` (its structural arm), yet its MCP handler forwards a
+    `text=` argument to `tortoise_fts_query(entity_type=…)`. A census built on
+    the binding would therefore name ONE tool where the surface has two. So the
+    handler body is AST-scanned for a `tortoise_fts_query` call that passes
+    `entity_type` — the same technique this file already uses for embedding
+    writers. The TWO handler-shaped sources are unioned with a THIRD,
+    :func:`_sdk_methods_on_vector_leg` (SDK methods that ask the leg for a fixed
+    `entity_type`, including through a private helper), and each entry carries
+    `named_by` saying which sources named it.
+    """
+    try:
+        from tortoise.tool_registry import TOOL_REGISTRY
+    except Exception as e:  # pragma: no cover - import failure is the caller's
+        return [{"tools": f"UNMEASURED({type(e).__name__}: {e})"}]
+
+    takes: object = "UNMEASURED(the SDK method could not be imported)"
+    try:
+        import inspect
+
+        from tortoise.sdk import TortoiseSDK
+
+        params = inspect.signature(
+            getattr(TortoiseSDK, VECTOR_LEG_SDK_METHOD)).parameters
+        takes = "entity_type" in params
+    except Exception as e:
+        takes = f"UNMEASURED({type(e).__name__}: {e})"
+
+    by_binding = {t.name for t in TOOL_REGISTRY
+                  if getattr(t, "sdk_method", None) == VECTOR_LEG_SDK_METHOD}
+    by_handler, handler_error = _handlers_forwarding_entity_type()
+    fixed_by_method, fixed_error, fixed_declared = \
+        _sdk_methods_on_vector_leg()
+    #: Tool name → the `entity_type` values its SDK method asks the leg for
+    #: WITHOUT the caller choosing one (third source — see
+    #: `_sdk_methods_on_vector_leg`).
+    by_fixed = {t.name: sorted(fixed_by_method[t.sdk_method])
+                for t in TOOL_REGISTRY
+                if getattr(t, "sdk_method", None) in fixed_by_method}
+    registered = {t.name for t in TOOL_REGISTRY}
+    spec = {t.name: getattr(t, "rest_spec", None) for t in TOOL_REGISTRY}
+
+    out: list[dict] = []
+    for name in sorted(by_binding | by_handler | set(by_fixed)):
+        sources: list[str] = []
+        if name in by_binding:
+            sources.append("registry sdk_method")
+        if name in by_handler:
+            sources.append("handler forwards entity_type into the hybrid engine")
+        if name in by_fixed:
+            sources.append("its SDK method calls the leg with a fixed entity_type")
+        how = " AND ".join(sources)
+        route = spec.get(name)
+        if route is not None:
+            rest = f"{route.method} {route.path}"
+        elif name in registered:
+            # ⛔ A registry tool with NO `rest_spec` is MCP-only — that is a
+            # fact about the surface, not a failed measurement, and conflating
+            # the two would report `tortoise_query` as unregistered.
+            rest = "MCP only (no REST route)"
+        else:
+            rest = "UNMEASURED(handler not in TOOL_REGISTRY — not on the MCP surface)"
+        fixed = by_fixed.get(name)
+        entry = {
+            "tool": name,
+            "rest": rest,
+            "named_by": how,
+            "takes_entity_type": takes,
+            # ⛔ Two different facts about the same tool, and collapsing them
+            # would overstate one class: a PASS-THROUGH tool can ask the leg
+            # for ANY type the caller supplies (`"caller-supplied"`), while a
+            # fixed-type tool asks for one the caller never names. A tool that
+            # is BOTH keeps both — `entity_types` reads `caller-supplied` (the
+            # wider fact, so a consequence is never understated) and the fixed
+            # list rides beside it as `also_fixed_entity_types` (review round 9,
+            # P3: the single value silently dropped the pass-through reach of a
+            # tool that also fixes a type).
+            "entity_types": ("caller-supplied" if (name in by_handler or fixed is None)
+                             else fixed),
+        }
+        if fixed is not None and name in by_handler:
+            entry["also_fixed_entity_types"] = fixed
+        out.append(entry)
+    # ⛔ THE DERIVED-FAILURE LINE IS DECIDED FROM THE SCAN, NOT FROM `out`
+    # (#11389 review, P2). The DECLARED BOUND below is appended to `out`, which
+    # made `not out` UNREACHABLE whenever a declaration existed: a surface that
+    # could not be derived AT ALL then published only the by-reference caveat,
+    # which reads as "the scan ran and this is its known edge" — the two
+    # channels separated in one direction (#11337) and silently collapsed in the
+    # other. `derived_tool_rows` is the scan's own verdict, captured before
+    # either caveat line is added.
+    derived_tool_rows = bool(out)
+    for error in (handler_error, fixed_error):
+        if error:
+            out.append({"tools": error})
+    # ⛔ An UNRESOLVABLE `VECTOR_LEG_SDK_METHOD` empties BOTH sets, so `out` was
+    # `[]` — and `takes`, which is computed to be `UNMEASURED(...)` in exactly
+    # that case, had no entry to ride on. The surface then read as a MEASURED
+    # "no tool can pass entity_type" beside `entity_types_whose_query_results_
+    # change` naming real types: the under-reporting direction, produced by the
+    # very drift the resolution pin exists to catch — a pin protects the repo,
+    # not the instrument as shipped (review round 2, P2).
+    if not derived_tool_rows or isinstance(takes, str):
+        out.append({"tools": f"UNMEASURED(the surface could not be derived: "
+                             f"{takes if isinstance(takes, str) else 'no tool resolves'})"})
+    # ⛔ The DECLARED BOUND is published on its own line, never merged into the
+    # scan-failure channel: it says the scan ran and this is its known edge, which a
+    # reader must be able to tell apart from "the scan could not run" (#11337).
+    # Emitted AFTER the derived-failure line for the same reason (#11389 review,
+    # P2): the failure is the more important fact, and appending it last would
+    # leave it present but unreachable when both apply.
+    if fixed_declared:
+        out.append({"tools": fixed_declared})
+    return out
+
+
+#: The comprehension forms, each of which introduces its OWN scope (#11389
+#: review, P2). Named once so the two walks that must agree about them cannot
+#: drift apart.
+_COMPREHENSION_NODES = (ast.ListComp, ast.SetComp, ast.DictComp,
+                        ast.GeneratorExp)
+
+
+def _comprehension_targets(node: ast.AST) -> frozenset[str]:
+    """The names a comprehension binds in its OWN scope.
+
+    ⛔ A COMPREHENSION IS A SCOPE (#11389 review, P2). Its `for` target shadows
+    an enclosing binding for the element, the `if` clauses and the body, so a
+    `Load` of that name INSIDE the comprehension refers to the comprehension —
+    not to a leg-reaching function of the enclosing method. Reading it as a
+    mention published a spurious `declared bound` entry for
+    `[_review_pool for _review_pool in rows]` and
+    `[r for _review_pool in rows if _review_pool]`: the cry-wolf direction this
+    channel exists to narrow, and invisible to the pinned fixture because its
+    element is `x`. Collects TARGETS only (which may destructure, `for a, b in
+    …`), never the element expression.
+    """
+    bound: set[str] = set()
+    for gen in getattr(node, "generators", ()):
+        for sub in ast.walk(gen.target):
+            if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Store):
+                bound.add(sub.id)
+    return frozenset(bound)
+
+
+def _sdk_methods_on_vector_leg(
+        ) -> tuple[dict[str, set[str]], str | None, str | None]:
+    """SDK methods that call the vector leg, and the `entity_type` they ask for.
+
+    ⛔ THE THIRD SOURCE, and the one neither of the other two can see (#11088
+    review round 7, P1). A handler that never forwards `entity_type` can still
+    reach the leg, because the SDK method it calls names the type itself:
+    `recall_state` calls `tortoise_fts_query(…, entity_type="object")` while its
+    `object_centric` default is on, and `search_sessions` calls it with
+    `entity_type="event"` — so `tortoise_recall`'s DEFAULT `mode="state"` and
+    `tortoise_search_sessions` both change when those labels' vectors are
+    removed, and a derivation built only on forwarded arguments named neither.
+    Under-reporting the surface of a surface change is the dangerous direction:
+    an owner approves a change that is larger than the request describes.
+
+    A call with **no** `entity_type=` runs the SDK's own default (`"point"`),
+    which is as much of an entrant as an explicit one — the label it lands on is
+    affected the same way. A non-literal argument is reported as
+    `UNKNOWN(<expression>)`, never guessed into a type.
+
+    Returns `(method name → entity types, error, declared_bound)`.
+
+    ⛔ THE TWO REFUSAL CHANNELS ARE SEPARATE (#11337 review, P1). `error` is the
+    reason the scan could not be TAKEN — a missing or unparseable source — and it
+    is what makes a caller read "no SDK method reaches the leg" correctly. The
+    declared bound is a DIFFERENT fact: the scan ran and its claim has a known
+    edge. Overloading one slot for both made a legitimate by-reference shape red
+    the real-tree tests whose precondition is `error is None`, under a message
+    that reads like a scan failure — a false block on a correct tree, whose
+    cheapest repair is to delete the declaration.
+    """
+    path = REPO_ROOT / "tortoise" / "sdk.py"
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except Exception as e:
+        return ({}, f"UNMEASURED(SDK scan failed: {type(e).__name__}: {e})",
+                None)
+
+    #: The SDK's declared default for the argument, read from the source rather
+    #: than restated here: `entity_type: str = "point"` in
+    #: `TortoiseSDK.tortoise_fts_query`. A call that omits the kwarg runs it.
+    default_entity_type = "UNKNOWN(no declared default found)"
+
+    def _is_target(node: ast.AST) -> bool:
+        if isinstance(node, ast.Attribute):
+            return node.attr == VECTOR_LEG_SDK_METHOD
+        return isinstance(node, ast.Name) and node.id == VECTOR_LEG_SDK_METHOD
+
+    def _types_for(call: ast.Call) -> list[str]:
+        found: list[str] = []
+        for kw in call.keywords:
+            if kw.arg is None:  # `**{…}` — the keywords are not in the tree
+                found.append("UNKNOWN(**kwargs unpacking)")
+            elif kw.arg == "entity_type":
+                found.append(kw.value.value if isinstance(kw.value, ast.Constant)
+                             and isinstance(kw.value.value, str)
+                             else f"UNKNOWN({ast.unparse(kw.value)[:40]})")
+        return found or [default_entity_type]
+
+    def _reachable_by_name(node: ast.AST, entrant: dict[str, set[str]],
+                           shadowed: set[str] | None = None) -> str | None:
+        """The leg-reaching function this expression names, if any.
+
+        Used ONLY to declare a reach this scan cannot resolve — never to add an
+        entrant. `self.<name>` and a bare `<name>` are in-module method
+        references; `getattr(self, "<name>")` is the same reach with the name
+        in a string literal, and `getattr(self, <expr>)` is a reach whose target
+        cannot be resolved at all — declared, because declaring adds no entrant
+        and a possibly-short caller list is the safe direction to report.
+        """
+        # ⛔ `shadowed` is the local bindings of the enclosing function: a bare
+        # `recall_state = 5` binds the NAME without referring to the method, and
+        # declaring it would caveat a complete table — the same cry-wolf failure
+        # the resolved-call exclusion removes (#11337 review, P2).
+        # ⛔ A STORE/DEL name is a BINDING, not a mention (#11389 review, P2 —
+        # a regression introduced by skipping comprehension scopes: the mention
+        # walk then reached `[_pool for _pool in rows]` and read the target as a
+        # reference, a spurious caveat on a complete table).
+        if (isinstance(node, ast.Name) and node.id in entrant
+                and isinstance(node.ctx, ast.Load)
+                and node.id not in (shadowed or ())):
+            return node.id
+        # ⛔ `ctx` applies to an Attribute too (#11389 review, P3): `self._pool = v`,
+        # `self._pool += v`, `self._pool: T = v` and `del self._pool` are BINDINGS,
+        # and publishing one is the same spurious caveat the bare-Name guard
+        # prevents.
+        if (isinstance(node, ast.Attribute) and node.attr in entrant
+                and isinstance(node.ctx, ast.Load)):
+            receiver = node.value
+            # `self`, and the in-module receivers that stand for it (#11389
+            # review, P3): `super()` and `type(self)`. A genuinely FOREIGN
+            # receiver (`self.conn.helper(1)`) is excluded HERE — but note the
+            # scope of that statement: this channel only. The transitive CLOSURE
+            # above matches `func.attr` with no receiver check, so it still names
+            # such a caller (pre-existing behaviour, unchanged by #11337). This
+            # channel's job is to add the caveat, not to correct the closure.
+            if isinstance(receiver, ast.Name) and receiver.id == "self":
+                return node.attr
+            if (isinstance(receiver, ast.Call)
+                    and isinstance(receiver.func, ast.Name)
+                    and receiver.func.id in ("super", "type")):
+                return node.attr
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == "getattr" and len(node.args) in (2, 3)
+                and isinstance(node.args[0], ast.Name)
+                and node.args[0].id == "self"):
+            name = node.args[1]
+            if (isinstance(name, ast.Constant) and isinstance(name.value, str)
+                    and name.value in entrant):
+                return name.value
+            if not isinstance(name, ast.Constant):
+                # ⛔ The name is not in the tree, so whether this reaches the leg
+                # is UNKNOWABLE here — not "no" (#11337 review). Reporting it
+                # costs a declaration and prevents the silent-short-list class.
+                return f"getattr(self, {ast.unparse(name)[:40]})"
+        return None
+
+    def _scan(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
+        found: set[str] = set()
+        # Only THIS function's own body: a nested `def` is its own method, and
+        # attributing its call to the enclosing scope would name the wrong one.
+        # ⛔ But a nested `class` BODY IS this function's body (#11389 review,
+        # P3): it executes when the method does, so a leg call sitting in it is
+        # a real fixed-type use — the same doctrine the mention walk follows.
+        # Skipping it here left such a call in NEITHER channel: not measured by
+        # this walk, and excluded from the mention walk as a call it "owns".
+        stack: list[ast.AST] = list(fn.body)
+        while stack:
+            node = stack.pop()
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if isinstance(node, ast.Call) and _is_target(node.func):
+                found.update(_types_for(node))
+            stack.extend(ast.iter_child_nodes(node))
+        return found
+
+    # ⛔ TWO PASSES, because the default must be resolved BEFORE any call site
+    # is read: a single `ast.walk` reaches `suggest_entry_points` (which omits
+    # the kwarg, i.e. runs the default) before it reaches the leg's own
+    # signature, so a one-pass version reported
+    # `UNKNOWN(no declared default found)` for a call whose type is `point`.
+    # An order-dependent derivation is not a measurement.
+    functions = [n for n in ast.walk(tree)
+                 if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    leg = next((fn for fn in functions if fn.name == VECTOR_LEG_SDK_METHOD), None)
+    if leg is not None:
+        # The leg's own signature declares the default. The leg itself is never
+        # counted as an ENTRANT — that would name it as its own caller.
+        for default, a in zip(
+                [None] * (len(leg.args.args) - len(leg.args.defaults))
+                + list(leg.args.defaults), leg.args.args, strict=True):
+            if a.arg == "entity_type" and isinstance(default, ast.Constant):
+                default_entity_type = default.value
+        for a, default in zip(leg.args.kwonlyargs, leg.args.kw_defaults,
+                              strict=True):
+            if a.arg == "entity_type" and isinstance(default, ast.Constant):
+                default_entity_type = default.value
+
+    direct: dict[str, set[str]] = {}
+    callees: dict[str, set[str]] = {}
+    known = {fn.name for fn in functions}
+    for fn in functions:
+        if fn is leg:
+            continue
+        types = _scan(fn)
+        if types:
+            direct[fn.name] = types
+        calls: set[str] = set()
+        stack = list(fn.body)
+        while stack:
+            node = stack.pop()
+            # Same doctrine as `_scan`: a nested class body runs with this
+            # function, so its calls are this function's edges.
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if isinstance(node, ast.Call):
+                func = node.func
+                name = (func.attr if isinstance(func, ast.Attribute)
+                        else func.id if isinstance(func, ast.Name) else None)
+                if name in known:
+                    calls.add(name)
+            stack.extend(ast.iter_child_nodes(node))
+        if calls:
+            callees[fn.name] = calls
+
+    # ⛔ ONE HOP IS NOT THE POPULATION (review round 9, P2). A registry tool can
+    # reach the leg through a PRIVATE helper: `review_connections` →
+    # `_review_add`/`_review_prune` → `_review_pool` → the leg. Keying the scan
+    # on the ENCLOSING function named `_review_pool` (not a `TOOL_REGISTRY
+    # .sdk_method`) and then dropped the tool with no entry anywhere — a silent
+    # hole in the caller list of an approval request. The transitive closure
+    # over in-module calls closes that class: a method is an entrant iff any
+    # path from it reaches the leg THROUGH A NAME-RESOLVED in-module call, and
+    # it carries the entity types found along the paths it can take.
+    #
+    # ⚠️ DECLARED BOUND (#11337): "name-resolved" is the whole claim. The callee
+    # extraction ABOVE reads `func.attr` / `func.id`; the walk below collects
+    # mentions instead, so a reach that takes a
+    # leg-reaching function BY REFERENCE is not an edge in this graph and the
+    # closure cannot traverse it. The forms are not a list to keep current —
+    # `_safe(self._review_pool, …)`, a `key=`/callback, `functools.partial`,
+    # `getattr(self, <name>)`, an alias, a container, a bare `return` — the
+    # rule is that the function is MENTIONED without being called — anywhere in
+    # a function BODY, and not shadowed by a function-scope binding.
+    # ⚠️ OUTSIDE THE WALK, and named rather than implied: a nested `def`'s
+    # decorators and parameter DEFAULTS (evaluated when the outer method runs —
+    # `def inner(cb=self._review_pool)` IS a real reach), and a comprehension's
+    # own binding targets. Those are not reported, so the census doc says so too;
+    # the class-definition-time argument that would justify excluding a METHOD
+    # signature's default does not apply to a nested def, and the previous
+    # comment wrongly used it for both. (A mention INSIDE a comprehension body
+    # IS walked and IS reported — EXCEPT a `Load` that reuses THAT comprehension's
+    # own target name: the target binds in the comprehension's own scope, so such
+    # a `Load` is the comprehension's binding, not the enclosing method's
+    # (#11389 review, P3).) Also NOT
+    # modelled in `shadowed`: `*args`/`**kwargs` names, lambda parameters, `match`
+    # patterns and `global`/`nonlocal` — those produce a spurious entry rather
+    # than a missed one, and are owned by `#11397`. Under-
+    # reporting is the dangerous direction for a surface an owner approves, so
+    # the shape is REPORTED through the same `UNMEASURED` channel the handler
+    # scan uses for its own bound (see `by_reference` below) instead of being
+    # dropped. It is deliberately not GUESSED into the entrant set: bare
+    # attribute-name matching would also over-attribute a foreign receiver
+    # (`self.conn.helper(1)`), and a guess dressed as a measurement is the class
+    # this instrument exists to refuse.
+    changed = True
+    while changed:
+        changed = False
+        for name, calls in callees.items():
+            reach = set(direct.get(name, set()))
+            for callee in calls:
+                reach |= direct.get(callee, set())
+            if not reach <= direct.get(name, set()):
+                merged = direct.get(name, set()) | reach
+                if merged != direct.get(name):
+                    direct[name] = merged
+                    changed = True
+
+    # ⛔ The declared bound, MADE OBSERVABLE (#11337). A method that hands a
+    # leg-reaching function to another call instead of calling it cannot be
+    # resolved by a `Call.func` scan — so if that shape is present the caller
+    # list is SHORT, and the only honest report is to say so. Emitted through
+    # the `UNMEASURED` channel the caller already prints, so it rides beside the
+    # tools rather than in a docstring nobody reads at report time.
+    # ⛔ MEASURED at this head, against the SOURCE: `tortoise/sdk.py` holds
+    # exactly ONE by-reference shape — `volunteer_context`'s
+    # `_search_fn=self.tortoise_fts_query` — so this does NOT stay empty and a
+    # clean run DOES publish a declared-bound line. Grepping for `_safe(`
+    # answers a SPELLING, not the shape; that inference is what made an earlier
+    # version of this comment certify the opposite of the truth, and the
+    # cheapest repair for a reader who trusted it would be to delete the
+    # declaration as a false positive. A previous cycle read five entries off this
+    # scan's output and published them as "LIVE" — they were all the
+    # resolved-call false positive above, which is why the negative pin exists
+    # beside the positive one: the instrument's own output is not evidence about
+    # itself.
+    # ⛔ EVERY NODE, not a set of positions (#11337 review, P3). Naming the
+    # shapes that carried the reach — a call argument, a `key=`/callback, a
+    # `functools.partial`, a `getattr`, a plain `ast.Assign` — pinned only the
+    # spellings the fixture happened to write, while `f: T = self._pool`, a
+    # walrus, a container (`[self._pool]`), an `if`-expression and a bare
+    # `return self._pool` were all still dropped with no entry. A mention of an
+    # entrant by name IS the fact this channel reports, whatever syntax carries
+    # it, so the rule is the mention — which is also the only rule that cannot
+    # go stale when the SDK's shape changes.
+    # ⛔ NOT SKIPPING ENTRANTS (#11337 review, P2). This used to skip any
+    # function already in `direct`, on the reasoning that it is named anyway.
+    # It is — but its ENTITY-TYPE SET is not: `direct[name]` is what
+    # `vector_leg_surface` publishes as `entity_types`, so a method that calls
+    # one leg-reaching helper and PASSES another lost the second helper's types
+    # with nothing saying so. The list being complete is not the claim; the set
+    # is. Only the leg itself is skipped (it is not its own caller).
+    #
+    # ⛔ AND A RESOLVED CALL IS NOT A BY-REFERENCE REACH (#11337 review, P0).
+    # `_reachable_by_name` matches a `self.<entrant>` Attribute, and a plain
+    # call's own `func` IS such an attribute — so `self._review_pool(scope)`,
+    # which the closure above has already traversed, was being declared as an
+    # unresolved reference. Measured: every one of the five entries this scan
+    # produced on the real `tortoise/sdk.py` was that false positive, and the
+    # published caveat said the caller table might be short when it was not —
+    # the cry-wolf failure that makes a real declaration ignorable, produced by
+    # the very channel meant to prevent it. The `func` of a `Call` is therefore
+    # excluded: the closure owns it.
+    #: ⛔ THE LEG IS IN THE MENTION SET (#11389 review, P1). `direct` excludes it
+    #: (it is not its own caller), but a mention OF the leg is the by-reference
+    #: case in its purest form — `_search_fn=self.tortoise_fts_query` in
+    #: `volunteer_context` passes the leg itself into the volunteer pipeline, which
+    #: calls it with `entity_type="point"`. Without the leg in this set that reach
+    #: was neither traversed (not a `Call.func`) NOR declared, and three artifacts
+    #: asserted no such shape existed. A name-resolved CALL of the leg is still
+    #: excluded, by `call_funcs` above — that is the closure's.
+    mentionable: dict[str, set[str]] = {**direct, VECTOR_LEG_SDK_METHOD: set()}
+    by_reference: dict[str, set[str]] = {}
+    for fn in functions:
+        if fn is leg:
+            continue
+        # ⛔ ONLY A NAME-RESOLVED CALL'S `func` IS THE CLOSURE'S (#11389 review,
+        # P2). Excluding every `Call.func` also excluded `getattr(self, n)(…)`,
+        # whose func is itself a `Call`: the closure cannot resolve that call,
+        # so the reach was neither traversed NOR declared — the silent-short-list
+        # class in the dangerous direction, hidden by the guard against false
+        # alarms. Only `Attribute`/`Name` funcs (the forms `calls` extracts) are
+        # excluded; anything else stays visible to the mention walk.
+        call_funcs = {id(c.func) for c in ast.walk(fn)
+                      if isinstance(c, ast.Call)
+                      and isinstance(c.func, (ast.Attribute, ast.Name))}
+        # ⛔ SCOPED TO THE BODY WALK BELOW, not `ast.walk(fn)` (#11337 review,
+        # P2). The whole-subtree walk collected a NESTED def's locals, so a
+        # nested `_review_pool = 5` suppressed a genuine mention in the
+        # ENCLOSING body — the silent-short-list direction this channel exists
+        # to prevent, produced by the guard against false alarms.
+        # ⚠️ NOT the same rule as the mention walk, and the difference is
+        # deliberate (#11389 review, P3): this walk skips `ClassDef` — a class
+        # namespace is not FUNCTION scope, so a class-body binding must not
+        # suppress an enclosing mention — while the mention walk descends into a
+        # class body, because a mention there IS a real reach. The two disagree
+        # about `class` on purpose; the residual that follows (a class-body
+        # binding reusing an entrant's name is an OVER-report) is on `#11397`.
+        shadowed: set[str] = set()
+        for sub in fn.args.args + fn.args.kwonlyargs + fn.args.posonlyargs:
+            shadowed.add(sub.arg)
+        for sub in list(fn.body):
+            stack_s = [sub]
+            while stack_s:
+                n = stack_s.pop()
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                  ast.ClassDef)):
+                    continue
+                # ⛔ NOT a comprehension target: `[x for _pool in …]` binds in the
+                # comprehension's OWN scope, so treating it as a function local
+                # suppresses a genuine mention elsewhere in the body — the
+                # under-report direction this guard exists to narrow, not create
+                # (#11389 review). Comprehension scopes are skipped entirely.
+                if isinstance(n, _COMPREHENSION_NODES):
+                    continue
+                if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store):
+                    shadowed.add(n.id)
+                # ⛔ These two bind a name on the NODE, not as `Name(Store)`
+                # (#11389 review, P3): `except X as _pool` keeps the name in
+                # `ExceptHandler.name`, and `import _pool` in the alias. A local
+                # that reuses an entrant's name is not a reach either way.
+                elif isinstance(n, ast.ExceptHandler) and n.name:
+                    shadowed.add(n.name)
+                elif isinstance(n, (ast.Import, ast.ImportFrom)):
+                    for alias in n.names:
+                        bound = alias.asname or alias.name.split(".")[0]
+                        shadowed.add(bound)
+                stack_s.extend(ast.iter_child_nodes(n))
+        # ⛔ A COMPREHENSION'S OWN BINDINGS SHADOW WITHIN IT (#11389 review,
+        # P2). `shadowed` above skips comprehension subtrees ON PURPOSE — a
+        # comprehension target binds in its own scope, so it must not suppress a
+        # mention elsewhere in the enclosing body. But this walk DESCENDS into
+        # the comprehension, where that target is exactly the binding a `Load`
+        # refers to; without the scope, `[_review_pool for _review_pool in
+        # rows]` and `[r for _review_pool in rows if _review_pool]` each read as
+        # a mention of the enclosing method's name.
+        stack: list[tuple[ast.AST, frozenset[str]]] = [
+            (n, frozenset()) for n in fn.body]
+        while stack:
+            node, comp_bound = stack.pop()
+            # ⛔ A nested `class` BODY IS WALKED (#11389 review, P3): it executes
+            # when the enclosing method does, and `self` inside it resolves to that
+            # method's — so `class K: cb = _safe(self._review_pool)` is a real
+            # by-reference reach. Only nested FUNCTIONS are their own scope here.
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if id(node) not in call_funcs:
+                reached = _reachable_by_name(node, mentionable,
+                                             shadowed | comp_bound)
+                if reached:
+                    by_reference.setdefault(fn.name, set()).add(reached)
+            if isinstance(node, _COMPREHENSION_NODES):
+                # ⛔ The OUTERMOST `for`'s ITERABLE is evaluated in the
+                # ENCLOSING scope, not the comprehension's (#11389 review, P3):
+                # `[x for _pool in _pool]` iterates the METHOD's `_pool`, so a
+                # mention there is a real reach and suppressing it was an
+                # under-report. Only the later `for` clauses and the element
+                # live inside the comprehension's own scope.
+                here = comp_bound | _comprehension_targets(node)
+                for f in ("elt", "key", "value"):
+                    child = getattr(node, f, None)
+                    if child is not None:
+                        stack.append((child, here))
+                for i, gen in enumerate(getattr(node, "generators", ())):
+                    stack.append((gen.iter, comp_bound if i == 0 else here))
+                    stack.append((gen.target, here))
+                    for cond in getattr(gen, "ifs", ()):
+                        stack.append((cond, here))
+                continue
+            for child in ast.iter_child_nodes(node):
+                stack.append((child, comp_bound))
+    declaration = None
+    if by_reference:
+        # ⛔ Every TARGET, not just the first: a method can take two different
+        # leg-reaching helpers by reference, and a per-method single string
+        # silently dropped the second (#11337 review, P2).
+        named = ", ".join(f"{fn} ({', '.join(sorted(targets))})"
+                          for fn, targets in sorted(by_reference.items()))
+        # ⛔ `declared bound:` is a MACHINE-READABLE marker, not decoration: the
+        # published entry carries the same dict shape and `UNMEASURED(` prefix
+        # as a scan failure, so without it a consumer cannot tell "the scan ran
+        # and has a known edge" from "the scan could not run" (#11337 review).
+        # The prose is count-neutral so one entry does not read ungrammatically.
+        declaration = (
+            f"UNMEASURED(declared bound: {named} — a leg-reaching function is "
+            "taken by reference here, which this scan follows as a name-resolved "
+            "call only; the caller list and its entity-type set may be short by "
+            "that reach)")
+    return {name: direct[name] for name in sorted(direct)}, None, declaration
+
+
+def _handlers_forwarding_entity_type() -> tuple[set[str], str | None]:
+    """MCP handlers that pass `entity_type` into `tortoise_fts_query`.
+
+    Both call shapes are accepted: `graph.tortoise_fts_query(…, entity_type=…)`
+    (the attribute IS the callee) and `_safe(graph.tortoise_fts_query, …,
+    entity_type=…)` (the attribute is the first ARGUMENT — the shape every
+    `_safe`-wrapped handler in this repo uses). A scan that only matched the
+    first would miss `tortoise_search`, the tool the claim is primarily about.
+
+    ⚠️ **DECLARED BOUND: this names handlers that call it DIRECTLY.** A handler
+    that delegates to a helper which forwards the argument is NOT named — the
+    HELPER's name is, and since it is not a registry tool it lands in the
+    `UNMEASURED(handler not in TOOL_REGISTRY …)` entry beside the real tools
+    rather than vanishing. `**{…}` keyword unpacking is likewise unmatched. At
+    this head neither shape exists — the two module-level handlers in
+    `mcp_server.py` that forward `entity_type` are the whole population of THIS
+    SCAN, and a new one is REPORTED, not silently dropped, because the unmatched
+    name lands in that `UNMEASURED` entry. Stated rather than claimed complete:
+    this scan's promise is over what a walk of the tree can see, and it is one of
+    THREE sources — a tool whose SDK method reaches the leg for a FIXED
+    `entity_type` is named by :func:`_sdk_methods_on_vector_leg`, because it
+    appears in no handler that forwards the argument (review round 7, P1).
+
+    Returns `(names, error)`; `error` is the reason when the scan could not be
+    taken, so the caller reports it instead of reading an empty set as "no tool
+    is affected".
+    """
+    path = REPO_ROOT / "tortoise" / "mcp_server.py"
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except Exception as e:
+        return set(), f"UNMEASURED(handler scan failed: {type(e).__name__}: {e})"
+
+    names: set[str] = set()
+
+    def _is_target(node: ast.AST) -> bool:
+        if isinstance(node, ast.Attribute):
+            return node.attr == VECTOR_LEG_SDK_METHOD
+        return isinstance(node, ast.Name) and node.id == VECTOR_LEG_SDK_METHOD
+
+    def _calls_with_entity_type(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+        # Only THIS function's own body — a nested `def` is its own handler and
+        # attributing its call to the outer scope would name the wrong tool.
+        # A nested CLASS body is this handler's body (same doctrine as `_scan`).
+        stack: list[ast.AST] = list(fn.body)
+        while stack:
+            node = stack.pop()
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if isinstance(node, ast.Call):
+                passes_entity_type = any(k.arg == "entity_type"
+                                         for k in node.keywords)
+                targets = _is_target(node.func) or any(
+                    _is_target(a) for a in node.args)
+                if passes_entity_type and targets:
+                    return True
+            stack.extend(ast.iter_child_nodes(node))
+        return False
+
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) \
+                and _calls_with_entity_type(node):
+            names.add(node.name)
+    return names, None
+
+
 def vector_census(graph, graph_name: str, at: str | None = None,
                   graph_names: list[str] | None = None,
                   uri_graph_name: str | None = None) -> dict:
@@ -1962,6 +3272,13 @@ def vector_census(graph, graph_name: str, at: str | None = None,
     # by construction (this tool's own review, P1 — a `:Chunk` with 2 stored
     # embeddings never appeared). The graph's own labels are the population.
     indexed: dict[str, list[dict]] = {}
+    #: label → {KIND: [fields]} — EVERY index kind the catalogue reports for the
+    #: label, not only VECTOR. `#11088` §3.1 asks whether a label carries a
+    #: FULLTEXT index (it decides whether a lexically-matching query survives a
+    #: vector removal), and the census said "a run settles it" while parsing
+    #: VECTOR rows only — so the deciding datum was not in the answer (review
+    #: round 7, P2). Recorded from the same rows, at no extra query cost.
+    index_kinds: dict[str, dict[str, list[str]]] = {}
     #: (label-or-None, reason) — matched by LABEL, so a short row (`['Point']`)
     #: is still attached to its label instead of being lost in a repr.
     unreadable: list[tuple[str | None, str]] = []
@@ -1976,6 +3293,10 @@ def vector_census(graph, graph_name: str, at: str | None = None,
             unreadable.append((label, f"types cell is {type(types).__name__}"))
             continue
         for fld, kinds in types.items():
+            if isinstance(kinds, (list, tuple, set)):
+                for kind in sorted({str(k).upper() for k in kinds}):
+                    index_kinds.setdefault(label, {}).setdefault(
+                        kind, []).append(fld)
             if isinstance(kinds, (list, tuple, set)) and any(
                 str(k).upper() == "VECTOR" for k in kinds
             ):
@@ -2070,22 +3391,71 @@ def vector_census(graph, graph_name: str, at: str | None = None,
         # number is unreadable (review round 7, P2), and the payload is derived
         # from the same number.
         width = None
+        width_reason: str | None = None
+        width_samples = 0
         if isinstance(stored, int) and stored > 0:
             try:
                 # `size(n.embedding)` is REJECTED on a vecf32 column, so the
                 # vector is fetched and measured here (measured: every payload
                 # read UNMEASURED before this).
+                #
+                # ⛔ MORE THAN ONE ROW, because one row's width is not the
+                # label's: a graph that went through an `EMBEDDING_DIM`
+                # rotation holds vectors of two widths, and `stored x width`
+                # then reports one row's size multiplied across every row —
+                # wrong in an unbounded direction, in the figure #11088 exists
+                # to produce, with nothing marking it as estimated (review
+                # round 7, P2; measured 5x1024 + 1x384 → 24,576 B reported for
+                # a true 22,016 B). ⚠️ A covering index does NOT make the
+                # disagreement impossible — measured: an index of dimension
+                # 384 over a label holding one 384-wide and five 1024-wide
+                # rows publishes `stored x dimension` on a 384-majority
+                # sample and refuses (`stored widths disagree`) on a mixed
+                # one, so a disagreement is BOTH arms' hazard. What the
+                # covering arm adds is a cross-check, not an invariant: it
+                # publishes `stored x dimension` only where the PROBED width
+                # agrees with the index dimension (`probed width W agrees`)
+                # and refuses otherwise. The census never establishes that an
+                # indexed label holds a single width, so that invariant is
+                # not assumed here — census doc §2 states the same.
                 probe = _read(
                     graph,
                     f"MATCH (n:{_cypher_label(label)}) "
-                    f"WHERE n.embedding IS NOT NULL RETURN n.embedding LIMIT 1",
+                    f"WHERE n.embedding IS NOT NULL RETURN n.embedding "
+                    f"LIMIT {WIDTH_PROBE_SAMPLES}",
                 ).result_set
-                if probe and probe[0] and probe[0][0] is not None:
-                    width = len(probe[0][0])
+                seen = [len(r[0]) for r in (probe or [])
+                        if r and r[0] is not None]
+                widths = set(seen)
+                width_samples = len(seen)
+                if len(widths) == 1:
+                    width = widths.pop()
+                elif len(widths) > 1:
+                    width_reason = ("stored widths disagree ("
+                                    + ", ".join(str(w) for w in sorted(widths))
+                                    + "), so stored x width is not a figure")
             except Exception:
                 width = None
         if isinstance(stored, str):
-            unindexed = "UNMEASURED(stored count unreadable)"
+            # ⛔ THE SAME MASKING, ONE BRANCH UP (#11389 review, P2). The
+            # two-cause rule below was wired only to the `dim`/`width` pair, so
+            # a row whose stored-count read FAILED **and** whose covering index
+            # `dimension` was unreadable still reported the count ALONE, with
+            # `indexed: true` beside it — the identical round trip this change
+            # exists to remove: repair the count, re-run, be refused again on
+            # the dimension, never told both causes existed. Measured with a
+            # fake that raises on `count(n)`.
+            # ⚠️ The WIDTH is deliberately NOT named here, unlike the
+            # dim/width arm: a width probe can only measure rows, and the count
+            # is exactly the fact that could not be read, so "no rows, nothing
+            # to probe" and "the probe failed" are indistinguishable and naming
+            # it would be a guess. The `dimension` is a CATALOGUE cell and
+            # independent of the count, so it is a cause we can name.
+            # The single-cause text is byte-identical to before.
+            unindexed = (
+                "UNMEASURED(stored count unreadable and the index dimension "
+                "unreadable)" if covering and dim is None
+                else "UNMEASURED(stored count unreadable)")
         elif covering and width is not None and dim is not None and width != dim:
             unindexed = f"UNMEASURED(index dim {dim} != stored width {width})"
         elif covering and stored != 0 and (width is None or dim is None):
@@ -2100,25 +3470,124 @@ def vector_census(graph, graph_name: str, at: str | None = None,
             # (docs.falkordb.com › Indexing › Vector Index), so an absent one is
             # an unreadable catalogue cell, not a label with no dimension;
             # `width` is None when the vecf32 probe failed or returned nothing.
-            missing = " and ".join(
-                name for name, value in
-                (("the index dimension", dim), ("the stored width", width))
-                if value is None
-            )
-            unindexed = f"UNMEASURED(coverage not provable: {missing} unreadable)"
+            # ⛔ NAME BOTH CAUSES WHEN THERE ARE TWO (#11337). This used to
+            # compute the cause from every unmeasured input and then REASSIGN
+            # it to the width cause alone, so a row whose index `dimension` was
+            # unreadable AND whose sampled widths disagreed reported only the
+            # width: a reader repairs the width probe, re-runs, is refused again
+            # with different text, and is never told the second cause exists.
+            # The single-cause texts are unchanged.
+            causes: list[str] = []
+            if dim is None:
+                causes.append("the index dimension unreadable")
+            if width is None:
+                causes.append(f"the stored width ({width_reason})"
+                              if width_reason else "the stored width unreadable")
+            unindexed = ("UNMEASURED(coverage not provable: "
+                         + " and ".join(causes) + ")")
         elif covering:
             unindexed = 0
         else:
             unindexed = stored
         if isinstance(stored, int) and stored == 0:
             payload = {"derived_payload_B": 0, "how": "no stored vectors on this label"}
-        elif dim is None:
-            payload = {"derived_payload_B": "UNMEASURED(no VECTOR index on "
-                                            "`embedding` — nothing to derive from)",
-                       "how": "needs a covering index dimension"}
+        elif unreadable_here:
+            # ⛔ The catalogue row could not be read, so COVERAGE is unknown —
+            # and `not covering` cannot tell "no index" from "an index we could
+            # not see" (`covering` is empty for both). `how` may not say either
+            # way, and the byte figure refuses for the same reason `indexed`
+            # and `unindexed` already do (review round 1, P2: the row said
+            # `indexed: UNMEASURED(...)` and, one field over, "NO covering
+            # index" — a coverage fact it had not measured).
+            # ⛔ BUT A FAILED CATALOGUE READ DOES NOT CANCEL WHAT THE WIDTH
+            # PROBE MEASURED (#11389 review, P2). The probe is an independent
+            # read and its disagreement is a MEASURED fact; discarding it made
+            # a reader repair the catalogue, re-run, and be refused again on
+            # the width — the same round trip, in the one arm the previous
+            # enumeration did not count. Measured before the fix: `disagree`
+            # appeared nowhere in the row while the probe had returned both
+            # widths. The catalogue text is otherwise unchanged.
+            payload = {"derived_payload_B": (
+                           "UNMEASURED(the catalogue row was unreadable, so "
+                           "coverage is not provable"
+                           + (f"; {width_reason}" if width_reason else "")
+                           + ")"),
+                       "how": (f"catalogue row unreadable: {unreadable_here[0]}"
+                               + ("; the width probe did run" if width_reason
+                                  else ""))}
         elif width is None:
-            payload = {"derived_payload_B": "UNMEASURED(stored width not probeable)",
-                       "how": "needs a width probe agreeing with the index"}
+            # ⛔ The refusal, BEFORE the index is consulted: without a measured
+            # width there is no byte figure, indexed or not — and when the probe
+            # saw more than one width, the reason is that, not "unprobeable".
+            # ⛔ NAME BOTH CAUSES HERE TOO (#11389 review, P2). The two-cause
+            # rule reached `unindexed` but stopped one branch short of the BYTE
+            # FIGURE: with a covering index whose `dimension` is unreadable over
+            # a mixed-width label, `unindexed` named both causes while
+            # `derived_payload_B` named the width alone — so a reader repairs
+            # the width, re-runs, and is refused again on the dimension. Same
+            # round trip, one field over. Measured before the fix.
+            # The single-cause texts are byte-identical: when `dim` is readable
+            # — or the label has no covering index, where an index `dimension`
+            # is not a cause at all — the old string is unchanged.
+            # ⛔ AND `how` NAMES IT TOO (#11389 review, P2). `how` is the
+            # REMEDY channel in this function (the dim-only arm says "needs the
+            # index dimension to cross-check the measured width"), so a `how`
+            # that names only the width sends the reader to re-probe something
+            # that will not lift the refusal. The refusal and the remedy must
+            # name the same causes or the field is worse than absent.
+            payload_causes: list[str] = []
+            dim_cause = "the index dimension unreadable"
+            if covering and dim is None:
+                payload_causes.append(dim_cause)
+            payload_causes.append(width_reason or "stored width not probeable")
+            how = ("a single width cannot stand for this label's stored vectors"
+                   if width_reason else "needs a width probe")
+            if covering and dim is None:
+                how += f", and {dim_cause}"
+            payload = {"derived_payload_B": "UNMEASURED("
+                                            + " and ".join(payload_causes)
+                                            + ")",
+                       "how": how}
+        elif not covering:
+            # ⛔ #11088: THE UNINDEXED LABELS ARE THE POPULATION THIS CENSUS IS
+            # FOR, and they had no byte figure at all. The payload used to be
+            # derived from the covering index's `dimension`, so every label the
+            # issue exists to quantify reported
+            # `UNMEASURED(no VECTOR index on embedding — nothing to derive
+            # from)` — while the stored WIDTH had already been probed one branch
+            # above (the `#4280` cross-check needs it). The number was in hand
+            # and not printed, which is exactly the `stored`-only / missing-figure
+            # class this instrument exists to refuse. The width is the
+            # measurement; with no index there is nothing to cross-check it
+            # against, and `how` says so rather than implying it was verified.
+            #
+            # ⛔ The predicate is `not covering`, NOT `dim is None`: a label can
+            # carry a VECTOR index on `embedding` whose `dimension` cell is
+            # unreadable, and keying on `dim` put "NO covering index" in `how`
+            # beside `indexed=True` and a populated `vector_indexes_on_label` —
+            # the row contradicting its own field (review, P2).
+            # ⛔ The SAMPLE SIZE belongs in `how`: a probe of N rows cannot
+            # prove every row agrees, so a narrower minority width outside the
+            # sample is not seen. Stating the sample is the difference between
+            # a bounded observation and an implied exhaustive check (review
+            # round 9, P2 — the figure stays, the overclaim goes).
+            payload = {"derived_payload_B": stored * width * 4,
+                       "how": f"stored {stored} x probed width {width} dims x 4 B "
+                              f"(vecf32); NO covering index, so the width comes "
+                              f"from {width_samples} sampled row(s) "
+                              "chosen by the engine (the probe carries no "
+                              "ORDER BY), and is not cross-checked — a narrower "
+                              "minority width outside that sample would not be "
+                              "seen"}
+        elif dim is None:
+            # A covering index EXISTS and its `dimension` is unreadable. The
+            # stored width is still measured, but coverage is not provable —
+            # the same posture `unindexed` takes for this row — so the byte
+            # figure refuses too rather than reading as verified.
+            payload = {"derived_payload_B": "UNMEASURED(a covering index exists "
+                                            "but its dimension is unreadable)",
+                       "how": "needs the index dimension to cross-check the "
+                              "measured width"}
         elif width != dim:
             payload = {"derived_payload_B": "UNMEASURED(stored width "
                                             f"{width} != index dimension {dim})",
@@ -2127,6 +3596,43 @@ def vector_census(graph, graph_name: str, at: str | None = None,
             payload = {"derived_payload_B": stored * dim * 4,
                        "how": f"stored {stored} x {dim} dims x 4 B (vecf32), "
                               f"probed width {width} agrees"}
+        # ── #11088: WHICH entity_type values stop answering ──────────────
+        # `unindexed` above is a COUNT. The surface question is a SET: removing
+        # the unindexed remainder does not change "a query", it changes the
+        # query for every `entity_type` the product translates onto this label.
+        # ⛔ What changes is SEMANTIC RECALL, not retrieval: with the vectors
+        # gone the dense leg has nothing to answer
+        # (`CALL db.idx.vector.queryNodes` on an unindexed label raises today,
+        # so `run_vector_query` degrades to a brute-force scan), but
+        # `classify_query` turns the FTS leg on for every text query, and
+        # `_FULLTEXT_INDEX_LABEL_FIELDS` declares a fulltext index on all five
+        # served labels — so a lexically-matching query keeps answering, and
+        # only a query that matched ONLY by meaning goes to zero rows. Measured
+        # for `:Object`; §3.1 of `docs/epics/2026-11-04-5090-vector-layer/`
+        # `S3-VECTOR-CENSUS.md` also records where `STORAGE-ARCHITECTURE.md`
+        # §12.1b's 2026-09-24 inventory DISAGREES (`:Source` FULLTEXT `—`, a
+        # reading taken before that DDL), so the answer for `document`/`source`
+        # is a census on the target graph and not an assumption. (Review round
+        # 1: this comment said "returns zero rows", which the measurement
+        # refuted.) A label with no `entity_type`
+        # at all is the worst class: stored, unindexed AND unqueryable — so it
+        # is reported as affected-for-nobody, not omitted.
+        ets = affected_entity_types(label)
+        # ⛔ Derived from the FINAL cell values, not from the locals above: an
+        # unreadable catalogue row leaves `covering` empty, so the `else:
+        # unindexed = stored` branch fabricates a full "unindexed" coverage —
+        # and computing `changes` from it published `True`, plus a
+        # `surface_consequence` entry, for a label whose own `unindexed` cell
+        # read `UNMEASURED` three lines away (review round 1, P1).
+        if unreadable_here:
+            changes = ("UNMEASURED(the catalogue row was unreadable, so whether "
+                       "any stored vector is unindexed is not provable)")
+        elif isinstance(unindexed, int) and isinstance(stored, int):
+            changes = bool(unindexed > 0 and ets)
+        else:
+            # Neither the count nor the coverage is measured, so neither is
+            # the consequence: `False` here would be a claim built on a hole.
+            changes = "UNMEASURED(removal consequence needs a measured count)"
         labels[label] = {
             "stored": stored,
             # An unreadable catalogue row is NOT "this label has no index": it
@@ -2134,17 +3640,156 @@ def vector_census(graph, graph_name: str, at: str | None = None,
             "indexed": ("UNMEASURED(catalogue row unreadable: "
                         f"{unreadable_here[0]})" if unreadable_here
                         else bool(covering)),
-            "unindexed": (f"UNMEASURED(catalogue row unreadable: {unreadable_here[0]})"
-                          if unreadable_here else unindexed),
+            "unindexed": (
+                f"UNMEASURED(catalogue row unreadable: {unreadable_here[0]}"
+                # ⛔ …and the width the probe DID measure is not cancelled by
+                # it (#11389 review, P2): `width_reason` is a measured fact
+                # from an independent read. Same rule as the payload above.
+                + (f"; {width_reason}" if width_reason else "")
+                + ")" if unreadable_here else unindexed),
             "vector_indexes_on_label": found or "none",
             "index": idx or "none",
+            # ⛔ EVERY index kind, not only VECTOR: §3.1's deciding datum for
+            # `:Source`/`document` is whether a FULLTEXT index exists, and the
+            # doc promised the run settles it (review round 7, P2).
+            "indexes_on_label": (
+                "UNMEASURED(catalogue row unreadable)" if unreadable_here
+                else (index_kinds.get(label) or "none")),
             "payload": payload,
+            "affected_entity_types": ets,
+            "removal_changes_query_results": changes,
         }
     return {"graph": graph_name, "at": at, "labels": labels,
             "catalogue": "CALL db.indexes()", "population": population_source,
             "command": CENSUS_COMMAND,
             "uri_path_graph": uri_graph_name,
-            "unreadable_catalogue_rows": unreadable}
+            "unreadable_catalogue_rows": unreadable,
+            "surface_consequence": surface_consequence(labels)}
+
+
+def surface_consequence(labels: dict) -> dict:
+    """The MCP/SDK surface a removal would change, from the census rows.
+
+    ⛔ This is REQUESTED, not performed (#11088 / `AGENTS.md`'s MCP-SDK surface
+    rule). The dict therefore carries `requested_not_performed: True` as a
+    FIELD rather than as a sentence in a document, so a consumer reading the
+    machine form cannot mistake a census for an authorisation.
+
+    Only labels whose removal would change a query are listed. A label that is
+    stored, unindexed and served by NO `entity_type` is reported in its row
+    (empty `affected_entity_types`) and is deliberately absent here: nothing
+    queries it, so nothing changes.
+
+    ⛔ A label whose consequence is `UNMEASURED(...)` is listed under
+    `unmeasured_labels`, NEVER dropped. Dropping it would shrink
+    `entity_types_whose_query_results_change` silently — the UNDER-reporting
+    direction this module's own §3 calls the dangerous one, since a surface
+    request whose consequence is understated is a request the owner can approve
+    by mistake (review round 1, P1). It is reachable on a live engine: an
+    unreadable catalogue row, and a per-label count that times out.
+    """
+    affected, unmeasured = [], []
+    for label, row in sorted(labels.items()):
+        changes = row.get("removal_changes_query_results")
+        if changes is True:
+            affected.append({
+                "label": label,
+                "entity_types": row["affected_entity_types"],
+                "unindexed": row["unindexed"],
+                "stored": row["stored"],
+                "derived_payload_B": row["payload"]["derived_payload_B"],
+            })
+        elif changes is not False:
+            # `True` / `False` are the only measured answers; anything else is a
+            # hole, and a hole is carried, not discarded.
+            unmeasured.append({
+                "label": label,
+                "entity_types": row["affected_entity_types"],
+                "why": changes,
+            })
+    return {
+        "requested_not_performed": True,
+        "sdk_method": VECTOR_LEG_SDK_METHOD,
+        "runner": VECTOR_LEG_RUNNER,
+        "surface": _annotated_surface(affected, unmeasured),
+        "entity_types_whose_query_results_change": sorted(
+            {et for a in affected for et in a["entity_types"]}),
+        "labels": affected,
+        # ⛔ The under-reporting channel. `entity_types_whose_query_results_change`
+        # is a MEASURED set; a reader must not take it as the whole population
+        # while this is non-empty.
+        "unmeasured_labels": unmeasured,
+    }
+
+
+def _annotated_surface(affected: list[dict], unmeasured: list[dict]) -> list[dict]:
+    """`vector_leg_surface()` with each tool's ACTUAL consequence attached.
+
+    ⛔ The entrant list and the affected list are different questions, and the
+    approval request needs the second: `tortoise_issue_insight` and
+    `tortoise_suggest_entry_points` reach the leg for `point` only, and `:Point`
+    is the one INDEXED label — naming them as entrants without saying so would
+    read as six affected tools. Each entry therefore carries
+    `reaches_affected_labels`: the intersection of what it asks the leg for with
+    the `entity_type` values whose results this census measured as changing, or
+    `"any (the caller chooses)"` for a pass-through tool (review round 7, P1:
+    the surface was under-reported; this keeps the over-report from replacing
+    it).
+
+    An UNMEASURED consequence makes the affected set a LOWER BOUND, so the field
+    says that instead of understating a tool's reach: a partial set may not be
+    used to clear a tool.
+    """
+    surface = vector_leg_surface()
+    possible = {et for a in affected for et in a["entity_types"]}
+    for entry in surface:
+        if "tool" not in entry:
+            continue
+        asked = entry.get("entity_types")
+        if unmeasured:
+            entry["reaches_affected_labels"] = (
+                "UNMEASURED(the affected set is partial — see unmeasured_labels)")
+        elif not possible:
+            # ⛔ NOTHING is removable on this graph, so NOTHING changes — and a
+            # pass-through tool must not print "any (the caller chooses)" here,
+            # which would name two tools as changing on a graph where the
+            # affected set is empty (review round 9, P2: an over-report in the
+            # approval artifact, contradicting this function's own promise).
+            entry["reaches_affected_labels"] = []
+        elif not isinstance(asked, list):
+            entry["reaches_affected_labels"] = "any (the caller chooses)"
+        elif any(str(t).startswith("UNKNOWN") for t in asked):
+            # ⛔ An `UNKNOWN(...)` member is the reporting channel for a
+            # non-literal `entity_type`; intersecting that STRING with the
+            # affected types would yield `[]` and read as a measured "no
+            # change" (review round 9, P2).
+            entry["reaches_affected_labels"] = (
+                "UNMEASURED(its SDK method's entity_type is not a literal)")
+        else:
+            entry["reaches_affected_labels"] = sorted(set(asked) & possible)
+    return surface
+
+
+def _non_vector_indexes_line(kinds: object) -> str:
+    """The text-mode line for a label's indexes, or `""` when VECTOR is all it has.
+
+    ⛔ Extracted so the FORMAT is testable: the first version built the string
+    inline and put the closing paren on the whole join instead of on each
+    entry, so a label carrying two non-VECTOR kinds printed
+    `FULLTEXT(a, RANGE(b)` — a malformed line in the one output a reader quotes
+    into an approval request, and invisible because the single-kind case (all
+    the §4 transcript had) is correct (verification gate, P2).
+    """
+    if isinstance(kinds, str) and kinds.startswith("UNMEASURED"):
+        return f"⛔ indexes: {kinds}"
+    if not isinstance(kinds, dict):
+        return ""
+    extra = {kind: fields for kind, fields in kinds.items() if kind != "VECTOR"}
+    if not extra:
+        return ""
+    return ("other indexes on this label: "
+            + ", ".join(f"{kind}({','.join(fields)})"
+                        for kind, fields in sorted(extra.items())))
 
 
 def _connect(uri: str):
@@ -2200,12 +3845,20 @@ def _connect(uri: str):
 
 def measure() -> dict:
     """Run the whole instrument. Clears the gate flags first — a lane's own env
-    must not be able to make a default-off gate read as enforced."""
+    must not be able to make a gate read as enforced or as idle.
+
+    ⛔ Both switches are set EXPLICITLY to their OFF value (`#10996`). Popping
+    them cleared the ambient value but produced an "off" reading only while the
+    flags were default-OFF; `TORTOISE_VALUE_GATE` now defaults ON (the S2.2
+    mechanical half, `EXTRACTOR-V4-ARCHITECTURE.md` §S2.2), so an unset value
+    would have made every row of this instrument read a DIFFERENT configuration
+    than the one it declares.
+    """
     # Snapshot and RESTORE: an import of a "read-only" instrument must not
     # leave the rest of the caller's process with both gates disabled.
     _flags = {v: os.environ.get(v) for v in ("TORTOISE_EMBED_GATE", "TORTOISE_VALUE_GATE")}
     for var in _flags:
-        os.environ.pop(var, None)
+        os.environ[var] = "0"
     try:
         rows = _measure_rows()
     finally:
@@ -2361,6 +4014,68 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  {label:10s} stored={d['stored']!s:12s} "
                   f"indexed={d['indexed']!s:6s} unindexed={d['unindexed']!s:12s} "
                   f"payload={d['payload']['derived_payload_B']}")
+            # #11088: the count is not the consequence — the SET of
+            # `entity_type` values is. Printed on the row it belongs to, so a
+            # reader cannot lift the number without reading what removing it
+            # would change.
+            # ⛔ `removal of the UNINDEXED remainder`, not `removal`: the field
+            # is about the unindexed share, and on an INDEXED label (`:Point`,
+            # the only one) the bare sentence read "removal changes query
+            # results: False" — one paraphrase from "deleting every Point's
+            # embedding is harmless" (review round 1, P2).
+            print(f"  {'':10s} entity_type(s) served by this label: "
+                  f"{d.get('affected_entity_types') or 'none (no query path)'}"
+                  f" — removing the UNINDEXED remainder changes query results: "
+                  f"{d.get('removal_changes_query_results')}")
+            # ⛔ §3.1 leans on a FULLTEXT index to say a lexically-matching
+            # query survives a vector removal, and said "the same run settles
+            # it" while the run reported VECTOR rows only. The kinds are now
+            # read, so they are PRINTED — a datum a reader must open the JSON
+            # for is a datum the text mode's claim cannot stand on (review
+            # round 7, P2).
+            indexes = _non_vector_indexes_line(d.get("indexes_on_label"))
+            if indexes:
+                print(f"  {'':10s} {indexes}")
+        sc = c.get("surface_consequence")
+        if sc:
+            print("  surface consequence — removal is REQUESTED, not "
+                  "performed; it needs the owner's approval (MCP/SDK surface):")
+            print(f"    affected entity_type values: "
+                  f"{sc.get('entity_types_whose_query_results_change') or 'none'}")
+            # ⛔ An UNMEASURED surface is PRINTED, not skipped — dropping it left
+            # the `path:` line starting with a bare `/` and understated the
+            # surface (review round 1, P3).
+            for entry in sc.get("surface") or []:
+                if "tool" not in entry:
+                    print(f"    ⛔ surface: {entry.get('tools')}")
+
+            def _surface_entry(entry: dict) -> str:
+                # ⛔ A tool whose SDK method names the type itself carries the
+                # TYPE, not a pass-through arrow: printing both classes the same
+                # way would hide the one the caller never chooses (review round
+                # 7, P1).
+                fixed = entry.get("entity_types")
+                chosen = ("" if not isinstance(fixed, list)
+                          else ", entity_type=" + "|".join(fixed))
+                return f"{entry['tool']} ({entry['rest']}{chosen})"
+
+            path = " / ".join(_surface_entry(t) for t in sc.get("surface") or []
+                              if "tool" in t)
+            print(f"    path: {path}"
+                  f" → {sc.get('sdk_method')}(entity_type=…) → {sc.get('runner')}")
+            # The question the approval request actually asks: WHICH tools'
+            # results change. Derived, per tool, from the measured set.
+            changed = [t for t in sc.get("surface") or []
+                       if "tool" in t and t.get("reaches_affected_labels")]
+            if changed:
+                print("    tools whose results change: " + " / ".join(
+                    f"{t['tool']} ({t['reaches_affected_labels']})"
+                    for t in changed))
+            for entry in sc.get("unmeasured_labels") or []:
+                print(f"    ⛔ UNMEASURED — {entry['label']} "
+                      f"({entry['entity_types'] or 'no entity_type'}): {entry['why']}")
+                print("       the affected set above is MEASURED ONLY; it is not "
+                      "the whole population")
         if "error" in c:
             print(f"  {c['error']}")
         if c.get("population"):

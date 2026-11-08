@@ -16,11 +16,16 @@ a duplicate list entry, or a structurally broken document — and
 `yaml.safe_load` then **silently keeps the LAST duplicate key**. Nothing
 downstream can tell that happened.
 
-It is a line-SET union, so byte-identical additions dedupe: two lanes registering
-the same test do NOT duplicate it. A duplicate appears when the same semantic
-entry is written on DIFFERING lines (the same file plus a different trailing
-comment), or when the same key gets DIFFERING values. Both were reproduced
-against a real `merge=union` merge (see #5373).
+It is a line-level union MERGE (not a set union — identical lines are NOT
+collapsed: two copies inside one conflicting hunk survive as two), and that is ALL
+it is: it never dedupes, it only replaces conflict markers with both sides' lines
+(#11336: `git merge-file --union`, base `alpha/X/gamma` vs `OURS1/X/OURS2` and
+`THEIRS1/X/THEIRS2`, emits `X` twice). MEASURED on real merges: the same row
+appended at two DIFFERENT anchors survives as TWO rows, with `merge=union` and
+without it alike, because nothing reconciles independent appends; only the SAME
+change in the SAME place collapses, and that is git's ordinary identical-change
+resolution, not a property of the attribute. A duplicate mapping key is the worse
+case — `yaml.safe_load` keeps the LAST one and nothing downstream can tell.
 
 This is not a belt-and-braces addition to an existing guard. The frozen
 baseline's own duplicate-name refusal (`surface_manifest._read_manifest`) is keyed

@@ -169,3 +169,123 @@ def test_a_directory_in_place_of_a_tool_fails_closed(tmp_path: Path) -> None:
 
     assert r.returncode != 0, "the pin accepted a directory in place of the tool"
     assert "not a non-empty regular file" in (r.stdout + r.stderr)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# #11057 reviews P2 + F1 + F2: the `cut_at_commit` provenance gate, and why its
+# ORDER, the job's git DEPTH and the PINNED copy that enforces it cannot be left
+# to a human reading the workflow.
+#
+# TWO QUESTIONS, TWO STEPS, and each is load-bearing:
+#   * the pre-pin `surface_manifest.py check --provenance-strict` step is the arm that
+#     fails CLOSED on a checkout that cannot answer (a dropped `fetch-depth: 0`);
+#   * the PINNED `tools/surface-guard.py` step is the arm a PR cannot edit — it grades
+#     the same two questions from the base ref (#11057 F2). Its default arm reds only on
+#     a PROVEN defect, so this job's ability to answer is what makes it a gate at all:
+#     the pin's fetch must NOT use `--depth=1`, which marks the whole clone shallow while
+#     keeping the objects and would silently reduce the pinned arm to a `::notice::`.
+#
+# All three facts are asserted from the workflow text — a reorder, a dropped depth or a
+# dropped pin is a silent weakening, and no reader of a green tick would see it.
+# ─────────────────────────────────────────────────────────────────────────────
+
+PROVENANCE_STEP = "The baseline's recorded cut commit resolves"
+
+
+def _surface_guard_steps() -> list[dict]:
+    wf = yaml.safe_load(WORKFLOW.read_text())
+    return wf["jobs"][JOB]["steps"]
+
+
+def _index_of(prefix: str) -> int:
+    found = [
+        i for i, s in enumerate(_surface_guard_steps())
+        if str(s.get("name", s.get("uses", ""))).startswith(prefix)
+    ]
+    assert len(found) == 1, f"expected exactly one step starting {prefix!r}, found {found}"
+    return found[0]
+
+
+def test_the_provenance_step_can_resolve_the_recorded_commit() -> None:
+    """`fetch-depth: 0` on this job's checkout, and the strict flag on the step.
+
+    Without the depth the step is a no-op gate — `checkout@v4` defaults to 1, so the
+    recorded (ancestor) commit is absent from EVERY run and the check can only print a
+    notice. Without `--provenance-strict` an unprovable checkout is not even a red, so a
+    dropped depth would weaken the gate silently instead of failing it.
+    """
+    steps = _surface_guard_steps()
+    checkout = next(s for s in steps if str(s.get("uses", "")).startswith("actions/checkout"))
+    assert (checkout.get("with") or {}).get("fetch-depth") == 0, (
+        "the surface-guard checkout is shallow, so the cut_at_commit provenance step "
+        "cannot resolve the recorded commit — it would pass by being unable to answer"
+    )
+
+    provenance = steps[_index_of(PROVENANCE_STEP)]
+    assert "--provenance-strict" in provenance["run"], provenance["run"]
+
+
+def test_the_provenance_step_runs_before_the_pin() -> None:
+    """The strict arm must answer, and it is the only arm that reds when it cannot.
+
+    This step is what fails CLOSED if someone drops `fetch-depth: 0`; the pinned guard's
+    default arm only reds on a PROVEN defect (a shallow local run must not be a false
+    red), so the strict arm has to run while the clone is certainly full. The pin's fetch
+    used to set the repo-level shallow flag (`--depth=1` keeps the objects and flips
+    `--is-shallow-repository` to `true` — measured on a 3-commit scratch clone), which
+    would have made the strict arm red for the wrong reason; #11057 review F2 removed that
+    depth (asserted below), so this ordering is now defence in depth.
+    """
+    assert _index_of(PROVENANCE_STEP) < _index_of(PIN_PREFIX), (
+        "the strict provenance step runs after the pin step — it is the arm that fails "
+        "closed on an unprovable checkout, so it must run while the clone can answer"
+    )
+
+
+def test_the_pin_does_not_mark_the_clone_shallow() -> None:
+    """#11057 review F2 — the pin's fetch must not disarm the arm it is protecting.
+
+    `git fetch --depth=1` sets the repo-level shallow flag, and the pinned
+    `tools/surface-guard.py` step runs AFTER it. Its provenance arm answers "cannot prove"
+    in a shallow clone (the honest answer — truncated history makes
+    `merge-base --is-ancestor` exit 1 rather than complain), and "cannot prove" is a
+    `::notice::` in its default arm. So `--depth=1` here silently reduces the one gate the
+    PR cannot edit to a log line — the class this whole job exists to close.
+
+    The job already pays `fetch-depth: 0` at checkout; a full fetch of the base branch is
+    a ref update over objects that are already present.
+    """
+    body = _pin_body()
+    depth_fetches = [ln.strip() for ln in body.splitlines() if "fetch" in ln and "--depth" in ln]
+    assert depth_fetches == [], (
+        "the pin step fetches with an explicit depth, which marks the whole clone shallow "
+        "and leaves the pinned provenance arm unable to answer for the rest of the job: "
+        f"{depth_fetches}"
+    )
+
+
+def test_the_pinned_guard_is_the_step_that_grades_provenance() -> None:
+    """The rule must live in the copy CI replaces from the base ref (#11057 review F2).
+
+    `surface_manifest.py` is deliberately NOT pinned (#5192 records the deadlock), so a
+    provenance rule that only that file enforces is a rule the PR under test can delete in
+    the same commit that records a SHA no clone will resolve. This asserts the arrangement,
+    not the behaviour (the arm itself is covered by `tests/test_surface_manifest.py`).
+    """
+    guard = (ROOT / "tools" / "surface-guard.py").read_text(encoding="utf-8")
+    assert "def _provenance_problems" in guard, (
+        "tools/surface-guard.py does not grade the baseline's recorded `cut_at_commit`, so "
+        "no pinned step can — and the PR's own copy of surface_manifest.py is exactly the "
+        "copy the pin exists because of"
+    )
+    imports = [
+        ln.strip() for ln in guard.splitlines()
+        if ln.lstrip().startswith(("import ", "from ")) and "surface_manifest" in ln
+    ]
+    assert imports == [], (
+        "the pinned guard IMPORTS the PR-authored surface_manifest module — the pin "
+        f"guarantees nothing about a module it imports: {imports}"
+    )
+    assert _index_of(GUARD_STEP) > _index_of(PIN_PREFIX), (
+        "the guard runs before the pin, so it grades with the PR's own copy of the gate"
+    )

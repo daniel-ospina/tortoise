@@ -81,7 +81,12 @@ RETIRED_LITERAL: dict[str, str] = {
     "tortoise_summarize_structure": 'tortoise_graph_overview(section="structure")',
     "tortoise_validate_domain": 'tortoise_graph_overview(section="validate_domain", domain=...)',
     "tortoise_paginated_query": "tortoise_query(offset=..., limit=...)",
-    "tortoise_query_points_by_tag": "tortoise_query(tag=...)",
+    # #11057 review F3: the RETIREMENT POINTER is part of the served contract, and the
+    # bare `tortoise_query(tag=...)` is the read this PR bounded at 100 rows with a plain
+    # list and no `hasMore`/`total` — pointing a retired caller at it lands them on a
+    # truncated answer they cannot distinguish from a complete one. The literal oracle
+    # carries the WALK for that reason, not the shortest spelling.
+    "tortoise_query_points_by_tag": "tortoise_query(tag=..., offset=..., limit=...)",
     "tortoise_stale": 'tortoise_graph_overview(section="stale", days=..., limit=...)',
     "tortoise_status": 'tortoise_graph_overview(section="status")',
     "tortoise_taxonomy": 'tortoise_graph_overview(section="taxonomy")',
@@ -1123,11 +1128,24 @@ def test_docs_only_edit_of_the_generated_doc_is_guarded_by_the_docs_job() -> Non
         # `measured_at_commit` ancestry claim needs HISTORY, and this job is the
         # one that checks out at `fetch-depth: 0` (#5086 review P1-1). Listed
         # here, not exempted: the exactness of this assertion is the point.
-        "python3 tools/substrate_map_check.py --check"
+        "python3 tools/substrate_map_check.py --check\n"
+        # #11084 / #2820: two more doc↔tree guards join the same step for the
+        # same `#4454` reason — a docs-only edit of either map selects no
+        # surface, and `docs` is the required, `paths:`-free context. `#2820`'s
+        # needs HISTORY for its anchor-ancestry claim for the same reason its
+        # #5086 sibling above does.
+        "python3 tools/problem_map_check.py --check\n"
+        # #11084: the surface map's guard, BOTH arms — the check, and the
+        # self-test that proves the check still catches a consistent shrink.
+        # `test_design_map_check.py` takes no `--check` flag (it is verify-only
+        # with no other mode), so its invocation is listed without one.
+        "python3 tools/test_design_map_check.py\n"
+        "python3 tools/test_design_map_check.py --self-test"
     )
     assert _code(str(step.get("run", ""))).strip() == expected, (
-        "the drift step must invoke EXACTLY the installer plus the four "
-        "`--check` commands — no shell operator, no `echo` decoy, no wrapper, no "
+        "the drift step must invoke EXACTLY the installer, the five `--check` "
+        "commands and the map guard's two arms — no shell operator, no "
+        "`echo` decoy, no wrapper, no "
         f"trailing anything, or a real failure reports green (#2656); got "
         f"{_code(str(step.get('run', '')))!r}"
     )

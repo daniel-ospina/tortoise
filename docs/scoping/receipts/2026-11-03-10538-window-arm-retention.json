@@ -25,6 +25,7 @@
         "graded_by_recall_all_at_5": 1,
         "limit_requested": 2,
         "net": 1,
+        "non_eviction": false,
         "order_changed": true,
         "pick_ranks": [
           2
@@ -61,6 +62,7 @@
         "graded_by_recall_all_at_5": 1,
         "limit_requested": 2,
         "net": 0,
+        "non_eviction": false,
         "order_changed": true,
         "pick_ranks": [
           3
@@ -97,6 +99,7 @@
         "graded_by_recall_all_at_5": 1,
         "limit_requested": 2,
         "net": 0,
+        "non_eviction": false,
         "order_changed": true,
         "pick_ranks": [
           3
@@ -133,6 +136,7 @@
         "graded_by_recall_all_at_5": 2,
         "limit_requested": 2,
         "net": 0,
+        "non_eviction": false,
         "order_changed": true,
         "pick_ranks": [
           3,
@@ -172,6 +176,7 @@
         "graded_by_recall_all_at_5": 2,
         "limit_requested": 2,
         "net": 0,
+        "non_eviction": false,
         "order_changed": true,
         "pick_ranks": [
           3,
@@ -211,6 +216,7 @@
         "graded_by_recall_all_at_5": 2,
         "limit_requested": 2,
         "net": 0,
+        "non_eviction": false,
         "order_changed": true,
         "pick_ranks": [
           3,
@@ -250,6 +256,7 @@
         "graded_by_recall_all_at_5": 2,
         "limit_requested": 2,
         "net": 0,
+        "non_eviction": false,
         "order_changed": true,
         "pick_ranks": [
           3,
@@ -289,6 +296,7 @@
         "graded_by_recall_all_at_5": 2,
         "limit_requested": 2,
         "net": 0,
+        "non_eviction": false,
         "order_changed": true,
         "pick_ranks": [
           3,
@@ -336,6 +344,7 @@
         "graded_by_recall_all_at_5": 1,
         "limit_requested": 2,
         "net": 1,
+        "non_eviction": false,
         "order_changed": true,
         "pick_ranks": [
           2
@@ -372,6 +381,7 @@
         "graded_by_recall_all_at_5": 1,
         "limit_requested": 2,
         "net": 0,
+        "non_eviction": false,
         "order_changed": true,
         "pick_ranks": [
           3
@@ -408,6 +418,7 @@
         "graded_by_recall_all_at_5": 1,
         "limit_requested": 2,
         "net": 0,
+        "non_eviction": false,
         "order_changed": true,
         "pick_ranks": [
           3
@@ -444,6 +455,7 @@
         "graded_by_recall_all_at_5": 2,
         "limit_requested": 2,
         "net": 0,
+        "non_eviction": false,
         "order_changed": true,
         "pick_ranks": [
           3,
@@ -483,6 +495,7 @@
         "graded_by_recall_all_at_5": 2,
         "limit_requested": 2,
         "net": 0,
+        "non_eviction": false,
         "order_changed": true,
         "pick_ranks": [
           3,
@@ -522,6 +535,7 @@
         "graded_by_recall_all_at_5": 2,
         "limit_requested": 2,
         "net": 0,
+        "non_eviction": false,
         "order_changed": true,
         "pick_ranks": [
           3,
@@ -561,6 +575,7 @@
         "graded_by_recall_all_at_5": 1,
         "limit_requested": 2,
         "net": 0,
+        "non_eviction": false,
         "order_changed": true,
         "pick_ranks": [
           4,
@@ -600,6 +615,7 @@
         "graded_by_recall_all_at_5": 0,
         "limit_requested": 2,
         "net": 0,
+        "non_eviction": false,
         "order_changed": true,
         "pick_ranks": [
           5
@@ -644,6 +660,7 @@
         "graded_by_recall_all_at_5": 1,
         "limit_requested": 2,
         "net": 1,
+        "non_eviction": false,
         "order_changed": true,
         "pick_ranks": [
           2
@@ -680,6 +697,7 @@
         "graded_by_recall_all_at_5": 1,
         "limit_requested": 2,
         "net": 0,
+        "non_eviction": false,
         "order_changed": true,
         "pick_ranks": [
           3
@@ -716,6 +734,7 @@
         "graded_by_recall_all_at_5": 1,
         "limit_requested": 2,
         "net": 0,
+        "non_eviction": false,
         "order_changed": true,
         "pick_ranks": [
           3
@@ -752,6 +771,7 @@
         "graded_by_recall_all_at_5": 2,
         "limit_requested": 2,
         "net": 0,
+        "non_eviction": false,
         "order_changed": true,
         "pick_ranks": [
           3,
@@ -791,6 +811,7 @@
         "graded_by_recall_all_at_5": 2,
         "limit_requested": 2,
         "net": 0,
+        "non_eviction": false,
         "order_changed": true,
         "pick_ranks": [
           3,
@@ -830,6 +851,7 @@
         "graded_by_recall_all_at_5": 2,
         "limit_requested": 2,
         "net": 0,
+        "non_eviction": false,
         "order_changed": true,
         "pick_ranks": [
           3,
@@ -869,6 +891,7 @@
         "graded_by_recall_all_at_5": 2,
         "limit_requested": 2,
         "net": 0,
+        "non_eviction": false,
         "order_changed": true,
         "pick_ranks": [
           3,
@@ -908,6 +931,7 @@
         "graded_by_recall_all_at_5": 1,
         "limit_requested": 2,
         "net": 0,
+        "non_eviction": false,
         "order_changed": true,
         "pick_ranks": [
           3
@@ -952,6 +976,7 @@
         "graded_by_recall_all_at_5": 1,
         "limit_requested": 2,
         "net": 1,
+        "non_eviction": false,
         "order_changed": true,
         "pick_ranks": [
           2
@@ -994,6 +1019,7 @@
         "graded_by_recall_all_at_5": 1,
         "limit_requested": 2,
         "net": 1,
+        "non_eviction": false,
         "order_changed": true,
         "pick_ranks": [
           3
@@ -1036,6 +1062,7 @@
         "graded_by_recall_all_at_5": 1,
         "limit_requested": 2,
         "net": 1,
+        "non_eviction": false,
         "order_changed": true,
         "pick_ranks": [
           4
@@ -1079,6 +1106,7 @@
         "graded_by_recall_all_at_5": 1,
         "limit_requested": 2,
         "net": 2,
+        "non_eviction": false,
         "order_changed": true,
         "pick_ranks": [
           4,
@@ -1123,6 +1151,7 @@
         "graded_by_recall_all_at_5": 0,
         "limit_requested": 2,
         "net": 2,
+        "non_eviction": false,
         "order_changed": true,
         "pick_ranks": [
           5,
@@ -1174,6 +1203,7 @@
         "graded_by_recall_all_at_5": 0,
         "limit_requested": 2,
         "net": 0,
+        "non_eviction": false,
         "order_changed": true,
         "pick_ranks": [
           10,
@@ -1225,6 +1255,7 @@
         "graded_by_recall_all_at_5": 0,
         "limit_requested": 2,
         "net": 0,
+        "non_eviction": false,
         "order_changed": true,
         "pick_ranks": [
           11,
@@ -1272,6 +1303,7 @@
         "graded_by_recall_all_at_5": 0,
         "limit_requested": 2,
         "net": 0,
+        "non_eviction": false,
         "order_changed": true,
         "pick_ranks": [
           12
@@ -1316,6 +1348,7 @@
         "graded_by_recall_all_at_5": 1,
         "limit_requested": 2,
         "net": 1,
+        "non_eviction": false,
         "order_changed": true,
         "pick_ranks": [
           2
@@ -1358,6 +1391,7 @@
         "graded_by_recall_all_at_5": 1,
         "limit_requested": 2,
         "net": 1,
+        "non_eviction": false,
         "order_changed": true,
         "pick_ranks": [
           3
@@ -1400,6 +1434,7 @@
         "graded_by_recall_all_at_5": 1,
         "limit_requested": 2,
         "net": 1,
+        "non_eviction": false,
         "order_changed": true,
         "pick_ranks": [
           4
@@ -1443,6 +1478,7 @@
         "graded_by_recall_all_at_5": 1,
         "limit_requested": 2,
         "net": 2,
+        "non_eviction": false,
         "order_changed": true,
         "pick_ranks": [
           4,
@@ -1487,6 +1523,7 @@
         "graded_by_recall_all_at_5": 0,
         "limit_requested": 2,
         "net": 2,
+        "non_eviction": false,
         "order_changed": true,
         "pick_ranks": [
           5,
@@ -1526,6 +1563,7 @@
         "graded_by_recall_all_at_5": 0,
         "limit_requested": 2,
         "net": 0,
+        "non_eviction": false,
         "order_changed": false,
         "pick_ranks": [],
         "pick_ranks_before_dedup": [],
@@ -1556,6 +1594,7 @@
         "graded_by_recall_all_at_5": 0,
         "limit_requested": 2,
         "net": 0,
+        "non_eviction": false,
         "order_changed": false,
         "pick_ranks": [],
         "pick_ranks_before_dedup": [],
@@ -1586,6 +1625,7 @@
         "graded_by_recall_all_at_5": 0,
         "limit_requested": 2,
         "net": 0,
+        "non_eviction": false,
         "order_changed": false,
         "pick_ranks": [],
         "pick_ranks_before_dedup": [],
@@ -1618,6 +1658,7 @@
         "graded_by_recall_all_at_5": 0,
         "limit_requested": 2,
         "net": 0,
+        "non_eviction": false,
         "order_changed": false,
         "pick_ranks": [],
         "pick_ranks_before_dedup": [],
@@ -1648,6 +1689,7 @@
         "graded_by_recall_all_at_5": 0,
         "limit_requested": 2,
         "net": 0,
+        "non_eviction": false,
         "order_changed": false,
         "pick_ranks": [],
         "pick_ranks_before_dedup": [],
@@ -1678,6 +1720,7 @@
         "graded_by_recall_all_at_5": 0,
         "limit_requested": 2,
         "net": 0,
+        "non_eviction": false,
         "order_changed": false,
         "pick_ranks": [],
         "pick_ranks_before_dedup": [],
@@ -1708,6 +1751,7 @@
         "graded_by_recall_all_at_5": 0,
         "limit_requested": 2,
         "net": 0,
+        "non_eviction": false,
         "order_changed": false,
         "pick_ranks": [],
         "pick_ranks_before_dedup": [],
@@ -1738,6 +1782,7 @@
         "graded_by_recall_all_at_5": 0,
         "limit_requested": 2,
         "net": 0,
+        "non_eviction": false,
         "order_changed": false,
         "pick_ranks": [],
         "pick_ranks_before_dedup": [],
@@ -1768,6 +1813,7 @@
         "graded_by_recall_all_at_5": 0,
         "limit_requested": 2,
         "net": 0,
+        "non_eviction": false,
         "order_changed": false,
         "pick_ranks": [],
         "pick_ranks_before_dedup": [],
@@ -1798,6 +1844,7 @@
         "graded_by_recall_all_at_5": 0,
         "limit_requested": 2,
         "net": 0,
+        "non_eviction": false,
         "order_changed": false,
         "pick_ranks": [],
         "pick_ranks_before_dedup": [],
@@ -1828,6 +1875,7 @@
         "graded_by_recall_all_at_5": 0,
         "limit_requested": 2,
         "net": 0,
+        "non_eviction": false,
         "order_changed": false,
         "pick_ranks": [],
         "pick_ranks_before_dedup": [],
@@ -1866,6 +1914,7 @@
         "graded_by_recall_all_at_5": 1,
         "limit_requested": 2,
         "net": 1,
+        "non_eviction": false,
         "order_changed": true,
         "pick_ranks": [
           2
@@ -1908,6 +1957,7 @@
         "graded_by_recall_all_at_5": 1,
         "limit_requested": 2,
         "net": 1,
+        "non_eviction": false,
         "order_changed": true,
         "pick_ranks": [
           3
@@ -1950,6 +2000,7 @@
         "graded_by_recall_all_at_5": 1,
         "limit_requested": 2,
         "net": 1,
+        "non_eviction": false,
         "order_changed": true,
         "pick_ranks": [
           4
@@ -1993,6 +2044,7 @@
         "graded_by_recall_all_at_5": 1,
         "limit_requested": 2,
         "net": 2,
+        "non_eviction": false,
         "order_changed": true,
         "pick_ranks": [
           4,
@@ -2037,6 +2089,7 @@
         "graded_by_recall_all_at_5": 0,
         "limit_requested": 2,
         "net": 2,
+        "non_eviction": false,
         "order_changed": true,
         "pick_ranks": [
           5,
@@ -2083,6 +2136,7 @@
         "graded_by_recall_all_at_5": 0,
         "limit_requested": 2,
         "net": 1,
+        "non_eviction": false,
         "order_changed": true,
         "pick_ranks": [
           10,
@@ -2130,6 +2184,7 @@
         "graded_by_recall_all_at_5": 0,
         "limit_requested": 2,
         "net": 0,
+        "non_eviction": false,
         "order_changed": true,
         "pick_ranks": [
           11
@@ -2166,6 +2221,7 @@
         "graded_by_recall_all_at_5": 0,
         "limit_requested": 2,
         "net": 0,
+        "non_eviction": false,
         "order_changed": false,
         "pick_ranks": [],
         "pick_ranks_before_dedup": [],
@@ -2198,6 +2254,7 @@
         "graded_by_recall_all_at_5": 0,
         "limit_requested": 2,
         "net": 0,
+        "non_eviction": false,
         "order_changed": false,
         "pick_ranks": [],
         "pick_ranks_before_dedup": [],
@@ -2228,6 +2285,7 @@
         "graded_by_recall_all_at_5": 0,
         "limit_requested": 2,
         "net": 0,
+        "non_eviction": false,
         "order_changed": false,
         "pick_ranks": [],
         "pick_ranks_before_dedup": [],
@@ -2258,6 +2316,7 @@
         "graded_by_recall_all_at_5": 0,
         "limit_requested": 2,
         "net": 0,
+        "non_eviction": false,
         "order_changed": false,
         "pick_ranks": [],
         "pick_ranks_before_dedup": [],
@@ -2288,6 +2347,7 @@
         "graded_by_recall_all_at_5": 0,
         "limit_requested": 2,
         "net": 0,
+        "non_eviction": false,
         "order_changed": false,
         "pick_ranks": [],
         "pick_ranks_before_dedup": [],
@@ -2318,6 +2378,7 @@
         "graded_by_recall_all_at_5": 0,
         "limit_requested": 2,
         "net": 0,
+        "non_eviction": false,
         "order_changed": false,
         "pick_ranks": [],
         "pick_ranks_before_dedup": [],
@@ -2348,6 +2409,7 @@
         "graded_by_recall_all_at_5": 0,
         "limit_requested": 2,
         "net": 0,
+        "non_eviction": false,
         "order_changed": false,
         "pick_ranks": [],
         "pick_ranks_before_dedup": [],
@@ -2378,6 +2440,7 @@
         "graded_by_recall_all_at_5": 0,
         "limit_requested": 2,
         "net": 0,
+        "non_eviction": false,
         "order_changed": false,
         "pick_ranks": [],
         "pick_ranks_before_dedup": [],
@@ -2408,6 +2471,7 @@
         "graded_by_recall_all_at_5": 0,
         "limit_requested": 2,
         "net": 0,
+        "non_eviction": false,
         "order_changed": false,
         "pick_ranks": [],
         "pick_ranks_before_dedup": [],
@@ -2446,6 +2510,7 @@
         "graded_by_recall_all_at_5": 1,
         "limit_requested": 2,
         "net": 1,
+        "non_eviction": false,
         "order_changed": true,
         "pick_ranks": [
           2
@@ -2488,6 +2553,7 @@
         "graded_by_recall_all_at_5": 1,
         "limit_requested": 2,
         "net": 1,
+        "non_eviction": false,
         "order_changed": true,
         "pick_ranks": [
           3
@@ -2530,6 +2596,7 @@
         "graded_by_recall_all_at_5": 1,
         "limit_requested": 2,
         "net": 1,
+        "non_eviction": false,
         "order_changed": true,
         "pick_ranks": [
           4
@@ -2573,6 +2640,7 @@
         "graded_by_recall_all_at_5": 1,
         "limit_requested": 2,
         "net": 2,
+        "non_eviction": false,
         "order_changed": true,
         "pick_ranks": [
           4,
@@ -2617,6 +2685,7 @@
         "graded_by_recall_all_at_5": 0,
         "limit_requested": 2,
         "net": 2,
+        "non_eviction": false,
         "order_changed": true,
         "pick_ranks": [
           5,
@@ -2661,6 +2730,7 @@
         "graded_by_recall_all_at_5": 0,
         "limit_requested": 2,
         "net": 2,
+        "non_eviction": false,
         "order_changed": true,
         "pick_ranks": [
           10,
@@ -2710,6 +2780,7 @@
         "graded_by_recall_all_at_5": 0,
         "limit_requested": 2,
         "net": 1,
+        "non_eviction": false,
         "order_changed": true,
         "pick_ranks": [
           11,
@@ -2757,6 +2828,7 @@
         "graded_by_recall_all_at_5": 0,
         "limit_requested": 2,
         "net": 0,
+        "non_eviction": false,
         "order_changed": true,
         "pick_ranks": [
           12
@@ -2786,6 +2858,7 @@
     "bucket_cap": 1,
     "limit": 2,
     "max_chunks_per_session": 3,
+    "non_eviction": false,
     "window": 12
   },
   "instrument": "tools/longmem_eval/window_arm_baseline.py",
@@ -2809,6 +2882,7 @@
       "graded_by_recall_all_at_5": 0,
       "limit_requested": 2,
       "net": 0,
+      "non_eviction": false,
       "order_changed": false,
       "pick_ranks": [],
       "pick_ranks_before_dedup": [],
@@ -2839,6 +2913,7 @@
       "graded_by_recall_all_at_5": 0,
       "limit_requested": 2,
       "net": 0,
+      "non_eviction": false,
       "order_changed": false,
       "pick_ranks": [],
       "pick_ranks_before_dedup": [],
@@ -2869,6 +2944,7 @@
       "graded_by_recall_all_at_5": 0,
       "limit_requested": 2,
       "net": 0,
+      "non_eviction": false,
       "order_changed": false,
       "pick_ranks": [],
       "pick_ranks_before_dedup": [],
@@ -2899,6 +2975,7 @@
       "graded_by_recall_all_at_5": 0,
       "limit_requested": 2,
       "net": 0,
+      "non_eviction": false,
       "order_changed": false,
       "pick_ranks": [],
       "pick_ranks_before_dedup": [],
@@ -2937,6 +3014,7 @@
       "graded_by_recall_all_at_5": 0,
       "limit_requested": 2,
       "net": 0,
+      "non_eviction": false,
       "order_changed": true,
       "pick_ranks": [
         10
@@ -2987,6 +3065,7 @@
       "graded_by_recall_all_at_5": 0,
       "limit_requested": 2,
       "net": 0,
+      "non_eviction": false,
       "order_changed": true,
       "pick_ranks": [
         10,
@@ -3038,6 +3117,7 @@
       "graded_by_recall_all_at_5": 2,
       "limit_requested": 2,
       "net": 0,
+      "non_eviction": false,
       "order_changed": true,
       "pick_ranks": [
         0,
@@ -3079,6 +3159,7 @@
       "graded_by_recall_all_at_5": 2,
       "limit_requested": 2,
       "net": 0,
+      "non_eviction": false,
       "order_changed": true,
       "pick_ranks": [
         0,
@@ -3118,6 +3199,7 @@
       "graded_by_recall_all_at_5": 2,
       "limit_requested": 2,
       "net": 0,
+      "non_eviction": false,
       "order_changed": true,
       "pick_ranks": [
         3,
@@ -3157,6 +3239,7 @@
       "graded_by_recall_all_at_5": 2,
       "limit_requested": 2,
       "net": 0,
+      "non_eviction": false,
       "order_changed": true,
       "pick_ranks": [
         0,
@@ -3196,6 +3279,7 @@
       "graded_by_recall_all_at_5": 2,
       "limit_requested": 2,
       "net": 0,
+      "non_eviction": false,
       "order_changed": true,
       "pick_ranks": [
         3,
@@ -3235,6 +3319,7 @@
       "graded_by_recall_all_at_5": 2,
       "limit_requested": 2,
       "net": 0,
+      "non_eviction": false,
       "order_changed": true,
       "pick_ranks": [
         0,
@@ -3274,6 +3359,7 @@
       "graded_by_recall_all_at_5": 2,
       "limit_requested": 2,
       "net": 0,
+      "non_eviction": false,
       "order_changed": true,
       "pick_ranks": [
         3,

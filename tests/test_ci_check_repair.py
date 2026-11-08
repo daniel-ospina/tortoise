@@ -1862,11 +1862,12 @@ def test_the_zero_job_floor_is_past_the_measured_queue_wait():
     run's FIRST job: p50 29.9 min, p95 77.0 min, max 81.9 min. The budget derivation
     this floor defers to is `tools/ci_queue_health.py:309`
     (`DEFAULT_MAX_PR_WAIT_SECONDS = 90 * 60.0`, "the first round number past" that max),
-    and `ci-wall-clock.md` §6 records the same derivation in its own
+    and `ci-wall-clock.md` §6 lines 422-424 records the same derivation in its own
     words ("max first-job wait 81.9 min → 90 min, so it fires past the measured-normal
-    population rather than on it"; no line span quoted here on purpose — §6's offset moves
-    with any insert above it, and the mechanical pin below reads the ONE span out of
-    `tools/ci_check_repair.py`). The floor was
+    population rather than on it"). This docstring carries the SECOND citation of that same
+    span, and the mechanical pin below holds it EQUAL to the one in
+    `tools/ci_check_repair.py` — so a re-cut of either alone reddens, and the span is never
+    restated from memory. The floor was
     1200 s, i.e. it selected the MEDIAN wait, and the repair for this class is
     cancel-then-rerun: at the median it makes the median run slower and adds one more
     run to the queue it is starved behind.
@@ -1882,38 +1883,83 @@ def test_the_floor_citations_RESOLVE_to_what_they_claim_at_this_head():
     """P3 (review): the citation block is the change's own claim about ITSELF.
 
     Commit `a7436214f` ("cite the floor's calibration as it is written") ships three
-    coordinates for the 5400 s floor — and two of them had already drifted by this
-    head: `tools/ci_queue_health.py:304` is the trailing COMMENT (the assignment is
-    one line below, at `:305`), and `docs/ops/ci-wall-clock.md` §6's line-span citation
-    opened four lines too wide — `326-332`, where `330-332` is the quoted derivation and
-    `326` is §6's OWN opening bullet ("It does not bound queue wait") — a shape the pin
-    could not see, because a span that CONTAINS the sentence passes. The
-    docstring names the reader who will follow these numbers and warns that whoever
-    mis-locates the derivation "discards the one section that supports this floor" —
-    so a stale coordinate sends the next lane to exactly the misreading the paragraph
+    coordinates for the 5400 s floor, and the defect class it kept is that a coordinate
+    can name the WRONG place: a trailing `#:` comment beside the derived value, or a
+    different section of the document than the sentence it is quoted for. Both drifts
+    were real, and both were hand-re-cut more than once before the pin below existed.
+
+    ⛔ NEITHER DRIFT'S ILLUSTRATIVE SPAN IS RESTATED HERE (round 13's P3s, and round
+    14's P3: an earlier revision described them with numbers that were stale at this
+    very head — and in one case had never been right at ANY head, which is why an
+    anecdote about them is not evidence worth keeping). This PR grew that document, so
+    a coordinate that is only true on `origin/main` hands the next reader
+    a checkable fact that is false here. The lesson needs no coordinate: a citation can
+    name another section entirely, and the docstring quoted above warns that whoever
+    mis-locates the derivation "discards the one section that supports this floor" — so
+    a stale coordinate sends the next lane to exactly the misreading the paragraph
     exists to prevent.
 
-    Pinned MECHANICALLY instead of corrected by hand a third time: the numbers are
-    read back out of the docstring and resolved against the files they cite, so a
-    later insert anywhere in either file reddens this instead of silently re-arming
-    the defect. Discriminating: restore `:304` or a span that does not contain the
-    quoted derivation and it reddens. ⚠ Only the coordinate in `tools/ci_check_repair.py`
-    is re-anchored on a red — never this docstring's prose: restating a live line number
-    here is how the coordinate drifts unnoticed (done once already, when commits on this
-    branch that expand a section ABOVE §6 moved §6, and the span with it — the numbers in
-    the paragraph above are the PRE-#6744 ones by design).
+    Pinned MECHANICALLY instead of corrected by hand a third time: the numbers are read
+    back out of the docstrings and resolved against the files they cite, and the pin is
+    PHRASING-AGNOSTIC (round 14's P2: pinning one literal phrasing left this file's own
+    previous wording — and every new one — uncovered, so a re-introduced coordinate
+    stayed green). FIVE arms, each with its scope stated so the claim matches the code
+    (round 15's P2 caught an earlier sentence claiming file-wide reach while the sweeping
+    arm read only one function):
 
-    Arm (3) derives the span from the doc's own text, so the next red NAMES the number to
-    write instead of only reporting that the citation is stale: arms (1) and (2) accept any
-    span wide enough to contain the measurement (they pass on `368-371`), which is not the
-    same thing as the span the sentence occupies — and on a red the fixer had to re-derive
-    the offset by hand, twice.
+    - **every** `ci_queue_health.py:<line>` cited by EITHER file must BE the assignment;
+    - the cited `§6 (lines A-B)` span must contain the sentence it is quoted for;
+    - the span is DERIVED from the document's own text (the sentence's first and last
+      line) and the citation must equal it — so a shift reds with the number to write
+      instead of leaving the next lane to re-derive the offset by hand, which is what
+      arms 1-2 cannot do: they accept any span WIDE ENOUGH to contain the measurement,
+      which is not the same thing as the span the sentence occupies;
+    - the sibling's `§6 lines A-B` citation must be found EXACTLY once (as the liveness
+      anchor, so the checked set cannot silently shrink) and must name the pin's span;
+    - every line of this file containing one of the CITATION tokens below **and** an
+      `A-B` span must name that same span. ⛔ THE TOKEN LIST IS THE DEFINITION, not an
+      illustrative sample (round 16's blocking P2: an earlier sentence promised
+      "whatever the wording around it", which the implementation never did, so a citation
+      phrased in words this file uses constantly — "cited at", "quoted at" — stayed
+      green while naming a stale span). The tokens are `§ 6` (with or without the space),
+      `derivation`, `cite`/`cited`/`cites`/`citing`/`citation`, `re-cut` (either
+      spelling) and `quote`/`quoted`; a span may use a hyphen, en dash or em dash.
+
+      THREE STATED EXCLUSIONS, listed because each is a place a stale span can still sit
+      — declaring them is the point, not hiding them: (1) lines containing the literal
+      `[0-9]` (this pin's own regex sources); (2) date-shaped spans such as `2026-11`
+      (`MEASURED 2026-11-03` is this file's house style, and a date is not a citation);
+      (3) a citation phrased WITHOUT one of those tokens — e.g. "see `ci-wall-clock.md`
+      lines 111-222" — which no lexical arm can see. That residual is why the sibling
+      citation stays the liveness anchor: the canonical citation of this span is
+      always token-bearing and always present.
+
+    ⚠ The derivation arm and the two below it OVERLAP ON PURPOSE and none of the three may
+    be deleted as redundant: the derivation arm is `origin/main`'s own independent pin
+    (written after rounds eleven to sixteen above), and each catches a shape the others
+    cannot — the derivation reds a span that is WIDE ENOUGH to contain the sentence but is
+    not the sentence's own extent, naming the number to write, while the last two red a
+    citation this file states ANYWHERE ELSE (reworded, appended to another docstring, or
+    re-introduced under a synonym) that the derivation cannot see, because it reads the ONE
+    coordinate in `tools/ci_check_repair.py`.
+
+    Discriminating: shift a cited span, reword the sibling's phrasing away, widen the
+    cited span while staying on the sentence, or state a different span on any
+    token-bearing line of this file, and it reddens.
     """
     root = Path(__file__).resolve().parents[1]
     src = (root / "tools" / "ci_check_repair.py").read_text()
+    own_src = Path(__file__).read_text()
 
-    # 1. Every `ci_queue_health.py:<line>` cited must BE the derived-value assignment.
+    # 1. Every `ci_queue_health.py:<line>` cited — in the tool AND in this file — must
+    #    BE the derived-value assignment. The test file's own coordinates were unchecked
+    #    until round 14, which is how a bare "one line below, at `:NNN`" describing the
+    #    wrong line survived three rounds while being wrong at every head. The BARE
+    #    `:NNN` form is deliberately not matched here: a bare coordinate in this file may
+    #    name a line in some OTHER file, and widening the arm would resolve it against
+    #    `ci_queue_health.py` and red falsely (round 15's non-blocking P3).
     cited = sorted(set(re.findall(r"ci_queue_health\.py:(\d+)", src)))
+    cited += sorted(set(re.findall(r"ci_queue_health\.py:(\d+)", own_src)))
     assert cited, "the citation block no longer cites ci_queue_health.py by line"
     health_lines = (root / "tools" / "ci_queue_health.py").read_text().splitlines()
     for number in cited:
@@ -1952,6 +1998,63 @@ def test_the_floor_citations_RESOLVE_to_what_they_claim_at_this_head():
         f"ci-wall-clock.md §6 moved: the sentence tools/ci_check_repair.py quotes now "
         f"occupies lines {opens[0]}-{closes[0]}, but the citation says {first}-{last}. "
         f"Change it to `(lines {opens[0]}-{closes[0]})`.")
+
+    # 4. THIS test's own docstrings carry the third citation of the same span, and
+    #    it is exactly what drifted when this PR grew `ci-wall-clock.md`:
+    #    the other two citations were re-cut to the span of that head and this one was
+    #    left behind
+    #    (on a span that had become other prose entirely). "Pinned MECHANICALLY
+    #    instead of corrected by hand a third time" has to include it, or the next
+    #    insert re-arms the same silent drift (#10962 round 11, P3).
+    #    EVERY occurrence and BOTH phrasings, deliberately: the first version of this
+    #    pin checked only the first `quoted derivation is at` match, so a hand-re-cut
+    #    of the sibling docstring 20 lines above ("§6 lines A-B records the same
+    #    derivation") — or a second copy of the parenthetical — stayed GREEN while
+    #    stale, which is the same false PASS this pin exists to prevent (round 12, P2).
+    own_src = Path(__file__).read_text()
+    sibling_hits = re.findall(
+        r"§6 lines ([0-9]{1,4})-([0-9]{1,4}) records the same derivation", own_src)
+    assert len(sibling_hits) == 1, (
+        f"expected exactly ONE '§6 lines A-B records the same derivation' citation in "
+        f"this file's docstrings, found {len(sibling_hits)} — ZERO means the citation "
+        "moved to a phrasing this pin does not cover (round 13's P2: a phrasing that "
+        "silently leaves the checked set is the same false PASS as a stale number), "
+        "and more than one means a copy nothing examines")
+    for found in sibling_hits:
+        assert found == (str(first), str(last)), (
+            f"a docstring in this file cites the derivation at {found[0]}-{found[1]} "
+            f"while the file's own citation (and the pinned span above) says "
+            f"{first}-{last} — a stale coordinate sends the next lane to the "
+            "misreading the paragraph exists to prevent")
+
+    # 5. PHRASING-AGNOSTIC backstop over the WHOLE FILE (round 14's P2, widened in
+    #    round 15 after its P2: the first version read one function, so a new citation
+    #    appended to the SIBLING docstring — the very site that drifted in round 11 —
+    #    stayed green). Keyed on the CITATION token list defined in this function's
+    #    docstring — that list is the DEFINITION of the scope, and the residual it cannot
+    #    reach is declared there rather than claimed away (round 16's blocking P2).
+    #    Spans accept a hyphen, en dash or em dash, because prose uses all three.
+    CITATION_WORDS = re.compile(
+        r"§\s*6|derivation|cit(?:e|ed|es|ing|ation)|re-?cut|quot(?:e|ed)")
+    ANY_SPAN = re.compile(r"(?<!\d)([0-9]{1,4})[-\u2013\u2014]([0-9]{1,4})(?!\d)")
+
+    def _is_date(start: str, end: str) -> bool:
+        return len(start) == 4 and start.startswith(("19", "20")) and len(end) <= 2
+
+    prose_spans = [
+        match
+        for line in own_src.splitlines()
+        if "[0-9]" not in line and CITATION_WORDS.search(line)
+        for match in ANY_SPAN.findall(line)
+        if not _is_date(*match)
+    ]
+    for found in prose_spans:
+        assert found == (str(first), str(last)), (
+            f"a line of this file naming the citation (one of the tokens listed in this "
+            f"function's docstring) states the span {found[0]}-{found[1]} while the "
+            f"pinned span is {first}-{last} — a coordinate that has moved is stale "
+            "here, and the token list is broad on purpose so a reworded citation "
+            "cannot re-enter through a synonym")
 
 
 def test_a_run_at_the_measured_median_queue_wait_is_not_cancelled():
