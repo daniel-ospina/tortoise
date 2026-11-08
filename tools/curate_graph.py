@@ -533,11 +533,23 @@ def cmd_plan(args: argparse.Namespace) -> int:
         # plan: a scripted driver must not read exit 0 as "migrated".
         print(f"REFUSED: {result.refused}", file=sys.stderr)
         return 3
-    if result.applied and result.stopped:
+    # Keyed on `stopped`, NOT on `applied`. A run stopped before its first batch
+    # accepted anything reports `applied: False` (nothing landed) — an `applied and
+    # stopped` test would fall straight through to exit 0, reading a stopped migration
+    # as a finished one. `stopped` is the fact; `applied` is a derived field.
+    if result.stopped:
         print(f"STOPPED mid-run: {result.stopped} (accepted={result.written})", file=sys.stderr)
         return 3
     if result.applied and result.refused:
         print(f"REFUSED mid-run: {result.refused} (accepted={result.written})", file=sys.stderr)
+        return 3
+    if args.apply and not result.applied:
+        # The apply leg ran, nothing was accepted, and the writer neither refused nor
+        # stopped. `IngestWriter` cannot produce this (it stops or refuses rather than
+        # reporting a success that accepted nothing), so a CUSTOM `PlanWriter` is the
+        # only source — but `applied: false` over a plan that still owes rows must not
+        # exit 0, or a driver reads a migration that moved nothing as finished.
+        print(f"NO-OP: nothing accepted, {result.pending} row(s) still owed", file=sys.stderr)
         return 3
     return 0
 

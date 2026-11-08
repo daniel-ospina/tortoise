@@ -25,7 +25,7 @@ Two measured facts govern the risk:
   a migration here is moving the only copy of a tenant's data.
 
 Code: `tortoise/curation.py` (classification + guards + additive writer) and
-`tools/curate_graph.py` (the CLI). Tests: `tests/test_curation_11469.py` (136 tests).
+`tools/curate_graph.py` (the CLI). Tests: `tests/test_curation_11469.py` (138 tests).
 
 ## The inventory — measured 2026-11-08 against `live-v4`
 
@@ -160,12 +160,17 @@ Environment: `TORTOISE_MCP_URL` + `TORTOISE_MCP_API_KEY`; `TORTOISE_CURATE_OFF=1
 |---:|---|
 | **0** | the run did what was asked: `inventory`, a dry `plan`, an operator-DISARMED run (the off-switch, asked for on purpose), an apply that completed, or an apply that owed the target nothing (idempotent re-run) |
 | **2** | a USAGE error, decided before any read: `--page-size 0`, `--apply` without `--graph`, `inventory` given a `plan`-only flag |
-| **3** | a real failure: the identity guard refused (never an in-place write), the target refused the write, the off-switch flipped mid-run, or any stop/refusal reached after the first batch |
+| **3** | a real failure: the identity guard refused (never an in-place write), the target refused the write, the off-switch flipped mid-run, or any stop/refusal/no-op — reached before OR after the first batch |
+| **1** | ⚠️ **not part of the designed contract** — an UNHANDLED failure. A read the surface refuses raises out of `MCPReader`'s section gate (`_checked`, `read_points`) before any handler, so `inventory` and `plan` exit 1 with a traceback. A driver should treat 1 as "the run crashed" and 3 as the designed failure rc |
 
 In the JSON report, `run.applied` follows what the target ACCEPTED: `true` means the apply leg
-landed (or there was nothing left to write), `false` with `run.refused` set means nothing was
-written — so a driver that reads the field instead of the exit code cannot read a refused migration
-as a finished one. `run.written` is a subset of `run.pending`, never a fourth counter to add in.
+landed (or there was nothing left to write), `false` with `run.refused` **or** `run.stopped` set
+means nothing was written — so a driver that reads the field instead of the exit code cannot read a
+refused or stopped migration as a finished one. A partial run (some keys accepted, then a refusal or
+a stop) keeps `applied: true` and reports the accepted keys in `run.written`, which is a subset of
+`run.pending`, never a fourth counter to add in. The one remaining shape — a writer that accepts
+nothing and neither refuses nor stops — is not producible by `IngestWriter`; it reports
+`applied: false` and exits **3** under its own `NO-OP` message rather than 0.
 
 ### Recorded, not changed here (round-33 review follow-ups)
 
@@ -173,18 +178,28 @@ Three follow-ups from the review are deliberately left as they are. They are rec
 the guarantees, because a review comment is not an artifact the next lane reads:
 
 * **a carried row's `kind` is emitted verbatim** — including a pack-namespaced spelling
-  (`core:decision`) and kinds no pack declares (`finding`). Ingest WARNS on an unrecognised
-  `pointKind` rather than refusing, so no row is lost; stripping the namespace here would silently
-  re-type rows the source declared namespaced, on a write path whose contract is fidelity. Which
-  spellings the clean target must accept is the clean graph's vocabulary decision (`#10175` step 2).
-  The rules still compare the BARE kind (`Row.bare_kind`), so no classification depends on it.
+  (`core:decision`) and kinds no pack declares (`finding`). Stripping the namespace here would
+  silently re-type rows the source declared namespaced, on a write path whose contract is fidelity.
+  Ingest does not silently drop either spelling, but by two DIFFERENT mechanisms: a bare
+  unrecognised `pointKind` is **WARNED** about and stored, while a pack-namespaced kind the target
+  has not installed is **REFUSED** loudly (`_refuse_unapproved_kind`). Either way no row is lost —
+  but "refused" is not "warned", so a namespaced spelling is not free. Which spellings the clean
+  target must accept is the clean graph's vocabulary decision (`#10175` step 2).
+  ⚠️ **Classification is NOT spelling-invariant, despite the bare-kind rule.** `classify_point`
+  compares `Row.bare_kind`, but `classify_source` and `classify_event` compare the EXACT
+  `row.kind`: a `core:agentSession` source falls through `classify_source`'s session arm to
+  `carry`, where a bare `agentSession` is `undecidable` (§9.1/D1). No live row moves today — the
+  census's source rows are all bare — but a lane that namespaced a kind on the strength of "the
+  rules use the bare kind" would turn a decision into a carry.
 * **the `_g_` split is on the LAST occurrence, so a graph id that itself contains `_g_` is
   TRUNCATED** (`org_o1_g_x_g_y` and `g_x_g_y` both yield `y`). That truncation is fail-closed by
   construction, not by accident: it collapses every spelling of one id to the SAME tail, so the
   guard never splits one graph in two, and its only failure direction is that two DIFFERENT graphs
   whose ids share that tail compare equal — which refuses a correct run, and can never pass an
   in-place write. Narrowing it would have to know which ids may contain `_g_`, which no surface
-  here guarantees.
+  here guarantees. An **empty** tail (an id ending in `_g_`) is not a spelling of anything and
+  canonicalises to `None`, so it refuses rather than falling back to the raw spelling — the
+  fallback was the one way this guarantee could have been false.
 * **two identity clauses are redundant** with `canonical_graph_id`'s `return None` catch-all ("the
   rows are the authority"): the `len(hits) > 1` refusal and the ambiguous-name one below it. They
   are deliberate defence in depth. The ambiguous-name clause is removable with no behaviour change

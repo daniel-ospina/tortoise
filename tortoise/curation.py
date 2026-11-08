@@ -606,13 +606,18 @@ class Plan:
                     "migrationKey": d.stable_key,
                     # VERBATIM, including a pack-namespaced spelling (`core:decision`) and
                     # an undeclared kind (`finding`). Deliberate, and RECORDED rather than
-                    # re-shaped (round-33 review follow-up 2): ingest accepts both — it
-                    # WARNS on an unrecognised pointKind, it does not refuse — so a strip
-                    # here would silently re-type rows the source declared namespaced, on
-                    # a write path whose whole contract is fidelity. `bare_kind` is used
-                    # for the RULES (a rule must not depend on the namespace), not for the
-                    # wire. What the clean target's kind vocabulary should accept is the
-                    # clean graph's decision (#10175 step 2), not this pass's.
+                    # re-shaped (round-33 review follow-up 2): a strip here would silently
+                    # re-type rows the source declared namespaced, on a write path whose
+                    # whole contract is fidelity. Ingest does not silently drop either
+                    # spelling, but by TWO mechanisms — a bare unrecognised pointKind is
+                    # WARNED about and stored, a kind naming a pack the target has not
+                    # installed is REFUSED (`_refuse_unapproved_kind`), so a namespaced
+                    # spelling is not free. ⚠️ Classification is NOT spelling-invariant:
+                    # `classify_point` uses `bare_kind`, but `classify_source` and
+                    # `classify_event` compare the EXACT `row.kind` — a `core:agentSession`
+                    # source is `carry` where a bare `agentSession` is `undecidable`. What
+                    # the clean target's kind vocabulary should accept is the clean graph's
+                    # decision (#10175 step 2), not this pass's.
                     "kind": d.kind or "statement",
                     "content": d.content,
                     "sourceNodeId": d.node_id,
@@ -784,7 +789,12 @@ def _canonical_from_row(row: Mapping[str, Any]) -> str | None:
     # EVERY row collapses to its id tail. Returning the namespace string itself
     # (while `g_<id>` returns the bare id) made two spellings of one graph compare
     # UNEQUAL — a fail-open on the exact guard that exists to stop an in-place run.
-    return _tail(str(ident)) or str(ident).strip().casefold() or None
+    # An EMPTY tail is not a spelling of anything (an id ending in `_g_`, or an empty
+    # gid): `_tail` returns "" and the old `or <raw spelling>` fallback handed back the
+    # namespace VERBATIM, so `org_o1_g_x_g_` and `g_x_g_` canonicalised differently and
+    # the guard PASSED — the one failure direction `_tail`'s truncation is documented
+    # never to have. Refuse instead (round-33 review follow-up 3's guarantee, made true).
+    return _tail(str(ident)) or None
 
 
 def _identity_shape(row: Mapping[str, Any]) -> frozenset[str]:
@@ -1263,12 +1273,13 @@ class RunResult:
 
     ``applied`` is True only when the apply leg actually TOOK: either something was
     accepted, or the plan owed the target nothing at all (``pending == 0``, an
-    idempotent re-run). A FULLY-refused apply — nothing accepted, everything still
-    pending — reports ``applied: False`` with ``refused`` set, because the exit code
+    idempotent re-run). A FULLY-refused apply, or an apply that was STOPPED before its
+    first batch accepted anything — nothing accepted, everything still pending — reports
+    ``applied: False`` with ``refused`` or ``stopped`` set, because the exit code
     alone is not what a driver reads: `"applied": true, "written": 0` over a refusal
-    is how a migration that wrote nothing reads as done (round-33 review follow-up
-    1). A partial refusal keeps ``applied: True`` and reports the accepted keys in
-    ``written``.
+    (or over a stop that landed nothing) is how a migration that wrote nothing reads as
+    done (round-33 review follow-up 1). A partial run — accepted keys, then a refusal
+    or a stop — keeps ``applied: True`` and reports the accepted keys in ``written``.
     """
 
     applied: bool
@@ -1445,6 +1456,11 @@ def run_plan(
                          duplicate_rows=duplicate_rows, pending=pending_count)
     accepted = [k for k in (result.get("written") or [])]
     ledger.record(accepted)
-    return RunResult(True, False, skipped, len(accepted), plan.target_graph, plan.digest(),
-                     stopped=result.get("stopped"), duplicate_rows=duplicate_rows,
-                     pending=pending_count)
+    # `applied` is the SAME question here as on the refusal arm: did the apply leg
+    # TAKE? A `stopped` result that landed no key answers NO — the target still owes
+    # every row. Without this, a run stopped before its first batch accepted anything
+    # reported `"applied": true, "written": 0, "pending": 1`, which is the exact
+    # reading this change exists to remove, one arm over (round-33 follow-up 1).
+    return RunResult(bool(accepted), False, skipped, len(accepted), plan.target_graph,
+                     plan.digest(), stopped=result.get("stopped"),
+                     duplicate_rows=duplicate_rows, pending=pending_count)

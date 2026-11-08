@@ -506,6 +506,54 @@ def test_a_fully_refused_apply_is_not_reported_as_applied(ledger):
     assert len(ledger) == 0, "a refused batch is never recorded as migrated"
 
 
+def test_an_empty_graph_id_tail_cannot_prove_two_graphs_distinct(tmp_path):
+    """Round-33 follow-up 3's guarantee, made true and pinned.
+
+    `_tail` yields "" for an id ending in `_g_`, and `_canonical_from_row` used to
+    fall back to the RAW spelling — so `org_o1_g_x_g_` and `g_x_g_`, two spellings of
+    ONE graph, canonicalised differently and the in-place guard PASSED. That is the
+    one failure direction `_tail`'s truncation is documented never to have, so an
+    empty tail must refuse instead of resolving by shape.
+    """
+    rows = [{"namespace": "org_o1_g_x_g_"}, {"namespace": "g_x_g_"}]
+    assert C._canonical_from_row({"namespace": "org_o1_g_x_g_"}) is None
+    assert C._canonical_from_row({"graph_id": "g_x_g_"}) is None
+    with pytest.raises(C.CurationRefused):
+        C.assert_distinct_graphs("org_o1_g_x_g_", "g_x_g_", graph_rows=rows)
+    # non-vacuity: a NON-empty tail still collapses both spellings, so the refusal
+    # above is about the empty tail and not about the guard refusing everything
+    assert C._canonical_from_row({"namespace": "org_o1_g_x_g_y"}) == "y"
+    assert C._canonical_from_row({"graph_id": "g_x_g_y"}) == "y"
+
+
+def test_a_stopped_apply_that_landed_nothing_is_not_reported_as_applied(ledger):
+    """Round-33 follow-up 1, the arm OVER — `applied` is the same question here.
+
+    The success return reported `applied=True` unconditionally, so a run STOPPED
+    before its first batch accepted anything reported
+    `"applied": true, "written": 0, "pending": 1` — the exact reading the refused
+    arm was just fixed for, one arm over. The docstring's promise ("True only when
+    the apply leg actually TOOK") was false here.
+    """
+
+    class StopBeforeFirstBatch:
+        def write_sections(self, target_graph, sections):
+            return {"written": [], "stopped": "off-switch engaged"}
+
+    plan = C.build_plan([row("a", kind="decision", content="Use the graph.")],
+                        source_graph="old", target_graph="new", packs={})
+    # non-vacuity: there WAS something to write, so `applied: False` is a statement
+    # about the stop and not about an empty plan
+    assert [d.disposition for d in plan.decisions] == [C.CARRY]
+    res = C.run_plan(plan, writer=StopBeforeFirstBatch(), ledger=ledger, apply=True,
+                     graph_rows=ROWS)
+    assert res.stopped == "off-switch engaged"
+    assert res.written == 0
+    assert res.applied is False, "nothing landed, so the run did not apply"
+    assert res.pending == 1, "a stopped run still owes the target its rows"
+    assert len(ledger) == 0
+
+
 def test_a_transport_failure_mid_run_reports_what_landed(tmp_path):
     calls = {"n": 0}
 
@@ -1764,14 +1812,35 @@ def test_the_cli_exit_codes_pin_every_failure_arm(monkeypatch, tmp_path, capsys)
             return {"written": [p["migrationKey"] for p in sections["points"]][:1],
                     "stopped": "off-switch flipped mid-run"}
 
+    class StopBeforeFirstBatchWriter:
+        def write_sections(self, target_graph, sections):
+            return {"written": [], "stopped": "off-switch engaged before any batch"}
+
+    class NoOpWriter:
+        """Reports success without accepting a key and without stopping.
+
+        `IngestWriter` never does this, so only a custom PlanWriter can — but the
+        honest-`applied` change makes this state report `applied: False`, and a
+        fall-through to exit 0 would read as a finished migration.
+        """
+
+        def write_sections(self, target_graph, sections):
+            return {"written": []}
+
     class RefuseWriter:
         def write_sections(self, target_graph, sections):
             exc = C.CurationRefused("ingest refused the batch")
             exc.written_keys = []
             raise exc
 
-    # 2. a MID-RUN stop and 3. a MID-RUN refusal are both failures
-    for i, (writer, needle) in enumerate(((StopWriter(), "STOPPED"), (RefuseWriter(), "REFUSED"))):
+    # 2. a MID-RUN stop, 2b. a stop that landed NOTHING, 2c. a no-op success, and
+    #    3. a MID-RUN refusal are all failures. 2b is the regression an honest
+    #    `applied` introduces (the stop arm must be keyed on `stopped`); 2c is the
+    #    state an honest `applied` makes reachable but no arm owned.
+    for i, (writer, needle) in enumerate(((StopWriter(), "STOPPED"),
+                                         (StopBeforeFirstBatchWriter(), "STOPPED"),
+                                         (NoOpWriter(), "NO-OP"),
+                                         (RefuseWriter(), "REFUSED"))):
         state["graphs"] = ROWS          # resolvable identity, so the run reaches the write
         monkeypatch.setattr(mod.C, "IngestWriter", lambda *a, _w=writer, **k: _w)
         # a FRESH ledger per arm: reusing one makes the second arm a no-op
