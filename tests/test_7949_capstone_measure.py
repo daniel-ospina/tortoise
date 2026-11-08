@@ -11395,17 +11395,25 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # such: an earlier `at (?:HEAD|here)` pinned the two spellings the record happened to use, so a
     # third qualifier (`at the head`) redded with a diagnostic asserting the WRONG NUMBER while
     # `:12929` was present (measured — the comment claimed a tolerance the code did not have).
-    # The qualifier is now ANY word run (`[\w]`) — `HEAD`, `the head`, or a base sha — and that is
-    # deliberate: it accepts both spellings the record legitimately uses. ⚠️ WHAT THAT DOES NOT DO:
-    # it does not grade the base's VALUE. The record pairs ``:12929` at `a1dff7cec8`` with
-    # ``:12779` at `62248db88`` in one sentence, and SWAPPING them keeps this arm GREEN (measured —
-    # at `62248db88` `vet_enabled` is at `:12779`, so `:12929` at that base is false). This sentence
-    # used to claim the opposite ("the qualifier must NOT be a base … are excluded"); that was true
-    # of the `: (\d+)`? at (?!`?\d)[\w]` arm it described and is FALSE of this one — the prose
-    # outlived its mechanism. Grading the base means re-reading `extractor_v2.py` AT that base,
-    # which a `fetch-depth: 1` checkout cannot do; that durable fix is #11564's subject (with
-    # #11571/#11173 for the neighbouring arms), so the residual is NAMED here instead of implied
-    # closed by a sentence the code does not implement.
+    # The qualifier is now ANY word run (`[\w]`) — `HEAD`, `the head`, or a base sha — and that
+    # is deliberate: it accepts both spellings the record legitimately uses. It replaces an earlier
+    # `(?:`?\d)` lookahead that EXCLUDED bases, so the prose above it ("the qualifier must NOT be
+    # a base … are excluded") was true of THAT arm and is false of this one: the sentence outlived
+    # its mechanism.
+    # ⚠️ WHAT THIS ARM DOES NOT DO: it does not grade the base's VALUE. The record pairs
+    # ``:12929` at `a1dff7cec8`` with ``:12779` at `62248db88`` in one sentence, and
+    # pointing `:12929`'s base at `62248db88` — ONE-SIDED, `:12779` left untouched — keeps this
+    # arm GREEN (measured), even though at that base `vet_enabled` is at `:12779`, so `:12929` at
+    # `62248db88` is a FALSE cite that passes every arm here.
+    # ⛔ The reproducer is that ONE-SIDED mutation, NOT a swap. SWAPPING the two cites reds on the
+    # `:12779`-qualified-by-`62248db88` arm below — a different claim — so a lane that tries the
+    # swap first sees RED and concludes the base IS graded, closing #11564 as already covered while
+    # the false cite still passes (measured both ways; an earlier revision of this comment named the
+    # swap, which is a measurement that does not reproduce).
+    # Grading the base means re-reading `extractor_v2.py` AT that base, which a `fetch-depth: 1`
+    # checkout cannot do; that durable fix is #11564's subject (with #11571/#11173 for the
+    # neighbouring arms), so the residual is NAMED here instead of implied closed by a sentence the
+    # code does not implement.
     # ⛔ The boundary is located by the SECTION MARKER alone (`^# §0/§2`) — no typography and no
     # extra word: the em-dash reword redded once (measured), and `sha-pinned` in the needle made
     # the word do work it was not doing (only one line matches `^# §0/§2`, verified) while a reword
