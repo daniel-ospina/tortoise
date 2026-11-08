@@ -3655,12 +3655,16 @@ def test_an_UNMEASURABLE_probe_VETOES_even_when_the_CONTROL_answers(monkeypatch)
         the fold in front of a DEGRADED probe row AND an ANSWERING control, which
         is the pair this test builds. MEASURED at this head:
         `test_the_documented_report_contracts_are_the_ones_the_run_RETURNS` calls
-        `probe_fts(..., control=False)`, so `report["control"]` is None and
-        `control_ok` is False for want of a control at all; the breaker-open test
-        asks for a control but its own read is degraded, so that arm reports
-        `mode="unavailable", ok=False`. With `control_ok` False the fold falls
-        through to `uncorroborated` — the WRONG VETO FOR THE RIGHT OUTCOME — so
-        none of them pins "the probe's own read did not run".
+        `probe_fts(..., control=False)`, so `report["control"]` is None — there is
+        no control at all; the breaker-open test does pass `control=True`, but its
+        fixture does not answer the control's own lexicon read, so that arm
+        reports `mode="unavailable", ok=False` (`note: "the control's lexicon read
+        FAILED …"`). ⛔ AND THE DEGRADED LEG IS NOT WHAT MAKES IT UNAVAILABLE: the
+        identical fixture with a HEALTHY leg reports a byte-identical control
+        block, because the control reads go through `g.query`, never through the
+        patched `run_fts_query`. With `control_ok` False the fold falls through to
+        `uncorroborated` — the WRONG VETO FOR THE RIGHT OUTCOME — so none of them
+        pins "the probe's own read did not run".
         Verified by mutation: with `elif out["unmeasurable"]:` deleted the rest of
         the suite stays green (128 passed, 4 skipped) and only this test reds, on
         `certifies is False`.
