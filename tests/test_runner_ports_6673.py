@@ -468,21 +468,19 @@ def test_provision_logging_never_corrupts_the_captured_port():
 # literal substring), each a shape fixture that never dials.
 #
 # ⛔ An entry only means anything while its file is in the POPULATION this guard
-# actually SCANS (`_imports_the_seam`). When a file leaves the population its
-# entry exempts a literal in a file the guard never reads — dead weight that looks
-# like a live remedy — and `test (e)` ALONE is green with the entry and green
-# without it (that is the gap, not the whole picture). The instrument that reds on
-# it is `test_every_seam_exemption_is_consulted`, measured by adding a row for a
-# file no population contains. An entry for a file the census does not select
-# exempts nothing and is worse than absent: it reads as a live declaration, so the
-# next auditor trusts a guard that is not running on that file, and the literal it
-# names is scanned by nothing at all.
+# actually SCANS (`_imports_the_seam`). A row for a file outside the population
+# exempts a literal this census never reads: `test (e)` alone is green with the
+# entry and green without it, which is why `test_every_seam_exemption_is_consulted`
+# reds on it — measured by adding a row for a file no population contains — rather
+# than letting that row read as a live declaration of a check that is not running.
 #
 # `tests/test_cache_eviction_evictor_pins.py` was retired on #11437. Its row
 # existed because the SUBSTRING population charged it with `docker_port=lambda: 6379`
 # on a comment; the import-edge population does not select it at all, so the row
 # could never be consulted again. The mechanism its reason described is pinned
-# instead by `test_the_mocked_seam_is_really_mocked_and_needs_no_exemption`.
+# instead by `test_the_mocked_seam_is_really_mocked_and_needs_no_exemption` — which
+# is also the one guard that reads that file's literals, so a file the census has
+# dropped is not left unguarded, just guarded somewhere the row cannot claim credit.
 SEAM_FILES_WITH_ALLOWED_LITERALS = {
     "tests/test_search_engine_gaps.py": [
         # a MOCKED non-local host (the probe is stubbed)
