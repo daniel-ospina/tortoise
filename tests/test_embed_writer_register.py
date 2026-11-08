@@ -850,8 +850,8 @@ def test_a_stores_declaration_that_does_not_answer_is_refused():
     `_graph_fingerprint`, `turn_prior_vectors`, `_index_gate_read`, `_apply_one`), carry a value a
     later pass stores (`add_point`, `_journal_event_raw_write`), quote a wipe it does not own
     (`_prewipe_synthetic_write_scope`, whose whole body is a `return` — the `SET n.embedding = NULL`
-    it quotes is `_rebuild_all_replay`'s), or interpolate the label at runtime
-    (`restore_graph`)), so it is DECLARED. The refusals below are what keeps that
+    it quotes is `_rebuild_all_replay`'s, and that writer is NOT among these fifteen), or interpolate
+    the label at runtime (`restore_graph`)), so it is DECLARED. The refusals below are what keeps that
     declaration from degrading into a default: an empty tuple ("unspecified") and a missing field
     would both read to the grader as *nothing to compare*, i.e. a silent pass for the one writer
     nobody checked.

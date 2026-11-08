@@ -69,10 +69,13 @@ asks *"is every stored vector on a label the query leg can serve?"* — a fact a
 its CLASS cannot express (the `EXEMPT` docstring above says so in its own words: *"a consumer that
 needs the difference must carry it"*). Each declaration therefore also carries `stores`: the graph
 labels the writer's vector is stored on, or :data:`NO_LIVE_VECTOR` / :data:`LABELS_AT_RUNTIME`.
-⛔ It is declared here rather than derived by the instrument because the derivation cannot reach it:
-of the twenty outside-gate writers, the writer's own Cypher names a single label for three, two
-conflicting labels for two, and no usable label for the other fifteen. ⚠️ Those fifteen fail for
-SEVERAL different reasons, so list none of them as "the" reason: the label sits in a `MATCH` the
+⛔ It is declared here rather than derived by the instrument because the derivation does not reach
+most of them: of the twenty outside-gate writers, a `MERGE|CREATE (:Label` scan over the writer's own
+body names a single label for three and two conflicting labels for two, and no usable label for the
+other fifteen — and of those five readings the INSTRUMENT hands out only one
+(`session_indexer::main`, the one `ungated` writer), because `_embedding_writers` short-circuits
+`unresolved_write` before its own-literal scan. ⚠️ Those fifteen fail for SEVERAL different
+reasons, so list none of them as "the" reason: the label sits in a `MATCH` the
 derivation deliberately does not credit, because a `MATCH` is a read (`_embedding_repair_attempt`
 writes `set_embedding_clause("e")` inside its own `MATCH (e:Event {eventId:$eid})`); or the store
 clause is held in a module-level constant the per-writer scan does not open (`_write_capture_turns`
