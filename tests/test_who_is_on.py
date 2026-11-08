@@ -1498,9 +1498,13 @@ exec {self.gh} "$@"
         self._write_exec(d / "python3", (
             "#!/bin/bash\n"
             "# a 3.9 interpreter: EVALUATES the real probe against a faked version\n"
-            "if [ \"$1\" = \"-V\" ]; then echo 'Python 3.9.6'; exit 0; fi\n"
+            "if [ \"$1\" = \"-V\" ]; then echo 'Python 3.11.9'; exit 0; fi\n"
             "if [ \"$1\" = \"-c\" ]; then\n"
-            f'  exec "{PYTHON}" -c \'import sys; sys.version_info = (3, 9, 6, "final", 0);'
+            # ⛔ THE FAKE IS THE VERSION IMMEDIATELY BELOW THE FLOOR (#11202 review
+            # round 11). 3.9 pinned the bound only over the range (3,9,6]..host: a
+            # bound lowered to >= (3, 10) or >= (3, 11) — the ambient `python3` on
+            # Ubuntu 22.04 / Debian 12 — still shipped green. 3.11.9 is the boundary.
+            f'  exec "{PYTHON}" -c \'import sys; sys.version_info = (3, 11, 9, "final", 0);'
             ' exec(sys.argv[1])\' "$2"\n'
             "fi\n"
             "exit 1\n"
@@ -1535,7 +1539,7 @@ exec {self.gh} "$@"
         self.assertIn("Python >= 3.12", proc.stderr)
         self.assertIn("uv", proc.stderr)
         # It must NAME the interpreter it found, not just assert one is missing.
-        self.assertIn("3.9.6", proc.stderr)
+        self.assertIn("3.11.9", proc.stderr)
 
     def test_a_312_python3_is_preferred_and_uv_is_never_reached(self):
         """The FAST PATH: a >=3.12 `python3` wins, and `uv` must not run at all.
@@ -1555,11 +1559,16 @@ exec {self.gh} "$@"
         self._write_exec(d / "python3", (
             "#!/bin/bash\n"
             f'printf \'%s\\n\' "$@" >> "{ran}"\n'
-            "if [ \"$1\" = \"-V\" ]; then echo 'Python 3.12.7'; exit 0; fi\n"
-            # ⛔ The VERSION PROBE runs the real payload under the REAL interpreter, so a
-            # bound raised past this host's version turns this test red instead of
-            # passing on an unconditional `exit 0` (#11202 review round 10).
-            f'if [ "$1" = "-c" ]; then exec "{PYTHON}" -c "$2"; fi\n'
+            "if [ \"$1\" = \"-V\" ]; then echo 'Python 3.12.0'; exit 0; fi\n"
+            # ⛔ AND THIS PROBE IS PINNED TOO, NOT RUN UNDER THE HOST INTERPRETER
+            # (#11202 review round 11). Delegating to the real interpreter made this
+            # arm a function of the host's version: on a box at >= 3.13 a bound raised
+            # to >= (3, 13) exited 0, the fast path was taken, `uv` was never reached,
+            # and the test stayed green — a raise above the floor shipping green, the
+            # direction this round exists to close. Faked at exactly (3, 12, 0): it
+            # accepts >= (3, 12) and rejects any raise, on every host.
+            f'if [ "$1" = "-c" ]; then exec "{PYTHON}" -c \'import sys; '
+            'sys.version_info = (3, 12, 0, "final", 0); exec(sys.argv[1])\' "$2"; fi\n'
             "exit 0\n"
         ))
         self._write_exec(d / "uv", (
