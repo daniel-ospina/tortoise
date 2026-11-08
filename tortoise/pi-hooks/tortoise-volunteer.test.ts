@@ -30,7 +30,15 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import tortoiseVolunteer, {
@@ -39,8 +47,10 @@ import tortoiseVolunteer, {
   EXTENSION_NAME,
   HARNESS,
   MAX_INJECT_CHARS,
-  MAX_PROMPT_CHARS,
+  MAX_PROMPT_BYTES,
+  MAX_SEEN_PER_SESSION,
   buildInjection,
+  clipToBytes,
   createDedupe,
   disabled,
   parseReflexJson,
@@ -162,7 +172,66 @@ test("fail-open: kill switch, empty prompt, empty graph, dead reflex, a throw", 
   );
 });
 
-test("the prompt is bounded before it reaches the reflex", async () => {
+test("an inert verdict is LATCHED — one probe per process, not per turn", async () => {
+  // Review finding 5: without a latch, every user turn re-walked the candidate
+  // chain, re-spawned Python, and REWROTE the breadcrumb — so `recorded_at`
+  // could only ever say "now" and could never date a dead install.
+  const home = tmpHome();
+  const crumbs = join(home, "capture-errors");
+  const pi = mockPi();
+  tortoiseVolunteer(pi as never, { env: { PATH: "" }, home, breadcrumbDir: crumbs });
+  await pi.handlers.before_agent_start({ messageType: "user", prompt: "one" }, SESSION_CTX());
+  const breadcrumb = join(crumbs, "pi-install.json");
+  assert.equal(existsSync(breadcrumb), true);
+  const first = readFileSync(breadcrumb, "utf8");
+  assert.match(first, /latched for the rest of this Pi process/);
+  const stamped = JSON.parse(first).recorded_at;
+
+  // …a second (and third) turn injects nothing and leaves the record — and its
+  // timestamp — exactly as the first turn wrote them.
+  for (const prompt of ["two", "three"]) {
+    assert.equal(
+      await pi.handlers.before_agent_start({ messageType: "user", prompt }, SESSION_CTX()),
+      undefined,
+    );
+    assert.equal(readFileSync(breadcrumb, "utf8"), first, "the record must not be rewritten per turn");
+  }
+  assert.equal(JSON.parse(readFileSync(breadcrumb, "utf8")).recorded_at, stamped);
+});
+
+test("the reflex chain shares ONE deadline across candidates", async () => {
+  // Review finding 5: Pi counts as busy while `before_agent_start` runs, so a
+  // budget PER candidate made the turn's wait N × timeoutMs. A chain that runs
+  // out of budget is a TIMEOUT (no injection, install fine) — never `inert`,
+  // which writes a "reinstall" breadcrumb over a working install.
+  const home = tmpHome();
+  const slow = fakeCli(join(home, "slow"), "sleep 5");
+  const quick = fakeCli(join(home, "quick"), `printf '%s' '{"block":"x"}'`);
+  const cfgPath = join(home, "tortoise-config.json");
+  writeFileSync(cfgPath, JSON.stringify({ volunteer: { timeoutMs: 300 } }));
+  const started = Date.now();
+  const verdict = await resolveBlock(
+    "p",
+    "",
+    readVolunteerConfig({}, cfgPath),
+    [slow, quick],
+  );
+  const elapsed = Date.now() - started;
+  assert.equal(verdict.status, "timeout", JSON.stringify(verdict));
+  assert.ok(elapsed < 1500, `the chain must not spend a budget per candidate (took ${elapsed}ms)`);
+});
+
+test("the prompt is bounded in BYTES, not characters", async () => {
+  // The reflex's validator charges `len(content.encode("utf-8"))` against a
+  // 15 KiB window. A char-indexed bound passes ASCII and REFUSES the same
+  // LENGTH of a 3-byte script — which is how a healthy install came to be
+  // recorded as inert (review finding 3).
+  assert.equal(Buffer.byteLength(clipToBytes("á".repeat(40000), MAX_PROMPT_BYTES), "utf8") <= MAX_PROMPT_BYTES, true);
+  const clipped = clipToBytes("á".repeat(40000), MAX_PROMPT_BYTES);
+  assert.ok(Buffer.byteLength(clipped, "utf8") <= MAX_PROMPT_BYTES);
+  assert.equal(clipped.includes("\uFFFD"), false, "a multi-byte code point must never be split");
+  assert.equal(clipToBytes("short", MAX_PROMPT_BYTES), "short", "a fitting prompt is untouched");
+
   const pi = mockPi();
   let seenPrompt = "";
   tortoiseVolunteer(pi as never, {
@@ -174,10 +243,10 @@ test("the prompt is bounded before it reaches the reflex", async () => {
     },
   });
   await pi.handlers.before_agent_start(
-    { messageType: "user", prompt: "x".repeat(MAX_PROMPT_CHARS * 2) },
+    { messageType: "user", prompt: "x".repeat(MAX_PROMPT_BYTES * 2) },
     SESSION_CTX(),
   );
-  assert.equal(seenPrompt.length, MAX_PROMPT_CHARS);
+  assert.equal(Buffer.byteLength(seenPrompt, "utf8"), MAX_PROMPT_BYTES);
 });
 
 test("cross-turn dedupe: the identical block is not re-injected in a session", async () => {
@@ -199,6 +268,22 @@ test("cross-turn dedupe: the identical block is not re-injected in a session", a
   assert.equal(dedupe("s", "block"), true);
   assert.equal(dedupe("s", "block"), false);
   assert.equal(dedupe("s", "other"), true);
+  // ⛔ A, B, A: the stated contract is "never the same block twice in a
+  // session", not "not the same as last time" (review finding 6 — the code
+  // answered the weaker question while the comment claimed the stronger one).
+  assert.equal(dedupe("s", "block"), false, "A must not come back after B");
+});
+
+test("the dedupe is bounded per session and isolated between sessions", () => {
+  const dedupe = createDedupe();
+  for (let i = 0; i < MAX_SEEN_PER_SESSION + 10; i += 1) {
+    assert.equal(dedupe("s", `block-${i}`), true);
+  }
+  // The oldest entries have been evicted, so they may surface again; what must
+  // hold is that the set never grows past the bound and recent blocks are
+  // remembered.
+  assert.equal(dedupe("s", `block-${MAX_SEEN_PER_SESSION + 9}`), false);
+  assert.equal(dedupe("t", `block-${MAX_SEEN_PER_SESSION + 9}`), true);
 });
 
 test("visible surface: display renders the reflex's `surfaced` marker", () => {
@@ -490,7 +575,11 @@ test("no reflex and no key: an inert breadcrumb lands in the canonical slot; an 
     false,
     "an empty graph must stay silent",
   );
-  assert.equal(emptyCli.length > 0, true);
+  // Assert something about the fake CLI that CAN fail: it is the seam's input,
+  // and a non-executable stub would make this row green for the wrong reason
+  // (review finding 7 — the previous line compared a constant to `true`).
+  assert.equal(statSync(emptyCli).isFile(), true);
+  assert.notEqual(statSync(emptyCli).mode & 0o111, 0, `${emptyCli} must be executable`);
 });
 
 test("sessionKeyOf tolerates every ctx shape Pi may hand a handler", () => {

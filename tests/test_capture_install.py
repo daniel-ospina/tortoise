@@ -4137,6 +4137,26 @@ def test_every_capture_artifact_ships_in_the_wheel():
         assert (_REPO_ROOT / "tortoise" / rel).is_file(), (
             f"{rel} is declared as package data but does not exist")
 
+    # #2119 review finding 1 (BLOCKING): the read seam is the SECOND artifact an
+    # installer copies, and the seam loop above iterates `CAPTURE_SEAM`, which
+    # names one artifact per harness — so a wheel missing
+    # `tortoise-volunteer.ts` failed the install on a USER's machine ("shipped
+    # Pi read seam not found … broken package?") after already writing the
+    # capture artifact, and NOTHING in this repo redded. The registry is the one
+    # declaration of every shipped artifact, so the guard iterates IT rather
+    # than a second hand-written list (a list is what missed them).
+    for harness, contract in hook_install.ARTIFACT_CONTRACTS.items():
+        if contract.volunteer_source is None:
+            continue
+        rel = str(contract.volunteer_source.relative_to(_REPO_ROOT / "tortoise"))
+        assert covered(rel), (
+            f"{harness}: {contract.volunteer_source} is not matched by any "
+            f"package-data pattern {patterns} — `tortoise install {harness}` "
+            "would fail resolving the read seam on a wheel install")
+        assert contract.volunteer_source.is_file(), (
+            f"{harness}: {contract.volunteer_source} is declared as the read "
+            "seam but does not exist")
+
 
 # The shipped install-contract generations, one per wizard-offered harness.
 # The marker is what makes a stale installed seam detectable, so it MUST be

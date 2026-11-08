@@ -5738,6 +5738,16 @@ def _uninstall_pi_volunteer(args) -> int:
               "extension — nothing was removed. Move it aside yourself if you "
               "are sure it is not another extension.", file=sys.stderr)
         return 1
+    # ⛔ `--dry-run` MEANS "without writing", and this branch is the one place
+    # in the family where the read seam is a FILE: before #2119 the `pi
+    # --uninstall` arm printed a sentence and touched nothing, so the dry-run
+    # contract could not be violated here. A delete is the strongest write the
+    # verb performs (there is no undo — the file was a copy, not a link), so it
+    # is printed and skipped, never performed (review finding 2).
+    if getattr(args, "dry_run", False):
+        print(f"[dry-run] would remove {target} (per-turn read seam)")
+        print(f"Note: the capture extension ({capture}) would be left in place.")
+        return 0
     try:
         target.unlink()
     except OSError as e:

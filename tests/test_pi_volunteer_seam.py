@@ -210,6 +210,25 @@ def test_a_stale_read_seam_is_reported_and_its_absence_is_not(home):
     findings = hook_install.detect_artifact_install(root, "pi")
     assert "modified-artifact" in {f.kind for f in findings}
 
+    # ⛔ A markerless file that is NOT ours must read as FOREIGN, not as an old
+    # copy of ours (review finding 4). The distinction is load-bearing: the
+    # installer and `--uninstall` both REFUSE a file they cannot prove they
+    # wrote, so "reinstall with `tortoise install pi`" — the `unversioned`
+    # wording — is advice that fails. `foreign-artifact` is also in
+    # `MANUAL_FIX_KINDS`, so callers tell the user to move it aside instead.
+    stale.write_text("// somebody else's extension\nexport default () => {};\n")
+    findings = hook_install.detect_artifact_install(root, "pi")
+    assert "foreign-artifact" in {f.kind for f in findings}
+    foreign = next(f for f in findings if f.kind == "foreign-artifact")
+    assert "move it aside" in foreign.detail
+    assert hook_install.is_manual_fix("foreign-artifact")
+
+    # …while a markerless copy that IS ours is the repairable class.
+    shipped = VOLUNTEER_EXTENSION.read_text()
+    stale.write_text(shipped.replace("// tortoise-hook-version: 18\n", "", 1))
+    findings = hook_install.detect_artifact_install(root, "pi")
+    assert "unversioned-artifact" in {f.kind for f in findings}
+
 
 def test_the_two_artifacts_declare_one_contract_number():
     """`contract_version_for("pi")` answers only when BOTH shipped artifacts
@@ -240,6 +259,25 @@ def test_uninstall_removes_the_read_half_only(home, capsys):
     # A second --uninstall is a clean no-op.
     assert _uninstall_pi_volunteer(None) == 0
     assert "not installed" in capsys.readouterr().out
+
+
+def test_uninstall_honours_dry_run(home, capsys):
+    """⛔ `--dry-run` is documented as "without writing", and the delete is the
+    strongest write this verb performs — there is no undo, the installed file is
+    a COPY, not a link (review finding 2: the first cut turned a branch that
+    printed a sentence into an unconditional `unlink()`)."""
+    from types import SimpleNamespace
+
+    from tortoise.__main__ import _uninstall_pi_volunteer
+
+    assert _install(home).ok
+    rc = _uninstall_pi_volunteer(SimpleNamespace(dry_run=True))
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "[dry-run] would remove" in out, out
+    assert (_ext_dir(home) / VOLUNTEER_EXTENSION.name).is_file(), (
+        "a dry run must not delete the seam")
+    assert (_ext_dir(home) / CAPTURE_EXTENSION.name).is_file()
 
 
 # ── 2. the real seam, end to end ─────────────────────────────────────────

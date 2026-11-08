@@ -2966,11 +2966,28 @@ def _grade_optional_artifact(installed: Path, source: Path,
         return []  # repo defect (pinned by tests), not this install's problem
     found = read_hook_version(installed)
     if found is None:
+        # ⛔ THE PRIMARY ARTIFACT'S TWO-WAY SPLIT, not one branch (review finding
+        # 4): a markerless file is either OURS from before the contract
+        # (`unversioned-artifact` — reinstall repairs it) or NOT OURS
+        # (`foreign-artifact` — reinstall REFUSES it, because
+        # `_foreign_install_refusal` and `_uninstall_pi_volunteer` both refuse a
+        # file they cannot prove they wrote). Collapsing them sent a user with
+        # someone else's extension at this path to a command that fails without
+        # naming the one step that works — the "installer-command clause the
+        # installer would refuse" class (#5351).
+        if _looks_like_our_script(installed):
+            return [Finding(
+                "unversioned-artifact",
+                f"{installed} carries no {HOOK_VERSION_TOKEN} marker "
+                f"(expected {expected}) — it was installed before the version "
+                f"contract, so the read seam runs with older logic; reinstall "
+                f"with `tortoise install {harness}`",
+                script=source.name,
+            )]
         return [Finding(
-            "unversioned-artifact",
-            f"{installed} carries no {HOOK_VERSION_TOKEN} marker "
-            f"(expected {expected}) — it is not a copy of this CLI's read "
-            f"seam; reinstall with `tortoise install {harness}`",
+            "foreign-artifact",
+            f"{installed} is not a Tortoise read seam — move it aside, then "
+            f"re-run `tortoise install {harness}` to install ours",
             script=source.name,
         )]
     if found < expected:

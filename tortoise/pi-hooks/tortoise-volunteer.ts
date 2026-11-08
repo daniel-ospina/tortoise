@@ -121,10 +121,16 @@ export const DEFAULT_API_URL = "https://api.premiselabs.co";
  * :func:`resolveBlock`.
  */
 export const DEFAULT_TIMEOUT_MS = 30000;
-/** The turn text is SEARCHED, never forwarded whole: `tortoise volunteer`
- *  validates a ≤15 KiB window, so a longer prompt would be refused as a bad
- *  request rather than silently narrowed. */
-export const MAX_PROMPT_CHARS = 15000;
+/** The turn text is SEARCHED, never forwarded whole, and the bound is in
+ *  BYTES because that is what the reflex's validator counts
+ *  (`tortoise/volunteer.py`: `MAX_WINDOW_BYTES = 15 * 1024`, charged per turn
+ *  as `len(content.encode("utf-8")) + PER_TURN_OVERHEAD_BYTES`).  A
+ *  character-count bound is not the same test — 15 000 chars of a non-Latin
+ *  script is 30–45 KiB — so a perfectly ordinary prompt was refused with
+ *  `WINDOW_TOO_LARGE_BYTES`, the CLI exited 1, and the seam recorded a healthy
+ *  install as `install-inert` (review finding 3; the exact #4314 confusion the
+ *  breadcrumb exists to prevent). */
+export const MAX_PROMPT_BYTES = 15 * 1024 - 64;
 /** The reflex's own block budget is 8 KiB (`volunteer.BLOCK_MAX_BYTES`); a
  *  longer body would mean the reflex contract moved, so bound on the way in. */
 export const MAX_INJECT_CHARS = 8000;
@@ -180,6 +186,28 @@ function positiveInt(value: unknown, fallback: number): number {
 
 function textOf(value: unknown): string {
   return typeof value === "string" ? value : "";
+}
+
+/**
+ * Truncate to at most `maxBytes` UTF-8 bytes WITHOUT splitting a code point.
+ *
+ * `String.prototype.slice` counts UTF-16 units and `TextEncoder` counts bytes,
+ * so a char-indexed cap cannot express the reflex's window limit. The walk is
+ * backwards from the byte cut over the trailing partial character (at most 3
+ * continuation bytes into a 4-byte sequence), which is bounded and cannot
+ * produce a lone surrogate — the thing a naive `slice(0, n)` on bytes would do
+ * with a manual `Buffer.from(...).subarray()`.
+ *
+ * Returns the input unchanged when it already fits, so the common path
+ * allocates nothing.
+ */
+export function clipToBytes(text: string, maxBytes: number): string {
+  const buf = Buffer.from(text, "utf8");
+  if (buf.length <= maxBytes) return text;
+  let end = Math.max(0, maxBytes);
+  // Back off over UTF-8 continuation bytes (10xxxxxx) to a lead byte.
+  while (end > 0 && (buf[end] & 0xc0) === 0x80) end -= 1;
+  return buf.subarray(0, end).toString("utf8");
 }
 
 /**
@@ -463,13 +491,34 @@ export async function runReflexHosted(
  * reflex already suppresses re-mentioning a pointer it surfaced earlier when
  * it is given the session id; this is the belt to that braces, so a stateless
  * hosted call cannot re-inject an identical block.
+ *
+ * ⛔ A SET PER SESSION, NOT THE LAST DIGEST (review finding 6). The first cut
+ * stored one digest per session key and answered "is this the same as LAST
+ * time", so the sequence `A, B, A` re-injected `A` while the contract said
+ * "never twice" — the comment described an invariant the code did not hold.
+ * Bounded at `MAX_SEEN_PER_SESSION` so a long session cannot grow it without
+ * limit: the reflex surfaces ≤5 pointers per turn, so 64 distinct blocks is
+ * far past any real re-surface, and the oldest entry is dropped rather than
+ * letting the map grow.
  */
+export const MAX_SEEN_PER_SESSION = 64;
+
 export function createDedupe() {
-  const seen = new Map<string, string>();
+  const seen = new Map<string, Set<string>>();
   return (sessionKey: string, block: string): boolean => {
     const digest = createHash("sha256").update(block).digest("hex");
-    if (seen.get(sessionKey) === digest) return false;
-    seen.set(sessionKey, digest);
+    let session = seen.get(sessionKey);
+    if (!session) {
+      session = new Set<string>();
+      seen.set(sessionKey, session);
+    }
+    if (session.has(digest)) return false;
+    if (session.size >= MAX_SEEN_PER_SESSION) {
+      // Set iteration is insertion order: drop the oldest digest.
+      const oldest = session.values().next();
+      if (!oldest.done) session.delete(oldest.value);
+    }
+    session.add(digest);
     return true;
   };
 }
@@ -597,8 +646,23 @@ export async function resolveBlock(
 ): Promise<ReflexVerdict> {
   const chain = cfg.command ? [cfg.command] : candidates;
   let lastError = "";
+  // ⛔ ONE DEADLINE FOR THE WHOLE CHAIN, not one budget per candidate (review
+  // finding 5). Pi is BUSY while `before_agent_start` runs (docs/extensions.md:
+  // "Pi counts as busy while a run starts, including the compaction check and
+  // `before_agent_start`"), so N slow candidates made the turn's wait
+  // N × timeoutMs — a ceiling nobody wrote down. Each attempt gets what is LEFT
+  // of the single budget; a chain that runs out is a timeout, which is a
+  // no-injection, never an inert install.
+  const deadline = Date.now() + cfg.timeoutMs;
   for (const command of chain) {
-    const run = await runReflexCommand(command, prompt, sessionId, cfg.timeoutMs);
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      return {
+        status: "timeout",
+        detail: `the reflex chain spent its ${cfg.timeoutMs}ms budget before ${command}`,
+      };
+    }
+    const run = await runReflexCommand(command, prompt, sessionId, remaining);
     if (run.timedOut) {
       return { status: "timeout", detail: `${command}: ${run.error}` };
     }
@@ -661,6 +725,16 @@ export default function tortoiseVolunteer(
   const home = deps.home ?? homedir();
   const cfg = readVolunteerConfig(env, configPath);
   const dedupe = createDedupe();
+  // ⛔ AN INERT VERDICT IS LATCHED FOR THE PROCESS (review finding 5). Without
+  // this, every user turn re-walked the whole candidate chain, re-spawned
+  // Python, and REWROTE the breadcrumb — so its `recorded_at` always read
+  // "now" and could never say how long the install had been dead, and a turn on
+  // a machine whose `tortoise` shim hangs paid the budget again and again.
+  // Latching is safe in the direction it errs: the remedy is an install, and
+  // the install guidance already says to restart Pi from a NEW terminal (a
+  // `/reload` keeps the environment). Only the `inert` class latches —
+  // `timeout` and `empty` are per-turn facts and must be re-evaluated.
+  let inertLatched = false;
 
   /** Run the reflex for one turn, fail-open in every direction. */
   const reflex = async (prompt: string, sessionId: string): Promise<ReflexResult | null> => {
@@ -671,6 +745,7 @@ export default function tortoiseVolunteer(
         return null;
       }
     }
+    if (inertLatched) return null;
     const candidates = reflexCandidates(env, home);
     let verdict: ReflexVerdict;
     try {
@@ -690,8 +765,11 @@ export default function tortoiseVolunteer(
     // stays untouched: an operator who reads "reinstall" off a breadcrumb
     // written by a working install is being sent to fix nothing.
     if (verdict.status === "inert") {
+      inertLatched = true;
       recordInstallInert(
-        `${verdict.detail} — injected nothing`,
+        `${verdict.detail} — injected nothing. This is latched for the rest of ` +
+          "this Pi process: re-run `tortoise install pi`, then restart Pi from " +
+          "a NEW terminal (a /reload keeps the environment).",
         env,
         home,
         deps.breadcrumbDir,
@@ -714,7 +792,7 @@ export default function tortoiseVolunteer(
       // message (`messageType: "custom"`) has no prompt, and injecting into it
       // would let this seam's own message start a second run.
       if (typed?.messageType !== "user") return undefined;
-      const prompt = textOf(typed.prompt).slice(0, MAX_PROMPT_CHARS);
+      const prompt = clipToBytes(textOf(typed.prompt), MAX_PROMPT_BYTES);
       if (!prompt.trim()) return undefined;
 
       const sessionKey = sessionKeyOf(ctx);
