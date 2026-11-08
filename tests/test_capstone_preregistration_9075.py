@@ -2053,9 +2053,12 @@ def test_the_real_machine_record_agrees_with_the_pins():
     drift cannot be the one place drift goes unwatched, so its
     `capstone_measure.py` cites are pinned here EXACTLY - the entry line, and the
     census range's own opening and closing lines - never as a window a shift can
-    slide inside. Kept inside THIS test rather than added as a new one so the
-    file's pinned `cases` count in `config/ci-surfaces.yml` does not move with a
-    guard that costs no runtime.
+    slide inside. Kept inside THIS test rather than added as a new test in
+    `tests/test_7949_capstone_measure.py`, because `config/ci-surfaces.yml` pins
+    THAT file's `cases` count at 228 and a guard that costs no runtime should not
+    move a shard-layout input. (THIS file's durations row states no case count,
+    so a new `def test_` here would move nothing either way - the nesting is
+    about not moving the OTHER suite's pinned number.)
     """
     pins = check.parse_pins(PREREG.read_text())
     assert check.check_machine_record(PREREG_DIR, pins) == []
