@@ -980,3 +980,94 @@ def test_a_points_refusal_names_its_real_cause():
         return {"error": "ERR_QUOTA: budget exceeded", "code": "QUOTA"}
     with pytest.raises(RuntimeError, match="QUOTA"):
         mod.MCPReader(call, None).read_points()
+
+
+# ── round-13 review findings ──────────────────────────────────────────────
+
+
+def test_the_counters_span_the_plan_in_every_mode(tmp_path):
+    """Round-13: the pending set was discarded, so a DRY run (the only runnable mode
+    today) reported 0/0/0 over a census of carry rows and a driver could read that
+    as "nothing to migrate"."""
+    rows = [row(f"p{i}", kind="decision", content=f"claim {i}") for i in range(3)] + [
+        row("https://x/y", node_type="source", kind="article", content="https://x/y")]
+    plan = C.build_plan(rows, source_graph="old", target_graph="new", packs={})
+    carry = len(plan.carry_rows())
+    led = C.Ledger(tmp_path / "l.jsonl", target="new")
+
+    # `pending` = rows NOT already in the target (attempted, or would be in a dry
+    # run), so the four counters SPAN the plan: skipped + duplicates + pending.
+    dry = C.run_plan(plan, writer=CountingWriter(), ledger=led, apply=False, graph_rows=ROWS)
+    assert dry.skipped_known + dry.duplicate_rows + dry.pending == carry
+    assert dry.pending == carry, "a dry run must say how much there is to migrate"
+
+    first = C.run_plan(plan, writer=CountingWriter(), ledger=led, apply=True, graph_rows=ROWS)
+    assert first.skipped_known + first.duplicate_rows + first.pending == carry
+    assert first.written == first.pending
+    again = C.run_plan(plan, writer=CountingWriter(), ledger=led, apply=True, graph_rows=ROWS)
+    assert again.skipped_known + again.duplicate_rows + again.pending == carry
+    assert again.written == 0 and again.pending == 0 and again.skipped_known == carry
+
+
+class _ShiftingSurface:
+    """A population that loses a row mid-walk: the offset walk repeats a row."""
+
+    def __init__(self):
+        self.pages = 0
+        self.population = [{"id": f"p{i}", "kind": "decision", "content": f"c{i}"}
+                           for i in range(6)]
+
+    def __call__(self, _name, args):
+        self.pages += 1
+        if self.pages == 2:            # p1 is retracted between page 1 and page 2
+            self.population.pop(1)
+        off = int(args.get("offset") or 0)
+        lim = int(args.get("limit") or 2)
+        return {"result": self.population[off:off + lim], "total": len(self.population)}
+
+
+def test_a_shifted_pagination_is_refused_not_silently_partial():
+    """Round-13: a retraction mid-walk shifted later rows up, so one live row was
+    skipped and a tombstone re-read — with `points_read == total`, so no guard fired."""
+    mod = _tool_module()
+    reader = mod.MCPReader(_ShiftingSurface(), None)
+    with pytest.raises(RuntimeError, match=r"shifted|twice"):
+        reader.read_points(page=2)
+
+
+def test_a_refused_run_still_reports_what_the_plan_owes():
+    """Round-13 follow-up: the pre-write refusal paths returned pending=0, the same
+    "reads as nothing to migrate" shape the dry run had."""
+    plan = C.build_plan([row("p1", kind="decision", content="a"),
+                         row("p2", kind="decision", content="b")],
+                        source_graph="old", target_graph="new", packs={})
+    off = C.run_plan(plan, writer=CountingWriter(),
+                     ledger=C.Ledger("/tmp/curate-off-11469.jsonl", target="new"),
+                     apply=True, off=True, graph_rows=ROWS)
+    assert off.pending == 2 and off.written == 0
+    refused = C.run_plan(plan, writer=CountingWriter(),
+                         ledger=C.Ledger("/tmp/curate-ref-11469.jsonl", target="new"),
+                         apply=True, graph_rows=[{"namespace": "org_9_g_aaa"}])
+    assert refused.pending == 2 and refused.refused
+
+
+class _ConstantTotalDuplicateSurface:
+    """A walk that re-serves a row while the reported total stays the same — the
+    case the total-change guard cannot see."""
+
+    def __init__(self):
+        self.pages = 0
+
+    def __call__(self, _name, args):
+        self.pages += 1
+        if self.pages == 1:
+            return {"result": [{"id": "p0", "kind": "decision", "content": "a"}], "total": 3}
+        # offset walk re-reads p0 instead of moving on
+        return {"result": [{"id": "p0", "kind": "decision", "content": "a"},
+                           {"id": "p1", "kind": "decision", "content": "b"}], "total": 3}
+
+
+def test_a_row_served_twice_is_refused_even_when_the_total_is_stable():
+    mod = _tool_module()
+    with pytest.raises(RuntimeError, match=r"returned twice"):
+        mod.MCPReader(_ConstantTotalDuplicateSurface(), None).read_points(page=1)

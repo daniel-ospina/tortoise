@@ -81,6 +81,8 @@ class MCPReader:
         refusal: str | None = None
         offset = 0
         total = None
+        seen: dict[str, int] = {}
+        totals: set[int] = set()
         while True:
             res = C.normalise_tool_result(self._q(offset=offset, limit=page))
             # A refusal on this surface is a `_safe`-answered payload with
@@ -91,9 +93,25 @@ class MCPReader:
             batch = _rows_from_tool(res)
             if isinstance(res, dict) and res.get("total") is not None:
                 total = int(res["total"])
+                totals.add(total)
             if not batch:
                 break
+            if len(totals) > 1:
+                # An offset walk over a population that CHANGED between pages does
+                # not describe one graph state: a row retracted mid-walk shifts every
+                # later row up, so one row is skipped and a tombstone is re-read, and
+                # the counts still match.
+                raise RuntimeError(
+                    f"pagination shifted mid-walk (reported total changed {sorted(totals)}) — "
+                    "refusing a census that mixes two graph states")
             for r in batch:
+                rid = str(r.get("id") or "")
+                if rid in seen:
+                    raise RuntimeError(
+                        f"row {rid!r} returned twice (pages {seen[rid]} and offset {offset}) — "
+                        "the population shifted mid-walk; refusing a census that both skips "
+                        "and repeats rows")
+                seen[rid] = offset
                 content = str(r.get("content") or "")
                 rows.append(C.Row(
                     node_id=str(r.get("id") or ""),

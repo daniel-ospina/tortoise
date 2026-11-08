@@ -919,6 +919,7 @@ class RunResult:
     stopped: str | None = None
     identity: str | None = None
     duplicate_rows: int = 0
+    pending: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -932,6 +933,7 @@ class RunResult:
             "stopped": self.stopped,
             "identity": self.identity,
             "duplicate_rows": self.duplicate_rows,
+            "pending": self.pending,
         }
 
 
@@ -1011,31 +1013,38 @@ def run_plan(
             f"{plan.target_graph!r} — a ledger answering for another graph would skip rows "
             "this target never received")
     identity_note: str | None = None
+    # The census of what this plan still owes the target, computed ONCE and carried
+    # by EVERY return path — including the refusals that happen before the write, or
+    # a refused run reports 0/0/0 over a plan of rows.
+    carry_total = len(plan.carry_rows())
     try:
         assert_distinct_graphs(plan.source_graph, plan.target_graph, graph_rows=graph_rows)
     except CurationRefused as exc:
         if apply:
-            return RunResult(False, False, 0, 0, plan.target_graph, plan.digest(), refused=str(exc))
+            return RunResult(False, False, 0, 0, plan.target_graph, plan.digest(),
+                             refused=str(exc), pending=carry_total)
         # A dry run writes nothing, so an unproven identity is reported rather than
         # blocking the plan — the guard is strict exactly where a write can happen.
         identity_note = str(exc)
     if off_switch_active(off):
-        return RunResult(False, True, 0, 0, plan.target_graph, plan.digest(), refused="off-switch active")
+        return RunResult(False, True, 0, 0, plan.target_graph, plan.digest(),
+                         refused="off-switch active", pending=carry_total)
     if not apply:
         # Accounting happens BEFORE this return: a dry run over a ledger that already
         # holds rows must not report 0 written / 0 skipped, which cannot be
         # reconciled with a census of 127 carry rows.
         _sections, skipped, dups = _pending_sections(plan.bundle(), ledger)
+        pending = sum(len(v) for v in _sections.values())
         return RunResult(False, False, skipped, 0, plan.target_graph, plan.digest(),
                          refused="dry run (--apply not given)", identity=identity_note,
-                         duplicate_rows=dups)
+                         duplicate_rows=dups, pending=pending)
 
     bundle = plan.bundle()
     sections, skipped, duplicate_rows = _pending_sections(bundle, ledger)
     pending_count = sum(len(v) for v in sections.values())
     if not pending_count:
         return RunResult(True, False, skipped, 0, plan.target_graph, plan.digest(),
-                         duplicate_rows=duplicate_rows)
+                         duplicate_rows=duplicate_rows, pending=pending_count)
     try:
         result = writer.write_sections(plan.target_graph, sections)
     except CurationRefused as exc:
@@ -1044,8 +1053,10 @@ def run_plan(
         accepted_partial = list(getattr(exc, "written_keys", ()) or [])
         ledger.record(accepted_partial)
         return RunResult(True, False, skipped, len(accepted_partial), plan.target_graph,
-                         plan.digest(), refused=str(exc), duplicate_rows=duplicate_rows)
+                         plan.digest(), refused=str(exc), duplicate_rows=duplicate_rows,
+                         pending=pending_count)
     accepted = [k for k in (result.get("written") or [])]
     ledger.record(accepted)
     return RunResult(True, False, skipped, len(accepted), plan.target_graph, plan.digest(),
-                     stopped=result.get("stopped"), duplicate_rows=duplicate_rows)
+                     stopped=result.get("stopped"), duplicate_rows=duplicate_rows,
+                     pending=pending_count)
