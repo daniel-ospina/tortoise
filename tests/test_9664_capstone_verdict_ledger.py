@@ -5071,12 +5071,8 @@ def test_a_probe_that_did_NOT_answer_false_states_the_OTHER_cause(capsys):
     assert "did not answer `true`" in err, (
         f"rc 128 is git failing to answer, and the NOTE must say that: {err}"
     )
-    assert "exited 128" in err, (
-        f"the NOTE must name the measurement it took — the exit code: {err}"
-    )
-    assert "not a git repository" in err, (
-        f"git's own first stderr line is carried verbatim: {err}"
-    )
+    assert "exited 128" in err, f"the NOTE must name the measurement it took — the exit code: {err}"
+    assert "not a git repository" in err, f"git's own first stderr line is carried verbatim: {err}"
     assert "git is present and says this is not a work tree" not in err, (
         "git exited 128 — it did NOT answer `false`, so that cause was never measured "
         f"and may not be printed: {err}"
@@ -5165,7 +5161,9 @@ def test_a_TARBALL_on_a_box_WITH_git_does_not_claim_git_is_unavailable(
     )
 
 
-def test_a_repository_git_REFUSES_is_not_reported_as_a_MISSING_repository(tmp_path, monkeypatch, capsys):
+def test_a_repository_git_REFUSES_is_not_reported_as_a_MISSING_repository(
+    tmp_path, monkeypatch, capsys
+):
     """A non-zero `rev-parse` is a MEASUREMENT, not the inference "no repository".
 
     ⛔ THE CAUSE THE INFERENCE GOT WRONG (#11474 review). The renderer read every
@@ -5176,31 +5174,70 @@ def test_a_repository_git_REFUSES_is_not_reported_as_a_MISSING_repository(tmp_pa
     while quoting git naming one, which is the guess-the-cause defect this PR removes,
     on the renderer that was added to remove it.
 
-    The environment hook is git's own (it is how git's test suite simulates a checkout
-    owned by another user); a real ownership change needs root, so this is the
-    hermetic route to the same code path. Set it only AFTER the fixture is built.
+    ⛔ THE REFUSAL IS DRIVEN BY A STUB, NOT BY GIT'S OWN TEST HOOK (#11474 review, round
+    7 — this pin was RED in CI at `78602ee66cce`). An earlier revision made git refuse
+    with `GIT_TEST_ASSUME_DIFFERENT_OWNER=1`, which is git's harness-internal switch
+    for simulating a checkout owned by another user (`t/t0033-safe-directory.sh`) — not
+    a supported interface, and not portable. Measured on both boxes, same probe:
+
+        git 2.43.0 (dev box)      -> rc 128, `fatal: detected dubious ownership …`
+        git 2.56.0 (CI runner)    -> rc 0   (the failing assertion's own words:
+                                     `needs git to REFUSE the repository (rc 128), not: rc=0`)
+
+    so this pin PASSED here and FAILED deterministically in the required `test (a)`
+    leg. Whether the difference is that newer git routes the hook differently or that
+    the runner's global `safe.directory` covers the fixture, the pin must be immune to
+    BOTH rather than assume either. Its subject is the RENDERER's behaviour on a
+    non-zero `rev-parse` exit — not git's ownership implementation — so the refusal is
+    produced by a `git` on PATH that RAN and REFUSED the repository, exactly the shape
+    a dubious-ownership checkout produces. The real-git control is kept (it is what
+    proves the fixture IS a repository, and therefore that "no repository" is a false
+    cause), and it is invoked by ABSOLUTE path so the stub cannot answer for it.
     """
     import shutil as _shutil
     import subprocess as _subprocess
 
-    assert _shutil.which("git"), "this pin needs a box WITH git"
+    real_git = _shutil.which("git")
+    assert real_git, "this pin needs a box WITH git"
 
     repo = tmp_path / "refused"
     repo.mkdir()
     (repo / "held.txt").write_text("held\n", encoding="utf-8")
-    _subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
+    _subprocess.run([real_git, "-C", str(repo), "init", "-q"], check=True)
 
-    # CONTROL: on the same repo, git answers normally. Without this a broken fixture
-    # would look like the refused shape and the pin would pass for the wrong reason.
+    # CONTROL: on the same repo, real git answers normally. Without this a broken
+    # fixture would look like the refused shape and the pin would pass for the wrong
+    # reason. It runs BEFORE the stub is on PATH, by absolute path.
     control = _subprocess.run(
-        ["git", "-C", str(repo), "rev-parse", "--is-inside-work-tree"],
+        [real_git, "-C", str(repo), "rev-parse", "--is-inside-work-tree"],
         capture_output=True,
         text=True,
         check=False,
     )
     assert (control.returncode, control.stdout.strip()) == (0, "true"), control
 
-    monkeypatch.setenv("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
+    # The refusal. Every invocation of this `git` RAN and REFUSED the repository — the
+    # shape git produces when `.git` is present and it will not trust it, and the shape
+    # whose exit 128 the renderer used to read as "there is no repository to ask".
+    stub_dir = tmp_path / "refused-bin"
+    stub_dir.mkdir()
+    stub = stub_dir / "git"
+    stub.write_text(
+        "#!/bin/sh\n"
+        f"echo \"fatal: detected dubious ownership in repository at '{repo}'\" >&2\n"
+        "exit 128\n",
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{stub_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+
+    # CONTROL for the stub itself: it must be what `git` RESOLVES to here, and it must
+    # produce the refused shape. Without this a stub that never ran (wrong PATH order,
+    # a bad shebang) would leave the renderer to abstain for a different cause while
+    # the downstream assertions still read green.
+    assert Path(_shutil.which("git") or "") == stub, (
+        f"the stub must be the git this PATH resolves, got {_shutil.which('git')!r}"
+    )
     refused = _subprocess.run(
         ["git", "-C", str(repo), "rev-parse", "--is-inside-work-tree"],
         capture_output=True,
@@ -5221,9 +5258,7 @@ def test_a_repository_git_REFUSES_is_not_reported_as_a_MISSING_repository(tmp_pa
     # at issue here.
     assert cl._is_tracked(repo / "held.txt", repo) is True
     err = capsys.readouterr().err
-    assert "exited 128" in err, (
-        f"the note must name the exit code it measured: {err}"
-    )
+    assert "exited 128" in err, f"the note must name the exit code it measured: {err}"
     assert "dubious ownership" in err, (
         f"git's own words must reach the reader, or the cause is guessable only: {err}"
     )
@@ -5318,8 +5353,7 @@ def test_a_git_that_COULD_NOT_ANSWER_is_not_read_as_a_measured_untracked(
     assert "did not get an ANSWER" in err, err
     assert f"exited {ls_files.returncode}" in err, err
     assert "not TRACKED" not in err, (
-        "git never answered for this path, so that sentence is a cause nobody "
-        f"measured: {err}"
+        f"git never answered for this path, so that sentence is a cause nobody measured: {err}"
     )
 
     # And the CALLER's row-level sentence must not pick one of `_is_tracked`'s two
