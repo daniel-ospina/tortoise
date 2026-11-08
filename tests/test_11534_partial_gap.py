@@ -32,8 +32,6 @@ import glob
 import json
 import os
 
-import pytest
-
 from tortoise import extractor_v2 as v2
 from tortoise import vet_gate
 

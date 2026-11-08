@@ -374,16 +374,17 @@ def _narrative_statements(narrative: str) -> int:
 # before it drives anything).
 #
 # ⚠️ Its measured limits, from the F3 population (#11534's evidence record,
-# ``docs/evidence/11534-partial-gap/``): on the 7 recorded sessions in
-# ``docs/evidence/1789-s4-reeemit-tax/`` it flags 16.1% of segments and overlaps
-# 5 of the 12 items S4 added. It catches clause-level elisions (a claim the
-# narrative made in a clause no candidate carries) and it MISSES the two shapes
-# this proxy cannot see by construction: (a) a **generalisation** — an operator
-# or point that restates a covered statement at a higher abstraction, so no
-# narrative span is uncovered even though the item is new (0 of S4's 5 operator
-# additions), and (b) a **re-shaped** item whose content the candidates already
-# lexically carry. Read a low ``coverage`` as evidence of missing prose, never as
-# a claim that a model should emit something.
+# ``docs/evidence/11534-partial-gap/``): on the 7 recorded sessions × the 2
+# recorded runs in ``docs/evidence/1789-s4-reeemit-tax/`` it flags **70 of 844
+# clause segments (8.3%)** and overlaps **9 of the 21 items S4 added — 8 of 12
+# `points` but 1 of 9 `operators`**. It catches clause-level elisions (a claim
+# the narrative made in a clause no candidate carries) and it MISSES the two
+# shapes this proxy cannot see by construction: (a) a **generalisation** — an
+# operator or point that restates a covered statement at a higher abstraction,
+# so no narrative span is uncovered even though the item is new (that is the 1
+# of 9), and (b) a **re-shaped** item whose content the candidates already
+# lexically carry. Read a low ``coverage`` as evidence of missing prose, never
+# as a claim that a model should emit something.
 #
 # ⚠️ The ADDRESS is a char span into the NARRATIVE — not into a source turn, and
 # not a graph span. #11534's body worried that the target needed `#2684`'s span
@@ -400,8 +401,8 @@ GAP_COVERAGE_FLOOR = 0.55
 
 #: Segments carrying fewer content words than this are not claims — markdown
 #: headings and bold labels (``**Root cause (preserved exactly).**``) are the
-#: population's dominant flag class without it (measured: 11 of 37 flags at a
-#: 2-token floor were labels or date fragments).
+#: population's dominant flag class without it (measured: dropping below four
+#: content words is what removes the label and date-fragment classes).
 GAP_MIN_CONTENT_TOKENS = 4
 
 #: How many flagged segments ride ``stats["batch"]``. The full count is always
@@ -432,7 +433,7 @@ _GAP_STOP = frozenset("""
  under until up us very was we were what when where which while who whom why
  will with within without would yet you your also although because though still
  three four five six seven eight nine ten does doesn nothing else what's dont
- isn't""".split())
+ isn't""".split())  # noqa: SIM905 — one word per line is the readable form here
 
 #: Suffix stripping — deliberately the CRUDEST possible stemmer (longest match
 #: wins, one pass). It exists so "shares"/"shared"/"sharing" meet; a real
@@ -512,7 +513,7 @@ def narrative_segments(narrative: str) -> list[dict]:
         separators = list(_GAP_CLAUSE.finditer(chunk))
         starts = [0] + [m.end() for m in separators]
         ends = [m.start() for m in separators] + [len(chunk)]
-        for clause, (a, b) in enumerate(zip(starts, ends)):
+        for clause, (a, b) in enumerate(zip(starts, ends, strict=True)):
             if b <= a:
                 continue                        # adjacent separators
             piece = chunk[a:b]

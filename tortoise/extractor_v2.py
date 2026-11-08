@@ -3655,18 +3655,20 @@ def run_s4(model, story: str, search: dict, embed_list: dict,
 # (`#11534`-additive, reported-never-acted-on); this stage is its consumer.
 #
 # ⚠️ THE MEASUREMENT THAT CONSTRAINS THIS STAGE — read it before believing the
-# stage recovers S4's additions. On the F3 population (7 recorded sessions,
-# `docs/evidence/1789-s4-reeemit-tax/`) the detector reaches only 5 of the 12
-# items S4 added, because the other 7 are not uncovered prose at all: they are
-# RE-SHAPED items (a point restating a statement the batch already carries) and
-# GENERALISATIONS (0 of S4's 5 operator additions restate any narrative span).
+# stage recovers S4's additions. On the F3 population (7 recorded sessions × 2
+# recorded runs, `docs/evidence/1789-s4-reeemit-tax/`) the detector reaches only
+# **9 of the 21 items S4 added — 8 of 12 `points`, 1 of 9 `operators`** — because
+# the misses are not uncovered prose at all: they are RE-SHAPED items (a point
+# restating a statement the batch already carries) and GENERALISATIONS (an
+# operator that restates a covered statement at a higher abstraction, so no
+# narrative span is uncovered).
 # So this stage targets ONE class of gap — a claim no candidate accounts for —
 # and it is NOT a like-for-like replacement for `run_s4`. The full measurement
 # and its consequences are in `docs/evidence/11534-partial-gap/README.md`; the
 # `run_s4` removal stays gated (`#11534`'s target 3).
 #
 # ⛔ DEFAULT OFF (`TORTOISE_PARTIAL_GAP_FILL`), and that is a MEASURED position,
-# not caution: the detector's flag rate is 16.1% of segments over the recorded
+# not caution: the detector flags 70 of 844 segments (8.3%) over the recorded
 # population and the dominant flag classes are non-claims (markdown labels, date
 # fragments, parenthetical asides), so an always-on stage would pay a model call
 # on most sessions to be told, correctly, that the spans are not claims. Arm it
