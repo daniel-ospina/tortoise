@@ -119,6 +119,42 @@ def test_reload_is_matched_as_an_exact_token(argv, expected):
     assert wt.reload_is_requested(argv) is expected
 
 
+def test_uvicorn_reload_envvar_is_its_other_input_for_the_reloader():
+    """⛔ ``$UVICORN_RELOAD`` starts the reloader with NO reload TOKEN at all.
+
+    click's ``auto_envvar_prefix="UVICORN"`` (``uvicorn/main.py``) makes this
+    variable a real input for ``--reload``. Measured on the pinned uvicorn
+    0.52.1: ``UVICORN_RELOAD=true python -m uvicorn app:app`` DOES spawn a served
+    child, and that child's ``sys.argv`` carries no ``--reload`` — so a
+    token-only check read it as a supervised multi-worker and refused it on an
+    embedded DB, which is the same unstartable-dev-topology defect as the token
+    form. The environment is passed explicitly here so the arm is not
+    sensitive to the ambient one.
+    """
+    assert wt.reload_env_is_set({wt.RELOAD_ENV: "true"}) is True
+    for not_truthy in ("0", "false", "off", "", "   ", "enabled", "y"):
+        # A typo must read OFF, so the child stays REFUSED (fail-closed).
+        assert wt.reload_env_is_set({wt.RELOAD_ENV: not_truthy}) is False
+    assert wt.reload_env_is_set({}) is False
+
+
+def test_a_supervised_child_asked_for_reload_by_env_is_one_worker():
+    """The env route and the token route must reach the SAME verdict."""
+    argv_without_token = ["uvicorn", "tortoise.hosted_api:app"]
+    by_env = wt.observe({wt.RELOAD_ENV: "1"}, supervised=True, argv=argv_without_token)
+    by_token = wt.observe({}, supervised=True, argv=[*argv_without_token, "--reload"])
+
+    for topology in (by_env, by_token):
+        assert topology.reloading is True
+        assert topology.is_multi_worker is False
+        # …and on an EMBEDDED database, which is the shape that had no escape.
+        assert wt.refusal_reason(topology) is None
+
+    # The SAME child with neither input is still gated: the exemption is narrow.
+    assert wt.refusal_reason(
+        wt.observe({}, supervised=True, argv=argv_without_token)) is not None
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 2. "Is the database shared" — the same scheme set the connection layer dials
 # ─────────────────────────────────────────────────────────────────────────────
