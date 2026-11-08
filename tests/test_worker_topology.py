@@ -206,7 +206,7 @@ def test_a_single_worker_always_runs_even_embedded_and_unacknowledged():
 
 
 def test_a_reload_child_is_one_worker_and_is_not_gated():
-    """⛔ The reloader IS a supervisor parent, and uvicorn forbids `--workers` with it.
+    """⛔ The reloader IS a supervisor parent, and uvicorn runs it as ONE worker.
 
     Treating "has a supervisor parent" as "is one of N" made
     `uvicorn … --reload` unstartable on an embedded DB with NO escape hatch —
@@ -221,6 +221,31 @@ def test_a_reload_child_is_one_worker_and_is_not_gated():
     # …and the same shape WITHOUT the reload token is gated, so the exemption is
     # narrow rather than "supervised is ignored".
     assert wt.refusal_reason(_topology(workers=1, supervised=True)) is not None
+
+
+def test_the_reload_arm_wins_over_a_named_worker_count():
+    """⛔ `--reload --workers 4` serves exactly ONE worker, and uvicorn says so.
+
+    Measured on the pinned uvicorn 0.52.1: the command prints
+    `WARNING: "workers" flag is ignored when reloading is enabled`, starts the
+    reloader, and starts exactly one served child. `main.py` branches on
+    `should_reload` BEFORE `workers > 1` — so the reload arm must be checked
+    first here too. With the count checked first, this topology was refused with
+    "Refusing to run N>=4 uvicorn workers … on an EMBEDDED database", which
+    describes a topology that is not running — the same false-report defect that
+    made the reload child unstartable in the first place.
+    """
+    both = wt.observe(_EMBEDDED, supervised=True,
+                      argv=["uvicorn", "a:a", "--reload", "--workers", "4"])
+    assert both.workers == 4, "the count is still measured — it is just not the verdict"
+    assert both.reloading is True
+    assert both.is_multi_worker is False
+    assert wt.refusal_reason(both) is None
+
+    # The same count WITHOUT reload is gated, so this is not "the count is ignored".
+    assert wt.refusal_reason(
+        wt.observe(_EMBEDDED, supervised=False,
+                   argv=["uvicorn", "a:a", "--workers", "4"])) is not None
 
 
 def test_an_embedded_database_refuses_n_workers_and_the_ack_must_not_lift_it():
