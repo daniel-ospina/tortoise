@@ -1470,6 +1470,25 @@ def test_the_10852_obligation_quotes_the_authority_AS_IT_NOW_READS():
         r'(?P<loc>(?:(?!STORAGE-ARCHITECTURE\.md)[\s\S]){0,200}?)'
         r':\s*\*"(?P<quote>(?:\\.|[^"\\])+)"\*',
         window))
+    # ⚠️ An EMPTY window result must not be reported as a MISSING quotation when
+    # the quotation is merely FURTHER AWAY than `WINDOW` (#11481 review round 9,
+    # measured: ~640 characters of prose inserted between the anchor and an
+    # INTACT citation reddened this pin with "found 0 — restore the quotation",
+    # pointing a maintainer at prose that is already correct). Search the whole
+    # source so the two causes stay distinguishable.
+    if not cands:
+        beyond = list(re.finditer(
+            r'STORAGE-ARCHITECTURE\.md'
+            r'(?P<loc>(?:(?!STORAGE-ARCHITECTURE\.md)[\s\S]){0,200}?)'
+            r':\s*\*"(?P<quote>(?:\\.|[^"\\])+)"\*',
+            source[anchor:]))
+        if beyond:
+            raise AssertionError(
+                "the narrowing's citation IS present, but "
+                f"{beyond[0].start()} characters after the anchor {ANCHOR!r} — "
+                f"beyond this pin's {WINDOW}-character tether. The quotation does "
+                "not need restoring; either move the citation back beside the "
+                "anchor or widen WINDOW, so the pin can see the shape it grades")
     # ⚠️ EXACTLY ONE, because two is AMBIGUOUS and ambiguity must be loud: nothing
     # here can tell which of two citations the narrowing rests on, so resolving
     # either silently certifies a coin flip.

@@ -280,7 +280,7 @@ FACT_STATEMENTS_IN_SIBLINGS: tuple[tuple[Path, str, str], ...] = (
     # deleting it silently returns the document to that state.
     (
         SEARCH,
-        "SEARCH's §7 states that the vector move is what makes the window feasible, not merely cheaper",
+        "SEARCH's §7 scopes the window's feasibility to the VECTOR index the move removes, and names the kept fulltext index as the unmeasured leg",
         "a graph dump has **no vector index to rebuild at all**",
     ),
     (
