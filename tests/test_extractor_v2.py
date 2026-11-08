@@ -6378,6 +6378,43 @@ class TestEdusChunksRescue2335:
         # the S2 items counted — rescued-or-not is about the S2-empty state)
         assert st["s4_merge"]["s2_items"] > 0  # S2 base entered the merge
 
+    def test_full_rescue_counts_when_only_the_mention_channel_carried(self,
+                                                                     monkeypatch):
+        """S2-empty, but `route_mentions` wrote BOOKKEEPING keys → still a rescue.
+
+        The guard used to be `any((embed_list or {}).values())`, i.e. mapping
+        truthiness. `route_mentions` writes `mention_stats` (an 8-key dict) plus
+        `mentions` onto the SAME mapping whenever `TORTOISE_REFERENTIALITY` is
+        armed, so a batch with ZERO candidates in every candidate section read as
+        non-empty and this counter — the ~2× cost band — silently stayed at 0 on
+        every armed run (review round 7, P2). The population is reachable without
+        contrivance: a model that emits the `mentions[]` channel and no candidates
+        is the channel-only shape `route_mentions` documents.
+        """
+        from tortoise import extractor_v2 as v2
+        monkeypatch.setenv("TORTOISE_REFERENTIALITY", "1")
+        conv = [{"role": "user", "content": "we decided X"}]
+
+        def resp(system, user):
+            if "STORY SUMMARIZER" in system:
+                return "We believed X."
+            if "MAPPER" in system:  # S2 — the channel ONLY, no candidates
+                return json.dumps({"entities": [], "events": [], "points": [],
+                                   "operators": [],
+                                   "mentions": [{"surface": "it",
+                                                 "rule_id":
+                                                 "referentiality.pronoun"}]})
+            if "GAP REVIEWER" in system:  # S4
+                return json.dumps(S2_FIXTURE)  # S4 full re-emission
+            return json.dumps(S2_FIXTURE)
+
+        out = v2.extract_session_v2(MockModel(resp), conv)
+        st = out["stats"]
+        assert st.get("s4_full_rescues", 0) == 1, (
+            "a bookkeeping key on the embed list is not an S2 candidate — the "
+            "S2-empty → S4-full rescue must still count")
+        assert st["s4_merge"]["added_by_s4"] > 0  # S4 rebuilt from empty
+
 
 class TestKindClassifierAdjudication2134:
     def test_kind_classifier_adjudication_length_no_escalation(self):

@@ -201,7 +201,12 @@ So:
   (`s4_full_rescues`, `#2335`). The stage records `armed: true, skipped:
   "empty embed_list"` there, so a measurement run can tell "armed and skipped"
   from "not armed" (#9116's ambiguity), and the exclusion is visible instead of
-  being read as "the stage found nothing".
+  being read as "the stage found nothing". The predicate is over the four
+  CANDIDATE sections (`_batch_has_candidates`), not the mapping — an armed
+  `route_mentions` pass writes `mention_stats` onto that same mapping, and a
+  truthiness test would have read such a batch as non-empty and fired a billed
+  call at the population this bullet says is excluded (pinned, armed, by
+  `test_the_skip_also_fires_when_the_mention_channel_wrote_bookkeeping`).
 * **The clause split is crude by design.** `,`/`:`/`—`/`but`/`so`/`though`/
   `while`/`which`/`because`/`and` — a claim split differently than that is
   judged as a larger or smaller unit, and a two-token elision is below the

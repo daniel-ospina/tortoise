@@ -463,6 +463,42 @@ def test_an_all_empty_s2_batch_is_skipped_without_a_model_call(monkeypatch):
     assert "llm" not in stats
 
 
+def test_the_skip_also_fires_when_the_mention_channel_wrote_bookkeeping(
+        monkeypatch):
+    """THE SKIP PREDICATE TESTS THE CANDIDATE SECTIONS, NOT THE MAPPING.
+
+    Review round 7's P2. The predicate was `any(embed_list.values())`, which is
+    true on a ZERO-candidate batch as soon as any pass has written bookkeeping
+    onto the same mapping — and `route_mentions` writes `mention_stats` (an 8-key
+    dict) plus `mentions` there whenever `TORTOISE_REFERENTIALITY` is armed. So
+    on the exact armed-for-measurement configuration the evidence record
+    prescribes, the skip never fired: every narrative span scored coverage 0.0,
+    one billed call went out, and `skipped` was never recorded — the stage's
+    stated contract inverted, silently, on the population it is scoped to
+    exclude.
+
+    The channel-only shape is not contrived: `route_mentions` documents that a
+    model may emit `mentions[]` and no candidate section, and its own docstring
+    records the SAME hazard defeating `s4_full_rescues` on the unarmed path.
+    """
+    monkeypatch.setenv("TORTOISE_REFERENTIALITY", "1")
+    empty_with_channel = {
+        "entities": [], "events": [], "operators": [], "points": [],
+        "mentions": [{"surface": "it",
+                      "rule_id": "referentiality.pronoun"}],
+    }
+    model = _Model(s2_answer=empty_with_channel)
+    out = _run(monkeypatch, model)
+    assert "gap_fill" not in model.calls, (
+        "a bookkeeping key is not a candidate — the zero-candidate batch is "
+        "still S4's rescue and must not cost a model call")
+    stats = out["stats"]["partial_gap_fill"]
+    assert stats["armed"] is True
+    assert stats["skipped"] == "empty embed_list"
+    assert stats["fired"] is False
+    assert "llm" not in stats
+
+
 def test_no_model_call_when_nothing_is_flagged():
     """Boundedness: a fully-covered session pays nothing."""
     class _NoCall:

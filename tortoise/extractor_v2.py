@@ -13019,6 +13019,46 @@ def _run_vet_pass(embed_list: dict, narrative: str, *, arbiter=None,
             "(fail-open)"], {}
 
 
+#: The sections that CARRY candidates — what "did this batch produce anything?"
+#: means (see :func:`_batch_has_candidates`).
+_CANDIDATE_SECTIONS = ("entities", "events", "points", "operators")
+
+
+def _batch_has_candidates(embed_list: object) -> bool:
+    """Did S2 produce any CANDIDATE?
+
+    ⛔ **Never `any(embed_list.values())`.** The embed list is not a bag of
+    candidate sections alone: :func:`route_mentions` writes bookkeeping keys onto
+    the SAME mapping when `TORTOISE_REFERENTIALITY` is armed — unconditionally
+    `mention_stats` (an 8-key dict), plus `mentions` / `mention_held` — so
+    mapping truthiness answers "did ANY pass touch this dict?", which is always
+    true on the armed path and reports CONTENT for a batch whose four candidate
+    sections are all empty. Measured consequences (both silent):
+
+    * `stats["s4_full_rescues"]` (#2335 WI-1b) is never incremented, so the
+      2x-cost band it exists to measure reads as "no rescues" on every armed
+      run — the exact zeroing `route_mentions`'s own docstring records for the
+      unarmed path, which it avoids by writing nothing when unarmed. The armed
+      path is where the key appears and where the guard was defeated.
+    * #11534's S2.2b skip (`armed: true, skipped: "empty embed_list"`) never
+      fires, so the stage spends a billed model call on exactly the
+      zero-candidate population it is documented to exclude, and flags every
+      narrative span (coverage 0.0) — a measurement run then cannot tell
+      "armed and skipped" from "not armed" (#9116's ambiguity).
+
+    A section counts when its list holds at least one item, mirroring
+    ``_s4_merge_stats``'s own counting basis. Malformed shapes count as no
+    candidates, which is `vet_gate`'s contract for them.
+    """
+    if not isinstance(embed_list, dict):
+        return False
+    for section in _CANDIDATE_SECTIONS:
+        items = embed_list.get(section)
+        if isinstance(items, (list, tuple)) and items:
+            return True
+    return False
+
+
 def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                        session_id: str | None = None, chunk_size: int = 50,
                        master: dict | None = None,
@@ -13286,7 +13326,7 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     gap_stage_stats: dict = {}
     if _partial_gap_fill_enabled():
         gap_fill_stats = {"armed": True, "fired": False}
-        if not (story and any(embed_list.values())):
+        if not (story and _batch_has_candidates(embed_list)):
             # ⛔ ARMED BUT SKIPPED IS RECORDED, NOT SILENT (review round 2, P2).
             # An empty S2 list is the case the issue scopes OUT (it asks about
             # PARTIAL gaps) and it is also the case S4 does the most work on
@@ -13294,17 +13334,22 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
             # visible in the record, or a measurement run cannot tell "armed and
             # skipped" from "not armed" (#9116's ambiguity).
             #
-            # ⛔ THE PREDICATE IS `any(embed_list.values())`, NOT `embed_list`
-            # (review round 3, P1). The post-VET dict is ALWAYS truthy —
+            # ⛔ THE PREDICATE IS `_batch_has_candidates`, NOT `embed_list` and
+            # not `any(embed_list.values())` (review round 3, P1; review round 7,
+            # P2 for the second form). The post-VET dict is ALWAYS truthy —
             # `{"entities": [], "events": [], "points": [], "operators": []}`
-            # is a non-empty mapping — so the falsy-dict test never fired on the
-            # zero-candidate shape at all, and the stage took the *firing* path
+            # is a non-empty mapping — so a falsy-dict test never fires on the
+            # zero-candidate shape at all, and the stage takes the *firing* path
             # instead: with no items every segment scores coverage 0.0, so every
-            # narrative span was flagged and one billed model call went out —
-            # the exact inverse of what this arm's name and the evidence record
-            # assert. This is the SAME predicate the S4 handler uses 140 lines
+            # narrative span is flagged and one billed model call goes out — the
+            # exact inverse of what this arm's name and the evidence record
+            # assert. Its VALUES are no better a test: with referentiality armed
+            # `route_mentions` has already written `mention_stats` onto the
+            # mapping, so values-truthiness is true on a batch with no candidates
+            # either. This is the SAME predicate the S4 handler uses 140 lines
             # later for `s4_full_rescues`; sharing it is what stops the two from
-            # diverging again.
+            # diverging again — and it is the reason the shared helper tests the
+            # candidate SECTIONS and not the mapping.
             gap_fill_stats["skipped"] = ("no story" if not story
                                          else "empty embed_list")
     if gap_fill_stats.get("armed") and not gap_fill_stats.get("skipped"):
@@ -13479,7 +13524,11 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                 # session from an EMPTY S2 base (the merge is otherwise the
                 # normal E4 merges-not-replaces on every healthy capture —
                 # counting those would corrupt the measurement).
-                if not any((embed_list or {}).values()):
+                # ⛔ The SAME `_batch_has_candidates` predicate the S2.2b arm
+                # above uses (review round 7, P2). Mapping truthiness was
+                # defeated by `route_mentions`'s `mention_stats` key on every
+                # referentiality-armed run, which silently zeroed this counter.
+                if not _batch_has_candidates(embed_list):
                     s4_full_rescues += 1
                 # #1789 Task 6: the delta-compliance signal — a delta-mode
                 # session whose S4 output is mostly VERBATIM re-emissions is
