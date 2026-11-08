@@ -64,21 +64,6 @@ and neither is chosen: the relation is dropped and the reason names the
 collision. ``extractor_v2`` already warns that the endpoint *is* ambiguous;
 this is the half that declines to settle it.
 
-ACCOUNTING: EVERY USABLE STATEMENT IS WRITTEN, DROPPED OR COLLAPSED
--------------------------------------------------------------------
-``apply_relation_edges`` returns ``written``, ``dropped`` AND ``collapsed``,
-and ``written + dropped + collapsed == considered`` over the statements it
-accepted. That third bucket is not decoration: the DIRECT writer's edge
-identity is ``(mechanism, src, dst)`` — the stated verb is deliberately NOT in
-it, because ``create_direct_edge`` has one edge per mechanism/endpoint pair and
-its ``label`` carries ONE meaning. So ``causes`` and ``supports`` stated over
-the same pair are one ``IMPL`` edge, and the second meaning cannot ride a label
-that already carries the first. The alternative — folding it into ``dropped`` —
-would report a meaning that DID land as lost, and staying silent (what this
-module used to do) leaves ``written + dropped`` short of the stated population
-with nothing naming the gap. A collapse is NAMED and counted, and it is
-reported through the caller's ``warn`` channel like a drop.
-
 ⛔ #10000 (P0) — WHAT THIS PATH MAY CARRY
 -----------------------------------------
 The write consumes the **typed relation** only: two ids, a verb, and (when the
@@ -97,26 +82,6 @@ attribute SET), so re-finalising the same batch writes the same EDGE rather
 than a duplicate. ⚠️ The JOURNAL is not idempotent and is not meant to be: each
 write appends one record descriptor, exactly as every other structural write in
 the repo does — idempotence here is about the edge.
-
-The plan half of that key is per writer, and the two are NOT the same key: the
-structural writer dedups on ``(predicate, src, dst)`` (the statement's own
-verb is in it) and the direct writer on ``(mechanism, src, dst)`` (it is not —
-see ACCOUNTING above). A second capture of the same statement is a MERGE no-op
-on the edge and a collapse in the plan, never a second edge.
-
-RESIDUALS THIS LEG DOES NOT CLOSE (measured, not assumed)
----------------------------------------------------------
-* ``references`` written structurally is a PLAIN Object→Object edge: its
-  anchored writer (``link_source_to_entity``) is Source→Entity, so the leg
-  cannot supply a ``sourceVersion`` here. The direction is faithful — only the
-  census reading is affected (``derivation_edges.references`` counts anchored
-  edges), and a stated ``references`` between two Objects is a real statement
-  that must not be dropped, so it is written unanchored rather than refused.
-* A registry read that RAISES is reported as ``None``/``()`` (see
-  :func:`_mechanism_for` / :func:`_stated_verdict`), i.e. as "the registry
-  declares nothing" rather than "the registry could not be read". Defensive
-  only — every current caller is in-process — and recorded here rather than
-  left to be rediscovered.
 """
 
 from __future__ import annotations
@@ -129,7 +94,6 @@ __all__ = [
     "RELATION_DIRECT",
     "RELATION_REFUSED",
     "RELATION_STRUCTURAL",
-    "RelationCollapse",
     "RelationDrop",
     "RelationEdge",
     "apply_relation_edges",
@@ -148,15 +112,6 @@ RELATION_REFUSED = "refused"
 #: The two mechanisms an edge can carry without an operator.
 _DIRECT_MECHANISMS = ("IMPL", "NAND")
 
-#: Predicates `link_entities` routes AWAY from `create_edge`, so the structural
-#: arm cannot write them FAITHFULLY. `wasDerivedFrom` goes to
-#: `create_derivation`, which stores `(dst)-[:wasDerivedFrom]->(src)`: the
-#: stated direction inverted. Writing that is worse than refusing it, so the arm
-#: refuses it BY NAME (measured unreachable from shipped packs today — `git grep
-#: -n wasDerivedFrom -- packs/ config/` names no relations row — but the gate is
-#: `predicate in _VALID_EDGE_PREDICATES`, which ADMITS it).
-_ROUTED_AWAY = frozenset({"wasDerivedFrom"})
-
 
 @dataclasses.dataclass(frozen=True)
 class RelationEdge:
@@ -168,27 +123,17 @@ class RelationEdge:
     write_path: str         # RELATION_STRUCTURAL | RELATION_DIRECT
     declared_by: str | None  # the pack whose hierarchy fixed the predicate
     stated_predicate: str   # the story's own verb, kept for the record
-    src_name: str = ""       # the stated endpoint NAMES — a refusal names them
-    dst_name: str = ""
     mechanism: str | None = None  # the registry's mechanism, when one bound
     label: str | None = None      # the Layer-2 meaning, when it rode one
-
-
-@dataclasses.dataclass(frozen=True)
-class RelationCollapse:
-    """One stated relation FOLDED onto an edge another statement already owns.
-
-    Not a drop: the edge IS written, the second statement's MEANING is not (the
-    direct writer's identity excludes the stated verb, so the label is taken).
-    Counted and named so that ``written + dropped + collapsed`` reconciles with
-    the stated population — see the module docstring's ACCOUNTING section.
-    """
-
-    src: str
-    dst: str
-    predicate: str   # the stated verb that produced no edge of its own
-    into: str        # the predicate of the edge it folded onto
-    reason: str
+    #: The endpoint NAMES the story used — carried so a refusal can name the
+    #: pair it was about (``RelationDrop`` speaks names, not ids).
+    src_name: str = ""
+    dst_name: str = ""
+    #: Further stated verbs this ONE edge absorbed: ``create_direct_edge`` is a
+    #: bare-pattern MERGE ("exactly one edge per (src,tgt,type)"), so two
+    #: meanings binding the same mechanism between the same pair cannot be two
+    #: edges. They are folded here — and NAMED — instead of vanishing.
+    folded: tuple[str, ...] = ()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -265,50 +210,18 @@ def _stated_verdict(predicate: str, mechanism: str | None) -> tuple[str, ...]:
         return ()
 
 
-def _routed_away_reason(predicate: str) -> str:
-    """Why this predicate may not be written structurally (``""`` when it may)."""
-    if predicate not in _ROUTED_AWAY:
-        return ""
-    return (
-        f"`{predicate}` is routed by `link_entities` to the derivation writer, "
-        f"which stores the pair as (dst)-[:{predicate}]->(src) — the OPPOSITE "
-        f"of the direction the story stated — so this leg refuses it rather "
-        f"than commit an inverted edge")
-
-
-def _collapse(src: str, dst: str, predicate: str, into: str) -> RelationCollapse:
-    """The record for a statement folded onto an edge already planned."""
-    if predicate == into:
-        return RelationCollapse(
-            src, dst, predicate, into,
-            f"the same stated relation ({predicate!r}) appears twice in this "
-            f"capture — the edge is written once and the second statement is "
-            f"literally the same edge")
-    return RelationCollapse(
-        src, dst, predicate, into,
-        f"the stated verb {predicate!r} folds onto the {into!r} edge this plan "
-        f"already writes between the same two nodes — the DIRECT writer's "
-        f"identity is (mechanism, src, dst), so a second meaning over that pair "
-        f"is the SAME edge and its `label` cannot displace the first's "
-        f"(#11237)")
-
-
 def plan_relation_edges(
     relations,
     entity_index: dict,
     registry=None,
     *,
     declared=None,
-) -> tuple[list[RelationEdge], list[RelationDrop], list[RelationCollapse]]:
-    """``(edges, drops, collapses)`` for the narrative's relations — no writes.
+) -> tuple[list[RelationEdge], list[RelationDrop]]:
+    """``(edges, drops)`` for the narrative's relations — the plan, no writes.
 
     ``entity_index`` is ``{name: [(graph_id, kind), …]}``: every entity THIS
     capture wrote, keyed by the name the story used. ``registry``/``declared``
     are the ``pack_hierarchy`` seams (a test passes its own catalog).
-
-    ``collapses`` are statements that produced NO edge of their own because an
-    already-planned edge IS that edge (see the module docstring's ACCOUNTING) —
-    neither written nor dropped, and counted so the three buckets reconcile.
 
     Pure: same inputs → same plan, so the plan is comparable across runs (the
     producer's half of idempotence; the writers' ``MERGE`` is the other half).
@@ -324,8 +237,12 @@ def plan_relation_edges(
                       else declared_hierarchy(registry))
     edges: list[RelationEdge] = []
     drops: list[RelationDrop] = []
-    collapsed: list[RelationCollapse] = []
     seen: set[tuple[str, str, str]] = set()
+    #: The DIRECT arm's edge identity is the MECHANISM, not the predicate (see
+    #: the fold comment below) — kept apart from ``seen`` so a structural
+    #: ``IMPL`` and a direct ``IMPL`` between one pair can never be read as the
+    #: same edge.
+    direct_at: dict[tuple[str, str, str], int] = {}
     for rel in relations or ():
         if not isinstance(rel, dict):
             continue
@@ -360,18 +277,13 @@ def plan_relation_edges(
                     continue
                 key = (edge.predicate, src_id, dst_id)
                 if key in seen:
-                    collapsed.append(_collapse(src, dst, predicate,
-                                               edge.predicate))
-                    continue
-                reason = _routed_away_reason(edge.predicate)
-                if reason:
-                    drops.append(RelationDrop(src, dst, predicate, reason))
                     continue
                 seen.add(key)
                 edges.append(RelationEdge(
                     src_id=src_id, dst_id=dst_id, predicate=edge.predicate,
                     write_path=RELATION_STRUCTURAL, declared_by=edge.pack,
-                    stated_predicate=predicate, src_name=src, dst_name=dst))
+                    stated_predicate=predicate,
+                    src_name=src, dst_name=dst))
             continue
 
         # ── 2. the story's own verb, through the registry's verdict ────────
@@ -388,17 +300,13 @@ def plan_relation_edges(
         if RELATION_STRUCTURAL in paths and predicate in _VALID_EDGE_PREDICATES:
             key = (predicate, src_id, dst_id)
             if key in seen:
-                collapsed.append(_collapse(src, dst, predicate, predicate))
-                continue
-            routed = _routed_away_reason(predicate)
-            if routed:
-                drops.append(RelationDrop(src, dst, predicate, routed))
                 continue
             seen.add(key)
             edges.append(RelationEdge(
                 src_id=src_id, dst_id=dst_id, predicate=predicate,
                 write_path=RELATION_STRUCTURAL, declared_by=None,
-                stated_predicate=predicate, src_name=src, dst_name=dst))
+                stated_predicate=predicate,
+                src_name=src, dst_name=dst))
             continue
         if mechanism in _DIRECT_MECHANISMS:
             # The operator-less half of the declared mechanism. The MEANING
@@ -407,16 +315,31 @@ def plan_relation_edges(
             label = predicate if predicate not in _DIRECT_MECHANISMS else None
             if label is None and semantics and semantics != mechanism:
                 label = semantics
+            # ⛔ The identity here is the MECHANISM, and that is the writer's
+            # own contract, not a choice made here: ``create_direct_edge`` is a
+            # bare-pattern MERGE — "exactly one edge per (src,tgt,type),
+            # last-writer-wins on attribute change". So two stated verbs that
+            # bind the SAME mechanism between the SAME pair CANNOT be two
+            # edges. The second meaning is FOLDED onto the first and recorded
+            # on ``RelationEdge.folded``, because the module's own rule is
+            # "a refusal is NAMED, never silent" and an uncounted fold makes a
+            # session that stated three relations report ``written=2,
+            # dropped=0`` with the third meaning nowhere (#11548 review, P2).
             key = (mechanism, src_id, dst_id)
-            if key in seen:
-                collapsed.append(_collapse(src, dst, predicate, mechanism))
+            kept_at = direct_at.get(key)
+            if kept_at is not None:
+                kept = edges[kept_at]
+                if (predicate != kept.stated_predicate
+                        and predicate not in kept.folded):
+                    edges[kept_at] = dataclasses.replace(
+                        kept, folded=(*kept.folded, predicate))
                 continue
-            seen.add(key)
+            direct_at[key] = len(edges)
             edges.append(RelationEdge(
                 src_id=src_id, dst_id=dst_id, predicate=mechanism,
                 write_path=RELATION_DIRECT, declared_by=None,
-                stated_predicate=predicate, src_name=src, dst_name=dst,
-                mechanism=mechanism, label=label))
+                stated_predicate=predicate, mechanism=mechanism,
+                label=label, src_name=src, dst_name=dst))
             continue
         drops.append(RelationDrop(
             src, dst, predicate,
@@ -424,7 +347,7 @@ def plan_relation_edges(
             f"({paths}) and declares no mechanism this leg can write without "
             f"an operator — the endpoints are Objects, so no operator is "
             f"licensed (ONTOLOGY §3.9)"))
-    return edges, drops, collapsed
+    return edges, drops
 
 
 def apply_relation_edges(
@@ -438,28 +361,23 @@ def apply_relation_edges(
 ) -> dict:
     """Write the planned edges through the ONE linking verb.
 
-    Returns ``{"edges": [...], "drops": [...], "collapses": [...],
-    "written": n, "dropped": n, "collapsed": n, "considered": n,
-    "write_paths": {...}}`` — the counts ride the capture receipt, the lists
-    are the per-statement record. Every drop AND every collapse is reported
-    through ``warn`` (the caller's warnings channel), so a stated relation that
-    produced no edge of its own is never silent.
-
-    ⛔ ``written + dropped + collapsed == considered``. The third bucket exists
-    because the DIRECT writer's identity is ``(mechanism, src, dst)``: two
-    stated verbs over one pair are ONE edge and the second meaning cannot ride
-    a label the first already owns. It is neither "written" (its meaning did
-    not land) nor "dropped" (the edge between that pair DID land), so it is
-    counted apart and NAMED — see the module docstring's ACCOUNTING section.
+    Returns ``{"edges": [...], "drops": [...], "written": n, "dropped": n,
+    "collapsed": [...], "folded": n, "write_paths": {...}}`` — the counts ride
+    the capture receipt, the lists are the per-relation record. Every drop AND
+    every fold is reported through ``warn`` (the caller's warnings channel), so
+    a stated relation that produced no edge of its own is never silent — and
+    ``written + dropped + folded`` reconciles with the stated population
+    (``folded`` counts MEANINGS, so one edge that absorbed two verbs counts 2).
 
     ⛔ A writer failure on ONE edge never aborts the rest: `#11237`'s channel is
     fail-open exactly as its producer is (`_assemble_relations` keeps what it
     validated and counts what it lost), so a single refusal is named and the
     next relation is still attempted.
     """
-    plan, drops, collapses = plan_relation_edges(
+    plan, drops = plan_relation_edges(
         relations, entity_index, registry, declared=declared)
     written: list[dict] = []
+    collapsed: list[dict] = []
     for edge in plan:
         try:
             if edge.write_path == RELATION_DIRECT:
@@ -468,15 +386,38 @@ def apply_relation_edges(
             else:
                 sdk.link_entities(edge.predicate, edge.src_id, edge.dst_id)
         except Exception as exc:  # noqa: BLE001, RUF100 — fail-open per relation
-            # ⛔ The record's shape is the SAME as every other drop's: the two
-            # stated endpoint NAMES, then the stated verb. This used to put the
-            # verb in `src` and leave `dst` empty, so a reader could not tell
-            # which pair the writer refused (#11237 review).
+            # ⛔ ``RelationDrop`` is ``(src, dst, predicate, reason)`` — the two
+            # NAMES, then the verb. This arm used to pass the stated verb as
+            # ``src`` and an empty ``dst``, so a refused pair lost both of its
+            # endpoints and every drop row in a receipt no longer had one
+            # shape (#11548 review, P2).
             drops.append(RelationDrop(
                 edge.src_name, edge.dst_name, edge.stated_predicate,
-                f"the writer refused {edge.predicate!r} ({type(exc).__name__}: "
-                f"{exc}) — the relation stays uncommitted"))
+                f"the writer refused {edge.predicate!r} "
+                f"({type(exc).__name__}: {exc}) — the relation stays "
+                f"uncommitted"))
             continue
+        if edge.folded:
+            # ⛔ Recorded ONLY for an edge that actually LANDED. Building this
+            # from the PLAN reported "the meaning was folded onto 'causes'" for
+            # an edge the writer had just refused — a lost meaning described as
+            # safely absorbed, and one short on the loss count (#11548 review
+            # round 2, BLOCKER).
+            collapsed.append({
+                "src": edge.src_name,
+                "dst": edge.dst_name,
+                "predicate": edge.predicate,
+                "kept": edge.label or edge.stated_predicate,
+                "folded": list(edge.folded),
+                "reason": (
+                    f"{', '.join(repr(v) for v in edge.folded)} bound the same "
+                    f"mechanism {edge.predicate!r} between this pair, and "
+                    f"create_direct_edge is one edge per (src, tgt, type) — the "
+                    f"meaning was folded onto "
+                    f"{edge.label or edge.stated_predicate!r} (#11237; ONTOLOGY "
+                    f"§3.9 gives an Object→Object pair no carrying operator to "
+                    f"hold a second one)"),
+            })
         written.append({
             "src_id": edge.src_id,
             "dst_id": edge.dst_id,
@@ -486,6 +427,7 @@ def apply_relation_edges(
             "declared_by": edge.declared_by,
             "mechanism": edge.mechanism,
             "label": edge.label,
+            "folded": list(edge.folded),
         })
     by_path: dict[str, int] = {}
     for row in written:
@@ -495,18 +437,20 @@ def apply_relation_edges(
             warn(
                 f"narrative relation not written (#11237): "
                 f"{drop.predicate} {drop.src!r} → {drop.dst!r} — {drop.reason}")
-        for fold in collapses:
+        for fold in collapsed:
             warn(
                 f"narrative relation folded (#11237): "
-                f"{fold.predicate} {fold.src!r} → {fold.dst!r} "
-                f"onto {fold.into!r} — {fold.reason}")
+                f"{fold['folded']} {fold['src']!r} → {fold['dst']!r} — "
+                f"{fold['reason']}")
     return {
         "edges": written,
         "drops": [dataclasses.asdict(d) for d in drops],
-        "collapses": [dataclasses.asdict(c) for c in collapses],
+        "collapsed": collapsed,
         "written": len(written),
         "dropped": len(drops),
-        "collapsed": len(collapses),
-        "considered": len(written) + len(drops) + len(collapses),
+        # MEANINGS folded, not edges carrying a fold: one edge can absorb two
+        # verbs, so counting edges made `written + dropped + folded` understate
+        # the stated population (#11548 review round 2, nit).
+        "folded": sum(len(row["folded"]) for row in collapsed),
         "write_paths": by_path,
     }

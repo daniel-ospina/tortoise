@@ -47,7 +47,7 @@ SESSION = "wp01_quarry_debug"
 
 
 def _emission(entities: list[dict], relations: list[dict],
-              points: list[dict] | None = None,
+              points: list[dict] | None = None, *,
               session_id: str = SESSION) -> dict:
     """A `extract_session_v2`-shaped result: the WIRE's own seam.
 
@@ -95,46 +95,46 @@ def _lane(monkeypatch, tmp_path):
         sdk.close()
 
 
-def _capture(lane, monkeypatch, result: dict,
-             session_id: str = SESSION) -> dict:
+def _capture(lane, monkeypatch, result: dict, *,
+             session_id: str | None = None) -> dict:
     import tortoise.extractor_v2 as ev2
 
     monkeypatch.setattr(ev2, "extract_session_v2", _extractor(result))
     fixture = corpus.load_fixture(SESSION)
     conv = runner.parse_roundtrip(
-        session_id, fixture["conversation"], fixture["harness"],
+        SESSION, fixture["conversation"], fixture["harness"],
         workdir=lane["workdir"])
     cap = lane["sdk"].capture_session(
-        conv, session_id=session_id, harness=fixture["harness"])
+        conv, session_id=session_id or SESSION, harness=fixture["harness"])
     assert cap.get("ok") is True, cap
     return cap
 
 
 def _edges(sdk) -> set[tuple[str, str, str, str]]:
     """``{(edge_type, src_name, dst_name, label)}`` for every Object→Object edge."""
-    rows = sdk._get_proj().g.query(
-        "MATCH (a:Object)-[e]->(b:Object) "
-        "WHERE type(e) IN ['hasPart','dependsOn','related','ownedBy',"
-        "'managedBy','IMPL','NAND','references','wasDerivedFrom'] "
-        "RETURN type(e), a.name, b.name, "
-        "coalesce(e.label, '')").result_set
-    return {(str(t), str(a), str(b), str(lbl)) for t, a, b, lbl in rows}
+    return set(_edge_counts(sdk))
 
 
-def _edge_counts(sdk) -> dict[str, int]:
-    """``{edge_type: count}`` — a COUNT, because a duplicate is invisible in a set.
+def _edge_counts(sdk) -> dict[tuple[str, str, str, str], int]:
+    """``{(edge_type, src_name, dst_name, label): n}`` — ``n`` read from the graph.
 
-    Two edges of the same type between the same two nodes with the same label
-    collapse into ONE tuple in :func:`_edges`, so idempotence — a claim about
-    the NUMBER of edges in the graph — cannot be asserted on a set at all
-    (#11237 review: the `MERGE`→`CREATE` mutant stayed green).
+    A COUNT, not a set. A duplicated edge keeps the same identity
+    ``(type, src, dst, label)``, so it collapses into the same set element by
+    construction — a set comparison can never observe a duplicate. That is
+    exactly the hole the first revision of the idempotence test fell into
+    (#11548 review, P1).
     """
     rows = sdk._get_proj().g.query(
         "MATCH (a:Object)-[e]->(b:Object) "
         "WHERE type(e) IN ['hasPart','dependsOn','related','ownedBy',"
         "'managedBy','IMPL','NAND','references','wasDerivedFrom'] "
-        "RETURN type(e), count(*)").result_set
-    return {str(t): int(c or 0) for t, c in rows}
+        "RETURN type(e), a.name, b.name, "
+        "coalesce(e.label, ''), count(*)").result_set
+    counts: dict[tuple[str, str, str, str], int] = {}
+    for t, a, b, lbl, n in rows:
+        key = (str(t), str(a), str(b), str(lbl))
+        counts[key] = counts.get(key, 0) + int(n or 0)
+    return counts
 
 
 _ENTITIES = [
@@ -146,10 +146,11 @@ _ENTITIES = [
 
 # ⛔ The PURE-PLAN guards for this module live in
 # `tests/test_relation_write_11237.py`, not here: `eval/**` is `on_demand` by an
-# owner decision (#10194), so a change to `tortoise/relation_write.py` ALONE runs
-# no file under `tests/eval/` — the module's own surface is `core`. What stays here
-# is the graph-level lane (a REAL capture commits the edges), which is the
-# product-number half and is deliberately on demand.
+# owner decision (#10194), and the on-demand subtraction runs AFTER surface
+# selection — so a change to `tortoise/relation_write.py` ALONE (surface `core`)
+# runs no file under `tests/eval/` at all, and an `eval/**` row on `core` is a row
+# that can never select it. What stays here is the graph-level lane (a REAL
+# capture commits the edges), which is the product-number half and is on demand.
 
 def test_relation_leg_writes_object_object_edges(_lane, monkeypatch):
     """A stated relation LANDS as an edge between the two resolved Objects.
@@ -172,65 +173,75 @@ def test_relation_leg_writes_object_object_edges(_lane, monkeypatch):
     ])
     cap = _capture(_lane, monkeypatch, result)
     written = cap["relation_write"]
-    assert written["written"] == 2, written
-    # `causes` and `supports` are TWO stated meanings over ONE pair, and the
-    # DIRECT writer's identity is `(mechanism, src, dst)` — the stated verb is
-    # deliberately not in it — so the second is a COLLAPSE, not a drop and not a
-    # second edge. It is counted and named, so the three buckets reconcile with
-    # the stated population (#11237 review).
-    assert written["dropped"] == 0, written
-    assert written["collapsed"] == 1, written
-    assert written["written"] + written["dropped"] + written["collapsed"] \
-        == written["considered"] == 3, written
-    fold, = written["collapses"]
-    assert (fold["src"], fold["dst"]) == ("retry storm", "deadline slip"), fold
-    assert fold["predicate"] == "supports" and fold["into"] == "IMPL", fold
+    assert written["written"] >= 2, written
 
     edges = _edges(_lane["sdk"])
+    # `causes` (IMPL, labelled) and `supports` collapse onto ONE IMPL edge
+    # between the same two Objects: `create_direct_edge` is a bare-pattern MERGE
+    # ("exactly one edge per (src, tgt, type)"), so on THIS arm the edge's
+    # identity is the MECHANISM, not the stated verb. The fold is COUNTED and
+    # NAMED on the receipt rather than silently dropped.
     assert ("IMPL", "retry storm", "deadline slip", "causes") in edges, edges
     assert ("hasPart", "retry budget", "retry storm", "") in edges, edges
     assert len([e for e in edges if e[0] == "IMPL"
                 and e[1] == "retry storm" and e[2] == "deadline slip"]) == 1, edges
+    assert written["folded"] == 1, written
+    assert [f["folded"] for f in written["collapsed"]] == [["supports"]], written
+    assert written["collapsed"][0]["kept"] == "causes", written
+    # The fold reconciles the accounting: 3 stated = 2 written + 0 dropped + 1
+    # folded, so the third meaning is counted, named and reconciled.
+    assert (written["written"] + written["dropped"]
+            + written["folded"]) == 3, written
 
 
 def test_relation_leg_is_idempotent_across_a_re_finalise(_lane, monkeypatch):
     """Re-finalising the same batch does not duplicate the edge (#11237 target).
 
-    ⛔ The second commit must be a REAL one, and the earlier version of this test
-    was not: `capture_session` short-circuits a re-capture of an existing
-    `session_id` (`session_existed and not retry_failed_capture` →
-    `mode: "replayed"`), so `_extract_session_v2` — and therefore this leg —
-    never ran a second time. It asserted that a graph nobody had written to was
-    unchanged, and the `MERGE`→`CREATE` mutant stayed GREEN (measured, #11237
-    review). The second capture now takes a DISTINCT id and names the SAME
-    entities, so the whole write path re-runs over the same two nodes.
+    ⛔ The first revision of this test called ``_capture`` twice with the SAME
+    ``session_id`` and compared the edge SET — which cannot fail, for two
+    independent reasons (#11548 review, P1):
 
-    The assertion is a COUNT (:func:`_edge_counts`), not a set: two edges with
-    the same type/label between the same pair are ONE tuple in a set.
+    1. a re-capture of an EXISTING, successfully captured session is the #1727
+       REPLAY no-op (``sdk.py``: ``elif session_existed and not
+       retry_failed_capture:`` → ``mode: "replayed"``), so
+       ``_extract_session_v2`` — and therefore ``apply_relation_edges`` — never
+       runs a second time; and
+    2. the comparison was a SET of edge identities, and a duplicated edge has
+       the SAME identity, so it collapses into the same element.
 
-    Non-vacuity: `MERGE`→`CREATE` in `create_direct_edge` (or dropping either
-    writer's merge) makes the second capture write a second edge, and the count
-    doubles.
+    Both holes are closed here: the second finalise is a REAL commit of the
+    same batch — a distinct ``session_id``/``client_commit_id``, so the replay
+    skip cannot answer for the write path, and the same entity NAMES, so the
+    writers see the same edge identity — and the assertion is a graph COUNT.
+
+    Revert-check (the mutant that must redden this): ``create_direct_edge``'s
+    bare-pattern ``MERGE`` → ``CREATE``, or ``create_edge``'s ``MERGE`` →
+    ``CREATE``. The second pass then leaves two edges per pair and this test
+    fails on the count.
     """
-    result = _emission(_ENTITIES, [
+    rels = [
         {"src": "retry storm", "dst": "deadline slip", "predicate": "causes"},
         {"src": "retry budget", "dst": "retry storm", "predicate": "hasPart"},
-    ])
-    _capture(_lane, monkeypatch, result)
+    ]
+    _capture(_lane, monkeypatch, _emission(_ENTITIES, rels))
     first = _edge_counts(_lane["sdk"])
-    assert first == {"IMPL": 1, "hasPart": 1}, first
-    second = _capture(_lane, monkeypatch,
-                      _emission(_ENTITIES, result["relations"],
-                                session_id="wp01_quarry_debug_again"),
-                      session_id="wp01_quarry_debug_again")
-    assert _edge_counts(_lane["sdk"]) == first, (
-        "the second REAL capture duplicated an edge — both writers are supposed "
-        "to MERGE on the edge")
-    # The plan half is the other side: the same statement folds instead of
-    # planning a second edge.
-    report = second["relation_write"]
-    assert report["written"] + report["dropped"] + report["collapsed"] \
-        == report["considered"] == 2, report
+    assert first, "the first capture must have written an edge to re-finalise"
+    assert all(count == 1 for count in first.values()), first
+
+    second_session = f"{SESSION}_refinalise"
+    again = _capture(_lane, monkeypatch,
+                     _emission(_ENTITIES, rels, session_id=second_session),
+                     session_id=second_session)
+    # ⛔ ANTI-VACUITY: the second call must be a REAL finalise, not the #1727
+    # replay no-op (which returns no `relation_write` block at all, so this
+    # assertion is what makes the whole test non-vacuous).
+    assert again["relation_write"]["written"] == 2, again["relation_write"]
+
+    second = _edge_counts(_lane["sdk"])
+    assert second == first, (
+        "a re-finalise must MERGE onto the same edge, not add one: "
+        f"before={first} after={second}")
+    assert all(count == 1 for count in second.values()), second
 
 
 def test_relation_leg_names_what_it_refused(_lane, monkeypatch):

@@ -187,77 +187,148 @@ def test_receipt_rejects_partial_metrics_on_completed_run():
     assert any("missing metrics" in i for i in issues)
 
 
-# ── #11237: the relation-write block and the Object→Object census ──────────
-#
-# These two blocks are the ones the PR's own claim rests on ("the E6 number has
-# a reader"), and before these cases NOTHING asserted them: deleting the
-# `object_edges` block from `graph_census`, the `relation_write` arm from
-# `validate_receipt`, or `_aggregate_relation_write` entirely left the suite
-# green (#11237 review P2).
+def test_receipt_rejects_a_non_int_relation_write_count():
+    """#11237: the additive `relation_write` block is shape-checked (#11548 P2).
 
-def test_receipt_rejects_a_non_integer_relation_write_count():
-    """A string count is refused BY NAME, not coerced.
-
-    `relation_write.written` is the number the E6 row is read against, so a
-    value that is not an int is an instrument fault: `"35"` would compare and
-    sum differently from `35` in every consumer downstream.
+    FAILS IF `validate_receipt`'s `relation_write` arm is deleted: a receipt
+    whose counts arrived as strings then validates as if it were intact, and a
+    reader downstream does arithmetic on a string.
     """
-    receipt = runner.build_receipt(_completed_report())
-    receipt["relation_write"] = {"written": "35", "dropped": 0}
+    report = _completed_report()
+    report["relation_write"] = {"written": "35", "dropped": 1}
+    receipt = runner.build_receipt(report)
+    assert receipt.get("relation_write") is not None, receipt.keys()
     issues = runner.validate_receipt(receipt)
     assert any("relation_write.written" in i for i in issues), issues
-    assert not any("relation_write.dropped" in i for i in issues), issues
 
 
-def test_receipt_accepts_a_pre_collapse_relation_write_block():
-    """`collapsed` is ADDITIVE — a receipt without it still validates.
+class _CensusResult:
+    def __init__(self, rows):
+        self.result_set = rows
 
-    The committed evidence receipts predate the collapse bucket; refusing them
-    would invalidate artifacts this PR does not touch (`written`/`dropped` stay
-    REQUIRED, because those two predate every receipt in the tree).
+
+class _CensusGraph:
+    """Answers each census query by identity, so no DB is needed."""
+
+    def __init__(self, object_edge_rows):
+        self.object_edge_rows = object_edge_rows
+        self.seen: list[str] = []
+
+    def query(self, sql, params=None):
+        self.seen.append(sql)
+        if sql == runner.SESSION_OBJECT_QUERY:
+            return _CensusResult([(11, "the retry storm"), (12, "the slip")])
+        if sql == runner.OBJECT_DERIVATION_LINK_QUERY:
+            return _CensusResult([(0,)])
+        if sql == runner.SESSION_REFERENCES_ANCHOR_QUERY:
+            return _CensusResult([(0, 0, 0, 0)])
+        if sql == runner.SESSION_OBJECT_EDGES_QUERY:
+            return _CensusResult(self.object_edge_rows)
+        if "extractedFrom" in sql:
+            return _CensusResult([(0, 0)])
+        return _CensusResult([])
+
+
+class _CensusSDK:
+    def __init__(self, graph):
+        self._graph = graph
+
+    def _get_proj(self):
+        class _Proj:
+            g = self._graph
+        _Proj.g = self._graph
+        return _Proj()
+
+
+def test_graph_census_reports_the_object_object_edges_the_graph_holds():
+    """#11237: the E6 row is READ off the graph — a broken read must not look like 0.
+
+    ``object_edges`` is the write-path lane's own read of the relation channel
+    (the before-arm the issue starts from is **0**), so the ONE failure this
+    must not have is a read that silently yields the baseline. Two properties
+    are pinned, and both are what a deleted block would break:
+
+    1. the key is ALWAYS present — an absent key cannot be told apart from a
+       session that stated nothing;
+    2. the counts are the ROWS the query returned, and the query is actually
+       issued for a session that has Objects.
+
+    FAILS IF `graph_census` stops running ``SESSION_OBJECT_EDGES_QUERY``
+    (``object_edges`` stays ``{}``) or stops emitting the key (``KeyError``).
     """
-    receipt = runner.build_receipt(_completed_report())
-    receipt["relation_write"] = {"written": 35, "dropped": 1}
-    assert not [i for i in runner.validate_receipt(receipt)
-                if "relation_write" in i]
-    receipt["relation_write"]["collapsed"] = True  # a bool is not an int here
-    assert any("relation_write.collapsed" in i
-               for i in runner.validate_receipt(receipt))
+    graph = _CensusGraph([("IMPL", 2), ("hasPart", 1)])
+    census = runner.graph_census(_CensusSDK(graph), "wp01", ["pt-1"])
+    assert census["object_edges"] == {"IMPL": 2, "hasPart": 1}, census
+    assert runner.SESSION_OBJECT_EDGES_QUERY in graph.seen, graph.seen
+
+    # a session with no Objects is a MEASURED zero, not an absent key
+    bare = runner.graph_census(_CensusSDK(_CensusGraph([])), "wp01", [])
+    assert bare["object_edges"] == {}, bare
 
 
-def test_the_relation_write_aggregate_sums_the_three_buckets():
-    """Per-session receipts SUM, and the per-statement record keeps its session.
+def test_the_object_edge_row_reaches_the_RUN_LEVEL_total():
+    """`object_edges_total` is the single number the E6 row is read against.
 
-    `written + dropped + collapsed` is the reconciliation the write leg promises
-    (`relation_write.apply_relation_edges`), and the run-level block is where a
-    reader checks it across the corpus — a bucket that silently stopped being
-    summed would make the corpus total understate what the leg did.
+    `graph_census`'s per-session block is only half the instrument: the receipt
+    carries `graph_census.aggregate`, and `object_edges_total` is what a reader
+    compares with the pre-registration's before-arm of **0**. A census that
+    counted per session but whose aggregate dropped the sum would publish the
+    baseline as the corpus total — the "a zero is a measurement" failure one
+    layer up.
 
-    Mutation: drop `collapsed` from the sum and the totals disagree with the
-    per-session blocks.
+    Mutation: delete the `object_edges`/`object_edges_total` arms of
+    `aggregate_graph_census` and this leg reds (KeyError / a short sum).
+    """
+    one = runner.graph_census(
+        _CensusSDK(_CensusGraph([("IMPL", 2), ("hasPart", 1)])), "s1", ["pt-1"])
+    two = runner.graph_census(
+        _CensusSDK(_CensusGraph([("IMPL", 1), ("related", 4)])), "s2", ["pt-2"])
+    agg = runner.aggregate_graph_census({"s1": one, "s2": two})
+    assert agg["object_edges"] == {"IMPL": 3, "hasPart": 1, "related": 4}, agg
+    assert agg["object_edges_total"] == 8, agg
+
+
+def test_the_relation_write_aggregate_sums_written_dropped_and_folded():
+    """The run-level block SUMS the three outcomes and keeps each one's session.
+
+    `relation_write.apply_relation_edges` promises that `written + dropped +
+    folded` reconciles with the stated population; the run-level block is where
+    a reader checks it across the corpus, so a bucket that quietly stopped
+    being summed would make the corpus total understate what the leg did
+    (#11548 review — `runner.py::_aggregate_relation_write` had NO assertion:
+    deleting it left the suite green).
+
+    `folded` counts MEANINGS (one edge can absorb two verbs), so it is summed
+    from each row's own `folded` list rather than from the row count.
+
+    Mutation: drop any of the three from the sum and the totals disagree with
+    the per-session blocks.
     """
     runs = {
-        "s2": {"written": 3, "dropped": 1, "collapsed": 2,
+        "s1": {"written": 1, "dropped": 0, "folded": 0,
+               "write_paths": {"direct": 1}, "edges": [], "drops": [],
+               "collapsed": []},
+        "s2": {"written": 3, "dropped": 1, "folded": 2,
                "write_paths": {"structural": 2, "direct": 1},
                "edges": [{"predicate": "hasPart"}],
                "drops": [{"predicate": "transacts", "src": "a", "dst": "b",
                           "reason": "no path"}],
-               "collapses": [{"predicate": "supports", "into": "IMPL"}]},
-        "s1": {"written": 1, "dropped": 0, "collapsed": 0,
-               "write_paths": {"direct": 1},
-               "edges": [], "drops": [], "collapses": []},
+               "collapsed": [{"src": "a", "dst": "b", "predicate": "IMPL",
+                              "kept": "causes",
+                              "folded": ["supports", "refutes"],
+                              "reason": "one edge per (src, tgt, type)"}]},
     }
     block = runner._aggregate_relation_write(runs)
     assert block["written"] == 4, block
     assert block["dropped"] == 1, block
-    assert block["collapsed"] == 2, block
-    assert block["considered"] == 7, block
+    assert block["folded"] == 2, block
+    assert block["written"] + block["dropped"] + block["folded"] == 7, block
     assert block["write_paths"] == {"structural": 2, "direct": 2}, block
-    # The per-statement record keeps its SESSION, so a named refussal can be
-    # traced to the capture that made it.
+    # The per-statement records keep their SESSION, so a named refusal/fold can
+    # be traced to the capture that made it.
     assert [row["session_id"] for row in block["drops"]] == ["s2"], block
-    assert [row["session_id"] for row in block["collapses"]] == ["s2"], block
-    # Pure: same receipts → same block.
+    assert [row["session_id"] for row in block["collapsed"]] == ["s2"], block
+    # Pure: same receipts -> same block.
     assert runner._aggregate_relation_write(runs) == block
 
 
