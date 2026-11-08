@@ -4861,12 +4861,36 @@ jobs:
       # The rail's predicate, at a PIN. Unpinned, this job would track agent-infra
       # `main` and could go red on a change nobody in this repo reviewed — on the
       # surface every PR's merge depends on.
+      #
+      # ⛔ THE PIN IS PART OF THE PREDICATE'S BEHAVIOUR, so a stale one silently
+      # changes the VERDICT (#3690, agent-infra). `ci_exemption.py` reads main's union
+      # rates through `_NODEID_RE`, whose parameter space spelled
+      # `[A-Za-z0-9_\[\]\-.:]` — it had no `/`, so EVERY main rate row for a
+      # path-PARAMETRISED pytest id was parsed, then DROPPED as malformed:
+      #
+      #   tests/test_entry_point_python_guard.py::test_entry_point_guards_the_
+      #   interpreter_before_its_imports[tools/build_site_icons.py]
+      #
+      # With the row dropped, `decide` saw an id absent from `main_rates` and reported
+      # main's OWN red as *"absent from main's failure set … introduced by this PR"* —
+      # a false BLOCK on a failure the PR cannot reach, for every affected id. The
+      # asymmetry is what hid it: the main SIGNATURE table parses through
+      # `is_failure_key_loose`, which always admitted the path, so the signature gate
+      # passed and only the presence gate refused. Measured on PR #11508 (`test (a)/
+      # (b)/(e)/(f)` red on main's own head, `tools/build_site_icons.py` never touched
+      # by the diff): at `0b8cfa37` the shared decision BLOCKED 2 such ids; at
+      # `cb7de2572` it EXEMPTED both, with the identical inputs.
+      #
+      # Bump = the minimal commit carrying the fix (`agent-infra#3690`, an ancestor of
+      # agent-infra `main`), not `main` itself — the pin still cannot track another
+      # repo's head. Revert only by pointing at a predicate that admits a path in the
+      # parameter space; a pin older than `cb7de2572` reinstates the false BLOCK.
       - name: Check out the shared CI predicate (pinned, #9984)
         uses: actions/checkout@v4
         with:
           repository: daniel-ospina/agent-infra
           path: .ci-predicate
-          ref: 0b8cfa37ea73c6b6b47db10c6bc32921d3b2d904
+          ref: cb7de2572518b7e49b6f51a0d3aec8d2a4a1135c
 
       # #9018: this job shells out to `gh`, which is simply ABSENT on the fallback
       # pool's minimal non-login PATH — where it reads as a test failure and is not
