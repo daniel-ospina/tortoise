@@ -668,41 +668,64 @@ def apply_relation_edges(
         relations, entity_index, registry, declared=declared)
     written: list[dict] = []
     collapsed: list[dict] = []
+
+    def _refused(edge: RelationEdge, why: str) -> None:
+        """Name a refused edge, and every meaning it was carrying.
+
+        ONE shape for BOTH refusal channels: the writer raising AND the writer
+        answering ``False``. ``link_entities`` returns *whatever the chosen
+        writer returns* (`sdk.py:17955`), and the two arms disagree about how
+        they report failure — ``create_edge`` signals a write it did NOT make by
+        returning ``False`` (`projection/edges.py:2919-2920`, when it resolves
+        no endpoint), while ``create_direct_edge`` raises. Reading only the
+        exception made the leg exception-shaped on one arm and
+        return-value-shaped on the other, so a structural refusal was counted as
+        a WRITE: a receipt claiming an edge the graph does not hold, with no
+        drop row and no warning (#11548 review, ISSUE 1). One function, so the
+        two channels cannot drift apart again.
+        """
+        drops.append(RelationDrop(
+            edge.src_name, edge.dst_name, edge.stated_predicate,
+            f"the writer refused {edge.predicate!r} ({why}) — the relation "
+            f"stays uncommitted"))
+        for folded_verb in edge.folded:
+            drops.append(RelationDrop(
+                edge.src_name, edge.dst_name, folded_verb,
+                f"this meaning was folded onto {edge.stated_predicate!r} "
+                f"({edge.predicate!r}), whose write the writer refused "
+                f"({why}) — the fold lost the meaning with the edge"))
+
     for edge in plan:
         try:
             if edge.write_path == RELATION_DIRECT:
                 # ``direction`` is passed ONLY on this arm: ``link_entities``
                 # refuses a parameter the reached writer does not honour, and
                 # ``create_edge`` (structural) records no direction at all.
-                sdk.link_entities(edge.predicate, edge.src_id, edge.dst_id,
-                                  label=edge.label,
-                                  direction=edge.direction)
+                # The RETURN is read: ``False`` is a refusal, not a write.
+                result = sdk.link_entities(edge.predicate, edge.src_id,
+                                           edge.dst_id,
+                                           label=edge.label,
+                                           direction=edge.direction)
             else:
-                sdk.link_entities(edge.predicate, edge.src_id, edge.dst_id)
+                result = sdk.link_entities(edge.predicate, edge.src_id,
+                                           edge.dst_id)
         except Exception as exc:  # noqa: BLE001, RUF100 — fail-open per relation
             # ⛔ ``RelationDrop`` is ``(src, dst, predicate, reason)`` — the two
             # NAMES, then the verb. This arm used to pass the stated verb as
             # ``src`` and an empty ``dst``, so a refused pair lost both of its
             # endpoints and every drop row in a receipt no longer had one
             # shape (#11548 review, P2).
-            drops.append(RelationDrop(
-                edge.src_name, edge.dst_name, edge.stated_predicate,
-                f"the writer refused {edge.predicate!r} "
-                f"({type(exc).__name__}: {exc}) — the relation stays "
-                f"uncommitted"))
-            # ⛔ A refused edge that had ABSORBED a meaning lost that meaning
-            # too, and the collapse is recorded only for an edge that LANDED —
-            # so without this row the receipt read `written=0, dropped=1,
-            # folded=0` for a two-statement population with the second meaning
-            # nowhere (#11548 round 3, P2). One drop per lost meaning keeps
-            # ``written + dropped + folded`` reconciling on THIS arm too.
-            for folded_verb in edge.folded:
-                drops.append(RelationDrop(
-                    edge.src_name, edge.dst_name, folded_verb,
-                    f"this meaning was folded onto {edge.stated_predicate!r} "
-                    f"({edge.predicate!r}), whose write the writer refused "
-                    f"({type(exc).__name__}) — the fold lost the meaning "
-                    f"with the edge"))
+            _refused(edge, f"{type(exc).__name__}: {exc}")
+            continue
+        # ⛔ ``is False``, DELIBERATELY — not a general truthiness test. The
+        # structural arm answers a ``bool`` and its ``False`` means "I resolved
+        # no endpoint and wrote nothing"; the direct arm answers a truthy
+        # envelope (a ``dict``), and a future envelope whose value merely reads
+        # falsey must not be mistaken for a refusal. Both are refusals the leg
+        # must NAME, and both now go through `_refused`.
+        if result is False:
+            _refused(edge, "False — the writer resolved no endpoint for this "
+                           "edge, so nothing was written")
             continue
         if edge.folded:
             # ⛔ Recorded ONLY for an edge that actually LANDED. Building this

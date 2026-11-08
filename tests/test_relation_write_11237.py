@@ -72,6 +72,21 @@ class _RecordingWriter:
         return {"ok": True}
 
 
+class _FalseWriter:
+    """An SDK whose STRUCTURAL writer reports a write it did NOT make.
+
+    This is not a synthetic shape: ``Projection.create_edge`` returns ``False``
+    when it resolves no endpoint (``tortoise/projection/edges.py:2919-2920``)
+    instead of raising, and ``link_entities`` returns whatever the chosen writer
+    returns (``sdk.py:17955``). So the leg has two refusal channels — an
+    exception on the direct arm and a ``False`` on the structural one — and
+    reading only the first counted a refusal as a write (#11548 review, ISSUE 1).
+    """
+
+    def link_entities(self, *_a, **_kw):
+        return False
+
+
 def test_ambiguous_endpoint_is_refused_not_guessed():
     """⛔ ``#11235``: identity is ``(name, kind)`` — a collision is NOT resolved.
 
@@ -557,3 +572,52 @@ def test_a_repeated_unwritable_statement_counts_once():
     ], INDEX)
     assert edges == [], edges
     assert len(drops) == 2, drops
+
+
+def test_a_writer_that_returns_False_is_a_REFUSAL_not_a_write():
+    """⛔ Reading only the exception made a structural refusal count as a WRITE.
+
+    ``link_entities`` returns whatever the chosen writer returns. The two arms
+    disagree about how they report failure: ``create_direct_edge`` RAISES, while
+    ``Projection.create_edge`` returns **``False``** when it resolves no endpoint
+    (``tortoise/projection/edges.py:2919-2920``). The leg read one and ignored the
+    other, so on that path it appended the row to ``written``, emitted no
+    ``RelationDrop`` and no warning, and ``written + dropped + folded`` still
+    reconciled — the statement counted as a SUCCESS against a graph that holds no
+    edge. That is the `fail-silent` class `link_entities`'s own dispatch says a
+    merge must never add, and `written` is the number the capture receipt carries
+    and the PR body quotes (#11548 review, ISSUE 1).
+
+    Latent today (the only caller hands over ids it minted microseconds earlier),
+    and one line from live for any future caller — a replay leg, a connector
+    sync, a repair pass.
+
+    Mutation: drop the `if result is False` arm and `written` reads 1 with
+    `dropped == 0`.
+    """
+    report = apply_relation_edges(
+        _FalseWriter(),
+        [{"src": "retry storm", "dst": "deadline slip",
+          "predicate": "related"}],
+        INDEX)
+    assert report["written"] == 0, report
+    assert report["dropped"] == 1, report
+    drop = report["drops"][0]
+    assert (drop["src"], drop["dst"]) == ("retry storm", "deadline slip"), drop
+    assert drop["predicate"] == "related", drop
+    assert "False" in drop["reason"], drop
+    assert "no endpoint" in drop["reason"], drop
+
+    # …and a refused edge that had ABSORBED a meaning loses that meaning too,
+    # exactly as the raising channel does — one drop per lost meaning, so the
+    # accounting reconciles on BOTH refusal channels.
+    folded = apply_relation_edges(
+        _FalseWriter(),
+        [{"src": "retry storm", "dst": "deadline slip", "predicate": "causes"},
+         {"src": "retry storm", "dst": "deadline slip", "predicate": "supports"}],
+        INDEX)
+    assert folded["written"] == 0, folded
+    assert folded["dropped"] == 2, folded
+    assert folded["folded"] == 0, folded
+    assert sorted(row["predicate"] for row in folded["drops"]) == \
+        ["causes", "supports"], folded
