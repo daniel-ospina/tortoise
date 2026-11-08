@@ -35,7 +35,7 @@ aboutObjects: "epic #5090, embed gate, vector index, unindexed embeddings, test-
 2. **Where do the numbers physically live?** **Not ours.** That is the storage architecture (`#4333`), and
    the decision's home is §14.3. Its deciding input — the fraction of a tenant's stock the cache actually
    holds — **cannot be measured today** (hosted capture is off by your 2026-10-14 ruling). So this epic
-   **carries** that decision as blocked and does not spend it.
+   **carries** that decision as recorded in `STORAGE-ARCHITECTURE.md` §14.3 and worked in `#4051`, and does not spend it.
 
 **What is left for this epic is small, and every item is something nobody else owns:**
 
@@ -73,8 +73,8 @@ self-hosting (**owner: not now**), and compression (§15: no engine to apply it 
 | **Where the vector index lives (V1)** | **§14.3** (decision home) · **`#4333`** (architecture) | Not this epic's — the changelog records `#5090` as a **consumer**. Its deciding input (`f`) is unmeasurable today (§17.4.6). |
 | Self-hosting FalkorDB | **D11** (`#4333`), **deferred** — and **owner, 2026-11-05: not now** | Owner, 2026-11-05, verbatim: *"we're not self-hosting flakorDB [sic] now. we have a lot of work that needs doing first"* — relayed at [#5090 comment 6669523691](https://github.com/daniel-ospina/tortoise/issues/5090#issuecomment-6669523691). Not in this epic's option set. |
 | Embedding compression / quantization | **§15's do-not-re-invent list** | *"no engine to apply it to"* — FalkorDB's stored form is `vecf32`. |
-| Filtered-ANN recall measurement | **V1's evidence, when V1 is taken** | It is evidence *for a move*. With no move planned, measuring it now is work with no consumer. Recorded in `02-research.md` so it is not lost. |
-| Creating indexes for the four unindexed labels | **V1** | It is V1's content, and it commits four further resident HNSW structures. The brief forbids it without a stated non-reversal; there is none. |
+| Filtered-ANN recall measurement | **`#4051`'s** (`SEARCH-ARCHITECTURE.md` §9 **M1**, a private-beta gate) | It is evidence *for a move*, and the location is decided (2026-11-07) — so the measurement leaves this epic, and it is not consumer-less. Recorded in `02-research.md` so it is not lost. |
+| Creating indexes for the four unindexed labels | **§14.3 V3** | It is V3's content (V1 settled only WHERE the index lives), and it commits four further resident HNSW structures. The brief forbids it without a stated non-reversal; there is none. |
 | Nothing evicts the cache | **`#10976`** (OPEN — `#11004` is its merged census PR) | **Egress.** |
 | Raw turns + narrative in the graph | **`#10000`** (`P0-blocker`) | **Ingress**; larger than this epic. |
 | The record's authority / arming | **`#7879`** · **`#9548`** | **Authority.** |
@@ -141,7 +141,7 @@ across 8 modules, a cross-store join, two-boundary erasure, a mandatory offline 
 **Justified skip, stated as a skip:** for V1's evidence, `02-research.md` carries the external pass (graph
 filters post-filter ⇒ recall@10 **0.942 → 0.401 at 10 % selectivity**; `iterative_scan` recovering **0.847**
 at CPU/tail-latency cost; at **0.1 %** selectivity with *correlated* filters — ours are correlated — **0 rows
-in 683 ms** against a btree's 3.6 ms; **SIFT-128, 128-dim**, ours are **384-dim** — 1,536 is the stored *byte* width). It is parked with V1,
+in 683 ms** against a btree's 3.6 ms; **SIFT-128, 128-dim**, ours are **384-dim** — 1,536 is the stored *byte* width). It goes with `#4051`,
 where it will be used.
 
 ---

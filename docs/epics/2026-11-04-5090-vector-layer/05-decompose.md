@@ -180,7 +180,7 @@ requests; its census half is not.
 | not filed | because |
 |---|---|
 | **"decide where the vector index lives" (V1)** | Home is **§14.3**; architecture owner is **`#4333`**; `#5090` is a **consumer** (changelog records the wrong-owner correction). Its deciding input cannot be measured today (§17.4.6). |
-| **create indexes for the four unindexed labels** | It **is** V1's content, and it commits four further resident HNSW structures. The lane brief forbids it without a stated non-reversal; there is none. |
+| **create indexes for the four unindexed labels** | It **is** §14.3 **V3**'s content (V1 settled only WHERE the index lives), and it commits four further resident HNSW structures. The lane brief forbids it without a stated non-reversal; there is none. |
 | **self-host FalkorDB** | **D11 deferred it; owner, 2026-11-05: not now.** Recorded, not scoped. |
 | **embedding compression / quantization** | **§15's do-not-re-invent list** — *"no engine to apply it to"*. |
 | **filtered-ANN recall measurement** | Evidence *for a move*. No move is planned ⇒ no consumer. Parked in `02-research.md` with its numbers, so it is not lost. |
