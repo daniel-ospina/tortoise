@@ -1287,11 +1287,53 @@ def source_fts_probe(g, phrase: str, *,
         "phrase": phrase,
         "hits": len(rows or ()),
         "urls": urls,
+        # ⛔ A HIT WHOSE URL IS NOT A STRING IS NOT ADDRESSABLE AND MUST NOT
+        # DISAPPEAR (#11536 review round 2, P2): `urls` drops it, so it would be
+        # neither residue, lexicon, stale, foreign nor unread — a hit in `hits`
+        # that no bucket sees, and the run would certify around it. The census has
+        # the same first-class bucket for the same reason (`unaddressable`).
+        "unresolved": max(0, len(rows or ()) - len(urls)),
         "truncated": len(rows or ()) >= _FTS_PROBE_LIMIT,
         "ran": bool(leg.get("ran")),
         "degraded": bool(leg.get("degraded")),
         "reason": leg.get("reason"),
     }
+
+
+#: A hit on an episodic session `:Source` that carries NO text at all. The index
+#: is declared on `_searchText`, so a match on such a node is a STALE INDEX ENTRY
+#: — the pair was cleared and the token survived — which is THE leak #11161 names.
+#: Measured on FalkorDB 4.20.6 the entry does go away with the property, so this
+#: is fail-closed rather than a live population; it must not certify as a "stem
+#: collision" if an engine (or a re-index) ever leaves one behind.
+#:
+#: ⚠️ AND `lexicon` MUST MEAN **PROVEN**, not "not residue" — which is the bug this
+#: bucket was split out to close (#11536 review round 2, P1). "Not pre-fix prose"
+#: is not "the post-fix lexicon": a CLEARED node is neither, and folding it into
+#: `lexicon` let the exact shape the leg exists for certify.
+
+def _is_proven_lexicon(props: Mapping[str, Any]) -> bool:
+    """True only when the node's pair is PROVABLY the post-#10852 derivation.
+
+    Two proofs, both of them the repo's own: the display PREFIX on ``summary``
+    (:data:`SESSION_SOURCE_SUMMARY_PREFIX` — the witness every writer emits), or
+    :func:`_proves_the_lexicon`'s exact ``_searchText == ", ".join(topics)`` for a
+    ``record-restore``d node, which has no ``summary`` at all.
+    """
+    summary = props.get(_SUMMARY)
+    if isinstance(summary, str) and summary.startswith(
+            SESSION_SOURCE_SUMMARY_PREFIX):
+        return True
+    return _proves_the_lexicon(props)
+
+
+def _has_no_text(props: Mapping[str, Any]) -> bool:
+    """True when the node's two indexed text columns both carry nothing."""
+    for key in (_SUMMARY, _SEARCH_TEXT):
+        value = props.get(key)
+        if isinstance(value, str) and value.strip():
+            return False
+    return True
 
 
 def classify_fts_hits(g, urls, *,
@@ -1304,12 +1346,22 @@ def classify_fts_hits(g, urls, *,
     applies the module's own :func:`carries_pre_lexicon_prose`, so the two halves
     cannot drift from the census.
 
-    Returns ``{"residue": [...], "lexicon": [...], "unread": [...]}``. A url the
-    read did not return is ``unread`` — a hit that could not be classified is
-    NOT evidence either way, and the caller must not fold it into ``lexicon``.
+    Returns ``{"residue": [...], "lexicon": [...], "stale": [...], "foreign": [...],
+    "unread": [...]}``. A url the read did not return is ``unread`` — a hit that
+    could not be classified is NOT evidence either way, and the caller must not
+    fold it into ``lexicon``.
+
+    ⛔ FOUR buckets, because "not residue" is not "lexicon" (#11536 review round 2,
+    P1): a CLEARED node carries neither the prose nor the lexicon, so a two-way
+    split put the very leak this leg exists for into the benign bucket. ``stale`` is
+    that shape (an episodic session Source with NO text at all — the index entry
+    outlived the property), and ``foreign`` is a Source outside this population (a
+    non-episodic source with its own `_searchText`, whose match says nothing about
+    this repair).
     """
     wanted = [u for u in (urls or ()) if isinstance(u, str) and u]
-    out: dict = {"residue": [], "lexicon": [], "unread": []}
+    out: dict = {"residue": [], "lexicon": [], "stale": [], "foreign": [],
+                 "unread": []}
     if not wanted:
         return out
     try:
@@ -1333,8 +1385,12 @@ def classify_fts_hits(g, urls, *,
             out["unread"].append(url)
         elif carries_pre_lexicon_prose(props):
             out["residue"].append(url)
-        else:
+        elif _is_proven_lexicon(props):
             out["lexicon"].append(url)
+        elif is_episodic_source_node(props) and _has_no_text(props):
+            out["stale"].append(url)
+        else:
+            out["foreign"].append(url)
     return out
 
 
@@ -1430,12 +1486,20 @@ def probe_fts(g, phrases, *, control: bool = True,
         "entity_type": FTS_PROBE_ENTITY_TYPE,
         "limit": _FTS_PROBE_LIMIT,
         "probes": measured,
+        # ⛔ A HIT ON A STALE INDEX ENTRY IS THE LEAK, not a stem collision: the
+        # node carries no text at all and the index still answered (#11536 review
+        # round 2, P1). It is named apart from `residue` so the refusal can say
+        # which shape was found — "the pair is still on the node" and "the pair is
+        # gone but the index entry survived" are different repairs.
         "leaked": [p["phrase"] for p in measured if p["residue"]],
+        "stale": [p["phrase"] for p in measured if p["stale"]],
         "stem_only": [p["phrase"] for p in measured
-                      if p["hits"] and not p["residue"] and not p["unread"]],
+                      if p["hits"] and not p["residue"] and not p["stale"]
+                      and not p["unread"]],
         "unmeasurable": [p["phrase"] for p in measured
                          if not p["ran"] or p["degraded"]],
         "truncated": [p["phrase"] for p in measured if p["truncated"]],
+        "unresolved": sum(p.get("unresolved") or 0 for p in measured),
         "control": None,
     }
     if control:
