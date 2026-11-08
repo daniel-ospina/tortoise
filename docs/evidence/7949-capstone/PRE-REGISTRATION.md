@@ -252,10 +252,10 @@ the `:aboutSubject`/`:aboutObject` edge is written at all), plus `TORTOISE_LABEL
 `TORTOISE_STATE_VALUE_VERBATIM`, pinned to **`1`** because its absent state is already ON
 (`extractor_v2._state_value_verbatim_enforced`, `env_flag(…, True)`) and it is read PER POINT at
 the emit site, where it decides whether a REWRITTEN value is WITHHELD (`=0` writes what the shipped
-default withholds). The last seven are the cycle-7 to
+default withholds). The cycle-7 to
 cycle-11 review findings (`TORTOISE_CONTEXT_ENRICH`/`TORTOISE_JSON_MODE`, then `TORTOISE_CHANGE_FEED`,
 then `TORTOISE_IDENTIFIER_TOKENS`, then `TORTOISE_SUBJECT_TAU_HI`/`_LO`, then
-`TORTOISE_STATE_VALUE_VERBATIM`): each sits on the acceptance
+`TORTOISE_STATE_VALUE_VERBATIM`) each sits on the acceptance
 path and was in no pin, no ledger row and no closure. The authoritative list is
 `capstone_measure.DOOR_PINNED_OFF` / `DOOR_PINNED_ON`, which `tests/test_7949_c2_door.py` resolves
 against the tree — this sentence is the reader's map, not the control. The set
@@ -282,11 +282,15 @@ to the EMPTY SET while sitting on the write path (`bind_point_subjects`, inside
 `TORTOISE_SUBJECT_TAU_HI=0.99`) — so the arm seams, the mention arm, the per-turn embed
 rewrite, the request's `response_format`, the change-feed writer, the identifier-token writer and the
 confidence-gated subject binder are inside the derived
-surface, not hand-listed beside it. That list grew one review round at a time (the last five are
-`TORTOISE_CONTEXT_ENRICH`/`TORTOISE_JSON_MODE`, then `TORTOISE_CHANGE_FEED`, then
-`TORTOISE_IDENTIFIER_TOKENS` in cycle 9, then `TORTOISE_SUBJECT_TAU_HI`/`_LO` in cycle 10, then
-`TORTOISE_STATE_VALUE_VERBATIM` in cycle 11, each found by a
-measured mutation that left the previous derivation green), which is the honest reason to state
+surface, not hand-listed beside it. That list grew one review round at a time — named POSITIONALLY,
+because a count in this sentence went stale every time it was written: `TORTOISE_CONTEXT_ENRICH` /
+`TORTOISE_JSON_MODE` (cycle 7), then `TORTOISE_CHANGE_FEED` (cycle 8), then `TORTOISE_IDENTIFIER_TOKENS`
+(cycle 9), then `TORTOISE_SUBJECT_TAU_HI`/`_LO` (cycle 10), then `TORTOISE_STATE_VALUE_VERBATIM`
+(cycle 11) — and the DISCOVERY ROUTES are not the same, so neither is generalised: cycles 7–10 were
+each found by a measured mutation that left the previous derivation green, while cycle 11 was found by
+the **CENSUS** (the switch landed inside `path_modules` and redded this closure for every PR until it
+was classified), which is the closure doing its own job rather than a mutation finding it. That is the
+honest reason to state
 it as a CLOSURE over the reads INSIDE those modules rather than as a list somebody curated — not
 a closure over everything the path reaches, which is the gap #11410 records. Every one is written in-process, **read back**, and a run whose read-back
 disagrees is **refused** (`probes/capstone_measure.py`); the measurement switches were
