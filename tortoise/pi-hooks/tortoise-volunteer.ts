@@ -1,13 +1,19 @@
-// tortoise-hook-version: 1
+// tortoise-hook-version: 18
 // Tortoise volunteering-memory seam for Pi — the per-turn READ half
 // (epic #2080, issue #2119).
 //
-// The `tortoise-hook-version` marker above is the install-contract generation
-// for this seam (see tortoise/hook_install.py): column-0, one per file, bumped
-// on ANY behavioural edit. The capture extension beside this one carries its
-// own marker; `hook_install.contract_version_for("pi")` reads BOTH and refuses
-// to answer when they disagree, so a half-upgraded pair is a repo defect the
+// The `tortoise-hook-version` marker above is the INSTALL-CONTRACT generation
+// of the Pi seam (see tortoise/hook_install.py): column-0, one per file, bumped
+// on any change to the shipped bytes. This file ENTERS at 18 — the generation
+// `tortoise-capture.ts` is at, not a fresh 1 — because the two artifacts are
+// written by ONE install run and are graded as one seam:
+// `hook_install.contract_version_for("pi")` reads both markers and refuses to
+// answer when they disagree, so a half-upgraded pair is a repo defect the
 // tests catch rather than an install that silently half-works.
+// `hook_install._grade_optional_artifact` grades an INSTALLED copy of this
+// file whenever it is present (absent is not drift — a capture-only install
+// never opted into injection), so a stale read seam reads as `stale-artifact`:
+// "reinstall with `tortoise install pi`".
 //
 // WHY THIS FILE EXISTS (#2119 re-measured 2026-11-08)
 // ---------------------------------------------------

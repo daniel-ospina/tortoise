@@ -311,6 +311,13 @@ CURSOR_HOOKS_SUBDIR = "hooks"
 #: ImportError rather than a test failure, so keep the dependency one-way.
 PI_EXTENSION_NAME = hook_install.ARTIFACT_CONTRACTS["pi"].install_name
 
+#: Pi's per-turn READ extension (#2119), written by the SAME install run beside
+#: the capture artifact.  Derived for the same #4680 reason as the line above:
+#: the installer, the ``--uninstall`` verb and the drift detector must all name
+#: the file the contract declares, or one of them edits a path nobody wrote.
+PI_VOLUNTEER_EXTENSION_NAME = (
+    hook_install.ARTIFACT_CONTRACTS["pi"].volunteer_source.name)
+
 #: The legacy agent-infra extension directory name (#3713).  Pi's loader does
 #: no basename dedupe, so ``tortoise-capture.ts`` and
 #: ``tortoise-capture/index.ts`` are TWO extensions that both POST the same
@@ -1679,6 +1686,97 @@ def startup_seam_report(*, home: str | os.PathLike[str] | None = None,
     return sentences
 
 
+def _install_pi_volunteer_artifact(
+        ext_dir: Path, home: Path, *, dry_run: bool) -> tuple[bool, list[str], str]:
+    """Write Pi's per-turn READ extension beside the capture one (#2119).
+
+    Returns ``(changed, actions, error)`` — the same triple ``_install_pi``
+    accumulates, so a caller reports both artifacts of the seam as one install.
+
+    Every guard the capture artifact gets, this one gets, from the SAME
+    helpers: the symlink-escape check against the install home, the
+    non-regular refusal, the ownership refusal before any write, the write-free
+    probe (so ``--dry-run`` and a real run agree on an impossible home), the
+    backup of a differing copy that IS ours, and an atomic write.  A second
+    artifact with weaker guards would be the path a hostile or broken shape
+    slips through, and it would be invisible because the capture half passed.
+
+    The verification is a BYTE comparison against the shipped source after the
+    write — the installer must not claim an artifact it did not land (#10241).
+    ``assert_seam_target`` still grades the capture artifact only; this is that
+    assertion's peer for the read half, assessed here because the read half is
+    OPTIONAL on disk (a capture-only install has no file to assert).
+    """
+    src = hook_install.ARTIFACT_CONTRACTS["pi"].volunteer_source
+    if src is None or not src.is_file():
+        return False, [], (
+            f"shipped Pi read seam not found at {src} — this install is "
+            "incomplete (broken package?). Reinstall tortoise.")
+    dst = ext_dir / PI_VOLUNTEER_EXTENSION_NAME
+    payload = src.read_bytes()
+
+    guard_root, guard_label = _install_guard("pi", home)
+    escape = _symlink_escape(guard_root, dst, label=guard_label)
+    if escape:
+        return False, [], f"Refusing: {escape}"
+    non_regular = _refuse_non_regular(dst)
+    if non_regular:
+        return False, [], non_regular
+    foreign = _foreign_install_refusal(dst, payload)
+    if foreign:
+        return False, [], foreign
+    unwritable = _preflight_probe([ext_dir])
+    if not unwritable and not dry_run:
+        unwritable = _preflight_writable([ext_dir])
+    if unwritable:
+        return False, [], f"Refusing: {unwritable}"
+
+    actions: list[str] = []
+    changed = False
+    try:
+        if not _is_regular_unchanged(dst, payload):
+            if dst.exists() and dst.is_file() and not dst.is_symlink():
+                # A differing copy that passed the ownership guard is a stale
+                # or locally edited Tortoise extension — preserve it first.
+                backup = _backup_path(dst)
+                if dry_run:
+                    actions.append(f"[dry-run] would back up {dst} → {backup}")
+                else:
+                    _atomic_bytes(backup, dst.read_bytes(), 0o600)
+                    actions.append(f"backed up {dst} → {backup}")
+            if dry_run:
+                actions.append(f"[dry-run] would install {dst} "
+                               "(per-turn read seam)")
+            else:
+                _atomic_bytes(dst, payload, 0o644)
+                actions.append(f"installed {dst} (per-turn read seam)")
+            changed = True
+    except OSError as e:
+        state = (f"the per-turn read seam is NOT fully installed, and the "
+                 f"{len(actions)} action(s) above DID land."
+                 if actions else
+                 "the per-turn read seam is NOT installed — nothing was "
+                 "written.")
+        return changed, actions, (
+            f"install failed at "
+            f"{getattr(e, 'filename', None) or dst}: "
+            f"{e.__class__.__name__}: {e} — {state} Re-run once the cause is "
+            "fixed; `tortoise hooks status` reports what is on disk.")
+
+    if not dry_run:
+        try:
+            landed = dst.read_bytes()
+        except OSError as e:
+            return changed, actions, (
+                f"the per-turn read seam could not be re-read after the "
+                f"write: {dst} → {e.__class__.__name__}: {e}")
+        if landed != payload:
+            return changed, actions, (
+                f"the per-turn read seam at {dst} does not match the shipped "
+                f"{src} after the write — something else is writing this path")
+    return changed, actions, ""
+
+
 def _install_pi(home: Path, *, dry_run: bool) -> InstallResult:
     harness = "pi"
     ext_dir = pi_home(home)
@@ -1822,6 +1920,20 @@ def _install_pi(home: Path, *, dry_run: bool) -> InstallResult:
         if divergence:
             return InstallResult(harness, changed=changed,
                                  actions=tuple(actions), error=divergence)
+
+    # (#2119) The seam's SECOND artifact — the per-turn READ extension. Written
+    # after the capture half is verified, so a refused/failed capture install
+    # never leaves a read seam behind (the read half alone injects context and
+    # files nothing: a user would see memory appearing and never learn that
+    # capture is broken). Its guards and its post-write byte check live in
+    # `_install_pi_volunteer_artifact`, deliberately the same ones.
+    v_changed, v_actions, v_error = _install_pi_volunteer_artifact(
+        ext_dir, home, dry_run=dry_run)
+    changed = changed or v_changed
+    actions.extend(v_actions)
+    if v_error:
+        return InstallResult(harness, changed=changed,
+                             actions=tuple(actions), error=v_error)
 
     return InstallResult(harness, changed=changed, actions=tuple(actions))
 

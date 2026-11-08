@@ -5530,16 +5530,13 @@ def _cmd_install_hooks(args) -> int:
     # (the cline target since #2124; the pre-#2124 `.cline/hooks` path is the
     # legacy one, removed by cline's own uninstall).
     if uninstall and harness == "pi":
-        # Derived from the install contract, never retyped (#3502). The
-        # `cursor` and `openclaw` sibling branches below already interpolate
-        # their layout; a literal here names a file the installer no longer
-        # writes the moment the contract's `install_name` moves — the exact
-        # hardcoded-copy drift class #3502 exists to close.
-        print("pi has no shell-hook read seam — nothing for --uninstall to "
-              "remove. The pi capture extension (~/.pi/agent/extensions/"
-              f"{_pi_capture_extension_name()}) is left in place; delete that "
-              "file to uninstall it.")
-        return 0
+        # #2119: Pi's read seam is NOT a shell-hook registration — it is the
+        # second extension file `tortoise install pi` writes beside the capture
+        # artifact, so `--uninstall` (documented as "the read-hook
+        # registration only, never the capture scripts") removes exactly that
+        # file and leaves capture alone. Before #2119 there was no read seam to
+        # remove and this branch printed a no-op sentence instead.
+        return _uninstall_pi_volunteer(args)
     # `cursor` has no shell-hook read seam either: routing `--uninstall` to
     # `_install_read_hook` exited 1 with "no shell-hook read seam" while the
     # HOME-scoped capture hook stayed live — the opposite of what a user
@@ -5687,15 +5684,71 @@ def _pi_capture_extension_name() -> str:
     never existed anywhere in this repo or in agent-infra — and promise a
     per-turn context injection the SHIPPED extension does not do. Pi's
     extension API does have that seam (``before_agent_start`` can inject a
-    message, and our own extensions use it); what is missing is Tortoise's
-    wiring of it (#2119, still open). Saying otherwise is a false claim about
-    the harness, not honest copy. Nothing failed when the prose drifted from
-    the artifact because nothing coupled the two; deriving it here is that
-    coupling.
+    message, and our own extensions use it) — Tortoise's wiring of it is
+    ``_pi_volunteer_extension_name()`` below, shipped by #2119. Saying
+    otherwise was a false claim about the harness, not honest copy. Nothing
+    failed when the prose drifted from the artifact because nothing coupled the
+    two; deriving it here is that coupling.
     """
     from tortoise.capture_install import PI_EXTENSION_NAME
 
     return PI_EXTENSION_NAME
+
+
+def _pi_volunteer_extension_name() -> str:
+    """The Pi READ seam's real install name, derived from the contract (#2119).
+
+    A literal here would be the same hardcoded-prose drift #3502 closed for the
+    capture extension: the sentence a user acts on must name the file the
+    installer writes.
+    """
+    from tortoise.capture_install import PI_VOLUNTEER_EXTENSION_NAME
+
+    return PI_VOLUNTEER_EXTENSION_NAME
+
+
+def _uninstall_pi_volunteer(args) -> int:
+    """`tortoise install pi --uninstall` — remove the per-turn READ seam.
+
+    Scoped exactly like the shell-hook harnesses' ``--uninstall``: it removes
+    the READ half and says what it left behind. Pi's read half is a file
+    (``tortoise-volunteer.ts``) rather than a settings.json entry, so removing
+    it is a delete of one path — and only a path this installer can prove it
+    wrote (``hook_install._looks_like_our_script``), because the extensions
+    directory is shared with every other extension the user installed.
+    """
+    from tortoise import hook_install as _hook_install
+    from tortoise.capture_install import PI_VOLUNTEER_EXTENSION_NAME
+
+    root = _hook_install.artifact_root("pi", Path.home())
+    target = (root / PI_VOLUNTEER_EXTENSION_NAME) if root is not None else None
+    if target is None:  # pragma: no cover - "pi" is a registered contract
+        print("pi has no registered artifact contract — nothing to remove.")
+        return 1
+    capture = _pi_capture_extension_name()
+    if not target.exists() and not target.is_symlink():
+        print(f"Pi per-turn memory injection is not installed ({target} is "
+              f"absent) — nothing to remove. The capture extension "
+              f"({capture}) is untouched.")
+        return 0
+    if not _hook_install._looks_like_our_script(target):
+        print(f"Refusing: {target} exists but does not look like a Tortoise "
+              "extension — nothing was removed. Move it aside yourself if you "
+              "are sure it is not another extension.", file=sys.stderr)
+        return 1
+    try:
+        target.unlink()
+    except OSError as e:
+        print(f"Cannot remove {target}: {e.__class__.__name__}: {e}",
+              file=sys.stderr)
+        return 1
+    print(f"removed {target} — per-turn memory injection is uninstalled.")
+    # The accounting rule (#3963/#3808 R14): a user who asked to uninstall must
+    # not conclude the whole seam is gone when capture is still live.
+    print(f"Note: `--uninstall` removes only the per-turn read seam. The "
+          f"capture extension ({capture}) is left in place and still files "
+          "sessions; delete that file to uninstall it.")
+    return 0
 
 
 def _install_capture_seam(args, install_capture) -> int:
@@ -5734,6 +5787,18 @@ def _install_capture_seam(args, install_capture) -> int:
         # be a lie (the action lines already said what WOULD happen).
         claim = "Pi capture extension installed. " if result.changed else ""
         print(f"{claim}{_PI_MCP_GUIDANCE}")
+        # #2119: name the READ half too. It is a separate extension file, and
+        # an injection seam that is silent by default (empty graph) is
+        # indistinguishable from one that never loaded — so the install says
+        # which file carries it and which switch turns on the visible surface.
+        print(f"Per-turn memory injection is installed as "
+              f"~/.pi/agent/extensions/{_pi_volunteer_extension_name()}: "
+              "`before_agent_start` runs the shared reflex over your prompt and "
+              "injects the why-context block silently. Set "
+              '`{"volunteer": {"display": true}}` in '
+              "~/.pi/agent/tortoise-config.json to render it (with the "
+              "surfaced-pointer marker) instead; TORTOISE_VOLUNTEER_DISABLE=1 "
+              "switches the seam off.")
     if args.harness == "codex" and not getattr(args, "dry_run", False):
         # #3818 P1-3: the capture registration is HOME-scoped ($CODEX_HOME/
         # hooks.json — the ONE hook source Codex 0.154.0 reads). Codex refuses
@@ -5957,8 +6022,11 @@ def _install_read_hook_impl(args) -> int:
               "(UserPromptSubmit → volunteer-turn.sh devin; Claude-hooks "
               "output contract)")
         print("  tortoise install pi      → ~/.pi/agent/extensions/"
-              f"{_pi_capture_extension_name()} (the capture extension; Pi has "
-              "no shell-hook read seam)")
+              f"{_pi_capture_extension_name()} (capture) + "
+              f"{_pi_volunteer_extension_name()} (the per-turn READ seam: "
+              "`before_agent_start` → the shared reflex → an injected "
+              "message). Pi's hooks ARE extensions, so there is no shell-hook "
+              "registration to merge)")
         print("  tortoise install cursor  → ~/.cursor/hooks.json "
               "(the sessionEnd capture hook + the sessionStart cold-context "
               "injection hook; Cursor has no per-turn shell-hook read seam — "
@@ -11956,19 +12024,29 @@ def _print_harness_instructions(harness: str) -> None:
         # activate it, contradicting both the install report and the dashboard's
         # Pi setup.
         #
-        # The replacement says what the extension DOES, and scopes the gap to
+        # The replacement says what the extensions DO, and scopes the gap to
         # Tortoise's wiring, NOT to Pi: Pi's extension API has a per-turn
         # injection seam (``before_agent_start`` injects a message, and our own
         # `skill-enforcer`/`loop-enforcer`/`cmux-session` extensions use it), so
         # "Pi cannot inject" would be a false impossibility claim of the same
-        # class as the promise it replaces. What is missing is Tortoise's use of
-        # that seam (#2119, still open).
+        # class as the promise it replaces.
+        #
+        # #2119 landed the wiring, so the honest copy changed again: BOTH
+        # artifacts are named (each derived from the install contract), and the
+        # sentence that said Pi injects nothing is GONE — keeping it would now
+        # be the same false claim in the other direction, and it is the one a
+        # user would act on by reaching for the MCP tools instead.
         _pi_ext = _pi_capture_extension_name()
+        _pi_vol = _pi_volunteer_extension_name()
         print(f"  ✅ {_pi_ext} extension captures your sessions into Tortoise.")
+        print(f"  ✅ {_pi_vol} extension injects graph context per turn: Pi's")
+        print("  `before_agent_start` runs the shared reflex over your prompt and")
+        print("  adds the why-context block to the turn (silent unless you set")
+        print('  `{"volunteer": {"display": true}}` in '
+              "~/.pi/agent/tortoise-config.json).")
         print(f"  {_PI_RESTART_GUIDANCE}")
-        print("  It files your sessions; it does not inject context per turn yet")
-        print("  (#2119). Call tortoise_help() or the Tortoise MCP tools when you")
-        print("  want graph context.")
+        print("  Call tortoise_help() or the Tortoise MCP tools when you want to")
+        print("  query the graph yourself.")
         print("  Add tortoise MCP to your .mcp.json:")
         print("    " + _json.dumps(_harness_stdio_config("pi"), indent=4).replace("\n", "\n    "))
     if harness == "claude" or harness == "multiple":

@@ -6273,6 +6273,17 @@ surfaces:
   # for the very change it guards (neither this Python guard nor the
   # extension's `node --test` suite ran). Dual-registered with `onboarding`.
   - test_pi_capture_hooks.py
+  # #2119: the Pi READ seam — `tortoise/pi-hooks/tortoise-volunteer.ts` (the
+  # artifact `tortoise install pi` writes beside the capture extension) and the
+  # `_install_pi` / `--uninstall` wiring in `tortoise/capture_install.py` +
+  # `tortoise/__main__.py`. `tortoise/pi-hooks/` matches no SOURCE_PATTERNS
+  # entry, so a pi-hooks-only diff selects `core` via the `tortoise/` fallback
+  # — and this is the arm that runs the real-seam check (the INSTALLED
+  # extension executed by node against the real reflex over a seeded graph) as
+  # well as the extension's own `node --test` suite. Dual-registered with
+  # `onboarding` (the install path a user's machine takes), the same #2938
+  # silent-drop class as its siblings above.
+  - test_pi_volunteer_seam.py
   # #3515: the store-sync BACKSTOP — `tortoise/pi-hooks/store-sync.ts` +
   # `cursor-store.ts`, driven through `tortoise store-sync` (a `__main__.py`
   # subcommand) as a PROCESS. Same selection reasoning as the sibling directly
@@ -7289,6 +7300,7 @@ surfaces:
   # (`startswith("supabase/")`) runs `.github/scripts/verify-cutover`, which
   # names this file.
   - test_provisioning_edge_function.py
+  - test_pi_volunteer_seam.py  # #2119: the Pi per-turn READ seam + its install/uninstall (dual-registered with `core`)
   - test_store_sync_worker.py  # #3515: the store-sync backstop (spool + Pi log) and its per-file cursor
   - test_retention_promise.py  # #4179: website/privacy.html horizon + canonical-doc link
   - test_signup_form_safety.py

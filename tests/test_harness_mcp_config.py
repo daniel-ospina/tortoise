@@ -34,7 +34,10 @@ from tortoise.__main__ import (  # noqa: I001
     _onboard_ready_lines,
     _print_harness_instructions,
 )
-from tortoise.capture_install import PI_EXTENSION_NAME
+from tortoise.capture_install import (
+    PI_EXTENSION_NAME,
+    PI_VOLUNTEER_EXTENSION_NAME,
+)
 from tortoise.auth import API_KEY_PREFIXES
 from tortoise.oauth import ACCESS_TOKEN_PREFIX, REFRESH_TOKEN_PREFIX
 
@@ -594,17 +597,22 @@ class TestPrintHarnessInstructions:
         assert "tortoise-context" not in out, (
             "`tortoise-context` has never existed — the Pi seam is the capture "
             "extension declared in hook_install.ARTIFACT_CONTRACTS")
-        # The gap is Tortoise's wiring of Pi's injection seam, NOT a ceiling in
+        # The gap was Tortoise's wiring of Pi's injection seam, NOT a ceiling in
         # Pi: Pi's extension API exposes `before_agent_start`, which injects a
         # message (our own `skill-enforcer`/`loop-enforcer`/`cmux-session`
-        # extensions use it). So do NOT assert "auto-inject" is absent in the
-        # abstract — that would red the build for copy that is TRUE once #2119
-        # lands. Pin the honest disclosure about the SHIPPED extension instead.
-        assert "does not inject context per turn" in out, (
-            "the Pi block must disclose that the SHIPPED extension is capture "
-            "only (Tortoise's per-turn injection is #2119, still open)")
-        assert "#2119" in out, (
-            "the disclosure must point at the issue that wires the seam")
+        # extensions use it). #2119 landed that wiring, so the block now names
+        # BOTH shipped artifacts and the capture-only disclaimer is GONE — it
+        # would now be the same false claim in the other direction, and the one
+        # a user would act on by reaching for the MCP tools instead. Both names
+        # are asserted here because the claim is only true while the installer
+        # writes those two files (`install_capture("pi")`, pinned by
+        # `tests/test_pi_volunteer_seam.py`).
+        assert "does not inject context per turn" not in out, (
+            "the capture-only disclaimer is FALSE since #2119 — an `install "
+            "pi` writes the per-turn read seam")
+        assert PI_VOLUNTEER_EXTENSION_NAME in out, (
+            "the Pi block must name the per-turn READ extension the installer "
+            "writes")
         assert (REPO_ROOT / "tortoise" / "pi-hooks" / PI_EXTENSION_NAME).is_file(), (
             "the advertised extension must be a real file the installer copies")
 
@@ -683,6 +691,13 @@ class TestPrintHarnessInstructions:
         for contract in ARTIFACT_CONTRACTS.values():
             names.add(contract.install_name)
             names.add(Path(contract.install_name).stem)
+            # #2119: a seam may ship a SECOND artifact beside its graded one
+            # (Pi's per-turn read extension). Both are declared by the same
+            # contract, so both may legitimately be advertised — and neither
+            # may be asserted as a literal anywhere.
+            if contract.volunteer_source is not None:
+                names.add(contract.volunteer_source.name)
+                names.add(Path(contract.volunteer_source.name).stem)
         return names
 
 
