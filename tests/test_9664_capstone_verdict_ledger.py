@@ -578,7 +578,7 @@ def test_a_sha_that_names_no_commit_is_invalid(monkeypatch):
     assert "names no commit" in str(excinfo.value)
 
 
-def test_an_unprovable_sha_is_not_a_defect(monkeypatch):
+def test_an_unprovable_sha_is_not_a_defect(monkeypatch, capsys):
     """The other half of the shallow-clone fix, and the half that had no pin.
 
     Cycle 2 rejected `_commit_exists` because a `fetch-depth: 1` checkout makes a
@@ -590,6 +590,11 @@ def test_an_unprovable_sha_is_not_a_defect(monkeypatch):
     and the shallow test SKIPS here (this checkout is not shallow). Asserted on
     the wiring, for the same reason the `absent` arm is: a shallow clone cannot
     produce the input that decides it.
+
+    ⛔ …and abstaining must not be SILENT (#11217). `render()` prints
+    `measured_at.sha` as provenance unconditionally, so a check that verifies
+    nothing while the sha is still printed as fact is the substitution the whole
+    function exists to prevent. The row is not blamed AND the abstention says so.
     """
     monkeypatch.setattr(cl, "_commit_state", lambda sha, repo_root: "unprovable")
     data = _ledger([_row("A")])
@@ -597,6 +602,44 @@ def test_an_unprovable_sha_is_not_a_defect(monkeypatch):
     # `validate` RAISES on a problem and returns the normalized rows otherwise, so
     # "not blamed" is asserted by the call simply not raising.
     assert [row["id"] for row in cl.validate(data)] == ["A"]
+    assert "UNPROVABLE" in capsys.readouterr().err, (
+        "the abstention must be ANNOUNCED — the sha is still rendered as provenance, "
+        "so silence is the substitution this check exists to prevent"
+    )
+
+
+def test_the_object_probe_never_lazy_fetches(monkeypatch):
+    """A partial clone must not turn a missing-commit probe into a promisor REFETCH (#11217).
+
+    `--filter=blob:none` clones report `--is-shallow-repository` as FALSE, so the
+    shallow probe does not cover them. An absent sha then makes `git cat-file`
+    reach for the origin, which took 2m29s here before exiting 128.
+
+    ⛔ This pins the ENV, not a verdict: the measured fetch exited 128 either way,
+    so the state was `absent` with and without it. What the env buys is latency,
+    and the flip it costs (a fetch that would have materialised a commit the
+    promisor holds but this clone's refspec does not is suppressed, so a real sha
+    can answer `absent`) is recorded in `_commit_state`'s docstring rather than
+    hidden here.
+    """
+    seen: dict[str, object] = {}
+
+    class _Proc:
+        returncode = 0
+        stdout = ""
+
+    def _fake_run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        seen["env"] = kwargs.get("env")
+        return _Proc()
+
+    monkeypatch.setattr(cl.subprocess, "run", _fake_run)
+    assert cl._commit_state("0" * 40) == "exists"
+    assert seen["cmd"][:2] == ["git", "cat-file"], seen["cmd"]
+    assert (seen["env"] or {}).get("GIT_NO_LAZY_FETCH") == "1", (
+        "the object probe must suppress the promisor refetch: a partial clone is "
+        "not shallow, so nothing else stops it"
+    )
 
 
 def test_dropping_rows_without_moving_the_pin_is_invalid(tmp_path):
