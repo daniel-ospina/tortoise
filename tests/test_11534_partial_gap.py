@@ -440,23 +440,58 @@ def test_an_operator_only_answer_is_not_recorded_as_zero_additions(monkeypatch):
     disclose it either (the detector scores candidate TEXT, and no span is
     un-covered merely because an operator is absent), which is why the row
     asserts them UNCHANGED alongside the non-zero addition.
+
+    ⛔ THE FIXTURE IS THE **CONTRACT** SHAPE, and the first version of this row
+    was not: it invented ``{kind, source, target, content}``, which no producer
+    emits, so it passed while a real operator still recorded zero
+    (``_OUTPUT_SCHEMA``: ``{"src": str, "dst": str, "op_type": ...}`` — no
+    ``name``, no ``content``). Both shapes are exercised below, because the
+    counter must not under-count an operator the merge accepts either.
     """
-    op = {"kind": "causes",
-          "source": {"name": "the hydrate stage"},
-          "target": {"name": "the wire stage"},
-          "content": "the hydrate stage shares code with the wire stage"}
+    contract_op = {"src": "the hydrate stage", "dst": "the wire stage",
+                   "op_type": "IMPL"}
     model = _Model(gap_answer=json.dumps(
-        {"entities": [], "events": [], "operators": [op], "points": []}))
+        {"entities": [], "events": [], "operators": [contract_op],
+         "points": []}))
     out = _run(monkeypatch, model)
     assert model.calls.count("gap_fill") == 1, "the stage must have fired"
     stats = out["stats"]["partial_gap_fill"]
     assert out["embed_list"]["operators"], (
         "non-vacuity: the operator must actually be in the embed list")
-    assert stats["added_items"] == 1
+    assert stats["added_items"] == 1, (
+        "the CONTRACT-shaped operator did not reach the embed list")
     assert stats["added_by_section"] == {"operators": 1}
     # the detector cannot see this addition — the very reason a separate count
     # is needed, and the reason `added_items: 0` was so believable.
     assert stats["flagged_before"] == stats["flagged_after"]
+
+
+def test_an_operator_carrying_only_name_or_content_is_still_counted(
+        monkeypatch):
+    """The counter's operator arm is ADDITIVE, not a contract filter.
+
+    ``merge_embed_lists`` merges an operator-shaped item whether or not it is
+    contract-valid, so a predicate that required ``src``/``dst``/``op_type``
+    would under-count a merged item — the same false zero in the other
+    direction. An operator carrying only ``content`` (or only ``name``) is
+    therefore counted too.
+    """
+    off_contract = {"kind": "causes",
+                    "content": "the hydrate stage shares code with the wire stage"}
+    model = _Model(gap_answer=json.dumps(
+        {"entities": [], "events": [], "operators": [off_contract],
+         "points": []}))
+    out = _run(monkeypatch, model)
+    stats = out["stats"]["partial_gap_fill"]
+    assert out["embed_list"]["operators"], "non-vacuity: it merged"
+    assert stats["added_items"] == 1
+    assert stats["added_by_section"] == {"operators": 1}
+    # ... and an EMPTY operator adds nothing, so the arm is not counting noise.
+    model = _Model(gap_answer=json.dumps(
+        {"entities": [], "events": [], "operators": [{}], "points": []}))
+    stats = _run(monkeypatch, model)["stats"]["partial_gap_fill"]
+    assert stats["added_items"] == 0
+    assert "added_by_section" not in stats
 
 
 def test_coverage_suspect_is_false_on_that_fixture():
@@ -625,16 +660,39 @@ def test_the_census_whitelist_is_the_merges_keep_set():
     Pinned here rather than by sharing a constant, because sharing one moves
     every line in `extractor_v2.py` and re-stales the #7949 bundle's absolute
     cites — a 311-number re-derivation for a latent hazard a pin closes.
+
+    ⛔ AND THE PIN WAS ONE-DIRECTIONAL UNTIL THE #11554 REVIEW (P2): it iterated
+    `_OUTPUT_SCHEMA` only, so it could not see the direction that LOSES content
+    — a channel `merge_embed_lists` KEEPS that the census does not know about.
+    `mention_held` was exactly that: the merge unions it by surface, the census
+    called it malformed, and a `mention_held` row was dropped and recorded as a
+    fabricated `gap_fill_shape_error`. The loop below now covers BOTH halves of
+    the keep-set, and asserts the census's own answer (`_unknown_delta_sections`)
+    as well as the merge's behaviour, so the two cannot drift in either
+    direction.
     """
-    for section in v2._OUTPUT_SCHEMA:
-        merged = v2.merge_embed_lists({}, {section: [{"content": "x"}]})
+    for section in (*v2._OUTPUT_SCHEMA, *v2._MERGE_KEPT_EXTRA_SECTIONS):
+        # `mention_held` rows are keyed by SURFACE, not by `content` — a probe
+        # item that does not satisfy the section's own row shape merges to an
+        # EMPTY list and the assertion below would read as "the merge drops it".
+        _item = ({"surface": "it", "rule_id": "referentiality.pronoun"}
+                 if section == "mention_held" else {"content": "x"})
+        merged = v2.merge_embed_lists({}, {section: [_item]})
         assert merged.get(section), (
-            f"`_OUTPUT_SCHEMA` names {section!r}, so the census treats it as a known "
-            "section — but merge_embed_lists DROPS it, which is exactly the silent "
-            "drop the census exists to catch")
+            f"`{section}` is treated as a KNOWN channel, so the census does not "
+            "flag it — but merge_embed_lists DROPS it, which is exactly the "
+            "silent drop the census exists to catch")
+        assert v2._unknown_delta_sections({section: [_item]}) == [], (
+            f"`{section}` is KEPT by the merge, so the census must not classify "
+            "it as malformed — that drops it AND records a shape error for a "
+            "valid answer")
     assert not any(v2.merge_embed_lists({}, {"items": [{"content": "x"}]})), (
-        "a key outside `_OUTPUT_SCHEMA` is dropped by the merge — which is why the "
+        "a key outside the keep-set is dropped by the merge — which is why the "
         "census must classify it as malformed rather than let it vanish silently")
+    assert v2._unknown_delta_sections({"items": [{"content": "x"}]}) == ["items"], (
+        "... and the census DOES name it")
+    assert v2._unknown_delta_sections({"items": []}) == [], (
+        "an EMPTY unknown key adds nothing, so it is not a shape error")
 
 
 def _long_narrative_model(narrative, **kw):

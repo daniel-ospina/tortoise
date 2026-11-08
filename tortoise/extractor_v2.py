@@ -13078,19 +13078,51 @@ def _candidate_section_counts(embed_list: object) -> dict[str, int]:
     disclose it either: the detector is lexical over candidate text and an
     operator's own text is not part of what it scores.
 
-    The counting predicate is the extractor's own (``name`` or ``content``,
-    non-empty) — the rule ``vet_gate._item_text`` names the extractor as the
+    The counting predicate is the extractor's own — ``name`` or ``content``,
+    non-empty — the rule ``vet_gate._item_text`` names the extractor as the
     authority for — so the three VET sections count exactly as ``check_batch``
     counted them and ``added_items`` does not shift meaning for a points-only
-    answer.
+    answer. **EXCEPT for operators**, which have neither field: see
+    :func:`_candidate_item_is_content`.
     """
     counts: dict[str, int] = {}
     for section in _CANDIDATE_SECTIONS:
         counts[section] = sum(
             1 for item in _section_list(embed_list, section)
             if isinstance(item, Mapping)
-            and str(item.get("name") or item.get("content") or "").strip())
+            and _candidate_item_is_content(section, item))
     return counts
+
+
+def _candidate_item_is_content(section: str, item: Mapping) -> bool:
+    """Does this item carry IDENTITY, for a per-section candidate COUNT?
+
+    ⛔ **NOT ``name or content`` FOR OPERATORS** (#11554 review, P1). The
+    operator contract in ``_OUTPUT_SCHEMA`` is
+    ``{"src": str, "dst": str, "op_type": "IMPL|NAND"}`` — no ``name``, no
+    ``content`` — so a name-or-content predicate counts a CONTRACT-SHAPED
+    operator as absent, and the false zero this counter exists to remove comes
+    straight back one layer down: measured, a model returning
+    ``[{"src": "the hydrate stage", "dst": "the wire stage", "op_type":
+    "IMPL"}]`` put the operator in ``embed_list["operators"]`` and still
+    recorded ``added_items: 0`` with no ``added_by_section``. The first version
+    of this counter had exactly that hole, and the row that was supposed to pin
+    it passed only because its fixture invented a ``{kind, source, target,
+    content}`` operator that no producer emits.
+
+    So the operator arm ADDS the fields that ARE its identity — the same triple
+    ``_merge_key`` identifies the section by — to ``check_batch``'s shared
+    ``name``/``content`` rule, which stays as every other section's rule so the
+    two counters still agree where they overlap. The arm is ADDITIVE on purpose:
+    ``merge_embed_lists`` merges an operator-shaped item whether or not it is
+    contract-valid, so a predicate that required the contract tuple would
+    under-count a merged item — the same false zero, in the other direction.
+    """
+    if section == "operators" and any(
+            str(item.get(field) or "").strip()
+            for field in ("src", "dst", "op_type")):
+        return True
+    return bool(str(item.get("name") or item.get("content") or "").strip())
 
 
 def extract_session_v2(model, conversation: list[dict], *, sdk=None,
@@ -13468,13 +13500,14 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                 # state no claim", the false record that branch is reserved for,
                 # for a WRAPPED answer (`{"items": [...]}`, `{"claims": [...]}`,
                 # or a bare item `_parse_json_robust` unwrapped) that is a SHAPE
-                # error, not nothing: `_OUTPUT_SCHEMA` == the merge's keep-set,
-                # pinned by `test_the_census_whitelist...` (round 6), so a section
-                # added to one set and not the other reds that row.
-                if isinstance(added, dict):
-                    bad_sections = bad_sections + [
-                        k for k, v in added.items()
-                        if k not in _OUTPUT_SCHEMA and v]
+                # error, not nothing: `_OUTPUT_SCHEMA` + `mention_held` == the
+                # merge's KEEP-SET, pinned by `test_the_census_whitelist...`
+                # (round 6, made bidirectional in the #11554 review), so a
+                # section added to one set and not the other reds that row.
+                # ⛔ The keep-set is NOT `_OUTPUT_SCHEMA` alone — the merge also
+                # keeps `mention_held` (see `_MERGE_KEPT_EXTRA_SECTIONS`), and
+                # asking only the schema classified that channel as malformed.
+                bad_sections = bad_sections + _unknown_delta_sections(added)
                 for _sec in bad_sections:
                     errors.append(f"gap-fill output malformed section {_sec!r} — "
                                   "dropped (gap unclosed for it)")
@@ -15547,6 +15580,40 @@ def _repair_candidates(working: str) -> list[str]:
 
 
 _EMBED_SECTIONS = ("entities", "points", "events", "operators")
+
+#: Channels ``merge_embed_lists`` KEEPS that ``_OUTPUT_SCHEMA`` does not carry.
+#:
+#: ⛔ THIS IS THE HALF OF THE KEEP-SET THAT WAS MISSING (#11554 review, P2).
+#: ``merge_embed_lists`` unions ``mention_held`` by SURFACE rather than by
+#: ``_merge_key`` — it documents that a row the extraction model invented is
+#: RE-VERIFIED by ``route_mentions`` (``_carried_holds``) before it may hold
+#: anything — so the merge keeps the key. The gap-fill unknown-key guard asked
+#: only ``_OUTPUT_SCHEMA``, so a delta carrying ``mention_held`` was classified
+#: malformed, DROPPED, and recorded a fabricated ``gap_fill_shape_error``: the
+#: two stages disagreed about the same answer, and the losing side lost content.
+#:
+#: Kept as a separate tuple rather than a shared constant because sharing one
+#: moves every line in this module and re-stales the #7949 bundle's absolute
+#: cites — the same reason ``test_the_census_whitelist_is_the_merges_keep_set``
+#: pins the two sets instead of unifying them. That row is now BIDIRECTIONAL
+#: over ``_OUTPUT_SCHEMA`` + this tuple, so a channel added to the merge and not
+#: here (or the reverse) reds it.
+_MERGE_KEPT_EXTRA_SECTIONS = ("mention_held",)
+
+
+def _unknown_delta_sections(added: object) -> list[str]:
+    """Delta keys the merge would DROP silently — the census's own question.
+
+    A key outside both ``_OUTPUT_SCHEMA`` and ``_MERGE_KEPT_EXTRA_SECTIONS``
+    that carries CONTENT is a SHAPE error (a wrapped answer: ``{"items": …}``,
+    ``{"claims": …}``), not "the spans state no claim" — and ``merge_embed_lists``
+    drops it with no record, which is why the guard has to name it.
+    """
+    if not isinstance(added, dict):
+        return []
+    return [k for k, v in added.items()
+            if k not in _OUTPUT_SCHEMA
+            and k not in _MERGE_KEPT_EXTRA_SECTIONS and v]
 
 
 def _close_balanced(text: str) -> str | None:
