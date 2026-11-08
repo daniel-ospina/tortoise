@@ -1548,8 +1548,11 @@ def _command_body(raw: str, base: Path, root: Path) -> tuple[str, Path, str]:
             # treated the post-`--` `-L` as an OPTION, so `physical` came out False and
             # the record was admitted — while bash exits 1 with "too many arguments"
             # (`-L` is a second operand there) and the graded command never ran.
-            # Measured over a 584-spelling sweep: 36 spellings flipped from refused to
-            # admitted, every one carrying a `P` before `--` and an `L` after it.
+            # ⛔ MEASURED, so the scope is not overstated: over the 584-spelling matrix
+            # (1-3 groups of `-P -L -PL -LP -Pe -Le -e --`) the PREVIOUS head admitted
+            # 68 spellings whose `cd` bash rejects, and every one of those 68 contains
+            # a `--` — they are all this class. This head admits 0 of them and agrees
+            # with bash on all 584.
             _prefix = ""
             while True:
                 _group = re.match(r"^(?:-[PLe]+|--)(?:\s+|$)", target)

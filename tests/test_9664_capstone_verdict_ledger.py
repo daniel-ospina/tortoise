@@ -2029,9 +2029,9 @@ def test_a_null_cd_target_is_a_no_op(tmp_path):
     # ⛔ `--` ENDS OPTION PARSING. Reading the mode across a post-`--` group treated
     # the operand `-L` as an option, so `cd -P -- -L ""` came out non-physical and
     # was ADMITTED — while bash exits 1 with "too many arguments" (`-L` is a second
-    # operand there) and the graded command never ran. Measured over a 584-spelling
-    # sweep: 36 spellings flipped to admitted. The whole sweep now agrees with bash
-    # on all 584.
+    # operand there) and the graded command never ran. MEASURED: the previous head
+    # admitted 68 of the 584 spellings whose `cd` bash rejects, every one containing
+    # a `--`; this head admits 0 and agrees with bash on all 584.
     for opt in ("-P -- -L", "-- -L", "-- -P", "-PL -- -L"):
         command = f'cmd:cd {opt} "" && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q'
         proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, command])]))
