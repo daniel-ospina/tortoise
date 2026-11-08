@@ -37,9 +37,10 @@ repo: explicit labels (`:ref:`) are preferred over fragile direct links because
 labels survive edits and warn when they break.
 
 This test does not ban line numbers — it refuses one that does not land on text.
-Any surviving `:NN` pointer is therefore kept HONEST: insert a section above it
-and this reds, naming the citing file and the dead target, instead of silently
-redirecting a future reader to a blank line.
+Any surviving `:NN` pointer **written in one of the two forms it resolves** is
+therefore kept HONEST: insert a section above it and this reds, naming the citing
+file and the dead target, instead of silently redirecting a future reader to a
+blank line. A pointer outside those forms is not kept honest — see STATED LIMITS.
 
 WHY THIS IS NOT A DUPLICATE OF THE EXISTING CITATION GUARDS
 
@@ -84,6 +85,19 @@ STATED LIMITS — deliberate, and measured rather than guessed:
     (`docs/scoping/2026-08-13-317-cross-encoder-scoping.md` and its research
     brief) cite the `265` scope doc's wiring table by its `#317 reranker` ROW
     NAME instead of by `:203`.
+  * The two resolved FORMS are also the instrument's scope, and they are
+    narrower than "a pointer into these two directories". A citation written as
+    a bare filename with no ``docs/`` prefix (``platform-seams.md:192``), a
+    ``docs/``-less relative path (``scoping/....md:98``), or a ``#L98`` fragment
+    matches NEITHER regex (``_PATH_REF`` requires the literal ``docs/``,
+    ``_SHORT_REF`` requires the ``scoping|research:NN`` shorthand) and is not
+    checked even when the target it names is in scope. Measured at the head this
+    landed on, one such live citation exists —
+    ``docs/research/2026-09-01-gbrain-learnings/platform-seams.md`` cites
+    ``platform-landscape.md:192-193``, an in-scope target, and the guard never
+    looks at it. What this instrument covers is "every pointer written in the
+    two forms above", not "every `:NN` pointer into ``docs/scoping/`` and
+    ``docs/research/``".
   * The CITING side is `docs/**/*.md` only (`docs.rglob`). This instrument never
     reads a pointer written inside a `.py` docstring or comment — including one
     of the three policy quotes above, which lives in `tortoise/hosted_api.py` — so
