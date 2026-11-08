@@ -84,16 +84,27 @@ def test_duplicate_follows_its_keeper():
 
     Same content hash, different content (a stale hash): the keeper is not carried,
     so its duplicate must not be carried either — and must say so.
+
+    Round-29 review finding 2: this asserted `"a" in reason` where the ids were
+    literally `"a"` and `"b"`, and the reason then interpolated the keeper's
+    DISPOSITION — so it passed on the letter `a` inside `not-carried`, and would
+    still have passed with the keeper reference deleted entirely. Ids are now
+    unmistakable and the assertion names the keeper's identity.
     """
     plan = C.build_plan(
-        [row("a", content="", content_hash="H"),
-         row("b", content="A durable claim", content_hash="H")],
+        [row("keeper-node", content="", content_hash="H"),
+         row("duplicate-node", content="A durable claim", content_hash="H")],
         source_graph="old", target_graph="new", packs={},
     )
     by_id = {d.node_id: d for d in plan.decisions}
-    assert by_id["a"].disposition == C.NOT_CARRIED          # empty content
-    assert by_id["b"].disposition == C.NOT_CARRIED          # follows the keeper, not its own rule
-    assert "a" in by_id["b"].reason
+    assert by_id["keeper-node"].disposition == C.NOT_CARRIED     # empty content
+    # follows the keeper, not its own rule
+    assert by_id["duplicate-node"].disposition == C.NOT_CARRIED
+    reason = by_id["duplicate-node"].reason
+    assert "keeper-node" in reason, f"the reason must name the keeper, not its disposition: {reason!r}"
+    # …and it must not be the disposition wearing a keeper's name: the substring
+    # that made the old assertion vacuous is now impossible to satisfy by accident.
+    assert "not-carried" in reason, "the keeper's disposition is still reported"
 
 
 def test_duplicate_of_an_undecidable_keeper_stays_undecidable():
@@ -986,6 +997,42 @@ def test_rows_that_disagree_about_one_ref_are_refused():
         C.assert_distinct_graphs("g_other", "team_x", graph_rows=rows)
 
 
+def test_a_total_pack_catalog_failure_is_visible_in_the_census(monkeypatch):
+    """Round-29 review finding 3: `pack_kind_map` promised that an empty map was
+    "visible in the census", but `census()` had no pack dimension at all — a run
+    where EVERY manifest failed to load built a fully pack-less plan, stamped
+    `pack: null` on every carried row, and reported a census byte-identical to a
+    healthy run's. The destination is the pack-FILED graph, so unobservable
+    pack loss is the failure this pins.
+    """
+    import tortoise.pack_registry as reg
+
+    def boom(*_a, **_kw):
+        raise OSError("manifest directory unreadable")
+
+    monkeypatch.setattr(reg, "default_packs_dir", boom)
+
+    mapping, note = C.load_pack_kind_map()
+    assert mapping == {}, "the catalog still degrades rather than blocking the inventory"
+    assert note and "pack catalog unavailable" in note
+    assert "OSError" in note, "the note names the cause, not just the symptom"
+
+    plan = C.build_plan([row("p1", kind="decision", content="a claim")],
+                        source_graph="old", target_graph="new")
+    census = plan.census()
+    assert plan.pack_catalog_note == note
+    assert census["pack_catalog_note"] == note
+    assert census["rows_without_pack"] == 1, (
+        "the aggregate report must be able to say that NO row is filed")
+
+    # A supplied mapping is healthy, and says so by carrying no note.
+    healthy = C.build_plan([row("p1", kind="decision", content="a claim")],
+                           source_graph="old", target_graph="new",
+                           packs={("pointKind", "decision"): "core"})
+    assert healthy.pack_catalog_note is None
+    assert healthy.census()["rows_without_pack"] == 0
+
+
 def test_an_unknown_kind_prefix_is_not_pack_ownership():
     """Round-12: `core:decision` returned pack "core", but no `core` pack exists —
     a migrated node would assert ownership of a pack that is not installed."""
@@ -1014,7 +1061,13 @@ def test_a_points_refusal_names_its_real_cause():
 def test_the_counters_span_the_plan_in_every_mode(tmp_path):
     """Round-13: the pending set was discarded, so a DRY run (the only runnable mode
     today) reported 0/0/0 over a census of carry rows and a driver could read that
-    as "nothing to migrate"."""
+    as "nothing to migrate".
+
+    Round-29 review finding 1: the name said "every mode" and the design doc named
+    `partial refusal` and `mid-run stop` by hand, but this test covered only dry /
+    apply / re-run — the two modes a 429 on the capped endpoint actually produces
+    had no reconciliation test at all. Both arms are below.
+    """
     rows = [row(f"p{i}", kind="decision", content=f"claim {i}") for i in range(3)] + [
         row("https://x/y", node_type="source", kind="article", content="https://x/y")]
     plan = C.build_plan(rows, source_graph="old", target_graph="new", packs={})
@@ -1022,7 +1075,9 @@ def test_the_counters_span_the_plan_in_every_mode(tmp_path):
     led = C.Ledger(tmp_path / "l.jsonl", target="new")
 
     # `pending` = rows NOT already in the target (attempted, or would be in a dry
-    # run), so the four counters SPAN the plan: skipped + duplicates + pending.
+    # run), so THREE counters SPAN the plan: skipped + duplicates + pending.
+    # `written` is a SUBSET of `pending`, never a fourth addend — see the design
+    # doc's `dry by default` row and round-29 review finding 1.
     dry = C.run_plan(plan, writer=CountingWriter(), ledger=led, apply=False, graph_rows=ROWS)
     assert dry.skipped_known + dry.duplicate_rows + dry.pending == carry
     assert dry.pending == carry, "a dry run must say how much there is to migrate"
@@ -1033,6 +1088,50 @@ def test_the_counters_span_the_plan_in_every_mode(tmp_path):
     again = C.run_plan(plan, writer=CountingWriter(), ledger=led, apply=True, graph_rows=ROWS)
     assert again.skipped_known + again.duplicate_rows + again.pending == carry
     assert again.written == 0 and again.pending == 0 and again.skipped_known == carry
+
+    # ── partial refusal (the 429 arm): the target accepts, then refuses ──────
+    # The refusal comes from INSIDE one `write_sections` call, carrying the keys a
+    # batch had already had accepted — that is the shape `IngestWriter` produces
+    # when its second batch is refused, and `run_plan` calls the writer once.
+    class _AcceptsThenRefuses:
+        def write_sections(self, target, sections):
+            first_key = sections["points"][0]["migrationKey"]
+            raise C.CurationRefused("ERR_QUOTA", written_keys=[first_key])
+
+    led2 = C.Ledger(tmp_path / "l2.jsonl", target="new")
+    part = C.run_plan(plan, writer=_AcceptsThenRefuses(), ledger=led2, apply=True,
+                      graph_rows=ROWS)
+    assert part.refused and "ERR_QUOTA" in part.refused
+    assert part.written == 1, "the accepted batch is reported"
+    # The three counters still SPAN the census, and `written` stays inside `pending`.
+    assert part.skipped_known + part.duplicate_rows + part.pending == carry
+    assert 0 < part.written <= part.pending, (
+        f"written ({part.written}) is a subset of pending ({part.pending}), never a fourth "
+        f"addend of the census ({carry})")
+
+    # ── mid-run stop (the off-switch arm): disarms between batches ───────────
+    armed = {"v": True}
+
+    def armed_then_off():
+        v = armed["v"]
+        armed["v"] = False
+        return v
+
+    def accept_one(_tool, _args):
+        return {"created": 1}
+
+    led3 = C.Ledger(tmp_path / "l3.jsonl", target="new")
+    stop = C.run_plan(
+        plan,
+        writer=C.IngestWriter(accept_one, batch_size=1, armed=armed_then_off),
+        ledger=led3,
+        apply=True,
+        graph_rows=ROWS,
+    )
+    assert stop.skipped_known + stop.duplicate_rows + stop.pending == carry
+    assert 0 < stop.written <= stop.pending, (
+        f"a mid-run stop reports what landed, inside pending — got written={stop.written}, "
+        f"pending={stop.pending}, census={carry}")
 
 
 class _ShiftingSurface:

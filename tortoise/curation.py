@@ -198,14 +198,20 @@ class Row:
 # ── pack routing ──────────────────────────────────────────────────────────
 
 
-def pack_kind_map() -> dict[tuple[str, str], str]:
-    """``{(bucket, kind): pack namespace}`` from the installed pack catalog.
+def load_pack_kind_map() -> tuple[dict[tuple[str, str], str], str | None]:
+    """``({(bucket, kind): pack namespace}, note)`` from the installed pack catalog.
 
     "File it against the pack that owns its kind" has a real schema behind it —
     the manifests — so the mapping is read from them rather than invented here.
-    A pack load failure degrades to an empty map (every row then reports
-    ``pack: None``, which is visible in the census) instead of raising: an
-    inventory must not be blocked by a missing catalog.
+    A pack load failure still degrades to an empty map instead of raising: an
+    inventory must not be blocked by a missing catalog. But the failure is
+    RETURNED, not merely logged — the census reports it (``pack_catalog_note`` /
+    ``rows_without_pack``), because an empty map and a healthy one are otherwise
+    indistinguishable in the aggregate report. (Round-29 review finding 3: this
+    docstring used to claim ``pack: None`` was "visible in the census" while
+    ``census()`` had no pack dimension at all, so a TOTAL catalog failure built a
+    fully pack-less plan stamped ``pack: null`` on every row and reported a
+    census byte-identical to a healthy run.)
     """
     out: dict[tuple[str, str], str] = {}
     try:
@@ -213,8 +219,11 @@ def pack_kind_map() -> dict[tuple[str, str], str]:
 
         reg = PackRegistry(default_packs_dir())
         reg.load_all()
-    except Exception:  # degrade visibly, never silently
-        return out
+    except Exception as exc:  # degrade visibly, never silently
+        return out, (
+            f"pack catalog unavailable ({type(exc).__name__}: {exc}) — every row "
+            "reports pack: None, so no row is filed against the pack that owns its kind"
+        )
     buckets = (
         ("pointKind", "point_kinds"),
         ("objectKind", "object_kinds"),
@@ -226,7 +235,16 @@ def pack_kind_map() -> dict[tuple[str, str], str]:
         for bucket, attr in buckets:
             for kind in getattr(pack, attr, ()) or ():
                 out.setdefault((bucket, kind), namespace)
-    return out
+    return out, None
+
+
+def pack_kind_map() -> dict[tuple[str, str], str]:
+    """The mapping alone, for callers that do not report on catalog health.
+
+    ``load_pack_kind_map`` is the one that can tell a caller WHY the map is
+    empty; this wrapper exists so an existing caller keeps its shape.
+    """
+    return load_pack_kind_map()[0]
 
 
 def pack_for(kind: str | None, node_type: str, mapping: Mapping[tuple[str, str], str]) -> str | None:
@@ -288,7 +306,13 @@ def _narrative(content: str) -> str | None:
     return None
 
 
-def classify_point(row: Row, packs: Mapping[tuple[str, str], str], *, duplicate_of: str | None = None) -> Decision:
+def classify_point(
+    row: Row,
+    packs: Mapping[tuple[str, str], str],
+    *,
+    duplicate_of: str | None = None,
+    keeper_id: str | None = None,
+) -> Decision:
     """A Point or an operator's disposition.
 
     The judgement is deliberately conservative: a row is only moved out of the
@@ -298,27 +322,34 @@ def classify_point(row: Row, packs: Mapping[tuple[str, str], str], *, duplicate_
 
     A ``duplicate_of`` row follows its KEEPER's disposition rather than a rule of
     its own: "the keeper carries it" must be true, or the report asserts something
-    the plan contradicts.
+    the plan contradicts. ``keeper_id`` is that row's node id, and the reason
+    NAMES it — interpolating the keeper's *disposition* instead left a reader of
+    ``plan --rows`` with ``(not-carried)`` where the identity belonged, which is
+    the one question ``duplicate_of`` exists to answer (round-29 review finding 2).
     """
     pack = pack_for(row.kind, row.node_type, packs)
     key = row.stable_key
+    # The keeper's IDENTITY, or an honest admission that the caller did not supply
+    # one. Never the disposition — that is what the reason already says.
+    who = keeper_id if keeper_id is not None else "a row this pass did not name"
 
     if duplicate_of == CARRY:
         return Decision(row.node_id, row.node_type, row.kind, NOT_CARRIED,
                         "exact content duplicate of a carried row (same content hash); "
-                        "the keeper carries it. MERGE of near-duplicates is #5006's scope, "
+                        f"the keeper {who} carries it. MERGE of near-duplicates is #5006's scope, "
                         "not this pass's", pack, key, row.content)
     if duplicate_of == UNDECIDABLE:
         return Decision(row.node_id, row.node_type, row.kind, UNDECIDABLE,
                         "exact content duplicate of a row that is itself undecidable — the "
-                        "content has no carry candidate yet, so this row is not carried either",
+                        f"content has no carry candidate yet (the keeper {who} is undecidable "
+                        "too), so this row is not carried either",
                         pack, key, row.content)
     if duplicate_of is not None:
         # The keeper was not carried: neither is its duplicate, and the reason names
         # the keeper rather than claiming a carry that did not happen.
         return Decision(row.node_id, row.node_type, row.kind, NOT_CARRIED,
                         f"exact content duplicate of a row that was not carried ({duplicate_of}); "
-                        "the keeper is the row of record for this content", pack, key, row.content)
+                        f"the keeper {who} is the row of record for this content", pack, key, row.content)
 
     if not (row.content or "").strip():
         return Decision(row.node_id, row.node_type, row.kind, NOT_CARRIED,
@@ -426,9 +457,15 @@ def classify_event(row: Row, packs: Mapping[tuple[str, str], str]) -> Decision:
                     "no-op this pass must not have (follow-up on #11469)", pack, key, row.content)
 
 
-def classify(row: Row, packs: Mapping[tuple[str, str], str], *, duplicate_of: str | None = None) -> Decision:
+def classify(
+    row: Row,
+    packs: Mapping[tuple[str, str], str],
+    *,
+    duplicate_of: str | None = None,
+    keeper_id: str | None = None,
+) -> Decision:
     if row.node_type in ("point", "operator"):
-        return classify_point(row, packs, duplicate_of=duplicate_of)
+        return classify_point(row, packs, duplicate_of=duplicate_of, keeper_id=keeper_id)
     if row.node_type == "object":
         return classify_object(row, packs)
     if row.node_type == "source":
@@ -450,9 +487,19 @@ class Plan:
     source_graph: str
     target_graph: str
     decisions: list[Decision] = field(default_factory=list)
+    #: Why the pack mapping is empty, when it is empty because the catalog could
+    #: not be read. ``None`` when a mapping was supplied or the catalog loaded.
+    pack_catalog_note: str | None = None
 
     def census(self) -> dict[str, Any]:
-        """Counts per (node_type, kind, disposition) — the inventory table."""
+        """Counts per (node_type, kind, disposition) — the inventory table.
+
+        It also carries the PACK dimension the pack routing can fail on, because
+        without it a total pack-catalog failure was unreportable: every row came
+        out with ``pack: None`` and the census was byte-identical to a healthy
+        run's (round-29 review finding 3). ``rows_without_pack`` is the signal an
+        operator can actually see in the aggregate report.
+        """
         by: dict[str, dict[str, int]] = {}
         for d in self.decisions:
             cls = f"{d.node_type}:{d.kind or '-'}"
@@ -462,12 +509,15 @@ class Plan:
         for slot in by.values():
             for k, v in slot.items():
                 totals[k] = totals.get(k, 0) + v
+        unfiled = sum(1 for d in self.decisions if not d.pack)
         return {
             "source_graph": self.source_graph,
             "target_graph": self.target_graph,
             "total_rows": len(self.decisions),
             "totals": totals,
             "by_class": dict(sorted(by.items())),
+            "rows_without_pack": unfiled,
+            "pack_catalog_note": self.pack_catalog_note,
         }
 
     def carry_rows(self) -> list[Decision]:
@@ -549,9 +599,16 @@ def build_plan(
     deterministic for a fixed input order — the reader's order, which the tool
     reports rather than claims to sort.
     """
-    mapping = pack_kind_map() if packs is None else packs
+    if packs is None:
+        mapping, pack_note = load_pack_kind_map()
+    else:
+        mapping, pack_note = packs, None
     rows = list(rows)
-    plan = Plan(source_graph=source_graph, target_graph=target_graph)
+    plan = Plan(
+        source_graph=source_graph,
+        target_graph=target_graph,
+        pack_catalog_note=pack_note,
+    )
 
     keepers: dict[str, str] = {}
     first_pass: dict[str, Decision] = {}
@@ -580,7 +637,12 @@ def build_plan(
             plan.decisions.append(first_pass[key])
         else:
             plan.decisions.append(
-                classify(row, mapping, duplicate_of=first_pass[key].disposition)
+                classify(
+                    row,
+                    mapping,
+                    duplicate_of=first_pass[key].disposition,
+                    keeper_id=keepers[key],
+                )
             )
     return plan
 
