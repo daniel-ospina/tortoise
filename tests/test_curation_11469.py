@@ -159,9 +159,10 @@ def _curation_off_switch_unset(monkeypatch):
     """The suite must not read an AMBIENT off switch.
 
     `TORTOISE_CURATE_OFF` is the operator's own variable and a plausible cell-wide
-    export; inherited, it turns 23 green tests red on correct code with messages that
-    read as `run_plan` accounting defects. Every test that wants the switch sets it
-    itself."""
+    export; inherited, it reddened 28 tests on correct code with messages that read as
+    `run_plan` accounting defects. Every test that wants the switch sets it itself, and
+    `test_the_suite_pins_the_ambient_off_switch_fixture` is the pin that keeps this
+    fixture here."""
     monkeypatch.delenv(C.OFF_SWITCH_ENV, raising=False)
 
 GRAPH_ROWS = [
@@ -1312,9 +1313,15 @@ def test_an_item_without_a_migration_key_is_accounted_not_crashed():
     assert len(out["written"]) == 1 and out["written"][0]
 
 
-def test_a_churn_midway_through_the_walk_is_caught_by_the_second_pass():
+def test_a_churn_midway_through_the_walk_is_caught_by_the_page_recheck():
     """Round-20 BLOCKING: a churn that lands after the first page is invisible to a
-    snapshot of the last page, because that snapshot is taken AFTER the churn."""
+    snapshot of the last page TAKEN BEFORE it.
+
+    Round-28: this test used to be named "…caught by the second pass" and matched three
+    mechanisms at once, so it stayed green with the second walk disabled AND green with
+    the page re-check disabled — it discriminated neither. It now pins exactly one, by
+    its own message; the second full walk is pinned by
+    `test_a_content_change_only_the_second_pass_can_see_is_refused`."""
     mod = _tool_module()
     pop = [{"id": f"r{i}", "kind": "decision", "content": f"c{i}"} for i in range(6)]
     state = {"pages": 0}
@@ -1330,7 +1337,7 @@ def test_a_churn_midway_through_the_walk_is_caught_by_the_second_pass():
         lim = int(args.get("limit") or 2)
         return {"result": pop[off:off + lim], "total": len(pop)}
 
-    with pytest.raises(RuntimeError, match=r"second read|DIFFERENT row sequence|changed during the walk"):
+    with pytest.raises(RuntimeError, match=r"last page changed during the walk"):
         mod.MCPReader(call, None).read_points(page=2)
 
 
@@ -1464,12 +1471,6 @@ def test_a_keyless_point_row_reaches_the_wire_under_the_writers_own_key(tmp_path
     assert C._fallback_key("points", a) != C._fallback_key("points", b)
     sent = [{k: v for k, v in row.items() if k != "migrationKey"} for row in sections["points"]]
     assert sent == [a, b], "a carried row was dropped as a duplicate"
-
-
-def test_the_off_switch_is_not_read_from_an_ambient_export():
-    """Round-25: inherited `TORTOISE_CURATE_OFF` reddened 23 tests on correct code."""
-    assert C.off_switch_active(False) is False
-    assert C.off_switch_active(True) is True
 
 
 # ── round-26 review findings ──────────────────────────────────────────────
