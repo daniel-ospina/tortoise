@@ -39,12 +39,14 @@ def mint_session_id() -> str:
 
 
 #: The CLIENT-FACING refusal text for a PRESENT-but-blank session id. One
-#: string, so the two enforcement points (the SDK doors and the hosted
-#: ``/v1/sessions`` boundary) cannot drift into two explanations of one rule.
-#: It is returned verbatim to callers (a 422 detail on the hosted surface), so
-#: it names the rule and the remedy only — the engine mechanics
-#: (`:Session` duplication / dropped CONTAINS edge) stay in the docstrings,
-#: never on a customer's wire (#9599 review P3).
+#: string, so the enforcement points that answer a caller (the two SDK doors,
+#: the hosted ``/v1/sessions`` boundary and ``commit_schema.CommitPayload`` —
+#: the last returns it as the ``POST /v1/sessions/commit`` 422 detail, since
+#: #8290's review made that door delegate to the same predicate) cannot drift
+#: into two explanations of one rule. It is returned verbatim to callers (a 422
+#: detail on the hosted surface), so it names the rule and the remedy only — the
+#: engine mechanics (:Session duplication / dropped CONTAINS edge) stay in the
+#: docstrings, never on a customer's wire (#9599 review P3).
 SESSION_ID_BLANK_REFUSAL = (
     "session_id is blank — a session id must name something (be non-blank); "
     "pass None to let Tortoise mint one"
@@ -73,8 +75,12 @@ SESSION_ID_NOT_STR_REFUSAL = (
 #:
 #: The reasoning is shared with the other refusal classes: ONE predicate for
 #: every door (``capture_session``, ``commit_session``, the hosted
-#: ``SessionRequest`` boundary), so the three cannot disagree about which ids
-#: may name a session.
+#: ``SessionRequest`` boundary, and ``commit_schema.CommitPayload`` — the
+#: Layer-1 model of the public ``POST /v1/sessions/commit``, whose
+#: ``session_id`` is written verbatim as a ``:Session``), so the four cannot
+#: disagree about which ids may name a session. ⚠️ Three-of-four is NOT
+#: reserved (#8290 review P1): the commit payload boundary was the door that
+#: used to admit the namespace and file a session every read surface hides.
 SESSION_ID_RESERVED_REFUSAL = (
     "session_id is inside the RESERVED demo/sample namespace (%s) — every "
     "session read surface excludes that namespace, so a capture filed under it "
@@ -91,9 +97,12 @@ def session_id_refusal(session_id: object) -> str | None:
     a duplicate of the other (#9599 review P2):
 
     * THIS function is the **DOOR half** — a caller-supplied ``session_id`` at
-      ``capture_session``, ``commit_session`` and the hosted
-      ``SessionRequest`` boundary — where the answer has to name a reason.
-      The three doors share it, so they cannot drift apart.
+      ``capture_session``, ``commit_session``, the hosted ``SessionRequest``
+      boundary and ``commit_schema.CommitPayload`` (``#8290`` review P1 — the
+      Layer-1 model of the public ``POST /v1/sessions/commit``, whose
+      ``session_id`` is written verbatim as a ``:Session`` and as an
+      ``AgentSession`` ``:Event``) — where the answer has to name a reason.
+      The four doors share it, so they cannot drift apart.
     * ``projection._writable_container_id`` is the **REPLAY half** —
       ``_writable_id`` PLUS this same blank clause — and it gates every fold
       that merges a session key (``_link_session``'s ``contains_session``,

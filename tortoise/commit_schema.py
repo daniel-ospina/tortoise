@@ -55,7 +55,7 @@ from pydantic import (
 
 from ._gate_memo import GateMemo
 from .file_indexer import provenance_basename
-from .ids import content_hash
+from .ids import content_hash, session_id_refusal
 from .pack_registry import (
     CANONICAL_POINT_KINDS,
     DECISION_POINT_KINDS,
@@ -982,10 +982,14 @@ class CommitPayload(BaseModel):
         # REPLAY half) stays BLANK-ONLY — #9594/#9553 govern it, and a replay
         # that started refusing rows an older tree legitimately wrote would
         # lose them.
-        from tortoise.ids import session_id_refusal
-
+        #
+        # ``is not None``, never truthiness: a refusal is a STRING and every
+        # sibling door compares it that way, so an empty refusal can never
+        # silently read as "admit" here either — the polarity this door exists
+        # to share. (The module already imports ``session_id_refusal`` from
+        # ``.ids`` beside ``content_hash``; no local re-import.)
         refusal = session_id_refusal(v)
-        if refusal:
+        if refusal is not None:
             raise ValueError(refusal)
         return v
 

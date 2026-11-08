@@ -17110,8 +17110,13 @@ class SessionRequest(BaseModel):
     # #4005 — the validator lives on ``CommitPayload``; there is no
     # ``CommitRecord`` class, and citing one sent a review to re-derive a third
     # spelling); this is the same sentence at the boundary — ONE predicate for
-    # all three DOORS (the two SDK doors and this one), so they cannot drift
-    # apart. ⛔ The blank rule has a SECOND, deliberate home one layer down: the
+    # every DOOR (the two SDK doors, the commit-payload Layer-1 model and this
+    # one), so they cannot drift apart. ⚠️ ``CommitPayload`` used to carry its
+    # OWN ad-hoc blank test, which is how the #8290 review found the RESERVED
+    # demo namespace admitted on the public ``POST /v1/sessions/commit`` while
+    # refused here and at the two SDK doors — a namespace gated at three of four
+    # doors is not reserved. It now delegates to the same predicate.
+    # ⛔ The blank rule has a SECOND, deliberate home one layer down: the
     # REPLAY half is ``projection._writable_container_id`` (``_writable_id``
     # PLUS this same blank clause), which gates both journal carriers and the
     # sidecar restores and landed on main with #9594 from the #9553 review P2 —
@@ -22109,9 +22114,10 @@ async def list_sessions(request: Request, org: dict = Depends(get_current_org_se
         # DERIVED (`session_schema.DEMO_SESSION_ID_PREFIX`), never re-spelled,
         # and cannot collide with a mintable id (`mint_session_id()` =
         # `session_<12 hex>` — `demo_` is neither hex nor 12 chars long), and
-        # the namespace is RESERVED at the capture doors
-        # (`ids.session_id_refusal`), so a caller cannot file a real capture
-        # into the excluded set either.
+        # the namespace is RESERVED at EVERY caller-id door
+        # (`ids.session_id_refusal` — the two SDK doors, the commit payload
+        # model and the hosted `SessionRequest` boundary), so a caller cannot
+        # file a real capture into the excluded set either.
         #
         # ⛔ The `s.id IS NULL` disjunct is deliberate Cypher three-valued-logic
         # care, not noise: `NULL STARTS WITH $p` is NULL, and a WHERE drops a

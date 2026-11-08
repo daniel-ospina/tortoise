@@ -96,13 +96,24 @@ __all__ = [
 #:    (``SessionRequest.session_id`` / the two SDK doors accept a caller's id of
 #:    any shape), so a genuine capture filed as ``session_demo_…`` used to be
 #:    written and then invisible on all three surfaces. The namespace is now
-#:    RESERVED at the doors by ``ids.session_id_refusal`` (the ONE predicate
-#:    every door already shares), so such a capture is refused loudly instead of
-#:    disappearing quietly.
+#:    RESERVED at ALL FOUR caller-id doors by ``ids.session_id_refusal`` (the
+#:    ONE predicate every door shares), so such a capture is refused loudly
+#:    instead of disappearing quietly.
+#:
+#:    ⚠️ ALL FOUR, or not at all. The second review pass found the first
+#:    reservation gated three of them: ``commit_schema.CommitPayload`` — the
+#:    Layer-1 model of the PUBLIC ``POST /v1/sessions/commit`` — still carried
+#:    its own ad-hoc blank test, so ``{"session_id": "session_demo_…"}`` was
+#:    accepted, and ``_execute_commit_writes`` wrote it verbatim as a
+#:    ``:Session`` (plus an ``AgentSession`` ``:Event``) that the list, the
+#:    detail door and the SDK then all hide. A namespace is reserved only if
+#:    EVERY id-accepting boundary refuses it; the payload validator now
+#:    delegates to the same predicate.
 #:
 #: ``tests/test_demo_session_read_exclusion_8290.py`` pins both halves — a
-#: 1000-mint population for (1), and the door/exclusion agreement for (2) —
-#: because a vacuous prefix test would hide every leak instead of one.
+#: 1000-mint population for (1), the door/exclusion agreement for (2), and one
+#: reserved-id refusal per real door (the two SDK doors AND the commit payload
+#: model) — because a vacuous prefix test would hide every leak instead of one.
 #:
 #: ⚠️ RESIDUAL, stated and not claimed closed: the reservation is NOT
 #: retroactive. A capture a caller filed under this prefix BEFORE the doors
@@ -114,15 +125,24 @@ __all__ = [
 #:
 #: ⚠️ SECOND RESIDUAL, named rather than silently left (the #8290 review's P1
 #: second half): the commit lane (`POST /v1/sessions/commit`) also writes an
-#: ``AgentSession`` Event under ``sessionId=<the same id>``. The four caller-id
-#: doors now REFUSE a reserved prefix, so no NEW such Event can be written; but
-#: an Event left by an older tree is still served by the SEARCH reads
-#: (``TortoiseSDK.search_sessions`` / ``get_events(eventKind='AgentSession')``)
-#: while ``get_session`` answers None — one id, two answers. Deliberate: the
-#: refund is a read filter on two surfaces this issue's scope does not own, and
-#: widening the exclusion there would hide a caller's legitimately-indexed
-#: session content that merely happens to name the prefix. Same repair as the
-#: residual above (re-capture under an un-reserved id).
+#: ``AgentSession`` Event under ``sessionId=<the same id>``, and
+#: ``TortoiseSDK.search_sessions`` / ``get_events(eventKind='AgentSession')``
+#: read that node kind WITHOUT this exclusion — so a reserved-prefix
+#: ``AgentSession`` Event is reachable through the SEARCH reads while
+#: ``get_session`` answers ``None`` for the same id: one id, two answers.
+#:
+#: The commit lane can no longer MINT one — the door that carried
+#: ``payload.session_id`` now refuses the prefix — but the reservation is on
+#: SESSION ids at the four session doors, NOT on every ``sessionId`` a caller
+#: can set through the other doors that accept one (``create_event(...,
+#: sessionId=…)`` persists it as-is), and an Event left by an older tree stays
+#: indexed either way.
+#:
+#: Deliberate: the repair is a read filter on two further surfaces this issue's
+#: scope does not own (the ``:Session`` container, the detail door and the SDK
+#: mirror are what #8290 names), and widening the exclusion there would hide a
+#: caller's legitimately-indexed session content that merely happens to name the
+#: prefix. Same repair as the residual above — re-capture under an un-reserved id.
 DEMO_SESSION_ID_PREFIX = "session_demo_"
 
 
