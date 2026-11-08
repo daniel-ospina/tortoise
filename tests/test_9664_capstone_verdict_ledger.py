@@ -541,15 +541,51 @@ def test_a_path_outside_or_not_a_file_is_invalid(tmp_path, escape):
     assert "evidence path" in proc.stderr
 
 
-def test_validate_honours_its_repo_root_argument(tmp_path):
-    """`repo_root` was accepted and never forwarded, so a caller scoping
-    validation to another tree silently validated against THIS checkout and the
-    "not in the tree" assertion could never fail on the developer's box."""
+def test_validate_honours_its_repo_root_argument(tmp_path, monkeypatch):
+    """`repo_root` was accepted and never forwarded, so a caller scoping validation to
+    another tree silently validated against THIS checkout and the "not in the tree"
+    assertion could never fail on the developer's box.
+
+    ⛔ This test could not fail for that property. `tmp_path/elsewhere` is not a git
+    repository, so the SHA arm answers `unmeasurable` and `validate` raises on "git
+    could not be asked" BEFORE the evidence arm decides anything. MEASURED: with
+    `_evidence_is_real(entry, repo_root)` reverted to `REPO_ROOT` at both call sites,
+    the whole file still passed and this test was among the passes — it was satisfied
+    by an unrelated arm while being cited as coverage for this one.
+
+    The SHA arm is stubbed to `exists` so the evidence arm is the only one that can
+    raise, and the assertion matches that arm's own message so a raise from the wrong
+    arm cannot satisfy it. Same mutant now reddens this test.
+    """
+    monkeypatch.setattr(cl, "_commit_state", lambda sha, repo_root=None: "exists")
     empty = tmp_path / "elsewhere"
     empty.mkdir()
     data = _ledger([_row("A")])  # cites a file that exists only in the real tree
-    with pytest.raises(cl.InvalidLedger):
+    with pytest.raises(cl.InvalidLedger, match="not a file in the tree"):
         cl.validate(data, repo_root=empty)
+
+
+def test_validate_forwards_repo_root_to_the_SHA_arm(monkeypatch, tmp_path):
+    """The sibling arm: `_commit_state` honours `repo_root`, but `validate` must HAND
+    it one. Reverting `_commit_state(sha, repo_root)` to `_commit_state(sha)` at the
+    call site left the suite green, so the forward — the half that makes `repo_root`
+    reach git at all — was pinned by nothing.
+
+    That mutant is a fail-open: a caller doing `validate(data, repo_root=<other tree>)`
+    gets `exists` for a sha that exists only in THIS checkout, and `render()` prints
+    `measured at origin/main@<sha>` as provenance for a tree that does not contain it.
+    """
+    seen: list[object] = []
+
+    def fake_commit_state(sha, repo_root=None):
+        seen.append(repo_root)
+        return "exists"
+
+    monkeypatch.setattr(cl, "_commit_state", fake_commit_state)
+    # A blocked row: no evidence entry, so the evidence arm cannot raise and the SHA
+    # arm is the only arm left that could decide anything.
+    cl.validate(_ledger([_row("A", "blocked")]), repo_root=tmp_path)
+    assert seen == [tmp_path]
 
 
 def test_an_unknown_version_is_invalid(tmp_path):
