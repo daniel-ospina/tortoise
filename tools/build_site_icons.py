@@ -38,8 +38,10 @@ import sys
 # tests/test_entry_point_python_guard.py is the DEFINITION of the accepted
 # preamble (`__future__`, `import sys`, this `if`) — do not restate it here.
 # The named invocation carries `--help` because `--source` is REQUIRED: the bare
-# path exits 2 (argparse usage) and would be a second unattributed error, the
-# #5136 rule tests/test_ci_runner_topology.py now pins for its own tool.
+# path exits 2 (argparse usage), so a refusal naming it would be a SECOND
+# unattributed error — the #5128 harm, which the landed
+# tests/test_ci_runner_topology.py pins as a P1 for its own tool (its test cites
+# #11483).
 if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     raise SystemExit(
         f"tools/build_site_icons.py requires Python >= 3.12 (got "
