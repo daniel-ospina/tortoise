@@ -2535,13 +2535,20 @@ def test_a_MULTI_token_probe_is_REFUSED_because_the_FTS_read_OR_joins_it(
         most likely first guess of all.
 
     ⛔ THE ASSERTION IS PINNED TO THE SHIPPED SWITCH VALUE (#11536 review round 2,
-    non-blocking note, now closed): `zx-99` is refused because the IDENTIFIER
-    mechanism expands it, and that mechanism is default-ON but switchable
-    (`TORTOISE_IDENTIFIER_TOKENS=0` is a legitimate outage lever). With it off in
-    an inherited shell, `zx-99` tokenises to the single term `zx` and the row
-    would red for a reason that is not the behaviour it claims to protect — the
-    same "inherited shell changes the measurement" class the door's pin set
-    exists for.
+    non-blocking note, now closed): with the IDENTIFIER mechanism ON (its shipped
+    default) `zx-99` tokenises to TWO terms (`['zx', 'zx99']`), so it is refused by
+    the TOKENISER check; the mechanism is switchable (`TORTOISE_IDENTIFIER_TOKENS=0`
+    is a legitimate outage lever) and with it off in an inherited shell `zx-99`
+    tokenises to the single term `zx`, which is ACCEPTED — measured. So the row
+    would red for a reason that is not the behaviour it claims to protect without
+    this pin — the same "inherited shell changes the measurement" class the door's
+    pin set exists for.
+
+    ⛔ AND THE REFUSAL IS THE TOKENISER'S, NOT THE `build_or_query` BACKSTOP'S
+    (#11536 review round 7, P2): the backstop is unreachable while the tokeniser
+    already emits the alias as a second token, and it is labelled a backstop in
+    the module for that reason. `test_the_build_or_query_BACKSTOP_fires_when_the_
+    tokeniser_stops_expanding` pins the route that would make it live.
     """
     from tortoise.session_source_prose_migration import probe_phrase_rejection
 
@@ -2555,6 +2562,47 @@ def test_a_MULTI_token_probe_is_REFUSED_because_the_FTS_read_OR_joins_it(
     assert probe_phrase_rejection("Fridays.") is None, (
         "a single token with punctuation is still ONE token — the read escapes "
         "it and it matches")
+
+
+def test_the_build_or_query_BACKSTOP_fires_when_the_tokeniser_stops_expanding(
+        monkeypatch):
+    """The `build_or_query` guard is a REACHABLE backstop, not dead code.
+
+    (1) FAILS on a tree that deletes the guard: this row patches
+        `sparse.build_or_query` to OR-join a single-token input and requires the
+        refusal, which is the message a deleted guard can never print.
+    (2) REACHABLE — by construction of the guard's own premise, not by an
+        operator input today: while `tokenize_sparse_query` defaults to
+        `keep_identifiers=True` it already emits the identifier alias as a SECOND
+        token, so the tokeniser check fires first and this branch is unreachable
+        for every input. MEASURED over 7,700 systematic identifier shapes and
+        60,000 random strings at this head: ZERO firings. The route that makes it
+        live is a change in `sparse` (alias expansion moved out of the tokeniser,
+        or this call passing `keep_identifiers=False`) — and on that tree the
+        tokeniser check would NOT catch a pipe-joined query, so deleting the
+        backstop would open a real hole.
+
+    ⛔ It is pinned with its rationale stated (#11536 review round 7, P2): the
+    module docstring used to claim the identifier mechanism is what refuses
+    `zx-99`, which is NOT the mechanism that refuses it.
+    """
+    from tortoise import session_source_prose_migration as m
+
+    # A single surviving token, so the tokeniser check passes …
+    assert m.probe_phrase_rejection("zebraquux") is None, (
+        "the premise of this row is a token the TOKENISER accepts")
+
+    # … and `build_or_query` returns an OR-union anyway, which is the shape the
+    # backstop exists for.
+    monkeypatch.setattr("tortoise.sparse.build_or_query",
+                        lambda *a, **k: "zebra|quux|\"zebra quux\"")
+    refused = m.probe_phrase_rejection("zebraquux")
+    assert refused is not None, (
+        "a pipe-joined query was ACCEPTED as a single-token probe — the read "
+        "would have measured the OR of three terms")
+    assert "identifier" in refused and "several terms" in refused, (
+        "the backstop fired but did not say which mechanism expanded the token: "
+        + refused)
 
 
 def test_a_hit_on_a_REPAIRED_node_is_a_STEM_COLLISION_not_a_leak(monkeypatch):
@@ -3736,6 +3784,15 @@ def test_an_EMPTY_Source_index_corroborates_a_CLEAR_only_graph(monkeypatch,
     report = m.probe_fts(graph, ["zebraquux"], control=True)
     assert report["control"]["mode"] == "empty-index"
     assert report["control"]["ok"] is True
+    # ⛔ THE ARM REPORTS ONLY WHAT IT MEASURED (#11536 review round 7, P2): `ran`
+    # and `degraded` used to be LITERAL constants here (True/False) beside a note
+    # that said "the read RAN", on the arm that runs no FTS read at all.
+    assert "ran" not in report["control"] and "degraded" not in report["control"], (
+        "the empty-index control still asserts that a read ran — it counts NODES, "
+        f"so it establishes no such thing: {report['control']}")
+    assert report["control"]["measured"] == "node-property", (
+        "the arm does not say WHICH population it counted, so a consumer cannot "
+        "tell it from a measured FTS control")
     assert m.source_index_is_empty(graph) is True
 
     _install_cli(monkeypatch, graph, ["--dry-run", "--assert-clean",
@@ -3748,6 +3805,17 @@ def test_an_EMPTY_Source_index_corroborates_a_CLEAR_only_graph(monkeypatch,
         "the empty-index line does not state the population the query asks about "
         "— a DOCUMENT is a :Source whose `_searchText` is the #125 field, so an "
         "unscoped \"no Source on this graph\" is false there")
+    assert "did not exercise the FTS read" in out, (
+        "the empty-index control line still claims a read it never ran — it "
+        "counts nodes: " + out)
+    assert "the read RAN" not in out, (
+        "the empty-index control still says the read ran: " + out)
+    # ⛔ AND THE GREEN LINE MUST NOT BORROW THE `probe` ARM'S EVIDENCE (#11536
+    # review round 7, P2): "the read ANSWERS" is what a MEASURED control proves;
+    # this arm counted nodes, so the clause has to say so instead.
+    assert "the read ANSWERS" not in out, (
+        "the sign-off claimed the read ANSWERS on the arm that ran no FTS read: "
+        + out)
 
     # …and a non-empty index with no lexicon node to probe stays uncorroborated.
     busy = _IndexGraph([(cleared,)], empty=False)
@@ -3874,12 +3942,20 @@ def test_nodes_at_one_url_that_DISAGREE_are_unexplained_not_benign(monkeypatch):
         (index entry outlived a cleared node) and a proven-lexicon twin would be
         labelled from whichever came last, so half of what the read returned was
         bucketed without being examined.
-    (2) REACHABLE — and this is the CLI-level FALSE PASS (#11536 review round 3,
-        note on the twin test above): the stale twin carries NO text, so the CENSUS
-        cannot see it (asserted below), and the lexicon twin is not a candidate
-        either. So `--dry-run --assert-clean` reads a ZERO census while the index
-        still answers for that url: the exact #11161 shape ("the census reads 0 and
-        the sentence is still retrievable"), reached through a url-mate.
+    (2) REACHABLE — and this is the CLI-level OVER-BLOCK (#11536 review round 3;
+        RATIONALE CORRECTED in round 7, P2): the stale twin carries NO text, so the
+        CENSUS cannot see it (asserted below), and the lexicon twin is not a
+        candidate either. So `--dry-run --assert-clean` reads a ZERO census while
+        the probe still returns this url.
+        ⛔ It is NOT the #11161 "sentence is still retrievable" shape, which the
+        earlier rationale here claimed: the stale twin is `summary=""` with
+        `_searchText` ABSENT, so it carries no value of the field the Source index
+        is declared on and can hold no index entry (the PR's own live leg asserts
+        exactly that — `hits == 0` once the pair is cleared), and the hit in this
+        fixture comes from the BENIGN lexicon twin. What the row therefore pins is
+        the FAIL-CLOSED VETO for a url whose nodes disagree — a false veto, which
+        is the correct polarity ("a false veto is re-measured; a false
+        certification is the leak") but is not a leak.
 
     The leg's own polarity decides the bucket: "a false veto is re-measured; a
     false certification is the leak".

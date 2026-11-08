@@ -456,16 +456,17 @@ def _report_fts(fts: dict) -> None:
     control = fts.get("control")
     if control is not None:
         if control.get("mode") == "empty-index":
-            # ⛔ THE SCOPE OF THE MEASUREMENT, IN THE SENTENCE (#11536 review round
-            # 6, P3): `_SOURCE_INDEX_ENTRIES` counts `documentKind IS NULL` nodes,
-            # and a DOCUMENT is a `:Source` whose `_searchText` is the #125 Document
-            # FTS field — so "no Source on this graph carries it" was false on any
-            # document-bearing graph. Name the population the query asks about.
+            # ⛔ THE SCOPE AND THE INSTRUMENT, IN THE SENTENCE (#11536 review
+            # rounds 6 and 7): `_SOURCE_INDEX_ENTRIES` counts `documentKind IS
+            # NULL` nodes, and a DOCUMENT is a `:Source` whose `_searchText` is the
+            # #125 Document FTS field — so "no Source on this graph carries it" was
+            # false on any document-bearing graph. AND this arm counts NODES; it
+            # runs no FTS read, so it must not say the read ran.
             print("          control: EMPTY Source index — no Source over the "
                   "probe's own population (`documentKind IS NULL`) carries "
-                  "`_searchText`, the field the index is declared on, and the "
-                  "read RAN, so the corpus is empty rather than the index being "
-                  "silent")
+                  "`_searchText`, the field the index is declared on, so there is "
+                  "nothing for the index to build on. ⛔ This arm counted NODES; "
+                  "it did not exercise the FTS read")
         elif control.get("hits") is None:
             print("          control: not available — "
                   f"{control.get('note')}")
@@ -515,7 +516,21 @@ def _report_fts(fts: dict) -> None:
                       "returned no pre-fix node either, so its zero cannot show "
                       "the sentence LEFT the index." + tail)
             elif kinds and all(kind == "absent" for kind in kinds):
-                print(head + counts + ", and the read ANSWERS — but this run took "
+                # ⛔ THE TWO CONTROL ARMS CORROBORATE DIFFERENTLY (#11536 review
+                # round 7, P2). `probe` MEASURED the FTS read, so "the read
+                # ANSWERS" is its own evidence. `empty-index` counted NODES and
+                # exercised no read at all, so printing the same clause for it
+                # asserted a measurement the run never took — on the one line the
+                # operator signs off with.
+                if (fts.get("control") or {}).get("mode") == "empty-index":
+                    corroborated = (
+                        ", and the node population over the probe's own scope "
+                        "carries no `_searchText` at all, so the index has "
+                        "nothing to build on — ⛔ this run counted NODES and did "
+                        "not exercise the FTS read")
+                else:
+                    corroborated = ", and the read ANSWERS"
+                print(head + counts + corroborated + " — but this run took "
                       "no BEFORE reading, so it did NOT establish that the token "
                       "was ever in the corpus. Run `--repair --probe-phrase "
                       "<token>` for the Target's before/after pair.")

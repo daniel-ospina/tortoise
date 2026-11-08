@@ -1268,7 +1268,19 @@ def probe_phrase_rejection(phrase: str) -> str | None:
     phrase that occurs nowhere still returns rows once it tokenises.
 
     The identifier mechanism (#8933) is the second way one typed token becomes
-    several (``zx-99`` → ``zx|zx99|"zx 99"``), so that shape is refused too.
+    several (``zx-99`` → ``zx|zx99|"zx 99"``). That shape is refused by the
+    TOKENISER check above, because :func:`tortoise.sparse.tokenize_sparse_query`
+    defaults to ``keep_identifiers=True`` and so already emits the alias as a
+    second token (``['zx', 'zx99']``) — MEASURED: over 7,700 systematic
+    identifier shapes and 60,000 random strings, the ``build_or_query`` check
+    below fired ZERO times. ⛔ It is kept as a BACKSTOP, not as the refusing
+    mechanism, and it is labelled that way because a guard that is described as
+    live while it can never fire is the over-claim this leg exists to remove: it
+    starts firing the moment ``sparse`` moves alias expansion out of the tokeniser
+    (or this call passes ``keep_identifiers=False``), and that is a hole the
+    tokeniser check would NOT catch. ``tests/test_11070_source_prose_repair.py``
+    pins that route by patching ``build_or_query``, so the backstop is reachable
+    and tested rather than dead.
 
     ⚠️ What this CANNOT decide is RARITY — whether the token exists in the
     corpus. That is measured, not declared: the before/after pair on the writing
@@ -1692,19 +1704,28 @@ def probe_fts(g, phrases, *, control: bool = True,
                                            # ADDRESSABLE — examined by no bucket
          "control": {"mode": "probe" | "empty-index" | "unavailable",
                      # `probe`:      a known-present lexicon token was measured
-                     #               (carries ran/degraded/reason too)
-                     # `empty-index`: no Source carries `_searchText` at all and
-                     #               the read RAN — structurally consistent, and
-                     #               the ONLY arm where ok=True with hits=0
+                     #               (the ONLY arm that carries ran/degraded)
+                     # `empty-index`: no Source carries `_searchText` at all —
+                     #               structurally consistent, and the ONLY arm
+                     #               where ok=True with hits=0
                      # `unavailable`: nothing corroborates the probe's zero
                      "ok", "hits",          # hits is None when not measured
                      "note",
-                     # `ran`/`degraded`/`reason` are present on `probe` and
-                     # `empty-index` and ABSENT on `unavailable` — a consumer must
-                     # read the arm before reaching for them (`--json` output is
-                     # the same dict), so the scoping is stated rather than
-                     # implied (#11536 review round 6).
-                     "ran", "degraded", "reason"} | None}
+                     # ⛔ `ran`/`degraded`/`reason` ARE PRESENT ON `probe` ONLY and
+                     # ABSENT on ``empty-index``/``unavailable`` (#11536 review
+                     # round 7, P2). On ``empty-index`` they were LITERAL
+                     # constants — ``"ran": True, "degraded": False`` — beside a
+                     # note that said "and the read RAN", on the ONE arm that
+                     # runs no FTS read at all: the measurement behind it is
+                     # ``source_index_is_empty``, a NODE-PROPERTY count. A `--json`
+                     # consumer therefore could not tell a corroborating `probe`
+                     # (measured) from this one (a constant) — the same over-claim
+                     # this leg spent six rounds removing.
+                     "ran", "degraded", "reason",   # `probe` ONLY
+                     # ``measured`` = what this arm actually counted, so the
+                     # `empty-index` consumer is told a population was read and
+                     # the FTS read was not exercised.
+                     "measured"} | None}          # `empty-index`: "node-property"
     # ⛔ ``mode`` IS LOAD-BEARING, not decoration (#11536 review round 5): the
     # three arms are distinguishable ONLY by it — a `probe` control can be ok True
     # or False, `empty-index` is ok True with hits 0, `unavailable` carries
@@ -1804,16 +1825,24 @@ def probe_fts(g, phrases, *, control: bool = True,
                 # the field ABSENT (#11536 review). The arm is sound because the
                 # probe's own `stale` veto catches a surviving entry and
                 # `leg_trace` catches a dead read, not because of the count.
+                # ⛔ THIS ARM CARRIES NO `ran`/`degraded` (#11536 review round 7,
+                # P2). They were LITERAL constants here — `"ran": True,
+                # "degraded": False` — and the note said "and the read RAN", on
+                # the ONE arm that runs NO FTS read: what is measured is
+                # `source_index_is_empty`, a NODE-PROPERTY count. The arm is still
+                # sound, but for the reasons stated above — the probe row's own
+                # `stale` veto catches a surviving entry and `leg_trace` catches a
+                # dead read — NOT because of anything this arm claims to have read.
                 report["control"] = {
                     "mode": "empty-index", "ok": True, "hits": 0,
-                    "ran": True, "degraded": False,
-                    "reason": "no_source_search_text",
+                    "measured": "node-property",
                     "note": "no SOURCE over the probe's own population "
                             "(`documentKind IS NULL`) carries `_searchText` (the "
-                            "field the index is declared on) and the read RAN, so "
-                            "the corpus is empty rather than the index being "
-                            "silent: the probe's 0 is consistent with a repaired "
-                            "graph",
+                            "field the index is declared on), so the corpus holds "
+                            "nothing for the index to build on and the probe's 0 "
+                            "is consistent with a repaired graph. ⛔ This arm "
+                            "counted NODES; it did not exercise the FTS read, so "
+                            "it does not by itself show that the read answers",
                 }
             elif empty is None:
                 report["control"] = {
