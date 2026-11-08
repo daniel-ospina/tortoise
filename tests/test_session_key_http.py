@@ -939,6 +939,13 @@ class TestOthersBranchFailClosedRecheck1879:
     seam (a real two-thread race here would be timing-dependent, and a
     sequential double-call would prove nothing). Mutation: delete the
     re-check → the mint returns 200 and the org ends at cap+1.
+
+    ⛔ The PROBE cache is warmed explicitly before `_make_sdk` is patched. That
+    cache is a PROCESS global whose warmth on entry is a startup-thread race, so
+    leaving it implicit made this test pass on an idle box and red on a loaded
+    CI runner (`_StubSDK` has no `_get_proj`, and a cold `_registry_anchor()`
+    builds through the very `_make_sdk` this test stubs). See the comment at the
+    warm call.
     """
 
     def test_revoke_that_frees_no_slot_refuses_instead_of_overshooting(
@@ -988,6 +995,24 @@ class TestOthersBranchFailClosedRecheck1879:
         def _make_sdk_spy(*a, **kw):
             ns = kw.get("namespace") or (a[0] if a else None)
             return _StubSDK() if ns == "registry" else orig_make_sdk(*a, **kw)
+
+        # ⛔ WARM THE PROBE CACHE **BEFORE** THE STUB IS INSTALLED (#10180 lane).
+        # The request's first registry read is `_membership_role` ->
+        # `_registry_anchor()`, which in URI mode is the CACHED registry probe
+        # (#8098). With a COLD cache that anchor calls `_make_sdk(namespace=
+        # "registry")` — i.e. the stub — and `_build_registry_probe_handle` then
+        # calls `sdk._get_proj()`, which `_StubSDK` does not have:
+        # `AttributeError: '_StubSDK' object has no attribute '_get_proj'` as a
+        # raw 500. Whether the cache happens to be warm when the body starts is
+        # a STARTUP-THREAD race (an unrelated background thread binds the anchor
+        # during the `client` fixture on an idle box, and loses that race on a
+        # loaded CI runner — measured: 31/31 pass locally, the same test red in
+        # `test (e)`), so the race must not be what decides the test. Warming it
+        # here makes the anchor a REAL handle for this test's identity
+        # (`TORTOISE_DB_URI` + the per-test `TORTOISE_DB_PATH` pin, so no other
+        # test can match the entry) and leaves the stub doing its ONE job: the
+        # mint path's registry reads.
+        ha._registry_anchor()
 
         monkeypatch.setattr(ha, "_make_sdk", _make_sdk_spy)
 
