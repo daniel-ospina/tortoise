@@ -1072,6 +1072,19 @@ def test_the_probe_pins_the_lane_and_reads_it_back():
     assert ("TORTOISE_S4_DELTA", "1") in probe.DOOR_PINNED_ON, (
         "TORTOISE_S4_DELTA is DEFAULT-ON; leaving it unpinned lets an ambient "
         "=0 swap S4's output contract under a declared arm")
+    # cycle 11: #10360's write-path enforcement gained its own off-switch in
+    # #11449 (default-ON, `extractor_v2._state_value_verbatim_enforced`), and
+    # ARMED it WITHHOLDS a point whose value the model rewrote
+    # (`_refuse_rewritten_value` on `execute_embed`'s S1/S2 path) — so it moves
+    # the POPULATION the run writes, not just the prompt. An ambient `=0`
+    # restores pre-#10513 write-through while the `arm:` line is unchanged,
+    # which is the silent-seam shape this door exists to close; the census
+    # reds while nothing holds the read, and this names the class it went into.
+    assert ("TORTOISE_STATE_VALUE_VERBATIM", "1") in probe.DOOR_PINNED_ON, (
+        "TORTOISE_STATE_VALUE_VERBATIM is DEFAULT-ON (`env_flag(..., True)`); "
+        "armed it refuses to write a point whose value the model rewrote, so "
+        "an ambient =0 changes the population a run writes under a declared "
+        "arm — pinned to its shipped default, or the door claim is false")
     assert "TORTOISE_LABEL_ORDER" in probe.DOOR_PINNED_OFF, (
         "TORTOISE_LABEL_ORDER=shuffle randomises the renders per call — it "
         "must be pinned off or two runs of the arm differ for a non-arm reason")

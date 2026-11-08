@@ -480,7 +480,24 @@ DOOR_PINNED_OFF = ("TORTOISE_SESSION_EXTRACTOR", "TORTOISE_EXTRACTOR",
 #: ``TORTOISE_S4_DELTA`` is DEFAULT-ON (``env_flag(..., True)``); an ambient
 #: ``=0`` silently swaps S4's output contract for the legacy complete-list one,
 #: which changes the embed list a run measures without changing the arm.
+#:
+#: ``TORTOISE_STATE_VALUE_VERBATIM`` (#10360's write-path enforcement) is here for
+#: the same reason, one layer down: DEFAULT-ON
+#: (``extractor_v2._state_value_verbatim_enforced`` -> ``env_flag(..., True)``),
+#: and ARMED it WITHHOLDS a point whose value the model rewrote
+#: (``_refuse_rewritten_value`` on ``execute_embed``'s S1/S2 model path). So the
+#: switch moves the POPULATION the run writes: an ambient ``=0`` restores the
+#: pre-#10513 write-through and a rewritten value lands, while the ``arm:`` line
+#: still declares the same arm. Pinned to the SHIPPED default rather than off —
+#: the acceptance measures the write path as shipped, and pinning it is what
+#: makes a run insensitive to the operator's shell. The census in
+#: ``tests/test_7949_c2_door.py::test_every_env_var_the_capture_path_reads_is_accounted_for``
+#: reds while a read on the capture path is in none of the four classes;
+#: ``extractor_v2.py`` gained this read with ``#11449`` (``91dbc9a8885``, 2026-11-07),
+#: which did not touch this probe — so the census went red on that commit and no
+#: class held the switch until it was pinned here.
 DOOR_PINNED_ON = (("TORTOISE_S4_DELTA", "1"), ("TORTOISE_JSON_MODE", "1"),
+                  ("TORTOISE_STATE_VALUE_VERBATIM", "1"),
                   # cycle 9 (#10983): `sparse.py:226` `env_flag(IDENTIFIER_ENV,
                   # True)` — default-ON, read through `projection/entities.py:1208`
                   # on the write path (`create_point` -> `point_identifier_aliases`),

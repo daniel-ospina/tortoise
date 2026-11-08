@@ -248,9 +248,11 @@ through `referentiality.ENV_FLAG`), `TORTOISE_CHANGE_FEED` (an ambient `=1` adds
 to the graph the run writes), and the two confidence gates `TORTOISE_SUBJECT_TAU_HI` /
 `TORTOISE_SUBJECT_TAU_LO` (read through a parameter by `subject_binding`, and they decide whether
 the `:aboutSubject`/`:aboutObject` edge is written at all), plus `TORTOISE_LABEL_ORDER_SEED` (inert while
-`TORTOISE_LABEL_ORDER` is off, pinned so the pair cannot be split), `TORTOISE_CONTEXT_ENRICH` (the per-turn REWRITE of the text each turn embeds, gated in `context_enrich.enrich_enabled` and reached from `sdk.capture_session` as `enrich_fn=_capture_enriched_texts`; fail-safe OFF) — all pinned **unset** — and `TORTOISE_JSON_MODE`, pinned to **`1`** because its absent state is already ON and it is read PER CALL to flip the request's `response_format` (`model_adapters`), and `TORTOISE_IDENTIFIER_TOKENS`, pinned to **`1`** because its absent state is already ON (`sparse.py:226`, `env_flag(IDENTIFIER_ENV, True)`) and it rewrites `search_keys` on every `:Point` the run writes (`projection/entities.py:1208`, reached from `create_point`); the registered corpus yields no aliases either way, measured. The last five are the cycle-7 to
-cycle-10 review findings (`TORTOISE_CONTEXT_ENRICH`/`TORTOISE_JSON_MODE`, then `TORTOISE_CHANGE_FEED`,
-then `TORTOISE_IDENTIFIER_TOKENS`, then `TORTOISE_SUBJECT_TAU_HI`/`_LO`): each sits on the acceptance
+`TORTOISE_LABEL_ORDER` is off, pinned so the pair cannot be split), `TORTOISE_CONTEXT_ENRICH` (the per-turn REWRITE of the text each turn embeds, gated in `context_enrich.enrich_enabled` and reached from `sdk.capture_session` as `enrich_fn=_capture_enriched_texts`; fail-safe OFF) — all pinned **unset** — and `TORTOISE_JSON_MODE`, pinned to **`1`** because its absent state is already ON and it is read PER CALL to flip the request's `response_format` (`model_adapters`), and `TORTOISE_IDENTIFIER_TOKENS`, pinned to **`1`** because its absent state is already ON (`sparse.py:226`, `env_flag(IDENTIFIER_ENV, True)`) and it rewrites `search_keys` on every `:Point` the run writes (`projection/entities.py:1208`, reached from `create_point`); the registered corpus yields no aliases either way, measured, and `TORTOISE_STATE_VALUE_VERBATIM`, pinned to **`1`** because its absent state is already ON too (`extractor_v2._state_value_verbatim_enforced`, `env_flag(STATE_VALUE_VERBATIM_SWITCH, True)`) and ARMED it WITHHOLDS a point whose value the model rewrote (`_refuse_rewritten_value`, called on `execute_embed`'s write path inside `extract_session_v2`) — an ambient `=0` writes that rewritten value instead, i.e. it changes the population the run writes with no change to the `arm:` line. The cycle-7 to
+cycle-11 findings added these (`TORTOISE_CONTEXT_ENRICH`/`TORTOISE_JSON_MODE` in cycle 7, then
+`TORTOISE_CHANGE_FEED`, then `TORTOISE_IDENTIFIER_TOKENS`, then `TORTOISE_SUBJECT_TAU_HI`/`_LO` in
+cycle 10, then `TORTOISE_STATE_VALUE_VERBATIM` in cycle 11 — that last one found by the CENSUS going
+red, not by a review round): each sits on the acceptance
 path and was in no pin, no ledger row and no closure. The authoritative list is
 `capstone_measure.DOOR_PINNED_OFF` / `DOOR_PINNED_ON`, which `tests/test_7949_c2_door.py` resolves
 against the tree — this sentence is the reader's map, not the control. The set
@@ -277,10 +279,12 @@ to the EMPTY SET while sitting on the write path (`bind_point_subjects`, inside
 `TORTOISE_SUBJECT_TAU_HI=0.99`) — so the arm seams, the mention arm, the per-turn embed
 rewrite, the request's `response_format`, the change-feed writer, the identifier-token writer and the
 confidence-gated subject binder are inside the derived
-surface, not hand-listed beside it. That list grew one review round at a time (the last four are
+surface, not hand-listed beside it. That list grew one review round at a time (the last five are
 `TORTOISE_CONTEXT_ENRICH`/`TORTOISE_JSON_MODE`, then `TORTOISE_CHANGE_FEED`, then
-`TORTOISE_IDENTIFIER_TOKENS` in cycle 9, then `TORTOISE_SUBJECT_TAU_HI`/`_LO` in cycle 10, each found by a
-measured mutation that left the previous derivation green), which is the honest reason to state
+`TORTOISE_IDENTIFIER_TOKENS` in cycle 9, then `TORTOISE_SUBJECT_TAU_HI`/`_LO` in cycle 10, then
+`TORTOISE_STATE_VALUE_VERBATIM` in cycle 11 — the earlier four each found by a measured mutation that
+left the previous derivation green, the last one by the census itself reddening when `#11449` added the
+read), which is the honest reason to state
 it as a CLOSURE over the reads INSIDE those modules rather than as a list somebody curated — not
 a closure over everything the path reaches, which is the gap #11410 records. Every one is written in-process, **read back**, and a run whose read-back
 disagrees is **refused** (`probes/capstone_measure.py`); the measurement switches were
@@ -1739,6 +1743,35 @@ re-cut from the resolved document (§8), and no committed verdict is re-scored.
   INSIDE S2.3's `condition` moved, in this document and in `preregistration.json`'s mirror of the
   same sentence; the numbers this record exists to freeze are byte-identical. `document_sha256`
   is re-cut in this same commit, per §8's rule for *any* edit to this file.
+
+### 10.15 — a pin ADDED: `TORTOISE_STATE_VALUE_VERBATIM` (`#11449`'s off-switch) (2026-11-08, `#11512`)
+
+- **Original value (as §10.14 left it):** the door's pinned-to set was `TORTOISE_S4_DELTA`=1,
+  `TORTOISE_JSON_MODE`=1, `TORTOISE_IDENTIFIER_TOKENS`=1, and `TORTOISE_STATE_VALUE_VERBATIM` was in
+  **no** class at all — not a pin, not a ledger row, not a declared input, not an acknowledged
+  non-seam.
+- **New value:** the same three plus `TORTOISE_STATE_VALUE_VERBATIM`=**`1`**, written in-process by
+  `probes/capstone_measure.py::DOOR_PINNED_ON` and re-read back like every other pin (a read-back
+  that disagrees REFUSES the run); `preregistration.json`'s `door.acceptance_arm.pinned_to` carries
+  the same entry, and `tests/test_7949_c2_door.py` binds the two copies.
+- **Why:** `#11449` (`91dbc9a8885`) gave the verbatim state-value refusal its own off-switch
+  (`extractor_v2._state_value_verbatim_enforced`, `env_flag(STATE_VALUE_VERBATIM_SWITCH, True)` —
+  default **ON**), and ARMED the rule WITHHOLDS a point whose value the model rewrote
+  (`_refuse_rewritten_value`, called on `execute_embed`'s write path). So the switch moves the
+  POPULATION a capture writes, not just its prompt: an ambient `=0` writes the rewritten value
+  instead while the `arm:` line still declares the same arm. Pinned to the **shipped default**
+  rather than off — the acceptance measures the write path as shipped, the same reading as
+  `TORTOISE_S4_DELTA`, `TORTOISE_JSON_MODE` and `TORTOISE_IDENTIFIER_TOKENS`. It is also the state
+  every already-scored log ran under: before `#11449` the refusal was unconditional, so pinning it
+  to `1` reproduces those runs rather than changing them.
+- **How it was found:** not by a mutation pass. The census in
+  `tests/test_7949_c2_door.py::test_every_env_var_the_capture_path_reads_is_accounted_for` went RED
+  on `main` at `91dbc9a8885`, because `extractor_v2.py` gained the read and no class held it — the
+  mechanical form of §1.6.2's closure, doing what it exists for.
+- **What moved: one pin, and no threshold.** No metric, denominator, threshold, class set, corpus
+  pin or `steps` member is added, removed or re-worded; no scored row changes, because the pinned
+  value equals the behaviour those rows were measured under. `document_sha256` is re-cut in this
+  same commit, per §8.
 
 ## 11. The step set V5 gates over — seven unconditional, one conditional (`#10215`)
 
