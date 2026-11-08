@@ -3209,6 +3209,12 @@ def test_a_checkout_without_git_REFUSES_and_NAMES_IT(monkeypatch, capsys):
     and the reason is PRINTED with the ledger marker. A git-less box still refuses the
     record — at the sha arm first, and here at the TRACKED arm too — which is the
     pre-shallow doctrine (`unmeasurable` = nothing measured = refused).
+
+    ⛔ WHAT ISOLATES THE TRACKED ARM IS THE STDERR ASSERTION, NOT THE STUB. `validate`
+    ACCUMULATES problems, so with `_commit_state` left unstubbed the sha problem and the
+    TRACKED problem travel in one joined message and every assertion here still passes
+    (measured). The stub narrows the message; the `could not be RUN` line is the only
+    evidence that the arm under test is the one that fired.
     """
     import types
 
@@ -3219,7 +3225,12 @@ def test_a_checkout_without_git_REFUSES_and_NAMES_IT(monkeypatch, capsys):
     monkeypatch.setattr(cl, "_commit_state", lambda sha, repo_root: "exists")
     with pytest.raises(cl.InvalidLedger) as excinfo:
         cl.validate(_ledger([_row("A")]))
-    assert "not TRACKED by git" in str(excinfo.value), str(excinfo.value)
+    msg = str(excinfo.value)
+    assert "could not be run here" in msg, msg
+    # ⛔ It must NOT claim git answered. On this box git was never asked, and the file
+    # is tracked and present in every clone — reporting it "not TRACKED by git" is the
+    # same guess-the-cause defect this change exists to remove, one layer up.
+    assert "not TRACKED by git" not in msg, msg
     err = capsys.readouterr().err
     assert "could not be RUN" in err, err  # the real cause is named, not guessed
     assert "Traceback" not in err, err
@@ -4691,9 +4702,11 @@ def test_an_EMFILE_on_the_ls_files_probe_cannot_manufacture_a_clean_exit(tmp_pat
 
     repo = _hermetic_repo(tmp_path)
     real_run = sp.run
+    fired: list[str] = []
 
     def explode(argv, *a, **kw):
         if argv[:2] == ["git", "ls-files"]:
+            fired.append(" ".join(argv[:2]))
             raise OSError(24, "Too many open files")
         return real_run(argv, *a, **kw)
 
@@ -4702,14 +4715,25 @@ def test_an_EMFILE_on_the_ls_files_probe_cannot_manufacture_a_clean_exit(tmp_pat
     mp.setattr(cl, "_commit_state", lambda sha, repo_root=None: "exists")
     try:
         data = _ledger([_row("A", evidence=["untracked.txt"])])
-        with pytest.raises(cl.InvalidLedger, match="not TRACKED by git"):
+        with pytest.raises(cl.InvalidLedger, match="could not be run here"):
             cl.validate(data, repo_root=repo)
     finally:
         mp.undo()
+    # ⛔ THE STUB MUST HAVE FIRED. Without this the test passes with `explode` neutered
+    # — the refusal it would then observe is the ordinary UNTRACKED one, already pinned
+    # by `test_an_untracked_artifact_is_invalid`, and the EMFILE cause would be covered
+    # by nothing while this row stayed green. If `_is_tracked` ever imports `run`
+    # directly instead of through the module attribute, the stub silently stops
+    # matching and this assertion is what notices.
+    assert fired == ["git ls-files"], fired
     # And with git answering, the same artifact is still refused BY NAME — the refusal
     # must name the artifact, not degrade every row into "could not be run".
     ok, why = cl._evidence_is_real("untracked.txt", repo)
     assert not ok and "not TRACKED" in why, why
+    # ⛔ And a TRACKED artifact is not caught by the EMFILE refusal: `None` must not be
+    # readable as "refuse everything", or the pin would pass on a tool that refuses all.
+    ok, why = cl._evidence_is_real("committed.txt", repo)
+    assert ok, why
     # The committed file is accepted, so the pin is not passing by refusing everything.
     ok, why = cl._evidence_is_real("committed.txt", repo)
     assert ok, why
@@ -4722,7 +4746,7 @@ def test_the_unrunnable_probe_path_is_not_the_abstention_path(tmp_path):
     `_tracked_unrunnable()` is NOTHING answered. Collapsing them is the fail-open, so
     this asserts they are distinct at the function level, not just end to end.
     """
-    assert cl._tracked_unrunnable(OSError(24, "Too many open files"), "x") is False
+    assert cl._tracked_unrunnable(OSError(24, "Too many open files"), "x") is None
     assert cl._tracked_unprovable() is True
 
 
@@ -4732,8 +4756,10 @@ def test_an_EMFILE_on_the_FOLLOW_UP_probe_also_refuses(tmp_path):
     `_is_tracked` calls `git ls-files`, and then — only when that exits non-zero — a
     follow-up `git rev-parse --is-inside-work-tree`. Both calls can fail to SPAWN, and
     both were folded into the abstention, so reverting only the follow-up guard back
-    to the shipped fail-open left the whole suite green (measured: 168 passed). A
-    guard with no pin is a guard the next lane deletes as dead code.
+    to the shipped fail-open left the whole suite green — measured at the head BEFORE
+    this pin was added: **168 passed, 0 failed**. With this pin present the same revert
+    is red (`1 failed, 168 passed`), which is the point: the number 168 is the tell that
+    the pin is the only thing standing between that guard and deletion as dead code.
     """
     import types
 
@@ -4750,6 +4776,6 @@ def test_an_EMFILE_on_the_FOLLOW_UP_probe_also_refuses(tmp_path):
     mp = pytest.MonkeyPatch()
     mp.setattr(cl, "subprocess", types.SimpleNamespace(run=boom_on_rev_parse))
     try:
-        assert cl._is_tracked(REPO_ROOT / "docs" / "x.md", REPO_ROOT) is False
+        assert cl._is_tracked(REPO_ROOT / "docs" / "x.md", REPO_ROOT) is None
     finally:
         mp.undo()
