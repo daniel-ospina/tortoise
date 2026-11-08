@@ -19,11 +19,11 @@ the corrected reading:
    (``sdk.py:16360``, called at ``:15397``) →
    ``extractor_v2.extract_session_v2`` (``extractor_v2.py:12829``) calls
    ``_edus_from_conversation`` (S0, ``:12947``), ``run_s1`` (S1, ``:1485``),
-   ``run_s2`` (S2.1, ``:15378``), ``_run_vet_pass`` (S2.2, ``:15430``),
-   ``kind_classifier.classify_items`` (S2.3, ``:13078``),
-   ``_apply_classify_kinds`` (S2.3, ``:13079``), ``search_graph`` (S3,
-   ``:13095``), ``run_s4`` (the gap filler, ``:13116``), and ``execute_embed``
-   (S5+S6, ``:13332``). ONE cite per symbol, on the line that symbol is on:
+   ``run_s2`` (S2.1, ``:15423``), ``_run_vet_pass`` (S2.2, ``:15475``),
+   ``kind_classifier.classify_items`` (S2.3, ``:13100``),
+   ``_apply_classify_kinds`` (S2.3, ``:13101``), ``search_graph`` (S3,
+   ``:13117``), ``run_s4`` (the gap filler, ``:13138``), and ``execute_embed``
+   (S5+S6, ``:13354``). ONE cite per symbol, on the line that symbol is on:
    S2.3 makes TWO calls two lines apart, and the single ``:NNNN`` a
    ``a``/``b`` pair cite could carry is only ever checkable for one of them —
    that pair form is how ``_apply_classify_kinds`` sat on ``:9210`` (naming
