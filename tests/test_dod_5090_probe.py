@@ -4562,11 +4562,18 @@ def _doc_section(text: str, start: str, end: str) -> str:
 # the evidence: `walk` is itself a coverage word, so that sentence matches under
 # either spelling — citing it as proof of `es` was a measurement that does not
 # reproduce (#11437 review, P3), corrected to the row above.
-_COVERAGE = re.compile(r"\b(?:walk|visit|reach|report)(?:s|es|ed)?\b")
+# ⛔ AND `ing`, one inflection further again (#11437 review, round 7, P2): without
+# it the present CONTINUOUS is unreadable to both the coverage test and the
+# governance window, so three honest restatements of the claim were false REDs.
+# Measured — `"the walk is not visiting"` / `"…is not reporting"` / `"…is not
+# reaching a nested def's decorators and parameter defaults"` were all RED under
+# `(?:s|es|ed)?` and are all GREEN with `ing` present. Zero rows in any of the
+# four sets move and the real doc is still a HIT.
+_COVERAGE = re.compile(r"\b(?:walk|visit|reach|report)(?:s|es|ed|ing)?\b")
 # The negation must GOVERN a coverage verb: within two words of one.
 _NEGATION_GOVERNS = re.compile(
     r"\b(?:not|never|outside)\b(?:\s+\w+){0,2}?\s+"
-    r"(?:walk|visit|reach|report)(?:s|es|ed)?\b")
+    r"(?:walk|visit|reach|report)(?:s|es|ed|ing)?\b")
 # ⛔ `_COVERAGE` is RETAINED DELIBERATELY AND IS CURRENTLY IMPLIED, and saying so
 # is the point (#11437 review, P3). Measured: `_NEGATION_GOVERNS` already requires
 # one of the same four verbs AFTER the negation, so on all 88 candidate sentences
@@ -4646,11 +4653,24 @@ _AFFIRMED = re.compile(
     # `not the only` row in `must_red`: that row reds only because `walk` sits
     # four words from `not`, so flipping the clause to `the walk does not only
     # visit …` satisfies the governance window and the shape was open one
-    # word-order away from a row claiming to close it. Closing it is safe in
-    # this direction because an honest statement of the claim has no twin —
-    # `does not only visit` ALWAYS implies `also visits` — so this arm adds no
-    # false block (measured: 0 of the 10 `must_stay_green` rows move).
-    r"|\b(?:not|never)\s+(?:only|merely|just|simply)\b")
+    # word-order away from a row claiming to close it.
+    # ⛔ THE CUE MUST GOVERN A COVERAGE VERB — do not drop that tail (#11437
+    # review, round 7, P1). The first cut of this arm was the bare pair
+    # `\b(?:not|never)\s+(?:only|merely|just|simply)\b`, and a bare pair fires
+    # ANYWHERE in the sentence: the inclusive `not only … but also`, which is how
+    # one HONESTLY states an exclusion, then reads as an affirmation. Measured
+    # RED-that-should-be-GREEN under the bare pair, GREEN under this one:
+    #   "not only the decorators but also the parameter defaults of a nested
+    #    `def` sit outside the walk, and are therefore not reported"
+    #   "it is not only the decorators that sit outside the walk; the parameter
+    #    defaults do too"
+    #   "…are not merely outside the walk — they are never reached at all"
+    # The claim that made the bare pair look free ("`does not only visit` ALWAYS
+    # implies `also visits`, so the arm adds no false block") is true of that
+    # PHRASE and was false of the REGEX — a scoped measurement generalised to the
+    # pattern, which is the error this file records twice elsewhere.
+    r"|\b(?:not|never)\s+(?:only|merely|just|simply)\s+"
+    r"(?:walk|visit|reach|report)(?:s|es|ed|ing)?\b")
 
 
 def _residual_sentences(s3: str) -> list[str]:
@@ -5223,12 +5243,26 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
         # ⛔ THE CLAUSE-SCOPE CLASS (#11437 review, round 6, P1). Governance asks
         # only that SOME negation sit within two words of SOME coverage verb — it
         # does not ask that the negation govern the CLAIM. Every row below
-        # satisfies the window while asserting the INVERSE, and none is a
-        # vocabulary problem, so no arm in `_AFFIRMED` closes them: each needs
-        # the predicate to know what the sentence's SUBJECT is, or to read a
-        # second negation, or to resolve a preposition. Measured GREEN. They are
-        # rows rather than prose because a residual nobody can see is
+        # satisfies the window while asserting the INVERSE. Measured GREEN. They
+        # are rows rather than prose because a residual nobody can see is
         # indistinguishable from a fix.
+        # ⛔ AND THE REASON THEY ARE OPEN IS A TRADE, NOT AN IMPOSSIBILITY (#11437
+        # review, round 7, P3). The round-6 wording here said "none is a
+        # vocabulary problem, so no arm in `_AFFIRMED` closes them" — measured
+        # FALSE. Each is closed by ONE `_AFFIRMED` alternative, with zero rows
+        # moving in any of the four sets and the real doc still a HIT:
+        #   double negation  <- \b(?:not|never)\b(?:\s+\w+){0,8}?\s+(?:not|never)\b
+        #   `without`-framed <- \bwithout\s+(?:\w+\s+){0,2}?(?:walk|visit|reach|report)...
+        #   both pseudo-clefts <- \b(?:not|never)\s+(?:the|a)\s+(?:\w+\s+)?walk\b
+        # They are held OPEN deliberately, because each closure buys a false block
+        # on an honest phrasing — measured: the walk-noun arm reds "nested def
+        # decorators and defaults are not the walk's business", and the `without`
+        # arm reds "…does not reach a nested def's decorators or defaults without
+        # also walking the body". That trade is this file's stated policy when a
+        # shape is in front of it, and it is NOT taken here: these four inverses
+        # are contrived phrasings, while the honest twins are ones a real editor
+        # would write. Declared is the honest state, but it is a CHOICE with a
+        # price, not a limit of the instrument.
         "open scope: pseudo-cleft — `walk` is itself a coverage word":
             "the body walk visits a nested `def`'s decorators and parameter "
             "defaults; it is not the closure walk that reaches them",
@@ -5325,18 +5359,28 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
 
     # …and the three alternatives this test claims an executor for are asserted to
     # HAVE one: with that alternative removed from `_AFFIRMED`, at least one
-    # `must_red` row must go back to GREEN. `_AFFIRMED` carries SEVEN top-level
-    # alternatives and this loop asserts three, so FOUR are unasserted — and they
+    # `must_red` row must go back to GREEN. `_AFFIRMED` carries EIGHT top-level
+    # alternatives and this loop asserts four, so FOUR are unasserted — and they
     # are not one class: `inside the walk`, `except that`, the negated-reverser
-    # class and the pseudo-negation class.
+    # class and the pseudo-negation class. (Round 7 corrected SEVEN→EIGHT and
+    # three→four: the concessive arm added in round 6 was invisible to both the
+    # count and the guard while being the arm that round's whole justification
+    # rested on — the arm added most recently is exactly the one a hand-count
+    # misses, #11437 review, round 7, P2.)
     # ⚠️ NONE of those four is "inert belt". Measured by ablating each arm to
     # `\bZZZNEVERMATCH\b` and re-evaluating ALL FOUR row sets (not just
-    # `must_red`): the concessive row at :4948 reds through `except that`; the
+    # `must_red`): the concessive row (label `inverse: except that they are not
+    # reported`) reds through `except that`; the
     # negated-reverser class carries `does not fail to report` (measured beside
     # that row); the three hedges red through the pseudo-negation class; and
-    # `inside the walk` takes TWO `declared_blocks` rows green (:5164
-    # `never inside the walk`, :5175 `inside the walk's …`) — it is INERT FOR
+    # `inside the walk` takes TWO `declared_blocks` rows green (labels `false
+    # block: `never inside the walk`` and `false block: `inside the walk's`
+    # matches the possessive`) — it is INERT FOR
     # `must_red` ONLY, so an ablation scoped to that one set reads the arm as dead.
+    # ⚠️ The pointers here are ROW LABELS, not line numbers: the previous two
+    # revisions cited `:4948` / `:5164` / `:5175`, and every one of them was
+    # invalidated the moment a commit inserted lines above the sets — twice
+    # (#11437 review, round 7, P3). A label survives an insertion.
     # ⚠️ An earlier wording here said "the other five negated-reverser branches are
     # deliberately NOT asserted … they are inert today": the count (five, for four)
     # and the class label were both wrong, and telling a reader an arm is unmeasured
@@ -5348,6 +5392,9 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
     for _arm_name, _arm in (
             ("therefore reported", r"\btherefore reported\b"),
             ("skipped", r"\bskipped\b"),
+            ("concessive-scope",
+             r"\b(?:not|never)\s+(?:only|merely|just|simply)\s+"
+             r"(?:walk|visit|reach|report)(?:s|es|ed|ing)?\b"),
             ("negated privative",
              r"\b(?:not|never)\s+un(?:visited|reported|reached|walked|covered"
              r"|mentioned|seen)\b")):
