@@ -400,6 +400,39 @@ _ENV_NAME: Final = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _UMASK_ARG: Final = re.compile(r"^[0-7]{1,4}$|^[ugoa]*[+\-=][rwxXst]*$")
 
 
+def _fails_before_a_chain(head: str, args: list[str]) -> bool:
+    """Does ``head args`` FAIL at script level, so a `&&` after it short-circuits?
+
+    ⛔ MEASURED, not inferred (fifth review cycle). The previous guard asked only
+    about `exit`, and justified exempting `return` with a measurement taken using
+    the WRONG SEPARATOR: `bash -c 'return 0 ; echo RAN-AFTER'` does print
+    RAN-AFTER, because `;` continues past a failure — but a record chains with
+    `&&`, where the same failure short-circuits. Measured on this box, each
+    followed by `&& echo RAN`:
+
+        exit 0       rc 0   no RAN     (terminates — the original case)
+        return 0/1   rc 2   no RAN     !!! admitted before this function
+        shift 5      rc 1   no RAN     !!! admitted before this function
+        shift        rc 1   no RAN     (bare `shift` is `shift 1`)
+        shift 0      rc 0   RAN        (succeeds, so NOT terminating)
+        break        rc 0   RAN        (warns, then continues)
+        continue     rc 0   RAN        (warns, then continues)
+
+    So a control builtin is TERMINATING unless it can succeed at script level,
+    which for `shift` means an explicit `0` operand and for `break`/`continue` is
+    always. DECLARED RESIDUAL (#11520): `set -o <invalid-option>` fails the same
+    way and is NOT covered here — refusing it needs the closed set of bash option
+    NAMES, which is flag-VALUE knowledge this module deliberately does not carry.
+    """
+    if head in {"exit", "return"}:
+        return True
+    if head == "shift":
+        # `shift 0` is the only spelling that succeeds with no positional params.
+        return not (len(args) == 1 and args[0] == "0")
+    # `break` / `continue` warn and CONTINUE at script level (measured rc 0).
+    return False
+
+
 def _wrapper_argument_defect(head: str, args: list[str], cwd: Path, root: Path) -> str | None:
     """Why ``head args`` is not a well-formed shell WRAPPER, or `None` if it is.
 
@@ -545,8 +578,22 @@ def _split_flag(token: str) -> tuple[str, str]:
         return flag, (value if sep else "")
     found = None
     for position, letter in enumerate(token[1:], start=1):
+        # ⛔ SCAN ONLY THE LEADING FLAG CLUSTER — stop where the BODY begins (review
+        # cycle 5, P1). Scanning the WHOLE token let a `-c`/`-e`-looking LETTER
+        # INSIDE THE BODY win: measured, `bash -c'uv run pytest
+        # tools/capstone_ledger.py'` set `found` on the `e` of "ledger", graded
+        # `'r.py'` as the script and REFUSED a legitimate record (a false block, and
+        # exit 1 hides the uncovered list) — and the prose spelling was refused by
+        # that same mis-split rather than by any rule. The cluster ends at the first
+        # character that is neither a shell single-letter flag NOR a script flag,
+        # which is exactly where `-cBODY`'s body starts; `-ec` / `-euc` / `-cu` stay
+        # inside the cluster, so the operand-taking flag is still found in it and the
+        # body still comes from the NEXT token.
         if f"-{letter}" in _SCRIPT_FLAGS:
             found = position
+            continue
+        if letter not in _SHORT_SHELL_FLAGS:
+            break
     if found is not None:
         remainder = token[found + 1 :]
         # ⛔ A PURE OPTION CLUSTER IS MORE FLAGS, NOT A BODY. Measured against real
@@ -1257,42 +1304,25 @@ def _evidence_is_real(
                     return True, ""
                 return False, f"`cmd:` evidence script {token!r} is not a command: {why}"
             if token.startswith("-"):
-                # ⛔ A dashed token is a FLAG only when it is ONE WORD. A token that
-                # CONTAINS whitespace was quoted by the author — `shlex` preserves
-                # whitespace only INSIDE a quote — so it is an argument wearing a
-                # dash, not a flag, and skipping it as one reached the
-                # runner-with-no-target arm. Measured, `cmd:uv run pytest "-q I did
-                # not run this"` reported `verified: 1 uncovered: 0` and exited 0,
-                # i.e. a record that states on its own line that the work was NOT
-                # run satisfied the strongest verdict in the vocabulary. The same
-                # shape with a real artifact after it (`pytest "-k not slow" <path>`)
-                # is a legitimate record, so the refusal is DEFERRED (see
-                # `unread_prose`) instead of taken here.
-                if any(char.isspace() for char in token):
-                    # ⛔ KNOWN-OPEN (#11520 root 5), pinned: a quoted disclaimer
-                    # ALSO followed by a real artifact stays ACCEPTED (`pytest "-q I
-                    # did not run this" <tracked path>`), because the deferral below
-                    # cannot tell a quoted FLAG+VALUE from a quoted SENTENCE —
-                    # `"-k not slow"` and `"-q I did not run this"` are
-                    # syntactically identical, and discriminating them is a semantic
-                    # judgement, not a grammar. The arm keeps the weaker side on
-                    # purpose: the module's own rule, recorded twice, is that "a
-                    # refusal that loses the finding is worse than the weaker arm",
-                    # and exit 1 prints no report. WITHOUT an artifact the same
-                    # spelling is still REFUSED (the `unread_prose` arm at the end of
-                    # this scan), so the naked case stays closed. Pinned by
-                    # `test_the_known_residual_false_PASSes_are_pinned_as_OPEN`.
-                    if unread_prose is None:
-                        unread_prose = token
-                    continue
+                # ⛔ THE ATTACHED-SCRIPT ARM RUNS **FIRST**, BEFORE the whitespace
+                # deferral (review cycle 5, P1). `-c'NOT RUN - see <path>'` is ONE
+                # shlex token that CONTAINS whitespace, so the prose test below
+                # matched it and `continue`d — the grading at the end of this block
+                # was never reached for exactly the bodies that carry a sentence.
+                # Measured at the previous head, `cmd:bash -c'NOT RUN - see
+                # tools/capstone_ledger.py' tests/…py` reported `verified: 1
+                # uncovered: 0` / CLEAN / exit 0, while the SAME value WITHOUT the
+                # trailing path was refused: the deferred prose was then CLEARED by
+                # the artifact token. Bash proves the body cannot run at all
+                # (`bash -c "bash -c'NOT RUN - see x' y"` → `-N: invalid option`,
+                # rc 2). Ordering is the whole fix: a body behind a script flag is a
+                # SCRIPT whatever characters it contains.
+                #
                 # ⛔ `-cBODY` / `--eval=BODY` is ONE shlex token, so
                 # `token in _SCRIPT_FLAGS` was False and the body was skipped as a
                 # plain flag — the one-word bypass the `-c` arm exists to close,
-                # one spelling over. Measured, `cmd:bash -c'NOT RUN - see
-                # tools/capstone_ledger.py'`, `cmd:bash -e'NOT RUN'` and
-                # `cmd:bash --eval="NOT RUN"` all reported CLEAN and exited 0 while
-                # the SPACED spelling of the same record was REFUSED. Split the
-                # attached value off and grade it exactly as the next-token arm does.
+                # one spelling over. Split the attached value off and grade it
+                # exactly as the next-token arm does.
                 flag, attached = _split_flag(token)
                 if flag in _SCRIPT_FLAGS and attached:
                     if depth >= _MAX_SCRIPT_DEPTH:
@@ -1303,6 +1333,35 @@ def _evidence_is_real(
                     if ok:
                         return True, ""
                     return False, f"`cmd:` evidence script {attached!r} is not a command: {why}"
+                # ⛔ A dashed token WITHOUT a script flag is a FLAG only when it is
+                # ONE WORD. A token that CONTAINS whitespace was quoted by the
+                # author — `shlex` preserves whitespace only INSIDE a quote — so it
+                # is an argument wearing a dash, not a flag, and skipping it as one
+                # reached the runner-with-no-target arm. Measured, `cmd:uv run pytest
+                # "-q I did not run this"` reported `verified: 1 uncovered: 0` and
+                # exited 0, i.e. a record that states on its own line that the work
+                # was NOT run satisfied the strongest verdict in the vocabulary. The
+                # same shape with a real artifact after it (`pytest "-k not slow"
+                # <path>`) is a legitimate record, so the refusal is DEFERRED (see
+                # `unread_prose`) instead of taken here.
+                #
+                # ⛔ KNOWN-OPEN (#11520 root 5), pinned: a quoted disclaimer ALSO
+                # followed by a real artifact stays ACCEPTED (`pytest "-q I did not
+                # run this" <tracked path>`), because the deferral below cannot tell
+                # a quoted FLAG+VALUE from a quoted SENTENCE — `"-k not slow"` and
+                # `"-q I did not run this"` are syntactically identical, and
+                # discriminating them is a semantic judgement, not a grammar (WHICH
+                # flag takes a value). The arm keeps the weaker side on purpose: the
+                # module's own rule, recorded twice, is that "a refusal that loses the
+                # finding is worse than the weaker arm", and exit 1 prints no report.
+                # WITHOUT an artifact the same spelling is still REFUSED (the
+                # `unread_prose` arm at the end of this scan), so the naked case stays
+                # closed. Pinned by
+                # `test_the_known_residual_false_PASSes_are_pinned_as_OPEN`.
+                if any(char.isspace() for char in token):
+                    if unread_prose is None:
+                        unread_prose = token
+                    continue
                 consumed_script = flag in _SCRIPT_FLAGS
                 continue
             if token in _CHAIN_WORDS or Path(token).name in RUNNERS:
@@ -1700,16 +1759,28 @@ def _command_body(raw: str, base: Path, root: Path) -> tuple[str, Path, str]:
                 # false PASS of exactly the class the `cd` guard beside it closes
                 # (eighth review cycle; `origin/main` refuses both). A TRAILING
                 # `… ; exit $?` / `… || exit 1` stays legal, which is the spelling
-                # this repo actually records. `return` is NOT terminating here: at
-                # script level bash prints an error and CONTINUES (measured:
-                # `bash -c 'return 0 ; echo RAN-AFTER'` prints RAN-AFTER).
-                if head == "exit" and index != _last_used:
+                # this repo actually records.
+                #
+                # ⛔ `return` IS terminating HERE, and the previous measurement that
+                # said otherwise was taken with the WRONG SEPARATOR (review cycle 5,
+                # P1). `bash -c 'return 0 ; echo RAN-AFTER'` does print RAN-AFTER —
+                # a `;` continues past a failure — but a record chains with `&&`,
+                # where the SAME failure SHORT-CIRCUITS: measured, `bash -c 'return 0
+                # && echo RAN-AFTER'` prints only "return: can only `return' from a
+                # function or sourced script", rc 2, NO RAN-AFTER. Generalising a
+                # `;` measurement to `&&` admitted `cmd:return 0 && uv run pytest
+                # …`, which was measured CLEAN / exit 0 for a runner bash never
+                # reached. `shift` is the same shape (`shift 0` succeeds, bare
+                # `shift` and `shift 5` fail rc 1); `break`/`continue` genuinely do
+                # continue (rc 0) and are NOT terminating. See
+                # `_fails_before_a_chain`.
+                if index != _last_used and _fails_before_a_chain(head, _tokens[1:]):
                     return (
                         "",
                         base,
-                        f"the `exit` segment {segment!r} TERMINATES the shell, so no "
-                        "later segment of this record can have run — `exit` may only "
-                        "be the LAST segment",
+                        f"the `{head}` segment {segment!r} FAILS at script level, so a "
+                        "`&&` after it SHORT-CIRCUITS and no later segment of this "
+                        "record can have run — it may only be the LAST segment",
                     )
                 # ⛔ The HEAD alone is not enough: read the wrapper's own arguments
                 # (see `_wrapper_argument_defect` for the measured bypass this

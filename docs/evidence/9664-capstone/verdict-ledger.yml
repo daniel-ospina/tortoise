@@ -90,13 +90,14 @@
 #         `echo`/`printf`/… must first be measured against the accepted
 #         `… && echo PASS`. Four carriages, all tracked in #11520 and all pinned —
 #         the list is enumerated because an unlisted carriage reads as closed;
-#       - a `-c`/`-e` script body is never TRUSTED, and the two spellings differ.
-#         An attached body with NO whitespace (`bash -cNOTRUNx`) is graded as a
-#         command in its own right. One that CONTAINS whitespace is refused as an
-#         unread quoted token — that is the spelling real bash parses as an invalid
-#         option cluster (`bash -c'echo F'` exits with "invalid option"), so the
-#         command cannot have run; `origin/main` accepted it, and grading the body
-#         instead would ACCEPT a record for a command bash refuses;
+#       - a `-c`/`-e` script body is never TRUSTED, and the ATTACHED spelling is
+#         graded: `bash -c'uv run pytest tools/x.py'` is a legitimate record (the body
+#         names an artifact) and `bash -c'NOT RUN - see tools/x.py'` is REFUSED, with
+#         or without an artifact token after it. An earlier head claimed the
+#         whitespace form was refused while the code DEFERRED it as prose and let a
+#         later artifact token clear it — `bash -c'NOT RUN - see tools/capstone_ledger.py'
+#         <tracked path>` exited 0. Fixed at this head and pinned; the `_split_flag`
+#         cluster scan is what makes the legitimate spelling survive the fix;
 #       - a NON-RUNNER program heading a segment (`mkdir -p out && …`, `rm -rf
 #         .pytest_cache && …`, `sleep 2 && …`) is REFUSED as prose, although the
 #         record is shell-valid and `origin/main` accepted it. This is a known-open

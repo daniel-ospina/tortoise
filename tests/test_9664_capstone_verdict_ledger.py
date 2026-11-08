@@ -1119,6 +1119,12 @@ def test_a_comment_ends_the_LINE_and_the_next_line_is_still_graded(tmp_path):
         # report. Without the artifact the same spelling IS refused (pinned by
         # `_UNREAD_TOKEN_BYPASSES`), so the deferral still closes the naked case.
         'cmd:uv run pytest "-q I did not run this" tests/test_9664_capstone_verdict_ledger.py',
+        # ⛔ Root 6: `set -o <invalid>` FAILS at script level, so the `&&`
+        # short-circuits exactly as `return`/`shift` do — but `_fails_before_a_chain`
+        # refuses only the builtins measured to fail UNCONDITIONALLY. Closing this
+        # needs the closed set of bash option NAMES (flag-VALUE knowledge), so it is
+        # recorded here rather than bought at that price.
+        "cmd:set -o nosuchoption && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
     ],
 )
 def test_the_known_residual_false_PASSes_are_pinned_as_OPEN(tmp_path, disclaimer):
@@ -1140,7 +1146,7 @@ def test_the_known_residual_false_PASSes_are_pinned_as_OPEN(tmp_path, disclaimer
 
     If #11520 is closed, this test must be INVERTED (EXIT_INVALID), not deleted.
 
-    ⛔ FIVE carriages are recorded, not four — the list read complete while one was
+    ⛔ SIX carriages are recorded, not five — the list read complete while one was
     missing, which is how this branch's residual prose kept being wrong:
     (root 1) a LATER runner-headed segment, ungraded;
     (root 2) prose appended inside the graded command's own segment, after its
@@ -1163,6 +1169,11 @@ def test_the_known_residual_false_PASSes_are_pinned_as_OPEN(tmp_path, disclaimer
     that this branch kept getting wrong harder to keep complete. The inversion
     instruction below is the tripwire, and it is checked by the reviewer, not by
     the runner.
+    (root 6) `set -o <invalid-option>` before a `&&`: the builtin FAILS, so the
+             chain short-circuits, but `_fails_before_a_chain` refuses only the
+             builtins measured to fail UNCONDITIONALLY (`return`, `shift`). Closing
+             it needs the closed set of bash option NAMES, which is flag-VALUE
+             knowledge this module deliberately refuses to carry.
     """
     proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, disclaimer])]))
     assert proc.returncode == cl.EXIT_CLEAN, (
@@ -1760,6 +1771,104 @@ _UNREAD_TOKEN_BYPASSES = [
 ]
 
 
+def test_an_attached_script_body_is_graded_whatever_it_contains(tmp_path):
+    """An attached `-cBODY`/`--eval=BODY` is a SCRIPT, not prose — always.
+
+    ⛔ MEASURED false PASS (fifth review cycle, P1). The whitespace deferral ran
+    BEFORE the `_split_flag` grading, so every body that carried a SENTENCE was
+    parked as `unread_prose` and `continue`d — the grading was never reached for
+    exactly the bodies it exists for. With a held artifact token after the entry the
+    parked prose was then CLEARED by `_names_artifact`, and:
+
+        cmd:bash -c'NOT RUN - see tools/capstone_ledger.py' tests/…py
+
+    reported `verified: 1 uncovered: 0` / `CAPSTONE-LEDGER-RESULT: CLEAN` / exit 0,
+    while the SAME value WITHOUT the trailing path was refused. Bash proves the
+    command cannot have run: `bash -c "bash -c'NOT RUN - see x' y"` answers
+    `-N: invalid option`, rc 2.
+
+    ⛔ AND THE FIX MUST NOT BUY IT WITH A FALSE BLOCK. Routing every whitespace
+    body through `_split_flag` only works because THAT function now stops scanning
+    at the end of the leading flag cluster; while it scanned the whole token it split
+    `-c'uv run pytest tools/capstone_ledger.py'` on the `e` of "ledger", graded
+    `'r.py'` as the script and REFUSED the legitimate record. Both directions are
+    pinned here so neither can be spelled as the other's bypass.
+    """
+    for entry in (
+        "cmd:bash -c'NOT RUN - see tools/capstone_ledger.py' "
+        "tests/test_9664_capstone_verdict_ledger.py",
+        'cmd:bash --eval="NOT RUN - see tools/capstone_ledger.py" '
+        "tests/test_9664_capstone_verdict_ledger.py",
+        "cmd:bash -e'NOT RUN - see tools/capstone_ledger.py' "
+        "tests/test_9664_capstone_verdict_ledger.py",
+    ):
+        proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, entry])]))
+        assert proc.returncode == cl.EXIT_INVALID, (
+            f"{entry!r} was ACCEPTED ({proc.returncode}) — an attached script body is "
+            f"graded as a script, so a disclaimer in it cannot carry the verdict\n"
+            f"{proc.stdout}{proc.stderr}"
+        )
+    # The same spelling, with a body that really names an artifact, must be ACCEPTED.
+    for entry in (
+        "cmd:bash -c'uv run pytest tools/capstone_ledger.py'",
+        'cmd:bash -c"uv run pytest tools/capstone_ledger.py"',
+    ):
+        proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, entry])]))
+        assert proc.returncode == cl.EXIT_CLEAN, (
+            f"{entry!r} was REFUSED ({proc.returncode}) — an attached body that names "
+            f"an artifact is a legitimate record, and refusing it is the false block "
+            f"this fix must not introduce\n{proc.stdout}{proc.stderr}"
+        )
+
+
+def test_a_control_builtin_that_fails_before_a_chain_is_terminating(tmp_path):
+    """A control builtin that FAILS short-circuits the `&&`, so nothing after ran.
+
+    ⛔ MEASURED false PASS (fifth review cycle, P1). Only `exit` was
+    position-restricted, and `return` was exempted on the strength of a `;`
+    measurement (`bash -c 'return 0 ; echo RAN-AFTER'` prints RAN-AFTER) — but a
+    RECORD chains with `&&`, where the same failure short-circuits. Measured on this
+    box, each followed by `&& echo RAN`:
+
+        return 0/1   rc 2   no RAN   → `cmd:return 0 && uv run pytest …` was CLEAN
+        shift 5      rc 1   no RAN   → `cmd:shift 5 && uv run pytest …` was CLEAN
+        shift        rc 1   no RAN   (bare `shift` is `shift 1`)
+        shift 0      rc 0   RAN      → must stay legal
+        break        rc 0   RAN      → must stay legal
+        continue     rc 0   RAN      → must stay legal
+
+    DECLARED RESIDUAL (#11520 root 6): `set -o <invalid-option>` fails the same way
+    and is NOT refused here — that needs the closed set of bash option NAMES, which
+    is flag-VALUE knowledge this module deliberately refuses to carry. Pinned OPEN in
+    `test_the_known_residual_false_PASSes_are_pinned_as_OPEN`.
+    """
+    command_tail = " && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q"
+    for head in ("return 0", "return 1", "shift 5", "shift"):
+        entry = f"cmd:{head}{command_tail}"
+        proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, entry])]))
+        assert proc.returncode == cl.EXIT_INVALID, (
+            f"{entry!r} was ACCEPTED ({proc.returncode}) — `{head}` fails at script "
+            f"level, so the `&&` short-circuits and the runner never ran\n"
+            f"{proc.stdout}{proc.stderr}"
+        )
+    # The spellings that SUCCEED at script level must stay legal.
+    for head in ("shift 0", "break", "continue"):
+        entry = f"cmd:{head}{command_tail}"
+        proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, entry])]))
+        assert proc.returncode == cl.EXIT_CLEAN, (
+            f"{entry!r} was REFUSED ({proc.returncode}) — `{head}` succeeds at script "
+            f"level (measured rc 0), so the runner after it really runs\n"
+            f"{proc.stdout}{proc.stderr}"
+        )
+    # A TRAILING control builtin stays legal: nothing after it is being claimed.
+    entry = "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q ; return 0"
+    proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, entry])]))
+    assert proc.returncode == cl.EXIT_CLEAN, (
+        f"{entry!r} was REFUSED ({proc.returncode}) — a TRAILING `return` is legal\n"
+        f"{proc.stdout}{proc.stderr}"
+    )
+
+
 @pytest.mark.parametrize("entry", _UNREAD_TOKEN_BYPASSES)
 def test_a_token_the_loop_never_reads_cannot_carry_the_verdict(tmp_path, entry):
     """Prose in a wrapper or in quotes is prose: it must not reach `verified`."""
@@ -2113,9 +2222,14 @@ def test_an_exit_that_is_not_the_last_segment_is_refused(tmp_path):
     reached. `origin/main` refuses both. This is the unconditional form of exactly
     what the `cd` guard beside it closes.
 
-    `return` is NOT the same: at script level bash prints an error and CONTINUES
-    (measured: `bash -c 'return 0 ; echo RAN-AFTER'` prints RAN-AFTER), so it is
-    deliberately not position-restricted.
+    `return` is NOT terminating on a `;` — bash prints an error and CONTINUES
+    (measured: `bash -c 'return 0 ; echo RAN-AFTER'` prints RAN-AFTER). ⛔ BUT IT IS
+    TERMINATING ON A `&&`, which is how a RECORD chains: measured,
+    `bash -c 'return 0 && echo RAN-AFTER'` prints only the `return` error, rc 2, and
+    NO RAN-AFTER. That distinction was the fifth review cycle's P1: this docstring
+    used to generalise the `;` measurement to a general "not position-restricted",
+    and `cmd:return 0 && uv run pytest …` was measured CLEAN / exit 0 for a runner
+    bash never reached. See `_fails_before_a_chain` and the dedicated test below.
     """
     for command in (
         "cmd:exit 0 ; uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
