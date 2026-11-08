@@ -2636,23 +2636,18 @@ def test_a_MULTI_token_probe_is_REFUSED_because_the_FTS_read_OR_joins_it(
             # None from `probe_phrase_rejection`.
             ("the fridays", "whitespace-separated words"),
             ("fridays x", "whitespace-separated words"),
-            # ⛔ AND THESE TWO ARE THE ONES THAT ACTUALLY PIN THE GUARD
-            # (#11536 review round 12, P2; wording corrected round 15, P2).
-            # WITHOUT them the row was green with the whitespace guard deleted:
-            # `"the fridays"` and `"fridays x"` each have TWO alphanumeric
-            # runs, so the `len(runs) > 1` guard below refuses them on its own
-            # and they cannot detect that guard's removal — which is exactly why
-            # the two fixtures below were added. ⛔ THEY DO PIN IT NOW, so the
-            # earlier phrasing ("the whitespace guard could be deleted with this
-            # row still green") described the row BEFORE this pair and was false
-            # about it after: MEASURED, with the whitespace guard disabled
-            # `"friday ."` and `"the ."` are both ACCEPTED (`None`) and this row
-            # reds. A single run plus a punctuation-only word is the shape ONLY
-            # the whitespace guard owns — MEASURED at this head:
-            # `_indexed_term_runs("friday .") == ['friday']` and the tokeniser
-            # yields one term, so without the guard they are ACCEPTED, and the
-            # read then sends `friday .` raw, which RediSearch evaluates as an
+            # ⛔ THESE TWO ARE THE FIXTURES THE WHITESPACE GUARD OWNS (#11536
+            # review round 12, P2). A single alphanumeric run plus a
+            # punctuation-only word is a shape ONLY that guard refuses:
+            # MEASURED, `_indexed_term_runs("friday .") == ['friday']` and the
+            # tokeniser yields one term, so with the guard disabled
+            # `probe_phrase_rejection("friday .")` and `("the .")` both return
+            # None and this row fails on the accept. Without the guard the read
+            # also sends `friday .` raw, which RediSearch evaluates as an
             # implicit AND that under-matches.
+            # The two fixtures above are answered by a DIFFERENT guard — each has
+            # two alphanumeric runs, so `len(runs) > 1` refuses them — and the
+            # expected reason beside each fixture names which guard answered.
             ("friday .", "whitespace-separated words"),
             ("the .", "whitespace-separated words"),
     ):
