@@ -15,7 +15,10 @@ per-session date annotations — the same shape the retrieval leg produces) and
 handed to the reader; the judge scores the answer — the run's judge, which is
 `deepseek-v4-flash` by default since the #8486 ruling of 2026-10-27 (see
 `docs/benchmarks/longmemeval-500q/run-report.md` §1.1); pass
-`--judge-model openai:gpt-4o-2024-08-06` for the OFFICIAL one. Recall is
+`--judge-model openai:gpt-4o-2024-08-06` for the OFFICIAL one — that spec
+needs `OPENAI_API_KEY` on the box (or the routed
+`openrouter:openai/gpt-4o-2024-08-06` form with `OPENROUTER_API_KEY`), and it
+fails closed naming the key rather than grading with another model. Recall is
 trivially 1.0 (every session is in context), so the cell isolates
 reader+judge capability — the ceiling any retrieval leg must approach.
 
