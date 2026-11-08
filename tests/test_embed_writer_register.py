@@ -1193,14 +1193,39 @@ def test_every_unattributable_store_alias_is_still_unbound_and_store_shaped() ->
         resolved = any(
             dict(_ALIAS_LABEL.findall(body)).get(alias) for body in bodies
         )
-        if not named or resolved:
-            stale.append(f"{(key, alias)} named={named} resolved={resolved} — {reason}")
+        if not named:
+            stale.append(f"{(key, alias)} — no longer NAMED by a store clause — {reason}")
+        elif resolved:
+            stale.append(f"{(key, alias)} — now BOUND — {reason}")
     assert not stale, (
         "these `STORE_ALIAS_UNATTRIBUTABLE` entries no longer excuse an unattributable store: an "
         "alias that is no longer NAMED by a store clause makes the entry inert, and one that is "
         "now BOUND hides a store the alias rule could attribute. Re-derive and drop the entry: "
         + "; ".join(stale)
     )
+
+
+def test_an_unattributable_exemption_stops_earning_its_place(monkeypatch) -> None:
+    """The liveness pin's own falsifier — neutering it must not be silent.
+
+    Measured before this test existed: turning the pin's only effect into `if False:` left
+    `193 passed, 1 skipped`, and deleting the test outright was equally invisible, because
+    `STORE_ALIAS_UNATTRIBUTABLE` is empty on the live tree. That is the class this file fixed
+    once for `STORE_CLAUSE_MARKERS`, and it matters more here: an undetected stale exemption
+    re-opens the `#11530` hole, because the completeness pin CLEARS its refusal on that key.
+    """
+    key = "tortoise.sdk::_write_capture_turns"
+    module = sys.modules[__name__]
+
+    monkeypatch.setattr(module, "STORE_ALIAS_UNATTRIBUTABLE",
+                        {(key, "t"): "synthetic: `t` IS bound in its own body"})
+    with pytest.raises(AssertionError, match="now BOUND"):
+        test_every_unattributable_store_alias_is_still_unbound_and_store_shaped()
+
+    monkeypatch.setattr(module, "STORE_ALIAS_UNATTRIBUTABLE",
+                        {(key, "zzz"): "synthetic: no store clause names this alias"})
+    with pytest.raises(AssertionError, match="no longer NAMED"):
+        test_every_unattributable_store_alias_is_still_unbound_and_store_shaped()
 
 
 def test_every_store_alias_pattern_still_sees_a_live_store() -> None:

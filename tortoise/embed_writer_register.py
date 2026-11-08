@@ -94,10 +94,18 @@ written through a helper that form list does not name, or (c) a vector carried b
 (`SET n += $p` / `SET n = $map` — the shape `_update_entity` itself stores through, which is why
 that entry's completeness rests on `LABEL_CONSTANTS` rather than on the alias rule; closing it
 statically needs data flow, and a naive `SET` rule false-reds `_rebuild_all_replay`, whose
-`SET b`/`SET s` carry the pre-wipe snapshot on `:Batch`/`:Session`). Shapes (a) and (b) RED when
-the clause names an alias — and a `LABEL_CONSTANTS` entry does NOT clear them; only a reviewed
-`STORE_ALIAS_UNATTRIBUTABLE` entry does. Shape (c) passes SILENTLY, so a reviewer of a label-tuple
-entry must read the body for a map merge by hand. The `NO_LIVE_VECTOR` pin proves the
+`SET b`/`SET s` carry the pre-wipe snapshot on `:Batch`/`:Session`). Shape (a) REDS whenever the clause names an alias the cited body never binds — a
+`LABEL_CONSTANTS` entry does NOT clear it; only a reviewed `STORE_ALIAS_UNATTRIBUTABLE` entry
+does. Shapes (b) and (c) pass SILENTLY whenever the writer has any other statically attributed
+store: the alias never reaches `aliases`, so neither the completeness pin NOR row 2 sees the
+store — measured for `_TURN_WRITE_CYPHER`, where a second store on unserved `Batch` through an
+unnamed helper keeps both suites green and leaves the row at `MET`. ⛔ And (b) with NO other
+attributed store falls into the no-alias branch, where a `LABEL_CONSTANTS` entry DOES clear it
+(measured on `_update_entity`) — so the pin is not a fallback for either shape: a reviewer of a
+label-tuple entry must read the body for a helper-rendered store and for a map merge by hand.
+(The same silence covers a helper whose alias is CONCATENATED —
+`set_embedding_clause("t" + suffix)` matches on `"t"` and attributes the store to `t`, which is
+right only while the suffix cannot change the alias.) The `NO_LIVE_VECTOR` pin proves the
 symbol's own body (plus one hop of module constants) executes no store clause, which is NOT the
 same as proving the writer stores nothing — a door that EXECUTES A CALLER-SUPPLIED statement
 (`sdk::_event_raw_write_door`) carries no marker and is caught only by review.
