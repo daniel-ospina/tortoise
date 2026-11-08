@@ -731,6 +731,21 @@ def test_a_runtime_label_declaration_holds_row_two_without_calling_it_unresolved
     assert row.verdict == "PARTIAL", row.observed
     assert any("decided at RUNTIME" in n for n in row.notes), row.notes
     assert not any("unresolved writers" in n for n in row.notes), row.notes
+    # ⛔ …and the WRITER must carry the runtime reason, not the "nothing in the product says"
+    # one (live-head review, P2). The bookkeeping that does it was deletable with the suite green
+    # (measured: replacing it with `pass` left 162 passed, 1 skipped), and without it a writer the
+    # register DOES declare `LABELS_AT_RUNTIME` is reported as an UNDECLARED one — blaming the
+    # product for a label its own declaration says is decided at restore time.
+    scored = probe.scored_labels()
+    assert scored["unresolved"].get("tortoise.y::_store_event") == probe.AT_RUNTIME_LABEL, (
+        "a declared `LABELS_AT_RUNTIME` writer is reported as an undeclared one — that note says "
+        "'nothing in the product says which label they store on', which its own declaration "
+        f"contradicts (got {scored['unresolved'].get('tortoise.y::_store_event')!r})"
+    )
+    assert "tortoise.y::_store_event" not in scored["by_writer"], (
+        "a runtime-label writer was resolved to a serving label — its label is not the register's "
+        f"to declare (by_writer={scored['by_writer']})"
+    )
 
 
 def test_a_DERIVED_label_beats_a_declaration(monkeypatch):
@@ -820,6 +835,31 @@ def test_an_UNREADABLE_register_is_UNMEASURED_not_a_green_row_two(monkeypatch):
     # one sentence's wording.
     assert "tortoise.w::_gated_two_labels" in joined, row.notes
     assert any("MORE THAN ONE label" in n for n in row.notes), row.notes
+
+    # ⛔ …and the case the docstring above names as WORSE than the misattribution — an unreadable
+    # register over a population whose labels ALL DERIVE, where there is no `unknown` writer left to
+    # hold the row. Measured (live-head review, P1): removing `or resolved["error"]` from the
+    # verdict left the WHOLE file green (162 passed, 1 skipped), and on this fixture the row then
+    # read `MET` while still printing `UNMEASURED` — the self-contradicting note row 1 refuses, one
+    # row over, and a false PASS. The arm is the only thing standing between an unread register and
+    # a `MET` here, so it is exercised explicitly rather than inherited.
+    derived = {
+        "tortoise.a::_store_event": {
+            "callee": probe.SEAM_CALL, "at": "tortoise/a.py:1",
+            "kind": "gated", "label": "Event", "callees": frozenset(),
+        },
+        "tortoise.b::_store_point": {
+            "callee": probe.SEAM_CALL, "at": "tortoise/b.py:2",
+            "kind": "gated", "label": "Point", "callees": frozenset(),
+        },
+    }
+    monkeypatch.setattr(probe, "embedding_writers", lambda: derived)
+    all_derived = probe.score_path_bullet()
+    assert any("UNMEASURED" in n for n in all_derived.notes), all_derived.notes
+    assert all_derived.verdict == "PARTIAL", (
+        "an unreadable register over a fully-derived population did not hold the row — the one "
+        f"input that can flip it was missing, so a `MET` here is a false pass: {all_derived.observed}"
+    )
 
 
 def test_a_malformed_stores_declaration_holds_row_two(monkeypatch):
