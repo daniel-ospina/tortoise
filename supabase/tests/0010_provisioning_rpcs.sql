@@ -605,7 +605,9 @@ RESET ROLE;
 --   * collaborator-only, paid, and pending_payment -> allowed (the predicate
 --     mirrors `supabase_control.owned_free_org_ids`, which counts OWNERSHIP of
 --     an org with no active paid subscription and excludes pending_payment);
---   * past_due / trialing                          -> refused (they ARE paying).
+--   * past_due / trialing                          -> allowed (they ARE paying:
+--     like `active` they are not a FREE org, so they do not consume the
+--     allowance and the create proceeds — see 8f, which asserts 3 orgs land).
 -- Every fixture id here ends in `-1981` (cleanup at the end of this section,
 -- idempotent re-runs).
 
@@ -799,7 +801,11 @@ DO $$ BEGIN
     '#1981: a COLLABORATOR on a free org still provisions their own');
 END $$;
 
--- ── 8f. subscription_status decides: paid/pending allow, paying refuses ─────
+-- ── 8f. subscription_status decides: the PAYING window is not a free org ───
+-- A paying org — `active`, `past_due`, `trialing` — does not consume the
+-- allowance, so the create is ALLOWED; `pending_payment` is not real yet, so
+-- it does not consume it either; `canceled` is NOT paying, so it DOES count
+-- (the #2789 §2 acceptance this backstop must not close).
 -- paid (active) owned org does not consume the allowance
 SELECT public.provision_team(
     p_user_id  := 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb4'::uuid,
