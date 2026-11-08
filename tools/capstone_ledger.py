@@ -382,9 +382,7 @@ _CD_SEGMENT: Final = re.compile(r"^cd\s+(\S[^;|&]*)$")
 #: A prose argument (`exit "I did not run this"`) does not match, which is the point:
 #: the control builtins were added to `_WRAPPER_VERBS` for `|| exit 1`, and without an
 #: argument grammar they admitted the very prose carriage that set exists to refuse.
-_CONTROL_OPERAND: Final = re.compile(
-    r"^(?:[+-]?\d{1,10}|\$\?|\$\{\?\}|\$#|\$\{#\})$"
-)
+_CONTROL_OPERAND: Final = re.compile(r"^(?:[+-]?\d{1,10}|\$\?|\$\{\?\}|\$#|\$\{#\})$")
 
 #: The shell CONTROL builtins admitted as wrappers. Named separately because the
 #: `exit`-position rule must treat them as non-inert: they terminate rather than
@@ -469,9 +467,7 @@ _ENV_FLAGS: Final[dict[str, frozenset[str]]] = {
 #: symbolic mode character"), so admitting `s`/`t`/`X` here (as `chmod` allows)
 #: admitted records for a command that never ran. ⛔ Octal is up to FIVE digits:
 #: `umask 07777` exits 0, so `{1,4}` false-blocked it.
-_UMASK_ARG: Final = re.compile(
-    r"^(?:[0-7]{1,5}|[ugoa]*[+\-=][rwx]*(?:,[ugoa]*[+\-=][rwx]*)*)$"
-)
+_UMASK_ARG: Final = re.compile(r"^(?:[0-7]{1,5}|[ugoa]*[+\-=][rwx]*(?:,[ugoa]*[+\-=][rwx]*)*)$")
 
 
 def _fails_before_a_chain(head: str, args: list[str]) -> bool:
@@ -1459,34 +1455,55 @@ def _evidence_is_real(
                 # SAME value WITHOUT the trailing path was refused: the deferred
                 # prose was then CLEARED by the artifact token.
                 #
-                # ⛔ AND THE ARM REFUSES — it does NOT grade — because an ATTACHED
-                # body is a command bash CANNOT EXECUTE (review cycle 6, P2; the
+                # ⛔ AND THE ARM REFUSES — it does NOT grade — because for a SHELL an
+                # ATTACHED body is a command that CANNOT EXECUTE (review cycle 6, P2;
                 # primary source, measured on this box):
                 #
-                #   bash -c'echo hi'   -> `bash: - : invalid option`, rc 1, no output
+                #   bash -c'echo hi'   -> rc 1, stderr `bash: - : invalid option`,
+                #                         body never runs; STDOUT carries the 26-line
+                #                         `set -o` table, because `o` parses as `-o`
                 #   bash -c 'echo hi'  -> prints `hi`, rc 0
                 #   sh   -c'echo hi'   -> `Illegal option -h`, rc 2
                 #
-                # With no space, `-cecho hi` is ONE argv word and bash reads what
-                # follows `-c` as MORE OPTION LETTERS. So no attached spelling was
-                # ever a runnable command, and grading the body (the previous form of
-                # this arm) recorded a `verified` row for a command that cannot have
-                # executed — the same false-PASS class as the disclaimer it refuses.
+                # With no space, `-cecho hi` is ONE argv word and the shell reads what
+                # follows `-c` as MORE OPTION LETTERS. ⛔ NOT UNIVERSAL, and an earlier
+                # revision of this comment over-claimed it: for CPython and node the
+                # attached value IS the documented, runnable form (`python3 -c'print(3)'`
+                # -> `3`, rc 0; `node --eval='console.log(1)'` -> `1`). Those are still
+                # refused — the body is a python/JS PROGRAM and this arm grades a body
+                # as a SHELL command line, which it can never be — and that refusal is a
+                # declared known-open FALSE BLOCK (#11520), not a claim that the
+                # spelling is unrunnable. So for a shell, grading the body recorded a
+                # `verified` row for a command that cannot have executed (the same
+                # false-PASS class as the disclaimer it refuses); for python/node the
+                # refusal costs a record but asserts nothing false.
                 # Refusing is also what makes the verdict independent of the cluster
                 # split: `-cmake x`, `-cec x`, `-cverified` and `--eval=…` are ALL
                 # refused, so a mis-split can neither admit a body nor drop a prefix.
-                # The SPACED form (`bash -c '<script>'`, body in the NEXT token) is
-                # the only runnable spelling and is graded by the `consumed_script`
+                # The SPACED form (`bash -c '<script>'`, body in the NEXT token) is the
+                # spelling a shell actually runs and is graded by the `consumed_script`
                 # arm below.
                 flag, attached = _split_flag(token)
                 if flag in _SCRIPT_FLAGS and attached:
+                    # ⛔ QUOTE THE TOKEN, NOT `_split_flag`'s REMAINDER (review cycle 7,
+                    # P2). The cluster scan consumes the leading flag letters, so for
+                    # `-cec uv run pytest <path>` the remainder is `' uv run pytest
+                    # <path>'` — the `ec ` the arm exists to reject was DROPPED from the
+                    # error text itself, so the message named a different body than the
+                    # record contained. The token is what the author wrote.
                     return False, (
-                        f"`cmd:` evidence attaches {_short(attached)} to {flag!r} in ONE "
-                        "token — the shell reads what follows the flag as more OPTION "
-                        "letters, so this spelling cannot execute at all (measured: "
-                        "`bash -c'echo hi'` answers `- : invalid option`, rc 1). Put "
+                        f"`cmd:` evidence puts a script body in the SAME token as its "
+                        f"flag ({_short(token)}). For a SHELL (`bash`/`sh`) the body "
+                        "after `-c` is read as more OPTION LETTERS, so that spelling "
+                        "cannot execute (measured: `bash -c'echo hi'` ends rc 1 with "
+                        "stderr `bash: - : invalid option` and the body never runs — "
+                        "stdout carries the `o`-table, because `o` parses as `-o`). Put "
                         "the script in its OWN token (`bash -c '<script>'`), which is "
-                        "the only runnable form and IS graded"
+                        "the spelling a shell runs. For `python`/`node` an attached "
+                        "`-cBODY` DOES run, but the body is a python/JS PROGRAM, not a "
+                        "shell command line, and this arm grades a body as a shell "
+                        "command line — so it is refused here too: a declared "
+                        "known-open FALSE BLOCK (#11520)"
                     )
                 # ⛔ A dashed token WITHOUT a script flag is a FLAG only when it is
                 # ONE WORD. A token that CONTAINS whitespace was quoted by the

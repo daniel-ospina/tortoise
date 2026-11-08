@@ -1967,7 +1967,7 @@ _UNREAD_TOKEN_BYPASSES = [
 
 
 def test_an_attached_script_body_is_refused_whatever_it_contains(tmp_path):
-    """An attached `-cBODY`/`--eval=BODY` cannot execute, so it is REFUSED.
+    """An attached `-cBODY`/`--eval=BODY` is REFUSED: it cannot be a shell body.
 
     ⛔ MEASURED false PASS (fifth review cycle, P1). The whitespace deferral ran
     BEFORE the `_split_flag` arm, so every body that carried a SENTENCE was parked
@@ -1982,17 +1982,30 @@ def test_an_attached_script_body_is_refused_whatever_it_contains(tmp_path):
     ⛔ AND GRADING THE BODY WAS ITSELF THE WRONG FIX (sixth review cycle, P2; the
     primary source measured on this box):
 
-        bash -c'echo hi'   -> `bash: - : invalid option`, rc 1, NO output
+        bash -c'echo hi'   -> rc 1, stderr `bash: - : invalid option`, body never
+                              runs; STDOUT carries the `set -o` table, because `o`
+                              parses as `-o`  (an earlier revision of this docstring
+                              said "no output" — that was a MIS-STATED measurement)
         bash -c 'echo hi'  -> prints `hi`, rc 0
 
-    With no space, `-cecho hi` is ONE argv word, so bash reads what follows `-c` as
-    more OPTION LETTERS and the body never runs. EVERY attached spelling is
-    therefore a command that cannot have executed — grading it recorded `verified`
-    for a command bash refuses. Refusing also makes the verdict independent of the
-    cluster split, so `-cmake x` / `-cec x` / `-cverified` / `--eval=…` are all
-    refused and a mis-split can neither admit a body nor silently drop a PREFIX
-    (measured before this: `bash -c'ec uv run pytest <path>'` graded the remainder
-    CLEAN, inventing a command that does not exist).
+    With no space, `-cecho hi` is ONE argv word, so a shell reads what follows `-c`
+    as more OPTION LETTERS and the body never runs — grading it recorded `verified`
+    for a command bash refuses.
+
+    ⛔ NOT UNIVERSAL (seventh review cycle, P2): for CPython and node the attached
+    value IS the runnable form — `python3 -c'print(3)'` prints `3`, rc 0, and
+    `node --eval='console.log(1)'` prints `1`. Those bodies are python/JS PROGRAMS,
+    and this arm grades a body as a SHELL command line, which they can never be — so
+    they are refused too. That refusal is a declared known-open FALSE BLOCK
+    (#11520), NOT a claim that the spelling is unrunnable; this docstring and the
+    arm's message say so explicitly, because asserting non-runnability there would
+    be a false written justification.
+
+    Refusing also makes the verdict independent of the cluster split, so `-cmake x`
+    / `-cec x` / `-cverified` / `--eval=…` are all refused and a mis-split can
+    neither admit a body nor silently drop a PREFIX (measured before this:
+    `bash -c'ec uv run pytest <path>'` graded the remainder CLEAN, inventing a
+    command that does not exist).
 
     The SPACED form — the only runnable spelling — must stay ACCEPTED, and is
     pinned here so the refusal cannot be widened into a false block.

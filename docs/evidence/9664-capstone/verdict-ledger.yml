@@ -157,14 +157,19 @@
 #       - a `-c`/`-e` script body is never TRUSTED, and the ATTACHED spelling is
 #         REFUSED: `bash -c'uv run pytest tools/x.py'` AND
 #         `bash -c'NOT RUN - see tools/x.py'` are both invalid, with or without an
-#         artifact token after them. The primary reason is that the spelling is not
-#         runnable at all — `-cBODY` in one word makes bash read the body as more
-#         OPTION LETTERS, measured as `bash -c'echo hi'` -> `bash: - : invalid
-#         option`, rc 1, no output, while `bash -c 'echo hi'` prints `hi`. Grading
-#         the body would therefore record `verified` for a command that cannot have
-#         executed. The SPACED form (`bash -c '<script>'`) IS the runnable spelling
-#         and IS graded; an earlier head deferred the whitespace form as prose and
-#         let a later artifact token clear it, so `bash -c'NOT RUN - see
+#         artifact token after them. For a SHELL the reason is that the spelling
+#         cannot run at all — `-cBODY` in one word makes the shell read the body as
+#         more OPTION LETTERS, measured as `bash -c'echo hi'` -> rc 1, stderr
+#         `bash: - : invalid option`, the body never runs (stdout carries the `set -o`
+#         table, because `o` parses as `-o`), while `bash -c 'echo hi'` prints `hi`.
+#         Grading such a body would record `verified` for a command that cannot have
+#         executed. The SPACED form (`bash -c '<script>'`) is the spelling a shell
+#         runs and IS graded. ⛔ NOT UNIVERSAL: for `python`/`node` the attached value
+#         IS runnable (`python3 -c'print(3)'` prints `3`), but the body is a python/JS
+#         PROGRAM and this arm grades a body as a shell command line — so those are
+#         refused as a declared known-open FALSE BLOCK (#11520), not as a
+#         non-runnability claim. An earlier head deferred the whitespace form as prose
+#         and let a later artifact token clear it, so `bash -c'NOT RUN - see
 #         tools/capstone_ledger.py' <tracked path>` exited 0 — fixed and pinned.
 #       - a control builtin that FAILS at script level (`return 0`, `shift 5`) is
 #         refused anywhere but last, because a `&&` after it short-circuits. The
