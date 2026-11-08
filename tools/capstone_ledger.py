@@ -387,6 +387,17 @@ def _split_chains(text: str) -> list[str]:
 #: block, and `exit 1` computes nothing, so it would hide the uncovered list too.
 _SCRIPT_FLAGS: Final[frozenset[str]] = frozenset({"-c", "-e", "--command", "--eval"})
 
+#: Runners whose first argument is a project LABEL, not a path: `make test`,
+#: `npm test`. There is nothing here to resolve against the tree, so the label is
+#: accepted as a record — but ONLY as a lone bare word (see `_LABEL`), because the
+#: thing this arm exists to refuse is a SENTENCE, and a sentence has spaces.
+_LABEL_RUNNERS: Final[frozenset[str]] = frozenset(
+    {"make", "npm", "npx", "bun", "deno", "poetry", "uvx", "docker"}
+)
+
+#: A project label: one bare word, no whitespace, no shell punctuation.
+_LABEL: Final = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]*")
+
 _WILDCARDS: Final = "*?["
 
 
@@ -492,6 +503,20 @@ def _names_artifact(token: str, cwd: Path, root: Path) -> tuple[bool, str]:
                     f"{text!r} is not TRACKED by git, so a reader's clone does not have it"
                 )
             return True, ""
+        if resolved.is_dir() and resolved.is_relative_to(root) and resolved != root:
+            # ⛔ A DIRECTORY IS A LEGITIMATE TARGET, and refusing it was a measured
+            # false block on the command this repo's own `AGENTS.md` hands a lane:
+            # `uv run pytest tests/ -v` was INVALID, so a lane recording what it
+            # actually ran lost the entire uncovered list (exit 1 computes nothing).
+            # It counts only if a reader's clone holds something under it, and the
+            # ROOT is refused above — `.` names EVERYTHING, the same vacuity as a
+            # bare `*`.
+            if not _is_tracked_dir(resolved, root):
+                return False, (
+                    f"{text!r} is a directory holding no TRACKED file, so it holds "
+                    "nothing a reader's clone has"
+                )
+            return True, ""
         return False, f"{text!r} is not a file in this tree"
     except (OSError, ValueError, NotImplementedError) as exc:
         # An entry that cannot even be RESOLVED is a defect in the RECORD, not a
@@ -501,6 +526,51 @@ def _names_artifact(token: str, cwd: Path, root: Path) -> tuple[bool, str]:
         # ValueError out of `resolve` — both printed a traceback instead of the
         # `CAPSTONE-LEDGER: INVALID` marker a log reader or caller keys on.
         return False, f"{text!r} cannot be resolved against this tree ({type(exc).__name__}: {exc})"
+
+
+def _is_tracked_dir(resolved: Path, root: Path) -> bool:
+    """Does this in-tree DIRECTORY hold at least one TRACKED file?
+
+    A directory is a legitimate `cmd:` target — `uv run pytest tests/ -v` is the
+    command this repo's own `AGENTS.md` hands a lane — but it counts only when a
+    reader's clone actually holds something under it: an empty or untracked
+    directory names nothing. (The ROOT is refused a level up, because `.` names
+    EVERYTHING — the same vacuity as a bare `*`.)
+    """
+    try:
+        rel = resolved.relative_to(root)
+    except ValueError:
+        return False
+    try:
+        proc = subprocess.run(
+            ["git", "ls-files", "--", str(rel)],
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        # No `git` at all is the ABSTENTION case, not a refusal (see `_is_tracked`).
+        return _tracked_unprovable()
+    if proc.returncode == 0:
+        return bool(proc.stdout.strip())
+    # Git failed. `_is_tracked` distinguishes "git answered and refused" from "git
+    # cannot answer here", so this must too — otherwise a git-less build context
+    # refuses `pytest tests/` while accepting a single cited file, which is the
+    # same row judged two ways by the tool's own doctrine.
+    try:
+        probe = subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return _tracked_unprovable()
+    if probe.returncode == 0 and probe.stdout.strip() == "true":
+        return False
+    return _tracked_unprovable()
 
 
 def _commit_state(sha: str, repo_root: Path = REPO_ROOT) -> str:
@@ -572,9 +642,13 @@ def _evidence_is_real(
     The `cmd:` arm gets the same treatment, for the same reason: accepting any
     non-empty string meant `cmd:done` — or a sentence explaining that the work
     was done — satisfied the strongest verdict in the vocabulary, so one word
-    defeated the whole record. A command entry must now be COMMAND-SHAPED (it
-    starts with a program that runs something) and NAME an artifact of this tree
-    in argument position; prose names nothing and is refused.
+    defeated the whole record. A command entry must now be COMMAND-SHAPED — its
+    first token is a program that runs something, and its FIRST argument position
+    names a tracked artifact (a file, a directory holding tracked files, a pytest
+    node-id, or a glob over a named directory). Three shapes are deliberately
+    admitted and confer nothing on their own: a runner with NO target (`cmd:make`),
+    a lone project LABEL for a label-runner (`cmd:make test`), and a `-c` script
+    body, which is graded as a command in its own right rather than trusted.
 
     ⛔ These two arms are one rule seen from two sides, and NEITHER alone is
     enough — both were measured as fail-open on their own:
@@ -621,7 +695,8 @@ def _evidence_is_real(
             return False, f"`cmd:` evidence is not a parseable command: {command!r}"
         if not tokens:
             return False, f"`cmd:` evidence names no command: {raw!r}"
-        if Path(tokens[0]).name not in RUNNERS:
+        runner = Path(tokens[0]).name
+        if runner not in RUNNERS:
             # ⛔ This is the arm that kills prose, and it is the whole reason this
             # PR exists. A token scan alone does not: both `cmd:verified manually
             # by reading pyproject.toml` and `cmd:NOT RUN - see
@@ -675,11 +750,21 @@ def _evidence_is_real(
             ok, why = _names_artifact(token, cmd_cwd, root)
             if ok:
                 return True, ""
+            if runner in _LABEL_RUNNERS and len(tokens) == 2 and _LABEL.fullmatch(token):
+                # `make test`, `npm test`: the target is a PROJECT LABEL, not a path,
+                # so there is nothing to resolve. Only a LONE bare word qualifies —
+                # a sentence is not a label. Without this the same rule accepted
+                # `cmd:make` (no argument, therefore "a record") and refused
+                # `cmd:make test` (the label read as a citation), which is an
+                # inconsistency rather than a policy, and it refused the command
+                # shapes a lane actually runs.
+                return True, ""
             return False, (
                 f"`cmd:` evidence names no artifact of this tree: {command!r} — the first "
                 f"thing in argument position after the runner must NAME the artifact "
-                f"(a bare path, a pytest node-id, or a glob over a named directory), and "
-                f"{why}. A command entry must NAME an artifact; prose names nothing."
+                f"(a tracked file, a directory holding tracked files, a pytest node-id, "
+                f"or a glob over a named directory), and {why}. A command entry must "
+                "NAME an artifact; prose names nothing."
             )
         # A runner with NO target — `make`, `uv run pytest`, `npm test`. It is a
         # legitimate RECORD and it confers nothing: `validate` already requires a
@@ -751,11 +836,22 @@ def _command_body(raw: str, base: Path, root: Path) -> tuple[str, Path]:
         if len(text) > 1 and text.startswith(quote) and text.endswith(quote):
             text = text[len(quote) : -len(quote)].strip()
             break
-    # `a && b` chains: grade the FIRST segment that starts with a program that
-    # runs something. Grading a fixed END also false-blocked a real record (a
-    # `&& echo PASS` tail), and grading the first segment false-blocked
-    # `cd tools && uv run …`; scanning for the first RUNNER-shaped segment accepts
-    # both and still refuses prose, which never contains one at all.
+    # `a && b` chains: the FIRST segment that is not a wrapper is THE command, and
+    # it is graded whether or not it looks like one.
+    #
+    # ⛔ NOT "scan for the first RUNNER-shaped segment". That rule silently DROPS
+    # prose, which is a measured FAIL-OPEN at this head: `cmd:NOT RUN && uv run
+    # pytest tests/test_9664_capstone_verdict_ledger.py` reported `criteria: 22
+    # verified: 22 uncovered: 0`, printed `CAPSTONE-LEDGER-RESULT: CLEAN` and exited
+    # 0, because the segment saying the work was NOT done was skipped and the real
+    # command after it was graded. The comment that used to sit here justified the
+    # skip with "prose … never contains one at all", which is false the moment prose
+    # can be chained in FRONT of a command — and it can.
+    #
+    # Prose therefore cannot be dropped and cannot precede the command: either makes
+    # the record say something it did not do. A segment AFTER the graded one is
+    # still decoration and is ignored (`… && echo PASS` was a measured false block,
+    # and exit 1 computes NOTHING, so an over-block loses the whole uncovered list).
     segments = [segment.strip() for segment in _split_chains(text)]
     # The directory the graded command runs in: `cd X && …` moves it, and a later
     # `cd` moves it again. Resolved against `root` only, so a `cd ../../..` cannot
@@ -792,31 +888,23 @@ def _command_body(raw: str, base: Path, root: Path) -> tuple[str, Path]:
                     cwd = moved
             continue
         try:
-            tokens = shlex.split(body)
+            shlex.split(body)
         except ValueError:
             # ⛔ A shell-VALID record must not invalidate the ledger. `shlex` rejects
             # `pytest … -q  # don't rerun` while `bash -n` accepts it, and exit 1
             # computes NOTHING — so one apostrophe in a trailing comment hid all 13
             # uncovered rows. An unquoted `#` starts a shell comment, so retry with
             # the comment removed. If it STILL will not parse it is not a command
-            # (prose with an apostrophe is the realistic case), and a refusal that
-            # cannot be turned into a clean exit is the fail-closed answer.
+            # (prose with an apostrophe is the realistic case), and it is REFUSED
+            # rather than skipped — skipping it is the fail-open above.
             without_comment = re.sub(r"\s+#.*$", "", body).strip()
-            if without_comment == body:
-                continue
-            body = without_comment
-            try:
-                tokens = shlex.split(body)
-            except ValueError:
-                continue
-        if tokens and Path(tokens[0]).name in RUNNERS:
-            return body, cwd
-    # No segment is runner-shaped. Return the first non-empty one so the error
-    # message quotes what was actually refused rather than a fragment.
-    for segment in segments:
-        if segment:
-            return _LEADING_ASSIGNMENT.sub("", segment).lstrip() or segment, root
-    return "", root
+            if without_comment and without_comment != body:
+                body = without_comment
+        # ⛔ THIS IS THE COMMAND — the first segment that survived wrapper removal.
+        # Return it as-is; the caller grades it and refuses it by name when it is
+        # not a command. Falling through to a LATER segment is the fail-open.
+        return body, cwd
+    return "", base
 
 
 def _short(text: str, limit: int = 120) -> str:

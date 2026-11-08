@@ -667,28 +667,188 @@ def test_a_cmd_entry_naming_an_absolute_path_outside_the_tree_is_invalid(tmp_pat
         assert "`cmd:` evidence" in str(excinfo.value)
 
 
-def test_a_cmd_target_that_is_not_a_regular_file_is_invalid(tmp_path):
-    """T6 in the `cmd:` arm via a BARE PATH — the member that had no pin.
+def test_a_cmd_target_that_names_no_held_artifact_is_invalid(tmp_path):
+    """T6 in the `cmd:` arm via a BARE PATH — a FIFO refuses, and so does the ROOT.
 
     The glob half is pinned (`test_a_glob_whose_matches_are_all_directories_…`),
-    but `_names_artifact`'s `is_file()` is a SEPARATE clause for bare paths, and
+    but `_names_artifact`'s file clause for bare paths is a SEPARATE one, and
     nothing pinned it: changing it to `exists()` left the whole suite green while
     a one-row `verified` ledger citing `cmd:sh docs` exited **0** with
-    `UNCOVERED LIST: empty — the only clean exit` — a directory (or a FIFO) counted
-    as held evidence. That is the false PASS this artifact exists to refuse.
-    """
-    tree = tmp_path / "tree"
-    (tree / "docs" / "sub").mkdir(parents=True)
-    os.mkfifo(tree / "pipe")
+    `UNCOVERED LIST: empty — the only clean exit` — a FIFO counted as held evidence.
 
-    for entry in ("cmd:sh docs", "cmd:sh pipe"):
+    ⛔ A DIRECTORY is the interesting case, and the answer was REVERSED here after a
+    measurement: refusing every directory made `cmd:uv run pytest tests/ -v` — the
+    command this repo's own `AGENTS.md` hands a lane under "Run commands/tests" —
+    INVALID on `origin/main`, and `exit 1` computes NOTHING, so a lane that recorded
+    what it actually ran lost the entire uncovered list. That is the same
+    "over-block loses the finding" failure the repo's own review rejected
+    (`810eb838c5b`: an arm that confers nothing must not invalidate anything).
+
+    A directory now counts IFF it is strictly below the root and holds at least one
+    TRACKED file. Both halves are asserted, because either one alone is spellable as
+    the other's bypass: `.` and `/` name EVERYTHING (the vacuity of a bare `*`), and
+    an empty or untracked directory names nothing a reader's clone has.
+    """
+    import subprocess as sp
+
+    tree = tmp_path / "tree"
+    (tree / "held" / "sub").mkdir(parents=True)
+    (tree / "held" / "sub" / "a_test.py").write_text("x\n", encoding="utf-8")
+    (tree / "empty").mkdir()
+    (tree / "untracked").mkdir()
+    (tree / "untracked" / "x.txt").write_text("not in any clone\n", encoding="utf-8")
+    os.mkfifo(tree / "pipe")
+    git = ["git", "-C", str(tree)]
+    sp.run([*git, "init", "-q"], check=True)
+    sp.run([*git, "add", "held"], check=True)
+    sp.run(
+        [
+            *git,
+            "-c",
+            "user.email=t@example.com",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "seed",
+        ],
+        check=True,
+    )
+    sha = sp.run(
+        [*git, "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+    def row_with(entry: str) -> dict:
+        """A row whose ONLY possible defect is the `cmd:` entry.
+
+        It holds a TRACKED artifact of this temp tree (so the row rule is satisfied)
+        and cites a sha that really exists there (so provenance is not the
+        complaint) — otherwise a refusal below would be green for the wrong reason.
+        """
+        data = _ledger([_row("A", evidence=["held/sub/a_test.py", entry])])
+        data["measured_at"]["sha"] = sha
+        return data
+
+    # The row rule and provenance both pass in this tree: prove it BEFORE asserting
+    # that the cases below are refused for the `cmd:` reason.
+    cl.validate(row_with("cmd:sh held/sub"), repo_root=tree)
+
+    # Refused: a FIFO, the ROOT (names everything), an empty dir, an untracked dir.
+    for entry in ("cmd:sh pipe", "cmd:sh .", "cmd:sh ./", "cmd:sh empty", "cmd:sh untracked"):
         with pytest.raises(cl.InvalidLedger):
-            cl.validate(_ledger([_row("A", evidence=[entry])]), repo_root=tree)
+            cl.validate(row_with(entry), repo_root=tree)
+
+    # Accepted: a directory that holds a TRACKED file — `pytest tests/` in this repo.
+    for entry in ("cmd:uv run pytest held -v", "cmd:uv run pytest held/sub", "cmd:sh held/"):
+        cl.validate(row_with(entry), repo_root=tree)
 
     # End to end: the empty-uncovered-list shape must not be reachable at all.
-    proc = _run_cli(tmp_path, _ledger([_row("A", evidence=["cmd:sh docs"])]))
+    proc = _run_cli(tmp_path, _ledger([_row("A", evidence=["cmd:sh pipe"])]))
     assert proc.returncode == cl.EXIT_INVALID, proc.stdout + proc.stderr
     assert "UNCOVERED LIST" not in proc.stdout, proc.stdout
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # The commands this repo's AGENTS.md hands a lane. Each was a measured
+        # FALSE BLOCK on origin/main: INVALID, and exit 1 prints no uncovered list,
+        # so a lane recording what it actually ran lost the whole finding.
+        "cmd:uv run pytest tests/ -v",
+        "cmd:uv run python -m pytest tests/ -q",
+        "cmd:TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
+        "cmd:`uv run python tools/capstone_ledger.py check`",
+        "cmd:cd tests && uv run pytest test_9664_capstone_verdict_ledger.py -q",
+        # A project LABEL is not a path: `make test` / `npm test` have nothing to
+        # resolve, so a lone bare word is accepted as a record.
+        "cmd:make test",
+        "cmd:npm test",
+        # A runner with no target at all is a record too.
+        "cmd:make",
+        "cmd:uv run pytest",
+    ],
+)
+def test_the_commands_agents_md_hands_a_lane_are_not_false_blocked(tmp_path, command):
+    """A real recorded command must never make the ledger INVALID.
+
+    ⛔ The inconsistency this closes, measured on `origin/main`: the same "first
+    argument must name an artifact" rule ACCEPTED `cmd:make` (no argument, so "a
+    record") and REFUSED `cmd:make test` (the label read as a citation). And it
+    refused `cmd:uv run pytest tests/ -v`, which is the repo's own documented test
+    command, because a directory is not a file.
+    """
+    proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, command])]))
+    assert proc.returncode == cl.EXIT_CLEAN, proc.stdout + proc.stderr
+
+
+def test_a_lone_label_does_not_excuse_a_SENTENCE(tmp_path):
+    """`make test` is a label; `make I did not run anything` is prose.
+
+    The label arm is deliberately ONE bare word and nothing else, so the sentence the
+    shape gate exists to refuse is still refused behind a label-runner.
+    """
+    for command in (
+        "cmd:make I did not run anything, see docs/evidence/9664-capstone/README.md",
+        "cmd:make NOT RUN",
+        "cmd:npm test -- not run, see pyproject.toml",
+    ):
+        proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, command])]))
+        assert proc.returncode == cl.EXIT_INVALID, (command, proc.stdout + proc.stderr)
+
+
+def test_prose_BEFORE_a_real_command_is_refused(tmp_path):
+    """Prose cannot be discarded by chaining a real command after it.
+
+    ⛔ Measured on `origin/main`: `_command_body` scanned for the first RUNNER-shaped
+    `&&` segment and SILENTLY DROPPED the rest, so
+    `cmd:NOT RUN && uv run pytest tests/test_9664_capstone_verdict_ledger.py` — a
+    record that says on its own line that the work was not run — was ACCEPTED. A
+    22-row ledger citing the always-available tracked
+    `docs/evidence/9664-capstone/README.md` plus that entry reported
+    `criteria: 22  verified: 22  uncovered: 0`, printed
+    `CAPSTONE-LEDGER-RESULT: CLEAN` and exited 0. The comment that justified the skip
+    said "prose … never contains one at all", which is false the moment prose can be
+    chained in FRONT of a command.
+
+    The first non-wrapper segment is now THE command and is graded as one; a segment
+    AFTER it is decoration and is ignored (`… && echo PASS` was a measured false
+    block).
+    """
+    proc = _run_cli(
+        tmp_path,
+        _ledger(
+            [
+                _row(
+                    "A",
+                    evidence=[
+                        REAL_EVIDENCE,
+                        "cmd:NOT RUN && uv run pytest tests/test_9664_capstone_verdict_ledger.py",
+                    ],
+                )
+            ]
+        ),
+    )
+    assert proc.returncode == cl.EXIT_INVALID, proc.stdout + proc.stderr
+    assert "START with a program" in proc.stderr, proc.stderr
+
+    # …while a DECORATIVE tail after a real command stays legal.
+    proc = _run_cli(
+        tmp_path,
+        _ledger(
+            [
+                _row(
+                    "A",
+                    evidence=[
+                        REAL_EVIDENCE,
+                        "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q "
+                        "&& echo PASS",
+                    ],
+                )
+            ]
+        ),
+    )
+    assert proc.returncode == cl.EXIT_CLEAN, proc.stdout + proc.stderr
 
 
 @pytest.mark.parametrize(
