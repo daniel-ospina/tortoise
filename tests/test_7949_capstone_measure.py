@@ -10709,10 +10709,11 @@ def test_the_control_arm_definition_names_the_frozen_records_divergence():
 def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     """`RECONCILE-A1-A2-A5.md`'s LIVE cites, which no sweep reads.
 
-    Rule 3 of agent-infra#3442: this PR re-points five cites in this record
-    (`extractor_v2.py:10815`->`:10891`, `sdk.py:17472`->`:17574`,
+    Rule 3 of agent-infra#3442: this PR pins five cites in this record — four it
+    re-pointed (`extractor_v2.py:10815`->`:10891`, `sdk.py:17472`->`:17574`,
     `sdk.py:16414-16428`->`:16516-16530` x3, `probes/capstone_measure.py:2238-2243`
-    ->`:2724-2726`) and, measured before this pin existed, re-staling ANY of them
+    ->`:2724-2726`) plus the unchanged `extractor_v2.py:1720` — and, measured before
+    this pin existed, re-staling ANY of them
     left every suite green: the record is in no `_BUNDLE_DOCS` entry and
     `grep -rn RECONCILE tests/` returned nothing. A record whose whole thesis is
     that "a claim nothing re-checks can rot silently" cannot leave its own numbers
@@ -10743,14 +10744,28 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         "line that spells the predicate allowlist")
     assert "`extractor_v2.py:10891`" in text, (
         "the record must cite the comment that says nothing consumes the channel")
+    # The SAME line is cited a SECOND time as a bare `:10891`, inside the
+    # reproduction block's comment. A bare cite carries no file token, so the
+    # prefixed arm above cannot see it: measured by re-staling it to `:10815` in
+    # place, which left every arm True before this assert existed.
+    assert "the comment at :10891" in text, (
+        "the reproduction block must name the SAME line its prose does — re-stale "
+        "it and this record's only reproduction path points at a dead line")
     assert "nothing in this tree consumes" in ext[10891 - 1], (
         f"extractor_v2.py:10891 reads {ext[10891 - 1].strip()[:90]!r}, not the "
         "comment stating nothing consumes `result[\"relations\"]`")
 
     # A2: the capture path that writes the `references` edge — the record names it
-    # TWICE (prose and the `sed -n '<n>p'` that reproduces it), so the two must agree.
+    # THREE times: the prose cite, the amendment parenthetical that states BOTH
+    # numbers moved together, and the `sed -n '<n>p'` that reproduces it. All three
+    # must agree; the parenthetical is pinned as a phrase because it is the only one
+    # that has no `sdk.py:` token or `sed` command for the arms below to catch
+    # (measured: re-staling it to `17472` left every arm True).
     assert "the capture path at `tortoise/sdk.py:17574`)" in text, (
         "the record must cite the capture path by its live number")
+    assert "both now read `17574`" in text, (
+        "the amendment parenthetical must state the SAME live number — it is the "
+        "only one of the three that carries neither a `sdk.py:` token nor a sed")
     assert re.findall(r"sed -n '(\d+)p' tortoise/sdk\.py", text) == ["17574"], (
         "the record's reproduction command must name the SAME line the prose does")
     assert sdk[17574 - 1].strip() == "proj.link_source_to_event(source_key, event_id)", (
