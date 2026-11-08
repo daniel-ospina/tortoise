@@ -18992,9 +18992,10 @@ class FalkorProjection(
             if first_report:
                 log.warning(
                     "#4997: vector search on %s is unindexed for label(s) %s "
-                    "(indexed: %s) — those reads silently full-scan. This is "
-                    "the gap that decision V1 (STORAGE-ARCHITECTURE.md §12.1c) "
-                    "governs; indexing those labels is NOT done here.",
+                    "(indexed: %s) — those reads silently full-scan. Whether "
+                    "those labels get an index is §14.3 V3 of "
+                    "STORAGE-ARCHITECTURE.md; V1 settled only WHERE an index "
+                    "lives. Indexing them is NOT done here.",
                     self._graph_name,
                     sorted(gap),
                     indexes_reported or "none",

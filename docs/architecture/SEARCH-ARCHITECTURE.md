@@ -335,7 +335,9 @@ makes EP recomputation exact (§6.3).
 ⚠️ **This window is RESIDENCY, not retention, and the distinction is load-bearing.** Demoting a subgraph
 removes it from the *cache*; it stays in the record. Nothing a customer keeps is deleted, no copy is
 dropped, and `#3853` — *"No default window, of any length. … there is no default retention period on user
-content"* (`docs/retention-and-deletion.md`, §"No default window, of any length") — is untouched: §4
+content"* (`docs/retention-and-deletion.md` §"A different axis: the product-usage record (#3843)", its
+*"No default window, of any length"* bullet; the general rule it rests on is §"The promise": *"R1 forbids
+retaining user **content** for any length"*) — is untouched: §4
 records that `FalkorDB` is a derived cache, never authoritative, so §11 excludes retention because there
 is **none here**. Read §7 as sizing what is *resident*, never as a TTL on what is *kept* — a per-node TTL
 is the bound `docs/architecture/CONSUMPTION-MODEL.md` forbids as *"any bound that shrinks what a customer
