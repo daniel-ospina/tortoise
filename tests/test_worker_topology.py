@@ -1232,7 +1232,7 @@ def test_the_shipped_gate_refuses_a_count_that_came_from_web_concurrency():
 #: is a hand-written ``case``, so a spelling added to ``_CLICK_TRUE`` without the
 #: shell keeping up would make the boot line lie (4 workers announced for the one
 #: child a reloader serves) — and these arms red instead.
-_CLICK_TRUE_SPELLINGS = tuple(sorted(wt._CLICK_TRUE)) + ("TRUE", "  Yes  ")
+_CLICK_TRUE_SPELLINGS = (*sorted(wt._CLICK_TRUE), "TRUE", "  Yes  ")
 
 #: Spellings click REJECTS. uvicorn exits before an app runs on these, so the
 #: reloader never starts — both halves must read them as NOT a reload, and the
