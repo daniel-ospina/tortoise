@@ -76,10 +76,11 @@ quality change. **Live before private-beta:**
 5. the **`null`-not-0.5 rule** for absent belief state (§6.3) — a live defect today, independent of windows.
 
 **Cost during private-beta, plainly:** a complete graph costs **\$11.01/tenant** at the 40-tenants-per-instance
-density — RAM \$8.75 + shared project line \$2.13 + record \$0.13 (§8.1) — against a `$5.70` storage budget, i.e.
+density — RAM \$8.75 + shared project line \$2.13 + record \$0.13 (§8.1) — against a \$5.70 storage budget, i.e.
 193 % of it. ⚠️ **It is also above the product's older recorded constraint** (*"a \$19 price with < \$9 total
 cost per user"*, `STORAGE-ARCHITECTURE.md` §1), because \$11.01 > \$9 — and at beta-scale density it is higher
-still (a 1 GB instance holds ~6 complete solo tenants, so the RAM line alone is ~\$12). **This is a knowing,
+still (a 1 GB instance holds ~5 complete solo tenants at the §8.1 basis of 200 MB provisioned each, so the RAM
+line alone is ~\$14.60 at the 1 GB tier's \$73). **This is a knowing,
 bounded overspend on a small, known tenant count**, taken because the alternative — arming a window nobody has
 measured — risks the quality this document ranks first. §7 records both ceilings so neither is mistaken for
 the other.
@@ -122,7 +123,7 @@ shows a RAM-resident index returning better answers at this scale.
 |---|---|---|
 | authoritative state (claims, entities, connections, operators, text, embeddings, turns, narrative) | **Postgres** | none — already the record |
 | **vector search** — ANN over embeddings | **Postgres** (`pgvector` + HNSW) | **MOVES** — was `db.idx.vector.queryNodes` (2 executing sites) |
-| **text search** — BM25-family over 7 fields / 5 labels | **FalkorDB** (`db.idx.fulltext`, TF-IDF) | **stays** — see §6.2; the move is deferred behind M3 |
+| **text search** — over 7 fields / 5 labels | **FalkorDB** (`db.idx.fulltext` — RediSearch's TF-IDF scorer, documented as BM25-style behaviour in `tortoise/sparse.py`) | **stays** — see §6.2; the move is deferred behind M3 |
 | **multi-hop traversal** (2-hop epistemic minimum: claim → operator → claim) | **FalkorDB** (Cypher) | none |
 | **writes, projections, backup/restore** | **FalkorDB** (Cypher) | none |
 | **EP state and computation** | state on graph nodes; **arithmetic in Python** | none — the EP-scalar carve-out stands (§6.3) |
@@ -188,10 +189,21 @@ fewer. A recall-only test passes while the product under-returns.
 
 `ts_rank`/`ts_rank_cd` have **no IDF and no length normalisation**; independent measurement at 381k
 vectors puts Postgres full-text **8–23 nDCG@10 points behind BM25**, with its hybrid scoring **below
-vector-only** on all three datasets. FalkorDB, by contrast, pins **TF-IDF on absolute score magnitudes** —
-so a move invalidates every absolute threshold and the recorded fusion weights (`{"vector": 1.5}` +
-implicit 1.0), and `to_tsvector` cannot reproduce the product's tokenizer behaviour (`ERR-4032` →
-`err4032` **plus** the adjacency phrase, `#8933`).
+vector-only** on all three datasets.
+
+**What this does and does not claim about our own scorer.** The FalkorDB leg is RediSearch's **TF-IDF**
+scorer, whose behaviour `tortoise/sparse.py` documents as *"the BM25-style rank behavior the epic's scope
+prescribes"* — so it is the thing the 8–23-point gap is measured against, and this document does **not**
+assert that its ranking is BM25-grade. The repo's own measurement of a lexical leg (`tortoise/bm25.py`,
+`#8488`) found **neither rarity nor length** priced into the scoring, measured on the **embedded
+(falkordblite) lane** — not on the hosted `db.idx.fulltext` leg, which is unmeasured here. What the move
+decisively breaks is the **absolute magnitude**: `db.idx.fulltext` returns scores on a scale this product
+pins thresholds and fusion weights to (`{"vector": 1.5}` + implicit 1.0), so a move invalidates every one
+of them whichever estimator is better, and `to_tsvector` cannot reproduce the product's tokenizer behaviour
+(`ERR-4032` → `err4032` **plus** the adjacency phrase, `#8933`).
+
+**A separate leg the move does not touch:** the in-memory sklearn **TF-IDF** fallback (`tortoise/sparse.py`,
+the embedded lane) is outside `db.idx.fulltext` entirely, so "the text index stays" says nothing about it.
 
 **Therefore:** the text index **stays** until **M3** measures a BM25-capable Postgres option (extensions
 are candidates, not assumptions) with **score distributions**, not only ranks, plus the identifier
@@ -226,8 +238,9 @@ the ranker refuses to order on.
 
 ## 7. The window — what the graph holds once it must be bounded
 
-**Why the window exists at all:** a *complete* graph costs **\$8.75/tenant** against a **\$5.70** budget
-(30 % of \$19). Density does not fix it — `$58.33` is already the DENSEST tier's per-GB rate, and density cannot
+**Why the window exists at all:** a *complete* graph costs **\$11.01/tenant** against a **\$5.70** budget
+(30 % of \$19) — **193 %, and its RAM line alone is \$8.75 (154 %)** (§8.1; the RAM line is NOT the tenant's
+cost, which §8.1 says explicitly). Density does not fix it — `$58.33` is already the DENSEST tier's per-GB rate, and density cannot
 shrink a tenant's own graph bytes; it only spreads the *fixed* lines. **The window is what makes the pricing work at scale.**
 
 ⚠️ **Where the \$5.70 comes from, because the document it amends records a different ceiling.** `STORAGE-ARCHITECTURE.md` §1
@@ -235,9 +248,13 @@ records the product constraint as *"a \$19 price with < \$9 total cost per user"
 "\$9 → \$19 budget"; the **30 %-of-price** target here is the owner's 2026-11-07 sizing rule for the **storage line**,
 and it is **strictly tighter** than that ceiling (\$5.70 < \$9). Both are quoted so neither is mistaken for the other:
 against the older **\$9 total-cost ceiling** a complete graph's **RAM line** is **~97 % of it** and its **total is ~122 %** (above it), while against the **\$5.70 storage target** the RAM line is **154 %** and the total **193 %** — and
-the target is what governs the window. **The rule's recorded home is §8**, which quotes it verbatim (*"the storage offered becomes what can be afforded
-with 0.3 × tier price"*, owner, 2026-11-07) and derives every threshold from it — so the target is no longer an
-unhomed figure, and §2.0's marker cites that derivation.
+the target is what governs the window. **The rule's recorded home is §8**, which quotes the owner's own words
+(`#4051` comment [`6712622492`](https://github.com/daniel-ospina/tortoise/issues/4051#issuecomment-6712622492))
+and derives every threshold from them — so the target is no longer an unhomed figure, and §2.0's marker cites
+that derivation. ⚠️ The owner's words bound **solo** (30 % of \$19 = \$5.70); carrying the rule to pro and team
+is this document's generalisation, recorded in the same thread (comment
+[`6712718679`](https://github.com/daniel-ospina/tortoise/issues/4051#issuecomment-6712718679)), and the
+thresholds for those two tiers are therefore a derivation, not a quotation.
 
 **⚠️ Why it is nonetheless NOT armed at private-beta (§1.5):** it is unmeasured. The bounded-cache
 literature measures latency and hit rate, not answer quality, and the best trace-aware policy reached ~54 %
@@ -277,10 +294,23 @@ every number here proportionally**): FalkorDB **\$43.75/GB-month provisioned** a
 may occupy **75 %** of it ⇒ **\$58.33 per GB of graph data**; Postgres disk **\$0.125/GB**; plan `$25` +
 compute `$60` per project.
 
-**The rule (owner, 2026-11-07):** *"the storage offered becomes what can be afforded with 0.3 × tier price."*
+**The rule, in the owner's own words** (`#4051` comment
+[`6712622492`](https://github.com/daniel-ospina/tortoise/issues/4051#issuecomment-6712622492), 2026-11-07):
+
+> *"i will put the price tier of the solo to \$19 and 30% of that is our per-month cost budget. So we need to
+> include falkor and postgres in that. there's overage after they exceed a threhsold, but for now we want to
+> set the trheshold fo psotgres and falkor so cobined they don't use up more than 0.3\*19 per month"*
+
 So every threshold below is **derived, not chosen**, and the derivation is one line — because only one of the
-two stores is expensive. For a tier priced `P`, with a record allowance of 1 GB, it must be solved *together
-with density*, since the shared project line is `$85 ÷ tenants`:
+two stores is expensive. ⚠️ **Read the scope honestly:** the owner's ruling names **solo** and gives one number,
+\$5.70 = 30 % of \$19. Applying `0.30 × price` to **pro and team** is **this document's generalisation**, recorded
+in the same thread (comment
+[`6712718679`](https://github.com/daniel-ospina/tortoise/issues/4051#issuecomment-6712718679)) rather than
+spoken by the owner — so those two rows are a derivation from the rule's form, and they are priced by the same
+formula rather than against a quoted figure.
+
+For a tier priced `P`, with a record allowance of 1 GB, the threshold must be solved *together with density*,
+since the shared project line is `$85 ÷ tenants`:
 
 ```text
 provisioned MB per tenant  p = (0.30·P − $0.125) ÷ ($43.75/1000 + $85/8000)
@@ -338,7 +368,7 @@ record and currently carries **solo = \$9**, so nothing here is live until that 
 |---|---|---|
 | **M1** | vector move: recall@10 vs exact ground truth, p95, **and the shortfall rate at 1 % / 10 % / 50 % selectivity** | whether the move ships — a recall-only test is not sufficient (§6.1) |
 | **M2** | **retrieval quality under a windowed vs complete graph**, on a fixed query set | the gate that ARMS §7 (post-measurement) — the literature has no answer |
-| **M3** | text ranking: a BM25-capable Postgres option vs the current TF-IDF, **score distributions** + the `#8933` identifier fixture | whether the text index ever moves (§6.2) |
+| **M3** | text ranking: a BM25-capable Postgres option vs the current `db.idx.fulltext` scores, **score distributions** + the `#8933` identifier fixture | whether the text index ever moves (§6.2) |
 | **M4** | rebuild peak memory and latency per tenant at the real window size | the 6× headroom (§7), the #1 risk |
 | **M5** | the **miss rate** per tenant | the compute/IOPS/egress tier |
 

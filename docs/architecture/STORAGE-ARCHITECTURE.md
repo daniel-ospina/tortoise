@@ -125,7 +125,7 @@ The cause is not that we store a lot. **It is that we pay for the *total* rather
 > `docs/architecture/SEARCH-ARCHITECTURE.md`, which also **resolves V1** (§14.3).
 >
 > **NARROWED — "keep the limit in falkor high":** the cache stays **complete through private-beta**, and becomes a **bounded
-> window only after the search doc's M2 measures retrieval quality, windowed vs complete** (`docs/architecture/SEARCH-ARCHITECTURE.md` §1.5, §9 — a DIFFERENT M2 from §15's invoice measurement), sized by the tier's 30 %-of-price cost budget (a complete graph is \$8.75/tenant against a
+> window only after the search doc's M2 measures retrieval quality, windowed vs complete** (`docs/architecture/SEARCH-ARCHITECTURE.md` §1.5, §9 — a DIFFERENT M2 from §15's invoice measurement), sized by the tier's 30 %-of-price cost budget (a complete graph's **total** is \$11.01/tenant — 193 %, and its RAM line **alone** is \$8.75 — against a
 > \$5.70 budget, and density cannot shrink a tenant's own graph bytes — `$58.33` is already the densest tier's per-GB rate). So the full cache is retained *temporarily*, not
 > indefinitely.
 >

@@ -54,8 +54,12 @@ item below implying either has found a defect in this document, not a proposal.
 > *"the narrative is not something we're suggesting to store in the graph (same as raw) but store in
 > supabase."*
 >
-> **§12.1c — the vector question is OPEN, and it is the owner's.**
-> *"⚠️ NOT DECIDED — owner's call."* (§14.3 **V1**.)
+> **§12.1c — the vector question is DECIDED (2026-11-07), not open.**
+> *"✅ DECIDED 2026-11-07 — the vector index does NOT live in FalkorDB. Vectors and their payload move to
+> Postgres (`pgvector`); traversal, writes and EP stay in the graph."* (§14.3 **V1**;
+> `docs/architecture/SEARCH-ARCHITECTURE.md`.) ⚠️ The `⚠️ NOT DECIDED — owner's call` wording this block used
+> to quote is **SUPERSEDED, kept as the record** — it is what the question said *before* the ruling, and a lane
+> quoting it today would conclude the opposite of the decision.
 >
 > **§14 — vendor.**
 > *"The vendor — **Supabase Postgres** is the owner's recorded choice for the system of record (local
@@ -69,7 +73,7 @@ they are excluded as prerequisites and recorded as such:
 | candidate prerequisite | the decision it would contradict | verdict |
 |---|---|---|
 | **"serve reads from Postgres / cut over the read path"** | §2.0, verbatim: *"we keep the limit in falkor high so we don't need to rush with enabling our queries to parse both falkor and postgres."* | **Deferred by the ruling** — `#7970` is OPEN and *"DEFERRED by §2.0"*. Not a first-customer gate. |
-| **"put embeddings in pgvector"** | §12.1c: *"✅ DECIDED 2026-11-07 — the vector index does NOT live in FalkorDB."* §14.3 V1, `docs/architecture/SEARCH-ARCHITECTURE.md`. | **A decision, not a prerequisite — and now DECIDED.** Embeddings are already durable without it (item A5). |
+| **"put embeddings in pgvector"** | §12.1c **ADOPTS it** (decided 2026-11-07: *"the vector index does NOT live in FalkorDB"*) — so there is no contradiction left; what remains is **sequencing**, not a reversed decision. | **A decision, not a prerequisite — and now DECIDED, in favour.** It is off this epic's critical path (N2), and embeddings are already durable without it (item A5). |
 | **"backfill the existing FalkorDB graph into Postgres"** | Owner scope ruling 2026-10-10: *"there are no existing customers. No migration-safety apparatus is designed or claimed here."* | **Not designed, on purpose.** The dual-write already exists by construction (§3/§17.1; item R1 arms it); a backfill is not it. |
 
 ---
