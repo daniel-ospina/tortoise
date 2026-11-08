@@ -78,7 +78,7 @@ High on root-cause framing, execution-boundary finding, #307 staleness (primary-
 
 **[QWEN-GATE] substitute reviewer used** — qwen3.8-max is blocked (401) on this session; one substitute fresh-context reviewer dispatched per the skill's coherence prompt.
 
-- Findings: P1×3 — (a) artifacts not persisted on disk (fixed by this doc + research artifact + #1137 comment + extra issues); (b) #1137 body + 307 scoping doc still encode the rejected HKDF-from-API-key design (addressed: #1137 comment + extra issue E1); (c) target wording "zero plaintext reachable" vs clear derived fields (reworded to "zero raw-content plaintext" + leak table names _searchText/topic-metadata/embeddings). P2×4 — #317 reranker disposition pinned per mode (skip at v1, disclosed impact); wrapped-key corruption + rotation-skew edge cases added to P3; P4 restructured as transport-level matrix-driven transform (79-tool enumeration = conformance test matrix only); #160 sequencing pinned in ADR addendum + zero-new-deps qualified to crypto core (client embedding dep noted).
+- Findings: P1×3 — (a) artifacts not persisted on disk (fixed by this doc + research artifact + #1137 comment + extra issues); (b) #1137 body + 307 scoping doc still encode the rejected HKDF-from-API-key design (addressed: #1137 comment + extra issue E1 = #1164); (c) target wording "zero plaintext reachable" vs clear derived fields (reworded to "zero raw-content plaintext" + leak table names _searchText/topic-metadata/embeddings). P2×4 — #317 reranker disposition pinned per mode (skip at v1, disclosed impact); wrapped-key corruption + rotation-skew edge cases added to P3; P4 restructured as transport-level matrix-driven transform (79-tool enumeration = conformance test matrix only); #160 sequencing pinned in ADR addendum + zero-new-deps qualified to crypto core (client embedding dep noted).
 - Coherence verdict: strong on execution boundary, two-key split, scrypt-passphrase rejection, JSONL parity, MCP hard-gate, migration enablement, edge-case coverage. No problem-dimension dropped between diamonds.
 
 ---
@@ -125,7 +125,7 @@ Unit (crypto envelope: round-trip/tamper/rotation/KDF vectors) → integration (
 - `cryptography==50.0.0` (pinned; AESGCM/HKDF/HMAC/scrypt) — **zero new third-party deps for the crypto core**; client-side embedding needs the `[embeddings]` extra/ONNX on the client (noted — "zero new deps" qualified).
 - #316 vector-benchmark methodology (read baseline); new write-path baseline defined in P0.
 - #160 hosted embeddings: "implementation complete, verified — **pending merge**" — server-side pipeline bypassed for v1 teams (client-side embedding, model-version pinned); sequencing window pinned in ADR addendum.
-- #317 cross-encoder reranker: consumes content (max_length 512 contract, 317 scoping:98) — **v1 disposition: skip rerank for encryptionVersion>=1 teams with disclosed result-parity impact**, or route via proxy; carve-out note filed (extra issue E2).
+- #317 cross-encoder reranker: consumes content (max_length 512 contract — `317` scoping, Task 6 row "CE-input content truncation contract") — **v1 disposition: skip rerank for encryptionVersion>=1 teams with disclosed result-parity impact**, or route via proxy; carve-out note filed (extra issue E2 = #1165).
 - Registry schema extension (7714 plan): `wrapped_key`/`key_version`/`kdf_params` on Team node.
 - No dependency on #307 (severed; #1137 tracks the #265 body edit — bodies untouched by scoping).
 
@@ -161,8 +161,8 @@ Unit (crypto envelope: round-trip/tamper/rotation/KDF vectors) → integration (
 | sentence-transformers / ONNX (`[embeddings]` extra) | — | existing extra | Client-side embedding (all-MiniLM-L6-v2/384, embeddings.py:148) — qualified dep: "zero new deps" applies to crypto core; client embedding weight already required for SDK embedding today. |
 | #316 | — | scoping + research committed | Read-latency baseline methodology (p50/p95/p99, warm-up, ≥100 samples, degradation chain, E2E-8 p95≤300ms). |
 | #160 | — | "implementation complete, verified — pending merge" | Server-side embedding pipeline — bypassed for v1 encrypted teams (client-side embedding, model-version pinned); sequencing pin in ADR addendum. |
-| #317 | — | scoping + research committed | Cross-encoder reranker consumes content (max_length 512) — v1: skip for encrypted teams, disclosed impact (E2). |
-| #307 / #1137 | — | #307 scoped (email integration, NOT encryption keys); #1137 open chore | Dependency severed; #1137 tracks #265 body edit; HKDF text in #1137/307-doc superseded (E1). |
+| #317 | — | scoping + research committed | Cross-encoder reranker consumes content (max_length 512) — v1: skip for encrypted teams, disclosed impact (E2 = #1165). |
+| #307 / #1137 | — | #307 scoped (email integration, NOT encryption keys); #1137 open chore | Dependency severed; #1137 tracks #265 body edit; HKDF text in #1137/307-doc superseded (E1 = #1164). |
 
 ---
 
@@ -199,8 +199,8 @@ Unit (crypto envelope: round-trip/tamper/rotation/KDF vectors) → integration (
 | SDK/CLI setup + recovery UX | UI | P3 ceremony + data-loss disclosure | ✅ |
 | Logging/analytics/metering | Cross-cutting | analytics verified content-free (endpoint/method/team); no plaintext logging rule; metering counts | ✅ |
 | Enablement gate / feature flag (encryptionVersion) | Cross-cutting | P5 migration + old-SDK 4xx | ✅ |
-| #307 / #1137 | External dep | severed; #1137 tracks body edit; E1 corrects HKDF text | ✅ |
-| #317 reranker | External dep | v1 skip for encrypted teams + disclosed impact (E2) | ✅ |
+| #307 / #1137 | External dep | severed; #1137 tracks body edit; E1 (#1164) corrects HKDF text | ✅ |
+| #317 reranker | External dep | v1 skip for encrypted teams + disclosed impact (E2 = #1165) | ✅ |
 | #316 baseline / #160 embeddings | External dep | P0/P5 + ADR addendum pin | ✅ |
 
 Coverage verified via REST search (no parallel encryption implementation in flight; #1137 open tracking the sever; no open encryptionVersion/_searchText work). **HARD-GATE: no wiring gaps — all touch points covered.**
