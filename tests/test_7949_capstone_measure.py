@@ -4528,10 +4528,10 @@ def test_the_bare_continuation_cites_name_what_they_say():
     rows = (
         # `each VET pass is gated on the LIST` — the gate AND its call, twice.
         ("docs/00_index.md", "each VET pass is gated on the LIST", (
-            ("13043", "if vet_enabled and embed_list:"),
-            ("13044", "embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass("),
-            ("13182", "if vet_enabled and complete_list:"),
-            ("13183", "complete_list, vet_union_stats, _w, _ = _run_vet_pass("),
+            ("13291", "if vet_enabled and embed_list:"),
+            ("13292", "embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass("),
+            ("13592", "if vet_enabled and complete_list:"),
+            ("13593", "complete_list, vet_union_stats, _w, _ = _run_vet_pass("),
         )),
         # the VET block's start; its three lines of keys (13407-13409) close on
         # line 13410 — DERIVED by content, not by arithmetic: `result["vet"] = {`
@@ -4543,8 +4543,8 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # which is why every ASSERTED number in this table is verified by
         # content instead.
         ("docs/00_index.md", "emitted unconditionally at", (
-            ("13396", 'result["classify_later"] = {'),
-            ("13406", 'result["vet"] = {'),
+            ("13806", 'result["classify_later"] = {'),
+            ("13816", 'result["vet"] = {'),
         )),
         # ⛔ THE CLASSIFY PASS'S OWN FAIL-OPEN PAIR (#10833 review, P2). A `+33`
         # shift applied to this row moved the first member while leaving the
@@ -4564,25 +4564,25 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # stale here: a comment asserts nothing, so read the anchors from the row,
         # never from this prose.
         ("docs/00_index.md", "fail-open `except` at", (
-            ("13071", "except Exception as e:  # never block capture (P1)"),
-            ("13218", "except Exception as e:  # never block capture (P1)"),
+            ("13477", "except Exception as e:  # never block capture (P1)"),
+            ("13628", "except Exception as e:  # never block capture (P1)"),
         )),
         # `_IDLE_CITES["vet"]`: the early return and the surface it emits
         ("probes/capstone_measure.py", "its vet surface", (
-            ("12933", "if not edus:"),
-            ("12953", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
+            ("13181", "if not edus:"),
+            ("13201", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
         )),
         # ...and the same claim in the rule's own docstring
         ("probes/capstone_measure.py", "with the flag ON", (
-            ("12953", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
+            ("13201", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
         )),
         ("probes/capstone_measure.py", "follows at", (
-            ("12932", "edus = _edus_from_conversation(conversation)"),
+            ("13180", "edus = _edus_from_conversation(conversation)"),
         )),
         # the S2.2/S2.3 block this probe names as the #9116 seam's subject
         ("probes/capstone_measure.py", 'result["vet"]`` at', (
-            ("13406", 'result["vet"] = {'),
-            ("13410", ("exact", "}")),
+            ("13816", 'result["vet"] = {'),
+            ("13820", ("exact", "}")),
         )),
         # The E-row audit's cites on the GATE ITSELF. `_BUNDLE_CITE` matches only
         # `sdk|edges|extractor_v2`, so a `tools/*.py` number is invisible to the
@@ -4645,10 +4645,10 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # return it names, while every gate reported OK. Two rows because the
         # claim wraps over two lines and a row scopes to ONE line.
         ("README.md", "i.e. BEFORE the", (
-            ("12929", "vet_enabled = (vet_arbiter is not None or _vet_enabled()"),
+            ("13177", "vet_enabled = (vet_arbiter is not None or _vet_enabled()"),
         )),
         ("README.md", "early return (`", (
-            ("12933", "if not edus:"),
+            ("13181", "if not edus:"),
         )),
         # ⛔ The #2684 row's cite (#10833 review, P2): the fold rewrote a CORRECT
         # `5042-5043` into `4948-4949` — inside `_refuse_rewritten_value`, an
@@ -4662,20 +4662,20 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # the bare one sat in no row, which is how a `+N` insert left it on a
         # docstring in an unrelated helper while every neighbour moved.
         ("README.md", "on its fail-open path", (
-            ("12808", "except Exception as e:  # noqa: BLE001, RUF100"),
-            ("12811", '"(fail-open)"], {}'),
+            ("13016", "except Exception as e:  # noqa: BLE001, RUF100"),
+            ("13019", '"(fail-open)"], {}'),
         )),
         # ⛔ AND THE PROBE'S OWN COPY (#10997 review round 5, P2): the same range
         # is baked into `_IDLE_CITES["vet"]`, i.e. into the cause a future run
         # PRINTS to a reader — and it sat on a line the neighbouring row does not
         # scope to, so a move would ship a stale number in machine-emitted prose.
         ("probes/capstone_measure.py", "on its fail-open path", (
-            ("12808", "except Exception as e:  # noqa: BLE001, RUF100"),
-            ("12811", '"(fail-open)"], {}'),
+            ("13016", "except Exception as e:  # noqa: BLE001, RUF100"),
+            ("13019", '"(fail-open)"], {}'),
         )),
         ("docs/00_index.md", "refuses a value-free point at", (
-            ("5354", "if not _carries_value(content, quote):"),
-            ("5355", "return None"),
+            ("5562", "if not _carries_value(content, quote):"),
+            ("5563", "return None"),
         )),
         # ⛔ THE S5 CONNECT CALL, IN BOTH DOCUMENTS (#11368 rebase review, P2). The
         # `+74` re-derivation matched `execute_embed` by SYMBOL and landed on its
@@ -4685,13 +4685,13 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # cannot see it, and no row scoped to it — which is exactly the invisibility
         # this pin exists for. Both rows hold the CALL, not the definition.
         ("README.md", "gap filler", (
-            ("13313", "result = execute_embed(complete_list, search, "
+            ("13723", "result = execute_embed(complete_list, search, "
                       "session_id=session_id,"),
         )),
         # ...and the probe's own copy of the same number, which sits in prose a
         # reader is sent to rather than in a table.
         ("probes/capstone_run.py", "ONE cite per symbol", (
-            ("13313", "result = execute_embed(complete_list, search, "
+            ("13723", "result = execute_embed(complete_list, search, "
                       "session_id=session_id,"),
         )),
     )
@@ -10710,7 +10710,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     """`RECONCILE-A1-A2-A5.md`'s LIVE cites, which no sweep reads.
 
     Rule 3 of agent-infra#3442: this PR re-points five cites in this record
-    (`extractor_v2.py:10815`->`:10891`, `sdk.py:17472`->`:17574`,
+    (`extractor_v2.py:10815`->`:11099`, `sdk.py:17472`->`:17574`,
     `sdk.py:16414-16428`->`:16516-16530` x3, `probes/capstone_measure.py:2238-2243`
     ->`:2724-2726`) and, measured before this pin existed, re-staling ANY of them
     left every suite green: the record is in no `_BUNDLE_DOCS` entry and
@@ -10736,15 +10736,15 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
 
     # A1: #11205's channel is TRANSPORT ONLY — the schema line that spells the
     # predicate allowlist, and the comment saying nothing in `tortoise/` consumes it.
-    assert "`hasPart` (`tortoise/extractor_v2.py:1720`)" in text, (
+    assert "`hasPart` (`tortoise/extractor_v2.py:1744`)" in text, (
         "the record must cite the relations schema where `hasPart` is spelled")
-    assert "hasPart" in ext[1720 - 1] and '"predicate":' in ext[1720 - 1], (
-        f"extractor_v2.py:1720 reads {ext[1720 - 1].strip()[:90]!r}, not the schema "
+    assert "hasPart" in ext[1744 - 1] and '"predicate":' in ext[1744 - 1], (
+        f"extractor_v2.py:1744 reads {ext[1744 - 1].strip()[:90]!r}, not the schema "
         "line that spells the predicate allowlist")
-    assert "`extractor_v2.py:10891`" in text, (
+    assert "`extractor_v2.py:11099`" in text, (
         "the record must cite the comment that says nothing consumes the channel")
-    assert "nothing in this tree consumes" in ext[10891 - 1], (
-        f"extractor_v2.py:10891 reads {ext[10891 - 1].strip()[:90]!r}, not the "
+    assert "nothing in this tree consumes" in ext[11099 - 1], (
+        f"extractor_v2.py:11099 reads {ext[11099 - 1].strip()[:90]!r}, not the "
         "comment stating nothing consumes `result[\"relations\"]`")
 
     # A2: the capture path that writes the `references` edge — the record names it
