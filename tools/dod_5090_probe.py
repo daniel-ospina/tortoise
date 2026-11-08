@@ -1858,8 +1858,13 @@ def resolved_stored_labels(written: dict[str, str] | None = None,
     * ``violations`` — ``{writer: why}`` a declaration that does not answer the question (HOLDS);
     * ``classes`` — ``{writer: cls}`` for every DECLARED writer, so a `bypass` is read from the
       declaration as well as from the census (row 2 holds on either);
-    * ``error`` — the register could not be read (HOLDS as UNMEASURED; every other bucket is
-      empty, because an unreadable declaration resolves nothing and blames nobody).
+    * ``error`` — the register could not be read (HOLDS as UNMEASURED; every bucket the
+      DECLARATION feeds is empty, because an unreadable declaration resolves nothing and blames
+      nobody) — but ``partial`` is deliberately NOT one of them: it is measured from the CENSUS,
+      before the register is touched, so it survives the failure boundary. ⛔ Keep it there: moving
+      that computation inside the `try` (to make this sentence literally true) would delete the
+      `MORE THAN ONE label` evidence on the error path, which is the "a `PARTIAL` that names
+      nobody" defect the row's own comments and its pin exist to prevent.
 
     Plus ``error``: a register that cannot be read yields NO resolution at all and a NAMED error,
     never an empty declaration (which would render every writer `undeclared` and blame the product
@@ -1928,6 +1933,17 @@ def resolved_stored_labels(written: dict[str, str] | None = None,
         if reading == dispositions["no_vector"]:
             out["contradictions"].append(
                 f"{writer}: declares {dispositions['no_vector']!r} but its own Cypher measures "
+                f"{sorted(measured)}")
+        elif reading == dispositions["at_runtime"]:
+            # ⛔ The THIRD arm, and the one this check first shipped without: `LABELS_AT_RUNTIME` is a
+            # `str`, so it satisfied neither arm above and the declaration was silently DROPPED — a
+            # contradiction accepted as agreement, and the row free to read `MET`. It contradicts a
+            # MEASURED label exactly as the other two do: the derivation resolved `Point`, while the
+            # declaration says the label is not statically knowable. Latent only while both live
+            # `at_runtime` writers are candidates whose derivation failed; one writer edit away from
+            # a false `MET` in the epic's published evidence (review finding, P1).
+            out["contradictions"].append(
+                f"{writer}: declares {dispositions['at_runtime']!r} but its own Cypher measures "
                 f"{sorted(measured)}")
         elif isinstance(reading, tuple) and not set(reading) <= measured:
             out["contradictions"].append(

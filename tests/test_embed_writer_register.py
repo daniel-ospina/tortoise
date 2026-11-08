@@ -59,7 +59,7 @@ is the product home; this file is its proof.
 |---|---|---|
 | `test_the_register_resolves_at_runtime_from_tortoise` | the issue's first row — *"resolvable at runtime from `tortoise/`"* | the register moves out of `tortoise/`, under `tortoise/projection/`, or stops being importable without the tooling |
 | `test_the_register_imports_without_entering_the_projection_cycle` | `04-plan.md` §5's leaf requirement, EXECUTED | importing the register pulls `tortoise.projection`, `tortoise.pack_state` or `tortoise.sdk` into `sys.modules`, i.e. it re-enters `projection → pack_state → sdk → projection` — the cycle whose config read is a reproduced `ImportError` (`tortoise.projection.__init__::_config_classes` records it). The "imports ONLY the standard library" arm is `test_the_register_is_not_a_second_rule_set`, not this one |
-| `test_the_register_is_not_a_second_rule_set` | plan risk R2 — *"the register becomes a second source of truth and drifts from `value_gate.RULES`"* | the register's imports leave `{__future__, collections, re, dataclasses, types}` — every `import` / `from` at EVERY level counts, so a relative `from .x import …` is not exempt — or it names `value_gate`/`embed_gate`/`RULES`/`EMBEDDING_RULES` in code (the ONE regex it holds is the `#\\d+` `owner_issue` format check, which is not a rule) |
+| `test_the_register_is_not_a_second_rule_set` | plan risk R2 — *"the register becomes a second source of truth and drifts from `value_gate.RULES`"* | the register's imports leave `{__future__, collections, re, dataclasses, types}` — every `import` / `from` at EVERY level counts, so a relative `from .x import …` is not exempt — or it names `value_gate`/`embed_gate`/`RULES`/`EMBEDDING_RULES` in code (the two regexes it holds are SHAPE checks — the `#\\d+` `owner_issue` format and the Cypher-label shape `_LABEL` — neither a rule) |
 | `test_a_duplicate_key_raises` | the issue's third row (D4) | a second declaration silently wins — the stale row survives a rewrite |
 | `test_a_bypass_declaration_is_refused` | `04-plan.md` §6.2 — *"no `bypass` class; an unclassified writer is a refusal at export time"* | `bypass` becomes declarable, so the class that means *defect* can be asserted as *accepted* |
 | `test_an_undeclared_writer_is_a_refusal_not_a_default` | the same contract, at the LOOKUP | `classify` answers for a writer nobody declared — the fallback that makes "no silent bypass" unkeepable |
@@ -843,7 +843,7 @@ def test_a_stores_declaration_that_does_not_answer_is_refused():
     with pytest.raises(TypeError):
         WriterClass(EXEMPT, "`tortoise.z::_w` reads one", "#11085")  # type: ignore[call-arg]
     for stores in ((), [], ["Event"], "Event", "", "exmpt", ("Event", ""), ("Ev ent",),
-                   ("Event", "Event"), ("Event", 3)):
+                   ("Event", "Event"), ("Event", 3), ("Event\n",), ("Event ",)):
         with pytest.raises(ValueError):
             register.load([("tortoise.z::_w", _record(stores=stores))])
     # …and every admissible shape still loads, so the refusal is not a blanket one.
@@ -965,7 +965,7 @@ def test_every_declared_label_re_derives_at_this_head() -> None:
                     and node.name == symbol):
                 own = "\n".join(lines[node.lineno - 1:node.end_lineno])
                 bodies.append(own + "\n" + "\n".join(
-                    text for name, text in constants.items() if name in own
+                    _constants_named_by(node, constants)
                 ))
         assert bodies, f"{key} cites {rel}::{symbol}, which that file does not define"
         assert any(needle in body for body in bodies), (
@@ -1023,8 +1023,7 @@ def test_a_runtime_label_declaration_is_named_not_guessed() -> None:
         f"{key} declares {EMBED_WRITER_CLASSES[key].stores!r}; the dump's labels are read at "
         "restore time, so no static label set can be true"
     )
-    body = (REPO_ROOT / "tortoise/hosted_backup.py").read_text(encoding="utf-8")
-    assert 'CREATE (n:{safe_labels})' in body, (
+    assert any('CREATE (n:{safe_labels})' in own for own in _declared_symbol_bodies(key)), (
         "the runtime-label reading rests on the dump's own labels; if the restore stops creating "
         "from `safe_labels`, re-read this declaration rather than deleting the assertion"
     )
@@ -1048,15 +1047,21 @@ def test_a_writer_that_EXECUTES_a_store_is_never_declared_no_live_vector() -> No
     """
     turns = EMBED_WRITER_CLASSES["tortoise.sdk::_write_capture_turns"]
     assert turns.stores == ("Point",), turns.stores
-    turn_cypher = (REPO_ROOT / "tortoise/sdk.py").read_text(encoding="utf-8")
-    assert 'MERGE (t:Point {id: turn.id})' in turn_cypher
-    assert "t.embedding=CASE WHEN turn.emb IS NOT NULL THEN vecf32(turn.emb) " in turn_cypher, (
+    # ⛔ SCOPED TO THE SYMBOL, not to `sdk.py`. Read whole, this file already contains
+    # `MERGE (t:Point {id: turn.id})` TWICE (the statement at :2460 and a COMMENT at :2927), so a
+    # whole-file `in` check stayed green after the writer's own statement was removed or retargeted
+    # as long as one copy survived anywhere in 50k lines — a pin that did not pin what its message
+    # claimed. `_declared_symbol_bodies` is the reader the sibling pin already uses.
+    turn_bodies = _declared_symbol_bodies("tortoise.sdk::_write_capture_turns")
+    assert any('MERGE (t:Point {id: turn.id})' in own for own in turn_bodies)
+    assert any("t.embedding=CASE WHEN turn.emb IS NOT NULL THEN vecf32(turn.emb) " in own
+               for own in turn_bodies), (
         "`_TURN_WRITE_CYPHER` stopped writing a vector — re-read this declaration"
     )
     door = EMBED_WRITER_CLASSES["tortoise.sdk::_event_raw_write_door"]
     assert door.stores == LABELS_AT_RUNTIME, door.stores
-    door_body = (REPO_ROOT / "tortoise/sdk.py").read_text(encoding="utf-8")
-    assert 'proj.g.query(statement, params=query_params)' in door_body, (
+    door_bodies = _declared_symbol_bodies("tortoise.sdk::_event_raw_write_door")
+    assert any('proj.g.query(statement, params=query_params)' in own for own in door_bodies), (
         "the door no longer EXECUTES the caller's statement — re-read this declaration"
     )
 
@@ -1094,6 +1099,24 @@ NO_STORE_EXEMPTIONS: dict[str, str] = {
         "executes no write statement"
     ),
 }
+
+
+def _constants_named_by(node: ast.AST, constants: dict[str, str]) -> list[str]:
+    """The module-level constants `node` actually NAMES, resolved through the AST.
+
+    ⛔ This replaced `if name in own` — a SUBSTRING match over the symbol's source text — which was
+    fail-OPEN in exactly the direction the `LABEL_EVIDENCE` pin exists to catch: any constant whose
+    NAME happened to occur anywhere in the symbol's body was concatenated into the searched text, so
+    a needle could be satisfied by a constant the writer never executes and the pin stayed green
+    while the store it describes had moved. Measured inclusion counts under the substring rule:
+    `_rebuild_all_replay` 17 constants, `_event_plain_merge` 2, `_update_entity` 4,
+    `_write_capture_turns` 6 — only the last genuinely needs the hop.
+
+    A name is resolved whether it is read directly, inside an f-string, or from a nested closure,
+    because `ast.walk` descends into all of them.
+    """
+    named = {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
+    return [text for name, text in constants.items() if name in named]
 
 
 def _declared_symbol_bodies(key: str) -> list[str]:
@@ -1134,7 +1157,7 @@ def _declared_symbol_bodies(key: str) -> list[str]:
                 and node.name == symbol):
             own = "\n".join(lines[node.lineno - 1:node.end_lineno])
             bodies.append(own + "\n" + "\n".join(
-                text for name, text in constants.items() if name in own))
+                _constants_named_by(node, constants)))
     assert bodies, f"{key} cites {rel}::{symbol}, which that file does not define"
     return bodies
 

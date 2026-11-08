@@ -570,6 +570,13 @@ def test_a_declaration_that_CONTRADICTS_a_measured_label_holds_row_two(monkeypat
     Both sides are now reported: the row holds, names the writer, and shows the two label sets, so
     a reviewer can rule on which side is wrong (part of the derivation is a heuristic, so the
     declaration is not assumed wrong either).
+
+    ⛔ `LABELS_AT_RUNTIME` is the THIRD contradictory shape and the one this check first shipped
+    without: it is a `str`, so it satisfied neither the `NO_LIVE_VECTOR` arm nor the label-tuple arm
+    and was silently DROPPED — a contradiction read as agreement, leaving the row free to read
+    `MET`. It contradicts a measured label exactly as the other two do (the derivation resolved
+    `Point`; the declaration says the label is not statically knowable), so it is exercised here in
+    the same loop (review finding, P1).
     """
     writers = {
         "tortoise.x::_upsert_point": {
@@ -579,7 +586,7 @@ def test_a_declaration_that_CONTRADICTS_a_measured_label_holds_row_two(monkeypat
     }
     monkeypatch.setattr(probe, "embedding_writers", lambda: writers)
     assert "Batch" not in probe.served_labels()
-    for stores in (("Point", "Batch"), NO_LIVE_VECTOR):
+    for stores in (("Point", "Batch"), NO_LIVE_VECTOR, LABELS_AT_RUNTIME):
         monkeypatch.setattr(
             probe, "declared_writers",
             lambda stores=stores: {"tortoise.x::_upsert_point": _store_declared(

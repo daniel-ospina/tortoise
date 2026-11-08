@@ -19,8 +19,10 @@ rule exists to close.
 
 * **Not a second rule set.** It speaks to *writer classification* — a different axis from *what earns
   a vector*, which is `value_gate.RULES` (`embed_gate.RULE_SET is value_gate.RULES`). This module
-  holds no *rule* pattern, no predicate and no rule id — its only regex is the `owner_issue` format
-  check (`_OWNER_ISSUE`) — and it imports **nothing from `tortoise`** — see "leaf" below.
+  holds no *rule* pattern, no predicate and no rule id — its only regexes are two SHAPE checks, the
+  `owner_issue` format (`_OWNER_ISSUE`) and the Cypher-label shape `_LABEL` (the same
+  defence-in-depth role `validate_entity_type`'s allowlist plays; neither is a predicate about what
+  earns a vector) — and it imports **nothing from `tortoise`** — see "leaf" below.
 * **Not a licence to change a writer.** It declares what each writer already does. Nothing consults
   it to decide a write yet; that is `#11086`'s seam.
 * **Not an audit log.** The evidence for each entry is the seam, cited in `reason` — never a line
@@ -39,8 +41,12 @@ rule exists to close.
   `tortoise.session_indexer::main` is the one entry with no census row (it is the instrument's ONE
   `ungated` write path, carried in the census's row-1 prose), so its citation is re-derived by the
   symbol test alone. A reader who wants "re-derivable by `CENSUS_EVIDENCE`" to cover 100% of this
-  file should read it as "by the three tests that re-derive it, one half each", which is what they
-  do.
+  file should read it as "by the tests named here and in the `stores` section below" — `cls`,
+  `reason` and `owner_issue` by
+  `tests/test_embed_writer_register.py::test_every_declaration_cites_a_seam_and_an_owning_issue`,
+  the label half of `stores` by `::test_every_declared_label_re_derives_at_this_head`, and its
+  `NO_LIVE_VECTOR` half by `::test_a_no_live_vector_declaration_executes_no_store_clause` — rather
+  than as a fixed number of tests covering it in equal halves.
 
 **A SECOND question, answered here since `#11492`: WHERE the vector lands.** `#5090` DoD row 2
 asks *"is every stored vector on a label the query leg can serve?"* — a fact about a writer that
