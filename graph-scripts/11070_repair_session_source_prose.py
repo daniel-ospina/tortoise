@@ -58,9 +58,12 @@ Usage:
   #    `--probe-phrase` (a SINGLE RARE token that appears only in the pre-fix
   #    summary — the index read OR-joins multi-term input, so a phrase or a
   #    common word measures nothing), or accept the weaker evidence BY NAME with
-  #    `--no-fts-probe`. A probe that still hits exits 1; so does a probe whose
-  #    zero cannot be corroborated — a zero from a dead instrument is not a zero
-  #    (#11161).
+  #    `--no-fts-probe`. A probe that still returns a node CARRYING THE PRE-FIX
+  #    PROSE exits 1; so does a probe whose zero cannot be corroborated — a zero
+  #    from a dead instrument is not a zero (#11161). ⚠️ A hit on a REPAIRED node
+  #    whose own `_searchText` accounts for the token is a stem collision: it is
+  #    reported, not failed (the derived lexicon is the transcript's own topic
+  #    list, so this is the ordinary outcome on the record arm).
   #
   #    ⚠️ WHAT CORROBORATES THE ZERO, AND WHEN STEP 3 CANNOT. Two things can:
   #    a known-present token from a POST-fix lexicon node (so a graph that has
@@ -270,6 +273,9 @@ def _merge_probe(before: dict | None, after: dict, *,
     out["unclassified"] = unclassified
     # Every probe whose token never matched a pre-fix node in the BEFORE reading
     # (or on a dry run, every probe — there was no BEFORE reading to match).
+    # ⚠️ WHY it did not discriminate (unmeasured / unclassified / clean zero) is
+    # `_before_leg_kind`'s job, and the refusals branch on that — not on a second
+    # copy of the same reasoning here.
     out["undiscriminating"] = [p["phrase"] for p in probes
                                if not p["discriminating"]]
     if out["leaked"]:
@@ -446,15 +452,33 @@ def _report_fts(fts: dict) -> None:
             print("          ✓ no node still carrying the pre-fix prose is findable "
                   "through the Source FTS index")
         else:
-            # ⛔ NARROWED TO WHAT WAS MEASURED (#11536 review, P1). Without a
-            # BEFORE reading this run cannot tell a token that LEFT the corpus
-            # from one that was never IN it, so it may not assert the Target's
-            # conjunctive property on the strength of an answering instrument.
-            print("          ✓ the probe token returns NOTHING from the Source FTS "
-                  "index and the read ANSWERS — but this run took no BEFORE "
-                  "reading, so it did NOT establish that the token was ever in "
-                  "the corpus. Run `--repair --probe-phrase <token>` for the "
-                  "Target's before/after pair.")
+            # ⛔ NARROWED TO WHAT WAS MEASURED — AND ONLY TO WHAT WAS MEASURED
+            # (#11536 review rounds 3 and 4). Two claims that were NOT measured
+            # are gone: "the probe token returns NOTHING" is false whenever the
+            # hits were classified benign (the ORDINARY record-arm outcome, since
+            # the derived lexicon is the transcript's own topic list), and "this
+            # run took no BEFORE reading" is false on a writing arm that wrote
+            # nothing. Both are derived here from the two data the fold holds.
+            hits = sum(int(p.get("hits") or 0) for p in fts["probes"])
+            benign = sum(len(p.get("lexicon") or ()) for p in fts["probes"])
+            took_before = any(p.get("residue_before") is not None
+                              for p in fts["probes"])
+            if took_before:
+                print("          ✓ no node carrying the pre-fix prose is findable "
+                      f"through the Source FTS index ({hits} hit(s), {benign} on "
+                      "nodes whose own lexicon accounts for the token) — but the "
+                      "BEFORE reading this run took returned no pre-fix node "
+                      "either, so its zero cannot show the sentence LEFT the "
+                      "index. Re-measure with a single rare token taken from the "
+                      "removed sentence.")
+            else:
+                print("          ✓ no node carrying the pre-fix prose is findable "
+                      f"through the Source FTS index ({hits} hit(s), {benign} on "
+                      "nodes whose own lexicon accounts for the token), and the "
+                      "read ANSWERS — but this run took no BEFORE reading, so it "
+                      "did NOT establish that the token was ever in the corpus. "
+                      "Run `--repair --probe-phrase <token>` for the Target's "
+                      "before/after pair.")
         return
     if fts["vetoed"] == "leaked":
         print(f"✗ {len(fts['leaked'])} probe(s) still return a node that CARRIES "
