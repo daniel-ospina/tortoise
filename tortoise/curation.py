@@ -51,6 +51,8 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
+from tortoise.env_truthy import is_truthy
+
 #: Env flag that disarms every write. Truthy values only; anything else leaves
 #: the run armed, because a switch that silently disarms on a typo is worse than
 #: no switch (the safe default is the documented one: armed, and idle unless
@@ -1047,7 +1049,7 @@ def assert_distinct_graphs(
 def off_switch_active(explicit: bool = False) -> bool:
     if explicit:
         return True
-    return str(os.environ.get(OFF_SWITCH_ENV, "")).strip().lower() in ("1", "true", "yes", "on")
+    return is_truthy(os.environ.get(OFF_SWITCH_ENV))
 
 
 # ── writing (additive, idempotent) ────────────────────────────────────────
