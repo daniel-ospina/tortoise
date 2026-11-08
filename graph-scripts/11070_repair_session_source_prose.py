@@ -257,9 +257,11 @@ def _report_fts(fts: dict) -> None:
     if fts["vetoed"] == "leaked":
         print(f"✗ {len(fts['leaked'])} probe(s) still return a node that CARRIES "
               f"THE PRE-FIX PROSE {fts['leaked']!r}: the sentence is still "
-              f"findable, whatever the census reads. The pair was cleared on "
-              f"the node but the index entry survives — do NOT report the "
-              f"repair as done (#11161).", file=sys.stderr)
+              f"findable through the Source FTS index. ⛔ ON A CENSUS THIS IS "
+              f"THE PRE-REPAIR STATE (nothing has been written yet); AFTER a "
+              f"repair it means the pair was cleared on the node while the "
+              f"indexed tokens survived — do NOT report the repair as done "
+              f"(#11161).", file=sys.stderr)
     elif fts["vetoed"] == "unmeasurable":
         print(f"✗ the Source FTS leg did not RUN for {fts['unmeasurable']!r} "
               f"(the read path's own reason is on the probe line). A leg that "
@@ -350,8 +352,10 @@ def main() -> int:
         ap.error("--repair and --dry-run are mutually exclusive")
     probes = list(args.probe_phrase or [])
     if probes and args.no_fts_probe:
-        ap.error("--probe-phrase and --no-fts-probe are contradictory: one asks "
-                 "for the FTS leg, the other disclaims it")
+        print("ERROR: --probe-phrase and --no-fts-probe are contradictory: one "
+              "asks for the FTS leg, the other disclaims it. Pick one.",
+              file=sys.stderr)
+        return 2
     for phrase in probes:
         why = probe_phrase_rejection(phrase)
         if why:
