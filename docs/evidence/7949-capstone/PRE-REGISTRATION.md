@@ -276,10 +276,13 @@ to the EMPTY SET while sitting on the write path (`bind_point_subjects`, inside
 `TORTOISE_SUBJECT_TAU_HI=0.99`) — so the arm seams, the mention arm, the per-turn embed
 rewrite, the request's `response_format`, the change-feed writer, the identifier-token writer and the
 confidence-gated subject binder are inside the derived
-surface, not hand-listed beside it. That list grew one review round at a time (the last four are
+surface, not hand-listed beside it. That list grew one review round at a time — cycles 7 to 11 are
 `TORTOISE_CONTEXT_ENRICH`/`TORTOISE_JSON_MODE`, then `TORTOISE_CHANGE_FEED`, then
-`TORTOISE_IDENTIFIER_TOKENS` in cycle 9, then `TORTOISE_SUBJECT_TAU_HI`/`_LO` in cycle 10, each found by a
-measured mutation that left the previous derivation green), which is the honest reason to state
+`TORTOISE_IDENTIFIER_TOKENS` in cycle 9, then `TORTOISE_SUBJECT_TAU_HI`/`_LO` in cycle 10 (each of those
+four found by a measured mutation that left the previous derivation green), then
+`TORTOISE_STATE_VALUE_VERBATIM` in cycle 11, which the **CENSUS** found rather than a mutation: the switch
+landed inside `path_modules` and red that suite (§10.15). Named positionally and never as a count — this
+paragraph said "the last four" over five rounds until §10.15 corrected it — which is the honest reason to state
 it as a CLOSURE over the reads INSIDE those modules rather than as a list somebody curated — not
 a closure over everything the path reaches, which is the gap #11410 records. Every one is written in-process, **read back**, and a run whose read-back
 disagrees is **refused** (`probes/capstone_measure.py`); the measurement switches were
@@ -1778,6 +1781,18 @@ into the graph the run writes instead of withheld — the pre-`#10513` semantics
 `tests/test_state_value_verbatim_10360.py::test_the_off_switch_defaults_ON_and_restores_the_pre_10513_write`.
 Pinning it to its shipped default **equals today's behaviour on a clean shell** and closes only the
 inherited-`=0` hole, which is the `TORTOISE_IDENTIFIER_TOKENS` precedent (§10, cycle 9).
+
+**A SECOND roll-call in the same subsection carried the same two defects, and this entry corrects it
+too.** §1.6.2's later paragraph said "the last four are … `TORTOISE_SUBJECT_TAU_HI`/`_LO` in cycle 10,
+each found by a measured mutation that left the previous derivation green", which — once cycle 11 joins
+that list — (a) counts four over the five rounds 7–11 and omits cycle 11 entirely, and (b) attributes
+every member to a measured mutation, which is **false for cycle 11**: the **CENSUS** found it, not a
+mutation (the "Why" above and `acceptance_arm.read_back` both say so — *"It was found by the CENSUS,
+not by hand: the switch landed inside path_modules and red that suite"*). It is now restated
+positionally, with the mutation attribution scoped to the four rounds it is true of and cycle 11's
+actual discovery mechanism named. A paragraph that states the count and the discovery method of a list
+**is** part of the registration's claim about that list; leaving it saying the opposite repeats, one
+sentence below, the defect this entry was already correcting.
 
 ⛔ **No value moves.** No metric, denominator, threshold, bar, floor or split changes, and no
 committed verdict is re-scored: the pin makes the measured population **shell-insensitive** and the
