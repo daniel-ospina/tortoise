@@ -3665,8 +3665,11 @@ def test_an_UNMEASURABLE_probe_VETOES_even_when_the_CONTROL_answers(monkeypatch)
         `mode="unavailable", ok=False` (`note: "no usable control token was
         found, and the Source index-entry read FAILED …"`). ⛔ AND THE DEGRADED LEG
         IS NOT WHAT MAKES IT UNAVAILABLE: the identical fixture with a HEALTHY leg
-        reports a byte-identical control block, because the control reads go
-        through `g.query`, never through the patched `run_fts_query`. With
+        reports a byte-identical control block, because THIS fixture's control
+        reads — the lexicon read and the index-entry read — go through `g.query`,
+        and it never reaches the control's `mode="probe"` arm (which DOES read
+        through the patched `run_fts_query`, `session_source_prose_migration.py`:
+        2140 → `source_fts_probe`). With
         `control_ok` False the fold falls through to `uncorroborated` — the WRONG
         VETO FOR THE RIGHT OUTCOME — so none of them pins "the probe's own read did
         not run".
