@@ -58,7 +58,8 @@ def _creds() -> tuple[str, str]:
     path = os.path.expanduser("~/.tortoise/credentials.json")
     if not os.path.exists(path):
         sys.exit(f"no credential at {path} — run `uv run tortoise signup` first")
-    cred = json.load(open(path))
+    with open(path) as fh:
+        cred = json.load(fh)
     base = (cred.get("api_url") or "https://api.premiselabs.co").rstrip("/")
     return cred["api_key"], base + "/mcp"
 
@@ -71,36 +72,52 @@ async def _call(session: ClientSession, name: str, args: dict) -> tuple[str, str
 
 async def main() -> int:
     key, url = _creds()
-    async with streamablehttp_client(url, headers={"Authorization": f"Bearer {key}"}) as conn:
-        async with ClientSession(conn[0], conn[1]) as session:
-            await session.initialize()
+    async with streamablehttp_client(
+        url, headers={"Authorization": f"Bearer {key}"}
+    ) as conn, ClientSession(conn[0], conn[1]) as session:
+        await session.initialize()
 
-            print("== 1. tortoise_list_graphs (what this org can reach) ==")
-            status, text = await _call(session, "tortoise_list_graphs", {})
-            print(status, text[:700], "\n")
+        print("== 1. tortoise_list_graphs (what this org can reach) ==")
+        status, text = await _call(session, "tortoise_list_graphs", {})
+        print(status, text[:700], "\n")
 
-            print(f"== 2. NEGATIVE CONTROL — write with explicit non-default graph {NEG_GRAPH!r} ==")
-            status, neg = await _call(session, "tortoise_create_point",
-                                      {"kind": "statement", "content": NEG_TEXT, "graph": NEG_GRAPH})
-            print(status, neg[:900], "\n")
+        print(f"== 2. NEGATIVE CONTROL — write with explicit non-default graph {NEG_GRAPH!r} ==")
+        status, neg = await _call(session, "tortoise_create_point",
+                                  {"kind": "statement", "content": NEG_TEXT, "graph": NEG_GRAPH})
+        print(status, neg[:900], "\n")
 
-            print("== 3. POSITIVE CONTROL — write into 'default', then read it back ==")
-            status, pos = await _call(session, "tortoise_create_point",
-                                      {"kind": "statement", "content": POS_TEXT})
-            print(status, pos[:300], "\n")
-            status, found = await _call(session, "tortoise_search",
+        print("== 3. POSITIVE CONTROL — write into 'default', then read it back ==")
+        status, pos = await _call(session, "tortoise_create_point",
+                                  {"kind": "statement", "content": POS_TEXT})
+        print(status, pos[:300], "\n")
+        status_pos, found = await _call(session, "tortoise_search",
                                         {"query": "positive control", "limit": 5})
-            print(status, found[:700], "\n")
+        print(status, found[:700], "\n")
 
-            print("== 4. FAIL-OPEN HALF — the negative probe string must be absent ==")
-            status, absent = await _call(session, "tortoise_search",
+        print("== 4. FAIL-OPEN HALF — the negative probe string must be absent ==")
+        status_neg, absent = await _call(session, "tortoise_search",
                                          {"query": "capstone-9664 U1 probe", "limit": 5})
-            print(status, repr(absent[:400]))
+        print(status, repr(absent[:400]))
 
-    # The verdict is mechanical so a re-run cannot be read optimistically: the
-    # negative write must have been REFUSED, and it must not be findable.
-    ok = (neg.startswith("No graph") and NEG_GRAPH in neg) and NEG_TEXT[:40] not in absent
-    print("\nPROBE-RESULT:", "REFUSED-AND-ABSENT" if ok else "UNEXPECTED")
+    # The verdict is mechanical so a re-run cannot be read optimistically, and it
+    # consults EVERY control — including the positive one, whose only job is to
+    # make "absent" mean something. Without it, a broken search on a fresh org
+    # reports REFUSED-AND-ABSENT for a fail-open half nobody measured (caught by
+    # review round 2).
+    negative_refused = neg.startswith("No graph") and NEG_GRAPH in neg
+    positive_write_ok = pos.startswith("{")           # create_point returns the point JSON
+    positive_found = status_pos == "OK" and POS_TEXT[:40] in found
+    negative_absent = (
+        status_neg == "OK"
+        and NEG_TEXT[:40] not in absent
+        # the control point proves the query space is live, so an empty-looking
+        # result set is a real absence rather than a dead index
+        and POS_TEXT[:40] in absent
+    )
+    ok = negative_refused and positive_write_ok and positive_found and negative_absent
+    print(f"\ncontrols: refused={negative_refused} pos_write={positive_write_ok} "
+          f"pos_found={positive_found} neg_absent={negative_absent}")
+    print("PROBE-RESULT:", "REFUSED-AND-ABSENT" if ok else "UNEXPECTED")
     return 0 if ok else 3
 
 

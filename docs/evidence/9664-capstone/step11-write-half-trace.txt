@@ -9,9 +9,12 @@ OpenAI before any Tortoise code ran:
 
     This tool call was blocked by OpenAI's safety checks. Please double check what you are sending.
 
-So U1's row recorded TWO missing things: "a hosted-org credential usable from the SDK/HTTP
-surface **plus a second graph to target**". This file measures the FIRST of those and reports
-what the second one now costs. It does not close U1 — that is recorded on the row.
+So U1's row recorded TWO missing things, quoted here with the splice marked (the old
+reason spliced two clauses; nothing is re-typed as contiguous that was not): "a hosted-org
+credential usable from the SDK/HTTP surface … plus a second graph to target". This file
+measures the FIRST of those and reports what the second one now costs. It does not close
+U1 — that is recorded on the row, deliberately, because #9340 makes U1 the ACCEPT arm
+(see 2 and 5).
 
 WHAT WAS DONE (and what it legitimately is)
 -------------------------------------------
@@ -19,11 +22,17 @@ A fresh free org was minted through the product's OWN documented zero-email path
 built for headless agents (#663):
 
     $ uv run tortoise signup
+    Signing up for a free hosted team (anonymous, no email)…
     ✅ Free team created: agent-a28284
-       API key: <redacted: tt_ key, saved to ~/.tortoise/credentials.json>
-       Recovery token: st_0472c48d...    (the only way back into the team)
+       API key: <redacted: tt_ key>
        Config saved to /home/cmux/.tortoise/credentials.json (shown once — store it)
-       …
+       Recovery token: st_0472c48d…
+       RECOVERY TOKEN — save this: it is the only way back into this team if your key is lost.
+       Next: tortoise create-point "hello world" --kind statement
+
+(One editorial [note], not output: the recovery token is what a later pass would use to
+retake the team if the `tt_` key is lost. The `Recovery token:` line and the warning under
+it are two separate lines in `tortoise/__main__.py`; neither is folded into the other here.)
 
 This is NOT a substituted target: it is a real org on the live service (api.premiselabs.co),
 and the write is delivered by the surface the product actually serves — `/mcp`, the mount a
@@ -81,13 +90,19 @@ MEASUREMENT — 4. the fail-open half: nothing landed from the refused write
     OK [{"id":"1a1b99d2bfc-1ceb72af6103","content":"capstone-9664 positive control: this string
         MUST be findable", …}]
 
-    PROBE-RESULT: REFUSED-AND-ABSENT
+    controls: refused=True pos_write=True pos_found=True neg_absent=True
+    PROBE-RESULT: REFUSED-AND-ABSENT        # exit 0
 
 The one hit is the POSITIVE CONTROL point, which shares the "capstone-9664" token — the
 NEGATIVE probe's text (`…explicit non-default graph (must not exist)`) appears in no result.
 So the refusal is not cosmetic AND the check is not vacuous: the same query space demonstrably
-returns points that exist. The script asserts this mechanically (`PROBE-RESULT`), exit 0 only
-when the negative write was refused AND its text is absent.
+returns points that exist.
+
+The verdict is mechanical and consults EVERY control — `neg_absent` requires that the search
+SUCCEEDED and returned the positive-control point, so a dead index or an error payload cannot
+be mistaken for an absence. (Review round 2 caught the first version: it checked only the
+negative half, so a stubbed failing search still printed `REFUSED-AND-ABSENT` and exited 0 —
+an unmeasured fail-open half reported as measured.)
 
 MEASUREMENT — 5. why U1's accept arm / U2 / U4 still cannot be measured (the 402, verbatim)
 -------------------------------------------------------------------------------------------

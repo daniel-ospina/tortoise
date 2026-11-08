@@ -147,9 +147,11 @@ measured_at:
 #   * steps 1-4 and 6-10 need a signed-in Tortoise session and, from step 4 on, a
 #     ChatGPT Plus/Pro session where a HUMAN completes the OAuth consent — which is
 #     #9664's own step-4 text ("human does the Pro auth");
-#   * the four #9340 ugly cases need, beyond a credential, a SECOND graph (the
-#     accept arm of U1) — a minted free org may hold one, measured 402 "Custom
-#     graphs require the Builder plan" (step11-write-half-trace.txt).
+#   * THREE of the four #9340 ugly cases (U1's accept arm, U2, U4) need, beyond a
+#     credential, a SECOND graph — a minted free org may hold one, measured 402
+#     "Custom graphs require the Builder plan" (step11-write-half-trace.txt).
+#     U3 is the exception and is `verified`: its outcome IS a refusal, which the
+#     2026-10-26 run obtained, so it needs neither a credential nor a second graph.
 # A credential WAS minted on 2026-11-08 (`uv run tortoise signup`) and it did not
 # unblock those rows; the write half of the ugly cases was measured with it and the
 # accept half stayed unreachable for the tier reason above.
