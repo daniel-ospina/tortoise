@@ -3749,7 +3749,7 @@ def _render_existing_items(embed_list: dict) -> str:
     to remember a summary. Rendered as an untrusted region — the texts are
     session-derived.
     """
-    lines: list[str] = []
+    lines: list[str] = _gap_operator_lines(embed_list)
     for section, _field, _kind, _family in _vet_gate.SECTIONS:
         texts = [str(_vet_gate._item_text(section, item))
                  for item in (_section_list(embed_list, section))
@@ -13403,7 +13403,7 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     gap_stage_stats: dict = {}
     if _partial_gap_fill_enabled():
         gap_fill_stats = {"armed": True, "fired": False}
-        if not (story and _batch_has_candidates(embed_list)):
+        if not (story and _gap_fill_sees_candidates(embed_list)):
             # ⛔ ARMED BUT SKIPPED IS RECORDED, NOT SILENT (review round 2, P2).
             # An empty S2 list is the case the issue scopes OUT (it asks about
             # PARTIAL gaps) and it is also the case S4 does the most work on
@@ -13411,22 +13411,22 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
             # visible in the record, or a measurement run cannot tell "armed and
             # skipped" from "not armed" (#9116's ambiguity).
             #
-            # ⛔ THE PREDICATE IS `_batch_has_candidates`, NOT `embed_list` and
-            # not `any(embed_list.values())` (review round 3, P1; review round 7,
-            # P2 for the second form). The post-VET dict is ALWAYS truthy —
-            # `{"entities": [], "events": [], "points": [], "operators": []}`
-            # is a non-empty mapping — so a falsy-dict test never fires on the
-            # zero-candidate shape at all, and the stage takes the *firing* path
-            # instead: with no items every segment scores coverage 0.0, so every
-            # narrative span is flagged and one billed model call goes out — the
-            # exact inverse of what this arm's name and the evidence record
-            # assert. Its VALUES are no better a test: with referentiality armed
-            # `route_mentions` has already written `mention_stats` onto the
-            # mapping, so values-truthiness is true on a batch with no candidates
-            # either. This is the SAME predicate the S4 handler uses 140 lines
-            # later for `s4_full_rescues`; sharing it is what stops the two from
-            # diverging again — and it is the reason the shared helper tests the
-            # candidate SECTIONS and not the mapping.
+            # ⛔ THE PREDICATE IS THE DETECTOR'S OWN `candidates` COUNT, NOT
+            # `embed_list` and not `any(embed_list.values())` (review round 3,
+            # P1; review round 7, P2 for the second form). The post-VET dict is
+            # ALWAYS truthy — `{"entities": [], "events": [], "points": [],
+            # "operators": []}` is a non-empty mapping — so a falsy-dict test
+            # never fires on the zero-candidate shape at all, and the stage takes
+            # the *firing* path instead: with no items every segment scores
+            # coverage 0.0, so every narrative span is flagged and one billed
+            # model call goes out — the exact inverse of what this arm's name and
+            # the evidence record assert. Its VALUES are no better a test: with
+            # referentiality armed `route_mentions` has already written
+            # `mention_stats` onto the mapping, so values-truthiness is true on a
+            # batch with no candidates either. Nor is it `_batch_has_candidates`,
+            # which walks FOUR sections where the detector counts THREE — an
+            # operator-only batch then fired over a fully-flagged narrative
+            # (round 9; measured `candidates: 0`, `flagged_total: 1`).
             gap_fill_stats["skipped"] = ("no story" if not story
                                          else "empty embed_list")
     if gap_fill_stats.get("armed") and not gap_fill_stats.get("skipped"):
@@ -16940,3 +16940,59 @@ def _composed_identities_agree(a: tuple[str, str, str | None],
         if other[2] is None and composed[0] == other[0] and composed[1] == other[1]:
             return True
     return False
+
+
+# ── review round 9: the two gaps a fresh review found in the #11534 arm ────
+#
+# Both live down here, past every `extractor_v2.py:NNNN` cite the #7949 capstone
+# bundle pins, because a helper defined above them would shift those cites. The
+# call sites are one-line substitutions, so the file's line count does not move.
+
+
+def _gap_operator_lines(embed_list: object) -> list[str]:
+    """The batch's existing ``operators``, as dedup lines for the gap-fill prompt.
+
+    ⛔ ``operators`` IS OUTSIDE ``_vet_gate.SECTIONS`` (``_item_text`` answers ""
+    for one — it has no ``name``/``content``), so a loop over that table left the
+    section out of the prompt ENTIRELY: measured, a batch carrying one operator
+    rendered an EMPTY ``EXISTING ITEMS`` block. That is the inverse of what the
+    block exists for — the prompt forbids re-emitting existing items and permits
+    an operator whose endpoints sit "in EXISTING ITEMS" — and the collision it
+    invites is destructive, because ``_merge_key``'s operator identity is
+    ``(src, dst, op_type, target_edge …)`` with NO ``claim``: a re-emitted
+    operator matches the S2 one and ``merge_embed_lists`` lets the gap-fill
+    version WIN, replacing its fields. Rendered as the edge triple the model
+    would have to reproduce, capped like every other section.
+    """
+    edges = [f"{str(item.get('src') or '').strip()} -"
+             f"[{str(item.get('op_type') or '').strip()}]-> "
+             f"{str(item.get('dst') or '').strip()}"
+             for item in _section_list(embed_list, "operators")
+             if isinstance(item, dict) and (item.get("src") or item.get("dst"))]
+    if not edges:
+        return []
+    return ["[operators] " + json.dumps(edges[:_GAP_EXISTING_CAP])]
+
+
+def _gap_fill_sees_candidates(embed_list: object) -> bool:
+    """Does the DETECTOR see a candidate? — the gap-fill arm's skip predicate.
+
+    ⛔ NOT ``_batch_has_candidates``, and the difference is a SECTION (round 9,
+    P2). That helper walks ``_CANDIDATE_SECTIONS`` (four, ``operators``
+    included) while ``check_batch``/``partial_gaps`` count through
+    ``vet_gate.SECTIONS`` (three, because ``_item_text`` answers "" for an
+    operator). On an operator-only batch the two therefore disagreed in the fatal
+    direction — measured: ``candidates: 0``, ``coverage_suspect: True``,
+    ``flagged_total: 1``, while ``_batch_has_candidates`` said True — so the arm
+    took the FIRING path over a fully-flagged narrative and spent a billed model
+    call on exactly the population its own comment says is excluded (the S4
+    rescue population). Asking the instrument the scan actually uses makes the
+    divergence unrepresentable: the predicate cannot disagree with the scan it
+    guards. ``_batch_has_candidates`` is untouched — it is S4's own
+    ``s4_full_rescues`` predicate, and moving it would change S4's skip
+    behaviour, which is not this arm's to change.
+    """
+    try:
+        return bool(_vet_gate.check_batch(embed_list, "").get("candidates"))
+    except Exception:  # noqa: BLE001 — a detector that raises must not arm a call
+        return False

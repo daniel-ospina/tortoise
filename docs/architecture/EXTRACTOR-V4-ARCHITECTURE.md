@@ -117,7 +117,7 @@ Production graph: **~25,000 quota nodes in 3–4 active days** (~27 per emitting
 
 **v3 has no discard, trim or gate anywhere.** It is a fidelity workstream. **v4 is a selection workstream.** ⚠️ **v3 is not absent from the tree: E2's carve-out (`STATE_VALUE_CARVE_OUT`, `#1534`) and E4 (`merge_embed_lists`, `:4845`) are load-bearing, and this document depends on them** (see §1, "v2 → v3 → v4").
 
-⚠️ **v3's E4 rule is load-bearing:** `"S4 merges, not replaces"` — `merge_embed_lists(embed_list, s4)` runs at `extractor_v2.py:13651` and S2 is preserved.
+⚠️ **v3's E4 rule is load-bearing:** `"S4 merges, not replaces"` — `merge_embed_lists(embed_list, s4)` runs at `extractor_v2.py:4845` and S2 is preserved.
 
 ---
 
@@ -769,7 +769,7 @@ unfirable (block at the top of §10).
 | **`KindClassifier.classify_items(items)`** → `{assignments: {id: {kind, margin, mode}}, stats, warnings}`, **never raises (fail-open)** | `kind_classifier.py:179` |
 | **A closed vocabulary** — the stats counter `closed_vocab_rejects` exists | `kind_classifier.py:200` |
 | **A mechanical kNN fast path** → margin gate → `nearMisses` rerank → **batched LLM only for the low-margin tail** | `#1695` |
-| **The deferred pass** — `_collect_classify_items(embed_list)` → `classify_items` → `_apply_classify_kinds` | `extractor_v2.py:13593` / `:4492`, called at `:4803` and `:4888` |
+| **The deferred pass** — `_collect_classify_items(embed_list)` → `classify_items` → `_apply_classify_kinds` | `extractor_v2.py:4467` / `:4492`, called at `:4803` and `:4888` |
 | **The flag** — `TORTOISE_CLASSIFY_LATER`, unset today = *"the LEGACY pipeline"* | `extractor_v2.py:513`, `:4656` |
 | **Jev requires an adapter, a prompt and a parser** — `llm_tail` is a **boolean** switch (`kind_classifier.py:93`), and the ambiguity tail is resolved by a hardcoded prompt plus a JSON parser — ✅ **now built, OFF by default: `s2_decision_seam.classify_decider` replaces the tail's DECISION SOURCE via `KindClassifier(tail_decider=…)`** | `kind_classifier.py:93`, `:309`; `s2_decision_seam.py` (`#5087`) |
 
