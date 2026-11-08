@@ -44,7 +44,12 @@ The earlier `platform-seams.md` row for #2120 (`~/.openclaw/*.claw` +
   session key, and the block itself is handed back to the reflex as
   `prior_context` on the next turn — `tortoise volunteer`'s JSON contract
   locally, the `POST /v1/context` body hosted — so a pointer the last injected
-  block carried is suppressed when the next block differs.
+  block carried is suppressed when the next block differs — **except on an
+  explicit ask** (a wh-question, a trailing "?", or "remind me what X was"),
+  which deliberately re-fires (`volunteer._is_explicit_ask`): the user asked
+  for it again. Measured, not assumed: a turn 3 phrased as a question re-fires
+  with correct continuity in place, so that carve-out is not a continuity
+  failure.
   Continuity is **one turn deep**: `createContinuity` remembers the last block
   per session key, not a session-wide ledger of every pointer surfaced, so a
   pointer surfaced two or more turns ago can fire again. `prior_context` is the
