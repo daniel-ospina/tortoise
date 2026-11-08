@@ -6983,10 +6983,18 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
     # reason (#11437 review, P3, F1). `_assert_census_states_the_residual(text)`
     # runs unconditionally in `test_the_census_doc_states_the_same_probe_bound_the
     # _report_does` — that hoist IS the round-2 P1 fix for #11443's dormancy. It
-    # was also the ONE fix in this PR with no distinguishing mutant: measured,
-    # deleting that line leaves `3 failed, 148 passed, 1 skipped` in a scratch
-    # copy, which is byte-identical to the UNMUTATED copy's three repo-context
-    # failures, i.e. the removal reds NOTHING. The reason is honest and unstated:
+    # was also the ONE fix in this PR with no distinguishing mutant: at the head
+    # that was measured — this branch BEFORE the rebase, when the file collected
+    # 152 — deleting that line left `3 failed, 148 passed, 1 skipped` in a scratch
+    # copy, byte-identical to the UNMUTATED copy's three repo-context failures,
+    # i.e. the removal redded NOTHING. ⛔ The count is SCOPED to that head rather
+    # than re-cut, because this file collects 166 now and no run of it can report
+    # 152; an unscoped figure here would be the stale-measurement defect §6 of the
+    # census doc exists to forbid. What closed the gap is the AST guard below —
+    # measured at this tree, deleting the same line reads `1 failed, 164 passed,
+    # 1 skipped`, the failure being
+    # `test_the_residual_pin_separates_the_claim_from_its_inverse`. The reason was
+    # honest and unstated:
     # the row-set test above performs the same assertion on the real doc, so the
     # residual stays protected while the DORMANCY does not — a one-line refactor
     # can put the call back inside an `if` and this file goes on pinning a claim

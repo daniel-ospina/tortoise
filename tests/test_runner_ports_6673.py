@@ -842,12 +842,14 @@ def test_the_guard_reads_its_population_through_the_selector(monkeypatch):
     So this drives the GUARD end to end with the population replaced: a real file carrying a
     docker-lane port literal and no exemption must be reported as an offender — matched ON
     THAT FILE, so an unrelated offender cannot satisfy the arm — and restoring its exemption
-    must silence it. The SECOND outcome is the revert detector: an inline substring ignores
-    the patch, so the guard scans the REAL population, reports files the emptied exemption
-    dict no longer covers, and REDS on this unwrapped call (measured: it named six of them).
-    ⛔ The first arm alone cannot see that revert — the stale exemptions make it satisfiable
-    for the wrong reason — so both arms stay, and the `match=` is what keeps the first one
-    about this fixture rather than about whatever else the real tree happens to contain.
+    must silence it.
+
+    ⛔ The SECOND, unwrapped call is what detects a REVERT, because the first arm is not
+    enough: an inline substring ignores the patch, so the guard scans the REAL population —
+    which CONTAINS this fixture, so `pytest.raises` is satisfied without the selector being
+    exercised at all. The unwrapped call then runs with only the fixture's exemption restored,
+    so the other files whose entries this test dropped are reported and the assertion REDS.
+    Both arms stay; the `match=` is what keeps the first one about this fixture.
     """
     target = ROOT / "tests/test_search_engine_gaps.py"
     rel = target.relative_to(ROOT).as_posix()
