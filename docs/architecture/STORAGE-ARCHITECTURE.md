@@ -117,14 +117,15 @@ The cause is not that we store a lot. **It is that we pay for the *total* rather
 >
 > *"ok, so we do hybrid now, data goes to postgres and it's loaded to hot (falkor); for now we keep the limit in falkor high so we don't need to rush with enabling our queries to parse both falkor and postgres."*
 >
-> ⛔ **SPLIT 2026-11-07 (owner): one clause adopted, one clause narrowed.**
+> ⛔ **SPLIT 2026-11-07 (owner): what the ruling does, clause by clause.**
 >
-> **ADOPTED — "so we don't need to rush with enabling our queries to parse both falkor and postgres":** the dual-store
-> read path **in the SEARCH doc's sense** is now the design — the **vector index and the embedding payload move to Postgres**
-> (`pgvector`), while traversal, writes and EP stay in FalkorDB, so a **search** query reads similarity candidates from
-> Postgres and walks them in the graph. ⚠️ **This is NOT `#7970`'s anchored-read cutover, which stays DEFERRED by §2.0**
-> (see the epic's `08-hosted-prerequisites.md` §0.1 and N1): serving record-backed reads from Postgres on the ordinary
-> read path is a separate, still-deferred change. See `docs/architecture/SEARCH-ARCHITECTURE.md`, which also **resolves V1** (§14.3).
+> **ADOPTED — the dual-store SEARCH path (this PR's decision, not a separate owner sentence):** the **vector index and
+> the embedding payload move to Postgres** (`pgvector`), while traversal, writes and EP stay in FalkorDB, so a **search**
+> query reads similarity candidates from Postgres and walks them in the graph. The owner's *"so we don't need to rush
+> with enabling our queries to parse both falkor and postgres"* is what makes this adoptable **without** forcing the
+> ordinary read path to parse both stores. ⚠️ **`#7970`'s anchored-read cutover therefore stays DEFERRED by §2.0** (the epic's
+> `08-hosted-prerequisites.md` §0.1 and N1) — it is a separate, still-deferred change.
+> See `docs/architecture/SEARCH-ARCHITECTURE.md`, which also **resolves V1** (§14.3).
 >
 > **NARROWED — "keep the limit in falkor high":** the cache stays **complete through private-beta**, and becomes a **bounded
 > window only after the search doc's M2 measures retrieval quality, windowed vs complete** (`docs/architecture/SEARCH-ARCHITECTURE.md` §1.5, §9 — a DIFFERENT M2 from §15's invoice measurement), sized by the tier's 30 %-of-price cost budget (a complete graph's **total** is \$11.01/tenant — 193 %, and its RAM line **alone** is \$8.75 — against a

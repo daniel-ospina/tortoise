@@ -169,9 +169,11 @@ raised) and §17.1-correct (record after the append, before the cache fold).
 
 `embedding jsonb` on `source` (`…01:175`), `event` (`…01:233`), `point` (`…03:66`). **No migration and no module uses `pgvector`** — `grep -riE 'pgvector|vector\('` over all 79
 migrations returns **0**, and `git grep -il pgvector -- 'tortoise/*'` is **0**. The word itself
-appears in prose only — e.g. this document, §12.1c's open question, this epic's
-`03-schema.md`, and the competitor notes. So the record is a **durability carrier** for vectors, not a retrieval index — which is
-exactly right while §2.0 keeps the cache fully populated and **V1 is undecided** (§12.1c/§14.3).
+appears in prose only — e.g. this document, §12.1c's decided record, this epic's
+`03-schema.md`, and the competitor notes. So the record is a **durability carrier** for vectors, not a retrieval index — which was
+exactly right while §2.0 kept the cache fully populated, and **V1 is now DECIDED** (§12.1c/§14.3, 2026-11-07):
+the retrieval index and the embedding payload move to Postgres, so this row's *reason for being a carrier only*
+dis gone — the record becomes the home of the index, not just of the bytes.
 
 ### A6. Metering / billing — **EXISTS and is live, org-scoped**
 
@@ -1034,7 +1036,8 @@ meter → allowance wiring — gates the first *allowance*, not the first custom
   repo. The questions the external leg would have asked, left unasked and unanswered: Supabase's
   pooler connection limits and their interaction with session-level `SET` (R6 makes the GUC
   session-scoped, and a transaction-mode pooler is where that breaks), PITR retention by plan tier
-  (R9), and `pgvector` index-build behaviour at our size (**only if V1 is decided**).
+  (R9), and `pgvector` index-build behaviour at our size (**now owed unconditionally — V1 was DECIDED on
+  2026-11-07**, so this is no longer conditional on it).
 - **No product code changed.** No migration, no module, no test. The **three runs in §G** (two pytest runs plus the
   PGlite validation) were run and reported; none of their files was modified.
 - **No issue filed.** An item that names an issue **as its home** gives that issue's state and its

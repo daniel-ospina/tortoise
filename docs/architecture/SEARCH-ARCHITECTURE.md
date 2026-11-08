@@ -1,11 +1,12 @@
 ---
 title: "Search architecture — where the vector index lives, and what the graph engine keeps"
-type: architecture
+type: engineering
 domain: platform
 doc_status: live
 created: 2026-11-07
 ownedBy: epistemic-team
-aboutSubjects: epistemic-team
+subjects.team: epistemic-team
+aboutSubjects: search
 aboutObjects: tortoise
 ---
 
@@ -35,7 +36,13 @@ what the graph engine holds.**
 
 **We have no dataset.** The only figures available come from dogfooding runs of **superseded product
 versions**. Owner ruling, 2026-11-07: *"it doesn't matter if 17% is 10 or 30%, what matters is the
-engineering principles. Then we'll measure and optimise after beta launch."*
+engineering principles. Then we'll measure and optimise after beta launch."* — relayed in `#4051` comment
+[`6713312036`](https://github.com/daniel-ospina/tortoise/issues/4051#issuecomment-6713312036), which records
+it as *"The owner's ruling"*; ⚠️ that comment's **v1 scope** (search AND traversal in Postgres, no hot cache)
+was withdrawn by comment
+[`6713838871`](https://github.com/daniel-ospina/tortoise/issues/4051#issuecomment-6713838871) — the method
+ruling quoted here was not, and §1.5's phase split is recorded in comment
+[`6714119028`](https://github.com/daniel-ospina/tortoise/issues/4051#issuecomment-6714119028).
 
 ⇒ **No decision below rests on a measured proportion of the graph.** The share a hot cache would hold is
 an **output** we measure from real tenants, never an input. An earlier draft sized the split from an
@@ -55,8 +62,11 @@ memory cap** and its **`NODE_CREATION_BUFFER` of 16 384 slots** (§7's #1-risk r
 
 The two constraints that sequence the work differ in kind, and only the second is quoted:
 
-> *"then we'll measure and optimise after beta launch"* (`#4051` comment
-> [`6713312036`](https://github.com/daniel-ospina/tortoise/issues/4051#issuecomment-6713312036))
+> *"measure and optimise after beta launch"* — the phase split this section implements is recorded in `#4051`
+> comment [`6714119028`](https://github.com/daniel-ospina/tortoise/issues/4051#issuecomment-6714119028), and the
+> four-part decision in the header above is comment
+> [`6713838871`](https://github.com/daniel-ospina/tortoise/issues/4051#issuecomment-6713838871) — **not**
+> `6713312036`, which that comment supersedes.
 
 and, as **this document's** sequencing obligation rather than a quotation: **nothing ships to private-beta until
 the guardrails in §1.5 are in place**, because a window armed without them is a redesign performed in front of
@@ -81,7 +91,10 @@ quality change. **Live before private-beta:**
 3. the **rebuild headroom** measured and reserved (§7) — the #1 production risk;
 4. the **shortfall assertion** on the vector leg (§6.1), without which a beta customer can silently receive
    fewer results than exist;
-5. the **`null`-not-0.5 rule** for absent belief state (§6.3) — a live defect today, independent of windows.
+5. the **`null`-not-0.5 rule** for absent belief state (§6.3) — a live defect today, independent of windows;
+6. the **two truncation reason strings** (§7) — `degraded: "insufficient_graph"` / `degraded:
+   "truncated_boundary"` — because item 1 only makes an incomplete answer *labelled*, not *labelled with a
+   reason a caller can branch on*.
 
 **Cost during private-beta, plainly:** a complete graph costs **\$11.01/tenant** at the 40-tenants-per-instance
 density — RAM \$8.75 + shared project line \$2.13 + record \$0.13 (§8.1) — against a \$5.70 storage budget, i.e.
@@ -121,7 +134,8 @@ with the index and is the bulk of the saving, not a rounding error beside it.
 
 **And the vector move is quality-neutral on the evidence.** At 381,559 vectors — inside our range —
 independent measurement puts pgvector/Qdrant/OpenSearch **within 0.0015 nDCG@10 of exact search**; the
-benchmark's own conclusion is *"choose the engine for operations, not for quality."* No published case
+benchmark's own conclusion is *"choose the engine for operations, not for quality."* — a third-party
+conclusion, carried in §1's PROVENANCE list with its citation owed. No published case
 shows a RAM-resident index returning better answers at this scale.
 
 ---
@@ -229,7 +243,7 @@ as authority**; the record schema carries **no column** for them and its `chk_po
 table comment restates the carve-out). ⚠️ **The one narrowed exception, stated so this section does not
 overstate the carve-out:** `baseline_source` / `baseline_alpha` / `baseline_beta` **are** columns —
 PRIMARY when `baseline_source = 'set-by-author'`, because an author-set prior is a non-reconstructible
-input rather than a derived value (the `#7955` correction to §17.5; `STORAGE-ARCHITECTURE.md:2052` says
+input rather than a derived value (the `#7955` correction to §17.5; `STORAGE-ARCHITECTURE.md:2055` says
 the carve-out is **not** reopened by it). That ruling stands and nothing here reverses it.
 
 **Which is why the retention unit must be a CLOSED component (§7):** a closed subgraph has no missing
@@ -256,7 +270,8 @@ shrink a tenant's own graph bytes; it only spreads the *fixed* lines. **The wind
 
 ⚠️ **Where the \$5.70 comes from, because the document it amends records a different ceiling.** `STORAGE-ARCHITECTURE.md` §1
 records the product constraint as *"a \$19 price with < \$9 total cost per user"*, and its M2 row prices against a
-"\$9 → \$19 budget"; the **30 %-of-price** target here is the owner's 2026-11-07 sizing rule for the **storage line**,
+"​\$9 → \$19 budget"; the **30 %-of-price** target here is the owner's 2026-11-07 sizing rule for the
+**storage AND shared-project lines together** (the owner's words cover falkor and postgres in one budget, §8),
 and it is **strictly tighter** than that ceiling (\$5.70 < \$9). Both are quoted so neither is mistaken for the other:
 against the older **\$9 total-cost ceiling** a complete graph's **RAM line** is **~97 % of it** and its **total is ~122 %** (above it), while against the **\$5.70 storage target** the RAM line is **154 %** and the total **193 %** — and
 the target is what governs the window. **The rule's recorded home is §8**, which quotes the owner's own words
@@ -368,7 +383,10 @@ mistaken for the stronger one.
 
 ⚠️ **And the Postgres side is not free of unknowns, only of cost:** under both states the dominant
 **unmeasured** lines are compute tier, provisioned IOPS and egress, driven by the **miss rate** — which
-nobody has measured (§17.4.6). Everything above is the storage lines and says so.
+nobody has measured (§17.4.6). Everything above is the **storage and shared-project** lines and says so —
+the `shared \$` column is `plan $25 + compute $60` per project divided by tenants, where $60 is an **assumed**
+compute line and the **tier choice itself is unmeasured**: a higher compute tier raises that column and the
+total with it.
 
 ⚠️ **These are derived thresholds, not published prices.** `product/pricing.json` is the price artifact of
 record and currently carries **solo = \$9**, so nothing here is live until that changes.
