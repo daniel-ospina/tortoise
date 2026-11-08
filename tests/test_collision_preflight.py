@@ -11535,9 +11535,14 @@ class HolderGateTests(unittest.TestCase):
         and was cut mid-word, losing the clause that says WHAT is unknown.
 
         The causes are DERIVED from the module under test (stub `_capture` at each
-        failure class), so this cannot drift from the wording the code emits.
+        failure class), so this cannot drift from the wording the code emits. Each arm
+        is driven with a CAUSE AT ITS OWN MAXIMUM as well as a short one (#11202 review
+        round 14): the 16-character `<html>nope</html>` body understated the unparsable
+        arm, which composes to 321 against this 320 window once `_gh_said` returns its
+        full `_GH_SAID_BOUND` — measured, and the reason `_GH_SAID_BOUND` is 99.
         """
         fs = self.cp.fleet_state
+        at_max = "x" * 400     # longer than _bounded_repr's bound: the bound decides
         cases = {
             "timeout (armed)": ("", fs.GH_READ_TIMEOUT_RC, ""),
             "refused (403)": (
@@ -11545,6 +11550,10 @@ class HolderGateTests(unittest.TestCase):
                 "API rate limit exceeded for user ID 1. " + "x" * 400,
             ),
             "unparsable body": ("<html>nope</html>", 0, ""),
+            # ⛔ THE ARM THE SHORT FIXTURE HID: an unparsable body/stderr that fills
+            # `_gh_said`'s whole bound is the longest cause any arm can carry.
+            "unparsable body (at the repr bound)": (at_max, 0, ""),
+            "unparsable stderr (at the repr bound)": ("", 0, at_max),
         }
         for label, reply in cases.items():
             with self.subTest(case=label), mock.patch.object(
