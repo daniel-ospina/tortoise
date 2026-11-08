@@ -586,29 +586,84 @@ def test_edge_function_hook_path_is_gone():
     #   req.headers.forEach  — header enumeration
     #   req.clone            — raw-body access for signature verification
     #   webhook-id / webhook-timestamp / webhook-signature — the protocol's own
-    #                          header names, which nothing else in this function
-    #                          would ever spell
+    #                          header names, LITERALLY SPELLED
     #   createHmac           — the signature computation
-    # RESIDUAL, stated rather than hidden: a restore computing HMAC through
-    # `crypto.subtle` would not be caught here — this file legitimately uses
-    # `crypto.subtle` (3 sites, for api-key and lookup hashing), so it cannot be
-    # pinned by absence. The protocol header names above are the backstop for
-    # that class, since a webhook verifier must read them from the request.
-    # ⛔ AND OVER THE FUNCTION'S LOCAL IMPORT CLOSURE, not just this file, because
-    # a restore can step outside BOTH the slice and the file. MEASURED (this PR's
+    # WHAT THESE PINS DO **NOT** COVER — stated precisely, because two earlier
+    # revisions of this comment were WRONG about it (the first claimed the header
+    # names were a backstop for `crypto.subtle`; the second claimed the runtime
+    # harness caught that mutant. Neither reproduced):
+    #   (a) a verifier that CONSTRUCTS the header name rather than spelling it
+    #       (`req.headers.get("webhook-" + suffix)`), AND
+    #   (b) an HMAC computed through `crypto.subtle` — which this file uses
+    #       legitimately (3 sites, api-key and lookup hashing), so it cannot be
+    #       pinned by absence, AND
+    #   (c) a NEW env var name (`SUPABASE_AUTH_HOOK_SECRET`), which no name pin
+    #       predicts.
+    #   MEASURED at this head, all three together in a helper above
+    #   authenticateCaller: these static pins PASS (19 passed) and the runtime
+    #   harness ALSO PASSES (20/20) — because the harness configures
+    #   `AUTH_HOOK_SECRET`, so a branch keyed on a different name is inert under
+    #   test. A restore reusing the OLD env name IS caught by the Phase-2 arms
+    #   (they assert 401 and get the hook path's non-401); one that invents a name
+    #   is not caught by either side.
+    #   THAT RESIDUAL IS BOUNDED BY A DIFFERENT SURFACE, not by a test here: the
+    #   branch cannot authenticate in production unless that secret is actually
+    #   provisioned, and provisioning is gated in `supabase-deploy.yml` (the
+    #   required-secret check) with `tenant-provision-monitor.yml` watching the
+    #   logged refusals. No test in THIS file pins the deployment's secret
+    #   inventory, and this comment does not claim otherwise.
+    #   These pins are therefore defence in depth over the literal and idiomatic
+    #   spellings of a restore — useful, cheap, and NOT claimed to be complete.
+    # ⛔ AND OVER THE FUNCTION'S REACHABLE CODE, not just this file, because a
+    # restore can step outside BOTH the slice and the file. MEASURED (this PR's
     # review): putting the verifier in `../_shared/<new>.ts`, importing it and
     # calling `hookIdentity(req)` from the handler left ALL 19 static tests green
     # — `index.ts` then carries no banned token at all, and the helper enumerates
     # headers in the other file. The runtime harness only trips it incidentally
     # (its import-rewriting cannot resolve the new module, so it dies with
     # ERR_MODULE_NOT_FOUND rather than failing an assertion), which is not a gate.
-    # So the same fingerprint scan runs over `index.ts` AND every local
-    # `../_shared/*.ts` module it imports — the code this function actually runs.
-    closure = [("index.ts", src)]
-    for rel in re.findall(r'from "(\.\./_shared/[^"]+)"', src):
-        dep = (EDGE_FN.parent / rel).resolve()
-        assert dep.is_file(), f"index.ts imports a missing module: {rel}"
-        closure.append((rel, dep.read_text()))
+    # A SECOND round showed the fix for that was too narrow: matching only
+    # `from "../_shared/…"` missed a SIBLING module (`./_hook.ts`), single quotes,
+    # `../other-fn/x.ts` and dynamic `import(`, so a verifier in
+    # `tenant-provision/_hook.ts` stayed invisible. The closure is therefore
+    # derived from EVERY relative specifier in either quote style (plus
+    # `import(`), resolved TRANSITIVELY, and the function's own directory is
+    # swept wholesale so a module the regex still misses cannot be left unscanned:
+    closure: list[tuple[str, str]] = []
+    seen: set[Path] = set()
+    queue: list[Path] = [EDGE_FN]
+    while queue:
+        path = queue.pop()
+        real = path.resolve()
+        if real in seen:
+            continue
+        seen.add(real)
+        text = real.read_text()
+        closure.append((str(real.relative_to(_REPO_ROOT)), text))
+        for rel in re.findall(
+            r'''(?:from|import)\s*\(?\s*["'](\.{1,2}/[^"']+)["']''', text
+        ):
+            dep = (real.parent / rel).resolve()
+            assert dep.is_file(), (
+                f"{real.name} imports a missing local module: {rel} — a rename "
+                "must not silently shrink the scanned set"
+            )
+            queue.append(dep)
+    # Belt and braces: every module in the function's own directory, whether or
+    # not a specifier pointed at it.
+    for sibling in sorted(EDGE_FN.parent.rglob("*.ts")):
+        if sibling.resolve() not in seen:
+            seen.add(sibling.resolve())
+            closure.append(
+                (
+                    str(sibling.resolve().relative_to(_REPO_ROOT)),
+                    sibling.read_text(),
+                )
+            )
+    assert len(closure) >= 2, (
+        "the scan must cover more than index.ts — an empty/one-file closure means "
+        "the specifier walk found nothing, which would silently restore the hole"
+    )
     for rel, text in closure:
         for banned in (
             "req.headers.forEach",
