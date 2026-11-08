@@ -703,6 +703,53 @@ def _parse_sse(text: str):
     return json.loads(text)
 
 
+def _require_the_seam_answered(r, *, bound: float, rig: str) -> None:
+    """A pre-SSE **504** is this RIG losing its race, not the property (#5049).
+
+    The two ONE-DEADLINE tests (`..._seam_spends_the_transport_deadline_not_a_
+    fresh_one` and `..._breach_reports_the_caller_visible_interval`) can only
+    observe the MCP seam if `http.response.start` reaches the wire BEFORE the
+    parent `WaitBoundMiddleware`'s deadline, i.e. if the app's
+    entry-to-response.start latency plus the injected pre-SSE cost fits inside
+    `bound`. At `bound = 1.5` / pre-SSE `0.5` that window is **1.0 s**, and CI
+    job `128708820655` (PR #11512, shard `test (a)`, 2026-11-08T11:21Z) measured
+    it OVER that window: the caller got the transport's 504 and the old
+    `assert r.status_code == 200` turned the runner's load into a red required
+    check — the `assert 504 == 200` class #4883/#5049 exist to remove.
+
+    So a 504 whose body is the product's own refusal envelope is an
+    INCONCLUSIVE skip that NAMES the bound, never a FAIL — #5049 rule 1, the
+    reason `tests/_verdict.py` declares the family. It is deliberately narrow:
+
+    * gated on `status_code == 504` AND `is_transport_wait_bound_refusal`, so
+      the expected **200** SSE refusal (the property's own answer, same envelope
+      one level down) reaches its assertions untouched, and an unrelated 504 or
+      error still falls through to the plain assert below;
+    * therefore non-vacuous: the pre-fix two-deadline code CANNOT produce this
+      shape — it starts the SSE before dispatching, so `response.start` is
+      already on the wire, the middleware lets the request finish, and the
+      caller-visible interval assertions FAIL as they must.
+
+    ``rig`` names which one-deadline test lost the race, so the skip reason
+    points at the measurement rather than at the bound.
+    """
+    from tests._verdict import inconclusive, is_transport_wait_bound_refusal
+
+    if r.status_code == 504 and is_transport_wait_bound_refusal(r):
+        inconclusive(
+            f"the MCP seam's post-SSE refusal in {rig}",
+            deadline_s=bound,
+            diagnosis=(
+                "The parent WaitBoundMiddleware's deadline fired before "
+                "http.response.start, so the caller got the transport's 504 "
+                "instead of the seam's 200 SSE refusal. That is this rig's "
+                "startup/pre-SSE window, not the property under test (#4883, "
+                "#5049 rule 1; CI job 128708820655 measured it at bound 1.5 s "
+                "with a 1.0 s window)."
+            ),
+        )
+
+
 #: Pre-SSE cost handed to the two ONE-DEADLINE tests (the pair that mounts the
 #: real middleware over the MCP sub-app). Shared, not inlined, so the pair's
 #: ``pre`` cannot drift and so each test's ``bound`` can be read against it: the
@@ -1000,6 +1047,9 @@ def test_mcp_seam_spends_the_transport_deadline_not_a_fresh_one(
     finally:
         ms._pending_mcp_wait_bound.clear()
 
+    _require_the_seam_answered(
+        r, bound=bound,
+        rig="test_mcp_seam_spends_the_transport_deadline_not_a_fresh_one")
     assert r.status_code == 200, r.text
     body = _parse_sse(r.text)
     assert body is not None, r.text
@@ -1115,6 +1165,9 @@ def test_mcp_breach_reports_the_caller_visible_interval(
     finally:
         ms._pending_mcp_wait_bound.clear()
 
+    _require_the_seam_answered(
+        r, bound=bound,
+        rig="test_mcp_breach_reports_the_caller_visible_interval")
     assert r.status_code == 200, r.text
     # Same independent-keyed floor, with the same margin over the 1/4 knife
     # edge, as the sibling test above (see its note).
@@ -1134,9 +1187,20 @@ def test_mcp_breach_reports_the_caller_visible_interval(
         f"the MCP breach reported {emitted} ms for a caller-visible wait of "
         f"{elapsed * 1000:.0f} ms — that is the seam-local interval, not the "
         "interval the bound governs")
-    assert abs(emitted - elapsed * 1000) < 150, (
+    # ONE-SIDED on purpose (#5049 rule 1, the arm #4883 measured failing on a
+    # CORRECT implementation): ``emitted`` is computed server-side from the
+    # request's own arrival, while ``elapsed`` is THIS process's client-side
+    # stopwatch — an in-process stall inflates only the latter (measured: 5013
+    # ms emitted vs 5690 ms caller-visible, i.e. ``abs() < 150`` reds on correct
+    # code). The surviving direction still catches an interval measured from the
+    # wrong origin (a process- or boot-relative timestamp exceeds the caller's
+    # own wait by far more than the slack), and the ``0.75 * bound`` floor above
+    # keeps the two-deadline regression covered — that floor is stall-safe
+    # because a stall can only INFLATE the interval the seam reports.
+    assert emitted <= elapsed * 1000 + 150, (
         f"emitted {emitted} ms vs caller-visible {elapsed * 1000:.0f} ms — the "
-        "two arms are measuring different intervals")
+        "seam reported more wait than the caller paid, so the two arms are "
+        "measuring different intervals")
 
 
 def test_mcp_breach_is_recorded_exactly_once_on_the_composed_path(
@@ -2064,3 +2128,81 @@ async def test_synchronous_handler_is_not_bounded_it_is_stated_not_assumed(
     assert rec.status == 200, (
         "the loop was blocked, so the bound could not fire")
     assert rec.json == {"ok": True}
+
+
+# ── the rig-vs-property gate of the two ONE-DEADLINE tests (#5049 rule 1) ──
+# Pinned here rather than in `tests/_verdict.py`: the CONTRACT (a refusal
+# envelope becomes INCONCLUSIVE) is that module's test, and this is the narrower
+# question the two one-deadline tests ask of it — which of the product's TWO
+# refusal surface shapes is the rig losing its race (504, pre-SSE) and which is
+# the property answering (200, post-SSE). Getting that backwards would either
+# turn a red `test (a)` back into a FAIL (the bug) or skip the arm the tests
+# exist to check (a vacuous green).
+
+
+def _pre_sse_504():
+    """The wire body the product emits when the middleware refuses pre-SSE."""
+    import httpx
+
+    return httpx.Response(504, json={
+        "jsonrpc": "2.0", "id": None,
+        "error": {"code": ERR_TIMEOUT,
+                  "message": ma._TRANSPORT_WAIT_BOUND_MESSAGE,
+                  "data": {"retry_after": ma._TRANSPORT_WAIT_RETRY_AFTER_S}}})
+
+
+def _post_sse_200():
+    """The wire body the SEAM emits — the same envelope inside an SSE frame."""
+    import httpx
+
+    return httpx.Response(200, text="event: message\ndata: " + json.dumps({
+        "jsonrpc": "2.0", "id": 1,
+        "result": {"isError": True, "structuredContent": {"error": {
+            "code": ERR_TIMEOUT,
+            "message": ma._TRANSPORT_WAIT_BOUND_MESSAGE,
+            "data": {"retry_after": ma._TRANSPORT_WAIT_RETRY_AFTER_S}}}},
+    }) + "\n\n")
+
+
+def test_a_pre_sse_504_is_inconclusive_and_names_the_bound():
+    """CI job `128708820655` on PR #11512: the middleware's 504 reddened a
+    required check that this diff cannot move. It must be INCONCLUSIVE (#5049
+    rule 1), it must NAME the bound, and it must name the rig that lost."""
+    from tests._verdict import INCONCLUSIVE_PREFIX
+
+    with pytest.raises(pytest.skip.Exception) as excinfo:
+        _require_the_seam_answered(
+            _pre_sse_504(), bound=1.5,
+            rig="test_mcp_breach_reports_the_caller_visible_interval")
+
+    reason = str(excinfo.value)
+    assert reason.startswith(INCONCLUSIVE_PREFIX), reason
+    assert "1.5s deadline" in reason, reason
+    assert "test_mcp_breach_reports_the_caller_visible_interval" in reason, reason
+
+
+def test_the_seams_own_post_sse_refusal_is_never_skipped():
+    """The property's OWN answer carries the SAME refusal envelope one level
+    down, so a gate that keyed on the envelope alone would skip the very arm
+    these tests exist to assert. It is gated on the 504 surface status."""
+    from tests._verdict import is_transport_wait_bound_refusal
+
+    r = _post_sse_200()
+    assert is_transport_wait_bound_refusal(r) is True, (
+        "the fixture must be the real envelope, or this test proves nothing")
+    _require_the_seam_answered(
+        r, bound=1.5,
+        rig="test_mcp_breach_reports_the_caller_visible_interval")
+    assert r.status_code == 200
+
+
+def test_an_unrelated_504_still_reaches_the_callers_own_assertion():
+    """Only the product's own refusal is a non-answer — a gateway 504, a bare
+    body, or any other error keeps its FAIL (#8579's review direction)."""
+    import httpx
+
+    for r in (httpx.Response(504, json={"detail": "upstream gateway timeout"}),
+              httpx.Response(502, text="bad gateway"),
+              httpx.Response(504, text=ma._TRANSPORT_WAIT_BOUND_MESSAGE)):
+        _require_the_seam_answered(r, bound=1.5, rig="the one-deadline rig")
+        assert r.status_code != 200
