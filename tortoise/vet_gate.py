@@ -952,6 +952,48 @@ def removal_pool(before: object, after: object) -> dict:
     }
 
 
+def applied_discards(before: object, after: object,
+                     decisions: Mapping[str, Mapping[str, Any]]) -> int:
+    """How many candidates a ``DISCARD`` verdict ACTUALLY removed.
+
+    ``stats["discarded"]`` counts **verdicts**, and that is the right number for
+    *"what did the gate say?"*. It is the wrong number for a **keep-rate**:
+    :func:`apply_vet`'s Rule 2 downgrades a discard to ``KEEP`` whenever the
+    entity is still referenced by a surviving candidate (dropping it would fail
+    ``validate_layer1`` and 422 the session), and Rule 4 RESTORES one an earlier
+    pass removed. On those runs the verdict count reports a loss that did not
+    happen — so a rate built on it under-states the yield, can select the wrong
+    narrative in a tie-break, and can fire a hand-armed threshold on a removal
+    that never occurred.
+
+    Counts by the SAME two questions the applied pass answers, so it cannot
+    disagree with the output it describes: the item carried a ``DISCARD``
+    verdict (``_item_id`` on ``before``, the list those ids came from) **and** it
+    is absent from ``after`` (:func:`_survives`, the value equality
+    :func:`removal_pool` rests on — which is also what makes a downgraded
+    discard correctly count as ZERO here).
+
+    Collateral prunes are deliberately NOT counted: an operator pruned because
+    it referenced a removed item carries no verdict of its own, and counting it
+    would report a loss of a candidate the narrative never produced.
+
+    Fail-open in the reporting direction: anything unreadable contributes 0, so
+    an unparseable decision or list under-reports removals rather than inventing
+    them — the same direction as :func:`apply_vet`'s own guards.
+    """
+    decisions = decisions if isinstance(decisions, Mapping) else {}
+    removed = 0
+    for section, index, item in _iter_items(before):
+        decision = decisions.get(_item_id(section, index, item))
+        if not isinstance(decision, Mapping):
+            continue
+        if str(decision.get("outcome") or "").strip().upper() != DISCARD:
+            continue
+        if not _survives(section, item, after):
+            removed += 1
+    return removed
+
+
 def _rewrite_entity_references(embed_list: Mapping[str, Any],
                                restored: Mapping[str, str]) -> None:
     """Re-spell a reference to the emitted entity's exact name.

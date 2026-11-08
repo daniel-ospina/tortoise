@@ -47,6 +47,13 @@ WHAT THIS PINS
    to a genuinely empty one, so the trigger must be told which it was. Both
    arms' retries and escalation already happened INSIDE their own stage; the
    one content-level retry is never spent on them.
+9. **The recorded numbers are ONE population, and the loss is the APPLIED one**
+   (`test_the_arm_counts_what_vet_APPLIED_not_what_it_said`,
+   `test_the_arm_denominator_is_the_list_vet_judged`) — the tie-break and
+   §4.2's hand calibration both read `candidates`/`discarded`/`keep_rate`, so a
+   rate divided across two different lists, or a loss counted from VERDICTS
+   where `apply_vet` downgraded the discard to a keep, decides the run's
+   narrative on a number that never happened.
 
 Every case is hermetic: a scripted model (no network, no SDK, no DB, no graph),
 the same shape `tests/test_5095_s3_identity_policy.py::_FakeModel` uses.
@@ -505,6 +512,47 @@ def _discarding_arbiter(items, narrative):
                           "rule_id": "test.keep_rate", "reason": "poor"}]}
 
 
+def _entity_victim(items, name: str) -> str | None:
+    """The id of the ENTITY called ``name``, in the arbiter's own item view.
+
+    The arbiter is handed a projected view (`{id, section, text, kind}`), NOT the
+    embed dicts, so a helper that looked for `item["name"]` would read `None` and
+    silently fail open — which is how a fixture stops testing what it claims to.
+    """
+    return next((i["id"] for i in items
+                 if i.get("section") == "entities" and i.get("text") == name),
+                None)
+
+
+def _downgraded_discard_arbiter(items, narrative):
+    """DISCARD a still-referenced entity (apply_vet downgrades it) + RENARRATE.
+
+    The batch verdict is what fires the retry, so the arm's numbers get recorded
+    on a run whose ONLY discard was downgraded to a keep.
+    """
+    victim = _entity_victim(items, "Alpha")
+    return {"verdicts": ([{"id": victim, "outcome": "DISCARD",
+                            "rule_id": "test.downgrade", "reason": "review"}]
+                          if victim else []),
+            "batch": {"outcome": "RENARRATE", "reason": "retry"}}
+
+
+def _discarding_arbiter_without_batch_verdict(items, narrative):
+    """The same downgraded discard, with NO batch token — only the rate can fire."""
+    victim = _entity_victim(items, "Alpha")
+    return {"verdicts": ([{"id": victim, "outcome": "DISCARD",
+                            "rule_id": "test.downgrade", "reason": "review"}]
+                          if victim else [])}
+
+
+def _discard_beta_arbiter(items, narrative):
+    """DISCARD the one entity nothing references — a removal that IS applied."""
+    victim = _entity_victim(items, "Beta")
+    return {"verdicts": ([{"id": victim, "outcome": "DISCARD",
+                            "rule_id": "test.keep_rate", "reason": "poor"}]
+                          if victim else [])}
+
+
 def test_the_keep_rate_arm_is_disarmed_by_default(monkeypatch):
     """Unset / garbage threshold → the keep-rate arm never fires; armed → once.
 
@@ -593,6 +641,128 @@ def test_the_census_stays_absent_when_the_retry_does_not_fire(monkeypatch):
     """A healthy run reports `fired: False` — never a fabricated episode."""
     _, result = _run(monkeypatch, ["Alice set a budget."], [_embed("Northwind")])
     assert result["stats"]["renarrate"] == {"fired": False}
+
+
+def test_the_arm_counts_what_vet_APPLIED_not_what_it_said(monkeypatch):
+    """A DISCARD the Layer-1 guard downgraded is not a loss in the arm's rate.
+
+    `vet_candidates`' `stats["discarded"]` counts **verdicts**; `apply_vet`
+    downgrades a discard to KEEP when the entity is still referenced by a
+    surviving candidate (Rule 2 — dropping it would fail `validate_layer1` and
+    422 the whole session). Reading the verdict count into `keep_rate` reports a
+    loss that never happened, and the tie-break compares exactly that number.
+
+    Both halves are asserted on the same run, because the defect is the
+    DISAGREEMENT: the arm says 0 discarded / 1.0, VET's own block says 1. A test
+    that only checked \"the arm reports something\" would pass on the pre-fix
+    code.
+    """
+    embedded = json.dumps({
+        "entities": [{"name": "Alpha", "kind": "core:org",
+                      "lifecycle": "created"}],
+        "events": [], "operators": [],
+        "points": [{"content": "the Alpha rollout moves to Q3",
+                    "pointKind": "statement",
+                    "about_entities": ["Alpha"]}],
+        "chain_notes": [], "link_before_create": [],
+    })
+    model, result = _run(monkeypatch,
+                         ["Alice and Bob met.", "Alice and Bob met again."],
+                         [embedded], arbiter=_downgraded_discard_arbiter)
+    renarrate = result["stats"]["renarrate"]
+    assert renarrate["fired"] is True, (
+        "the fixture must reach a recorded arm — an arbiter batch RENARRATE "
+        "fires it, and the assertion below is about that arm's numbers")
+    first = renarrate["first"]
+    assert first["candidates"] == 2, (
+        "one entity and one point — the list VET judged")
+    assert first["discarded"] == 0, (
+        "the discard was DOWNGRADED to a keep, so nothing was removed")
+    assert first["kept"] == 2 and first["keep_rate"] == 1.0, (
+        "a downgraded discard must not lower the recorded yield")
+    # ⛔ NON-VACUITY: the verdict really was a DISCARD, and the guard really did
+    # downgrade it. Without this pair the test would pass on a fixture where the
+    # arbiter was never consulted.
+    assert (result["vet"]["s2"]["stats"] or {}).get("discarded") == 1, (
+        "the gate's OWN block must still report the verdict it issued")
+    assert any("Layer-1 referential integrity" in w for w in result["warnings"])
+    assert "Alpha" in {e.get("name") for e in
+                       (result["embed_list"] or {}).get("entities", [])}
+
+
+def test_a_phantom_discard_does_not_arm_the_keep_rate_threshold(monkeypatch):
+    """The same fixture, armed: a downgraded discard must NOT spend the retry.
+
+    The discriminator against the pre-fix code is exact — a verdict-based rate
+    is `(2-1)/2 = 0.5`, which is below a 0.95 threshold and would fire a second
+    S1+S2 band; the applied rate is `1.0`, which must not.
+    """
+    embedded = json.dumps({
+        "entities": [{"name": "Alpha", "kind": "core:org",
+                      "lifecycle": "created"}],
+        "events": [], "operators": [],
+        "points": [{"content": "the Alpha rollout moves to Q3",
+                    "pointKind": "statement",
+                    "about_entities": ["Alpha"]}],
+        "chain_notes": [], "link_before_create": [],
+    })
+    model, result = _run(monkeypatch, ["Alice and Bob met."], [embedded],
+                         arbiter=_discarding_arbiter_without_batch_verdict,
+                         keep_rate="0.95")
+    assert result["stats"]["renarrate"] == {"fired": False}, (
+        "no candidate left the arm, so no threshold can be under")
+    assert len(model.s1_prompts) == 1, "the retry was never spent"
+
+
+def test_the_arm_denominator_is_the_list_vet_judged(monkeypatch):
+    """`candidates` is VET's population, never the pre-mentions batch count.
+
+    `check_batch` is computed BEFORE :func:`route_mentions` (deliberately: the
+    coverage signal must exist with every switch off), and `route_mentions`
+    REMOVES a held mention from `entities[]` before VET sees the list. So on the
+    referentiality arm the batch is one candidate larger than the population VET
+    judged, and dividing VET's removals by the batch count over-states the
+    denominator — the arm's rate, which the tie-break compares, comes out HIGHER
+    than the truth.
+
+    The two counts differ by construction here: 3 entities + 1 point is 4 at the
+    batch, one entity is held as a mention, and VET judges 3.
+    """
+    monkeypatch.setenv("TORTOISE_REFERENTIALITY", "1")
+    embedded = json.dumps({
+        "entities": [{"name": "It", "kind": "core:org",
+                      "lifecycle": "created"},
+                     {"name": "Alpha", "kind": "core:org",
+                      "lifecycle": "created"},
+                     {"name": "Beta", "kind": "core:org",
+                      "lifecycle": "created"}],
+        "events": [], "operators": [],
+        "points": [{"content": "the Alpha rollout moves to Q3",
+                    "pointKind": "statement",
+                    "about_entities": ["Alpha", "It"]}],
+        "chain_notes": [], "link_before_create": [],
+    })
+    _, result = _run(monkeypatch,
+                     ["Alice and Bob met.", "Alice and Bob met again."],
+                     [embedded], arbiter=_discard_beta_arbiter,
+                     keep_rate="0.9")
+    renarrate = result["stats"]["renarrate"]
+    assert renarrate["fired"] is True and renarrate["trigger"] == "keep_rate"
+    first = renarrate["first"]
+    # ⛔ NON-VACUITY FIRST: the mention really was held, so the pre-mentions
+    # batch really was 4. A fixture where nothing was held makes this leg
+    # satisfied by both the old and the new denominator.
+    mentions = (result.get("mentions") or {}).get("stats") or {}
+    assert (mentions.get("first") or {}).get("held_surfaces") == 1, (
+        "the fixture must actually hold one mention, or the two populations "
+        "are the same list and this test proves nothing")
+    assert first["candidates"] == 3, (
+        "the population VET judged: 3 entities minus the held mention, plus "
+        "the point — a batch-based denominator would report 4")
+    assert first["candidates"] == (result["vet"]["s2"]["stats"] or {})["candidates"]
+    assert first["discarded"] == 1 and first["kept"] == 2
+    assert first["kept"] + first["discarded"] == first["candidates"], (
+        "the two halves must partition the ONE population they are a rate of")
 
 
 def test_the_mentions_surface_keeps_ONE_shape(monkeypatch):

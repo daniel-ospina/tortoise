@@ -4588,8 +4588,8 @@ def test_the_bare_continuation_cites_name_what_they_say():
     rows = (
         # `each VET pass is gated on the LIST` — the gate AND its call, twice.
         ("docs/00_index.md", "each VET pass is gated on the LIST", (
-            ("15484", "if vet_enabled and embed_list:"),
-            ("15485", "embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass("),
+            ("15514", "if vet_enabled and embed_list:"),
+            ("15515", "embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass("),
             ("13225", "if vet_enabled and complete_list:"),
             ("13226", "complete_list, vet_union_stats, _w, _ = _run_vet_pass("),
         )),
@@ -4605,6 +4605,20 @@ def test_the_bare_continuation_cites_name_what_they_say():
         ("docs/00_index.md", "emitted unconditionally at", (
             ("13439", 'result["classify_later"] = {'),
             ("13449", 'result["vet"] = {'),
+        )),
+        # ⛔ THE CLASSIFY SWITCH ITSELF (the rebase onto `a1dff7cec8` re-staled it).
+        # `#11509` added this bare continuation to the probe's docstring with
+        # `main`'s `:12898`, which IS the assignment on `main`; `#11002`'s +15
+        # insertions above it (the S1 `emphasis` seam and the G5 record) moved the
+        # switch, so the sentence sent a reader 15 lines up into
+        # `extract_session_v2`'s preamble — into the VET/roll-up comment, which is
+        # precisely the confusion the sentence exists to prevent. Nothing read it:
+        # a bare `` `:N` `` names no file, so the sweep cannot see it. Measured on
+        # this head before the fix: `:12898` is `# the additive keys feed the
+        # harness's per-question integrity (M4).`
+        ("probes/capstone_measure.py", "is different code", (
+            ("12913", "classify_later = kind_classifier is not None or "
+                      "_classify_later_enabled()"),
         )),
         # ⛔ THE CLASSIFY PASS'S OWN FAIL-OPEN PAIR (#10833 review, P2). The
         # `+33` shift the fold applied to this row moved the first member to
@@ -4758,7 +4772,11 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # naming the call. One claim, two documents, two answers; the row pins
         # the CALL, and the phrase is the sentence that carries it.
         ("probes/capstone_run.py", "(S1,", (
-            ("15401", "chunk_stories.append(run_s1(model, _edus_to_text(chunk),"),
+            # 15401 -> 15429: this branch's own `_arm_metrics` docstring and
+            # `_arm_extract` bindings insert above the call, so the number is
+            # re-derived from the tree rather than carried from the round that
+            # added the row (the row's INTENT is unchanged: pin the CALL).
+            ("15429", "chunk_stories.append(run_s1(model, _edus_to_text(chunk),"),
         )),
     )
     # The SAME document states two of its claims as the RULE's own text rather than a

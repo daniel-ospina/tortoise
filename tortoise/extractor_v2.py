@@ -15301,18 +15301,46 @@ def _rate_text(metrics: dict) -> str:
     return "n/a" if rate is None else f"{float(rate):.3f}"
 
 
-def _arm_metrics(story: str, batch: dict | None, vet_stats: dict | None) -> dict:
+def _arm_metrics(story: str, batch: dict | None, vet_stats: dict | None,
+                 applied_discards: int | None = None) -> dict:
     """One arm's recorded numbers — what the tie-break and the record read.
 
-    ``candidates`` is `check_batch`'s count on the arm's S2 output (the same
-    predicate `vet_candidates` uses, so the two instruments cannot disagree);
-    ``discarded`` is VET's own count; KEEP/NOOP/MERGE are all *kept* — only
-    DISCARD removes.
+    ⛔ **Both numbers come from ONE population, and it is the one VET judged.**
+    Three corrections on the same theme, each measured in review:
+
+    1. ``candidates`` is VET's OWN count when the pass ran, **not**
+       `check_batch`'s. Those two read different lists once
+       :func:`route_mentions` runs: the batch is computed before it (deliberately
+       — the coverage signal is a fact about S2's output, and it must exist with
+       every switch off), while VET sees the list AFTER a held mention has been
+       removed from ``entities[]`` and its operators dropped. Dividing one arm's
+       VET removals by the other list's candidate count is not a rate.
+    2. ``discarded`` is what VET **applied**, not what it said
+       (:func:`vet_gate.applied_discards`): `apply_vet` downgrades a DISCARD to
+       KEEP when the entity is still referenced by a survivor, so the verdict
+       count over-states the removal and under-states the yield.
+    3. On the same run, ``vet.s2.stats.discarded`` reports the VERDICT count and
+       therefore **can** legitimately differ from this arm's ``discarded``. That
+       is a difference in questions, not an instrument disagreeing with itself —
+       the gate answered "what did I decide?" and this arm answers "what did
+       that cost?" — and §4.2's hand calibration reads THIS one, because the
+       threshold it sets is compared against a rate over shipped candidates.
+
+    When VET did not run (off-path, or fail-open), nothing was removed, so the
+    denominator falls back to `check_batch`'s count and ``discarded`` is 0 — the
+    two lists are the same list on that path.
+
+    ``coverage_suspect`` is read from ``batch`` in both cases, because it is
+    defined on the S2 output (see :func:`_renarrate_trigger`).
     """
     b = batch if isinstance(batch, dict) else {}
-    candidates = int(b.get("candidates") or 0)
     st = (vet_stats or {}).get("stats") if isinstance(vet_stats, dict) else None
-    discarded = int(st.get("discarded") or 0) if isinstance(st, dict) else 0
+    if isinstance(st, dict) and "candidates" in st:
+        candidates = max(0, int(st.get("candidates") or 0))
+        discarded = max(0, int(applied_discards or 0))
+    else:
+        candidates = max(0, int(b.get("candidates") or 0))
+        discarded = 0
     return {
         "narrative_chars": len(story or ""),
         "candidates": candidates,
@@ -15481,10 +15509,19 @@ def _arm_extract(model, edus, *, master, session_date, chunk_size,
     # unchanged, which is the pre-existing behaviour.
     vet_s2_stats: dict = {}
     vet_s2_pool: dict = {}
+    applied_discards = 0
+    pre_vet_list = embed_list
     if vet_enabled and embed_list:
         embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass(
             embed_list, story, arbiter=vet_arbiter)
         warnings_out.extend(_w)
+        # What VET APPLIED, not what it decided: `apply_vet` downgrades a
+        # DISCARD to KEEP for a still-referenced entity, so the verdict count
+        # over-states the loss and the arm's keep-rate would under-state the
+        # yield (#11002 review, P2).
+        applied_discards = _vet_gate.applied_discards(
+            pre_vet_list, embed_list,
+            (vet_s2_stats or {}).get("decisions") or {})
     vet_batch = (vet_s2_stats or {}).get("batch")
     if isinstance(vet_batch, dict) and vet_batch.get("outcome"):
         # An arbiter's batch-level verdict rides on top of the mechanical
@@ -15500,7 +15537,7 @@ def _arm_extract(model, edus, *, master, session_date, chunk_size,
         "vet_pool": vet_s2_pool,
         "mention_stats": mention_stats,
         "warnings": warnings_out,
-        "metrics": _arm_metrics(story, batch, vet_s2_stats),
+        "metrics": _arm_metrics(story, batch, vet_s2_stats, applied_discards),
         "chunks": chunks,
         "failed_chunks": failed_chunks,
         # A failed S2 call, so the retry's decision can tell "the instrument
