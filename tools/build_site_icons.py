@@ -51,7 +51,6 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
 import argparse
 import struct
 import subprocess
-import sys
 import tempfile
 import zlib
 from pathlib import Path
