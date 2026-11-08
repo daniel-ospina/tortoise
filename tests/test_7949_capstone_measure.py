@@ -11239,7 +11239,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # window is the proven-rotten one: the record says this very cite was stale-corrected
     # once and moved again by `#11459`'s +102 insertion.
     #
-    # ⛔ Pinned at BOTH ENDPOINTS, exactly as the 2724-2726 arm above pins its three lines:
+    # ⛔ Pinned at BOTH ENDPOINTS, exactly as the 2726-2728 arm below pins its three lines:
     # a substring test over the 9-line slice was GREEN against a 1-2 line insertion above the
     # window (measured) — the content simply slid along inside the shifted slice, so the arm
     # added BECAUSE this cite rots by insertion did not detect an insertion. The two content

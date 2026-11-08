@@ -2054,11 +2054,13 @@ def test_the_real_machine_record_agrees_with_the_pins():
     `capstone_measure.py` cites are pinned here EXACTLY - the entry line, and the
     census range's own opening and closing lines - never as a window a shift can
     slide inside. Kept inside THIS test rather than added as a new test in
-    `tests/test_7949_capstone_measure.py`, because `config/ci-surfaces.yml` pins
-    THAT file's `cases` count at 228 and a guard that costs no runtime should not
-    move a shard-layout input. (THIS file's durations row states no case count,
-    so a new `def test_` here would move nothing either way - the nesting is
-    about not moving the OTHER suite's pinned number.)
+    `tests/test_7949_capstone_measure.py`, because the thing pinned is THIS
+    file's own subject (`check.check_machine_record` over the machine record),
+    and neither suite's durations row states a case count, so a new `def test_`
+    would move no shard-layout input either way. (Measured rather than assumed:
+    `config/ci-surfaces.yml` has no `cases` key at all — the file's rows carry a
+    WEIGHT and a prose comment — and this file's own row states no case count
+    either.)
     """
     pins = check.parse_pins(PREREG.read_text())
     assert check.check_machine_record(PREREG_DIR, pins) == []

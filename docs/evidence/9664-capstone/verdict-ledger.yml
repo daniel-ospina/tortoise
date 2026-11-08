@@ -323,8 +323,12 @@ measured_at:
 #                          # count line later the same day printed 130, seventy above the 60
 #                          # recorded beside it, and reconciling the two required knowing
 #                          # which tree this pass ran on. Pinned to `5ef5805f0` both lines
-#                          # reproduce — and the filter is still empty at the LIVE `origin/main`
-#                          # (measured), so the conclusion below is not an artifact of the pin.
+#                          # reproduce. ⛔ NO `origin/main` READING BELONGS HERE: that ref MOVES,
+#                          # and an earlier revision of this very sentence asserted the filter was
+#                          # "still empty at the LIVE `origin/main`" — re-measured at `cd79fb0e1e`
+#                          # the same filter returns `tortoise/sdk.py`, so the assertion had rotted
+#                          # into a false claim while the PINNED tree was never wrong. The pin is
+#                          # the claim; the conclusion below rests on it alone.
 #   $ git diff --name-only 5938deafefde2a73ba105ab1384f9cff695e9e8b..5ef5805f0953c2cf0eb2338ca0ad0af4594ee70d \
 #       | rg -i 'onboarding|harness|consent|mcp_auth|sdk\.py|tool_registry|dashboard'
 #   (no output)            # nothing graded moves between the DEPLOYED tree and the graded tree, so a
