@@ -535,6 +535,8 @@ def _disarmed_artifact(
     read_failure: str | None = None,
     pending: int = 0,
     refused: str = "off-switch active",
+    census_measured: bool | None = None,
+    read_note: str | None = None,
 ) -> int:
     """A DISARMED run that stopped early: exit 0, the reason on the artifact.
 
@@ -570,9 +572,15 @@ def _disarmed_artifact(
         # forbids). When `census` is given it is a FULL measured census: this arm is a
         # census that WAS read, stopped by the ledger.
         "census": census,
-        "census_measured": census is not None,
+        # The CALLER supplies the fact where it knows better than `census is not None`:
+        # a measured-but-unreconciled census exists AND has an unmeasured source
+        # population, and deriving the flag from presence alone reported it as measured
+        # (round-41 review). `read_note` carries the reason when it is not in
+        # `read_failure` (that field is for the read that RAISED).
+        "census_measured": (census is not None) if census_measured is None else census_measured,
         "disarmed_reason": reason,
         "read_failure": read_failure,
+        "read_note": read_note,
         "run": {
             "applied": False, "off": True, "skipped_known": 0, "written": 0,
             "target_graph": args.target, "digest": None, "refused": refused,
@@ -668,9 +676,15 @@ def cmd_plan(args: argparse.Namespace) -> int:
             # -read arm exited 0 — two disarmed runs in one incident, opposite contracts
             # (round-38 P3). ⛔ `pending` is the carry count, NOT 0: the ledger is what
             # could not be read, so its holdings are unknown and the rows it might have
-            # held are still owed (round-38 review P2).
+            # held are still owed (round-38 review P2). ⛔ `census_measured` is the
+            # CALLER's fact, not `census is not None`: this arm can ALSO carry an
+            # unreconcilable source listing, so the points were measured and the source
+            # population was not — presence alone reported that as measured, and dropped
+            # the reason entirely (round-41 review P3).
             return _disarmed_artifact(args, str(exc), census=plan.census(),
-                                      pending=len(plan.carry_rows()), refused=str(exc))
+                                      pending=len(plan.carry_rows()), refused=str(exc),
+                                      census_measured=unreconciled is None,
+                                      read_note=reader.note)
         print(f"REFUSED: {exc}", file=sys.stderr)
         return 3
     if args.rows:

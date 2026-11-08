@@ -2958,3 +2958,35 @@ def test_a_name_spelled_target_scopes_literally_and_never_skips(tmp_path):
                         packs={})
     with pytest.raises(C.CurationRefused, match="answering for another graph"):
         C.run_plan(plan, writer=CountingWriter(), ledger=led, apply=True, graph_rows=ROWS)
+
+def test_a_disarmed_run_over_a_damaged_ledger_keeps_the_unmeasured_source_fact(
+        monkeypatch, tmp_path):
+    """Round-41 P3 — the round-40 fix landed on the main payload, not this sibling arm.
+
+    A disarmed run can be BOTH unreconciled (sources unmeasurable) AND ledger-refused.
+    `_disarmed_artifact` derived `census_measured` from `census is not None`, so that
+    combination reported `True` over an unmeasured source population and dropped the
+    reason entirely (no `read_note`). The caller now supplies the fact, and the note
+    travels.
+    """
+    mod = _tool_module()
+    led = tmp_path / "l.jsonl"
+    led.write_text("null\n")                       # a damaged ledger line
+
+    def call(name, args):
+        if name == "tortoise_query":
+            return {"result": [{"id": "p1", "kind": "decision", "content": "c"}], "total": 1}
+        if args.get("section") == "sources":
+            return {"result": []}
+        if args.get("section") == "status":
+            return {"unexpected": "shape"}          # nothing to reconcile the empty listing
+        return {"result": []}
+    monkeypatch.setattr(mod, "_live_call_tool", call)
+    assert mod.main(["plan", "--graph", "org_x_g_old", "--target", "org_x_g_new",
+                     "--apply", "--off", "--no-verify-read", "--ledger", str(led),
+                     "--out", str(tmp_path / "p.json")]) == 0
+    payload = json.loads((tmp_path / "p.json").read_text())
+    assert payload["census"], "the MEASURED half still travels"
+    assert payload["census_measured"] is False, payload["census_measured"]
+    assert "cannot be told from an unread one" in (payload["read_note"] or ""), payload
+    assert "damaged" in payload["disarmed_reason"], payload["disarmed_reason"]
