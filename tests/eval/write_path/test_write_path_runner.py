@@ -406,6 +406,53 @@ def test_the_aggregate_keeps_the_two_measures_apart():
         aggregate
 
 
+def test_a_row_whose_basis_is_not_the_verified_one_is_NOT_summed():
+    """A superseded reading can never re-enter `object_edges_total`.
+
+    The committed `w2b-relations-2026-11-08-11237.json` predates the
+    attributable read and carries `object_edges_basis:
+    "incident-source-bounded"` with SOURCE-BOUNDED numbers under
+    `object_edges`. Summing those would put the shared-Object over-count
+    (measured: `wp05_retro_writeup` reported `related: 1` while its own leg
+    wrote ZERO) back into the single number the E6 pre-registration is read
+    against — a receipt from the past publishing a measurement the code
+    disowns.
+
+    The row is REFUSED from the sum, NAMED on the aggregate, and NAMED in the
+    run's notes. FAILS IF the aggregate sums every non-empty `object_edges`
+    regardless of its basis, or if it drops such a row silently.
+    """
+    aggregate = runner.aggregate_graph_census({
+        "wp05": {
+            "session_id": "wp05", "objects": {"total": 1},
+            "object_edges": {"related": 1},
+            "object_edges_basis": "incident-source-bounded",
+            "object_edges_incident": {"related": 1},
+            "object_edges_missing": [],
+        },
+        "wp07": {
+            "session_id": "wp07", "objects": {"total": 1},
+            "object_edges": {"IMPL": 2},
+            "object_edges_basis": "write-leg-record-verified",
+            "object_edges_incident": {"IMPL": 2},
+            "object_edges_missing": [],
+        },
+    })
+    assert aggregate["object_edges"] == {"IMPL": 2}, aggregate
+    assert aggregate["object_edges_total"] == 2, aggregate
+    assert aggregate["object_edges_unattributed"] == [{
+        "session_id": "wp05", "basis": "incident-source-bounded",
+        "object_edges": {"related": 1}}], aggregate
+    # The refused numbers stay readable as what they are.
+    assert aggregate["object_edges_incident"] == {"related": 1, "IMPL": 2}, \
+        aggregate
+    notes = runner.graph_census_notes({
+        "aggregate": aggregate,
+        "sessions": {"wp05": {"object_edges_basis":
+                             "incident-source-bounded"}}})
+    assert any("NOT summed" in note and "wp05" in note for note in notes), notes
+
+
 def test_the_object_edge_row_reaches_the_RUN_LEVEL_total():
     """`object_edges_total` is the single number the E6 row is read against.
 
@@ -418,14 +465,35 @@ def test_the_object_edge_row_reaches_the_RUN_LEVEL_total():
 
     Mutation: delete the `object_edges`/`object_edges_total` arms of
     `aggregate_graph_census` and this leg reds (KeyError / a short sum).
+
+    ⚠️ The row is read from the leg's OWN RECORD (verified in the graph), not
+    from the source-bounded read, so a census handed no `relation_write` block
+    has no attributable row at all — that is `absent`, a MEASURED absence (see
+    `test_graph_census_counts_only_the_edges_this_session_wrote`). This case
+    therefore feeds the leg record; a block-less census' numbers land in
+    `object_edges_incident`.
     """
     one = runner.graph_census(
-        _CensusSDK(_CensusGraph([("IMPL", 2), ("hasPart", 1)])), "s1", ["pt-1"])
+        _CensusSDK(_CensusGraph([("IMPL", 2), ("hasPart", 1)])), "s1", ["pt-1"],
+        relation_write={"edges": [
+            {"src_id": "o1", "dst_id": "o2", "predicate": "IMPL"},
+            {"src_id": "o1", "dst_id": "o3", "predicate": "IMPL"},
+            {"src_id": "o1", "dst_id": "o4", "predicate": "hasPart"},
+        ]})
     two = runner.graph_census(
-        _CensusSDK(_CensusGraph([("IMPL", 1), ("related", 4)])), "s2", ["pt-2"])
+        _CensusSDK(_CensusGraph([("IMPL", 1), ("related", 4)])), "s2", ["pt-2"],
+        relation_write={"edges": [
+            {"src_id": "o5", "dst_id": "o6", "predicate": "IMPL"},
+            {"src_id": "o5", "dst_id": "o7", "predicate": "related"},
+            {"src_id": "o5", "dst_id": "o8", "predicate": "related"},
+            {"src_id": "o5", "dst_id": "o9", "predicate": "related"},
+            {"src_id": "o5", "dst_id": "o10", "predicate": "related"},
+        ]})
     agg = runner.aggregate_graph_census({"s1": one, "s2": two})
     assert agg["object_edges"] == {"IMPL": 3, "hasPart": 1, "related": 4}, agg
     assert agg["object_edges_total"] == 8, agg
+    assert agg["object_edges_basis"] == {"write-leg-record-verified": 2}, agg
+    assert agg["object_edges_unattributed"] == [], agg
 
 
 def test_the_relation_write_aggregate_sums_written_dropped_and_folded():

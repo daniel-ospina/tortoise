@@ -832,6 +832,13 @@ def graph_census(sdk, session_id: str, point_ids: list[str],
         #     (`object_edges_error` carries the reason);
         #   * `absent` — the capture never entered the leg and stated no
         #     relations, so the E6 row is not answerable from it.
+        # ⚠️ A receipt may also carry `incident-source-bounded`, which THIS
+        # function never emits: it marks a census block written before the
+        # attributable read existed, whose `object_edges` is therefore the
+        # source-bounded incident read rather than the measure. The aggregate
+        # accepts it as a basis name and REFUSES to sum such a row
+        # (`object_edges_unattributed`), so a superseded reading can never
+        # re-enter the E6 number through a historical artifact.
         "object_edges_basis": (
             "leg-raised" if relation_leg_error is not None
             else "write-leg-record-verified" if block is not None
@@ -875,6 +882,7 @@ def aggregate_graph_census(per_session: dict[str, dict]) -> dict:
     object_edges_incident: dict[str, int] = {}
     object_edges_missing: list[dict] = []
     object_edges_basis: dict[str, int] = {}
+    object_edges_unattributed: list[dict] = []
     sessions_with_object_edges: list[str] = []
     errored = sorted(
         sid for sid, census in per_session.items() if "error" in census)
@@ -891,16 +899,37 @@ def aggregate_graph_census(per_session: dict[str, dict]) -> dict:
         # is the attributable one (the write leg's own record, verified in the
         # graph) and `object_edges_incident` is context that over-counts across
         # sessions sharing an Object node.
-        for rel, count in (census.get("object_edges") or {}).items():
-            object_edges[str(rel)] = object_edges.get(str(rel), 0) + int(
-                count or 0)
+        #
+        # ⛔ ONLY a `write-leg-record-verified` row is the E6 number. A receipt
+        # whose basis says the row came from ANY other read is not the measure
+        # `graph_census` defines, so summing it would let a superseded reading
+        # back into the single number the E6 pre-registration is read against —
+        # and the superseded one is the SOURCE-BOUNDED read, which counts
+        # another session's edge through a shared `:Object` node (measured on
+        # the committed `w2b-relations-2026-11-08-11237.json`: `wp05` reported
+        # `related: 1` while its own leg wrote ZERO). Such a row is not
+        # discarded silently: it is NAMED in `object_edges_unattributed` and in
+        # `graph_census_notes`, and its numbers stay available under the
+        # session's own `object_edges_incident`.
+        _basis = str(census.get("object_edges_basis") or "absent")
+        object_edges_basis[_basis] = object_edges_basis.get(_basis, 0) + 1
+        _attributable = dict(census.get("object_edges") or {})
+        if _basis == "write-leg-record-verified":
+            for rel, count in _attributable.items():
+                object_edges[str(rel)] = object_edges.get(str(rel), 0) + int(
+                    count or 0)
+        elif _attributable:
+            object_edges_unattributed.append({
+                "session_id": census.get("session_id") or "",
+                "basis": _basis,
+                "object_edges": {str(k): int(v or 0)
+                                 for k, v in _attributable.items()},
+            })
         for rel, count in (census.get("object_edges_incident") or {}).items():
             object_edges_incident[str(rel)] = object_edges_incident.get(
                 str(rel), 0) + int(count or 0)
         object_edges_missing.extend(census.get("object_edges_missing") or [])
-        _basis = str(census.get("object_edges_basis") or "absent")
-        object_edges_basis[_basis] = object_edges_basis.get(_basis, 0) + 1
-        if census.get("object_edges"):
+        if _basis == "write-leg-record-verified" and _attributable:
             sessions_with_object_edges.append(census.get("session_id") or "")
         for rel, counts in (census.get("derivation_edges") or {}).items():
             if rel not in edges:
@@ -938,6 +967,9 @@ def aggregate_graph_census(per_session: dict[str, dict]) -> dict:
         "object_edges_total": sum(object_edges.values()),
         "object_edges_basis": object_edges_basis,
         "object_edges_missing": object_edges_missing,
+        # Rows this aggregate REFUSED to sum into the E6 number, with the basis
+        # that disqualified each one. Empty on a run the leg measured.
+        "object_edges_unattributed": object_edges_unattributed,
         "object_edges_sessions": sorted(s for s in sessions_with_object_edges),
         "object_edges_incident": object_edges_incident,
         "object_edges_incident_total": sum(object_edges_incident.values()),
@@ -1024,6 +1056,22 @@ def graph_census_notes(census: dict | None) -> list[str]:
     # state no relations at all, so a note per such run would be noise that
     # trains a reader to skip the channel. A RAISED leg is different — that is
     # a failure, and it is named above.
+    #
+    # A row that exists but whose basis the E6 number REFUSES is a note, because
+    # the reader would otherwise see a non-empty `object_edges` on the session
+    # and a smaller total on the aggregate with no explanation. `absent` and
+    # `leg-raised` never reach here (they carry no `object_edges`).
+    unattributed = list(aggregate.get("object_edges_unattributed") or [])
+    if unattributed:
+        notes.append(
+            "E6 row NOT summed for "
+            f"{len(unattributed)} of {aggregate.get('sessions')} session(s) — "
+            "its basis is not `write-leg-record-verified`, so the numbers are "
+            "NOT the attributable measure and `object_edges_total` EXCLUDES "
+            "them (they remain on the session as `object_edges_incident`): "
+            + "; ".join(
+                f"{row.get('session_id')}: basis={row.get('basis')!r} "
+                f"{row.get('object_edges')}" for row in unattributed))
     errored = list(aggregate.get("sessions_errored") or [])
     if not errored:
         return notes
