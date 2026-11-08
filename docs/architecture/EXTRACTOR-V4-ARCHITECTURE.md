@@ -1096,8 +1096,10 @@ started (`extractor_v2.py`'s `renarrate_stats`, pinned in `tests/test_selection_
 no-trigger row has no `first` block and no `coverage_suspect` to read. The first arm's own
 `coverage_suspect` — `stats["renarrate"]["first"]["coverage_suspect"]` — exists whenever the retry
 STARTED: on a fired run, and equally on a fail-open run, whose `fired: False` the flag alone cannot
-separate from a no-trigger row. F3's restriction therefore removes the FIRED rows but not the
-fail-open ones; those carry `first` and are selected by `retry_failed`, as above. The nearest substitute
+separate from a no-trigger row. Measured on that path, the record is
+`{"fired": False, "trigger": "coverage_suspect", "retry_failed": …, "first": {…, "coverage_suspect":
+true}}`. F3's restriction therefore removes the FIRED rows but not the fail-open ones; those carry
+`first` and are selected by `retry_failed`, as above. The nearest substitute
 is **not** the same quantity: `vet_candidates` (`vet_gate.py`) applies `check_batch` to the list AFTER
 the `route_mentions` removal in `extractor_v2.py`, whereas the arm's flag is `check_batch` on the
 PRE-`route_mentions` S2 output — and `route_mentions` can shrink that list to zero, so a session that
