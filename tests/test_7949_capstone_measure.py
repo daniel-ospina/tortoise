@@ -10756,7 +10756,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     `:9006 :9024 :9031 :9411`, drifted +68 unnoticed since #11449 — the neighbouring
     #11376 did not move these lines), the `:12929` `vet_enabled` live-cite, the
     bundle's `hasPart`/`hierarchies` split, and the four further LIVE cites a fresh
-    review found still unwatched (`pack_hierarchy.py:419`, the
+    review found still unwatched (`pack_hierarchy.py:431`, the
     `probes/capstone_measure.py:275-283` window and the `sdk.py:17574` cite it carries
     INSIDE it, `identity_hold.py:125`, `value_gate.py:81`) — and, measured before
     this pin existed, re-staling ANY of them
@@ -10788,7 +10788,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
 
     ⛔ SCOPE, stated so this docstring does not claim more than the arms bind: the record
     carries FURTHER live cites this leg does NOT pin — among them
-    `pack_hierarchy.py:59`/`:78`/`:353`/`:447` and `extractor_v2.py:1154`, each stated once
+    `pack_hierarchy.py:59`/`:78`/`:365`/`:459` and `extractor_v2.py:1154`, each stated once
     or twice and watched by nothing (measured: re-staling any of them leaves this file
     green). They are recorded on #11173, the open root for capstone cite drift, whose
     durable fix is putting RECONCILE in a sweep (`_BUNDLE_DOCS`) rather than growing this
@@ -11264,8 +11264,8 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     assert "tortoise/sdk.py:17574" in _probe_win, (
         "the cited probe window must still carry the `sdk.py:17574` cite it states — one "
         "number in two places cannot be allowed to drift apart silently")
-    assert pack_hierarchy[419 - 1].strip() == "def apply_hierarchy_edges(", (
-        f"tortoise/pack_hierarchy.py:419 reads {pack_hierarchy[419 - 1].strip()!r}, not the "
+    assert pack_hierarchy[431 - 1].strip() == "def apply_hierarchy_edges(", (
+        f"tortoise/pack_hierarchy.py:431 reads {pack_hierarchy[431 - 1].strip()!r}, not the "
         "declaration the record names as the thing that writes the hierarchy edges")
     assert identity_hold[125 - 1].strip() == 'HOLD_ENDPOINT = "operator_endpoint"', (
         f"tortoise/identity_hold.py:125 reads {identity_hold[125 - 1].strip()!r}, not the "
@@ -11279,7 +11279,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # contradicts the docstring's "re-staling a cite in the RECORD reds it". The window's
     # RANGE is asserted as the range its endpoints were just verified at, so the record cannot
     # name a different window than the one pinned above.
-    for _cite in ("`pack_hierarchy.py:419`", "`probes/capstone_measure.py:275-283`",
+    for _cite in ("`pack_hierarchy.py:431`", "`probes/capstone_measure.py:275-283`",
                   "`identity_hold.py:125`", "`tortoise/value_gate.py:81`"):
         assert _cite in text, (
             f"the record must still cite {_cite} — the arm below pins the line it names, "

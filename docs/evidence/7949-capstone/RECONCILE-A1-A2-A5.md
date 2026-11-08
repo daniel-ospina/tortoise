@@ -109,7 +109,7 @@ real, substantial half — do not understate it:
 - `tortoise/pack_hierarchy.py::declared_hierarchy()` resolves each entry to a namespaced
   `(from_kind, predicate, to_kind)`; `relation_write_paths()` binds it to a writer.
 - `plan_hierarchy_edges()` filters candidate pairs to declared ones; `apply_hierarchy_edges()`
-  (`pack_hierarchy.py:419`) writes them through `sdk.link_entities` → `create_edge`.
+  (`pack_hierarchy.py:431`) writes them through `sdk.link_entities` → `create_edge`.
 - `tortoise pack validate` reports both lists. **Reproduced here** at `80c912244`, `packs/dev`, exit 0:
 
 ```text
@@ -132,8 +132,8 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
    `tortoise/pack_hierarchy.py` (re-running it after this record lands also matches this file and its
    index row — the count here is the pre-diff one, which is the one that decides the claim).
    `plan_hierarchy_edges` → **9 hits, all in the same test file**, plus four references in
-   `tortoise/pack_hierarchy.py` (`:59` the module docstring, `:78` `__all__`, `:353` the definition,
-   `:447` one internal call) — **no caller anywhere else in the tree**, `__main__.py` included (its
+   `tortoise/pack_hierarchy.py` (`:59` the module docstring, `:78` `__all__`, `:365` the definition,
+   `:459` one internal call) — **no caller anywhere else in the tree**, `__main__.py` included (its
    `pack validate` reads `declared_hierarchy`/`hierarchy_diagnostics`, not the planner). The producer is
    a **planner/oracle**; `#11213`'s own body says so and routes instance pairing to `#10999` (now
    **CLOSED**; its remainder is **`#11237`**, OPEN).
@@ -317,12 +317,17 @@ one arithmetic, and an arithmetic that is right for one base is already wrong fo
 symbol and let the line number be a convenience printed beside it** (`git grep -n 'vet_enabled = '
 -- tortoise/extractor_v2.py`, `git grep -n 'payload_entities.append' -- tortoise/extractor_v2.py` —
 the path matters: unscoped, both patterns also match THIS record and its quoted lines, which is the
-count-of-mentions trap §0 documents). Every number this paragraph pins to one of §5's four shas is re-derived at that sha by the
-`for s in aa414b4d5 8e49ae909 80c912244 d69faaf38` sweep in §5 — a live grep cannot do it (scoped,
-`git grep -n 'vet_enabled = ' -- tortoise/extractor_v2.py` prints
-`:12929` at `a1dff7cec8` and `:12779` at `62248db88`, and the sweep covers **neither** of those two
-bases — pinned to the two shas, never to `HEAD`, because a `HEAD`-relative number is the same rot in a
-new coat), which is the whole point. That is the class of defect §0 exists to catch: a number true at
+count-of-mentions trap §0 documents). Every number this paragraph pins to one of §5's four shas is
+re-derived at that sha by the `for s in aa414b4d5 8e49ae909 80c912244 d69faaf38` sweep in §5 — a live
+grep cannot do it (scoped, `git grep -n 'vet_enabled = ' -- tortoise/extractor_v2.py` prints
+`:12929` at the head and `:12779` at `62248db88` — the head's number being the one `a1dff7cec8`
+already carried — and the sweep covers **neither** of those two bases), which is the whole point. ⚠️ The live number is the ONE `HEAD`-relative
+cite this record keeps, deliberately: it is the operand a reader re-derives the rest FROM, so it has to
+be today's — and stating it is safe only because it is WATCHED, by
+`tests/test_7949_capstone_measure.py::test_the_reconcile_cites_resolve_where_the_record_says_they_do`,
+which reds the moment it drifts. Pinning a HISTORICAL number to `HEAD` is the different, unsafe thing
+(that is the same rot in a new coat), which is why every other cite here names the sha it was true at.
+That is the class of defect §0 exists to catch: a number true at
 one base and false at the base the record claims. Which is why the 0.0 pp above is the **armed** result,
 not an unarmed one.
 
@@ -629,7 +634,8 @@ gh issue view 10997 --json state,closedAt                 # CLOSED 21:33:55Z
 gh issue view 11021 --json state,closedAt                 # CLOSED, one second after its merge
 
 # §0/§2 — the sha-pinned cites, each re-derived AT THE SHA IT NAMES (the one read that decides them;
-# a live grep cannot: `git grep -n 'vet_enabled = ' -- tortoise/extractor_v2.py` prints :12929 at a1dff7cec8, :12779 at 62248db88, neither of which is one of these numbers)
+# a live grep cannot: `git grep -n 'vet_enabled = ' -- tortoise/extractor_v2.py` prints :12929 at the head
+# (the number a1dff7cec8 already carried) and :12779 at 62248db88, neither of which is one of these numbers)
 for s in aa414b4d5 8e49ae909 80c912244 d69faaf38; do echo "== $s"; \
   git show "$s":tortoise/extractor_v2.py | grep -n 'vet_enabled = (\|os.environ.get("TORTOISE_VET")\|def _hold_endpoint\|_hold_endpoint(hold_store\|def _mint_endpoint\|payload_entities.append({'; done
 # aa414b4d5 → 1153, 8784, 9401, 11351 · 8e49ae909 → 1153, 8785, 9402, 11358
