@@ -71,7 +71,8 @@ cannot find is the #5063 defect the PR body leads with). Two forms are resolved:
      mechanical check can judge it);
   2. the shorthand `` `317` scoping:NN `` / ``317 research:NN``, resolved to the
      single record under `docs/scoping/` / `docs/research/` whose PATH carries
-     `<number>` as a hyphen-delimited token. The match is on the path's tokens,
+     `<number>` as a `-<number>-` token — hyphen-WRAPPED on both sides. The match
+     is on the path's tokens,
      not on a filename glob: `docs/research/` is nested, and the `#265` brief this
      PR edits keeps its number in the DIRECTORY
      (`docs/research/2026-08-13-265-encryption/axis-research.md`).
@@ -186,9 +187,22 @@ def _resolve_shorthand(
     lives in the DIRECTORY and the filename carries none. A `*-265-*.md` filename
     glob (one level or recursive) therefore reports a correct shorthand as
     unresolvable, so the match is made against the path's `-<number>-` tokens
-    instead. A number that is the path's FIRST or LAST token (e.g.
-    `265-foo/x.md`, `foo-265.md`) does not match and is reported as unresolvable
-    — fail-closed, and no such path exists in the tree today.
+    instead. ⛔ THE MATCH IS NARROWER THAN "the path mentions <number>", and the
+    differences are measured, not hypothetical (all three fail CLOSED — they
+    report the shorthand unresolvable rather than resolving it to a wrong
+    record):
+      * a number that is the path's FIRST token — `docs/research/` carries seven
+        such `#1714` records (`1714-problem-diverge.md` and siblings), so a
+        `` `1714` research:NN `` shorthand is reported unresolvable today;
+      * a number that ENDS a directory segment (`foo-265/x.md`) — neither first
+        nor last token, and `-265-` does not occur;
+      * a label not hyphen-LEADING — `docs/scoping/` carries `.334-diamond-working.md`
+        and `.334-solution-working.md`, which `-334-` cannot see, so a
+        `` `334` scoping:NN `` shorthand resolves to the one hyphen-wrapped
+        `#334` record and CANNOT report the others as ambiguous.
+    What the ambiguity arm does guarantee is only this: two or more records that
+    BOTH carry `-<number>-` return `(None, "ambiguous: …")` and never a silent
+    pick.
     """
     candidates = sorted(
         path
@@ -341,7 +355,8 @@ def test_a_nested_record_resolves_by_its_path_label(tmp_path: Path):
     `docs/research/2026-08-13-265-encryption/axis-research.md`: the number is in the
     directory and the FILENAME carries none, so a `*-265-*.md` filename glob (one
     level or recursive) reports a correct shorthand as unresolvable. Resolution is
-    by the path's hyphen-delimited token instead.
+    by the path's `-<number>-` token instead (see `_resolve_shorthand` for the
+    three shapes that still fail closed).
     """
     nested = tmp_path / "docs" / "research" / "2026-08-13-265-encryption"
     nested.mkdir(parents=True)
