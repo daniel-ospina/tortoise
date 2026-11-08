@@ -10865,7 +10865,12 @@ def _cite_qualifiers(region: str) -> list[tuple[str, str]]:
     #     record itself writes `` `:1154` `` at end-of-line with `` at **`80c912244`** `` on the
     #     next (measured at `:313`), so its gap is `\s*` and CROSSES a newline;
     #   * a parenthesised qualifier must CLOSE, and it must be on the cite's OWN line — its gap
-    #     is `[^\S\n]*`, so an ordinary aside on the next line is not read as this cite's.
+    #     is `[^\S\n]*`, so an ordinary aside on the next line is not read as this cite's. It
+    #     ends at `[,)]`, NOT at `\)` alone: an ANNOTATED parenthetical (`(HEAD, main)`,
+    #     `(62248db88, see #11555)`) is the same claim with a footnote beside it, and demanding
+    #     the token be immediately followed by `)` made those invisible — measured, and a live
+    #     shape in that form passed green (#11517 review). `\s*[,)]` cannot step over a space,
+    #     so `(see the note above)` and `(line 3)` are still NOT qualifiers.
     # Folding both into one capture group (as this line first did) made any `(...)` after a cite
     # a "qualifier": `:9021 (see the note above)` redded as `[('9021','see')]` and `(line 3)` as
     # `('9021','line')` — an ordinary sentence reported as "a LIVE shape came back" (#11517
@@ -10873,7 +10878,7 @@ def _cite_qualifiers(region: str) -> list[tuple[str, str]]:
     # `at` branch on exactly the wrapped typography this record uses — measured, and it is the
     # state the same review caught in the second round.
     for n, at_q, paren_q in re.findall(
-            r":(\d+)`?(?:\s*\bat\b\s*([^\s,;)\]]{0,24})|[^\S\n]*\([^\S\n]*([^\s,;)\]]{0,24})\))",
+            r":(\d+)`?(?:\s*\bat\b\s*([^\s,;)\]]{0,24})|[^\S\n]*\([^\S\n]*([^\s,;)\]]{0,24})\s*[,)])",
             region):
         q = (at_q or paren_q).strip("*`().,;")
         if q:
@@ -11018,6 +11023,12 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         "but the `at` branch's gap MUST cross one: the record wraps a base onto the next line "
         "(`:313` — `` `:1154` `` then `` at **`80c912244`** ``), and a rule that bars the "
         "newline for both branches is blind to a live shape written that way (measured)")
+    assert _cite_qualifiers(":13011 (HEAD, main)") == [("13011", "HEAD")], (
+        "an ANNOTATED parenthetical is the same claim with a footnote beside it — requiring "
+        "the token to be followed immediately by `)` made `(HEAD, main)` invisible, i.e. a "
+        "live shape passing green (#11517 review)")
+    assert _cite_qualifiers(":9343 (62248db88, see #11555)") == [("9343", "62248db88")], (
+        "and a base annotated the same way stays classified")
 
     # A1: #11205's channel is TRANSPORT ONLY — the schema line that spells the
     # predicate allowlist, and the comment saying nothing in `tortoise/` consumes it.
@@ -11423,12 +11434,12 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
             _base = {(_n, _q) for _n, _q in _quals if re.fullmatch(r"[0-9a-f]{7,40}", _q)}
             _not_base = [(_n, _q) for _n, _q in _quals if (_n, _q) not in _base]
             assert not _not_base, (
-                f"the §5 block qualifies a cite with something that is SHA-SHAPED but not a "
-                f"base ({_not_base}) — `<n> at HEAD` and `<n> (HEAD)` are the LIVE shapes "
-                "`#11555` retired. What this predicate measures is only the SHAPE (7–40 "
-                "lowercase hex); base CORRECTNESS is not tested here — it is carried by the "
-                "`:12929`/`:12779` arms beside this one, and a sha-shaped qualifier for the "
-                "wrong base stays green (#11517 review)")
+                f"the §5 block qualifies a cite with something that is NOT a base "
+                f"({_not_base}) — a base is 7–40 lowercase hex, and `<n> at HEAD` / "
+                "`<n> (HEAD)` are the LIVE shapes `#11555` retired. ⛔ What this predicate "
+                "measures is the qualifier's SHAPE only; base CORRECTNESS is not tested here "
+                "— it is carried by the `:12929`/`:12779` arms beside this one, so a "
+                "sha-shaped qualifier for the wrong base stays green (#11517 review)")
     # The SYMBOL is what the record cites, so the invariant that survives any later insertion is
     # that `vet_enabled = (` is unique IN THE FILE. A rename or a second assignment is what makes
     # the citation ambiguous; the line it happens to sit on is not the claim.
