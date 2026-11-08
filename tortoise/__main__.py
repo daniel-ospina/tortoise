@@ -5917,8 +5917,8 @@ def _install_read_hook_impl(args) -> int:
               "(UserPromptSubmit → volunteer-turn.sh claude) + capture: "
               "session-start.sh / session-end.sh into <dir>/.claude/hooks "
               "with a merged SessionStart/SessionEnd entry (timeout 60)")
-        print("  tortoise install cline   → <dir>/.cline/hooks/UserPromptSubmit "
-              "(→ volunteer-turn.sh cline)")
+        print("  tortoise install cline   → <dir>/.clinerules/hooks/"
+              "UserPromptSubmit (→ volunteer-turn.sh cline)")
         # Devin's file is the ONE JSON seam with no ``"hooks"`` wrapper: the
         # hooks object IS the file (docs.devin.ai/cli/extensibility/hooks —
         # "In .devin/hooks.v1.json, the hooks object is the entire file (no
@@ -5971,7 +5971,17 @@ def _install_read_hook_impl(args) -> int:
     # in {"hooks": [{type, command}]} — a flat {type, command} under the
     # event key is silently ignored by codex's parser (hook_config.rs
     # deserializes events as Vec<MatcherGroup>). Cline hooks are executable
-    # files at .cline/hooks/<EventName>.
+    # files named <EventName>, in a hooks DIRECTORY — and WHICH directory is
+    # the trap: the VS Code extension discovers workspace hooks ONLY under
+    # <ws>/.clinerules/hooks (apps/vscode/src/core/storage/disk.ts ships
+    # ``hooksDir: ".clinerules/hooks"`` in GlobalFileNames, consumed by
+    # getWorkspaceHooksDirs → getAllHooksDirs → hook-factory), while the
+    # newer SDK/CLI loader reads BOTH <ws>/.clinerules/hooks (its
+    # DEPRECATED_CONFIG_DIR) and <ws>/.cline/hooks (CLINE_CONFIG_DIR) —
+    # sdk/packages/shared/src/storage/paths.ts resolveHooksConfigSearchPaths.
+    # .clinerules/hooks is therefore the ONE path every Cline surface reads;
+    # .cline/hooks is read by the SDK/CLI only. This installer wrote
+    # .cline/hooks until #2124, so an extension user got no hook at all.
     #
     # Devin's file is the one JSON seam with NO wrapper key (see the
     # `wrapped` flag below): ``.devin/hooks.v1.json`` IS the hooks object.
@@ -5980,6 +5990,12 @@ def _install_read_hook_impl(args) -> int:
     # script already emits for the ``devin`` harness arg (verified against
     # docs.devin.ai/cli/extensibility/hooks + /hooks/lifecycle-hooks, the
     # re-fetch the wave-1 matrix row left pending).
+    #
+    # ``legacy_target`` is a path an EARLIER release of this installer wrote
+    # for the same seam. It is never written; it is migrated away on install
+    # and removed on uninstall, both behind the same ownership check as the
+    # live target (#2124).
+    legacy_target = None
     if harness == "codex":
         target = root / ".codex" / "hooks.json"
         # Nested matcher-group shape (verified against codex primary docs).
@@ -5999,7 +6015,10 @@ def _install_read_hook_impl(args) -> int:
         registration = [{"hooks": [{"type": "command",
                                     "command": f"{quoted_script} devin"}]}]
     elif harness == "cline":
-        target = root / ".cline" / "hooks" / "UserPromptSubmit"
+        # .clinerules/hooks is read by EVERY Cline surface; .cline/hooks only
+        # by the SDK/CLI (see the path note above the chain).
+        target = root / ".clinerules" / "hooks" / "UserPromptSubmit"
+        legacy_target = root / ".cline" / "hooks" / "UserPromptSubmit"
         registration = None
     elif harness == "hermes":
         # Hermes' per-turn surface is the ``pre_llm_call`` PLUGIN hook — a
@@ -6070,31 +6089,35 @@ def _install_read_hook_impl(args) -> int:
 
     # ── Symlink-escape guard: refuse when ANY existing component between the
     #    install root and the target (including the leaf AND intermediate
-    #    dirs like .claude/ or .cline/hooks/) resolves OUTSIDE the resolved
-    #    root — a repo symlink must not write through to a real user file
-    #    (e.g. .claude/settings.json → ~/.claude/settings.json, or
-    #    .cline/ → a shared hooks dir). Resolution compares resolved paths on
-    #    both sides, so a root reached via a symlinked alias (macOS /tmp →
-    #    /private/tmp, worktrees) is NOT a false positive. ───────────────
+    #    dirs like .claude/ or .clinerules/hooks/) resolves OUTSIDE the
+    #    resolved root — a repo symlink must not write through to a real user
+    #    file (e.g. .claude/settings.json → ~/.claude/settings.json, or
+    #    .clinerules/ → a shared hooks dir). Resolution compares resolved
+    #    paths on both sides, so a root reached via a symlinked alias (macOS
+    #    /tmp → /private/tmp, worktrees) is NOT a false positive. The LEGACY
+    #    path is guarded too: it is never written, but it IS unlinked when it
+    #    holds our registration, and a delete through a symlinked `.cline/`
+    #    would reach outside the root just as a write would (#2124). ─────
     root_r = root.resolve()
-    try:
-        rel_parts = target.relative_to(root).parts
-    except ValueError:
-        rel_parts = target.parts  # target outside root — fall back to leaf
-    cur = root
-    check_paths = [root]
-    for part in rel_parts:
-        cur = cur / part
-        check_paths.append(cur)
-    for cp in check_paths:
-        if cp.is_symlink():
-            resolved = cp.resolve()
-            if resolved != root_r and root_r not in resolved.parents:
-                print(f"Refusing: {cp} resolves to {resolved} — outside the "
-                      f"install dir {root_r}. Symlinked harness configs are "
-                      "not touched (unlink the symlink first or pass --dir "
-                      "explicitly).", file=_sys.stderr)
-                return 1
+    for candidate in [target] + ([legacy_target] if legacy_target else []):
+        try:
+            rel_parts = candidate.relative_to(root).parts
+        except ValueError:
+            rel_parts = candidate.parts  # outside root — fall back to leaf
+        cur = root
+        check_paths = [root]
+        for part in rel_parts:
+            cur = cur / part
+            check_paths.append(cur)
+        for cp in check_paths:
+            if cp.is_symlink():
+                resolved = cp.resolve()
+                if resolved != root_r and root_r not in resolved.parents:
+                    print(f"Refusing: {cp} resolves to {resolved} — outside "
+                          f"the install dir {root_r}. Symlinked harness "
+                          "configs are not touched (unlink the symlink first "
+                          "or pass --dir explicitly).", file=_sys.stderr)
+                    return 1
 
     # #2383: uninstall with NO registration present must be a clean no-op —
     # never fall through to the fresh-install write below (a double
@@ -6103,7 +6126,11 @@ def _install_read_hook_impl(args) -> int:
     # out: a DANGLING in-root symlink (exists() False) must also no-op —
     # the R1 carve-out let it fall through and re-invert. Live symlinks
     # (exists() True) take the normal branch below (read-through + write).
-    if uninstall and not target.exists():
+    # A LEGACY registration also counts as "something to remove" (#2124): it
+    # is where an earlier release wrote, so a user who installed then has
+    # exactly that file to clean up.
+    if uninstall and not target.exists() and not (
+            legacy_target is not None and legacy_target.exists()):
         print(f"No {harness} registration at {target} — nothing to remove.")
         return 0
 
@@ -6135,13 +6162,19 @@ def _install_read_hook_impl(args) -> int:
         return False
 
     if harness == "cline":
-        # Cline hooks are files at .cline/hooks/<EventName> (project) or
-        # ~/.cline/hooks (global); hooks must also be enabled in settings.
+        # Cline hooks are executable FILES named <EventName> inside a hooks
+        # DIRECTORY. `<dir>/.clinerules/hooks` is read by EVERY Cline surface
+        # (the VS Code extension's GlobalFileNames.hooksDir, and the SDK/CLI's
+        # DEPRECATED_CONFIG_DIR leg); `<dir>/.cline/hooks` — ``legacy_target``,
+        # what this installer wrote before #2124 — is read by the SDK/CLI ONLY.
+        # Hooks must also be enabled in Cline settings.
         marker_content = f"#!/usr/bin/env bash\nexec {quoted_script} cline\n"
-        if target.exists() and target.is_dir():
-            print(f"{target} is a directory — refusing to touch it.",
-                  file=_sys.stderr)
-            return 1
+        cline_paths = [p for p in (target, legacy_target) if p is not None]
+        for p in cline_paths:
+            if p.exists() and p.is_dir():
+                print(f"{p} is a directory — refusing to touch it.",
+                      file=_sys.stderr)
+                return 1
         if target.exists():
             existing_text = target.read_text(
                 encoding="utf-8", errors="replace")
@@ -6161,12 +6194,40 @@ def _install_read_hook_impl(args) -> int:
                           "Remove it manually or install into another dir.",
                           file=_sys.stderr)
                 return 1
+
+        def _cline_owns_path(p: Path) -> bool:
+            """Ownership of the registration at ``p`` (unreadable → not ours)."""
+            try:
+                return _cline_marker_owns(
+                    p.read_text(encoding="utf-8", errors="replace"))
+            except OSError:
+                return False
+
         if dry:
             print(f"[dry-run] would write {target}:")
             print(marker_content.rstrip())
+            if (legacy_target is not None and legacy_target.exists()
+                    and _cline_owns_path(legacy_target)):
+                print(f"[dry-run] would remove the legacy registration at "
+                      f"{legacy_target}")
         elif uninstall:
-            target.unlink()
-            print(f"Removed {target}")
+            removed, skipped = [], []
+            for p in cline_paths:
+                if not p.exists():
+                    continue
+                if _cline_owns_path(p):
+                    p.unlink()
+                    removed.append(p)
+                else:
+                    skipped.append(p)
+            if not removed:
+                print(f"No {harness} registration of ours at {target} — "
+                      "nothing to remove.")
+            for p in removed:
+                print(f"Removed {p}")
+            for p in skipped:
+                print(f"{p} is not our volunteer-turn.sh hook — "
+                      "refusing to delete it.", file=_sys.stderr)
         else:
             target.parent.mkdir(parents=True, exist_ok=True)
             # #3918: the exec bit goes on the TEMP, with the content — a
@@ -6174,8 +6235,22 @@ def _install_read_hook_impl(args) -> int:
             # exists but can never run.
             _atomic_write_text(target, marker_content, mode=0o755)
             print(f"Installed {target}")
+            # #2124 migration: a registration at the legacy path injects
+            # nothing through the extension, and would double-inject through
+            # the SDK/CLI now that the live path exists. Remove OUR OWN old
+            # file; a foreign one is left alone and merely reported.
+            if legacy_target is not None and legacy_target.exists():
+                if _cline_owns_path(legacy_target):
+                    legacy_target.unlink()
+                    print(f"Removed the legacy registration at "
+                          f"{legacy_target} — Cline's VS Code extension never "
+                          "read that path, so it injected nothing there.")
+                else:
+                    print(f"Note: {legacy_target} exists and is not a "
+                          "tortoise hook — left untouched.", file=_sys.stderr)
             print("Then enable hooks in Cline settings (Hook feature) — "
-                  "project .cline/hooks or global ~/.cline/hooks both work.")
+                  "Cline reads <dir>/.clinerules/hooks (the legacy "
+                  "<dir>/.cline/hooks is read by its SDK/CLI only).")
         return 0
 
     # ── hermes: a directory PLUGIN (plugin.yaml + __init__.py), not a

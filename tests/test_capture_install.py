@@ -2963,6 +2963,8 @@ def test_cli_install_cursor_installs_capture_and_discloses_the_ide_only_limit(
     assert entry["command"].endswith(capture_install.CURSOR_SCRIPT_NAME)
     assert "hooks" not in entry, "the entry must be flat (#3819)"
     # cursor has no read seam — nothing may be written to a project cline path
+    # (both the live `.clinerules/hooks` seam and the pre-#2124 `.cline/hooks`)
+    assert not (root / ".clinerules").exists(), r.stdout
     assert not (root / ".cline").exists(), r.stdout
     # the IDE-only disclosure is on the install surface
     assert "IDE-ONLY" in r.stdout, r.stdout
@@ -3009,6 +3011,7 @@ def test_cli_install_cursor_uninstall_says_the_seam_remains(tmp_path):
         assert spec.name in r.stdout, (spec.name, r.stdout)
         assert spec.event in r.stdout, (spec.event, r.stdout)
     # it never inspected/rewrote a cline registration as if it were cursor's
+    assert not (root / ".clinerules").exists(), r.stdout
     assert not (root / ".cline").exists(), r.stdout
 
 
@@ -3064,7 +3067,7 @@ def test_cli_install_claude_second_run_is_reported_as_a_no_op(cli):
 def test_cli_install_pi_writes_the_extension_into_the_temp_home(cli):
     """Mutation: add "pi" to the parser choices without handling it — the
     request falls into the cline branch and writes a bogus
-    `.cline/hooks/UserPromptSubmit` instead of the capture extension."""
+    `.clinerules/hooks/UserPromptSubmit` instead of the capture extension."""
     run, root, home = cli
 
     r = run("install", "pi")
@@ -3072,6 +3075,7 @@ def test_cli_install_pi_writes_the_extension_into_the_temp_home(cli):
     assert r.returncode == 0, r.stderr
     assert (home / ".pi" / "agent" / "extensions"
             / capture_install.PI_EXTENSION_NAME).read_bytes() == _PI
+    assert not (root / ".clinerules").exists(), "pi was mis-routed to the cline seam"
     assert not (root / ".cline").exists(), "pi was mis-routed to the cline seam"
 
 
@@ -3384,23 +3388,23 @@ def test_cli_install_codex_non_ascii_registration_under_ascii_locale(tmp_path):
 
 def test_cli_install_pi_uninstall_never_touches_a_cline_file(cli):
     """`pi` has no read hook — `--uninstall` must not fall through to the
-    cline target and rewrite `.cline/hooks/UserPromptSubmit`.
+    cline target and rewrite `<dir>/.clinerules/hooks/UserPromptSubmit`.
 
     Mutation: route every `--uninstall` to `_install_read_hook` before the pi
     check (pi lands in that function's cline `else` branch, reads the cline
     file as if it were a pi registration, and prints a misleading path)."""
     run, root, _home = cli
-    cline = root / ".cline" / "hooks" / "UserPromptSubmit"
-    cline.parent.mkdir(parents=True)
+    seam = root / ".clinerules" / "hooks" / "UserPromptSubmit"
+    seam.parent.mkdir(parents=True)
     original = json.dumps({"hooks": {"UserPromptSubmit": [
         {"hooks": [{"type": "command", "command": "someone-elses.sh"}]}]}})
-    cline.write_text(original)
+    seam.write_text(original)
 
     r = run("install", "pi", "--uninstall")
 
     assert r.returncode == 0, r.stderr
     assert "pi has no shell-hook read seam" in r.stdout
-    assert cline.read_text() == original, "the cline hook file was modified"
+    assert seam.read_text() == original, "the cline hook file was modified"
 
 
 def test_cli_install_pi_rerun_does_not_claim_installed(cli):

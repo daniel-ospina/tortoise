@@ -285,16 +285,22 @@ def test_install_cline_writes_hook_file(tmp_path):
     env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
     r = _run(["install", "cline", "--dir", str(tmp_path)], env)
     assert r.returncode == 0, r.stderr
-    hook = tmp_path / ".cline" / "hooks" / "UserPromptSubmit"
+    hook = tmp_path / ".clinerules" / "hooks" / "UserPromptSubmit"
     assert hook.exists()
     assert os.access(hook, os.X_OK)  # Cline hooks are executed files
     assert "volunteer-turn.sh cline" in hook.read_text()
+    # #2124: `.clinerules/hooks` is the ONE workspace hooks dir every Cline
+    # surface reads (`apps/vscode/src/core/storage/disk.ts` ships
+    # `hooksDir: ".clinerules/hooks"`). `.cline/hooks` is read by Cline's
+    # SDK/CLI only, so writing there alone left the VS Code extension — the
+    # surface a project install targets — with no hook at all.
+    assert not (tmp_path / ".cline" / "hooks" / "UserPromptSubmit").exists()
 
 
 def test_install_cline_refuses_overwrite_of_foreign_hook(tmp_path):
     """A pre-existing cline UserPromptSubmit hook that is NOT ours is
     refused (never overwritten)."""
-    hook = tmp_path / ".cline" / "hooks" / "UserPromptSubmit"
+    hook = tmp_path / ".clinerules" / "hooks" / "UserPromptSubmit"
     hook.parent.mkdir(parents=True)
     hook.write_text("#!/usr/bin/env bash\necho user-authored\n")
     env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
@@ -311,11 +317,72 @@ def test_install_cline_refuses_overwrite_of_foreign_hook(tmp_path):
 def test_install_cline_uninstall_removes_own_hook(tmp_path):
     env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
     _run(["install", "cline", "--dir", str(tmp_path)], env)
-    hook = tmp_path / ".cline" / "hooks" / "UserPromptSubmit"
+    hook = tmp_path / ".clinerules" / "hooks" / "UserPromptSubmit"
     assert hook.exists()
     r = _run(["install", "cline", "--dir", str(tmp_path), "--uninstall"], env)
     assert r.returncode == 0, r.stderr
     assert not hook.exists()
+
+
+def test_install_cline_migrates_the_legacy_registration(tmp_path):
+    """#2124: an earlier release wrote `<dir>/.cline/hooks/UserPromptSubmit`,
+    which Cline's VS Code extension never reads. Install must move to
+    `.clinerules/hooks` AND remove OUR OWN legacy file, or the SDK/CLI (which
+    reads both) would inject twice.
+
+    MUTATION: drop the migration → a stale legacy file survives → RED.
+    """
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+    legacy = tmp_path / ".cline" / "hooks" / "UserPromptSubmit"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("#!/usr/bin/env bash\n"
+                      "exec /nonexistent/volunteer-turn.sh cline\n")
+    os.chmod(legacy, 0o755)
+
+    r = _run(["install", "cline", "--dir", str(tmp_path)], env)
+    assert r.returncode == 0, r.stderr
+    assert (tmp_path / ".clinerules" / "hooks" / "UserPromptSubmit").exists()
+    assert not legacy.exists(), "our own legacy registration was left behind"
+    assert "legacy registration" in r.stdout
+
+
+def test_install_cline_leaves_a_FOREIGN_legacy_hook_alone(tmp_path):
+    """A user's own `.cline/hooks/UserPromptSubmit` is not ours to delete —
+    ownership is the marker LINE (#2383), so migration must skip it and say so
+    rather than fail the install.
+
+    MUTATION: migrate without the ownership check → a user hook is destroyed
+    → RED.
+    """
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+    legacy = tmp_path / ".cline" / "hooks" / "UserPromptSubmit"
+    legacy.parent.mkdir(parents=True)
+    user_text = "#!/usr/bin/env bash\necho my own hook\n"
+    legacy.write_text(user_text)
+
+    r = _run(["install", "cline", "--dir", str(tmp_path)], env)
+    assert r.returncode == 0, r.stderr
+    assert legacy.exists() and legacy.read_text() == user_text
+    assert "left untouched" in r.stderr
+
+
+def test_install_cline_uninstall_removes_a_legacy_only_registration(tmp_path):
+    """A user whose only registration is the legacy one can still uninstall —
+    the `no registration → clean no-op` guard must not fire over a legacy
+    file, or `--uninstall` becomes a silent leak.
+
+    MUTATION: the pre-#2124 guard (`uninstall and not target.exists()`) →
+    returns 0 without touching the legacy file → RED.
+    """
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+    legacy = tmp_path / ".cline" / "hooks" / "UserPromptSubmit"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("#!/usr/bin/env bash\n"
+                      "exec /nonexistent/volunteer-turn.sh cline\n")
+
+    r = _run(["install", "cline", "--dir", str(tmp_path), "--uninstall"], env)
+    assert r.returncode == 0, r.stderr
+    assert not legacy.exists(), "a legacy-only registration leaked"
 
 
 # ── Devin CLI (#2124) — `.devin/hooks.v1.json`, the ONE JSON seam whose
@@ -523,13 +590,13 @@ def test_install_refuses_symlink_escape(tmp_path):
 
 
 def test_install_refuses_symlinked_intermediate_dir(tmp_path):
-    """A symlinked INTERMEDIATE dir (.cline/ → outside) must refuse even when
+    """A symlinked INTERMEDIATE dir (.clinerules/ → outside) must refuse even when
     the leaf file does not exist yet — no write-through outside the root."""
     outside = tmp_path / "outside-hooks"
     outside.mkdir()
     proj = tmp_path / "proj"
-    (proj / ".cline").parent.mkdir(parents=True, exist_ok=True)
-    (proj / ".cline").symlink_to(outside)
+    (proj / ".clinerules").parent.mkdir(parents=True, exist_ok=True)
+    (proj / ".clinerules").symlink_to(outside)
     env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
     r = _run(["install", "cline", "--dir", str(proj)], env)
     assert r.returncode == 1
@@ -540,7 +607,7 @@ def test_install_refuses_symlinked_intermediate_dir(tmp_path):
 def test_install_cline_refuses_directory_target(tmp_path):
     """A directory sitting at the cline hook path is a clean refusal, not a
     traceback."""
-    hook = tmp_path / ".cline" / "hooks" / "UserPromptSubmit"
+    hook = tmp_path / ".clinerules" / "hooks" / "UserPromptSubmit"
     hook.mkdir(parents=True)
     env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
     r = _run(["install", "cline", "--dir", str(tmp_path)], env)
@@ -681,12 +748,93 @@ def test_volunteer_turn_hook_codex_contract(env, tmp_path):
 
 
 def test_volunteer_turn_hook_cline_contract(env, tmp_path):
-    """Cline UserPromptSubmit → contextModification.context."""
-    stdin = json.dumps({"prompt": "How is CI deploy triggered?"})
+    """Cline `UserPromptSubmit` → `{"cancel": false, "contextModification": "…"}`.
+
+    Both shapes here are Cline's OWN, re-derived from its source (#2124), not
+    from our earlier guess — this test graded a fabricated contract until then:
+
+    * stdin is NESTED: `hooks.proto` declares
+      `UserPromptSubmitData user_prompt_submit = 12`, and `hook-factory.ts`
+      serialises `jsonObj.userPromptSubmit` (defaulting `.prompt` to "").
+    * stdout must carry `contextModification` as a **flat string**:
+      `hooks.proto` `string context_modification = 1`, and
+      `hook-factory.ts:74-84` returns
+      "Invalid hook output: 'contextModification' must be a string" for
+      anything else — so the `{"context": …}` object this arm used to emit
+      reached no model on any Cline surface.
+
+    MUTATION: revert either shape → RED (the object check is the exact
+    predicate `hook-factory.ts` applies; the prompt assertion fails because
+    the reflex is handed the raw JSON envelope).
+    """
+    stdin = json.dumps({
+        "userPromptSubmit": {
+            "prompt": "How is CI deploy triggered?",
+            "attachments": [],
+        }
+    })
     r = _hook_run(env, "cline", stdin, tmp_path)
     assert r.returncode == 0, r.stderr
     out = json.loads(r.stdout)
-    assert "point/" in out["contextModification"]["context"]
+    # The predicate Cline's validator applies, verbatim.
+    assert isinstance(out["contextModification"], str), (
+        "Cline rejects a non-string contextModification — got "
+        f"{type(out['contextModification']).__name__}: {out!r}")
+    assert out.get("cancel") is False
+    # The reflex must see the QUESTION, never the JSON envelope.
+    assert "point/" in out["contextModification"]
+    assert "CI pipeline deploys" in out["contextModification"]
+    assert "userPromptSubmit" not in out["contextModification"], (
+        "the reflex was queried with the raw stdin envelope")
+
+
+def test_volunteer_turn_hook_cline_stdin_prompt_is_extracted(tmp_path):
+    """The reflex must be handed the QUESTION, not Cline's JSON envelope.
+
+    Cline nests the prompt (`hooks.proto` declares
+    `UserPromptSubmitData user_prompt_submit = 12`, and `hook-factory.ts`
+    serialises `jsonObj.userPromptSubmit`), so a top-level-only extractor
+    silently falls back to the whole stdin blob and queries the graph with
+    JSON syntax instead of the user's question.
+
+    The reflex is STUBBED here on purpose. The graph-seeded contract test
+    CANNOT see this defect: the envelope CONTAINS the question text, so the
+    retrieval leg still matches on the blob and the test stays green —
+    measured, by reverting the nested read and re-running it. Only asserting
+    what the reflex RECEIVED discriminates.
+
+    MUTATION: drop the `userPromptSubmit` read → the echo carries the
+    envelope → RED.
+    """
+    utils = _minimal_path(tmp_path)
+    stub = tmp_path / "stubbin" / "tortoise"
+    stub.parent.mkdir()
+    # A Python stub so the hook's interpreter guard (`_tortoise_bin_qualifies`
+    # reads the shebang) accepts it, exactly as it would a real console script.
+    stub.write_text(
+        f"#!{sys.executable}\n"
+        "import sys\n"
+        "print('REFLEX-PROMPT=[' + sys.stdin.read() + ']')\n")
+    stub.chmod(0o755)
+
+    question = "How is CI deploy triggered?"
+    stdin = json.dumps({"userPromptSubmit": {"prompt": question,
+                                             "attachments": []}})
+    env = {
+        **os.environ,
+        "PATH": f"{stub.parent}:{utils}",
+        "HOME": str(tmp_path / "home"),
+        "VIRTUAL_ENV": "",
+        "TORTOISE_DB_URI": "",
+        "TORTOISE_DB_PATH": str(tmp_path / "nope.db"),
+        "TORTOISE_SECRET_PEPPER": "test-static-pepper",
+    }
+    r = _hook_run(env, "cline", stdin, tmp_path)
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    assert out["contextModification"] == f"REFLEX-PROMPT=[{question}]", (
+        "the reflex did not receive the user's question — it was handed "
+        f"{out['contextModification']!r}")
 
 
 def test_volunteer_turn_hook_devin_contract(env, tmp_path):
@@ -727,7 +875,7 @@ def test_install_uninstall_when_absent_is_clean_noop(tmp_path):
     env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
     for harness, rel in (("codex", ".codex/hooks.json"),
                          ("claude", ".claude/settings.json"),
-                         ("cline", ".cline/hooks/UserPromptSubmit")):
+                         ("cline", ".clinerules/hooks/UserPromptSubmit")):
         target = tmp_path / rel
         r = _run(["install", harness, "--dir", str(tmp_path), "--uninstall"],
                  env)
@@ -931,7 +1079,7 @@ def test_uninstall_never_deletes_config_the_installer_did_not_write(tmp_path):
 
     # (c) cline: a user hook that merely MENTIONS the script survives.
     men_dir = tmp_path / "mention"
-    men_hook = men_dir / ".cline" / "hooks" / "UserPromptSubmit"
+    men_hook = men_dir / ".clinerules" / "hooks" / "UserPromptSubmit"
     men_hook.parent.mkdir(parents=True)
     user_text = ("#!/usr/bin/env bash\n"
                  "# I also have the tortoise volunteer-turn.sh installed\n"
@@ -968,7 +1116,7 @@ def test_uninstall_never_deletes_config_the_installer_did_not_write(tmp_path):
     r = _run(["install", "cline", "--dir", str(own_cline), "--uninstall"],
              env)
     assert r.returncode == 0, r.stderr
-    assert not (own_cline / ".cline" / "hooks" / "UserPromptSubmit").exists()
+    assert not (own_cline / ".clinerules" / "hooks" / "UserPromptSubmit").exists()
 
 
 # ── #3808 R27 — the read-half failure boundary is TOTAL, not a list ──────
@@ -1025,12 +1173,12 @@ _BOUNDARY_CASES = [
      ["Install failed:", "IsADirectoryError"]),
     # FileExistsError — a regular FILE where an intermediate dir belongs.
     ("cline-hooks-as-file-fileexistserror", "cline",
-     lambda r: ((r / ".cline").mkdir(),
-                (r / ".cline" / "hooks").write_text("x")),
+     lambda r: ((r / ".clinerules").mkdir(),
+                (r / ".clinerules" / "hooks").write_text("x")),
      ["Install failed:", "FileExistsError"]),
     # NotADirectoryError — a regular FILE where a parent dir belongs.
     ("cline-dotdir-as-file-notadirectoryerror", "cline",
-     lambda r: (r / ".cline").write_text("x"),
+     lambda r: (r / ".clinerules").write_text("x"),
      ["Install failed:", "NotADirectoryError"]),
 ]
 
@@ -1315,7 +1463,7 @@ def test_cline_marker_failure_leaves_the_marker_and_its_mode(tmp_path,
     """
     import tortoise.__main__ as tmain
 
-    hook = tmp_path / ".cline" / "hooks" / "UserPromptSubmit"
+    hook = tmp_path / ".clinerules" / "hooks" / "UserPromptSubmit"
     hook.parent.mkdir(parents=True)
     # A DEAD two-token marker — structurally ours, so the installer proceeds
     # to the repair write instead of refusing a foreign hook.
@@ -1345,7 +1493,7 @@ def test_cline_marker_is_installed_atomically_with_its_exec_bit(tmp_path):
     """
     import tortoise.__main__ as tmain
 
-    hook = tmp_path / ".cline" / "hooks" / "UserPromptSubmit"
+    hook = tmp_path / ".clinerules" / "hooks" / "UserPromptSubmit"
     hook.parent.mkdir(parents=True)
     hook.write_text("#!/usr/bin/env bash\n"
                     "exec /nonexistent/volunteer-turn.sh cline\n")
