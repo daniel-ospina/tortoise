@@ -24,6 +24,9 @@ verdict — it never re-derives a writability table of its own:
     ONTOLOGY §8's ``SEMANTICS_MECHANISMS`` for its meaning);
   * the PATHS come from ``relation_write_paths({"predicate": …, "mechanism":
     …})``;
+  * the DIRECTION a stated meaning records comes from
+    ``pack_registry.SEMANTICS_DIRECTIONS`` (``causes``/``supports`` → ``->``,
+    ``mutuallySupportive`` → ``<->`` …), the SAME one map ONTOLOGY §8 rules;
   * an empty verdict is a REFUSAL, and it is NAMED — never a silent drop and
     never an edge written anyway.
 
@@ -88,6 +91,40 @@ structural writer dedups on ``(predicate, src, dst)`` and the direct writer on
 ``(mechanism, src, dst)`` — the stated verb is deliberately not in the second,
 which is why a second meaning over one pair is a recorded FOLD (see
 ``RelationEdge.folded``) rather than a second edge.
+
+DIRECTION IS CONSUMED, NOT DEFAULTED
+------------------------------------
+``create_direct_edge``'s CYCLE-25 default is ``direction=None →
+"bidirectional"`` for IMPL, so a one-way statement (*"the retry storm causes
+the deadline slip"*) would be stored as belief flowing BOTH ways unless the leg
+supplies the direction the statement already declares. It does:
+:func:`_direction_for` reads ``pack_registry.SEMANTICS_DIRECTIONS`` — ONTOLOGY
+§8's RULED table (``causes``/``supports`` → ``->``, ``mutuallySupportive`` →
+``<->``, ``related`` → ``-``) — from the meaning riding the edge (``label``,
+which is the story's verb, else the record's ``semantics`` gloss), then from the
+verb itself, and only for a meaning that declares NO direction does it fall back
+to ``_DIRECTION_STATED`` (the model's one-way token: a stated relation runs
+``src → dst``). The value rides ``link_entities(direction=…)`` onto the direct
+arm, and the written row records it, so a reader can tell a one-way stated claim
+from a writer default without re-deriving it. ``live.direction_flows`` reads it
+back unchanged.
+
+⚠️ The STRUCTURAL arm (``create_edge``) has no direction slot at all —
+``link_entities`` REFUSES ``direction`` on that arm (#4282) rather than
+dropping it — so a structural Object→Object edge carries no direction property
+and ``direction`` is ``None`` on those rows. That is the writer's contract, not
+a default chosen here: no EP belief flows along a structural edge.
+
+ACCOUNTING
+----------
+``written + dropped + folded`` reconciles with the stated population, on EVERY
+arm — including the two where it did not (#11548 round 3, P2): a refused edge
+that carried a fold reports one drop per LOST MEANING (never a bare "1 drop"
+for two statements), and a second, DIFFERENT stated verb over a declared
+hierarchy pair is a recorded fold on the declared edge rather than a silent
+``continue``. A literal REPEAT of the same verb over the same pair is a
+duplicate statement, not a lost meaning: it is deduped (``extractor_v2.
+_assemble_relations`` dedups it upstream as well) and counts once.
 
 RESIDUALS THIS LEG DOES NOT CLOSE (measured, not assumed)
 ---------------------------------------------------------
@@ -259,7 +296,8 @@ def _mechanism_for(predicate: str, semantics: str | None) -> str | None:
     return None
 
 
-def _direction_for(label: str | None, predicate: str) -> str:
+def _direction_for(label: str | None, predicate: str,
+                   semantics: str | None = None) -> str:
     """The direction the edge's MEANING records — the ruled table, not a guess.
 
     ``pack_registry.SEMANTICS_DIRECTIONS`` is ONTOLOGY §8's ruled mapping from a
@@ -268,7 +306,17 @@ def _direction_for(label: str | None, predicate: str) -> str:
     Consuming it here is the same rule as the write path's own: the registry
     decides, this leg does not re-derive. The meaning riding the edge is
     ``label`` (the story's verb when it is not itself a mechanism), else the
-    verb itself.
+    verb itself — and the record's ``semantics`` gloss is the LAST candidate
+    before the fallback, because ``_mechanism_for`` can bind a mechanism from
+    the gloss alone when the verb is outside the declared vocabulary: without
+    it, a verb glossed ``mutuallySupportive`` would take the one-way fallback
+    while its ruling says BOTH ways (#11548 round 4, P1 — the ruling must reach
+    the edge however the meaning arrived).
+
+    ⚠️ The fallback (``_DIRECTION_STATED``) is reached only by a meaning that
+    declares NO direction: a bare ``IMPL``/``NAND`` verb, or a verb and gloss
+    both outside the table. It is deliberately NOT the writer's CYCLE-25 default
+    (``bidirectional`` for IMPL): a stated relation runs ``src → dst``.
 
     ⚠️ A FOLD keeps the FIRST verb's label (``create_direct_edge`` is one edge
     per (src, tgt, type)), so the surviving meaning's direction is the one
@@ -277,10 +325,30 @@ def _direction_for(label: str | None, predicate: str) -> str:
     """
     from .pack_registry import SEMANTICS_DIRECTIONS
 
-    for meaning in (label, predicate):
+    for meaning in (label, predicate, semantics):
         if meaning and meaning in SEMANTICS_DIRECTIONS:
             return SEMANTICS_DIRECTIONS[meaning]
     return _DIRECTION_STATED
+
+
+def _fold_onto(
+    edges: list[RelationEdge], kept_at: int, stated_predicate: str,
+) -> None:
+    """Record a second, DIFFERENT stated verb absorbed by the edge at ``kept_at``.
+
+    One edge, two stated meanings, and the second one is NAMED on the edge that
+    absorbed it — the arms that dedup by an edge identity (mechanism for the
+    direct writer, declared predicate for the structural writer) share this.
+    A literal repeat of the SAME verb is not a fold: it is the same statement
+    and no meaning was lost.
+    """
+    kept = edges[kept_at]
+    if stated_predicate == kept.stated_predicate:
+        return
+    if stated_predicate in kept.folded:
+        return
+    edges[kept_at] = dataclasses.replace(
+        kept, folded=(*kept.folded, stated_predicate))
 
 
 def _stated_verdict(predicate: str, mechanism: str | None) -> tuple[str, ...]:
@@ -319,11 +387,15 @@ def plan_relation_edges(
                       else declared_hierarchy(registry))
     edges: list[RelationEdge] = []
     drops: list[RelationDrop] = []
-    seen: set[tuple[str, str, str]] = set()
+    #: The edge identity the STRUCTURAL arms dedup on — ``(predicate, src,
+    #: dst)`` — mapped to the index of the edge it planned, so a second, DIFFERENT
+    #: stated verb over the same pair is recorded as a FOLD on that edge instead
+    #: of vanishing through a bare ``continue`` (#11548 round 3, P2).
+    structural_at: dict[tuple[str, str, str], int] = {}
     #: The DIRECT arm's edge identity is the MECHANISM, not the predicate (see
-    #: the fold comment below) — kept apart from ``seen`` so a structural
-    #: ``IMPL`` and a direct ``IMPL`` between one pair can never be read as the
-    #: same edge.
+    #: the fold comment below) — kept apart from ``structural_at`` so a
+    #: structural ``IMPL`` and a direct ``IMPL`` between one pair can never be
+    #: read as the same edge.
     direct_at: dict[tuple[str, str, str], int] = {}
     for rel in relations or ():
         if not isinstance(rel, dict):
@@ -358,13 +430,19 @@ def plan_relation_edges(
                         f"endpoints and does not mint a carrying operator"))
                     continue
                 key = (edge.predicate, src_id, dst_id)
-                if key in seen:
+                kept_at = structural_at.get(key)
+                if kept_at is not None:
+                    # A second statement over the same DECLARED pair plans the
+                    # same edge. A different verb is a second meaning folded
+                    # onto it and is NAMED; a literal repeat is the same
+                    # statement and is deduped silently.
+                    _fold_onto(edges, kept_at, predicate)
                     continue
                 routed = _routed_away_reason(edge.predicate)
                 if routed:
                     drops.append(RelationDrop(src, dst, predicate, routed))
                     continue
-                seen.add(key)
+                structural_at[key] = len(edges)
                 edges.append(RelationEdge(
                     src_id=src_id, dst_id=dst_id, predicate=edge.predicate,
                     write_path=RELATION_STRUCTURAL, declared_by=edge.pack,
@@ -385,13 +463,15 @@ def plan_relation_edges(
             continue
         if RELATION_STRUCTURAL in paths and predicate in _VALID_EDGE_PREDICATES:
             key = (predicate, src_id, dst_id)
-            if key in seen:
+            kept_at = structural_at.get(key)
+            if kept_at is not None:
+                _fold_onto(edges, kept_at, predicate)
                 continue
             routed = _routed_away_reason(predicate)
             if routed:
                 drops.append(RelationDrop(src, dst, predicate, routed))
                 continue
-            seen.add(key)
+            structural_at[key] = len(edges)
             edges.append(RelationEdge(
                 src_id=src_id, dst_id=dst_id, predicate=predicate,
                 write_path=RELATION_STRUCTURAL, declared_by=None,
@@ -418,11 +498,7 @@ def plan_relation_edges(
             key = (mechanism, src_id, dst_id)
             kept_at = direct_at.get(key)
             if kept_at is not None:
-                kept = edges[kept_at]
-                if (predicate != kept.stated_predicate
-                        and predicate not in kept.folded):
-                    edges[kept_at] = dataclasses.replace(
-                        kept, folded=(*kept.folded, predicate))
+                _fold_onto(edges, kept_at, predicate)
                 continue
             direct_at[key] = len(edges)
             edges.append(RelationEdge(
@@ -431,8 +507,9 @@ def plan_relation_edges(
                 stated_predicate=predicate, mechanism=mechanism,
                 label=label, src_name=src, dst_name=dst,
                 # The meaning's RULED direction, not the writer's IMPL default
-                # and not a blanket one-way (see ``_direction_for``).
-                direction=_direction_for(label, predicate)))
+                # and not a blanket one-way (see ``_direction_for``; the record's
+                # ``semantics`` gloss is consulted before the one-way fallback).
+                direction=_direction_for(label, predicate, semantics)))
             continue
         drops.append(RelationDrop(
             src, dst, predicate,
@@ -461,6 +538,14 @@ def apply_relation_edges(
     a stated relation that produced no edge of its own is never silent — and
     ``written + dropped + folded`` reconciles with the stated population
     (``folded`` counts MEANINGS, so one edge that absorbed two verbs counts 2).
+    That holds on the REFUSAL arm too: a refused edge that had absorbed a
+    meaning yields one drop row per lost MEANING, so a refused fold is counted
+    as the loss it is rather than reported as ``written=0, dropped=1`` for a
+    two-statement population (#11548 round 3, P2).
+
+    ``direction`` rides the DIRECT arm only, from ``SEMANTICS_DIRECTIONS``; the
+    structural arm's writer has no slot for it (`link_entities` refuses it
+    there, #4282), so those edges carry none and the row records ``None``.
 
     ⛔ A writer failure on ONE edge never aborts the rest: `#11237`'s channel is
     fail-open exactly as its producer is (`_assemble_relations` keeps what it
@@ -493,6 +578,19 @@ def apply_relation_edges(
                 f"the writer refused {edge.predicate!r} "
                 f"({type(exc).__name__}: {exc}) — the relation stays "
                 f"uncommitted"))
+            # ⛔ A refused edge that had ABSORBED a meaning lost that meaning
+            # too, and the collapse is recorded only for an edge that LANDED —
+            # so without this row the receipt read `written=0, dropped=1,
+            # folded=0` for a two-statement population with the second meaning
+            # nowhere (#11548 round 3, P2). One drop per lost meaning keeps
+            # ``written + dropped + folded`` reconciling on THIS arm too.
+            for folded_verb in edge.folded:
+                drops.append(RelationDrop(
+                    edge.src_name, edge.dst_name, folded_verb,
+                    f"this meaning was folded onto {edge.stated_predicate!r} "
+                    f"({edge.predicate!r}), whose write the writer refused "
+                    f"({type(exc).__name__}) — the fold lost the meaning "
+                    f"with the edge"))
             continue
         if edge.folded:
             # ⛔ Recorded ONLY for an edge that actually LANDED. Building this
