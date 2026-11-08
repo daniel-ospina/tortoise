@@ -10962,18 +10962,17 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # → `:1735`, `grep -n 'nothing in this tree consumes'` → `:10906`).
     assert "`hasPart`" in text and "`tortoise/extractor_v2.py:1735`" in text, (
         "the record must cite the relations schema where `hasPart` is spelled")
-    # ⛔ BOTH SIDES' shapes survive (#11519 review): main split this into two membership tests,
-    # and side1 bound the PREDICATE to the CITE. Two memberships cannot tell a record that names
-    # `hasPart` in one sentence and the cite in another. But side1's form was a LITERAL, and
-    # `#11546` (de1e2c9b2) removed exactly that needle by name — *"needles whose claim is a number
-    # or a token and whose tail was prose"* — so restoring it verbatim re-introduced the false
-    # block it was retired for: measured, the same clause reworded `` `hasPart` —
-    # `tortoise/extractor_v2.py:1735` `` REDDED while asserting the two had "separate sentences",
-    # which was false of that edit. Bound by a reword-TOLERANT pattern instead: no sentence
-    # boundary between the mention and the cite, clause punctuation otherwise free.
-    assert re.search(r"`hasPart`[^.\n]{0,80}`tortoise/extractor_v2\.py:1735`", text), (
-        "the record must bind the `hasPart` mention to the cite it names within one clause — "
-        "separate sentences leave both membership arms above green")
+    # ⛔ THE ADJACENCY IS DELIBERATELY NOT PINNED — recorded here, which is what the review of
+    # the forward merge (#11519) asked for as the alternative to restoring it. Three forms were
+    # measured, and each one that binds the mention to the cite in ONE assertion is a
+    # false-BLOCK generator: side1's literal redded on a em-dash reword of the same clause;
+    # `[^.\n]{0,80}` redded on `` `hasPart`, i.e. `cite` `` and on the reversed order
+    # (`` the allowlist at `cite` includes `hasPart` ``), while still passing a two-CLAUSE
+    # rewrite. `#11546` (de1e2c9b2) removed exactly this needle class by name — *"needles whose
+    # claim is a number or a token and whose tail was prose"*. main's two membership tests above
+    # are that decision, this file follows it, and the claim they cannot express (mention and
+    # cite about the same line) is left to a reader rather than to a predicate that misfires in
+    # three of the four rewrites measured.
     # The A1 proof command must match BOTH shapes its sentence covers, and must stay on ONE line WITH
     # its pathspec. Two measured ways to pin the COMPLEMENT instead: a dot-ANCHORED `'\.(verb)\('`
     # exits 1 on an unqualified `return create_operator(payload)`, and a `[^[:alnum:]_.]` class
@@ -11305,22 +11304,16 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         # things a wording cannot dodge: the LIVE number never appears in these regions at all, and
         # every `:12929` there carries the base it was true at within 60 characters — the same
         # idiom the neighbouring `:12779` arm already uses for its own number.
-        # ⛔ NOT a single-number deny-list (#11519 review, P3): rejecting only `:12944` let every
-        # OTHER HEAD-relative number through — measured GREEN on `:12941`, `:12950` and `:13011`,
-        # each `(HEAD)`-qualified and three-to-several-hundred lines off the live one, which reads
-        # exactly like rot to a reader. And a bare `":12944" not in` ALSO false-blocked a
-        # sha-qualified live read (`:12944` at `b3efd0153`), which the record's policy permits —
-        # what it forbids is a `HEAD`-RELATIVE number. So the rule is the qualifier, not the
-        # number: any `:NNNN` in these regions whose next 40 characters name HEAD is the retired
-        # shape. The policy sentence that SAYS `never to \`HEAD\`` is not matched — no `:NNNN`
-        # precedes it (measured: 0 hits in both regions on the current record).
-        _head_relative = re.findall(
-            r":\d{3,5}[^.\n]{0,40}(?:HEAD|this tree|the tree)", _region, re.IGNORECASE)
-        assert _head_relative == [], (
-            f"{_label} carries a HEAD-relative number ({_head_relative}) — the record cites this "
-            "symbol at the base it was true at (`:12929` at `a1dff7cec8`), never relative to a "
-            "moving tree, which is the shape `#11555` retired: true only until the next insertion "
-            "above it")
+        # ⛔ THE LIVE-NUMBER ARM IS DELIBERATELY ABSENT — see the residual below. Three forms were
+        # measured and every one of them was wrong in a direction: a single-number deny-list
+        # (`":12944" not in`) under-blocked every other HEAD-relative number and over-blocked a
+        # sha-qualified read; a qualifier regex under-blocked a BARE `:12944` and over-blocked
+        # ordinary prose (`HEAD` unanchored matches "ahead"/"header", and "in this tree" read as a
+        # citation); a finite number list is a word list by another name. What DOES hold, and is
+        # asserted: the cited number itself must carry its base (the loop below), so re-staling
+        # `:12929` reds. What does NOT hold is a general "no live number here" rule — that needs a
+        # rule the record's own base-qualified and file-qualified cites can both satisfy, which is
+        # a separate piece of work on this record's citation grammar.
         for _m in re.finditer(r":12929", _region):
             _near = _region[max(0, _m.start() - 60):_m.end() + 60]
             assert "a1dff7cec8" in _near, (
@@ -11348,9 +11341,9 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         and any(isinstance(t, ast.Name) and t.id == "vet_enabled"
                 for t in (node.targets if isinstance(node, ast.Assign) else [node.target]))]
     assert len(_vet_lines) == 1, (
-        f"`vet_enabled = (` must appear exactly once in extractor_v2.py; found "
-        f"{_vet_lines} — the record cites this symbol, so a second assignment or a rename is "
-        "what makes its citation ambiguous")
+        f"`vet_enabled` must be DEFINED exactly once in extractor_v2.py (an `Assign`/`AnnAssign` "
+        f"to the bare name) — found at {_vet_lines}. The record cites this symbol, so a second "
+        "definition or a rename is what makes its citation ambiguous")
     # The INVARIANT is that every `:12779` names the base it was true at — never that there are
     # two of them. (A `count(...) >= 2` bound refused a legitimate consolidation to one
     # base-qualified note, and fired before the pin that names the real defect.)
