@@ -18,11 +18,11 @@ the corrected reading:
    ``TortoiseSDK.capture_session`` → ``sdk._extract_session_v2``
    (``sdk.py:16360``, called at ``:15397``) →
    ``extractor_v2.extract_session_v2`` (``extractor_v2.py:12829``) calls
-   ``_edus_from_conversation`` (S0, ``:12947``), ``run_s1`` (S1, ``:12900``),
-   ``run_s2`` (S2.1, ``:12924``), ``_run_vet_pass`` (S2.2, ``:15392``),
-   ``kind_classifier.classify_items`` (S2.3, ``:12983``),
-   ``_apply_classify_kinds`` (S2.3, ``:12984``), ``search_graph`` (S3,
-   ``:13000``), ``run_s4`` (the gap filler, ``:13021``), and ``execute_embed``
+   ``_edus_from_conversation`` (S0, ``:12947``), ``run_s1`` (S1, ``:1485``),
+   ``run_s2`` (S2.1, ``:15341``), ``_run_vet_pass`` (S2.2, ``:15392``),
+   ``kind_classifier.classify_items`` (S2.3, ``:13066``),
+   ``_apply_classify_kinds`` (S2.3, ``:13067``), ``search_graph`` (S3,
+   ``:13083``), ``run_s4`` (the gap filler, ``:13104``), and ``execute_embed``
    (S5+S6, ``:13320``). ONE cite per symbol, on the line that symbol is on:
    S2.3 makes TWO calls two lines apart, and the single ``:NNNN`` a
    ``a``/``b`` pair cite could carry is only ever checkable for one of them —
