@@ -494,27 +494,24 @@ measured_at:
 # this paragraph cited `347cf03cb8` and declared `704fd60ee` absent. The checkout that
 # produced that cut was a SHALLOW clone: `git rev-parse --is-shallow-repository` -> true
 # THERE, and `347cf03cb8` is that clone's TRUNCATION BOUNDARY, not a root.
-# ⛔ THE SCOPE MATTERS, AND TWO EARLIER CUTS OF THIS SENTENCE BOTH GOT IT WRONG — in
-# opposite directions. The first said "this checkout is a SHALLOW clone"; a second replaced
-# that with "on the hub checkout this record is maintained in, that SAME command prints
-# `false`", offered so a reader could check it. MEASURED 2026-11-08, BOTH checkouts print
-# `true`:
-#   $ git -C /home/cmux/tortoise rev-parse --is-shallow-repository   -> true
-#   $ git rev-parse --is-shallow-repository      # this lane's worktree -> true
-#   $ wc -l < /home/cmux/tortoise/.git/shallow                       -> 2
-# so the FIRST cut was the accurate one and the "correction" was the wrong claim: a reader
-# told to run the diagnostic to check the paragraph gets `true`, i.e. the paragraph DOES
-# describe the tree in front of them. Stated plainly rather than scoped to an unnamed box,
-# which is what let the wrong half survive a round of review. A `git merge-base
-# --is-ancestor` in a truncated history answers "not reachable HERE", and that was read as
-# "does not exist":
-#   $ git merge-base --is-ancestor 704fd60ee origin/main   -> non-zero THERE
-#       (on the clone that produced the bad cut — its truncation boundary sat past
-#        `704fd60ee`. ⚠️ `is-shallow-repository` ALONE DOES NOT DECIDE THIS: measured
-#        2026-11-08, both checkouts this record is written from are shallow AND hold
-#        the commit, so the same command returns 0 there — boundaries
-#        `68ebaac634` in this worktree, `3dfd586d65`/`52fa6eb145` on the hub. Read the
-#        answer WITH the boundary line; a true `true` is not by itself the `non-zero`.)
+# ⛔ THE SCOPE MATTERS, AND EVERY EARLIER CUT OF THIS PARAGRAPH GOT IT WRONG THE SAME
+# WAY: each asserted what a COMMAND prints, as though every box holding a clone of this
+# repository were in the same state. Shallow-ness is a property of ONE CLONE, and this
+# record is maintained from more than one, so the "correction" travelled and flipped
+# truth value without the defect it describes ever changing. Measured 2026-11-08, same
+# commands, two boxes, OPPOSITE answers:
+#   $ git -C /home/cmux/tortoise rev-parse --is-shallow-repository  -> false
+#   $ ls /home/cmux/tortoise/.git/shallow                           -> ENOENT
+#   $ git merge-base --is-ancestor 704fd60ee origin/main            -> rc 0 (is an ancestor)
+#   # …and on the cell lane that re-measured it: both checkouts -> `true`, shallow files of
+#   # 2 / 3 / 1 lines, boundaries `68ebaac634` / `3dfd586d65` / `52fa6eb145`.
+# So the sentence states the DEFECT and the clone PROPERTY, never a verdict about the tree
+# in front of you: the cut that cited `347cf03cb8` and called `704fd60ee` absent was made
+# from a SHALLOW clone whose truncation boundary sat past that commit. In such a history
+# `git merge-base --is-ancestor 704fd60ee origin/main` answers "not reachable HERE", and
+# that was read as "does not exist" — which is why `is-shallow-repository` ALONE does not
+# decide it: it says nothing about WHERE the boundary sits. Read the answer WITH the
+# boundary line, and do not treat either `true` or `false` as the finding.
 #   $ gh api repos/daniel-ospina/tortoise/compare/704fd60ee...5938deaf
 #   {"ahead_by":496,"behind_by":0}                        # and of the deployed tree
 # ⛔ NO `...main` COMPARE HERE EITHER (review finding, this pass). An earlier cut
