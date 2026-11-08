@@ -1103,6 +1103,19 @@ def test_the_probe_pins_the_lane_and_reads_it_back():
             f"measures (or can, if its sibling switch moves), and is not "
             f"pinned: an inherited value would be measured under a door whose "
             f"log claims it was pinned (#10983 review round 2)")
+    # ⛔ A PINNED-ON member, and it must stay PINNED rather than move into
+    # ``acknowledged_not_a_measurement_seam`` below: #10360's verbatim-value
+    # refusal is read PER POINT at the emit site and WITHHOLDS a value, so an
+    # ambient ``=0`` writes what the shipped default refuses — the measured
+    # population moves under the door. Its default is ON, so the non-neutral
+    # state is ``0`` and the pin target is the shipped default (same shape as
+    # ``TORTOISE_S4_DELTA``). Pinning only makes the read CLASSIFIED; declaring
+    # it a non-seam would state something false about it.
+    assert ("TORTOISE_STATE_VALUE_VERBATIM", "1") in probe.DOOR_PINNED_ON, (
+        "TORTOISE_STATE_VALUE_VERBATIM (#10360) is DEFAULT-ON and read per "
+        "point at the emit site: =0 disarms the rewritten-value refusal, so "
+        "the run writes a value the shipped default withholds. It must be "
+        "pinned to its shipped default, not merely acknowledged")
 
 
 class _Unpoppable(dict):
