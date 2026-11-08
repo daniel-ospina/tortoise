@@ -4604,16 +4604,15 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # ⛔ AND A THIRD DELTA, from the `origin/main` carry (#11331): `#11298`'s
         # `door` run-block key registered in `_NON_MEASUREMENT_RUN_KEYS` put 15
         # lines above the accounting block and moved `_step_accounting` again.
-        # ⛔ AND A FOURTH: `ed3d8761f` moved the def once more. Those four
-        # readings are HISTORY and therefore immutable — each is `git show
-        # <sha>:tools/capstone_verdict_check.py | grep -n '^def _step_accounting('`
-        # (`1390485c1` -> 690, `ed3d8761f` -> 699), a reading of a commit that
-        # already happened.
-        # ⛔ THE LIVE NUMERAL, by contrast, is deliberately NOT restated here.
-        # The row below asserts it; this prose used to copy the CURRENT value and
-        # went stale the moment a commit landed above the block — which is why
-        # there are now four deltas and not three. Read the live value from the
-        # `_step_accounting` row, or `grep -n '^def _step_accounting('
+        # ⛔ AND A FOURTH: `ed3d8761f` moved the def once more. The historical
+        # readings in this block are re-verified by
+        # `git show <sha>:tools/capstone_verdict_check.py | grep -n '^def _step_accounting('`
+        # (`1390485c1` -> 690, `ed3d8761f` -> 699): they read commits that already
+        # happened, so they cannot rot.
+        # ⛔ THE LIVE VALUE IS NOT MAINTAINED IN THIS PROSE — even where a
+        # historical reading happens to equal it, as `ed3d8761f`'s does today.
+        # It went stale four times while it lived here. The row below asserts it;
+        # read it from there, or `grep -n '^def _step_accounting('
         # tools/capstone_verdict_check.py`.
         # The comment block above the tuple is where that reasoning has to live,
         # so the shift cannot be avoided by shortening it — a line count above a
