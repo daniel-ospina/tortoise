@@ -1592,7 +1592,18 @@ def test_a_glob_whose_matches_are_all_untracked_is_refused(monkeypatch):
 
 
 def test_a_cd_that_would_leave_the_tree_is_refused(tmp_path):
-    """Honouring `cd` must not let a record walk the check out of the checkout."""
+    """Honouring `cd` must not let a record walk the check out of the checkout.
+
+    ⛔ CORRECTED ENFORCEMENT POINT (fifth review cycle): this record is still
+    refused, but no longer by the `cd` arm. `cd ../../..` RESOLVES and is a
+    directory, so the shell's own precondition for `cd` holds and the segment is
+    admitted; what refuses the record is the ARTIFACT rule, because `tests/x.py`
+    no longer resolves inside the tree from the moved `cwd`. That is the right
+    reason and it is strictly stronger: the tree rule is enforced on the artifact
+    that is actually cited, rather than on every `cd` including a trailing one that
+    no later segment depends on. Asserted on the message so a regression cannot
+    quietly refuse it for an unrelated reason.
+    """
     proc = _run_cli(
         tmp_path,
         _ledger(
@@ -1605,7 +1616,7 @@ def test_a_cd_that_would_leave_the_tree_is_refused(tmp_path):
         ),
     )
     assert proc.returncode == cl.EXIT_INVALID, proc.stdout + proc.stderr
-    assert "does not name a directory inside this tree" in proc.stderr, proc.stderr
+    assert "names no artifact of this tree" in proc.stderr, proc.stderr
 
 
 def test_a_cd_that_cannot_succeed_is_refused_not_silently_ignored(tmp_path):
@@ -1872,6 +1883,69 @@ def test_a_tilde_in_a_source_wrapper_is_expanded(tmp_path):
         f"`source ~/.bashrc` was REFUSED ({proc.returncode}) with HOME={home} — the "
         f"`~` is not expanded before the join\n{proc.stdout}{proc.stderr}"
     )
+
+
+def test_a_control_builtin_argument_is_graded_not_skipped(tmp_path):
+    """A control builtin's argument has a GRAMMAR, and prose does not match it.
+
+    ⛔ MEASURED prose carriage (fifth review cycle): adding `exit`/`return`/`shift`/
+    `break`/`continue` to `_WRAPPER_VERBS` without an argument branch left their
+    arguments UNREAD — `_wrapper_argument_defect` fell through to `return None` — so
+    `… && exit "I did not run this"` reached `verified` / `uncovered: 0` / exit 0
+    behind every control head. `export`/`unset`/`umask`/`set` refused the same
+    carriage, which is what made the ledger's "the WRAPPER half of that root is
+    closed" sentence false. `man bash` gives each of them one optional integer.
+    """
+    for wrapper in ("exit", "return", "shift", "break", "continue"):
+        command = (
+            "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q && "
+            f'{wrapper} "I did not run this"'
+        )
+        proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, command])]))
+        assert proc.returncode == cl.EXIT_INVALID, (
+            f"{command!r} was ACCEPTED ({proc.returncode}) — a control builtin's "
+            f"argument is prose, not an integer\n{proc.stdout}{proc.stderr}"
+        )
+
+
+def test_a_cd_is_graded_on_the_shell_precondition_not_on_containment(tmp_path):
+    """`cd /tmp` SUCCEEDS, so refusing it asserted a failure that did not happen.
+
+    ⛔ MEASURED false block (fifth review cycle): the arm required the target to be
+    inside the tree, so a trailing `&& cd /tmp` made the whole ledger INVALID and
+    exit 1 printed no report. The verdict also turned on a DASH — `cd -P /tmp` and
+    `cd -` were accepted because the leading `-` skipped grading entirely, while
+    `cd /tmp` was refused. Options are now stripped first and the test is the
+    shell's own: does the target exist and is it a directory?
+
+    ⛔ The anti-bypass is preserved and re-verified: a `cd` that does not resolve is
+    still refused, and a `cd` that escapes the tree cannot rescue a later artifact,
+    because the artifact rule still requires the target INSIDE the tree.
+    """
+    for command in (
+        "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q && cd /tmp",
+        "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q && cd -P /tmp",
+        "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q && cd -L /tmp",
+        "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q && cd tools",
+    ):
+        proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, command])]))
+        assert proc.returncode == cl.EXIT_CLEAN, (
+            f"{command!r} was REFUSED ({proc.returncode}) — a `cd` that resolves did "
+            f"not fail\n{proc.stdout}{proc.stderr}"
+        )
+    # The bypass this arm exists for: a `cd` that CANNOT succeed, and one that
+    # escapes the tree to rescue a later artifact from the tree rule.
+    for command in (
+        "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q && cd I did not run this",
+        "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q "
+        "&& cd /nonexistent-capstone-probe",
+        "cmd:cd /tmp && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
+    ):
+        proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, command])]))
+        assert proc.returncode == cl.EXIT_INVALID, (
+            f"{command!r} was ACCEPTED ({proc.returncode}) — a `cd` that cannot "
+            f"succeed, or one that moves the tree rule out of reach\n{proc.stdout}{proc.stderr}"
+        )
 
 
 def test_a_non_runner_prep_segment_is_a_known_false_block(tmp_path):

@@ -376,6 +376,12 @@ _LEADING_ASSIGNMENT: Final = re.compile(
 #: normalised, only the plain `cd X && …` this repo's own recipes use).
 _CD_SEGMENT: Final = re.compile(r"^cd\s+(\S[^;|&]*)$")
 
+#: The operand a shell CONTROL builtin accepts (`man bash`): one optional integer.
+#: `exit 1`, `return 0`, `shift 2`, `break`, `continue 3`. A prose argument
+#: (`exit "I did not run this"`) does not match, which is the point: the control
+#: builtins were added to `_WRAPPER_VERBS` for `|| exit 1`, and without an argument
+#: grammar they admitted the very prose carriage that set exists to refuse.
+_CONTROL_OPERAND: Final = re.compile(r"^[+-]?\d{1,10}$")
 #: A bare NAME — an `export`/`unset` operand that is not an assignment.
 _ENV_NAME: Final = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -402,6 +408,19 @@ def _wrapper_argument_defect(head: str, args: list[str], cwd: Path, root: Path) 
     any text and `… && echo PASS` must stay legal — so it is named as a residual at
     `_DECORATIVE` rather than left for a reader to infer as closed.
     """
+    # ⛔ CONTROL builtins take at most ONE optional integer operand (`man bash`:
+    # `exit [n]`, `return [n]`, `shift [n]`, `break [n]`, `continue [n]`). WITHOUT
+    # this branch they fell through to the `return None` below and their arguments
+    # were NEVER READ, so `… && exit "I did not run this"` reached `verified` /
+    # `uncovered: 0` / exit 0 behind every control head — and the ledger's own "the
+    # WRAPPER half of that root is closed" sentence became false (fifth review
+    # cycle). Measured: `export`/`unset`/`umask`/`set` refused the same carriage;
+    # only the newly-added builtins admitted it.
+    if head in {"exit", "return", "shift", "break", "continue"}:
+        for arg in args:
+            if not _CONTROL_OPERAND.match(arg):
+                return f"{_short(arg)} is not a numeric argument"
+        return None
     if head in {"export", "unset"}:
         for arg in args:
             if arg.startswith("-") or arg == "--":
@@ -757,16 +776,19 @@ _WRAPPER_VERBS: Final[frozenset[str]] = frozenset(
         # "may carry commands and wrappers, not prose" while refusing a COMMAND
         # (third review cycle). Measured false block; `origin/main` accepted all
         # three shapes, and exit 1 hid the entire uncovered list.
-        # These cannot hide a claim: a record whose ONLY segments are wrappers is
-        # still refused as "names no command" (pinned by
-        # `test_a_record_of_only_wrappers_still_names_no_command`).
+        # ⛔ Their ARGUMENTS are graded in `_wrapper_argument_defect` — admitting a
+        # head without reading its arguments is the exact bypass that function
+        # exists to close, and doing it here let `… && exit "I did not run this"`
+        # reach `verified` / exit 0 (fifth review cycle).
+        # `pushd`/`popd` are DELIBERATELY absent: their operand is a DIRECTORY, and
+        # grading it on existence is box-dependent (the same cost `source` discloses),
+        # while leaving it ungraded re-opens that prose carriage. A record using them
+        # is refused as prose — the same known-open false block as `mkdir` (#11520).
         "exit",
         "return",
         "shift",
         "break",
         "continue",
-        "pushd",
-        "popd",
     }
 )
 
@@ -1429,33 +1451,45 @@ def _command_body(raw: str, base: Path, root: Path) -> tuple[str, Path, str]:
         cd = _CD_SEGMENT.match(body)
         if cd:
             target = cd.group(1).strip().strip("'\"")
+            # ⛔ STRIP THE OPTIONS FIRST, so every spelling of one destination grades
+            # identically. `cd -P /tmp` and `cd /tmp` both mean /tmp, but the leading
+            # `-` made the flag spelling skip grading ENTIRELY while the bare one was
+            # refused — the verdict turned on a dash (fifth review cycle). `--` ends
+            # option parsing.
+            target = re.sub(r"^(?:-[PLe@]+|--)\s*", "", target).strip()
             if target and not target.startswith("-"):
                 try:
                     moved = (root / target).resolve()
                 except (OSError, ValueError):
                     moved = None
-                if moved is None or not moved.is_relative_to(root) or not moved.is_dir():
-                    # ⛔ `is_dir()` is load-bearing: `(root / target).resolve()` does NOT
-                    # fail on a name that does not exist — it returns the joined path,
-                    # which is still relative to `root`, so a containment test alone
-                    # accepted `cd I did not run this` and graded the real command
-                    # afterwards.
-                    # ⛔ NOT silently ignored. In the shell a FAILING `cd`
-                    # short-circuits the `&&`, so no later segment can have run —
-                    # and this arm used to `continue` regardless, leaving `cwd`
-                    # unchanged and grading the real command anyway. Measured,
-                    # `cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py
-                    # -q && cd I did not run this` was ACCEPTED while the naked
-                    # `… && I did not run this` was REFUSED: the same disclaimer,
-                    # admitted by prefixing it with a `cd` that cannot succeed.
-                    # A `cd` that escapes the tree is refused for the second
-                    # reason: it would move the grading root outside it.
+                # ⛔ THE PRECONDITION IS THE SHELL'S, NOT CONTAINMENT. `cd X` fails iff
+                # X does not exist or is not a directory; when it SUCCEEDS the later
+                # segments ran, so refusing a resolvable `cd /tmp` asserted a "failing
+                # `cd`" that did not fail and threw away the whole uncovered list
+                # (fifth review cycle; `origin/main` accepted the record). Containment
+                # needs no test here: a moved `cwd` outside the tree is still
+                # overridden by the ARTIFACT rule, which requires every named target to
+                # live inside the tree (`_names_artifact`), so `cd /tmp && pytest
+                # tests/x` is refused for naming nothing — the right reason.
+                # ⛔ `is_dir()` is load-bearing: `(root / target).resolve()` does NOT
+                # fail on a name that does not exist — it returns the joined path — so
+                # an existence test alone accepted `cd I did not run this` and graded
+                # the real command afterwards.
+                # ⛔ NOT silently ignored. In the shell a FAILING `cd` short-circuits the
+                # `&&`, so no later segment can have run — and this arm used to
+                # `continue` regardless, leaving `cwd` unchanged and grading the real
+                # command anyway. Measured, `cmd:uv run pytest
+                # tests/test_9664_capstone_verdict_ledger.py -q && cd I did not run
+                # this` was ACCEPTED while the naked `… && I did not run this` was
+                # REFUSED: the same disclaimer, admitted by prefixing it with a `cd`
+                # that cannot succeed.
+                if moved is None or not moved.is_dir():
                     return (
                         "",
                         base,
-                        f"the `cd` segment {segment!r} does not name a directory inside "
-                        "this tree, and a failing `cd` short-circuits the `&&` — no "
-                        "later segment of this record can have run",
+                        f"the `cd` segment {segment!r} does not name a directory, and a "
+                        "failing `cd` short-circuits the `&&` — no later segment of "
+                        "this record can have run",
                     )
                 cwd = moved
             continue

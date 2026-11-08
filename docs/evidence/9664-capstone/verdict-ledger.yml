@@ -73,9 +73,15 @@
 #         decorative reader is admitted without grading one argument, so
 #         `… && echo "I did not run this"` and `… && printf "%s" "NOT RUN"` yield a
 #         `verified` row and `uncovered: 0`. The WRAPPER half of that root is
-#         closed (a wrapper's argument IS graded, so
-#         `export "I did not run this" && …` is refused); the DECORATIVE half is
-#         open because requiring shell-shaped arguments from
+#         closed ONLY where the wrapper has a grammar the shell enforces: `export`,
+#         `unset`, `set`, `umask`, `source`/`.` and the control builtins
+#         `exit`/`return`/`shift`/`break`/`continue` each grade their argument, so
+#         `export "I did not run this" && …` and `… && exit "I did not run this"`
+#         are both refused. `pushd`/`popd` are deliberately NOT wrappers, because
+#         their operand is a directory and grading it on existence is
+#         box-dependent; a record using them is refused as prose, on the same
+#         known-open false block as `mkdir` (root 5). The DECORATIVE half is open
+#         because requiring shell-shaped arguments from
 #         `echo`/`printf`/… must first be measured against the accepted
 #         `… && echo PASS`. Four carriages, all tracked in #11520 and all pinned —
 #         the list is enumerated because an unlisted carriage reads as closed;
@@ -109,10 +115,17 @@
 #         and exit 1 prints no report, so it hid the whole uncovered list;
 #       - shell WRAPPERS (`cd`, `NAME=value`, `set`/`export`/`source`/`.`, `umask`,
 #         `unset`, and the control builtins `exit`/`return`/`shift`/`break`/
-#         `continue`/`pushd`/`popd`) and DECORATIVE segments (a printer, a reader, or
-#         a sink: `echo`, `tail`, `cat`, `grep`, `tee`, `logger`) are allowed and
-#         cite nothing. A record whose ONLY segments are wrappers is still refused
-#         as "names no command", so a wrapper can never be a one-word verdict.
+#         `continue`) and DECORATIVE segments (a printer, a reader, or a sink:
+#         `echo`, `tail`, `cat`, `grep`, `tee`, `logger`) are allowed and cite
+#         nothing. A record whose ONLY segments are wrappers is still refused as
+#         "names no command", so a wrapper can never be a one-word verdict.
+#       - a `cd` segment is graded on the SHELL's precondition, not on containment:
+#         `cd X` fails iff X does not exist or is not a directory, and a failing `cd`
+#         short-circuits the `&&` so no later segment ran. A `cd` that RESOLVES is
+#         therefore admitted even outside the tree — the artifact rule still refuses
+#         anything a moved `cwd` could not resolve INSIDE it, so `cd /tmp && uv run
+#         pytest tests/x` names nothing. The `cd` options (`-P`, `-L`, `--`) are
+#         stripped first so every spelling of one destination grades identically.
 #   * `criteria_expected` (top level, REQUIRED) pins the denominator, so dropping a
 #     row without moving the count is a refusal.
 #   * YAML merge keys (`<<`) are refused: every row states its own verdict, and a
