@@ -594,21 +594,38 @@ def test_edge_function_hook_path_is_gone():
     # `crypto.subtle` (3 sites, for api-key and lookup hashing), so it cannot be
     # pinned by absence. The protocol header names above are the backstop for
     # that class, since a webhook verifier must read them from the request.
-    for banned in (
-        "req.headers.forEach",
-        "req.clone",
-        "Object.fromEntries(req.headers)",
-        "webhook-id",
-        "webhook-timestamp",
-        "webhook-signature",
-        "createHmac",
-    ):
-        assert banned not in src, (
-            f"the deleted hook path's fingerprint `{banned}` must not appear "
-            "ANYWHERE in the function — not just outside authenticateCaller's "
-            "body, because a helper defined elsewhere in the file reaches the "
-            "same request and the slice-based pins above cannot see it"
-        )
+    # ⛔ AND OVER THE FUNCTION'S LOCAL IMPORT CLOSURE, not just this file, because
+    # a restore can step outside BOTH the slice and the file. MEASURED (this PR's
+    # review): putting the verifier in `../_shared/<new>.ts`, importing it and
+    # calling `hookIdentity(req)` from the handler left ALL 19 static tests green
+    # — `index.ts` then carries no banned token at all, and the helper enumerates
+    # headers in the other file. The runtime harness only trips it incidentally
+    # (its import-rewriting cannot resolve the new module, so it dies with
+    # ERR_MODULE_NOT_FOUND rather than failing an assertion), which is not a gate.
+    # So the same fingerprint scan runs over `index.ts` AND every local
+    # `../_shared/*.ts` module it imports — the code this function actually runs.
+    closure = [("index.ts", src)]
+    for rel in re.findall(r'from "(\.\./_shared/[^"]+)"', src):
+        dep = (EDGE_FN.parent / rel).resolve()
+        assert dep.is_file(), f"index.ts imports a missing module: {rel}"
+        closure.append((rel, dep.read_text()))
+    for rel, text in closure:
+        for banned in (
+            "req.headers.forEach",
+            "req.clone",
+            "Object.fromEntries(req.headers)",
+            "webhook-id",
+            "webhook-timestamp",
+            "webhook-signature",
+            "createHmac",
+        ):
+            assert banned not in text, (
+                f"the deleted hook path's fingerprint `{banned}` must not appear "
+                f"ANYWHERE in the code this function runs (`{rel}`) — not just "
+                "outside authenticateCaller's body, and not just outside "
+                "index.ts, because a helper in either place reaches the same "
+                "request and the slice-based pins above cannot see it"
+            )
     assert 'req.headers.get("authorization")' in auth_body, (
         "the one header authenticateCaller reads must be Authorization"
     )
