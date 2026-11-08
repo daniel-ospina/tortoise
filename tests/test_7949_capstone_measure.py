@@ -10830,11 +10830,32 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     #                                     stayed green on this one)
     #   `# call create_operator(p)`     -> NOT a call; only the mention arm fires
     #   `_X = "create_operator(p)"`     -> NOT a call; only the mention arm fires
-    assert re.findall(
-        r"git grep -n 'create_operator' -- tortoise/extractor_v2\.py\s+# (.*)",
-        text) == [":9006 :9024 :9031 :9411"], (
-        "the record's create_operator reproduction must quote the LIVE line numbers — "
-        "re-derive them with `git grep -n 'create_operator' -- tortoise/extractor_v2.py`")
+    # The LIVE run is the LEADING `:NNNN` group, not the whole comment: #11519's landing
+    # appends the PROVENANCE of the four numbers (`(`62248db88` printed :8938 …; #11449,
+    # moved all four +68)`), which is a claim about two other bases and must not be read as
+    # live. Pinning the whole tail pinned one PR's wording instead of the invariant, and
+    # redded on a re-worded history while every live number was correct.
+    _quote = re.findall(
+        r"git grep -n 'create_operator' -- tortoise/extractor_v2\.py\s+# (.*)", text)
+    assert len(_quote) == 1, (
+        "the record must carry EXACTLY ONE `git grep -n 'create_operator' -- "
+        f"tortoise/extractor_v2.py` reproduction (found {len(_quote)}) — a second one states "
+        "numbers no arm below re-derives")
+    _live_run = re.match(r"((?::\d+[ ]*)+)", _quote[0])
+    assert _live_run is not None, (
+        "the create_operator reproduction must open with the LIVE line numbers it quotes — "
+        f"it reads {_quote[0][:70]!r}; re-derive them with `git grep -n 'create_operator' -- "
+        "tortoise/extractor_v2.py`")
+    assert _live_run.group(1).split() == [
+        f":{i}" for i, line in enumerate(ext, 1) if "create_operator" in line], (
+        "the record's create_operator reproduction must quote the LIVE line numbers, in the "
+        f"tree's order ({_live_run.group(1).split()}) — re-derive them with "
+        "`git grep -n 'create_operator' -- tortoise/extractor_v2.py`")
+    _trailing = _quote[0][_live_run.end():].strip()
+    assert not _trailing or re.match(r"^\(`[0-9a-f]{7,}` printed", _trailing), (
+        "any number the create_operator quote carries BESIDES the live run must be introduced "
+        "by a BASE-QUALIFIED parenthetical (`(\u0060<sha>\u0060 printed …)`) — a bare second "
+        f"run reads as live while it is history (got {_trailing[:70]!r})")
     live_mentions = [i for i, line in enumerate(ext, 1) if "create_operator" in line]
     assert live_mentions == [9006, 9024, 9031, 9411], (
         f"extractor_v2.py's create_operator mentions are at {live_mentions}, not the "
@@ -10942,10 +10963,18 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # historical qualifier: dropping the parenthetical wrote `:12929` correctly and was still
     # told it had quoted the WRONG live line — a message whose repair would INTRODUCE the
     # re-stale (measured).
-    assert "`:12929` here" in text, (
+    # ⚠️ Checked STRUCTURALLY (which region the number sits in), never by the wording around
+    # it: the landed text says "at HEAD", the pre-#11519 wording said "here", and pinning
+    # either phrase reds on the other while the invariant holds — a message whose repair
+    # would be to re-word a CORRECT number (the failure mode the A2 parenthetical pin hit).
+    _block_at = text.find("# §0/§2 — the sha-pinned cites")
+    assert _block_at > 0, (
+        "the §0/§2 sha-pinned reproduction block is GONE — it is where the record's "
+        "sha-pinned numbers are derived")
+    assert ":12929" in text[:_block_at], (
         "the §1 prose must quote the LIVE vet_enabled line")
-    assert "prints :12929 here" in text, (
-        "the §5 reproduction note must quote the LIVE vet_enabled line")
+    assert ":12929" in text[_block_at:], (
+        "the §5 reproduction block must quote the LIVE vet_enabled line")
     assert ext[12929 - 1].strip().startswith("vet_enabled = ("), (
         f"extractor_v2.py:12929 reads {ext[12929 - 1].strip()[:80]!r}, not the "
         "vet_enabled computation the record cites")
@@ -10959,10 +10988,10 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         assert "62248db88" in _near, (
             f"`:12779` at offset {_m.start()} does not name the base it was true at — "
             "an unqualified occurrence is a re-stale presented as live")
-    assert "`:12779` was the number at `62248db88`" in text and (
-        "`:12779` at `62248db88`" in text), (
-        "both historical mentions must name the base they were true at — the record's own "
-        "rule is that a number is only as good as the base it was taken at")
+    # ⛔ No phrase pin here on purpose: the loop above is the claim (EVERY occurrence names
+    # its base). Pinning "both" as two exact sentences redded on a re-worded pair that kept
+    # both base-qualified — and this paragraph's own note says the invariant is never the
+    # count.
 
     # A2: the capture path that writes the `references` edge — the record names it
     # THREE times: the prose cite, the amendment parenthetical that states BOTH
