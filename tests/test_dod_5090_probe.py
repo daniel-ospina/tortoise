@@ -643,7 +643,11 @@ def test_an_UNREADABLE_register_is_UNMEASURED_not_a_green_row_two(monkeypatch):
     unresolved writer, so it could not see that the row printed BOTH `…none is blamed on the
     product` AND `unresolved writers … nothing in the product says which label they store on` about
     the same writers — a self-contradicting note that asserts a product defect which does not exist.
-    The fixture now carries an `ungated` writer, which is the shape that produced the second note.
+    The fixture now carries an outside-gate writer whose own label derivation failed — kind
+    `unresolved_write`, label `UNKNOWN` (`_unresolved_writer`) — which is the shape that produced
+    the second note. ⛔ Name it precisely (round-3 review): it is NOT the `ungated` kind, and a
+    rebuild that swapped in `kind: "ungated"` with a RESOLVED label would put the writer outside
+    `unknown` altogether, so the note under test would never print and this pin would go vacuous.
     """
     def _unreadable():
         raise RuntimeError("register exploded")

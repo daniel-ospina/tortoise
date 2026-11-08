@@ -1165,6 +1165,55 @@ def test_a_no_live_vector_declaration_executes_no_store_clause() -> None:
     )
 
 
+def test_the_direct_store_pattern_sees_a_store_and_not_a_wipe() -> None:
+    r"""The pattern above needs a falsifier in the POSITIVE direction (round-3 review, P2).
+
+    ⛔ Measured by the reviewer: setting `STORE_CLAUSE_PATTERNS = ()` left
+    `test_a_no_live_vector_declaration_executes_no_store_clause` GREEN — so the guard that closes
+    the direct-`SET` hole could be deleted by any later "cleanup" with nothing red, which is the
+    false pass it exists to prevent. Absence of offenders is not evidence the pattern works; the
+    pattern has to be shown to MATCH. Both directions are pinned here, plus the link to discovery.
+
+    ⛔ Stated residual (do not overclaim this pin): it covers the DOTTED spelling (`n.embedding`),
+    which is the one the `NO_LIVE_VECTOR` declarations are checked against. `_EMBED_WRITE`'s bare
+    alternate (`(?<![\w.])embedding\s*=`, a keyword argument or a local assignment) is NOT covered
+    — such a writer could still enter the population and pass declared `no-live-vector`. The
+    dict-key carriers (`record["embedding"] = …`) are out of scope by design. And the lookahead is
+    case-SENSITIVE, so `SET n.embedding = null` matches — a false RED, never a false pass.
+    """
+    assert STORE_CLAUSE_PATTERNS, (
+        "the direct-store pattern is gone — a `no-live-vector` writer storing only via "
+        "`SET n.embedding = $e` would pass this suite"
+    )
+    def hits(text: str) -> bool:
+        return any(p.search(text) for p in STORE_CLAUSE_PATTERNS)
+
+    # MUST MATCH — the shapes that are a real store.
+    assert hits("SET n.embedding = $e"), "a direct labelled store must be seen"
+    assert hits('SET n.embedding="$x"'), "a quoted store must be seen"
+    assert hits("SET n.embedding=$e"), "a store with no inner spaces must be seen"
+    # MUST NOT MATCH — the wipe, which is not a store. The whitespace sits INSIDE the lookahead on
+    # purpose: `\s*(?!NULL)` backtracks `\s*` to zero characters and then tests the space, so it
+    # matches the wipe too (measured — it flagged `_prewipe_synthetic_write_scope`).
+    assert not hits("SET n.embedding = NULL"), "the wipe must not read as a store"
+    assert not hits("SET n.embedding=NULL"), "the wipe must not read as a store"
+    # …and the two must not DRIFT on a STORE: whatever `_EMBED_WRITE` — the instrument's OWN
+    # discovery clause — calls a write, this pin must also see, or a writer can enter the
+    # population through a clause the pin cannot read. The ONE deliberate divergence is the WIPE:
+    # `_EMBED_WRITE` matches `= NULL` as well (it keys on the assignment, not the value), and this
+    # pin must NOT — so the divergence is asserted rather than assumed.
+    for sample in ("SET n.embedding = $e", "SET n.embedding=$e"):
+        assert probe._EMBED_WRITE.search(sample), sample
+        assert hits(sample), (
+            f"discovery sees a store in {sample!r} but the no-live-vector pin does not — "
+            "a writer can enter the population through a clause this pin cannot read"
+        )
+    assert probe._EMBED_WRITE.search("SET n.embedding = NULL"), (
+        "the wipe is expected to match discovery; if that changed, re-read this divergence"
+    )
+    assert not hits("SET n.embedding = NULL"), "the pin must diverge from discovery on the wipe"
+
+
 def test_the_DECLARATIONS_tuple_is_what_the_live_map_was_built_from():
     """The frozen map is `_DECLARATIONS`, loaded once — not re-derived at lookup time."""
     from_declarations = register.load(register._DECLARATIONS)

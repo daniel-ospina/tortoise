@@ -2109,11 +2109,16 @@ def score_path_bullet() -> Row:
             "not answer WHERE the vector lands): "
             + ", ".join(f"{w}: {why}" for w, why in sorted(resolved["violations"].items()))
         )
-    # ⛔ `#11492` round-2 review: these two notes are gated on the register being READABLE, one
-    # layer up (`unresolved_undeclared` / `unexplained` are emptied when `resolved["error"]` is
-    # set), so an unreadable register cannot print "nothing in the product says which label they
-    # store on" in the same cell that says it blames nobody. The UNMEASURED note above is the
-    # whole of what an unreadable register can say — the blame belongs to the instrument.
+    # ⛔ `#11492` round-2/round-3 review. The two note populations have DIFFERENT subjects and are
+    # gated DIFFERENTLY, one layer up — do not "restore" them to a shared rule:
+    #   * `unresolved_undeclared` is about writers only the REGISTER could have declared, which is
+    #     unknowable when the register cannot be read → it is EMPTIED on `resolved["error"]`, so an
+    #     unreadable register cannot print "nothing in the product says which label they store on"
+    #     in the same cell that says it blames nobody. The blame belongs to the instrument.
+    #   * `unexplained` is about a writer whose label came from its OWN Cypher (`gated`, label
+    #     `UNKNOWN…`/`UNKNOWN(two labels: …)`) — the register was never consulted for it, so an
+    #     unreadable register does not excuse dropping it → it is subtracted BY KIND, never emptied,
+    #     or the row holds `PARTIAL` while naming nobody (the defect round 1 fixed).
     if unresolved_undeclared:
         notes.append(
             "unresolved writers (hold this row at PARTIAL — nothing in the product says which "
