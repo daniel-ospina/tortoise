@@ -840,10 +840,14 @@ def test_the_guard_reads_its_population_through_the_selector(monkeypatch):
     function rather than the body that consumes it.
 
     So this drives the GUARD end to end with the population replaced: a real file carrying a
-    docker-lane port literal and no exemption must be reported as an offender, and adding
-    the exemption must silence it. Neither outcome is reachable unless the guard reads
-    `_seam_files()` — an inline substring ignores the patch, finds nothing to report, and
-    this test fails.
+    docker-lane port literal and no exemption must be reported as an offender — matched ON
+    THAT FILE, so an unrelated offender cannot satisfy the arm — and restoring its exemption
+    must silence it. The SECOND outcome is the revert detector: an inline substring ignores
+    the patch, so the guard scans the REAL population, reports files the emptied exemption
+    dict no longer covers, and REDS on this unwrapped call (measured: it named six of them).
+    ⛔ The first arm alone cannot see that revert — the stale exemptions make it satisfiable
+    for the wrong reason — so both arms stay, and the `match=` is what keeps the first one
+    about this fixture rather than about whatever else the real tree happens to contain.
     """
     target = ROOT / "tests/test_search_engine_gaps.py"
     rel = target.relative_to(ROOT).as_posix()
@@ -855,7 +859,7 @@ def test_the_guard_reads_its_population_through_the_selector(monkeypatch):
     # DROP the live exemptions first, or the fixture's own entry silences the guard and the
     # offender arm never runs (measured: the first draft of this pin failed exactly that way).
     monkeypatch.setattr(module, "SEAM_FILES_WITH_ALLOWED_LITERALS", {})
-    with pytest.raises(AssertionError, match="must not ALSO hardcode"):
+    with pytest.raises(AssertionError, match=re.escape(rel)):
         test_no_migrated_file_still_hardcodes_a_lane_port()
     monkeypatch.setattr(module, "SEAM_FILES_WITH_ALLOWED_LITERALS", {rel: ["6379"]})
     test_no_migrated_file_still_hardcodes_a_lane_port()
@@ -1156,6 +1160,11 @@ def test_every_test_name_the_docstrings_name_exists():
         if token.type == tokenize.COMMENT:
             referenced.update(
                 re.findall(r"`(test_[A-Za-z0-9_]+)`", token.string))
+    assert referenced, (
+        "no backticked test-name reference was found in this file's docstrings or its `#` "
+        "comments, so this pin measured NOTHING — a matcher that stops matching must red "
+        "here rather than report a clean sweep over an empty set (the row-set guards in "
+        "this file red the same shape for the same reason)")
     dangling = sorted(
         name for name in referenced
         if name not in defined and not (this.parent / f"{name}.py").exists())
