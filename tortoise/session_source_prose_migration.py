@@ -1255,12 +1255,36 @@ def probe_phrase_rejection(phrase: str) -> str | None:
     return None
 
 
+#: The ONE predicate for "this FTS row's url can be classified".
+#:
+#: ⛔ TWO PREDICATES FOR ONE QUESTION IS THE BUG (#11536 review round 3, P1).
+#: :func:`source_fts_probe` kept every ``isinstance(row[0], str)`` row in ``urls``
+#: while :func:`classify_fts_hits` then dropped the falsy ones, so a hit whose
+#: ``node.url`` is the EMPTY STRING was counted in ``hits``, counted as resolved
+#: (``unresolved == 0``) and reached NO bucket — and the fold certified over it with
+#: an answering control. MEASURED on the round-2 tree::
+#:
+#:     probe   hits=1  urls=['']  unresolved=0
+#:     split   all SIX buckets empty (residue, lexicon, stale, foreign, unexplained,
+#:             unread) — NOT a five-key dict: `unexplained` is the stem-proof bucket
+#:     fold    certifies=True  vetoed=None
+#:
+#: It is the same class as the non-string url the round-2 fix closed, one
+#: predicate short: "a hit that nothing examined is not evidence" applies to every
+#: row the classifier cannot address, however it fails to be addressable. Both
+#: sides call THIS, so they cannot drift a third time.
+
+def _addressable(value: Any) -> bool:
+    """True when *value* is a non-empty string the classifier can resolve."""
+    return isinstance(value, str) and bool(value)
+
+
 def source_fts_probe(g, phrase: str, *,
                      timeout_ms: int = CACHE_READ_TIMEOUT_MS) -> dict:
     """Ask the Source FTS index whether *phrase* is still findable.
 
-    Returns ``{"phrase", "hits", "urls", "truncated", "ran", "degraded",
-    "reason"}``. ``hits`` counts the rows the read returned (capped at
+    Returns ``{"phrase", "hits", "urls", "unresolved", "truncated", "ran",
+    "degraded", "reason"}``. ``hits`` counts the rows the read returned (capped at
     :data:`_FTS_PROBE_LIMIT`), so ``0`` reads as "not findable"; ``urls`` is what
     the classifier resolves, and ``truncated`` says the window filled — i.e. the
     count is a FLOOR and residue could be hiding past it.
@@ -1282,16 +1306,19 @@ def source_fts_probe(g, phrase: str, *,
         g, phrase, entity_type=FTS_PROBE_ENTITY_TYPE, limit=_FTS_PROBE_LIMIT,
         timeout_ms=_effective_timeout_ms(g, timeout_ms), leg_trace=trace)
     leg = next((e for e in trace if e.get("leg") == "fts"), {})
-    urls = [row[0] for row in rows or () if row and isinstance(row[0], str)]
+    urls = [row[0] for row in rows or () if row and _addressable(row[0])]
     return {
         "phrase": phrase,
         "hits": len(rows or ()),
         "urls": urls,
-        # ⛔ A HIT WHOSE URL IS NOT A STRING IS NOT ADDRESSABLE AND MUST NOT
-        # DISAPPEAR (#11536 review round 2, P2): `urls` drops it, so it would be
-        # neither residue, lexicon, stale, foreign nor unread — a hit in `hits`
-        # that no bucket sees, and the run would certify around it. The census has
-        # the same first-class bucket for the same reason (`unaddressable`).
+        # ⛔ A HIT WHOSE URL IS NOT ADDRESSABLE IS NOT INVISIBLE (#11536 review
+        # round 2, P2; round 3 closed the second door). `urls` drops it, so it
+        # would be neither residue, lexicon, stale, foreign nor unread — a hit in
+        # `hits` that no bucket sees, and the run would certify around it. The
+        # census has the same first-class bucket for the same reason
+        # (`unaddressable`). The predicate is :func:`_addressable`, the SAME one
+        # `classify_fts_hits` filters on, so a row cannot be "resolved" here and
+        # dropped there — which is exactly how the EMPTY-STRING url certified.
         "unresolved": max(0, len(rows or ()) - len(urls)),
         "truncated": len(rows or ()) >= _FTS_PROBE_LIMIT,
         "ran": bool(leg.get("ran")),
@@ -1429,7 +1456,7 @@ def classify_fts_hits(g, urls, *, phrase: str | None = None,
     supposed to remove. ``unexplained`` is that shape — neither provably the
     prose nor provably a stem collision — and it vetoes.
     """
-    wanted = [u for u in (urls or ()) if isinstance(u, str) and u]
+    wanted = [u for u in (urls or ()) if _addressable(u)]
     out: dict = {"residue": [], "lexicon": [], "stale": [], "foreign": [],
                  "unexplained": [], "unread": []}
     if not wanted:
@@ -1572,7 +1599,14 @@ def probe_fts(g, phrases, *, control: bool = True,
         # the stale-entry candidate, not a benign collision.
         "stem_only": [p["phrase"] for p in measured
                       if p["hits"] and not p["residue"] and not p["stale"]
-                      and not p["unread"] and not p["unexplained"]],
+                      and not p["unread"] and not p["unexplained"]
+                      # ⛔ AND NOT AN UNRESOLVED HIT (#11536 review round 3, P2):
+                      # `stem_only` documents "hits, but every one is a lexicon
+                      # node". A probe whose only hit had no addressable url has an
+                      # EMPTY `lexicon` bucket, so without this term it reported the
+                      # hit as a benign stem collision in `--json` — the same
+                      # "nothing examined" shape the verdict already vetoes.
+                      and not p.get("unresolved")],
         "unexplained": [p["phrase"] for p in measured if p["unexplained"]],
         "unmeasurable": [p["phrase"] for p in measured
                          if not p["ran"] or p["degraded"]],

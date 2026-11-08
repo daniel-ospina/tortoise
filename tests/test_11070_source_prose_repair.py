@@ -2825,6 +2825,72 @@ def test_the_uncorroborated_refusal_names_only_what_the_run_measured(monkeypatch
     assert "BEFORE READING WAS TAKEN" not in err
 
 
+def test_an_EMPTY_STRING_url_is_UNRESOLVED_and_cannot_certify(monkeypatch):
+    """#11536 review round 3, P1 (fail-open): the second door onto the same bucket.
+
+    (1) MEASURED on the round-2 tree: `source_fts_probe` kept every
+        `isinstance(row[0], str)` row in `urls`, so a hit whose `node.url` is the
+        EMPTY STRING made `len(rows) - len(urls)` **0** — resolved — while
+        `classify_fts_hits`'s truthiness filter dropped it. Result: `hits=1`,
+        `unresolved=0`, and five EMPTY buckets; `_merge_probe` then returned
+        `certifies=True, vetoed=None` with an answering control. The run printed
+        "no node still carrying the pre-fix prose is findable" over a hit nothing
+        examined — the same class as the non-string url, one predicate short.
+    (2) ROOT CAUSE: two predicates for one question. The probe asked "is this a
+        str?" and the classifier asked "is this a USABLE str?", so the shapes
+        between them were counted as resolved and then dropped. Both now call
+        :func:`_addressable`, which no longer leaves a gap to rediscover.
+    (3) AND THE SURFACE THE FIX HAS TO CARRY (#11536 review round 3, P2 on this
+        very test): `stem_only` documented "hits, but every one is a lexicon node"
+        and reported this probe as a benign collision while `lexicon` was EMPTY,
+        and the refusal printed `for []` plus two causes neither of which applied.
+        Both are asserted below, so the next lane cannot re-open either.
+    """
+    from tortoise import session_source_prose_migration as m
+
+    _install_fts(monkeypatch, {"zebraquux": [("", 1.0)],
+                              "migration": [("session:s-post", 2.0)]})
+
+    class _ControlGraph(_RecordingGraph):
+        """A lexicon node the CONTROL can read, so the zero is corroborated."""
+
+        def query(self, cypher, params=None, timeout=None):
+            if "STARTS WITH $prefix" in cypher:
+                return _Result([("migration, plan, friday",)])
+            return super().query(cypher, params=params, timeout=timeout)
+
+    report = m.probe_fts(_ControlGraph([(_post_fix_node(),)]), ["zebraquux"],
+                         control=True)
+    assert report["probes"][0]["hits"] == 1
+    assert report["probes"][0]["urls"] == []
+    assert report["unresolved"] == 1, (
+        "an empty-string url was counted as RESOLVED: the probe kept it in `urls` "
+        "and the classifier then dropped it, so the hit reached no bucket")
+    assert report["control"]["ok"] is True, (
+        "the control answers on purpose: a corroborated zero must not certify "
+        "around a hit that nothing examined")
+    assert report["stem_only"] == [], (
+        "`stem_only` documents 'hits, every one a lexicon node' — this probe's "
+        "`lexicon` bucket is EMPTY, so reporting it as a benign stem collision "
+        "contradicts its own documented meaning in `--json`")
+
+    # (3) the refusal must name the cause that applies, not two that do not.
+    folded = _cli._merge_probe({"ran": True, "probes": []}, report)
+    assert folded["certifies"] is False and folded["vetoed"] == "unclassified", (
+        "a hit with an unaddressable url certified the leg")
+    import io
+    from contextlib import redirect_stderr
+    buf = io.StringIO()
+    with redirect_stderr(buf):
+        _cli._report_fts(folded)
+    said = buf.getvalue()
+    assert "could not be ADDRESSED" in said, (
+        "the refusal did not name the unaddressable url as the cause: " + said)
+    assert "COULD NOT BE CLASSIFIED for []" not in said, (
+        "the refusal named an empty phrase list and a classification-read "
+        "failure that did not happen: " + said)
+
+
 def test_a_BREAKER_OPEN_read_is_UNMEASURABLE_not_a_clean_zero(monkeypatch):
     """A leg that did not run returns `[]` — exactly as a clean miss does.
 
