@@ -368,6 +368,83 @@ _LEADING_ASSIGNMENT: Final = re.compile(
 #: normalised, only the plain `cd X && …` this repo's own recipes use).
 _CD_SEGMENT: Final = re.compile(r"^cd\s+(\S[^;|&]*)$")
 
+#: A bare NAME — an `export`/`unset` operand that is not an assignment.
+_ENV_NAME: Final = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+#: A `umask` mask: octal, or the symbolic form (`u=rwx,g=rx,o=`).
+_UMASK_ARG: Final = re.compile(r"^[0-7]{1,4}$|^[ugoa]*[+\-=][rwxXst]*$")
+
+
+def _wrapper_argument_defect(head: str, args: list[str], cwd: Path, root: Path) -> str | None:
+    """Why ``head args`` is not a well-formed shell WRAPPER, or `None` if it is.
+
+    ⛔ A wrapper used to be admitted on its HEAD alone, so its arguments were never
+    read — measured on the merged tree, `cmd:export NOT RUN && uv run pytest …`,
+    `cmd:source NOT RUN && …` and `cmd:echo NOT RUN … && …` were ACCEPTED while the
+    naked `cmd:NOT RUN && …` was REFUSED: the same disclaimer, admitted by one
+    word. The wrapper runs nothing that is being cited, so admitting it is right;
+    admitting it WITHOUT READING ITS ARGUMENTS is what made it a bypass.
+
+    Each wrapper here has a grammar the shell itself enforces, so the argument is
+    checked. `export`/`unset` take NAMEs, `set` takes options, `umask` takes a
+    mask, and `source` takes a file that must EXIST (a failing `source` short-
+    circuits the `&&`, so no later segment can have run).
+
+    ⛔ A DECORATIVE PRINTER is the genuinely undecidable half — `echo` may print
+    any text and `… && echo PASS` must stay legal — so it is named as a residual at
+    `_DECORATIVE` rather than left for a reader to infer as closed.
+    """
+    if head in {"export", "unset"}:
+        for arg in args:
+            if arg.startswith("-") or arg == "--":
+                continue
+            if not (_ENV_NAME.match(arg) or _ENV_ASSIGNMENT.match(arg)):
+                return f"{_short(arg)} is neither a NAME nor a NAME=value assignment"
+        return None
+    if head == "set":
+        for arg in args:
+            if not (arg.startswith("-") or arg.startswith("+")):
+                return f"{_short(arg)} is not a shell option"
+        return None
+    if head == "umask":
+        for arg in args:
+            if not _UMASK_ARG.match(arg):
+                return f"{_short(arg)} is not a umask mask"
+        return None
+    if head == "source":
+        if not args:
+            return None
+        target = args[0].strip("'\"")
+        try:
+            resolved = (cwd / target).resolve()
+        except (OSError, ValueError):
+            resolved = None
+        if resolved is None or not resolved.is_file():
+            return (
+                f"{_short(target)} does not name a file, and a failing `source` "
+                "short-circuits the `&&` — no later segment of this record can have run"
+            )
+        return None
+    return None
+
+
+def _split_flag(token: str) -> tuple[str, str]:
+    """Split one dashed token into its FLAG and any value ATTACHED to it.
+
+    `-c` -> `('-c', '')`, `-cBODY` -> `('-c', 'BODY')`, `--eval=BODY` ->
+    `('--eval', 'BODY')`, `--check` -> `('--check', '')`. The ATTACHED form is what
+    `bash -c'…'`, `bash -e'…'` and `--eval="…"` produce, and it is the reason
+    `token in _SCRIPT_FLAGS` was not enough: shlex returns the flag and its body as
+    ONE token, so the body was never graded. See the call site for the measurement.
+    """
+    if token.startswith("--"):
+        flag, sep, value = token.partition("=")
+        return flag, (value if sep else "")
+    if len(token) > 2:
+        return token[:2], token[2:]
+    return token, ""
+
+
 #: A `-c`/`-e` script may itself contain a `-c`. Bounded so a crafted record cannot
 #: recurse the validator; anything past this is a refusal, not a hang.
 _MAX_SCRIPT_DEPTH: Final[int] = 3
@@ -389,8 +466,16 @@ def _is_redirection(text: str, index: int) -> bool:
 
     The shell's rule is adjacency to `>`: `&>`/`&>>` put the `&` before it;
     `2>&1`, `>&2`, `N>&M`, `N>&-` and bash's noclobber override `>|` put it after.
-    Anything else — `a & b`, `a | b`, `a |& b` — is a separator (`|&` is a pipe plus
-    a background marker; it splits and the empty middle segment is skipped).
+    Anything else — `a & b`, `a | b`, `a |& b` — is a separator, and the empty
+    middle segment it leaves behind is skipped.
+
+    ⛔ `|&` is NOT "a pipe plus a background marker" (a false statement this
+    docstring used to make): per `man bash` §"Pipelines", it is a pipeline control
+    operator whose stderr is also piped — shorthand for `2>&1 |`. It still
+    separates, so the split is right; the justification was not, and a wrong reason
+    in a paragraph whose job is to make the next reader trust the splitter invites
+    the wrong inference (that something is backgrounded, so its status stops gating
+    the `&&` — which it does not).
     """
     if text[index] not in "&|":
         return False
@@ -947,9 +1032,39 @@ def _evidence_is_real(
                     return True, ""
                 return False, f"`cmd:` evidence script {token!r} is not a command: {why}"
             if token.startswith("-"):
-                # A flag (and the `--` separator). A flag's VALUE may still be the
-                # artifact; it is reached on the next iteration.
-                consumed_script = token in _SCRIPT_FLAGS
+                # ⛔ A dashed token is a FLAG only when it is ONE WORD. A token that
+                # CONTAINS whitespace was quoted by the author — `shlex` preserves
+                # whitespace only INSIDE a quote — so it is an argument wearing a
+                # dash, not a flag, and skipping it as one reached the
+                # runner-with-no-target arm: measured, `cmd:uv run pytest "-q I did
+                # not run this"` reported `verified: 1 uncovered: 0` and exited 0,
+                # i.e. a record that states on its own line that the work was NOT
+                # run satisfied the strongest verdict in the vocabulary.
+                if any(char.isspace() for char in token):
+                    return False, (
+                        f"`cmd:` evidence carries the quoted value {_short(token)} where an "
+                        "artifact must be — a token containing whitespace was quoted by the "
+                        "author, so it is an argument, not a flag, and prose names nothing"
+                    )
+                # ⛔ `-cBODY` / `--eval=BODY` is ONE shlex token, so
+                # `token in _SCRIPT_FLAGS` was False and the body was skipped as a
+                # plain flag — the one-word bypass the `-c` arm exists to close,
+                # one spelling over. Measured, `cmd:bash -c'NOT RUN - see
+                # tools/capstone_ledger.py'`, `cmd:bash -e'NOT RUN'` and
+                # `cmd:bash --eval="NOT RUN"` all reported CLEAN and exited 0 while
+                # the SPACED spelling of the same record was REFUSED. Split the
+                # attached value off and grade it exactly as the next-token arm does.
+                flag, attached = _split_flag(token)
+                if flag in _SCRIPT_FLAGS and attached:
+                    if depth >= _MAX_SCRIPT_DEPTH:
+                        return False, ("`cmd:` evidence nests `-c` scripts too deeply to grade")
+                    ok, why = _evidence_is_real(
+                        f"{_CMD_PREFIX}{attached}", repo_root, depth + 1, cmd_cwd
+                    )
+                    if ok:
+                        return True, ""
+                    return False, f"`cmd:` evidence script {attached!r} is not a command: {why}"
+                consumed_script = flag in _SCRIPT_FLAGS
                 continue
             if token in _CHAIN_WORDS or Path(token).name in RUNNERS:
                 # Still inside the runner chain: `uv` `run` `python` `-m` `pytest`.
@@ -1131,8 +1246,30 @@ def _command_body(raw: str, base: Path, root: Path) -> tuple[str, Path, str]:
                     moved = (root / target).resolve()
                 except (OSError, ValueError):
                     moved = None
-                if moved is not None and moved.is_relative_to(root):
-                    cwd = moved
+                if moved is None or not moved.is_relative_to(root) or not moved.is_dir():
+                    # ⛔ `is_dir()` is load-bearing: `(root / target).resolve()` does NOT
+                    # fail on a name that does not exist — it returns the joined path,
+                    # which is still relative to `root`, so a containment test alone
+                    # accepted `cd I did not run this` and graded the real command
+                    # afterwards.
+                    # ⛔ NOT silently ignored. In the shell a FAILING `cd`
+                    # short-circuits the `&&`, so no later segment can have run —
+                    # and this arm used to `continue` regardless, leaving `cwd`
+                    # unchanged and grading the real command anyway. Measured,
+                    # `cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py
+                    # -q && cd I did not run this` was ACCEPTED while the naked
+                    # `… && I did not run this` was REFUSED: the same disclaimer,
+                    # admitted by prefixing it with a `cd` that cannot succeed.
+                    # A `cd` that escapes the tree is refused for the second
+                    # reason: it would move the grading root outside it.
+                    return (
+                        "",
+                        base,
+                        f"the `cd` segment {segment!r} does not name a directory inside "
+                        "this tree, and a failing `cd` short-circuits the `&&` — no "
+                        "later segment of this record can have run",
+                    )
+                cwd = moved
             continue
         try:
             _tokens = shlex.split(body)
@@ -1162,6 +1299,16 @@ def _command_body(raw: str, base: Path, root: Path) -> tuple[str, Path, str]:
         if _tokens:
             head = Path(_tokens[0]).name
             if head in _WRAPPER_VERBS or head in _DECORATIVE:
+                # ⛔ The HEAD alone is not enough: read the wrapper's own arguments
+                # (see `_wrapper_argument_defect` for the measured bypass this
+                # closes, and for the decorative-printer residual it cannot).
+                why = _wrapper_argument_defect(head, _tokens[1:], cwd, root)
+                if why is not None:
+                    return (
+                        "",
+                        base,
+                        f"the segment {segment!r} is not a valid `{head}`: {why}",
+                    )
                 continue
             if head in RUNNERS:
                 if command is None:

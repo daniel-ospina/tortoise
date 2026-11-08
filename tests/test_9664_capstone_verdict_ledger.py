@@ -1478,7 +1478,140 @@ def test_a_cd_that_would_leave_the_tree_is_refused(tmp_path):
         ),
     )
     assert proc.returncode == cl.EXIT_INVALID, proc.stdout + proc.stderr
-    assert "names no artifact of this tree" in proc.stderr, proc.stderr
+    assert "does not name a directory inside this tree" in proc.stderr, proc.stderr
+
+
+def test_a_cd_that_cannot_succeed_is_refused_not_silently_ignored(tmp_path):
+    """A `cd` whose target does not EXIST must refuse the record, not be skipped.
+
+    Measured fail-open: `cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py
+    -q && cd I did not run this` was ACCEPTED while the naked `… && I did not run
+    this` was REFUSED — the same disclaimer, admitted by prefixing it with a `cd`
+    that cannot succeed. In the shell a failing `cd` short-circuits the `&&`, so the
+    graded command CANNOT have run; the old arm `continue`d regardless and graded it
+    anyway.
+
+    ⛔ `is_dir()` is the load-bearing half: `(root / target).resolve()` does NOT
+    fail on a name that does not exist, so a containment test alone still accepted
+    this record. Pinned here so a future simplification to a containment test reds.
+    """
+    proc = _run_cli(
+        tmp_path,
+        _ledger(
+            [
+                _row(
+                    "A",
+                    evidence=[
+                        REAL_EVIDENCE,
+                        "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q "
+                        "&& cd I did not run this",
+                    ],
+                )
+            ]
+        ),
+    )
+    assert proc.returncode == cl.EXIT_INVALID, proc.stdout + proc.stderr
+    assert "short-circuits" in proc.stderr, proc.stderr
+
+
+def test_a_source_that_names_no_file_is_refused(tmp_path):
+    """A `source` of a non-existent file short-circuits the `&&` too."""
+    proc = _run_cli(
+        tmp_path,
+        _ledger(
+            [
+                _row(
+                    "A",
+                    evidence=[
+                        REAL_EVIDENCE,
+                        "cmd:source NOT RUN && uv run pytest "
+                        "tests/test_9664_capstone_verdict_ledger.py",
+                    ],
+                )
+            ]
+        ),
+    )
+    assert proc.returncode == cl.EXIT_INVALID, proc.stdout + proc.stderr
+    assert "does not name a file" in proc.stderr, proc.stderr
+
+
+#: ⛔ SCRIPT-FLAG and QUOTED-VALUE bypasses, each measured ACCEPTED at the head this
+#: review was run against and each reported `verified` / `CLEAN` / exit 0. They are
+#: one defect: a token the loop never READ. `-cBODY`/`--eval=BODY` is ONE shlex token
+#: so `token in _SCRIPT_FLAGS` was False; a quoted token containing whitespace was
+#: skipped as a "flag" and reached the runner-with-no-target arm.
+_UNREAD_TOKEN_BYPASSES = [
+    "cmd:bash -c'NOT RUN - see tools/capstone_ledger.py'",
+    'cmd:python -c"NOT RUN"',
+    'cmd:bash --eval="NOT RUN"',
+    "cmd:bash -e'NOT RUN'",
+    'cmd:uv run pytest "-q I did not run this"',
+    'cmd:python "-NOT RUN - see tools/capstone_ledger.py"',
+]
+
+
+@pytest.mark.parametrize("entry", _UNREAD_TOKEN_BYPASSES)
+def test_a_token_the_loop_never_reads_cannot_carry_the_verdict(tmp_path, entry):
+    """Prose in a wrapper or in quotes is prose: it must not reach `verified`."""
+    proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, entry])]))
+    assert proc.returncode == cl.EXIT_INVALID, (
+        f"{entry!r} was ACCEPTED ({proc.returncode}): a token the loop never reads "
+        f"carried the verdict\n{proc.stdout}{proc.stderr}"
+    )
+
+
+def test_a_deciding_wrapper_argument_is_read_not_skipped(tmp_path):
+    """The wrapper's ARGUMENT is read where the shell's own grammar decides it.
+
+    `export NOT RUN` splits into two VALID shell names, so it is indistinguishable
+    from a legitimate export and stays a deployed residual (see
+    `test_the_deployed_wrapper_head_residual_is_pinned`). `source` does not have
+    that ambiguity, so it is closed here.
+    """
+    proc = _run_cli(
+        tmp_path,
+        _ledger(
+            [
+                _row(
+                    "A",
+                    evidence=[
+                        REAL_EVIDENCE,
+                        "cmd:source NOT RUN && uv run pytest "
+                        "tests/test_9664_capstone_verdict_ledger.py",
+                    ],
+                )
+            ]
+        ),
+    )
+    assert proc.returncode == cl.EXIT_INVALID, proc.stdout + proc.stderr
+
+
+#: ⛔ DEPLOYED RESIDUAL, pinned as OPEN rather than left for a reader to infer as
+#: closed. A decorative PRINTER (and `export`, whose arguments are valid NAMEs) can
+#: carry the disclaimer verbatim, because `echo` may legitimately print any text and
+#: `… && echo PASS` must stay legal. Closing it needs a semantic judgement, not a
+#: grammar — so it is recorded, on #11520 (the open root for `cmd:` disclaimers that
+#: the arm does not grade), and pinned here so a future fix is a DELIBERATE change.
+_DEPLOYED_WRAPPER_HEAD_RESIDUALS = [
+    "cmd:echo NOT RUN - I did not run this && uv run pytest "
+    "tests/test_9664_capstone_verdict_ledger.py -q",
+    "cmd:export NOT RUN && uv run pytest tests/test_9664_capstone_verdict_ledger.py",
+]
+
+
+@pytest.mark.parametrize("entry", _DEPLOYED_WRAPPER_HEAD_RESIDUALS)
+def test_the_deployed_wrapper_head_residual_is_pinned(tmp_path, entry):
+    """Known-open (#11520): a wrapper HEAD an author can put anything behind.
+
+    This asserts the CURRENT behaviour so the residual cannot rot into an
+    undocumented state. When #11520 is closed, THIS test is the one that flips —
+    and flipping it is the deliberate act, not an accident.
+    """
+    proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, entry])]))
+    assert proc.returncode != cl.EXIT_INVALID, (
+        f"{entry!r} is now REFUSED — #11520 may have been closed; if so, delete this "
+        f"pin and move the entry to `_UNREAD_TOKEN_BYPASSES`.\n{proc.stdout}{proc.stderr}"
+    )
 
 
 def test_a_cmd_target_that_is_not_tracked_is_refused(monkeypatch):
