@@ -164,7 +164,14 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
    all. ⚠️ That command is **self-matching** once this record lands — every hit is then this file's own
    lines — so re-derive it with the file excluded:
    `git grep -rn -E 'hasPart|hierarchies|decomposesInto' -- 'docs/evidence/7949-capstone/' \
-   ':!docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md'` → **exit 1, no output**.
+   ':!docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md'` → **40 lines, exit 0 — all in the
+   bundle.** The per-file split lives in ONE place, the §5 note below (it is re-derived from
+   the tree by the `test_7949_capstone_measure` arm); restating it here as a second copy is
+   how two halves of one document start disagreeing under an amendment.
+   ⚠️ Those hits are the bundle's **own registration of the A1 row** (#10982 landed it after this
+   record was written), not a producer — the bundle CITES the predicate, it does not produce it. On
+   the **pre-diff tree** the same command was **0 hits**: that is the base the `exit 1` in earlier
+   revisions of this record was taken at, and it no longer holds here.
 4. **The rollup query does not exist.** `git grep -in 'rollup' -- '*.py' '*.md'` over the tree returns
    only unrelated uses (extractor `_rollup_llm`/`_rollup_recovery` stage counters, a CI per-name rollup
    discussion, a plan doc). There is **no** query of the graph shape "which work items serve this goal,
@@ -638,9 +645,9 @@ git grep -o 'result\["relations"\]' -- tests/ | wc -l    # 59 OCCURRENCES (both 
 git grep -n -o 'result\["relations"\]' -- tests/ \
   | cut -d: -f2 | sort | uniq -d                          # the 3 extra: the doubly-named :1551, :1579, :161
 grep -c '^  - id:' config/v4-mechanisms.yml                 # 13 — and none for the hierarchy mechanism
-tools/who-is-on.sh 10984 --repo .                           # exit 0 = complete answer (2 holders on a
-                                                          # clean checkout); exit 2 = a surface could not
-                                                          # be queried — never read either as "nobody"
+tools/who-is-on.sh 10984 --repo .                           # exit 0 = complete answer; exit 2 = a
+                                                          # surface could not be queried — never read
+                                                          # either as "nobody"
 uv run python tools/collision_preflight.py 10984 --repo .    # the dispatch-time gate (exit 0 = clear)
 grep -n -i -E 'hierarch|hasPart|part-whole|11001|10984' config/v4-mechanisms.yml      # no output
 # …and the structural edges that DO exist on the capture path, which is why the claim above is scoped:
