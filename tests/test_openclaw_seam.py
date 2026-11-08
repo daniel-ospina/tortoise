@@ -855,16 +855,50 @@ def _plugin_int_constant(name: str) -> int:
     MIRRORED rather than imported. A mirror that drifts is not a smaller bound —
     it is no bound at all: a narrower one silently truncates turns it could have
     sent, a wider one builds a window the validator REJECTS, and the rejection
-    is swallowed by the fail-open boundary as an empty injection. Parse digits
-    and ``*`` only (no ``eval``) — the constants are written as ``15 * 1024``.
+    is swallowed by the fail-open boundary as an empty injection.
+
+    Identifiers and ``*``/``+``/``-`` are resolved (the constants are written as
+    ``15 * 1024`` and as ``REFLEX_MAX_WINDOW_BYTES -
+    REFLEX_PER_TURN_OVERHEAD_BYTES``), because pinning only the OPERANDS leaves
+    the DERIVED budget free to drift — measured in review: widening
+    ``REFLEX_PROMPT_MAX_BYTES`` by 64 bytes left every test green. No ``eval``:
+    the grammar accepted here is digits, identifiers and those three operators.
     """
     src = ENTRY.read_text(encoding="utf-8")
-    match = re.search(rf"export const {name}\s*=\s*([0-9*\s]+);", src)
-    assert match, f"{name} is not a plain integer expression in {ENTRY}"
-    value = 1
-    for part in match.group(1).split("*"):
-        value *= int(part.strip())
-    return value
+    consts = {
+        m.group(1): m.group(2)
+        for m in re.finditer(r"export const ([A-Z][A-Z0-9_]*)\s*=\s*([^;]+);", src)
+    }
+
+    def value_of(expr: str, *, _depth: int = 0) -> int:
+        assert _depth < 8, f"constant expression too deep in {ENTRY}: {expr!r}"
+        total, sign = 0, 1
+        for raw in re.split(r"([+-])", expr):
+            term = raw.strip()
+            if not term:
+                continue
+            if term == "+":
+                sign = 1
+                continue
+            if term == "-":
+                sign = -1
+                continue
+            assert re.fullmatch(r"[A-Za-z_0-9*\s]+", term), (
+                f"unsupported token {term!r} in {name}'s expression")
+            product = 1
+            for part in term.split("*"):
+                part = part.strip()
+                if part.isdigit():
+                    product *= int(part)
+                else:
+                    assert part in consts, f"{part} is not a module constant"
+                    product *= value_of(consts[part], _depth=_depth + 1)
+            total += sign * product
+            sign = 1
+        return total
+
+    assert name in consts, f"{name} is not a plain integer expression in {ENTRY}"
+    return value_of(consts[name])
 
 
 def test_plugin_window_budget_is_the_reflexs_own_constant():
@@ -884,3 +918,35 @@ def test_plugin_window_budget_is_the_reflexs_own_constant():
         _plugin_int_constant("REFLEX_PER_TURN_OVERHEAD_BYTES")
         == PER_TURN_OVERHEAD_BYTES
     )
+    # The budget `boundedPrompt` actually enforces is DERIVED, so it must be
+    # pinned too: widening it by the per-turn overhead keeps every other
+    # assertion green while one byte over the boundary becomes a silent no-op.
+    budget = _plugin_int_constant("REFLEX_PROMPT_MAX_BYTES")
+    assert budget == MAX_WINDOW_BYTES - PER_TURN_OVERHEAD_BYTES
+
+    # …and the boundary is the VALIDATOR's, not our arithmetic: the exact
+    # budget is accepted, one byte more is refused. Asserted through the real
+    # `validate_request` so a change to the validator's accounting reddens here.
+    from tortoise.volunteer import VolunteerValidationError, validate_request
+
+    at_cap = [{"role": "user", "content": "x" * budget}]
+    validate_request(at_cap)  # must not raise
+    with pytest.raises(VolunteerValidationError):
+        validate_request([{"role": "user", "content": "x" * (budget + 1)}])
+
+
+def test_plugin_session_id_bound_matches_the_hosted_model():
+    """`session_id` is capped at 256 chars by the server's own model.
+
+    The plugin sends the raw OpenClaw `sessionKey`, which a gateway is free to
+    mint at any length. An over-long key makes EVERY hosted turn a 422, and
+    `!response.ok` turns that into an empty injection for the whole session —
+    the same silent fail-open the hosted-body fix removed, reintroduced through
+    a different field. The bound is mirrored, so pin it to the model.
+    """
+    from tortoise.hosted_api import VolunteerContextRequest
+
+    field = VolunteerContextRequest.model_fields["session_id"]
+    limits = [m.max_length for m in field.metadata if hasattr(m, "max_length")]
+    assert limits == [256], f"the hosted model's session_id bound moved: {limits}"
+    assert _plugin_int_constant("MAX_SESSION_ID_CHARS") == limits[0]

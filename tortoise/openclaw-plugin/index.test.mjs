@@ -11,6 +11,8 @@ import { test } from "node:test";
 
 import register, {
   boundedPrompt,
+  boundedSessionId,
+  MAX_SESSION_ID_CHARS,
   REFLEX_PROMPT_MAX_BYTES,
   captureRecords,
   createContinuity,
@@ -404,4 +406,18 @@ test("register: a long multibyte prompt reaches the reflex inside its byte budge
   assert.ok(Buffer.byteLength(content, "utf8") <= REFLEX_PROMPT_MAX_BYTES);
   assert.ok(content.endsWith("the actual question"));
   assert.ok(!content.includes("\uFFFD"));
+});
+
+test("boundedSessionId: the hosted body's session_id stays inside the model's 256", () => {
+  // The server model is `session_id: str | None = Field(None, max_length=256)`,
+  // and an over-long key 422s every hosted turn — swallowed as "" by the
+  // fail-open catch, i.e. nothing injected for that whole session.
+  assert.equal(MAX_SESSION_ID_CHARS, 256);
+  const long = "k".repeat(300);
+  assert.equal(boundedSessionId(long).length, 256);
+  assert.equal(boundedSessionId("s-1"), "s-1"); // short ids pass through
+  assert.equal(boundedSessionId(""), null);
+  assert.equal(boundedSessionId(undefined), null);
+  const payload = JSON.parse(reflexPayload("p", { sessionId: long }));
+  assert.equal(payload.session_id.length, MAX_SESSION_ID_CHARS);
 });

@@ -219,6 +219,12 @@ def test_volunteer_cli_prior_context_suppresses_a_re_mention(env):
         ["volunteer", "--json", "--prior-context", block], env, stdin=_RE_MENTION)
     assert with_prior.returncode == 0, with_prior.stderr
     suppressed = json.loads(with_prior.stdout)
+    # `degraded_reason is None` is load-bearing, not decoration: a
+    # ``degraded_response`` is ALSO "no pointers, empty block" (fail-open), so
+    # without it a regression that makes the --prior-context leg DEGRADE rather
+    # than suppress reports as a PASS — the assertion would prove the shape of
+    # the failure it exists to catch.
+    assert suppressed.get("degraded_reason") is None, suppressed
     assert suppressed["pointers"] == [] and suppressed["block"] == "", (
         f"a pointer already surfaced in prior_context must not re-inject: {suppressed}")
 
@@ -235,7 +241,9 @@ def test_volunteer_cli_contract_dict_carries_prior_context(env):
     })
     r = _run(["volunteer", "--json"], env, stdin=payload)
     assert r.returncode == 0, r.stderr
-    assert json.loads(r.stdout)["pointers"] == [], r.stdout
+    contract = json.loads(r.stdout)
+    assert contract.get("degraded_reason") is None, contract  # see the note above
+    assert contract["pointers"] == [], r.stdout
 
 
 # ── 2. `tortoise install` — agent-first harness registration ────────────

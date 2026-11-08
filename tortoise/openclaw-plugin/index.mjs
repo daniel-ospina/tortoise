@@ -62,6 +62,21 @@ export const REFLEX_PROMPT_MAX_BYTES =
   REFLEX_MAX_WINDOW_BYTES - REFLEX_PER_TURN_OVERHEAD_BYTES;
 
 /**
+ * The hosted body's `session_id` is `str | None = Field(None, max_length=256)`
+ * (`tortoise/hosted_api.py`), so an OpenClaw session key longer than 256
+ * characters — a gateway is free to mint one — makes EVERY hosted turn a 422,
+ * which `!response.ok` turns into an empty injection for that whole session:
+ * the same silent fail-open the hosted-body fix removed. The id is carried, not
+ * consulted (the reflex validates it and never keys suppression on it), so
+ * truncation costs no correctness and keeps the turn inside the contract.
+ */
+export const MAX_SESSION_ID_CHARS = 256;
+export function boundedSessionId(sessionId) {
+  if (!sessionId) return null;
+  return String(sessionId).slice(0, MAX_SESSION_ID_CHARS);
+}
+
+/**
  * Bound a prompt to the reflex's BYTE budget, keeping the TAIL.
  *
  * Tail, not head, for the same reason `framework.py` keeps it: the ask being
@@ -161,7 +176,7 @@ export function readConfig(apiConfig, env = process.env) {
 export function reflexPayload(prompt, { sessionId, priorContext } = {}) {
   return JSON.stringify({
     window: [{ role: "user", content: prompt }],
-    session_id: sessionId ? String(sessionId) : null,
+    session_id: boundedSessionId(sessionId),
     prior_context: priorContext ? String(priorContext) : null,
   });
 }
@@ -206,7 +221,7 @@ export async function runHosted(apiUrl, apiKey, prompt, timeoutMs, continuity = 
       },
       body: JSON.stringify({
         window: [{ role: "user", content: prompt }],
-        session_id: continuity.sessionId ? String(continuity.sessionId) : null,
+        session_id: boundedSessionId(continuity.sessionId),
         prior_context: continuity.priorContext
           ? String(continuity.priorContext)
           : null,
