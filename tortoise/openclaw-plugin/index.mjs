@@ -108,7 +108,8 @@ export function readConfig(apiConfig, env = process.env) {
  * The reflex stdin payload for one turn — the JSON contract `tortoise
  * volunteer` documents (a `{window, …}` dict), NOT a flag set.
  *
- * ``prior_context`` is the CONTINUITY input (#2120 indicator 4): the block
+ * ``prior_context`` is the CONTINUITY input (#2120 scope "Cross-turn
+ * dedupe"): the block
  * this seam injected on an earlier turn, which the reflex's own stage-5
  * re-mention suppression reads. ``session_id`` is carried (validated, sent)
  * but is NOT consulted by the decision — the suppression set comes from
@@ -186,7 +187,7 @@ export async function runHosted(apiUrl, apiKey, prompt, timeoutMs, continuity = 
   }
 }
 
-/** Cross-turn dedupe (#2120 indicator 4): never re-inject the same block twice. */
+/** Cross-turn dedupe (#2120 scope "Cross-turn dedupe"): never re-inject the same block twice. */
 export function createDedupe() {
   const seen = new Map();
   return (sessionKey, block) => {
@@ -198,7 +199,7 @@ export function createDedupe() {
 }
 
 /**
- * Cross-turn CONTINUITY (#2120 indicator 4).
+ * Cross-turn CONTINUITY (#2120 scope "Cross-turn dedupe").
  *
  * The digest dedupe above only catches an IDENTICAL block. A turn whose block
  * changes by one pointer (a second pointer clears the gate, or one drops out)

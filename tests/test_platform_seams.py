@@ -195,7 +195,7 @@ _RE_MENTION = "So CI deploys via GitHub Actions on main merge."
 
 
 def test_volunteer_cli_prior_context_suppresses_a_re_mention(env):
-    """#2120 indicator 4 — cross-turn dedupe.
+    """#2120 scope "Cross-turn dedupe" — `--prior-context` is the input.
 
     The reflex's re-mention suppression reads ``prior_context`` and NOTHING
     else, so a per-turn seam that cannot pass it re-fires a pointer it already
