@@ -24,6 +24,7 @@ stop being reported.
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import os
 import re
@@ -3482,3 +3483,1147 @@ def test_a_long_path_is_truncated_in_the_error_line(tmp_path):
     proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[long])]))
     assert proc.returncode == cl.EXIT_INVALID
     assert "…" in proc.stderr, proc.stderr
+
+
+def _refusal_exit_status(exc: ast.Call) -> int | None:
+    """The PROCESS status a guard's `raise SystemExit(...)` leaves behind (#11342).
+
+    The caller has ALREADY pinned the shape this function is handed — a one-argument
+    `raise SystemExit(<msg>)` with no keywords (the assertions above the only call
+    site) — so the no-argument spellings are not this function's business: a
+    `SystemExit()` guard is refused there, by name, before it reaches here. Guarding
+    for them here as well was an unreachable branch behind an assert, which is why
+    it is gone rather than mirrored.
+
+    Mirrors CPython's own conversion — `.code` becomes a status via `0 if code is
+    None else (code if isinstance(code, int) else 1)` — and the OS then keeps
+    only the low 8 bits. Both steps matter: `SystemExit(None)`,
+    `SystemExit(False)`, `SystemExit(0)`, `SystemExit(256)` and `SystemExit(768)`
+    all leave the process at **0**, so a bare `code != 0` would report a guard
+    that prints the full refusal and then exits CLEAN as passing.
+
+    The argument is RESOLVED with `ast.literal_eval`, not pattern-matched on
+    `ast.Constant`: `-256` parses as `UnaryOp(USub, Constant(256))`, which leaves
+    the process at **0** while a Constant-only check calls it "a message" and
+    returns 1 — the same fail-open, one node type over. No separate `_UNRESOLVED`
+    sentinel exists: an unresolvable argument IS the ``None`` return, and two
+    spellings of one state is a trap for the next editor.
+
+    `literal_eval` folds sign and number literals but NOT arithmetic: `0 + 0`,
+    `2 ** 8`, `len('')` and `int(0)` all raise `ValueError`, so they — and every
+    bare `Name` — return ``None`` and the caller reports them UNPROVEN. That is
+    deliberate rather than a gap: the guard is the first statement after
+    `import sys`, so a module-level constant it named would be assigned BELOW it
+    and the refusal would be a `NameError` traceback (`EXIT_INVALID` is assigned
+    at :151 under a guard at :113), which the census reds.
+    """
+    arg = exc.args[0]
+    # An f-string is a MESSAGE, and CPython prints a str argument then exits 1.
+    # `raise SystemExit(f"…")` is the shape both pinned tools use.
+    if isinstance(arg, ast.JoinedStr):
+        return 1
+    try:
+        value: object = ast.literal_eval(arg)
+    except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+        return None
+    if value is None:
+        return 0
+    if isinstance(value, str):
+        return 1
+    if isinstance(value, bool):
+        return 1 if value else 0
+    if isinstance(value, int):
+        # `int.__and__`, not `&`: an int SUBCLASS can override `__and__`, and the
+        # OS applies int arithmetic whatever the subclass declares.
+        return int.__and__(value, 0xFF)
+    # Any OTHER resolvable object (a float, a list, a tuple, bytes) is the `else`
+    # arm of CPython's own conversion: it prints the object and exits **1**. It is
+    # reachable, so it is NOT the UNPROVEN return — `None` here would report a shape
+    # CPython grades exactly as unproven, i.e. a red over a legal guard.
+    return 1
+
+
+@pytest.mark.parametrize(
+    "argument,expected",
+    [
+        ('f"msg"', 1),  # an f-string IS a message: CPython prints it and exits 1
+        ('"EXIT_INVALID"', 1),  # so is a str literal
+        ("0", 0),
+        ("1", 1),
+        ("2", 2),
+        ("256", 0),  # the OS keeps only the low 8 bits
+        ("-256", 0),
+        ("768", 0),
+        ("None", 0),
+        ("False", 0),
+        ("True", 1),
+        ("0 + 0", None),  # `literal_eval` folds no BinOp — UNPROVEN, not 0
+        ("EXIT_INVALID", None),  # nor a bare Name
+        ("3.5", 1),  # a resolvable NON-int is CPython's `else` arm: print, exit 1
+        ("[1, 2]", 1),  # …and so is any other object literal
+    ],
+)
+def test_the_refusal_status_resolver_matches_cpython(argument, expected):
+    """The resolver's OWN table, executed.
+
+    Without this row set the resolver was covered only by the two pinned guards,
+    and those reach exactly TWO arms — the f-string one
+    (`capstone_ledger.py`'s `SystemExit(f"…")`) and the small-int one
+    (`build_site_icons.py`'s `SystemExit(4)`) — so the `str`, `None`, `bool` and
+    trailing-`return 1` arms had no coverage at all, and the fail-closed `None`
+    (UNPROVEN) return could be mutated to `1` with the whole file GREEN. Measured:
+    that mutation left `assert status is not None` untouched, because no pinned
+    guard reaches the `except`. A table is the only way to execute those arms; the
+    resolver's docstring already asserts this table, so it is now executed rather
+    than described.
+
+    The table carries BOTH terminal arms, which is why the `3.5` / `[1, 2]` rows
+    exist: they reach the trailing `return 1` (CPython's `else` arm — print the
+    object, exit 1), which the `0 + 0` / `EXIT_INVALID` rows never touch because
+    those leave through the `except` instead. Measured: with only the unresolvable
+    rows, mutating the trailing `return 1` to `return None` left the whole table
+    GREEN — the arm was described by the docstring and exercised by nothing.
+    """
+    exc = ast.parse(f"raise SystemExit({argument})").body[0].exc
+    assert isinstance(exc, ast.Call)
+    assert _refusal_exit_status(exc) == expected, (argument, expected)
+
+
+@pytest.mark.parametrize(
+    "source,expected",
+    [
+        ('print("m", file=sys.stderr)', True),
+        ('print("m")', False),
+        ('print("m", file=sys.stdout)', False),
+        ('print("m", file=stderr)', False),
+        ('print("m", flush=True)', False),
+    ],
+)
+def test_the_stderr_print_detector_requires_the_file_keyword(source, expected):
+    """The print-shape detector on its own, executed in both directions.
+
+    `tools/build_site_icons.py` DOES take this branch — it refuses with
+    `print(…, file=sys.stderr)` then `raise SystemExit(4)` — so the detector is
+    reached from a pinned tool. What no pinned tool reaches is its FALSE side: the
+    row that says a print WITHOUT `file=sys.stderr` is wrong, which is the arm a
+    future edit can silently invert. Mutating `_is_stderr_print` to `return True`
+    was GREEN in both cases before these rows existed, which is why the table tests
+    both directions rather than only the shape a live guard happens to have.
+    """
+    call = ast.parse(source).body[0].value
+    assert isinstance(call, ast.Call)
+    assert _is_stderr_print(call) is expected, source
+
+
+def _census_module():
+    """The entry-point census, loaded by path — the SINGLE OWNER of its predicates.
+
+    A copy of the census's `_BARE_INVOCATION` regex inside this file would drift
+    narrower again (that is how the advertised-form arm ended up weaker than the
+    census it mirrors: a docstring-only substring misses a COMMENT, a `USAGE`
+    constant and the `python3 ./tools/...` spelling, all measured), so the
+    pattern is imported, not restated. Loaded by path with `importlib` — the same
+    mechanism this file already uses for the tools under test — so it cannot
+    depend on pytest's `sys.path` layout.
+    """
+    path = REPO_ROOT / "tests" / "test_entry_point_python_guard.py"
+    spec = importlib.util.spec_from_file_location("_entry_point_python_guard_census", path)
+    assert spec is not None and spec.loader is not None, path
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _is_stderr_print(call: ast.Call) -> bool:
+    """Whether a `print(...)` call writes to `sys.stderr`.
+
+    The census reads a refusal from TWO channels, and only ONE of them makes a
+    stdout print invisible:
+
+      * for a tool it pins a `REFUSAL_CODES` row for, it RUNS the tool and reads
+        `probe.stderr` (`test_the_refusal_exit_code_is_the_one_the_tool_can_spare`,
+        parametrized over `REFUSAL_CODES`) — a refusal printed to stdout is then
+        invisible to it;
+      * for a tool with NO row it only executes the guard node and joins BOTH
+        channels — `str(refusal.value) + captured.out + captured.err` — so a
+        stdout print IS visible there.
+
+    The channel is therefore a CONTRACT only where the census pins one: a stdout
+    print for a tool with a `REFUSAL_CODES` row is unreadable to the census and
+    must red; the same shape for a tool with NO row is legal, and demanding stderr
+    there would red a census-LEGAL guard — the false-red class this pin must not
+    add. Both tools carry a row TODAY (main's #11507 added
+    `tools/build_site_icons.py: 4`), and the caller now REFUSES a pinned tool whose
+    row is missing (`assert expected_status is not None`), so from any pinned tool
+    the `None` arm below is UNREACHABLE by construction: it is kept executable only
+    by `test_the_stderr_requirement_is_gated_on_the_census_pinning`, whose job is to
+    pin the DECISION rather than the state of today's census. Production is
+    row-required; the arm exists so the rule "a row is a contract, no row is not"
+    is a decision with a test, not an inline conditional nobody can mutate safely.
+    """
+    return any(
+        kw.arg == "file"
+        and isinstance(kw.value, ast.Attribute)
+        and kw.value.attr == "stderr"
+        and isinstance(kw.value.value, ast.Name)
+        and kw.value.value.id == "sys"
+        for kw in call.keywords
+    )
+
+
+def _channel_is_wrong(print_call: ast.Call, expected_status: int | None) -> bool:
+    """Whether the census would MISREAD this print-shape refusal (#5128).
+
+    TRUE only for the combination the census cannot see: a `print(<message>)` to
+    STDOUT in a tool whose `REFUSAL_CODES` row makes the census RUN the tool and
+    read `probe.stderr`. FALSE for a stderr print (readable) and FALSE for a tool
+    with no row (the census executes the guard node and joins both channels).
+
+    Factored out and table-tested because inlined it was unpinnable: both pinned
+    tools carry a row today, so the false branch is unreachable from them, and
+    inverting the condition (`is not None` -> `is None` — one token, not dead code)
+    while dropping the tool's `file=sys.stderr` left the whole suite GREEN (measured,
+    190 passed). That is the exact defect the arm exists to catch, so the decision
+    itself is executed by `test_the_stderr_requirement_is_gated_on_the_census_pinning`.
+    """
+    return expected_status is not None and not _is_stderr_print(print_call)
+
+
+@pytest.mark.parametrize(
+    "source,pinned,expected",
+    [
+        ('print("m", file=sys.stderr)', 4, False),  # readable by the census's stderr arm
+        ('print("m", file=sys.stdout)', 4, True),  # stdout while the census reads stderr
+        ('print("m")', 4, True),  # the same hole, defaulted
+        ('print("m")', None, False),  # no row: the census joins BOTH channels
+        ('print("m", file=sys.stderr)', None, False),
+    ],
+)
+def test_the_stderr_requirement_is_gated_on_the_census_pinning(source, pinned, expected):
+    """The channel DECISION on its own, because no pinned tool can reach both sides.
+
+    Both tools carry a `REFUSAL_CODES` row (main's #11507 added
+    `tools/build_site_icons.py: 4`), so a pin that only exercised them could not
+    tell "the gate is `is not None`" from "the gate is always true": measured,
+    inverting it to `is None` AND dropping the tool's `file=sys.stderr` left the
+    suite at 190 passed. The `None` rows pin the other direction — a tool with no
+    row must NOT be required to print to stderr, or this pin reds a census-LEGAL
+    guard (the false-red class its docstring says it must not add).
+    """
+    call = ast.parse(source).body[0].value
+    assert isinstance(call, ast.Call)
+    assert _channel_is_wrong(call, pinned) is expected, (source, pinned, expected)
+
+
+def _advertise_offenders(rel: str, text: str, census) -> list[str]:
+    """The census's advertised-form predicate, applied to a file's TEXT (#5128).
+
+    Factored OUT of the sweep so the predicate AND its wiring to a real subject can
+    be executed (see `test_the_advertised_form_filter_is_not_deaf`, which drives
+    this same function with synthetic text). Inline, a filter that had lost its
+    condition (`if False and (…)` — the check deleted, the assertion kept) left the
+    whole suite GREEN, because the two pinned tools genuinely advertise no bare
+    form: "no offenders in this file" and "this filter flags nothing" are the same
+    observation until something feeds it a line that SHOULD be flagged, and the
+    only thing that does is a tool that already has an offender. Routing BOTH
+    callers through one function means a mutation that empties it reds the
+    synthetic-subject test, rather than leaving only the call site to notice.
+    """
+    return [
+        f"{rel}:{n}: {line.strip()}"
+        for n, line in enumerate(text.splitlines(), 1)
+        for m in census._BARE_INVOCATION.finditer(line)
+        if (m.group(1) is None or f"{m.group(1)}/{m.group(2)}" not in census._CARVE_OUTS)
+        and (rel, line.strip()) not in census._DELIBERATE_BARE_FORM
+    ]
+
+
+def _run_guard(guard: ast.If, monkeypatch, version: tuple[int, ...]) -> str:
+    """Execute the guard ALONE with `sys.version_info` faked, return what it says.
+
+    Returns the refusal text appended to whichever channel carried it, or "" when
+    the guard did not refuse (i.e. it was INERT — what must happen at the floor).
+
+    This is BEHAVIOURAL on purpose. A structural check of the message can pin the
+    floor, the file and an invocation and still accept `(got 9.3)` — the two
+    subscripts in the wrong order render a value the census's own `"(got 3.9)"`
+    assertion rejects, and no set-membership test on the AST can see the order or
+    the separator. Executing the guard closes ordering, separators and formatting
+    at once.
+    """
+    module = ast.Module(body=[guard], type_ignores=[])
+    code = compile(module, f"<guard@{guard.lineno}>", "exec")
+    monkeypatch.setattr(sys, "version_info", version)
+    refused: SystemExit | None = None
+    try:
+        # The node is parsed from a TRACKED file; nothing here is input.
+        exec(code, {"sys": sys})
+    except SystemExit as exc:
+        refused = exc
+    return "" if refused is None else str(refused.code)
+
+
+def _refusal_text(guard: ast.If, capsys, monkeypatch, version: tuple[int, ...]) -> str:
+    """What the guard SAYS on a faked interpreter, across every channel."""
+    said = _run_guard(guard, monkeypatch, version)
+    captured = capsys.readouterr()
+    return said + captured.out + captured.err
+
+
+def _guard_if(tree: ast.Module) -> ast.If | None:
+    """The module's #5128 interpreter guard, FOUND without pinning its position.
+
+    Position is `test_the_tool_carries_the_5128_interpreter_guard_first`'s claim,
+    not this helper's: a test that only needs to EXECUTE the guard must not
+    re-assert (and so re-litigate) the preamble order in a second place.
+    """
+    for node in tree.body:
+        if isinstance(node, ast.If) and "version_info" in ast.unparse(node.test):
+            return node
+    return None
+
+
+PINNED_TOOLS = [
+    pytest.param(TOOL, id="capstone_ledger"),
+    pytest.param(REPO_ROOT / "tools" / "build_site_icons.py", id="build_site_icons"),
+]
+
+
+def _preamble_index(body: list[ast.stmt]) -> int | None:
+    """Index of the `#5128` guard in a tool's module body, or None (#9664).
+
+    The census's `_guard_index` walk, and nothing more: skip EXACTLY ONE module
+    docstring, then ZERO OR MORE `__future__` imports, then exactly ONE **bare**
+    `import sys`, then the `if sys.version_info < (3, 12)` guard.
+
+    Requiring a `__future__` import would red census-LEGAL files — measured at this
+    head over the census's OWN corpus (237 files: 178 under `tools/`, 59 under
+    `graph-scripts/`): 19 of the 59 `graph-scripts/` files carry none as their first
+    post-docstring statement, against 0 of the 178 `tools/` files. (Of the 185
+    tracked `tools/*.py`, 3 are `__init__.py` — excluded by name — and 4 are
+    `RUNTIME_39`, which is why the corpus is 178; of `graph-scripts/`'s 60 tracked,
+    `profile_395_local_ep.py` is `UNGUARDABLE`, which is why it is 59.) Skipping
+    every leading `ast.Expr` is wrong
+    too: a second bare string literal
+    before the guard passed a skip-all-Expr loop and reded the census.
+
+    `asname is None` is the conjunct nothing else can see, and it is NOT redundant:
+    `import sys as _sys` binds no `sys`, so the guard is a `NameError` at runtime
+    while a name-only comparison passes — and the behavioural arms cannot observe
+    it, because `_run_guard` EXECUTES the guard with `sys` injected into its
+    namespace. Measured: deleting this conjunct and aliasing the import in
+    `tools/build_site_icons.py` left the pin GREEN (`2 passed`) over a tool whose
+    `--help` raises `NameError: name 'sys' is not defined`. A false PASS on the only
+    gate a `tools/`-only diff gets, so the walk is a helper with its own table
+    (`test_the_preamble_walk_rejects_what_the_census_rejects`) rather than an
+    inline chain whose removal nothing notices.
+    """
+    i = 0
+    if (
+        i < len(body)
+        and isinstance(body[i], ast.Expr)
+        and isinstance(body[i].value, ast.Constant)
+        and isinstance(body[i].value.value, str)
+    ):
+        i += 1
+    while (
+        i < len(body)
+        and isinstance(body[i], ast.ImportFrom)
+        and body[i].module == "__future__"
+    ):
+        i += 1
+    # Bounds-checked before each access: a truncated preamble returns None, so the
+    # caller diagnoses it rather than raising an IndexError the reader must decode.
+    if i >= len(body) or not isinstance(body[i], ast.Import):
+        return None
+    if [a.name for a in body[i].names] != ["sys"] or body[i].names[0].asname is not None:
+        return None
+    i += 1
+    if i >= len(body) or not isinstance(body[i], ast.If):
+        return None
+    return i
+
+
+@pytest.mark.parametrize(
+    "source,expected",
+    [
+        ("import sys\nif sys.version_info < (3, 12):\n    pass\n", 1),
+        (
+            '\"\"\"d\"\"\"\nfrom __future__ import annotations\nimport sys\n'
+            "if sys.version_info < (3, 12):\n    pass\n",
+            3,
+        ),
+        # ZERO OR MORE `__future__` imports is the walk's OWN claim, and no row
+        # carried two, so `while` -> `if` stayed GREEN (measured, 9 passed). It
+        # cannot false-PASS — one `if` REJECTS a legal two-`__future__` preamble,
+        # i.e. an over-block — but an unpinned claim is the vacuous-arm class this
+        # file keeps removing. The census's `_guard_index` returns 4 here as well
+        # (asserted below), so this row is parity, not a stricter local rule.
+        (
+            '\"\"\"d\"\"\"\nfrom __future__ import annotations\n'
+            'from __future__ import generator_stop\nimport sys\n'
+            "if sys.version_info < (3, 12):\n    pass\n",
+            4,
+        ),
+        # the load-bearing rejection: an ALIASED import binds no `sys`
+        ("import sys as _sys\nif sys.version_info < (3, 12):\n    pass\n", None),
+        # two names in one import
+        ('\"\"\"d\"\"\"\nimport sys, os\nif sys.version_info < (3, 12):\n    pass\n', None),
+        # a SECOND bare string literal is not a docstring the census skips
+        ('\"\"\"d\"\"\"\n\"second\"\nimport sys\nif sys.version_info < (3, 12):\n    pass\n', None),
+        # truncated preambles
+        ("import sys\n", None),
+        ("from __future__ import annotations\n", None),
+    ],
+)
+def test_the_preamble_walk_rejects_what_the_census_rejects(source, expected):
+    """The preamble WALK, executed on synthetic bodies.
+
+    `asname is None` was the one conjunct no other arm could see: both pinned tools
+    import `sys` bare, and the behavioural arms inject `sys` into the exec
+    namespace, so an ALIASED import passes them all while the real tool raises
+    `NameError` at runtime. Its deletion left the whole file GREEN (measured), which
+    is the vacuous-arm class this file's own docstrings keep removing — so the walk
+    is executed here in both directions, not described in a comment above an
+    assertion that nothing can falsify.
+
+    ⛔ AND against the CENSUS's own walk, row by row. This helper re-implements
+    `tests/test_entry_point_python_guard.py::_guard_index` + `_is_bare_sys_import`,
+    so hard-coded expectations alone would let the two drift apart silently: a
+    census TIGHTENING would make this pin an over-block, a census LOOSENING would
+    make it a future false PASS — both measured, in both directions, with this pin
+    GREEN. The census is loaded by path (`_census_module`) and asserted to agree,
+    which is the file's own doctrine for the regex and the refusal table.
+    """
+    body = list(ast.parse(source).body)
+    assert _preamble_index(body) == expected, source
+    assert _census_module()._guard_index(body) == expected, (
+        f"this pin's walk and the census's `_guard_index` disagree: pin="
+        f"{_preamble_index(body)!r} census="
+        f"{_census_module()._guard_index(body)!r} for {source!r}"
+    )
+
+
+@pytest.mark.parametrize("tool", PINNED_TOOLS)
+def test_the_tool_carries_the_5128_interpreter_guard_first(tool, capsys, monkeypatch):
+    """The guard must precede EVERY other import, and refuse attributably.
+
+    Measured on CI: `tools/capstone_ledger.py` was added without the guard, and
+    shard `a` reded on `tests/test_entry_point_python_guard.py` — while every
+    local suite run was green.
+
+    That census cannot be the only pin, and the reason is a measured ASYMMETRY
+    in `tools/ci_selection.py`: for a PR that touches only one tool,
+    `select(['tools/capstone_ledger.py'], 'pull_request', load_manifest())["test_files"]`
+    returns 82 file names (basenames, no `tests/` prefix) that INCLUDE
+    `test_9664_capstone_verdict_ledger.py` (it is
+    `tier1`-registered in `config/ci-surfaces.yml` — the
+    `- test_9664_capstone_verdict_ledger.py` row whose comment begins `# #9664:`,
+    dual-registered with `core`; located by that quote, never by a line number,
+    because every merge that inserts a row above it moves the number) and EXCLUDE
+    `tests/test_entry_point_python_guard.py`. So pinning here is what makes the
+    guard checked on a tool-only diff; pinning in the census alone is not. Both
+    tools this PR touches are parameterised for that reason — an unpinned second
+    file is the same gap one tool over.
+
+    DECLARED BOUND — what this pin mirrors, and what is UNGRADED instead.
+
+    It MIRRORS these census arms over the two tools' OWN files: preamble order,
+    floor, guard shape, both refusal shapes, the RENDERED message (read from the
+    text the operator sees, never from the AST's string constants), the derived
+    process status, the census `REFUSAL_CODES` row that status must match, and
+    the invocation the refusal names RESOLVING — executed PER TOOL, on the
+    census's own criterion: a form that ADDS a token is the `--help` class and
+    must exit 0, while a form that adds NONE is the tool's own entry point and is
+    graded on not crashing rather than on its verdict code, since
+    `capstone_ledger.py`'s 2 is its UNCOVERED verdict — and the
+    advertised-invocation sweep driven by the census's own `_BARE_INVOCATION` +
+    exemption sets, never a copy, CALL SITE included (`_WIRED_into_the_pin`
+    drives the pin with the sweep disconnected, so deleting the call cannot pass).
+
+    ⛔ EVERYTHING ELSE in `tests/test_entry_point_python_guard.py` is NOT mirrored —
+    and this paragraph deliberately does NOT enumerate that set, because a list is
+    what went wrong here: two enumerations of "the arms I do not mirror" each came
+    back missing arms that exist, and an unlisted arm reads as a covered one. The
+    rule is the claim: if the assertion is not named in the MIRRORS list above, this
+    file does not grade it.
+
+    ⚠️ AND ON THE DIFFS THAT REACH THIS FILE WITHOUT THE CENSUS, those unmirrored
+    arms are UNGRADED, not "closed by selection". That is the whole gap, stated
+    once: this file is `tier1`-registered, so it is selected by diff shapes that do
+    not select the census — measured via `select(…, 'pull_request', load_manifest())`
+    with `census = 'test_entry_point_python_guard.py' in test_files`:
+
+        tools/capstone_ledger.py     82 files, census OUT   <- the tools/ surface
+        tools/build_site_icons.py    82 files, census OUT
+        docs/plans/x.md              82 files, census OUT   <- the docs/ surface
+        tests/test_x.py             788 files, census IN
+        graph-scripts/audit_graph.py 788 files, census IN
+
+    ⛔ `tools/edge_census.py` and `tools/branch_reaper.py` are deliberately NOT
+    rows here, and this paragraph used to carry them as "3 files, census OUT …
+    nothing grades it" — FALSE, and false in the direction that inflated the gap
+    (#11491 review, ISSUE 2): both are `TOOL_CARVEOUTS` entries in
+    `tools/ci_selection.py` (`#4408`, `#4503`) — not `SHARED_MODULES`, which holds
+    no `tools/` path — so a diff touching either fails closed to the FULL matrix
+    and DOES run the census. They are named, not tabulated: a re-measured number
+    per tool is this block's own failure mode, and `ci_selection.py`'s own tables
+    are the single owner of which paths fail closed.
+
+    Find them by QUOTE, not by line number (which rots on every edit, and did:
+    this paragraph named the wrong table for three rounds): the anchor for the
+    reaper is the comment block opening `# #4408: the local-branch reaper`,
+    whose last line is `-> FULL matrix (fail closed) — the safe default for a
+    destructive-ref tool.`; the census's is the block opening
+    `# #4503: the edge census/probe`, ending `-> FULL\n    # matrix (fail closed)`
+    and naming its own pin, `test_edge_census_tool_change_fails_closed_to_full`.
+    ⛔ The CLAIM ITSELF is executed, not asserted —
+    `test_the_two_named_carve_outs_REALLY_do_run_the_census` below drives
+    `select()` on both paths and fails if either stops failing closed. Without it
+    a lane could "fix" this paragraph by deleting the carve-out rows that hold
+    the guarantee and every other arm here would stay green (measured: deleting
+    `"tools/branch_reaper.py",` from `TOOL_CARVEOUTS` left this file at
+    207 passed until that test existed).
+
+    So on a `tools/`-only or `docs/`-only diff, every unmirrored arm above is
+    ungraded and this pin is the only gate. Measured, both ways: appending a line
+    advertising `python3 tools/capstone_ledger.py check` to a tracked DOC leaves
+    this file GREEN while the census reds
+    `test_no_doc_or_usage_advertises_the_form_the_guard_refuses`; and the same line
+    appended to an UNPINNED sibling tool (`tools/ask_pool_admission_probe.py`, 82
+    files, census OUT — re-measured when the two "3 files" rows above were
+    corrected) likewise leaves it GREEN (206 passed) while the census reds
+    (1 failed, 536 passed, 2 skipped). That is a routing gap in
+    `tools/ci_selection.py`, not something a pin in this file can close; it is
+    tracked as #11363 (same root: a diff that never selects the census leaves its
+    #5128 guard unchecked).
+
+    What IS closed by selection is only this: a `tests/` or `graph-scripts/` edit
+    selects 788 files INCLUDING the census, so those diffs are graded by the census
+    itself rather than by this pin. ⛔ `tools/` and `docs/` are NOT in that set —
+    which is the distinction this paragraph exists to keep visible, and the reason
+    it says "ungraded" instead of "not a hole".
+
+    """
+    tree = ast.parse(tool.read_text(encoding="utf-8"))
+    body = list(tree.body)
+    i = _preamble_index(body)
+    assert i is not None, (
+        f"the #5128 preamble must be one module docstring, ZERO OR MORE "
+        f"`__future__` imports, then a BARE `import sys`, then the interpreter "
+        f"guard (the census's `_guard_index` walk); got "
+        f"{[type(n).__name__ for n in body[:4]]} — `_preamble_index`'s table "
+        f"(`test_the_preamble_walk_rejects_what_the_census_rejects`) names each "
+        f"rejection"
+    )
+    guard = body[i]
+    test = guard.test
+    assert isinstance(test, ast.Compare) and isinstance(test.left, ast.Attribute), ast.dump(test)
+    assert isinstance(test.left.value, ast.Name), (
+        f"the guard must test `sys.version_info`; got {ast.dump(test.left)}"
+    )
+    assert test.left.attr == "version_info" and test.left.value.id == "sys"
+    assert len(test.ops) == 1 and isinstance(test.ops[0], ast.Lt), ast.dump(test)
+    assert isinstance(test.comparators[0], ast.Tuple), ast.dump(test.comparators[0])
+    # `len(elts) == 2` BEFORE indexing: a malformed floor (`< (3,)`, `< (3, 12, 0)`)
+    # must fail with this diagnosis, not raise IndexError. Mirrors the census's
+    # `_floor_in_test`, which returns None rather than indexing unguarded.
+    elts = test.comparators[0].elts
+    assert len(elts) == 2, (
+        f"the floor must be a 2-tuple `(major, minor)`; got {ast.dump(test.comparators[0])}"
+    )
+    # `isinstance(..., int)` and the bool exclusion matter: `[3.0, 12.0] == [3, 12]`
+    # is True in Python, so a value-only comparison accepts a FLOAT floor the
+    # census's own `_floor_in_test` rejects (`isinstance(element.value, int)`) — a
+    # green pin over a census-red guard, the one thing this arm must never do.
+    assert [
+        e.value
+        for e in elts
+        if isinstance(e, ast.Constant)
+        and isinstance(e.value, int)
+        and not isinstance(e.value, bool)
+    ] == [3, 12], f"the floor must be (3, 12); got {ast.dump(test.comparators[0])}"
+
+    # The guard's BODY must be one of the two shapes the census accepts — that
+    # rule is `_system_exit_message`'s, not a search for "any Raise somewhere":
+    # a three-statement body (a stray `print`, a binding, then the raise) carries
+    # a correct message and still reds the census, so it must red here too.
+    body_nodes = guard.body
+    print_shape = (
+        len(body_nodes) == 2
+        and isinstance(body_nodes[0], ast.Expr)
+        and isinstance(body_nodes[0].value, ast.Call)
+        and isinstance(body_nodes[0].value.func, ast.Name)
+        and body_nodes[0].value.func.id == "print"
+        and body_nodes[0].value.args
+        and isinstance(body_nodes[1], ast.Raise)
+    )
+    shapes_ok = (len(body_nodes) == 1 and isinstance(body_nodes[0], ast.Raise)) or print_shape
+    assert shapes_ok, (
+        f"the guard must be exactly one of the two #5128 shapes — `raise "
+        f"SystemExit(<message>)`, or `print(<message>)` + `raise "
+        f"SystemExit(<int>)`; got {[type(n).__name__ for n in body_nodes]} "
+        f"(tests/test_entry_point_python_guard.py reds on any other shape)"
+    )
+
+    raises = [n for n in body_nodes if isinstance(n, ast.Raise)]
+    # ★ An `else:` clause runs at the floor — on the interpreter this guard exists
+    # to PASS — so it can change what a 3.12 run does. Two classes:
+    #   * `else: raise SystemExit(0)` — a SILENT NO-OP: the tool does nothing, says
+    #     nothing, and exits 0. Measured: a green pin over a tool that ran `exit 0`
+    #     with no output. The floor-inertness assert below also catches this one.
+    #   * `else: print('x')` / any NON-RAISING else — no raise to observe, so
+    #     inertness is blind to it and this is the assert that reds it (measured:
+    #     the assert disabled + that else = the whole file GREEN; assert intact = RED).
+    # The census reds both via its floor probe; this pin is the only gate on a
+    # `tools/`-only diff, so it must red them too.
+    assert not guard.orelse, (
+        f"the guard must carry NO `else` clause: it would run at the floor, on the "
+        f"interpreter the guard exists to PASS — measured, `else: raise "
+        f"SystemExit(0)` makes the tool a silent no-op with a green pin: "
+        f"{[type(n).__name__ for n in guard.orelse]}"
+    )
+    # NO `_run_guard(..., (3, 12, 0, "final", 0)) == ""` assertion here: the test
+    # node above is pinned to exactly `sys.version_info < (3, 12)`, and
+    # `(3, 12, 0, "final", 0) < (3, 12)` is False on every run, so the body
+    # provably cannot execute and the probe's `""` is entailed — the assertion can
+    # never fire. Inertness at the floor stays entailed by the node, floor and
+    # `orelse` pins above; the 3.9/3.10 probes below assert the refusal TEXT, not
+    # inertness at 3.12, so they are not what grades it. No coverage is lost.
+    # Same class as the `len(raises) == 1` arm removed below.
+    # NO separate `len(raises) == 1` assertion here: `shapes_ok` above admits
+    # exactly two bodies, each carrying exactly one `Raise`, so such an assertion
+    # is entailed and can never fire. Measured — it is the vacuous-arm class this
+    # pin's own `_refusal_exit_status` docstring removed rather than mirrored.
+    raise_node = raises[0]
+    exc = raise_node.exc
+    assert isinstance(exc, ast.Call), (
+        f"the guard must `raise SystemExit(...)`; got {ast.dump(raise_node)}"
+    )
+    assert isinstance(exc.func, ast.Name) and exc.func.id == "SystemExit", (
+        f"the guard must raise `SystemExit`; any other exception reads to the "
+        f"operator as the tool being broken: {ast.dump(raise_node)}"
+    )
+    assert len(exc.args) == 1 and not exc.keywords, (
+        f"`raise SystemExit(...)` must carry exactly one argument; the census "
+        f"rejects `SystemExit(<msg>, 1)` as an unattributable refusal: "
+        f"{ast.dump(raise_node)}"
+    )
+
+    # ★ #11342: the refusal must not report SUCCESS. A guard that prints the
+    # full, attributable message and then `raise SystemExit(0)` passes every
+    # message assertion above while telling every caller the tool ran clean.
+    status = _refusal_exit_status(exc)
+    assert status is not None, (
+        f"cannot statically resolve the refusal's exit code, so its status is "
+        f"UNPROVEN — use an int literal or an f-string message (arithmetic over "
+        f"literals and bare names are NOT resolved): got {ast.dump(raise_node)}"
+    )
+    # The expected status is the CENSUS's own pin, not a constant read back from
+    # the module under test: measured, a coordinated edit (`EXIT_INVALID = 3` +
+    # `SystemExit(3)`) kept a self-referential assertion green while the census
+    # reded, and 3 is `EXIT_DISABLED` — a refusal indistinguishable from the
+    # off-switch.
+    #
+    # A MISSING row is a REFUSAL here, not a licence. It used to fall back to
+    # `status != 0` ("the census accepts any non-zero status"), and that fallback
+    # was a fail-open: measured at the head that added this, dropping
+    # `build_site_icons.py`'s `REFUSAL_CODES` + `REFUSAL_WHY` rows AND downgrading
+    # its refusal from `SystemExit(4)` to `SystemExit(1)` left this whole file
+    # GREEN (195 passed) while the regression the tool's own comment forbids went
+    # in: "an environment refusal must not wear 1 or a caller cannot tell 'the
+    # tool refused' from 'the interpreter is too old'". Silently widening to any
+    # non-zero is the pin accepting whatever a coordinated edit leaves behind, so
+    # every PINNED tool must be in the census's table and the demand is stated
+    # rather than inferred.
+    expected_status = _census_module().REFUSAL_CODES.get(f"tools/{tool.name}")
+    # (#11491 review, ISSUE 1) The block above used to be followed by a
+    # `status != 0` PARITY fallback for a missing row, under a second comment that
+    # said so — while the block above it, and this test's own docstring, claimed
+    # the caller REFUSED a rowless pinned tool. It did not: measured, dropping
+    # `build_site_icons.py`'s `REFUSAL_CODES` + `REFUSAL_WHY` rows and downgrading
+    # its guard from `SystemExit(4)` to `SystemExit(1)` left this whole file GREEN
+    # while `_channel_is_wrong`'s `expected_status is not None` short-circuit also
+    # stopped checking the CHANNEL — two gates lost to one edit, on the only
+    # surface a `tools/`-only diff gets. So the demand is now real, not prose.
+    #
+    # This IS a stricter local contract than the census (which accepts any
+    # non-zero for an unpinned tool), and deliberately so: the census's row is what
+    # this pin COMPARES AGAINST, so without one there is nothing to mirror and the
+    # arm silently degrades to "the tool failed somehow". A new tool is not
+    # false-redded by this — it is told to get its row, which is the census's own
+    # registration step, not a demand this file invents. `_channel_is_wrong`'s
+    # `None` branch is therefore unreachable FROM A PINNED TOOL by construction,
+    # exactly as its docstring says; it is kept executable by its own table test.
+    assert expected_status is not None, (
+        f"the census pins no `REFUSAL_CODES` row for `tools/{tool.name}`, so this "
+        f"pin has no status to compare against and would widen to 'any non-zero'"
+        f" — the fail-open measured at the head that added this clause (delete the "
+        f"row, downgrade the guard to `SystemExit(1)`, and both the status and the "
+        f"CHANNEL checks go green). Add `tools/{tool.name}` to `REFUSAL_CODES` and "
+        f"`REFUSAL_WHY` in `tests/test_entry_point_python_guard.py`, or stop "
+        f"pinning the tool here."
+    )
+    assert status == expected_status, (
+        f"the refusal must exit the status the census pins for this tool "
+        f"({expected_status!r}), and a coordinated edit of the module's own "
+        f"constant is exactly what this compares against. Got {status}: "
+        f"{ast.dump(raise_node)}"
+    )
+
+    if print_shape:
+        # The channel is only a CONTRACT where the census pins one. A REFUSAL_CODES
+        # tool is refused by RUNNING it and reading `probe.stderr`, so a stdout
+        # print is a refusal the census never sees; a tool with no row is graded by
+        # executing the guard node, where the census joins stdout AND stderr, so
+        # demanding stderr there would red a census-LEGAL guard — the false-red
+        # class this pin must not add. The decision is a helper, not an inline
+        # conditional: inlined, its false branch was unreachable from both pinned
+        # tools and invertible with the suite green (see `_channel_is_wrong`).
+        assert not _channel_is_wrong(body_nodes[0].value, expected_status), (
+            f"the refusal must be printed to `sys.stderr`: the census RUNS this "
+            f"tool and reads `probe.stderr` (its REFUSAL_CODES arm), so a "
+            f"`print(<message>)` to stdout is a refusal the operator and the "
+            f"census both miss: {ast.dump(body_nodes[0].value)}"
+        )
+        message = body_nodes[0].value.args[0]
+    else:
+        message = exc.args[0]
+
+    # The message is graded BEHAVIOURALLY — from the text the operator actually sees
+    # on a faked 3.9 host — and NOT from the string constants that happen to appear
+    # in the AST. Measured (review round 16): joining every `ast.Constant` string in
+    # the message left this file at 206 passed GREEN when the subject was moved into
+    # a never-taken branch (`f"{'… requires Python >= 3.12' if False else ''}"`), so a
+    # refusal that no longer names its file in the operator's output satisfied the
+    # "RENDERED message" claim, while the census reded on the identical mutation
+    # (`2 failed`) because it adjudicates `rel in str(refusal.value) + out + err`.
+    said = _refusal_text(guard, capsys, monkeypatch, (3, 9, 6, "final", 0))
+    # The message must name the floor, the file, and an invocation at all. ⛔ This
+    # clause is a PREFIX test only — `uv run python tools/<name>` is a prefix of
+    # BOTH forms — so it cannot distinguish the form that resolves from one that
+    # does not. The polarity differs per tool and is stated rather than generalised:
+    # `tools/build_site_icons.py`'s bare path is argparse's usage error (exit 2) and
+    # its `--help` form resolves (exit 0); `tools/capstone_ledger.py`'s NAMED form
+    # IS the bare path, which resolves to a computed verdict (exit 2 =
+    # `EXIT_UNCOVERED`), while its `--help` exits 5 with no verdict. The WORKING
+    # claim is proved by executing it PER TOOL, in
+    # `test_the_refusal_names_a_form_that_actually_RESOLVES`. Measured: reverting
+    # the site-icon message to the bare path left this file GREEN while the census
+    # reded, and `tools/capstone_ledger.py`'s advice naming `--nope` left it GREEN
+    # too — which is why the proof lives in its own parametrized arm, not here.
+    #
+    # The subject is asserted as ONE clause, not as a bare `"<tool name>" in
+    # rendered` substring: the invocation clause below already contains that
+    # basename, so a substring test would pass on a refusal that named a
+    # DIFFERENT tool in its subject line.
+    assert f"tools/{tool.name} requires Python >= 3.12" in said, (
+        f"the refusal must name the file and the floor in its subject AS RENDERED; "
+        f"it said {said!r} (message node: {ast.dump(message)})"
+    )
+    assert f"uv run python tools/{tool.name}" in said, (
+        f"the refusal must name an invocation at all AS RENDERED (PREFIX only — "
+        f"whether it RESOLVES is proved per tool in "
+        f"test_the_refusal_names_a_form_that_actually_RESOLVES); it said {said!r} "
+        f"(message node: {ast.dump(message)})"
+    )
+
+    # The census also requires the refusal to name the interpreter it GOT — and
+    # this is asserted BEHAVIOURALLY, because a structural check cannot see the
+    # ORDER: `(got {version_info[1]}.{version_info[0]})` renders `(got 9.3)` and
+    # reds the census while satisfying any set-of-subscripts test.
+    assert "(got 3.9)" in said, (
+        f"the refusal must name the interpreter it GOT as the operator sees it "
+        f"(`(got 3.9)` on a 3.9 host); it said {said!r}"
+    )
+    # A SECOND interpreter, because one faked version cannot tell an interpolated
+    # message from a hard-coded string: `(got 3.9)` written as a literal passes the
+    # 3.9 run. Measured: the census has the same single-version blind spot, so on a
+    # tool-only diff this is the only place the difference can be caught.
+    said_310 = _refusal_text(guard, capsys, monkeypatch, (3, 10, 9, "final", 0))
+    assert "(got 3.10)" in said_310, (
+        f"the refusal must INTERPOLATE the interpreter it got — a hard-coded "
+        f"`(got 3.9)` passes a single-version probe: on 3.10 it said {said_310!r}"
+    )
+
+    # The census's `test_no_doc_or_usage_advertises_the_form_the_guard_refuses`
+    # sweeps THIS tool's docstring too, and it is the same gate-class as the pin
+    # above: it greps `python3 <path>` for a tool that IS guarded, because the
+    # reader copies the advertised form and meets a refusal the doc never
+    # predicted. Measured on a tool-only diff —
+    # `select(['tools/capstone_ledger.py'])['test_files']` returns 82 names,
+    # INCLUDING this test's file and EXCLUDING
+    # `tests/test_entry_point_python_guard.py` — so
+    # this pin is the only gate there and must not be narrower than the sweep.
+    # (Not hypothetical: `tools/build_site_icons.py` merged advertising
+    # `python3 tools/build_site_icons.py`, and the sweep is what caught it.)
+    #
+    # Driven by the CENSUS'S OWN PATTERN over the tool's WHOLE TEXT, not a
+    # substring over `ast.get_docstring`: measured, a `# (an older revision was
+    # invoked as python3 tools/<name> check)` COMMENT and the `python3 ./tools/...`
+    # spelling both left a docstring-substring pin GREEN while the census reded.
+    # A copied regex would drift the same way, so the predicate — not a copy of
+    # it — is the single owner.
+    census = _census_module()
+    rel = tool.relative_to(REPO_ROOT).as_posix()
+    text = tool.read_text(encoding="utf-8")
+    # EVERY match on EVERY line, with the census's own exemptions — `finditer`,
+    # not `search`. One match per line is a hole the census does not have: a line
+    # whose FIRST match is a carve-out hides a real offender later on it. Measured
+    # (review round 7):
+    #   `# historical: python3 tools/tmpdir_sweep.py --help; python3 tools/capstone_ledger.py check`
+    # left this pin GREEN (2 passed) while the census reddened. The exemptions are
+    # the census's data, not a re-derived filter: filtering on
+    # `group(1) == "tools" and group(2) == tool.name` also re-narrows the regex's
+    # ELIDED branch (`python3 ...`, groups None) and its cross-path matches
+    # (`python3 graph-scripts/...`), both of which the census reds too.
+    offenders = _advertise_offenders(rel, text, census)
+    assert not offenders, (
+        f"the tool advertises `python3 tools/{tool.name}`, the form its guard "
+        f"REFUSES; the census's "
+        f"`test_no_doc_or_usage_advertises_the_form_the_guard_refuses` reds on "
+        f"it, and that test does not run on a tool-only diff: {offenders}"
+    )
+
+
+def _ci_selection_module():
+    """`tools/ci_selection.py`, loaded by path — the owner of the routing claim.
+
+    Loaded the same way `_census_module()` loads the census, so the test below
+    reads the tables that DECIDE routing instead of copying them.
+    """
+    path = REPO_ROOT / "tools" / "ci_selection.py"
+    spec = importlib.util.spec_from_file_location("_ci_selection_for_9664", path)
+    assert spec is not None and spec.loader is not None, path
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_two_named_carve_outs_REALLY_do_run_the_census():
+    """The DECLARED BOUND's routing paragraph, EXECUTED in both directions.
+
+    That paragraph exists so a reader can find out which paths still reach the
+    census on a `tools/`-only diff, and it has been wrong once already: it named
+    `SHARED_MODULES` where `TOOL_CARVEOUTS` holds the guarantee (round 15, P2).
+    Prose about routing cannot grade itself — a re-measured table in a docstring
+    is this block's own failure mode — so the claim is driven through `select()`,
+    the single owner, and BOTH directions are pinned:
+
+      * the two named carve-outs must fail closed to the FULL matrix, i.e. the
+        census DOES run on a diff touching either (the paragraph's claim);
+      * the two tools this pin covers must NOT fail closed, and the census must
+        stay OUT of their selection while THIS file stays IN — otherwise the gap
+        the whole pin exists to fill would not exist and the pin would be
+        redundant rather than load-bearing.
+
+    Non-vacuity, measured: deleting `"tools/branch_reaper.py",` from
+    `TOOL_CARVEOUTS` reds this test (the path falls back under the flat `tools/`
+    prefix, so the selection is no longer full), and so does deleting
+    `"tools/edge_census.py",`. That is the concrete reason this is not prose: the
+    earlier review warned a lane could "fix" the paragraph by deleting the rows
+    that hold the guarantee, and before this arm existed that edit was green.
+    """
+    ci = _ci_selection_module()
+    manifest = ci.load_manifest()
+
+    for rel in ("tools/branch_reaper.py", "tools/edge_census.py"):
+        explain: dict = {}
+        selection = ci.select([rel], "pull_request", manifest, explain)
+        assert explain.get("reasons") == ["unknown-paths"], (
+            f"{rel} no longer routes through the unknown-path fail-closed branch; "
+            f"the DECLARED BOUND paragraph says it does. explain={explain!r}"
+        )
+        assert selection["full"] is True, (
+            f"a diff touching {rel} no longer selects the FULL matrix, so the "
+            f"census no longer runs on the one diff that changes it — the "
+            f"paragraph's operative claim is now FALSE: {selection['surfaces']!r}"
+        )
+        assert selection["test_files"] == "ALL", (
+            f"{rel} is not routed to ALL tests; got {selection['test_files']!r}"
+        )
+
+    # The opposite direction: the pinned tools are NOT fail-closed, which is what
+    # makes this pin the only gate on a tool-only diff.
+    for pinned in PINNED_TOOLS:
+        # `PINNED_TOOLS` holds `pytest.param` objects (they carry the ids the
+        # parametrised arm above shows), so unwrap rather than restate the paths.
+        tool = pinned.values[0] if hasattr(pinned, "values") else pinned
+        rel = tool.relative_to(REPO_ROOT).as_posix()
+        selection = ci.select([rel], "pull_request", manifest)
+        assert selection["full"] is False, (
+            f"{rel} now fails closed to the FULL matrix, so the census would run "
+            f"on its diff and this pin would stop being the only gate — the "
+            f"paragraph's premise (82 files, census OUT) is FALSE: "
+            f"{selection['surfaces']!r}"
+        )
+        assert "test_9664_capstone_verdict_ledger.py" in selection["test_files"], (
+            f"this pin is not selected for a {rel} diff; the paragraph says 82 "
+            f"files INCLUDING this one"
+        )
+        assert "test_entry_point_python_guard.py" not in selection["test_files"], (
+            f"the census IS selected for a {rel} diff, which contradicts the "
+            f"paragraph's routing argument (the pin would then be redundant)"
+        )
+
+
+class _CensusMissingRow:
+    """The REAL census, with one `REFUSAL_CODES` row deleted. Nothing else faked.
+
+    Delegating rather than a `SimpleNamespace(REFUSAL_CODES=...)` on purpose: the
+    arms AFTER the row check (`_advertise_offenders`, `_channel_is_wrong`) read
+    `_BARE_INVOCATION` and friends from this same object, so a stub missing them
+    would red the caller for the WRONG reason and the test below would pass for a
+    reason it does not have.
+    """
+
+    def __init__(self, census, drop: str) -> None:
+        self._census = census
+        self.REFUSAL_CODES = {
+            k: v for k, v in census.REFUSAL_CODES.items() if k != drop
+        }
+
+    def __getattr__(self, name):  # every other census attribute stays LIVE
+        return getattr(self._census, name)
+
+
+def test_a_pinned_tool_with_NO_census_row_is_a_REFUSAL_not_a_licence(capsys, monkeypatch):
+    """#11491 review ISSUE 1 (P2): the row demand is EXECUTED, not just documented.
+
+    The measured fail-open this closes: delete `tools/build_site_icons.py`'s
+    `REFUSAL_CODES` + `REFUSAL_WHY` rows and downgrade its guard from
+    `SystemExit(4)` to `SystemExit(1)`. With the old `status != 0` fallback this
+    whole file stayed GREEN (the census's own parametrization just loses the row,
+    and on a `tools/`-only diff it is not selected), so a tool whose refusal wears
+    1 — indistinguishable from "the interpreter is too old" — shipped with the pin
+    that exists to catch exactly that.
+
+    NON-VACUITY: on the pre-fix code this test FAILS — `pytest.raises` sees the
+    caller complete instead of refusing, because `expected_status is None` took the
+    parity fallback. Re-measured by reverting the `assert expected_status is not
+    None` clause: `1 failed` (the `DID NOT RAISE` path), and green again with it.
+    """
+    module = importlib.import_module(
+        test_the_tool_carries_the_5128_interpreter_guard_first.__module__
+    )
+    census = _census_module()
+    assert "tools/build_site_icons.py" in census.REFUSAL_CODES, (
+        "this arm's premise is main's #11507 row; if it was dropped, the row "
+        "deletion is itself the regression and every pinned tool is ungradeable"
+    )
+    monkeypatch.setattr(
+        module,
+        "_census_module",
+        lambda: _CensusMissingRow(census, "tools/build_site_icons.py"),
+    )
+    with pytest.raises(AssertionError, match="pins no `REFUSAL_CODES` row"):
+        test_the_tool_carries_the_5128_interpreter_guard_first(
+            REPO_ROOT / "tools" / "build_site_icons.py", capsys, monkeypatch
+        )
+
+
+@pytest.mark.parametrize("tool", PINNED_TOOLS)
+def test_the_refusal_names_a_form_that_actually_RESOLVES(tool, capsys, monkeypatch):
+    """The census's #11507 arm, mirrored PER TOOL — because its copy does not run here.
+
+    `tests/test_entry_point_python_guard.py::
+    test_the_site_icon_guard_names_an_invocation_that_actually_resolves` proves the
+    invocation the refusal NAMES works, and it is the only gate that does one class
+    of claim: the prefix `uv run python tools/<name>` is satisfied by the bare path
+    AND by a form that adds the token the tool actually needs, so a prefix test
+    cannot see the regression. A `tools/<name>`-only diff selects 82 test files
+    INCLUDING this one and EXCLUDING the census, so on the diff that can introduce
+    the regression this file is the whole gate.
+
+    ⛔ PARAMETRIZED, not icons-only. An earlier cut of this arm hard-wired
+    `build_site_icons.py` while the case docstring claimed it covered "the
+    invocation the refusal names" for the pinned tools — so `capstone_ledger.py`'s
+    advice stayed pinned by the PREFIX alone, and rewording it to
+    `… --nope` (argparse: exit 5, a SECOND unattributed error, the exact class
+    #5128 exists for) left this file at 203 passed. Measured.
+
+    The claim proved is the census's, generalised: the form the refusal names must
+    not be a USAGE error. That is what makes the advice resolvable on both tools —
+    `build_site_icons.py` names `--help` (its bare path is a usage error because
+    `--source` is required), and `capstone_ledger.py` names the bare entry point,
+    which runs its check. So the named form is executed, and its stderr is read for
+    argparse's own `usage:` / `error:` pair rather than for one tool's exit code.
+    """
+    path = tool
+    guard = _guard_if(ast.parse(path.read_text(encoding="utf-8")))
+    assert guard is not None, f"{path} carries no #5128 interpreter guard"
+    said = _refusal_text(guard, capsys, monkeypatch, (3, 9, 6, "final", 0))
+    named_prefix = f"uv run python tools/{path.name}"
+    assert named_prefix in said, (
+        f"the refusal must name `{named_prefix}` in its advice: {said!r}"
+    )
+    # The tokens the refusal ADDS after the entry point are part of the advice —
+    # `--help` for the tool whose bare path is a usage error, nothing for the tool
+    # whose entry point is its own command.
+    tail = said.split(named_prefix, 1)[1].split("`", 1)[0]
+    extra = [tok for tok in tail.split() if tok.startswith("-")]
+    named = subprocess.run(
+        [sys.executable, str(path), *extra], capture_output=True, text=True
+    )
+    # argparse writes BOTH lines for a usage error; a working form writes neither.
+    # ⛔ "Not a usage error" is NOT "resolves" — the census's #11507 arm asserts
+    # `resolved.returncode == 0` for the named form, and any criterion weaker than
+    # that is a shadow. Measured (review round 16): rewording the icons refusal to
+    # name `--source=/nope.png` left THIS arm at 2 passed GREEN — that run fails
+    # with `/nope.png: not a file` (rc=1), which writes neither argparse line —
+    # while the census reded on the identical mutation. The polarity below is the
+    # census's, split per tool because only one tool adds a token.
+    stderr_lower = named.stderr.lower()
+    assert "usage:" not in stderr_lower and "error:" not in stderr_lower, (
+        f"the invocation the refusal names is a USAGE error — advice that is a "
+        f"SECOND unattributed error, the class #5128 exists for: "
+        f"{named_prefix} {' '.join(extra)} -> rc={named.returncode}, "
+        f"{named.stderr[-400:]!r}"
+    )
+    if extra:
+        # The census's own criterion, for the form the census pins: an invocation
+        # that ADDS tokens is the `--help` class, whose only right answer is 0.
+        assert named.returncode == 0, (
+            f"the invocation the refusal names must RESOLVE — the census asserts "
+            f"`resolved.returncode == 0` for exactly this form, and this pin must "
+            f"not be narrower than the census on the one diff shape where the "
+            f"census does not run: {named_prefix} {' '.join(extra)} -> "
+            f"rc={named.returncode}, {named.stderr[-400:]!r}"
+        )
+        # Why the extra token is there at all: the bare path must be the usage
+        # error the named form avoids. If it ever stops being one, the advice is
+        # no longer necessary and this arm should be revisited rather than kept.
+        bare = subprocess.run(
+            [sys.executable, str(path)], capture_output=True, text=True
+        )
+        assert "usage:" in bare.stderr.lower() and "error:" in bare.stderr.lower(), (
+            f"`{named_prefix}` names {' '.join(extra)}, so the BARE path must be a "
+            f"usage error that form avoids; it was not: rc={bare.returncode}, "
+            f"{bare.stderr[-300:]!r}"
+        )
+    else:
+        # The named form adds NOTHING, so it IS the tool's own entry point, and its
+        # exit code is a VERDICT (`capstone_ledger.py` exits 2 = UNCOVERED) —
+        # grading that as a failure is the over-block this arm must not add. What is
+        # still graded is that the advice does not CRASH: a traceback is the same
+        # unattributed error as a usage error.
+        assert "Traceback (most recent call last)" not in named.stderr, (
+            f"the refusal names `{named_prefix}` with no extra token, so that must "
+            f"be the tool's working entry point; it raised instead of producing a "
+            f"verdict: rc={named.returncode}, {named.stderr[-400:]!r}"
+        )
+
+
+def test_the_advertised_form_filter_is_not_deaf():
+    """The sweep's FILTER, executed on synthetic lines — not only "this file is clean".
+
+    Measured before this test existed: replacing the sweep comprehension's condition
+    with `if False and (…)` — the check deleted, the assertion kept — left the suite
+    at 724 passed, exactly as unmutated. The arm was live only for a file that
+    already had an offender, which is the one state it exists to detect, so nothing
+    executed its correctness. Each assertion below pins one side of the predicate:
+    it must flag an offender, must NOT flag a compliant invocation, must honour the
+    census's own carve-outs, and must flag the ELIDED form (whose regex branch has
+    no path, so no carve-out can exempt it).
+    """
+    census = _census_module()
+    rel = "tools/capstone_ledger.py"
+    assert _advertise_offenders(rel, f"run `python3 {rel} check`", census), (
+        "the filter flags NO offender — the sweep is deaf, and a tool advertising the "
+        "refused form would pass it"
+    )
+    assert not _advertise_offenders(rel, f"run `uv run python {rel} check`", census), (
+        "the filter flags a COMPLIANT invocation — every pinned tool would red"
+    )
+    carve = sorted(census._CARVE_OUTS)[0]
+    assert not _advertise_offenders(rel, f"`python3 {carve}`", census), (
+        f"a census carve-out ({carve}) must stay exempt — the exemptions are the "
+        f"census's data, not a re-derived filter"
+    )
+    assert _advertise_offenders(rel, "`python3 ...`", census), (
+        "the ELIDED form has no path, so no carve-out can exempt it; the census reds "
+        "it and the filter must too"
+    )
+    # MULTIPLICITY — the round-7 hole, and the only fail-OPEN arm in this table.
+    # Measured at this head: reverting the sweep's `finditer` to `search` left the
+    # whole file GREEN (204 passed), so the comment above the sweep asserting
+    # "`finditer`, not `search`" pinned nothing. One match per line lets a line
+    # whose FIRST match is a carve-out hide a real offender later on it — a hole
+    # the census does not have. The carve-out is asserted to BE one, so this row
+    # cannot rot into a line carrying no exemption.
+    hiding_carve = "tools/tmpdir_sweep.py"
+    assert hiding_carve in census._CARVE_OUTS, (
+        f"{hiding_carve} is no longer a census carve-out, so this row would test "
+        f"nothing — pick a current exemption from `_CARVE_OUTS`"
+    )
+    hiding = f"# historical: python3 {hiding_carve} --help; python3 {rel} check"
+    assert _advertise_offenders(rel, hiding, census), (
+        "a carve-out match FIRST on the line hid a real offender later on it: the "
+        "sweep must use `finditer`, not `search` (review round 7). The census reds "
+        f"this line; the filter found nothing in {hiding!r}"
+    )
+    # The RECORD exemption is a third clause, and it is executed by nothing else:
+    # both pinned tools carry no `_DELIBERATE_BARE_FORM` line, so deleting the
+    # clause left the suite GREEN (measured). It is keyed by (path, stripped line),
+    # so the census's own first entry is the only honest subject.
+    record_rel, record_line = sorted(census._DELIBERATE_BARE_FORM)[0]
+    assert not _advertise_offenders(record_rel, record_line, census), (
+        f"a census RECORD exemption must stay exempt ({record_rel!r}): rewriting "
+        f"recorded evidence to satisfy a gate falsifies provenance, which is why the "
+        f"census exempts it"
+    )
+
+
+def test_the_advertised_form_sweep_is_WIRED_into_the_pin(monkeypatch, capsys):
+    """The sweep's CALL SITE, not only its filter.
+
+    `test_the_advertised_form_filter_is_not_deaf` proves `_advertise_offenders`
+    flags an offender — but it calls the helper DIRECTLY, so its caller can stop
+    calling it and every one of those assertions still passes. Measured (review
+    round 16): replacing the call site with `offenders = []` left this file at
+    **206 passed**, identical to unmutated — because both pinned tools legitimately
+    yield no offenders, so "the sweep ran and found nothing" and "the sweep is
+    gone" are the SAME observation at that site. A recorded claim
+    ("the advertised-invocation sweep driven by the census's own
+    `_BARE_INVOCATION` + exemption sets") could then be deleted silently.
+
+    So the sweep is DISCONNECTED here and the pin is driven directly — the same
+    technique `test_a_pinned_tool_with_NO_census_row_is_a_REFUSAL_not_a_licence`
+    uses for the `REFUSAL_CODES` arm. If the call site is removed, the injected
+    offender never reaches the assertion and this test reds for the reason it
+    exists rather than passing on an empty result.
+    """
+    sentinel = [
+        "tools/capstone_ledger.py:1: `python3 tools/capstone_ledger.py`"
+    ]
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "_advertise_offenders",
+        lambda *args, **kwargs: list(sentinel),
+    )
+    with pytest.raises(AssertionError, match="advertises"):
+        test_the_tool_carries_the_5128_interpreter_guard_first(
+            TOOL, capsys, monkeypatch
+        )
+
+
+def test_capstone_ledgers_refusal_code_is_the_one_the_census_pins():
+    """`REFUSAL_CODES["tools/capstone_ledger.py"] == 1`, and it must stay there.
+
+    The census's `REFUSAL_WHY` entry explains the choice: the tool's 0-4 set is
+    CLOSED and fully spent, so `EXIT_INVALID` is reused on purpose as the
+    fail-closed neighbour. Adding 5 to satisfy a lint would change a documented
+    public contract, so the constant itself is pinned — a coordinated edit of
+    the constant AND the guard is what `status == 1` in the parametrised test
+    catches.
+    """
+    assert cl.EXIT_INVALID == 1
+    # The row the sentence above is about, asserted against the census ITSELF: a
+    # census edit that moved the pin would otherwise leave this test green while
+    # its own name became false (measured by mutating the row to 2 — only the
+    # parametrised status arm reded).
+    census = _census_module()
+    assert census.REFUSAL_CODES["tools/capstone_ledger.py"] == 1, (
+        f"the census's own row for this tool must be 1; got "
+        f"{census.REFUSAL_CODES['tools/capstone_ledger.py']!r}"
+    )

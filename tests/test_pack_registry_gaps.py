@@ -787,8 +787,25 @@ class TestRelationWriteVerdict:
         assert {tuple(r["write_paths"]) for r in relations} == {("operator",)}
 
     def test_shipped_catalog_reports_the_legacy_relations(self):
-        """Regression pin on the real packs: the 4 legacy `pm` relations
-        bind no mechanism and must be REPORTED."""
+        """Regression pin on the real packs: the legacy `pm` rows are RESOLVED,
+        not silenced (#11083).
+
+        This pin used to assert the opposite — that all four `pm` rows
+        (`blocks`, `partOfSprint`, `assignedTo`, `onBoard`) came back
+        `predicate-not-in-allowlist`. #11083 resolved them under #2766's
+        three-layer convention: three gain a `mechanism` + a canonical meaning
+        (so they bind the operator/structural write path), and `onBoard` — a
+        VIEW over cards, recomputed from `cardMoved` — keeps its declaration
+        with `declarationOnly: true` and a printed reason.
+
+        What must stay true, and is asserted here:
+          * the declared POPULATION does not shrink to make the count green
+            (36 relations before and after — nothing deleted, #11083 Target);
+          * no shipped row is `predicate-not-in-allowlist` — the state #2766
+            calls "the declaration gap" must be empty in the shipped catalog;
+          * the one acknowledged declaration is `onBoard`, and it carries the
+            reason the census prints (`declarationOnlyReason`).
+        """
         from tortoise.pack_registry import (
             RELATION_WRITE_VERDICTS,
             default_packs_dir,
@@ -799,15 +816,68 @@ class TestRelationWriteVerdict:
         relations = reg.list_relations()
         # Every verdict is one the schema declares — the vocabulary is closed.
         assert {r["write_verdict"] for r in relations} <= set(RELATION_WRITE_VERDICTS)
+        assert len(relations) == 36, (
+            "the declared relation population must not be reduced by deleting "
+            f"a declaration to make the verdict counts green, got {len(relations)}"
+        )
         reported = {
             (r["pack"], r["predicate"])
             for r in relations
             if r["write_verdict"] == "predicate-not-in-allowlist"
         }
-        assert reported == {
-            ("pm", "blocks"), ("pm", "partOfSprint"),
-            ("pm", "assignedTo"), ("pm", "onBoard"),
-        }, reported
+        assert reported == set(), reported
+        acknowledged = {
+            (r["pack"], r["predicate"])
+            for r in relations
+            if r["write_verdict"] == "declaration-only"
+        }
+        assert acknowledged == {("pm", "onBoard")}, acknowledged
+        on_board = next(
+            r for r in relations
+            if r["pack"] == "pm" and r["predicate"] == "onBoard"
+        )
+        assert on_board.get("declarationOnlyReason"), (
+            "`declarationOnly: true` without a printable reason is a SILENCER, "
+            "not a disposition (#11083 R7)"
+        )
+
+        # ⛔ The DOMAIN WORDS must SURVIVE. #2766's convention — restated as the
+        # owner's ruling for these exact rows (#11083 comment 6714848519,
+        # 2026-11-08) — is "keep each domain word as the **label**, give it the
+        # canonical layer-2 meaning, and it becomes writable". A rename to the
+        # meaning's own name DELETES a word: `CORE_OPERATOR_LABELS` unions
+        # `SEMANTICS_VALUES` with each pack's `relations[].predicate`, so a caller
+        # (or the extractor) emitting `blocks` would hit `undeclared_relation` and
+        # be told to use a different word. This assertion used to work; it was
+        # rewritten to population COUNTS, which cannot see a rename — and the
+        # rename then landed with nothing red anywhere in the tree.
+        pm_rows = {r["predicate"]: r for r in relations if r["pack"] == "pm"}
+        assert set(pm_rows) == {
+            "blocks", "partOfSprint", "assignedTo", "onBoard"}, (
+            "a `pm` domain word was deleted or renamed — the ruling keeps every "
+            f"label and changes only its MEANING, got {sorted(pm_rows)}")
+        assert pm_rows["blocks"]["semantics"] == "dependsOn"
+        assert pm_rows["blocks"]["effective_direction"] == "<-", (
+            "'A blocks B' means B depends on A — the ruled direction flip; "
+            "`dependsOn`'s table default `->` transfers confidence "
+            "blocker→blocked, the inverse of the truth")
+        assert pm_rows["partOfSprint"]["semantics"] == "hasPart"
+        assert pm_rows["assignedTo"]["semantics"] == "managedBy"
+
+        # ⛔ #11083's two new discoverable cells, which nothing read. Deleting
+        # `entry["effective_direction"]` (or `entry["direction"]`) from
+        # `list_relations()` reddened NOTHING before this assertion — on the cell
+        # the module comment calls the one that keeps "the discoverable API" from
+        # asserting a relation is bound to a sense its declaration does not bind.
+        holds = next(
+            r for r in relations
+            if (r["pack"], r["predicate"]) == ("venture", "holds")
+        )
+        assert holds["direction"] == "<-", (
+            "the DECLARED per-edge sense (ruling (c)) is not surfaced")
+        assert holds["effective_direction"] == "<-", (
+            "the resolved sense is not surfaced — or it let `ownedBy`'s table "
+            "default `->` outrank the declaration")
 
 
 class TestListConnectors:
