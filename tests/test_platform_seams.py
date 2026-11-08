@@ -760,6 +760,74 @@ def test_install_refuses_symlinked_intermediate_dir(tmp_path):
     assert not (outside / "hooks" / "UserPromptSubmit").exists()  # untouched
 
 
+def test_uninstall_cline_ignores_an_outside_symlink_on_the_untouched_path(
+        tmp_path):
+    """The symlink-escape guard covers only paths the operation WRITES or
+    DELETES (#11588 review cycle 5).
+
+    With an in-root legacy registration and `.clinerules` symlinked to a dir
+    OUTSIDE the root, an `--uninstall` used to refuse with
+    "… resolves to … outside the install dir" and leave OUR OWN hook in place
+    (measured: rc 1, hook still there; the base removed it, because the legacy
+    path was not a candidate at all). Nothing was at risk: the file being
+    deleted was in-root.
+
+    The guard must still refuse the INSTALL in that same project — that one
+    would write through the out-of-root symlink.
+
+    MUTATION: guard every candidate unconditionally → RED on the uninstall rc.
+    """
+    outside = tmp_path / "shared-clinerules"
+    outside.mkdir()
+    proj = tmp_path / "proj"
+    legacy = proj / ".cline" / "hooks" / "UserPromptSubmit"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("#!/usr/bin/env bash\n"
+                      "exec /nonexistent/volunteer-turn.sh cline\n")
+    (proj / ".clinerules").symlink_to(outside)
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+
+    u = _run(["install", "cline", "--dir", str(proj), "--uninstall"], env)
+    assert u.returncode == 0, (u.returncode, u.stdout, u.stderr)
+    assert not legacy.exists(), (
+        "an unrelated out-of-root symlink blocked the removal of OUR OWN "
+        "in-root registration")
+
+    # …while the write side of the SAME guard still holds.
+    r = _run(["install", "cline", "--dir", str(proj)], env)
+    assert r.returncode == 1, (r.returncode, r.stdout, r.stderr)
+    assert "Refusing" in r.stderr
+    assert not (outside / "hooks" / "UserPromptSubmit").exists()
+
+
+def test_uninstall_cline_removes_the_live_hook_when_dot_cline_leaves_the_root(
+        tmp_path):
+    """Install, then the user symlinks `.cline` to a shared dir outside the
+    root: `--uninstall` must still remove the LIVE registration it just
+    installed (nothing of ours lives under the symlink), or the reflex keeps
+    firing after the user asked to remove it (#11588 review cycle 5).
+
+    MUTATION: guard every candidate unconditionally → RED (rc 1, hook kept).
+    """
+    outside = tmp_path / "shared-cline"
+    outside.mkdir()
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+
+    r = _run(["install", "cline", "--dir", str(proj)], env)
+    assert r.returncode == 0, r.stderr
+    live = proj / ".clinerules" / "hooks" / "UserPromptSubmit"
+    assert live.is_file()
+    (proj / ".cline").symlink_to(outside)
+
+    u = _run(["install", "cline", "--dir", str(proj), "--uninstall"], env)
+    assert u.returncode == 0, (u.returncode, u.stdout, u.stderr)
+    assert not live.exists(), (
+        "the live registration survived an uninstall because of a symlink on "
+        "the path it does not use")
+
+
 def test_install_cline_refuses_directory_target(tmp_path):
     """A directory sitting at the cline hook path is a clean refusal, not a
     traceback."""

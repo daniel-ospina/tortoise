@@ -112,7 +112,11 @@ hook script as a module. No MCP tool or public SDK method is touched.
 - R5 Uninstall leaves our file behind at either path → caught by the uninstall assertions on both
   paths **including a live old script path** (`test_install_cline_migrates_a_legacy_registration_whose_script_path_lives`,
   which also pins the install-side migration for that shape — the dead-path form alone let a live one
-  slip through and leave both hooks injecting twice).
+  slip through and leave both hooks injecting twice) — **and** by the two symlink-scoping tests
+  (`test_uninstall_cline_ignores_an_outside_symlink_on_the_untouched_path`,
+  `test_uninstall_cline_removes_the_live_hook_when_dot_cline_leaves_the_root`): the escape guard covers
+  only paths the operation writes or deletes, so a symlink on the path an uninstall does NOT touch can
+  no longer block removal of our own in-root registration.
 - R6 A regression in the other harness arms (`claude|codex|devin` share one arm) → caught by their
   unchanged contract tests in the same file.
 - R7 A project whose `.clinerules` is a rules FILE (Cline's other rules convention) gets an install

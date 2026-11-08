@@ -6110,8 +6110,25 @@ def _install_read_hook_impl(args) -> int:
     #    path is guarded too: it is never written, but it IS unlinked when it
     #    holds our registration, and a delete through a symlinked `.cline/`
     #    would reach outside the root just as a write would (#2124). ─────
+    # Which candidates are actually WRITTEN or DELETED — and ONLY those
+    # (#11588 review cycle 5). An install writes `target` and retires a legacy
+    # file only when one EXISTS; an uninstall deletes only what exists. A path
+    # the run cannot touch must not block it: guarding `.clinerules` on an
+    # `--uninstall` whose registration sits in-root at `.cline/hooks` refused
+    # the removal of OUR OWN hook (measured: rc 1, hook left in place, where
+    # the base removed it), and guarding a non-existent `.cline` refused an
+    # install that never writes there. Every real write and every real delete
+    # stays guarded: an existing file behind an out-of-root symlink still
+    # refuses, which is what `test_install_refuses_symlinked_intermediate_dir`
+    # and the uninstall half below pin.
     root_r = root.resolve()
-    for candidate in [target] + ([legacy_target] if legacy_target else []):
+    if uninstall:
+        guarded = [p for p in (target, legacy_target)
+                   if p is not None and p.exists()]
+    else:
+        guarded = [p for p in (target, legacy_target)
+                   if p is not None and (p == target or p.exists())]
+    for candidate in guarded:
         try:
             rel_parts = candidate.relative_to(root).parts
         except ValueError:
