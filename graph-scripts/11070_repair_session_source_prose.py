@@ -406,8 +406,12 @@ def _report_fts(fts: dict) -> None:
             # ⛔ THE MARKER MUST MATCH THE KIND (#11536 review round 6): a leg that
             # RAN and returned hits it could not classify DID measure, so stamping
             # "did not measure" beside the very urls it measured contradicted the
-            # line it annotates. `unmeasured`/`unknown` are the only kinds that did
-            # not measure; `unclassified` measured and could not finish.
+            # line it annotates. `unmeasured` is the only REACHABLE kind here that
+            # did not measure; `unclassified` measured and could not finish.
+            # `unknown` ("a reading existed, we do not know what it established")
+            # would deserve a third phrase, and is unreachable from `_merge_probe`
+            # — `residue_before is not None` implies `before is not None` — so the
+            # clause deliberately does not mention it rather than assert its state.
             before = f"{before} " + (
                 "⚠️ BEFORE leg could not fully classify its hits"
                 if before_kind == "unclassified"
