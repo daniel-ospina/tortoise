@@ -1390,7 +1390,8 @@ def _successor_clause_violations(doc: str) -> list[str]:
     for required, why in (
         ("is NOT the test that it has",
          "the record must name the trap: the fold's stages EXIST, which is not "
-         "the successor landing"),        ("apply_vet",
+         "the successor landing"),
+        ("apply_vet",
          "the record must name the gate's symbol that cannot add (removal-only)"),
         ("classify_items",
          "the record must name the classifier's symbol that labels only"),
