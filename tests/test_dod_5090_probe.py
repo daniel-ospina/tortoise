@@ -4854,6 +4854,18 @@ def _residual_sentences(s3: str) -> list[str]:
       report …"`, `"…does not generally reach …"`. Closing this needs SCOPE
       rather than a longer list, so it is declared instead — and all three are
       ROWS in `declared_open` below, not prose (#11437 review, P3).
+    * a negation that DOES govern a coverage verb but not the CLAIM — the other
+      half of the stray-negation class, which the governance window was claimed
+      to have closed and has not (#11437 review, round 14, P2). Four shapes were
+      measured GREEN at the head that reported them: a negation governing a
+      DIFFERENT object of the verb (`"the body walk does not report the closure's
+      frames, but it does report …"`), two walks named in one sentence
+      (`"the closure walk does not report …; the body walk reports …"`), a
+      TEMPORAL bound (`until` / `unless` / `once` …`the outer method runs`,
+      which asserts that the walk does report them later), and an EXCLUSIVE
+      complement (`"does not visit anything but …"`). All six are ROWS in
+      `declared_open` below. Closing them needs the predicate to know which
+      OBJECT a negation scopes over, which is not vocabulary.
 
     FALSE-BLOCK (it reds the claim, stated honestly):
 
@@ -4861,6 +4873,12 @@ def _residual_sentences(s3: str) -> list[str]:
       `skipped`, or one phrased `"…are never inside the walk"` — `inside the
       walk` is an affirm marker and `never` does not outrank it. All three are
       ROWS in `declared_blocks` below (#11437 review, P3);
+    * an honest exclusion whose negation cue is spelled `cannot` (or a
+      contraction), which the cue list does not carry — measured RED, and until
+      round 14 no row or bullet named the spelling, so a reader had to INFER that
+      the three-token bullet excluded a fourth spelling. The census doc's own
+      voice uses `cannot` three times, so a §3 reword in its register lands here.
+      A ROW in `declared_blocks` below (#11437 review, round 14, P3);
     * an HONEST sentence that uses a marker as an ASIDE — both measured RED
       (#11437 review, round 2, P3): a concessive `"…except that a default is
       evaluated when the outer method runs"`, which trips the `except that`
@@ -5861,7 +5879,7 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
     for _window in (0, 1, 2, 3):
         monkeypatch.setattr(
             sys.modules[__name__], "_NEGATION_GOVERNS",
-            re.compile(_window_pattern.replace("{0,2}?", "{0,%d}?" % _window)))
+            re.compile(_window_pattern.replace("{0,2}?", f"{{0,{_window}}}?")))
         _measured_sweep[_window] = (
             sum(1 for _s in must_red.values() if not _red(_s)),
             sum(1 for _s in declared_open.values() if _red(_s)),
