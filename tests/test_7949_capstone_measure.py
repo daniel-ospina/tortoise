@@ -4528,14 +4528,14 @@ def test_the_bare_continuation_cites_name_what_they_say():
     rows = (
         # `each VET pass is gated on the LIST` — the gate AND its call, twice.
         ("docs/00_index.md", "each VET pass is gated on the LIST", (
-            ("12967", "if vet_enabled and embed_list:"),
-            ("12968", "embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass("),
-            ("13106", "if vet_enabled and complete_list:"),
-            ("13107", "complete_list, vet_union_stats, _w, _ = _run_vet_pass("),
+            ("13043", "if vet_enabled and embed_list:"),
+            ("13044", "embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass("),
+            ("13182", "if vet_enabled and complete_list:"),
+            ("13183", "complete_list, vet_union_stats, _w, _ = _run_vet_pass("),
         )),
-        # the VET block's start; its three lines of keys (13331-13333) close on
-        # line 13334 — DERIVED by content, not by arithmetic: `result["vet"] = {`
-        # opens at 13330 and the block's `}` is 13334. ⚠️ A conflict resolution
+        # the VET block's start; its three lines of keys (13407-13409) close on
+        # line 13410 — DERIVED by content, not by arithmetic: `result["vet"] = {`
+        # opens at 13406 and the block's `}` is 13410. ⚠️ A conflict resolution
         # here once kept main's numerals (13256/13257-13259/13260 — correct on
         # main, but in THIS tree 13256 is the `"hold"` key and 13257-13260 is
         # the whole `chain_enforcer` block) next to the branch's post-refactor
@@ -4543,8 +4543,8 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # which is why every ASSERTED number in this table is verified by
         # content instead.
         ("docs/00_index.md", "emitted unconditionally at", (
-            ("13320", 'result["classify_later"] = {'),
-            ("13330", 'result["vet"] = {'),
+            ("13396", 'result["classify_later"] = {'),
+            ("13406", 'result["vet"] = {'),
         )),
         # ⛔ THE CLASSIFY PASS'S OWN FAIL-OPEN PAIR (#10833 review, P2). The
         # `+33` shift the fold applied to this row moved the first member to
@@ -4558,25 +4558,25 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # a reader following `:10620` must land in the `classify_later and
         # complete_list` block, which the row below holds at `:10599`.
         ("docs/00_index.md", "fail-open `except` at", (
-            ("12995", "except Exception as e:  # never block capture (P1)"),
-            ("13142", "except Exception as e:  # never block capture (P1)"),
+            ("13071", "except Exception as e:  # never block capture (P1)"),
+            ("13218", "except Exception as e:  # never block capture (P1)"),
         )),
         # `_IDLE_CITES["vet"]`: the early return and the surface it emits
         ("probes/capstone_measure.py", "its vet surface", (
-            ("12857", "if not edus:"),
-            ("12877", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
+            ("12933", "if not edus:"),
+            ("12953", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
         )),
         # ...and the same claim in the rule's own docstring
         ("probes/capstone_measure.py", "with the flag ON", (
-            ("12877", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
+            ("12953", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
         )),
         ("probes/capstone_measure.py", "follows at", (
-            ("12856", "edus = _edus_from_conversation(conversation)"),
+            ("12932", "edus = _edus_from_conversation(conversation)"),
         )),
         # the S2.2/S2.3 block this probe names as the #9116 seam's subject
         ("probes/capstone_measure.py", 'result["vet"]`` at', (
-            ("13330", 'result["vet"] = {'),
-            ("13334", ("exact", "}")),
+            ("13406", 'result["vet"] = {'),
+            ("13410", ("exact", "}")),
         )),
         # The E-row audit's cites on the GATE ITSELF. `_BUNDLE_CITE` matches only
         # `sdk|edges|extractor_v2`, so a `tools/*.py` number is invisible to the
@@ -4631,10 +4631,10 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # return it names, while every gate reported OK. Two rows because the
         # claim wraps over two lines and a row scopes to ONE line.
         ("README.md", "i.e. BEFORE the", (
-            ("12853", "vet_enabled = (vet_arbiter is not None or _vet_enabled()"),
+            ("12929", "vet_enabled = (vet_arbiter is not None or _vet_enabled()"),
         )),
         ("README.md", "early return (`", (
-            ("12857", "if not edus:"),
+            ("12933", "if not edus:"),
         )),
         # ⛔ The #2684 row's cite (#10833 review, P2): the fold rewrote a CORRECT
         # `5042-5043` into `4948-4949` — inside `_refuse_rewritten_value`, an
@@ -4648,20 +4648,20 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # the bare one sat in no row, which is how a `+N` insert left it on a
         # docstring in an unrelated helper while every neighbour moved.
         ("README.md", "on its fail-open path", (
-            ("12732", "except Exception as e:  # noqa: BLE001, RUF100"),
-            ("12735", '"(fail-open)"], {}'),
+            ("12808", "except Exception as e:  # noqa: BLE001, RUF100"),
+            ("12811", '"(fail-open)"], {}'),
         )),
         # ⛔ AND THE PROBE'S OWN COPY (#10997 review round 5, P2): the same range
         # is baked into `_IDLE_CITES["vet"]`, i.e. into the cause a future run
         # PRINTS to a reader — and it sat on a line the neighbouring row does not
         # scope to, so a move would ship a stale number in machine-emitted prose.
         ("probes/capstone_measure.py", "on its fail-open path", (
-            ("12732", "except Exception as e:  # noqa: BLE001, RUF100"),
-            ("12735", '"(fail-open)"], {}'),
+            ("12808", "except Exception as e:  # noqa: BLE001, RUF100"),
+            ("12811", '"(fail-open)"], {}'),
         )),
         ("docs/00_index.md", "refuses a value-free point at", (
-            ("5286", "if not _carries_value(content, quote):"),
-            ("5287", "return None"),
+            ("5354", "if not _carries_value(content, quote):"),
+            ("5355", "return None"),
         )),
         # ⛔ THE S5 CONNECT CALL, IN BOTH DOCUMENTS (#11368 rebase review, P2). The
         # `+74` re-derivation matched `execute_embed` by SYMBOL and landed on its
@@ -4671,13 +4671,13 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # cannot see it, and no row scoped to it — which is exactly the invisibility
         # this pin exists for. Both rows hold the CALL, not the definition.
         ("README.md", "gap filler", (
-            ("13237", "result = execute_embed(complete_list, search, "
+            ("13313", "result = execute_embed(complete_list, search, "
                       "session_id=session_id,"),
         )),
         # ...and the probe's own copy of the same number, which sits in prose a
         # reader is sent to rather than in a table.
         ("probes/capstone_run.py", "ONE cite per symbol", (
-            ("13237", "result = execute_embed(complete_list, search, "
+            ("13313", "result = execute_embed(complete_list, search, "
                       "session_id=session_id,"),
         )),
     )
@@ -5139,24 +5139,27 @@ def test_the_pre_registration_cites_the_classify_sites_the_tree_actually_has():
        §11 sentences stayed GREEN (`1 passed`, measured). `_without_change_history`
        fixes it.
     2. Even with history stripped, `` `if items:` `` has TWO live carriers — the §9
-       provenance row (`:757`) and §11.1's prose sentence (`:1145`) — so reverting
+       provenance row and §11.1's prose sentence — so reverting
        the prose alone still left the row satisfying the pin. Every live carrier is
        now bound to both gates, which is why `_live_blocks` exists.
 
-       The section labels here were wrong in an earlier round of this PR and are
-       pinned to the document's own headings rather than to a memory of it: `## 9.
-       Provenance of every number in this file` opens at `:744` (so the table row at
-       `:757` is §9, not §7 — §7 ends at `:703`, where `## 8.` opens), and `### 11.1`
-       opens at `:1141` (so `:1145` is §11.1, not §11.3 — §11.3 opens at `:1173`). The
-       other §11.3 reference in this docstring, the fail-open pair at `:1189-1195`,
-       IS §11.3 and is unchanged. A wrong label is not cosmetic here: the whole point
-       of this leg is that a reader can go and LOOK at the carrier.
+       The section labels here were wrong in an earlier round of this PR, and SO WAS
+       EVERY LINE NUMBER IN THIS PARAGRAPH: transcribed from a memory of the document
+       rather than read off it, they matched a revision ~600 lines shorter. That is
+       why the carriers are named by their SECTION HEADING and their PHRASE, never by
+       a number, and every number the legs actually use is DERIVED at run time
+       (`_extractor_lineno`, `_live_blocks`, `ast`) rather than typed. For the record:
+       the provenance row is under `## 9. Provenance of every number in this file`
+       (§7 ends where `## 8. Change control` opens), the `if items:` prose sentence is
+       under `### 11.1 The finding, and what it is not`, and the fail-open pair the
+       paragraph below refers to is `### 11.3`'s. A wrong label is not cosmetic here:
+       the whole point of this leg is that a reader can go and LOOK at the carrier.
 
     The fail-open pair needs no per-carrier loop, and that is measured rather than
-    assumed: after the strip, `:12921` and `:13068` each occur in exactly ONE live
-    block (`:1189-1195`, the §11.3 sentence that pairs them), so the whole-document
-    check below binds to that sentence. (`classify(S2) failed` also appears in the
-    frozen YAML corpus pin at `:604-699`, which is why the carriers are located by
+    assumed: after the strip, each of the two arms occurs in exactly ONE live block (the
+    §11.3 sentence that pairs them), so the whole-document check below binds to that
+    sentence. (`classify(S2) failed` also appears in the frozen YAML corpus pin's
+    `idle_evidence` text, which is why the carriers are located by
     the `` `if items:` `` phrase and not by the arms' own marker text.)
     """
     collector = _extractor_lineno("def _collect_classify_items(")
@@ -5190,11 +5193,182 @@ def test_the_pre_registration_cites_the_classify_sites_the_tree_actually_has():
             # the record states the condition in one folded scalar; the RANGE and
             # the two gates are the document's table/text, not the record's.
             continue
-        assert f"tortoise/extractor_v2.py:{collector}-{end}" in text, (
-            f"{doc_name} does not cite the collector's extent as "
-            f"tortoise/extractor_v2.py:{collector}-{end} (the `def` through "
-            f"`return items`) — a range that runs past the body names the next "
-            "function's lines")
+        # ⛔ THE EXTENT IS BOUND PER LIVE CARRIER, for the same reason the gates
+        # below are (review round 2, P1): there are two live carriers — the §9
+        # provenance row and §11.1's prose — so a whole-document `in text` check is
+        # satisfied by whichever ONE of them is right. Measured at
+        # `a4b5fe28c`: mutating the §11.1 extent alone (`:11174-11196` ->
+        # `:11175-11196`) left this leg `1 passed`, and so did mutating the §9 row's
+        # end alone; only a gate cite in the same sentence red it. The pin a
+        # re-derivation leans on has to fail for the carrier that is wrong.
+        extent_carriers = [block for block in _live_blocks(text)
+                           if "_collect_classify_items" in block]
+        assert extent_carriers, (
+            f"{doc_name} has no live (non-§10) block naming `_collect_classify_items` "
+            "— the collector cite must sit in live prose, not only in a change-control "
+            "entry that `_without_change_history` strips")
+        # A carrier that names the collector's EXTENT must name the right one. (A
+        # carrier that names only the single line — the `steps:` condition's folded
+        # scalar does — makes no extent claim, so it is not held to this.)
+        # ⛔ SHAPE-TOLERANT (review round 5, P2). The first cut matched only
+        # `extractor_v2.py:A-B` with an ASCII hyphen, so a stale extent spelled
+        # `:A–B` (en dash), `:A - B` (spaced) or `:A … extractor_v2.py:B` (two
+        # single cites) escaped BOTH the carrier filter and the equality test —
+        # measured: three such rewrites of a live carrier left this leg `0 failed`.
+        # A block that names TWO OR MORE extractor_v2 positions is making an
+        # extent claim whatever its punctuation, so it is held to the extent; a
+        # block naming exactly one (the `steps:` condition's folded scalar) makes
+        # no extent claim and stays out.
+        _extent_cite = re.compile(r"extractor_v2\.py:(\d+)(?:\s*[-\u2013\u2014]\s*(\d+))?")
+        # ⛔ THE BARE FORM IS THE ONE A RE-DERIVATION ACTUALLY WRITES (round 6, P2).
+        # This document's dominant spelling for a SECOND cite on a line is bare —
+        # "`if items:` at `:13058`" — so a stale extent appended that way carries
+        # no `extractor_v2.py:` prefix and the pattern above cannot see it: measured,
+        # "`_collect_classify_items` (`tortoise/extractor_v2.py:11174`, `:11098-11120`)"
+        # left this leg `PASS (NOT caught)`, the exact "correct twin" defect the set
+        # equality below exists to close. A bare RANGE on a line that itself carries
+        # an `extractor_v2.py:` cite is therefore an extractor cite too. A CONNECTOR
+        # is required, so bare SINGLE cites (the extremely common `at `:13058`` form,
+        # which makes no extent claim) stay out, and the lookbehind keeps `log:1-2`
+        # style ranges on unrelated lines untouched.
+        # ⛔ AND THE CONNECTOR'S PUNCTUATION VARIES (round 10, P2). The dash test
+        # above admitted only a dash that sat INSIDE one span (`:A-B`), so a stale
+        # extent spelled the way this document actually writes a SECOND cite — each
+        # endpoint in its OWN backticks (`:11098`-`:11120`) — or spelled with the word
+        # form (`:11098 to :11120`) escaped: measured, appending each of those to a live
+        # carrier left this leg `PASS (escaped)`. The span markers and the spaces
+        # between them are punctuation, not meaning, so they are absorbed; the second
+        # endpoint's leading `:` is optional for the same reason. An ELLIPSIS is in the
+        # connector set for the same reason (round 11): it is a punctuation spelling of
+        # "to", and the live documents contain no `:A` … `:B` at all, so admitting it
+        # costs nothing and closes the shape instead of declaring it. A CONNECTOR is
+        # still required, which is what keeps bare SINGLE cites (the extremely common
+        # `at `:13058`` form, making no extent claim) out, and `[ \t]` rather than `\s`
+        # keeps a cross-line dash from being read as one extent.
+        _bare_range = re.compile(
+            r"(?<![A-Za-z0-9_.]):(\d+)[` \t]*(?:[-\u2013\u2014]|to|\u2026|\.\.\.)"
+            r"[` \t]*:?(\d+)")
+        # ⛔ THE BARE RANGE BELONGS TO THE CARRIER'S SENTENCE, NOT TO ITS LINE
+        # (round 7, P2). Line-scoping the bare-range rule above was one re-wrap away
+        # from blind: the document wraps at ~103 columns and `_live_blocks` scopes
+        # carriers to the BLOCK precisely so re-wrapping cannot red this pin — but
+        # with a line test it made the pin MISS instead, measured: a wrapped
+        # `…was formerly \`:11098-11120\`` appended to the §11.1 carrier left this
+        # leg `PASSES (NOT caught)`.
+        # ⛔ AND IT BELONGS TO THE NEAREST *PRECEDING* FILE CITE, NOT TO "THE LINE HAS
+        # ONE" (round 8, P2). A per-line `is another file cited on this line?` test is
+        # order-blind, so `was formerly \`:11098-11120\` per \`README.md:44\`` still
+        # escaped — measured `PASSES (NOT caught)` — while the same token placed BEFORE
+        # the range correctly excluded it. Both of these bundles cross-cite heavily, so
+        # that is a shape a re-derivation produces. A bare range is therefore attributed
+        # to the last `file:line` token that precedes it ON ITS LINE, and counted when
+        # that token is `extractor_v2.py:` or when nothing precedes it (a wrapped
+        # continuation line). That keeps the §9 row's legitimate bare log cite
+        # (`capstone-measured-9152448d.log:271` … `:299-309`) out of the extractor's
+        # numbers, and it fixes the over-block the line test caused on a row citing the
+        # extent AND a log range.
+        # ACCEPTED RESIDUALS, declared rather than chased — each needs semantics, not
+        # punctuation, to resolve. ⛔ Residual 1 is NOT hypothetical: §9's own table row
+        # (`PRE-REGISTRATION.md:1130`, `capstone-measured-9152448d.log:271` … `:299-309`)
+        # is exactly that shape, it lives in the SAME live block as the extent row, and
+        # the nearest-preceding-token rule is what keeps its `:299-309` out of the
+        # extractor's numbers — measured, removing the exclusion yields
+        # `[299, 309, 11174, 11196]` and reds. So do not read that branch as dead code:
+        #   1. a bare range that FOLLOWS another file's cite on the same line
+        #      (`per \`README.md:44\`, was formerly \`:11098-11120\``) — the same shape
+        #      that keeps §9's `:299-309` out, so it is not counted;
+        #   2. a bare range that follows an EXTRACTOR cite but really belongs to a
+        #      third file (`` `:11174-11196` … the log's `:299-309` ``) — once the
+        #      basename fix above is in, that one IS counted and would red. The
+        #      document avoids it by spelling the log token on that row, so nothing
+        #      live reds; closing it needs the file named on every cite.
+        #   3. a stale extent whose endpoints are joined by a WORD rather than a
+        #      connector glyph (`:11098` and `:11120`). Declared because it CANNOT be
+        #      closed by punctuation, and that was measured, not assumed (round 11):
+        #      admitting `and` reds the live §9 row (`PRE-REGISTRATION.md:1121`), whose
+        #      `:13058` and `:13207` are two SINGLE cites enumerated under the extractor
+        #      owner — exactly the `at `:13058`` form this rule exempts. (The ELLIPSIS
+        #      half of this residual is GONE: round 11 put `…`/`...` in the connector
+        #      set, which reds the stale spelling while the live documents stay green —
+        #      they contain no `:A` … `:B` at all.) Closing what is left needs the
+        #      extent recognised semantically ("these two endpoints describe one span")
+        #      or the document to spell every extent with a connector glyph.
+        _file_tok = re.compile(
+            r"[\w./-]+\.(?:log|md|json|jsonl|py|yml|yaml|txt|csv):\d+")
+
+        def _bare_ranges(
+            line: str,
+            _rng: re.Pattern[str] = _bare_range,
+            _tok: re.Pattern[str] = _file_tok,
+        ) -> list[tuple[str, str]]:
+            """Bare `:lo-hi` ranges this line attributes to `extractor_v2.py`."""
+            kept: list[tuple[str, str]] = []
+            for match in _rng.finditer(line):
+                preceding = list(_tok.finditer(line[: match.start()]))
+                # ⛔ COMPARE THE BASENAME (round 9, P2). The document writes
+                # `tortoise/extractor_v2.py:` — TEN times — and the bare spelling
+                # never (`grep -cP "(?<!tortoise/)extractor_v2\.py:"` -> 0), so a
+                # prefix test against `extractor_v2.py:` was FALSE for every live
+                # carrier: the "counted" arm was dead and the rule collapsed to
+                # "counted only when nothing precedes it", silently un-fixing the
+                # INLINE stale twin that rounds 6 and 7 closed (measured: inline
+                # append to either carrier PASSED at the previous commit). Compare
+                # the token's basename, not its path prefix.
+                if preceding and not preceding[-1].group(0).split("/")[-1].startswith(
+                    "extractor_v2.py:"
+                ):
+                    continue
+                kept.append((match.group(1), match.group(2)))
+            return kept
+
+        def _extent_numbers(
+            block: str,
+            _re: re.Pattern[str] = _extent_cite,
+            _bare: re.Pattern[str] = _bare_range,
+        ) -> list[int]:
+            numbers: list[int] = []
+            for lo, hi in _re.findall(block):
+                numbers.append(int(lo))
+                if hi:
+                    numbers.append(int(hi))
+            for line in block.splitlines():
+                for lo, hi in _bare_ranges(line, _bare):
+                    numbers.extend((int(lo), int(hi)))
+            return numbers
+
+        def _reversed_ranges(
+            block: str,
+            _re: re.Pattern[str] = _extent_cite,
+        ) -> list[str]:
+            pairs = [(lo, hi) for lo, hi in _re.findall(block) if hi]
+            for line in block.splitlines():
+                pairs.extend(_bare_ranges(line))
+            return [f"{lo}-{hi}" for lo, hi in pairs if int(lo) >= int(hi)]
+
+        ranged = [block for block in extent_carriers if len(_extent_numbers(block)) >= 2]
+        assert ranged, (
+            f"{doc_name} names `_collect_classify_items` but never its extent "
+            f"(tortoise/extractor_v2.py:{collector}-{end}) — the `def` through "
+            "`return items` is the claim §11's argument rests on")
+        for block in ranged:
+            # ⛔ THE SET, NOT A MEMBERSHIP TEST (review round 3, P2). A bare
+            # `in block` is satisfied by the CORRECT range even when a STALE one
+            # sits beside it in the same sentence — measured: appending
+            # ", formerly tortoise/extractor_v2.py:11098-11120" next to the right
+            # range left this leg `1 passed`. A stale cite with a correct twin is
+            # the same defect, so the block must cite the extent ONCE and right.
+            found = sorted(_extent_numbers(block))
+            assert not _reversed_ranges(block), (
+                f"{doc_name}: a live carrier cites a REVERSED range "
+                f"{_reversed_ranges(block)} — a range reads low-to-high, and a set "
+                "comparison cannot tell `:11196-11174` from the extent it inverts")
+            assert found == sorted({collector, end}), (
+                f"{doc_name}: a live carrier naming `_collect_classify_items` cites "
+                f"position(s) {found or ['<none>']} — it must cite exactly "
+                f"tortoise/extractor_v2.py:{collector}-{end} "
+                "(the `def` through `return items`). A range that runs past the "
+                "body names the next function's lines, and a STALE range left "
+                "beside the right one is the same defect with a correct twin")
         # ⛔ EVERY LIVE CARRIER MUST NAME BOTH GATES, not just one of them anywhere
         # in the file. With two live carriers (the §9 provenance row and §11.1's prose)
         # a single whole-document check is satisfied by whichever one is correct,
@@ -10516,3 +10690,82 @@ def test_the_control_arm_definition_names_the_frozen_records_divergence():
     assert ">\n> ⛔ **`PRE-REGISTRATION.md`" in doc, (
         "the disclosure must be a separate quoted paragraph, not wedged into a "
         "sentence")
+
+
+def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
+    """`RECONCILE-A1-A2-A5.md`'s LIVE cites, which no sweep reads.
+
+    Rule 3 of agent-infra#3442: this PR re-points five cites in this record
+    (`extractor_v2.py:10815`->`:10891`, `sdk.py:17472`->`:17574`,
+    `sdk.py:16414-16428`->`:16516-16530` x3, `probes/capstone_measure.py:2238-2243`
+    ->`:2724-2726`) and, measured before this pin existed, re-staling ANY of them
+    left every suite green: the record is in no `_BUNDLE_DOCS` entry and
+    `grep -rn RECONCILE tests/` returned nothing. A record whose whole thesis is
+    that "a claim nothing re-checks can rot silently" cannot leave its own numbers
+    unwatched.
+
+    It is pinned HERE rather than by adding the record to `_BUNDLE_DOCS`, because
+    the record also carries amendment paragraphs that quote numbers at an OLD base
+    on purpose (`:8880` at `80c912244`, `:9433` at `d69faaf38`); sweeping the whole
+    document would either red on those or need a historical marker plus its exact
+    cite list, i.e. more pinned surface than the claims this PR touches. This leg
+    binds only what the PR re-derived, and it is discriminating in both directions:
+    re-staling a cite in the RECORD reds it, and an insertion in the CODE above a
+    cited line reds it too — every arm pins its cited line EXACTLY (a range pins
+    both endpoints and its middle), never a window that a shift can slide inside.
+    """
+    record = _REPO / "docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md"
+    text = record.read_text(encoding="utf-8")
+    sdk = (_REPO / "tortoise/sdk.py").read_text(encoding="utf-8").splitlines()
+    ext = (_REPO / "tortoise/extractor_v2.py").read_text(encoding="utf-8").splitlines()
+    probe = PROBE.read_text(encoding="utf-8").splitlines()
+
+    # A1: #11205's channel is TRANSPORT ONLY — the schema line that spells the
+    # predicate allowlist, and the comment saying nothing in `tortoise/` consumes it.
+    assert "`hasPart` (`tortoise/extractor_v2.py:1720`)" in text, (
+        "the record must cite the relations schema where `hasPart` is spelled")
+    assert "hasPart" in ext[1720 - 1] and '"predicate":' in ext[1720 - 1], (
+        f"extractor_v2.py:1720 reads {ext[1720 - 1].strip()[:90]!r}, not the schema "
+        "line that spells the predicate allowlist")
+    assert "`extractor_v2.py:10891`" in text, (
+        "the record must cite the comment that says nothing consumes the channel")
+    assert "nothing in this tree consumes" in ext[10891 - 1], (
+        f"extractor_v2.py:10891 reads {ext[10891 - 1].strip()[:90]!r}, not the "
+        "comment stating nothing consumes `result[\"relations\"]`")
+
+    # A2: the capture path that writes the `references` edge — the record names it
+    # TWICE (prose and the `sed -n '<n>p'` that reproduces it), so the two must agree.
+    assert "the capture path at `tortoise/sdk.py:17574`)" in text, (
+        "the record must cite the capture path by its live number")
+    assert re.findall(r"sed -n '(\d+)p' tortoise/sdk\.py", text) == ["17574"], (
+        "the record's reproduction command must name the SAME line the prose does")
+    assert sdk[17574 - 1].strip() == "proj.link_source_to_event(source_key, event_id)", (
+        f"sdk.py:17574 reads {sdk[17574 - 1].strip()!r}, not the references writer")
+
+    # A2's Object mint: the write seam that routes creation by kind, cited THREE
+    # times as a range. Both endpoints are claims — the classifier opens it, the
+    # object arm's `is_episodic=False)` closes it.
+    assert len(re.findall(r"`?(?:tortoise/)?sdk\.py:16516-16530`?", text)) == 3, (
+        "the record names this seam three times — the mint, the route, and the "
+        "reproduction command — and all three must move together")
+    assert sdk[16516 - 1].strip() == "_ekind = _payload_entity_kind(e)", (
+        f"sdk.py:16516 reads {sdk[16516 - 1].strip()!r}, not the classifier call")
+    assert sdk[16530 - 1].strip() == "is_episodic=False)", (
+        f"sdk.py:16530 reads {sdk[16530 - 1].strip()!r}, not the object arm's close")
+
+    # A5: the census query the "cannot observe the edge" gap rests on. All THREE
+    # lines of the cited range are pinned, because the claim is the RANGE: the
+    # `g.query(` call opens it, the `MATCH` enumeration is its middle, and the
+    # anchored count closes it. A one-line insertion above the call therefore moves
+    # every endpoint and reds — a window test on the MATCH token alone did NOT
+    # (measured in review: one inserted line above :2724 left this arm GREEN while
+    # the record's `2724-2726` was stale at both ends).
+    assert "`probes/capstone_measure.py:2724-2726`" in text
+    assert probe[2724 - 1].strip() == "for name, count, anchored in projection.g.query(", (
+        f"capstone_measure.py:2724 reads {probe[2724 - 1].strip()!r}, not the census call")
+    assert "MATCH ()-[r]->() RETURN type(r)" in probe[2725 - 1], (
+        f"capstone_measure.py:2725 reads {probe[2725 - 1].strip()!r}, not the "
+        "relationship census query")
+    assert "count(r.sourceVersion)" in probe[2726 - 1], (
+        f"capstone_measure.py:2726 reads {probe[2726 - 1].strip()!r}, not the "
+        "anchored count that closes the query")
