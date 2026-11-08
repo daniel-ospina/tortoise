@@ -925,10 +925,14 @@ class TestAtomicProvisionBackstop:
     client as the SAME structured 402 — a 500 here would be a regression in the
     one case the backstop exists to handle (the race the Python gate lost).
 
-    What is NOT asserted here: the SQL decision matrix itself (which orgs
-    count, which tiers/statuses gate). That is
+    What is NOT asserted here: the SQL decision matrix's BEHAVIOUR (which orgs
+    count, which tiers/statuses gate, what is written on a refusal). That is
     `supabase/tests/0010_provisioning_rpcs.sql` §8, run by the PGlite harness —
-    a Python fake would only restate the predicate a third time.
+    a Python fake would only restate the predicate a third time. The predicate's
+    DECLARATION is a different question and IS pinned here, by
+    `test_the_sql_predicate_is_the_python_predicate`: the SQL literal set against
+    `_BILLING_ACTIVE_STATUSES`/`_PENDING_PAYMENT_STATUS`, the ownership clauses,
+    and the negative space (no clause beyond the declared predicate).
     """
 
     _BLOCKING = "team-free-racer"
@@ -1141,6 +1145,55 @@ class TestAtomicProvisionBackstop:
         assert re.search(r"m\.org_id\s*<>\s*p_org_id", block), (
             "the SQL gate lost `m.org_id <> p_org_id`: a retry of an org's own "
             "provision would be refused")
+
+        # ── THE NEGATIVE SPACE — nothing but the declared predicate ─────────
+        # Presence-only pins cannot see an ADDED condition, and the header's own
+        # "NO `tier` / NO `deleted_at`" sentence is precisely about absence.
+        # Measured mutant: inserting `AND o.tier = 'free'` before the status arm
+        # left every assertion above GREEN and left §8's outcome matrix
+        # unmoved (every blocking fixture there is a default-`p_tier='free'`
+        # org) — while the backstop stopped blocking an org the Python gate
+        # blocks, i.e. fail-open in the only lane this PR protects. The mirror
+        # (`AND o.tier <> 'free'`) is the R1 failure, equally invisible.
+
+        # (1) the gate may reference ONLY the columns its Python twin reads.
+        columns = set(re.findall(r"\b[mo]\.([a-z_]+)\b", block))
+        assert columns == {"user_id", "org_id", "status", "role",
+                           "created_at", "id", "subscription_status"}, (
+            "the SQL gate references " + repr(sorted(columns)) + "; the "
+            "declared predicate reads only m.{user_id,org_id,status,role,"
+            "created_at} and o.{id,subscription_status}. An ADDED column "
+            "(o.tier, o.deleted_at) silently changes what counts as free "
+            "without reddening anything else")
+        # (2) the statement itself is a GOLDEN pin: an added clause over an
+        # already-referenced column (e.g. `AND m.status <> 'deleted'`) is
+        # invisible to (1), and is exactly the class the header promises cannot
+        # happen. Whitespace is normalised, so only the predicate's CONTENT
+        # reddens this.
+        select = re.search(
+            r"SELECT m\.org_id INTO v_blocking_org_id(.*?)LIMIT 1;",
+            block, re.S)
+        assert select, (
+            "the gate's SELECT ... LIMIT 1 statement is gone; the golden pin "
+            "below cannot grade a predicate it cannot find")
+        assert re.sub(r"\s+", " ", select.group(1)).strip() == (
+            "FROM public.org_memberships m "
+            "JOIN public.organizations o ON o.id = m.org_id "
+            "WHERE m.user_id = p_user_id "
+            "AND m.status = 'active' "
+            "AND m.role = 'owner' "
+            "AND m.org_id <> '' "
+            "AND m.org_id <> p_org_id "
+            "AND (o.subscription_status IS NULL "
+            "OR (o.subscription_status <> 'active' "
+            "AND o.subscription_status <> 'past_due' "
+            "AND o.subscription_status <> 'trialing' "
+            "AND o.subscription_status <> 'pending_payment')) "
+            "ORDER BY m.created_at"), (
+            "the SQL gate's WHERE clause is no longer the declared predicate "
+            "(`owned_free_org_ids`). If you changed it on purpose, this golden "
+            "text AND the Python twin move in the same commit — a clause added "
+            "on one side only is the fail-open direction this pin exists for")
 
 
 def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
