@@ -102,10 +102,12 @@ RESIDUALS, NAMED RATHER THAN IMPLIED
 * ``uvicorn.run(workers=N)`` from a script — no ``--workers`` token and no
   ``$WEB_CONCURRENCY`` — is caught only by the supervised-parent arm, whose
   message then says the SERVED count was not readable rather than inventing one.
-* The reload exemption is keyed on the ``--reload`` token. ``uvicorn.run(reload=True)``
-  called from a script leaves no token, so a programmatic reload child would be
-  read as a supervised multi-worker and refused (fail-closed). Nothing in this
-  repo launches the app that way.
+* The reload exemption is keyed on the ``--reload`` token **and**
+  ``$UVICORN_RELOAD`` — uvicorn's own two inputs for that flag (click's
+  ``auto_envvar_prefix="UVICORN"``), both measured on the pinned 0.52.1. A
+  reloader started PROGRAMMATICALLY (``uvicorn.run(reload=True)`` from a script)
+  leaves neither, so such a child would be read as a supervised multi-worker and
+  refused (fail-closed). Nothing in this repo launches the app that way.
 """
 from __future__ import annotations
 
@@ -138,9 +140,15 @@ WEB_CONCURRENCY_ENV = "WEB_CONCURRENCY"
 WORKERS_FLAG = "--workers"
 
 #: uvicorn's reload flag. ``--reload`` and ``--workers`` are mutually exclusive
-#: (uvicorn raises when both are given), so its presence means the supervisor
+#: (uvicorn warns that ``workers`` is IGNORED, and ``main.py`` branches
+#: ``should_reload`` before ``workers > 1``), so its presence means the supervisor
 #: parent is the RELOADER and the worker count is 1.
 RELOAD_FLAG = "--reload"
+
+#: click's ``context_settings={"auto_envvar_prefix": "UVICORN"}``
+#: (``uvicorn/main.py``) makes this variable a real input for ``--reload`` — so
+#: uvicorn's reloader can start with NO reload TOKEN on the command line.
+RELOAD_ENV = "UVICORN_RELOAD"
 
 #: Every guard #1677 identifies as unlanded. This tuple IS the ledger: a lane
 #: that lands one deletes its row, and the deletion is the review artifact.
@@ -242,6 +250,26 @@ def reload_is_requested(argv: Sequence[str] | None = None) -> bool:
     return RELOAD_FLAG in list(args)
 
 
+def reload_env_is_set(environ: Mapping[str, str] | None = None) -> bool:
+    """True when ``$UVICORN_RELOAD`` asks uvicorn for its reloader.
+
+    click's ``auto_envvar_prefix="UVICORN"`` makes this a real input for the
+    ``--reload`` flag, so the reloader starts with NO reload TOKEN anywhere on the
+    command line. Measured on the pinned uvicorn 0.52.1:
+    ``UVICORN_RELOAD=true python -m uvicorn app:app`` DOES start the reloader, and
+    the served child's ``sys.argv`` carries no ``--reload``. A token-only check
+    therefore read that child as a supervised multi-worker and refused it — the
+    same unstartable-dev-topology defect this module already fixed for the token
+    form, by a narrower route.
+
+    ``is_truthy`` is the repo's declared contract, so a typo reads OFF and the
+    child stays REFUSED (fail-closed): only an explicit acknowledgment of the
+    reloader changes the verdict.
+    """
+    env = os.environ if environ is None else environ
+    return is_truthy(env.get(RELOAD_ENV))
+
+
 def has_supervisor_parent() -> bool:
     """True iff SOME uvicorn supervisor spawned this process.
 
@@ -330,7 +358,7 @@ def observe(environ: Mapping[str, str] | None = None,
     return Topology(
         workers=resolve_effective_workers(environ, argv),
         supervised=has_supervisor_parent() if supervised is None else supervised,
-        reloading=reload_is_requested(argv),
+        reloading=reload_is_requested(argv) or reload_env_is_set(environ),
         shared_db=db_is_shared(environ),
         acknowledged=ack_is_set(environ),
     )
@@ -439,6 +467,11 @@ if __name__ == "__main__":
     # reload is ONE worker even though it is supervised.
     assert reload_is_requested(["uvicorn", "a:a", "--reload"])
     assert not reload_is_requested(["uvicorn", "a:a", "--reload-dir", "src"])
+    # …and uvicorn's OTHER input for it is $UVICORN_RELOAD, which leaves no token.
+    assert reload_env_is_set({RELOAD_ENV: "true"})
+    assert not reload_env_is_set({RELOAD_ENV: "enabled"})  # typo -> fail closed
+    assert refusal_reason(
+        observe({RELOAD_ENV: "1"}, supervised=True, argv=["uvicorn", "a:a"])) is None
 
     # embedded + N>=2 is refused and NOT liftable by the acknowledgement.
     assert refusal_reason(observe(_embedded, supervised=False, argv=[])) is None
