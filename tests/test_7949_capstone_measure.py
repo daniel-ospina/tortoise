@@ -10779,15 +10779,16 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # the record's line numbers — the wrong repair, aimed at a staleness where the
     # conclusion itself is false (measured: the call arm could never be reached).
     assert not re.search(
-        r"(?<![\w.])(create_edge|create_about_edge|create_operator)\s*\(",
+        r"(?<![\w.`])(create_edge|create_about_edge|create_operator)\(",
         "\n".join(ext)), (
         "the record's load-bearing half is the CALL count (0) — a production call "
         "site makes its 'no producer' conclusion FALSE, not merely stale, so this "
         "reds before the line-number arm below can misdirect the repair")
-    # ⚠️ NOT dot-anchored: an unqualified `return create_operator(payload)` is a call with
-    # no receiver, and a `\.`-anchored pattern missed it, so the mention arm below fired
-    # first with the WRONG repair message (measured). No definition of either name exists
-    # in this module, so the identifier anchor cannot false-fire.
+    # ⚠️ NOT anchored on a leading dot and NOT allowing whitespace before the paren: a
+    # production call needs no receiver (`return create_operator(payload)`), and prose that
+    # names the identifier before a parenthesis is not a call. Both were measured — the
+    # dot-anchor let the unqualified call through, and `\s*\(` turned a trailing prose
+    # mention into a red claiming the conclusion was false when nothing was called.
     assert re.findall(
         r"git grep -n 'create_operator' -- tortoise/extractor_v2\.py\s+# (.*)",
         text) == [":9006 :9024 :9031 :9411"], (
@@ -10837,27 +10838,38 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     assert "40 lines, exit 0 — all in the bundle" in text, (
         "the §5 note must keep the measured shape of its own reproduction — the "
         "unqualified `# exit 1 = no output` is what rotted")
-    # …and the §1 twin states the SAME total (its split is single-sourced in §5 to remove the
-    # duplication, but the total is a claim in both). Two statements of one number must agree,
-    # so the count is pinned: roting either to 41 leaves one.
-    assert text.count("40 lines, exit 0") == 2, (
-        f"the bundle grep's total appears {text.count('40 lines, exit 0')} times — §1 and §5 "
-        "both state it and must agree; re-derive both from `git grep` rather than one")
-    # The record's per-file breakdown must BE the live map, not merely sit beside it: the
-    # map below is derived, and a record that re-words its own split (measured: 21/8/11,
-    # sum still 40) must red rather than pass on the total alone.
+    # …and the §1 twin states the SAME total, single-sourced or not: the invariant is
+    # AGREEMENT, never plurality. Measured both ways — a count pin refused a legitimate
+    # de-duplication (§1 pointing at §5) with a message telling the fixer to undo it, while
+    # a disagreeing twin (41 beside 40) must still red.
+    assert set(re.findall(r"(\d+) lines, exit 0", text)) == {"40"}, (
+        f"the bundle grep's total is stated as {sorted(set(re.findall(r'(\d+) lines, exit 0', text)))} "
+        "— every statement of it must agree on the live 40; re-derive rather than amend one")
+    # The record's per-file breakdown must BE the live map — ONE statement, in its declared
+    # home (the §5 note). A document-wide `in text` search passed a CONTRADICTORY second
+    # copy placed in §1 (measured: §5 deleted, §1 carrying the same split -> green; §5
+    # correct and §1 carrying 21/8/11 -> green), which is the disagreement §1's own
+    # amendment paragraph names as the thing to avoid.
+    _note_at = text.index("40 lines, exit 0 — all in the bundle")
+    _note = text[_note_at:_note_at + 400]
     for _name, _n in per_file.items():
-        assert f"{_name} {_n}" in text, (
-            f"the record must state `{_name} {_n}` — that is the live count, and the "
-            "per-file split is the half a re-worded annotation can un-state")
-    # §1 item 3 carries THE SAME command as the §5 note (line 167 vs line 655). This PR
-    # fixed §5 first and left §1 asserting `exit 1, no output` about a command that prints
-    # 40 lines — one document, two contradictory results, both read as live. The stale
-    # form may not appear at all now that the bundle owns the row.
-    assert "exit 1, no output" not in text, (
+        _seen = re.findall(rf"{re.escape(_name)} (\d+)", text)
+        assert _seen == [str(_n)], (
+            f"`{_name}` is stated as {_seen}; the live count is {_n} — exactly one "
+            "statement, and it must be the derived one")
+        assert f"{_name} {_n}" in _note, (
+            f"the split's statement of `{_name} {_n}` must sit in the §5 note — that is "
+            "its declared single home, not any sentence in the record that happens to match")
+    # §1 item 3 carried THE SAME command as the §5 note (line 167 vs line 655) and asserted
+    # `exit 1, no output` about a command that prints 40 lines — one document, two
+    # contradictory results, both read as live. Ban the RENDERING (the arrow-prefixed
+    # result), not the bare phrase: an unrelated command annotated `# exit 1, no output`
+    # in this block is legitimate and was refused with a message about the wrong grep
+    # (measured).
+    assert "\u2192 **exit 1, no output**" not in text, (
         "the bundle grep is no longer empty (#10982 registered the A1 row after this "
-        "record was written) — every surviving `exit 1` reads as a live result, so the "
-        "§1 twin (§5's counterpart, line 167) must be re-derived too, not just §5's")
+        "record was written) — an arrow-rendered `exit 1, no output` reads as a live "
+        "result, so the §1 twin must be re-derived too, not just §5's")
 
     # §0/§5's `vet_enabled` live-cite, in BOTH places it is quoted. This claim had already
     # rotted +150 (`:12779` -> `:12929`) and contradicted three green surfaces that say
@@ -10873,12 +10885,11 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     assert ext[12929 - 1].strip().startswith("vet_enabled = ("), (
         f"extractor_v2.py:12929 reads {ext[12929 - 1].strip()[:80]!r}, not the "
         "vet_enabled computation the record cites")
-    assert text.count(":12779") >= 2, (
-        "both historical mentions of the old base's number must survive as history")
-    # The INVARIANT is that every `:12779` names its base — not that there are exactly two.
-    # Measured: a third, base-qualified mention (a legitimate future amendment shape) was
-    # refused by a `count(...) == 2` pin with the wrong reason ("unqualified"). Test the
-    # property, so a correct note is accepted and an unqualified one is not.
+    assert ":12779" in text and "`:12779` was the number at `62248db88`" in text, (
+        "the historical mentions of the old base's number must survive, base-qualified")
+    # The INVARIANT is that every `:12779` names its base. NOT that there are two of them:
+    # a `count(...) >= 2` bound refused a legitimate consolidation to one base-qualified
+    # note, firing BEFORE the phrase assert that names the real defect (measured).
     for _m in re.finditer(r":12779", text):
         _near = text[max(0, _m.start() - 60):_m.end() + 60]
         assert "62248db88" in _near, (

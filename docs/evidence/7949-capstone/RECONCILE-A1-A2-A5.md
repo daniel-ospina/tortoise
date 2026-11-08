@@ -47,7 +47,7 @@ recorded, because each one on its own is a trap:
 |---|---|---|---|---|
 | `#11213` | `#11001` | **MERGED** 2026-11-06T19:13:23Z | `e918f3d6d` | ✅ `merge-base --is-ancestor` → 0 |
 | `#11211` | (part of `#11021` — **not** a PR close) | **MERGED** 2026-11-06T20:27:05Z | `aa414b4d5` | ✅ `merge-base --is-ancestor` → 0 |
-| `#11212` | `#10997` | **MERGED** 2026-11-06T21:33:54Z | `80c912244` | ✅ **`80c912244` IS the `origin/main` tip** — but ❌ `merge-base --is-ancestor 78e8abae6` still exits **1**, because the landing was **squashed** |
+| `#11212` | `#10997` | **MERGED** 2026-11-06T21:33:54Z | `80c912244` | ✅ **`80c912244` is an ANCESTOR of `origin/main`** (`merge-base --is-ancestor 80c912244 origin/main` → 0) — it was the tip when this record was measured, and is 287 commits behind the tip at the `#11546` head, so the DURABLE test is the ancestor one, never tip-equality. And ❌ `merge-base --is-ancestor 78e8abae6` still exits **1**, because the landing was **squashed** |
 | `#11205` | `#10999` (closed by its own merge commit — `Closes #10999` rode `316a572ce2`'s message; ⛔ `closingIssuesReferences` is empty because the keyword rode the commit, **not** the PR body, so the empty field is **not** evidence of a manual close) | **MERGED** 2026-11-06T22:40:32Z — **after the base, before this record merged** | `316a572ce2` | ✅ `merge-base --is-ancestor` → 0; and it is the landing that moved one of §5's own counts (below) |
 
 ⛔ **`git merge-base --is-ancestor` is a ONE-SIDED landing test: exit `1` is not a landing test, and
@@ -599,7 +599,9 @@ gh pr view 10850 --json state,mergedAt,closingIssuesReferences,body \
   --jq '{state, mergedAt, closing: [.closingIssuesReferences[].number], firstLine: (.body|split("\n")[0])}'   # CLOSED, null, [10812], "Closes #10812."
 gh pr view 10562 --json state,mergedAt,closingIssuesReferences,body \
   --jq '{state, mergedAt, closing: [.closingIssuesReferences[].number], firstLine: (.body|split("\n")[0])}'   # CLOSED, null, [8447], "Closes #8447"
-git rev-parse origin/main                                 # 80c912244 — the squash commit IS the tip
+git rev-parse origin/main                                 # NOT 80c912244 any more — origin/main moves.
+                                                          # The durable test is the ancestor one:
+                                                          # git merge-base --is-ancestor 80c912244 origin/main → 0
 git fetch origin 78e8abae6b2cabc67d2cba75c53bfe7757c232e6   # BY SHA: the branch moved on, so
                                                           # without this the next line exits 128
                                                           # "Not a valid object name" — a sha read is
