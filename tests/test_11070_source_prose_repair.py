@@ -4038,7 +4038,11 @@ def test_the_documented_report_contracts_are_the_ones_the_run_RETURNS(monkeypatc
     # separates a corroborating probe from a structurally empty index.
     assert report["control"] is not None
     for key in report["control"]:
-        assert key in probe_doc, (
+        # ⛔ QUOTED, like the top-level leg above (#11536 review round 6): an
+        # unquoted membership test is satisfied by the PROSE around the contract,
+        # so deleting `"mode": …` from the documented shape would leave this leg
+        # green — measured.
+        assert f'"{key}"' in probe_doc, (
             f"the control block carries {key!r} but the documented contract "
             f"never names it")
     split = m.classify_fts_hits(_LexiconGraph([(_post_fix_node(),)]),

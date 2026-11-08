@@ -1681,6 +1681,11 @@ def probe_fts(g, phrases, *, control: bool = True,
                      # `unavailable`: nothing corroborates the probe's zero
                      "ok", "hits",          # hits is None when not measured
                      "note",
+                     # `ran`/`degraded`/`reason` are present on `probe` and
+                     # `empty-index` and ABSENT on `unavailable` — a consumer must
+                     # read the arm before reaching for them (`--json` output is
+                     # the same dict), so the scoping is stated rather than
+                     # implied (#11536 review round 6).
                      "ran", "degraded", "reason"} | None}
     # ⛔ ``mode`` IS LOAD-BEARING, not decoration (#11536 review round 5): the
     # three arms are distinguishable ONLY by it — a `probe` control can be ok True
