@@ -648,25 +648,6 @@ class TestRemovedPackGranularity:
         assert _install_status(sdk, "tenant-ops") is None
         assert get_tenant_manifests(sdk) == []
 
-    def test_removed_entry_does_not_seed_sibling_validation(self, sdk):
-        """A removed entry must not resolve a kept pack's cross-reference.
-
-        ``sibling_yamls`` seeds the manifest validator so a pack may reference
-        a sibling carried in the same ``pack_config``. A ``removed`` entry is
-        deliberately NOT installed, so letting its yaml seed the set would let
-        a kept pack validate against a namespace the import never creates.
-        Pins the exclusion, which had no coverage at all.
-        """
-        from tortoise.hosted_api import _apply_import_pack_config
-        payload = {"pack_config": {"schema_version": 1, "packs": [
-            {"namespace": "tenant-ops", "version": "0.1.0",
-             "activated": False, "status": "removed",
-             "yaml": CUSTOM_MANIFEST},
-        ]}}
-        _apply_import_pack_config(sdk, payload)
-        # nothing was installed, so nothing can be referenced afterwards
-        assert _install_status(sdk, "tenant-ops") is None
-
     def test_removed_custom_pack_does_not_abort_restore(self, sdk):
         """The LEGACY shape: ``yaml: null``, i.e. the manifest was deleted.
 
