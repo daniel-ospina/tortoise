@@ -2494,7 +2494,8 @@ def _install_fts(monkeypatch, mapping, *, leg=None):
     return calls
 
 
-def test_a_MULTI_token_probe_is_REFUSED_because_the_FTS_read_OR_joins_it():
+def test_a_MULTI_token_probe_is_REFUSED_because_the_FTS_read_OR_joins_it(
+        monkeypatch):
     """A phrase is not a probe — the read turns it into an OR of its words.
 
     (1) FAILS on a naive probe: `build_or_query('the second-latest PR comment')`
@@ -2505,8 +2506,19 @@ def test_a_MULTI_token_probe_is_REFUSED_because_the_FTS_read_OR_joins_it():
         (the #3518 descriptor this repair must not destroy).
     (2) REACHABLE: both inputs are ordinary operator guesses, and `the` is the
         most likely first guess of all.
+
+    ⛔ THE ASSERTION IS PINNED TO THE SHIPPED SWITCH VALUE (#11536 review round 2,
+    non-blocking note, now closed): `zx-99` is refused because the IDENTIFIER
+    mechanism expands it, and that mechanism is default-ON but switchable
+    (`TORTOISE_IDENTIFIER_TOKENS=0` is a legitimate outage lever). With it off in
+    an inherited shell, `zx-99` tokenises to the single term `zx` and the row
+    would red for a reason that is not the behaviour it claims to protect — the
+    same "inherited shell changes the measurement" class the door's pin set
+    exists for.
     """
     from tortoise.session_source_prose_migration import probe_phrase_rejection
+
+    monkeypatch.setenv("TORTOISE_IDENTIFIER_TOKENS", "1")
 
     for phrase in ("the second-latest PR comment", "the", "zx-99", "   "):
         assert probe_phrase_rejection(phrase), (
