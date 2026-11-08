@@ -745,11 +745,16 @@ def test_the_mocked_seam_is_really_mocked_and_needs_no_exemption():
     # census decides membership over RAW TEXT, so the pins file's own prose must not spell the
     # import as a statement-shaped substring — which is exactly what `#11492` reworded.
     members = {p.relative_to(ROOT).as_posix() for p in _seam_files()}
-    assert rel not in members, (
+    assert rel not in members or rel in SEAM_FILES_WITH_ALLOWED_LITERALS, (
         f"{rel} is back in the scanned population. It STUBS the seam, so its `docker_port` "
-        "stub is not a split-brain offender: if the prose legitimately needs to spell the "
-        "import again, add a SEAM_FILES_WITH_ALLOWED_LITERALS entry with a reason that states "
-        "the exec-then-rebind mechanism — do not reword this pin away.")
+        "stub is not a split-brain offender. Two remedies actually clear this assertion: keep "
+        "the prose from spelling the import statement-shaped (the state `#11492` restored), or "
+        "add a SEAM_FILES_WITH_ALLOWED_LITERALS entry with a reason that states the "
+        "exec-then-rebind mechanism — which "
+        "`test_no_declared_exemption_outlives_the_membership_that_earned_it` then requires to "
+        "stay a member. ⛔ Membership is decided by a RAW-TEXT scan, so adding the exemption "
+        "alone cannot satisfy a bare `rel not in members`: that spelling named a remedy which "
+        "left the pin red, with no route but deleting it.")
 
 
 def test_action_inputs_are_declared():

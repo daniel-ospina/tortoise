@@ -713,6 +713,64 @@ def test_a_gated_writer_with_an_UNSINGLE_label_is_NAMED_not_just_held(monkeypatc
                for n in row.notes), row.notes
 
 
+def test_an_ungated_plain_UNKNOWN_writer_is_resolved_by_its_declaration(monkeypatch):
+    """`#11492` review (P2): the `ungated` arm of row 2's candidate filter is DRIVEN.
+
+    The filter admits `kind in ("unresolved_write", "ungated")`, and every other row-2 fixture
+    exercises the `unresolved_write` arm only: the sole `ungated` fixtures carry a two-label
+    `UNKNOWN(two labels: …)` MEASUREMENT, which the `partial` exclusion removes *before* the
+    filter is consulted, so they never reach it. Measured at the head this test was added to:
+    narrowing the tuple to `("unresolved_write",)` left this file at `161 passed, 2 skipped` —
+    the arm could be deleted with nothing red.
+
+    Why deleting it is not cosmetic: an `ungated` writer whose own Cypher named NO single label
+    (the derivation yields the plain `UNKNOWN`) that the register DOES declare would stay in
+    `unknown`, and the note the row prints for that set says *"nothing in the product says which
+    label they store on"* — a false statement about the product, on a `PARTIAL` that names the
+    wrong cause. That is the misattribution this row fixed in two other branches, and the arm is
+    the only thing that keeps it out of this one.
+    """
+    writers = {
+        "tortoise.x::_upsert_point": {
+            "callee": probe.SEAM_CALL, "at": "tortoise/x.py:1",
+            "kind": "gated", "label": "Point", "callees": frozenset(),
+        },
+        # `ungated`, and its OWN Cypher names no single label — the plain `UNKNOWN` shape.
+        "tortoise.y::_ungated_unknown": {
+            "callee": "compute_session_embedding", "at": "tortoise/y.py:2",
+            "kind": "ungated", "label": "UNKNOWN",
+            "callees": frozenset({"compute_session_embedding"}),
+        },
+    }
+    monkeypatch.setattr(probe, "embedding_writers", lambda: writers)
+
+    # 1. UNDECLARED — the writer is in the candidate set, so the row names it as a product gap.
+    monkeypatch.setattr(probe, "declared_writers", lambda: {})
+    row = probe.score_path_bullet()
+    assert row.verdict == "PARTIAL", row.observed
+    unresolved = [n for n in row.notes if "unresolved writers" in n]
+    assert unresolved and "tortoise.y::_ungated_unknown" in unresolved[0], (
+        "an undeclared `ungated` writer with a plain UNKNOWN label must be NAMED as a product "
+        f"gap: {row.notes}")
+
+    # 2. DECLARED — the SAME writer is now scored from its declaration, and the "nothing in the
+    #    product says" note must not name it. Deleting the `ungated` arm reds this assertion,
+    #    because the declaration would never be consulted and the writer would still be blamed.
+    monkeypatch.setattr(
+        probe, "declared_writers",
+        lambda: {"tortoise.y::_ungated_unknown": _store_declared(
+            "tortoise.y::_ungated_unknown", ("Event",))})
+    row = probe.score_path_bullet()
+    scored = probe.scored_labels()
+    assert scored["by_writer"].get("tortoise.y::_ungated_unknown") == "Event", (
+        "the `ungated` arm of row 2's candidate filter did not admit the writer, so its "
+        f"declaration was never consulted (by_writer={scored['by_writer']})")
+    assert not any("tortoise.y::_ungated_unknown" in n
+                   for n in row.notes if "unresolved writers" in n), (
+        "a writer the register DECLARES was reported as one nothing in the product answers "
+        f"for: {row.notes}")
+
+
 def test_a_runtime_label_declaration_holds_row_two_without_calling_it_unresolved(monkeypatch):
     """`#11492` — `labels-at-runtime` holds the row, and it is NOT the "unresolved writers" hold.
 

@@ -1098,9 +1098,11 @@ def test_a_declared_label_set_covers_every_label_its_own_store_targets() -> None
             # CONSTANT re-derived in both directions, or this pin is silently INERT for the entry.
             assert key in LABEL_CONSTANTS, (
                 f"{key} declares {sorted(declared)} but no store clause in its body names an "
-                "alias this pin can attribute. Either cite a LABEL_CONSTANTS entry (which is "
-                "re-derived in both directions), or add a reasoned exemption saying why the "
-                "label set cannot be re-derived — do NOT leave the completeness claim unbacked"
+                "alias this pin can attribute, and this branch's ONLY escape is a "
+                "LABEL_CONSTANTS entry (which is re-derived in both directions). "
+                "⛔ `STORE_ALIAS_UNATTRIBUTABLE` does NOT clear this branch — it is read solely in "
+                "the PER-ALIAS branch below — so an entry keyed (key, alias) leaves this "
+                "assertion red; do NOT leave the completeness claim unbacked"
             )
             continue
         # ⛔ PER-ALIAS, never total: an alias named by a store clause but bound to no label in the

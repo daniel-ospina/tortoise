@@ -321,13 +321,13 @@ assertion measures.
 ```text
 $ uv run python tools/test_lane.py run -- tests/test_dod_5090_probe.py -q
 121 passed, 1 skipped in 42.50s   # the #11088 transcript this row was cut from
-                                 # this tree: 163 collected, 162 passed, 1 skipped
+                                 # this tree: 164 collected, 163 passed, 1 skipped
 ```
 
-(115 collected before #11088's round 7; the file collects **163 in the tree this document sits in** —
+(115 collected before #11088's round 7; the file collects **164 in the tree this document sits in** —
 nine added by #11337 over the then-122 baseline, nineteen by `#11444`'s writer-register falsifiers, one
-by `#11471`'s GATED-writer bypass arm, and twelve by `#11492` — so `main` collects `122 + 9 + 19 + 1 = 151`
-and this tree `151 + 12 = 163`): seven
+by `#11471`'s GATED-writer bypass arm, and thirteen by `#11492` — so `main` collects `122 + 9 + 19 + 1 = 151`
+and this tree `151 + 13 = 164`): seven
 row-2 resolution pins (register resolves every writer; the unserved-label falsifier; the
 derived-label-wins arm; the runtime-label hold; the unreadable register holding as `UNMEASURED`; the
 malformed-`stores` hold; the register's own `bypass` hold), one that holds the row on a census

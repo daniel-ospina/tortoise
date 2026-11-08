@@ -99,7 +99,13 @@ statically needs data flow, and a naive `SET` rule false-reds `_rebuild_all_repl
 does. Shapes (b) and (c) pass SILENTLY whenever the writer has any other statically attributed
 store: the alias never reaches `aliases`, so neither the completeness pin NOR row 2 sees the
 store — measured for `_TURN_WRITE_CYPHER`, where a second store on unserved `Batch` through an
-unnamed helper keeps both suites green and leaves the row at `MET`. ⛔ And (b) with NO other
+unnamed helper keeps both suites green and leaves `stored-without-a-query-path` at `none`: the
+injected label never reaches the served-set comparison at all, so a RE-RUN does not surface it.
+⛔ State it as that observable, never as the row's verdict: row 2 on the tree carrying this shape
+reads `PARTIAL` for a separate reason — its two `LABELS_AT_RUNTIME` declarations hold it
+(`tools/dod_5090_probe.py`'s verdict arm) — so "leaves the row at `MET`" is a claim a measurement
+contradicts, and the sentence a reader uses to size the residual must survive re-measurement.
+⛔ And (b) with NO other
 attributed store falls into the no-alias branch, where a `LABEL_CONSTANTS` entry DOES clear it
 (measured on `_update_entity`) — so the pin is not a fallback for either shape: a reviewer of a
 label-tuple entry must read the body for a helper-rendered store and for a map merge by hand.
@@ -302,8 +308,14 @@ EXEMPT = "exempt"
 CLASSES: tuple[str, ...] = (RECOGNISED_PRODUCER, EXEMPT)
 
 #: `#11492`. **WHERE the writer's vector lands** — row 2's question, which a class cannot answer.
-#: A declaration states either the graph labels its vector is stored on (a tuple like
-#: `("Event",)`), or one of the two dispositions below.
+#: A declaration states either the graph labels **this writer's own body** stores a vector on (a
+#: tuple like `("Event",)`), or one of the two dispositions below.
+#: ⛔ "This writer's own body", NOT "where the value finally lands": a CARRIER writer whose value
+#: the FOLD later stores (a journal append — `tortoise.api::add_point`,
+#: `tortoise.sdk::_journal_event_raw_write`) declares :data:`NO_LIVE_VECTOR`, because the store is
+#: not in its body and a tuple here would attribute the fold's label to it. Reading the field as
+#: "where the vector ends up" re-declares those two entries and re-opens exactly the ambiguity
+#: `#11492`'s first review round closed.
 #:
 #: ⛔ Why this belongs in the declaration and NOT in a derivation inside the instrument: of the
 #: twenty outside-gate writers, the instrument's own label derivation (the `MERGE|CREATE (:Label`
@@ -391,8 +403,11 @@ class WriterClass:
     own test re-derives the symbol every entry cites.
 
     ``stores`` answers the SECOND question a consumer needs (`#11492`, `#5090` DoD row 2 — *is every
-    stored vector on a label the query leg serves?*): a tuple of Cypher labels the writer's vector
-    is stored on, or :data:`NO_LIVE_VECTOR` / :data:`LABELS_AT_RUNTIME`. ⛔ It carries **no default**:
+    stored vector on a label the query leg serves?*): a tuple of the Cypher labels **this writer's
+    own body** stores a vector on, or :data:`NO_LIVE_VECTOR` / :data:`LABELS_AT_RUNTIME`.
+    ⛔ "Its own body", not "where the value finally lands" — a CARRIER whose value the fold stores
+    (a journal append) is :data:`NO_LIVE_VECTOR`, or its tuple would attribute the FOLD's label to
+    a writer that never names it. ⛔ It carries **no default**:
     a new declaration must ANSWER the question, because a default would be a silent safe-looking
     answer for exactly the writer nobody checked. Its evidence is re-derived at HEAD by
     `tests/test_embed_writer_register.py::test_every_declared_label_re_derives_at_this_head`
