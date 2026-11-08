@@ -67,8 +67,8 @@ claim nothing supports. **The seam has since LANDED (#9116), so this module no
 longer reports them as unobservable-by-construction.** Pre-seam, ``capture_session``'s
 receipt could not carry them and the failure was ONE LAYER UP from where it was
 first attributed: ``extract_session_v2`` built the surfaces
-(``result["classify_later"]`` at ``tortoise/extractor_v2.py:13403-13409`` and
-``result["vet"]`` at ``:13413-13417``) while the meta fold dropped them with
+(``result["classify_later"]`` at ``tortoise/extractor_v2.py:13415-13421`` and
+``result["vet"]`` at ``:13425-13429``) while the meta fold dropped them with
 ``"stats": out.get("stats") or {}``. The fold now calls
 ``_capture_stats_with_step_witness`` (``tortoise/sdk.py:17188``), which copies each
 stage's own counts onto ``stats["step_witness"]`` and drops no candidate text — so
@@ -161,8 +161,8 @@ def _sdk_line(code: str) -> int:
     A line cite is the one number in this bundle no reader can keep true by hand:
     any commit that inserts a line above the site moves it, and the meta fold has
     moved on this branch's own history and again on ``main``'s ``#9964``. Typed,
-    the CAUSE re-stales SILENTLY — a shipped cause once named ``:13593`` for a fold
-    that had moved to ``:13611``, and the only thing that caught it was
+    the CAUSE re-stales SILENTLY — a shipped cause once named ``:13605`` for a fold
+    that had moved to ``:13623``, and the only thing that caught it was
     ``tests/test_7949_capstone_measure.py``, which derives the line in the PIN and
     compares. Deriving it here too means the cause a reader (and #9116's fixer)
     actually reads cannot re-stale on a merge that touched nothing this bundle
@@ -1767,9 +1767,9 @@ _IDLE_CITES: dict[str, str] = {
         "the VET pass would have worked on is empty: `vet_enabled` is computed "
         "BEFORE the `if not edus:` early return that emits {'enabled': "
         "vet_enabled, 's2': {}, 'union': {}} (tortoise/extractor_v2.py:12944, the "
-        "flag; :12948, the early return; :12968, its vet surface), and each VET "
-        "pass is gated on the LIST — `if vet_enabled and embed_list:` (:15391), "
-        "`if vet_enabled and complete_list:` (:13189) — so "
+        "flag; :12948, the early return; :12979, its vet surface), and each VET "
+        "pass is gated on the LIST — `if vet_enabled and embed_list:` (:15429), "
+        "`if vet_enabled and complete_list:` (:13201) — so "
         "a block that says enabled=true proves the FLAG, never that the pass "
         "ran. A FAILED vet pass leaves the same empty stats (`_run_vet_pass` "
         "returns {} on its fail-open path, :12823-12826)."
@@ -1780,13 +1780,13 @@ _IDLE_CITES: dict[str, str] = {
         "tortoise/extractor_v2.py:12913 (and set False when its classifier cannot "
         "be constructed, :12938), the `if not edus:` early return emits "
         "{'enabled': classify_later, 's2': {}, 'union': {}, "
-        "'restamp_overrides': 0, 'slot_rekeys': 0} (:12964-12967), and each "
+        "'restamp_overrides': 0, 'slot_rekeys': 0} (:12975-12978), and each "
         "classify pass is gated on the LIST and then on a NON-EMPTY item set — "
-        "`if classify_later and embed_list:` (:13062) around `if items:` "
-        "(:13065), `if classify_later and complete_list:` (:13204) around "
-        "`if items:` (:13214) — so a block that says enabled=true proves the "
+        "`if classify_later and embed_list:` (:13074) around `if items:` "
+        "(:13077), `if classify_later and complete_list:` (:13216) around "
+        "`if items:` (:13226) — so a block that says enabled=true proves the "
         "FLAG, never that the pass ran. A FAILED classify pass leaves the same "
-        "empty stats (its fail-open `except` at :13078 / :13225)."
+        "empty stats (its fail-open `except` at :13090 / :13237)."
     ),
 }
 
@@ -1798,7 +1798,7 @@ def _pass_ran(block: dict) -> bool | None:
     where the two were confused. ``extract_session_v2`` emits ``result["vet"]``
     and ``result["classify_later"]`` UNCONDITIONALLY — on the flag-OFF arm and on
     the early-return path the block is ``{"enabled": False, "s2": {}, "union":
-    {}}`` (:12964-12967, :12968, :13403-13417) — so an acceptance test of "a non-empty dict"
+    {}}`` (:12975-12978, :12979, :13415-13429) — so an acceptance test of "a non-empty dict"
     reports S2.2/S2.3 WITNESSED on a run measured with the flags OFF, printing
     ``enabled=false, s2={}`` beside the word WITNESSED.
 
@@ -1807,10 +1807,10 @@ def _pass_ran(block: dict) -> bool | None:
     pass is reached: ``vet_enabled`` is set at ``extractor_v2.py:12944`` and
     ``edus = _edus_from_conversation(...)`` follows at ``:12947``, whose
     ``if not edus:`` early return (``:12948``) emits literally ``"vet": {"enabled":
-    vet_enabled, "s2": {}, "union": {}}`` (``:12968``) — with the flag ON. The
+    vet_enabled, "s2": {}, "union": {}}`` (``:12979``) — with the flag ON. The
     passes themselves are gated on the LIST, not the flag: ``if vet_enabled and
-    embed_list:`` (``:15391``) and ``if vet_enabled and complete_list:``
-    (``:13189``). So a session whose conversation produced no list emits
+    embed_list:`` (``:15429``) and ``if vet_enabled and complete_list:``
+    (``:13201``). So a session whose conversation produced no list emits
     ``enabled: True`` with empty counters and no pass ever ran; so does a pass
     that FAILED, because ``_run_vet_pass`` returns ``{}`` stats on its fail-open
     exception path (``extractor_v2.py:12823-12826``). ``enabled: true`` therefore

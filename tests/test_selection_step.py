@@ -42,7 +42,11 @@ WHAT THIS PINS
 7. **The record** — both arms' numbers ride `stats["renarrate"]`, so an action
    never happens without a record (I2).
 8. **The failure path does not spend the retry** — an S1 that failed (empty
-   narrative) yields no batch to be poor about, so the retry is not burnt on it.
+   narrative) yields no batch to be poor about, and a **failed S2 call** is a
+   transport-class failure, not a poor batch: its empty list is byte-identical
+   to a genuinely empty one, so the trigger must be told which it was. Both
+   arms' retries and escalation already happened INSIDE their own stage; the
+   one content-level retry is never spent on them.
 
 Every case is hermetic: a scripted model (no network, no SDK, no DB, no graph),
 the same shape `tests/test_5095_s3_identity_policy.py::_FakeModel` uses.
@@ -193,6 +197,47 @@ def test_an_s1_failure_does_not_spend_the_retry(monkeypatch):
     assert len(model.s2_prompts) == 0, "no narrative → no S2 at all"
 
 
+def test_an_s2_failure_does_not_spend_the_retry(monkeypatch):
+    """An S2 that RAISED is a transport failure, not a poor batch.
+
+    `check_batch` reads `(embed_list, story)`, and a call that raised leaves
+    `embed_list` empty without asserting anything about the narrative's yield —
+    byte-identical to "prose in, ZERO candidates out", which is precisely the
+    signal armed by construction. Without the distinction the SAME failure is
+    paid for twice (S1+S2 again) and still commits nothing, on every session for
+    the duration of the outage, while the narrative may have been rich and only
+    the instrument broken.
+
+    Non-vacuity: on the pre-fix code the trigger reads `coverage_suspect` off
+    the empty list, so `s1_prompts` is 2 and `renarrate` is `fired: True`.
+    """
+    monkeypatch.delenv("TORTOISE_RENARRATE_KEEP_RATE", raising=False)
+    monkeypatch.setattr(extractor_v2.time, "sleep", lambda _s: None)
+
+    class _S2Down(_Scripted):
+        def complete(self, *, system, user, max_tokens=None):
+            if "STORY SUMMARIZER" in system:
+                return super().complete(system=system, user=user,
+                                        max_tokens=max_tokens)
+            self.other_stages.append("s2")
+            raise RuntimeError("provider exploded")
+
+    model = _S2Down(["Alice set a budget. Bob ships Friday."], [_EMPTY_EMBED])
+    result = extract_session_v2(model, list(CONVERSATION), sdk=None,
+                                session_id="11002-test",
+                                session_date="2026-11-08")
+    assert model.other_stages.count("s2") >= 1, "S2 must have been attempted"
+    assert len(model.s1_prompts) == 1, (
+        "a failed S2 must not re-narrate: the batch it produced carries no fact "
+        "about the narrative's yield, and the retry would pay the same outage twice"
+    )
+    assert result["stats"]["renarrate"] == {"fired": False}
+    assert any("S2 failed" in e for e in result["errors"]), (
+        "the failure is still recorded loudly — refusing the retry is not hiding it"
+    )
+    assert result["embed_list"] == {}, "nothing invented on the failure path"
+
+
 # ── 2. the retry is a different question ──────────────────────────────────
 
 def test_the_second_narrative_prompt_differs_and_names_the_gap(monkeypatch):
@@ -215,11 +260,20 @@ def test_the_second_narrative_prompt_differs_and_names_the_gap(monkeypatch):
     assert "RE-NARRATE" in second
 
 
-def test_run_s1_renders_byte_identically_without_emphasis():
+def test_run_s1_renders_byte_identically_without_emphasis(monkeypatch):
     """``emphasis=None`` must not move a single byte of S1's prompt.
 
-    The retry is the only caller that passes it; a render that differed when it
-    is absent would silently move every S1 prompt in the fleet.
+    The retry is the only caller that passes it, so the render with no emphasis
+    has to be the PRE-#11002 prompt exactly — otherwise every S1 call in the
+    fleet moves the moment the seam exists.
+
+    ⛔ The baseline is COMPUTED FROM THE TEMPLATE, not compared to a second
+    ``emphasis=None`` call. Comparing two identically-parameterised calls is a
+    vacuous guard: the two paths coincide by construction, so any render
+    mutation (an unconditional slot rewrite, ``if emphasis is not None:`` +
+    ``"\n\n"``, ``emphasis or "X"``) leaves both strings equal and the
+    assertion green — it pins nothing about the pre-PR prompt, which is the
+    property the name claims (agent-infra#3442 rule 3).
     """
     seen: list[str] = []
 
@@ -233,7 +287,43 @@ def test_run_s1_renders_byte_identically_without_emphasis():
     run_s1(_M(), "CONVERSATION BODY", session_date="2026-11-08")
     run_s1(_M(), "CONVERSATION BODY", session_date="2026-11-08", emphasis=None)
     assert len(seen) == 2
-    assert seen[0] == seen[1]
+    # The pre-#11002 render, reconstructed from the template itself: this is the
+    # string every S1 call site produced before the seam existed.
+    baseline = (extractor_v2.S1_TMPL
+                .replace("{memory_granularity}",
+                         extractor_v2._granularity_text(None))
+                .replace("{date_anchor}",
+                         extractor_v2._date_anchor("2026-11-08")))
+    assert "{memory_granularity}" not in baseline
+    assert extractor_v2._renarrate_emphasis("coverage_suspect") not in baseline
+    assert seen[0] == baseline, "an absent emphasis must not move the render"
+    assert seen[1] == baseline, "explicit None is the same request as absent"
+
+    # …and the armed arm differs from that baseline by EXACTLY the appended
+    # block: the emphasis rides the granularity slot, it does not rewrite the
+    # template around it.
+    seen.clear()
+    run_s1(_M(), "CONVERSATION BODY", session_date="2026-11-08",
+           emphasis="EMPHASIS BLOCK")
+    armed = (extractor_v2.S1_TMPL
+             .replace("{memory_granularity}",
+                      extractor_v2._granularity_text(None)
+                      + "\n\nEMPHASIS BLOCK")
+             .replace("{date_anchor}",
+                      extractor_v2._date_anchor("2026-11-08")))
+    assert seen[0] == armed
+    assert seen[0] != baseline
+    assert seen[0].replace("\n\nEMPHASIS BLOCK", "", 1) == baseline, (
+        "the armed prompt must be the baseline plus one appended block — a "
+        "mutation anywhere else in the render would leave a remainder here"
+    )
+
+    # The falsy-but-present spelling is a no-op too (`if emphasis:`, not
+    # `if emphasis is not None:`) — the retry never passes "", and a render that
+    # treated it as armed would emit a stray block for a caller that did not ask.
+    seen.clear()
+    run_s1(_M(), "CONVERSATION BODY", session_date="2026-11-08", emphasis="")
+    assert seen[0] == baseline, "an empty emphasis is not an emphasis"
 
 
 # ── 3. E4's property survives; the narrative follows §4.4's tie-break ────
@@ -343,6 +433,13 @@ def test_coverage_suspect_is_armed_with_no_threshold(monkeypatch):
     assert extractor_v2._renarrate_trigger(
         {"coverage_suspect": False, "candidates": 4}, {"keep_rate": 0.25},
         None) is None
+    # …and a batch from a FAILED S2 is not "prose in, nothing out": the empty
+    # list is the instrument's, not the narrative's (review F1).
+    assert extractor_v2._renarrate_trigger(
+        {"coverage_suspect": True, "candidates": 0}, {"keep_rate": None},
+        None, s2_failed=True) is None, (
+        "a raised S2 call must never arm the content-level retry"
+    )
 
 
 def test_an_arbiter_batch_renarrate_is_consumed(monkeypatch):
@@ -379,6 +476,24 @@ def test_the_census_stays_absent_when_the_retry_does_not_fire(monkeypatch):
     """A healthy run reports `fired: False` — never a fabricated episode."""
     _, result = _run(monkeypatch, ["Alice set a budget."], [_embed("Northwind")])
     assert result["stats"]["renarrate"] == {"fired": False}
+
+
+def test_every_return_carries_the_renarrate_channel(monkeypatch):
+    """`stats["renarrate"]` is on EVERY return, the empty-conversation one too.
+
+    It is an evidence surface about whether a mechanism acted — the same class as
+    `vet`/`classify_later`/`identity`, which this function already makes
+    unconditional — so a consumer never has to tell "did not fire" from "this
+    build has no retry". The empty-conversation return is hand-enumerated and
+    was the one path that omitted it (review F2), so a consumer crashed with
+    `KeyError` on exactly the session where nothing ran.
+    """
+    model, _ = _run(monkeypatch, ["Alice set a budget."], [_embed("Northwind")])
+    assert _entity_names(_) == {"Northwind"}, "the fixture really did extract"
+    empty = extract_session_v2(_Scripted(["story"], [_EMPTY_EMBED]), [],
+                               sdk=None, session_id="11002-empty")
+    assert empty["stats"]["renarrate"] == {"fired": False}
+    assert empty["stats"]["llm"]["calls"] == 0, "nothing ran, so nothing was spent"
 
 
 def test_the_emphasis_block_is_bounded():
