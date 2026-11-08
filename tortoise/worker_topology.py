@@ -373,26 +373,22 @@ def _workers_flag_value(argv: Sequence[str] | None = None) -> str | None:
     (click ``type=int``), so no running topology is described either way.
     """
     args = list(sys.argv if argv is None else argv)
+    # ⛔ ARITY, via :func:`_parsed_options` — the same walk the reload reader uses.
+    # A `--workers=1` token is only a workers FLAG when click reaches it as a
+    # token; `--host --workers=1` makes it `--host`'s VALUE, uvicorn then reads
+    # `$WEB_CONCURRENCY`, and a membership scan reports 1 while the server runs
+    # four — MEASURED on the pinned 0.52.1 (`--host --workers=1` / `--uds` /
+    # `--root-path` / `--app-dir` / `--forwarded-allow-ips` / `--loop` all leave
+    # `Config.workers = 4`). Last one wins, as click does.
     found: str | None = None
-    index = 0
-    while index < len(args):
-        token = args[index]
-        if token == WORKERS_FLAG:
-            # ⛔ The NEXT token is the VALUE whatever it looks like, and it is
-            # CONSUMED — never re-scanned as a flag. That is what the shell arm
-            # does (`_count="${_args[$_i]:-}"`, then it steps past), so a
-            # value that itself looks like a flag (`--workers --workers=`) is ONE
-            # malformed value in both resolvers instead of "flag, then flag" in
-            # one. A trailing bare flag reads EMPTY (absent), which is the
-            # shell's `-z` fall-through to `$WEB_CONCURRENCY`. click exits 2 on
-            # both shapes, so no topology exists to describe — but the two
-            # resolvers must still agree, because `_AGREEMENT_TABLE` runs both.
-            found = args[index + 1] if index + 1 < len(args) else ""
-            index += 2
+    for name, value in _parsed_options(args):
+        if name != WORKERS_FLAG:
             continue
-        if token.startswith(WORKERS_FLAG + "="):
-            found = token[len(WORKERS_FLAG) + 1:]
-        index += 1
+        # A bare trailing flag reads EMPTY (absent), which is what the shell's
+        # `-z` fall-through to `$WEB_CONCURRENCY` does. click exits 2 on that
+        # shape, so no topology is described either way — but the two resolvers
+        # must agree, because `_AGREEMENT_TABLE` runs both.
+        found = "" if value is None else value
     return found if found else None
 
 
