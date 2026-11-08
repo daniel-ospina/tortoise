@@ -1330,7 +1330,15 @@ def test_a_retry_that_raises_after_the_re_bind_keeps_the_first_arms_capture(
     only way to read `0` instead of `0 + 1`.
     """
     def _boom(_metrics):
-        raise RuntimeError("the retry's tail exploded")
+        # `_ParseError`, not `RuntimeError` (review round 2, P3): the census
+        # class this raises is `parse_error`, which NOTHING ELSE in this run can
+        # produce — `_classify_error` never returns it (its own docstring says
+        # the stage callers produce it), and arm B's failed S1 chunk is a
+        # `RuntimeError` landing in `transient_unknown`. With a `RuntimeError`
+        # here, "some census bump happened" is satisfied BY THAT ARM, so a
+        # census assertion would pass with the handler's own `_bump_census`
+        # deleted — a false pass, measured.
+        raise extractor_v2._ParseError("the retry's tail exploded")
 
     monkeypatch.setattr(extractor_v2, "_rate_text", _boom)
     monkeypatch.setattr(extractor_v2.time, "sleep", lambda _s: None)
@@ -1433,10 +1441,25 @@ def test_a_retry_that_raises_after_the_re_bind_keeps_the_first_arms_capture(
     )
     # ⛔ `vet_s2_stats` is arm-dependent even for an EMPTY arm: VET records a
     # `batch` block either way, so `candidates` is 0 for arm A and 2 for arm B.
+    #
+    # ⛔ THIS PINS `vet_s2_stats` ONLY, and the message must not claim otherwise
+    # (review round 2, P2 — the previous wording said "skips
+    # `vet_s2_stats`/`vet_s2_pool`" while the assertion read `stats` alone).
+    # `vet_s2_pool` is restored beside it in the handler, but it is NOT
+    # observable on this fixture: it reaches the tree through exactly one
+    # consumer, the post-S4 union pass's `prior=` argument
+    # (`extractor_v2.py:13302-13303`), which is SKIPPED here because arm A ships
+    # NOTHING (`if vet_enabled and complete_list:`) — so on this trigger no arm's
+    # pool is ever read. DECLARED RESIDUAL, not covered: deleting
+    # `vet_s2_pool = arm["vet_pool"]` from the handler leaves this suite GREEN
+    # (measured at this head — 321 passed across `test_selection_step.py` +
+    # `test_7949_capstone_measure.py`). Closing it needs a fixture whose arm A
+    # ships a list AND whose arm-B pool differs, so the union pass runs and
+    # `prior=` becomes readable; that is a separate change, not a wording fix.
     assert result["vet"]["s2"]["stats"]["candidates"] == 0, (
-        "a restore that skips `vet_s2_stats`/`vet_s2_pool` publishes arm B's "
-        "judgement (2 candidates) about a list that did not ship — the vet "
-        f"surface would describe an arm nobody chose: {result['vet']['s2']!r}"
+        "a restore that skips `vet_s2_stats` publishes arm B's judgement "
+        "(2 candidates) about a list that did not ship — the vet surface "
+        f"would describe an arm nobody chose: {result['vet']['s2']!r}"
     )
     # The run-level chunk counters are the only observable that pins
     # `chunks`/`failed_chunks`: both arms ran, so a restore that skips them (or
@@ -1468,6 +1491,16 @@ def test_a_retry_that_raises_after_the_re_bind_keeps_the_first_arms_capture(
     assert any("re-narrate retry failed" in e for e in result["errors"]), (
         f"a fail-open path that is silent on `errors` hides the failure: "
         f"{result['errors']}"
+    )
+    # ⛔ AND THE CENSUS ITSELF (review round 2, P3). Asserting only `errors`
+    # left `_bump_census(error_census, e)` unpinned — deleting it from the
+    # handler left this whole suite GREEN (measured). The record's own comment
+    # says the failure must reach "the ERROR surface and the census"; this is
+    # the half that reads the census. `parse_error` is attributable because
+    # nothing else in the run produces it (see `_boom`).
+    assert result["error_census"].get("parse_error") == 1, (
+        "a fail-open path that never reaches the census is invisible to the "
+        f"report census, which is what triage reads: {result['error_census']}"
     )
 
 
