@@ -395,12 +395,27 @@ def test_an_unknown_version_is_invalid(tmp_path):
 
 
 def test_a_sha_that_names_no_commit_is_invalid(tmp_path):
-    """Shape is not existence: a fabricated 40-hex sha rendered as provenance."""
+    """Shape is not existence: a fabricated 40-hex sha rendered as provenance.
+
+    ⛔ A SHALLOW checkout cannot answer this question at all (#11217): `actions/checkout@v4`
+    defaults to `fetch-depth: 1`, so a recorded ANCESTOR is absent by construction and
+    "absent" is indistinguishable from "fabricated". The tool abstains there rather than
+    reporting a false RED — which is what red the 22 committed-ledger rows in every CI
+    shard. Both arms are asserted so neither can rot: the RESIDUAL is stated, not hidden —
+    in a shallow checkout a genuinely fabricated sha is not caught, and the refusal arm
+    runs in any full clone (and in the merge rail).
+    """
     data = _ledger([_row("A")])
     data["measured_at"]["sha"] = "deadbeef" * 5
     proc = _run_cli(tmp_path, data)
-    assert proc.returncode == cl.EXIT_INVALID, proc.stdout + proc.stderr
-    assert "names no commit" in proc.stderr
+    if cl._is_shallow():
+        assert "names no commit" not in proc.stderr, (
+            "a shallow checkout must ABSTAIN, not red the record for history it does not hold: "
+            + proc.stderr
+        )
+    else:
+        assert proc.returncode == cl.EXIT_INVALID, proc.stdout + proc.stderr
+        assert "names no commit" in proc.stderr
 
 
 # ── the REAL committed ledger ──────────────────────────────────────────────

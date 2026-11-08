@@ -179,14 +179,48 @@ def load_ledger(path: Path) -> dict[str, Any]:
     return data
 
 
-def _commit_exists(sha: str) -> bool:
-    """Is `sha` an object in THIS repository? A sha nobody can resolve is a claim.
+def _is_shallow() -> bool:
+    """Is this checkout shallow? The exact signal, not an inference from absence.
+
+    `actions/checkout@v4` defaults to `fetch-depth: 1`, so the `test` job's checkout is
+    shallow BY CONSTRUCTION and a recorded ancestor commit is simply not in it. In a
+    depth-1 clone the boundary commit is a grafted root, so "absent" and "fabricated"
+    are INDISTINGUISHABLE here — which is why this question has to be asked separately
+    before absence is read as evidence.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "--is-shallow-repository"],
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:  # pragma: no cover - git absent
+        return False
+    if proc.returncode != 0:  # pragma: no cover - not a repo
+        return False
+    return proc.stdout.strip().lower() == "true"
+
+
+def _commit_exists(sha: str) -> bool | None:
+    """Is `sha` an object in THIS repository? `None` when the checkout cannot answer.
 
     The 40-hex shape check alone lets `measured_at.sha: deadbeef…` through, and
     `render()` then prints "measured at origin/main@deadbeef… on <date>" as fact.
     The one claim binding 22 verdicts to a tree is therefore the cheapest thing
     in the record to fabricate, so it is checked against the object database.
+
+    ⛔ THREE-VALUED ON PURPOSE (#11217). A shallow checkout cannot tell a fabricated sha
+    from an ancestor that is merely absent, and reading that absence as "fabricated"
+    reds 22 rows of this suite on every CI run — blaming the ledger for the checkout's
+    shape. The `test` job checks out at `fetch-depth: 1` (python-ci.yml:489 states it),
+    so `None` is the honest answer there; the refusal arm runs wherever history exists.
+    This is the third reader of ONE signal, matching `tools/capstone_preregistration_check.py`
+    (`history_unavailable` → UNPROVABLE) and `tools/surface_manifest.py` (`is_shallow`).
     """
+    if _is_shallow():
+        return None
     try:
         proc = subprocess.run(
             ["git", "cat-file", "-e", f"{sha}^{{commit}}"],
@@ -266,8 +300,10 @@ def validate(data: dict[str, Any], repo_root: Path = REPO_ROOT) -> list[dict[str
         sha = str(measured_at.get("sha") or "")
         if len(sha) != 40 or any(c not in "0123456789abcdef" for c in sha):
             problems.append(f"`measured_at.sha` must be a 40-hex sha, got {sha!r}")
-        elif not _commit_exists(sha):
+        elif _commit_exists(sha) is False:
             # Shape is not existence: a fabricated sha renders as provenance.
+            # `None` (shallow checkout) is NOT a verdict — it is an answer this tree
+            # cannot give, and reporting one would be a false RED (#11217).
             problems.append(f"`measured_at.sha` names no commit in this repository: {sha}")
         if not str(measured_at.get("date") or "").strip():
             problems.append("`measured_at.date` must be set (YYYY-MM-DD)")
