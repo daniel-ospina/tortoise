@@ -231,7 +231,6 @@ def _merge_probe(before: dict | None, after: dict, *,
         if before is not None and index < len(before["probes"]):
             before_row = before["probes"][index]
             prior = len(before_row["residue"])
-        row["residue_before"] = prior
         # ⛔ CARRY THE BEFORE LEG'S OWN MEASUREMENT, NOT JUST ITS RESIDUE COUNT
         # (#11536 review round 3, P2). `residue_before` is populated whenever a
         # BEFORE reading exists — whether it RAN, whether it was DEGRADED (a

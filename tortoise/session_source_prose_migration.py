@@ -838,6 +838,13 @@ def reconcile_session_source_prose(
                       row-level-security problem that does not exist, which is
                       the inverse of the conflation #10000 review fixed one
                       bucket over,
+      ``no_session_id``  urls a reader WAS supplied for but whose node carries
+                      no derivable session id — a pre-#4005 bare-filename url,
+                      for instance. ⛔ A FOURTH bucket, not folded into
+                      ``no_reader`` (a reader was supplied) or ``no_record``
+                      (the record was never asked): before it existed these
+                      nodes satisfied neither, so on the clear arm a
+                      DESTRUCTIVE write was reported as nothing,
       ``left_alone``  urls NOT written at all because the record could not
                       supply a replacement and ``clear_without_record`` is
                       False. Clearing is the arm that cannot be undone by a
@@ -850,6 +857,13 @@ def reconcile_session_source_prose(
                       non-string pair value (the write compares the pair as
                       text). Named on every arm, never silent — repair the node
                       by hand or delete it,
+      ``written``     urls whose write actually MATCHED a ``:Source``. ⛔ Read
+                      by the CLI as ``wrote=bool(report["written"])`` to select
+                      the fail-closed arm of the FTS verdict, so it is the
+                      count the run was certified by — never arithmetic over the
+                      buckets above, which overlap (`left_alone` also holds the
+                      ``no_session_id``/``no_reader`` nodes) and would report
+                      fewer repairs than were made,
       ``notes``       url -> why a candidate was handled the way it was,
       ``census_before``  the population, measured,
       ``census_after``   the population re-MEASURED after the writes; equal to
@@ -857,7 +871,11 @@ def reconcile_session_source_prose(
                       written. Re-measured rather than decremented: a write that
                       silently missed (a node deleted mid-run) must show up as a
                       census that did not move, which `before - healed` hides,
-      ``dry_run``     the flag this call carried.
+      ``dry_run``     the flag this call carried,
+      ``timeout_ms``  the timeout the reads ACTUALLY used, after clamping to the
+                      server's own cap — the requested value may be larger, so
+                      an operator reading the report sees the bound it ran
+                      under.
     """
     # `found` lets a caller that has ALREADY taken the census (the CLI's dry run,
     # which wants the byte sizes) hand it in instead of paying for a second

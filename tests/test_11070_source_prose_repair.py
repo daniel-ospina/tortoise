@@ -4120,6 +4120,51 @@ def test_the_documented_report_contracts_are_the_ones_the_run_RETURNS(monkeypatc
     assert degraded["unmeasurable"] == ["zebraquux"]
 
 
+def test_the_reconcile_contract_lists_every_key_the_run_returns():
+    """#11536 review note: the repair's ``Returns`` block named ten of FOURTEEN keys.
+
+    (1) FAILS on the shipped docstring. ``reconcile_session_source_prose`` emits
+        ``candidates``/``repaired``/``empty_sessions``/``no_record``/
+        ``no_reader``/``no_session_id``/``unaddressable``/``left_alone``/
+        ``written``/``notes``/``census_before``/``census_after``/``dry_run``/
+        ``timeout_ms``, and its contract listed ten of them: it omitted
+        ``no_session_id`` (the bucket that stopped a DESTRUCTIVE write being
+        reported as nothing), ``written`` (the count the CLI certifies a run by —
+        ``wrote=bool(report["written"])`` selects the fail-closed arm of the FTS
+        verdict) and ``timeout_ms``. A caller implementing the report from the
+        docstring would not know the key the verdict depends on exists.
+    (2) REACHABLE: all three are on EVERY report, dry run included (the "SAME
+        keys in both modes" claim the block opens with), so this is the ordinary
+        return shape, not a branch.
+    (3) POLARITY THAT MUST NOT GO RED: a repair that WROTE reports its url in
+        ``written``, so the documented key is genuinely emitted with meaning
+        rather than merely named.
+
+    ⛔ The membership test is QUOTED (``key``), the lesson round 6 measured one
+    function over: an unquoted test is satisfied by the PROSE around the
+    contract, so deleting a key's line would leave the leg green.
+    """
+    from tortoise import session_source_prose_migration as m
+
+    graph = _RecordingGraph([(_session_node(),)])
+    dry = m.reconcile_session_source_prose(graph, dry_run=True)
+    doc = " ".join((m.reconcile_session_source_prose.__doc__ or "").split())
+    for key in dry:
+        assert f"``{key}``" in doc, (
+            f"`reconcile_session_source_prose` RETURNS {key!r} but its `Returns` "
+            f"block never lists it — the report's contract omits a key the run "
+            f"actually emits")
+
+    # (3) the same report, WRITING: the documented `written` key carries the url
+    # the write matched, so naming it is not a claim about a key that is always
+    # empty.
+    real = m.reconcile_session_source_prose(
+        _RecordingGraph([(_session_node(),)]),
+        read_transcript=_reader("User: friday rebuild plan"), dry_run=False)
+    assert real["written"] == ["session:s-11070"]
+    assert set(real) == set(dry), "dry and writing runs must return the same keys"
+
+
 def test_a_BEFORE_reading_that_did_not_MEASURE_is_not_reported_as_a_clean_zero(
         monkeypatch, capsys):
     """#11536 review round 3, P2: `residue_before == 0` was three states in one.
