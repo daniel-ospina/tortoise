@@ -25,7 +25,7 @@ Two measured facts govern the risk:
   a migration here is moving the only copy of a tenant's data.
 
 Code: `tortoise/curation.py` (classification + guards + additive writer) and
-`tools/curate_graph.py` (the CLI). Tests: `tests/test_curation_11469.py` (58 tests).
+`tools/curate_graph.py` (the CLI). Tests: `tests/test_curation_11469.py` (61 tests).
 
 ## The inventory — measured 2026-11-08 against `live-v4`
 
@@ -89,9 +89,10 @@ unjudged. Two options, and this issue does not choose between them:
 
 1. a **semantic pass** (search/embedding-similarity clustering + a reviewer) that proposes a
    carry-set for review; or
-2. **incremental curation**: migrate the decided slice now (the 127 carried rows + operators +
-   Subjects), and let the statement bulk be curated as the fleet writes new memory into the clean
-   graph anyway.
+2. **incremental curation**: migrate the decided slice now (the 127 carried rows + the operators the
+   rule carries), and let the statement bulk be curated as the fleet writes new memory into the clean
+   graph anyway. Subjects are NOT in that slice: this pass has no subject rule, so every Subject is
+   `undecidable` (26 rows — a decision, not a rule).
 
 What the tool guarantees either way: a run only ever carries rows whose disposition is `carry`,
 and every other row is reported with its reason. Nothing is dropped from the old graph — it stays
@@ -108,6 +109,7 @@ flagged *not enumerated* rather than presented as measure-and-classify results.
 | property | mechanism | test |
 |---|---|---|
 | the old graph is only read | the module has no destructive call at all; the reader exposes no write verb. The property is the WRITER's verb list — a bundle-text grep for "delete" cannot observe a destructive call | `test_writer_protocol_declares_no_destructive_verb` (property), `test_bundle_carries_no_deletion` (supplement) |
+| a read that refuses is never census data | every `graph_overview` section read (including the credential-bound retry) is unwrapped and FAILS CLOSED on an error envelope — an envelope falling through `_rows_from_tool` reads as "0 rows"; `sources_read` is reconciled against `counts.Source` via a reported `source_count_gap`, never called complete | `test_the_inventory_report_names_the_source_filter` |
 | the target is only added to | `PlanWriter` is a **single-verb** protocol (`write_sections`, which writes each bundle SECTION — `points` and `sources` — because a carried Source sent as a Point is re-typed, and a bundle that only ever sent `points` reported success while writing none) — additivity is a property of the type, not of the caller's discipline | `test_writer_protocol_declares_no_destructive_verb`, `test_a_carried_source_is_reached_by_the_writer` |
 | **idempotent** | stable `migrationKey` per content hash → target-side dedup (`ingest` folds by content hash + kind) **and** a local ledger that skips a migrated key before it reaches the wire | `test_second_run_writes_nothing`, `test_duplicate_follows_its_keeper` |
 | **off-switch** | `TORTOISE_CURATE_OFF=1` / `--off`, checked before the run **and before each write batch** | `test_explicit_off_switch_writes_nothing`, `test_env_off_switch_writes_nothing` |

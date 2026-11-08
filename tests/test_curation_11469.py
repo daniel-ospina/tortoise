@@ -673,3 +673,42 @@ def test_the_inventory_report_names_the_source_filter():
     spec.loader.exec_module(mod)
     notes = mod.NOT_ENUMERABLE
     assert "source" in notes and "documentKind IS NULL" in notes["source"]
+
+
+# ── round-7 review findings ───────────────────────────────────────────────
+
+
+def test_two_sources_sharing_a_url_but_not_a_kind_both_reach_the_wire(tmp_path):
+    """Round-7: a url-only ledger key collapsed two Source rows onto one entry and
+    reported `skipped_known` on a FIRST run with an EMPTY ledger."""
+    plan = C.build_plan(
+        [row("s1", node_type="source", kind="article", content="https://x/y"),
+         row("s2", node_type="source", kind="document", content="https://x/y")],
+        source_graph="old", target_graph="new", packs={})
+    w = CountingWriter()
+    res = C.run_plan(plan, writer=w, ledger=C.Ledger(tmp_path / "l.jsonl", target="new"),
+                     apply=True, graph_rows=ROWS)
+    assert res.skipped_known == 0, "nothing was written yet, so nothing is 'already known'"
+    assert res.written == 2 and len(w.calls[0][1]) == 2
+
+
+def test_a_kept_point_still_carries_its_migration_key():
+    """Round-7: the key was stripped from EVERY section, so a migrated point was no
+    longer identifiable in the target — the module's stated purpose."""
+    seen = {}
+    def call_tool(_name, args):
+        seen.update(args["bundle"])
+        return {"ok": True, "created": 1}
+    C.IngestWriter(call_tool).write_sections(
+        "new", {"points": [{"migrationKey": "k1", "kind": "statement", "content": "c"}]})
+    assert seen["points"][0]["migrationKey"] == "k1"
+
+
+def test_a_real_content_row_is_not_dropped_for_an_empty_keeper():
+    """Round-7: an empty row sharing the content hash made the real row 'follow a
+    keeper that carries nothing' — the content would have been carried nowhere."""
+    a = row("a", kind="decision", content="   ", content_hash="h1")   # empty keeper candidate
+    b = row("b", kind="decision", content="ship it", content_hash="h1")  # real content, same hash
+    plan = C.build_plan([a, b], source_graph="old", target_graph="new", packs={})
+    carried = [d.node_id for d in plan.carry_rows()]
+    assert carried == ["b"], carried

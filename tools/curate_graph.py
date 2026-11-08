@@ -112,31 +112,48 @@ class MCPReader:
         silently absorbed.
         """
         args = {"section": section}
-        if self.graph:
-            try:
-                res = C.normalise_tool_result(self._call("tortoise_graph_overview", {**args, "graph": self.graph}))
-            except Exception as exc:  # a refusal, not an empty section
-                self.note = (f"credential-bound read for {section!r}: the explicit graph argument "
-                             f"was refused ({str(exc)[:160]}); used the credential's own graph")
-                return C.normalise_tool_result(self._call("tortoise_graph_overview", args))
-            err = _error_of(res)
-            if err:
-                # An error envelope is truthy and does NOT raise; returning it as a
-                # section would present a refusal as census data.
-                self.note = (f"credential-bound read for {section!r}: the explicit graph argument "
-                             f"was refused ({err[:160]}); used the credential's own graph")
-                return C.normalise_tool_result(self._call("tortoise_graph_overview", args))
-            # An EMPTY result is a legitimate answer (a graph with no sources), so it
-            # is returned as-is rather than re-read from a different graph.
-            return res
-        return C.normalise_tool_result(self._call("tortoise_graph_overview", args))
+        if not self.graph:
+            return self._checked(self._call("tortoise_graph_overview", args), section)
+        try:
+            res = C.normalise_tool_result(self._call("tortoise_graph_overview", {**args, "graph": self.graph}))
+        except Exception as exc:  # a refusal, not an empty section
+            self.note = (f"credential-bound read for {section!r}: the explicit graph argument "
+                         f"was refused ({str(exc)[:160]}); used the credential's own graph")
+            return self._checked(self._call("tortoise_graph_overview", args), section)
+        err = _error_of(res)
+        if err:
+            # An error envelope is truthy and does NOT raise; returning it as a
+            # section would present a refusal as census data.
+            self.note = (f"credential-bound read for {section!r}: the explicit graph argument "
+                         f"was refused ({err[:160]}); used the credential's own graph")
+            return self._checked(self._call("tortoise_graph_overview", args), section)
+        # An EMPTY result is a legitimate answer (a graph with no sources), so it is
+        # returned as-is rather than re-read from a different graph.
+        return res
+
+    @staticmethod
+    def _checked(raw: Any, section: str) -> Any:
+        """Unwrap, then FAIL CLOSED on an error envelope.
+
+        A retry can refuse too, and an envelope falling through to `_rows_from_tool`
+        reads as "0 rows" — a refusal presented as a census. Points fail closed for
+        this reason; every section does.
+        """
+        res = C.normalise_tool_result(raw)
+        err = _error_of(res)
+        if err:
+            raise RuntimeError(f"read of section {section!r} was refused: {err[:300]}")
+        return res
 
     def read_sources(self) -> tuple[list[C.Row], int | None]:
-        """Sources, plus the total the surface reported (or None).
+        """Sources, plus the total the surface reported (None when it reports none).
 
-        Two honesty checks ride on the total: the surface's source listing matches
-        `documentKind IS NULL`, so it is a SUBSET of `counts.Source` — the caller
-        reconciles and names the gap rather than reporting a complete census.
+        The surface's source listing matches `documentKind IS NULL`, so it is a
+        SUBSET of `counts.Source`; the caller reconciles against that and names the
+        gap (NOT_ENUMERABLE["source"]) rather than reporting a complete census. A
+        row SECTION carries no `total` key, so None is the honest answer here — the
+        previous code returned `len(out)`, which could never disagree with
+        `sources_read` and so reconciled nothing.
         """
         res = self._section("sources")
         raw = _rows_from_tool(res)
@@ -153,7 +170,7 @@ class MCPReader:
                 node_id=url, node_type="source", kind=s.get("sourceKind"),
                 content=url, content_hash=None, props=s,
             ))
-        return out, (total if total is not None else len(out))
+        return out, total
 
     def counts(self) -> dict[str, Any]:
         res = self._section("status")
@@ -190,6 +207,19 @@ def _live_call_tool(name: str, args: dict[str, Any] | None = None) -> Any:
     return mcp_client.call_tool(name, args or {})
 
 
+def _source_gap(counts: Any, read: int) -> int | None:
+    """`counts.Source` minus what this read path enumerated (None if unreported).
+
+    Non-zero is EXPECTED: `sdk.list_sources` matches `documentKind IS NULL`, so a
+    Document-kind Source is never listed. Reported rather than explained away.
+    """
+    if not isinstance(counts, dict):
+        return None
+    node_counts = counts.get("counts") if isinstance(counts.get("counts"), dict) else counts
+    total = node_counts.get("Source") if isinstance(node_counts, dict) else None
+    return (total - read) if isinstance(total, int) else None
+
+
 NOT_ENUMERABLE = {
     "operator": "tortoise_query excludes operator Points unless an operator kind is "
                 "requested (sdk._operator_scope_clauses, #7108) — count from structure.operators",
@@ -219,6 +249,7 @@ def cmd_inventory(args: argparse.Namespace) -> int:
         "points_total_reported": total,
         "sources_read": len(sources),
         "sources_total_reported": source_total,
+        "source_count_gap": _source_gap(counts, len(sources)),
         "structure": structure,
         "graphs": graphs,
         "not_enumerable_by_this_read_path": dict(NOT_ENUMERABLE),
@@ -257,6 +288,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
               "identity must be the graph that was actually read", file=sys.stderr)
         return 2
     reader = MCPReader(_live_call_tool, args.graph)
+    counts = reader.counts()
     points, _ = reader.read_points(page=args.page)
     sources, source_total = reader.read_sources()
     graphs = reader.graphs()
@@ -278,6 +310,10 @@ def cmd_plan(args: argparse.Namespace) -> int:
         return 3
     payload = {"census": plan.census(), "run": result.as_dict(),
                "sources_read": len(sources), "sources_total_reported": source_total,
+               "source_count_gap": _source_gap(counts, len(sources)),
+               # The plan is the artifact a driver writes; a census without the
+               # classes this read path cannot enumerate reads as complete.
+               "not_enumerable_by_this_read_path": dict(NOT_ENUMERABLE),
                # A credential-bound fallback read means the rows came from the
                # credential's own graph, not the one asked for — never silent.
                "read_note": reader.note}

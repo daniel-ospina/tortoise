@@ -555,6 +555,18 @@ def build_plan(
             continue
         keepers[key] = row.node_id
         first_pass[key] = classify(row, mapping)
+    # A keeper that carries NOTHING cannot be "the row of record" for the content:
+    # preferring a keeper whose own disposition carries means a real-content row is
+    # never dropped in favour of an empty one that happens to share its hash.
+    for row in rows:
+        key = row.stable_key
+        if first_pass[key].disposition == CARRY or first_pass[key].node_id == row.node_id:
+            continue
+        if keepers.get(key) != row.node_id and str(row.content or "").strip():
+            candidate = classify(row, mapping)
+            if candidate.disposition == CARRY:
+                keepers[key] = row.node_id
+                first_pass[key] = candidate
 
     for row in rows:
         key = row.stable_key
@@ -783,8 +795,12 @@ class IngestWriter:
                 "graph": target_graph,
                 "promotion_policy": "auto",
                 "granularity": "bulk",
-                "bundle": {section: [{k: v for k, v in p.items() if k != "migrationKey"}
-                                     for p in batch]},
+                # `migrationKey` travels on a POINT (it is a declared point prop and
+                # is what makes a migrated row identifiable in the target without a
+                # local ledger); a :Source accepts only its declared props (#3998),
+                # so the key is stripped from that section alone.
+                "bundle": {section: ([{k: v for k, v in p.items() if k != "migrationKey"}
+                                      for p in batch] if section == "sources" else list(batch))},
             })
             # Unwrapping is INSIDE the guard: `normalise_tool_result` raises on the
             # `isError` path, and a refusal there must still report the batches
@@ -925,7 +941,12 @@ def run_plan(
             if key is None:
                 # Sources carry no key on the node (#3998), so their ledger key is
                 # derived from the url, which is what the target merges on.
-                key = f"{MIGRATION_KEY_PREFIX}source:-:{item.get('url')}"
+                # kind AND url: two Source rows can share a url with different
+                # kinds (create_source merges by url, list_sources groups by
+                # (url, kind)), and a url-only key silently collapsed them onto one
+                # ledger entry — reported as skipped_known on a FIRST run.
+                key = (f"{MIGRATION_KEY_PREFIX}source:"
+                       f"{item.get('sourceKind') or '-'}:{item.get('url')}")
             if key in ledger or any(k.get("migrationKey") == key for k in keyed):
                 continue
             keyed.append({**item, "migrationKey": key})
