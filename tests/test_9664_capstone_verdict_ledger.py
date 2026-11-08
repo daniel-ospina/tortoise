@@ -1137,11 +1137,14 @@ def test_a_fabricated_sha_is_refused_end_to_end_in_a_full_clone(tmp_path):
     """HERMETIC, and the arm the wiring pin above cannot reach by itself.
 
     `test_a_sha_that_names_no_commit_is_invalid` pins `validate`'s DECISION with the
-    state machine stubbed, because this checkout is shallow. That leaves the real
-    path — a full clone, a forged sha, `validate` calling `_commit_state` — with no
-    end-to-end pin at all. `_commit_state` honouring `repo_root` is what makes this
-    reachable: a temp FULL clone answers `absent`, so the refusal fires for real
-    rather than by stubbing.
+    state machine stubbed, because the live checkout's DEPTH is not a property a
+    deterministic test may depend on: on this box the shared `.git` is a FULL clone
+    (`git rev-parse --is-shallow-repository` -> false, so a forged sha already
+    answers `absent` here), while a CI shard's depth-1 checkout answers `unprovable`
+    for the same input. That leaves the real path — a full clone, a forged sha,
+    `validate` calling `_commit_state` — with no end-to-end pin at all.
+    `_commit_state` honouring `repo_root` is what makes this reachable: a temp FULL
+    clone answers `absent`, so the refusal fires for real rather than by stubbing.
 
     The cited artifact is committed in that same temp repo, so the ONLY defect is
     the sha — otherwise this would pass on the tracked rule instead, for the wrong
@@ -1155,6 +1158,10 @@ def test_a_fabricated_sha_is_refused_end_to_end_in_a_full_clone(tmp_path):
     git = ["git", "-C", str(repo)]
     sp.run([*git, "init", "-q"], check=True)
     sp.run([*git, "add", "held.txt"], check=True)
+    # `commit.gpgsign=false` is part of being HERMETIC: this fixture SEEDS a commit,
+    # so on a box that signs commits it would ERROR (exit 128, "gpg failed to sign
+    # the data") instead of asserting — a pin failing for a reason unrelated to its
+    # arm. The sibling temp-repo fixture in this file already configures it.
     sp.run(
         [
             *git,
@@ -1162,6 +1169,8 @@ def test_a_fabricated_sha_is_refused_end_to_end_in_a_full_clone(tmp_path):
             "user.email=t@example.com",
             "-c",
             "user.name=t",
+            "-c",
+            "commit.gpgsign=false",
             "commit",
             "-q",
             "-m",
