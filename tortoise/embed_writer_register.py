@@ -56,9 +56,15 @@ fact; the field is that fact, declared once (the policy-as-data shape `#11444` a
 ⚠️ **Its residual, stated rather than implied:** a `NO_LIVE_VECTOR` or label-tuple declaration is
 accepted **by name** once `load()` validates it — the instrument cannot re-derive "this writer
 stores nothing" (that is `UNDECIDABLE_WRITE_SHAPES`, data flow, the same limit `exempt` has on row
-1). The register is product code under review, and
-`tests/test_embed_writer_register.py::test_every_declared_label_re_derives_at_this_head` re-derives
-every declared label against the writer's own body at HEAD.
+1). The register is product code under review, and this suite re-derives BOTH halves against the
+writer's own body at HEAD:
+`tests/test_embed_writer_register.py::test_every_declared_label_re_derives_at_this_head` for every
+declared label, and
+`tests/test_embed_writer_register.py::test_a_no_live_vector_declaration_executes_no_store_clause`
+for every `NO_LIVE_VECTOR` entry. ⛔ State the residual at its true size: the second pin proves the
+symbol's own body (plus one hop of module constants) executes no store clause, which is NOT the
+same as proving the writer stores nothing — a door that EXECUTES A CALLER-SUPPLIED statement
+(`sdk::_event_raw_write_door`) carries no marker and is caught only by review.
 
 **Discovery, and the edge of the guard.** The guard's population comes from
 `tools/dod_5090_probe.py::embedding_writers()`, so the guard is exactly as wide as that discovery —

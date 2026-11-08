@@ -605,6 +605,12 @@ def test_an_UNREADABLE_register_is_UNMEASURED_not_a_green_row_two(monkeypatch):
     An empty answer here would render every outside-gate writer `unresolved` and blame the PRODUCT
     for the instrument's own failure; a `MET` would be worse still, because the one input that can
     flip the row would be missing. Neither is allowed.
+
+    ⛔ `#11492` round-2 review (P2): the first version of this test used a population with NO
+    unresolved writer, so it could not see that the row printed BOTH `…none is blamed on the
+    product` AND `unresolved writers … nothing in the product says which label they store on` about
+    the same writers — a self-contradicting note that asserts a product defect which does not exist.
+    The fixture now carries an `ungated` writer, which is the shape that produced the second note.
     """
     def _unreadable():
         raise RuntimeError("register exploded")
@@ -3853,6 +3859,41 @@ def test_an_UNREADABLE_register_holds_row_one_as_UNMEASURED(tmp_path, monkeypatc
     assert "undeclared writers" not in row.observed, (
         "an unreadable register must not be reported as the product declaring "
         f"nothing: {row.observed}")
+
+
+def test_the_LIVE_reader_plumbs_the_stores_declaration_through():
+    """`#11492`: the register's `stores` field must actually REACH the row's reader.
+
+    ⛔ Found by mutation, not by review: deleting `"stores"` from `declared_writers()`'s dict —
+    i.e. disconnecting the ONE field this whole change exists to read — left the entire probe suite
+    GREEN (157 passed, 1 skipped) while the live instrument reported
+    `0 label-resolved · 0 declared no-live-vector · 0 labels-at-runtime · 0 undeclared · 19
+    malformed`: every row-two test injects BOTH inputs via `monkeypatch`, so none of them ever
+    exercises the product-register → reader seam. This is the mirror of the `#11492`-recorded
+    `injected-map-inherits-live-declaration` lesson: a fixture that replaces half its world measures
+    the other half's, and the seam between them goes unpinned.
+
+    Asserted against the LIVE register and the LIVE reader, so it cannot be satisfied by injecting
+    a declaration.
+    """
+    from tortoise import embed_writer_register as register
+
+    declared = probe.declared_writers()
+    assert set(declared) == set(register.EMBED_WRITER_CLASSES), (
+        "the reader and the register disagree about which writers are declared: "
+        f"missing={sorted(set(register.EMBED_WRITER_CLASSES) - set(declared))} "
+        f"extra={sorted(set(declared) - set(register.EMBED_WRITER_CLASSES))}"
+    )
+    for key, entry in sorted(register.EMBED_WRITER_CLASSES.items()):
+        assert "stores" in declared[key], (
+            f"`declared_writers()` dropped `stores` for {key} — row 2 reads the declaration for "
+            "exactly this field, and without it every writer reads `malformed` while the suite "
+            "stays green"
+        )
+        assert declared[key]["stores"] == entry.stores, (
+            f"{key} reaches row 2 with stores={declared[key]['stores']!r}, but the register "
+            f"declares {entry.stores!r} — the reader must pass it through UNINTERPRETED"
+        )
 
 
 def test_the_LIVE_register_credits_every_writer_outside_the_gate(monkeypatch):

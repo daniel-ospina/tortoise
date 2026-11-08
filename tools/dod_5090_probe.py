@@ -1759,9 +1759,13 @@ def score_rule_bullet() -> Row:
 #: "this writer stores no live vector" — that is `UNDECIDABLE_WRITE_SHAPES`, data flow — so a false
 #: `NO_LIVE_VECTOR` for a writer that DOES store is indistinguishable here from a correct one.
 #: That is row 1's `exempt` residual one row over, and its mitigation is the same one: the register
-#: is product code under review, and `tests/test_embed_writer_register.py`
-#: ::test_every_declared_label_re_derives_at_this_head re-derives every declared label against the
-#: writer's own body at HEAD.
+#: is product code under review, and the register's own suite re-derives BOTH halves at HEAD —
+#: `::test_every_declared_label_re_derives_at_this_head` for every declared label, and
+#: `::test_a_no_live_vector_declaration_executes_no_store_clause` for every `NO_LIVE_VECTOR` entry.
+#: ⛔ State the residual at its true size (round-1 review): the `NO_LIVE_VECTOR` scan proves the
+#: writer's own body executes no store clause, which is NOT the same as proving it stores nothing —
+#: a door that EXECUTES A CALLER-SUPPLIED statement (`sdk::_event_raw_write_door`) carries no
+#: marker and is caught only by review. The pin narrows that half; it does not close it.
 ROW2_REGISTER_MODULE = REGISTER_MODULE
 
 
@@ -2067,6 +2071,11 @@ def score_path_bullet() -> Row:
             "not answer WHERE the vector lands): "
             + ", ".join(f"{w}: {why}" for w, why in sorted(resolved["violations"].items()))
         )
+    # ⛔ `#11492` round-2 review: these two notes are gated on the register being READABLE, one
+    # layer up (`unresolved_undeclared` / `unexplained` are emptied when `resolved["error"]` is
+    # set), so an unreadable register cannot print "nothing in the product says which label they
+    # store on" in the same cell that says it blames nobody. The UNMEASURED note above is the
+    # whole of what an unreadable register can say — the blame belongs to the instrument.
     if unresolved_undeclared:
         notes.append(
             "unresolved writers (hold this row at PARTIAL — nothing in the product says which "

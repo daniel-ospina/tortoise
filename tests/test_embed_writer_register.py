@@ -1042,6 +1042,112 @@ def test_a_writer_that_EXECUTES_a_store_is_never_declared_no_live_vector() -> No
     )
 
 
+#: The clause shapes that mean a writer's OWN body stores a vector: the two builders that render a
+#: store fragment, and the dense constructor that fills one. A `no-live-vector` declaration whose
+#: symbol carries one of these is claiming a store does not exist where the body renders one.
+STORE_CLAUSE_MARKERS = ("vecf32(", "set_embedding_clause(", "clear_then_set_prefix(")
+
+#: The shapes that legitimately NAME a store clause without storing, each with the reason. Kept as
+#: data so the exemption is read and re-checked rather than being an invisible `if`: every key must
+#: still be a LIVE `no-live-vector` declaration, so the table cannot outlive the shape it exempts.
+NO_STORE_EXEMPTIONS: dict[str, str] = {
+    "tortoise.vector_write::set_embedding_clause": (
+        "the store-clause BUILDER itself: it renders the fragment another (declared) writer "
+        "executes, so it names `set_embedding_clause(` by defining it and `vecf32(` while "
+        "building the string — neither is a store in this body"
+    ),
+    "tortoise.consistency::_compare_views": (
+        "it COMPARES at the store's width: both `vecf32(` occurrences are inside docstrings "
+        "explaining why the comparison rounds, so the body executes no store clause"
+    ),
+}
+
+
+def _declared_symbol_bodies(key: str) -> list[str]:
+    """Every definition of `module::symbol` in its own file, PLUS one hop of module constants.
+
+    One hop because a store clause can be held in a module-level constant the writer executes
+    (`_TURN_WRITE_CYPHER`) — the same reader rule `test_every_declared_label_re_derives_at_this_head`
+    applies to its cited needles.
+    """
+    module, symbol = key.split("::", 1)
+    if "/" in module or module.endswith(".py"):
+        rel = module
+    else:
+        candidate = module.replace(".", "/")
+        # ⛔ PACKAGE first: `tortoise.projection` is a package whose `__init__.py` defines the
+        # symbol, and a thin `tortoise/projection.py` shim also exists beside it. Taking the
+        # sibling module first made every `tortoise.projection::*` key resolve to the shim, which
+        # defines nothing — so the pin would have read as "the writer is gone" for four entries.
+        rel = (f"{candidate}/__init__.py" if (REPO_ROOT / candidate).is_dir()
+               else f"{candidate}.py")
+    path = REPO_ROOT / rel
+    assert path.is_file(), (key, rel)
+    source = path.read_text(encoding="utf-8")
+    lines = source.splitlines()
+    tree = ast.parse(source)
+    constants: dict[str, str] = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            text = "\n".join(lines[node.lineno - 1:node.end_lineno])
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    constants[target.id] = text
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            constants[node.target.id] = "\n".join(lines[node.lineno - 1:node.end_lineno])
+    bodies: list[str] = []
+    for node in ast.walk(tree):
+        if (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name == symbol):
+            own = "\n".join(lines[node.lineno - 1:node.end_lineno])
+            bodies.append(own + "\n" + "\n".join(
+                text for name, text in constants.items() if name in own))
+    assert bodies, f"{key} cites {rel}::{symbol}, which that file does not define"
+    return bodies
+
+
+def test_a_no_live_vector_declaration_executes_no_store_clause() -> None:
+    """`#11492` round-2 review (P2): the OTHER half of `stores` is re-derived at HEAD too.
+
+    `test_every_declared_label_re_derives_at_this_head` covers the eight label-tuple entries,
+    because a label is a value it can compare. The twelve `NO_LIVE_VECTOR` / `LABELS_AT_RUNTIME`
+    entries had no automated check at all — and that is exactly the half round 1 measured **2 of 12
+    WRONG** in (`_write_capture_turns` and `_event_raw_write_door` each declared `no-live-vector`
+    while executing a live vector store). The residual paragraph claimed the label test was the
+    mitigation for a false `NO_LIVE_VECTOR`; it never reached that half. This closes it for the
+    readable shapes.
+
+    ⛔ Stated at its true size: this proves a `no-live-vector` symbol's own body (plus one hop of
+    module constants) executes no store clause. It does NOT prove the writer stores nothing — a door
+    that EXECUTES A CALLER-SUPPLIED statement (`sdk::_event_raw_write_door`) carries no marker and
+    is caught only by review. It narrows the half; it does not close it.
+    """
+    no_vector = sorted(key for key, entry in EMBED_WRITER_CLASSES.items()
+                       if entry.stores == NO_LIVE_VECTOR)
+    assert no_vector, "no declaration is `no-live-vector` — this pin would assert nothing"
+    # The exemption table may not outlive what it exempts: a key that is no longer a
+    # `no-live-vector` declaration is a stale excuse, and a stale excuse is how a real store
+    # gets through later.
+    assert set(NO_STORE_EXEMPTIONS) <= set(no_vector), (
+        "exemptions for writers that are no longer `no-live-vector`: "
+        f"{sorted(set(NO_STORE_EXEMPTIONS) - set(no_vector))}"
+    )
+    offenders: dict[str, list[str]] = {}
+    for key in no_vector:
+        if key in NO_STORE_EXEMPTIONS:
+            continue
+        bodies = _declared_symbol_bodies(key)
+        hits = [m for m in STORE_CLAUSE_MARKERS if any(m in b for b in bodies)]
+        if hits:
+            offenders[key] = hits
+    assert not offenders, (
+        "these writers are declared `no-live-vector` but their own body executes a store clause "
+        f"{offenders} — row 2 REMOVES such a writer from the map it audits, so a real store would "
+        "still print `stored-without-a-query-path: none`. Declare the label, or add a reasoned "
+        "entry to NO_STORE_EXEMPTIONS"
+    )
+
+
 def test_the_DECLARATIONS_tuple_is_what_the_live_map_was_built_from():
     """The frozen map is `_DECLARATIONS`, loaded once — not re-derived at lookup time."""
     from_declarations = register.load(register._DECLARATIONS)
