@@ -30,7 +30,9 @@ existing cache with.
    re-dated.** 4,375 session contents repeat; of the **6,660** repeated pairs, **0** share a session
    date. The date is prompt-visible: `extractor_v2._date_anchor` (`extractor_v2.py:1455-1471`)
    renders *"**DATE ANCHOR — today is `<session_date>`**"* into the **system** prompt of S1
-   (`run_s1`, `:1485-1535`), S2 (`run_s2` → `render_s2_prompt`, `:3617`) and S4. So the
+   (`run_s1`, `:1485-1535`) — the S1 system prompt is `S1_TMPL.replace("{date_anchor}",
+   _date_anchor(session_date))` at `:1528` — and into S2 (`render_s2_prompt`, `:2174`) and S4
+   (`render_s4_prompt`, `:3617`). So the
    **session-level** prompt identity is exactly **1.000×**, and a session-level extraction cache has
    nothing to hit. The **S1 prompt is a finer unit than the session** — `extract_session_v2` splits
    each session into EDU chunks and calls `run_s1` per chunk with the session date (`chunk_transcript`
