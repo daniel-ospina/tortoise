@@ -519,6 +519,53 @@ test("a TIMEOUT is not an inert install: no breadcrumb, and the chain stops", as
   assert.match(verdict.status === "timeout" ? verdict.detail : "", /timed out after 300ms/);
 });
 
+test("a REFUSED hosted request is not an inert install: no breadcrumb, no latch", async () => {
+  // A 401/402/403/5xx means the endpoint ANSWERED and refused us — so the
+  // install is demonstrably working. Classifying that as `inert` wrote the
+  // canonical `install-inert` slot, whose documented meaning is "reinstall
+  // it": an operator whose hosted quota was exhausted was told to reinstall a
+  // working install, and the cause was never named (#11584 review).
+  const home = tmpHome();
+  const crumbs = join(home, "capture-errors");
+  const cfgPath = join(home, "tortoise-config.json");
+  writeFileSync(cfgPath, JSON.stringify({ apiKey: "tt_live_key" }));
+  // No CLI anywhere, so the seam falls through to the hosted transport.
+  const pi = mockPi();
+  tortoiseVolunteer(pi as never, {
+    env: { PATH: join(home, "empty-bin") },
+    home,
+    configPath: cfgPath,
+    breadcrumbDir: crumbs,
+    fetchImpl: (async () =>
+      ({ ok: false, status: 402, statusText: "Payment Required" }) as Response) as typeof fetch,
+  });
+
+  assert.equal(
+    await pi.handlers.before_agent_start({ messageType: "user", prompt: "q" }, SESSION_CTX()),
+    undefined,
+    "a refused hosted request injects nothing",
+  );
+  assert.equal(
+    existsSync(join(crumbs, "pi-install.json")),
+    false,
+    "a REFUSED request must not read as an inert INSTALL — the operator would be " +
+      "told to reinstall something that works",
+  );
+
+  // The verdict names the real cause, and is distinct from both `inert` and
+  // `timeout` so the distinction survives at the API, not only at the file.
+  const verdict = await resolveBlock(
+    "q",
+    "",
+    readVolunteerConfig({ TORTOISE_API_KEY: "tt_live_key" }, cfgPath),
+    [],
+    (async () =>
+      ({ ok: false, status: 402, statusText: "Payment Required" }) as Response) as typeof fetch,
+  );
+  assert.equal(verdict.status, "refused");
+  assert.match(verdict.status === "refused" ? verdict.detail : "", /HTTP 402/);
+});
+
 test("runReflexCommand reports a timeout as a TIMEOUT, a non-zero exit as a failure", async () => {
   const home = tmpHome();
   const slow = await runReflexCommand(fakeCli(join(home, "a"), "sleep 5"), "q", "", 250);

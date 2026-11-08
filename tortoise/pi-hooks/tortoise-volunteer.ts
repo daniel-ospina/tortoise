@@ -108,12 +108,22 @@ export const DEFAULT_API_URL = "https://api.premiselabs.co";
  *
  * 30000 is the same ceiling Claude Code gives its equivalent per-turn
  * injection seam (`UserPromptSubmit` hooks default to 30 s; a timed-out hook
- * is cancelled and its injected context discarded — docs, fetched 2026-11-08),
- * and it sits below the reflex's own model-load budget
- * (`EmbeddingModel._LOAD_TIMEOUT_S = 90 s`, #1349 measured a ~57 s cold load on
- * a 2 GB VM) so a cold machine still fits. It bounds a BROKEN reflex to one
- * bounded wait; it does not set the latency of a healthy one — that is ~9 s
- * here and is the reflex's cost, not this constant's.
+ * is cancelled and its injected context discarded — docs, fetched 2026-11-08).
+ * It bounds a BROKEN reflex to one bounded wait; it does not set the latency of
+ * a healthy one — that is ~9 s here and is the reflex's cost, not this
+ * constant's.
+ *
+ * ⛔ It does NOT cover a COLD model build, and an earlier version of this
+ * comment claimed it did ("sits below `_LOAD_TIMEOUT_S = 90 s` … so a cold
+ * machine still fits"). 30 s does not fit inside the ~57 s cold load the same
+ * sentence cites — the conclusion was inverted relative to its own number. What
+ * actually happens on a cold machine is correct and is NOT an error: the turn
+ * times out (`status: "timeout"`), injects nothing, and stays silent — no
+ * breadcrumb, no latch — while the reflex keeps building the model in the
+ * background, so the NEXT turn is warm. That is the honest bound: one turn
+ * without injection on a cold start, never a wrong report about the install.
+ * `_LOAD_TIMEOUT_S` is the reflex's own model-load ceiling (90 s, above this
+ * one); it is not a promise that this budget covers the load.
  *
  * Override per machine with `{"volunteer": {"timeoutMs": N}}` in
  * `~/.pi/agent/tortoise-config.json`. A timeout is a clean no-injection
@@ -173,6 +183,12 @@ export interface VolunteerDeps {
   ) => Promise<ReflexResult | null> | ReflexResult | null;
   /** Injected so a test never touches the operator's breadcrumb slot. */
   breadcrumbDir?: string;
+  /** Injected so a test can drive the seam's SECOND transport (a hosted
+   *  `POST /v1/context`) without a network call. The hosted path is otherwise
+   *  unreachable from a test — it is only tried when no CLI resolves and a key
+   *  is configured — and that is how a 402 could write an `install-inert`
+   *  breadcrumb for a working install without any test noticing (#11584). */
+  fetchImpl?: typeof fetch;
 }
 
 function truthy(value: unknown): boolean {
@@ -445,8 +461,8 @@ export async function runReflexHosted(
   sessionId: string,
   timeoutMs: number,
   fetchImpl: typeof fetch = fetch,
-): Promise<{ result: ReflexResult | null; timedOut: boolean }> {
-  if (!apiKey) return { result: null, timedOut: false };
+): Promise<{ result: ReflexResult | null; timedOut: boolean; refused: string }> {
+  if (!apiKey) return { result: null, timedOut: false, refused: "" };
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -462,9 +478,25 @@ export async function runReflexHosted(
       }),
       signal: controller.signal,
     });
-    if (!response.ok) return { result: null, timedOut: false };
+    // ⛔ A REFUSAL IS NOT "NOTHING COULD RUN". The install is demonstrably
+    // working — it reached the endpoint and was answered. Classifying a
+    // 401/402/403/5xx as `inert` wrote the canonical `install-inert`
+    // breadcrumb, whose documented meaning is "this install resolved nothing,
+    // reinstall it": an operator running a healthy install whose hosted
+    // quota was exhausted was told to reinstall it, and the real cause was
+    // never named. Name it (status + reason) and let the caller treat it as
+    // the timeout-like non-verdict it is.
+    if (!response.ok) {
+      return {
+        result: null,
+        timedOut: false,
+        refused: `HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ""}`,
+      };
+    }
     const body = (await response.json().catch(() => null)) as Record<string, unknown> | null;
-    if (!body || typeof body !== "object") return { result: null, timedOut: false };
+    if (!body || typeof body !== "object") {
+      return { result: null, timedOut: false, refused: "unparseable response body" };
+    }
     const block = textOf(body.block) || textOf(body.context);
     const surfaced = Array.isArray(body.surfaced)
       ? body.surfaced
@@ -475,11 +507,11 @@ export async function runReflexHosted(
           )
           .filter((label) => label !== "")
       : [];
-    return { result: { block, surfaced }, timedOut: false };
+    return { result: { block, surfaced }, timedOut: false, refused: "" };
   } catch {
     // Same distinction as the CLI leg: our OWN abort means the endpoint did not
     // answer in budget (slow, not absent), which is not an inert install.
-    return { result: null, timedOut: controller.signal.aborted };
+    return { result: null, timedOut: controller.signal.aborted, refused: "" };
   } finally {
     clearTimeout(timer);
   }
@@ -618,6 +650,12 @@ export type ReflexVerdict =
   | { status: "block"; result: ReflexResult }
   | { status: "empty" }
   | { status: "timeout"; detail: string }
+  /** The reflex or the hosted endpoint was REACHED and refused us (an HTTP
+   *  status, an unparseable answer). Like `timeout` this is NO VERDICT ABOUT
+   *  THE INSTALL — the install ran — so it must never write the
+   *  `install-inert` breadcrumb (#11584 review). It is distinct from
+   *  `timeout` only so the operator-facing detail can name the real cause. */
+  | { status: "refused"; detail: string }
   | { status: "inert"; detail: string };
 
 /**
@@ -703,8 +741,19 @@ export async function resolveBlock(
   if (hosted.timedOut) {
     return { status: "timeout", detail: `POST ${cfg.apiUrl}/v1/context timed out` };
   }
+  if (hosted.refused) {
+    return {
+      status: "refused",
+      detail: `POST ${cfg.apiUrl}/v1/context refused (${hosted.refused})`,
+    };
+  }
   if (!hosted.result) {
-    return { status: "inert", detail: `POST ${cfg.apiUrl}/v1/context refused or timed out` };
+    // Reached, answered, but carried nothing usable — still no evidence that
+    // the install is broken, so still not `inert`.
+    return {
+      status: "refused",
+      detail: `POST ${cfg.apiUrl}/v1/context returned no block`,
+    };
   }
   return hosted.result.block.trim()
     ? { status: "block", result: hosted.result }
@@ -754,7 +803,8 @@ export default function tortoiseVolunteer(
         sessionId,
         cfg,
         candidates,
-        (typeof fetch === "function" ? fetch : undefined) as typeof fetch,
+        (deps.fetchImpl ??
+          (typeof fetch === "function" ? fetch : undefined)) as typeof fetch,
       );
     } catch (error) {
       verdict = { status: "inert", detail: `reflex raised: ${String(error)}` };
@@ -778,6 +828,10 @@ export default function tortoiseVolunteer(
     }
     if (verdict.status === "empty") return null;
     if (verdict.status === "timeout") return null;
+    // A refusal is the same NO-VERDICT class as a timeout: the seam ran, so the
+    // canonical `install-inert` slot stays untouched and the inert latch is not
+    // set — a 402 that clears must not disable the seam for the whole process.
+    if (verdict.status === "refused") return null;
     return verdict.result;
   };
 
