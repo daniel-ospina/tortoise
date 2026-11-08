@@ -227,23 +227,30 @@ class MultiWorkerRefused(RuntimeError):
 def _positive_int(raw: object) -> int | None:
     """``raw`` as a positive int, or None when it does not parse as one.
 
-    The grammar is the SHIPPED shell block's, not ``int()``'s: surrounding ASCII
-    whitespace, an optional single leading ``+``, then ASCII digits only
-    (``entrypoint.sh``'s ``_resolve_requested_workers`` — it trims ends, drops a
-    leading ``+``, and normalises ``''|*[!0-9]*`` to 1). ``int(' 2 ')`` and
-    ``int('+2')`` are accepted because they really do start two workers, so a
-    resolver that rejected them would report a topology nobody is running.
+    ONE grammar, shared with ``entrypoint.sh``'s ``_resolve_requested_workers``
+    (which executes before this package is importable, so the spelling is
+    duplicated by necessity — ``_AGREEMENT_TABLE`` in
+    ``tests/test_worker_topology.py`` EXECUTES both on the same input so they
+    cannot drift): surrounding ASCII whitespace, an optional single leading
+    ``+``, then ASCII digits, with ``_`` separators allowed BETWEEN digits.
+    ``int(' 2 ')``, ``int('+2')`` and ``int('1_0')`` really do start 2/2/10
+    workers, so a resolver that rejected them would report a topology nobody is
+    running.
 
-    ⛔ ``int()``'s grammar is WIDER than this in two directions — underscore
-    separators (``int('1_0') == 10``) and non-ASCII decimal digits
-    (``int('١٢') == 12``) — and POSIX shell cannot reproduce them portably. The
-    two resolvers therefore agree by construction on the intersection, and both
-    report **1** for those spellings. That is deliberately the conservative
-    direction and it is NOT a bypass: a real ``N > 1`` produced by such a value
-    still runs under uvicorn's supervisor, so ``has_supervisor_parent()`` refuses
-    it regardless of the count this function reports. Reporting a count the
-    shell and the app agree on is what stops the boot line lying; the gate does
-    not rest on the count.
+    ⛔ The separator rule is ``int()``'s own (PEP 515): ``1_0`` is TEN, while a
+    leading, trailing or doubled ``_`` makes ``int()`` raise, so those stay None
+    here and normalise to 1 in the shell — agreement, in the direction that
+    reports 1 for input uvicorn refuses to start at all.
+
+    ⚠️ DECLARED RESIDUAL, shared with the shell: ``int()`` ALSO accepts non-ASCII
+    decimal digits (``int('١٢') == 12``), which bash arithmetic cannot evaluate
+    and which ``isascii()`` therefore rejects on this side too. Both resolvers
+    report **1** for that spelling while uvicorn would run 12. The direction is
+    under-report, which cannot open the gate — a real ``N > 1`` still runs under
+    uvicorn's supervisor, and ``has_supervisor_parent()`` refuses it whatever the
+    count reads — and it is unreachable except by an operator deliberately typing
+    Unicode digits. Closing it would mean porting ``int()``'s Unicode tables into
+    shell to buy a correct number for a value nobody writes.
 
     None — never a default — so a malformed value cannot be silently read as 1;
     callers fall through to the next source only on None.
@@ -253,11 +260,15 @@ def _positive_int(raw: object) -> int | None:
     value = str(raw).strip(" \t\n\r\v\f")
     if value.startswith("+"):
         value = value[1:]
-    # ``str.isdigit`` accepts Unicode decimals (``'١'``), so ``isascii`` is the
-    # arm that keeps this equal to the shell's ``[!0-9]``.
-    if not value or not value.isascii() or not value.isdigit():
+    # ASCII digits only, with ``_`` allowed BETWEEN digits (``int()``'s PEP 515
+    # rule). ``str.isdigit`` accepts Unicode decimals (``'١'``), so ``isascii``
+    # is the arm that keeps this equal to the shell's ``[!0-9]``.
+    body = value.replace("_", "")
+    if not value or not body or not body.isascii() or not body.isdigit():
         return None
-    count = int(value)
+    if value[0] == "_" or value[-1] == "_" or "__" in value:
+        return None
+    count = int(body)
     return count if count > 0 else None
 
 

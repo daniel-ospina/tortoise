@@ -733,16 +733,25 @@ _AGREEMENT_TABLE: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
     (("uvicorn", "app:app"), {"UVICORN_WORKERS": "0", "WEB_CONCURRENCY": "4"}),
     (("uvicorn", "app:app"), {"UVICORN_WORKERS": "", "WEB_CONCURRENCY": "4"}),
     (("uvicorn", "app:app"), {"UVICORN_WORKERS": "+2"}),
-    # ⛔ ``int()``'s grammar is WIDER than the shipped block's (which is
-    # ``[+]?[0-9]+`` after trimming ends). ``int('1_0') == 10`` and
-    # ``int('\u0661\u0662') == 12``, so a Python resolver that kept ``int()`` reported 10/12
-    # while the block reported 1 — and the app reads the block's value FIRST, so
-    # the boot line lied about the topology. Both resolvers now share ONE grammar
-    # and both say 1; the divergence from uvicorn is fail-closed (a real N>1 still
-    # runs under the supervisor, which ``has_supervisor_parent()`` refuses).
-    (("uvicorn", "app:app"), {"WEB_CONCURRENCY": "1_0"}),
-    (("uvicorn", "app:app"), {"WEB_CONCURRENCY": "\u0661\u0662"}),
-    (("uvicorn", "app:app", "--workers", "1_0"), {}),
+    # ⛔ ``int()`` accepts PEP 515 separators BETWEEN digits, so ``1_0`` starts TEN
+    # workers. The shipped block was digit-only and exported 1 — and the app reads
+    # the block's value FIRST, so the boot line lied about the topology: the same
+    # class ``--workers +2`` and ``WEB_CONCURRENCY=' 2 '`` had. BOTH arms now read
+    # the separator rule the way ``int()`` does (ten, not one). The one remaining
+    # divergence is non-ASCII decimal digits, which bash arithmetic cannot
+    # evaluate — that stays under-report, and a real N>1 still runs under the
+    # supervisor, which ``has_supervisor_parent()`` refuses whatever the count
+    # reads.
+    (("uvicorn", "app:app"), {"WEB_CONCURRENCY": "1_0"}),          # 10, both
+    (("uvicorn", "app:app", "--workers", "1_0"), {}),            # 10, both
+    (("uvicorn", "app:app"), {"WEB_CONCURRENCY": "\u0661\u0662"}),  # Unicode: 1, both
+    # …and the placements ``int()`` RAISES on must agree too (both 1): a leading,
+    # trailing or doubled separator is not a number, and reinterpreting it as one
+    # would report a topology uvicorn never starts.
+    (("uvicorn", "app:app"), {"WEB_CONCURRENCY": "_10"}),
+    (("uvicorn", "app:app"), {"WEB_CONCURRENCY": "10_"}),
+    (("uvicorn", "app:app"), {"WEB_CONCURRENCY": "1__0"}),
+    (("uvicorn", "app:app"), {"WEB_CONCURRENCY": "1_0_"}),
 )
 
 

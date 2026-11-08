@@ -516,20 +516,26 @@ _resolve_requested_workers() {
     # test rejected both and reported 1 — the measurement lying about the very
     # topology it exists to report, in the direction that reads as "safe".
     #
-    # ⛔ The grammar below is the INTERSECTION with `int()`, not `int()` itself:
-    # `int()` also accepts `_` separators (`1_0` -> 10) and non-ASCII decimal
-    # digits (`١٢` -> 12), which POSIX sh cannot reproduce portably. Those read
-    # as 1 HERE and in `worker_topology._positive_int`, so the two resolvers
-    # agree; the divergence from uvicorn is fail-closed, because a real N>1 from
-    # such a value still runs under the supervisor and the app's
-    # `has_supervisor_parent()` arm refuses it whatever the count says. Do not
-    # "fix" this by widening the shell alone — that re-opens the disagreement
-    # this comment exists to close (see `_AGREEMENT_TABLE` in
-    # `tests/test_worker_topology.py`, which executes both resolvers).
+    # ⛔ The grammar below is `int()`'s own EXCEPT for non-ASCII decimal digits:
+    # `int()` accepts `_` separators BETWEEN digits (`1_0` -> 10) and Unicode
+    # decimals (`١٢` -> 12). The separators are reproduced here (bash `=~`, this
+    # script is `#!/bin/bash`) so the number matches the server that starts;
+    # Unicode digits are NOT (bash arithmetic cannot evaluate them), and stay a
+    # DECLARED RESIDUAL in the under-report direction — pinned by
+    # `_AGREEMENT_TABLE` in `tests/test_worker_topology.py`, which EXECUTES both
+    # this block and `worker_topology._positive_int` on the same input, so the two
+    # cannot drift. Do not "simplify" one arm without the other.
     _count="$(printf '%s' "$_count" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
     case "$_count" in
         +*) _count="${_count#+}" ;;
     esac
+    # Strip PEP 515 separators FIRST, and only in the shape `int()` accepts:
+    # `_10`, `10_` and `1__0` all raise ValueError there, so they must keep
+    # falling through to the normalise-to-1 arm rather than being reinterpreted
+    # as a count uvicorn would refuse to start.
+    if [[ "$_count" =~ ^[0-9]+(_[0-9]+)*$ ]]; then
+        _count="${_count//_/}"
+    fi
     # `0`, a negative and a non-numeric value are not ours to reinterpret:
     # uvicorn treats `workers > 1` as the supervisor's switch (so `0` and `-2`
     # run in-process) and would raise on the non-numeric. Normalise them to 1 so
