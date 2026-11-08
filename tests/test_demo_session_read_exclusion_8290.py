@@ -295,6 +295,33 @@ def test_the_session_schema_no_longer_records_the_gap_as_open():
     assert "is_demo_session_id" in src
 
 
+def test_the_demo_seeders_repair_record_no_longer_calls_the_session_readable():
+    """The inverse drift, one file over — and the record a repair lane reads.
+
+    ``_seed_demo_graph``'s §9.1 residual note is what a lane reads before the
+    graph-side removal (#11325). It said the demo ``:Session`` "is still returned
+    by the session reads" and that a node-only repair still *publishes* the
+    ``declared=3, served=0`` split (a 503 on an armed deployment,
+    ``{"turns": 3, "turn_points": []}`` on an unarmed one). #8290 closed all
+    three read doors, so both statements are false at this head and a repair
+    plan derived from them would target a read surface that no longer exists.
+
+    Mutation: restore either sentence in ``tortoise/hosted_api.py`` — this REDs,
+    and the assertions are text the PRE-fix file carries (measured: 1 occurrence
+    each at ``f0667453``), so the pin is not vacuous.
+    """
+    src = _src("tortoise/hosted_api.py")
+    assert "so on an armed, journaling deployment the" not in src, (
+        "the seeder's note still publishes a read-door observation #8290 closed")
+    assert "the demo `:Session` is still returned by" not in src, (
+        "the seeder's blast radius still calls the demo :Session readable")
+    # ...and the substance the note must still carry, so an empty section cannot
+    # satisfy the two absences above.
+    assert "The graph-side repair is BOTH halves in ONE step" in src
+    assert "the demo id is absent from" in src
+    assert "TortoiseSDK.get_session" in src
+
+
 # ── the DOORS, not just the predicate (a predicate alone pins nothing) ────
 
 

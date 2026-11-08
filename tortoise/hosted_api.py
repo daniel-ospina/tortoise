@@ -14945,7 +14945,7 @@ def _seed_demo_graph(org_id: str, sdk=None) -> dict:
     # ⚠️ NOT RETROACTIVE, the same posture as the `tags` note above: the sentinel
     # short-circuits before any write, so a demo graph seeded BEFORE this keeps
     # its `epi_turn*` nodes AND its session's declared turn counter, which still
-    # reads 3 — the two are undone by DIFFERENT statements, and only the node
+    # declares 3 — the two are undone by DIFFERENT statements, and only the node
     # delete is irreversible.
     # ⛔ RE-SEEDING DOES NOT REPAIR THEM — a re-seed writes nothing for those
     # ids and deletes nothing (unlike the `tags` case, whose `MERGE` re-writes
@@ -14967,12 +14967,21 @@ def _seed_demo_graph(org_id: str, sdk=None) -> dict:
     # `:Session` along with them. ⛔ That is a READ-BEFORE-WRITE rule, not two
     # suggestions: doing the re-seed without the delete lands the quiet
     # half-state above. The node delete ALONE is not the repair either: it
-    # leaves `declared=3, served=0`, so on an armed, journaling deployment the
-    # demo session's read refuses with `record_unavailable` (503), and on an
-    # unarmed one it serves `{"turns": 3, "turn_points": []}` — the exact split
-    # the counter note above exists to eliminate. Destructive, so it is out of
-    # this change's scope and belongs to §9.1's residual (a) — a graph-side
-    # removal no instrument ships today. ⛔ NOT `#10017`'s purge, though these
+    # leaves `declared=3, served=0` — the exact split the counter note above
+    # exists to eliminate. ⚠️ That split is STORED state, and since #8290 no
+    # session read surface publishes it: the demo id is absent from
+    # `GET /v1/sessions`, answers 404 on `GET /v1/sessions/{id}`, and is `None`
+    # from `TortoiseSDK.get_session`. The pre-#8290 read-door observations once
+    # recorded here (an armed `record_unavailable` 503, an unarmed
+    # `{"turns": 3, "turn_points": []}`) are therefore no longer reachable
+    # through the demo id at all. The split is still WRONG — the shared rule
+    # (`record_read.served_turn_count`) refuses the shortfall and is pinned
+    # directly in `tests/test_10000_turns_record_only.py` — and it becomes
+    # visible again the moment a read door is added or the exclusion narrowed,
+    # which is why the repair still moves BOTH halves. Destructive, so it is
+    # out of this change's scope and belongs to §9.1's residual (a) — a
+    # graph-side removal no instrument ships today.
+    # ⛔ NOT `#10017`'s purge, though these
     # are `pointKind='event'` `:Point`s wired to the demo session: turn SHAPE
     # is `is_episodic` + `pointKind='event'` + `is_operator=false` + a single-session
     # `<sid>_t<digits>` id
@@ -14989,10 +14998,12 @@ def _seed_demo_graph(org_id: str, sdk=None) -> dict:
     # IS read and lands in the `non_decimal_suffix` anomaly class instead, so
     # the census refuses (`outside_population` → `census-not-clean`). Either
     # way it purges nothing (#11325).
-    # Blast radius: opt-in sample content that
-    # `org.point_count` excludes — but the demo `:Session` is still returned by
-    # the session reads, so the pre-existing nodes stay reachable there and in
-    # search (with their counter, which is why the repair must move both).
+    # Blast radius: opt-in sample content that `org.point_count` excludes. The
+    # demo `:Session` itself is no longer served by ANY session read surface
+    # (#8290) — absent from the list, 404 by id, `None` from the SDK — so the
+    # pre-existing `epi_turn*` nodes stay reachable only through the SEARCH
+    # reads this change declares as an open residual, and they still sit beside
+    # the session's declared counter (which is why the repair must move both).
 
     # ── Epistemic Layer — claims with evidence ───────────────────
     epistemic_points = _DEMO_EPISTEMIC_POINTS
