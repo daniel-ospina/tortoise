@@ -155,8 +155,8 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
    and the probe's agree again.) What is missing is the *declared part-whole* edge, not every structural
    edge — and saying otherwise would send a lane off to build a writer the graph already has (the "second
    producer" the epic forbids).
-3. **The census cannot observe the edge even if it existed.** `probes/capstone_measure.py:2238-2243`
-   enumerates **every** relationship type (`MATCH ()-[r]->() RETURN type(r) …`), and the registered
+3. **The census cannot observe the edge even if it existed.** `probes/capstone_measure.py:2711-2717`
+   enumerates **every** relationship type (`MATCH ()-[r]->() RETURN type(r) …` at `:2714`), and the registered
    scored census (`capstone-measured-9152448d.log:299-309`) lists 9 types — `CONTAINS` 309, `IMPL` 65,
    `INPUT` 68, `NAND` 14, `aboutObject` 248, `aboutSubject` 21, `extractedFrom` 150, `mitigated_by` 11,
    `references` 7 — with **`hasPart` absent**. Because the query is complete, absence from that list is
@@ -300,7 +300,7 @@ symbol and let the line number be a convenience printed beside it** (`git grep -
 the path matters: unscoped, both patterns also match THIS record and its quoted lines, which is the
 count-of-mentions trap §0 documents). Every number in this paragraph is re-derived at its own sha by the
 `for s in aa414b4d5 8e49ae909 80c912244 d69faaf38` sweep in §5 — a live grep cannot do it (it prints
-`:12779` here), which is the whole point. That is the class of defect §0 exists to catch: a number true at
+`:12929` at HEAD, `:12779` at `62248db88`), which is the whole point. That is the class of defect §0 exists to catch: a number true at
 one base and false at the base the record claims. Which is why the 0.0 pp above is the **armed** result,
 not an unarmed one.
 
@@ -606,7 +606,7 @@ gh issue view 10997 --json state,closedAt                 # CLOSED 21:33:55Z
 gh issue view 11021 --json state,closedAt                 # CLOSED, one second after its merge
 
 # §0/§2 — the sha-pinned cites, each re-derived AT THE SHA IT NAMES (the one read that decides them;
-# a live grep cannot: `git grep -n 'vet_enabled = '` prints :12779 here, which is none of these numbers)
+# a live grep cannot: `git grep -n 'vet_enabled = '` prints :12929 at HEAD (:12779 at 62248db88), which is none of these numbers)
 for s in aa414b4d5 8e49ae909 80c912244 d69faaf38; do echo "== $s"; \
   git show "$s":tortoise/extractor_v2.py | grep -n 'vet_enabled = (\|os.environ.get("TORTOISE_VET")\|def _hold_endpoint\|_hold_endpoint(hold_store\|def _mint_endpoint\|payload_entities.append({'; done
 # aa414b4d5 → 1153, 8784, 9401, 11351 · 8e49ae909 → 1153, 8785, 9402, 11358
