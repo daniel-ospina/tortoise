@@ -1535,6 +1535,24 @@ def test_a_retry_that_raises_after_the_re_bind_keeps_the_first_arms_capture(
         "arm A had no failed chunk; a mutant that keeps arm B's count would "
         f"publish 0 + 1 = 1: {result['stats'].get('failed_chunks')!r}"
     )
+    # ⛔ THE ASYMMETRY IS DELIBERATE, AND IT IS PINNED HERE RATHER THAN LEFT
+    # IMPLICIT (review round 4, P3). The run-level counters describe the capture
+    # that SHIPPED — arm A's alone — but `errors`/`error_census` are a LOG of
+    # what happened and are deliberately NOT restored, so arm B's chunk failure
+    # survives there. Publishing `failed_chunks == 0` beside an `errors` line
+    # reading "1/2 S1 chunks failed" is therefore the intended shape, not a
+    # contradiction, and it is readable through `renarrate["chunks"]`. Asserting
+    # it keeps the shape from being "fixed" by someone who reads the pair as a
+    # bug and restores the failure counters to match.
+    assert any("S1 chunks failed" in e for e in result["errors"]), (
+        "the second arm's chunk failure must stay on the error log even though "
+        "its COUNTER is restored — `errors`/`error_census` are a record of what "
+        f"happened, not a description of the shipped capture: {result['errors']}"
+    )
+    assert result["error_census"].get("s1_chunk_summary") == 1, (
+        "the arm-B chunk failure's census class survives the restore for the "
+        f"same reason: {result['error_census']}"
+    )
     # P3 (review round 1): the failure must reach the ERROR surface and the
     # census, like every sibling fail-open arm in this function — not only the
     # warnings list, or the run reads clean on `result["errors"]`.
