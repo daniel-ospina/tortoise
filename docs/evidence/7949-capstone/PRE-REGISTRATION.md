@@ -1701,8 +1701,8 @@ re-cut from the resolved document (§8), and no committed verdict is re-scored.
   hunks START at `:5190`, `:5245`, `:5275`, `:5285`, `:9923` and `:9943` (the first group's added
   lines run to `:5288`).
   ⛔ **Two deltas from one commit, and the table states both** — this is why a blanket `+76` is a
-  wrong re-derivation for part of the block: the first four hunks add **68** lines (`+54`, `+1`,
-  `+9`, `+4`) above `:5286`, so the #2684 `_carries_value` pair moves `:5286-5287` → `:5354-5355`
+  wrong re-derivation for part of the block: the first four hunks contribute **68** NET lines
+  (`+54`, `+2−1`, `+9`, `+4` — the second is a two-for-one replacement) above `:5286`, so the #2684 `_carries_value` pair moves `:5286-5287` → `:5354-5355`
   (**+68**), while everything at or below the collector sees all six hunks and moves **+76**:
   `:11098`→`:11174`, `:11098-11120`→`:11174-11196` (the extent read out of `ast`, `def` through
   `return items`), `:12982`→`:13058`, `:13131`→`:13207`, `:12995`→`:13071`, `:13142`→`:13218`.

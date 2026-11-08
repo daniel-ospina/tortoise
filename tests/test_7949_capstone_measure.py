@@ -5248,11 +5248,16 @@ def test_the_pre_registration_cites_the_classify_sites_the_tree_actually_has():
         # (`capstone-measured-9152448d.log:271` … `:299-309`) out of the extractor's
         # numbers, and it fixes the over-block the line test caused on a row citing the
         # extent AND a log range.
-        # ACCEPTED RESIDUAL, declared rather than chased: a bare range that FOLLOWS
-        # another file's cite on the same line (`per \`README.md:44\`, was formerly
-        # \`:11098-11120\``) is unattributable without semantics — the same shape that
-        # keeps §9's `:299-309` out — so it is not counted and not caught. Closing that
-        # needs the doc to spell the file on every cite, which it does not.
+        # ACCEPTED RESIDUALS, declared rather than chased — both are shapes this
+        # document never produces, and both would need semantics to resolve:
+        #   1. a bare range that FOLLOWS another file's cite on the same line
+        #      (`per \`README.md:44\`, was formerly \`:11098-11120\``) — the same shape
+        #      that keeps §9's `:299-309` out, so it is not counted;
+        #   2. a bare range that follows an EXTRACTOR cite but really belongs to a
+        #      third file (`` `:11174-11196` … the log's `:299-309` ``) — once the
+        #      basename fix above is in, that one IS counted and would red. The
+        #      document avoids it by spelling the log token on that row, so nothing
+        #      live reds; closing it needs the file named on every cite.
         _file_tok = re.compile(
             r"[\w./-]+\.(?:log|md|json|jsonl|py|yml|yaml|txt|csv):\d+")
 
@@ -5265,7 +5270,18 @@ def test_the_pre_registration_cites_the_classify_sites_the_tree_actually_has():
             kept: list[tuple[str, str]] = []
             for match in _rng.finditer(line):
                 preceding = list(_tok.finditer(line[: match.start()]))
-                if preceding and not preceding[-1].group(0).startswith("extractor_v2.py:"):
+                # ⛔ COMPARE THE BASENAME (round 9, P2). The document writes
+                # `tortoise/extractor_v2.py:` — TEN times — and the bare spelling
+                # never (`grep -cP "(?<!tortoise/)extractor_v2\.py:"` -> 0), so a
+                # prefix test against `extractor_v2.py:` was FALSE for every live
+                # carrier: the "counted" arm was dead and the rule collapsed to
+                # "counted only when nothing precedes it", silently un-fixing the
+                # INLINE stale twin that rounds 6 and 7 closed (measured: inline
+                # append to either carrier PASSED at the previous commit). Compare
+                # the token's basename, not its path prefix.
+                if preceding and not preceding[-1].group(0).split("/")[-1].startswith(
+                    "extractor_v2.py:"
+                ):
                     continue
                 kept.append((match.group(1), match.group(2)))
             return kept
