@@ -20,19 +20,26 @@ Therefore, in code:
 * **The run is idempotent twice over.** Every carried row gets a stable
   ``migrationKey`` derived from its content hash (a) so the target's own
   content-hash dedup folds a repeated write, and (b) so this module's ledger can
-  skip a row it already migrated *before* it reaches the wire. The second half
-  is what makes "run it twice, nothing changes" true even for a target that
-  does not dedup.
+  skip a row it already migrated *before* it reaches the wire. The ledger is
+  **scoped to its target graph**: the same row migrated into graph A has not been
+  migrated into graph B, and a second target must not silently receive nothing.
+* **A write is only ever recorded as written when the target ACCEPTED it.** The
+  writer raises on a refusal and reports the keys it accepted; the ledger is
+  written from that report, never from the attempt. A ledger that records
+  attempts is worse than no ledger — it is permanent silent loss of the only copy.
 * **It can be switched off.** ``TORTOISE_CURATE_OFF=1`` (or ``--off``) turns
-  every write into a report line. The switch is checked before each write, not
-  once at start-up, so flipping it mid-run stops the run.
+  every write into a report line. The switch is checked before the run AND
+  before each write batch, so flipping it mid-run stops the run at the next batch.
 
-``source_graph == target_graph`` is refused outright: with the source at its
-node cap the only thing such a run could do is write noise into the archive.
+``source_graph == target_graph`` is refused outright — including the case where the
+two are the same graph under different accepted spellings (graph id, ``g_<id>``
+namespace, ``stable_id``, or the case-insensitive graph NAME the operator actually
+types). That check needs the workspace's graph rows, so an ``--apply`` run refuses
+when it cannot resolve both refs to a canonical id (fail closed).
 
-Nothing in this module is exported from ``tortoise/__all__`` and no SDK method
-is added — the public surface is unchanged (#4282: surface changes need
-the owner's approval, and this issue grants none).
+Nothing in this module is exported from ``tortoise/__all__`` and no SDK method is
+added — the public surface is unchanged (#4282: surface changes need the owner's
+approval, and this issue grants none).
 """
 
 from __future__ import annotations
@@ -64,7 +71,9 @@ UNDECIDABLE = "undecidable"
 DISPOSITIONS = (CARRY, NOT_CARRIED, UNDECIDABLE)
 
 #: Kinds whose instances are owner-level decisions or the strategy artifacts
-#: hung off them. These are the rows a curated graph exists to keep.
+#: hung off them. These are the rows a curated graph exists to keep. Compared
+#: against the BARE kind, because the source carries both spellings
+#: (``decision`` and ``core:decision``).
 SIGNAL_KINDS = frozenset({
     "decision", "option", "finding", "jobToBeDone", "useCase",
     "requirement", "workflow", "userJourney",
@@ -88,6 +97,10 @@ NARRATIVE_MARKERS = (
 )
 
 
+class CurationRefused(RuntimeError):
+    """A guard refused the run, or the target refused a write. Never swallowed."""
+
+
 # ── the normalised row ────────────────────────────────────────────────────
 
 
@@ -95,8 +108,10 @@ NARRATIVE_MARKERS = (
 class Row:
     """One node as a read surface returned it, normalised to what curation needs.
 
-    ``props`` keeps the whole source row so a decision can be re-derived and
-    audited from the report alone.
+    ``props`` keeps the source row (minus the embedding vectors) so a decision can
+    be re-derived from the report alone, and so a carried row can be re-assembled
+    into a valid ingest item — ingest REQUIRES ``content`` on every point item
+    (``sdk._check_item_shape``), and a bundle without it is refused wholesale.
     """
 
     node_id: str
@@ -105,6 +120,14 @@ class Row:
     content: str = ""
     content_hash: str | None = None
     props: Mapping[str, Any] = field(default_factory=dict)
+
+    @property
+    def bare_kind(self) -> str | None:
+        """The kind with any pack namespace stripped (``dev:bug`` → ``bug``)."""
+        if not self.kind:
+            return None
+        namespace, sep, bare = self.kind.partition(":")
+        return bare if sep and namespace else self.kind
 
     @property
     def stable_key(self) -> str:
@@ -133,7 +156,7 @@ def pack_kind_map() -> dict[tuple[str, str], str]:
 
         reg = PackRegistry(default_packs_dir())
         reg.load_all()
-    except Exception:
+    except Exception:  # degrade visibly, never silently
         return out
     buckets = (
         ("pointKind", "point_kinds"),
@@ -182,6 +205,7 @@ class Decision:
     reason: str
     pack: str | None
     stable_key: str
+    content: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -210,50 +234,71 @@ def classify_point(row: Row, packs: Mapping[tuple[str, str], str], *, duplicate_
     ``undecidable`` bucket when a rule the report can quote decides it. Session
     *provenance* alone is NOT noise — the claim extracted from a session may be
     the most durable thing in the graph — so it never decides the disposition.
+
+    A ``duplicate_of`` row follows its KEEPER's disposition rather than a rule of
+    its own: "the keeper carries it" must be true, or the report asserts something
+    the plan contradicts.
     """
     pack = pack_for(row.kind, row.node_type, packs)
     key = row.stable_key
-    node_type = row.node_type
 
-    if node_type == "operator":
-        return Decision(row.node_id, node_type, row.kind, CARRY,
-                        "operator (IMPL/NAND/composedOf) — the reasoning layer; carried "
-                        "with its endpoints so the claim does not arrive as a floating node",
-                        pack, key)
-
-    if duplicate_of:
-        return Decision(row.node_id, node_type, row.kind, NOT_CARRIED,
-                        f"exact content duplicate of {duplicate_of} (same content hash); "
+    if duplicate_of == CARRY:
+        return Decision(row.node_id, row.node_type, row.kind, NOT_CARRIED,
+                        "exact content duplicate of a carried row (same content hash); "
                         "the keeper carries it. MERGE of near-duplicates is #5006's scope, "
-                        "not this pass's", pack, key)
+                        "not this pass's", pack, key, row.content)
+    if duplicate_of == UNDECIDABLE:
+        return Decision(row.node_id, row.node_type, row.kind, UNDECIDABLE,
+                        "exact content duplicate of a row that is itself undecidable — the "
+                        "content has no carry candidate yet, so this row is not carried either",
+                        pack, key, row.content)
+    if duplicate_of is not None:
+        # The keeper was not carried: neither is its duplicate, and the reason names
+        # the keeper rather than claiming a carry that did not happen.
+        return Decision(row.node_id, row.node_type, row.kind, NOT_CARRIED,
+                        f"exact content duplicate of a row that was not carried ({duplicate_of}); "
+                        "the keeper is the row of record for this content", pack, key, row.content)
 
-    if row.kind in SIGNAL_KINDS:
-        return Decision(row.node_id, node_type, row.kind, CARRY,
-                        f"{row.kind} — an owner-level artifact the curated graph exists to keep",
-                        pack, key)
+    if row.node_type == "operator":
+        # NOTE: the MCP read path excludes operator Points unless an operator
+        # kind is requested (sdk._operator_scope_clauses, #7108), so this branch
+        # is unreachable from `tools/curate_graph.py` today. It stays because the
+        # rule is right, and it is marked unreachable in the inventory rather
+        # than presented as a measured count.
+        return Decision(row.node_id, row.node_type, row.kind, CARRY,
+                        "operator (IMPL/NAND/composedOf) — the reasoning layer; the row is "
+                        "carried as a claim, its edges are the ingest contract's job (#888 W4)",
+                        pack, key, row.content)
 
-    if row.kind == "diary":
-        return Decision(row.node_id, node_type, row.kind, UNDECIDABLE,
+    if row.bare_kind in SIGNAL_KINDS:
+        return Decision(row.node_id, row.node_type, row.kind, CARRY,
+                        f"{row.bare_kind} — an owner-level artifact the curated graph exists to keep",
+                        pack, key, row.content)
+
+    if row.bare_kind == "diary":
+        return Decision(row.node_id, row.node_type, row.kind, UNDECIDABLE,
                         "agent diary — narration shaped like a narrative, but it is an authored "
-                        "artifact, so neither rule decides it", pack, key)
+                        "artifact, so neither rule decides it", pack, key, row.content)
 
-    if row.kind == "evidence":
-        return Decision(row.node_id, node_type, row.kind, CARRY,
+    if row.bare_kind == "evidence":
+        return Decision(row.node_id, row.node_type, row.kind, CARRY,
                         "evidence — carried; its Source tier must be resolved at ingest "
-                        "(the source layer is 100% session-backed, see the inventory)", pack, key)
+                        "(the source layer is 100% session-backed, see the inventory)",
+                        pack, key, row.content)
 
     marker = _narrative(row.content or "")
     if marker:
-        return Decision(row.node_id, node_type, row.kind, NOT_CARRIED,
-                        f"turn narration, not a claim (matched marker {marker!r})", pack, key)
+        return Decision(row.node_id, row.node_type, row.kind, NOT_CARRIED,
+                        f"turn narration, not a claim (matched marker {marker!r})",
+                        pack, key, row.content)
 
     if not (row.content or "").strip():
-        return Decision(row.node_id, node_type, row.kind, NOT_CARRIED,
-                        "empty content — nothing to carry", pack, key)
+        return Decision(row.node_id, row.node_type, row.kind, NOT_CARRIED,
+                        "empty content — nothing to carry", pack, key, row.content)
 
-    return Decision(row.node_id, node_type, row.kind, UNDECIDABLE,
+    return Decision(row.node_id, row.node_type, row.kind, UNDECIDABLE,
                     "statement with no deciding rule: carrying it is a per-row judgement "
-                    "(reported for review, not guessed)", pack, key)
+                    "(reported for review, not guessed)", pack, key, row.content)
 
 
 #: The census' own drop-shape rule (#5059 / #11021 / #11211): a noun phrase with
@@ -277,10 +322,10 @@ def classify_object(row: Row, packs: Mapping[tuple[str, str], str]) -> Decision:
         return Decision(row.node_id, row.node_type, row.kind, NOT_CARRIED,
                         "bare definite description / path / identifier — a mention, not an "
                         "entity (#11021/#11211); it refers to nothing to connect to",
-                        pack, key)
+                        pack, key, row.content)
     return Decision(row.node_id, row.node_type, row.kind, UNDECIDABLE,
                     "object with a referent-shaped name: whether it is an entity the curated "
-                    "graph needs is a judgement, not a rule", pack, key)
+                    "graph needs is a judgement, not a rule", pack, key, row.content)
 
 
 def classify_source(row: Row, packs: Mapping[tuple[str, str], str]) -> Decision:
@@ -292,9 +337,9 @@ def classify_source(row: Row, packs: Mapping[tuple[str, str], str]) -> Decision:
                         "tier lives in Postgres, not in the graph — but this tenant's record "
                         "holds 0 rows (#10175), so the graph is the only copy and 'do not "
                         "carry it' would leave the transcript with no home. Needs a decision, "
-                        "not a rule", pack, key)
+                        "not a rule", pack, key, row.content)
     return Decision(row.node_id, row.node_type, row.kind, CARRY,
-                    "a real provenance artifact (not a session transcript)", pack, key)
+                    "a real provenance artifact (not a session transcript)", pack, key, row.content)
 
 
 def classify_event(row: Row, packs: Mapping[tuple[str, str], str]) -> Decision:
@@ -304,9 +349,9 @@ def classify_event(row: Row, packs: Mapping[tuple[str, str], str]) -> Decision:
         return Decision(row.node_id, row.node_type, row.kind, UNDECIDABLE,
                         "agent-session Event: the raw/episodic tier is supposed to live outside "
                         "the graph (#10000), but the record holds 0 rows for this tenant, so "
-                        "dropping it here has no safe destination", pack, key)
+                        "dropping it here has no safe destination", pack, key, row.content)
     return Decision(row.node_id, row.node_type, row.kind, CARRY,
-                    "a domain Event (not a session container)", pack, key)
+                    "a domain Event (not a session container)", pack, key, row.content)
 
 
 def classify(row: Row, packs: Mapping[tuple[str, str], str], *, duplicate_of: str | None = None) -> Decision:
@@ -319,8 +364,8 @@ def classify(row: Row, packs: Mapping[tuple[str, str], str], *, duplicate_of: st
     if row.node_type == "event":
         return classify_event(row, packs)
     return Decision(row.node_id, row.node_type, row.kind, UNDECIDABLE,
-                    "no classifier for this node type in this pass", pack_for(row.kind, row.node_type, packs),
-                    row.stable_key)
+                    "no classifier for this node type in this pass",
+                    pack_for(row.kind, row.node_type, packs), row.stable_key, row.content)
 
 
 # ── the plan ──────────────────────────────────────────────────────────────
@@ -362,11 +407,13 @@ class Plan:
         return hashlib.sha256(basis.encode("utf-8")).hexdigest()
 
     def bundle(self) -> dict[str, Any]:
-        """The additive write bundle: points only, each with its migrationKey.
+        """The additive write bundle: points only, each with its ``content``.
 
-        Concrete connection-building (which claims imply which edges) is the
-        ingest contract's job (#888 W4): this bundle carries the rows and the
-        keys, and never a deletion.
+        ``content`` is not optional — ``sdk._check_item_shape`` refuses a point
+        item without it (Phase 1, so a whole bundle is rejected, not one row).
+        Connection wiring (which claim serves as evidence for which) is the ingest
+        contract's job (#888 W4), and is NOT built here: the bundle is rows, not
+        edges. Never a deletion.
         """
         return {
             "migrationKeyPrefix": MIGRATION_KEY_PREFIX,
@@ -377,7 +424,7 @@ class Plan:
                     "ref": d.stable_key,
                     "migrationKey": d.stable_key,
                     "kind": d.kind or "statement",
-                    "nodeType": d.node_type,
+                    "content": d.content,
                     "sourceNodeId": d.node_id,
                     "pack": d.pack,
                 }
@@ -393,69 +440,129 @@ def build_plan(
     target_graph: str,
     packs: Mapping[tuple[str, str], str] | None = None,
 ) -> Plan:
-    """Classify every row, folding exact content duplicates onto a keeper.
+    """Classify every row, then fold exact content duplicates onto a keeper.
 
-    The first row seen for a given ``stable_key`` is the keeper — rows arrive in
-    a stable order (the reader sorts by node id), so the same input always
-    produces the same plan.
+    Two passes on purpose: a duplicate's disposition must follow its KEEPER's
+    (``classify_point(duplicate_of=...)``), which cannot be known while streaming.
+    The keeper for a stable key is the first row seen for it, so the plan is
+    deterministic for a fixed input order — the reader's order, which the tool
+    reports rather than claims to sort.
     """
     mapping = pack_kind_map() if packs is None else packs
+    rows = list(rows)
     plan = Plan(source_graph=source_graph, target_graph=target_graph)
+
     keepers: dict[str, str] = {}
+    first_pass: dict[str, Decision] = {}
     for row in rows:
         key = row.stable_key
-        dup = keepers.get(key)
-        if dup is None and row.node_type in ("point", "operator"):
-            keepers[key] = row.node_id
-        plan.decisions.append(classify(row, mapping, duplicate_of=dup))
+        if key in keepers:
+            continue
+        keepers[key] = row.node_id
+        first_pass[key] = classify(row, mapping)
+
+    for row in rows:
+        key = row.stable_key
+        if keepers.get(key) == row.node_id:
+            plan.decisions.append(first_pass[key])
+        else:
+            plan.decisions.append(
+                classify(row, mapping, duplicate_of=first_pass[key].disposition)
+            )
     return plan
 
 
 # ── guards ────────────────────────────────────────────────────────────────
 
 
-class CurationRefused(RuntimeError):
-    """A guard refused the run. Never caught into a silent no-op."""
+def _tail(g: str) -> str:
+    g = (g or "").strip().lower()
+    if not g:
+        return ""
+    t = g.split("_g_")[-1]
+    if t.startswith("g_") and len(t) > 2:
+        t = t[2:]
+    return t
 
 
-def _same_graph(a: str, b: str) -> bool:
-    """True when two spellings name the same graph.
+def canonical_graph_id(ref: str, graph_rows: Sequence[Mapping[str, Any]] | None) -> str | None:
+    """Resolve any accepted spelling of a graph to one canonical id.
 
-    The surface offers three accepted spellings for one graph — namespace
-    (``org_<org>_g_<id>``), graph id (``g_<id>``) and the bare id ``<id>`` — so a
-    naive string comparison would let a caller target its own source by spelling
-    it differently. The comparison therefore runs on the resolved id tail.
+    The `graph` argument resolves through ``mcp_auth.resolve_graph_target``, which
+    accepts a graph **id**, a ``stable_id``, a namespace (``org_…_g_<id>``) and a
+    case-insensitive graph **name**. A guard that only understands ids would wave
+    ``--graph live-v4 --target org_…_g_2b7e4c9d1a6f8035`` straight into the capped
+    archive, so the comparison runs on the canonical identity — and returns None
+    when it cannot establish it, which the caller treats as a refusal.
     """
+    ref = (ref or "").strip()
+    if not ref:
+        return None
+    if graph_rows:
+        wanted = ref.casefold()
+        for row in graph_rows:
+            for field in ("graph_id", "stable_id", "namespace"):
+                val = row.get(field)
+                if val and str(val).casefold() == wanted:
+                    return str(row.get("graph_id") or row.get("stable_id") or val)
+        by_name = [r for r in graph_rows
+                   if (r.get("name") or "").casefold() == wanted]
+        if len(by_name) == 1:
+            return str(by_name[0].get("graph_id") or by_name[0].get("stable_id")
+                       or by_name[0].get("namespace") or ref)
+        if len(by_name) > 1:
+            return None  # ambiguous name: refuse rather than guess
+    if "_g_" in ref or ref.startswith("g_"):
+        return _tail(ref) or None
+    if graph_rows is None:
+        return _tail(ref) or None
+    return None
 
-    def tail(g: str) -> str:
-        g = (g or "").strip().lower()
-        if not g:
-            return ""
-        t = g.split("_g_")[-1]
-        if t.startswith("g_") and len(t) > 2:
-            t = t[2:]
-        return t
 
-    na, nb = (a or "").strip().lower(), (b or "").strip().lower()
-    if not na or not nb:
-        return False
-    return na == nb or tail(na) == tail(nb)
+def _same_graph(a: str, b: str, graph_rows: Sequence[Mapping[str, Any]] | None = None) -> bool:
+    ca = canonical_graph_id(a, graph_rows)
+    cb = canonical_graph_id(b, graph_rows)
+    if ca and cb:
+        return ca == cb
+    return bool(a) and a.strip().casefold() == b.strip().casefold()
 
 
-def assert_distinct_graphs(source_graph: str, target_graph: str) -> None:
+def assert_distinct_graphs(
+    source_graph: str,
+    target_graph: str,
+    *,
+    graph_rows: Sequence[Mapping[str, Any]] | None = None,
+) -> None:
     """Refuse a migration whose target is its own source.
 
     The source sits at its node cap, so the only write it could accept is a
     refusal — and if the cap were ever lifted, an in-place run would write
-    curated noise back into the archive the ruling protects.
+    curated rows back into the archive the ruling protects. Because the identity
+    check is only as good as the spellings it understands, an unresolvable ref is
+    a REFUSAL (fail closed), not a pass.
     """
     if not target_graph:
         raise CurationRefused("no target graph named: a curation pass needs a distinct target")
+    if graph_rows is not None:
+        ca = canonical_graph_id(source_graph, graph_rows)
+        cb = canonical_graph_id(target_graph, graph_rows)
+        if ca is None:
+            raise CurationRefused(
+                f"cannot resolve the source graph {source_graph!r} to a known graph id — "
+                "refusing to run a migration whose source identity is unproven")
+        if cb is None:
+            raise CurationRefused(
+                f"cannot resolve the target graph {target_graph!r} to a known graph id — "
+                "refusing to run: an unproven target could be the archive itself")
+        if ca == cb:
+            raise CurationRefused(
+                f"source and target are the same graph ({ca!r}); the old graph is a "
+                "read-only historic artifact (#11469)")
+        return
     if _same_graph(source_graph, target_graph):
         raise CurationRefused(
-            f"source and target are the same graph ({source_graph!r}); the old graph is a "
-            "read-only historic artifact (#11469)"
-        )
+            f"source and target resolve to the same graph ({source_graph!r} vs "
+            f"{target_graph!r}); the old graph is a read-only historic artifact (#11469)")
 
 
 def off_switch_active(explicit: bool = False) -> bool:
@@ -473,11 +580,30 @@ class PlanWriter(Protocol):
 
     Deliberately single-verb: there is no ``delete``, ``retract`` or ``update``
     on this protocol, so "the pass cannot destroy anything" is a property of the
-    type rather than of the caller's discipline.
+    type rather than of the caller's discipline. ``write_points`` returns ONLY the
+    keys the target accepted, and raises on a refusal.
     """
 
     def write_points(self, target_graph: str, points: Sequence[Mapping[str, Any]]) -> Mapping[str, Any]:
         ...
+
+
+def _ingest_refused(res: Any) -> str | None:
+    """The reason a tool result means "not accepted", or None when it was accepted.
+
+    ``ingest`` reports refusals as an error envelope (``{"error": ...``,
+    ``{"violations": [...]``) rather than by raising, so counting the attempt as a
+    success is how a ledger ends up claiming rows that do not exist.
+    """
+    if not isinstance(res, dict):
+        return None if res is not None else "no result from the target"
+    for key in ("error", "violations", "detail"):
+        val = res.get(key)
+        if val:
+            return f"target refused the batch: {str(val)[:300]}"
+    if res.get("ok") is False:
+        return "target reported ok=false"
+    return None
 
 
 class IngestWriter:
@@ -491,14 +617,24 @@ class IngestWriter:
 
     TOOL = "tortoise_ingest"
 
-    def __init__(self, call_tool: Callable[[str, Mapping[str, Any]], Any], *, batch_size: int = 100):
+    def __init__(
+        self,
+        call_tool: Callable[[str, Mapping[str, Any]], Any],
+        *,
+        batch_size: int = 100,
+        armed: Callable[[], bool] = lambda: not off_switch_active(),
+    ):
         self._call = call_tool
         self._batch = max(1, batch_size)
+        self._armed = armed
 
     def write_points(self, target_graph: str, points: Sequence[Mapping[str, Any]]) -> Mapping[str, Any]:
         written: list[str] = []
-        results: list[Any] = []
         for i in range(0, len(points), self._batch):
+            if not self._armed():
+                # Mid-run stop: what was accepted so far is reported (and ledgered),
+                # the rest is simply not attempted.
+                return {"written": written, "stopped": "off-switch engaged"}
             batch = list(points[i:i + self._batch])
             res = self._call(self.TOOL, {
                 "graph": target_graph,
@@ -506,23 +642,27 @@ class IngestWriter:
                 "granularity": "bulk",
                 "bundle": {"points": batch},
             })
-            results.append(res)
+            refused = _ingest_refused(res)
+            if refused:
+                raise CurationRefused(refused)
             written.extend(p["migrationKey"] for p in batch)
-        return {"written": written, "results": results}
+        return {"written": written}
 
 
 class Ledger:
-    """Local record of what this pass already migrated.
+    """Local record of what this pass already migrated **into this target**.
 
     The ledger is the half of idempotency that does not depend on the target
-    server: a key it holds is never sent again, whatever the target would do
-    with it. It is append-only and written atomically, because a ledger that can
-    be lost mid-run is the same as no ledger.
+    server: a key it holds is never sent again, whatever the target would do with
+    it. It is scoped by target graph — the same row migrated into graph A has not
+    been migrated into graph B — append-only, and fsynced, because a ledger that
+    can be lost (or that answers for the wrong graph) is worse than none.
     """
 
-    def __init__(self, path: str | os.PathLike[str]):
+    def __init__(self, path: str | os.PathLike[str], target: str):
         self.path = str(path)
-        self._keys: set[str] = set()
+        self.target = target
+        self._keys: set[tuple[str, str]] = set()
         self._load()
 
     def _load(self) -> None:
@@ -533,17 +673,18 @@ class Ledger:
                     if not line:
                         continue
                     try:
-                        self._keys.add(json.loads(line)["migrationKey"])
+                        row = json.loads(line)
+                        self._keys.add((row["target"], row["migrationKey"]))
                     except (json.JSONDecodeError, KeyError):
                         continue  # a torn tail line is skipped, not fatal
         except FileNotFoundError:
             pass
 
     def __contains__(self, key: object) -> bool:
-        return key in self._keys
+        return (self.target, key) in self._keys
 
     def __len__(self) -> int:
-        return len(self._keys)
+        return sum(1 for t, _ in self._keys if t == self.target)
 
     def record(self, keys: Iterable[str]) -> None:
         keys = list(keys)
@@ -552,8 +693,8 @@ class Ledger:
         os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
         with open(self.path, "a", encoding="utf-8") as fh:
             for k in keys:
-                fh.write(json.dumps({"migrationKey": k}) + "\n")
-                self._keys.add(k)
+                fh.write(json.dumps({"target": self.target, "migrationKey": k}) + "\n")
+                self._keys.add((self.target, k))
             fh.flush()
             os.fsync(fh.fileno())
 
@@ -567,6 +708,7 @@ class RunResult:
     target_graph: str
     digest: str
     refused: str | None = None
+    stopped: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -577,6 +719,7 @@ class RunResult:
             "target_graph": self.target_graph,
             "digest": self.digest,
             "refused": self.refused,
+            "stopped": self.stopped,
         }
 
 
@@ -587,6 +730,7 @@ def run_plan(
     ledger: Ledger,
     apply: bool = False,
     off: bool = False,
+    graph_rows: Sequence[Mapping[str, Any]] | None = None,
 ) -> RunResult:
     """Execute a plan. Dry by default; additive and idempotent when applied.
 
@@ -594,7 +738,7 @@ def run_plan(
     touches nothing — that is the mode to use against a target that does not
     exist yet.
     """
-    assert_distinct_graphs(plan.source_graph, plan.target_graph)
+    assert_distinct_graphs(plan.source_graph, plan.target_graph, graph_rows=graph_rows)
     if off_switch_active(off):
         return RunResult(False, True, 0, 0, plan.target_graph, plan.digest(), refused="off-switch active")
     if not apply:
@@ -605,6 +749,13 @@ def run_plan(
     skipped = len(points) - len(pending)
     if not pending:
         return RunResult(True, False, skipped, 0, plan.target_graph, plan.digest())
-    result = writer.write_points(plan.target_graph, pending)
-    ledger.record(result.get("written") or [p["migrationKey"] for p in pending])
-    return RunResult(True, False, skipped, len(pending), plan.target_graph, plan.digest())
+    try:
+        result = writer.write_points(plan.target_graph, pending)
+    except CurationRefused as exc:
+        # Nothing is recorded: an attempt is not a migration.
+        return RunResult(True, False, skipped, 0, plan.target_graph, plan.digest(),
+                         refused=str(exc))
+    accepted = [k for k in (result.get("written") or [])]
+    ledger.record(accepted)
+    return RunResult(True, False, skipped, len(accepted), plan.target_graph, plan.digest(),
+                     stopped=result.get("stopped"))

@@ -43,7 +43,7 @@ class CountingWriter:
 
 @pytest.fixture()
 def ledger(tmp_path):
-    return C.Ledger(tmp_path / "ledger.jsonl")
+    return C.Ledger(tmp_path / "ledger.jsonl", target="new")
 
 
 # ── idempotency ──────────────────────────────────────────────────────────
@@ -75,15 +75,31 @@ def test_digest_is_stable_across_runs(ledger):
     assert p1.digest() == p2.digest()
 
 
-def test_duplicate_content_folds_onto_one_keeper():
+def test_duplicate_follows_its_keeper():
+    """'the keeper carries it' must be TRUE, or the report contradicts the plan.
+
+    Same content hash, different content (a stale hash): the keeper is not carried,
+    so its duplicate must not be carried either — and must say so.
+    """
+    plan = C.build_plan(
+        [row("a", content="", content_hash="H"),
+         row("b", content="A durable claim", content_hash="H")],
+        source_graph="old", target_graph="new", packs={},
+    )
+    by_id = {d.node_id: d for d in plan.decisions}
+    assert by_id["a"].disposition == C.NOT_CARRIED          # empty content
+    assert by_id["b"].disposition == C.NOT_CARRIED          # follows the keeper, not its own rule
+    assert "a" in by_id["b"].reason
+
+
+def test_duplicate_of_an_undecidable_keeper_stays_undecidable():
     plan = C.build_plan(
         [row("a", content="same thing"), row("b", content="same thing")],
         source_graph="old", target_graph="new", packs={},
     )
     by_id = {d.node_id: d for d in plan.decisions}
-    assert by_id["a"].disposition == C.UNDECIDABLE  # the keeper is still judged on merit
-    assert by_id["b"].disposition == C.NOT_CARRIED
-    assert "a" in by_id["b"].reason
+    assert by_id["b"].disposition == C.UNDECIDABLE
+    assert "no carry candidate" in by_id["b"].reason
 
 
 # ── the switch and the guards ────────────────────────────────────────────
@@ -125,6 +141,58 @@ def test_source_equals_target_refused_across_spellings():
         C.assert_distinct_graphs("org_abc_g_2b7e4c9d1a6f8035", "g_2b7e4c9d1a6f8035")
 
 
+GRAPH_ROWS = [
+    {"graph_id": "default", "stable_id": "g_0bcdb207ef7336c3", "name": "default",
+     "namespace": "team_3326a01ea34ae595d84de5d8f9"},
+    {"graph_id": "g_2b7e4c9d1a6f8035", "stable_id": "g_2b7e4c9d1a6f8035", "name": "live-v4",
+     "namespace": "org_3326a01ea34ae595d84de5d8f9_g_2b7e4c9d1a6f8035"},
+    {"graph_id": "g_deadbeefdeadbeef", "stable_id": "g_deadbeefdeadbeef", "name": "clean",
+     "namespace": "org_3326a01ea34ae595d84de5d8f9_g_deadbeefdeadbeef"},
+]
+
+
+def test_the_graph_name_is_the_same_graph_as_its_namespace():
+    """The operator types `live-v4`; the doc calls that the same graph as the
+    namespace. A guard that only understands ids would let an in-place run through."""
+    with pytest.raises(C.CurationRefused):
+        C.assert_distinct_graphs("live-v4", "org_3326a01ea34ae595d84de5d8f9_g_2b7e4c9d1a6f8035",
+                                 graph_rows=GRAPH_ROWS)
+
+
+def test_unresolvable_target_is_refused_fail_closed():
+    with pytest.raises(C.CurationRefused):
+        C.assert_distinct_graphs("live-v4", "not-a-graph", graph_rows=GRAPH_ROWS)
+
+
+def test_ambiguous_name_is_refused():
+    rows = [*GRAPH_ROWS, {"graph_id": "g_ffffffffffffffff", "name": "clean",
+                          "namespace": "org_x_g_ffffffffffffffff"}]
+    with pytest.raises(C.CurationRefused):
+        C.assert_distinct_graphs("live-v4", "clean", graph_rows=rows)
+
+
+def test_distinct_graphs_pass():
+    C.assert_distinct_graphs("live-v4", "clean", graph_rows=GRAPH_ROWS)
+
+
+NAMESPACE_ROWS = [{"namespace": "org_x_g_2b7e4c9d1a6f8035"},
+                  {"namespace": "org_x_g_deadbeefdeadbeef"}]
+
+
+def test_namespace_only_identity_is_enough_to_tell_graphs_apart():
+    """This server exposes namespaces (which encode the id), not name rows — so two
+    namespaces that differ ARE two graphs, and the guard must not over-block them."""
+    C.assert_distinct_graphs("org_x_g_2b7e4c9d1a6f8035", "org_x_g_deadbeefdeadbeef",
+                             graph_rows=NAMESPACE_ROWS)
+
+
+def test_a_name_the_surface_cannot_resolve_is_refused():
+    """`live-v4` cannot be resolved from namespace-only rows — refusing is the only
+    safe answer, because the alternative is assuming it is not the archive."""
+    with pytest.raises(C.CurationRefused):
+        C.assert_distinct_graphs("live-v4", "org_x_g_deadbeefdeadbeef", graph_rows=NAMESPACE_ROWS)
+
+
 def test_no_target_refused():
     with pytest.raises(C.CurationRefused):
         C.assert_distinct_graphs("old", "")
@@ -135,6 +203,78 @@ def test_writer_protocol_declares_no_destructive_verb():
     this test fails before the pass can destroy the only copy."""
     verbs = [m for m in dir(C.PlanWriter) if not m.startswith("_")]
     assert verbs == ["write_points"], verbs
+
+
+class RefusingWriter:
+    def __init__(self):
+        self.calls = 0
+
+    def write_points(self, target_graph, points):
+        self.calls += 1
+        raise C.CurationRefused("target refused the batch: {'error': 'quota'}")
+
+
+def test_a_refused_write_is_never_recorded(tmp_path):
+    """A ledger that records ATTEMPTS is silent loss of the only copy."""
+    led = C.Ledger(tmp_path / "l.jsonl", target="new")
+    plan = C.build_plan([row("a", content="Let me look.")], source_graph="old",
+                        target_graph="new", packs={})
+    plan.decisions = [C.Decision(d.node_id, d.node_type, d.kind, C.CARRY, "test", d.pack,
+                                 d.stable_key, d.content) for d in plan.decisions]
+    res = C.run_plan(plan, writer=RefusingWriter(), ledger=led, apply=True)
+    assert res.written == 0
+    assert res.refused and "refused" in res.refused
+    assert len(led) == 0
+
+
+def test_ledger_is_scoped_to_its_target(tmp_path):
+    """Migrating into graph A does not mean graph B was migrated."""
+    path = tmp_path / "l.jsonl"
+    plan = C.build_plan([row("a", content="Let me look.")], source_graph="old",
+                        target_graph="A", packs={})
+    plan.decisions = [C.Decision(d.node_id, d.node_type, d.kind, C.CARRY, "test", d.pack,
+                                 d.stable_key, d.content) for d in plan.decisions]
+    w = CountingWriter()
+    C.run_plan(plan, writer=w, ledger=C.Ledger(path, target="A"), apply=True)
+
+    plan_b = C.Plan(source_graph="old", target_graph="B", decisions=plan.decisions)
+    res = C.run_plan(plan_b, writer=w, ledger=C.Ledger(path, target="B"), apply=True)
+    assert res.written == 1, "the second target must receive the row"
+    assert [t for t, _ in w.calls] == ["A", "B"]
+
+
+def test_off_switch_stops_a_run_between_batches():
+    armed = {"v": True}
+    calls = []
+
+    def call_tool(tool, args):
+        calls.append(args)
+        return {"filed": 1}
+
+    writer = C.IngestWriter(call_tool, batch_size=1, armed=lambda: armed["v"])
+    points = [{"migrationKey": f"k{i}", "content": "c"} for i in range(3)]
+    # arm for the first batch, then flip the switch mid-run
+    armed["v"] = True
+
+    def armed_then_off():
+        v = armed["v"]
+        armed["v"] = False
+        return v
+
+    writer = C.IngestWriter(call_tool, batch_size=1, armed=armed_then_off)
+    out = writer.write_points("new", points)
+    assert len(out["written"]) == 1
+    assert out["stopped"] == "off-switch engaged"
+    assert len(calls) == 1
+
+
+def test_ingest_refusal_envelope_is_not_a_success():
+    def call_tool(tool, args):
+        return {"error": "ERR_BUNDLE_INVALID", "violations": [{"section": "points"}]}
+
+    writer = C.IngestWriter(call_tool)
+    with pytest.raises(C.CurationRefused):
+        writer.write_points("new", [{"migrationKey": "k", "content": "c"}])
 
 
 # ── classification rules the inventory table cites ───────────────────────
@@ -177,6 +317,11 @@ def test_operator_is_carried_as_reasoning():
     assert d.disposition == C.CARRY and "reasoning" in d.reason
 
 
+def test_namespaced_signal_kind_is_still_signal():
+    d = C.classify(row(kind="core:decision", content="We keep the old graph."), {})
+    assert d.disposition == C.CARRY
+
+
 def test_pack_resolution_bare_and_namespaced():
     packs = {("pointKind", "bug"): "dev", ("objectKind", "code"): "dev"}
     assert C.pack_for("bug", "point", packs) == "dev"
@@ -198,6 +343,16 @@ def test_census_counts_every_row_once():
     assert sum(census["totals"].values()) == 3
     assert census["totals"][C.CARRY] == 1
     assert census["totals"][C.NOT_CARRIED] == 2
+
+
+def test_bundle_items_carry_content():
+    """`ingest` refuses the WHOLE bundle when a point item has no content
+    (sdk._check_item_shape) — a bundle without it writes zero rows."""
+    plan = C.build_plan([row("a", kind="decision", content="We keep the old graph.")],
+                        source_graph="old", target_graph="new", packs={})
+    item = plan.bundle()["points"][0]
+    assert item["content"] == "We keep the old graph."
+    assert item["ref"] == item["migrationKey"]
 
 
 def test_bundle_carries_no_deletion():

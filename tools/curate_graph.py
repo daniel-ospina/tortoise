@@ -55,6 +55,16 @@ def _normalise(res: Any) -> Any:
     return payload
 
 
+def _error_of(res: Any) -> str | None:
+    """The reason a tool payload is a REFUSAL, or None when it is data."""
+    if isinstance(res, dict):
+        for key in ("error", "detail", "violations"):
+            val = res.get(key)
+            if val:
+                return str(val)
+    return None
+
+
 def _rows_from_tool(res: Any) -> list[dict[str, Any]]:
     res = _normalise(res)
     if isinstance(res, dict):
@@ -130,11 +140,20 @@ class MCPReader:
         if self.graph:
             try:
                 res = _normalise(self._call("tortoise_graph_overview", {**args, "graph": self.graph}))
-                if res:
-                    return res
-            except Exception:
-                pass
-            self.note = "credential-bound read: the explicit graph argument was refused; used the credential's own graph"
+            except Exception as exc:  # a refusal, not an empty section
+                self.note = (f"credential-bound read for {section!r}: the explicit graph argument "
+                             f"was refused ({str(exc)[:160]}); used the credential's own graph")
+                return _normalise(self._call("tortoise_graph_overview", args))
+            err = _error_of(res)
+            if err:
+                # An error envelope is truthy and does NOT raise; returning it as a
+                # section would present a refusal as census data.
+                self.note = (f"credential-bound read for {section!r}: the explicit graph argument "
+                             f"was refused ({err[:160]}); used the credential's own graph")
+                return _normalise(self._call("tortoise_graph_overview", args))
+            # An EMPTY result is a legitimate answer (a graph with no sources), so it
+            # is returned as-is rather than re-read from a different graph.
+            return res
         return _normalise(self._call("tortoise_graph_overview", args))
 
     def read_sources(self) -> list[C.Row]:
@@ -156,6 +175,22 @@ class MCPReader:
         res = self._section("structure")
         return res if isinstance(res, dict) else {}
 
+    def graphs(self) -> list[dict[str, Any]]:
+        """The workspace's graph identities, in whatever shape this server offers.
+
+        The tool set exposes NAMESPACES (``org_…_g_<id>``) here, and a namespace
+        encodes its graph id — enough to tell two graphs apart. A graph NAME
+        (``live-v4``) is not resolvable from this surface at all, which is why an
+        unresolvable ref is a refusal in the guard rather than a pass.
+        """
+        out: list[dict[str, Any]] = []
+        for row in _rows_from_tool(self._section("graphs")):
+            if isinstance(row, dict):
+                out.append(dict(row))
+            elif isinstance(row, str) and row:
+                out.append({"namespace": row})
+        return out
+
     def audit(self) -> dict[str, Any]:
         res = self._section("audit")
         return res if isinstance(res, dict) else {}
@@ -171,6 +206,7 @@ def cmd_inventory(args: argparse.Namespace) -> int:
     reader = MCPReader(_live_call_tool, args.graph)
     counts = reader.counts()
     structure = reader.structure()
+    graphs = reader.graphs()
     points, total = reader.read_points(page=args.page)
     sources = reader.read_sources()
     audit = reader.audit()
@@ -183,6 +219,14 @@ def cmd_inventory(args: argparse.Namespace) -> int:
         "points_total_reported": total,
         "sources_read": len(sources),
         "structure": structure,
+        "graphs": graphs,
+        "not_enumerable_by_this_read_path": {
+            "operator": "tortoise_query excludes operator Points unless an operator kind is "
+                        "requested (sdk._operator_scope_clauses, #7108) — count from structure.operators",
+            "object": "no listing surface on the MCP tool set — count from counts.Object",
+            "event": "no listing surface on the MCP tool set — count from counts.Event",
+            "subject": "no listing surface on the MCP tool set — count from counts.Subject",
+        },
         "read_note": reader.note,
         "audit": {
             "node_count": audit.get("node_count"),
@@ -213,14 +257,19 @@ def cmd_plan(args: argparse.Namespace) -> int:
     reader = MCPReader(_live_call_tool, args.graph)
     points, _ = reader.read_points(page=args.page)
     sources = reader.read_sources()
+    graphs = reader.graphs()
     plan = C.build_plan(points + sources, source_graph=args.graph or "default", target_graph=args.target)
     try:
         result = C.run_plan(
             plan,
             writer=C.IngestWriter(_live_call_tool),
-            ledger=C.Ledger(args.ledger or os.path.expanduser("~/.tortoise/curate-11469-ledger.jsonl")),
+            ledger=C.Ledger(
+                args.ledger or os.path.expanduser("~/.tortoise/curate-11469-ledger.jsonl"),
+                target=args.target,
+            ),
             apply=args.apply,
             off=args.off,
+            graph_rows=graphs,
         )
     except C.CurationRefused as exc:
         print(f"REFUSED: {exc}", file=sys.stderr)

@@ -25,7 +25,7 @@ Two measured facts govern the risk:
   a migration here is moving the only copy of a tenant's data.
 
 Code: `tortoise/curation.py` (classification + guards + additive writer) and
-`tools/curate_graph.py` (the CLI). Tests: `tests/test_curation_11469.py`.
+`tools/curate_graph.py` (the CLI). Tests: `tests/test_curation_11469.py` (31 tests).
 
 ## The inventory — measured 2026-11-08 against `live-v4`
 
@@ -40,11 +40,11 @@ Code: `tortoise/curation.py` (classification + guards + additive writer) and
 |---|---:|---|
 | **Point** | **19,595** | 15,868 non-operator + **3,727 operators** |
 | · non-operator Point | 15,868 | `structure.total`; the paginated read returns 15,842 live/non-retracted rows |
-| · operator (IMPL/NAND/…) | 3,727 | the reasoning layer; readable only through its endpoints (no listing surface) |
-| **Object** | **5,379** | entity layer, not enumerable on the MCP surface (see caveat) |
-| **Event** | **4,670** | agent-session containers (episodic tier) |
-| **Source** | **1,578** | **100% `agentSession`, `session:<uuid>` urls** — zero real artifacts |
-| **Subject** | **26** | identity layer |
+| · operator (IMPL/NAND/…) | 3,727 | **count only** (`structure.operators`) — the read path excludes operator Points unless an operator kind is requested (`sdk._operator_scope_clauses`, #7108) |
+| **Object** | **5,379** | **count only** (`counts.Object`) — no listing surface on the tool set |
+| **Event** | **4,670** | **count only** — agent-session containers (episodic tier) |
+| **Source** | **1,578** | **enumerated** — **100% `agentSession`, `session:<uuid>` urls**, zero real artifacts |
+| **Subject** | **26** | **count only** |
 | edges | 7,981 | `audit.edge_count` |
 | **total nodes** | **31,248** | non-episodic cap counter = 19,595 + 5,379 + 26 = **25,000 / 25,000** |
 
@@ -60,13 +60,13 @@ report, and a row that no rule decides is `undecidable` rather than guessed.
 | `point:finding` | 1 | **carry** | durable finding |
 | `point:jobToBeDone` | 1 | **carry** | strategy artifact |
 | `point:useCase` | 1 | **carry** | strategy artifact |
-| `point:evidence` | 120 | **carry** (115) / not-carried (5) | evidence is signal; 5 are narration/empty by rule |
+| `point:evidence` | 120 | **carry** (115) / not-carried (5) | evidence is signal; the 5 are empty or duplicates of a non-carried row |
 | `point:diary` | 2 | **undecidable** | agent diary: authored, but narrative-shaped |
-| `point:statement` | 15,708 | **not-carried 58 / undecidable 15,650** | 58 match a turn-narration marker; **the remaining 15,650 are the real question — see below** |
+| `point:statement` | 15,708 | **not-carried 0 / undecidable 15,708** | **not one** matches a turn-narration marker; every one is a claim this rule set cannot judge |
 | `source:agentSession` | 1,578 | **undecidable** | §9.1/D1 (`#10000`) says the raw tier lives in Postgres — but this tenant's record holds **0 rows**, so "do not carry it" would leave the transcript with no home |
-| `object` (bare definite) | majority of 5,379 | **not-carried** | `#11021`/`#11211`: a noun phrase that refers to nothing is not an entity. Biased 1,000-row sample: **96%** drop-shaped; `#5333`'s full census on the same graph: **83%** of 7,870 objects |
+| `object` (bare definite) | majority of 5,379 (**not enumerated** — sample only) | **not-carried** | `#11021`/`#11211`: a noun phrase that refers to nothing is not an entity. Biased 1,000-row sample: **96%** drop-shaped; `#5333`'s full census on the same graph: **83%** of 7,870 objects |
 | `event` (session container) | 4,670 | **undecidable** | same only-copy problem as Sources |
-| `operator` | 3,727 | **carry** | carried with its endpoints so no claim arrives floating |
+| `operator` | 3,727 (**not enumerated** — count only) | **carry** (rule) | the rule carries the operator row as a claim; edges are the ingest contract's job (#888 W4), not built here |
 
 ### Defects already measured on the source (audit, read-only)
 
@@ -80,9 +80,10 @@ report, and a row that no rule decides is `undecidable` rather than guessed.
 
 ### ⚠️ The finding that decides the shape of this work
 
-**A deterministic rule set cannot select the signal out of 15,650 statements.** Only 58 fall to
-a narration rule; the rest are claims, plausible and unjudged. Two options, and this issue does not
-choose between them:
+**A deterministic rule set cannot select the signal out of 15,708 statements.** Not one statement in
+this graph matches a narration marker — the narration rule selects nothing at all — and the remaining
+rules (decision / evidence / operator / …) select 127 rows. The 15,708 are claims, plausible and
+unjudged. Two options, and this issue does not choose between them:
 
 1. a **semantic pass** (search/embedding-similarity clustering + a reviewer) that proposes a
    carry-set for review; or
@@ -96,15 +97,23 @@ whole.
 
 ## What the harness guarantees (and how each is proven)
 
+⚠️ **One consequence of the read surface, stated so the census is not over-read:** `tortoise_query`
+returns non-operator Points only, and Objects/Events/Subjects have no listing tool. So the enumerable
+population this pass classifies is **15,842 points + 1,578 sources**; operator/Object/Event/Subject
+rows appear in the tables as **counts from `graph_overview`**, with the class rule stated, and are
+flagged *not enumerated* rather than presented as measure-and-classify results.
+
 | property | mechanism | test |
 |---|---|---|
 | the old graph is only read | the module has no destructive call at all; the reader exposes no write verb | `test_bundle_carries_no_deletion`, `test_writer_protocol_declares_no_destructive_verb` |
 | the target is only added to | `PlanWriter` is a **single-verb** protocol (`write_points`) — additivity is a property of the type, not of the caller's discipline | `test_writer_protocol_declares_no_destructive_verb` |
 | **idempotent** | stable `migrationKey` per content hash → target-side dedup (`ingest` folds by content hash + kind) **and** a local ledger that skips a migrated key before it reaches the wire | `test_second_run_writes_nothing`, `test_duplicate_content_folds_onto_one_keeper` |
-| **off-switch** | `TORTOISE_CURATE_OFF=1` / `--off`, checked per run | `test_explicit_off_switch_writes_nothing`, `test_env_off_switch_writes_nothing` |
-| **source ≠ target** | refused across all three spellings of one graph (namespace / `g_<id>` / `<id>`) | `test_source_equals_target_refused`, `…_across_spellings` |
+| **off-switch** | `TORTOISE_CURATE_OFF=1` / `--off`, checked before the run **and before each write batch** | `test_explicit_off_switch_writes_nothing`, `test_env_off_switch_writes_nothing` |
+| **source ≠ target** | compared on the CANONICAL graph id resolved from the workspace's graph rows — graph id, `stable_id`, namespace and the case-insensitive NAME (`live-v4`) all collapse to one identity; an unresolvable or ambiguous ref is a REFUSAL (fail closed) | `test_source_equals_target_refused`, `…_across_spellings`, `test_the_graph_name_is_the_same_graph_as_its_namespace`, `test_unresolvable_target_is_refused_fail_closed`, `test_ambiguous_name_is_refused` |
 | dry by default | `--apply` is required; the default run writes nothing | `test_dry_run_writes_nothing` |
-| no silent zero | a read that returns 0 rows, or fewer than the reported total, **fails** — an empty census must never look like "nothing to migrate" | `CurateGraph.read_points` raises |
+| a refusal is never recorded as a write | the writer raises on a refusal envelope; the ledger is written from the ACCEPTED keys only, and the ledger is scoped per target graph | `test_a_refused_write_is_never_recorded`, `test_ingest_refusal_envelope_is_not_a_success`, `test_ledger_is_scoped_to_its_target` |
+| the bundle is ingest-valid | every point item carries `content` (ingest Phase-1 refuses a bundle otherwise) | `test_bundle_items_carry_content` |
+| no silent zero | a read that returns 0 rows, or fewer than the reported total, **fails** — an empty census must never look like "nothing to migrate" | `MCPReader.read_points` raises |
 
 ## How to run
 
@@ -129,7 +138,7 @@ Environment: `TORTOISE_MCP_URL` + `TORTOISE_MCP_API_KEY`; `TORTOISE_CURATE_OFF=1
 2. **The MCP credential is graph-bound to `live-v4`** — it cannot write to another graph, and
    `live-v4` is at its cap, so any write there is `GRAPH-WRITE-REFUSED` by design. A graph-bound
    credential refusing a re-target is a property of the venue, not a bug to route around.
-3. **15,650 statements have no deciding rule** (above) — carrying them un-reviewed would migrate
+3. **15,708 statements have no deciding rule** (above) — carrying them un-reviewed would migrate
    the mess rather than curate it.
 
 None of the three is worked around here: the harness is ready, and the first `--apply` is gated on
