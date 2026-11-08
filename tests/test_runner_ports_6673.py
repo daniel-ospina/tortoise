@@ -468,11 +468,12 @@ def test_provision_logging_never_corrupts_the_captured_port():
 # literal substring), each a shape fixture that never dials.
 #
 # ⛔ An entry only means anything while its file is in the POPULATION this guard
-# actually SCANS (`_imports_the_seam`), and that is asserted — see
-# `test_every_seam_exemption_is_consulted`. When a file leaves the population its
+# actually SCANS (`_imports_the_seam`). When a file leaves the population its
 # entry exempts a literal in a file the guard never reads — dead weight that looks
-# like a live remedy — and NOTHING reds either way, because `test (e)` is green with
-# the entry and green without it. An entry for a file the census does not select
+# like a live remedy — and `test (e)` ALONE is green with the entry and green
+# without it (that is the gap, not the whole picture). The instrument that reds on
+# it is `test_every_seam_exemption_is_consulted`, measured by adding a row for a
+# file no population contains. An entry for a file the census does not select
 # exempts nothing and is worse than absent: it reads as a live declaration, so the
 # next auditor trusts a guard that is not running on that file, and the literal it
 # names is scanned by nothing at all.
