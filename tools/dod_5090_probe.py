@@ -2050,10 +2050,12 @@ def score_path_bullet() -> Row:
     duplicates = sorted(w for w, d in writers.items() if d["kind"] == "duplicate")
     unparsed = unparsed_modules(writers)
     # A writer whose label is unresolved and which NO note above accounts for: a `gated` writer
-    # whose own Cypher named no single label (`UNKNOWN`, or the `UNKNOWN(two labels: …)` shape), or
-    # a `duplicate` (reported by its own note below). `#11492`'s review caught the first draft
-    # narrowing the `unresolved writers` note to the declaration population and thereby dropping the
-    # `gated` case from the evidence while still holding the row — a `PARTIAL` naming nobody.
+    # whose own Cypher named NO single label (label `UNKNOWN`, one label — NOT the
+    # `UNKNOWN(two labels: …)` shape, which is a MEASUREMENT: it is subtracted via
+    # `resolved["partial"]` and named by its own "MORE THAN ONE label" note), or a `duplicate`
+    # (reported by its own note below). `#11492`'s review caught the first draft narrowing the
+    # `unresolved writers` note to the declaration population and thereby dropping the `gated` case
+    # from the evidence while still holding the row — a `PARTIAL` naming nobody.
     #
     # ⛔ Subtracted BY KIND, never emptied on `resolved["error"]` (round-2 review, P2): the two
     # note populations have DIFFERENT subjects. `unresolved_undeclared` is about writers only the
@@ -2115,10 +2117,13 @@ def score_path_bullet() -> Row:
     #     unknowable when the register cannot be read → it is EMPTIED on `resolved["error"]`, so an
     #     unreadable register cannot print "nothing in the product says which label they store on"
     #     in the same cell that says it blames nobody. The blame belongs to the instrument.
-    #   * `unexplained` is about a writer whose label came from its OWN Cypher (`gated`, label
-    #     `UNKNOWN…`/`UNKNOWN(two labels: …)`) — the register was never consulted for it, so an
+    #   * `unexplained` is about a writer whose label came from its OWN Cypher and named NO single
+    #     label (`gated`, label `UNKNOWN`) — the register was never consulted for it, so an
     #     unreadable register does not excuse dropping it → it is subtracted BY KIND, never emptied,
-    #     or the row holds `PARTIAL` while naming nobody (the defect round 1 fixed).
+    #     or the row holds `PARTIAL` while naming nobody (the defect round 1 fixed). ⛔ The
+    #     `UNKNOWN(two labels: …)` shape is NOT here: it is a MEASUREMENT, removed by
+    #     `- set(resolved["partial"])` and named by its own "MORE THAN ONE label" note — deleting
+    #     that note as "redundant" would re-create a `PARTIAL` naming nobody, one branch over.
     if unresolved_undeclared:
         notes.append(
             "unresolved writers (hold this row at PARTIAL — nothing in the product says which "
