@@ -123,13 +123,19 @@ measured_at:
 #         runs (a `pytest`/script invocation whose own output is quoted, not a report).
 #
 #       $ uv run python tools/test_lane.py run -- tests/test_9664_capstone_verdict_ledger.py tests/test_9340_graph_tool_argument.py tests/test_pack_selection_by_graph.py tests/test_cross_tenant_read_isolation.py tests/test_onboarding_auto_complete.py tests/test_oauth_consent_page_step4.py tests/test_oauth_consent_bff_routes.py -q
-#       456 passed, 5 failed                       # 461 collected. Run THROUGH
+#       456 passed, 5 failed                       # 461 collected AT THAT HEAD. Run THROUGH
 #                                                   # `tools/worktree_report.py run` (this worktree's
 #                                                   # WORKTREE-REPORT.md), so the counts are parsed from
 #                                                   # the real log rather than typed by the author.
 #       per-file collection, summed: 295 (the six contract files: 66 / 54 / 9 / 42 / 65 / 59)
-#                                  + 166 (`test_9664_capstone_verdict_ledger.py`, the ledger pin suite)
-#                                  = 461 = 456 passed + 5 failed.   Counted, not estimated.
+#                                  + 167 (`test_9664_capstone_verdict_ledger.py`, the ledger pin suite)
+#                                  = 462 COLLECTED at this head.   Counted, not estimated.
+#       The run above PREDATES this PR's own `test_c2_and_e3_cannot_be_graded_differently`,
+#       so it collected 461 (295 + 166) at its head while the same seven files collect
+#       462 here (295 + 167) - each of those seven counted individually at this head.
+#       The SPLIT at this head is ARITHMETIC, not a re-run: the pin suite's 167 all pass
+#       and the 5 failures are S2's ACL group, i.e. 462 = 457 + 5. Re-run the command
+#       above to replace this with a measured split; do not quote 457 as one until you do.
 #       the 5 are `TestCreateGraphWithPacks`, refused by the PRIVATE lane container's ACL layer — see S2.
 #       $ TORTOISE_TEST_CARVE_OUT=1 uv run python -m pytest tests/test_7949_c2_door.py tests/test_7949_capstone_measure.py -q
 #       302 passed                                 # 24 (the door census, its pinned-ON/refusal arms
