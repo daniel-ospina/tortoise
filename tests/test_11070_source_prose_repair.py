@@ -1631,6 +1631,11 @@ def test_a_census_with_an_UNUSABLE_record_dsn_EXITS_instead_of_tracebacking(
     monkeypatch.delenv("TORTOISE_ORG_ID", raising=False)
     monkeypatch.setattr(sys, "argv", [
         _CLI_PATH.name, "--dry-run", "--assert-clean",
+        # ⛔ THE FTS LEG IS NAMED AWAY ON PURPOSE (#11161). `--assert-clean`
+        # now refuses (exit 2) unless the sign-off names its evidence, and that
+        # refusal fires BEFORE any door is opened — which would make this test
+        # assert about the FTS flag instead of about the DSN it exists to pin.
+        "--no-fts-probe",
         "--org-id", "org_x", "--graph-id", "gx"])
 
     code = _cli.main()                     # must RETURN, not raise
