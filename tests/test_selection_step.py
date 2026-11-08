@@ -781,3 +781,101 @@ def test_a_threshold_that_is_not_a_rate_disarms(monkeypatch, raw):
 def test_a_threshold_in_range_arms(monkeypatch):
     monkeypatch.setenv("TORTOISE_RENARRATE_KEEP_RATE", "0.85")
     assert extractor_v2._renarrate_threshold() == 0.85
+
+
+# ── the two surfaces round 5 reviewed as UNASSERTED ────────────────────────
+# Round 5's verdict was ISSUES 2, both test-gaps on new behaviour: the removal
+# pool had NO assertion anywhere (emptying it redded no row) and the per-arm
+# `coverage_suspect` — the flag §4.4's F3 removal-gate is defined over — was
+# unasserted. Both are pinned here, with the mutation each one dies under named.
+
+def test_the_removal_pools_of_both_arms_are_unioned():
+    """`_merge_arm_pools` — the record that stops a resurrection and a 422.
+
+    Both arms compose the SHIPPED list (the union), so both arms' removals must
+    carry into the post-S4 pass: an item either arm DISCARDED must not be
+    resurrected by that pass, and an entity either arm removed must still be
+    restorable when the other arm's narrative references it (`apply_vet`'s Rule
+    4, whose failure mode is a session-wide Layer-1 422).
+
+    ⛔ NON-VACUITY, measured against the shapes this names: `return {}` fails
+    every assertion; first-arm-only drops `beta` and `Bob`; second-arm-only
+    drops `alpha`; swapping the collision order returns Alice's FIRST note.
+    """
+    first = {"removed_texts": {"alpha", "shared"},
+             "removed_entities": {"Alice": {"note": "from-first"}}}
+    second = {"removed_texts": {"beta", "shared"},
+              "removed_entities": {"Bob": {"note": "from-second"},
+                                   "Alice": {"note": "from-second"}}}
+    merged = extractor_v2._merge_arm_pools(first, second)
+    assert merged["removed_texts"] == {"alpha", "beta", "shared"}, (
+        "the UNION, not one arm's set — a lost removal text can be resurrected"
+    )
+    assert set(merged["removed_entities"]) == {"Alice", "Bob"}, (
+        "an entity removed by EITHER arm must stay restorable by Rule 4"
+    )
+    assert merged["removed_entities"]["Alice"] == {"note": "from-second"}, (
+        "the SECOND arm wins a key collision — the same rule the item merge uses"
+    )
+    # Fail-open in the pool's own direction: an unreadable side contributes
+    # nothing rather than raising, so one broken arm cannot fail the run.
+    assert extractor_v2._merge_arm_pools(first, None)["removed_texts"] == {
+        "alpha", "shared"}
+    assert extractor_v2._merge_arm_pools(None, "not a pool") == {
+        "removed_texts": set(), "removed_entities": {}}
+
+
+def test_the_pick_hands_the_union_pool_to_the_post_s4_pass():
+    """The CONSUMER edge: `_renarrate_pick` publishes the union as `vet_pool`.
+
+    Round 5 measured that emptying the helper redded nothing. Asserting only the
+    helper would leave the same hole one level up, where the pool is actually
+    consumed: a pick that published the second arm's pool alone would drop the
+    first arm's removals from a list that IS the union of both.
+    """
+    def _arm(pool, rate):
+        return {"story": "n", "embed_list": {"entities": []},
+                "metrics": {"keep_rate": rate}, "vet_pool": pool,
+                "vet_stats": {}, "mention_stats": {}, "warnings": [],
+                "batch": {}, "chunks": 1, "failed_chunks": 0, "s2_failed": False}
+
+    first = _arm({"removed_texts": {"from-first"},
+                  "removed_entities": {"A": {}}}, 0.5)
+    second = _arm({"removed_texts": {"from-second"},
+                   "removed_entities": {"B": {}}}, 0.9)
+    picked = extractor_v2._renarrate_pick(first, second)
+    assert picked["vet_pool"]["removed_texts"] == {"from-first", "from-second"}, (
+        "the post-S4 pass must receive BOTH arms' removal texts"
+    )
+    assert set(picked["vet_pool"]["removed_entities"]) == {"A", "B"}, (
+        "and BOTH arms' restorable entities"
+    )
+
+
+def test_each_arm_records_its_own_coverage_verdict(monkeypatch):
+    """F3's predicate reads the PRE-retry arm, so each arm records its OWN flag.
+
+    §4.4's F3 — the gate on removing `run_s4` — is defined over the pre-retry
+    arm: "S4 added items while `coverage_suspect` is False". The pipeline's
+    published `result["vet"]["s2"]` is the SECOND arm's block, and on a retried
+    run the second arm's flag is False BY CONSTRUCTION (the first arm's True is
+    what fired the retry). A reader counting F3 against it would therefore score
+    exactly the sessions the retry DID reach as ones it cannot reach.
+
+    ⛔ NON-VACUITY: this dies if `_arm_metrics` stops recording the flag (the
+    key is missing), if it records the PIPELINE's flag for both arms (then
+    `first` is False), and if it negates it (both assertions invert) — which is
+    why the two arms are asserted to DIFFER rather than to each be truthy.
+    """
+    _, result = _run(monkeypatch,
+                     ["Alice set a budget. Bob ships Friday."],
+                     [_EMPTY_EMBED, _embed("Northwind")])
+    renarrate = result["stats"]["renarrate"]
+    assert renarrate["fired"] is True
+    assert renarrate["trigger"] == "coverage_suspect"
+    assert renarrate["first"]["coverage_suspect"] is True, (
+        "the arm that fired the retry lost everything — F3's pre-retry arm"
+    )
+    assert renarrate["second"]["coverage_suspect"] is False, (
+        "the retried arm emitted candidates; False here is by construction"
+    )
