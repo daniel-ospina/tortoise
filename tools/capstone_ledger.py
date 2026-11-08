@@ -475,7 +475,7 @@ def _names_artifact(token: str, cwd: Path, root: Path) -> tuple[bool, str]:
                 resolved_match = match.resolve()
                 if not (resolved_match.is_file() and resolved_match.is_relative_to(root)):
                     continue
-                if _is_tracked(resolved_match, root):
+                if _is_tracked(resolved_match, root) is True:
                     return True, ""
                 untracked_seen = True
             if untracked_seen:
@@ -487,7 +487,12 @@ def _names_artifact(token: str, cwd: Path, root: Path) -> tuple[bool, str]:
         candidate = Path(text)
         resolved = (candidate if candidate.is_absolute() else cwd / text).resolve()
         if resolved.is_file() and resolved.is_relative_to(root):
-            if not _is_tracked(resolved, root):
+            tracked = _is_tracked(resolved, root)
+            if tracked is None:
+                return False, (
+                    f"{text!r} cannot be verified: the TRACKED check could not be run here"
+                )
+            if tracked is False:
                 return False, (
                     f"{text!r} is not TRACKED by git, so a reader's clone does not have it"
                 )
@@ -706,13 +711,21 @@ def _evidence_is_real(
         return False, f"evidence path cannot be inspected ({exc}): {_short(entry)}"
     if not is_file:
         return False, f"evidence path is not a file in the tree: {entry}"
-    if not _is_tracked(resolved, root):
+    tracked = _is_tracked(resolved, root)
+    if tracked is False:
         # `is_file()` alone accepted a GITIGNORED artifact (measured:
         # `WORKTREE-REPORT.md`, 68 KB of machine-local lane output) — so the row
         # validated on the authoring box and was INVALID for every reader, which is
         # the one thing "an artifact IN THE TREE" must not mean.
         return False, (
             f"evidence path is not TRACKED by git, so a reader's clone does not have it: {entry}"
+        )
+    if tracked is None:
+        # Nothing was measured. Do NOT report this as "not TRACKED": the file may be
+        # tracked and present in every clone, and the REFUSED line on stderr already
+        # names the real cause.
+        return False, (
+            f"evidence path cannot be verified: the TRACKED check could not be run here: {entry}"
         )
     return True, ""
 
@@ -824,8 +837,14 @@ def _short(text: str, limit: int = 120) -> str:
     return repr(text if len(text) <= limit else text[:limit] + "…")
 
 
-def _is_tracked(resolved: Path, root: Path) -> bool:
-    """Is `resolved` tracked? An UNRUNNABLE probe REFUSES; it does not abstain.
+def _is_tracked(resolved: Path, root: Path) -> bool | None:
+    """`True` tracked · `False` git answered "no" · `None` the probe could not RUN.
+
+    The third value exists so the CALLER can tell the two refusals apart in the message
+    it prints: `False` is a measurement ("not TRACKED by git"), `None` is the absence of
+    one. Collapsing them produced a marker line telling a reader a file present in every
+    clone is "not TRACKED by git" on a box where `git` was never asked — the same
+    guess-the-cause defect this function was fixed for, one layer up.
 
     The abstention is PRINTED rather than silent, because a CLEAN verdict
     byte-identical to one where the rule ran is how a check quietly stops
@@ -842,9 +861,11 @@ def _is_tracked(resolved: Path, root: Path) -> bool:
 
     ⛔ WHAT IT MEASURES: `git ls-files` reads the INDEX, so a staged-but-uncommitted
     file, an intent-to-add file, and a symlink RESOLVED to a tracked target all answer
-    "tracked" while a reader's clone has none of them — and `-- <rel>` is a PATHSPEC,
-    so a cited name that prefix-matches a tracked path is answered TRACKED too.
-    Pre-existing, unchanged here, filed as #11499.
+    "tracked" while a reader's clone has none of them. Pre-existing, unchanged here,
+    filed as #11499. (`-- <rel>` is also a PATHSPEC, but the prefix-matching direction
+    is only reachable for a DIRECTORY-shaped name — `docs` answers 0, `docs/ab` answers
+    1 — and no call site reaches this function with a directory, so it is not listed as
+    a live mechanism.)
     """
     try:
         rel = resolved.relative_to(root)
@@ -878,7 +899,7 @@ def _is_tracked(resolved: Path, root: Path) -> bool:
     return _tracked_unprovable()
 
 
-def _tracked_unrunnable(exc: OSError, rel: Path) -> bool:
+def _tracked_unrunnable(exc: OSError, rel: Path) -> None:
     """The probe could not RUN. Nothing was measured, so the row is REFUSED.
 
     ⛔ NOT `_tracked_unprovable()`: that one is for a MEASURED "git says this is not
@@ -891,7 +912,7 @@ def _tracked_unrunnable(exc: OSError, rel: Path) -> bool:
         "and the row does not count",
         file=sys.stderr,
     )
-    return False
+    return None
 
 
 def _tracked_unprovable() -> bool:
