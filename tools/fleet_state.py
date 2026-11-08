@@ -2053,7 +2053,7 @@ class GitHubRows(list):
 #: (#11202 review round 4: 200 overran the window on the refusal arm, where the cause
 #: and not only the tail is what carries the words; round 14: 100 composed the
 #: UNPARSABLE arm to 321 against a 320 window once the fixture carried a body at
-#: `_bounded_repr`'s own maximum instead of a 16-character `<html>nope</html>` — the
+#: `_bounded_repr`'s own maximum instead of the short `<html>nope</html>` body — the
 #: cut removed only the final `)` of `#8175`, so the defect was the CLAIM, not the
 #: rendering).
 _GH_SAID_BOUND = 99

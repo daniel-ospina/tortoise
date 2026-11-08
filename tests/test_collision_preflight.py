@@ -11537,7 +11537,7 @@ class HolderGateTests(unittest.TestCase):
         The causes are DERIVED from the module under test (stub `_capture` at each
         failure class), so this cannot drift from the wording the code emits. Each arm
         is driven with a CAUSE AT ITS OWN MAXIMUM as well as a short one (#11202 review
-        round 14): the 16-character `<html>nope</html>` body understated the unparsable
+        round 14): the short `<html>nope</html>` body understated the unparsable
         arm, which composes to 321 against this 320 window once `_gh_said` returns its
         full `_GH_SAID_BOUND` — measured, and the reason `_GH_SAID_BOUND` is 99.
         """
