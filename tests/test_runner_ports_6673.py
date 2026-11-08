@@ -26,11 +26,13 @@ from __future__ import annotations
 import ast
 import importlib
 import inspect
+import io
 import os
 import re
 import socket
 import subprocess
 import sys
+import tokenize
 import types
 import uuid
 from pathlib import Path
@@ -967,9 +969,25 @@ def test_every_test_name_the_docstrings_name_exists():
     every backticked test-name reference out of the docstrings, and requires each
     to be a test defined here or the stem of a sibling `tests/<name>.py`. A name
     that is neither is a rename nobody followed, or a test that never existed.
+
+    ⛔ AND THE `#` COMMENTS (#11437 review, P3, F2). The AST is not the whole
+    file: `ast.get_docstring` sees docstrings only, and every exemption's REASON
+    in this file is a `#` comment — the text #10951's doctrine makes load-bearing
+    ("an exemption's REASON is what disables a guard"). Measured before this:
+    typoing a backticked name inside the reason block beside the retired
+    exemption returned `1 passed, 73 deselected`, while the same typo in a
+    docstring redded. Three comment-borne references sat covered by nothing
+    (`test_every_seam_exemption_is_consulted`,
+    `test_the_mocked_seam_is_excluded_by_the_population_predicate`,
+    `test_the_stubbed_docker_seams_are_POSIX_parseable`), so a rename referenced
+    from a reason block would have rotted with nothing to red. Comments are read
+    with `tokenize`, which is why the source is tokenized rather than scanned
+    with a regex: a `#` inside a string literal is not a comment and a `#` in a
+    docstring is already covered above.
     """
     this = Path(__file__)
-    tree = ast.parse(this.read_text(encoding="utf-8"))
+    source_text = this.read_text(encoding="utf-8")
+    tree = ast.parse(source_text)
     defined = {n.name for n in ast.walk(tree)
                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
                and n.name.startswith("test_")}
@@ -978,13 +996,17 @@ def test_every_test_name_the_docstrings_name_exists():
         if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef)):
             referenced.update(
                 re.findall(r"`(test_[A-Za-z0-9_]+)`", ast.get_docstring(node) or ""))
+    for token in tokenize.generate_tokens(io.StringIO(source_text).readline):
+        if token.type == tokenize.COMMENT:
+            referenced.update(
+                re.findall(r"`(test_[A-Za-z0-9_]+)`", token.string))
     dangling = sorted(
         name for name in referenced
         if name not in defined and not (this.parent / f"{name}.py").exists())
     assert not dangling, (
-        "these docstrings name a test that does not exist — a rename was not "
-        "followed, or the name was never real, so a reader following the "
-        "pointer greps and finds only the pointer itself:\n  "
+        "these docstrings or `#` comments name a test that does not exist — a "
+        "rename was not followed, or the name was never real, so a reader "
+        "following the pointer greps and finds only the pointer itself:\n  "
         + "\n  ".join(dangling))
 
 

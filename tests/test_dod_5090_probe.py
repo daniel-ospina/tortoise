@@ -4653,6 +4653,18 @@ _AFFIRMED = re.compile(
     r"|\b(?:not|never)\s+un(?:visited|reported|reached|walked|covered|mentioned|seen)\b"
     r"|\b(?:not|never)\s+(?:always|necessarily|certain|certainly|sure|clear"
     r"|definitely|conclusively|guaranteed)\b"
+    # ⛔ `might not` — A CUE THE TERMSET ALREADY CARRIED, omitted here until now
+    # (#11437 review, P3, F4). `negspacy==1.1.0`'s `en['pseudo_negations']`
+    # carries **`might not`** and `not only`; this alternation carried neither
+    # (the concessive arm below closes `not only`'s shape — measured, `"the walk
+    # not only visits …"` is RED). Measured GREEN before this arm: `"the walk
+    # might not visit a nested `def`'s decorators and parameter defaults"` — a
+    # HEDGE satisfying a pin that protects a TOTAL exclusion, which is the same
+    # false PASS the nine cues above exist to refuse. ⛔ SCOPED TO A COVERAGE VERB
+    # for the reason the concessive arm is: a bare `might not` fires on an honest
+    # trailing aside (`"…; this might not be the only gap"`, measured GREEN under
+    # the bare pair and GREEN here).
+    r"|\bmight\s+not\s+(?:walk|visit|reach|report)(?:s|es|ed|ing)?\b"
     # ⛔ The CONCESSIVE-SCOPE class (#11437 review, round 6, P1). `not only
     # visit` negates a DEGREE, not the visit — and the sentence's own second
     # clause then ASSERTS the coverage (`… — it also evaluates them`), which is
@@ -4708,6 +4720,32 @@ _AFFIRMED = re.compile(
     r"(?:walk|visit|reach|report)(?:s|es|ed|ing)?\b")
 
 
+# ⛔ THE DEFEATER GATE (#11437 review, P3, F5). The three AND terms above read
+# VOCABULARY, so three sentence SHAPES satisfied the pin while asserting
+# something else entirely — each measured GREEN at the head that reported them:
+#
+#   "an earlier draft of this document said the walk does not visit a nested
+#    `def`'s decorators and parameter defaults, which is false"
+#   "the walk does not visit a nested `def`'s decorators and parameter defaults;
+#    in fact it does visit them"
+#   "if the walk does not visit a nested `def`'s decorators and parameter
+#    defaults, the census would under-report"
+#
+# The first is not hypothetical in THIS document: §3.1 is built out of exactly
+# that construction ("An earlier draft of this document … **That is false**"), so
+# a §3 revision note QUOTING the old claim satisfied the pin while the same
+# paragraph refuted it — a false PASS in the direction that matters, in this
+# file's own house style. A sentence carrying a DEFEATER does not ASSERT the
+# claim: it quotes-and-refutes it, reverses it, or states it as a premise. So a
+# defeater refuses the sentence outright.
+#
+# ⚠️ ITS PRICE IS A FALSE BLOCK, taken deliberately (the file's stated policy:
+# where the two directions conflict, take the false block) and PINNED as a row —
+# an honest `"…are not visited if the outer method does not run"` reds, on the
+# same footing as `"…are never touched by the walk"`: the negation must reach a
+# coverage verb, and a conditional clause is not the pin's business.
+_DEFEATED = re.compile(r"\bis false\b|\bincorrect\b|\bin fact\b|\bif\b")
+
 def _residual_sentences(s3: str) -> list[str]:
     r"""Sentences of §3 that state the walk does NOT visit a nested def's
     decorators/defaults — the claim the pin exists to protect.
@@ -4748,6 +4786,14 @@ def _residual_sentences(s3: str) -> list[str]:
       a class pattern for negated reversers and negated privatives now, not four
       literals, but it is still a list. A ROW in `declared_open` below
       (#11437 review, P3);
+    * a QUOTE-AND-REFUTE, a self-contradiction, or a CONDITIONAL — the three
+      shapes `_DEFEATED` now refuses (#11437 review, P3, F5; each measured GREEN
+      before it, and each a ROW in `must_red` below). This is the one shape class
+      the predicate closes rather than declares, because a defeater is assertion
+      structure the vocabulary can see: `is false` / `incorrect` / `in fact` /
+      `if`. ⚠️ It does NOT make the predicate sound — a refutation that uses none
+      of those four markers (`"…, so the earlier wording was wrong"`) is still
+      GREEN, which stays in this list on the same footing as the rest;
     * a HEDGE whose cue is outside `_AFFIRMED`'s pseudo-negation termset. The
       NegEx-style list closes `not always` / `not necessarily` / `not sure` /
       `not certain` / `not clear` …, but an adverb it does not name still reads
@@ -4775,6 +4821,19 @@ def _residual_sentences(s3: str) -> list[str]:
       list — measured, `"…are never TOUCHED by the walk"` reds, because the
       negation must reach one of those four verbs to be read as governing it
       (#11437 review, round 3, P1);
+    * an honest restatement split in two by an INLINE ABBREVIATION — `"…, e.g.
+      `def inner(cb=self._pool)`, are not reported by the walk"` reds, because
+      segmentation is `split(". ")` and `e.g. ` contains it: the fragment that
+      keeps the cue loses decorator+default, and the fragment that keeps those
+      loses the cue (#11437 review, P3, F3). The real §3 ships that example as a
+      parenthetical for exactly this reason, and collapsing it inline — the doc's
+      own style elsewhere — turns a doc+code pair that still agrees into a red.
+      Declared rather than fixed: an abbreviation-aware split is a bigger change
+      than the framing it protects, and the row is in `declared_blocks` below;
+    * an honest restatement that carries a DEFEATER MARKER — `"…are not visited
+      if the outer method does not run"` reds through `_DEFEATED`, which is the
+      price of closing the quote-and-refute/conditional class in the other
+      direction (#11437 review, P3, F5). A row in `declared_blocks` below;
     * an HONEST statement whose negation and in-vocabulary verb are separated by
       PUNCTUATION or by ≥3 words — the governance window is 0–2 `\w+`, and `\w+`
       cannot span a comma, so the honest `"…are never, in the body walk,
@@ -4862,7 +4921,8 @@ def _residual_sentences(s3: str) -> list[str]:
             if "decorator" in sentence and "default" in sentence
             and _NEGATION_GOVERNS.search(sentence)
             and _COVERAGE.search(sentence)
-            and not _AFFIRMED.search(sentence)]
+            and not _AFFIRMED.search(sentence)
+            and not _DEFEATED.search(sentence)]
 
 
 def _assert_census_states_the_residual(text: str) -> None:
@@ -5228,6 +5288,38 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
         "hedge: `not necessarily`":
             "the walk does not necessarily report a nested `def`'s decorators "
             "and defaults",
+        # ⛔ `might not` — THE CUE THE TERMSET ALREADY CARRIED (#11437 review,
+        # P3, F4). Measured GREEN at the head that reported it, because the
+        # pseudo-negation alternation listed nine cues and this is NegEx's tenth
+        # (`negspacy`'s `en['pseudo_negations']` carries `might not`, read at the
+        # source, not assumed). A hedge satisfying a pin that protects a TOTAL
+        # exclusion is the false PASS the whole class exists to refuse, so the
+        # omission sat in the direction that matters.
+        "hedge: `might not`":
+            "the walk might not visit a nested `def`'s decorators and parameter "
+            "defaults",
+        # ⛔ THE CONCESSIVE WORD ORDER WITHOUT `does` (#11437 review, P3, F4's own
+        # example, which the rows above did not cover): the arm requires the cue
+        # to govern a coverage verb and `not only visits` satisfies it, while
+        # every concessive row above is spelled `does not only …`. Measured RED
+        # with the arm and GREEN with it ablated, so it is this row's executor.
+        "inverse: concessive `not only visits` (no `does`)":
+            "the walk not only visits a nested `def`'s decorators and parameter "
+            "defaults, it reports them",
+        # ⛔ THE THREE DEFEATER SHAPES (#11437 review, P3, F5), each measured GREEN
+        # at the head that reported it and RED through `_DEFEATED`. The first is
+        # this document's OWN house style — §3.1 is built on "An earlier draft of
+        # this document … **That is false**" — so a §3 revision note quoting the
+        # old claim satisfied the pin while the same paragraph refuted it.
+        "inverse: quote-and-refute — the doc quoting its own false claim":
+            "an earlier draft of this document said the walk does not visit a "
+            "nested `def`'s decorators and parameter defaults, which is false",
+        "inverse: self-contradiction — `in fact` reverses it":
+            "the walk does not visit a nested `def`'s decorators and parameter "
+            "defaults; in fact it does visit them",
+        "inverse: CONDITIONAL — the claim is a premise, not an assertion":
+            "if the walk does not visit a nested `def`'s decorators and "
+            "parameter defaults, the census would under-report",
     }
     for label, sentence in must_red.items():
         assert sentence != original, f"row {label!r} merely restates the claim"
@@ -5461,6 +5553,21 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
         "false block: concessive about the INSTRUMENT'S walk":
             "the instrument does not only walk the body: a nested `def`'s "
             "decorators and parameter defaults sit outside every walk it performs",
+        # ⛔ THE SEGMENTATION PRICE (#11437 review, P3, F3), measured RED: the split
+        # is `split(". ")`, so an inline abbreviation that contains `. ` severs the
+        # cue from the words it governs. The real §3 keeps its example in a
+        # parenthetical for exactly this reason; the row exists so the limit is a
+        # result rather than prose, and so a later abbreviation-aware split can
+        # move it into `must_stay_green`.
+        "false block: an inline `e.g.` example splits the sentence":
+            "a nested `def`'s decorators and parameter defaults, e.g. `def "
+            "inner(cb=self._pool)`, are not reported by the walk",
+        # ⛔ THE DEFEATER GATE'S PRICE (#11437 review, P3, F5), the other direction
+        # of the same rule: closing the conditional may not be free, so the price
+        # is measured and pinned instead of discovered later by an editor.
+        "false block: an honest conditional about the outer method":
+            "the walk does not visit a nested `def`'s decorators and parameter "
+            "defaults if the outer method does not run",
     }
     for label, sentence in declared_blocks.items():
         assert sentence != original, (
@@ -5533,7 +5640,13 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
              r"(?:walk|visit|reach|report)(?:s|es|ed|ing)?\b"),
             ("negated privative",
              r"\b(?:not|never)\s+un(?:visited|reported|reached|walked|covered"
-             r"|mentioned|seen)\b")):
+             r"|mentioned|seen)\b"),
+            # ⛔ The `might not` arm added for F4 is asserted by the SAME loop, so
+            # the cue that closed a measured false PASS cannot be deleted silently
+            # (#11437 review, P3). Measured: ablating it re-GREENs the
+            # `hedge: `might not`` row.
+            ("`might not` (pseudo-negation)",
+             r"\bmight\s+not\s+(?:walk|visit|reach|report)(?:s|es|ed|ing)?\b")):
         assert _arm in _pinned_affirmed.pattern, (
             f"the `{_arm_name}` alternative has left `_AFFIRMED`, so the guard "
             f"below would silently check nothing")
@@ -5547,6 +5660,27 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
             f"no `must_red` row depends on `_AFFIRMED`'s `{_arm_name}` "
             f"alternative: with it removed every row still reds, so that "
             f"alternative's closure of its shape is a claim rather than a result")
+
+    # ⛔ …and the DEFEATER GATE gets the same executor (#11437 review, P3, F5).
+    # `_DEFEATED` is an AND-side term like `_COVERAGE`, but unlike `_COVERAGE` it
+    # is NOT inert: it carries the three measured shapes above. Both facts are
+    # asserted — the markers must still be in the pattern, and at least one
+    # `must_red` row must go GREEN with the gate removed — because a gate whose
+    # markers were deleted in a rewrite would otherwise keep passing on the rows
+    # that red through `_AFFIRMED` instead.
+    _pinned_defeated = _DEFEATED
+    for _marker in (r"\bis false\b", r"\bincorrect\b", r"\bin fact\b", r"\bif\b"):
+        assert _marker in _pinned_defeated.pattern, (
+            f"the `{_marker}` marker has left `_DEFEATED`, so the shapes it "
+            f"was added for are GREEN again with nothing red")
+    monkeypatch.setattr(_this_module, "_DEFEATED",
+                        re.compile(r"\bZZZNEVERMATCH\b"))
+    _carried_defeated = [lbl for lbl, sent in must_red.items() if not _red(sent)]
+    monkeypatch.setattr(_this_module, "_DEFEATED", _pinned_defeated)
+    assert _carried_defeated, (
+        "no `must_red` row depends on `_DEFEATED`: with the gate removed every "
+        "row still reds, so the quote-and-refute / self-contradiction / "
+        "conditional closures are a claim rather than a result")
 
     # ⛔ THE PIN ITSELF MUST BE ABLE TO FAIL (#11437 review, round 2, P1).
     # Everything above pins `_residual_sentences`; this pins the ASSERTION built
@@ -5677,6 +5811,57 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
         f"substitution does not land, so the block catches its own guard and the "
         f"arm passes while proving nothing. Evaluate `_mutate` first and pass the "
         f"result into the block")
+
+    # ⛔ …and the HOIST itself is pinned, the same way and for the same measured
+    # reason (#11437 review, P3, F1). `_assert_census_states_the_residual(text)`
+    # runs unconditionally in `test_the_census_doc_states_the_same_probe_bound_the
+    # _report_does` — that hoist IS the round-2 P1 fix for #11443's dormancy. It
+    # was also the ONE fix in this PR with no distinguishing mutant: measured,
+    # deleting that line leaves `3 failed, 148 passed, 1 skipped` in a scratch
+    # copy, which is byte-identical to the UNMUTATED copy's three repo-context
+    # failures, i.e. the removal reds NOTHING. The reason is honest and unstated:
+    # the row-set test above performs the same assertion on the real doc, so the
+    # residual stays protected while the DORMANCY does not — a one-line refactor
+    # can put the call back inside an `if` and this file goes on pinning a claim
+    # from a branch that does not run, which is exactly the false PASS the hoist
+    # was written to remove.
+    # ⛔ TWO facts, both AST rather than prose: (a) a TOP-LEVEL call exists in
+    # that test's body, so a `declared is None`-only call cannot satisfy this; and
+    # (b) no call to it anywhere in that test sits inside an `If`, so a
+    # belt-and-braces duplicate beside the dormant one does not launder it.
+    def _is_residual_pin_call(node: ast.AST) -> bool:
+        return (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "_assert_census_states_the_residual")
+    pin_owner = next(
+        (node for node in ast.parse(source).body
+         if isinstance(node, ast.FunctionDef)
+         and node.name ==
+         "test_the_census_doc_states_the_same_probe_bound_the_report_does"),
+        None)
+    assert pin_owner is not None, (
+        "the test that owns the hoisted residual pin is not findable by name, "
+        "so the guard below would silently check nothing")
+    hoisted = [stmt.lineno for stmt in pin_owner.body
+               if isinstance(stmt, ast.Expr) and _is_residual_pin_call(stmt.value)]
+    conditional = [inner.lineno for node in ast.walk(pin_owner)
+                   if isinstance(node, ast.If)
+                   for inner in ast.walk(node)
+                   if _is_residual_pin_call(inner)]
+    assert hoisted, (
+        "the residual pin is no longer called at the TOP LEVEL of "
+        "`test_the_census_doc_states_the_same_probe_bound_the_report_does`: "
+        "either it was deleted, or it went back inside a branch (the "
+        "`declared is None` arm is DEAD on this tree, so a call there never runs "
+        "and the file pins a claim from a branch nobody executes — #11443's "
+        "dormancy, reinstated with the whole file green)")
+    assert not conditional, (
+        f"`_assert_census_states_the_residual` is called INSIDE an `if` at "
+        f"line(s) {conditional} of "
+        f"`test_the_census_doc_states_the_same_probe_bound_the_report_does`: the "
+        f"residual is a property of the WALK, not of whether the scan declares a "
+        f"bound, so the call must run on every tree. On this tree that branch is "
+        f"dead, which is the false PASS this hoist removed")
 
 
 def test_the_census_doc_collects_what_the_file_collects():
