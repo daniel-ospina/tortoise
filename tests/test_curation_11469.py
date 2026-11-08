@@ -1470,3 +1470,107 @@ def test_the_off_switch_is_not_read_from_an_ambient_export():
     """Round-25: inherited `TORTOISE_CURATE_OFF` reddened 23 tests on correct code."""
     assert C.off_switch_active(False) is False
     assert C.off_switch_active(True) is True
+
+
+# ── round-26 review findings ──────────────────────────────────────────────
+
+
+def test_a_falsy_but_present_migration_key_uses_the_writers_derivation(tmp_path):
+    """Round-26: `_pending_sections` tested `is None`, the writer `or`. With `""` the
+    two sides derived DIFFERENT keys, so two rows collapsed onto one (the second never
+    reached the wire) and every re-run re-sent them."""
+    a = {"kind": "decision", "content": "first", "migrationKey": ""}
+    b = {"kind": "decision", "content": "second", "migrationKey": ""}
+    sections, skipped, dups = C._pending_sections({"points": [a, b], "sources": [
+        {"url": "https://x.test/1", "sourceKind": "web", "migrationKey": 0}]},
+        C.Ledger(tmp_path / "l.jsonl", target="new"))
+    assert skipped == 0 and dups == 0
+    keys = [p["migrationKey"] for p in sections["points"]]
+    assert keys == [C._fallback_key("points", a), C._fallback_key("points", b)]
+    assert sections["sources"][0]["migrationKey"] == C._fallback_key(
+        "sources", {"url": "https://x.test/1", "sourceKind": "web"})
+
+
+def test_the_ledger_records_what_the_target_accepted_not_what_was_attempted(tmp_path):
+    """Round-26: a writer that reports a SUBSET without raising (legal under
+    `write_sections`' contract) must not have every attempted row ledgered."""
+    class SubsetWriter:
+        def write_sections(self, target_graph, sections):
+            return {"written": [sections["points"][0]["migrationKey"]]}
+
+    plan = C.build_plan([row("p1", kind="decision", content="a"),
+                         row("p2", kind="decision", content="b")],
+                        source_graph="old", target_graph="new", packs={})
+    led = C.Ledger(tmp_path / "l.jsonl", target="new")
+    res = C.run_plan(plan, writer=SubsetWriter(), ledger=led, apply=True, graph_rows=ROWS)
+    assert res.written == 1 and len(led) == 1
+
+
+@pytest.mark.parametrize("value", ["0", "no", "off", "", "false"])
+def test_only_a_truthy_vocabulary_disarms_the_run(ledger, monkeypatch, value):
+    """Round-26: the docstring promises anything else leaves the run ARMED; only "1"
+    was ever exercised, so widening the vocabulary would have passed."""
+    monkeypatch.setenv(C.OFF_SWITCH_ENV, value)
+    assert C.off_switch_active(False) is False
+
+
+def test_a_ledger_path_that_cannot_be_read_is_a_refusal_not_a_traceback(tmp_path):
+    """Round-26: `--ledger <a directory>` escaped as IsADirectoryError/OSError."""
+    with pytest.raises(C.CurationRefused, match=r"cannot be read"):
+        C.Ledger(tmp_path, target="new")          # a directory, not a file
+
+
+def test_the_cli_exit_codes_pin_every_failure_arm(monkeypatch, tmp_path):
+    """Round-26: returning 0 from any of the three failure arms left the suite green."""
+    mod = _tool_module()
+    state = {"graphs": [{"graph_id": "g_a", "stable_id": "g_a", "namespace": "org_x_g_a"}]}
+
+    def call(name, args):
+        if name == "tortoise_graph_overview" and args.get("section") == "graphs":
+            return {"result": state["graphs"]}       # the identity rows the guard reads
+        if name == "tortoise_query":
+            return {"result": [{"id": "p1", "kind": "decision", "content": "c"}], "total": 1}
+        return {"result": []}
+    monkeypatch.setattr(mod, "_live_call_tool", call)
+    # the refs must be spellings the ROWS name, or every arm below would be the
+    # identity refusal and the other two arms would go untested
+    base = ["plan", "--graph", ROWS[0]["namespace"], "--target", ROWS[1]["namespace"],
+            "--no-verify-read", "--ledger", str(tmp_path / "l.jsonl"),
+            "--out", str(tmp_path / "p.json")]
+
+    # 1. the identity guard refuses: the rows are the AUTHORITY, and none of them
+    #    names the refs, so an applying run is refused rather than resolved by shape
+    state["graphs"] = [{"graph_id": "g_other", "stable_id": "g_other",
+                        "namespace": "org_y_g_other"}]
+    assert mod.main([*base, "--apply"]) == 3
+
+    class StopWriter:
+        def write_sections(self, target_graph, sections):
+            return {"written": [p["migrationKey"] for p in sections["points"]][:1],
+                    "stopped": "off-switch flipped mid-run"}
+
+    class RefuseWriter:
+        def write_sections(self, target_graph, sections):
+            exc = C.CurationRefused("ingest refused the batch")
+            exc.written_keys = []
+            raise exc
+
+    # 2. a MID-RUN stop and 3. a MID-RUN refusal are both failures
+    for i, (writer, needle) in enumerate(((StopWriter(), "STOPPED"), (RefuseWriter(), "REFUSED"))):
+        state["graphs"] = ROWS          # resolvable identity, so the run reaches the write
+        monkeypatch.setattr(mod.C, "IngestWriter", lambda *a, _w=writer, **k: _w)
+        # a FRESH ledger per arm: reusing one makes the second arm a no-op
+        # (skipped_known=1, pending=0) and the writer is never reached
+        args = [*base[:-4], "--ledger", str(tmp_path / f"l{i}.jsonl"),
+                "--out", str(tmp_path / f"p{i}.json"), "--apply"]
+        assert mod.main(args) == 3, f"{needle} must be a failure exit"
+
+
+def test_apply_without_graph_is_refused_before_any_read(monkeypatch, capsys):
+    """Round-26: the guard was unpinned, and two comments claimed it was covered.
+    Removing it turns a usage error (2) into a full read of the capped source."""
+    mod = _tool_module()
+    monkeypatch.setattr(mod, "_live_call_tool",
+                        lambda *a, **k: pytest.fail("must not read (or write) a graph"))
+    assert mod.main(["plan", "--target", "org_x_g_new", "--apply"]) == 2
+    assert "--graph" in capsys.readouterr().err

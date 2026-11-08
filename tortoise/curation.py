@@ -967,6 +967,14 @@ class Ledger:
                             "file (truncate to the last complete line) before re-running") from exc
         except FileNotFoundError:
             pass
+        except OSError as exc:
+            # `--ledger <a directory>` / an unreadable file: a usage error on the
+            # operator's own path, so it owes the same refusal + remedy as a damaged
+            # line rather than an IsADirectoryError traceback out of main().
+            raise CurationRefused(
+                f"ledger {self.path!r} cannot be read ({type(exc).__name__}: {exc}); "
+                "point --ledger at a writable FILE path, or remove the obstacle"
+            ) from exc
 
     def __contains__(self, key: object) -> bool:
         return (self.target, key) in self._keys
@@ -1049,8 +1057,12 @@ def _pending_sections(
         keyed: list[Mapping[str, Any]] = []
         queued: set[str] = set()
         for item in items:
+            # `not key`, not `is None`: the writer falls back on ANY falsy key
+            # (`p.get("migrationKey") or _fallback_key(...)`), so `""`/`0`/`False` here
+            # would give the planner and the writer two different keys — the round-25
+            # defect one spelling over, with the same two consequences.
             key = item.get("migrationKey")
-            if key is None:
+            if not key:
                 # Sources carry no key on the node (#3998), so their ledger key is
                 # derived from the url, which is what the target merges on.
                 # kind AND url: two Source rows can share a url with different
