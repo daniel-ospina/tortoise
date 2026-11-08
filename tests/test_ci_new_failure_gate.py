@@ -943,12 +943,19 @@ def test_the_rail_and_the_gate_agree_on_the_same_fixture(tmp_path):
 def test_the_rate_door_admits_a_PATH_inside_the_pytest_parameter_space(tmp_path):
     r"""A main-red on a PATH-PARAMETRISED id must exempt, not read as PR-introduced.
 
-    The measured false BLOCK (PR #11508, agent-infra#3690): `_NODEID_RE`'s parameter
-    space spelled `[A-Za-z0-9_\[\]\-.:]` and carried no `/`, so main's union-rate row
-    for `…[tools/build_site_icons.py]` matched the row shape, then was DROPPED as
-    malformed. With the row gone, `decide` saw the id absent from `main_rates` and
-    said *"absent from main's failure set … introduced by this PR"* — blocking a
-    failure on a file the PR never touched, for every path-parametrised id.
+    The measured false BLOCK (PR #11508, agent-infra#3690): `_NODEID_RE`'s `rest`
+    class spelled the parameter-SYNTAX characters `[A-Za-z0-9_\[\]\-.:]` and carried
+    no `/`, so main's union-rate row for `…[tools/build_site_icons.py]` matched the
+    row shape, then was DROPPED as malformed. With the row gone, `decide` saw the id
+    absent from `main_rates` and said *"absent from main's failure set … introduced
+    by this PR"* — blocking a failure on a file the PR never touched, for every
+    path-parametrised id.
+
+    ⛔ THIS PINS ONE CHARACTER, NOT COMPLETENESS. `rest` is an allowlist of parameter
+    SYNTAX, not the whole parameter space: a SPACE-bearing param
+    (`[chromium-Claude Desktop]`), a `\`, or a non-ASCII test name is still dropped
+    upstream and still yields the identical BLOCK (agent-infra#3691, open). So a red
+    here naming some OTHER character is that residual, not a regression of this case.
 
     ⛔ THE ASYMMETRY IS WHAT HID IT: main's SIGNATURE row for the same id parses
     through `is_failure_key_loose`, which always admitted the path — so the signature
@@ -979,10 +986,12 @@ def test_the_rate_door_admits_a_PATH_inside_the_pytest_parameter_space(tmp_path)
     )
     assert "VERDICT\tCLEAN" in rail.stdout, (
         "the shared decision did not exempt a main-red whose pytest parameter is a "
-        "PATH. Either a predicate OLDER than agent-infra@cb7de2572 (#3690) is in "
-        "force — the workflow's `.ci-predicate` pin, or the local "
-        "`scripts/ci_exemption.py` pointer — or the parameter space regressed again. "
-        "Both reinstate a false BLOCK on failures the PR cannot reach.\n"
+        "PATH. Only ONE thing can cause this: the `scripts/ci_exemption.py` this box "
+        "resolves PREDATES agent-infra@cb7de2572 (#3690), or `rest` regressed again. "
+        "⛔ The workflow's `.ci-predicate` pin is NOT a candidate — this case never "
+        "reads it (see the docstring), so inspecting or moving that pin cannot change "
+        "this assertion. Fix the thing that ran: update the agent-infra checkout this "
+        "`scripts/` pointer resolves (`tools/link_agent_infra_scripts.py`).\n"
         + rail.stdout + rail.stderr
     )
     assert PATH_PARAM_ID in rail.stdout, (

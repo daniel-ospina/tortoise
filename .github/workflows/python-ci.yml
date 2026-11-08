@@ -4864,9 +4864,9 @@ jobs:
       #
       # ⛔ THE PIN IS PART OF THE PREDICATE'S BEHAVIOUR, so a stale one silently
       # changes the VERDICT (#3690, agent-infra). `ci_exemption.py` reads main's union
-      # rates through `_NODEID_RE`, whose parameter space spelled
-      # `[A-Za-z0-9_\[\]\-.:]` — it had no `/`, so EVERY main rate row for a
-      # path-PARAMETRISED pytest id was parsed, then DROPPED as malformed:
+      # rates through `_NODEID_RE`, whose `rest` class spelled the parameter-SYNTAX
+      # characters `[A-Za-z0-9_\[\]\-.:]` — and carried no `/`, so EVERY main rate
+      # row for a path-PARAMETRISED pytest id was parsed, then DROPPED as malformed:
       #
       #   tests/test_entry_point_python_guard.py::test_entry_point_guards_the_
       #   interpreter_before_its_imports[tools/build_site_icons.py]
@@ -4883,8 +4883,19 @@ jobs:
       #
       # Bump = the minimal commit carrying the fix (`agent-infra#3690`, an ancestor of
       # agent-infra `main`), not `main` itself — the pin still cannot track another
-      # repo's head. Revert only by pointing at a predicate that admits a path in the
-      # parameter space; a pin older than `cb7de2572` reinstates the false BLOCK.
+      # repo's head. Revert only by pointing at a predicate whose `rest` class admits
+      # a `/`; a pin older than `cb7de2572` reinstates the false BLOCK.
+      #
+      # ⛔ DO NOT READ THIS BUMP AS "THE PARAMETER SPACE IS NOW ADMITTED". `rest` is an
+      # ALLOWLIST of parameter-SYNTAX characters, not the whole space — the pinned
+      # module says so itself and carries an open KNOWN RESIDUAL for it
+      # (agent-infra#3691): a SPACE-bearing param (`[chromium-Claude Desktop]`), a
+      # `\`, or a non-ASCII test name is still dropped from main's rate table and
+      # still produces this same "absent from main's failure set" BLOCK. So if a
+      # future false BLOCK names a DIFFERENT character, the pin is not the regression
+      # — it is that residual, and the fix belongs in `rest` (or the producer), not
+      # here. Sending a fixer to the pin for a space is the trap this paragraph is
+      # written to prevent.
       - name: Check out the shared CI predicate (pinned, #9984)
         uses: actions/checkout@v4
         with:
