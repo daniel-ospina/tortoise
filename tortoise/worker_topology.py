@@ -251,14 +251,33 @@ RELOAD_FLAG = "--reload"
 UVICORN_FLAG_OPTIONS: frozenset[str] = frozenset({
     "--reload",
     "--access-log",
+    "--no-access-log",
     "--use-colors",
+    "--no-use-colors",
     "--proxy-headers",
+    "--no-proxy-headers",
     "--server-header",
+    "--no-server-header",
     "--date-header",
+    "--no-date-header",
     "--version",
     "--reset-contextvars",
     "--factory",
 })
+
+#: ⛔ The ``--no-*`` SPELLINGS ARE FLAGS TOO, and forgetting them was a
+#: MEASURED fail-open. Five of uvicorn 0.52.1's boolean options are declared
+#: ``"--x/--no-x"``, so click puts the negated form in ``secondary_opts`` while
+#: ``opts`` carries only the positive one. A table built from ``opts`` alone
+#: therefore treats ``--no-access-log`` as VALUE-TAKING and swallows the next
+#: token — so ``--no-access-log --workers=4`` read as "no worker count" and the
+#: ``--lifespan off`` guard certified one worker while uvicorn served FOUR
+#: ungated processes on an embedded database, with NO ambient
+#: ``$WEB_CONCURRENCY`` needed (the swallowed token IS the flag). Both readings
+#: of the same table were wrong in opposite directions: the count was masked, and
+#: ``--no-access-log --reload`` was misread as "no reloader" so a legitimate dev
+#: topology was REFUSED. ``test_the_uvicorn_flag_set_is_uvicorns_own`` now
+#: asserts ``opts`` **and** ``secondary_opts``, so this half cannot drift again.
 
 #: click's ``context_settings={"auto_envvar_prefix": "UVICORN"}``
 #: (``uvicorn/main.py``) makes this variable a real input for ``--reload`` — so
@@ -507,6 +526,16 @@ def _parsed_options(argv: Sequence[str] | None = None) -> list[tuple[str, str | 
                 index += 1
                 continue
             parsed.append((token, args[index + 1] if index + 1 < len(args) else None))
+            index += 2
+            continue
+        if token.startswith("-") and token != "-":
+            # ⛔ ANY other dash token consumes the next token, exactly as
+            # `entrypoint.sh`'s scan does. It used to be ignored, so the two arms
+            # disagreed on `-x --workers=1` (shell 4 / Python 1) and on
+            # `-- --workers=2`. Every such argv makes click exit 2, so no
+            # topology is misdescribed TODAY — but `_AGREEMENT_TABLE` is what
+            # claims the two arms cannot drift, and a uvicorn that grows a short
+            # value-taking option would make the next divergence a LIVE one.
             index += 2
             continue
         index += 1

@@ -933,6 +933,28 @@ _AGREEMENT_TABLE: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
      {"WEB_CONCURRENCY": "4"}),
     # …and the control: the value given BEFORE the flag is still a real flag.
     (("uvicorn", "app:app", "--host", "0.0.0.0", "--workers=2"), {}),
+    # ⛔ THE `--no-*` HALF of the flag table. uvicorn's booleans are declared
+    # `"--x/--no-x"`, so `secondary_opts` is where the negated spelling lives; a
+    # table read from `opts` alone calls `--no-access-log` VALUE-TAKING and it
+    # swallows the workers flag — no ambient `$WEB_CONCURRENCY` required, because
+    # the swallowed token IS the flag. MEASURED on the pinned 0.52.1: this shape
+    # started FOUR ungated processes behind a banner that certified one.
+    (("uvicorn", "app:app", "--no-access-log", "--workers=4"),
+     {"WEB_CONCURRENCY": "4"}),
+    (("uvicorn", "app:app", "--no-date-header", "--workers", "4"),
+     {"WEB_CONCURRENCY": "4"}),
+    (("uvicorn", "app:app", "--no-proxy-headers", "--host", "--workers=1"),
+     {"WEB_CONCURRENCY": "4"}),
+    (("uvicorn", "app:app", "--no-use-colors", "--workers=4"), {}),
+    # ⛔ And the DASH tokens that are not long options: the shell consumes the
+    # next token for ANY `-…` it does not recognise, and `_parsed_options` used to
+    # ignore them entirely — so the two arms disagreed here (shell 4 / Python 1
+    # for `-x --workers=1`, and the same split on `--`). Every such argv makes
+    # click exit 2, so no live topology is misdescribed today; the rows exist
+    # because the table is the thing that claims these arms cannot drift.
+    (("uvicorn", "app:app", "-x", "--workers=1"), {"WEB_CONCURRENCY": "4"}),
+    (("uvicorn", "app:app", "--", "--workers=2"), {"WEB_CONCURRENCY": "4"}),
+    (("uvicorn", "app:app", "-h", "--workers=2"), {"WEB_CONCURRENCY": "4"}),
 )
 
 
@@ -1082,6 +1104,10 @@ def test_the_lifespan_off_refusal_covers_counts_the_shell_CANNOT_see():
         # here, so the real count reaches the guard and the boot is refused.
         (("uvicorn", "app:app", "--host", "--workers=1",
           "--lifespan", "off"), {"WEB_CONCURRENCY": "4"}),
+        (("uvicorn", "app:app", "--no-access-log", "--workers=4",
+          "--lifespan", "off"), {}),
+        (("uvicorn", "app:app", "--no-date-header", "--workers", "4",
+          "--lifespan=off"), {}),
         (("uvicorn", "app:app", "--app-dir", "--workers=1",
           "--lifespan", "off"), {"WEB_CONCURRENCY": "4"}),
         (("uvicorn", "app:app", "--root-path", "--workers=1",
@@ -1533,13 +1559,23 @@ def test_the_uvicorn_flag_set_is_uvicorns_own():
     """
     from uvicorn.main import main as uvicorn_main
 
+    # ⛔ BOTH halves of a boolean option's spelling. Five of uvicorn's booleans
+    # are declared `"--x/--no-x"`, so click keeps the NEGATED form in
+    # `secondary_opts` and `opts` carries only the positive one. A pin that reads
+    # `opts` alone is green over an incomplete table — which is exactly how
+    # `--no-access-log --workers=4` became a permitted FOUR-worker lifespan-off
+    # boot (the flag was read as value-taking, swallowed the workers token, and
+    # the guard certified one) and `--no-access-log --reload` a refused dev
+    # topology. MEASURED on the pinned 0.52.1.
     flags = set()
     for param in uvicorn_main.params:
-        opts = [o for o in getattr(param, "opts", ()) if o.startswith("--")]
-        if not opts:
+        if not (getattr(param, "is_flag", False)
+                or getattr(param, "flag_value", None)):
             continue
-        if getattr(param, "is_flag", False) or getattr(param, "flag_value", None):
-            flags.update(opts)
+        for spelling in (*getattr(param, "opts", ()),
+                         *getattr(param, "secondary_opts", ())):
+            if spelling.startswith("--"):
+                flags.add(spelling)
     assert flags == set(wt.UVICORN_FLAG_OPTIONS)
 
 

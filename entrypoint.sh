@@ -489,9 +489,22 @@ _uvicorn_flag_option() {
     # `--reload --workers 4` read as "no workers value" (the reloader swallowed
     # it) and the exported count fell through to `$WEB_CONCURRENCY` — caught by
     # `_AGREEMENT_TABLE`, which is exactly why both arms run one table.
+    #
+    # ⛔ The `--no-*` forms are FLAGS too. Five of uvicorn's booleans are declared
+    # `"--x/--no-x"`, so click keeps the negated spelling in `secondary_opts` and
+    # a table transcribed from `opts` alone reads `--no-access-log` as
+    # VALUE-TAKING — it then swallows the next token, so `--no-access-log
+    # --workers=4` reads as "no count" and the lifespan-off guard certifies ONE
+    # worker while uvicorn serves FOUR ungated processes (MEASURED, no ambient
+    # `$WEB_CONCURRENCY` needed), and `--no-access-log --reload` is misread as
+    # "no reloader", refusing a legitimate dev topology. Pinned against the
+    # parser's `opts` AND `secondary_opts` by
+    # `test_the_uvicorn_flag_set_is_uvicorns_own`.
     case "$1" in
-        --reload|--access-log|--use-colors|--proxy-headers|--server-header\
-        |--date-header|--version|--reset-contextvars|--factory) return 0 ;;
+        --reload|--access-log|--no-access-log|--use-colors|--no-use-colors\
+        |--proxy-headers|--no-proxy-headers|--server-header|--no-server-header\
+        |--date-header|--no-date-header|--version|--reset-contextvars\
+        |--factory) return 0 ;;
     esac
     return 1
 }
