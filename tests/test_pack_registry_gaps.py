@@ -787,8 +787,25 @@ class TestRelationWriteVerdict:
         assert {tuple(r["write_paths"]) for r in relations} == {("operator",)}
 
     def test_shipped_catalog_reports_the_legacy_relations(self):
-        """Regression pin on the real packs: the 4 legacy `pm` relations
-        bind no mechanism and must be REPORTED."""
+        """Regression pin on the real packs: the legacy `pm` rows are RESOLVED,
+        not silenced (#11083).
+
+        This pin used to assert the opposite — that all four `pm` rows
+        (`blocks`, `partOfSprint`, `assignedTo`, `onBoard`) came back
+        `predicate-not-in-allowlist`. #11083 resolved them under #2766's
+        three-layer convention: three gain a `mechanism` + a canonical meaning
+        (so they bind the operator/structural write path), and `onBoard` — a
+        VIEW over cards, recomputed from `cardMoved` — keeps its declaration
+        with `declarationOnly: true` and a printed reason.
+
+        What must stay true, and is asserted here:
+          * the declared POPULATION does not shrink to make the count green
+            (36 relations before and after — nothing deleted, #11083 Target);
+          * no shipped row is `predicate-not-in-allowlist` — the state #2766
+            calls "the declaration gap" must be empty in the shipped catalog;
+          * the one acknowledged declaration is `onBoard`, and it carries the
+            reason the census prints (`declarationOnlyReason`).
+        """
         from tortoise.pack_registry import (
             RELATION_WRITE_VERDICTS,
             default_packs_dir,
@@ -799,15 +816,30 @@ class TestRelationWriteVerdict:
         relations = reg.list_relations()
         # Every verdict is one the schema declares — the vocabulary is closed.
         assert {r["write_verdict"] for r in relations} <= set(RELATION_WRITE_VERDICTS)
+        assert len(relations) == 36, (
+            "the declared relation population must not be reduced by deleting "
+            f"a declaration to make the verdict counts green, got {len(relations)}"
+        )
         reported = {
             (r["pack"], r["predicate"])
             for r in relations
             if r["write_verdict"] == "predicate-not-in-allowlist"
         }
-        assert reported == {
-            ("pm", "blocks"), ("pm", "partOfSprint"),
-            ("pm", "assignedTo"), ("pm", "onBoard"),
-        }, reported
+        assert reported == set(), reported
+        acknowledged = {
+            (r["pack"], r["predicate"])
+            for r in relations
+            if r["write_verdict"] == "declaration-only"
+        }
+        assert acknowledged == {("pm", "onBoard")}, acknowledged
+        on_board = next(
+            r for r in relations
+            if r["pack"] == "pm" and r["predicate"] == "onBoard"
+        )
+        assert on_board.get("declarationOnlyReason"), (
+            "`declarationOnly: true` without a printable reason is a SILENCER, "
+            "not a disposition (#11083 R7)"
+        )
 
 
 class TestListConnectors:
