@@ -841,7 +841,8 @@ def test_a_stores_declaration_that_does_not_answer_is_refused():
     """`#11492`: every declaration answers row 2's question, and `load()` refuses a shrug.
 
     Row 2 is *"is every stored vector on a label the query leg can serve?"*, and the one fact it
-    needs — WHERE the vector lands — cannot be derived for most writers (a store is not always a
+    needs — WHERE the vector lands — cannot be derived for most writers (15 of the 20 outside-gate
+    writers name no usable label in their own Cypher, because a store is not always a
     `MERGE|CREATE (:Label` in the writer's own body: the label may sit in a `MATCH` the derivation
     does not credit, in a module-level constant, behind a property-map merge, behind a store
     delegated to another writer (`_index_process_unit`), in a writer that only BUILDS a clause
