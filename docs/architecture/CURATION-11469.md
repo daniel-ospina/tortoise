@@ -25,7 +25,7 @@ Two measured facts govern the risk:
   a migration here is moving the only copy of a tenant's data.
 
 Code: `tortoise/curation.py` (classification + guards + additive writer) and
-`tools/curate_graph.py` (the CLI). Tests: `tests/test_curation_11469.py` (93 tests).
+`tools/curate_graph.py` (the CLI). Tests: `tests/test_curation_11469.py` (95 tests).
 
 ## The inventory — measured 2026-11-08 against `live-v4`
 

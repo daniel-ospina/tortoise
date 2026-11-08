@@ -458,6 +458,23 @@ def cmd_plan(args: argparse.Namespace) -> int:
     return 0
 
 
+def _page_size(text: str) -> int:
+    """`--page-size` must be a USAGE error when it is not a legal size.
+
+    Unvalidated, `--page-size 0` reached the surface, came back as
+    `{"error": "limit must be >= 1"}`, and surfaced as "refusing to report an empty
+    graph" with a traceback (exit 1) — a usage mistake reported as a data verdict.
+    """
+    import argparse as _argparse
+    try:
+        val = int(text)
+    except ValueError as exc:
+        raise _argparse.ArgumentTypeError(f"not an integer: {text!r}") from exc
+    if val < 1:
+        raise _argparse.ArgumentTypeError(f"must be >= 1 (got {val})")
+    return val
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Curation pass for our own memory (#11469)")
     ap.add_argument("action", choices=["inventory", "plan"])
@@ -468,7 +485,7 @@ def main(argv: list[str] | None = None) -> int:
                                   "node id, disposition, the rule's reason, pack) — the artifact "
                                   "a row-by-row review of the plan actually needs")
     ap.add_argument("--ledger", help="ledger path (default ~/.tortoise/curate-11469-ledger.jsonl)")
-    ap.add_argument("--page-size", "--page", dest="page", type=int, default=PAGE,
+    ap.add_argument("--page-size", "--page", dest="page", type=_page_size, default=PAGE,
                     help=f"rows per read (default {PAGE}). This is a page SIZE, not a "
                          "1-based page number: a small value makes the read take many calls")
     ap.add_argument("--apply", action="store_true", help="actually write (default: plan only)")

@@ -627,8 +627,10 @@ def _canonical_from_row(row: Mapping[str, Any]) -> str | None:
               row.get("name")]
     ident = next((f for f in fields if f and str(f).casefold() != _DEFAULT_SENTINEL), None)
     if not ident:
-        ident = next((f for f in fields if f), None)
-    if not ident:
+        # ONLY the sentinel remains: it names the tenant graph without identifying it,
+        # so it is NOT an identity. Returning "default" let a row set of
+        # `[{"graph_id": "default"}, {"namespace": "team_x"}]` canonically distinguish
+        # the tenant graph from `team_x` — the in-place fail-open, one row shape over.
         return None
     # EVERY row collapses to its id tail. Returning the namespace string itself
     # (while `g_<id>` returns the bare id) made two spellings of one graph compare
@@ -943,9 +945,10 @@ def _pending_sections(
     """Split a bundle into what this target has NOT seen, and tote up the rest.
 
     Returns ``(sections, skipped_known, duplicate_rows)``. `skipped_known` is a
-    LEDGER fact; `duplicate_rows` counts rows this READ repeats (two :Source nodes
-    sharing url+kind — `sdk.list_sources` has no GROUP BY). Conflating the two is
-    how a row never sent got reported as "already migrated".
+    LEDGER fact; `duplicate_rows` counts rows this PLAN repeats (the same Source
+    twice — not producible by `sdk.list_sources`, which groups by
+    `(url, sourceKind)`, but reachable from a hand-built plan or another reader).
+    Conflating the two is how a row never sent got reported as "already migrated".
     """
     # BOTH sections are pending-tracked: a carried Source that never reaches the
     # wire is exactly the silent no-op this pass must not have.
@@ -976,10 +979,11 @@ def _pending_sections(
             if key in ledger:
                 continue
             if any(k.get("migrationKey") == key for k in keyed):
-                # A DUPLICATE within this read, not a row already in the target: two
-                # :Source nodes can share (url, kind) — `sdk.list_sources` has no
-                # GROUP BY — and counting it as `skipped_known` would claim a
-                # migration that never happened.
+                # A DUPLICATE within this read, not a row already in the target. The
+                # live read path groups Sources by (url, sourceKind) — `sdk.list_sources`
+                # returns `count(p)` — so this cannot arise from `read_sources`; it is
+                # reachable from a hand-built plan or another reader, and counting it as
+                # `skipped_known` would claim a migration that never happened.
                 duplicates += 1
                 continue
             keyed.append({**item, "migrationKey": key})

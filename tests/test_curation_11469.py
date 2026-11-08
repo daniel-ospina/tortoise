@@ -829,7 +829,7 @@ def test_the_entry_point_reader_refuses_a_zero_or_short_point_read():
         mod.MCPReader(short, None).read_points()
 
 
-def test_an_unqualified_read_is_never_labelled_default(monkeypatch):
+def test_an_unqualified_read_is_never_labelled_default(monkeypatch, tmp_path):
     """Round-9: an omitted `graph` reads the CREDENTIAL's own graph (#10084), so a
     report saying "default" states the opposite — and the inventory and the plan
     must use the SAME label, or one artifact contradicts itself."""
@@ -842,8 +842,12 @@ def test_an_unqualified_read_is_never_labelled_default(monkeypatch):
             return {"result": [{"url": "https://x/y", "sourceKind": "article"}]}
         return {"result": []}
     monkeypatch.setattr(mod, "_live_call_tool", call)
-    rc = mod.main(["inventory", "--out", "/dev/null"])
+    rc = mod.main(["inventory", "--out", str(tmp_path / "inv.json")])
     assert rc == 0
+    report = json.loads((tmp_path / "inv.json").read_text())
+    # the LABEL itself, not just "it ran"
+    assert report["graph"] == "(credential-bound)"
+    assert report["census"]["source_graph"] == "(credential-bound)"
 
 
 def test_the_unqualified_label_is_credential_bound_everywhere():
@@ -870,9 +874,11 @@ def test_the_fallback_vocabulary_matches_the_real_refusal_producers():
 
 
 def test_a_duplicate_source_row_is_not_reported_as_already_migrated(tmp_path):
-    """Round-10: two `:Source` nodes sharing (url, kind) are two carry decisions but
-    one write; counting the second as `skipped_known` claims a migration that never
-    happened (`sdk.list_sources` has no GROUP BY)."""
+    """Round-10/17: a plan carrying the same Source twice is two carry decisions but
+    ONE write; counting the second as `skipped_known` claims a migration that never
+    happened. NOTE this shape cannot come from `read_sources` — `sdk.list_sources`
+    groups by (url, sourceKind) — it comes from a hand-built plan or another reader;
+    the counter exists so the arithmetic reconciles either way."""
     plan = C.build_plan(
         [row("https://x/y", node_type="source", kind="article", content="https://x/y"),
          row("https://x/y", node_type="source", kind="article", content="https://x/y")],
@@ -1178,6 +1184,10 @@ def test_a_write_flag_on_inventory_is_refused_not_ignored(monkeypatch, capsys):
     monkeypatch.setattr(mod, "_live_call_tool", lambda *a, **k: {"result": []})
     assert mod.main(["inventory", "--apply"]) == 2
     assert "apply only to `plan`" in capsys.readouterr().err
+    # EVERY write flag, not just the one that happened to be checked first
+    for flag in (["--ledger", "/tmp/x.jsonl"], ["--target", "org_x_g_new"]):
+        assert mod.main(["inventory", *flag]) == 2
+        assert "apply only to `plan`" in capsys.readouterr().err
 
 
 def test_inventory_writes_the_row_artifact_it_advertises(monkeypatch, tmp_path):
@@ -1203,3 +1213,21 @@ def test_the_page_flag_is_documented_as_a_page_size():
     with contextlib.suppress(SystemExit), contextlib.redirect_stdout(buf):
         mod.main(["--help"])
     assert "page SIZE" in buf.getvalue()
+
+
+def test_a_row_set_whose_only_spelling_is_the_sentinel_has_no_identity():
+    """Round-17: the sentinel fell through to a literal "default" identity, so a
+    tenant row exposing no namespace still distinguished `default` from `team_x`."""
+    rows = [{"graph_id": "default"}, {"namespace": "team_org1"}]
+    assert C.canonical_graph_id("default", rows) is None
+    with pytest.raises(C.CurationRefused):
+        C.assert_distinct_graphs("default", "team_org1", graph_rows=rows)
+
+
+def test_an_illegal_page_size_is_a_usage_error():
+    """Round-17: `--page-size 0` reached the surface and came back as
+    "refusing to report an empty graph" with a traceback, not as a usage error."""
+    mod = _tool_module()
+    with pytest.raises(SystemExit) as exc:
+        mod.main(["inventory", "--page-size", "0"])
+    assert exc.value.code == 2
