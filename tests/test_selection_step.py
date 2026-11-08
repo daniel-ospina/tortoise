@@ -1319,17 +1319,60 @@ def test_a_retry_that_raises_after_the_re_bind_keeps_the_first_arms_capture(
     block reds on the assertion that names it (`story`, `embed_list`,
     `mention_s2_stats`), which is the "restores only some bindings" mutant this
     exists to catch.
+
+    ⛔ AND THE TWO ARM COUNTERS MUST DISAGREE (review round 2, P3). The first
+    fixture chunked the transcript ONCE per arm and neither chunk failed, so
+    arm A, arm B and their sum were all `0` and deleting
+    `failed_chunks = arm["failed_chunks"]` left this test GREEN — the exact
+    `0 + 0 == 0` trap `test_the_chunk_counters_cover_BOTH_arms` documents. Arm
+    B's FIRST chunk now raises (caught by `_arm_extract`'s own handler) while
+    its SECOND still yields a narrative, so the restored `failed_chunks` is the
+    only way to read `0` instead of `0 + 1`.
     """
     def _boom(_metrics):
         raise RuntimeError("the retry's tail exploded")
 
     monkeypatch.setattr(extractor_v2, "_rate_text", _boom)
+    monkeypatch.setattr(extractor_v2.time, "sleep", lambda _s: None)
+    monkeypatch.delenv("TORTOISE_RENARRATE_KEEP_RATE", raising=False)
     # VET is armed so `vet_s2_stats` is arm-dependent: arm A's list is empty
     # (nothing to judge) while arm B's is not, so the restore is OBSERVABLE.
     # With VET off both arms record `{}` and the mutation is invisible.
     monkeypatch.setenv("TORTOISE_VET", "1")
-    model = _Scripted(
+
+    class _SecondArmFirstChunkFails(_Scripted):
+        """Arm B's first chunk raises; its second chunk still yields a story.
+
+        Keyed on the prompt, never on a call counter: `_complete` retries the
+        SAME prompt, so a counter would take the retries — and arm B's second
+        chunk — down with it, emptying the arm that must re-bind `embed_list`.
+        """
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._seen: list[str] = []
+            self._fail: str | None = None
+
+        def complete(self, *, system, user, max_tokens=None):
+            if "STORY SUMMARIZER" not in system:
+                return super().complete(system=system, user=user,
+                                        max_tokens=max_tokens)
+            key = system + "\x00" + user
+            if key not in self._seen:
+                self._seen.append(key)
+            if self._fail is None and len(self._seen) == 3:
+                self._fail = key
+            if key == self._fail:
+                self.s1_prompts.append(system)
+                raise RuntimeError("S1 chunk exploded on the retried arm")
+            return super().complete(system=system, user=user,
+                                    max_tokens=max_tokens)
+
+    model = _SecondArmFirstChunkFails(
+        # One answer per surviving chunk: arm A's two, then arm B's second (its
+        # first raised). Arm A's narrative is "Alice"; arm B's is "Carol".
         ["Alice set a budget. Bob ships Friday.",
+         "Alice set a budget. Bob ships Friday.",
          "Carol signs the contract. Dave reviews it."],
         # Arm A yields NOTHING (the coverage trigger), arm B yields a candidate
         # — so `embed_list` after the run says which arm shipped.
@@ -1337,7 +1380,7 @@ def test_a_retry_that_raises_after_the_re_bind_keeps_the_first_arms_capture(
     )
     result = extract_session_v2(model, list(CONVERSATION), sdk=None,
                                 session_id="11002-test",
-                                session_date="2026-11-08")
+                                session_date="2026-11-08", chunk_size=1)
     assert len(model.s2_prompts) == 2, "the retry really did run and pay"
 
     renarrate = result["stats"]["renarrate"]
@@ -1398,12 +1441,26 @@ def test_a_retry_that_raises_after_the_re_bind_keeps_the_first_arms_capture(
     # The run-level chunk counters are the only observable that pins
     # `chunks`/`failed_chunks`: both arms ran, so a restore that skips them (or
     # doubles them) reads differently from arm A's own count.
-    assert result["stats"]["chunks"] == 1, (
-        f"arm A's chunk count must ship alone: {result['stats'].get('chunks')!r}"
+    # ⛔ NON-VACUITY FIRST: the arms must DISAGREE, or `0 + 0 == 0` satisfies
+    # the `failed_chunks` leg without the restore. Arm B really did fail a
+    # chunk (see the fixture), so arm A's `0` and the sum `0 + 1` are separable.
+    arms = renarrate["chunks"]
+    assert arms["second"]["failed"] == 1, (
+        "arm B must really have failed exactly one chunk — without this the "
+        f"`failed_chunks` leg cannot discriminate: {arms}"
+    )
+    assert arms["first"]["failed"] == 0, f"arm A's chunks all returned: {arms}"
+    assert arms["first"]["chunks"] > 0 and arms["second"]["chunks"] > 0, (
+        f"both arms really chunked the transcript: {arms}"
+    )
+    assert result["stats"]["chunks"] == arms["first"]["chunks"], (
+        "arm A's chunk count must ship alone — a mutant that keeps the sum "
+        f"publishes {arms['first']['chunks'] + arms['second']['chunks']}: "
+        f"{result['stats'].get('chunks')!r} vs {arms}"
     )
     assert result["stats"]["failed_chunks"] == 0, (
         "arm A had no failed chunk; a mutant that keeps arm B's count would "
-        f"publish {result['stats'].get('failed_chunks')!r}"
+        f"publish 0 + 1 = 1: {result['stats'].get('failed_chunks')!r}"
     )
     # P3 (review round 1): the failure must reach the ERROR surface and the
     # census, like every sibling fail-open arm in this function — not only the
