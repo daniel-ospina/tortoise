@@ -82,6 +82,26 @@ attribute SET), so re-finalising the same batch writes the same EDGE rather
 than a duplicate. ⚠️ The JOURNAL is not idempotent and is not meant to be: each
 write appends one record descriptor, exactly as every other structural write in
 the repo does — idempotence here is about the edge.
+
+The plan half of that key is per writer, and the two are NOT the same key: the
+structural writer dedups on ``(predicate, src, dst)`` and the direct writer on
+``(mechanism, src, dst)`` — the stated verb is deliberately not in the second,
+which is why a second meaning over one pair is a recorded FOLD (see
+``RelationEdge.folded``) rather than a second edge.
+
+RESIDUALS THIS LEG DOES NOT CLOSE (measured, not assumed)
+---------------------------------------------------------
+* ``references`` written structurally is a PLAIN Object→Object edge: its
+  anchored writer (``link_source_to_entity``) is Source→Entity, so this leg
+  cannot supply a ``sourceVersion`` here. The direction is faithful — only the
+  census reading is affected (``derivation_edges.references`` counts anchored
+  edges) — and a stated ``references`` between two Objects is a real statement
+  that must not be dropped, so it is written unanchored rather than refused.
+* A registry read that RAISES is reported as ``None``/``()`` (see
+  :func:`_mechanism_for` / :func:`_stated_verdict`), i.e. as "the registry
+  declares nothing" rather than "the registry could not be read". Defensive
+  only — every current caller is in-process — and recorded here rather than
+  left to be rediscovered.
 """
 
 from __future__ import annotations
@@ -111,6 +131,26 @@ RELATION_REFUSED = "refused"
 
 #: The two mechanisms an edge can carry without an operator.
 _DIRECT_MECHANISMS = ("IMPL", "NAND")
+
+#: Predicates `link_entities` routes AWAY from `create_edge`, so the structural
+#: arm cannot write them FAITHFULLY. `wasDerivedFrom` goes to
+#: `create_derivation`, which stores `(dst)-[:wasDerivedFrom]->(src)`: the
+#: stated direction INVERTED. Writing that is worse than refusing it, so the arm
+#: refuses it BY NAME (measured unreachable from shipped packs today — `git grep
+#: -n wasDerivedFrom -- packs/ config/` names no relations row — but the arm's
+#: gate is `predicate in _VALID_EDGE_PREDICATES`, which ADMITS it).
+_ROUTED_AWAY = frozenset({"wasDerivedFrom"})
+
+
+def _routed_away_reason(predicate: str) -> str:
+    """Why this predicate may not be written structurally (``""`` when it may)."""
+    if predicate not in _ROUTED_AWAY:
+        return ""
+    return (
+        f"`{predicate}` is routed by `link_entities` to the derivation writer, "
+        f"which stores the pair as (dst)-[:{predicate}]->(src) — the OPPOSITE "
+        f"of the direction the story stated — so this leg refuses it rather "
+        f"than commit an inverted edge (#11237 residual)")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -278,6 +318,10 @@ def plan_relation_edges(
                 key = (edge.predicate, src_id, dst_id)
                 if key in seen:
                     continue
+                routed = _routed_away_reason(edge.predicate)
+                if routed:
+                    drops.append(RelationDrop(src, dst, predicate, routed))
+                    continue
                 seen.add(key)
                 edges.append(RelationEdge(
                     src_id=src_id, dst_id=dst_id, predicate=edge.predicate,
@@ -300,6 +344,10 @@ def plan_relation_edges(
         if RELATION_STRUCTURAL in paths and predicate in _VALID_EDGE_PREDICATES:
             key = (predicate, src_id, dst_id)
             if key in seen:
+                continue
+            routed = _routed_away_reason(predicate)
+            if routed:
+                drops.append(RelationDrop(src, dst, predicate, routed))
                 continue
             seen.add(key)
             edges.append(RelationEdge(

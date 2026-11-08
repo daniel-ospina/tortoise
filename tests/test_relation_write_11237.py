@@ -236,3 +236,24 @@ def test_the_plan_consumes_only_the_typed_record():
         "stated_predicate", "mechanism", "label", "src_name", "dst_name",
         "folded",
     }
+
+
+def test_a_predicate_link_entities_inverts_is_refused_not_written():
+    """⛔ `wasDerivedFrom` is REFUSED structurally — `link_entities` INVERTS it.
+
+    `link_entities("wasDerivedFrom", a, b)` routes to `create_derivation`, which
+    stores `(b)-[:wasDerivedFrom]->(a)` — the opposite of what the story stated —
+    while the structural arm's gate (`predicate in _VALID_EDGE_PREDICATES`)
+    ADMITS it. Refusing it by name is the residual the #11548 review named: a
+    stored-inverted edge is worse than a named drop.
+
+    Mutation: drop the `_routed_away_reason` arm and the plan writes an
+    inverted edge instead of a drop.
+    """
+    edges, drops = plan_relation_edges(
+        [{"src": "retry storm", "dst": "deadline slip",
+          "predicate": "wasDerivedFrom"}], INDEX)
+    assert edges == [], edges
+    assert len(drops) == 1, drops
+    assert (drops[0].src, drops[0].dst) == ("retry storm", "deadline slip")
+    assert "OPPOSITE" in drops[0].reason, drops[0].reason
