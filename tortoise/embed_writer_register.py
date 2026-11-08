@@ -43,15 +43,24 @@ rule exists to close.
   symbol test alone. A reader who wants "re-derivable by `CENSUS_EVIDENCE`" to cover 100% of this
   file should read it as "by the several tests that re-derive it — one per HALF of a declaration,
   not one per field" rather than as a fixed number, because the count moves as fields are added.
-  The authoritative list is the test map in `tests/test_embed_writer_register.py`, which is itself
-  reviewed; the halves are the cited seams and `reason`
+  The list of pins below is the test map in `tests/test_embed_writer_register.py`. It is
+  **not exhaustive** (it carries a row per CLAIM, not per test, and predates several pins), so a
+  reader checking ONE half should follow the pin that half names rather than assuming the map
+  covers it. The halves are the cited seams and `reason`
   (`::test_every_declaration_cites_a_seam_and_an_owning_issue`), the class AGREEMENT
   (`::test_the_instrument_and_the_product_declare_the_same_writers`), and the three `stores`
-  shapes — a label tuple (`::test_every_declared_label_re_derives_at_this_head`), `NO_LIVE_VECTOR`
+  shapes — a label tuple, `NO_LIVE_VECTOR`
   (`::test_a_no_live_vector_declaration_executes_no_store_clause`) and `LABELS_AT_RUNTIME`
   (`::test_a_runtime_label_declaration_is_named_not_guessed` for the dump importer,
   `::test_a_writer_that_EXECUTES_a_store_is_never_declared_no_live_vector` for the
-  caller's-statement door — the two live entries, one pin each). `owner_issue` is deliberately NOT
+  caller's-statement door — the two live entries, one pin each).
+  ⛔ A label tuple needs **two** pins and both are required, one per direction:
+  `::test_every_declared_label_re_derives_at_this_head` proves nothing DECLARED has stopped being
+  stored, and `::test_a_declared_label_set_covers_every_label_its_own_store_targets` proves nothing
+  STORED has been omitted from the declaration — added by `#11492`'s review (`#11530`) after a
+  second store on an unserved label kept every test green;
+  `::test_every_store_alias_pattern_still_sees_a_live_store` keeps the clause forms those pins
+  read from going inert. `owner_issue` is deliberately NOT
   in that list: it is an ATTRIBUTION, asserted as a FORMAT (`startswith("#")`) in the symbol test
   and as fixed VALUES elsewhere, never derived from evidence.
 

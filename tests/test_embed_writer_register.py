@@ -74,6 +74,10 @@ is the product home; this file is its proof.
 | `test_a_stores_declaration_that_does_not_answer_is_refused` (`#11492`) | row 2's question — *where does this writer's vector land?* — is ANSWERED by every declaration, never defaulted | a declaration is constructible without `stores`, or `load()` accepts an empty tuple, a mutable list, a non-label string, or a typo'd disposition (any of which would read as an unserved LABEL and hold a correct tree) |
 | `test_every_declared_label_re_derives_at_this_head` (`#11492`) | the declared LABELS are re-derived at HEAD, the `CENSUS_EVIDENCE` discipline one field over | a writer's store clause moves to another label (or the needle stops being in the symbol), so the declaration silently answers about the old one |
 | `test_a_runtime_label_declaration_is_named_not_guessed` (`#11492`) | `LABELS_AT_RUNTIME` is a DECLARED, reviewable statement — `no-live-vector` would be a lie and a guessed label a fabrication | the dump importer (`restore_graph`) is declared as storing nothing or as storing a fixed label |
+| `test_a_no_live_vector_declaration_executes_no_store_clause` (`#11492`) | `NO_LIVE_VECTOR` is a claim about ABSENCE, so it must be checked against the symbol's own body plus one hop of module constants | a `no-live-vector` writer's body (or a constant it names) carries a store clause after all |
+| `test_a_writer_that_EXECUTES_a_store_is_never_declared_no_live_vector` (`#11492`) | the second `LABELS_AT_RUNTIME` entry — a door that EXECUTES a caller-supplied statement — is named, not guessed, and a writer that runs a store cannot be declared as storing nothing | `sdk::_event_raw_write_door` is declared `NO_LIVE_VECTOR`, or its executed statement moves to a label nobody declared |
+| `test_a_declared_label_set_covers_every_label_its_own_store_targets` (`#11492` / `#11530`) | the OTHER direction of the label tuple: `stores` answers WHERE, so it may not UNDER-name | a store clause's alias is bound to a label the declaration omits, or an alias it names is bound to no label at all (both measured: `#11530` and `#11492`'s third review). Scoped to the ALIAS the clause names — a body-wide rule false-reds three correct writers that bind labels with no vector |
+| `test_every_store_alias_pattern_still_sees_a_live_store` (`#11530`) | every member of `_STORE_ALIAS` is a form the writers really use, so no member can be deleted or rot unnoticed | a form (`set_embedding_clause`, `clear_then_set_prefix`, a literal `.embedding =`) is removed, or stops matching every label-declaring writer — which would silently make the completeness pin above inert |
 
 ⛔ **These tests write no graph and flip no gate.** `#11085` changes no writer's behaviour, no schema,
 and no MCP/SDK surface — the register is a declaration, and its proof is a refusal.
@@ -1028,14 +1032,31 @@ def test_every_declared_label_re_derives_at_this_head() -> None:
 
 
 #: The clauses that name a store by ALIAS — the only ones this rule can attribute to a label.
-#: Each is a form the register's own writers use: the shared set-clause helper, the shared
-#: clear-then-set helper (`_TURN_WRITE_CYPHER`), and a literal `alias.embedding = …`. A `NULL`
-#: assignment is excluded: `SET t.embedding=NULL` REMOVES the property (`#4194`) and stores nothing.
-_STORE_ALIAS = (
-    re.compile(r"set_embedding_clause\(\s*[\"'](\w+)[\"']"),
-    re.compile(r"clear_then_set_prefix\(\s*[\"'](\w+)[\"']"),
-    re.compile(r"\b(\w+)\.embedding\s*=(?!\s*NULL)"),
+#: Keyed by FORM so `test_every_store_alias_pattern_still_sees_a_live_store` can tell a member that
+#: ROTS from one that was DELETED (a pin that merely iterates the dict cannot see a deletion).
+#:
+#: ⛔ A `= NULL` assignment is deliberately excluded: `SET t.embedding=NULL` REMOVES the property
+#: (`#4194`) and stores nothing, so counting `t` there would invent a store.
+_STORE_ALIAS: dict[str, re.Pattern[str]] = {
+    "set_embedding_clause": re.compile(r"set_embedding_clause\(\s*[\"'](\w+)[\"']"),
+    "clear_then_set_prefix": re.compile(r"clear_then_set_prefix\(\s*[\"'](\w+)[\"']"),
+    "literal-embedding-assignment": re.compile(r"\b(\w+)\.embedding\s*=(?!\s*NULL)"),
+}
+
+#: The forms above are the complete set. Pinned so DELETING a member cannot pass silently — the
+#: failure a member-iterating pin cannot see, and the one that would silently stop the alias rule
+#: from attributing a store written through that helper.
+_STORE_ALIAS_FORMS = frozenset(
+    {"set_embedding_clause", "clear_then_set_prefix", "literal-embedding-assignment"}
 )
+
+#: Writers whose store alias is legitimately bound in a CALLER rather than in the cited symbol, so
+#: the completeness pin cannot attribute it. Keyed `module::symbol` -> the reason it cannot be
+#: attributed here. ⛔ Empty on purpose: every live entry binds its own alias. An entry appears here
+#: only by a deliberate, reviewed decision — never to buy green, because a writer listed here has
+#: its `stores` tuple trusted for what it OMITS, which is the state row 2 must be told about.
+STORE_ALIAS_UNATTRIBUTABLE: dict[str, str] = {}
+
 #: `(alias:Label` — how a Cypher statement binds an alias to a label. `\w+` deliberately does not
 #: match an INTERPOLATED label (`CREATE (n:{safe_labels})`), which no static rule can attribute.
 _ALIAS_LABEL = re.compile(r"(?:MERGE|CREATE|MATCH)\s*\(\s*(\w+)\s*:\s*(\w+)")
@@ -1065,7 +1086,7 @@ def test_a_declared_label_set_covers_every_label_its_own_store_targets() -> None
         for body in _declared_symbol_bodies(key):
             for alias, label in _ALIAS_LABEL.findall(body):
                 bound.setdefault(alias, set()).add(label)
-            for pattern in _STORE_ALIAS:
+            for pattern in _STORE_ALIAS.values():
                 aliases |= set(pattern.findall(body))
         if not aliases:
             # No statically readable store alias: the completeness claim must be carried by a
@@ -1077,12 +1098,25 @@ def test_a_declared_label_set_covers_every_label_its_own_store_targets() -> None
                 "label set cannot be re-derived — do NOT leave the completeness claim unbacked"
             )
             continue
-        stored = set().union(*(bound.get(alias, set()) for alias in aliases))
-        assert stored, (
-            f"{key}: store aliases {sorted(aliases)} resolved to NO label in its own body, so "
-            "this pin cannot attribute them and is INERT for this entry — the alias/label "
-            "reader broke, and a silent pass is what it exists to prevent"
+        # ⛔ PER-ALIAS, never total: an alias named by a store clause but bound to no label in the
+        # cited body contributes an EMPTY set, and dropping it silently is a false PASS — measured,
+        # `SET b.embedding = vecf32(turn.emb)` alongside a resolvable `t` kept this suite at 190
+        # passed while `b` stored on unserved `Batch`. A total check (`any alias resolves`) cannot
+        # see it.
+        unattributed = sorted(alias for alias in aliases if not bound.get(alias))
+        assert not unattributed or key in STORE_ALIAS_UNATTRIBUTABLE, (
+            f"{key}: store clause(s) name alias/es {unattributed}, which its own body never binds "
+            "to a label, so this pin cannot attribute them and would pass an UNSERVED store "
+            "silently. Bind the alias, cite a LABEL_CONSTANTS entry, or — only where the alias is "
+            "legitimately bound in a CALLER — add a reasoned STORE_ALIAS_UNATTRIBUTABLE entry."
         )
+        stored = set().union(*(bound.get(alias, set()) for alias in aliases if bound.get(alias)))
+        if not stored:
+            # Reachable ONLY through a reviewed `STORE_ALIAS_UNATTRIBUTABLE` entry: the assertion
+            # above already refused every unattributed alias that is not declared there. Such an
+            # entry's `stores` tuple is trusted for what it OMITS — the state row 2 must be TOLD
+            # about, which is what the dict entry is for; it is not papered over here.
+            continue
         covered += 1
         assert stored <= set(declared), (
             f"{key} declares stores={sorted(declared)} but its own store clause writes through "
@@ -1093,6 +1127,32 @@ def test_a_declared_label_set_covers_every_label_its_own_store_targets() -> None
     assert covered >= 6, (
         f"the alias rule resolved only {covered} entries — it is inert for the rest, which is the "
         "shape this pin must never become"
+    )
+
+
+def test_every_store_alias_pattern_still_sees_a_live_store() -> None:
+    """Every member of `_STORE_ALIAS` must still match a store clause of a REAL writer.
+
+    ⛔ Both directions, because they fail differently: a member that ROTS (a helper renamed) stops
+    attributing silently, and a member that is DELETED is invisible to a pin that merely iterates
+    the dict — so the FORM set is asserted first. `clear_then_set_prefix` is currently redundant on
+    every entry (`_write_capture_turns` also carries a literal `t.embedding =`), which is exactly
+    why its deletion would otherwise cost nothing and be noticed by nobody.
+    """
+    assert set(_STORE_ALIAS) == _STORE_ALIAS_FORMS, (
+        "a store-clause form was added without pinning it, or REMOVED — a removed form silently "
+        "stops the completeness pin (`#11530`) from attributing stores written through it. "
+        f"expected={sorted(_STORE_ALIAS_FORMS)} got={sorted(_STORE_ALIAS)}"
+    )
+    bodies = [body for key in LABEL_EVIDENCE for body in _declared_symbol_bodies(key)]
+    dead = sorted(
+        form for form, pattern in _STORE_ALIAS.items()
+        if not any(pattern.search(body) for body in bodies)
+    )
+    assert not dead, (
+        f"{dead} matches no store clause of any label-declaring writer — a form that sees nothing "
+        "cannot attribute the alias it exists for, and every entry using it would pass as 'no "
+        "alias', which the completeness pin reads as covered"
     )
 
 
