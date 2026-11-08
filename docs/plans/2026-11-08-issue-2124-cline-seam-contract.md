@@ -7,7 +7,8 @@
 
 ## Confirmed problem
 
-#2124's indicator 2 is *"each adapter is verified against its documented seam (primary-source)"*, and
+Issue #2124's indicator 2 is *"each adapter is verified against its documented seam (primary-source)"*,
+and
 the 2026-10-18 re-measurement recorded it **OPEN for Cline** — the shipped seam was *"graded by OUR
 tests only; delivery unverified."* Re-verified **against Cline's source** (the research comment), that
 indicator does not merely fail: the seam cannot inject on any Cline surface. Three independent defects,
@@ -21,7 +22,7 @@ each reproduced locally:
 
 Reproduction (real script, stubbed reflex that echoes the prompt it received), before any change:
 
-```
+```console
 $ printf '%s' '{"prompt":"How is CI deploy triggered?"}' | volunteer-turn.sh cline
 {"contextModification": {"context": "REFLEX-SAW-PROMPT=[How is CI deploy triggered?]"}}   # F1: object
 $ printf '%s' '{"userPromptSubmit":{"prompt":"How is CI deploy triggered?","attachments":[]}}' | volunteer-turn.sh cline
@@ -84,8 +85,11 @@ hook script as a module. No MCP tool or public SDK method is touched.
    reference the hook.
 
 ### Review Scope Contract
+
 **Class:** code
+
 **Risk surface** — what this change can break, each with the check that would catch it:
+
 - R1 The reflex receives the envelope instead of the question for a Cline turn → caught by the cline
   contract test fed Cline's **real** stdin shape and asserting the reflex input.
 - R2 The emitted JSON is rejected by Cline's validator → caught by asserting
@@ -96,8 +100,11 @@ hook script as a module. No MCP tool or public SDK method is touched.
 - R5 Uninstall leaves our file behind at either path → caught by uninstall assertions on both paths.
 - R6 A regression in the other harness arms (`claude|codex|devin` share one arm) → caught by their
   unchanged contract tests in the same file.
+
 **Threat classes:** (not adversarial) — not gate/enforcement code.
+
 **Out of scope — must NOT be raised** (note, file, do not chase):
+
 - #8962 (`hooks status`/`hooks upgrade` report cline/devin as "unknown harness") — a separate open issue.
 - The demand-gated tail (Devin/OpenCode/Gemini session parsers, `install gemini`, OpenCode plugin) —
   held by #2124's own recorded demand gate.
@@ -105,6 +112,7 @@ hook script as a module. No MCP tool or public SDK method is touched.
   third-party repo, recorded in the correction log, not fixed here.
 - The global hook directory (`~/Documents/Cline/Hooks` for the extension vs `~/.cline/hooks` for the
   SDK) — `tortoise install` writes project-scope registrations only.
+
 **Acceptance:** every `R<n>` has its named evidence, and no open item remains on the declared surface.
 
 ## Rounds
