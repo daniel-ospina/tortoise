@@ -1689,6 +1689,38 @@ last — so the pinned artifact stays green under the stricter rule.
 `UNMEASURED(...)` register changes: the cell is re-ordered and nothing else, `document_sha256` is
 re-cut from the resolved document (§8), and no committed verdict is re-scored.
 
+### 10.14 — the §11 cite block re-pointed again, after the `#9116`/`#11205`/`#11264`/`#11361` inserts moved `extractor_v2.py` and `sdk.py` (`#10274`, 2026-11-08)
+
+- **Original value (as §10.10 left it):** `_collect_classify_items` at `:11098`, its extent
+  `:11098-11120`, the two `if items:` gates at `:12982`/`:13131`, and the two fail-open `except`
+  arms at `:12995`/`:13142`. The rest of the bundle's cites sat at the same head: the vet flag
+  `:12853`, its early return `:12857`, its emitted surface `:12877`, the vet gates `:12967`/`:13106`,
+  the classify flag `:12822`, its early-return block `:12873-12876`, its gates `:12979`/`:13121`,
+  its `if items:` gates `:12982`/`:13131`, the two result blocks `:13320-13326`/`:13330-13334`, the
+  vet fail-open pair `:12732-12735`, and — in `sdk.py`, cited by SYMBOL here so this document carries no `sdk.py`
+  line that no sweep resolves — the meta fold `_capture_stats_with_step_witness`, `link_source_to_event`,
+  the `_extract_session_v2` `def` and its call site.
+- **New value:** `_collect_classify_items` at `:11174`, its extent `:11174-11196`, the two
+  `if items:` gates at `:13058`/`:13207`, and the two fail-open `except` arms at `:13071`/`:13218`.
+  The rest of the bundle: vet flag `:12929`, early return `:12933`, emitted surface `:12953`, gates
+  `:13043`/`:13182`, classify flag `:12898`, early-return block `:12949-12952`, gates
+  `:13055`/`:13197`, result blocks `:13396-13402`/`:13406-13410`, vet fail-open pair
+  `:12808-12811`; the three `sdk.py` sites above moved with the same inserts and were re-derived
+  in the bundle's own documents (`README.md`, both probes), which the cite sweep resolves.
+- **Why.** Later commits inserted lines ABOVE those sites again — the `#9116` seam and the
+  `#11205`/`#11264`/`#11361` insertions — so `tests/test_7949_capstone_measure.py` and
+  `tests/test_7949_capstone_verdict_check.py` redded on `main` (`8 failed, 432 passed` at
+  `5ef5805f09`, reproduced on a pristine worktree of that commit). Every number was re-derived from
+  the tree **by symbol**, never by an offset: the inserts are spread across the file, so a single
+  delta is wrong in both directions — the failure §10.9 records twice already. Each value was
+  verified by CONTENT at this head (the `def`, the `return items` that ends it, the two `if items:`
+  gates, the two `except` arms, the two result blocks, the seam's own fold line), and the two pin
+  tables that carry typed numbers (`tests/test_7949_capstone_measure.py`'s bare-continuation rows)
+  were re-derived the same way, keeping every content anchor.
+- **What moved: nothing else.** No metric, denominator, threshold, class set, corpus pin or `steps`
+  block is touched; the numbers this record exists to freeze are byte-identical. `document_sha256`
+  is re-cut in this same commit, per §8's rule for *any* edit to this file.
+
 ## 11. The step set V5 gates over — seven unconditional, one conditional (`#10215`)
 
 **Why this section exists.** `tools/capstone_verdict_check.py`'s V5 and `probes/capstone_run.py`'s G5
