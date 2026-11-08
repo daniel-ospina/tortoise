@@ -50,8 +50,13 @@
 #         AFTER it is decoration and is ignored;
 #       - a `-c`/`-e` script body is graded as a command in its own right, never
 #         trusted;
-#       - a lone project LABEL (`make test`, `npm test`) and a runner with no
-#         target at all (`cmd:make`) are records and confer nothing.
+#       - a runner with NO target at all (`cmd:make`) is a record and confers
+#         nothing; a runner with a NON-PATH argument is refused, because a bare
+#         word (`make test`, `make NOT-RUN`) is a claim and not an artifact;
+#       - EVERY `&&` segment is graded: a record may carry commands, shell
+#         wrappers (`cd`, `NAME=value`, `set`/`export`/`source`) and decorative
+#         printers (`echo`/`printf`/`true`), but not prose on either side of the
+#         command.
 #   * `criteria_expected` (top level, REQUIRED) pins the denominator, so dropping a
 #     row without moving the count is a refusal.
 #   * YAML merge keys (`<<`) are refused: every row states its own verdict, and a

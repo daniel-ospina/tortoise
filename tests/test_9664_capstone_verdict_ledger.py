@@ -444,7 +444,10 @@ def test_prose_wrapped_in_a_shell_script_is_refused(tmp_path, script):
     """
     proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, script])]))
     assert proc.returncode == cl.EXIT_INVALID, (script, proc.stdout + proc.stderr)
-    assert "must START with a program that runs something" in proc.stderr, proc.stderr
+    # The refusal may come from either arm — the script body is graded as its own
+    # command line now, so the wording is the compound-record one, not the
+    # runner-position one. The DECISION is what is pinned, not the sentence.
+    assert "not a command" in proc.stderr, proc.stderr
 
 
 @pytest.mark.parametrize(
@@ -752,53 +755,84 @@ def test_a_cmd_target_that_names_no_held_artifact_is_invalid(tmp_path):
 @pytest.mark.parametrize(
     "command",
     [
-        # The commands this repo's AGENTS.md hands a lane. Each was a measured
-        # FALSE BLOCK on origin/main: INVALID, and exit 1 prints no uncovered list,
-        # so a lane recording what it actually ran lost the whole finding.
+        # Shapes a lane ACTUALLY records. Only the three directory-target forms
+        # (`pytest tests/`, `-m pytest tests/`) were measured FALSE BLOCKS on
+        # origin/main; the rest were already accepted there and are pinned so the
+        # every-segment rule cannot start refusing them. Naming this precisely
+        # matters: an earlier revision of this comment claimed all of them were
+        # blocked, which five of them were not.
         "cmd:uv run pytest tests/ -v",
         "cmd:uv run python -m pytest tests/ -q",
         "cmd:TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
         "cmd:`uv run python tools/capstone_ledger.py check`",
         "cmd:cd tests && uv run pytest test_9664_capstone_verdict_ledger.py -q",
-        # A project LABEL is not a path: `make test` / `npm test` have nothing to
-        # resolve, so a lone bare word is accepted as a record.
-        "cmd:make test",
-        "cmd:npm test",
-        # A runner with no target at all is a record too.
+        # A runner with no target at all is a record.
         "cmd:make",
         "cmd:uv run pytest",
+        # A pure shell preamble in front of the real command (main accepted these;
+        # normalising only `cd`/`NAME=value` made them a regression).
+        "cmd:set -e && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
+        "cmd:export FOO=1 && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
+        "cmd:source .venv/bin/activate && uv run pytest "
+        "tests/test_9664_capstone_verdict_ledger.py -q",
+        # A decorative tail and a second REAL command, both after the graded one.
+        "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q && echo PASS",
+        "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q "
+        "&& ruff check tools/capstone_ledger.py",
     ],
 )
 def test_the_commands_agents_md_hands_a_lane_are_not_false_blocked(tmp_path, command):
     """A real recorded command must never make the ledger INVALID.
 
-    ⛔ The inconsistency this closes, measured on `origin/main`: the same "first
-    argument must name an artifact" rule ACCEPTED `cmd:make` (no argument, so "a
-    record") and REFUSED `cmd:make test` (the label read as a citation). And it
-    refused `cmd:uv run pytest tests/ -v`, which is the repo's own documented test
-    command, because a directory is not a file.
+    ⛔ Measured FALSE BLOCKS on `origin/main`: `cmd:uv run pytest tests/ -v` and
+    `cmd:uv run python -m pytest tests/ -q` (the repo's own documented test form,
+    refused because a directory is not a file), and `cmd:make test` / `cmd:npm test`
+    (a label read as a citation). Exit 1 computes NOTHING, so a lane recording what
+    it actually ran lost the entire uncovered list.
+
+    The `make test` / `npm test` half of that is now answered the OTHER way — by
+    refusing every non-path argument behind a runner rather than by inventing a
+    "project label" arm, which re-admitted `cmd:make NOT-RUN`. See
+    `test_a_NON_PATH_argument_behind_a_runner_is_not_a_citation`. The rest of this
+    test pins that the every-segment rule does not start refusing real records.
     """
     proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, command])]))
     assert proc.returncode == cl.EXIT_CLEAN, proc.stdout + proc.stderr
 
 
-def test_a_lone_label_does_not_excuse_a_SENTENCE(tmp_path):
-    """`make test` is a label; `make I did not run anything` is prose.
+def test_a_NON_PATH_argument_behind_a_runner_is_not_a_citation(tmp_path):
+    """There is no "project label" arm — a word is not an artifact.
 
-    The label arm is deliberately ONE bare word and nothing else, so the sentence the
-    shape gate exists to refuse is still refused behind a label-runner.
+    ⛔ An earlier revision of this branch accepted a lone bare word for
+    `make`/`npm`/`docker` (`cmd:make test`), reasoning that a subcommand is not a
+    path. Measured, that re-admitted the one-word claim this gate exists to refuse:
+    `cmd:make NOT-RUN` beside a held artifact was ACCEPTED, and a 22-row ledger
+    using it reported `uncovered: 0`, `CAPSTONE-LEDGER-RESULT: CLEAN`, exit 0. It
+    bought nothing here either — this repo has no `Makefile` and no root
+    `package.json` (`AGENTS.md`), so `make test` names no target that exists.
+
+    A runner with NO argument at all (`cmd:make`) is still a record; a runner with a
+    non-path argument is not.
     """
     for command in (
+        "cmd:make NOT-RUN",
+        "cmd:make failed",
+        "cmd:make verified",
+        "cmd:npm not_run",
+        "cmd:docker DONE",
+        "cmd:make test",
         "cmd:make I did not run anything, see docs/evidence/9664-capstone/README.md",
-        "cmd:make NOT RUN",
-        "cmd:npm test -- not run, see pyproject.toml",
     ):
         proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, command])]))
         assert proc.returncode == cl.EXIT_INVALID, (command, proc.stdout + proc.stderr)
 
+    # …while a runner with no target is a record that confers nothing.
+    proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, "cmd:make"])]))
+    assert proc.returncode == cl.EXIT_CLEAN, proc.stdout + proc.stderr
 
-def test_prose_BEFORE_a_real_command_is_refused(tmp_path):
-    """Prose cannot be discarded by chaining a real command after it.
+
+def test_prose_on_EITHER_side_of_a_real_command_is_refused(tmp_path):
+    """A compound record cannot carry a disclaimer, before or after the command.
 
     ⛔ Measured on `origin/main`: `_command_body` scanned for the first RUNNER-shaped
     `&&` segment and SILENTLY DROPPED the rest, so
@@ -807,48 +841,34 @@ def test_prose_BEFORE_a_real_command_is_refused(tmp_path):
     22-row ledger citing the always-available tracked
     `docs/evidence/9664-capstone/README.md` plus that entry reported
     `criteria: 22  verified: 22  uncovered: 0`, printed
-    `CAPSTONE-LEDGER-RESULT: CLEAN` and exited 0. The comment that justified the skip
-    said "prose … never contains one at all", which is false the moment prose can be
-    chained in FRONT of a command.
+    `CAPSTONE-LEDGER-RESULT: CLEAN` and exited 0. The comment that justified the
+    skip said "prose … never contains one at all", which is false the moment prose
+    can be chained in FRONT of a command.
 
-    The first non-wrapper segment is now THE command and is graded as one; a segment
-    AFTER it is decoration and is ignored (`… && echo PASS` was a measured false
-    block).
+    ⛔ And the SAME hole mirrors: the first fix graded only the first segment, so
+    `cmd:uv run pytest tests/… && I did not run this` was still ACCEPTED and still
+    produced a clean 22-row ledger. A disclaimer after the command is the same
+    claim as one before it, so EVERY segment is graded.
     """
-    proc = _run_cli(
-        tmp_path,
-        _ledger(
-            [
-                _row(
-                    "A",
-                    evidence=[
-                        REAL_EVIDENCE,
-                        "cmd:NOT RUN && uv run pytest tests/test_9664_capstone_verdict_ledger.py",
-                    ],
-                )
-            ]
-        ),
-    )
-    assert proc.returncode == cl.EXIT_INVALID, proc.stdout + proc.stderr
-    assert "START with a program" in proc.stderr, proc.stderr
+    for attack in (
+        "cmd:NOT RUN && uv run pytest tests/test_9664_capstone_verdict_ledger.py",
+        "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py && I did not run this",
+    ):
+        proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, attack])]))
+        assert proc.returncode == cl.EXIT_INVALID, (attack, proc.stdout + proc.stderr)
+        assert "not a command" in proc.stderr, proc.stderr
 
-    # …while a DECORATIVE tail after a real command stays legal.
-    proc = _run_cli(
-        tmp_path,
-        _ledger(
-            [
-                _row(
-                    "A",
-                    evidence=[
-                        REAL_EVIDENCE,
-                        "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q "
-                        "&& echo PASS",
-                    ],
-                )
-            ]
-        ),
-    )
-    assert proc.returncode == cl.EXIT_CLEAN, proc.stdout + proc.stderr
+    # A compound record made only of commands, wrappers and decorative printers is
+    # still a legitimate record — the two measured false blocks stay accepted.
+    for legitimate in (
+        "cmd:cd tests && uv run pytest test_9664_capstone_verdict_ledger.py -q",
+        "cmd:set -e && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
+        "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q && echo PASS",
+        "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q "
+        "&& ruff check tools/capstone_ledger.py",
+    ):
+        proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, legitimate])]))
+        assert proc.returncode == cl.EXIT_CLEAN, (legitimate, proc.stdout + proc.stderr)
 
 
 @pytest.mark.parametrize(
@@ -1135,7 +1155,7 @@ def test_a_prose_cmd_is_refused_beside_a_held_artifact(tmp_path):
     ]:
         proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, prose])]))
         assert proc.returncode == cl.EXIT_INVALID, (prose, proc.stdout + proc.stderr)
-        assert "must START with a program that runs something" in proc.stderr, proc.stderr
+        assert "not a command" in proc.stderr, proc.stderr
 
 
 @pytest.mark.parametrize(

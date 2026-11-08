@@ -296,6 +296,11 @@ RUNNERS: Final[frozenset[str]] = frozenset(
         "env",
         "uvx",
         "poetry",
+        # A verifier this repo actually runs, and a legitimate SECOND command in a
+        # compound record (`uv run pytest … && ruff check <path>`). Without it that
+        # tail segment is prose by the every-segment rule and the whole row is
+        # refused — a false block on a real record.
+        "ruff",
     }
 )
 
@@ -387,16 +392,29 @@ def _split_chains(text: str) -> list[str]:
 #: block, and `exit 1` computes nothing, so it would hide the uncovered list too.
 _SCRIPT_FLAGS: Final[frozenset[str]] = frozenset({"-c", "-e", "--command", "--eval"})
 
-#: Runners whose first argument is a project LABEL, not a path: `make test`,
-#: `npm test`. There is nothing here to resolve against the tree, so the label is
-#: accepted as a record — but ONLY as a lone bare word (see `_LABEL`), because the
-#: thing this arm exists to refuse is a SENTENCE, and a sentence has spaces.
-_LABEL_RUNNERS: Final[frozenset[str]] = frozenset(
-    {"make", "npm", "npx", "bun", "deno", "poetry", "uvx", "docker"}
-)
+#: ⛔ THERE IS DELIBERATELY NO "project label" ARM. An earlier revision of this
+#: branch accepted a lone bare word for `make`/`npm`/`docker` (`make test`), on the
+#: reasoning that a subcommand is not a path. Measured, that arm re-admitted exactly
+#: the one-word claim the gate exists to refuse: `cmd:make NOT-RUN`, `cmd:make
+#: failed`, `cmd:make verified`, `cmd:npm not_run` and `cmd:docker DONE` were all
+#: ACCEPTED, and a 22-row ledger using `cmd:make NOT-RUN` reported `uncovered: 0`,
+#: `CAPSTONE-LEDGER-RESULT: CLEAN`, exit 0. It also bought nothing HERE: this repo
+#: has no `Makefile` and no root `package.json` (see `AGENTS.md`), so `make test`
+#: names no artifact and no target that exists. A runner with NO argument at all
+#: (`cmd:make`) stays accepted as a record that confers nothing; a runner with a
+#: non-path argument does not.
+#: Shell WRAPPER verbs that may sit in their own `&&` segment in front of the real
+#: command. They run nothing that is being cited; they prepare the shell. Measured
+#: false blocks when they were graded as the command: `set -e && uv run pytest …`,
+#: `export FOO=1 && …`, `source .venv/bin/activate && …` were all ACCEPTED on
+#: `origin/main` and REFUSED once only `cd`/`NAME=value` were normalised.
+_WRAPPER_VERBS: Final[frozenset[str]] = frozenset({"set", "export", "source", "umask", "unset"})
 
-#: A project label: one bare word, no whitespace, no shell punctuation.
-_LABEL: Final = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]*")
+#: DECORATIVE printers: a tail like `… && echo PASS` announces the result and cites
+#: nothing. Refusing it was a measured false block, and exit 1 computes NOTHING, so
+#: an over-block loses the whole uncovered list. Kept deliberately tiny — every name
+#: here is one that cannot be read as a claim about the work.
+_DECORATIVE: Final[frozenset[str]] = frozenset({"echo", "printf", "true", ":"})
 
 _WILDCARDS: Final = "*?["
 
@@ -511,12 +529,32 @@ def _names_artifact(token: str, cwd: Path, root: Path) -> tuple[bool, str]:
             # It counts only if a reader's clone holds something under it, and the
             # ROOT is refused above — `.` names EVERYTHING, the same vacuity as a
             # bare `*`.
+            if resolved == cwd:
+                # ⛔ THE SAME VACUITY ONE LEVEL DOWN. `cmd:sh .` was already refused
+                # (it resolves to the root), but `cmd:cd docs && uv run pytest .`
+                # was ACCEPTED while `.` there names every file under `docs` — the
+                # claim "an artifact of the tree" with nothing in particular cited.
+                # A target that resolves to the directory the command RAN in is the
+                # working directory, not an artifact.
+                return False, (
+                    f"{text!r} resolves to the directory the command ran in, so it "
+                    "names everything under it and therefore no artifact (the same "
+                    "vacuity as a bare `*`)"
+                )
             if not _is_tracked_dir(resolved, root):
                 return False, (
                     f"{text!r} is a directory holding no TRACKED file, so it holds "
                     "nothing a reader's clone has"
                 )
             return True, ""
+        if resolved.is_dir() and resolved == root:
+            # Name the VACUITY, not "not a file": the reviewer's point is that a
+            # runner told only "not a file in this tree" cannot tell why `.` is
+            # refused while `cmd:sh tests` is accepted.
+            return False, (
+                f"{text!r} resolves to the repository root, so it names everything "
+                "and therefore no artifact (a bare `*`/`.`/`/` is not a citation)"
+            )
         return False, f"{text!r} is not a file in this tree"
     except (OSError, ValueError, NotImplementedError) as exc:
         # An entry that cannot even be RESOLVED is a defect in the RECORD, not a
@@ -646,9 +684,10 @@ def _evidence_is_real(
     first token is a program that runs something, and its FIRST argument position
     names a tracked artifact (a file, a directory holding tracked files, a pytest
     node-id, or a glob over a named directory). Three shapes are deliberately
-    admitted and confer nothing on their own: a runner with NO target (`cmd:make`),
-    a lone project LABEL for a label-runner (`cmd:make test`), and a `-c` script
-    body, which is graded as a command in its own right rather than trusted.
+    admitted and confer nothing on their own: a runner with NO argument
+    (`cmd:make`), and a `-c` script body, which is graded as a command in its own
+    right rather than trusted. Every `&&` segment is graded, so a record cannot
+    carry a disclaimer on either side of the command.
 
     ⛔ These two arms are one rule seen from two sides, and NEITHER alone is
     enough — both were measured as fail-open on their own:
@@ -686,7 +725,9 @@ def _evidence_is_real(
         raw = entry[len(_CMD_PREFIX) :].strip()
         if not raw:
             return False, "`cmd:` evidence names no command"
-        command, cmd_cwd = _command_body(raw, base, root)
+        command, cmd_cwd, shape_problem = _command_body(raw, base, root)
+        if shape_problem:
+            return False, f"`cmd:` evidence is not a command line: {shape_problem}"
         if not command:
             return False, f"`cmd:` evidence names no command: {raw!r}"
         try:
@@ -750,15 +791,6 @@ def _evidence_is_real(
             ok, why = _names_artifact(token, cmd_cwd, root)
             if ok:
                 return True, ""
-            if runner in _LABEL_RUNNERS and len(tokens) == 2 and _LABEL.fullmatch(token):
-                # `make test`, `npm test`: the target is a PROJECT LABEL, not a path,
-                # so there is nothing to resolve. Only a LONE bare word qualifies —
-                # a sentence is not a label. Without this the same rule accepted
-                # `cmd:make` (no argument, therefore "a record") and refused
-                # `cmd:make test` (the label read as a citation), which is an
-                # inconsistency rather than a policy, and it refused the command
-                # shapes a lane actually runs.
-                return True, ""
             return False, (
                 f"`cmd:` evidence names no artifact of this tree: {command!r} — the first "
                 f"thing in argument position after the runner must NAME the artifact "
@@ -802,24 +834,43 @@ def _evidence_is_real(
     return True, ""
 
 
-def _command_body(raw: str, base: Path, root: Path) -> tuple[str, Path]:
-    """The part of a `cmd:` entry that has to be a RUNNABLE command, and the
-    directory it runs in.
+def _command_body(raw: str, base: Path, root: Path) -> tuple[str, Path, str]:
+    """The command a `cmd:` entry records, the directory it ran in, and — when the
+    record is a compound line carrying something OTHER than commands — why not.
 
     A record is written by whoever ran the thing, quoting what they ran, so the
     entry routinely carries the SHELL WRAPPER around the command. Each of these
     was measured as a false block against the raw shape test, on a legitimate
-    record, and the five are the shapes this repo's own `AGENTS.md` hands a lane:
+    record:
 
         `uv run pytest tests/x.py -q`            markdown backticks around it
         TORTOISE_TEST_CARVE_OUT=1 uv run …       a leading environment assignment
         TORTOISE_DB_URI='docker://…' uv run …    same, with a quoted value
         cd tools && uv run pytest tests/x.py     a directory change first
-        make                                     a project target
+        set -e && uv run pytest …                a shell-safety preamble
+        source .venv/bin/activate && uv run …    an activation step
 
-    ⛔ Only the WRAPPER is removed. The shape test still runs on what is left,
-    which is what keeps `cmd:NOT RUN - see tools/capstone_ledger.py` refused: no
-    normalisation below can turn a sentence into a program.
+    ⛔ EVERY `&&` SEGMENT IS GRADED, on both sides of the command. That is the
+    whole rule, and it is load-bearing in two measured directions:
+
+    * skipping the segments BEFORE the command is the P1 fail-open: a 22-row
+      ledger citing the always-available tracked `docs/evidence/9664-capstone/
+      README.md` plus `cmd:NOT RUN && uv run pytest tests/…` reported
+      `uncovered: 0`, `CAPSTONE-LEDGER-RESULT: CLEAN`, exit 0;
+    * skipping the segments AFTER it is the SAME fail-open mirrored: `cmd:uv run
+      pytest tests/… && I did not run this` was ACCEPTED and produced the same
+      clean exit. A record that disclaims the work must not be gradable as having
+      done it, whichever side of the `&&` the disclaimer sits on.
+
+    A segment is therefore admissible only as one of: a WRAPPER (`cd`, a leading
+    `NAME=value`, `set`/`export`/`source`/`umask`/`unset`), a DECORATIVE printer
+    (`echo`/`printf`/`true`/`:`), or a RUNNER. Anything else is prose, and prose is
+    refused by name. `… && echo PASS` and `… && ruff check <path>` stay legal, so
+    the two measured false blocks above do not come back.
+
+    ⛔ Only WRAPPERS are removed. The shape test still runs on what is left, which
+    is what keeps `cmd:NOT RUN - see tools/capstone_ledger.py` refused: no
+    normalisation here can turn a sentence into a program.
 
     ⛔ The SECOND return value is why `cd` is normalisation and not a false block:
     dropping the `cd` and then resolving the target against the repo root refuses
@@ -857,6 +908,8 @@ def _command_body(raw: str, base: Path, root: Path) -> tuple[str, Path]:
     # `cd` moves it again. Resolved against `root` only, so a `cd ../../..` cannot
     # walk the check out of the tree.
     cwd = base
+    command: str | None = None
+    command_cwd = base
     for segment in segments:
         if not segment:
             continue
@@ -888,7 +941,7 @@ def _command_body(raw: str, base: Path, root: Path) -> tuple[str, Path]:
                     cwd = moved
             continue
         try:
-            shlex.split(body)
+            _tokens = shlex.split(body)
         except ValueError:
             # ⛔ A shell-VALID record must not invalidate the ledger. `shlex` rejects
             # `pytest … -q  # don't rerun` while `bash -n` accepts it, and exit 1
@@ -900,11 +953,37 @@ def _command_body(raw: str, base: Path, root: Path) -> tuple[str, Path]:
             without_comment = re.sub(r"\s+#.*$", "", body).strip()
             if without_comment and without_comment != body:
                 body = without_comment
-        # ⛔ THIS IS THE COMMAND — the first segment that survived wrapper removal.
-        # Return it as-is; the caller grades it and refuses it by name when it is
-        # not a command. Falling through to a LATER segment is the fail-open.
-        return body, cwd
-    return "", base
+                try:
+                    _tokens = shlex.split(body)
+                except ValueError:
+                    _tokens = []
+            else:
+                _tokens = []
+        # ⛔ EVERY segment is graded, on BOTH sides of the command. A segment that
+        # is neither a shell wrapper, a decorative printer, nor a runner is prose:
+        # refusing it is what stops `NOT RUN && <cmd>` (prose BEFORE) and
+        # `<cmd> && I did not run this` (prose AFTER) from being recorded as work.
+        # Both were measured fail-opens on the merged tree, each producing
+        # `CAPSTONE-LEDGER-RESULT: CLEAN` and exit 0 from a 22-row ledger.
+        if _tokens:
+            head = Path(_tokens[0]).name
+            if head in _WRAPPER_VERBS or head in _DECORATIVE:
+                continue
+            if head in RUNNERS:
+                if command is None:
+                    command, command_cwd = body, cwd
+                continue
+        return (
+            "",
+            base,
+            f"the segment {segment!r} is neither a command nor a shell wrapper (`cd`, "
+            f"`NAME=value`, {sorted(_WRAPPER_VERBS)}) nor decorative "
+            f"({sorted(_DECORATIVE)}) — a compound `cmd:` record may carry commands and "
+            "wrappers, not prose",
+        )
+    if command is None:
+        return "", base, ""
+    return command, command_cwd, ""
 
 
 def _short(text: str, limit: int = 120) -> str:
