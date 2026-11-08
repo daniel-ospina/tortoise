@@ -506,6 +506,48 @@ def test_the_emphasis_block_is_bounded():
     )
 
 
+def test_the_emphasis_block_claims_nothing_a_trigger_cannot_verify():
+    """The block's premise must hold on EVERY trigger that can reach it.
+
+    `coverage_suspect` is prose in, ZERO candidates out — "yielded nothing" is
+    exact there. `arbiter_renarrate` and `keep_rate` are its OPPOSITE case: the
+    narrative yielded *something* and a judge (or a keep-rate) found it poor.
+    The block asserted emptiness flatly, so on two of its three triggers it
+    handed the model a false premise (round-2 review note 1). Both are
+    unreachable today — `s2_decision_seam` never emits `RENARRATE` and the
+    keep-rate arm ships disarmed — which is exactly why nothing caught it: a
+    false premise waits silently for the first lane that arms one.
+
+    ⛔ The emptiness claims are the ASSERTION, not a style preference. A block
+    that says the story "yielded nothing" while the trigger says it yielded
+    something is not a weaker instruction, it is a contradictory one, and the
+    retry exists to ask a BETTER question — not an untrue one.
+    """
+    triggers = ("coverage_suspect", "arbiter_renarrate", "keep_rate")
+    blocks = {reason: extractor_v2._renarrate_emphasis(reason) for reason in triggers}
+    for reason, block in blocks.items():
+        assert "RE-NARRATE" in block
+        assert reason in block, "the block names the signal that fired"
+    for reason in ("arbiter_renarrate", "keep_rate"):
+        for claim in ("yielded nothing", "nothing at extraction", "zero candidates"):
+            assert claim not in blocks[reason], (
+                f"{reason!r} fires when the narrative yielded SOMETHING, so the "
+                f"block may not assert {claim!r} — the model would be told a "
+                f"premise the trigger itself refutes"
+            )
+    # ⛔ FORWARD GUARD, labelled as such: this half passes on the pre-fix tree by
+    # design (that block was uniform too — uniformly wrong, which the assertions
+    # above are what red). It is here so a FUTURE edit cannot reintroduce a
+    # per-trigger claim without stating it, which is how the first one survived.
+    canonical = blocks["coverage_suspect"]
+    for reason, block in blocks.items():
+        assert block == canonical.replace("coverage_suspect", reason), (
+            f"the {reason!r} variant differs beyond the signal name — a "
+            f"trigger-specific premise is only true on the trigger it was "
+            f"written for"
+        )
+
+
 def test_check_batch_gained_no_actionable_key():
     """The gate stays a SELECTOR: the retry reads the existing signals only.
 

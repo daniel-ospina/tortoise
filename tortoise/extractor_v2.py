@@ -15197,11 +15197,11 @@ def _renarrate_emphasis(reason: str) -> str:
     first attempt is a pure cost double: S1 renders from the transcript and the
     granularity slot only, at temperature 0.0, so an identical prompt cannot
     return a different narrative. The block therefore re-states the SAME
-    declaration `_granularity_text` already carries, at its foremost strength —
-    it adds no rule the pack did not declare.
+    declaration `_granularity_text` already carries, at its foremost strength — it adds no rule
+    the pack did not declare. The premise is trigger-agnostic: only `coverage_suspect` knows.
     """
     return (
-        "**RE-NARRATE — the previous story of this session yielded nothing at "
+        "**RE-NARRATE — the previous story of this session fell short at "
         f"extraction ({reason}).** Re-state this conversation at the FOREMOST "
         "granularity the rules above declare: every decision, every event, "
         "every durable belief, and the named participants that carry them "
