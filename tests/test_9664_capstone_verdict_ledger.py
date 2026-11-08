@@ -1626,6 +1626,26 @@ def test_set_and_umask_accept_their_own_option_operands(tmp_path):
         )
 
 
+def test_a_quoted_disclaimer_beside_an_artifact_is_a_known_gap(tmp_path):
+    """KNOWN-OPEN (#11520): a quoted disclaimer PLUS a real artifact is ACCEPTED.
+
+    ⛔ The deferral that stops `pytest "-k not slow" <tracked path>` being a false
+    block cannot also refuse `pytest "-q I did not run this" <tracked path>` — the
+    two tokens are syntactically identical, and telling them apart is a semantic
+    judgement, not a grammar. The arm keeps the WEAKER side on purpose: the
+    module's own rule, recorded twice, is that "a refusal that loses the finding is
+    worse than the weaker arm", and `EXIT_INVALID` prints no report at all.
+
+    INVERT this pin (EXIT_INVALID) when #11520 is closed — do not delete it.
+    """
+    command = 'cmd:uv run pytest "-q I did not run this" tests/test_9664_capstone_verdict_ledger.py'
+    proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, command])]))
+    assert proc.returncode != cl.EXIT_INVALID, (
+        f"{command!r} is now REFUSED — if a semantic rule landed, invert this pin and "
+        f"re-check `-k not slow` is still accepted.\n{proc.stdout}{proc.stderr}"
+    )
+
+
 def test_a_quoted_flag_and_value_together_is_not_prose(tmp_path):
     """`pytest "-k not slow" <tracked path>` is a real record, not a disclaimer.
 

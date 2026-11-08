@@ -1121,6 +1121,16 @@ def _evidence_is_real(
                 # is a legitimate record, so the refusal is DEFERRED (see
                 # `unread_prose`) instead of taken here.
                 if any(char.isspace() for char in token):
+                    # ⛔ KNOWN-OPEN, pinned: a quoted disclaimer ALSO followed by a real
+                    # artifact stays ACCEPTED (`pytest "-q I did not run this"
+                    # <tracked path>`), because the deferral below cannot tell a
+                    # quoted FLAG+VALUE from a quoted SENTENCE — `"-k not slow"` and
+                    # `"-q I did not run this"` are syntactically identical. The arm
+                    # keeps the weaker side on purpose: the module's own rule, twice
+                    # recorded, is that "a refusal that loses the finding is worse
+                    # than the weaker arm", and `EXIT_INVALID` prints no report. See
+                    # `test_a_quoted_disclaimer_beside_an_artifact_is_a_known_gap`
+                    # and #11520.
                     if unread_prose is None:
                         unread_prose = token
                     continue
