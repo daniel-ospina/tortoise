@@ -2142,11 +2142,21 @@ def _is_tracked(resolved: Path, root: Path) -> bool | None:
 
     ⛔ WHAT IT MEASURES: `git ls-files` reads the INDEX, so a staged-but-uncommitted
     file, an intent-to-add file, and a symlink RESOLVED to a tracked target all answer
-    "tracked" while a reader's clone has none of them. Pre-existing, unchanged here,
-    filed as #11499. (`-- <rel>` is also a PATHSPEC, but the prefix-matching direction
-    is only reachable for a DIRECTORY-shaped name — `docs` answers 0, `docs/ab` answers
-    1 — and no call site reaches this function with a directory, so it is not listed as
-    a live mechanism.)
+    "tracked" while a reader's clone has none of them. Pre-existing, filed as #11499;
+    the STAGED / INTENT-TO-ADD half is unchanged here.
+
+    ⛔ `-- <rel>` IS A PATHSPEC, AND BOTH DIRECTIONS WERE LIVE (#11474 review). An
+    earlier revision of this note dismissed it on the PREFIX direction alone ("only
+    reachable for a DIRECTORY-shaped name — `docs` answers 0, `docs/ab` answers 1 —
+    and no call site reaches this function with a directory"). That argument does not
+    cover the WILDCARD direction, which needs nothing but a metacharacter in the
+    FILENAME: with `docs/ev-axb.md` tracked and `docs/ev-a*b.md` present but in no
+    index, `git ls-files --error-unmatch -- 'docs/ev-a*b.md'` prints `docs/ev-axb.md`
+    and exits 0, so `_is_tracked` answered `True` and an artifact no clone has was
+    accepted as evidence — the fail-open this function exists to refuse, reached
+    through the probe itself. The pathspec is therefore `:(literal)`, which makes the
+    name a name rather than a pattern (measured on that same repo: rc 1, "did not
+    match any file(s) known to git").
     """
     try:
         rel = resolved.relative_to(root)
@@ -2160,7 +2170,11 @@ def _is_tracked(resolved: Path, root: Path) -> bool | None:
         return False
     try:
         proc = subprocess.run(
-            ["git", "ls-files", "--error-unmatch", "--", str(rel)],
+            # `:(literal)` is load-bearing, not decoration: without it `rel` is a
+            # PATHSPEC, and a filename carrying `*`/`?`/`[` matches a DIFFERENT
+            # tracked file — measured, `docs/ev-a*b.md` (untracked) answered rc 0
+            # because `docs/ev-axb.md` is tracked. See the docstring.
+            ["git", "ls-files", "--error-unmatch", "--", f":(literal){rel}"],
             cwd=str(root),
             capture_output=True,
             text=True,

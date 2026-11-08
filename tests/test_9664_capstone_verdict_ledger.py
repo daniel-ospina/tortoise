@@ -5328,6 +5328,77 @@ def test_a_git_that_COULD_NOT_ANSWER_is_not_read_as_a_measured_untracked(
     assert "not TRACKED" not in why, why
 
 
+def test_a_PATTERN_shaped_filename_does_not_inherit_its_tracked_SIBLING(tmp_path):
+    """`-- <rel>` is a PATHSPEC, so a `*` in a NAME matched a DIFFERENT tracked file.
+
+    ⛔ THE WILDCARD DIRECTION OF THAT PATHSPEC (#11474 review), and it is the
+    fail-open this whole change exists to refuse, reached through the probe itself.
+    `_is_tracked` handed `str(rel)` straight to git, so with `docs/ev-axb.md` tracked
+    and `docs/ev-a*b.md` present but in NO index:
+
+        $ git ls-files --error-unmatch -- 'docs/ev-a*b.md'
+        docs/ev-axb.md                 # rc 0 — a DIFFERENT file answered
+
+        _is_tracked(docs/ev-a*b.md)               -> True
+        _evidence_is_real("docs/ev-a*b.md")      -> (True, '')   # a `verified` row
+
+    An artifact no clone has therefore satisfied the TRACKED rule. The docstring that
+    dismissed the pathspec hazard argued only the PREFIX direction ("only reachable
+    for a DIRECTORY-shaped name"), which does not cover a metacharacter in the
+    FILENAME. `:(literal)` makes the name a name; this pin holds both directions — the
+    wildcard-shaped name is NOT tracked, and the sibling it used to match still IS.
+    """
+    import subprocess as sp
+
+    repo = tmp_path / "pathspec"
+    (repo / "docs").mkdir(parents=True)
+    (repo / "docs" / "ev-axb.md").write_text("real\n", encoding="utf-8")
+    git = ["git", "-C", str(repo)]
+    sp.run([*git, "init", "-q"], check=True)
+    sp.run([*git, "add", "docs/ev-axb.md"], check=True)
+    sp.run(
+        [
+            *git,
+            "-c",
+            "user.email=t@example.com",
+            "-c",
+            "user.name=t",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "-m",
+            "seed",
+        ],
+        check=True,
+    )
+    star = repo / "docs" / "ev-a*b.md"
+    star.write_text("untracked\n", encoding="utf-8")
+
+    # CONTROL: the bare pathspec really does resolve to the tracked sibling, so this
+    # pin cannot pass merely because the fixture never reached the hazard.
+    raw = sp.run(
+        [*git, "ls-files", "--error-unmatch", "--", "docs/ev-a*b.md"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert raw.returncode == 0 and raw.stdout.strip() == "docs/ev-axb.md", (
+        "this pin needs the pathspec to MATCH the tracked sibling, or it tests nothing: "
+        f"rc={raw.returncode} stdout={raw.stdout!r} stderr={raw.stderr!r}"
+    )
+
+    assert cl._is_tracked(star, repo) is False, (
+        "a file in no index must not inherit a tracked sibling's status through its "
+        "NAME — that is the fail-open the TRACKED rule exists to refuse"
+    )
+    ok, why = cl._evidence_is_real("docs/ev-a*b.md", repo_root=repo)
+    assert ok is False and "not TRACKED" in why, why
+
+    # The other direction: the file that IS tracked still answers.
+    assert cl._is_tracked(repo / "docs" / "ev-axb.md", repo) is True
+
+
 @pytest.mark.parametrize(
     ("site", "call"),
     [
