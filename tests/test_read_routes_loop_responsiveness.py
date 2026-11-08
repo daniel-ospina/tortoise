@@ -278,9 +278,12 @@ _CONSTRUCTION_CASES = [c for c in _READ_CASES
 #: These are the four routes that are about to query the DATA plane, so their
 #: SDK handle must arrive with its projection ALREADY attached — the cold open
 #: (``Projection.__init__``: connect, version probe, ``_ensure_indexes()`` and,
-#: on a restored/DR graph, the index BUILD) is budgeted by
-#: ``probe_setup_timeout()`` (20 s, up to 300 s) and belongs to the ``graph``
-#: construction lane, NOT inside the read lane's 8 s saturation bound. A route
+#: on a restored/DR graph, the index BUILD) belongs to the ``graph``
+#: construction lane, whose wait bound is the one ``_graph_offload`` resolves for
+#: a caller that passes no ``timeout=`` — ``graph_offload_timeout_s()``, i.e.
+#: ``probe_setup_timeout()`` + ``CONTROL_PLANE_GRAPH_OFFLOAD_MARGIN_S`` (30 s by
+#: default, up to 310 s at the knob's ceiling) — and NOT inside the read lane's
+#: 8 s saturation bound. A route
 #: that never touches the projection (registry / control-plane reads: ``team``,
 #: ``sessions-*``, ``dream-health``) deliberately does NOT pass it — it must not
 #: pay a connect it never uses.
@@ -3247,8 +3250,11 @@ async def _warm_up_paying_the_cold_phases(ac, label: str, handler: str,
     ``bound`` stays the cold open's declared budget, so a route that is
     genuinely wedged still breaches it and says so. The deferral is granted at
     most ONCE, against the load's OWN deadline (``one_time_setup_deadline()``),
-    so the wait is FINITE by construction: total ≤ ``_LOAD_TIMEOUT_S`` + one
-    ``bound``. ⚠️ Recorded, not hidden: in the test lane ``_LOAD_TIMEOUT_S`` is
+    so the wait is FINITE by construction: total ≤ ``_LOAD_TIMEOUT_S`` + TWO
+    ``bound``s. The second one is not slack: the deadline is stamped when the
+    load STARTS, which is inside this request and therefore AFTER this wait
+    began, so the grant may begin up to one ``bound`` into it (the projection
+    cold open's own phase, per the first bullet above). ⚠️ Recorded, not hidden: in the test lane ``_LOAD_TIMEOUT_S`` is
     270 s, so a load that consumed its whole budget would leave this item under
     ``pytest-timeout``'s own 300 s — in that state the ITEM reports the timeout
     rather than the route. That is the outcome ``tests/conftest.py`` chose the
@@ -3528,12 +3534,15 @@ def test_the_read_path_answers_while_the_default_executor_is_stalled(client):
       #6960).
 
     ⚠️ AND THAT SECOND LOAD IS NOT LEFT AS A RESIDUAL HERE. `warm_up_bound` is
-    the COLD OPEN's budget, so it sits BELOW that load's budget — which means
+    the COLD OPEN's budget, and at the shipped default it sits BELOW that load's
+    device budget (30 s vs 90 s), which means
     the bound must not JUDGE that load, and `_warm_up_paying_the_cold_phases`
     does not: while a one-time embedder load is in flight it defers the
     judgement, against the load's OWN deadline (`one_time_setup_deadline()`),
     granted at most ONCE — so the wait stays FINITE by construction
-    (≤ `_LOAD_TIMEOUT_S` + one `warm_up_bound`) rather than growing on every
+    (≤ `_LOAD_TIMEOUT_S` + 2 × `warm_up_bound`: the deadline is stamped when the
+    load STARTS, which is up to one `warm_up_bound` into this wait) rather than
+    growing on every
     poll. Measured before this, on a healthy route: `[search] the WARM-UP search
     request did not answer within 20.0s` — reachable because the load's
     `huggingface_hub` resolve alone can burn a 15 s retry backoff (the suite's
