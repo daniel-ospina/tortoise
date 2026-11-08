@@ -108,9 +108,12 @@ EXPECTED_IDS = [
 #: pin therefore FORBADE a legitimate future state (C2 downgraded alone because the
 #: uncovered list stopped being explicit, E3 untouched), and because the premise
 #: was false the assertion could only ever fail for the reason it was told about.
-#: Deleted rather than reworded: agent-infra#3442 rule 3 — an assertion whose value
-#: cannot vary under any mutation of the diff is dead weight that misleads the next
-#: reader. Nothing was lost: the shrink is forced open by
+#: Deleted rather than reworded, for two reasons that are different in kind. The pin
+#: ENCODED A FALSE PREMISE, so it false-failed a legitimate state — an OVER-CONSTRAINT,
+#: not an inert assertion. (agent-infra#3442 rule 3 is about an assertion whose value
+#: CANNOT vary under any mutation; this one varied on a legitimate regrade, which is a
+#: different defect, and citing rule 3 for it would hand the next lane the wrong lesson.)
+#: And the shrink did not depend on it: it is forced open by
 #: `test_committed_ledger_uncovered_set_is_pinned` on `EXPECTED_UNCOVERED` below.
 EXPECTED_UNCOVERED = [
     "C1",

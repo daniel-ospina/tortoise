@@ -405,6 +405,13 @@ measured_at:
 #       (c) the merge of `origin/main` at THIS head added 42 more to that same file
 #       (125 `def test_`, up from 114; `c5dbd28971`, #11491), taking it 255 -> 297. So every
 #       number below is RE-MEASURED at this head rather than carried forward from (b)'s.
+#       ⛔ AND "THIS HEAD" IS NOT `measured_at.sha`, which is the tree the ROWS were graded
+#       on. The 297 exists only here: at `measured_at.sha` (`5ef5805f0`) the same pin file
+#       collects 165 (71 `def test_`), so the seven files collect 295 + 165 = 460 THERE and
+#       592 here — a 132-test gap, and it is the one #11491 landed after the baseline. Both
+#       readings are true of their own tree; a reader re-deriving this tally must use the
+#       head of the RUN, not `measured_at`. The only graded row that quotes this tally is
+#       S4's, and it quotes it for the two consent files' own 124.
 #       So the tally at THIS head is a COLLECTION count, and only that:
 #           per-file collection, summed: 295 (the six contract files: 66 / 54 / 9 / 42 / 65 / 59)
 #                                      + 297 (`test_9664_capstone_verdict_ledger.py`, the ledger pin suite)
@@ -478,8 +485,10 @@ measured_at:
 # sha was unreachable, which made a TRUE observation look unverifiable. Both halves are
 # the review finding; both are corrected here.
 # `git log -S 'id {stable_id}, graph_id' --all -- tortoise/mcp_auth.py` resolves the
-# reachable commit. The function now renders
-# `(id …, graph_id …)` for the DEFAULT row, and its OTHER arm — taken when the row's
+# reachable commit. The function renders `(id …, graph_id …)` for the DEFAULT row, and —
+# taken when the row's `stable_id` is absent or equals its gid — its OTHER arm renders the
+# name `repr`-quoted with a bare gid, i.e. `'name' (gid)` (the paragraph resumes after the
+# block below).
 # ⛔ WHY A MERGE-BOUNDARY COMMIT GOT CITED AT ALL, kept because the next lane on a
 # shallow checkout will reach for the same command (review round 13). An earlier cut of
 # this paragraph cited `347cf03cb8` and declared `704fd60ee` absent. The checkout that
@@ -522,10 +531,10 @@ measured_at:
 # `absent`, for an ancestor in a shallow checkout — "blaming the record reds the required
 # check on a legitimate ledger (#9075 r4 P1)", pinned by
 # `test_a_shallow_checkout_is_unprovable_never_absent`.
-# Resuming: when the row's `stable_id` is
-# absent or equals its gid, the OTHER arm renders the name `repr`-quoted with a bare
-# gid, i.e. `'name' (gid)`, NOT the unquoted `name (gid)` an earlier cut of this
-# paragraph printed (`mcp_auth._describe_graph`, the `return f"{name!r} ({gid})"` arm).
+# Resuming after that block: the two arms are recorded rather than harmonised, because
+# each is a real rendering of the same function. The OTHER arm prints `'name' (gid)` — the
+# name `repr`-quoted and the gid BARE — NOT the unquoted `name (gid)` an earlier cut of
+# this paragraph printed (`mcp_auth._describe_graph`, the `return f"{name!r} ({gid})"` arm).
 # `step11-write-half-trace.txt` block 2 shows the first arm (`'default' (id g_dfa9a45dc4234801,
 # graph_id 'default')`); U1's row quotes the
 # shape-neutral prefix `Reachable graphs: 'default' ...` and deliberately does not
