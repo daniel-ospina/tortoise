@@ -4594,12 +4594,20 @@ _NEGATION_GOVERNS = re.compile(
 # the exclusion NOR its inverse, because it negates the MODALITY —
 # `"it is not sure the walk reaches …"`, `"…does not always visit …"`,
 # `"…does not necessarily report …"` were all GREEN, so a §3 re-written into
-# hedges went on satisfying the pin. That list is the STANDARD's answer, not an
-# invention here: NegEx carries an explicit PSEUDO-NEGATION termset (with
-# `negspacy`'s `en_clinical` default) precisely because `not certain` / `not
-# sure` / `not necessarily` are cues that do NOT negate the finding they precede
-# — https://pypi.org/project/negspacy/ (external rung for #11437: `web_search`
-# model=sonar on "NegEx NegSpacy negation cue scope … pseudo-negation").
+# hedges went on satisfying the pin. The CLASS is the standard's: NegEx carries an
+# explicit PSEUDO-NEGATION termset (marked `pseudo_negations` in `negspacy`'s
+# `termsets.py`, `en_clinical` by default), which exists precisely because a cue
+# like `not necessarily` does NOT negate the finding it precedes.
+# ⚠️ WHAT IS THE STANDARD'S AND WHAT IS OURS, measured on the source rather than
+# assumed (#11437 review, P3): of this alternation's nine cues, **exactly one**
+# (`not necessarily`) is in that termset. `not sure`, `not always`, `not certain`,
+# `not clear`, `definitely`, `conclusively` and `guaranteed` are this file's own
+# EXTENSION of the class — NegEx's own terms are `not certain if` / `not
+# certain whether`, not `not certain`. So this is a NegEx-STYLE list, not a copy
+# of it; call it "the STANDARD's answer, not an invention here" and the claim is
+# the opposite of what the source measures. (Source read for #11437:
+# `negspacy==1.1.0`, `negspacy/termsets.py`; the pypi page documents the class
+# and the default, not the membership.)
 # Measured before this alternation: 3/3 hedges GREEN; after: 3/3 RED, with every
 # `must_stay_green`, `declared_open` and `declared_blocks` row unmoved.
 _AFFIRMED = re.compile(
@@ -4620,10 +4628,15 @@ def _residual_sentences(s3: str) -> list[str]:
 
     FALSE-GREEN (it misses the inverse):
 
-    * a DECOY about one of §3's other walks — the doc distinguishes the direct
-      walk, the closure, the mention scan and the retrieval walk, and
+    * a DECOY about a walk that is not the body walk — the doc names **three**
+      walks (`"the three walks — `direct`, the closure, the mention scan —"`), and
       `"Parameter defaults and decorators are not reported against the retrieval
-      walk."` reds nothing while saying nothing about the body walk;
+      walk."` reds nothing while saying nothing about the body walk. ⚠️ "the
+      retrieval walk" is a name this doc NEVER uses (measured: 0 occurrences in
+      §3 and 0 in `tools/dod_5090_probe.py`), which is why it is a decoy rather
+      than a quote — the predicate cannot know which walk names exist, so it has
+      to accept any of them. An earlier wording said the doc distinguished FOUR
+      walks; it distinguishes three (#11437 review, P3);
     * a sentence about the INSTRUMENT'S OUTPUT rather than the walk's visit —
       `report` is in the coverage list because §3's real clause says "and
       therefore NOT reported", so `"This section has not reported on `def`
