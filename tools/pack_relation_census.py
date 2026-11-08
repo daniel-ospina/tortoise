@@ -316,7 +316,14 @@ def _dangling(packs_dir: Path, all_rows: list[dict]) -> list[dict]:
         if kind in used:
             continue
         out.append({
-            "kind": kind,
+            # ⛔ The DECLARED spelling, not the lowercased join key. `pack_kinds`
+            # is keyed on `kind.lower()` for the endpoint comparison (a declared
+            # `fromKind` may spell a kind in any case), but emitting that key
+            # named kinds no manifest declares — the artifact said
+            # `marketing:competitorcontent` / `pm:kanbanboard` where the packs say
+            # `competitorContent` / `kanbanBoard`, and no test reads this cell.
+            # `full` is `"<ns>:<Kind>"` as declared, one line above.
+            "kind": full.split(":", 1)[1],
             "namespace": full.split(":", 1)[0],
             "owner": None,
             "note": (
@@ -424,11 +431,20 @@ def build_census(packs_dir: Path | str = REPO_ROOT / "packs", *,
             # README named it while it did not exist, which is the defect class
             # `layers.written` produced twice.)
             "note": (
+                # ⛔ The RULE only. An earlier wording added "a direction-agnostic
+                # join would read one lower" — a DERIVED metric this function never
+                # computes, so nothing could notice it going stale: with a second
+                # inverse-spelling hierarchy in `packs/`, `distinct_connections`
+                # rose by one while the agnostic join fell by two, and `--check`
+                # stayed green. A note may state the rule; only a computed cell may
+                # state a number (the same rule this module's docstring gives for
+                # every other quoted count).
                 "the join is ORDERED (pack_hierarchy._matching_row: the same "
                 "(fromKind, toKind) in that order, plus the same predicate or the "
-                "same semantics); an inverse-spelling row is NOT counted, so the "
-                "ordered join's answer is stated here and a direction-agnostic "
-                "one would read one lower"
+                "same semantics). An inverse-spelling row — the same pair declared "
+                "the other way round — is NOT counted by that join; counting it "
+                "would need a predicate-inversion table, a second parser this "
+                "artifact deliberately does not have"
             ),
         },
         # `None` on a hermetic re-derivation (no graph was touched); the measured

@@ -850,3 +850,31 @@ def test_h14_the_pipeline_unmeasured_cell_cites_the_SENTENCE_not_a_line(artifact
     assert "nothing in this tree consumes `result[\"relations\"]`" in src, (
         "the cited SENTENCE is not in the file it points at — an unfollowable "
         "citation is the same defect as a stale line number")
+
+
+def test_h2c_the_dangling_kinds_are_spelled_as_the_packs_DECLARE_them(artifact):
+    """`_dangling` joins endpoints on the LOWERCASED kind (`kind.lower()`), which
+    is the right key for a case-insensitive comparison — and the wrong thing to
+    REPORT. Emitting the join key named kinds no manifest declares: the artifact
+    said `marketing:competitorcontent` and `pm:kanbanboard` where the packs say
+    `competitorContent` and `kanbanBoard`, and nothing read this cell, so the
+    misspelling could not red anything.
+
+    Pinned on the declared spelling: a `core` row comes from the canonical
+    constant (its own spelling), any other row must match its pack's declared
+    object kind EXACTLY.
+    """
+    from tortoise.pack_registry import PackRegistry
+
+    reg = PackRegistry(REPO_ROOT / "packs")
+    reg.load_all()
+    declared = {ns: set(pack.object_kinds or ()) for ns, pack in reg.packs.items()}
+    rows = artifact["dangling"]
+    assert rows, "the section the commitment spine shows up in is empty"
+    for row in rows:
+        if row["namespace"] == "core":
+            continue
+        assert row["kind"] in declared.get(row["namespace"], set()), (
+            f"{row['namespace']}:{row['kind']} is not a declared object kind of "
+            f"that pack — the artifact is reporting the lowercased join KEY "
+            f"(declared: {sorted(declared.get(row['namespace'], ()))})")

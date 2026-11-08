@@ -51,9 +51,10 @@ row declares **in the same direction** are venture's.
 `Investment → Program` (`hasPart`) states the same FACT as its `relations[]`
 `partOf` (`program → investment`, `semantics: hasPart`) in the **inverse**
 direction, so the ordered join does not count it. Counting inverse-named ranks
-would read 37; that needs a predicate-inversion table, i.e. a second parser this
-artifact deliberately does not have, so the rule is STATED (here and in
-`population.note`) instead of the number being widened.
+would need a predicate-inversion table, i.e. a second parser this artifact
+deliberately does not have, so the rule is STATED (here and in
+`population.note`) instead of the number being widened — and the note states the
+RULE only, because only a computed cell may carry a count.
 
 | | before #11083 | after #11083 |
 |---|---|---|

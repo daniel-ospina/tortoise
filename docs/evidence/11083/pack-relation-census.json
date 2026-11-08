@@ -17,7 +17,7 @@
     "declared": 42,
     "restated_hierarchy_rows": 4,
     "distinct_connections": 38,
-    "note": "the join is ORDERED (pack_hierarchy._matching_row: the same (fromKind, toKind) in that order, plus the same predicate or the same semantics); an inverse-spelling row is NOT counted, so the ordered join's answer is stated here and a direction-agnostic one would read one lower"
+    "note": "the join is ORDERED (pack_hierarchy._matching_row: the same (fromKind, toKind) in that order, plus the same predicate or the same semantics). An inverse-spelling row \u2014 the same pair declared the other way round \u2014 is NOT counted by that join; counting it would need a predicate-inversion table, a second parser this artifact deliberately does not have"
   },
   "probe": {
     "store": "a throwaway embedded store (`TORTOISE_DB_URI` is deliberately NOT read)",
@@ -1168,7 +1168,7 @@
       "note": "is a core Object kind (ONTOLOGY \u00a75's commitment-state family) and NO declared relation or hierarchy names it as an endpoint, in any pack \u2014 the graph can hold one but cannot connect it to the work that serves it or the person who owns it"
     },
     {
-      "kind": "competitorcontent",
+      "kind": "competitorContent",
       "namespace": "marketing",
       "owner": null,
       "note": "is declared by its pack and no declared relation or hierarchy names it as an endpoint"
@@ -1192,7 +1192,7 @@
       "note": "is declared by its pack and no declared relation or hierarchy names it as an endpoint"
     },
     {
-      "kind": "kanbanboard",
+      "kind": "kanbanBoard",
       "namespace": "pm",
       "owner": null,
       "note": "is declared by its pack and no declared relation or hierarchy names it as an endpoint"
