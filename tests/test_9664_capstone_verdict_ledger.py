@@ -1556,7 +1556,47 @@ def test_a_long_path_is_truncated_in_the_error_line(tmp_path):
     assert "…" in proc.stderr, proc.stderr
 
 
-def _refusal_exit_status(exc: ast.expr | None) -> int:
+_UNRESOLVED = object()
+
+
+def _module_int_constants(body: list[ast.stmt], before_index: int) -> dict[str, int]:
+    """`NAME: Final[int] = <int literal>` values assigned BEFORE `before_index`.
+
+    A guard may spend a named constant rather than a literal — this tool defines
+    `EXIT_CLEAN: Final[int] = 0` (:137), so `raise SystemExit(EXIT_CLEAN)` is a
+    shape someone could plausibly write. But only constants assigned EARLIER IN
+    THE MODULE count: the guard is the first statement after `import sys`, so a
+    name defined below it is not bound when the guard runs and the refusal
+    becomes a `NameError` traceback instead of an attributable message. Measured:
+    `raise SystemExit(EXIT_INVALID)` (assigned at :138, guard at :101) reds the
+    census with a `NameError` traceback while a statically naive pin passes it.
+    """
+    values: dict[str, int] = {}
+    for node in body[:before_index]:
+        if not isinstance(node, ast.AnnAssign) or not isinstance(node.target, ast.Name):
+            continue
+        if node.value is None:
+            continue
+        annotation = node.annotation
+        is_int = (isinstance(annotation, ast.Name) and annotation.id == "int") or (
+            isinstance(annotation, ast.Subscript)
+            and isinstance(annotation.value, ast.Name)
+            and annotation.value.id == "Final"
+        )
+        if not is_int:
+            continue
+        try:
+            value = ast.literal_eval(node.value)
+        except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+            continue
+        if isinstance(value, int) and not isinstance(value, bool):
+            values[node.target.id] = value
+    return values
+
+
+def _refusal_exit_status(
+    exc: ast.expr | None, module_body: list[ast.stmt], guard_index: int
+) -> int | None:
     """The PROCESS status a guard's `raise SystemExit(...)` leaves behind (#11342).
 
     Mirrors CPython's own conversion — `.code` becomes a status via `0 if code is
@@ -1566,16 +1606,32 @@ def _refusal_exit_status(exc: ast.expr | None) -> int:
     all leave the process at **0**, so a bare `code != 0` would report a guard
     that prints the full refusal and then exits CLEAN as passing.
 
-    A non-constant argument cannot be resolved statically and is treated as
-    non-zero: `raise SystemExit(<message>)` — the historical #5128 shape this
-    tool uses — exits 1.
+    The argument is RESOLVED, not pattern-matched on `ast.Constant`. `ast.parse`
+    does no constant folding, so `-256`, `0 + 0`, `2 ** 8` and `0 * 7` arrive as
+    `UnaryOp` / `BinOp` nodes that all leave the process at **0** while a
+    Constant-only check calls them "a message" and returns 1 — the same
+    fail-open, one node type over. A `Name` is resolved against the module's own
+    `Final[int]` constants.
+
+    Returns ``None`` when the argument cannot be resolved statically. The CALLER
+    must treat that as a FAILURE rather than as non-zero: this pin is the only
+    gate on a `tools/`-only diff, so an unresolvable code is an unproven one.
     """
     if not (isinstance(exc, ast.Call) and exc.args):
         return 0  # `raise SystemExit` / `SystemExit()` leaves `.code` as None
     arg = exc.args[0]
-    if not isinstance(arg, ast.Constant):
-        return 1  # unresolvable; the `SystemExit(<str>)` shape exits 1
-    value = arg.value
+    # An f-string is a MESSAGE, and CPython prints a str argument then exits 1.
+    # `raise SystemExit(f"…")` is the shape this tool actually uses.
+    if isinstance(arg, ast.JoinedStr):
+        return 1
+    try:
+        value: object = ast.literal_eval(arg)
+    except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+        value = _UNRESOLVED
+    if value is _UNRESOLVED and isinstance(arg, ast.Name):
+        value = _module_int_constants(module_body, guard_index).get(arg.id, _UNRESOLVED)
+    if value is _UNRESOLVED:
+        return None
     if value is None:
         return 0
     if isinstance(value, str):
@@ -1586,7 +1642,31 @@ def _refusal_exit_status(exc: ast.expr | None) -> int:
         # `int.__and__`, not `&`: an int SUBCLASS can override `__and__`, and the
         # OS applies int arithmetic whatever the subclass declares.
         return int.__and__(value, 0xFF)
-    return 1
+    return None
+
+
+def _interpolates_the_actual_interpreter(node: ast.expr) -> bool:
+    """Whether a refusal message interpolates the interpreter it GOT.
+
+    The census asserts this behaviourally (`"(got 3.9)"` in the real refusal);
+    structurally that is a `sys.version_info[<n>]` SUBSCRIPT. The
+    `.major` / `.minor` spelling is deliberately NOT accepted: the census fakes
+    `sys.version_info` with a plain tuple for its probe, and a tuple carries no
+    `.major`, so that shape raises `AttributeError` under the census and reds it
+    — a guard this pin passed would red a later census run instead.
+    """
+    for sub in ast.walk(node):
+        if not isinstance(sub, ast.Subscript):
+            continue
+        target = sub.value
+        if (
+            isinstance(target, ast.Attribute)
+            and target.attr == "version_info"
+            and isinstance(target.value, ast.Name)
+            and target.value.id == "sys"
+        ):
+            return True
+    return False
 
 
 def test_the_tool_carries_the_5128_interpreter_guard_first():
@@ -1598,12 +1678,13 @@ def test_the_tool_carries_the_5128_interpreter_guard_first():
 
     That census cannot be the only pin, and the reason is a measured ASYMMETRY
     in `tools/ci_selection.py`: for a PR that touches only this tool,
-    `select(['tools/capstone_ledger.py'], 'pull_request')` returns 81 files that
-    INCLUDE this module (it is `tier1`-registered, `config/ci-surfaces.yml:8079`)
-    and EXCLUDE `tests/test_entry_point_python_guard.py`. So pinning here is what
-    makes the guard checked on a tool-only diff; pinning in the census alone is
-    not. Asserting it HERE also means the next edit to this tool fails fast, in
-    the same run as everything else about it.
+    `select(['tools/capstone_ledger.py'], 'pull_request', load_manifest())`
+    returns 82 files that INCLUDE this module (it is `tier1`-registered,
+    `config/ci-surfaces.yml:8082`) and EXCLUDE
+    `tests/test_entry_point_python_guard.py`. So pinning here is what makes the
+    guard checked on a tool-only diff; pinning in the census alone is not.
+    Asserting it HERE also means the next edit to this tool fails fast, in the
+    same run as everything else about it.
     """
     tree = ast.parse(TOOL.read_text(encoding="utf-8"))
     body = list(tree.body)
@@ -1689,10 +1770,31 @@ def test_the_tool_carries_the_5128_interpreter_guard_first():
         f"the guard must raise `SystemExit`; any other exception reads to the "
         f"operator as the tool being broken: {ast.dump(raise_node)}"
     )
-    status = _refusal_exit_status(exc)
+    status = _refusal_exit_status(exc, body, i)
+    assert status is not None, (
+        f"cannot statically resolve the refusal's exit code, so its status is "
+        f"UNPROVEN — use an int literal, a module-level `Final[int]`, or an "
+        f"f-string message; got {ast.dump(raise_node)}"
+    )
     assert status != 0, (
         f"the guard refused but the PROCESS exits {status} — a refusal that "
         f"reports success is indistinguishable from the tool having run: "
+        f"{ast.dump(raise_node)}"
+    )
+    # The census pins this tool's refusal code to 1 (`REFUSAL_CODES`, whose
+    # `REFUSAL_WHY` entry explains it: the 0-4 set is closed and fully spent, so
+    # EXIT_INVALID is reused as the fail-closed neighbour). That test does not
+    # run on a tool-only diff, so the same per-tool contract is pinned here —
+    # otherwise `raise SystemExit(3)` would pass the pin and red the census on a
+    # later core-surface run instead.
+    assert status == cl.EXIT_INVALID, (
+        f"the refusal must exit {cl.EXIT_INVALID} (`EXIT_INVALID`, the tool's "
+        f"fail-closed neighbour — its 0-4 set is closed and fully spent); got "
+        f"{status}: {ast.dump(raise_node)}"
+    )
+    assert len(exc.args) == 1 and not exc.keywords, (
+        f"`raise SystemExit(...)` must carry exactly one argument; the census "
+        f"rejects `SystemExit(<msg>, 1)` as an unattributable refusal: "
         f"{ast.dump(raise_node)}"
     )
 
@@ -1721,4 +1823,16 @@ def test_the_tool_carries_the_5128_interpreter_guard_first():
     assert f"uv run python tools/{TOOL.name}" in rendered, (
         f"the refusal must name an invocation that WORKS; renders as {rendered!r} "
         f"(message node: {ast.dump(message)})"
+    )
+    # The census also requires the refusal to name the interpreter it GOT, not
+    # just the floor: `(got 3.9)` is what makes the message attributable to the
+    # operator's actual situation. Without this the pin would accept a refusal
+    # that reds the census — on the one diff where the pin is the only gate.
+    assert "(got " in rendered, (
+        f"the refusal must name the interpreter it GOT, not only the floor; "
+        f"renders as {rendered!r} (message node: {ast.dump(message)})"
+    )
+    assert _interpolates_the_actual_interpreter(message), (
+        f"the refusal must INTERPOLATE `sys.version_info` — a hard-coded '3.9' "
+        f"is the same unattributed error for the next reader: {ast.dump(message)}"
     )
