@@ -13424,9 +13424,9 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                     # "the spans state no claim" — `malformed_sections` above is
                     # what tells them apart (review round 4, P1):
                     #   * a WELL-FORMED all-empty answer is the CORRECT answer
-                    #     for a label/date/aside span, and the dominant one on
-                    #     the recorded population — `added_items: 0` priced as
-                    #     the measured cost of one call;
+                    #     for a label/date/aside span, and `added_items: 0` is
+                    #     the measured cost of one call; how much of the
+                    #     population is that class is NOT measured (record §2);
                     #   * an ALL-MALFORMED answer emitted content this stage
                     #     then dropped, and it is recorded as such (per-section
                     #     error + `gap_fill_shape_error` census +
