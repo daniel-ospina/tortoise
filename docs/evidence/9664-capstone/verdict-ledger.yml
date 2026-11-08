@@ -64,23 +64,40 @@ criteria_expected: 22
 
 measured_at:
   ref: origin/main
-  sha: e1ba0974ef8452d57ad17ecaff18579d4772cd2b
-  date: 2026-11-07
+  sha: 5ef5805f0953c2cf0eb2338ca0ad0af4594ee70d
+  date: 2026-11-08
 
 # Environment established BEFORE any row was graded (by execution, not by reading):
 #
 #   $ curl -s https://api.premiselabs.co/v1/version
-#   {"version":"0.2.0","commit_sha":"40301bfdb3885d8bab0e40848e98e86a646654c3"}
-#   $ git merge-base --is-ancestor 40301bfdb3885d8bab0e40848e98e86a646654c3 origin/main && echo yes
+#   {"version":"0.2.0","commit_sha":"5938deafefde2a73ba105ab1384f9cff695e9e8b"}
+#   $ git merge-base --is-ancestor 5938deafefde2a73ba105ab1384f9cff695e9e8b origin/main && echo yes
 #   yes                    # the deployed sha IS an ancestor of this tree (no deploy of foreign code)
-#   $ git rev-list --count 40301bfdb3885d8bab0e40848e98e86a646654c3..origin/main
-#   8                      # deploy lag, RE-MEASURED 2026-11-07: 8 commits, not the 1 an earlier draft claimed.
-#                          # main itself moved during this pass (e1ba0974e -> dbbf5d874); the 8 commits are
-#                          # docs/test/CI/refactor and touch NO surface graded below — verified, not assumed:
-#                          #   $ git diff --name-only 40301bfdb..origin/main | rg -i 'onboarding|harness|consent|mcp_auth|sdk\.py|tool_registry|dashboard'
-#                          #   (no output)
-#                          # So a PRODUCTION observation still stands for the rows it is cited on, and the
-#                          # measured_at sha below is the tree this pass actually executed.
+#   $ git rev-list --count 5938deafefde2a73ba105ab1384f9cff695e9e8b..origin/main
+#   60                     # deploy lag, RE-MEASURED 2026-11-08 against THIS pass's tree (5ef5805f0).
+#                          # A lag number means nothing without its endpoint, which is why the sha is
+#                          # re-read here rather than carried: the previous pass recorded 40301bfdb/8,
+#                          # and the deployment had ADVANCED since. It was not wrong, it was older —
+#                          #   $ git merge-base --is-ancestor 40301bfdb 5938deaf && echo yes   -> yes
+#   $ git diff --name-only 5938deafefde2a73ba105ab1384f9cff695e9e8b..origin/main \
+#       | rg -i 'onboarding|harness|consent|mcp_auth|sdk\.py|tool_registry|dashboard'
+#   (no output)            # nothing graded moves between the DEPLOYED tree and the graded tree, so a
+#                          # PRODUCTION observation still stands for the rows it is cited on.
+#   $ git merge-base --is-ancestor e1ba0974ef8452d57ad17ecaff18579d4772cd2b 5938deaf && echo yes
+#   yes                    # the PREVIOUS pass's measured tree is itself an ancestor of what is now
+#                          # deployed, so its observations were made on a tree that reached production.
+#   $ git diff --name-only e1ba0974ef8452d57ad17ecaff18579d4772cd2b..5938deaf \
+#       | rg -i 'onboarding|harness|consent|mcp_auth|sdk\.py|tool_registry|dashboard'
+#   tortoise/sdk.py        # ONE graded file moved between the previous measured tree and the deployed
+#                          # one — re-measured because a moved SDK is the one change that could
+#                          # invalidate a `Contract green` row. It cannot:
+#                          #   $ git diff e1ba0974e..5938deaf -- tortoise/sdk.py \
+#                          #       | rg '^[+-] *(async )?def [a-z]'
+#                          #   (no output)   # 434 insertions / 45 deletions, and NOT ONE public method
+#                          #                 # added, removed or renamed. Retrieval internals only
+#                          #                 # (#11459, #11468) — the SDK SURFACE is unchanged.
+#                          # So no row's contract claim is disturbed, and that is measured rather than
+#                          # assumed from the file being "probably irrelevant".
 #   $ for u in api.../v1/version app.premiselabs.co tortoise.premiselabs.co/docs; do curl -o /dev/null -w '%{http_code}\n' "$u"; done
 #   200 / 200 / 200        # no blackout at measurement time (#10660 did not reproduce)
 #   $ curl -s https://app.premiselabs.co/auth | grep -oE 'APP_RETURN_ROUTES *= *\[[^]]*\]'
@@ -90,18 +107,25 @@ measured_at:
 #
 # Two independent layers are therefore established and NOT re-graded below:
 #   * the product/environment blockers named by the 2026-10-26 run are closed and the
-#     deployed sha is an ancestor of this tree (deploy lag 8, ancestor confirmed above);
+#     deployed sha is an ancestor of this tree (deploy lag 60 — re-measured below, and the
+#     figure this sentence used to carry, 8, was an older DEPLOYMENT, not a different fact);
 #   * the contract layer is green at this head, MEASURED BY EXECUTION in this pass —
 #     every count below is a line from a run in this worktree's
 #     `.worktree-report/`, not a carried-forward number:
 #
-#       $ uv run python tools/test_lane.py run -- tests/test_onboarding_auto_complete.py tests/test_cross_tenant_read_isolation.py -q
-#       51 passed                                   # 42 + 9 by collection
-#       $ uv run python tools/test_lane.py run -- tests/test_oauth_consent_page_step4.py tests/test_oauth_consent_bff_routes.py tests/test_9340_graph_tool_argument.py tests/test_pack_selection_by_graph.py -q
-#       239 passed, 5 failed                        # the 5 are `TestCreateGraphWithPacks`, refused by the
-#                                                   # PRIVATE lane container's ACL layer — see S2
+#       $ uv run python tools/test_lane.py run -- tests/test_9664_capstone_verdict_ledger.py tests/test_9340_graph_tool_argument.py tests/test_pack_selection_by_graph.py tests/test_cross_tenant_read_isolation.py tests/test_onboarding_auto_complete.py tests/test_oauth_consent_page_step4.py tests/test_oauth_consent_bff_routes.py -q
+#       456 passed, 5 failed                       # 461 collected. Run THROUGH
+#                                                   # `tools/worktree_report.py run` (this worktree's
+#                                                   # WORKTREE-REPORT.md), so the counts are parsed from
+#                                                   # the real log rather than typed by the author.
+#       per-file collection, summed: 295 (the six contract files: 66 / 54 / 9 / 42 / 65 / 59)
+#                                  + 166 (`test_9664_capstone_verdict_ledger.py`, the ledger pin suite)
+#                                  = 461 = 456 passed + 5 failed.   Counted, not estimated.
+#       the 5 are `TestCreateGraphWithPacks`, refused by the PRIVATE lane container's ACL layer — see S2.
 #       $ uv run python docs/evidence/9664-capstone/probes/step_premise_census.py
 #       MEASURED: 26 premises, 0 unmeasured sections.  (exit 0)
+#       $ uv run python tools/capstone_ledger.py check
+#       CAPSTONE-LEDGER-RESULT: UNCOVERED(12)       # exit 2 — the ONLY clean exit is an empty list
 #
 # ⛔ A previous draft of this preamble claimed "81 passed/2 skipped/1 xfailed" and
 # "190 passed (9340 graph argument + consent step4 + consent BFF)". Both were
@@ -131,14 +155,22 @@ criteria:
 
   - id: C2
     text: "Every step has a verdict; the \"not covered\" list is explicit (an empty uncovered list is the only clean exit)."
-    verdict: not-covered
-    reason: >-
-      The uncovered list is non-empty and this ledger is that list, computed:
-      S1-S10 and U1-U4 below carry per-row verdicts and reasons, and
-      `tools/capstone_ledger.py check` exits 2 on this file. Before this ledger the
-      list could only be obtained by re-reading the thread, and three passes got
-      three denominators (14 / 18 / 22) - which is why the criterion could never
-      be answered by anyone but its last reader.
+    # CORRECTED 2026-11-08 — this row said `not-covered`, and that was a FALSE
+    # NEGATIVE, not caution. The criterion asks for (a) a verdict on every step,
+    # (b) an EXPLICIT uncovered list, and (c) that an empty uncovered list be the
+    # only clean exit. It does not ask for the list to be EMPTY. All three clauses
+    # are properties of this file that the tool enforces on every run, and E3
+    # ("a per-step verdict, never an aggregate, with the reason") states a strict
+    # SUBSET of the same requirement and IS graded `verified` — so grading C2
+    # lower made the two rows contradict each other. A ledger that grades one
+    # claim two ways is not more conservative, it is unreadable.
+    verdict: verified
+    evidence:
+      - docs/evidence/9664-capstone/verdict-ledger.yml
+      - tools/capstone_ledger.py
+      - tests/test_9664_capstone_verdict_ledger.py
+    reason: ""
+    evidence_kind: trace
 
   - id: C3
     text: "Anything that failed has an issue."
@@ -154,9 +186,12 @@ criteria:
     verdict: blocked
     reason: >-
       A gate on other issues, not a deliverable: it cannot be satisfied until C1
-      and C2 are, so it is blocked BY them. Recorded rather than omitted so the
-      ledger's denominator does not silently shrink (an omitted gate reads as a
-      satisfied one).
+      is, so it is blocked BY C1. Recorded rather than omitted so the ledger's
+      denominator does not silently shrink (an omitted gate reads as a satisfied
+      one). C2 was the other half of this block until 2026-11-08, when it was
+      regraded `verified` for the reason recorded on its own row; this row's
+      dependency is updated with it rather than left naming a satisfied criterion
+      as a blocker - a stale dependency list is how a gate reads as open forever.
 
   # ── §A — the ten run steps, VERBATIM from the issue's "The run" table ───────
   - id: S1
@@ -227,10 +262,16 @@ criteria:
       token issue. Census rows 5a-5e re-measure the gates at this head (26
       premises, 0 unmeasured). A previous draft of this row said `verified` "as
       corrected" - that reads a refuted statement as covered, which is the exact
-      false PASS this ledger exists to refuse. The row needs the criterion
-      RESTATED (what does close, and when) before a run can satisfy it; the
-      server-observation waiver explains why no screenshot can carry it, and does
-      not make a false claim true.
+      false PASS this ledger exists to refuse.
+      WHAT REMAINS IS NOT A RUN: the criterion has to be RESTATED by the issue's
+      owner, because only #9664's own text can say what the step should observe.
+      Proposed wording, offered on the issue and NOT applied here: "both events are
+      observed AFTER the token is issued and neither at it - `connection-written`
+      persists as a client checkpoint, `harness-connected` is filed server-side on
+      the first agent write." That is the shape the shipped gates have (measured
+      above); restating it turns an ungradable row into one a run can carry.
+      `tools/capstone_ledger.py` still exits non-zero on this row, so a later pass
+      cannot read the proposal as an acceptance.
 
   - id: S6
     text: "paste the pointer prompt — the agent calls `tortoise_load_skill`"
@@ -246,9 +287,33 @@ criteria:
       CONFIRMED, 0 of 72). The run's trace shows the real call order instead. A
       previous draft said `verified` "as corrected", which counts a refuted
       observable as covered; `failed` would assert a failure that #9664's own
-      "anything that failed has an issue" row must then back - and no issue names
-      this one - so the honest state is: restate the criterion (which tool, if
-      any) and file the gap, then a run can grade it.
+      "anything that failed has an issue" row must then back.
+      THE ROOT IS NOW NAMED, so this row is actionable rather than dangling: the
+      criterion was transcribed from the served onboarding document, and that
+      document instructs calls the client cannot make. At this head
+      `tortoise/onboarding/SKILL.md` names `tortoise_health` 11 times (both served
+      copies), including `:616` "Call `tortoise_health` (MCP tool, all 6 harnesses
+      once connected)" and `:633` "Never claim connected on a failed
+      `tortoise_health`" - while `:657` in the SAME file states the name is retired
+      and absent from `tools/list`. It is tracked, open, and one name wide:
+      **#5439**, where this pass appended the line-numbered measurements and the
+      finding that the ChatGPT carve-out does not reach `:922`'s decide-protocol
+      verify step. `tortoise_onboarding_state` occupied the same class and has since
+      been removed from both served copies, so the migration is achievable.
+      What remains is (a) #5439's copy fix, then (b) the issue owner restating step
+      6 against a name that exists. ⚠️ The successor is
+      `tortoise_graph_overview(section="health")`, **not** `tortoise_overview` - a
+      previously drafted version of this row cited `RETIRED_USE_INSTEAD` at
+      `tortoise/tool_registry.py:1535` and named `tortoise_overview` as the replacement,
+      and BOTH were wrong: the map is at `:2085-2099`, and `tortoise_overview` is ITSELF
+      retired (`:2094`) into the same container. Measured against the live registry - 72
+      tools, `tortoise_health` ABSENT, `tortoise_overview` ABSENT,
+      `tortoise_graph_overview` LIVE. The module states the rule that catches this at
+      `:2088-2093`: "a replacement must RESOLVE in one hop ... a chain here would send a
+      caller of `tortoise_health` to a name that is itself retired." #5439's own
+      proposed remedy walks into exactly that.
+      Filing a peer issue for the restatement was REFUSED: the criterion text lives on
+      #9664 and only its owner may rewrite an acceptance criterion.
 
   - id: S7
     text: "\"what graphs do I have?\" — `tortoise_list_graphs` returns only entitled graphs"
