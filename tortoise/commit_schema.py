@@ -963,8 +963,30 @@ class CommitPayload(BaseModel):
         # counters, Document and Event were written — a redacted 500 with the
         # CommitRecord stuck ``partial`` and a non-converging retry. The id is
         # the Source's collision domain, so reject a blank one at Layer-1.
-        if not v.strip():
-            raise ValueError("session_id must be a non-blank string")
+        #
+        # #8290 review P1: this door used to be the FOURTH of four caller-id
+        # doors and the only one that judged the id with its own ad-hoc test
+        # instead of the shared predicate. It is not a cosmetic difference:
+        # the payload's id is written VERBATIM as a ``:Session``
+        # (``hosted_api._execute_commit_writes`` / the budget-held path) and as
+        # an ``AgentSession`` Event under the same id, so an id inside the
+        # RESERVED demo namespace would be filed here and then hidden by every
+        # session read surface — written, durable (the replay fold is
+        # BLANK-ONLY by #9594/#9553, so it survives), and invisible to its
+        # owner. Delegating to ``ids.session_id_refusal`` keeps ONE predicate
+        # across all four doors AND yields the same refusal TEXT the SDK doors
+        # already return, so the 422 detail is one string rather than a fourth
+        # spelling.
+        #
+        # ⛔ Deliberately NOT widened: ``projection._writable_container_id`` (the
+        # REPLAY half) stays BLANK-ONLY — #9594/#9553 govern it, and a replay
+        # that started refusing rows an older tree legitimately wrote would
+        # lose them.
+        from tortoise.ids import session_id_refusal
+
+        refusal = session_id_refusal(v)
+        if refusal:
+            raise ValueError(refusal)
         return v
 
     @field_validator("captured_at")

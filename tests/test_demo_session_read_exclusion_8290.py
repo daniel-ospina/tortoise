@@ -114,9 +114,14 @@ def test_the_exclusion_swallows_exactly_what_the_doors_refuse():
                 "doors admit it — a real capture filed under it would be "
                 "written and then invisible on all three surfaces")
         else:
-            # ...and nothing the doors admit may be hidden as a side effect
-            # (blank/non-str are refused for their OWN reasons, never hidden)
-            assert not session_schema.is_demo_session_id(value), value
+            # ...and the RESERVED class must never fire OUTSIDE the hidden set:
+            # a refusal widened past the exclusion would 422 ids the read
+            # surfaces still serve, so a caller could not re-capture under an id
+            # it can read back. (Blank/non-str are refused for their OWN,
+            # different classes — this asserts only the reserved one.)
+            assert refused is None or "RESERVED demo/sample namespace" not in refused, (
+                f"{value!r} is READABLE but the doors refuse it as a reserved "
+                "demo id — a capture under it could never be re-filed")
 
 
 def test_no_mintable_session_id_can_carry_the_demo_prefix():
@@ -130,12 +135,14 @@ def test_no_mintable_session_id_can_carry_the_demo_prefix():
     that matched everything would hide every leak instead of one. A 1000-mint
     population is cheap and makes the claim falsifiable.
 
-    The assertions are deliberately TWO: the population must be large enough for
-    the test to mean anything (a generator that yielded nothing would pass the
-    loop vacuously), and no member may match.
+    The assertions are deliberately TWO: the ids must be UNIQUE (a constant
+    mint would still carry the prefix question but would collapse the
+    population's discriminating power), and no member may match. The
+    population length itself is not asserted — it is built from a literal
+    ``range(1000)`` two lines up, so a length test could never fail and would
+    pin nothing (#8290 review P2).
     """
     population = [mint_session_id() for _ in range(1000)]
-    assert len(population) == 1000, "the mint population collapsed — vacuous run"
     assert len(set(population)) == 1000, "mint_session_id is no longer unique"
     offenders = [s for s in population
                  if session_schema.is_demo_session_id(s)]
@@ -218,6 +225,61 @@ def test_sdk_read_uses_the_shared_predicate():
         "door 404s it (the surfaces-disagree defect one arm over)")
     assert "session_demo_" not in body, (
         "the SDK read must not re-spell the prefix")
+
+
+def test_the_commit_door_refuses_a_reserved_id_too():
+    """The FOURTH caller-id door (#8290 review P1).
+
+    `POST /v1/sessions/commit`'s Layer-1 model judged `session_id` with its own
+    ad-hoc blank test instead of the shared predicate, so a reserved-prefix id
+    passed validation and was then written VERBATIM as a `:Session` (and an
+    `AgentSession` Event) — durable and hidden from every read surface. The
+    soundness claim in `session_schema.py` is about every door, so this pins
+    the one that did not participate.
+
+    REDS IF: the validator reverts to the blank-only test (a reserved id would
+    then be returned unchanged instead of raising), or the validator stops
+    being bound to the `session_id` field.
+    """
+    from tortoise.commit_schema import CommitPayload
+
+    v = CommitPayload._non_blank_session_id
+    reserved = session_schema.demo_session_id("abcdef123456")
+    with pytest.raises(ValueError) as exc:
+        v(reserved)
+    assert "RESERVED demo/sample namespace" in str(exc.value), (
+        "the commit door must name the reserved class, not a generic refusal")
+    # ...and the classes it ALREADY owned are unchanged (non-vacuity: a
+    # validator that raised on everything would pass the arm above)
+    with pytest.raises(ValueError):
+        v("   ")
+    assert v("session_0123456789ab") == "session_0123456789ab"
+
+
+def test_the_commit_door_rule_is_BOUND_to_the_session_id_field():
+    """The committed model — not just the helper — refuses a reserved id.
+
+    The arm above calls the validator directly, which cannot tell a rule that is
+    DECORATED onto ``session_id`` from one that has been unbound (a renamed
+    field, a dropped decorator). This drives the real model, so the refusal is
+    observed at the door a caller actually reaches. The payload is deliberately
+    PARTIAL: pydantic reports every field error at once, so the claim is that
+    ``session_id`` carries the reserved refusal among them — not that the
+    payload is otherwise valid.
+    """
+    from pydantic import ValidationError
+
+    from tortoise.commit_schema import CommitPayload
+
+    reserved = session_schema.demo_session_id("abcdef123456")
+    with pytest.raises(ValidationError) as exc:
+        CommitPayload.model_validate({"session_id": reserved})
+    hits = [e for e in exc.value.errors()
+            if e.get("loc") == ("session_id",)
+            and "RESERVED demo/sample namespace" in e.get("msg", "")]
+    assert hits, (
+        "the reserved-id refusal is no longer BOUND to CommitPayload."
+        f"session_id — errors seen: {exc.value.errors()[:3]!r}")
 
 
 def test_the_session_schema_no_longer_records_the_gap_as_open():

@@ -111,6 +111,18 @@ __all__ = [
 #: migration un-hides it, because nothing can distinguish such a row from the
 #: sample by id alone. The repair is a re-capture under an un-reserved id, and
 #: the graph row is reachable only by id from an operator, not by the product.
+#:
+#: ⚠️ SECOND RESIDUAL, named rather than silently left (the #8290 review's P1
+#: second half): the commit lane (`POST /v1/sessions/commit`) also writes an
+#: ``AgentSession`` Event under ``sessionId=<the same id>``. The four caller-id
+#: doors now REFUSE a reserved prefix, so no NEW such Event can be written; but
+#: an Event left by an older tree is still served by the SEARCH reads
+#: (``TortoiseSDK.search_sessions`` / ``get_events(eventKind='AgentSession')``)
+#: while ``get_session`` answers None — one id, two answers. Deliberate: the
+#: refund is a read filter on two surfaces this issue's scope does not own, and
+#: widening the exclusion there would hide a caller's legitimately-indexed
+#: session content that merely happens to name the prefix. Same repair as the
+#: residual above (re-capture under an un-reserved id).
 DEMO_SESSION_ID_PREFIX = "session_demo_"
 
 
