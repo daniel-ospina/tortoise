@@ -349,7 +349,7 @@ _MAX_SCRIPT_DEPTH: Final[int] = 3
 #: reported `verified: 22  uncovered: 0`, `CAPSTONE-LEDGER-RESULT: CLEAN`, exit 0.
 #: Two-character operators are matched before their one-character prefixes.
 _TWO_CHAR_SEPARATORS: Final[tuple[str, ...]] = ("&&", "||")
-_ONE_CHAR_SEPARATORS: Final[frozenset[str]] = frozenset({";", "|", "&", "\n"})
+_ONE_CHAR_SEPARATORS: Final[frozenset[str]] = frozenset()
 
 
 def _split_segments(text: str) -> list[str]:
@@ -431,27 +431,7 @@ _WRAPPER_VERBS: Final[frozenset[str]] = frozenset({"set", "export", "source", "u
 #: ACCEPTED on `origin/main` and REFUSED by the every-segment rule, and exit 1
 #: computes NOTHING, so the whole uncovered list disappeared. Every name here is a
 #: read or a print; none can be read as a claim that the work was done.
-_DECORATIVE: Final[frozenset[str]] = frozenset(
-    {
-        ":",
-        "awk",
-        "cat",
-        "cut",
-        "echo",
-        "grep",
-        "head",
-        "jq",
-        "ls",
-        "printf",
-        "sed",
-        "sort",
-        "tail",
-        "tr",
-        "true",
-        "uniq",
-        "wc",
-    }
-)
+_DECORATIVE: Final[frozenset[str]] = frozenset({":", "echo", "printf", "true"})
 
 _WILDCARDS: Final = "*?["
 
