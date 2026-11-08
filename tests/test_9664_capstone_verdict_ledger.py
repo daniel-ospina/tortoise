@@ -1716,6 +1716,95 @@ def test_set_and_umask_accept_their_own_option_operands(tmp_path):
         )
 
 
+def test_wrapper_grammars_admit_the_forms_bash_itself_accepts(tmp_path):
+    """Three shell facts, each measured against bash — and each refused here.
+
+    ⛔ MEASURED FALSE BLOCKS, all three found by the final review cycle of this
+    branch, each verified by RUNNING bash and the classifier rather than by
+    reading the grammar:
+
+    * `umask u=rwx,g=rx,o=` — the symbolic mask is a COMMA-SEPARATED CLAUSE LIST,
+      which is the exact spelling `_UMASK_ARG`'s own comment advertised, and the
+      first grammar matched only ONE clause. bash: rc 0.
+    * `set -- a b` — `--` ENDS option parsing, so every later operand is a
+      POSITIONAL PARAMETER, not an option. bash: rc 0.
+    * `unset 'A[0]'` — an array ELEMENT, not a bare NAME. bash: rc 0.
+
+    All three are `EXIT_INVALID`, and exit 1 prints no report, so each one cost
+    the whole uncovered list — the harm this arm's own comment ranks as worse
+    than the weaker verdict. `export 'A[0]'` stays refused in the companion test:
+    bash rejects it, so admitting it would be a false PASS instead.
+
+    ⛔ DISCRIMINATION, MEASURED AND STATED HONESTLY: these three cases PASS against
+    `origin/main`'s `tools/capstone_ledger.py`, because main has NO `umask`/`set`/
+    `unset` argument grammar at all and therefore accepted them trivially. So this
+    test is a REGRESSION PIN for the grammar THIS BRANCH introduces, not evidence
+    that main was wrong here. The companion
+    `test_the_stricter_wrapper_grammars_still_refuse_prose` DOES fail on main (main
+    admitted `umask "I did not run this"`), which is where the discrimination lives.
+    """
+    for command in (
+        "cmd:umask u=rwx,g=rx,o= && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
+        "cmd:umask u=rwx && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
+        "cmd:set -- a b && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
+        "cmd:unset 'A[0]' && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
+    ):
+        proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, command])]))
+        assert proc.returncode == cl.EXIT_CLEAN, (
+            f"{command!r} was REFUSED ({proc.returncode}) — bash accepts it (rc 0), "
+            f"so this is a false block\n{proc.stdout}{proc.stderr}"
+        )
+
+
+def test_the_stricter_wrapper_grammars_still_refuse_prose(tmp_path):
+    """Widening the three grammars must not re-open the carriage they guard.
+
+    The fix above admits `--`-terminated `set` operands and `unset` array
+    elements; a grammar that admits EVERY operand would admit the disclaimer
+    these wrappers were given an argument grammar to refuse. `export 'A[0]'` is
+    pinned here too: bash errors on it ("not a valid identifier"), so its refusal
+    is correct and must not be widened along with `unset`'s.
+    """
+    for command in (
+        'cmd:umask "I did not run this" && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q',
+        'cmd:set "I did not run this" && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q',
+        "cmd:set -e 'I did not run this' && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
+        'cmd:unset "I did not run this" && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q',
+        "cmd:export 'A[0]' && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
+    ):
+        proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, command])]))
+        assert proc.returncode == cl.EXIT_INVALID, (
+            f"{command!r} was ACCEPTED ({proc.returncode}) — prose rode in on a "
+            f"wrapper the grammar was widened for\n{proc.stdout}{proc.stderr}"
+        )
+
+
+def test_the_assignment_carriage_is_open_and_declared(tmp_path):
+    """`NAME=value` is an OPEN carriage, and the ledger now enumerates it as one.
+
+    ⛔ MEASURED, third finding of the final review cycle: `_command_body` strips a
+    leading `NAME=value` and `continue`s, so the assignment's VALUE is never
+    graded and a disclaimer can ride in it while the row still reads `verified`
+    (`uncovered: 0`, `CAPSTONE-LEDGER-RESULT: CLEAN`).
+
+    Admitting it is CORRECT — an assignment runs nothing and cites nothing, so it
+    is inert exactly like `cd`/`set` — so this is not a grammar bug. The defect was
+    that the carriage was UNDECLARED: `NAME=value` was listed among the allowed
+    wrappers while the ledger's "what is NOT closed" list omitted it, so it read as
+    closed. This test pins the behaviour the ledger now declares, so the doc and
+    the code cannot drift apart silently in either direction.
+    """
+    command = (
+        'cmd:A="I did not run this" && uv run pytest '
+        "tests/test_9664_capstone_verdict_ledger.py -q"
+    )
+    proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, command])]))
+    assert proc.returncode == cl.EXIT_CLEAN, (
+        "the assignment carriage changed shape without the ledger being updated "
+        f"({proc.returncode})\n{proc.stdout}{proc.stderr}"
+    )
+
+
 def test_a_quoted_flag_and_value_together_is_not_prose(tmp_path):
     """`pytest "-k not slow" <tracked path>` is a real record, not a disclaimer.
 

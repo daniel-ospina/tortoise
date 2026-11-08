@@ -396,8 +396,22 @@ _CONTROL_BUILTINS: Final[frozenset[str]] = frozenset(
 #: A bare NAME — an `export`/`unset` operand that is not an assignment.
 _ENV_NAME: Final = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
-#: A `umask` mask: octal, or the symbolic form (`u=rwx,g=rx,o=`).
-_UMASK_ARG: Final = re.compile(r"^[0-7]{1,4}$|^[ugoa]*[+\-=][rwxXst]*$")
+#: ONE array ELEMENT of a NAME, e.g. `unset 'A[0]'`. ⛔ `unset` takes this form and
+#: bash exits 0 for it, so requiring a bare NAME refused it — a false block on a
+#: record bash accepts, and exit 1 hides the whole uncovered report. Deliberately
+#: NOT extended to `export`: `export 'A[0]'` is a real bash error ("not a valid
+#: identifier"), so admitting it there would be a false PASS.
+_ENV_ARRAY_ELEMENT: Final = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\[[^\]]+\]$")
+
+#: A `umask` mask: octal, or the symbolic form. ⛔ The symbolic form is a
+#: COMMA-SEPARATED CLAUSE LIST (`u=rwx,g=rx,o=` — the exact spelling this comment
+#: has always named), and the first grammar matched only ONE clause, so the form
+#: the comment advertised was the form the arm refused. Measured: `bash -c 'umask
+#: u=rwx,g=rx,o='` exits 0, the classifier returned `EXIT_INVALID` with an EMPTY
+#: stdout, and the whole uncovered list was lost.
+_UMASK_ARG: Final = re.compile(
+    r"^(?:[0-7]{1,4}|[ugoa]*[+\-=][rwxXst]*(?:,[ugoa]*[+\-=][rwxXst]*)*)$"
+)
 
 
 def _fails_before_a_chain(head: str, args: list[str]) -> bool:
@@ -478,8 +492,14 @@ def _wrapper_argument_defect(head: str, args: list[str], cwd: Path, root: Path) 
         for arg in args:
             if arg.startswith("-") or arg == "--":
                 continue
-            if not (_ENV_NAME.match(arg) or _ENV_ASSIGNMENT.match(arg)):
-                return f"{_short(arg)} is neither a NAME nor a NAME=value assignment"
+            if _ENV_NAME.match(arg) or _ENV_ASSIGNMENT.match(arg):
+                continue
+            # ⛔ `unset 'A[0]'` removes ONE array ELEMENT and bash exits 0 for it;
+            # requiring a bare NAME (or `NAME=`) refused it as prose. `unset` only:
+            # see `_ENV_ARRAY_ELEMENT` for why `export` keeps the stricter rule.
+            if head == "unset" and _ENV_ARRAY_ELEMENT.match(arg):
+                continue
+            return f"{_short(arg)} is neither a NAME nor a NAME=value assignment"
         return None
     if head == "set":
         # ⛔ `man bash`: `set [-abefhkmnptuvxBCEHPT] [-o option-name] [--] [-] [arg …]`.
@@ -493,6 +513,13 @@ def _wrapper_argument_defect(head: str, args: list[str], cwd: Path, root: Path) 
             if expect_option_name:
                 expect_option_name = False
                 continue
+            # ⛔ `--` ENDS option parsing: every operand after it is a POSITIONAL
+            # PARAMETER, not an option (`man bash`: `set … [--] [-] [arg …]`).
+            # Requiring each of those to start with `-`/`+` refused `set -- a b`,
+            # which bash accepts (rc 0) — a false block on a record that ran, and
+            # exit 1 hides the whole uncovered report.
+            if arg == "--":
+                return None
             if not (arg.startswith("-") or arg.startswith("+")):
                 return f"{_short(arg)} is not a shell option"
             # ⛔ A CLUSTER ENDING IN `o` takes the NEXT bare word as its option

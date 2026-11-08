@@ -77,7 +77,16 @@
 #         `unset`, `set`, `umask`, `source`/`.` and the control builtins
 #         `exit`/`return`/`shift`/`break`/`continue` each grade their argument, so
 #         `export "I did not run this" && …` and `… && exit "I did not run this"`
-#         are both refused. A control builtin takes AT MOST ONE operand, and that
+#         are both refused. ⛔ `NAME=value` is the FIFTH carriage and is OPEN: the
+#         leading assignment is stripped and nothing after the `=` is graded, so
+#         `A="I did not run this" && uv run pytest …` yields a `verified` row and
+#         `uncovered: 0` (measured). Admitting it is CORRECT — an assignment runs
+#         nothing and cites nothing, so it is inert exactly like `cd`/`set` — the
+#         defect was that it went UNLISTED while being named among the allowed
+#         wrappers, so the carriage read as closed. Tracked in #11520 and pinned by
+#         `test_the_assignment_carriage_is_open_and_declared`, which fails if the
+#         behaviour and this declaration ever diverge.
+#         A control builtin takes AT MOST ONE operand, and that
 #         operand may be the shell's own status expansion (`exit $?`, the idiom this
 #         repo's install scripts use) — refusing that was a measured false block.
 #         `pushd`/`popd` are deliberately NOT wrappers: they
@@ -88,7 +97,7 @@
 #         half is open
 #         because requiring shell-shaped arguments from
 #         `echo`/`printf`/… must first be measured against the accepted
-#         `… && echo PASS`. Four carriages, all tracked in #11520 and all pinned —
+#         `… && echo PASS`. FIVE carriages, all tracked in #11520 and all pinned —
 #         the list is enumerated because an unlisted carriage reads as closed;
 #       - a `-c`/`-e` script body is never TRUSTED, and the ATTACHED spelling is
 #         graded: `bash -c'uv run pytest tools/x.py'` is a legitimate record (the body
