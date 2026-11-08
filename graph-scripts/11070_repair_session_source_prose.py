@@ -310,10 +310,17 @@ def _report_fts(fts: dict) -> None:
                   f"nodes whose `_searchText` IS the post-fix lexicon and whose "
                   f"own tokens account for the probe)")
         if probe.get("unexplained"):
-            print(f"            ⛔ {len(probe['unexplained'])} hit(s) on a node that "
-                  f"carries the post-fix lexicon but whose OWN tokens do not "
-                  f"account for the probe token — a surviving pre-fix index "
-                  f"entry, or a stem this check cannot fold")
+            # ⛔ THREE CAUSES, NOT ONE (#11536 review round 3): a url with
+            # several `:Source` nodes whose labels DISAGREE lands in this bucket
+            # too, and there the "node whose own tokens do not account for the
+            # probe" reading is false — the proven node's tokens DO account for
+            # it; only its url-mate disagreed. The message must not pick one.
+            print(f"            ⛔ {len(probe['unexplained'])} hit(s) that are NOT "
+                  f"provably a stem collision: a node that carries the post-fix "
+                  f"lexicon but whose OWN tokens do not account for the probe "
+                  f"token (a surviving pre-fix index entry, or a stem this "
+                  f"check cannot fold), or ONE url whose several nodes "
+                  f"disagree about what they carry")
         if probe.get("stale"):
             print(f"            ⛔ {len(probe['stale'])} hit(s) on an episodic session "
                   f"`:Source` that carries NO text at all — a STALE index entry")
@@ -408,15 +415,17 @@ def _report_fts(fts: dict) -> None:
                   f"read may be under load), or repair the stale index entry.",
                   file=sys.stderr)
     elif fts["vetoed"] == "unexplained":
-        print(f"✗ {len(fts['unexplained'])} probe(s) came back from a node that "
-              f"PROVES it carries the post-fix lexicon, while the probe token "
-              f"matches none of that node's OWN lexicon tokens "
-              f"{fts['unexplained']!r}. That is not a stem collision: either the "
-              f"index still holds the PRE-FIX entry behind a repaired node (the "
-              f"leak #11161 names), or the engine relates two words this check "
-              f"cannot fold. Re-measure with a token you know is in the "
-              f"lexicon, or inspect the node's `_searchText` against its index "
-              f"entry before signing off.", file=sys.stderr)
+        print(f"✗ {len(fts['unexplained'])} probe(s) came back from a hit this "
+              f"check could not prove benign: {fts['unexplained']!r}. That is "
+              f"not a stem collision, and there are three shapes it can be — a "
+              f"node that PROVES it carries the post-fix lexicon while the probe "
+              f"token matches none of that node's OWN lexicon tokens (the index "
+              f"still holds the PRE-FIX entry behind a repaired node, the leak "
+              f"#11161 names), an engine relation this check cannot fold, or ONE "
+              f"url carrying several `:Source` nodes that DISAGREE about what "
+              f"they carry (a repaired twin beside one that is not). Inspect the "
+              f"`_searchText` of EVERY node at that url against its index entry "
+              f"before signing off.", file=sys.stderr)
     elif fts["vetoed"] == "undiscriminating-probe":
         print(f"✗ this run WROTE, and {fts['undiscriminating']!r} matched no "
               f"pre-fix prose even BEFORE the writes — so its zero cannot show "

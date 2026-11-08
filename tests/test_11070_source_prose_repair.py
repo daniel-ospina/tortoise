@@ -52,6 +52,7 @@ from __future__ import annotations
 import importlib.util as _ilu
 import itertools
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -3584,31 +3585,47 @@ def test_TWO_nodes_at_ONE_url_are_BOTH_classified_so_a_prose_twin_cannot_certify
 
     (1) FAILS on the shipped classifier: ``classify_fts_hits`` folded the hit
         rows into ``props_by_url[url] = props``, so ONE url carrying TWO
-        ``:Source`` nodes kept whichever node the engine returned LAST. A url
-        whose nodes are a pre-fix prose twin and a repaired one was therefore
-        classified ENTIRELY from the repaired twin, the prose twin was never
-        examined, and ``_merge_probe`` certified — while the FTS read that
-        produced the rows returned the prose node too, i.e. the sentence was
-        still retrievable. That is #11161's own failure mode reached through a
-        different door: the run certifies around a hit it did not look at.
-    (2) REACHABLE: ``:Source`` declares NO uniqueness constraint on ``url``
-        (``find_session_sources_carrying_prose`` says so and dedupes on
-        ``id(s)`` for exactly this reason, #11176), so a second writer's CREATE
-        can leave two nodes at one (label, key) — and the probe's read returns
-        BOTH rows, as it did here.
-    (3) THE OTHER POLARITY: two PROVEN lexicon twins at one url stay a stem
-        collision, so agreement is not punished.
+        ``:Source`` nodes kept whichever node the engine returned LAST. Here the
+        last row is a REPAIRED twin and the other is a prose-carrying one, so the
+        url was classified entirely from the repaired node, the prose node was
+        never examined, and ``_merge_probe`` certified while the FTS read that
+        produced the rows returned the prose node too — the sentence was still
+        retrievable. #11161's own failure mode, through a different door.
+    (2) REACHABLE: ``:Source`` declares NO uniqueness on ``url``
+        (``find_session_sources_carrying_prose`` says so and dedupes on ``id(s)``
+        for exactly this reason, #11176), so a second writer's CREATE can leave two
+        nodes at one (label, key) and the probe's read returns BOTH rows.
+    (3) WHAT THIS ROW DOES AND DOES NOT CLAIM (#11536 review round 3, note on this
+        very test): it pins the FOLD's BUCKET — a url whose other node still
+        carries the prose is not reported as a benign stem collision. It is NOT by
+        itself a CLI-level false PASS: the census reads the same predicate over the
+        same population, so it lists this prose twin as a candidate (asserted
+        below) and the repair either clears it or the census refuses to reach 0.
+        The CLI-level shape — census 0 while the index still answers — is the
+        STALE twin, and it is the next test (`..._DISAGREE_...`) that carries it.
+        Stating the split matters: the previous docstring claimed the CLI would
+        certify here, which this fixture cannot show.
+    (4) THE OTHER POLARITIES: an episodic prose twin still WINS as `residue`, and
+        two PROVEN lexicon twins stay a stem collision, so agreement is not
+        punished.
     """
     from tortoise import session_source_prose_migration as m
 
     prose_twin = _session_node(url="session:dup", sessionId="dup",
                                summary=PROSE, _searchText=PROSE)
     repaired_twin = _post_fix_node(url="session:dup", sessionId="dup")
-    graph = _RecordingGraph([(prose_twin,), (repaired_twin,)])
+    graph = _RecordingGraph([(repaired_twin,), (prose_twin,)])
     # `friday` is a token BOTH twins carry: the repaired one as lexicon, the
-    # prose one as prose.
+    # prose one as prose. The REPAIRED twin is FIRST, so it is the one the
+    # pre-fix `props_by_url[url] = props` fold kept — which is the whole bug.
     _install_fts(monkeypatch, {"friday": [("session:dup", 1.0),
                                          ("session:dup", 2.0)]})
+
+    assert [n["url"] for n in m.find_session_sources_carrying_prose(graph)] == [
+        "session:dup"], (
+        "the census reads the same predicate over the same population, so it DOES "
+        "see this prose twin — which is why this row claims the bucket, not a "
+        "census-blind false PASS")
 
     report = m.probe_fts(graph, ["friday"], control=False)
     probe = report["probes"][0]
@@ -3616,12 +3633,25 @@ def test_TWO_nodes_at_ONE_url_are_BOTH_classified_so_a_prose_twin_cannot_certify
     assert probe["residue"] == ["session:dup"], (
         "a url whose OTHER node still carries the pre-fix prose was classified "
         f"as benign: {probe}")
-    assert probe["lexicon"] == []
-    assert report["leaked"] == ["friday"]
+    assert probe["lexicon"] == [] and probe["unread"] == []
 
     folded = _cli._merge_probe(None, report)
     assert folded["certifies"] is False and folded["vetoed"] == "leaked", (
         "the fold certified over a url whose prose twin the probe returned")
+
+    # (2b) an EPISODIC prose twin still takes the `leaked` arm, not `unexplained`.
+    episodic_twin = _session_node(url="session:dup3", sessionId="dup3",
+                                  summary=PROSE, _searchText=PROSE)
+    repaired_twin3 = _post_fix_node(url="session:dup3", sessionId="dup3")
+    _install_fts(monkeypatch, {"friday": [("session:dup3", 1.0),
+                                         ("session:dup3", 2.0)]})
+    report = m.probe_fts(_RecordingGraph([(repaired_twin3,), (episodic_twin,)]),
+                         ["friday"], control=False)
+    probe = report["probes"][0]
+    assert probe["residue"] == ["session:dup3"] and probe["lexicon"] == [], (
+        f"an episodic prose twin lost to a repaired twin: {probe}")
+    folded = _cli._merge_probe(None, report)
+    assert folded["certifies"] is False and folded["vetoed"] == "leaked"
 
     # (3) two proven-lexicon twins at one url: agreement, not a false veto.
     twin_a = _post_fix_node(url="session:dup2", sessionId="dup2")
@@ -3642,8 +3672,12 @@ def test_nodes_at_one_url_that_DISAGREE_are_unexplained_not_benign(monkeypatch):
         (index entry outlived a cleared node) and a proven-lexicon twin would be
         labelled from whichever came last, so half of what the read returned was
         bucketed without being examined.
-    (2) REACHABLE: same no-uniqueness argument as the twin test above; here the
-        twins differ in the other direction.
+    (2) REACHABLE — and this is the CLI-level FALSE PASS (#11536 review round 3,
+        note on the twin test above): the stale twin carries NO text, so the CENSUS
+        cannot see it (asserted below), and the lexicon twin is not a candidate
+        either. So `--dry-run --assert-clean` reads a ZERO census while the index
+        still answers for that url: the exact #11161 shape ("the census reads 0 and
+        the sentence is still retrievable"), reached through a url-mate.
 
     The leg's own polarity decides the bucket: "a false veto is re-measured; a
     false certification is the leak".
@@ -3654,15 +3688,43 @@ def test_nodes_at_one_url_that_DISAGREE_are_unexplained_not_benign(monkeypatch):
                                summary="", _searchText=None,
                                topics=["friday", "rebuild"])
     lexicon_twin = _post_fix_node(url="session:mixed", sessionId="mixed")
-    split = m.classify_fts_hits(_RecordingGraph([(stale_twin,),
-                                                (lexicon_twin,)]),
-                               ["session:mixed"], phrase="friday")
+    graph = _RecordingGraph([(stale_twin,), (lexicon_twin,)])
+
+    assert m.find_session_sources_carrying_prose(graph) == [], (
+        "the false PASS depends on the census NOT seeing this url: the stale twin "
+        "carries no text and the lexicon twin is not a candidate")
+
+    split = m.classify_fts_hits(graph, ["session:mixed"], phrase="friday")
     assert split["unexplained"] == ["session:mixed"], (
         f"a url whose nodes disagree was bucketed anyway: {split}")
     assert split["lexicon"] == [] and split["stale"] == []
 
+    # …and it VETOES: a census that reads 0 must not certify over it.
+    _install_fts(monkeypatch, {"friday": [("session:mixed", 2.0)]})
+    report = m.probe_fts(graph, ["friday"], control=False)
+    assert report["probes"][0]["hits"] == 1
+    folded = _cli._merge_probe(None, report)
+    assert folded["certifies"] is False and folded["vetoed"] == "unexplained", (
+        "a census-blind hit at a disagreeing url certified the leg")
 
-def test_the_control_walks_PAST_a_lexicon_node_whose_tokens_are_ALL_unusable():
+    # …and the message names the cause that applies, so the next reader is not
+    # told the single-node story about a two-node url (#11536 review round 3).
+    import io
+    from contextlib import redirect_stderr
+    buf = io.StringIO()
+    with redirect_stderr(buf):
+        _cli._report_fts(folded)
+    said = buf.getvalue()
+    assert "DISAGREE" in said, (
+        "the refusal did not name the disagreeing-twins cause: " + said)
+    assert "PROVES it carries the post-fix lexicon, while the probe token " \
+           "matches none" not in said, (
+        "the refusal still asserted the single-node cause for a two-node url: "
+        + said)
+
+
+def test_the_control_walks_PAST_a_lexicon_node_whose_tokens_are_ALL_unusable(
+        monkeypatch):
     """#11536 review round 3, note: ``LIMIT 1`` reported a false absence.
 
     (1) FAILS on the shipped control: ``_CONTROL_LEXICON_ROWS`` read ONE node and
@@ -3697,16 +3759,43 @@ def test_the_control_walks_PAST_a_lexicon_node_whose_tokens_are_ALL_unusable():
 
         def query(self, cypher, params=None, timeout=None):
             if "STARTS WITH $prefix" in cypher:
-                limit = 1
-                marker = "RETURN s._searchText LIMIT "
-                if marker in cypher:
-                    limit = int(cypher.split(marker, 1)[1].split()[0])
+                # The real server honours the clause, wherever it sits (the
+                # query carries an ORDER BY before it) — a fake that returned
+                # every row regardless could not discriminate a `LIMIT 1` read.
+                limit = int(re.search(r"LIMIT (\d+)\s*$", cypher).group(1))
                 return _Result(self.ROWS[:limit])
             return super().query(cypher, params=params, timeout=timeout)
 
     assert m.lexicon_control_token(_StoppardThenReal()) == "migration", (
         "the control stopped at the first lexicon row and reported the graph "
         "had no usable node")
+
+    # ⛔ THE WINDOW IS ORDERED, and what the note claims is BOUNDED BY IT
+    # (#11536 review round 3, note): an unordered `LIMIT` makes the control's
+    # availability non-deterministic between two runs over an unchanged graph, and
+    # "no usable token" over a window is not a statement about the whole graph.
+    assert "ORDER BY" in m._CONTROL_LEXICON_ROWS, (
+        "the control's window is unordered, so its verdict can differ between "
+        "runs over an unchanged graph")
+
+    class _Busy(_StoppardThenReal):
+        """A graph the index DOES hold entries for, with NO usable control row."""
+
+        ROWS: tuple[tuple[str], ...] = (("the, and, to, of, it",),)
+
+        def query(self, cypher, params=None, timeout=None):
+            if "coalesce(s._searchText, '') <> ''" in cypher:
+                return _Result([(3,)])
+            return super().query(cypher, params=params, timeout=timeout)
+
+    _install_fts(monkeypatch, {"zebraquux": []})
+    report = m.probe_fts(_Busy(), ["zebraquux"], control=True)
+    assert report["control"]["mode"] == "unavailable"
+    note = report["control"]["note"]
+    assert "post-fix lexicon row(s) the control read returned" in note, (
+        f"the note claims a universal about a bounded read: {note}")
+    assert str(m._CONTROL_LEXICON_WINDOW) in note, (
+        f"the note does not name the window it read: {note}")
 
 
 def test_a_JSON_signoff_STATES_the_leg_it_did_not_measure(monkeypatch, capsys):

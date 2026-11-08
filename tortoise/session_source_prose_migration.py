@@ -1205,12 +1205,20 @@ _HITS_ROWS = (
 #: can all be ordinary words that :func:`probe_phrase_rejection` refuses as probe
 #: tokens — and one unusable node was reported as "no POST-fix lexicon node", a
 #: false statement about the graph that pointed the operator at ``--no-fts-probe``.
+#: How many post-fix lexicon rows the control reads. Named because the `unavailable`
+#: note must say WHICH population "no usable token" is about (#11536 review round 3):
+#: a bounded window, never the whole graph.
+_CONTROL_LEXICON_WINDOW = 8
+
 _CONTROL_LEXICON_ROWS = (
     "MATCH (s:Source) "
     "WHERE s.summary STARTS WITH $prefix "
     "AND s._searchText IS NOT NULL "
     "AND s.documentKind IS NULL "
-    "RETURN s._searchText LIMIT 8"
+    "RETURN s._searchText "
+    # ⛔ ORDERED, so two runs over an unchanged graph cannot reach different
+    # control verdicts from an unordered window (#11536 review round 3).
+    f"ORDER BY s.url, id(s) LIMIT {_CONTROL_LEXICON_WINDOW}"
 )
 
 #: The SECOND control: does the index's field hold ANY entry at all, over the
@@ -1727,12 +1735,19 @@ def probe_fts(g, phrases, *, control: bool = True,
                     # The old wording asserted a fact about the graph the run had
                     # not measured, and pointed the operator at the weaker
                     # evidence this leg exists to stop certifying on.
-                    "note": "no usable control TOKEN was found (no post-fix "
-                            "lexicon node, or none whose tokens are valid "
-                            "single-token probes), and the Source index DOES "
-                            "hold entries — so its silence on the probe cannot "
-                            "be corroborated (the index is answering, but "
-                            "nothing here proves it would answer for a "
+                    # ⛔ BOUNDED, AND SAID SO: the control reads a WINDOW of
+                    # post-fix lexicon rows, so "no usable token" is a statement
+                    # about that window, never about the whole graph — the same
+                    # over-claim, one order smaller, that the round-3 rewording
+                    # removed (#11536 review round 3). The query is ORDERed so
+                    # the window is the same one on every run.
+                    "note": "no usable control TOKEN was found among the "
+                            f"{_CONTROL_LEXICON_WINDOW} post-fix lexicon row(s) "
+                            "the control read returned (none whose tokens are "
+                            "valid single-token probes), and the Source index "
+                            "DOES hold entries — so its silence on the probe "
+                            "cannot be corroborated (the index is answering, "
+                            "but nothing here proves it would answer for a "
                             "known-present token). Run the measurement on the "
                             "writing arm (`--repair --probe-phrase …`), which "
                             "takes its own BEFORE reading."}
