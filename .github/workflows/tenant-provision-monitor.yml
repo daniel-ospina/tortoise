@@ -103,15 +103,26 @@ jobs:
           # so every signup 403s at the server-only gate". Security-scanner
           # probes emit 1-2 lines per window and must not page, so: count, and
           # only >=5 per window opens an incident.
-          deny_count="$(printf '%s' "$out" | jq -r '.result[]? | select(.event_message != null) | .event_message' \
-            | grep -Fc "refused a browser-origin call" || true)"
-          hits="$(printf '%s' "$out" | jq -r '.result[]? | select(.event_message != null) | .event_message' \
+          # ONE jq pass: the same message list feeds the count, the evidence sample and
+          # the marker grep, so the three cannot drift apart.
+          msgs="$(printf '%s' "$out" | jq -r '.result[]? | select(.event_message != null) | .event_message')"
+          deny_count="$(printf '%s\n' "$msgs" | grep -Fc "refused a browser-origin call" || true)"
+          deny_raw="$(printf '%s\n' "$msgs" | grep -F "refused a browser-origin call" || true)"
+          hits="$(printf '%s\n' "$msgs" \
             | grep -F \
               -e "FASTAPI_URL is not set" \
               -e "Provisioning misconfigured" \
               -e "provision_team failed" \
               -e "tenant-provision error" \
             | sort -u | head -20 || true)"
+          # ⛔ The COUNT arm fires with NO marker hit, so an evidence block built from
+          # `$hits` alone is EMPTY on exactly the incident this arm was re-pointed at
+          # ("a client regressed to calling from a BROWSER"), whose only log lines ARE
+          # the deny lines. Both operands go into the evidence, so whichever arm fires
+          # the record carries what fired — an incident filed with a blank block reads
+          # as "no log lines", not as "the denied lines were not included".
+          evidence="$(printf '%s\n%s\n' "$hits" "$deny_raw" \
+            | grep -v '^[[:space:]]*$' | sort -u | head -20 || true)"
           if [ -n "$hits" ] || [ "$deny_count" -ge 5 ]; then
             # #3907: file the FINDING, not the occurrence. `title` is the STABLE
             # dedupe key (no run id, no timestamp, no count); the shared
@@ -131,9 +142,10 @@ jobs:
             cat > "$body_file" <<EOF
           Automatic alert from the hourly tenant-provision log monitor (workflow: $GITHUB_WORKFLOW, run: $GITHUB_RUN_ID).
 
-          Evidence (last 3h, deduplicated event_message lines):
+          Evidence (last 3h, deduplicated event_message lines — incident-class
+          markers and browser-origin refusals):
           \`\`\`
-          $hits
+          $evidence
           \`\`\`
 
           Investigate Supabase function logs: https://supabase.com/dashboard/project/$SUPABASE_PROJECT_REF/logs/edge-functions
@@ -145,8 +157,11 @@ jobs:
             if [ "$af_rc" != "0" ]; then
               echo "::error::auto-file failed (rc=$af_rc) — the monitor could not file or update its issue; this failing run IS the alert"
             fi
-            echo "::error::incident-class markers found in tenant-provision logs:"
-            printf '%s\n' "$hits"
+            # Both operands are named: the deny arm fires on a COUNT with no marker
+            # hit, and the marker arm fires on hits with <5 refusals. Naming only the
+            # markers made the deny incident read as "no markers" and print nothing.
+            echo "::error::tenant-provision log monitor fired — incident-class marker lines: $(printf '%s' "$hits" | grep -c . || true); browser-origin refusals: $deny_count"
+            printf '%s\n' "$evidence"
             exit 1
           fi
           echo "✅ no incident-class markers in the last 3h of tenant-provision logs"
