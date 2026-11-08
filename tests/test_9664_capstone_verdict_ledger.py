@@ -4735,9 +4735,18 @@ def test_an_EMFILE_on_the_ls_files_probe_cannot_manufacture_a_clean_exit(tmp_pat
 def test_the_unrunnable_probe_path_is_not_the_abstention_path():
     """The two OSError causes must not share a return value — that sharing WAS the bug.
 
-    `_tracked_unprovable()` is a MEASURED answer ("git says this is not a work tree");
-    `_tracked_unrunnable()` is NOTHING answered. Collapsing them is the fail-open, so
-    this asserts they are distinct at the function level, not just end to end.
+    `_tracked_unprovable()` returns the ABSTENTION (`True`) — git could not answer for
+    the TREE at all; `_tracked_unrunnable()` returns `None` — NOTHING was measured.
+    Collapsing them is the fail-open, so this asserts they are distinct at the function
+    level, not just end to end.
+
+    ⛔ `_tracked_unprovable` has TWO causes, so its pin is written for what it does,
+    not for one of them: `git is unavailable here` (no repository — the branch this
+    call exercises, since no probe is passed) and `git is present and says this is not
+    a work tree` (a bare repo over `GIT_DIR`, reached with `probe=`). It is NOT
+    "a MEASURED answer" unconditionally: on the no-repository branch git was never
+    able to ask at all. Both ABSTAIN — #11503 Option 1 — and the distinction that
+    matters here is abstention vs. no-measurement, not the sub-cause.
     """
     assert cl._tracked_unrunnable(OSError(24, "Too many open files"), "x") is None
     assert cl._tracked_unprovable() is True

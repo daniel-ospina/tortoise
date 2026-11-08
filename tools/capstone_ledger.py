@@ -1130,8 +1130,10 @@ def _names_artifact(token: str, cwd: Path, root: Path) -> tuple[bool, str]:
                 resolved_match = match.resolve()
                 if not (resolved_match.is_file() and resolved_match.is_relative_to(root)):
                     continue
-                # ⛔ THREE answers, not two. `None` is "the probe could not RUN", and
-                # folding it in with `False` here told a reader that every file a glob
+                # ⛔ THREE answers, not two. `None` is "nothing was measured about this
+                # path" — and that has TWO causes: the probe could not be SPAWNED, or it
+                # ran and failed to ANSWER (see `_is_tracked`). Folding it in with `False`
+                # here told a reader that every file a glob
                 # matches "is untracked by git" when git had never been asked — the same
                 # guess-the-cause defect this change removes from the other two call
                 # sites. A measured "no match is tracked" is still reported as that.
@@ -2088,7 +2090,13 @@ def _short(text: str, limit: int = 120) -> str:
 
 
 def _is_tracked(resolved: Path, root: Path) -> bool | None:
-    """`True` tracked · `False` measured-not-tracked · `None` the probe could not RUN.
+    """`True` tracked · `False` measured-not-tracked · `None` nothing was measured.
+
+    ⛔ `None` HAS TWO CAUSES and names neither: the probe could not be SPAWNED
+    (`_tracked_unrunnable`), or git RAN and failed to answer for the path
+    (`_tracked_unanswered` — exit 128 on an unreadable index). It is one value because
+    the decision is the same — nothing was measured, so the row may not be called
+    tracked — and the per-path REFUSED line is where the cause is named.
 
     ⛔ `False` covers TWO measured facts, and only the first is git's own answer: git
     said "no", OR the path is not under `root` at all (the `ValueError` arm below) —
@@ -2212,11 +2220,13 @@ def _tracked_unanswered(returncode: int, rel: Path) -> None:
     """Git ran and did NOT answer for `rel`. Nothing was measured, so that path is refused.
 
     ⛔ A THIRD refusal, with its own cause. `_tracked_unrunnable` is a probe that
-    could not be SPAWNED (`OSError`); `_tracked_unprovable` is a MEASURED "this is not
-    a work tree"; this one is git present and answering for the TREE while failing to
-    answer for the PATH — `git ls-files --error-unmatch` exits 128 on an unreadable
-    index, and the work-tree probe still says `true`. Rendering any of the three with
-    another's sentence is the guess-the-cause defect this function exists to remove.
+    could not be SPAWNED (`OSError`); `_tracked_unprovable` is git unable to answer for
+    the TREE — no repository at all, or a MEASURED "this is not a work tree" (two
+    causes of its own; see its docstring); this one is git present, answering for the
+    TREE, and failing to answer for the PATH — `git ls-files --error-unmatch` exits 128
+    on an unreadable index while the work-tree probe still says `true`. Rendering any
+    of the three with another's sentence is the guess-the-cause defect this function
+    exists to remove.
 
     Only exit 1 is a `no` ("no match"); every other non-zero is a failure to answer.
     The message names the exit code rather than pointing at an undiagnosed git error,
