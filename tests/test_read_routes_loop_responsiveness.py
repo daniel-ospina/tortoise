@@ -3319,7 +3319,7 @@ def test_the_warm_up_does_NOT_judge_a_one_time_load_by_the_cold_open_bound(
     surface only as the very CI red it exists to remove. This exercises the
     branch directly, against a fake client, with the probe monkeypatched.
 
-    Three arms, one per property:
+    Four arms, one per property:
 
     1. a request SLOWER than ``bound`` is ABSORBED while a load is in flight
        (this is the behaviour the warm-up exists for — measured red in CI as
