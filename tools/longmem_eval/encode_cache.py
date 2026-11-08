@@ -8,10 +8,10 @@ of units are cross-question cache hits (turn leg 246,750/189,522 = 1.302x;
 chunk leg 124,345/96,086 = 1.294x). This docstring previously claimed "5-10x
 redundant encodes" — that figure was never measured, and the census refuted it,
 so no live site restates it. The plan that ORIGINATED it
-(`docs/plans/2026-08-17-1349-embedder-selection.md:63`, and its budget line at
-`:96`) is left standing as the historical record it is; the research write-up
-(`docs/research/2026-11-08-1779-eval-session-dedup.md` §0.1) names exactly
-those two lines as its origin.
+(`docs/plans/2026-08-17-1349-embedder-selection.md:63`, and its restatement at
+`:101` — `:96` before this PR inserted its note) is left standing as the
+historical record it is, and this PR adds a dated correction note at that line;
+the research write-up names the origin in §0.1 and both lines in §5.
 
 The unit counts above are the DATASET-DERIVABLE encode units — turn Points
 plus raw chunks. A `v2` run additionally embeds LLM-derived extraction Point

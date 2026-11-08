@@ -136,13 +136,14 @@ for this issue by its own scope guard ("Out of scope: any parse/retrieval semant
 ## 5. What changed in the tree (and what deliberately did not)
 
 - **New:** `tools/longmem_eval/haystack_overlap.py` (census + derived verdict + CLI) and its test
-  `tests/longmem_eval/test_haystack_overlap_1779.py` (10 tests; registered in `config/ci-surfaces.yml`
+  `tests/longmem_eval/test_haystack_overlap_1779.py` (13 tests: 12 hermetic + the real-split pin; registered in `config/ci-surfaces.yml`
   on the `eval` surface, where `tools/longmem_eval/` is a `SOURCE_PATTERNS` entry, and therefore in
   the non-gating `on_demand` lane — `python tools/ci_selection.py --integrity` exits 0).
 - **Corrected:** the unmeasured "5-10×" in `encode_cache.py` (docstring), `README.md` (encode-cache
   section + a new measured-overlap table) and `run.py:7383` (comment) now cite the measured 1.299× /
   23.0% and name the census that produced it. Its ORIGIN —
-  `docs/plans/2026-08-17-1349-embedder-selection.md:63` and its restatement at `:96` — keeps its
+  `docs/plans/2026-08-17-1349-embedder-selection.md:63` and its restatement at `:101` (`:96` before
+  this PR's note) — keeps its
   original text (a plan is the dated record of what was believed) and gains a dated correction note
   at each site, so the next reader cannot take it as a current premise.
 - **Refactored (no behaviour change):** `ingest._turn_text` — one definition of the turn Point's
@@ -160,8 +161,8 @@ for this issue by its own scope guard ("Out of scope: any parse/retrieval semant
    (`prompt_cache_hit_tokens` → `cache_read_per_1m`). Answerable from any real run's report; no
    measurement was possible in this lane (no LLM keys, no spend authorisation).
 3. **The M split.** The S split is the design-locked target (#1144 axis 2). M has ~500 sessions per
-   question, so its cross-question overlap may differ — one `--split m` invocation of the census
-   answers it (2.7 GB download; deliberately not run here).
+   question, so its cross-question overlap may differ — one `--split m --download` invocation of the
+   census answers it (2.7 GB download, so it is never implicit);
 4. **A dataset refresh** changes any of the above numbers → the `@slow` pin reds and the docs get
    re-derived, which is the point of pinning them.
 5. **The `v2` extraction leg is outside every share quoted here.** The census counts the texts the
@@ -182,6 +183,7 @@ for this issue by its own scope guard ("Out of scope: any parse/retrieval semant
   attempt at #1779; the only `#1779` hits in the log are another repo's numbering); the #1746 plan
   (`docs/plans/2026-08-26-1746-parse-error-robustness.md:22,228,314` — which sets the scope guard
   and names this issue as the follow-up) and `docs/plans/2026-08-17-1349-embedder-selection.md:63,96`
+  (both `main`-era line numbers: `:96` moved to `:101` when this PR added its note at `:64-68`)
   (the origin of the "5-10×" claim); `tools/longmem_eval/{ingest,ingest_v2,encode_cache,run}.py`;
   `tests/test_dataset_audit.py` (the pinned-census + `@slow` pattern reused here).
   **Tortoise graph: NOT consulted — no graph was reachable on this cell**
@@ -213,7 +215,7 @@ for this issue by its own scope guard ("Out of scope: any parse/retrieval semant
 TORTOISE_LME_CACHE_DIR=~/.cache/tortoise-longmemeval \
   python -m tools.longmem_eval.haystack_overlap --json
 
-# the tests (10 passed; the @slow pin needs the cached S split)
+# the tests (12 passed, 1 skipped; the @slow pin needs the cached S split)
 TORTOISE_TEST_CARVE_OUT=1 TORTOISE_LME_CACHE_DIR=~/.cache/tortoise-longmemeval \
   python -m pytest tests/longmem_eval/test_haystack_overlap_1779.py -q -p no:cacheprovider
 ```
