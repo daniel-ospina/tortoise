@@ -79,7 +79,7 @@ def _stored(sdk, op_id: str) -> tuple[str, str]:
 # full probe over one row is ~2 s, and a sample would leave 37 `written` cells
 # unverified. The same pass is the artifact's evidence producer:
 #   uv run python tools/pack_relation_census.py --write-probe
-def test_g1_write_probe_reproduces_the_committed_written_column(sdk):
+def test_g1_write_probe_reproduces_the_committed_written_column(sdk, monkeypatch):
     """The artifact's `written` cells are the graph's answer, not a transcription.
 
     ⛔ A probe that omitted `direction=` would write `->` for `venture:holds`
@@ -95,10 +95,12 @@ def test_g1_write_probe_reproduces_the_committed_written_column(sdk):
     rows = [r for section in fresh["packs"].values()
             for r in section["relations"] + section["hierarchies"]]
 
-    # `_sdk` is the probe's ONE injection point, so the private-name touch is
-    # deliberate and carries no `noqa`: `SLF001` is not an enabled rule here, and
-    # RUF100 reds an unused directive (ruff's own lint job caught it).
-    census._sdk = lambda uri=None: sdk
+    # `_sdk` is the probe's ONE injection point. `monkeypatch.setattr` (not a
+    # plain assignment) because the module global is process-wide and the `sdk`
+    # fixture CLOSES its SDK at teardown: a leaked `_sdk` would hand the next
+    # reader in this process a closed store. `RUF100` reds an unused `noqa`, so
+    # no directive is carried here — `SLF001` is not an enabled rule.
+    monkeypatch.setattr(census, "_sdk", lambda uri=None: sdk)
     probe = census._run_write_probe(rows, REPO_ROOT / "packs", None)
 
     # ⛔ The artifact's `probe` block is a MEASURED cell, so it is compared to the
@@ -113,6 +115,9 @@ def test_g1_write_probe_reproduces_the_committed_written_column(sdk):
     assert probe["deleted"] == probe["minted"], (
         f"{probe['minted'] - probe['deleted']} minted node(s) survived the "
         f"cleanup: {probe['leftovers']}")
+    assert probe["leftovers"] == committed["probe"]["leftovers"] == [], (
+        f"a residue was reported ({probe['leftovers']}) — the artifact must carry "
+        "the same reading, and an empty list is the only clean one")
     assert probe["leftovers"] == committed["probe"]["leftovers"] == [], (
         f"a residue was reported ({probe['leftovers']}) — the artifact must carry "
         "the same reading, and an empty list is the only clean one")
@@ -289,7 +294,7 @@ def test_g3b_the_endpoint_cache_is_keyed_on_the_NAMESPACED_kind(sdk):
     assert len(minted) == 2
 
 
-def test_g4_the_probe_deletes_what_it_mints(sdk):
+def test_g4_the_probe_deletes_what_it_mints(sdk, monkeypatch):
     """Two docstrings claimed `--write-probe` deletes what it mints. It did not.
 
     There was no `delete` anywhere in the census, `_sdk` honoured
@@ -312,7 +317,10 @@ def test_g4_the_probe_deletes_what_it_mints(sdk):
         "fromKind": "pm:card",
         "toKind": "pm:card",
     })
-    census._sdk = lambda uri=None: sdk
+    # Restored by `monkeypatch`, not left for the process: the `sdk` fixture
+    # closes its SDK at teardown, so a leaked module global would make every
+    # later test in this process read a closed store (H10's `_sdk` spy included).
+    monkeypatch.setattr(census, "_sdk", lambda uri=None: sdk)
     # ⛔ Observe the ids the PROBE actually passed: `_mint_endpoint` alone cannot
     # answer this, because the defect would be the CALLER not asking for the
     # second node (measured: a `_mint_endpoint`-only test stayed green with the

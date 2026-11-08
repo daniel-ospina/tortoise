@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 """The per-pack relation census — declared → writable → sense → written (#11083).
 
 WHY THIS EXISTS
@@ -70,10 +70,24 @@ is produced with it; the hermetic half re-derives without one.
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — CPython parses the
+# whole file before executing it, so a guard placed after the imports cannot run:
+# an older interpreter dies in `argparse`/a module-level 3.11+-only import with no
+# attribution, which is the refusal this entry point owes its caller. The
+# preamble (`[docstring] [__future__] import sys` then this `if`) is pinned by
+# `tests/test_entry_point_python_guard.py`.
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/pack_relation_census.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/pack_relation_census.py`"
+    )
+
 import argparse
 import json
 import os
-import sys
 from collections import Counter
 from pathlib import Path
 

@@ -32,7 +32,7 @@ import yaml
 # as `->` — the census and the writer disagreeing about one row, which is the
 # divergence `live.py`'s one-normalizer invariant exists to prevent (#7852).
 from .live import ACCEPTED_DIRECTION_VALUES as _ACCEPTED_DIRECTION_VALUES
-from .live import canonical_direction
+from .live import canonical_direction, is_default_direction
 from .source_credibility import SOURCE_KIND_DEFAULTS
 from .status_folds import (
     StatusFoldIndex,
@@ -682,6 +682,17 @@ def effective_direction(rel: dict) -> str | None:
        ``<-`` is reported) while ``create_operator`` honours it as ``->``
        (``is_default_direction("unidirectional") is False`` → basis ``explicit``).
        One wrong sign, which is exactly the hazard the load-time warn exists for.
+
+       ⛔ The declared token is honoured only when it DIFFERENTIATES, because
+       that is the condition the writer applies (``sdk.py``: ``derived = …; if
+       derived is not None and is_default_direction(direction): direction =
+       derived``). ``<->``/``bidirectional`` is the signature default that means
+       "not declared" (``live.is_default_direction``), so for a row declaring
+       ``{semantics: produces, direction: <->}`` the MEANING wins and the graph
+       stores ``<-``. Reporting the literal ``<->`` here would restore exactly
+       the divergence above in the opposite direction, on a token a manifest
+       spellings-check allows. ``-`` and the one-way tokens DO differentiate and
+       therefore outrank the meaning, as they do at the writer.
     2. otherwise the Layer-2 meaning's direction through the SAME chain the write
        path uses: ``SEMANTICS_TRANSITION`` then ``SEMANTICS_DIRECTIONS``. A
        retired spelling is resolved here exactly as `sdk.create_operator`
@@ -700,7 +711,7 @@ def effective_direction(rel: dict) -> str | None:
     """
     declared = rel.get("direction")
     canonical = canonical_direction(declared)
-    if canonical is not None:
+    if canonical is not None and not is_default_direction(declared):
         return canonical
     semantics = rel.get("semantics")
     if not isinstance(semantics, str) or not semantics:

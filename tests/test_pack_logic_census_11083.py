@@ -255,13 +255,37 @@ def test_h3e_a_LEGACY_token_is_honoured_exactly_as_the_writer_honours_it():
     the writer honoured it as `->`: for a row whose meaning is `produces` (table
     `<-`), the census reported `<-` and the graph stored `->`. One wrong sign on
     the very cell this PR exists to make trustworthy.
+
+    ⛔ The MIRROR-IMAGE divergence is the other half of the same rule, and a
+    reader honouring "any declared token" gets it wrong: the writer resolves a
+    declared direction only when it DIFFERENTIATES (`sdk.py:23192` — `derived =
+    self._direction_from_semantics(semantics); if derived is not None and
+    is_default_direction(direction): direction = derived`), and `live.py` says
+    `bidirectional`/`<->` IS the non-differentiating default. So a row declaring
+    `{semantics: produces, direction: bidirectional}` is stored `<-`, and a
+    census cell saying `<->` would be the census and the writer disagreeing
+    again — this time claiming a mutual edge the graph does not hold.
     """
     assert effective_direction(
         {"semantics": "produces", "direction": "unidirectional"}) == "->", (
         "`unidirectional` IS `->`; reporting the meaning's `<-` here would put the "
         "census and `create_operator` on opposite sides of one row")
+    # A DEFAULT token does not differentiate, so the MEANING wins — exactly as
+    # `create_operator` overwrites it. Both spellings of the default, and both
+    # because `is_default_direction` is the one predicate, not a token list.
     assert effective_direction(
-        {"semantics": "produces", "direction": "bidirectional"}) == "<->"
+        {"semantics": "produces", "direction": "bidirectional"}) == "<-", (
+        "`bidirectional` is the writer's non-declaration default, so the writer "
+        "stores the meaning's `<-`; a census cell of `<->` would describe an "
+        "edge the graph does not hold")
+    assert effective_direction(
+        {"semantics": "produces", "direction": "<->"}) == "<-", (
+        "the model spelling of the same default must resolve identically")
+    # `-` DOES differentiate (no confidence transfers, owner ruling), so it is
+    # honoured over the meaning — the normalizer must not widen `default` into
+    # "everything that is not one-way".
+    assert effective_direction(
+        {"semantics": "produces", "direction": "-"}) == "-"
     # The four model values are unaffected, and a declared token still outranks
     # the meaning (H3d's rule) — the normalizer must not widen what is honoured.
     assert effective_direction({"semantics": "produces", "direction": "<-"}) == "<-"
