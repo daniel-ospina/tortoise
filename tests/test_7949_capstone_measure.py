@@ -4596,9 +4596,9 @@ def test_the_bare_continuation_cites_name_what_they_say():
             ("13231", "if vet_enabled and complete_list:"),
             ("13232", "complete_list, vet_union_stats, _w, _ = _run_vet_pass("),
         )),
-        # the VET block's start; its lines of keys (13450-13452) close on
-        # line 13453 — DERIVED by content, not by arithmetic: `result["vet"] = {`
-        # opens at 13449 and the block's `}` is 13453. ⚠️ A conflict resolution
+        # the VET block's start; its lines of keys (13456-13458) close on
+        # line 13459 — DERIVED by content, not by arithmetic: `result["vet"] = {`
+        # opens at 13455 and the block's `}` is 13459. ⚠️ A conflict resolution
         # here once kept main's numerals (13256/13257-13259/13260 — correct on
         # main, but in THIS tree 13256 is the `"hold"` key and 13257-13260 is
         # the whole `chain_enforcer` block) next to the branch's post-refactor
@@ -4662,6 +4662,32 @@ def test_the_bare_continuation_cites_name_what_they_say():
         )),
         # the S2.2/S2.3 block this probe names as the #9116 seam's subject
         ("probes/capstone_measure.py", 'result["vet"]`` at', (
+            ("13455", 'result["vet"] = {'),
+            ("13459", ("exact", "}")),
+        )),
+        # ⛔ The SAME two blocks as the probe's `_pass_ran` docstring names them
+        # (#11517 review, finding 3). It said the flag-OFF surfaces live at
+        # `:13445-13453`, which is the CLASSIFY block plus the two VET comment
+        # lines — it does not contain `result["vet"]` at all, because the two
+        # blocks are 13445-13451 and 13455-13459. The row above pins the VET
+        # bounds for a DIFFERENT sentence, so this sentence's own copy of the
+        # block bounds had no reader: a bare `:N`-range names no file, which is
+        # the drift the whole `_PIN_ROWS` leg exists to stop. Non-vacuity: on
+        # the pre-fix line the `13451` half fails BOTH clauses (`:13451` and
+        # `-13451` are absent from `:13445-13453`), so the pin reds on exactly
+        # the wrong range it was added for.
+        #
+        # ⛔ AND BOTH BLOCK BOUNDS, not a subset: the corrected sentence names
+        # `:13445-13451, :13455-13459`, so `13455`/`13459` are its OWN copy of
+        # the VET bounds and need the same reader. The `13455`/`13459` row on
+        # `probes/capstone_run.py` scopes to THAT document's line; it cannot see
+        # this sentence, and a row that pinned 4 of a sentence's 6 numbers would
+        # leave the fix's own new cite as the one this leg still cannot see.
+        ("probes/capstone_measure.py", "so an acceptance test of", (
+            ("12975", '"classify_later": {"enabled": classify_later,'),
+            ("12979", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
+            ("13445", 'result["classify_later"] = {'),
+            ("13451", ("exact", "}")),
             ("13455", 'result["vet"] = {'),
             ("13459", ("exact", "}")),
         )),

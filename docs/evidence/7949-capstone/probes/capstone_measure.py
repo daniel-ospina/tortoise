@@ -1810,7 +1810,7 @@ def _pass_ran(block: dict) -> bool | None:
     where the two were confused. ``extract_session_v2`` emits ``result["vet"]``
     and ``result["classify_later"]`` UNCONDITIONALLY — on the flag-OFF arm and on
     the early-return path the block is ``{"enabled": False, "s2": {}, "union":
-    {}}`` (:12975-12978, :12979, :13445-13453) — so an acceptance test of "a non-empty dict"
+    {}}`` (:12975-12978, :12979, :13445-13451, :13455-13459) — so an acceptance test of "a non-empty dict"
     reports S2.2/S2.3 WITNESSED on a run measured with the flags OFF, printing
     ``enabled=false, s2={}`` beside the word WITNESSED.
 
