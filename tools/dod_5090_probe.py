@@ -2026,9 +2026,19 @@ def score_path_bullet() -> Row:
     # a `duplicate` (reported by its own note below). `#11492`'s review caught the first draft
     # narrowing the `unresolved writers` note to the declaration population and thereby dropping the
     # `gated` case from the evidence while still holding the row — a `PARTIAL` naming nobody.
-    unexplained = [] if resolved["error"] else sorted(
-        set(unknown) - set(unresolved_undeclared) - set(resolved["at_runtime"])
+    #
+    # ⛔ Subtracted BY KIND, never emptied on `resolved["error"]` (round-2 review, P2): the two
+    # note populations have DIFFERENT subjects. `unresolved_undeclared` is about writers only the
+    # register could have declared, so an unreadable register makes it unknowable and it is emptied
+    # above. A `gated` writer's label came from its OWN Cypher and the register was never consulted
+    # for it — its declaration is unaffected by whether the register could be read, so emptying this
+    # set would re-create the very defect the comment above records: a `PARTIAL` that names nobody.
+    # The expression is equivalent to the previous one whenever the register IS readable.
+    unexplained = sorted(
+        set(unknown) - set(resolved["at_runtime"])
         - set(resolved["violations"]) - set(duplicates)
+        - {fn for fn in unknown
+           if writers[fn]["kind"] in ("unresolved_write", "ungated")}
     )
     orphans = labels - served
     notes = [

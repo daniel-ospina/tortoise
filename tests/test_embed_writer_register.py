@@ -1047,6 +1047,19 @@ def test_a_writer_that_EXECUTES_a_store_is_never_declared_no_live_vector() -> No
 #: symbol carries one of these is claiming a store does not exist where the body renders one.
 STORE_CLAUSE_MARKERS = ("vecf32(", "set_embedding_clause(", "clear_then_set_prefix(")
 
+#: The DIRECT property-assignment store — `SET n.embedding = $v` — which is the instrument's own
+#: discovery shape (`tools/dod_5090_probe.py::_EMBED_WRITE`). It must be here or the pin has a hole
+#: exactly as wide as that shape: a writer can enter the population BECAUSE of a clause the literal
+#: markers above never see, then pass this pin when declared `no-live-vector`, and row 2 pops it from
+#: the map it audits while still printing `stored-without-a-query-path: none` (round-2 review, P2).
+#: ⛔ `(?!\s*NULL)` — the whitespace belongs INSIDE the lookahead. Written as `\s*=(?!NULL)` the
+#: pattern matches the wipe too, because `\s*` backtracks to zero characters and the lookahead then
+#: tests the space rather than `NULL` (measured: it flagged `_prewipe_synthetic_write_scope`, whose
+#: only occurrence is a docstring quoting `SET n.embedding = NULL`). The wipe assigns NULL and is a
+#: WIPE, not a store; the dict-key carriers (`record["embedding"] = …`) are a different spelling and
+#: stay out of scope.
+STORE_CLAUSE_PATTERNS = (re.compile(r"\.embedding\s*=(?!\s*NULL)"),)
+
 #: The shapes that legitimately NAME a store clause without storing, each with the reason. Kept as
 #: data so the exemption is read and re-checked rather than being an invisible `if`: every key must
 #: still be a LIVE `no-live-vector` declaration, so the table cannot outlive the shape it exempts.
@@ -1057,8 +1070,9 @@ NO_STORE_EXEMPTIONS: dict[str, str] = {
         "building the string — neither is a store in this body"
     ),
     "tortoise.consistency::_compare_views": (
-        "it COMPARES at the store's width: both `vecf32(` occurrences are inside docstrings "
-        "explaining why the comparison rounds, so the body executes no store clause"
+        "it COMPARES and returns divergence data; its ONE `vecf32(` occurrence is a code COMMENT "
+        "(tortoise/consistency.py:867) quoting what `replay(journal)` cannot produce, and the body "
+        "executes no write statement"
     ),
 }
 
@@ -1114,8 +1128,9 @@ def test_a_no_live_vector_declaration_executes_no_store_clause() -> None:
     entries had no automated check at all — and that is exactly the half round 1 measured **2 of 12
     WRONG** in (`_write_capture_turns` and `_event_raw_write_door` each declared `no-live-vector`
     while executing a live vector store). The residual paragraph claimed the label test was the
-    mitigation for a false `NO_LIVE_VECTOR`; it never reached that half. This closes it for the
-    readable shapes.
+    mitigation for a false `NO_LIVE_VECTOR`; it never reached that half. This narrows that half to
+    the shapes it can read — the clause builders, the dense constructor, AND a direct
+    `SET <alias>.embedding = …` (the instrument's own discovery shape).
 
     ⛔ Stated at its true size: this proves a `no-live-vector` symbol's own body (plus one hop of
     module constants) executes no store clause. It does NOT prove the writer stores nothing — a door
@@ -1138,6 +1153,8 @@ def test_a_no_live_vector_declaration_executes_no_store_clause() -> None:
             continue
         bodies = _declared_symbol_bodies(key)
         hits = [m for m in STORE_CLAUSE_MARKERS if any(m in b for b in bodies)]
+        hits += [f"/{p.pattern}/" for p in STORE_CLAUSE_PATTERNS
+                 if any(p.search(b) for b in bodies)]
         if hits:
             offenders[key] = hits
     assert not offenders, (

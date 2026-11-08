@@ -621,7 +621,18 @@ def test_an_UNREADABLE_register_is_UNMEASURED_not_a_green_row_two(monkeypatch):
     # store on" in the same cell that said none was blamed on the product (`#11492`'s round-2
     # review, blocking). `_row_two_population()` carries the unresolved writers this must not
     # blame.
-    monkeypatch.setattr(probe, "embedding_writers", _row_two_population)
+    #
+    # ⛔ Round-2 review (P2), second pass: emptying `unexplained` on the error path ALSO dropped the
+    # `gated` writer whose own Cypher named no single label — a subject the register is never
+    # consulted for, so its evidence is unaffected by the register being unreadable. That writer is
+    # added below, and its note must be PRESENT: a `PARTIAL` that names nobody is the defect round 1
+    # fixed, one branch over.
+    population = dict(_row_two_population())
+    population["tortoise.w::_gated_two_labels"] = {
+        "callee": probe.SEAM_CALL, "at": "tortoise/w.py:3",
+        "kind": "gated", "label": "UNKNOWN(two labels: Batch, Point)", "callees": frozenset(),
+    }
+    monkeypatch.setattr(probe, "embedding_writers", lambda: population)
     monkeypatch.setattr(probe, "declared_writers", _unreadable)
     row = probe.score_path_bullet()
     assert row.verdict == "PARTIAL", row.observed
@@ -631,7 +642,11 @@ def test_an_UNREADABLE_register_is_UNMEASURED_not_a_green_row_two(monkeypatch):
     assert "unresolved writers" not in joined, (
         "an unreadable register resolves NOTHING, so it must not also assert that the product "
         f"declares nothing for these writers: {row.notes}")
-    assert "no declaration can answer" not in joined, row.notes
+    # The gated writer's own derivation failed, which the register could not have helped with —
+    # so it must still NAME it, or the row holds `PARTIAL` without saying why.
+    assert "no declaration can answer" in joined, (
+        f"the gated writer whose own Cypher named no single label must still be named: {row.notes}")
+    assert "tortoise.w::_gated_two_labels" in joined, row.notes
 
 
 def test_a_malformed_stores_declaration_holds_row_two(monkeypatch):
