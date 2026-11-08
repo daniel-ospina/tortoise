@@ -47,7 +47,7 @@ recorded, because each one on its own is a trap:
 |---|---|---|---|---|
 | `#11213` | `#11001` | **MERGED** 2026-11-06T19:13:23Z | `e918f3d6d` | ✅ `merge-base --is-ancestor` → 0 |
 | `#11211` | (part of `#11021` — **not** a PR close) | **MERGED** 2026-11-06T20:27:05Z | `aa414b4d5` | ✅ `merge-base --is-ancestor` → 0 |
-| `#11212` | `#10997` | **MERGED** 2026-11-06T21:33:54Z | `80c912244` | ✅ **`80c912244` is an ANCESTOR of `origin/main`** (`merge-base --is-ancestor 80c912244 origin/main` → 0) — it was the tip when this record was measured, and is 287 commits behind the tip at the `#11546` head, so the DURABLE test is the ancestor one, never tip-equality. And ❌ `merge-base --is-ancestor 78e8abae6` still exits **1**, because the landing was **squashed** |
+| `#11212` | `#10997` | **MERGED** 2026-11-06T21:33:54Z | `80c912244` | ✅ **`80c912244` is an ANCESTOR of `origin/main`** (`merge-base --is-ancestor 80c912244 origin/main` → 0) — it was the tip when this record was measured, and it is no longer (a commit count here would be stale the day after it was written), so the DURABLE test is the ancestor one, never tip-equality. And ❌ `merge-base --is-ancestor 78e8abae6` still exits **1**, because the landing was **squashed** |
 | `#11205` | `#10999` (closed by its own merge commit — `Closes #10999` rode `316a572ce2`'s message; ⛔ `closingIssuesReferences` is empty because the keyword rode the commit, **not** the PR body, so the empty field is **not** evidence of a manual close) | **MERGED** 2026-11-06T22:40:32Z — **after the base, before this record merged** | `316a572ce2` | ✅ `merge-base --is-ancestor` → 0; and it is the landing that moved one of §5's own counts (below) |
 
 ⛔ **`git merge-base --is-ancestor` is a ONE-SIDED landing test: exit `1` is not a landing test, and
@@ -164,14 +164,12 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
    all. ⚠️ That command is **self-matching** once this record lands — every hit is then this file's own
    lines — so re-derive it with the file excluded:
    `git grep -rn -E 'hasPart|hierarchies|decomposesInto' -- 'docs/evidence/7949-capstone/' \
-   ':!docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md'` → **40 lines, exit 0 — all in the
-   bundle.** The per-file split lives in ONE place, the §5 note below (it is re-derived from
-   the tree by the `test_7949_capstone_measure` arm); restating it here as a second copy is
-   how two halves of one document start disagreeing under an amendment.
-   ⚠️ Those hits are the bundle's **own registration of the A1 row** (#10982 landed it after this
-   record was written), not a producer — the bundle CITES the predicate, it does not produce it. On
-   the **pre-diff tree** the same command was **0 hits**: that is the base the `exit 1` in earlier
-   revisions of this record was taken at, and it no longer holds here.
+   ':!docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md'` → **all 40 hits are the bundle's own registration**
+   (#10982 landed it after this record was written) — the bundle CITES the predicate, it does not
+   produce it; the producer claim is the call-shaped grep above, which is still empty. On the
+   **pre-diff tree** the same command was **0 hits** — that is the base the `exit 1` in earlier
+   revisions of this record was taken at, and it no longer holds here. The count and its per-file
+   split are stated once, in the §5 note below.
 4. **The rollup query does not exist.** `git grep -in 'rollup' -- '*.py' '*.md'` over the tree returns
    only unrelated uses (extractor `_rollup_llm`/`_rollup_recovery` stage counters, a CI per-name rollup
    discussion, a plan doc). There is **no** query of the graph shape "which work items serve this goal,
