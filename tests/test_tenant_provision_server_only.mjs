@@ -233,10 +233,21 @@ try {
   // answers the same 401 — the arm stays tautological for that restore class.
   // Both are pinned below. The secret is VALID base64 so both semantics are
   // well-defined. Do not "simplify" this back to one arm or to a literal.
+  //
+  // ⛔ AND THE TIMESTAMP MUST BE FRESH. `standardwebhooks@1.0.0` calls
+  // `verifyTimestamp` BEFORE it hashes (dist/index.js:58, ahead of `sign` at
+  // :59) and throws `Message timestamp too old` once
+  // `now - timestamp > WEBHOOK_TOLERANCE_IN_SECONDS` (300s, dist/index.js:7,95).
+  // A frozen `1700000000` therefore makes the library-shaped arm REJECT before
+  // the key is ever used — the arm cannot fail for the verifier it names, i.e.
+  // the same tautology one layer down. `Date.now()` keeps it inside tolerance so
+  // the HMAC compare is actually reached. (The stub arm has no tolerance check —
+  // it just hashes the timestamp into the signed string — so a fresh ts is
+  // harmless there; it stays a signature the stub accepts.)
   const HOOK_SECRET_B64 = "MDEyMzQ1Njc4OWFiY2RlZmdoaWprbG1u";
   const HOOK_SECRET_ENV = "v1,whsec_" + HOOK_SECRET_B64; // what AUTH_HOOK_SECRET held
   const hookId = "msg_1";
-  const hookTs = "1700000000";
+  const hookTs = String(Math.floor(Date.now() / 1000)); // inside the 300s tolerance
   const hookBody = JSON.stringify({ user: { id: USER_ID, email: EMAIL } });
   const hookSig = (key) =>
     "v1," +

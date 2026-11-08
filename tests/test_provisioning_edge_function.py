@@ -431,9 +431,17 @@ def test_edge_function_refuses_browser_origin_calls():
     )
     # The refusal must precede authentication: a browser call is refused on the
     # caller's SHAPE, never after spending a token verification on it.
-    assert src.index('req.headers.get("origin")') < src.index(
-        "authenticateCaller(req)"
-    ), "the origin refusal must run before token verification"
+    # ⛔ Anchor on the REFUSAL, not on the header READ. `req.headers.get("origin")`
+    # sits at the top of `Deno.serve`; comparing THAT index to
+    # `authenticateCaller(req)` says nothing about where the 403 sits, so moving
+    # the `if (requestOrigin) … 403` block BELOW the token verification left this
+    # green (measured: 19/19 static tests passed with the refusal moved).
+    assert src.index(
+        'json({ error: "Forbidden: this endpoint is server-only" }, 403)'
+    ) < src.index("authenticateCaller(req)"), (
+        "the origin refusal itself must run before token verification — reading "
+        "Origin early does not make the REFUSAL early"
+    )
 
 
 def test_the_log_monitor_counts_only_literals_the_function_emits():
@@ -568,6 +576,39 @@ def test_edge_function_hook_path_is_gone():
         "hook path needs the RAW BODY, so a clone here is that path's fingerprint:"
         f"\n{auth_body}"
     )
+    # ⛔ AND THE SAME PINS FILE-WIDE, because `auth_body` is a SOURCE SLICE and a
+    # restore can step outside it. MEASURED (this PR's review): moving the hook
+    # path into a helper defined ABOVE `async function authenticateCaller` and
+    # calling it from inside — one benign-looking line — left ALL 19 static
+    # tests green while the branch was a live authentication path. The slice
+    # cannot see a function it does not contain, so the artifacts of a webhook
+    # signature path are pinned across the WHOLE file (all four are 0 today):
+    #   req.headers.forEach  — header enumeration
+    #   req.clone            — raw-body access for signature verification
+    #   webhook-id / webhook-timestamp / webhook-signature — the protocol's own
+    #                          header names, which nothing else in this function
+    #                          would ever spell
+    #   createHmac           — the signature computation
+    # RESIDUAL, stated rather than hidden: a restore computing HMAC through
+    # `crypto.subtle` would not be caught here — this file legitimately uses
+    # `crypto.subtle` (3 sites, for api-key and lookup hashing), so it cannot be
+    # pinned by absence. The protocol header names above are the backstop for
+    # that class, since a webhook verifier must read them from the request.
+    for banned in (
+        "req.headers.forEach",
+        "req.clone",
+        "Object.fromEntries(req.headers)",
+        "webhook-id",
+        "webhook-timestamp",
+        "webhook-signature",
+        "createHmac",
+    ):
+        assert banned not in src, (
+            f"the deleted hook path's fingerprint `{banned}` must not appear "
+            "ANYWHERE in the function — not just outside authenticateCaller's "
+            "body, because a helper defined elsewhere in the file reaches the "
+            "same request and the slice-based pins above cannot see it"
+        )
     assert 'req.headers.get("authorization")' in auth_body, (
         "the one header authenticateCaller reads must be Authorization"
     )
