@@ -700,7 +700,7 @@ unfirable (block at the top of §10).
 > (`TORTOISE_VALUE_GATE`) defaults **ON**, so the VET pass — and `apply_vet` — DOES run on the
 > default arm, keeping everything the `#4899` identifier-only predicate does not fire on (measured:
 > 0 drops of 61 Objects). Judge the fold by that, not by "the flags default OFF"; and presence is not
-> sufficiency: the fold's **remedy** half IS implemented for ONE class and NOT for another (the two halves are stated in the S2.2b note below). VET's **coverage signal**
+> sufficiency: the fold's **remedy** half IS implemented for ONE class and NOT for another (the two halves are stated in the S2.2b-ADD note below). VET's **coverage signal**
 > only **detects** (`check_batch`'s `coverage_suspect` — *"reported, never acted on"*, and only for a
 > narrative that produced **zero** candidates). `apply_vet` only **removes** — **except** the Layer-1
 > entity RESTORE from `prior` (`vet_gate.py` **Rule 4**), which re-emits an entity an EARLIER pass
