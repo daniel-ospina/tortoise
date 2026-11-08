@@ -120,11 +120,25 @@
 #               while the tests stay green.
 #           (6) ⛔ A SIXTH CARRIAGE, and unlike (1)-(5) it is a FALSE PASS rather
 #               than inert data: a READER/SINK head `: {cat,grep,wait,tee,ls,sed,
-#               awk,jq,sort,wc,head,tail}` placed BEFORE the graded command is
-#               admitted with ANY operand, and those heads FAIL on an operand that
-#               does not resolve, so the `&&` short-circuits exactly as the
-#               wrapper family does. Measured at `22668a11`, each reaching
-#               `uncovered: 0` / CLEAN / exit 0:
+#               awk,jq,sort,wc,head,tail,cut,tr,uniq}` placed BEFORE the graded
+#               command is admitted with ANY operand, and those heads FAIL on an
+#               operand that does not resolve, so the `&&` short-circuits exactly as
+#               the wrapper family does. Measured at `22668a11` and re-measured at
+#               this head, each reaching `uncovered: 0` / CLEAN / exit 0:
+#                 ⛔ `cut`, `tr` and `uniq` were MISSING from this set while
+#                 `_DECORATIVE` admitted them too — measured, `cut "I did not run
+#                 this" && …` graded CLEAN while bash exited 1, so an enumeration
+#                 that claims to BE the family was narrower than the code and read as
+#                 closed. The FIFTEEN above are every `_DECORATIVE` head that CAN fail
+#                 on an operand — measured at this head: `cat`, `cut`, `grep`, `head`,
+#                 `jq`, `ls`, `sed`, `sort`, `tail`, `tr` and `wait` fail on a bare
+#                 word, while `awk`, `tee`, `wc` and `uniq` accept one (as a program,
+#                 as a file they create, or as stdin) and fail on a path that does not
+#                 exist. The other five (`: echo printf logger true`) succeed whatever
+#                 they are handed, so their operand is inert data (carriage (4)) and
+#                 never a false PASS. Both halves are derived from the code by
+#                 `test_the_reader_head_carriage_enumerates_every_decorative_head`,
+#                 so the set cannot drift from `_DECORATIVE` again:
 #                 cmd:cat "I did not run this" && uv run pytest …   (bash rc 1:
 #                     `cat: 'I did not run this': No such file or directory`)
 #                 cmd:grep "I did not run this" /nonexistent && …   (bash rc 2)

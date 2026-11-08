@@ -2664,6 +2664,52 @@ def test_a_control_builtin_argument_is_graded_not_skipped(tmp_path):
         )
 
 
+def test_the_reader_head_carriage_enumerates_every_decorative_head():
+    """The (6) carriage's head set must BE `_DECORATIVE`, split by measured behaviour.
+
+    ⛔ MEASURED, review of `b610f0d03`: carriage (6) declared a brace set of TWELVE
+    reader/sink heads while `_DECORATIVE` holds TWENTY, so `cut`, `tr` and `uniq`
+    reached `uncovered: 0` / CLEAN / exit 0 with an "I did not run this" operand and
+    were OUTSIDE the enumerated family — measured: `cut "I did not run this" && …`
+    graded CLEAN while bash exited 1, the `&&` short-circuiting so the graded
+    command provably never ran. The ledger's own rule is "an unlisted carriage
+    reads as closed", which makes an enumeration that is narrower than the code the
+    same defect by a shorter route.
+
+    Both halves are DERIVED from `_DECORATIVE` rather than hard-coded, so a head
+    added to the code fails here until it is declared in one half or the other:
+    the heads that FAIL on an operand that does not resolve are the false-PASS
+    family (they belong in the (6) set), and the five that succeed whatever they
+    are handed are inert data (carriage (4)).
+    """
+    # The inert five, by MEASURED behaviour, not by naming convention: each exits 0
+    # whatever operand it is given, so it cannot short-circuit the `&&` and its
+    # argument is inert data. Every OTHER `_DECORATIVE` head fails on a bad operand.
+    inert = {":", "echo", "printf", "logger", "true"}
+    text = LEDGER.read_text(encoding="utf-8")
+    declared_match = re.search(r"READER/SINK head `: \{([^}]*)\}`", text)
+    assert declared_match, (
+        "carriage (6)'s head set is no longer declared in the anchored form — "
+        "restore it, do not delete this pin: an enumeration that is not checked "
+        "against the code is how three failing heads went undeclared"
+    )
+    # The set is WRAPPED across comment lines, so each token carries the line's `#`
+    # prefix and indentation. Stripping it here (rather than reformatting the ledger
+    # to suit the parser) keeps the anchor independent of where the line breaks fall.
+    declared = {
+        h.strip().lstrip("#").strip()
+        for h in declared_match.group(1).split(",")
+        if h.strip().lstrip("#").strip()
+    }
+    expected = set(cl._DECORATIVE) - inert
+    assert declared == expected, (
+        "carriage (6) enumerates the false-PASS family incompletely: "
+        f"missing={sorted(expected - declared)} extra={sorted(declared - expected)}. "
+        "An unlisted carriage reads as closed — declare the head (or, if it is "
+        "inert, move it to the inert five) rather than leaving it out"
+    )
+
+
 def test_a_reader_head_before_the_command_is_a_known_false_PASS(tmp_path):
     """A READER/SINK head's operand is ungraded BEFORE the command — pinned OPEN.
 
@@ -2694,6 +2740,7 @@ def test_a_reader_head_before_the_command_is_a_known_false_PASS(tmp_path):
     for command in (
         'cmd:cat "I did not run this" && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q',
         'cmd:grep "I did not run this" /nonexistent && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q',
+        'cmd:cut "I did not run this" && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q',
         "cmd:export -f FOO && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
     ):
         proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, command])]))
