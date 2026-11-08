@@ -862,8 +862,12 @@ the request shape: the direct DeepSeek lane is served by
 `_ThinkingDisabledTransport`, so every default request also carries
 `thinking:{"type":"disabled"}`. ⛔ That is selected by the ROUTED PROVIDER'S KEY
 ENV, not by the model id (`THINKING_BY_DEFAULT_KEY_ENVS = {"DEEPSEEK_API_KEY"}`):
-re-pointing the SAME model at `openrouter:` drops the guard and returns an empty
-answer inside the 500-token budget, which is the trap this pin moved off.)
+re-pointing the SAME model at `openrouter:` drops the guard, so the request no
+longer carries the field. Whether an empty answer follows depends on that route
+reasoning by default — the starved-answer measurement (11,352 prompt tokens, 500
+completion tokens, `content=''`, recorded `valid: True`, scored 0) is on
+`api.deepseek.com`, NOT on OpenRouter, and that difference is exactly why this
+pin names the transport as well as the model.)
 The prompt constants
 (`_SYSTEM_PROMPT`, `_TYPE_FRAGMENTS`) live in the same module. Every report
 records the reader's resolved identity + the verbatim prompt in its
