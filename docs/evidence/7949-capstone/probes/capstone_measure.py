@@ -490,7 +490,7 @@ DOOR_PINNED_ON = (("TORTOISE_S4_DELTA", "1"), ("TORTOISE_JSON_MODE", "1"),
                   # aliases either way (0 of 27 points, 0 turns across the 7
                   # fixtures — measured), so the pin makes the population
                   # insensitive to the shell without moving a number.
-                  ("TORTOISE_IDENTIFIER_TOKENS", "1"))
+                  ("TORTOISE_IDENTIFIER_TOKENS", "1"), ("TORTOISE_STATE_VALUE_VERBATIM", "1"))  # cycle 11 (#11449 of #10360): DEFAULT-ON, read PER EMITTED POINT at the v2 emit site (`_state_value_verbatim_enforced`); an ambient `=0` disarms the write-path refusal, so a rewritten value gets WRITTEN and the population grows — pinned to the SHIPPED default (read_back records it). Kept on ONE line on purpose: a line inserted here shifts every numeric probe-file cite the #7949 bundle carries, and the sweep parses THIS comment as cites too.
 
 #: Every key a complete read-back carries — the pinned-off set plus the
 #: pinned-to set. A ``door_header``/``door_record`` handed an INCOMPLETE dict is
