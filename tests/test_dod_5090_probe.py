@@ -5222,16 +5222,21 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
     # `must_red` row must go back to GREEN. `_AFFIRMED` carries SEVEN top-level
     # alternatives and this loop asserts three, so FOUR are unasserted — and they
     # are not one class: `inside the walk`, `except that`, the negated-reverser
-    # class and the pseudo-negation class. Three of those four are load-bearing
-    # today (branch ablation across the `must_red` set: the concessive row at
-    # :4947 reds through `except that`; the reverser class carries
-    # `does not fail to report`, measured beside that row; the three hedges red
-    # through the pseudo-negation class), and `inside the walk` is the one that is
-    # inert. ⚠️ An earlier wording here said "the other five negated-reverser
-    # branches are deliberately NOT asserted … they are inert today": the count
-    # (five, for four) and the class label were both wrong, and telling a reader
-    # the hedge arm is unmeasured belt invites exactly the deletion this PR exists
-    # to prevent (#11437 review, P3).
+    # class and the pseudo-negation class.
+    # ⚠️ NONE of those four is "inert belt". Measured by ablating each arm to
+    # `\bZZZNEVERMATCH\b` and re-evaluating ALL FOUR row sets (not just
+    # `must_red`): the concessive row at :4948 reds through `except that`; the
+    # negated-reverser class carries `does not fail to report` (measured beside
+    # that row); the three hedges red through the pseudo-negation class; and
+    # `inside the walk` takes TWO `declared_blocks` rows green (:5164
+    # `never inside the walk`, :5175 `inside the walk's …`) — it is INERT FOR
+    # `must_red` ONLY, so an ablation scoped to that one set reads the arm as dead.
+    # ⚠️ An earlier wording here said "the other five negated-reverser branches are
+    # deliberately NOT asserted … they are inert today": the count (five, for four)
+    # and the class label were both wrong, and telling a reader an arm is unmeasured
+    # belt invites exactly the deletion this PR exists to prevent (#11437 review,
+    # P3 — corrected twice, because the first correction kept the scoped ablation
+    # but dropped its scope).
     _this_module = sys.modules[__name__]
     _pinned_affirmed = _AFFIRMED
     for _arm_name, _arm in (
