@@ -24,11 +24,18 @@ the whole page it is about to deliver.
 
 THE THREE CONTRACTS THIS MODULE PINS
 ====================================
-1. **The dream is the only writer.** Nothing on the capture path and nothing on
-   the push path writes a snapshot (``precompute*`` is called from the hosted
-   dream worker's pool item, inside the per-graph dream lock). That is what
-   makes the staleness bound "one dream cadence" a *property of the design*
-   rather than a promise: there is no second writer that could drift.
+1. **The dream is the only writer, and it is EVERY dream pass.** Nothing on the
+   capture path and nothing on the push path writes a snapshot
+   (``precompute*`` is called inside the per-graph dream lock, after the pass —
+   from the write-triggered drain AND from ``POST /v1/dream``'s three branches,
+   which is the pass the scheduler actually runs). That is what makes the
+   staleness bound "one dream cadence" a *property of the design* rather than a
+   promise: there is no second writer that could drift, and no belief-moving
+   dream that skips the refresh (#8099 review F2). ⚠️ One pass is NOT covered
+   and is stated rather than implied: the capture path's own ingest EP pass
+   (``hosted_api._apply_capture_ingest_ep``) moves beliefs outside the dream
+   worker; its snapshots go stale until the next dream, and this is the same
+   residual that pass already carries for the event store (#3086).
 2. **Absent = not computed, and absent costs a push nothing.** A graph with no
    subscriptions gets ZERO writes from this module — the subscription probe
    runs first and a subscriber-less graph takes the return before any index or
@@ -188,9 +195,26 @@ def ensure_schema(proj) -> None:
 def read_blocks(proj, point_ids: list[str]) -> dict[str, dict]:
     """Return ``{point_id: canonical_block}`` for the points that HAVE a snapshot.
 
-    ONE single-node read on the ``point_id`` index — no traversal, no EP call,
-    no assembly. A point with no snapshot is simply absent from the result
+    ONE bounded read on the ``point_id`` index — no traversal, no EP call, no
+    assembly. A point with no snapshot is simply absent from the result
     ("absent = not computed", contract 2 of the module docstring).
+
+    ⛔ THE READ IS VALIDITY-FILTERED, and that is the RETRACTION guarantee
+    (#8099 review F1). The statement joins the ``:Point`` node and excludes a
+    TERMINAL one (``live._terminal_excluded``, the one spelling of the
+    predicate), so a snapshot whose point was deleted, retracted, invalidated or
+    superseded is a MISS at read time. Dropping it in the writer's pass is NOT
+    enough for the guarantee the module docstring states: `dispatch_pending` is
+    also driven by the scheduled retry sweep and on demand
+    (`webhook_delivery.py:1221-1226`), neither of which precomputes, and even
+    the dream pass only sees a BOUNDED id set (``MAX_PENDING_EVENTS`` /
+    ``MAX_POINTS_PER_PASS``) — so a retraction outside that window would ride
+    out with a block claiming the point is live. The field's answer to a cache
+    whose source mutates behind it is read-time validity filtering (Zep /
+    Graphiti filter bi-temporal edges on every read rather than trusting the
+    invalidation pass to have run first), and here it costs one extra pattern
+    match on an already-bounded id list. ``precompute``'s ``_vanished`` drop
+    stays as what it is: cache HYGIENE (bounded growth), not the guarantee.
 
     Fail-open: any graph error returns ``{}`` (the caller degrades to "no why"
     rather than failing the delivery, contract 3).
@@ -205,10 +229,14 @@ def read_blocks(proj, point_ids: list[str]) -> dict[str, dict]:
     ids = [pid for pid in (point_ids or []) if pid][:MAX_WHY_IDS_PER_PAGE]
     if not ids:
         return {}
+    from .live import _terminal_excluded
+
     try:
         rows = _run(
             proj,
             "MATCH (w:WhySnapshot) WHERE w.point_id IN $ids "
+            "MATCH (n:Point {id: w.point_id}) "
+            f"WHERE {_terminal_excluded('n.status')} "
             "RETURN w.point_id, w.block, w.assembled_at",
             params={"ids": ids},
         ).result_set
@@ -422,9 +450,13 @@ def precompute(proj, point_ids: list[str], *, now: datetime | None = None,
             logger.warning("why_snapshot: snapshot write failed: %s", e)
             summary["reason"] = "write_failed"
             return summary
-    # A snapshot whose point is GONE is dropped (a retraction's push must not
-    # carry a block claiming the point is live). Driven by an existence read,
-    # never by a missing block — see `_vanished`.
+    # A snapshot whose point is GONE is dropped — CACHE HYGIENE, not the
+    # guarantee (#8099 review F1). The guarantee is `read_blocks`' validity
+    # join: the push path refuses a block whose point is deleted or terminal
+    # whether or not this drop ever ran, because `dispatch_pending` also runs
+    # from the retry sweep and on demand (neither precomputes) and this pass
+    # only ever sees a bounded id set. Driven by an existence read, never by a
+    # missing block — see `_vanished`.
     gone = _vanished(proj, ids)
     if gone:
         summary["dropped"] = _drop(proj, gone)

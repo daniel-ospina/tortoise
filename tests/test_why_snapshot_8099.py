@@ -56,6 +56,10 @@ pytest.importorskip("cryptography")  # the subscription secret's at-rest encrypt
 #: ``_fresh_sdk``'s wipe.
 pytestmark = pytest.mark.embedded_only
 
+# The authenticated TestClient fixture (temp-DB SDK patching + the module env
+# the hosted app needs on import), for the `/v1/dream` wiring case. Imported
+# for the FIXTURE, not for a test in that module.
+from tests.test_hosted_api import client as client  # noqa: E402
 from tortoise import webhook_delivery as wd  # noqa: E402
 from tortoise import why_snapshot as ws  # noqa: E402
 from tortoise.sdk import TortoiseSDK  # noqa: E402
@@ -842,3 +846,110 @@ def test_pending_event_read_is_bounded(monkeypatch):
     ws.pending_point_ids(proj, min_cursor=7, limit=3)
     assert seen["limit"] == 3, f"the bound was not passed through: {seen}"
     sdk.close()
+
+
+# ── the RETRACTION guarantee, at READ time (#8099 review F1) ─────────────
+
+def test_a_deleted_points_snapshot_is_never_served_before_any_drop():
+    """FAILING VALUE: a push that serves a block for a DELETED point because the
+    writer's drop has not run yet (or ran over a bounded id set that did not
+    include it). ``dispatch_pending`` is also driven by the scheduled retry
+    sweep and on demand — neither precomputes — so the drop cannot be the
+    guarantee.
+
+    The case deliberately performs NO ``precompute`` between the delete and the
+    read: that is the window the old code served, and the one this pins shut.
+    """
+    sdk = _fresh_sdk()
+    planted = _plant_claim(sdk, "A deleted point is never served a why block")
+    proj = sdk._get_proj()
+    ws.precompute(proj, [planted["claim"]])
+    assert ws.read_blocks(proj, [planted["claim"]]), "precondition: it is served"
+
+    sdk.delete_point(planted["claim"])
+    # NO precompute here — the drop is hygiene, not the guarantee.
+    assert ws.read_blocks(proj, [planted["claim"]]) == {}, (
+        "a snapshot for a DELETED point was served — a retraction's push would "
+        "carry a block claiming the point is live")
+    assert ws.read_why_entries(proj, [planted["claim"]]) == {}
+
+    _subscribe(sdk)
+    transport = FakeTransport()
+    assert wd.dispatch_pending(proj, transport=transport)["delivered"] >= 1
+    leaked = [e for body in _bodies(transport) for e in body.get("why", [])
+              if e.get("point_id") == planted["claim"]]
+    assert leaked == [], f"the push carried a why block for a deleted point: {leaked}"
+    sdk.close()
+
+
+def test_a_retracted_points_snapshot_is_never_served():
+    """FAILING VALUE: a snapshot served for a TERMINAL point. ``retract_point``
+    keeps the node (``status='retracted'``), so an existence-only filter passes
+    it — and a ``PointRetracted`` delivery would then carry a block whose
+    ``supersession.status`` reads "live".
+
+    Also covers the legacy ``outdated`` flag, the second dead marker
+    (``invalidate_point`` sets it and leaves ``status`` untouched).
+    """
+    sdk = _fresh_sdk()
+    planted = _plant_claim(sdk, "A retracted point is never served a why block")
+    proj = sdk._get_proj()
+    ws.precompute(proj, [planted["claim"]])
+    assert ws.read_blocks(proj, [planted["claim"]]), "precondition: it is served"
+
+    sdk.retract_point(planted["claim"])
+    # The node is still there — only the validity filter can refuse it.
+    rows = proj.g.query("MATCH (n:Point {id:$id}) RETURN n.status",
+                        params={"id": planted["claim"]}).result_set
+    assert rows and rows[0][0] == "retracted", rows
+    assert ws.read_blocks(proj, [planted["claim"]]) == {}, (
+        "a snapshot for a RETRACTED point was served")
+
+    # The legacy flag is the second dead marker, and it must be honoured too.
+    ws.precompute(proj, [planted["support"]])
+    proj.g.query("MATCH (n:Point {id:$id}) SET n.outdated = true",
+                 params={"id": planted["support"]})
+    assert ws.read_blocks(proj, [planted["support"]]) == {}, (
+        "a snapshot for an `outdated=true` point was served")
+    sdk.close()
+
+
+# ── indicator 3 across EVERY dream entry point (#8099 review F2) ──────────
+
+def test_the_dream_endpoint_refreshes_the_snapshot_cache(client, monkeypatch):
+    """FAILING VALUE: ``POST /v1/dream`` — the manual, the SCHEDULED
+    ``stale-first`` and the whole-graph pass — running an EP pass that rewrites
+    believes and writing no snapshot, so the push keeps serving the pre-pass
+    number. Only the write-triggered drain was wired, and this endpoint is the
+    pass the scheduler runs.
+
+    All three branches are driven (a refactor that wired only one would
+    otherwise pass), and the ORDER is asserted: the precompute runs AFTER the
+    pass and receives THAT pass's result.
+    """
+    import tortoise.hosted_api as ha_mod
+
+    calls: list[tuple] = []
+
+    def _stub_dream(self, *a, **k):
+        payload = {"ok": True, "affected_claims": ["pt_0000000a"],
+                   "mode": k.get("mode") or ("full" if k.get("full") else "dirty")}
+        calls.append(("dream", payload))
+        return payload
+
+    def _observe_precompute(sdk, dream_result):
+        calls.append(("precompute", dream_result))
+        return None
+
+    monkeypatch.setattr(TortoiseSDK, "dream", _stub_dream)
+    monkeypatch.setattr(ha_mod, "_precompute_why_blocks", _observe_precompute)
+
+    for params in ({}, {"mode": "stale-first"}, {"full": "true"}):
+        calls.clear()
+        response = client.post("/v1/dream", params=params)
+        assert response.status_code == 200, response.text
+        assert [c[0] for c in calls] == ["dream", "precompute"], (
+            f"{params}: the dream pass did not refresh the why-block cache — "
+            f"observed {[c[0] for c in calls]}")
+        assert calls[1][1] is calls[0][1], (
+            f"{params}: the precompute did not receive that pass's result")
