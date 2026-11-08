@@ -417,23 +417,25 @@ measured_at:
 #       are true of their own tree, and a reader re-deriving this tally must use the head of
 #       the RUN, not `measured_at`.
 #       Two graded S4-row clauses quote this tally rather than one: the two consent files'
-#       own 124, AND the seven-file `587 passed / 5 failed` split — so moving this tally
+#       own 124, AND the seven-file `611 passed / 5 failed` split — so moving this tally
 #       moves S4 twice.
 #       So the tally at THIS head is a COLLECTION count, and only that:
 #           per-file collection, summed: 295 (the six contract files: 66 / 54 / 9 / 42 / 65 / 59)
 #                                      + 321 (`test_9664_capstone_verdict_ledger.py`, the ledger pin suite)
 #                                      = 616 COLLECTED at this head.   Counted, not estimated.
 #       ⛔ THE SPLIT IS MEASURED, NOT DERIVED, AND IT DOES NOT CARRY ACROSS HOSTS OR HEADS.
-#       The two readings below were taken at the head where the collection was **592**, i.e.
-#       BEFORE landing (d) added its 24 tests; they are reported as that tree's, never
-#       re-quoted as this head's, and no split is claimed for the 616 above. `592 - 5`
-#       happens to equal 587 on THAT host, but nothing about the split follows
+#       `616 - 5` happens to equal 611 on THIS host, but nothing about the split follows
 #       from the collection count: the 5 are docker-lane-only (S2's ACL group) and do not
 #       reproduce on a carve-out host, so the inference is unsound even when it happens to
-#       land. It was MEASURED at that head, twice, one run each:
+#       land. MEASURED at this head on the private docker lane:
+#           uv run python tools/test_lane.py run -- <the seven files> -q
+#                                       ->  611 passed, 5 failed   (616 collected)
+#       The two readings an earlier revision recorded were taken at the head where the
+#       collection was **592** (i.e. BEFORE landing (d) added its 24 tests), so they are
+#       reported as THAT tree's and never re-quoted as this one's:
 #           env -u TORTOISE_API_KEY … -q   ->  587 passed, 5 failed   (592 collected)
 #           (ambient, a key is set)        ->  586 passed, 6 failed   (592 collected)
-#       So the tally at that head was 587 + 5 = 592, and the line above (`456 passed, 5
+#       So the tally at this head is 611 + 5 = 616, and the line above (`456 passed, 5
 #       failed`) is that EARLIER RUN's own output at ITS OWN head — reported, not
 #       re-quoted as this one's.
 #       ⛔ `env -u TORTOISE_API_KEY` IS PART OF THE COMMAND, not noise: with a key in the
@@ -679,10 +681,9 @@ criteria:
     verdict: blocked
     reason: >-
       Server half is green at this head, measured in this pass: the two consent
-      files collect 65 + 59 = **124** tests and all 124 passed (within that pass's
-      seven-file run, `587 passed / 5 failed` — the split was measured at the head
-      where the collection was 592, before landing (d) in the preamble block added 24
-      more tests to the pin suite; the 5 being S2's ACL group, and none
+      files collect 65 + 59 = **124** tests and all 124 passed (within this pass's
+      seven-file run, `611 passed / 5 failed` — the two consent files contributed all of
+      their 124 to that run's 611; the 5 being S2's ACL group, and none
       of them in these two files) - a previous draft of this row claimed "190 passed"
       for these two files, which their collection denies. Live `/auth` serves the
       `/api/consent/start` return route, matching main's public/signup.html.

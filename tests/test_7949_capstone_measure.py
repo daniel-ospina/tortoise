@@ -11459,6 +11459,28 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
             assert "a1dff7cec8" in _near, (
                 f"{_label}: `:12929` at offset {_m.start()} does not name the base it was true at "
                 "— an unqualified occurrence is a re-stale presented as live")
+        # ⛔ A HEAD-RELATIVE LIVE NUMBER IS FORBIDDEN HERE, and the ban is DERIVED from the tree
+        # rather than typed, because the arm above cannot see one: §2 used to carry
+        # `:NNNN at the tree you are reading` immediately followed by a base-qualified
+        # `:12929 at a1dff7cec8`, and the ±60 window around the LIVE occurrence reached that
+        # neighbour's base, so the PAIR was satisfied by the NEIGHBOURING cite (measured: main
+        # moved `vet_enabled = (` from `:12929` to `:12944` under the merge and this whole file
+        # stayed green). The record's own landed policy (#11555) is why the number is gone
+        # rather than re-pointed: "cite the symbol and let the line number be a convenience
+        # printed beside it", pinned to a SHA. So the pin reads the tree and forbids the live
+        # line number from appearing in the region at all — a re-pointed live cite, a
+        # re-staled one and a fresh one all red, and no number is copied from the prose.
+        if not _is_repro_block:
+            _v2 = (_REPO / "tortoise/extractor_v2.py").read_text(encoding="utf-8").splitlines()
+            _vet = [i + 1 for i, _ln in enumerate(_v2) if "vet_enabled = (" in _ln]
+            assert len(_vet) == 1, (
+                f"{_label}: expected exactly one `vet_enabled = (` in tortoise/extractor_v2.py, "
+                f"found {_vet} — re-derive this region's cites")
+            assert f":{_vet[0]}" not in _region, (
+                f"{_label}: prints `:{_vet[0]}`, the line `vet_enabled = (` is on in the tree this "
+                "pin just read. A HEAD-relative number rots on the next merge and the "
+                "base-qualified cite beside it shields it from the window above (measured). "
+                "Cite the symbol; pin a number only to the sha it was true at.")
         # ⛔ The §5 watch, kept where main's WORKS and widened to the spellings main's cannot see
         # (#11519 review). Main's arm was `_found == ["12929"]` over an `at`-WORD shape: green on
         # the §5 block and RED on §2 (main's record re-cut §2's cite, so arm and text disagreed
@@ -11782,13 +11804,13 @@ def test_the_probes_cross_file_cites_resolve_to_the_symbols_they_name():
     Non-vacuity, measured at the pre-fix head: every arm reds there — `:519` is a
     `TORTOISE_VALUE_GATE` comment (the value is at `:1001`), `:4019` is the
     `"probe": "docs/…/capstone_measure.py",` key (the census key is at `:4046`), and
-    the `door` entry's `:4164`/`:4299` name NEITHER half of any pair: at this branch's
-    pre-fix head `:4164` is the frozen-sessions GUARD (the `REFUSED` f-string is TWO lines
-    below, at `:4166`, past `:4165`'s `raise SystemExit(`) and `:4299` is
-    `"verdict": verdict_word(e5_result),`; on
-    `origin/main` the f-string is at `:4164` and `:4299` is
-    `"denominator": e5["raw_n"],`. No single tree makes both halves true. Re-staling any
-    one of them reds this arm again.
+    the `door` entry's `:4164`/`:4299` name NEITHER half of any pair — and the numbers in
+    this paragraph are deliberately SYMBOLS, not tree positions: the merge that landed
+    main's #11502 moved every one of them (measured after it: the frozen-sessions GUARD,
+    the `REFUSED` f-string, `"verdict": verdict_word(e5_result),` and
+    `"denominator": e5["raw_n"],` all sit on new lines). What the arm asserts is the
+    PAIRING at the head it runs on, which it reads out of the citing file, so no number
+    here is a claim about a tree. Re-staling any cite reds it again.
 
     ⛔ The pair is TWO CALL SITES on purpose. An earlier cut of this pin bound ``:3782`` —
     ``def render_log(``, a DEFINITION — against the ``require_door_entered(runs)`` call,
@@ -11816,11 +11838,14 @@ def test_the_probes_cross_file_cites_resolve_to_the_symbols_they_name():
                 f"{line!r}, which does not contain {symbol!r}. Re-derive the number from the "
                 "tree (grep the symbol); do NOT move the symbol to fit the cite")
             # A cite that lands on the DEFINITION would satisfy `symbol in line` too —
-            # `:899` reads `def require_door_entered(runs) -> dict:`, and `:3782` reads
-            # `def render_log(`, but neither proves ORDER: the `door` entry argues that
-            # `main` reaches the gate BEFORE the renderer, so what it must name is the two
-            # CALLS in `main` (`:4191`, `:4326`). The shape is asserted alongside the token
-            # so the pair cannot silently slide onto a definition and lose the argument.
+            # `def require_door_entered(runs) -> dict:` and `def render_log(` are both
+            # definitions, but neither proves ORDER: the `door` entry argues that `main`
+            # reaches the gate BEFORE the renderer, so what it must name is the two CALLS
+            # in `main` (`require_door_entered(runs)` and `text = render_log(`). The shape
+            # is asserted alongside the token so the pair cannot silently slide onto a
+            # definition and lose the argument. ⛔ No line numbers here: the merge that
+            # landed main moved all four of them, and a number in a comment is a claim no
+            # arm reads (this pin's thesis, turned on its own prose).
             assert line.startswith("def ") == symbol.startswith("def "), (
                 f"capstone_measure.py:{num} is cited for {symbol!r}, but that line is "
                 f"{'a definition' if line.startswith('def ') else 'not a definition'} — the "
