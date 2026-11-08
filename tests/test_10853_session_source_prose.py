@@ -1414,30 +1414,49 @@ def test_the_10852_obligation_quotes_the_authority_AS_IT_NOW_READS():
     # away from 527 (this PR's §2.0 insertion pushed it to 551, silently), and it
     # reddened only when the code was RE-CITED to `§9.1`, a form its hardcoded
     # literal could not match. The locator is now RANGED against the authority.
-    # ⚠️ The GRAMMAR here is deliberately permissive and the CLASSIFIER is what is
-    # strict: any citation shape parses, so an unrecognised locator is diagnosed
-    # as the PARSER gap it is — never as a missing quotation, which sends a
-    # maintainer hunting for a mutation that did not happen (#11481 review, twice:
-    # the first cut gated the diagnosis on a 24-character window and on `.`
-    # not spanning newlines, so a wrapped or verbose locator still landed on
-    # "restore the quotation").
+    # ⚠️ The GRAMMAR that finds a citation is deliberately permissive and the
+    # CLASSIFIER is what is strict: any citation shape is FOUND, so an
+    # unrecognised locator is diagnosed as the PARSER gap it is — never as a
+    # missing quotation, which sends a maintainer hunting for a mutation that did
+    # not happen (#11481 review round 2: the first cut gated that diagnosis on a
+    # 24-character window and on `.` not spanning newlines, so a wrapped or
+    # verbose locator still landed on "restore the quotation").
+    #
+    # ⛔ BUT THE CITATION IS FOUND BY ITS OWN ANCHOR, NEVER BY FIRST MATCH.
+    # `re.search` over the whole module takes the FIRST citation-shaped span, so
+    # ANY other `STORAGE-ARCHITECTURE.md … : *"…"*` in a 3,400-line file SHADOWS
+    # the narrowing's — measured (#11481 review round 3): with a valid decoy above,
+    # a citation broken to `§9.2` AND a fully DELETED quotation both certified
+    # GREEN, because the decoy was what got resolved. Anchoring is not cosmetic;
+    # it is what makes the candidate the NARROWING'S citation — and the anchor is
+    # asserted, so deleting it is a loud failure rather than a quiet re-point.
     source = inspect.getsource(cp)
-    match = re.search(
+    ANCHOR = "The authority for the pair is"
+    anchor = source.find(ANCHOR)
+    assert anchor >= 0, (
+        "the pin's ANCHOR is gone from `cache_projection` — it locates the "
+        f"narrowing's citation by {ANCHOR!r}, so re-point the anchor rather than "
+        "deleting it (a first-match search is what let a decoy citation certify "
+        "this pin, #11481 review round 3)")
+    WINDOW = 600
+    window = source[anchor:anchor + WINDOW]
+    cands = list(re.finditer(
         r'STORAGE-ARCHITECTURE\.md(?P<loc>[\s\S]{0,200}?):\s*\*"(?P<quote>[^"]+)"\*',
-        source,
-    )
-    assert match, (
-        "the narrowing's authority is no longer quoted in the source — the pin "
-        "extracts `STORAGE-ARCHITECTURE.md`, a `:NNN` or `§N.N` locator, and the "
-        "quoted sentence from `cache_projection`, so restore the quotation")
+        window))
+    # ⚠️ EXACTLY ONE, because two is AMBIGUOUS and ambiguity must be loud: nothing
+    # here can tell which of two citations the narrowing rests on, so resolving
+    # either silently certifies a coin flip.
+    assert len(cands) == 1, (
+        "the narrowing's authority is not a SINGLE citation in the "
+        f"{WINDOW}-character window after its anchor {ANCHOR!r}: found "
+        f"{len(cands)} — {[' '.join(m.group('loc').split()) for m in cands]}. "
+        "This pin cannot tell which one the narrowing rests on; leave exactly one "
+        "(and restore the quotation if the list is empty)")
     # The quotation wraps across lines in the docstring; the document states it
-    # as one sentence, so compare on normalised whitespace. The locator is
-    # normalised the same way and stripped of its backticks, because the tree
-    # spells the same citation three ways (`` .md:527` ``, `` .md` §9.1 ``,
-    # `` .md` §9.1/D1 ``, the last two lines above the citation in
-    # `cache_projection.py`).
-    quote = " ".join(match.group("quote").split())
-    loc = " ".join(match.group("loc").split()).strip("`").strip()
+    # as one sentence, so compare on normalised whitespace, and normalise the
+    # locator the same way before stripping its backticks.
+    quote = " ".join(cands[0].group("quote").split())
+    loc = " ".join(cands[0].group("loc").split()).strip("`").strip()
     if re.fullmatch(r":\d+", loc):
         # A LINE locator must still HOLD the sentence. Without this arm the line
         # number is decorative: any insertion above it re-points it silently.
@@ -1460,7 +1479,13 @@ def test_the_10852_obligation_quotes_the_authority_AS_IT_NOW_READS():
         # this document reads `### 9.1 …`, so the locator is stripped to its number
         # before it is ranged against one, and the `/D<n>` tag is not part of the
         # heading either.
-        section_match = re.search(r"§\s*(?P<sec>[\d.]+)(?:/(?P<tag>D\d+))?", loc)
+        # ⛔ `fullmatch`, NOT `search`: an unanchored classifier silently DISCARDS
+        # whatever prose follows a valid-looking `§N.N`, so up to 200 characters of
+        # arbitrary text could ride along in the locator and the quotation resolved
+        # against a section the citation did not name (#11481 review round 3,
+        # measured). A locator with trailing words is a PARSER gap, and says so.
+        section_match = re.fullmatch(
+            r"§\s*(?P<sec>\d+(?:\.\d+)*)(?:/(?P<tag>D\d+))?", loc)
         assert section_match, (
             "the ruling is still quoted in `cache_projection`, but its LOCATOR is "
             f"not one this pin parses ({loc!r}) — accepted forms are "
