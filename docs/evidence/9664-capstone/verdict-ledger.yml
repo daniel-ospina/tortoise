@@ -107,11 +107,19 @@ measured_at:
 #
 # Two independent layers are therefore established and NOT re-graded below:
 #   * the product/environment blockers named by the 2026-10-26 run are closed and the
-#     deployed sha is an ancestor of this tree (deploy lag 60 — re-measured below, and the
-#     figure this sentence used to carry, 8, was an older DEPLOYMENT, not a different fact);
-#   * the contract layer is green at this head, MEASURED BY EXECUTION in this pass —
-#     every count below is a line from a run in this worktree's
-#     `.worktree-report/`, not a carried-forward number:
+#     deployed sha is an ancestor of this tree (deploy lag 60 — re-measured ABOVE, in the
+#     version command block; the figure this sentence used to carry, 8, was an older
+#     DEPLOYMENT, not a different fact);
+#   * the contract layer is green at this head, MEASURED BY EXECUTION in this pass.
+#     PROVENANCE, stated per number rather than as one blanket claim, because a
+#     blanket claim is what a reader cannot check:
+#       - the run below and the ledger-pin run are BOTH recorded through
+#         `tools/worktree_report.py run`, so their counts are parsed from real logs in
+#         this worktree's `.worktree-report/logs/`;
+#       - the per-file collection figures come from separate `pytest --collect-only`
+#         invocations that are NOT in `.worktree-report/` (they produce no suite run),
+#         and are quoted from those invocations' own output;
+#       - `the 5 are` and the census line are this pass's direct runs.
 #
 #       $ uv run python tools/test_lane.py run -- tests/test_9664_capstone_verdict_ledger.py tests/test_9340_graph_tool_argument.py tests/test_pack_selection_by_graph.py tests/test_cross_tenant_read_isolation.py tests/test_onboarding_auto_complete.py tests/test_oauth_consent_page_step4.py tests/test_oauth_consent_bff_routes.py -q
 #       456 passed, 5 failed                       # 461 collected. Run THROUGH
@@ -237,10 +245,10 @@ criteria:
     verdict: blocked
     reason: >-
       Server half is green at this head, measured in this pass: the two consent
-      files collect 65 + 59 = **124** tests and all 124 passed (inside a four-file
-      run that reported 239 passed / 5 failed, the 5 being S2's ACL group; a
-      previous draft of this row claimed "190 passed" for these two files, which
-      their collection denies). Live `/auth` serves the
+      files collect 65 + 59 = **124** tests and all 124 passed (within this pass's
+      seven-file run, `456 passed / 5 failed`; the 5 being S2's ACL group, and none
+      of them in these two files) - a previous draft of this row claimed "190 passed"
+      for these two files, which their collection denies. Live `/auth` serves the
       `/api/consent/start` return route, matching main's public/signup.html.
       The ChatGPT half needs a human to complete the OAuth sign-in — the issue's
       own step-4 text says "human does the Pro auth". Missing by name: a ChatGPT
@@ -305,7 +313,7 @@ criteria:
       `tortoise_graph_overview(section="health")`, **not** `tortoise_overview` - a
       previously drafted version of this row cited `RETIRED_USE_INSTEAD` at
       `tortoise/tool_registry.py:1535` and named `tortoise_overview` as the replacement,
-      and BOTH were wrong: the map is at `:2085-2099`, and `tortoise_overview` is ITSELF
+      and BOTH were wrong: the map is at `:2072-2099`, and `tortoise_overview` is ITSELF
       retired (`:2094`) into the same container. Measured against the live registry - 72
       tools, `tortoise_health` ABSENT, `tortoise_overview` ABSENT,
       `tortoise_graph_overview` LIVE. The module states the rule that catches this at
