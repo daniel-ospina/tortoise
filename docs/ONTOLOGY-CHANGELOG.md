@@ -138,7 +138,19 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 > reports (`'live'` for a status-carrying label, `''` for an `:Event`). **Scope of the trap:** `:Object` and
 > `:Subject` only. `Point` births keep the `#7856` born-live contract and still STORE `status='live'`, so the
 > `MATCH (p:Point {status:'live'})` idiom printed in **§5's Point Status Vocabulary**
-> (`ONTOLOGY.md:1149`) remains correct as written.
+> (`ONTOLOGY.md:1152`) remains correct as written.
+
+---
+
+> **Changelog v3.33 (2026-11-08 — issue #11083 — the `ownedBy` target is SETTLED as an Entity, and `produces` joins the Layer-2 meanings):**
+`ownedBy`'s target row now reads **Entity → (Subject | Object)**, on the owner's `#11083` ruling (c) of 2026-11-05:
+with one predicate covering "a person owns a thing", "a company owns a thing" and "a holding IS a stake in a
+company", the predicate alone can no longer say which end owns which, so **the per-edge `direction` carries the
+sense** — `->` = the TARGET owns the source, `<-` = the SOURCE owns the target, read as a stake in it. The residual
+is recorded rather than enforced: no code validates endpoint kinds by semantics, so the ruling is carried per
+declaration and REPORTED (by `pack_registry.effective_direction` and the pack census). §3.9 also stops calling
+`produces` a retired spelling: it is a Layer-2 meaning (§8), so it is declared and does not warn — the transition
+map is the authority for the retired list, and `produces` left it when it became a meaning.
 
 ---
 

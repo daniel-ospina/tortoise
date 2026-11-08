@@ -264,16 +264,27 @@ def test_h4_every_meaning_is_advertised_in_the_prompt_contract():
     """
     from tortoise.extractor_v2 import OUTPUT_CONTRACT, OUTPUT_CONTRACT_CORE_ONLY
 
-    relations_line = next(
-        line for line in OUTPUT_CONTRACT.splitlines() if '"relations":' in line)
+    # ⛔ Each CLAUSE is read separately. `OUTPUT_CONTRACT.relations` advertises two
+    # vocabularies on one line — the `predicate` allowlist and the `semantics`
+    # (layer-2 meaning) allowlist — so a membership test on the whole LINE stays
+    # green while either list alone loses an entry (measured: deleting `produces`
+    # from the predicate list left the line-level assertion green). Same clause
+    # parsing as `tests/test_10999_batch_story_relations.py`.
+    relations = OUTPUT_CONTRACT.split('"relations":', 1)[1]
+    predicates = relations.split('"predicate": "', 1)[1].split('"', 1)[0]
+    proposed = relations.split('"semantics": "', 1)[1].split('"', 1)[0]
     for meaning in SEMANTICS_VALUES:
-        assert meaning in relations_line, (
-            f"meaning {meaning!r} is accepted by the gate but never advertised in "
-            "OUTPUT_CONTRACT.relations — the model cannot emit it")
+        assert meaning in predicates, (
+            f"meaning {meaning!r} is accepted by the gate as a predicate but never "
+            "advertised in OUTPUT_CONTRACT's predicate allowlist — the model "
+            "cannot emit it")
+        assert meaning in proposed, (
+            f"meaning {meaning!r} is accepted as a layer-2 semantic but missing "
+            "from OUTPUT_CONTRACT's semantics allowlist — the model cannot emit it")
         assert meaning in OUTPUT_CONTRACT_CORE_ONLY, (
             f"{meaning!r} missing from the DERIVED core-only contract")
     for mechanism in SEMANTICS_MECHANISMS:
-        assert mechanism in relations_line, mechanism
+        assert mechanism in predicates, mechanism
 
 
 # ── H5 — declarationOnly is a disposition, never a silencer ──────────────────

@@ -201,7 +201,7 @@ Connector entities (GitHub/Linear/Slack) get Source nodes at the projection chok
 | `participatesIn` | Subject → Event | unidirectional | N-ary | `schema:attendee` | Subjects involved in an event, created by the event write path from the event's participant list — falling back to the event's `subject` when no explicit participants are given |
 | `memberOf` | Subject → Subject | unidirectional | N-ary | `org:membership` | Membership in team/group/organization. **Canonical** — generalizable to teams, orgs, any hierarchy. |
 | `managedBy` | Entity → Subject | unidirectional | N-ary | RACI Responsible | Operational responsibility |
-| `ownedBy` | Entity → (**Subject \| Object**) | unidirectional (per edge) | N-ary | RACI Accountable | Accountability, data boundary. **The target is deliberately OPEN (#11083 ruling (c), owner 2026-11-05).** With one predicate covering "a person owns a thing", "a company owns a thing" and "a holding IS a stake in a company", the predicate alone can no longer say which end owns which — so **the per-edge `direction` carries the sense**: `->` = the TARGET owns the source (`investment --ownedBy--> fund`); `<-` = the SOURCE owns the target, read as a stake in it (`investment --ownedBy--> company`). ⚠️ Accepted residual: no code validates endpoint kinds by semantics, so the ruling is carried per declaration and **reported** (by `pack_registry.effective_direction` and the pack census), not enforced. |
+| `ownedBy` | Entity → (**Subject \| Object**) | unidirectional (per edge) | N-ary | RACI Accountable | Accountability, data boundary. **The target is an Entity (a Subject or an Object).** With one predicate covering "a person owns a thing", "a company owns a thing" and "a holding IS a stake in a company", the predicate alone can no longer say which end owns which — so **the per-edge `direction` carries the sense**: `->` = the TARGET owns the source (`investment --ownedBy--> fund`); `<-` = the SOURCE owns the target, read as a stake in it (`investment --ownedBy--> company`). ⚠️ Accepted residual: no code validates endpoint kinds by semantics, so the ruling is carried per declaration and **reported** (by `pack_registry.effective_direction` and the pack census), not enforced. |
 
 > **memberOf is canonical.** `get_org_structure` queries `memberOf` for membership (Subject→Subject, member→org). `holdsRole` is retained as a distinct concept (person→role is not membership). The legacy `hasMember` predicate (org→member) remains in valid_predicates for backward compatibility with existing graph edges.
 
@@ -350,7 +350,7 @@ Epistemic edges (operators): `IMPL`, `NAND` (+ semantic label).
 > reification table governs which edges *ought* to carry an operator, and an undeclared label
 > still warns without blocking (warn-not-block, #1934). A **retired** spelling (`opposes`,
 > `holds`, `funds` — the transition map) is deliberately **not** declared, so it keeps warning and
-> the caller learns the canonical word. **`produces` is NOT one of them since v3.32**: it is a
+> the caller learns the canonical word. **`produces` is not one of them**: it is a
 > Layer-2 meaning (§8), so it is declared and does not warn — the transition map is the authority
 > for that list, and `produces` left it when it became a meaning (#11083). `measures` is declared
 > nowhere and

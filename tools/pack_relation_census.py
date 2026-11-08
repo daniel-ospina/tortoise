@@ -463,7 +463,10 @@ def build_census(packs_dir: Path | str = REPO_ROOT / "packs", *,
             "note": (
                 "`0 written on the Object→Object class` is a PIPELINE reading. "
                 "`dev:hasPart` and `dev:dependsOn` land a real direct "
-                "(:Object)-[:hasPart]->(:Object) when a caller names them, so the "
+                "(:Object)-[:<predicate>]->(:Object) when a caller names them — "
+                "the structural writer stamps the ROW's own predicate, so "
+                "`create_edge(\"dependsOn\", a, b)` stores `:dependsOn`, not "
+                "`:hasPart` — so the "
                 "honest baseline is 0 pipeline-written / caller-writable, and the "
                 "gap #11001 was expected to fill is an INVOCATION, not a missing "
                 "primitive."

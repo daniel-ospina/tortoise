@@ -1235,6 +1235,6 @@
     }
   },
   "capability_vs_pipeline": {
-    "note": "`0 written on the Object\u2192Object class` is a PIPELINE reading. `dev:hasPart` and `dev:dependsOn` land a real direct (:Object)-[:hasPart]->(:Object) when a caller names them, so the honest baseline is 0 pipeline-written / caller-writable, and the gap #11001 was expected to fill is an INVOCATION, not a missing primitive."
+    "note": "`0 written on the Object\u2192Object class` is a PIPELINE reading. `dev:hasPart` and `dev:dependsOn` land a real direct (:Object)-[:<predicate>]->(:Object) when a caller names them \u2014 the structural writer stamps the ROW's own predicate, so `create_edge(\"dependsOn\", a, b)` stores `:dependsOn`, not `:hasPart` \u2014 so the honest baseline is 0 pipeline-written / caller-writable, and the gap #11001 was expected to fill is an INVOCATION, not a missing primitive."
   }
 }
