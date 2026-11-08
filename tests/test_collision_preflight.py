@@ -11535,11 +11535,24 @@ class HolderGateTests(unittest.TestCase):
         and was cut mid-word, losing the clause that says WHAT is unknown.
 
         The causes are DERIVED from the module under test (stub `_capture` at each
-        failure class), so this cannot drift from the wording the code emits. Each arm
-        is driven with a CAUSE AT ITS OWN MAXIMUM as well as a short one (#11202 review
-        round 14): the short `<html>nope</html>` body understated the unparsable
-        arm, which composes to 321 against this 320 window once `_gh_said` returns its
-        full `_GH_SAID_BOUND` — measured, and the reason `_GH_SAID_BOUND` is 99.
+        failure class), so this cannot drift from the wording the code emits.
+
+        ⛔ AND THE LONGEST CAUSE IS THE ONE THAT MUST BE DRIVEN (#11202 review round
+        14). The short `<html>nope</html>` body understated the UNPARSABLE arm, which
+        composes to 321 against this 320 window once `_gh_said` returns its full
+        `_GH_SAID_BOUND` — measured, and the reason `_GH_SAID_BOUND` is 99. So every
+        arm that CARRIES a payload is driven at that payload's maximum: the unparsable
+        body at a 400-char body, the unparsable stderr at a 400-char stderr, and the
+        403 at a 400-char cause behind its own `Fetching page 2 of 19...` prefix.
+        `unparsable body` is the ONE arm driven at BOTH ends, because it is the arm whose
+        short fixture hid the overrun. `timeout (armed)` is single-fixture and stays
+        that way: it carries no payload to lengthen — its cause is composed inside
+        `gh_json` — so there is no longer variant of it to drive.
+
+        Stated as the property each arm actually has rather than as a uniform rule:
+        a docstring that claims more coverage than the table below delivers is the
+        defect class this whole change exists to remove, and "each arm at its maximum
+        as well as a short one" was false for three of these four arms (#11529 review).
         """
         fs = self.cp.fleet_state
         at_max = "x" * 400     # longer than _bounded_repr's bound: the bound decides
