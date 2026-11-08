@@ -98,7 +98,8 @@ def collect_pack_config(proj) -> dict:
     ``removed``), ``yaml`` is the custom manifest text or null for starter
     packs.
 
-    ``status`` is what makes restore parity (#1936 indicator 2) expressible:    ``activated`` alone collapses ``disabled`` and ``removed`` into one
+    ``status`` is what makes restore parity (#1936 indicator 2) expressible:
+    ``activated`` alone collapses ``disabled`` and ``removed`` into one
     boolean, so an importer could not tell "the tenant switched this pack
     off" (carry it, write ``disabled``) from "the tenant removed this pack"
     (its ``:PackManifest`` is gone and ``yaml`` is null — the entry must be
