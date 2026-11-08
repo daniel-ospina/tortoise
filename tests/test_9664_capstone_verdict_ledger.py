@@ -1846,3 +1846,20 @@ def test_the_tool_carries_the_5128_interpreter_guard_first():
         f"has (`sys.version_info[0]` and `[1]`); found {sorted(components)}, "
         f"renders as {rendered!r} (message node: {ast.dump(message)})"
     )
+    # The census's `test_no_doc_or_usage_advertises_the_form_the_guard_refuses`
+    # sweeps THIS tool's docstring too, and it is the same gate-class as the pin
+    # above: it greps `python3 <path>` for a tool that IS guarded, because the
+    # reader copies the advertised form and meets a refusal the doc never
+    # predicted. Measured on a tool-only diff —
+    # `select(['tools/capstone_ledger.py'])` returns 82 files, INCLUDING this
+    # test's file and EXCLUDING `tests/test_entry_point_python_guard.py` — so
+    # this pin is the only gate there and must not be narrower than the sweep.
+    # (This is not hypothetical: `tools/build_site_icons.py` merged advertising
+    # `python3 tools/build_site_icons.py`, and the sweep is what caught it.)
+    doc = ast.get_docstring(tree) or ""
+    assert f"python3 tools/{TOOL.name}" not in doc, (
+        f"the tool's own docstring advertises `python3 tools/{TOOL.name}`, the "
+        f"form its guard REFUSES; the census's "
+        f"`test_no_doc_or_usage_advertises_the_form_the_guard_refuses` reds on "
+        f"it, and that test does not run on a tool-only diff"
+    )
