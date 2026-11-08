@@ -1826,20 +1826,23 @@ def test_the_stderr_requirement_is_gated_on_the_census_pinning(source, pinned, e
     assert _channel_is_wrong(call, pinned) is expected, (source, pinned, expected)
 
 
-def _advertised_bare_forms(rel: str, lines, census) -> list[str]:
-    """The census's advertised-form predicate, applied to `lines` (#5128).
+def _advertise_offenders(rel: str, text: str, census) -> list[str]:
+    """The census's advertised-form predicate, applied to a file's TEXT (#5128).
 
-    Factored OUT of the sweep so the predicate itself can be executed (see
-    `test_the_advertised_form_filter_is_not_deaf`). Inline, a filter that had lost
-    its condition (`if False and (…)` — the check deleted, the assertion kept) left
-    the whole suite GREEN, because the two pinned tools genuinely advertise no bare
+    Factored OUT of the sweep so the predicate AND its wiring to a real subject can
+    be executed (see `test_the_advertised_form_filter_is_not_deaf`, which drives
+    this same function with synthetic text). Inline, a filter that had lost its
+    condition (`if False and (…)` — the check deleted, the assertion kept) left the
+    whole suite GREEN, because the two pinned tools genuinely advertise no bare
     form: "no offenders in this file" and "this filter flags nothing" are the same
     observation until something feeds it a line that SHOULD be flagged, and the
-    only thing that does is a tool that already has an offender.
+    only thing that does is a tool that already has an offender. Routing BOTH
+    callers through one function means a mutation that empties it reds the
+    synthetic-subject test, rather than leaving only the call site to notice.
     """
     return [
         f"{rel}:{n}: {line.strip()}"
-        for n, line in enumerate(lines, 1)
+        for n, line in enumerate(text.splitlines(), 1)
         for m in census._BARE_INVOCATION.finditer(line)
         if (m.group(1) is None or f"{m.group(1)}/{m.group(2)}" not in census._CARVE_OUTS)
         and (rel, line.strip()) not in census._DELIBERATE_BARE_FORM
@@ -1979,8 +1982,22 @@ def test_the_preamble_walk_rejects_what_the_census_rejects(source, expected):
     is the vacuous-arm class this file's own docstrings keep removing — so the walk
     is executed here in both directions, not described in a comment above an
     assertion that nothing can falsify.
+
+    ⛔ AND against the CENSUS's own walk, row by row. This helper re-implements
+    `tests/test_entry_point_python_guard.py::_guard_index` + `_is_bare_sys_import`,
+    so hard-coded expectations alone would let the two drift apart silently: a
+    census TIGHTENING would make this pin an over-block, a census LOOSENING would
+    make it a future false PASS — both measured, in both directions, with this pin
+    GREEN. The census is loaded by path (`_census_module`) and asserted to agree,
+    which is the file's own doctrine for the regex and the refusal table.
     """
-    assert _preamble_index(list(ast.parse(source).body)) == expected, source
+    body = list(ast.parse(source).body)
+    assert _preamble_index(body) == expected, source
+    assert _census_module()._guard_index(body) == expected, (
+        f"this pin's walk and the census's `_guard_index` disagree: pin="
+        f"{_preamble_index(body)!r} census="
+        f"{_census_module()._guard_index(body)!r} for {source!r}"
+    )
 
 
 @pytest.mark.parametrize("tool", PINNED_TOOLS)
@@ -2008,19 +2025,12 @@ def test_the_tool_carries_the_5128_interpreter_guard_first(tool, capsys, monkeyp
     DECLARED BOUND — what this pin does NOT mirror, and why that is not a hole:
     it mirrors the census's arms over the TWO TOOLS' OWN FILES (preamble order,
     floor, guard shape, inertness at the floor, both refusal shapes, the RENDERED
-    message, the derived process status, the census row that status must match, and
-    the advertised-invocation sweep driven by the census's own `_BARE_INVOCATION` +
-    exemption sets), PLUS one arm the census does carry but this pin can only carry
-    for one tool: the invocation the `tools/build_site_icons.py` refusal names
-    RESOLVING (its `--source` is `required=True`, so only the `--help` form it names
-    resolves). ⛔ NOTHING here grades whether the form `tools/capstone_ledger.py`'s
-    refusal NAMES **resolves** — only that it names one (the prefix clause above
-    reds a message naming a different form); the census has no resolve arm for it
-    either, so that dimension is ungraded for that tool on a tool-only diff;
-    measured: mutating its message to name `--help` (exit 5, no verdict) or
-    `--ledger NONEXISTENT` leaves this file completely GREEN — no arm notices.
-    (Deliberately no count: a number here went stale three rounds running as arms
-    were added.)
+    message, the derived process status, the census row that status must match, the
+    invocation the refusal names RESOLVING (executed PER TOOL: the named form is
+    run, and its stderr is read for argparse's own `usage:`/`error:` pair — not for
+    one tool's exit code, since `capstone_ledger.py`'s 2 is its UNCOVERED verdict),
+    and the advertised-invocation sweep driven by the census's own
+    `_BARE_INVOCATION` + exemption sets.
 
     It does not mirror the census's `docs/` + `graph-scripts/` + sibling-`tools/`
     walk, its corpus vacuity, `RUNTIME_39`/`UNGUARDABLE` accuracy, detector
@@ -2045,9 +2055,10 @@ def test_the_tool_carries_the_5128_interpreter_guard_first(tool, capsys, monkeyp
     this paragraph exists to keep visible: `tests/` edits select 788 files
     INCLUDING the census, and an edit to another tool or to the census file itself
     selects the census too — so for those arms the census itself would then run.
-    This bound is declared rather than implied because a pin that silently claims
-    parity is how each of six review rounds found it weaker than the census by one
-    more dimension.
+    (Deliberately no arm count: a number here went stale three rounds running as
+    arms were added.) This bound is declared rather than implied because a pin that
+    silently claims parity is how each of six review rounds found it weaker than
+    the census by one more dimension.
     """
     tree = ast.parse(tool.read_text(encoding="utf-8"))
     body = list(tree.body)
@@ -2111,13 +2122,16 @@ def test_the_tool_carries_the_5128_interpreter_guard_first(tool, capsys, monkeyp
     )
 
     raises = [n for n in body_nodes if isinstance(n, ast.Raise)]
-    # ★ An `else:` clause is a SILENT NO-OP, and a worse fail-open than a bad
-    # message: `if old: raise … else: raise SystemExit(0)` passes every assertion
-    # about the body, and then the tool does NOTHING at all on the interpreter the
-    # guard is meant to pass — no work, no message, exit 0. Measured: the pin was
-    # green and the tool ran `exit 0` with no output. The census reds it because its
-    # floor probe raises out of the guard; this pin is the only gate on a
-    # `tools/`-only diff, so it must red it too.
+    # ★ An `else:` clause runs at the floor — on the interpreter this guard exists
+    # to PASS — so it can change what a 3.12 run does. Two classes:
+    #   * `else: raise SystemExit(0)` — a SILENT NO-OP: the tool does nothing, says
+    #     nothing, and exits 0. Measured: a green pin over a tool that ran `exit 0`
+    #     with no output. The floor-inertness assert below also catches this one.
+    #   * `else: print('x')` / any NON-RAISING else — no raise to observe, so
+    #     inertness is blind to it and this is the assert that reds it (measured:
+    #     the assert disabled + that else = the whole file GREEN; assert intact = RED).
+    # The census reds both via its floor probe; this pin is the only gate on a
+    # `tools/`-only diff, so it must red them too.
     assert not guard.orelse, (
         f"the guard must carry NO `else` clause: it would run at the floor, on the "
         f"interpreter the guard exists to PASS — measured, `else: raise "
@@ -2177,17 +2191,21 @@ def test_the_tool_carries_the_5128_interpreter_guard_first(tool, capsys, monkeyp
     # every PINNED tool must be in the census's table and the demand is stated
     # rather than inferred.
     expected_status = _census_module().REFUSAL_CODES.get(f"tools/{tool.name}")
-    assert expected_status is not None, (
-        f"the census pins no `REFUSAL_CODES` row for `tools/{tool.name}`, so this "
-        f"pin has nothing to compare the refusal's status against and would accept "
-        f"ANY non-zero one. Every pinned tool must carry a row "
-        f"(`tests/test_entry_point_python_guard.py::REFUSAL_CODES`): without it the "
-        f"census does not grade this tool by RUNNING it either, so the exit status "
-        f"is pinned nowhere. Add the row, and its `REFUSAL_WHY` reason."
-    )
-    assert status == expected_status, (
+    # The expected status is the CENSUS's own pin, not a constant read back from
+    # the module under test: measured, a coordinated edit (`EXIT_INVALID = 3` +
+    # `SystemExit(3)`) kept a self-referential assertion green while the census
+    # reded, and 3 is `EXIT_DISABLED` — a refusal indistinguishable from the
+    # off-switch. Where the census pins NO code for this tool it accepts any
+    # NON-ZERO refusal, so demanding 1 unconditionally would red a census-LEGAL
+    # tool — the false-red class this pin must not add. Parity, not a stricter
+    # local contract: a lane that adds a third tool without a census row gets the
+    # census's own rule, which is what `_channel_is_wrong`'s no-row branch assumes.
+    assert (
+        status == expected_status if expected_status is not None else status != 0
+    ), (
         f"the refusal must exit the status the census pins for this tool "
-        f"({expected_status!r}), and a coordinated edit of the module's own "
+        f"({expected_status!r}; None means the census pins no row for it and accepts "
+        f"any non-zero status), and a coordinated edit of the module's own "
         f"constant is exactly what this compares against. Got {status}: "
         f"{ast.dump(raise_node)}"
     )
@@ -2224,10 +2242,11 @@ def test_the_tool_carries_the_5128_interpreter_guard_first(tool, capsys, monkeyp
     # its `--help` form resolves (exit 0); `tools/capstone_ledger.py`'s NAMED form
     # IS the bare path, which resolves to a computed verdict (exit 2 =
     # `EXIT_UNCOVERED`), while its `--help` exits 5 with no verdict. The WORKING
-    # claim is proved by executing it, in
-    # `test_the_site_icon_refusal_names_the_form_that_actually_RESOLVES`. Measured:
-    # reverting the site-icon message to the bare path left this file GREEN while
-    # the census reded, which is why the proof lives in its own arm and not here.
+    # claim is proved by executing it PER TOOL, in
+    # `test_the_refusal_names_a_form_that_actually_RESOLVES`. Measured: reverting
+    # the site-icon message to the bare path left this file GREEN while the census
+    # reded, and `tools/capstone_ledger.py`'s advice naming `--nope` left it GREEN
+    # too — which is why the proof lives in its own parametrized arm, not here.
     #
     # The subject is asserted as ONE clause, not as a bare `"<tool name>" in
     # rendered` substring: the invocation clause below already contains that
@@ -2239,9 +2258,9 @@ def test_the_tool_carries_the_5128_interpreter_guard_first(tool, capsys, monkeyp
     )
     assert f"uv run python tools/{tool.name}" in rendered, (
         f"the refusal must name an invocation at all (PREFIX only — whether it "
-        f"RESOLVES is proved in "
-        f"test_the_site_icon_refusal_names_the_form_that_actually_RESOLVES, and "
-        f"only for tools/build_site_icons.py); renders as {rendered!r} "
+        f"RESOLVES is proved per tool in "
+        f"test_the_refusal_names_a_form_that_actually_RESOLVES); renders as "
+        f"{rendered!r} "
         f"(message node: {ast.dump(message)})"
     )
 
@@ -2295,7 +2314,7 @@ def test_the_tool_carries_the_5128_interpreter_guard_first(tool, capsys, monkeyp
     # `group(1) == "tools" and group(2) == tool.name` also re-narrows the regex's
     # ELIDED branch (`python3 ...`, groups None) and its cross-path matches
     # (`python3 graph-scripts/...`), both of which the census reds too.
-    offenders = _advertised_bare_forms(rel, text.splitlines(), census)
+    offenders = _advertise_offenders(rel, text, census)
     assert not offenders, (
         f"the tool advertises `python3 tools/{tool.name}`, the form its guard "
         f"REFUSES; the census's "
@@ -2304,50 +2323,72 @@ def test_the_tool_carries_the_5128_interpreter_guard_first(tool, capsys, monkeyp
     )
 
 
-def test_the_site_icon_refusal_names_the_form_that_actually_RESOLVES(
-    capsys, monkeypatch
-):
-    """The census's #11507 arm, mirrored — because the census's copy does not run here.
+@pytest.mark.parametrize("tool", PINNED_TOOLS)
+def test_the_refusal_names_a_form_that_actually_RESOLVES(tool, capsys, monkeypatch):
+    """The census's #11507 arm, mirrored PER TOOL — because its copy does not run here.
 
     `tests/test_entry_point_python_guard.py::
     test_the_site_icon_guard_names_an_invocation_that_actually_resolves` proves the
-    invocation the refusal NAMES works, and it is the only gate that does one
-    class of claim: the prefix `uv run python tools/<name>` is satisfied by the
-    bare path AND by the `--help` form, so a prefix test cannot see the
-    regression. A `tools/build_site_icons.py`-only diff selects 82 test files
-    INCLUDING this one and EXCLUDING the census, so on the diff that can
-    introduce the regression this file is the whole gate.
+    invocation the refusal NAMES works, and it is the only gate that does one class
+    of claim: the prefix `uv run python tools/<name>` is satisfied by the bare path
+    AND by a form that adds the token the tool actually needs, so a prefix test
+    cannot see the regression. A `tools/<name>`-only diff selects 82 test files
+    INCLUDING this one and EXCLUDING the census, so on the diff that can introduce
+    the regression this file is the whole gate.
 
-    Measured at the head that added this test: reverting the tool's message to the
-    pre-#11507 bare path — the exact SECOND unattributed error #5128 was filed for
-    — left this file GREEN (2 passed on the tool's arm) while the census reded on
-    its own copy. The pin was strictly weaker than the gate it claims to stand in
-    for, on precisely the diff where it is the only one that runs.
+    ⛔ PARAMETRIZED, not icons-only. An earlier cut of this arm hard-wired
+    `build_site_icons.py` while the case docstring claimed it covered "the
+    invocation the refusal names" for the pinned tools — so `capstone_ledger.py`'s
+    advice stayed pinned by the PREFIX alone, and rewording it to
+    `… --nope` (argparse: exit 5, a SECOND unattributed error, the exact class
+    #5128 exists for) left this file at 203 passed. Measured.
 
-    Proven rather than read off the string: `--source` is `required=True`, so the
-    bare path is argparse's own usage error and only the named form resolves.
+    The claim proved is the census's, generalised: the form the refusal names must
+    not be a USAGE error. That is what makes the advice resolvable on both tools —
+    `build_site_icons.py` names `--help` (its bare path is a usage error because
+    `--source` is required), and `capstone_ledger.py` names the bare entry point,
+    which runs its check. So the named form is executed, and its stderr is read for
+    argparse's own `usage:` / `error:` pair rather than for one tool's exit code.
     """
-    path = REPO_ROOT / "tools" / "build_site_icons.py"
+    path = tool
     guard = _guard_if(ast.parse(path.read_text(encoding="utf-8")))
     assert guard is not None, f"{path} carries no #5128 interpreter guard"
     said = _refusal_text(guard, capsys, monkeypatch, (3, 9, 6, "final", 0))
-    assert "tools/build_site_icons.py --help" in said, (
-        "the refusal must name the `--help` form, which needs no `--source` "
-        f"token: {said!r}"
+    named_prefix = f"uv run python tools/{path.name}"
+    assert named_prefix in said, (
+        f"the refusal must name `{named_prefix}` in its advice: {said!r}"
     )
-    resolved = subprocess.run(
-        [sys.executable, str(path), "--help"], capture_output=True, text=True
+    # The tokens the refusal ADDS after the entry point are part of the advice —
+    # `--help` for the tool whose bare path is a usage error, nothing for the tool
+    # whose entry point is its own command.
+    tail = said.split(named_prefix, 1)[1].split("`", 1)[0]
+    extra = [tok for tok in tail.split() if tok.startswith("-")]
+    named = subprocess.run(
+        [sys.executable, str(path), *extra], capture_output=True, text=True
     )
-    assert resolved.returncode == 0, (
-        "the invocation the refusal names must RESOLVE; it exited "
-        f"{resolved.returncode}: {resolved.stderr[-400:]!r}"
+    # argparse writes BOTH lines for a usage error; a working form writes neither.
+    # Exit codes are deliberately not compared here: this tool's verdict codes are
+    # its normal output (`capstone_ledger.py` exits 2 = UNCOVERED), and grading a
+    # verdict as a failure is the over-block this arm must not add.
+    stderr_lower = named.stderr.lower()
+    assert "usage:" not in stderr_lower and "error:" not in stderr_lower, (
+        f"the invocation the refusal names is a USAGE error — advice that is a "
+        f"SECOND unattributed error, the class #5128 exists for: "
+        f"{named_prefix} {' '.join(extra)} -> rc={named.returncode}, "
+        f"{named.stderr[-400:]!r}"
     )
-    bare = subprocess.run([sys.executable, str(path)], capture_output=True, text=True)
-    assert bare.returncode == 2, (
-        "the bare path must stay a USAGE error (argparse, `--source` is required) — "
-        "if it stops being one, this guard's advice is no longer the only form "
-        f"that resolves: rc={bare.returncode}, {bare.stderr[-300:]!r}"
-    )
+    if extra:
+        # Why the extra token is there at all: the bare path must be the usage
+        # error the named form avoids. If it ever stops being one, the advice is
+        # no longer necessary and this arm should be revisited rather than kept.
+        bare = subprocess.run(
+            [sys.executable, str(path)], capture_output=True, text=True
+        )
+        assert "usage:" in bare.stderr.lower() and "error:" in bare.stderr.lower(), (
+            f"`{named_prefix}` names {' '.join(extra)}, so the BARE path must be a "
+            f"usage error that form avoids; it was not: rc={bare.returncode}, "
+            f"{bare.stderr[-300:]!r}"
+        )
 
 
 def test_the_advertised_form_filter_is_not_deaf():
@@ -2364,19 +2405,19 @@ def test_the_advertised_form_filter_is_not_deaf():
     """
     census = _census_module()
     rel = "tools/capstone_ledger.py"
-    assert _advertised_bare_forms(rel, [f"run `python3 {rel} check`"], census), (
+    assert _advertise_offenders(rel, f"run `python3 {rel} check`", census), (
         "the filter flags NO offender — the sweep is deaf, and a tool advertising the "
         "refused form would pass it"
     )
-    assert not _advertised_bare_forms(rel, [f"run `uv run python {rel} check`"], census), (
+    assert not _advertise_offenders(rel, f"run `uv run python {rel} check`", census), (
         "the filter flags a COMPLIANT invocation — every pinned tool would red"
     )
     carve = sorted(census._CARVE_OUTS)[0]
-    assert not _advertised_bare_forms(rel, [f"`python3 {carve}`"], census), (
+    assert not _advertise_offenders(rel, f"`python3 {carve}`", census), (
         f"a census carve-out ({carve}) must stay exempt — the exemptions are the "
         f"census's data, not a re-derived filter"
     )
-    assert _advertised_bare_forms(rel, ["`python3 ...`"], census), (
+    assert _advertise_offenders(rel, "`python3 ...`", census), (
         "the ELIDED form has no path, so no carve-out can exempt it; the census reds "
         "it and the filter must too"
     )
@@ -2385,7 +2426,7 @@ def test_the_advertised_form_filter_is_not_deaf():
     # clause left the suite GREEN (measured). It is keyed by (path, stripped line),
     # so the census's own first entry is the only honest subject.
     record_rel, record_line = sorted(census._DELIBERATE_BARE_FORM)[0]
-    assert not _advertised_bare_forms(record_rel, [record_line], census), (
+    assert not _advertise_offenders(record_rel, record_line, census), (
         f"a census RECORD exemption must stay exempt ({record_rel!r}): rewriting "
         f"recorded evidence to satisfy a gate falsifies provenance, which is why the "
         f"census exempts it"
