@@ -1871,6 +1871,19 @@ def _refusal_text(guard: ast.If, capsys, monkeypatch, version: tuple[int, ...]) 
     return said + captured.out + captured.err
 
 
+def _guard_if(tree: ast.Module) -> ast.If | None:
+    """The module's #5128 interpreter guard, FOUND without pinning its position.
+
+    Position is `test_the_tool_carries_the_5128_interpreter_guard_first`'s claim,
+    not this helper's: a test that only needs to EXECUTE the guard must not
+    re-assert (and so re-litigate) the preamble order in a second place.
+    """
+    for node in tree.body:
+        if isinstance(node, ast.If) and "version_info" in ast.unparse(node.test):
+            return node
+    return None
+
+
 PINNED_TOOLS = [
     pytest.param(TOOL, id="capstone_ledger"),
     pytest.param(REPO_ROOT / "tools" / "build_site_icons.py", id="build_site_icons"),
@@ -1902,8 +1915,9 @@ def test_the_tool_carries_the_5128_interpreter_guard_first(tool, capsys, monkeyp
     DECLARED BOUND — what this pin does NOT mirror, and why that is not a hole:
     it mirrors the census's arms over the TWO TOOLS' OWN FILES (preamble order,
     floor, guard shape, inertness at the floor, both refusal shapes, the RENDERED
-    message, the derived process status, and the advertised-invocation sweep driven
-    by the census's own `_BARE_INVOCATION` + exemption sets). It does not mirror the
+    message, the derived process status, the census row that status must match, the
+    invocation the refusal names RESOLVING, and the advertised-invocation sweep
+    driven by the census's own `_BARE_INVOCATION` + exemption sets). It does not mirror the
     census's `docs/` + `graph-scripts/` + sibling-`tools/` walk, nor its corpus
     vacuity, `RUNTIME_39`/`UNGUARDABLE` accuracy, detector self-test or `-m`
     resolution arms: reaching any of those needs an edit to `docs/`, to another
@@ -2058,17 +2072,33 @@ def test_the_tool_carries_the_5128_interpreter_guard_first(tool, capsys, monkeyp
     # the module under test: measured, a coordinated edit (`EXIT_INVALID = 3` +
     # `SystemExit(3)`) kept a self-referential assertion green while the census
     # reded, and 3 is `EXIT_DISABLED` — a refusal indistinguishable from the
-    # off-switch. Where the census pins NO code for this tool it accepts any
-    # NON-ZERO refusal, so demanding 1 unconditionally would red a census-legal
-    # tool — the false-red class this pin must not add.
+    # off-switch.
+    #
+    # A MISSING row is a REFUSAL here, not a licence. It used to fall back to
+    # `status != 0` ("the census accepts any non-zero status"), and that fallback
+    # was a fail-open: measured at the head that added this, dropping
+    # `build_site_icons.py`'s `REFUSAL_CODES` + `REFUSAL_WHY` rows AND downgrading
+    # its refusal from `SystemExit(4)` to `SystemExit(1)` left this whole file
+    # GREEN (195 passed) while the regression the tool's own comment forbids went
+    # in: "an environment refusal must not wear 1 or a caller cannot tell 'the
+    # tool refused' from 'the interpreter is too old'". Silently widening to any
+    # non-zero is the pin accepting whatever a coordinated edit leaves behind, so
+    # every PINNED tool must be in the census's table and the demand is stated
+    # rather than inferred.
     expected_status = _census_module().REFUSAL_CODES.get(f"tools/{tool.name}")
-    assert (
-        status == expected_status if expected_status is not None else status != 0
-    ), (
+    assert expected_status is not None, (
+        f"the census pins no `REFUSAL_CODES` row for `tools/{tool.name}`, so this "
+        f"pin has nothing to compare the refusal's status against and would accept "
+        f"ANY non-zero one. Every pinned tool must carry a row "
+        f"(`tests/test_entry_point_python_guard.py::REFUSAL_CODES`): without it the "
+        f"census does not grade this tool by RUNNING it either, so the exit status "
+        f"is pinned nowhere. Add the row, and its `REFUSAL_WHY` reason."
+    )
+    assert status == expected_status, (
         f"the refusal must exit the status the census pins for this tool "
-        f"({expected_status!r}; None means the census accepts any non-zero "
-        f"status), and a coordinated edit of the module's own constant is exactly "
-        f"what this compares against. Got {status}: {ast.dump(raise_node)}"
+        f"({expected_status!r}), and a coordinated edit of the module's own "
+        f"constant is exactly what this compares against. Got {status}: "
+        f"{ast.dump(raise_node)}"
     )
 
     if print_shape:
@@ -2095,8 +2125,13 @@ def test_the_tool_carries_the_5128_interpreter_guard_first(tool, capsys, monkeyp
         for n in ast.walk(message)
         if isinstance(n, ast.Constant) and isinstance(n.value, str)
     )
-    # The message must name the floor, the file, and an invocation that WORKS —
-    # a refusal naming a broken invocation is the same unattributed error again.
+    # The message must name the floor, the file, and an invocation at all. ⛔ This
+    # clause is a PREFIX test only — `uv run python tools/<name>` is satisfied by
+    # BOTH the form that resolves and the bare path that does not — so the claim
+    # that the named invocation WORKS is proved separately, by executing it, in
+    # `test_the_site_icon_refusal_names_the_form_that_actually_RESOLVES`. Measured:
+    # reverting that tool's message to the bare path left this file GREEN while the
+    # census reded, which is why the proof lives in its own arm and not here.
     #
     # The subject is asserted as ONE clause, not as a bare `"<tool name>" in
     # rendered` substring: the invocation clause below already contains that
@@ -2167,6 +2202,52 @@ def test_the_tool_carries_the_5128_interpreter_guard_first(tool, capsys, monkeyp
         f"REFUSES; the census's "
         f"`test_no_doc_or_usage_advertises_the_form_the_guard_refuses` reds on "
         f"it, and that test does not run on a tool-only diff: {offenders}"
+    )
+
+
+def test_the_site_icon_refusal_names_the_form_that_actually_RESOLVES(
+    capsys, monkeypatch
+):
+    """The census's #11507 arm, mirrored — because the census's copy does not run here.
+
+    `tests/test_entry_point_python_guard.py::
+    test_the_site_icon_guard_names_an_invocation_that_actually_resolves` proves the
+    invocation the refusal NAMES works, and it is the only gate that does one
+    class of claim: the prefix `uv run python tools/<name>` is satisfied by the
+    bare path AND by the `--help` form, so a prefix test cannot see the
+    regression. A `tools/build_site_icons.py`-only diff selects 82 test files
+    INCLUDING this one and EXCLUDING the census, so on the diff that can
+    introduce the regression this file is the whole gate.
+
+    Measured at the head that added this test: reverting the tool's message to the
+    pre-#11507 bare path — the exact SECOND unattributed error #5128 was filed for
+    — left this file GREEN (2 passed on the tool's arm) while the census reded on
+    its own copy. The pin was strictly weaker than the gate it claims to stand in
+    for, on precisely the diff where it is the only one that runs.
+
+    Proven rather than read off the string: `--source` is `required=True`, so the
+    bare path is argparse's own usage error and only the named form resolves.
+    """
+    path = REPO_ROOT / "tools" / "build_site_icons.py"
+    guard = _guard_if(ast.parse(path.read_text(encoding="utf-8")))
+    assert guard is not None, f"{path} carries no #5128 interpreter guard"
+    said = _refusal_text(guard, capsys, monkeypatch, (3, 9, 6, "final", 0))
+    assert "tools/build_site_icons.py --help" in said, (
+        "the refusal must name the `--help` form, which needs no `--source` "
+        f"token: {said!r}"
+    )
+    resolved = subprocess.run(
+        [sys.executable, str(path), "--help"], capture_output=True, text=True
+    )
+    assert resolved.returncode == 0, (
+        "the invocation the refusal names must RESOLVE; it exited "
+        f"{resolved.returncode}: {resolved.stderr[-400:]!r}"
+    )
+    bare = subprocess.run([sys.executable, str(path)], capture_output=True, text=True)
+    assert bare.returncode == 2, (
+        "the bare path must stay a USAGE error (argparse, `--source` is required) — "
+        "if it stops being one, this guard's advice is no longer the only form "
+        f"that resolves: rc={bare.returncode}, {bare.stderr[-300:]!r}"
     )
 
 
