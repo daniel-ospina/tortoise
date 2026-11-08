@@ -84,7 +84,7 @@ Vocabulary (owner ruling **O4**, `EXTRACTOR-V4-ARCHITECTURE.md` §16.3 / §16.4)
 - ``DISCARD`` — do not ship; the candidate is removed and its counterfactual
   recorded.
 - ``MERGE`` — fold into another candidate.
-- ``RENARRATE`` — **batch-level only**: re-extract the batch.
+- ``RENARRATE`` — **batch-level only**: re-extract the batch. ⛔ **This token HAS a consumer (#11002)**: ``extractor_v2`` reads a batch verdict's ``outcome`` after the S2.2 pass and, exactly once per run, re-narrates and re-extracts (``_renarrate_trigger`` → ``_arm_extract`` with the emphasis seam). The gate still performs no re-extraction itself — it says the batch is poor, the pipeline decides what to do about it, which is the same verdict/action split ``MERGE`` has above.
 
 This is VET's **selection** axis and is deliberately distinct from
 ``extractor_v2.DecisionRecord``'s consolidation axis (``ADD``/``UPDATE``/
@@ -345,10 +345,13 @@ def _iter_items(embed_list: object
 def _narrative_statements(narrative: str) -> int:
     """A deterministic proxy for "how many things did the narrative state?".
 
-    Deliberately crude and **unmeasured** — it exists to be *reported*, not to
-    trigger an action. The design's `RENARRATE` trigger threshold is explicitly
-    something the draft-and-run loop must set on real sessions (§4.2), so this
-    function never decides anything by itself.
+    Deliberately crude and **unmeasured** — it is a *count*, never a threshold,
+    so it cannot decide anything by itself. It reaches an action only through
+    ``check_batch``'s ``coverage_suspect``, the ONE unambiguous coverage failure
+    (prose in, zero candidates out — no ratio, no number to choose); #11002 is
+    what consumes that flag. The design's `RENARRATE` trigger threshold remains
+    something the draft-and-run loop must set on real sessions (§4.2), and a
+    keep-rate threshold is therefore NOT chosen in advance here.
     """
     return sum(1 for part in _SENTENCE_SPLIT.split(str(narrative or ""))
                if part and part.strip())
@@ -359,7 +362,16 @@ def _narrative_statements(narrative: str) -> int:
 def check_batch(embed_list: object, narrative: str) -> dict:
     """Level 2 — *did this batch come out right?*
 
-    Two signals, both **reported, never acted on** in v1:
+    Two signals. They are **inert HERE** — this gate never retries, re-narrates
+    or extracts anything (its role is to *select*), and no key below gates a
+    decision inside this module. The consumer is the PIPELINE: #11002 reads
+    ``coverage_suspect`` (and an arbiter's ``RENARRATE``, above) via
+    ``extractor_v2._renarrate_trigger`` and runs at most one re-narrate. An
+    earlier revision of this docstring said *"reported, never acted on in v1"*;
+    scoping #11002 measured that the ``in v1`` qualifier was the only thing
+    between that sentence and a false claim once the pipeline consumes it — so
+    the sentence now names the boundary that is actually true (inert at the
+    gate, consumed by the pipeline) instead of a qualifier a reader can miss.
 
     - **coverage** — candidates emitted vs. statements the narrative carried.
       ``coverage_suspect`` fires only on the unambiguous case (a non-empty
@@ -938,6 +950,48 @@ def removal_pool(before: object, after: object) -> dict:
         "removed_entities": {n: it for n, it in before_entities.items()
                              if n not in after_entities},
     }
+
+
+def applied_discards(before: object, after: object,
+                     decisions: Mapping[str, Mapping[str, Any]]) -> int:
+    """How many candidates a ``DISCARD`` verdict ACTUALLY removed.
+
+    ``stats["discarded"]`` counts **verdicts**, and that is the right number for
+    *"what did the gate say?"*. It is the wrong number for a **keep-rate**:
+    :func:`apply_vet`'s Rule 2 downgrades a discard to ``KEEP`` whenever the
+    entity is still referenced by a surviving candidate (dropping it would fail
+    ``validate_layer1`` and 422 the session), and Rule 4 RESTORES one an earlier
+    pass removed. On those runs the verdict count reports a loss that did not
+    happen — so a rate built on it under-states the yield, can select the wrong
+    narrative in a tie-break, and can fire a hand-armed threshold on a removal
+    that never occurred.
+
+    Counts by the SAME two questions the applied pass answers, so it cannot
+    disagree with the output it describes: the item carried a ``DISCARD``
+    verdict (``_item_id`` on ``before``, the list those ids came from) **and** it
+    is absent from ``after`` (:func:`_survives`, the value equality
+    :func:`removal_pool` rests on — which is also what makes a downgraded
+    discard correctly count as ZERO here).
+
+    Collateral prunes are deliberately NOT counted: an operator pruned because
+    it referenced a removed item carries no verdict of its own, and counting it
+    would report a loss of a candidate the narrative never produced.
+
+    Fail-open in the reporting direction: anything unreadable contributes 0, so
+    an unparseable decision or list under-reports removals rather than inventing
+    them — the same direction as :func:`apply_vet`'s own guards.
+    """
+    decisions = decisions if isinstance(decisions, Mapping) else {}
+    removed = 0
+    for section, index, item in _iter_items(before):
+        decision = decisions.get(_item_id(section, index, item))
+        if not isinstance(decision, Mapping):
+            continue
+        if str(decision.get("outcome") or "").strip().upper() != DISCARD:
+            continue
+        if not _survives(section, item, after):
+            removed += 1
+    return removed
 
 
 def _rewrite_entity_references(embed_list: Mapping[str, Any],
