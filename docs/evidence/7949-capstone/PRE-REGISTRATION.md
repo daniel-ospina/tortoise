@@ -281,8 +281,9 @@ surface, not hand-listed beside it. That list grew one review round at a time �
 `TORTOISE_IDENTIFIER_TOKENS` in cycle 9, then `TORTOISE_SUBJECT_TAU_HI`/`_LO` in cycle 10 (each of those
 four found by a measured mutation that left the previous derivation green), then
 `TORTOISE_STATE_VALUE_VERBATIM` in cycle 11, which the **CENSUS** found rather than a mutation: the switch
-landed inside `path_modules` and red that suite (§10.15). Named positionally and never as a count — this
-paragraph said "the last four" over five rounds until §10.15 corrected it — which is the honest reason to state
+landed inside `path_modules` and red that suite (§10.15). Named positionally and never as a count:
+"the last four" WAS correct over the four rounds it then listed, and adding cycle 11 without restating it is
+the drift §10.15 corrected — which is the honest reason to state
 it as a CLOSURE over the reads INSIDE those modules rather than as a list somebody curated — not
 a closure over everything the path reaches, which is the gap #11410 records. Every one is written in-process, **read back**, and a run whose read-back
 disagrees is **refused** (`probes/capstone_measure.py`); the measurement switches were
@@ -1746,6 +1747,7 @@ re-cut from the resolved document (§8), and no committed verdict is re-scored.
 - **What moved: nothing else.** No metric, denominator, threshold, class set or corpus pin is
   touched: the values this record freezes are unchanged and only line citations move.
   `document_sha256` is re-cut in this same commit, per §8's rule for *any* edit to this file.
+
 ### 10.15 — the door's pin set gains `TORTOISE_STATE_VALUE_VERBATIM` (`#10360`, 2026-11-08)
 
 ⛔ **Scope, because §10.14 records the same PIN from the other direction.** `#11449`'s lane
@@ -1780,14 +1782,16 @@ non-seam**, because its absent state is already ON and its only non-neutral stat
 into the graph the run writes instead of withheld — the pre-`#10513` semantics, already pinned by
 `tests/test_state_value_verbatim_10360.py::test_the_off_switch_defaults_ON_and_restores_the_pre_10513_write`.
 Pinning it to its shipped default **equals today's behaviour on a clean shell** and closes only the
-inherited-`=0` hole, which is the `TORTOISE_IDENTIFIER_TOKENS` precedent (§10, cycle 9).
+inherited-`=0` hole, which is the `TORTOISE_IDENTIFIER_TOKENS` precedent (§1.6.2, cycle 9).
 
-**A SECOND roll-call in the same subsection carried the same two defects, and this entry corrects it
+**A SECOND roll-call in the same subsection needed the same restatement, and this entry makes it
 too.** §1.6.2's later paragraph said "the last four are … `TORTOISE_SUBJECT_TAU_HI`/`_LO` in cycle 10,
-each found by a measured mutation that left the previous derivation green", which — once cycle 11 joins
-that list — (a) counts four over the five rounds 7–11 and omits cycle 11 entirely, and (b) attributes
-every member to a measured mutation, which is **false for cycle 11**: the **CENSUS** found it, not a
-mutation (the "Why" above and `acceptance_arm.read_back` both say so — *"It was found by the CENSUS,
+each found by a measured mutation that left the previous derivation green". That count was right over the
+four rounds it then named — **it is adding cycle 11 to the list, above, that makes it stale**, which is
+why the two edits belong together: once cycle 11 joins, the sentence (a) counts four over the five rounds
+7–11 and omits cycle 11 entirely, and (b) attributes every member to a measured mutation, which is
+**false for cycle 11**: the **CENSUS** found it, not a mutation (the "Why" above and
+`acceptance_arm.read_back` both say so — *"It was found by the CENSUS,
 not by hand: the switch landed inside path_modules and red that suite"*). It is now restated
 positionally, with the mutation attribution scoped to the four rounds it is true of and cycle 11's
 actual discovery mechanism named. A paragraph that states the count and the discovery method of a list
@@ -1798,7 +1802,6 @@ sentence below, the defect this entry was already correcting.
 committed verdict is re-scored: the pin makes the measured population **shell-insensitive** and the
 registered corpus's numbers are untouched. `document_sha256` is re-cut from the resolved document in
 the same commit (§8).
-
 
 ## 11. The step set V5 gates over — seven unconditional, one conditional (`#10215`)
 
