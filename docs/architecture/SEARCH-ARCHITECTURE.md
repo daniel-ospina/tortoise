@@ -263,8 +263,8 @@ input rather than a derived value (the `#7955` correction to `STORAGE-ARCHITECTU
 “`baseline_source` is NOT unconditionally DERIVED”, which says the carve-out is **not** reopened by it).
 That ruling stands and nothing here reverses it.
 
-**Which is why the retention unit must be a CLOSED component (§7):** a closed subgraph has no missing
-boundary, so recomputing EP for it is **exact**, not approximate. Retention policy and the EP carve-out
+**Which is why the window's unit of RESIDENCY must be a CLOSED component (§7):** a closed subgraph has no missing
+boundary, so recomputing EP for it is **exact**, not approximate. Residency and the EP carve-out
 therefore point the same way — and no schema change is needed.
 
 **One live defect must be fixed independently of all of this, and it is already in the code.** A claim
@@ -328,9 +328,18 @@ scheduling question, not a feasibility one**, and the residual cost is exactly w
 reserves: re-materialising a window still peaks at **4.9–5.9×** its resting size (the table above), and that
 peak is a graph-memory peak, not an index one.
 
-**The unit of retention is a CLOSED component, not a node.** A retained hub whose neighbours were evicted
-pays for the node and still cannot complete the walk. Retaining closed neighbourhoods (1–2 hops) also
+**The unit of RESIDENCY is a CLOSED component, not a node.** A pinned hub whose neighbours were evicted
+pays for the node and still cannot complete the walk. Pinning closed neighbourhoods (1–2 hops) also
 makes EP recomputation exact (§6.3).
+
+⚠️ **This window is RESIDENCY, not retention, and the distinction is load-bearing.** Demoting a subgraph
+removes it from the *cache*; it stays in the record. Nothing a customer keeps is deleted, no copy is
+dropped, and `#3853` — *"No default window, of any length. … there is no default retention period on user
+content"* (`docs/retention-and-deletion.md`, §"No default window, of any length") — is untouched: §4
+records that `FalkorDB` is a derived cache, never authoritative, so §11 excludes retention because there
+is **none here**. Read §7 as sizing what is *resident*, never as a TTL on what is *kept* — a per-node TTL
+is the bound `docs/architecture/CONSUMPTION-MODEL.md` forbids as *"any bound that shrinks what a customer
+may keep, however it is denominated"*, and it is not this.
 
 **The policy, as researched:**
 
@@ -463,7 +472,8 @@ complete graph affordable.
 
 ## 11. Out of scope
 
-Tier prices and overage values; the compute/IOPS/egress tier; retention (`#3853`); the session cap
+Tier prices and overage values; the compute/IOPS/egress tier; retention (`#3853` — §7's window is
+*residency*, not retention: nothing is deleted); the session cap
 (`#4010`); the `record_only` tier's scope beyond `:Point` (`#10017`); **the implementation order** —
 deliberately last, and **this document's** sequencing choice, not a quoted ruling: canonical docs first, so a
 lane never implements against a superseded architecture. (Its shape matches the phase correction in `#4051`
