@@ -24,6 +24,7 @@ stop being reported.
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import os
 import subprocess
@@ -1553,3 +1554,173 @@ def test_a_long_path_is_truncated_in_the_error_line(tmp_path):
     proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[long])]))
     assert proc.returncode == cl.EXIT_INVALID
     assert "…" in proc.stderr, proc.stderr
+
+
+def _refusal_exit_status(exc: ast.expr | None) -> int:
+    """The PROCESS status a guard's `raise SystemExit(...)` leaves behind (#11342).
+
+    Mirrors CPython's own conversion — `.code` becomes a status via `0 if code is
+    None else (code if isinstance(code, int) else 1)` — and the OS then keeps
+    only the low 8 bits. Both steps matter: `SystemExit()`, `SystemExit(None)`,
+    `SystemExit(False)`, `SystemExit(0)`, `SystemExit(256)` and `SystemExit(768)`
+    all leave the process at **0**, so a bare `code != 0` would report a guard
+    that prints the full refusal and then exits CLEAN as passing.
+
+    A non-constant argument cannot be resolved statically and is treated as
+    non-zero: `raise SystemExit(<message>)` — the historical #5128 shape this
+    tool uses — exits 1.
+    """
+    if not (isinstance(exc, ast.Call) and exc.args):
+        return 0  # `raise SystemExit` / `SystemExit()` leaves `.code` as None
+    arg = exc.args[0]
+    if not isinstance(arg, ast.Constant):
+        return 1  # unresolvable; the `SystemExit(<str>)` shape exits 1
+    value = arg.value
+    if value is None:
+        return 0
+    if isinstance(value, str):
+        return 1
+    if isinstance(value, bool):
+        return 1 if value else 0
+    if isinstance(value, int):
+        # `int.__and__`, not `&`: an int SUBCLASS can override `__and__`, and the
+        # OS applies int arithmetic whatever the subclass declares.
+        return int.__and__(value, 0xFF)
+    return 1
+
+
+def test_the_tool_carries_the_5128_interpreter_guard_first():
+    """The guard must precede EVERY other import.
+
+    Measured on CI: `tools/capstone_ledger.py` was added without the guard, and
+    shard `a` reded on `tests/test_entry_point_python_guard.py` — while every
+    local suite run was green.
+
+    That census cannot be the only pin, and the reason is a measured ASYMMETRY
+    in `tools/ci_selection.py`: for a PR that touches only this tool,
+    `select(['tools/capstone_ledger.py'], 'pull_request')` returns 81 files that
+    INCLUDE this module (it is `tier1`-registered, `config/ci-surfaces.yml:8079`)
+    and EXCLUDE `tests/test_entry_point_python_guard.py`. So pinning here is what
+    makes the guard checked on a tool-only diff; pinning in the census alone is
+    not. Asserting it HERE also means the next edit to this tool fails fast, in
+    the same run as everything else about it.
+    """
+    tree = ast.parse(TOOL.read_text(encoding="utf-8"))
+    body = list(tree.body)
+    # Skip the module docstring, the `__future__` import, and `import sys`.
+    i = 0
+    while i < len(body) and isinstance(body[i], ast.Expr):  # docstring
+        i += 1
+    assert i < len(body) and isinstance(body[i], ast.ImportFrom), "no __future__ import"
+    assert body[i].module == "__future__", body[i].module
+    i += 1
+    # Bounds-checked before each access: a truncated preamble must fail with the
+    # reason below, not an IndexError the reader has to decode.
+    assert i < len(body), "`import sys` must follow __future__ (file ends too early)"
+    assert isinstance(body[i], ast.Import), "`import sys` must follow __future__"
+    assert [a.name for a in body[i].names] == ["sys"], body[i].names
+    i += 1
+
+    assert i < len(body), (
+        "the #5128 interpreter guard must follow the docstring / __future__ import / "
+        "`import sys` (file ends too early to carry one)"
+    )
+    guard = body[i]
+    assert isinstance(guard, ast.If), (
+        f"the #5128 interpreter guard must be the first statement after the "
+        f"docstring / __future__ import / `import sys`; found {type(guard).__name__} "
+        f"(tests/test_entry_point_python_guard.py reds on this)"
+    )
+    test = guard.test
+    assert isinstance(test, ast.Compare) and isinstance(test.left, ast.Attribute), ast.dump(test)
+    assert isinstance(test.left.value, ast.Name), (
+        f"the guard must test `sys.version_info`; got {ast.dump(test.left)}"
+    )
+    assert test.left.attr == "version_info" and test.left.value.id == "sys"
+    assert len(test.ops) == 1 and isinstance(test.ops[0], ast.Lt), ast.dump(test)
+    assert isinstance(test.comparators[0], ast.Tuple), ast.dump(test.comparators[0])
+    # `len(elts) == 2` BEFORE indexing: a malformed floor (`< (3,)`, `< (3, 12, 0)`)
+    # must fail with this diagnosis, not raise IndexError. Mirrors the census's
+    # `_floor_in_test`, which returns None rather than indexing unguarded.
+    elts = test.comparators[0].elts
+    assert len(elts) == 2, (
+        f"the floor must be a 2-tuple `(major, minor)`; got {ast.dump(test.comparators[0])}"
+    )
+    assert [e.value for e in elts if isinstance(e, ast.Constant)] == [3, 12], (
+        f"the floor must be (3, 12); got {ast.dump(test.comparators[0])}"
+    )
+
+    # Two shapes satisfy #5128 and both give an attributable refusal; the census
+    # accepts both, so this pin must too or it would reject a census-valid guard:
+    #   * `raise SystemExit(<one message>)`            — the historical shape
+    #   * `print(<message>, file=sys.stderr)` + `raise SystemExit(<int>)` — #4053,
+    #     used by `tools/ci_runner_topology.py` in the very commit that landed
+    #     this guard (8040b4da1). `SystemExit(<int>)` carries no message, so the
+    #     text lives in the `print`.
+    body_nodes = guard.body
+    print_shape = (
+        len(body_nodes) == 2
+        and isinstance(body_nodes[0], ast.Expr)
+        and isinstance(body_nodes[0].value, ast.Call)
+        and isinstance(body_nodes[0].value.func, ast.Name)
+        and body_nodes[0].value.func.id == "print"
+        and body_nodes[0].value.args
+        and isinstance(body_nodes[1], ast.Raise)
+    )
+    if print_shape:
+        message = body_nodes[0].value.args[0]
+    # The raise itself is validated in BOTH shapes. This arm exists because the
+    # census does not run on a tool-only diff, so it must not be weaker than the
+    # census's own `#11342` block: a guard that prints the correct refusal and
+    # then `raise SystemExit(0)` — or raises some other exception — must red here
+    # too, or the fail-OPEN shape merges green.
+    raises = [n for n in body_nodes if isinstance(n, ast.Raise)]
+    assert len(raises) == 1, (
+        f"the guard must refuse on an old interpreter — either `raise "
+        f"SystemExit(<message>)` or `print(<message>, file=sys.stderr)` + "
+        f"`raise SystemExit(<int>)`; got {[type(n).__name__ for n in body_nodes]}"
+    )
+    raise_node = raises[0]
+    exc = raise_node.exc
+    assert isinstance(exc, ast.Call), (
+        f"the guard must `raise SystemExit(...)`; got {ast.dump(raise_node)}"
+    )
+    assert isinstance(exc.func, ast.Name) and exc.func.id == "SystemExit", (
+        f"the guard must raise `SystemExit`; any other exception reads to the "
+        f"operator as the tool being broken: {ast.dump(raise_node)}"
+    )
+    status = _refusal_exit_status(exc)
+    assert status != 0, (
+        f"the guard refused but the PROCESS exits {status} — a refusal that "
+        f"reports success is indistinguishable from the tool having run: "
+        f"{ast.dump(raise_node)}"
+    )
+
+    if not print_shape:
+        assert exc.args, "`SystemExit()` with no argument tells the operator nothing"
+        message = exc.args[0]
+
+    rendered = "".join(
+        n.value
+        for n in ast.walk(message)
+        if isinstance(n, ast.Constant) and isinstance(n.value, str)
+    )
+    # The message must name the floor, the file, and an invocation that WORKS —
+    # a refusal naming a broken invocation is the same unattributed error again.
+    #
+    # The subject is asserted as ONE clause, not as a bare `"capstone_ledger.py"
+    # in rendered` substring: the invocation clause below already contains that
+    # basename, so a substring test would pass on a refusal that named a
+    # DIFFERENT tool in its subject line. Measured: the mutant
+    # `tools/other_tool.py requires …` + a correct invocation passed the
+    # substring form and fails this one.
+    assert f"tools/{TOOL.name} requires Python >= 3.12" in rendered, (
+        f"the refusal must name the file and the floor in its subject; renders as "
+        f"{rendered!r} (message node: {ast.dump(message)})"
+    )
+    assert f"uv run python tools/{TOOL.name}" in rendered, (
+        f"the refusal must name an invocation that WORKS; renders as {rendered!r} "
+        f"(message node: {ast.dump(message)})"
+    )
+
+
