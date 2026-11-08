@@ -485,13 +485,20 @@ measured_at:
 # this paragraph cited `347cf03cb8` and declared `704fd60ee` absent. The checkout that
 # produced that cut was a SHALLOW clone: `git rev-parse --is-shallow-repository` -> true
 # THERE, and `347cf03cb8` is that clone's TRUNCATION BOUNDARY, not a root.
-# ⛔ THE SCOPE MATTERS AND AN EARLIER CUT OF THIS SENTENCE GOT IT WRONG: it said "this
-# checkout is a SHALLOW clone", and on the hub checkout this record is maintained in, that
-# SAME command prints `false` (measured 2026-11-08), so a reader running the diagnostic to
-# check the paragraph would be told it does not describe the tree in front of them. The
-# failure mode below is real and worth keeping; the claim about WHICH checkout has it is
-# what was wrong. A `git merge-base --is-ancestor` in a truncated
-# history answers "not reachable HERE", and that was read as "does not exist":
+# ⛔ THE SCOPE MATTERS, AND TWO EARLIER CUTS OF THIS SENTENCE BOTH GOT IT WRONG — in
+# opposite directions. The first said "this checkout is a SHALLOW clone"; a second replaced
+# that with "on the hub checkout this record is maintained in, that SAME command prints
+# `false`", offered so a reader could check it. MEASURED 2026-11-08, BOTH checkouts print
+# `true`:
+#   $ git -C /home/cmux/tortoise rev-parse --is-shallow-repository   -> true
+#   $ git rev-parse --is-shallow-repository      # this lane's worktree -> true
+#   $ wc -l < /home/cmux/tortoise/.git/shallow                       -> 2
+# so the FIRST cut was the accurate one and the "correction" was the wrong claim: a reader
+# told to run the diagnostic to check the paragraph gets `true`, i.e. the paragraph DOES
+# describe the tree in front of them. Stated plainly rather than scoped to an unnamed box,
+# which is what let the wrong half survive a round of review. A `git merge-base
+# --is-ancestor` in a truncated history answers "not reachable HERE", and that was read as
+# "does not exist":
 #   $ git merge-base --is-ancestor 704fd60ee origin/main   -> non-zero
 #   $ gh api repos/daniel-ospina/tortoise/compare/704fd60ee...main
 #   {"ahead_by":628,"behind_by":0,"status":"ahead"}     # IS an ancestor
