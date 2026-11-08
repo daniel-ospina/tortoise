@@ -4529,15 +4529,23 @@ def _doc_section(text: str, start: str, end: str) -> str:
 # Window measured at THIS head over all 29 `must_red` rows: 0 and 2 leave the
 # must_red set fully RED (0/29 leak) and keep the real doc a HIT; **3 opens 2 of
 # 29**, starting with "are not missed by the walk". ⛔ Window 0 is not free
-# either, one set over: it wrongly REDS **5** of the 11 `declared_open` rows.
+# either, one set over: it wrongly REDS **9** of the 15 `declared_open` rows.
 # And since #11437's round-6 clause-scope rows landed, **window 1 is no longer
-# clean at all** — it wrongly REDS 2 of them (the double-negation and
-# `without`-framed shapes need the second word to find their coverage verb). So
+# clean at all** — it wrongly REDS 3 of them: the two PSEUDO-CLEFT rows (`walk` is
+# itself a coverage word, so the cleft's own SUBJECT satisfies the window and the
+# predicate needs the second word to find the real verb) and the `only ever`
+# ADVERB row. ⚠️ The double-negation and `without`-framed rows are GREEN at window
+# 1 AND at window 0 — their coverage verb sits adjacent to a negation (`not
+# visit`, `not true … not visit`), so they never depended on the extra word; an
+# earlier wording named them and was WRONG, which is why it is corrected here with
+# the identity rather than only the count (#11437 review, round 7, P2 — the count
+# reproduced and the identity did not, and the fix was claimed in a commit
+# message while the text was left unchanged). ⚠️ Window 3 also wrongly GREENs 1
+# `declared_blocks` row (`coverage verb outside the walk/visit/reach/report`). So
 # at this head **2 is the ONLY clean window**: 0 and 1 each cost `declared_open`
 # rows, 3 costs `must_red` rows. (An earlier draft cited "13/13 inverse rows";
 # the row set has since grown to 29 and the denominator re-derived against it —
-# #11437 review, P3, re-measured round 6.)
-# #11437 review, P3.)
+# #11437 review, P3, re-measured round 8.)
 # ⛔ COST, taken deliberately: window 2 makes "…are never TOUCHED by the walk"
 # RED, because `touched` is not in the coverage list — a false block bought for
 # that false pass, which is the trade this predicate always takes.
@@ -4576,8 +4584,8 @@ _NEGATION_GOVERNS = re.compile(
     r"(?:walk|visit|reach|report)(?:s|es|ed|ing)?\b")
 # ⛔ `_COVERAGE` is RETAINED DELIBERATELY AND IS CURRENTLY IMPLIED, and saying so
 # is the point (#11437 review, P3). Measured: `_NEGATION_GOVERNS` already requires
-# one of the same four verbs AFTER the negation, so on all 88 candidate sentences
-# (the 58 rows across the four sets, plus the 30 sentences of the real §3 under
+# one of the same four verbs AFTER the negation, so on all 95 candidate sentences
+# (the 65 rows across the four sets, plus the 30 sentences of the real §3 under
 # this predicate's own `split(". ")` segmentation) there is no case where the
 # governance test hits and this one does not — dropping the term from
 # `_residual_sentences` changes no verdict. It stays because it is the INDEPENDENT
@@ -4669,6 +4677,33 @@ _AFFIRMED = re.compile(
     # implies `also visits`, so the arm adds no false block") is true of that
     # PHRASE and was false of the REGEX — a scoped measurement generalised to the
     # pattern, which is the error this file records twice elsewhere.
+    # ⛔ AND THIS ARM IS NOT A CLOSURE OF THE CONCESSIVE CLASS — it is a
+    # NARROWING, and the narrowest honest state of it is what ships here (#11437
+    # review, round 8, P1+P3). Three rounds have now tightened this one arm and
+    # each tightening traded a false block for a false pass in the other
+    # direction: the bare pair blocked the honest INCLUSIVE, and adding the verb
+    # tail stops blocking it while leaving every concessive whose complement is a
+    # REVERSER, an ADVERB or a NOUN unred. Measured at this head (RED is the
+    # wanted verdict for an inverse):
+    #   GREEN, asserted coverage — inverses this arm does NOT reach:
+    #     "…are not only outside the walk — they are reported by it"
+    #     "…are not merely outside the walk; the walk reports them"
+    #     "the walk does not only ever visit …; it also reports them"
+    #     "…are not simply outside the walk — the walk visits them"
+    #     -> the four `declared_open` rows labelled `open concessive: …`
+    #   RED, the claim stated honestly — the false blocks this arm DOES buy:
+    #     "…are never merely visited: they are never visited at all"
+    #     "the gap is not merely walked past: … are not reported"
+    #     "the instrument does not only walk the body: … sit outside every walk"
+    #     -> the three `declared_blocks` rows labelled `false block: concessive …`
+    # ⛔ CLOSING THESE NEEDS ASSERTION STRUCTURE, NOT A LONGER LIST. Measured, a
+    # clause-scope negative lookahead (`(?!\s*[^.;]*\b(?:not|never|outside)\b)`)
+    # does rescue the reverser complement, but it leaves `not only EVER visit`
+    # GREEN and still reds all three honest shapes above — so it buys three
+    # correct verdicts and loses one, which is a wash, not a fix. A vocabulary
+    # arm over English prose does not converge; what keeps this honest is that
+    # EVERY measured shape in both directions is a ROW in
+    # `test_the_residual_pin_separates_the_claim_from_its_inverse`.
     r"|\b(?:not|never)\s+(?:only|merely|just|simply)\s+"
     r"(?:walk|visit|reach|report)(?:s|es|ed|ing)?\b")
 
@@ -4747,12 +4782,22 @@ def _residual_sentences(s3: str) -> list[str]:
       red (#11437 review, round 6, P2). Both are ROWS in `declared_blocks` below.
       ⛔ This is the price of the window itself, and widening it to 3 is measured
       to open 2 of the 29 `must_red` rows (`not` + a non-coverage verb, and `not`
-      governing an adjective), so it is declared rather than paid for in the
-      other direction.
+      governing an adjective) and to wrongly GREEN 1 `declared_blocks` row, so it
+      is declared rather than paid for in the other direction;
+    * an HONEST statement stated inside a CONCESSIVE whose cue happens to sit next
+      to a coverage verb — `"…are never merely visited: they are never visited at
+      all"`, `"the gap is not merely walked past: … are not reported"`, `"the
+      instrument does not only walk the body: … sit outside every walk it
+      performs"` — all measured RED, and GREEN with the `_AFFIRMED` concessive arm
+      ablated, so the arm is the sole cause (#11437 review, round 8, P3). All
+      three are ROWS in `declared_blocks` below. ⛔ This is the other half of that
+      arm's trade: it stops blocking the honest INCLUSIVE (`not only … but also`)
+      and starts blocking the honest CONCESSIVE, and the four inverses it therefore
+      leaves GREEN are the `open concessive:` rows in `declared_open`.
 
     ⛔ NOT a false block, and listed here only to correct an earlier claim
     (#11437 review, P3): a PARTIAL exclusion stated as a HEDGE whose cue is one of
-    `_AFFIRMED`'s eight pseudo-negations — `"…are not
+    `_AFFIRMED`'s nine pseudo-negations — `"…are not
     always visited"` — reds, and that is CORRECT, not a price paid. The pin
     protects a TOTAL claim (the walk does not visit them); a hedge asserts a
     weakened one, which is not the claim, so satisfying the pin with it would be
@@ -5275,6 +5320,26 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
         "open scope: `without`-framed inverse":
             "the walk does not visit the body without reaching a nested "
             "`def`'s decorators and parameter defaults",
+        # ⛔ THE CONCESSIVE RESIDUALS (#11437 review, round 8, P1). The
+        # `_AFFIRMED` concessive arm requires the cue to govern a COVERAGE VERB,
+        # which is what stops it blocking the honest inclusive `not only … but
+        # also`. The price is that a concessive whose complement is a REVERSER, an
+        # ADVERB or a NOUN is unred — measured GREEN, and with the arm removed
+        # entirely still GREEN, so no other arm covers them. Pinned as rows because
+        # a residual nobody can see is indistinguishable from a fix, and because
+        # this arm has now been tightened three rounds without converging.
+        "open concessive: reverser complement — `not only outside … reported`":
+            "a nested `def`'s decorators and parameter defaults are not only "
+            "outside the walk — they are reported by it",
+        "open concessive: reverser complement, second clause names the walk":
+            "a nested `def`'s decorators and parameter defaults are not merely "
+            "outside the walk; the walk reports them",
+        "open concessive: an ADVERB between the cue and the verb (`only ever`)":
+            "the walk does not only ever visit a nested `def`'s decorators and "
+            "parameter defaults; it also reports them",
+        "open concessive: reverser complement, privative second clause":
+            "a nested `def`'s decorators and parameter defaults are not simply "
+            "outside the walk — the walk visits them",
     }
     for label, sentence in declared_open.items():
         assert sentence != original, f"decoy row {label!r} merely restates the claim"
@@ -5325,6 +5390,21 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
         "false block: honest, an ASIDE between negation and verb":
             "the walk does not, as an earlier draft said, visit a nested def's "
             "decorators and defaults",
+        # ⛔ THE CONCESSIVE ARM'S OWN FALSE BLOCKS (#11437 review, round 8, P3),
+        # measured RED at this head and GREEN with the arm ablated — so the arm is
+        # the sole cause. Each is the claim stated honestly inside a concessive
+        # whose cue happens to sit next to a coverage verb. Rows, not prose, for
+        # the reason the whole file exists: a measured shape with no row is a shape
+        # the next editor will delete as a contradiction.
+        "false block: concessive over a coverage verb (`never merely visited`)":
+            "a nested `def`'s decorators and parameter defaults are never merely "
+            "visited: they are never visited at all",
+        "false block: concessive over a coverage verb (`not merely walked past`)":
+            "the gap is not merely walked past: a nested `def`'s decorators and "
+            "parameter defaults are not reported",
+        "false block: concessive about the INSTRUMENT'S walk":
+            "the instrument does not only walk the body: a nested `def`'s "
+            "decorators and parameter defaults sit outside every walk it performs",
     }
     for label, sentence in declared_blocks.items():
         assert sentence != original, (
@@ -5357,7 +5437,7 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
         f"added freely, but a row that disappears takes its measured shape's "
         f"falsifier with it")
 
-    # …and the three alternatives this test claims an executor for are asserted to
+    # …and the FOUR alternatives this test claims an executor for are asserted to
     # HAVE one: with that alternative removed from `_AFFIRMED`, at least one
     # `must_red` row must go back to GREEN. `_AFFIRMED` carries EIGHT top-level
     # alternatives and this loop asserts four, so FOUR are unasserted — and they
