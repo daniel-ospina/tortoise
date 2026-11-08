@@ -1445,7 +1445,7 @@ place a machine reads it.
   `:10749`/`:11973`), never by adding an offset.
 - **What moved: nothing but line-cites.** No metric, denominator, threshold, class set, corpus pin or
   step declaration changes; the only text change inside the `steps` block is the same line-cite in
-  `steps.conditional[0].condition` (`:11098` → `:11174`), which names no metric. The numbers this
+  `steps.conditional[0].condition` (`:9767` → `:9934`), which names no metric. The numbers this
   record exists to freeze are byte-identical. `document_sha256` is re-cut in this same commit, per
   §8's rule for *any* edit to this file.
 
@@ -1464,7 +1464,7 @@ place a machine reads it.
   section has already recorded twice.
 - **What moved: nothing but line-cites.** No metric, denominator, threshold, class set, corpus pin or
   step declaration changes; the only text change inside the `steps` block is the same line-cite in
-  `steps.conditional[0].condition` (`:11098` → `:11174`), which names no metric. The numbers this
+  `steps.conditional[0].condition` (`:9934` → `:10397`), which names no metric. The numbers this
   record exists to freeze are byte-identical. `document_sha256` is re-cut in this same commit, per
   §8's rule for *any* edit to this file.
 
@@ -1505,7 +1505,7 @@ place a machine reads it.
   audit, `docs/00_index.md` and the architecture doc) that had to be re-derived the same way.
 - **What moved: nothing but line-cites.** No metric, denominator, threshold, class set, corpus pin or
   step declaration changes; the only text change inside the `steps` block is the same line-cite in
-  `steps.conditional[0].condition` (`:11098` → `:11174`), which names no metric. The numbers this
+  `steps.conditional[0].condition` (`:10397` → `:11098`), which names no metric. The numbers this
   record exists to freeze are byte-identical. `document_sha256` is re-cut in this same commit, per
   §8's rule for *any* edit to this file.
 
@@ -1526,10 +1526,10 @@ place a machine reads it.
   `+0` on the collector and the `+74` on the four cites below it are one measurement, and quoting
   only one of them is how the next re-derivation anchors on the wrong number.
 - **What moved: nothing but line-cites.** No metric, denominator, threshold, class set, corpus pin or
-  step declaration changes; the only text change inside the `steps` block is the same line-cite in
-  `steps.conditional[0].condition` (`:11098` → `:11174`), which names no metric. The numbers this
-  record exists to freeze are byte-identical. `document_sha256` is re-cut in this same commit, per
-  §8's rule for *any* edit to this file.
+  step declaration changes; this entry makes **no** `steps`-block change — the condition line-cite
+  stays at `:11098` here and is re-derived in §10.14. The numbers this record exists to freeze are
+  byte-identical. `document_sha256` is re-cut in this same commit, per §8's rule for *any* edit to
+  this file.
 
 ⚠️ §10.8's own **New value** is deliberately left at `:10397`/`:11849`/`:11862` — the state
 `#10997` left — because it is the ANCHOR §10.9 re-derives from ("must anchor on the measured
