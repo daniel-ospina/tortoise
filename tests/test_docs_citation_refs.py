@@ -69,13 +69,20 @@ cannot find is the #5063 defect the PR body leads with). Two forms are resolved:
      non-blank, because a range's span is the author's claim about content and no
      mechanical check can judge it);
   2. the shorthand `` `317` scoping:NN `` / ``317 research:NN``, resolved to the
-     single `docs/scoping/*-317-*.md` / `docs/research/*-317-*.md` that exists.
+     single record under `docs/scoping/` / `docs/research/` whose PATH carries
+     `<number>` as a hyphen-delimited token. The match is on the path's tokens,
+     not on a filename glob: `docs/research/` is nested, and the `#265` brief this
+     PR edits keeps its number in the DIRECTORY
+     (`docs/research/2026-08-13-265-encryption/axis-research.md`).
 
 STATED LIMITS — deliberate, and measured rather than guessed:
 
   * A bare ``:NN`` continuation (``(`:203`)``) carries no document name, so it
     cannot be resolved in isolation and is NOT checked. A citation meant to
-    survive should carry its own name instead of leaning on a preceding one.
+    survive should carry its own name instead of leaning on a preceding one —
+    which is why the one such pointer this change introduces
+    (`docs/scoping/2026-08-13-317-cross-encoder-scoping.md`, the wiring-table
+    row) is cited by the ROW's name, not by `:203`.
   * The CITING side is `docs/**/*.md` only (`docs.rglob`). This instrument never
     reads a pointer written inside a `.py` docstring or comment — including one
     of the three policy quotes above, which lives in `tortoise/hosted_api.py` — so
@@ -91,8 +98,9 @@ STATED LIMITS — deliberate, and measured rather than guessed:
     target of #1165. A guard that shipped red would be disabled within a day, and
     repairing ten unrelated pointers is not this change's job — they are tracked
     under `#5063` ("one binding from a written claim to the system it describes"),
-    the shared root this guard is a symptom of, so a reader can follow the
-    pointer. Widening `_TARGET_SCOPE` is the follow-up once that backlog is paid.
+    the shared root this guard is a symptom of, AND enumerated row by row in
+    `#11573` so a reader can act on them rather than only read the root.
+    Widening `_TARGET_SCOPE` is the follow-up once that backlog is paid.
 """
 from __future__ import annotations
 
@@ -113,7 +121,13 @@ _TARGET_SCOPE = ("scoping", "research")
 _PATH_REF = re.compile(r"(?<![\w/])(docs/[A-Za-z0-9_./-]+\.md):(\d+)(?:-(\d+))?")
 
 #: The shorthand form: `` `317` scoping:98 ``, `317 scoping:98`, `` `265`-scoping:128 ``.
-_SHORT_REF = re.compile(r"`?(\d+)`?[-\s](scoping|research):(\d+)(?:-(\d+))?")
+#: ⛔ THE LEFT BOUNDARY IS LOAD-BEARING. Without it a DATE fragment matches: the
+#: words `2026-08-13 research:99` contain `13 research:99`, which resolves to every
+#: `*-13-*.md` in the tree (16 of them when this was measured) and reds a correct
+#: sentence naming 16 files. `(?<![\w-])` refuses a match starting mid-token —
+#: mid-NUMBER and mid-DATE — while leaving `` `317`-scoping:128 `` and
+#: `265 scoping:128` intact.
+_SHORT_REF = re.compile(r"(?<![\w-])`?(\d+)`?[-\s](scoping|research):(\d+)(?:-(\d+))?")
 
 
 def _in_scope(target: Path, root: Path) -> bool:
@@ -135,13 +149,25 @@ def _dead_reason(lines: list[str], start: int, end: int | None) -> str | None:
 def _resolve_shorthand(
     number: str, kind: str, docs: Path
 ) -> tuple[Path | None, str | None]:
-    """The single `docs/<kind>/*-<number>-*.md`, or (None, why not)."""
-    candidates = sorted((docs / kind).glob(f"*-{number}-*.md"))
+    """The single `docs/<kind>/` record labelled `<number>`, or (None, why not).
+
+    The label is a hyphen-delimited NUMBER TOKEN in the path — not a prefix of the
+    FILENAME. `docs/research/` is NESTED: the `#265` brief this change edits is
+    `docs/research/2026-08-13-265-encryption/axis-research.md`, where the number
+    lives in the DIRECTORY and the filename carries none. A `*-265-*.md` filename
+    glob (one level or recursive) therefore reports a correct shorthand as
+    unresolvable, so the match is made against the path's tokens instead.
+    """
+    candidates = sorted(
+        path
+        for path in (docs / kind).rglob("*.md")
+        if f"-{number}-" in f"/{path.relative_to(docs / kind).as_posix()}"
+    )
     if len(candidates) == 1:
         return candidates[0], None
     if not candidates:
-        return None, f"no docs/{kind}/*-{number}-*.md exists"
-    return None, f"ambiguous: {[c.name for c in candidates]}"
+        return None, f"no docs/{kind}/ path carries the -{number}- label"
+    return None, f"ambiguous: {[c.relative_to(docs).as_posix() for c in candidates]}"
 
 
 def _citation_problems(docs: Path = DOCS) -> list[str]:
@@ -253,6 +279,52 @@ def test_the_guard_ignores_targets_outside_its_declared_scope(tmp_path: Path):
 
     assert len(problems) == 1, problems
     assert "research" in problems[0] and "architecture" not in problems[0], problems
+
+
+def test_a_date_fragment_is_not_a_shorthand_citation(tmp_path: Path):
+    """A DATE beside the word `research:`/`scoping:` is not a label.
+
+    Without the `(?<![\\w-])` boundary on `_SHORT_REF`, the prose
+    `the 2026-08-13 research:99 note` matches `13 research:99`, which resolves to
+    every `*-13-*.md` in the tree (16 of them when this was measured, all
+    `2026-08-13-*` scope records) and reds a CORRECT sentence naming 16 files. The
+    guard must see no citation here at all.
+    """
+    (tmp_path / "docs" / "scoping").mkdir(parents=True)
+    for name in ("2026-08-13-265-a-scoping.md", "2026-08-13-307-b-scoping.md"):
+        (tmp_path / "docs" / "scoping" / name).write_text("a\nb\n", encoding="utf-8")
+    (tmp_path / "docs" / "citing.md").write_text(
+        "Per the 2026-08-13 research:99 note and the 2026-08-13 scoping:99 list.\n",
+        encoding="utf-8",
+    )
+
+    assert _citation_problems(docs=tmp_path / "docs") == []
+
+
+def test_a_nested_record_resolves_by_its_path_label(tmp_path: Path):
+    """`docs/research/` is NESTED — the number can live in the DIRECTORY.
+
+    The `#265` brief this change edits is
+    `docs/research/2026-08-13-265-encryption/axis-research.md`: the number is in the
+    directory and the FILENAME carries none, so a `*-265-*.md` filename glob (one
+    level or recursive) reports a correct shorthand as unresolvable. Resolution is
+    by the path's hyphen-delimited token instead.
+    """
+    nested = tmp_path / "docs" / "research" / "2026-08-13-265-encryption"
+    nested.mkdir(parents=True)
+    (nested / "axis-research.md").write_text("first line\nsecond line\n", encoding="utf-8")
+    (tmp_path / "docs" / "citing.md").write_text(
+        "see `265` research:2 for the carve-out\n", encoding="utf-8"
+    )
+
+    assert _citation_problems(docs=tmp_path / "docs") == []
+
+    # …and the arm is not vacuous: the same shorthand at a BLANK line is reported,
+    # naming the nested file, so the recursive resolution really did find it.
+    (nested / "axis-research.md").write_text("first line\n\nthird line\n", encoding="utf-8")
+    problems = _citation_problems(docs=tmp_path / "docs")
+    assert len(problems) == 1, problems
+    assert "axis-research.md:2 (line 2 is BLANK)" in problems[0], problems
 
 
 def test_the_real_docs_tree_is_not_empty():
