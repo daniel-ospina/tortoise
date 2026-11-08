@@ -720,7 +720,8 @@ unfirable (block at the top of §10).
 > that can ADD; the successor above is that stage (`tests/test_selection_step.py` pins the ADD proof
 > and the union), and what still stands between it and the deletion is §4.4's **F3** measurement —
 > `_s4_merge_stats`'s `added_by_s4 > 0` **while** the FIRST (pre-retry) arm's `coverage_suspect` is
-> False, i.e. an episode the retry cannot reach — which is an eval-lane run, not a code change.
+> False **and no retry fired** (one arm, one flag, one base — see §4.4), i.e. an episode the retry
+> cannot reach — which is an eval-lane run, not a code change.
 > (Pinned: `tests/test_extractor_v4_s4_stage_claims.py`, `tests/test_selection_step.py`.)
 >
 > **On the step *names*:** the code's own stages are **S1–S5** (`[S1] STORY SUMMARY` … `[S5] EMBED`, module
@@ -1040,13 +1041,19 @@ New entities + connections + **metadata**. The metadata includes **lifecycle eve
 `run_s4`'s removal (the `#8500` migration deliverable, executed under `#11002`) is gated on **one**
 measurement, and it is an eval-lane run, not a code change. On the frozen corpus, count the sessions
 where `_s4_merge_stats`'s `added_by_s4 > 0` **while the FIRST (pre-retry) arm's `coverage_suspect` is
-False**. ⛔ **Whose flag, spelled out, because this PR makes it two arms.** A retried run can reach
-`check_batch` twice, and the retried arm's flag is False *by construction* — the first arm's True is
-what fired the retry — so counting against the pipeline's published `result["vet"]["s2"]` (the
-SECOND arm's block) would count exactly the sessions the retry DID reach as ones it cannot. F3 is
-about what the retry could not have been asked to do, so it is the pre-retry arm's verdict; that arm's
-value is on the run's own record at `stats["renarrate"]["first"]["coverage_suspect"]` (and, on a run
-that did not fire, `trigger` is absent and the single arm's flag is the `vet.s2.batch` one).
+False** — **restricted to sessions where the retry did not fire**
+(`stats["renarrate"]["fired"]` is `False`). ⛔ **Whose flag, spelled out, because this PR makes it
+two arms.** A retried run can reach `check_batch` twice, and the retried arm's flag is False *by
+construction* — the first arm's True is what fired the retry — so counting against the pipeline's
+published `result["vet"]["s2"]` (the SECOND arm's block) would count exactly the sessions the retry
+DID reach as ones it cannot. That arm's own value is on the run's record at
+`stats["renarrate"]["first"]["coverage_suspect"]`; on a run that did not fire, the single arm's flag
+is the `vet.s2.batch` one. ⛔ **And whose BASE, which is the second half of the same trap.**
+`added_by_s4` is `merged - s2_items`, and on a retried run `s2_items` is the UNION (both arms), so
+S4's contribution would be measured against a bigger base and understated — on precisely the
+population where a retry fired for a reason other than coverage (an injected arbiter). Restricting
+the count to non-retried sessions makes both halves unambiguous: one arm, one flag, one base. The
+population is therefore "S4 added items, the coverage check did not flag the batch, and no retry ran".
 That is an episode where S4 ADDED items in a case the coverage check could not flag — so the bounded
 re-narrate above cannot reach it, because the retry's armed-by-construction arm is exactly
 `coverage_suspect`. `> 0` means **do not delete `run_s4`**: the retry is a successor for the

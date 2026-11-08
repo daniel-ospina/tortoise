@@ -710,7 +710,7 @@ def test_extract_stats_llm_rollup(monkeypatch):
 
     out = v2.extract_session_v2(_model(model_complete), _conv())
     llm = out["stats"]["llm"]
-    assert llm["calls"] == 6   # S1(2) + S2 x2(2, #11002 coverage retry) + S4(1)
+    assert llm["calls"] == 6   # S1 x3 (429 + its retry, + the retry arm) + S2 x2 (#11002) + S4 x1
     assert llm["retries"] == 1  # only S1's recovered retry
     assert llm["truncated"] == 0
     assert out["error_census"] == {}  # fully recovered → no census entries
