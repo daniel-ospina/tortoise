@@ -3015,6 +3015,56 @@ def test_a_NUMBER_and_an_ACCENTED_word_are_probes_a_STOPWORD_is_not():
             f"{refused!r} was accepted — the read does not send it as one term")
 
 
+def test_a_NUMBER_probe_is_EXPLAINED_by_a_numeric_lexicon(monkeypatch):
+    """#11536 review round 10, P1: the sibling predicate kept the QUERY tokeniser.
+
+    (1) FAILS on the round-9 tree: `_probe_explains_the_lexicon` built both sides
+        with `tokenize_sparse_query`, which DROPS all-digit tokens — so a
+        bare-number probe (ACCEPTED since round 8) could never be explained by a
+        numeric lexicon. MEASURED on the shape the writers emit for a numeric
+        transcript (`summary = PREFIX + "100, 200, 4820"`,
+        `_searchText = "100, 200, 4820"`, `topics` the same): the node classified
+        `unexplained`, `_merge_probe` returned `vetoed="unexplained"`, and the
+        refusal blamed "a surviving pre-fix index entry" that the run's own data
+        falsifies. On the documented runbook path — `--repair --probe-phrase
+        <a number copied out of the removed sentence>` — a CORRECT repair exited
+        1, and the remedy it implied (clear the lexicon) is the #3518 harm this
+        leg exists to prevent. Fail-closed, so nothing shipped; that is why it is
+        P1 and not P0.
+    (2) REACHABLE: numbers are the most discriminating token in prose and the
+        writers derive a lexicon from them without modification.
+    (3) POLARITY THAT MUST NOT GO RED: the measured `friday`/`fridays` stem
+        collision still earns `lexicon`, and a token the node does not carry is
+        still `unexplained`.
+    """
+    from tortoise import session_source_prose_migration as m
+
+    numeric = _post_fix_node(
+        url="session:s-num", sessionId="s-num",
+        summary=SESSION_SOURCE_SUMMARY_PREFIX + ", ".join(
+            ["100", "200", "4820"]),
+        _searchText=", ".join(["100", "200", "4820"]),
+        topics=["100", "200", "4820"])
+    assert m._indexed_text_is_the_displayed_pair(numeric)
+    assert m._probe_explains_the_lexicon(numeric, "4820"), (
+        "a bare-number probe cannot be explained by a numeric lexicon — the "
+        "query tokeniser drops digits, so a CORRECT repair is refused")
+    assert m._hit_node_bucket(numeric, "4820") == "lexicon"
+
+    _install_fts(monkeypatch, {"4820": [("session:s-num", 1.0)]})
+    report = m.probe_fts(_RecordingGraph([(numeric,)]), ["4820"], control=False)
+    assert report["probes"][0]["lexicon"] == ["session:s-num"]
+    assert report["probes"][0]["unexplained"] == []
+    folded = _cli._merge_probe(None, report, wrote=True)
+    assert folded["vetoed"] != "unexplained", (
+        "a correct repair over a numeric lexicon was vetoed as a surviving "
+        "pre-fix index entry")
+
+    # (3) the two neighbouring polarities are unchanged.
+    assert m._hit_node_bucket(_post_fix_node(), "fridays") == "lexicon"
+    assert m._hit_node_bucket(_post_fix_node(), "zebraquux") == "unexplained"
+
+
 def test_a_hit_on_a_PRE_FIX_node_IS_a_leak(monkeypatch):
     """The other polarity, and it is the one that must RED.
 

@@ -1261,7 +1261,14 @@ _HITS_ROWS = (
     "       s.sessionId, s.turn_max_index, id(s)"
 )
 
-#: A FEW post-fix lexicon nodes' ``_searchText``, for the positive control. Read
+#: A FEW ``_searchText`` values of Sources that carry the DISPLAY PREFIX, for the
+#: positive control. ⛔ NOT "post-fix lexicon nodes" (#11536 review round 10, P2):
+#: the window selects on the prefix witness ALONE, and this module's own round-5
+#: guard exists because that witness does not prove the indexed text is the
+#: lexicon. The control's JOB only needs a token the index should hold — it
+#: answers \"is the read alive\", not \"did the writer produce a lexicon\" — so the
+#: selection is left as it is and every CLAIM about it is narrowed to what it
+#: established. Read
 #: by the WITNESS (the ``summary`` prefix), which is the same discriminator
 #: :func:`carries_pre_lexicon_prose` uses — so the control queries a node the
 #: lexicon writer produced, not one this repair left behind.
@@ -1684,11 +1691,21 @@ def _probe_explains_the_lexicon(props: Mapping[str, Any], phrase: str) -> bool:
     text = props.get(_SEARCH_TEXT)
     if not isinstance(text, str) or not text.strip():
         return False
-    from tortoise.sparse import tokenize_sparse_query  # lazy (see module docs)
-
-    indexed = {_stem_key(token) for token in tokenize_sparse_query(
-        text, space_separated_identifiers=False)}
-    asked = tokenize_sparse_query(phrase, space_separated_identifiers=False)
+    # ⛔ THE INDEX'S TERMS, NOT THE QUERY PARSER'S (#11536 review round 10, P1).
+    # `tokenize_sparse_query` DROPS all-digit, sub-2-character and stopword
+    # tokens, so a bare-NUMBER probe — ACCEPTED since round 8 — could never be
+    # explained by a numeric lexicon. MEASURED: a correctly repaired node with
+    # `_searchText="100, 200, 4820"` classified probe `4820` as `unexplained`,
+    # and the refusal blamed "a surviving pre-fix index entry" that the run's own
+    # data falsifies — on the documented runbook path
+    # (`--repair --probe-phrase <a number from the removed sentence>`) a correct
+    # repair exited 1 and the implied remedy was clearing the #3518 descriptor.
+    # The STEM FOLD stays: relating a PROBE token to a lexicon token is exactly
+    # where the index's own stemming is what answered the query. This is the same
+    # QUERY-parser-vs-INDEX-tokeniser split round 8 fixed in
+    # :func:`_indexed_text_is_the_displayed_pair`.
+    indexed = {_stem_key(token) for token in _indexed_term_runs(text)}
+    asked = _indexed_term_runs(phrase)
     if not indexed or not asked:
         return False
     return all(_stem_key(token) in indexed for token in asked)
@@ -1895,9 +1912,15 @@ def lexicon_control_read(g, *,
     caller can say which of the two happened; the module's own `source_index_is_empty`
     already distinguishes them for the other control arm.
 
-    The positive control itself: a token the lexicon writer put on a node must
-    still be findable, which is what makes the probes' zero evidence that the index
-    ANSWERS rather than evidence that the read is dead.
+    The positive control itself: a token of a Source that carries the display
+    prefix must still be findable, which is what makes the probes' zero evidence
+    that the index ANSWERS rather than evidence that the read is dead.
+
+    ⛔ WHAT IT DOES NOT PROVE (#11536 review round 10, P2): the window selects on
+    the display-PREFIX witness alone, and this module's own round-5 guard exists
+    because that witness does not establish that the indexed text IS the lexicon.
+    The control needs only a token the index ought to hold, so the selection is
+    unchanged; the CLAIM is narrowed to liveness.
     """
     try:
         rows = g.query(_CONTROL_LEXICON_ROWS,
@@ -2086,7 +2109,10 @@ def probe_fts(g, phrases, *, control: bool = True,
                 "ok": bool(got["hits"]), "hits": got["hits"],
                 "ran": got["ran"], "degraded": got["degraded"],
                 "reason": got["reason"],
-                "note": "one token of a post-fix lexicon node's `_searchText`",
+                "note": "one token of a Source whose `summary` carries the display "
+                            "prefix (the witness the lexicon writer emits)"
+                            " — the window selects on that witness, so this"
+                            " proves the READ answers",
             }
         else:
             empty = source_index_is_empty(g, timeout_ms=timeout_ms)

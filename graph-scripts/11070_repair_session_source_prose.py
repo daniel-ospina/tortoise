@@ -549,8 +549,12 @@ def _report_fts(fts: dict, census_after: int | None = None) -> None:
             # needs. (The PROBE phrases above ARE printed — the operator typed
             # them on this command line, so they are their own input, not text
             # this tool derived from the record.)
-            print(f"          control (one post-fix lexicon token): "
-                  f"{control['hits']} hit(s)")
+            # ⛔ NAMED FOR WHAT IT MEASURED (#11536 review round 10, P2): the
+            # control's window selects on the display-prefix witness, not on a
+            # proven lexicon, so "one post-fix lexicon token" claimed a provenance
+            # nothing checked. What it establishes is that the READ answers.
+            print(f"          control (one display-prefix Source token — the "
+                  f"read answers): {control['hits']} hit(s)")
     if fts["certifies"]:
         if any(p.get("discriminating") for p in fts["probes"]):
             # ⛔ A TOKEN-SCOPED MEASUREMENT CANNOT CARRY A POPULATION CLAIM
