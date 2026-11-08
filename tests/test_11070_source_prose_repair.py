@@ -3678,7 +3678,12 @@ def test_an_UNMEASURABLE_probe_VETOES_even_when_the_CONTROL_answers(monkeypatch)
         Verified by mutation at this head: with `elif out["unmeasurable"]:`
         deleted the rest of the suite stays green (128 passed, 4 skipped) and only
         this test reds, on `certifies is False`; MOVING that veto below arm (b)
-        reds it the same way, so its ORDER in the ladder is pinned too.
+        reds it the same way. ⛔ AND THAT IS ALL THIS FIXTURE PINS: its probe
+        never discriminated, so moving the veto below `elif discriminating:`
+        leaves THIS test green — the claim that its "ORDER in the ladder is
+        pinned" was false, and measured so (`129 passed, 4 skipped` on that
+        mutation). The arm ABOVE `discriminating` is pinned by the adjacent
+        `test_an_UNMEASURABLE_AFTER_read_VETOES_a_DISCRIMINATING_probe`.
     (2) REACHABLE: a breaker trip or a `query_failed` between the probe read and
         the control read is the ordinary transient this leg exists for.
     """
@@ -3725,6 +3730,48 @@ def test_an_UNMEASURABLE_probe_VETOES_even_when_the_CONTROL_answers(monkeypatch)
     assert folded["certifies"] is False, (
         "a probe whose OWN READ WAS DEGRADED certified — `--dry-run "
         "--assert-clean` would exit 0 over a leg that measured nothing")
+    assert folded["vetoed"] == "unmeasurable", (
+        "the refusal is not the unmeasured-probe one: "
+        + repr(folded["vetoed"]))
+
+
+def test_an_UNMEASURABLE_AFTER_read_VETOES_a_DISCRIMINATING_probe():
+    """The `unmeasurable` veto sits ABOVE arm (a) — over a probe that DID hit.
+
+    (1) FAILS on a fold whose `unmeasurable` arm is ordered BELOW
+        `elif discriminating:`: `discriminating` is computed from the BEFORE
+        row's residue and the AFTER residue buckets, INDEPENDENT of
+        `degraded` — so a degraded AFTER read over a BEFORE row that DID hit
+        sets BOTH, and arm (a) then certifies a leg whose AFTER read measured
+        nothing. MEASURED on that ordering mutation: this fixture's
+        `certifies`/`vetoed` go from `False`/`unmeasurable` to `True`/`None`.
+    (2) REACHABLE: a breaker trip or a `query_failed` between the probe read and
+        the control read, on a token that hit before the writes — the same
+        transient the neighbouring test names.
+    """
+    before = {"ran": True, "probes": [{"phrase": "zebraquux",
+                                       "residue": ["tortoise://n1"]}]}
+    after = {"unmeasurable": ["zebraquux"], "control": {"ok": True},
+             "leaked": [], "truncated": [],
+             "probes": [{"phrase": "zebraquux", "residue": [], "stale": False,
+                         "unexplained": None, "unread": []}]}
+    folded = _cli._merge_probe(before, after)
+
+    # THE PREMISE: this fixture really does reach BOTH states at once, so a
+    # reordering cannot be mistaken for a fixture that never sees one of them.
+    assert folded["unmeasurable"] == ["zebraquux"], (
+        "the fixture did not degrade the AFTER read: " + repr(folded))
+    assert folded["probes"][0]["discriminating"] is True, (
+        "the fixture's BEFORE row did not HIT, so the `discriminating` arm this "
+        "test is about is never reached: " + repr(folded["probes"][0]))
+    assert folded["leaked"] == [] and not folded.get("stale"), (
+        "an earlier veto in the ladder is reached, not the one under test: "
+        + repr(folded))
+
+    assert folded["certifies"] is False, (
+        "a probe whose AFTER read was DEGRADED certified through arm (a) — the "
+        "veto is ordered below `discriminating`, so the same false PASS survives "
+        "one arm later")
     assert folded["vetoed"] == "unmeasurable", (
         "the refusal is not the unmeasured-probe one: "
         + repr(folded["vetoed"]))
