@@ -119,7 +119,8 @@ measured_at:
 #       - the per-file collection figures come from separate `pytest --collect-only`
 #         invocations that are NOT in `.worktree-report/` (they produce no suite run),
 #         and are quoted from those invocations' own output;
-#       - `the 5 are` and the census line are this pass's direct runs.
+#       - `the 5 are`, the census line and the two #7949 suites are this pass's DIRECT
+#         runs (a `pytest`/script invocation whose own output is quoted, not a report).
 #
 #       $ uv run python tools/test_lane.py run -- tests/test_9664_capstone_verdict_ledger.py tests/test_9340_graph_tool_argument.py tests/test_pack_selection_by_graph.py tests/test_cross_tenant_read_isolation.py tests/test_onboarding_auto_complete.py tests/test_oauth_consent_page_step4.py tests/test_oauth_consent_bff_routes.py -q
 #       456 passed, 5 failed                       # 461 collected. Run THROUGH
@@ -130,6 +131,13 @@ measured_at:
 #                                  + 166 (`test_9664_capstone_verdict_ledger.py`, the ledger pin suite)
 #                                  = 461 = 456 passed + 5 failed.   Counted, not estimated.
 #       the 5 are `TestCreateGraphWithPacks`, refused by the PRIVATE lane container's ACL layer — see S2.
+#       $ TORTOISE_TEST_CARVE_OUT=1 uv run python -m pytest tests/test_7949_c2_door.py tests/test_7949_capstone_measure.py -q
+#       302 passed                                 # 24 (the door census, its pinned-ON/refusal arms
+#                                                  # and the one-hop ledger pins) + 278 (the #7949
+#                                                  # cite, idle and registration pins) = 302. These
+#                                                  # are the two files this change EDITS, so the
+#                                                  # contract-layer claim above is not carried by
+#                                                  # the seven-file run alone.
 #       $ uv run python docs/evidence/9664-capstone/probes/step_premise_census.py
 #       MEASURED: 26 premises, 0 unmeasured sections.  (exit 0)
 #       $ uv run python tools/capstone_ledger.py check

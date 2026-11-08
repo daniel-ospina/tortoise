@@ -10698,7 +10698,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     Rule 3 of agent-infra#3442: this PR re-points five cites in this record
     (`extractor_v2.py:10815`->`:10891`, `sdk.py:17472`->`:17574`,
     `sdk.py:16414-16428`->`:16516-16530` x3, `probes/capstone_measure.py:2238-2243`
-    ->`:2724-2726`) and, measured before this pin existed, re-staling ANY of them
+    ->`:2726-2728`) and, measured before this pin existed, re-staling ANY of them
     left every suite green: the record is in no `_BUNDLE_DOCS` entry and
     `grep -rn RECONCILE tests/` returned nothing. A record whose whole thesis is
     that "a claim nothing re-checks can rot silently" cannot leave its own numbers
@@ -10758,14 +10758,14 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # `g.query(` call opens it, the `MATCH` enumeration is its middle, and the
     # anchored count closes it. A one-line insertion above the call therefore moves
     # every endpoint and reds — a window test on the MATCH token alone did NOT
-    # (measured in review: one inserted line above :2724 left this arm GREEN while
-    # the record's `2724-2726` was stale at both ends).
-    assert "`probes/capstone_measure.py:2724-2726`" in text
-    assert probe[2724 - 1].strip() == "for name, count, anchored in projection.g.query(", (
-        f"capstone_measure.py:2724 reads {probe[2724 - 1].strip()!r}, not the census call")
-    assert "MATCH ()-[r]->() RETURN type(r)" in probe[2725 - 1], (
-        f"capstone_measure.py:2725 reads {probe[2725 - 1].strip()!r}, not the "
+    # (measured in review: one inserted line above :2726 left this arm GREEN while
+    # the record's `2726-2728` was stale at both ends).
+    assert "`probes/capstone_measure.py:2726-2728`" in text
+    assert probe[2726 - 1].strip() == "for name, count, anchored in projection.g.query(", (
+        f"capstone_measure.py:2726 reads {probe[2726 - 1].strip()!r}, not the census call")
+    assert "MATCH ()-[r]->() RETURN type(r)" in probe[2727 - 1], (
+        f"capstone_measure.py:2727 reads {probe[2727 - 1].strip()!r}, not the "
         "relationship census query")
-    assert "count(r.sourceVersion)" in probe[2726 - 1], (
-        f"capstone_measure.py:2726 reads {probe[2726 - 1].strip()!r}, not the "
+    assert "count(r.sourceVersion)" in probe[2728 - 1], (
+        f"capstone_measure.py:2728 reads {probe[2728 - 1].strip()!r}, not the "
         "anchored count that closes the query")

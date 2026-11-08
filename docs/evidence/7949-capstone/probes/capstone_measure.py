@@ -480,14 +480,7 @@ DOOR_PINNED_OFF = ("TORTOISE_SESSION_EXTRACTOR", "TORTOISE_EXTRACTOR",
 #: ``TORTOISE_S4_DELTA`` is DEFAULT-ON (``env_flag(..., True)``); an ambient
 #: ``=0`` silently swaps S4's output contract for the legacy complete-list one,
 #: which changes the embed list a run measures without changing the arm.
-#:
-#: ``TORTOISE_STATE_VALUE_VERBATIM`` (#10360) is the same class, and the one read
-#: the closure had left unclassified: read PER POINT at the emit site
-#: (``extractor_v2._state_value_verbatim_enforced``, ``env_truthy``, so absent
-#: resolves ON), it decides whether a REWRITTEN value is WITHHELD — ``=0`` writes
-#: what the default withholds. Pinned to the SHIPPED default, not off.
 DOOR_PINNED_ON = (("TORTOISE_S4_DELTA", "1"), ("TORTOISE_JSON_MODE", "1"),
-                  ("TORTOISE_STATE_VALUE_VERBATIM", "1"),
                   # cycle 9 (#10983): `sparse.py:226` `env_flag(IDENTIFIER_ENV,
                   # True)` — default-ON, read through `projection/entities.py:1208`
                   # on the write path (`create_point` -> `point_identifier_aliases`),
@@ -498,16 +491,18 @@ DOOR_PINNED_ON = (("TORTOISE_S4_DELTA", "1"), ("TORTOISE_JSON_MODE", "1"),
                   # fixtures — measured), so the pin makes the population
                   # insensitive to the shell without moving a number.
                   ("TORTOISE_IDENTIFIER_TOKENS", "1"),
-                  # the union that absorbed `#11449` (`91dbc9a88`): `extractor_v2` is
-                  # the ONLY module that reads this switch (`_state_value_verbatim_enforced`,
-                  # the module's one `env_flag` read — the nine modules the closure test
-                  # names are the path it SCANNED, not the readers), and its ABSENT state is
-                  # NOT the neutral one to inherit: the code resolves
-                  # `env_flag(SWITCH, True)`, so an ambient
-                  # `=0` DISARMS the write path's verbatim-value refusal (a rewritten
-                  # value is then WRITTEN and the resurrection guard cannot fire), which
-                  # changes the population under a header that would still claim the door
-                  # held. Pinned to the SHIPPED default, exactly as `TORTOISE_S4_DELTA`.
+                  # `#10360`, and the union that absorbed `#11449` (`91dbc9a88`):
+                  # `extractor_v2` is the ONLY module that reads this switch
+                  # (`_state_value_verbatim_enforced`, its one `env_flag` read — the
+                  # nine modules the closure test names are the path it SCANNED, not
+                  # the readers), and it reads it PER POINT at the emit site. Its
+                  # ABSENT state is NOT the neutral one to inherit: the code resolves
+                  # `env_flag(SWITCH, True)` (absent/blank/unparseable ⇒ ON), so an
+                  # ambient `=0` DISARMS the write path's verbatim-value refusal (a
+                  # rewritten value is then WRITTEN and the resurrection guard cannot
+                  # fire), which changes the population under a header that would
+                  # still claim the door held. Pinned to the SHIPPED default, exactly
+                  # as `TORTOISE_S4_DELTA`.
                   ("TORTOISE_STATE_VALUE_VERBATIM", "1"))
 
 #: Every key a complete read-back carries — the pinned-off set plus the
