@@ -7937,8 +7937,8 @@ surfaces:
   # published numbers does NOT run on a census-tool change with or without this row.
   # ⛔ And NO CI lane re-derives it: the on-demand lane (`eval-suite-manual.yml`,
   # #10194) provisions the embedder and FalkorDB but never
-  # `~/.cache/tortoise-longmemeval`, so the pin SKIPS there exactly as in the gated
-  # shards (measured: grep for TORTOISE_LME_CACHE_DIR/longmemeval over
+  # `~/.cache/tortoise-longmemeval`, so the pin SKIPS there (measured: grep for
+  # TORTOISE_LME_CACHE_DIR/longmemeval over
   # `.github/workflows/` returns nothing). The numbers are re-derived only by running
   # `test_census_on_real_s_split` on a box that holds the cached S split (research
   # note §8); provisioning the dataset in CI is out of scope for this measurement-only
