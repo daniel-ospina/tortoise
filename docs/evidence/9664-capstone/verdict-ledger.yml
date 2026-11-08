@@ -522,12 +522,14 @@ measured_at:
 # quoted a `compare/704fd60ee...main` reading as evidence. That is a reading of a MOVING
 # ref, so it was already stale when it was read — and the FIRST attempt to fix it re-typed
 # a second such number, which did not even agree with itself: read against this checkout's
-# STALE local `origin/main` and against the live ref it gave two different answers, which
-# is precisely the point. Neither number is kept. No `origin/main` reading belongs in a
-# provenance block (see the rule 180 lines up), and a lag number means nothing without its
-# endpoint (see the rule just above). The conclusion needs neither: `--is-ancestor` on a
-# checkout holding both, plus the sha-pinned `...5938deaf` compare above, establish it —
-# and that one IS pinned to a sha, so it reproduces.
+# local `origin/main` (which stood at `cd79fb0e1e` when it was taken) it gave one value and
+# against the live ref another, which is precisely the point. Neither number is kept; the
+# sha IS, so the disagreement reproduces by re-running that reading at that endpoint. No
+# `origin/main` reading belongs in a provenance block (see the rule in the provenance
+# section above), and a lag number means nothing without its endpoint (see the rule just
+# above). The conclusion needs neither: `--is-ancestor` on a checkout holding both, plus the
+# sha-pinned `...5938deaf` compare above, establish it — and that one IS pinned to a sha, so
+# it reproduces.
 #   $ gh api repos/daniel-ospina/tortoise/commits/704fd60ee
 #   +        return f"{name!r} (id {stable_id}, graph_id {gid!r})"   # it INTRODUCES it
 # `git log -S … --all` then "resolved" the boundary, because a shallow `-S` credits the
