@@ -633,8 +633,20 @@ def _imports_the_seam(path: Path) -> bool:
     submodule import was never in scope and is not added: doing so would put 18
     further files under a guard that has never judged them, inside a fix whose
     reason is a false positive (#11437).
+
+    ⛔ The name test is a NECESSARY CONDITION, not a verdict. An `import`
+    statement must spell `_live_utils` in the source, so a file that never
+    mentions the name cannot import it — which makes the string test a sound
+    cheap pre-filter in front of the parse (91 of `tests/`'s 1437 files instead
+    of all of them: the parse-everything draft cost 12.2 s and surfaced
+    `SyntaxWarning` noise from unrelated files). The DECISION is still the
+    `Import`/`ImportFrom` node below — the pre-filter can only ever skip a
+    file, never accuse one.
     """
-    for node in ast.walk(ast.parse(path.read_text())):
+    src = path.read_text()
+    if "_live_utils" not in src:
+        return False
+    for node in ast.walk(ast.parse(src)):
         if isinstance(node, ast.Import):
             if any(a.name.split(".")[-1] == "_live_utils" for a in node.names):
                 return True
