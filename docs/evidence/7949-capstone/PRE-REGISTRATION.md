@@ -1777,11 +1777,12 @@ roll-call read:
 > then `TORTOISE_IDENTIFIER_TOKENS`, then `TORTOISE_SUBJECT_TAU_HI`/`_LO`): each sits on the acceptance
 > path and was in no pin, no ledger row and no closure.
 
-`preregistration.json`'s `acceptance_arm.pinned_to` agreed **at this branch's base**
-`f76b74c3e62`, carrying exactly the three `"1"` pins (`TORTOISE_S4_DELTA`,
-`TORTOISE_JSON_MODE`, `TORTOISE_IDENTIFIER_TOKENS`). It carries FOUR at `origin/main`
-`a1dff7cec`, which is the point of the scope note above: the fourth entry arrived on `main`,
-not here.
+`preregistration.json`'s `acceptance_arm.pinned_to` did **not** agree with that prose at this
+branch's base `a1dff7cec`: the record already carried **four** `"1"` pins
+(`TORTOISE_S4_DELTA`, `TORTOISE_JSON_MODE`, `TORTOISE_IDENTIFIER_TOKENS`,
+`TORTOISE_STATE_VALUE_VERBATIM`), while §1.6.2 still listed three and its roll-call stopped at
+cycle 10. The record and the document had drifted apart on `main`; this entry closes the prose
+side, so the two published copies say the same thing again.
 
 **New value.** Three things change, and the record's pin set is not one of them. (1) §1.6.2's
 **prose** sentence gains `TORTOISE_STATE_VALUE_VERBATIM` at its shipped default `"1"`; (2) its
@@ -1795,7 +1796,9 @@ entry, so what lands here is prose plus the `read_back` narrative, not a second 
 
 **Why.** `#10360`'s write-path guard landed **inside** `path_modules` — `TORTOISE_STATE_VALUE_VERBATIM`,
 read by `extractor_v2._state_value_verbatim_enforced` as `env_flag(..., True)` — so the door's census
-red at this branch's base `f76b74c3e62`
+was RED at the head this defect was diagnosed on, `f76b74c3e62` (the `#11508` merge, `origin/main`'s
+parent; that tree's `capstone_measure.py` does not name the switch and its `DOOR_PINNED_ON` holds
+three entries)
 (`tests/test_7949_c2_door.py::test_every_env_var_the_capture_path_reads_is_accounted_for`):
 the switch was in no pin, no ledger row and no closure. It is a **pin and not an acknowledged
 non-seam**, because its absent state is already ON and its only non-neutral state is an inherited
