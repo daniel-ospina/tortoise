@@ -376,7 +376,7 @@ window.** Set it by what the product wants to promise and state it beside the wi
 | provisioned per tenant | 200 MB | 103 MB |
 | tenants per 8 GB instance | 40 | 78 |
 | RAM + shared + record | \$8.75 + \$2.13 + \$0.13 = **\$11.01** | \$4.49 + \$1.09 + \$0.13 = **\$5.71** |
-| vs the \$5.70 budget | **193 %** — above, and accepted knowingly | **100 %** — the budget, exactly |
+| vs the \$5.70 budget | **193 %** — above, and accepted knowingly | **100 %** — the budget, to the cent after rounding (the unrounded model is \$5.70; the printed cells round up by \$0.01) |
 | the same, RAM line alone | \$8.75 = **154 %** of the budget | \$4.49 = **79 %** of it |
 
 ⛔ **The last row is the one that misleads, and it is here deliberately.** The **RAM line alone** already
@@ -404,7 +404,7 @@ record and currently carries **solo = \$9**, so nothing here is live until that 
 | **M2** | **retrieval quality under a windowed vs complete graph**, on a fixed query set | the gate that ARMS §7 (post-measurement) — the literature has no answer |
 | **M3** | text ranking: a BM25-capable Postgres option vs the current `db.idx.fulltext` scores, **score distributions** + the `#8933` identifier fixture | whether the text index ever moves (§6.2) |
 | **M4** | rebuild peak memory and latency per tenant at the real window size | the 6× headroom (§7), the #1 risk |
-| **M5** | the **miss rate** per tenant | the compute/IOPS/egress tier |
+| **M5** | the **miss rate** per tenant (a DIFFERENT M5 from `STORAGE-ARCHITECTURE.md` §14.3's, which asks where the vector index lives and was answered 2026-11-07) | the compute/IOPS/egress tier |
 
 ---
 

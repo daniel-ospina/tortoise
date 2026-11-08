@@ -251,8 +251,8 @@ FACT_STATEMENTS_IN_SIBLINGS: tuple[tuple[Path, str, str], ...] = (
     ),
     (
         STORAGE,
-        "STORAGE homes the embeddings ruling on the open V1 decision",
-        "the open **V1/§12.1c** decision (`#4997`)",
+        "STORAGE homes the embeddings ruling in the V1/§12.1c decision",
+        "the **V1/§12.1c** decision settles where the vector index LIVES",
     ),
     (
         ONTOLOGY,

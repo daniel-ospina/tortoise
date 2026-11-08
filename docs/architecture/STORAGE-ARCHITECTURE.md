@@ -119,7 +119,9 @@ The cause is not that we store a lot. **It is that we pay for the *total* rather
 >
 > ⛔ **SPLIT 2026-11-07 (owner): what the ruling does, clause by clause.**
 >
-> **ADOPTED — the dual-store SEARCH path (this PR's decision, not a separate owner sentence):** the **vector index and
+> **ADOPTED — the dual-store SEARCH path** (owner, 2026-11-07, `#4051` comment
+> [`6713838871`](https://github.com/daniel-ospina/tortoise/issues/4051#issuecomment-6713838871) — bullets 1 and 3; only the
+> *reading* that splits the 2026-10-08 ruling into these two clauses is this PR's): the **vector index and
 > the embedding payload move to Postgres** (`pgvector`), while traversal, writes and EP stay in FalkorDB, so a **search**
 > query reads similarity candidates from Postgres and walks them in the graph. The owner's *"so we don't need to rush
 > with enabling our queries to parse both falkor and postgres"* is what makes this adoptable **without** forcing the
@@ -1298,7 +1300,7 @@ Every system above embeds **name + description/summary**. Our `:Object` carries 
 
 > **Taking *"objects must be vectorised"* literally would index 7,859 strings that are 62.3% low-information, with no description field, and buy near-zero discriminating power for BOTH jobs a vector could do** — while paying the dominant RAM cost.
 
-**⭐ What we already have is the right shape:** `Object.name` **already has a FULLTEXT index**, as do `Event.subject`/`Event.name` (measured, §12.1b). **Lexical entity lookup is the resolution signal every system above pairs with the vector — and we have it.** What we lack is (a) the **description field** that would make an entity vector meaningful, and (b) a ruling on whether `:Object`/`:Event` embeddings should exist at all — the **V1/§12.1c** decision, which RESOLVED the vector's location on 2026-11-07 and left this indexing question OPEN (`#4997`).
+**⭐ What we already have is the right shape:** `Object.name` **already has a FULLTEXT index**, as do `Event.subject`/`Event.name` (measured, §12.1b). **Lexical entity lookup is the resolution signal every system above pairs with the vector — and we have it.** What we lack is (a) the **description field** that would make an entity vector meaningful, and (b) a ruling on whether `:Object`/`:Event` embeddings should exist at all. Those are two different questions: the **V1/§12.1c** decision settles where the vector index LIVES (Postgres, 2026-11-07), and it does not settle whether these two labels carry embeddings — that is §12.2d's question, tracked in `#4997`.
 
 **⚠️ Weak names are a SEQUENCING fact, not an argument against the vector (owner, 2026-09-24).** The definite-description problem **belongs to the extractor workstream** (VET/CLASSIFY, the `DISCARD` path); it is not a reason to doubt entity vectors. The correct reading:
 
