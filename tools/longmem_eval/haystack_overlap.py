@@ -18,13 +18,31 @@ drift):
   * **session slots** — one haystack session per question;
   * **session identity** — ``sha256(ingest._session_transcript(session))``,
     the text the ingest writes (role-prefixed turns);
-  * **prompt identity** — that transcript **plus the session date**. The date
-    is prompt-visible: ``extractor_v2._date_anchor`` renders
+  * **session prompt identity** — that transcript **plus the session date**. The
+    date is prompt-visible: ``extractor_v2._date_anchor`` renders
     "**DATE ANCHOR — today is `<session_date>`**" into the S1/S2/S4 *system*
     prompt whenever the session is dated (a slot whose date is missing renders
     no anchor, and the census counts it under the empty date rather than
     assuming it away). So a response cache keyed on prompt text reuses a
     session only when the content **and** the date match;
+  * **chunk prompt identity** — the raw-chunk text **plus the same session
+    date**, i.e. the ``(text, date)`` joint over the chunk leg. ⛔ This is the
+    cell the ``prompt_level_response_cache`` verdict is derived from, because
+    the prompt the harness actually renders is **not** a whole-session
+    transcript: ``ingest_v2`` hands each session to ``extract_session_v2``,
+    which splits it into EDU chunks and calls ``run_s1`` **once per chunk**
+    with the session date (``extractor_v2.chunk_transcript`` → ``_arm_extract``
+    → ``run_s1(..., session_date=...)``, whose system prompt is
+    ``S1_TMPL.replace("{date_anchor}", _date_anchor(session_date))``). A
+    session-level identity repeating 1.000× therefore does NOT settle the
+    prompt unit — P(a session repeats) ≤ P(a chunk repeats), so the session
+    cell can only understate chunk reuse. The exact S1 unit is not
+    dataset-derivable (its chunks are ``chunk_transcript`` over **LLM-derived**
+    EDUs), so the raw-chunk leg is the finest cell a dataset-only census can
+    measure — the same 'dataset-derivable only' boundary the encode-unit
+    denominator states. ``extract_session_v2`` is also the v1 path's extractor
+    (``ingest.py`` calls it), so this is the product's prompt granularity, not
+    a v2-only shape;
   * **encode units** — the two texts ``ingest_haystack`` /
     ``ingest_haystack_v2`` embed per session: one turn Point per turn
     (``ingest._turn_text``) and one raw chunk per ``chunk_turns`` window
@@ -39,10 +57,15 @@ drift):
 **The measured answer (S split, 500 Q, 2026-11-08):** see ``CENSUS``. In one
 pass: 23,867 session slots, 18,464 distinct session contents (1.2926×),
 5,403 duplicate slots — but **0** of the repeated pairs share a session date,
-so prompt-identity reuse is exactly 1.000×: a prompt-level response cache —
-and a session-level extraction cache, which has the *same* identity condition
-— would save nothing. The text→embedding cache (already built) is the one
-realizable lever, at 1.299× / 23.0% of encode units.
+so the SESSION prompt identity is exactly 1.000× and a session-level
+extraction cache has nothing to hit. The **S1 prompt** is a finer unit (one
+prompt per EDU chunk, not per session), so its cell is measured separately:
+124,345 chunk prompts, 124,318 distinct ``(chunk text, session date)``
+identities — 1.0002×, i.e. **27 repeats, 0.02% of the leg**. A prompt-level
+response cache is therefore arithmetically reachable and worth nothing: below
+``MATERIAL_HIT_SHARE``, which is the verdict the issue asked for, computed on
+the unit the harness actually renders. The text→embedding cache (already
+built) is the one realizable lever, at 1.299× / 23.0% of encode units.
 
 **What this module is NOT.** Not a run instrument and not a gate: it reads the
 dataset only (no DB, no LLM, no keys) and writes nothing unless ``--out`` is
@@ -86,10 +109,28 @@ from .ingest import (
 #: Measurement date. Any number quoted in a doc must name this census.
 FINDINGS_DATE = "2026-11-08"
 
-#: A prompt is identified by the transcript the prompts carry PLUS the session
-#: date the date anchor injects (`extractor_v2._date_anchor`) — both are
-#: inputs of `render_s2_prompt` / the S1/S4 system prompt.
+#: A SESSION-level prompt is identified by the transcript the prompts carry
+#: PLUS the session date the date anchor injects (`extractor_v2._date_anchor`)
+#: — both are inputs of `render_s2_prompt` / the S1/S4 system prompt.
 PROMPT_IDENTITY = "rendered session transcript + session_date"
+
+#: The S1 prompt is rendered per EDU CHUNK, not per session
+#: (`extract_session_v2` → `chunk_transcript` → `run_s1`), so the identity the
+#: response-cache verdict turns on is the chunk text plus the same date.
+CHUNK_PROMPT_IDENTITY = "rendered S1 chunk text + session_date"
+
+#: How much of an avenue's OWN unit population must hit before the avenue is
+#: worth building at all. `realizable` is `reuse > 1.0 AND hit_share >= this`:
+#: reuse polarity alone is not a decision, because an identity that repeats 27
+#: times out of 124,345 is arithmetically realizable and practically worthless —
+#: reporting it as "realizable" would be the same overstatement this module
+#: exists to retire, only pointed the other way (PR #11577 review). The floor is
+#: DECLARED once, here, and every published verdict quotes the measured share it
+#: was applied to, so the rule is visible instead of living in a doc's prose.
+#: 1% is deliberately far below the cache this lane already ships (the
+#: text→embedding cache measures 23.0% of encode units in one pass), so the
+#: rule can only ever reject an avenue that is an order of magnitude weaker.
+MATERIAL_HIT_SHARE = 0.01
 
 #: The measured S-split census (2026-11-08, 500 questions, chunk_turns=2).
 #: Pinned by `tests/longmem_eval/test_haystack_overlap_1779.py::test_census_on_real_s_split`
@@ -129,7 +170,9 @@ CENSUS: dict[str, Any] = {
         "turn": {"slots": 246750, "distinct": 189522, "hit_slots": 57228,
                  "reuse_factor": 1.302, "hit_share": 0.2319},
         "chunk": {"slots": 124345, "distinct": 96086, "hit_slots": 28259,
-                  "reuse_factor": 1.2941, "hit_share": 0.2273},
+                  "reuse_factor": 1.2941, "hit_share": 0.2273,
+                  "distinct_content_date": 124318,
+                  "prompt_reuse_factor": 1.0002},
         "total": {"slots": 371095, "distinct": 285608, "hit_slots": 85487,
                   "reuse_factor": 1.2993, "hit_share": 0.2304,
                   "chunk_share_of_units": 0.3351},
@@ -189,6 +232,9 @@ def census_overlap(instances: list[dict],
     content_dates: dict[str, Counter[str]] = {}
     turn_units: Counter[str] = Counter()
     chunk_units: Counter[str] = Counter()
+    # The JOINT the `prompt_level_response_cache` verdict is derived from: S1
+    # renders one prompt per chunk, so the identity is (chunk text, date).
+    chunk_prompts: Counter[tuple[str, str]] = Counter()
 
     per_question: list[set[str]] = []
     within_question_dups = 0
@@ -221,6 +267,7 @@ def census_overlap(instances: list[dict],
                                       str(turn.get("content") or ""))] += 1
             for _ci, text, _idxs in _session_chunks(session, chunk_turns):
                 chunk_units[text] += 1
+                chunk_prompts[(_sha(text), date)] += 1
 
         per_question.append(q_contents)
 
@@ -248,7 +295,13 @@ def census_overlap(instances: list[dict],
                 same_date_pairs += date_n * (date_n - 1) // 2
 
     turn_leg = _leg(turn_units)
-    chunk_leg = _leg(chunk_units)
+    chunk_prompt_slots = sum(chunk_prompts.values())
+    chunk_prompt_distinct = len(chunk_prompts)
+    chunk_prompt_reuse = (round(chunk_prompt_slots / chunk_prompt_distinct, 4)
+                          if chunk_prompt_distinct else 0.0)
+    chunk_leg = _leg(chunk_units,
+                     distinct_content_date=chunk_prompt_distinct,
+                     prompt_reuse_factor=chunk_prompt_reuse)
     total_leg = _leg(turn_units + chunk_units)
     total_leg["chunk_share_of_units"] = (
         round(chunk_leg["slots"] / total_leg["slots"], 4)
@@ -262,8 +315,12 @@ def census_overlap(instances: list[dict],
         duplicate_content_slots=duplicate_content_slots,
         repeated_pairs=repeated_pairs,
         same_date_pairs=same_date_pairs,
-        prompt_reuse=prompt_reuse,
-        encode_reuse=total_leg["reuse_factor"],
+        session_prompt={"slots": prompt_slots, "distinct": prompt_distinct,
+                        "reuse_factor": prompt_reuse},
+        chunk_prompt={"slots": chunk_prompt_slots,
+                      "distinct": chunk_prompt_distinct,
+                      "reuse_factor": chunk_prompt_reuse},
+        encode=total_leg,
     )
 
     return {
@@ -307,45 +364,95 @@ def census_overlap(instances: list[dict],
     }
 
 
+def _avenue(identity: str, cell: dict[str, Any], *,
+            blocked_by: str | None) -> dict[str, Any]:
+    """One avenue's verdict, DERIVED from its own measured cell.
+
+    ``realizable`` answers the only question a decision needs — would building
+    this cache pay? — so it requires the identity to repeat **materially**
+    (``MATERIAL_HIT_SHARE``), not merely to repeat. The measured magnitude is
+    always published beside it (``hit_slots`` / ``hit_share``), so a reader never
+    has to trust the boolean: 27 hits out of 124,345 is realizable in arithmetic
+    and worthless in practice, and the row says both.
+    """
+    slots = cell["slots"]
+    hits = slots - cell["distinct"]
+    share = round(hits / slots, 4) if slots else 0.0
+    return {
+        "identity": identity,
+        "reuse_factor": cell["reuse_factor"],
+        "hit_slots": hits,
+        "hit_share": share,
+        "realizable": cell["reuse_factor"] > 1.0 and share >= MATERIAL_HIT_SHARE,
+        "blocked_by": blocked_by,
+        "materiality_floor": MATERIAL_HIT_SHARE,
+    }
+
+
 def _decision(*, duplicate_content_slots: int, repeated_pairs: int,
-              same_date_pairs: int, prompt_reuse: float,
-              encode_reuse: float) -> dict[str, Any]:
+              same_date_pairs: int, session_prompt: dict[str, Any],
+              chunk_prompt: dict[str, Any],
+              encode: dict[str, Any]) -> dict[str, Any]:
     """The cache-granularity verdict, DERIVED from the census numbers.
 
-    ``realizable`` is computed, never typed in: a reuse avenue is realizable
-    only when its identity actually repeats. The two session-level avenues
-    share one identity condition (the prompt), so they always agree — they
-    differ in what would be stored (the extracted payload vs the raw
-    response), not in when they could fire.
+    ⛔ The two LLM avenues do NOT share one identity condition. A session's
+    extraction can only be reused when its **whole-session** prompt is identical
+    — the SESSION cell (transcript + date) settles that. The prompt a response
+    cache would store is rendered **per EDU chunk**
+    (``extract_session_v2`` → ``chunk_transcript`` → ``run_s1``), so that avenue
+    is settled by the CHUNK cell ``(chunk text, session date)``: a session-level
+    1.000× does not imply a chunk-level 1.000× (P(session repeats) ≤ P(chunk
+    repeats)), and deriving it from the coarser cell asserts a verdict beyond
+    the measured cell — the 'published number with no producer' class this
+    module exists to retire (PR #11577 review, following the earlier finding
+    that the session cell had been used as a proxy for the prompt unit).
     """
-    prompt_realizable = prompt_reuse > 1.0
-    blocked = None
-    if not prompt_realizable and duplicate_content_slots:
-        blocked = (
-            f"{duplicate_content_slots} session slots repeat another slot's "
-            f"content, but {same_date_pairs} of {repeated_pairs} repeated pairs "
-            "share a session date — and the date is prompt-visible "
-            "(extractor_v2._date_anchor injects it into the S1/S2/S4 system "
-            "prompt), so no two repeated sessions render the same prompt")
-    elif not prompt_realizable:
-        blocked = "no cross-question session repeats (nothing to reuse)"
+    session_blocked = None
+    if session_prompt["reuse_factor"] <= 1.0:
+        if duplicate_content_slots:
+            session_blocked = (
+                f"{duplicate_content_slots} session slots repeat another slot's "
+                f"content, but {same_date_pairs} of {repeated_pairs} repeated "
+                "pairs share a session date — and the date is prompt-visible "
+                "(extractor_v2._date_anchor injects it into the S1/S2/S4 system "
+                "prompt), so no two repeated sessions render the same prompt")
+        else:
+            session_blocked = "no cross-question session repeats (nothing to reuse)"
+    elif ((session_prompt["slots"] - session_prompt["distinct"])
+          / max(session_prompt["slots"], 1)) < MATERIAL_HIT_SHARE:
+        session_blocked = (
+            "the session prompt identity repeats, but on "
+            f"{session_prompt['slots'] - session_prompt['distinct']} of "
+            f"{session_prompt['slots']} slots — below the "
+            f"{MATERIAL_HIT_SHARE:.0%} materiality floor")
+
+    chunk_blocked = None
+    if chunk_prompt["reuse_factor"] <= 1.0:
+        chunk_blocked = (
+            f"{chunk_prompt['slots']} S1 chunk prompts render from the chunk "
+            f"leg and only {chunk_prompt['distinct']} distinct (chunk text, "
+            "session date) identities exist: the date is prompt-visible "
+            "(extractor_v2._date_anchor renders into run_s1's system prompt), "
+            "so a repeated chunk text carried by a differently-dated session "
+            "is a different prompt")
+    elif ((chunk_prompt["slots"] - chunk_prompt["distinct"])
+          / max(chunk_prompt["slots"], 1)) < MATERIAL_HIT_SHARE:
+        chunk_blocked = (
+            "the chunk prompt identity repeats, but on only "
+            f"{chunk_prompt['slots'] - chunk_prompt['distinct']} of "
+            f"{chunk_prompt['slots']} S1 chunk prompts "
+            f"({(chunk_prompt['slots'] - chunk_prompt['distinct']) / max(chunk_prompt['slots'], 1):.2%})"
+            f" — below the {MATERIAL_HIT_SHARE:.0%} materiality floor, so a "
+            "response cache would save a rounding error of the LLM work")
+
     return {
-        "session_level_extraction_reuse": {
-            "identity": PROMPT_IDENTITY,
-            "reuse_factor": prompt_reuse,
-            "realizable": prompt_realizable,
-            "blocked_by": blocked,
-        },
-        "prompt_level_response_cache": {
-            "identity": PROMPT_IDENTITY,
-            "reuse_factor": prompt_reuse,
-            "realizable": prompt_realizable,
-            "blocked_by": blocked,
-        },
+        "session_level_extraction_reuse": _avenue(
+            PROMPT_IDENTITY, session_prompt, blocked_by=session_blocked),
+        "prompt_level_response_cache": _avenue(
+            CHUNK_PROMPT_IDENTITY, chunk_prompt, blocked_by=chunk_blocked),
         "encode_cache_text_keyed": {
-            "identity": "sha256(model_id + prompt_name + text)",
-            "reuse_factor": encode_reuse,
-            "realizable": encode_reuse > 1.0,
+            **_avenue("sha256(model_id + prompt_name + text)", encode,
+                      blocked_by=None),
             "already_implemented": "tools/longmem_eval/encode_cache.py",
         },
     }
@@ -364,7 +471,11 @@ def _summary(census: dict[str, Any]) -> str:
         f"{s['same_date_pairs']}",
         f"  questions w/ a repeat         : "
         f"{s['questions_with_repeated_content']}/{census['n_instances']}",
-        f"  prompt identity reuse         : {s['prompt_reuse_factor']}x",
+        f"  prompt identity reuse (session): {s['prompt_reuse_factor']}x",
+        f"  prompt identity reuse (S1 chunk): "
+        f"{e['chunk']['prompt_reuse_factor']}x "
+        f"({e['chunk']['slots'] - e['chunk']['distinct_content_date']} of "
+        f"{e['chunk']['slots']} chunk prompts repeat)",
         f"  encode units (total)          : {e['total']['slots']}"
         f"  distinct {e['total']['distinct']}"
         f"  reuse {e['total']['reuse_factor']}x"

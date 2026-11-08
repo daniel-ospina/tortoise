@@ -422,15 +422,23 @@ dataset alone (no DB, no LLM, no keys) and reports the granularity verdict:
 |---|---|---|
 | text→embedding (`encode_cache.py`, built) | **1.299×** (23.0% of units) | yes |
 | session-level extraction reuse | **1.000×** | **no** |
-| prompt-level response cache | **1.000×** | **no** |
+| prompt-level response cache | **1.0002×** (27 of 124,345 S1 chunk prompts = 0.02%) | **no** |
 
 Cross-question *sessions* do repeat — 5,403 of 23,867 slots repeat another
 slot's content (1.293×, and all 500 questions hold at least one repeat) — but
 **0 of the 6,660 repeated pairs share a session date**. The date is
 prompt-visible (`extractor_v2._date_anchor` injects "today is `<session_date>`"
-into the S1/S2/S4 system prompt), so no two repeated sessions render the same
-prompt: a response cache, and a session-level extraction cache (same identity
-condition), have nothing to hit. The numbers are pinned by
+into the S1/S2/S4 system prompt), so a session-level extraction cache has
+nothing to hit.
+
+The **response cache is a finer unit than the session**, and it is measured as
+its own cell rather than inferred from the session one: `extract_session_v2`
+splits a session into EDU chunks and calls `run_s1` **per chunk** with the
+session date, so the identity is `(chunk text, session date)` — 124,318
+distinct over 124,345 chunk prompts, **27 repeats**. `realizable` therefore
+requires the reuse to be *material* (`MATERIAL_HIT_SHARE`, 1% of the avenue's
+own unit population), not merely > 1.0: 27 of 124,345 is a rounding error of
+the LLM work. The numbers are pinned by
 `tests/longmem_eval/test_haystack_overlap_1779.py::test_census_on_real_s_split`
 (@slow; skipped in CI, which has no dataset), so a dataset refresh reds the pin
 instead of silently re-basing them.

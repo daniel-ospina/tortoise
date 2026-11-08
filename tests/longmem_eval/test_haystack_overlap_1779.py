@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from tools.longmem_eval import dataset as lme_dataset  # noqa: E402, RUF100
 from tools.longmem_eval.haystack_overlap import (  # noqa: E402, RUF100
     CENSUS,
+    MATERIAL_HIT_SHARE,
     census_overlap,
     main,
 )
@@ -70,8 +71,103 @@ def test_identical_content_different_dates_is_not_prompt_reuse():
     for name in ("session_level_extraction_reuse", "prompt_level_response_cache"):
         row = census["decision"][name]
         assert row["realizable"] is False
-        # the refusal NAMES the measurement, not a convention
-        assert "0 of 1 repeated pairs share a session date" in row["blocked_by"]
+        assert row["reuse_factor"] == 1.0
+    # each avenue refuses with a message naming ITS OWN measured cell — the
+    # session row counts session pairs, the prompt row counts S1 chunk prompts
+    assert "0 of 1 repeated pairs share a session date" in (
+        census["decision"]["session_level_extraction_reuse"]["blocked_by"])
+    assert "only 2 distinct (chunk text, session date) identities" in (
+        census["decision"]["prompt_level_response_cache"]["blocked_by"])
+
+
+def test_prompt_cache_verdict_is_derived_from_the_CHUNK_cell_not_the_session():
+    """The prompt cache is settled on the unit the harness RENDERS, not on the
+    session (PR #11577 review).
+
+    `extract_session_v2` chunks each session and calls `run_s1` per chunk with
+    the session date, so the stored-response identity is (chunk text, date).
+
+The two sessions here share a chunk (`alpha`) under the SAME date but differ
+    overall, so:
+
+      * the SESSION cell never repeats (distinct transcripts) → session reuse
+        1.000×, avenue not realizable;
+      * the CHUNK cell repeats (`alpha` twice, same date) → 4 chunk prompts
+        over 3 identities → avenue realizable.
+
+    Deriving the prompt verdict from the session cell reports `False` and reds
+    here — the mutant this test exists to kill. (The real S split lands the
+    other way round: 1.0002× / 27 of 124,345, immaterial — the magnitude is
+    pinned by `test_census_on_real_s_split`.)
+    """
+    instances = [
+        _instance("q1", [[{"role": "user", "content": "alpha"},
+                          {"role": "user", "content": "beta"}]],
+                  ["2024-05-05"]),
+        _instance("q2", [[{"role": "user", "content": "alpha"},
+                          {"role": "user", "content": "gamma"}]],
+                  ["2024-05-05"]),
+    ]
+    census = census_overlap(instances, chunk_turns=1)
+    s = census["sessions"]
+    assert s["distinct_contents"] == 2        # two different transcripts
+    assert s["prompt_reuse_factor"] == 1.0
+    assert census["decision"]["session_level_extraction_reuse"][
+        "realizable"] is False
+
+    chunk = census["encode_units"]["chunk"]
+    assert chunk["slots"] == 4
+    assert chunk["distinct"] == 3             # 'alpha' repeats
+    assert chunk["distinct_content_date"] == 3  # ... under the same date
+    assert chunk["prompt_reuse_factor"] == round(4 / 3, 4)
+    prompt_row = census["decision"]["prompt_level_response_cache"]
+    assert prompt_row["realizable"] is True
+    assert prompt_row["hit_slots"] == 1
+    assert prompt_row["identity"] == "rendered S1 chunk text + session_date"
+
+
+def test_an_immaterial_repeat_is_published_but_not_realizable():
+    """Repeating is not the same as being worth building.
+
+    An identity that repeats twice in 900 prompts is arithmetically realizable
+    and practically worthless, so `realizable` also requires
+    `MATERIAL_HIT_SHARE` — and the measured magnitude stays published, so the
+    boolean is never the only evidence a reader gets.
+
+    Both arms run the SAME shape with only the repeat count changed, so the
+    floor's action is mechanical rather than an assertion about one fixture.
+    """
+    def _corpus(repeats: int) -> dict:
+        # 300 sessions x 3 turns, chunk_turns=1 → one chunk per turn, so the
+        # chunk leg has 900 slots and exactly `repeats` of them carry the same
+        # text under the same date; every other turn text is unique.
+        sessions, dates = [], []
+        n = 0
+        for _ in range(300):
+            turns = []
+            for _ in range(3):
+                content = "shared" if n < repeats else f"unique filler {n}"
+                turns.append({"role": "user", "content": content})
+                n += 1
+            sessions.append(turns)
+            dates.append("2024-05-05")
+        return census_overlap([_instance("q1", sessions, dates)], chunk_turns=1)
+
+    thin = _corpus(3)
+    thin_row = thin["decision"]["prompt_level_response_cache"]
+    assert thin["encode_units"]["chunk"]["slots"] == 900
+    assert thin_row["hit_slots"] == 2          # the identity DOES repeat
+    assert thin_row["reuse_factor"] > 1.0
+    assert thin_row["hit_share"] < thin_row["materiality_floor"]
+    assert thin_row["realizable"] is False
+    assert "below the" in thin_row["blocked_by"]
+
+    dense = _corpus(20)                        # same shape, 20 repeats
+    dense_row = dense["decision"]["prompt_level_response_cache"]
+    assert dense_row["hit_slots"] == 19
+    assert dense_row["hit_share"] >= dense_row["materiality_floor"]
+    assert dense_row["realizable"] is True
+    assert dense_row["blocked_by"] is None
 
 
 def test_identical_content_and_date_is_prompt_reuse():
@@ -358,7 +454,20 @@ def test_census_on_real_s_split():
     # the numbers the verdict turns on, restated so a change reads as itself
     assert census["sessions"]["same_date_pairs"] == 0
     assert census["sessions"]["prompt_reuse_factor"] == 1.0
-    assert census["decision"]["prompt_level_response_cache"]["realizable"] is False
+    # ⛔ The prompt-cache verdict is settled on the S1 CHUNK cell, not the
+    # session cell: the harness renders one prompt per EDU chunk. Its measured
+    # magnitude is the finding (27 of 124,345 = 0.02%), so it is restated here
+    # — a verdict asserted without its cell is what this pin exists to prevent.
+    chunk = census["encode_units"]["chunk"]
+    assert chunk["distinct_content_date"] == 124318
+    assert chunk["prompt_reuse_factor"] == 1.0002
+    prompt_row = census["decision"]["prompt_level_response_cache"]
+    assert prompt_row["hit_slots"] == 27
+    assert prompt_row["hit_share"] < MATERIAL_HIT_SHARE
+    assert prompt_row["realizable"] is False
+    assert prompt_row["identity"] == "rendered S1 chunk text + session_date"
+    assert census["decision"]["session_level_extraction_reuse"][
+        "realizable"] is False
     assert census["decision"]["encode_cache_text_keyed"]["realizable"] is True
     # the verdict's reuse figure IS the measured encode reuse — not a second
     # number a doc could drift from

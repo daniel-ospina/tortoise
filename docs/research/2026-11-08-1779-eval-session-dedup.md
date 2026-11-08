@@ -30,9 +30,15 @@ existing cache with.
    re-dated.** 4,375 session contents repeat; of the **6,660** repeated pairs, **0** share a session
    date. The date is prompt-visible: `extractor_v2._date_anchor` (`extractor_v2.py:1455-1471`)
    renders *"**DATE ANCHOR — today is `<session_date>`**"* into the **system** prompt of S1
-   (`run_s1`, `:1486-1515`), S2 (`run_s2` → `render_s2_prompt`, `:2550-2580`) and S4. So
-   **prompt-identity reuse is exactly 1.000×** — a prompt-level response cache, and a session-level
-   extraction cache (the same identity condition, different payload), have nothing to hit.
+   (`run_s1`, `:1485-1535`), S2 (`run_s2` → `render_s2_prompt`, `:3617`) and S4. So the
+   **session-level** prompt identity is exactly **1.000×**, and a session-level extraction cache has
+   nothing to hit. The **S1 prompt is a finer unit than the session** — `extract_session_v2` splits
+   each session into EDU chunks and calls `run_s1` per chunk with the session date (`chunk_transcript`
+   → `_arm_extract` → `run_s1`), so the response cache's identity is `(chunk text, session date)`,
+   which is measured as its own cell: **124,318 distinct identities over 124,345 chunk prompts =
+   1.0002×, i.e. 27 repeats, 0.02% of the leg**. So the two LLM avenues do **not** share one identity
+   condition, and both land in the same place for the same reason: there is nothing to build —
+   1.000× at chunk granularity is 27 prompts out of 124,345.
 3. **The one realizable lever is the text→embedding cache that already exists**, at the measured
    **1.299×** — and its larger value is on REPEAT passes with the same `(model, prompt)`, where the
    disk cache is ~all hits (a crashed burn resumes off the same file). ⛔ The HNSW spot-check is NOT
@@ -64,11 +70,15 @@ keys. They do not share an answer, which is exactly why the measurement had to c
 | avenue | cache key is | a hit requires |
 |---|---|---|
 | text→embedding (built: `encode_cache.py`) | `sha256(model_id + prompt_name + text)` | the same **text** |
-| prompt-level response cache | the rendered prompt | the same **transcript *and* session date** |
+| prompt-level response cache | the rendered **S1 chunk** prompt | the same **chunk text *and* session date** |
 | session-level extraction reuse | the session's content | the same **transcript *and* session date** |
 
-The bottom two rows are one condition, not two: a session's extraction can only be reused when its
-prompt is identical, so any measurement of prompt identity settles both.
+The bottom two rows are **not** one condition: the extraction cache keys on the whole session, while
+S1 renders one prompt per **EDU chunk** (`extract_session_v2` → `chunk_transcript` → `run_s1`), so the
+response cache's identity is chunk-level. P(a session repeats) ≤ P(a chunk repeats), so the session
+cell can only *understate* prompt reuse — which is why the census measures the chunk cell separately
+and the verdict is derived from it (an earlier round of this PR derived it from the session proxy; a
+review caught that as a number asserted beyond its measured cell).
 
 ## 2. Method — measure the unit the product actually encodes
 
@@ -76,7 +86,12 @@ prompt is identical, so any measurement of prompt identity settles both.
 renderers** rather than a re-implementation:
 
 - session identity — `ingest._session_transcript(session)` (the text the ingest writes);
-- prompt identity — that transcript **+ `haystack_dates[i]`** (the second prompt input);
+- session prompt identity — that transcript **+ `haystack_dates[i]`**;
+- **chunk prompt identity** — the raw-chunk text **+ the same date**, i.e. the `(chunk text, date)`
+  joint. This is the cell the response-cache verdict is derived from, because S1's prompt is rendered
+  per EDU chunk. The exact S1 unit is not dataset-derivable (its chunks are `chunk_transcript` over
+  **LLM-derived** EDUs), so the raw-chunk leg is the finest cell a dataset-only census can measure —
+  the same "dataset-derivable only" boundary the encode-unit denominator states;
 - encode units — one turn Point per turn (`ingest._turn_text`) and one raw chunk per
   `chunk_turns`-window (`ingest._session_chunks`, `DEFAULT_CHUNK_TURNS = 2`).
 
@@ -107,7 +122,8 @@ first place.
 | distinct session ids | 19,195 |
 | distinct session contents | 18,464 → **reuse 1.2926×**, 5,403 duplicate slots |
 | repeated pairs / pairs sharing a date | 6,660 / **0** |
-| distinct (content, date) — i.e. distinct prompts | 23,867 = slots → **prompt reuse 1.000×** |
+| distinct (transcript, date) — distinct SESSION prompts | 23,867 = slots → **session prompt reuse 1.000×** |
+| distinct (chunk text, date) — distinct **S1 prompts** | 124,318 of 124,345 → **1.0002×**, **27 repeats (0.02%)** |
 | questions holding ≥1 repeated session | **500 / 500** |
 | repeat histogram (contents × repeats) | 1×:14,089 · 2×:3,533 · 3×:688 · 4×:130 · 5×:18 · 6×:5 · 8×:1 |
 | encode units — turn leg | 246,750 slots / 189,522 distinct → **1.302×** (23.2% hits) |
@@ -126,9 +142,15 @@ to retire. The re-dating is a property of the duplication, not of the date popul
 
 | avenue | measured reuse | realizable | why |
 |---|---|---|---|
-| text→embedding (`encode_cache.py`) | **1.299×** | **yes** (built) | the key is the text; 23.0% of units hit in one pass, ~all on a repeat pass |
-| prompt-level response cache | **1.000×** | **no** | 0 of 6,660 repeated pairs share a date; the date is prompt-visible |
-| session-level extraction reuse | **1.000×** | **no** | same identity condition as the row above |
+| text→embedding (`encode_cache.py`) | **1.299×** (23.0% of units) | **yes** (built) | the key is the text; 23.0% of units hit in one pass, ~all on a repeat pass |
+| prompt-level response cache | **1.0002×** (27 of 124,345 S1 chunk prompts = 0.02%) | **no** | S1 renders one prompt per chunk, and the `(chunk text, date)` cell is 124,318 distinct over 124,345 slots — the 27 repeats are `0.02%`, below the declared `MATERIAL_HIT_SHARE` of 1% |
+| session-level extraction reuse | **1.000×** | **no** | 0 of 6,660 repeated pairs share a date; the date is prompt-visible |
+
+`realizable` is `reuse > 1.0 AND hit_share >= MATERIAL_HIT_SHARE` (`haystack_overlap.py`), declared
+once in the module and published in every verdict row: repeating is not the same as being worth
+building, and 27 hits out of 124,345 is a rounding error of the LLM work. The floor sits an order of
+magnitude below the cache this lane already ships (23.0%), so it can only reject an avenue that is
+demonstrably weaker than the one already built.
 
 Nothing is worth building at the LLM level for *cross-question* reuse, and the alternative that is
 left — dropping or relocating the date anchor to make prompts repeat — is a **prompt-semantics**
@@ -139,7 +161,7 @@ for this issue by its own scope guard ("Out of scope: any parse/retrieval semant
 ## 5. What changed in the tree (and what deliberately did not)
 
 - **New:** `tools/longmem_eval/haystack_overlap.py` (census + derived verdict + CLI) and its test
-  `tests/longmem_eval/test_haystack_overlap_1779.py` (16 tests: 15 hermetic + the real-split pin — a
+  `tests/longmem_eval/test_haystack_overlap_1779.py` (18 tests: 17 hermetic + the real-split pin — a
   count this document's §5 line must match, asserted by
   `test_the_research_doc_publishes_this_files_REAL_test_count`; registered on the `eval` surface for
   OWNERSHIP (`tools/longmem_eval/` is a `SOURCE_PATTERNS` entry of it), and independently a non-gating
@@ -226,7 +248,7 @@ for this issue by its own scope guard ("Out of scope: any parse/retrieval semant
 TORTOISE_LME_CACHE_DIR=~/.cache/tortoise-longmemeval \
   python -m tools.longmem_eval.haystack_overlap --json
 
-# the tests (15 hermetic pass; the @slow pin only runs with the cached S split)
+# the tests (17 hermetic pass; the @slow pin only runs with the cached S split)
 TORTOISE_TEST_CARVE_OUT=1 TORTOISE_LME_CACHE_DIR=~/.cache/tortoise-longmemeval \
   python -m pytest tests/longmem_eval/test_haystack_overlap_1779.py -q -p no:cacheprovider
 ```
