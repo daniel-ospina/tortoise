@@ -1062,7 +1062,8 @@ pipeline's coverage flag and its retry counter do not exist on those rows. So of
 **one is measured and two are not:** `added_by_s4 > 0` is measured — **4/7 primary, 3/7 re-run,
 5/7 across the union on the `legacy` arm** (`TORTOISE_S4_DELTA=0`), and **2/7 on either run of the
 `delta` arm**, which is DEFAULT-ON — while the flag clause is an INFERENCE from the artifacts'
-own S2 item counts (29–49 in every one of the 28 session-runs) and the retry clause is a property
+own S2 item counts (29–49 in every one of the 14 session-runs — 28 arm blocks, both arms of a
+row carrying the same count in all 28) and the retry clause is a property
 of the instrument's construction (no pipeline run ⇒ no retry). ⚠️ The inference is not free: the
 artifact stores COUNTS, and `check_batch`'s `candidates` applies a stricter predicate (a `Mapping`
 item with non-empty `name or content`), so the counts do not by themselves pin the flag. Both

@@ -1747,9 +1747,11 @@ re-cut from the resolved document (§8), and no committed verdict is re-scored.
 
 ### 10.15 — the §11 cite block re-pointed for `#11002` (2026-11-08, `#11002`)
 
-- **Baseline — measured at THIS branch's base, `f76b74c3e`:** `_collect_classify_items` at
-  `:11174`, its extent `:11174-11196`, the two `if items:` gates at `:13058`/`:13207`, and the two
-  fail-open `except` arms at `:13071`/`:13218`.
+- **Baseline — measured at this branch's PRE-rebase base, `f76b74c3e` (= `origin/main`'s parent;
+  the reading is unchanged at `origin/main` `a1dff7cec`, which touches no line of
+  `extractor_v2.py` — `git diff f76b74c3e..a1dff7cec -- tortoise/extractor_v2.py` is empty):**
+  `_collect_classify_items` at `:11174`, its extent `:11174-11196`, the two `if items:` gates at
+  `:13058`/`:13207`, and the two fail-open `except` arms at `:13071`/`:13218`.
 - **New value — measured at this head:** the same symbols at `:11189`, `:11189-11211`,
   `:13101`/`:13250` and `:13114`/`:13261`.
 - **Why the baseline is NOT §10.10's `:11098`.** §10.9 and §10.10 record the moves `#11264`/`#11361`

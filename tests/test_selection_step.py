@@ -832,6 +832,14 @@ def test_the_pick_hands_the_union_pool_to_the_post_s4_pass():
     helper would leave the same hole one level up, where the pool is actually
     consumed: a pick that published the second arm's pool alone would drop the
     first arm's removals from a list that IS the union of both.
+
+    ⛔ AND ASSERTING THE HELPER ALONE **WAS** THE SAME HOLE (round 4 of the
+    rebase review, measured): reverting the consumption site
+    (`vet_s2_pool = picked["vet_pool"]` -> the first arm's pool) left this file
+    and the two extractor suites at `424 passed, 1 skipped`. So the row below
+    drives the REAL pipeline through a retried keep-rate run and reads the
+    `prior` the post-S4 pass is handed — which is the only carrier of the
+    first arm's DISCARD protection when the first arm yields nothing.
     """
     def _arm(pool, rate):
         return {"story": "n", "embed_list": {"entities": []},
@@ -850,6 +858,54 @@ def test_the_pick_hands_the_union_pool_to_the_post_s4_pass():
     assert set(picked["vet_pool"]["removed_entities"]) == {"A", "B"}, (
         "and BOTH arms' restorable entities"
     )
+
+
+def test_the_pipeline_hands_BOTH_arms_pools_to_the_post_s4_pass(monkeypatch):
+    """The SAME claim, on the wire: what `extract_session_v2` actually passes.
+
+    Two arms with DIFFERENT candidates, each discarding its own first item, so
+    the two pools are distinguishable by name: `Alpha` (first arm) and `Gamma`
+    (second arm). Each arm's own VET pass is handed no `prior`; the post-S4
+    union pass must be handed BOTH — the first arm's `Alpha` is the one a
+    second-arm-only pool would silently lose, and losing it re-opens
+    `apply_vet`'s resurrection path for an item S2 discarded.
+    """
+    payload_a = json.dumps({
+        "entities": [{"name": "Alpha", "kind": "core:org", "lifecycle": "created"},
+                     {"name": "Beta", "kind": "core:org", "lifecycle": "created"}],
+        "events": [], "operators": [], "points": [],
+        "chain_notes": [], "link_before_create": [],
+    })
+    payload_b = json.dumps({
+        "entities": [{"name": "Gamma", "kind": "core:org", "lifecycle": "created"},
+                     {"name": "Delta", "kind": "core:org", "lifecycle": "created"}],
+        "events": [], "operators": [], "points": [],
+        "chain_notes": [], "link_before_create": [],
+    })
+    priors: list = []
+    real = extractor_v2._run_vet_pass
+
+    def _spy(embed_list, narrative, **kw):
+        priors.append(kw.get("prior"))
+        return real(embed_list, narrative, **kw)
+
+    monkeypatch.setattr(extractor_v2, "_run_vet_pass", _spy)
+    _, result = _run(monkeypatch, ["Alice and Bob met.", "Carol and Dan met."],
+                     [payload_a, payload_b], arbiter=_discarding_arbiter,
+                     keep_rate="0.9")
+    assert result["stats"]["renarrate"]["fired"] is True, (
+        "the keep-rate arm must fire, or there is no union pass to inspect"
+    )
+    assert len(priors) == 3, (
+        f"one VET pass per arm plus the post-S4 union pass, got {len(priors)}")
+    assert priors[0] is None and priors[1] is None, (
+        "each ARM's own pass starts from no prior removals")
+    pool = priors[2] or {}
+    restored = set((pool.get("removed_entities") or {}))
+    # The pool keys are NORMALISED (`_norm`), so `Alpha` arrives as `alpha`.
+    assert {"alpha", "gamma"} <= restored, (
+        "the post-S4 pass must be handed BOTH arms' removals — the first arm's "
+        f"`Alpha` is what a second-arm-only pool drops; got {sorted(restored)}")
 
 
 def test_each_arm_records_its_own_coverage_verdict(monkeypatch):
