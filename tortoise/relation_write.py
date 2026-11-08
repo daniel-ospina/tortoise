@@ -241,18 +241,26 @@ class RelationDrop:
     reason: str
 
 
-def _entity_kind(entity_index: dict, name: str) -> tuple[str, str | None] | None:
-    """``(id, kind)`` for one endpoint name, or ``None`` with the reason set.
+def _entity_kind(entity_index: dict, name: str) -> tuple[str, str | None]:
+    """``(id, kind)`` for one endpoint name.
 
-    Returns ``None`` for an absent name, and the caller distinguishes
-    "unresolved" from "ambiguous" through :func:`_endpoint_reason` — the two
-    need different sentences, and collapsing them would report a name collision
-    as a missing endpoint.
+    PRECONDITION: :func:`_endpoint_reason` returned ``None`` for ``name`` — i.e.
+    the name resolves to exactly ONE entity id. That is where the absent-name
+    and the ambiguous-name (#11235) decisions are made and where the two
+    different sentences come from; collapsing them into this function would
+    report a name collision as a missing endpoint. There is no second copy of
+    that test here, on purpose (see the note in the body).
     """
     holders = entity_index.get(name) or ()
     ids = {hid for hid, _kind in holders if hid}
-    if len(ids) != 1:
-        return None
+    # ⛔ NO GUARD HERE, AND THAT IS DELIBERATE. Every caller reaches this AFTER
+    # :func:`_endpoint_reason` returned ``None``, which establishes ``len(ids)
+    # == 1`` (it returns a reason for the empty and the multi-id case). A guard
+    # duplicating that test here could never fire — and a guard that cannot fail
+    # is worse than none: an earlier version had one, and the ``#11235`` case's
+    # docstring named it as its mutation, so the attribution pointed the next
+    # reader at a line that provably could not red anything (#11548 review, F2).
+    # The ambiguity decision lives in ONE place, ``_endpoint_reason``.
     hid = next(iter(ids))
     kind = next((k for i, k in holders if i == hid and k), None)
     return hid, kind
@@ -397,6 +405,21 @@ def plan_relation_edges(
     #: structural ``IMPL`` and a direct ``IMPL`` between one pair can never be
     #: read as the same edge.
     direct_at: dict[tuple[str, str, str], int] = {}
+    #: The DROP arms dedup on the statement they lost, exactly as the landing
+    #: arms dedup on the edge they planned — otherwise a REPEATED statement that
+    #: is dropped is counted once per repetition while the same statement
+    #: LANDING is counted once, and ``written + dropped + folded`` stops
+    #: reconciling with the stated population (#11548 review, F3b: `transacts`
+    #: stated twice reported ``dropped=2`` for one statement).
+    dropped_at: set[tuple[str, str, str, str]] = set()
+
+    def _drop(src_name: str, dst_name: str, stated: str, why: str) -> None:
+        key = (src_name, dst_name, stated, why)
+        if key in dropped_at:
+            return
+        dropped_at.add(key)
+        drops.append(RelationDrop(src_name, dst_name, stated, why))
+
     for rel in relations or ():
         if not isinstance(rel, dict):
             continue
@@ -410,7 +433,7 @@ def plan_relation_edges(
         reason = _endpoint_reason(entity_index, src) \
             or _endpoint_reason(entity_index, dst)
         if reason is not None:
-            drops.append(RelationDrop(src, dst, predicate, reason))
+            _drop(src, dst, predicate, reason)
             continue
         src_id, src_kind = _entity_kind(entity_index, src)
         dst_id, dst_kind = _entity_kind(entity_index, dst)
@@ -420,15 +443,18 @@ def plan_relation_edges(
             [(src_kind, src_id, dst_kind, dst_id)], registry,
             declared=declared_edges) if declared_edges else []
         if planned:
-            for edge in planned:
-                if edge.write_path != HIERARCHY_STRUCTURAL:
-                    drops.append(RelationDrop(
-                        src, dst, predicate,
-                        f"the pack {edge.pack!r} declares "
-                        f"{edge.from_kind} → {edge.to_kind} on the OPERATOR "
-                        f"path ({edge.predicate}) — this leg writes Object "
-                        f"endpoints and does not mint a carrying operator"))
-                    continue
+            # ⛔ ONE STATEMENT, ONE OUTCOME. A declared declaration can bind BOTH
+            # a structural edge and an operator-path edge for the same kind
+            # pair, and this leg writes objects only — so the operator-path
+            # declaration is NOT a second loss of a statement the structural
+            # edge already carried. Counting both made one stated relation
+            # report ``written=1, dropped=1`` (total 2 for a population of 1)
+            # with a drop sentence claiming the relation was not written when
+            # its edge had just landed (#11548 review, F3a).
+            structural = [e for e in planned
+                          if e.write_path == HIERARCHY_STRUCTURAL]
+            outcomes = 0
+            for edge in structural:
                 key = (edge.predicate, src_id, dst_id)
                 kept_at = structural_at.get(key)
                 if kept_at is not None:
@@ -437,10 +463,12 @@ def plan_relation_edges(
                     # onto it and is NAMED; a literal repeat is the same
                     # statement and is deduped silently.
                     _fold_onto(edges, kept_at, predicate)
+                    outcomes += 1
                     continue
                 routed = _routed_away_reason(edge.predicate)
                 if routed:
-                    drops.append(RelationDrop(src, dst, predicate, routed))
+                    _drop(src, dst, predicate, routed)
+                    outcomes += 1
                     continue
                 structural_at[key] = len(edges)
                 edges.append(RelationEdge(
@@ -448,18 +476,30 @@ def plan_relation_edges(
                     write_path=RELATION_STRUCTURAL, declared_by=edge.pack,
                     stated_predicate=predicate,
                     src_name=src, dst_name=dst))
+                outcomes += 1
+            if outcomes == 0:
+                # The declaration binds the pair ONLY on the operator path. One
+                # drop names it — ONE per stated relation, not one per declared
+                # path, so a pack declaring the same pair twice does not make
+                # two losses out of one statement.
+                operators = sorted({f"{e.pack!r} ({e.predicate})"
+                                    for e in planned})
+                _drop(src, dst, predicate,
+                      f"the declared hierarchy binds {src_kind} → "
+                      f"{dst_kind} on the OPERATOR path only "
+                      f"({', '.join(operators)}) — this leg writes Object "
+                      f"endpoints and does not mint a carrying operator")
             continue
 
         # ── 2. the story's own verb, through the registry's verdict ────────
         mechanism = _mechanism_for(predicate, semantics)
         paths = _stated_verdict(predicate, mechanism)
         if not paths:
-            drops.append(RelationDrop(
-                src, dst, predicate,
-                f"`{predicate}` binds no declared write path "
-                f"(relation_write_paths() -> ()) — it is neither in the "
-                f"structural writer's predicate set nor bound to a mechanism, "
-                f"so nothing is written and nothing is inferred in its place"))
+            _drop(src, dst, predicate,
+                  f"`{predicate}` binds no declared write path "
+                  f"(relation_write_paths() -> ()) — it is neither in the "
+                  f"structural writer's predicate set nor bound to a mechanism, "
+                  f"so nothing is written and nothing is inferred in its place")
             continue
         if RELATION_STRUCTURAL in paths and predicate in _VALID_EDGE_PREDICATES:
             key = (predicate, src_id, dst_id)
@@ -469,7 +509,7 @@ def plan_relation_edges(
                 continue
             routed = _routed_away_reason(predicate)
             if routed:
-                drops.append(RelationDrop(src, dst, predicate, routed))
+                _drop(src, dst, predicate, routed)
                 continue
             structural_at[key] = len(edges)
             edges.append(RelationEdge(
@@ -511,12 +551,31 @@ def plan_relation_edges(
                 # ``semantics`` gloss is consulted before the one-way fallback).
                 direction=_direction_for(label, predicate, semantics)))
             continue
-        drops.append(RelationDrop(
-            src, dst, predicate,
-            f"`{predicate}` binds only the operator path "
-            f"({paths}) and declares no mechanism this leg can write without "
-            f"an operator — the endpoints are Objects, so no operator is "
-            f"licensed (ONTOLOGY §3.9)"))
+        # ⛔ THE TWO REASONS ARE DIFFERENT AND USED TO BE ONE (#11548 review, F1).
+        # ``relation_write_paths`` answers for the UNION of every structural
+        # writer (``edges.STRUCTURAL_WRITE_PREDICATES``), while this leg calls
+        # exactly ONE of them — ``link_entities`` → ``create_edge``
+        # (``edges._VALID_EDGE_PREDICATES``). The sets differ by exactly the two
+        # predicates another writer owns (``aboutPoint`` → ``create_about_edge``,
+        # ``extractedFrom`` → the ingest path), so a verb can be STRUCTURAL and
+        # still be unreachable here. Reporting that as "binds only the operator
+        # path (('structural',))" contradicted its own parenthetical and would
+        # send a reader off to build a writer the graph already has.
+        if RELATION_STRUCTURAL in paths:
+            _drop(src, dst, predicate,
+                  f"`{predicate}` binds a structural writer, but NOT the one "
+                  f"this leg calls: `relation_write_paths()` answers for the "
+                  f"union of every structural writer ({paths}), while "
+                  f"`link_entities` reaches only `create_edge` — "
+                  f"`{predicate}` is minted by another member of that union "
+                  f"(a Source→Entity or about-edge writer), so writing it here "
+                  f"would be a DIFFERENT edge from the declared one")
+            continue
+        _drop(src, dst, predicate,
+              f"`{predicate}` binds only the operator path ({paths}) and "
+              f"declares no mechanism this leg can write without an operator "
+              f"— the endpoints are Objects, so no operator is licensed "
+              f"(ONTOLOGY §3.9)")
     return edges, drops
 
 

@@ -954,7 +954,7 @@ def aggregate_graph_census(per_session: dict[str, dict]) -> dict:
             "with_derivation_link": objects_linked,
         },
         "derivation_edges": edges,
-        # #11237: the Object→Object write path's own row, summed over sessions.
+        # #11237: the write leg's own row, summed over sessions.
         # `object_edges_total` is the single number the E6 pre-registration
         # reads against its before-arm of 0, and it is the ATTRIBUTABLE count
         # (write-leg record, verified in the graph) — not the incident read.
@@ -963,6 +963,16 @@ def aggregate_graph_census(per_session: dict[str, dict]) -> dict:
         # `object_edges_basis` (how many sessions could answer at all) and
         # `object_edges_missing` (claims the graph did not hold), never on its
         # own.
+        # ⛔ AND IT IS NOT "Object→Object ONLY", which is how the E6
+        # pre-registration words its row (#11548 review, context note). The
+        # attributable read verifies every edge the leg RECORDED, and the
+        # structural arm writes `ownedBy`/`managedBy` to SUBJECTS as well — on
+        # the committed `w2b-relations-2026-11-08-11237.json` that split is 24
+        # Object→Object vs 11 Subject-targeted. The widening is deliberate
+        # (those are edges this leg wrote, and excluding them was the #10000
+        # pin's own blind spot), so the E6 after-arm must compare a POST-DIFF
+        # `object_edges_total` against the before-arm with that difference
+        # stated, rather than treating the two as the same population.
         "object_edges": object_edges,
         "object_edges_total": sum(object_edges.values()),
         "object_edges_basis": object_edges_basis,

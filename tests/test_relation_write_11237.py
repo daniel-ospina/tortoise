@@ -83,7 +83,9 @@ def test_ambiguous_endpoint_is_refused_not_guessed():
     already warns that such an endpoint is ambiguous; this is the write-side
     half that refuses to settle it by accident.
 
-    Mutation: `if len(ids) != 1` → `if not ids` guesses through the collision.
+    Mutation: delete `_endpoint_reason`'s `if len(ids) > 1` arm, or route the
+    collision through `_entity_kind`, and this case reds (`TypeError` on the
+    2-id unpack, or a guessed edge).
     """
     index = {
         "lumen auth": [("obj-1", "organization"), ("subj-1", "organization")],
@@ -398,3 +400,95 @@ def test_a_predicate_link_entities_inverts_is_refused_not_written():
     assert len(drops) == 1, drops
     assert (drops[0].src, drops[0].dst) == ("retry storm", "deadline slip")
     assert "OPPOSITE" in drops[0].reason, drops[0].reason
+
+
+def test_a_structural_verb_another_writer_owns_names_ITS_own_reason():
+    """⛔ "structural" in the registry is not "the writer this leg calls".
+
+    `relation_write_paths` answers for the UNION of every structural writer
+    (`edges.STRUCTURAL_WRITE_PREDICATES`), while this leg reaches exactly ONE of
+    them — `link_entities` → `create_edge` (`edges._VALID_EDGE_PREDICATES`). The
+    two sets differ by the predicates another writer mints (`aboutPoint` →
+    `create_about_edge`, `extractedFrom` → the ingest path), so a verb can bind
+    `('structural',)` and still be unreachable here.
+
+    The refusal used to reuse the OPERATOR-path sentence, which contradicted its
+    own parenthetical — `` `aboutPoint` binds only the operator path
+    (('structural',)) `` — and that class of wrong cause sends the next reader
+    off to build a writer the graph already has (#11548 review, F1).
+
+    Mutation: route this case back into the operator-path arm and the two
+    assertions on the reason red (`"operator path" in reason` becomes true).
+    """
+    for verb in ("aboutPoint", "extractedFrom"):
+        edges, drops = plan_relation_edges(
+            [{"src": "retry storm", "dst": "deadline slip",
+              "predicate": verb}], INDEX, declared=())
+        assert edges == [], (verb, edges)
+        assert len(drops) == 1, (verb, drops)
+        reason = drops[0].reason
+        # It SAYS what is true: a structural writer exists, just not this one.
+        assert "structural writer" in reason, (verb, reason)
+        assert "create_edge" in reason, (verb, reason)
+        # …and it no longer claims the operator path is the only one declared.
+        assert "operator path" not in reason, (verb, reason)
+
+
+def test_a_dropped_statement_is_counted_ONCE_per_statement():
+    """A REPEAT of a dropped statement is one statement, not two losses.
+
+    The landing arms dedup repeats on the edge identity by design ("a literal
+    repeat is the same statement"), so the drop arms must dedup on the statement
+    they lost — otherwise `transacts` stated twice reported ``dropped=2`` for a
+    population of 1 while the same verb LANDING twice reported ``written=1``,
+    and ``written + dropped + folded`` stopped reconciling (#11548 review, F3b).
+
+    Mutation: drop the `dropped_at` key and `len(drops)` reads 2.
+    """
+    edges, drops = plan_relation_edges(
+        [{"src": "retry storm", "dst": "deadline slip",
+          "predicate": "transacts"}] * 2, INDEX)
+    assert edges == [], edges
+    assert len(drops) == 1, drops
+
+
+def test_a_pair_declared_on_BOTH_paths_is_written_once_and_loses_nothing():
+    """⛔ One stated relation gets ONE outcome — even when a pack declares it twice.
+
+    A declared hierarchy can bind the same kind pair on a structural predicate
+    AND on an operator-path one. This leg writes Objects only, so the operator
+    declaration is unreachable — but it is not a SECOND LOSS of a statement the
+    structural edge just carried. Counting both reported, for one stated
+    relation, ``written=1, dropped=1`` (total 2) with a drop sentence saying the
+    relation was not written when its edge had landed (#11548 review, F3a).
+
+    When the pair is declared ONLY on the operator path there is nothing else to
+    carry it, and exactly ONE drop names that — once per stated relation, not
+    once per declared path.
+
+    Mutation: put the operator-path drop back inside the per-edge loop and the
+    first block's `drops == []` reds (and the single-drop case reads 2).
+    """
+    both = (
+        DeclaredHierarchy(pack="dev", path="Theme \u2192 Epic",
+                          predicate="hasPart", from_kind="dev:theme",
+                          to_kind="dev:epic", write_path="structural"),
+        DeclaredHierarchy(pack="dev", path="Theme \u2192 Epic (operator)",
+                          predicate="supports", from_kind="dev:theme",
+                          to_kind="dev:epic", write_path="operator"),
+    )
+    index = {"quarry": [("obj-theme", "dev:theme")],
+             "auth table": [("obj-epic", "dev:epic")]}
+    stated = [{"src": "quarry", "dst": "auth table", "predicate": "related"}]
+
+    edges, drops = plan_relation_edges(stated, index, declared=both)
+    assert drops == [], drops
+    assert len(edges) == 1, edges
+    assert edges[0].write_path == "structural", edges[0]
+
+    operator_only = (both[1],)
+    edges, drops = plan_relation_edges(stated, index,
+                                       declared=operator_only)
+    assert edges == [], edges
+    assert len(drops) == 1, drops
+    assert "OPERATOR path only" in drops[0].reason, drops[0].reason
