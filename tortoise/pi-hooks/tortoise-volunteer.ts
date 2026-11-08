@@ -665,15 +665,25 @@ export type ReflexVerdict =
  * `empty` is the ordinary answer — the reflex RAN and nothing cleared the
  * confidence gate — and it stays silent. `timeout` means a reflex RAN and did
  * not finish in budget: silence, and NO evidence about the install, because the
- * install is demonstrably working (it started the process). `inert` means
- * nothing could run at all (no candidate resolved, every candidate failed, no
- * hosted key, a refused request): the caller records the breadcrumb.
+ * install is demonstrably working (it started the process). `refused` means a
+ * candidate was REACHED and answered nothing usable (an HTTP status, an
+ * unparseable body) — also no evidence about the install. `inert` is reserved
+ * for the one thing an install actually fixes: NOTHING COULD RUN AT ALL (no
+ * candidate resolved AND no hosted key), which is the only class the caller may
+ * latch on and breadcrumb.
+ *
+ * ⛔ A resolved CLI candidate that FAILED is `refused`, NOT `inert` (#11584
+ * review finding 1, second half). "Every candidate failed" is what a
+ * momentarily locked graph or a reflex mid-upgrade looks like on an install
+ * that is entirely sound, and `inert` latches the seam off for the rest of the
+ * process AND writes the `install-inert` breadcrumb telling the operator to
+ * reinstall it. Only a chain that could not be formed at all is inert.
  *
  * A timeout ABORTS the chain rather than falling through to the next candidate.
  * A slow reflex is slow in the reflex, not in the path it was found on, so the
  * next candidate would spend the same budget again and multiply the turn's
  * wait by the size of the chain — the opposite of the bound this constant
- * exists to provide. Exhausting the chain is what `inert` is for.
+ * exists to provide. Exhausting the chain is what `refused` is for.
  */
 export async function resolveBlock(
   prompt: string,
@@ -716,7 +726,14 @@ export async function resolveBlock(
     return parsed.block.trim() ? { status: "block", result: parsed } : { status: "empty" };
   }
   if (chain.length) {
-    return { status: "inert", detail: `every resolved tortoise reflex failed (${lastError})` };
+    // ⛔ Not `inert` (#11584 review finding 1, second half). A non-zero exit
+    // from every candidate is what a momentarily locked graph or a reflex
+    // mid-upgrade looks like; `inert` would latch the seam OFF for the whole
+    // process and write "reinstall" about an install that works.
+    return {
+      status: "refused",
+      detail: `every resolved tortoise reflex failed (${lastError})`,
+    };
   }
   // No CLI anywhere: a configured hosted key is the documented SECOND
   // transport (the CLI's own hosted mode posts the same body), not a fallback
@@ -807,7 +824,10 @@ export default function tortoiseVolunteer(
           (typeof fetch === "function" ? fetch : undefined)) as typeof fetch,
       );
     } catch (error) {
-      verdict = { status: "inert", detail: `reflex raised: ${String(error)}` };
+      // An unexpected throw out of the resolver is a bug in THIS seam, not
+      // evidence about the install, so it must not latch or breadcrumb
+      // (#11584 review finding 1).
+      verdict = { status: "refused", detail: `reflex raised: ${String(error)}` };
     }
     // An inert install must leave evidence; an empty graph must not (#4314) —
     // and neither must a SLOW one. A timeout says the reflex ran and the

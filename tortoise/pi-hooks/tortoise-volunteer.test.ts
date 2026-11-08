@@ -400,7 +400,12 @@ test("the CLI contract, run for real: `volunteer --json --session-id`, prompt on
   assert.equal(readFileSync(promptFile, "utf-8"), "how does CI deploy?");
 });
 
-test("a non-zero exit, a `{status:error}` body, and an unparseable body are all fail-open", async () => {
+test("a non-zero exit, a `{status:error}` body, and an unparseable body are fail-open and NEVER `inert`", async () => {
+  // ⛔ These are `refused`, not `inert` (#11584 review finding 1, second half).
+  // `inert` is the claim "your install is broken — reinstall it", and it
+  // LATCHES the seam off for the rest of the process. A non-zero exit from
+  // every candidate is what a momentarily locked graph or a reflex mid-upgrade
+  // looks like on a perfectly sound install.
   const home = tmpHome();
   const exitFail = fakeCli(join(home, "a"), "exit 2");
   const failed = await resolveBlock(
@@ -409,9 +414,9 @@ test("a non-zero exit, a `{status:error}` body, and an unparseable body are all 
     readVolunteerConfig({ TORTOISE_COMMAND: exitFail }, join(home, "no.json")),
     [],
   );
-  assert.equal(failed.status, "inert");
+  assert.equal(failed.status, "refused");
   assert.match(
-    failed.status === "inert" ? failed.detail : "",
+    failed.status === "refused" ? failed.detail : "",
     /every resolved tortoise reflex failed \(.*a\/tortoise: /,
   );
 
@@ -419,14 +424,14 @@ test("a non-zero exit, a `{status:error}` body, and an unparseable body are all 
   assert.equal(
     (await resolveBlock("q", "", readVolunteerConfig({ TORTOISE_COMMAND: errorBody }, join(home, "no.json")), []))
       .status,
-    "inert",
+    "refused",
   );
 
   const garbage = fakeCli(join(home, "c"), "printf '%s' 'not json'");
   assert.equal(
     (await resolveBlock("q", "", readVolunteerConfig({ TORTOISE_COMMAND: garbage }, join(home, "no.json")), []))
       .status,
-    "inert",
+    "refused",
   );
 
   // Clean silence: the reflex ran, nothing cleared the gate. NOT inert.
@@ -564,6 +569,58 @@ test("a REFUSED hosted request is not an inert install: no breadcrumb, no latch"
   );
   assert.equal(verdict.status, "refused");
   assert.match(verdict.status === "refused" ? verdict.detail : "", /HTTP 402/);
+});
+
+test("a TRANSIENT CLI failure does not latch, and writes no install breadcrumb", async () => {
+  // #11584 review finding 1, second half: the latch exists so a DEAD install
+  // is not re-walked every turn, and its justification is "the remedy is an
+  // install" — true only of `inert`. A locked graph or a reflex mid-upgrade is
+  // a PER-TURN fact: classifying it `inert` disabled per-turn memory for the
+  // rest of the Pi process and wrote `kind: install-inert` ("reinstall") about
+  // an install that works. The hosted leg was split out separately; this is the
+  // CLI leg, which is the ordinary transient on a laptop.
+  //
+  // The fake CLI fails ONCE (consuming its own flag) and then answers normally,
+  // so a latched seam CANNOT pass: turn 2 would never call it.
+  const home = tmpHome();
+  const crumbs = join(home, "capture-errors");
+  const flag = join(home, "still-broken");
+  writeFileSync(flag, "");
+  const flaky = fakeCli(
+    join(home, "bin"),
+    [
+      `if [ -f ${JSON.stringify(flag)} ]; then rm -f ${JSON.stringify(flag)}; exit 2; fi`,
+      `printf '%s' '{"block":"## Memory surfaced this turn","surfaced":[]}'`,
+    ].join("\n"),
+  );
+  assert.notEqual(statSync(flaky).mode & 0o111, 0, "the stub must be executable");
+
+  const pi = mockPi();
+  tortoiseVolunteer(pi as never, {
+    env: { PATH: join(home, "bin") },
+    home,
+    configPath: join(home, "absent.json"),
+    breadcrumbDir: crumbs,
+  });
+
+  assert.equal(
+    await pi.handlers.before_agent_start({ messageType: "user", prompt: "q" }, SESSION_CTX()),
+    undefined,
+    "a failed reflex injects nothing, fail-open",
+  );
+  assert.equal(
+    existsSync(join(crumbs, "pi-install.json")),
+    false,
+    "a TRANSIENT failure is not evidence about the install — no `install-inert` " +
+      "breadcrumb, or the operator is told to reinstall a working install",
+  );
+
+  const second = (await pi.handlers.before_agent_start(
+    { messageType: "user", prompt: "q" },
+    SESSION_CTX(),
+  )) as { message?: { content?: unknown } } | undefined;
+  assert.ok(second?.message, "turn 2 must retry: a transient CLI failure may NOT latch");
+  assert.match(String(second?.message?.content ?? ""), /Memory surfaced this turn/);
 });
 
 test("runReflexCommand reports a timeout as a TIMEOUT, a non-zero exit as a failure", async () => {
