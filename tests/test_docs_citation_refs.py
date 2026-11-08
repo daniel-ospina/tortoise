@@ -53,10 +53,13 @@ WHY THIS IS NOT A DUPLICATE OF THE EXISTING CITATION GUARDS
 but neither reads this relation. `citation_rot` resolves a quoted `sym` against a
 `file.py:NNNN` whose symbol must still exist in that source file, and it states
 the same claim across several design documents rather than one — the asserted set
-is `FACT_STATEMENTS_IN_SIBLINGS`, whose entries name `STORAGE`, `ONTOLOGY`,
-`EVAL_SPEC`, `INGEST` and `ONTOLOGY_CHANGELOG` (`DOC` is a declared module
-constant that carries no entry, and `SEARCH` does not exist at this head; the
-paragraph below records that `origin/main` adds it below `ONTOLOGY`).
+is `FACT_STATEMENTS_IN_SIBLINGS`, whose entries are `STORAGE`, `ONTOLOGY`,
+`SEARCH`, `EVAL_SPEC`, `INGEST` and `ONTOLOGY_CHANGELOG` (`DOC` is a declared
+module constant that carries no entry. ⛔ `SEARCH` was absent when this file was
+written and arrived with the `origin/main` merge — re-derive the set at YOUR head
+(`grep -nE '^\\s+(STORAGE|ONTOLOGY|SEARCH|INGEST|EVAL_SPEC|ONTOLOGY_CHANGELOG),'
+tests/test_extractor_v4_citation_rot.py`) instead of trusting this list, for the
+same reason the paragraph below declines to state the constants' line numbers).
 `doc_citations` does not use `file.py:NNNN` at all: it pins
 that §7's value-gate row names the SHIPPED symbols (`value_gate._REFERENCE` /
 `identifier_only()`) and that those symbols behave as the row says. Neither reads
@@ -145,9 +148,12 @@ STATED LIMITS — deliberate, and measured rather than guessed:
     citation in the tree.
   * The guard is scoped to those two directories ON PURPOSE. With `_in_scope`
     widened to accept EVERY target under `docs/`, this tree carried **10** further
-    dead citations when the disposition was written (measured at `e66450bb`, this
-    change's base; paths below are relative to `docs/`: `ONTOLOGY.md` ×4 — three
-    blank lines plus one PAST-EOF cite, which is a different repair from a blank
+    dead citations when the disposition was written (measured at `e66450bb`,
+    the base WHEN IT WAS WRITTEN — the paragraph below re-measures the same
+    widening against `origin/main` and gets **8**, so do not "correct" this 10 to
+    that 8: they are two different heads and neither is the live one; paths below
+    are relative to `docs/`: `ONTOLOGY.md` ×4 — three blank lines plus one
+    PAST-EOF cite, which is a different repair from a blank
     one — `ops/registry-backup-dr.md` ×2, `infra/embedded-reaper-cron.md`,
     `architecture/STORAGE-ARCHITECTURE.md`,
     `epics/2026-08-03-tortoise-hosted-platform/plans/7714-data-model.md`,
