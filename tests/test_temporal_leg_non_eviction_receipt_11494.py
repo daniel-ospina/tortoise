@@ -567,9 +567,10 @@ def test_the_guard_judges_the_window_the_RUN_caps(monkeypatch):
     VERDICT: the text pin reddened, the behaviour did not.
 
     ⛔ THE DISCRIMINATOR IS THE REASON VALUE, not a count. On this pool BOTH
-    caps refuse the SAME pick (``p9``/``t9``), so ``applied``, ``picks``, the
-    leg reason and the refusal LIST are identical — only the ruling condition
-    it is refused under moves:
+    caps refuse the SAME four picks (``p6``..``p9``), with the same ``applied``,
+    the same ``picks`` and the same leg reason, and the first THREE refusal
+    rows are IDENTICAL. Exactly ONE row moves — ``p9`` — and the only field
+    that moves in it is its REASON, from condition (1) to condition (3):
 
     * ``cap=1`` (a deliberately TIGHT run cap, well below the shipped
       ``DEFAULT_MAX_CHUNKS_PER_SESSION`` of 3 that the control arm uses):
@@ -626,8 +627,9 @@ def test_the_guard_judges_the_window_the_RUN_caps(monkeypatch):
         "this fixture no longer satisfies the clustering precondition, so the "
         "window arm will not fire and the assertions below prove nothing")
 
-    tight = _stats(_read(monkeypatch, CHUNK_BEARING, cap=1, limit=4,
-                         point_kind="session-transcript"))
+    tight_ret = _read(monkeypatch, CHUNK_BEARING, cap=1, limit=4,
+                      point_kind="session-transcript")
+    tight = _stats(tight_ret)
     assert tight["non_eviction_targeting"] == "window", (
         f"this pin is about the window arm's guard; the target must be the "
         f"date window, not the anchor path: {tight['non_eviction_targeting']}")
@@ -644,8 +646,9 @@ def test_the_guard_judges_the_window_the_RUN_caps(monkeypatch):
     # The control arm: the same pool, the same picks, the cap the DROPPED
     # forward silently uses. Only the LAST refusal moves — which is what makes
     # the assertion above a measurement of the forward rather than of the pool.
-    loose = _stats(_read(monkeypatch, CHUNK_BEARING, cap=_D, limit=4,
-                         point_kind="session-transcript"))
+    loose_ret = _read(monkeypatch, CHUNK_BEARING, cap=_D, limit=4,
+                      point_kind="session-transcript")
+    loose = _stats(loose_ret)
     assert loose["non_eviction_targeting"] == "window", loose
     assert _reasons(loose)[:3] == _reasons(tight)[:3], (
         "only p9 is supposed to move between the caps; if more moved, the "
@@ -653,6 +656,16 @@ def test_the_guard_judges_the_window_the_RUN_caps(monkeypatch):
     assert _reasons(loose)[3] == ("p9", "t9", "evicts:t8"), (
         "the loose-cap arm is the control that proves this fixture CAN flip: "
         f"p9 must land on condition (3) there: {_reasons(loose)}")
+
+    # …and the two arms agree on the LEG's own empty-leg reason too, which the
+    # docstring above claims and nothing in this test otherwise reads: a cap
+    # that moved the leg out of ``non_eviction_guard`` would be a second
+    # difference between the arms riding along with the one being measured.
+    assert _leg(tight_ret)["reason"] == _leg(loose_ret)["reason"] == (
+        "non_eviction_guard"), (
+        "both caps must leave the leg in its empty-leg reason, so the only "
+        f"difference measured here is p9's ruling condition: "
+        f"tight={_leg(tight_ret)}, loose={_leg(loose_ret)}")
 
     # …and the two arms agree on everything else, so the flip is a REASON flip
     # and nothing here rides on a count that moved for another cause.
