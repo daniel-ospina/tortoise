@@ -5139,24 +5139,27 @@ def test_the_pre_registration_cites_the_classify_sites_the_tree_actually_has():
        §11 sentences stayed GREEN (`1 passed`, measured). `_without_change_history`
        fixes it.
     2. Even with history stripped, `` `if items:` `` has TWO live carriers — the §9
-       provenance row (`:757`) and §11.1's prose sentence (`:1145`) — so reverting
+       provenance row and §11.1's prose sentence — so reverting
        the prose alone still left the row satisfying the pin. Every live carrier is
        now bound to both gates, which is why `_live_blocks` exists.
 
-       The section labels here were wrong in an earlier round of this PR and are
-       pinned to the document's own headings rather than to a memory of it: `## 9.
-       Provenance of every number in this file` opens at `:744` (so the table row at
-       `:757` is §9, not §7 — §7 ends at `:703`, where `## 8.` opens), and `### 11.1`
-       opens at `:1141` (so `:1145` is §11.1, not §11.3 — §11.3 opens at `:1173`). The
-       other §11.3 reference in this docstring, the fail-open pair at `:1189-1195`,
-       IS §11.3 and is unchanged. A wrong label is not cosmetic here: the whole point
-       of this leg is that a reader can go and LOOK at the carrier.
+       The section labels here were wrong in an earlier round of this PR, and SO WAS
+       EVERY LINE NUMBER IN THIS PARAGRAPH: transcribed from a memory of the document
+       rather than read off it, they matched a revision ~600 lines shorter. That is
+       why the carriers are named by their SECTION HEADING and their PHRASE, never by
+       a number, and every number the legs actually use is DERIVED at run time
+       (`_extractor_lineno`, `_live_blocks`, `ast`) rather than typed. For the record:
+       the provenance row is under `## 9. Provenance of every number in this file`
+       (§7 ends where `## 8. Change control` opens), the `if items:` prose sentence is
+       under `### 11.1 The finding, and what it is not`, and the fail-open pair the
+       paragraph below refers to is `### 11.3`'s. A wrong label is not cosmetic here:
+       the whole point of this leg is that a reader can go and LOOK at the carrier.
 
     The fail-open pair needs no per-carrier loop, and that is measured rather than
-    assumed: after the strip, `:12921` and `:13068` each occur in exactly ONE live
-    block (`:1189-1195`, the §11.3 sentence that pairs them), so the whole-document
-    check below binds to that sentence. (`classify(S2) failed` also appears in the
-    frozen YAML corpus pin at `:604-699`, which is why the carriers are located by
+    assumed: after the strip, each of the two arms occurs in exactly ONE live block (the
+    §11.3 sentence that pairs them), so the whole-document check below binds to that
+    sentence. (`classify(S2) failed` also appears in the frozen YAML corpus pin's
+    `idle_evidence` text, which is why the carriers are located by
     the `` `if items:` `` phrase and not by the arms' own marker text.)
     """
     collector = _extractor_lineno("def _collect_classify_items(")
