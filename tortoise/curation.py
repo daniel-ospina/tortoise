@@ -1262,8 +1262,15 @@ def _ledger_row(
     wanted = (ref or "").strip()
     if not wanted or not graph_rows:
         return None
-    for row in graph_rows:
-        for fname in _LEDGER_REF_FIELDS:
+    # FIELD-MAJOR, matching `mcp_auth.resolve_graph_target`'s scan order: every
+    # `graph_id` before any `stable_id`, then `namespace`. A ROW-major walk returns a
+    # row whose LATER field equals the ref before one whose EARLIER field does, so the
+    # ledger's notion of the target could disagree with the write path's — measured
+    # 2026-11-08 (round-39 P3): rows `[{graph_id: g_alpha, namespace: LIVE},
+    # {graph_id: LIVE, namespace: org_o1_g_beta}]` resolved `LIVE` to BETA for the write
+    # and to ALPHA here, recording BETA's keys under ALPHA.
+    for fname in _LEDGER_REF_FIELDS:
+        for row in graph_rows:
             val = row.get(fname)
             if val is not None and str(val).strip() == wanted:
                 return row
@@ -1356,17 +1363,11 @@ def ledger_scopes(
     computed key would then refuse a ledger that is in fact this graph's — a false
     block on the one guard that protects the "skipped before the wire" half of R3.
 
-    ⛔ THE SET IS REFS, NOT IDENTITIES. It is the literal spelling plus the REF fields
-    of the row that spelling resolves through — `_ledger_row`, which matches the EXACT
-    identity fields only (``graph_id``/``stable_id``/``namespace``), i.e. the fields
-    `mcp_auth.resolve_graph_target` compares with ``==``. ⛔ NOT `_matched_row` and
-    never a ``name``: that helper's casefolded-name fallback mirrors the resolver's
-    LAST resort, and a name is not an identity — a graph's name can equal ANOTHER
-    graph's id, so a ref resolved by name was matched by the ledger against one graph
-    and written by the real path into another (round-38 P2: ALPHA's `name: g_beta` put
-    BETA's id in ALPHA's scope, so a run into BETA skipped every row —
-    `applied: True, written: 0`, exit 0. The ledger's error direction is a SKIP, the
-    guard's is a REFUSAL, which is why it does not share the name fallback).
+    ⛔ THE SET IS REFS, NOT IDENTITIES. It is the literal spelling plus the spelling
+    fields of the row that spelling RESOLVES THROUGH (`_ledger_row`, which
+    matches EXACT identity fields only — NOT `_matched_row`, whose name fallback would
+    reinstate the cross-graph skip this scope exists to prevent) — the refs
+    `mcp_auth.resolve_graph_target` accepts for that one graph, and nothing derived.
     Putting `_tail`'s identity in the set inverted this guard's error direction: a bare
     tail is id-SHAPED but is resolved by the real path as a NAME, so graph A's tail
     ``x`` matched a request for the different graph NAMED ``x`` and the run reported

@@ -2813,6 +2813,82 @@ def test_a_disarmed_run_over_a_damaged_ledger_still_exits_zero(monkeypatch, tmp_
     assert payload["read_failure"] is None
 
 
+def test_the_ledger_resolves_field_major_like_the_write_path():
+    """Round-39 P3 — `_ledger_row` walked ROW-major while the resolver walks FIELD-major.
+
+    A ROW-major walk returns a row whose LATER field equals the ref before one whose
+    EARLIER field does, so rows `[{graph_id: g_alpha, namespace: LIVE},
+    {graph_id: LIVE, namespace: org_o1_g_beta}]` resolved `LIVE` to BETA on the write
+    path and to ALPHA here: the run wrote into BETA and recorded its keys under ALPHA,
+    and a later run into ALPHA then reported `written: 0` over rows it never received.
+    """
+    rows = [{"graph_id": "g_alpha", "namespace": "LIVE"},
+            {"graph_id": "LIVE", "namespace": "org_o1_g_beta"}]
+    # FIELD-major: `graph_id` on row 2 beats `namespace` on row 1 — the resolver's order
+    scope = C.ledger_scope("LIVE", rows)
+    assert scope != "g_alpha", scope
+    assert scope == "org_o1_g_beta", scope
+    assert C.ledger_scopes("LIVE", rows).isdisjoint(C.ledger_scopes("g_alpha", rows))
+
+
+def test_every_plan_payload_says_whether_the_census_was_measured(monkeypatch, tmp_path):
+    """Round-39 P3 — `census_measured` was on the two FAILURE arms only.
+
+    The field exists so a driver answers "was it measured?" uniformly; the most common
+    disarmed run (healthy `--off`) is exactly the one that lacked it, and a driver doing
+    `payload["census_measured"]` KeyError-ed there while the failure arms were explicit.
+    Both `inventory` and a healthy `plan` (disarmed and armed) now carry it.
+    """
+    mod = _tool_module()
+
+    def call(name, args):
+        if name == "tortoise_graph_overview" and args.get("section") == "status":
+            return {"counts": {"Source": 0}}
+        if name == "tortoise_query":
+            return {"result": [{"id": "p1", "kind": "decision", "content": "c"}], "total": 1}
+        return {"result": []}
+    monkeypatch.setattr(mod, "_live_call_tool", call)
+    assert mod.main(["inventory", "--out", str(tmp_path / "inv.json"),
+                     "--no-verify-read"]) == 0
+    assert json.loads((tmp_path / "inv.json").read_text())["census_measured"] is True
+
+    for extra, out in ((["--off"], "off.json"), ([], "on.json")):
+        assert mod.main(["plan", "--graph", "org_x_g_old", "--target", "org_x_g_new",
+                         *extra, "--no-verify-read", "--out", str(tmp_path / out),
+                         "--ledger", str(tmp_path / "l.jsonl")]) == 0
+        assert json.loads((tmp_path / out).read_text())["census_measured"] is True
+
+
+def test_the_disarmed_unreconciled_arm_says_the_sources_were_not_measured(monkeypatch,
+                                                                          tmp_path):
+    """Round-40 P3 — `census_measured` was unconditionally True on the plan payload.
+
+    The disarmed arm carries an UNRECONCILABLE source listing through to the artifact
+    (the armed one returns 3 above), so on that arm the source population was not
+    measured. The field exists so a driver reads that from the field alone, with the
+    reason in `read_note` — a blanket True made the two arms indistinguishable.
+    """
+    mod = _tool_module()
+
+    def call(name, args):
+        if name == "tortoise_query":
+            return {"result": [{"id": "p1", "kind": "decision", "content": "c"}], "total": 1}
+        if args.get("section") == "sources":
+            return {"result": []}
+        if args.get("section") == "status":
+            return {"unexpected": "shape"}           # nothing to reconcile the empty listing
+        return {"result": []}
+    monkeypatch.setattr(mod, "_live_call_tool", call)
+    assert mod.main(["plan", "--graph", "org_x_g_old", "--target", "org_x_g_new",
+                     "--apply", "--off", "--no-verify-read",
+                     "--out", str(tmp_path / "p.json"),
+                     "--ledger", str(tmp_path / "l.jsonl")]) == 0
+    payload = json.loads((tmp_path / "p.json").read_text())
+    assert payload["census_measured"] is False, payload["census_measured"]
+    assert payload["census"], "the MEASURED half of the census still travels"
+    assert "cannot be told from an unread one" in (payload["read_note"] or "")
+
+
 def test_a_disarmed_run_over_a_damaged_ledger_reports_what_it_still_owes(monkeypatch,
                                                                          tmp_path, capsys):
     """Round-38 review P2 — a measured census beside `pending: 0` reads as "done".
@@ -2852,37 +2928,6 @@ def test_a_disarmed_run_over_a_damaged_ledger_reports_what_it_still_owes(monkeyp
     assert run["skipped_known"] + run["duplicate_rows"] + run["pending"] == carried, run
     # and the `refused` field names the LEDGER, not the switch the operator set
     assert "damaged" in run["refused"], run["refused"]
-
-
-def test_a_disarmed_run_carries_census_measured_on_the_full_plan_arm(monkeypatch,
-                                                                     tmp_path, capsys):
-    """Round-38 review P3 — "present on BOTH arms" must be readable by key.
-
-    A driver told to answer "was the census measured?" from `census_measured` on every
-    disarmed artifact got a `KeyError` on the COMMONEST one: a plain `--off` run that
-    ran the whole plan carries `run` counters and no `census_measured` at all. The key
-    is now on the plan payload too (this path only runs when every read succeeded, so
-    the answer is always `true` there).
-    """
-    mod = _tool_module()
-    led = tmp_path / "l.jsonl"
-
-    def call(name, args):
-        if name == "tortoise_graph_overview" and args.get("section") == "status":
-            return {"counts": {"Source": 0}}
-        if name == "tortoise_query":
-            return {"result": [{"id": "p1", "kind": "decision", "content": "c"}], "total": 1}
-        if name == "tortoise_ingest":
-            raise AssertionError("a disarmed run reached the wire")
-        return {"result": []}
-    monkeypatch.setattr(mod, "_live_call_tool", call)
-    rc = mod.main(["plan", "--graph", "org_x_g_old", "--target", "org_x_g_new", "--apply",
-                   "--off", "--ledger", str(led), "--no-verify-read",
-                   "--out", str(tmp_path / "p.json")])
-    assert rc == 0, capsys.readouterr()
-    payload = json.loads((tmp_path / "p.json").read_text())
-    assert payload["census_measured"] is True, payload
-    assert payload["run"]["off"] is True, payload["run"]
 
 
 def test_a_name_spelled_target_scopes_literally_and_never_skips(tmp_path):
