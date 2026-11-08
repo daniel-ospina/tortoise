@@ -2,9 +2,8 @@
 
 Runs the official **LongMemEval-S** benchmark (500 questions, ~40-session
 histories) against Tortoise as an external comparability measurement: ingest
-each question's chat history into the graph → hybrid retrieval (graph points
-
-+ raw session transcripts) → reader LLM answers from retrieved context →
+each question's chat history into the graph → hybrid retrieval (graph points +
+raw session transcripts) → reader LLM answers from retrieved context →
 answer-check judge (our own pinned model by default since the #8486 owner
 ruling of 2026-10-27; the **official GPT-4o** judge is one explicit override
 away — see the env table below). Reports overall + per-category accuracy,
