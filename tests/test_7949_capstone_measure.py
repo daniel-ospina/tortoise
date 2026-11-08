@@ -4589,8 +4589,8 @@ def test_the_bare_continuation_cites_name_what_they_say():
     rows = (
         # `each VET pass is gated on the LIST` — the gate AND its call, twice.
         ("docs/00_index.md", "each VET pass is gated on the LIST", (
-            ("15484", "if vet_enabled and embed_list:"),
-            ("15485", "embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass("),
+            ("15529", "if vet_enabled and embed_list:"),
+            ("15530", "embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass("),
             ("13225", "if vet_enabled and complete_list:"),
             ("13226", "complete_list, vet_union_stats, _w, _ = _run_vet_pass("),
         )),

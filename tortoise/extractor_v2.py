@@ -15301,18 +15301,45 @@ def _rate_text(metrics: dict) -> str:
     return "n/a" if rate is None else f"{float(rate):.3f}"
 
 
-def _arm_metrics(story: str, batch: dict | None, vet_stats: dict | None) -> dict:
+def _arm_metrics(story: str, batch: dict | None, vet_stats: dict | None, *,
+                 s2_failed: bool = False) -> dict:
     """One arm's recorded numbers — what the tie-break and the record read.
 
-    ``candidates`` is `check_batch`'s count on the arm's S2 output (the same
-    predicate `vet_candidates` uses, so the two instruments cannot disagree);
-    ``discarded`` is VET's own count; KEEP/NOOP/MERGE are all *kept* — only
-    DISCARD removes.
+    ⛔ **ONE BASE PER ARM (review of PR #11517, P1).** ``discarded`` is VET's
+    own count, so ``candidates`` must be the count VET decided **over** — and
+    that is NOT `check_batch`'s number. ``route_mentions`` runs BETWEEN the
+    batch check and the gate and **REMOVES** entities (its move 1, the
+    structural half of the no-mint guarantee, plus the operators it drops), so
+    the two bases differ by exactly the mentions held. Measured on a
+    referentiality-armed arm: `check_batch` counted 3, VET saw 2 and discarded 1
+    — and the record published `kept: 2, keep_rate: 0.667` where the arm's own
+    gate had kept 1 of 2 (`0.5`). That is not a rounding difference: with a
+    hand-armed `TORTOISE_RENARRATE_KEEP_RATE=0.6` the retry would not fire on a
+    session whose true rate is 0.5, i.e. on the population the knob exists for,
+    and the tie-break would call the arm that held more mentions the better
+    yield. So:
+
+    - **VET ran** → the base is VET's ``stats["candidates"]``, the same block
+      its ``discarded`` comes from. ONE number, ONE base.
+    - **VET did not run** (off-path, or the pass failed open) → the base is
+      `check_batch`'s count, which is then the only instrument that saw the arm;
+      ``discarded`` is 0 by construction, so the rate is 1.0 over a real base
+      and ``None`` over an empty one.
+
+    ⛔ A held mention is a **removal**, not a keep: it is reported on
+    ``result["mentions"]`` (and is outside this pair of numbers), it must not
+    be counted as kept here, and it must not move the keep-rate's base — the
+    rate answers *"of what the gate saw, how much survived it?"*, which is the
+    question §4.4's threshold is about.
     """
     b = batch if isinstance(batch, dict) else {}
-    candidates = int(b.get("candidates") or 0)
     st = (vet_stats or {}).get("stats") if isinstance(vet_stats, dict) else None
-    discarded = int(st.get("discarded") or 0) if isinstance(st, dict) else 0
+    st = st if isinstance(st, dict) else {}
+    batch_candidates = int(b.get("candidates") or 0)
+    vet_candidates = st.get("candidates")
+    candidates = (int(vet_candidates) if vet_candidates is not None
+                  else batch_candidates)
+    discarded = int(st.get("discarded") or 0)
     return {
         "narrative_chars": len(story or ""),
         "candidates": candidates,
@@ -15320,13 +15347,31 @@ def _arm_metrics(story: str, batch: dict | None, vet_stats: dict | None) -> dict
         "kept": max(0, candidates - min(candidates, discarded)),
         "keep_rate": _keep_rate(candidates, discarded),
         # The arm's OWN coverage verdict, recorded because §4.4's F3 is defined
-        # over the PRE-retry arm only (review round 3, P2). On a retried run the
-        # SECOND arm's flag is False by construction (the first arm's True is
-        # what fired the retry), so a reader counting "S4 added items while
-        # coverage_suspect is False" against the pipeline's published
-        # `result["vet"]["s2"]` — which is the second arm's block — would count
-        # exactly the sessions the retry DID reach as ones it cannot.
-        "coverage_suspect": bool(b.get("coverage_suspect")),
+        # over the PRE-retry arm only (review round 3, P2): a reader counting
+        # "S4 added items while coverage_suspect is False" against the
+        # pipeline's published `result["vet"]["s2"]` — which is the SECOND
+        # arm's block — would count the sessions the retry reached as ones it
+        # cannot.
+        #
+        # ⛔ TWO CORRECTIONS (review of PR #11517, P2), both measured against
+        # this file's own fixtures:
+        #
+        # 1. The retried arm's flag is NOT "False by construction". A retry
+        #    fired by `coverage_suspect` whose second narrative ALSO yields
+        #    nothing publishes True here — which is exactly what
+        #    `test_the_retry_fires_at_most_once_per_run` drives (its second arm
+        #    reports `candidates == 0`). Only an ARBITER/keep-rate retry has a
+        #    first arm that did produce candidates.
+        # 2. The flag must carry the trigger's own `s2_failed` qualifier. The
+        #    trigger refuses to treat a RAISED S2 as "prose in, nothing out"
+        #    (`_renarrate_trigger`'s F1 guard); recording the raw flag undid that
+        #    distinction on the surface §4.4's F3 is read from, so an arm whose
+        #    instrument broke was published as an arm whose narrative yielded
+        #    nothing. `None` here is the honest value: the flag was never
+        #    measurable on that arm, and `s2_failed` says why.
+        "coverage_suspect": (None if s2_failed
+                             else bool(b.get("coverage_suspect"))),
+        "s2_failed": bool(s2_failed),
     }
 
 
@@ -15500,7 +15545,8 @@ def _arm_extract(model, edus, *, master, session_date, chunk_size,
         "vet_pool": vet_s2_pool,
         "mention_stats": mention_stats,
         "warnings": warnings_out,
-        "metrics": _arm_metrics(story, batch, vet_s2_stats),
+        "metrics": _arm_metrics(story, batch, vet_s2_stats,
+                                s2_failed=s2_failed),
         "chunks": chunks,
         "failed_chunks": failed_chunks,
         # A failed S2 call, so the retry's decision can tell "the instrument
@@ -15512,11 +15558,31 @@ def _arm_extract(model, edus, *, master, session_date, chunk_size,
 def _merge_arm_pools(first: dict, second: dict) -> dict:
     """Union two VET removal pools — the carry-forward record for the shipped list.
 
-    Both arms compose the shipped list (the union), so both arms' removals carry:
-    an item either arm discarded must not be resurrected by the post-S4 union
-    pass, and an entity either arm removed must still be restorable when the
-    other arm's narrative references it (`apply_vet`'s rule 4). Fail-open in the
-    same direction as the pool itself: an unreadable pool contributes nothing.
+    Both arms' removals are handed to the post-S4 pass, which is what makes two
+    properties hold across the union, and it is worth being exact about WHICH two
+    (review of PR #11517, P2 — the first draft claimed a third one the mechanism
+    does not implement):
+
+    1. an operator whose endpoint EITHER arm removed is pruned from the shipped
+       list (`apply_vet`'s `content_gone`/`entity_gone` leg);
+    2. an entity either arm removed is still restorable when the OTHER arm's
+       narrative references it (`apply_vet`'s Rule 4).
+
+    ⛔ What it does NOT do: **a candidate cannot be un-discarded by its text.**
+    `prior_texts` prunes operators only — it is not a claim filter — so an item
+    arm A discarded that arm B (a DIFFERENT narrative, vetted by its own pass
+    with no knowledge of arm A's verdict) re-emitted DOES ship in the union, and
+    `stats["renarrate"]["first"]["discarded"]` is the only record that arm A
+    said no. That is a disclosed residual, not a guarantee: it is reachable only
+    on the disarmed keep-rate arm or an arbiter batch `RENARRATE`
+    (`s2_decision_seam` emits neither), never on `coverage_suspect`, where the
+    first arm's list is empty by definition. Suppressing arm B's item instead
+    would be a different decision (the owner's union ruling makes the SECOND
+    arm win identity-key collisions), so it is recorded here rather than
+    invented in a review fix.
+
+    Fail-open in the same direction as the pool itself: an unreadable pool
+    contributes nothing.
     """
     texts: set = set()
     ents: dict = {}
@@ -15598,6 +15664,13 @@ def _renarrate_pick(first: dict, second: dict) -> dict:
         # (an arbiter batch RENARRATE, which `s2_decision_seam` never emits, or
         # a hand-armed `TORTOISE_RENARRATE_KEEP_RATE`), never on the
         # `coverage_suspect` path where the first arm is empty by definition.
+        # ⛔ AND THE FIRST ARM'S VERDICTS ARE NOT PUBLISHED AT ALL (review of PR
+        # #11517, P2): its `decisions` — the record that makes a discard
+        # auditable — reach no surface, only `stats["renarrate"]["first"]`'s
+        # counts, so an item arm A discarded and arm B re-emitted ships with no
+        # record of arm A's verdict (`_merge_arm_pools` names the mechanism).
+        # Publishing a second decision block would change the `vet.s2` SHAPE
+        # this PR just stabilised, so it is recorded, not smuggled in here.
         "vet_stats": second["vet_stats"] or first["vet_stats"],
         "vet_pool": _merge_arm_pools(first.get("vet_pool") or {},
                                      second.get("vet_pool") or {}),

@@ -1757,7 +1757,7 @@ _IDLE_CITES: dict[str, str] = {
         "BEFORE the `if not edus:` early return that emits {'enabled': "
         "vet_enabled, 's2': {}, 'union': {}} (tortoise/extractor_v2.py:12944, the "
         "flag; :12948, the early return; :12979, its vet surface), and each VET "
-        "pass is gated on the LIST — `if vet_enabled and embed_list:` (:15484), "
+        "pass is gated on the LIST — `if vet_enabled and embed_list:` (:15529), "
         "`if vet_enabled and complete_list:` (:13225) — so "
         "a block that says enabled=true proves the FLAG, never that the pass "
         "ran. A FAILED vet pass leaves the same empty stats (`_run_vet_pass` "
@@ -1798,7 +1798,7 @@ def _pass_ran(block: dict) -> bool | None:
     ``if not edus:`` early return (``:12948``) emits literally ``"vet": {"enabled":
     vet_enabled, "s2": {}, "union": {}}`` (``:12979``) — with the flag ON. The
     passes themselves are gated on the LIST, not the flag: ``if vet_enabled and
-    embed_list:`` (``:15484``) and ``if vet_enabled and complete_list:``
+    embed_list:`` (``:15529``) and ``if vet_enabled and complete_list:``
     (``:13225``). So a session whose conversation produced no list emits
     ``enabled: True`` with empty counters and no pass ever ran; so does a pass
     that FAILED, because ``_run_vet_pass`` returns ``{}`` stats on its fail-open

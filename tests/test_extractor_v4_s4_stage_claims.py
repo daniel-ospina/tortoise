@@ -1278,9 +1278,12 @@ def test_an_else_branch_call_reds_the_off_switch_check():
 # half: neither fold stage can ADD an item a coverage check found missing.
 # ⛔ #11002 resolved that half — the bounded re-narrate can ADD — so the record's
 # verdict is now "the successor HAS landed" and the ordering obligation's
-# pre-condition is MET. What remains before `run_s4` leaves is §4.4's F3
-# measurement (S4's `added_by_s4 > 0` while `coverage_suspect` is False), not a
-# code change. These tests pin both halves: the LANDED verdict with its ADD
+# pre-condition is MET. What remains before `run_s4` leaves is NOT this verdict
+# and NOT §4.4's F3 measurement either: F3 was RUN on 2026-11-08 and it FIRES
+# (4/7 primary, 3/7 re-run, 5/7 union of the two committed
+# `docs/evidence/1789-s4-reeemit-tax/` artifacts), so `run_s4` stays and the
+# deletion is blocked on the partial-gap stage in #11534 — a code change, not a
+# measurement. These tests pin both halves: the LANDED verdict with its ADD
 # proof, and the FOLD stages' unchanged inability to produce candidates — so a
 # future lane cannot read a stage list as "gap-filling moved" a second time.
 

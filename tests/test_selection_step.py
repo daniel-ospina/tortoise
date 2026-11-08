@@ -182,6 +182,11 @@ def test_the_retry_fires_at_most_once_per_run(monkeypatch):
     assert result["stats"]["renarrate"]["fired"] is True
     # The poor outcome is recorded honestly: both arms are still in the record.
     assert result["stats"]["renarrate"]["second"]["candidates"] == 0
+    assert result["stats"]["renarrate"]["second"]["coverage_suspect"] is True, (
+        "a retried arm that ALSO yields nothing publishes True — the retried "
+        "arm's flag is usually False, never False BY CONSTRUCTION (review of "
+        "PR #11517, P2)"
+    )
     assert _entity_names(result) == set()
 
 
@@ -857,10 +862,17 @@ def test_each_arm_records_its_own_coverage_verdict(monkeypatch):
 
     §4.4's F3 — the gate on removing `run_s4` — is defined over the pre-retry
     arm: "S4 added items while `coverage_suspect` is False". The pipeline's
-    published `result["vet"]["s2"]` is the SECOND arm's block, and on a retried
-    run the second arm's flag is False BY CONSTRUCTION (the first arm's True is
-    what fired the retry). A reader counting F3 against it would therefore score
-    exactly the sessions the retry DID reach as ones it cannot reach.
+    published `result["vet"]["s2"]` is the SECOND arm's block, so a reader
+    counting F3 against it would score the sessions the retry reached as ones it
+    cannot — hence a per-arm flag.
+
+    ⛔ NOT "False by construction" (corrected in review of PR #11517, P2): a
+    retry fired by `coverage_suspect` whose SECOND narrative also yields nothing
+    publishes True on the second arm, which is what
+    `test_the_retry_fires_at_most_once_per_run` drives. The per-arm record is
+    what makes those two cases tellable apart, and `s2_failed` rides beside the
+    flag so a RAISED S2 (never a coverage verdict — `_renarrate_trigger` refuses
+    it) is not read as one: the flag is `None` there, not True.
 
     ⛔ NON-VACUITY: this dies if `_arm_metrics` stops recording the flag (the
     key is missing), if it records the PIPELINE's flag for both arms (then
@@ -878,4 +890,63 @@ def test_each_arm_records_its_own_coverage_verdict(monkeypatch):
     )
     assert renarrate["second"]["coverage_suspect"] is False, (
         "the retried arm emitted candidates; False here is by construction"
+    )
+
+
+def test_an_arm_measures_its_keep_rate_over_the_base_vet_decided_on(monkeypatch):
+    """ONE BASE: `candidates`/`discarded`/`keep_rate` come from the gate's own pass.
+
+    ⛔ THE DEFECT THIS PINS (review of PR #11517, P1). `route_mentions` runs
+    **between** `check_batch` and the VET pass and **REMOVES** entities (its move
+    1 — the structural half of #11021's no-mint guarantee, plus the operators it
+    drops). So `check_batch`'s count is a base the gate never decided over:
+    measuring `discarded` against it mixes two populations, and a held mention
+    then reads as a KEEP it never was. Measured before the fix, on this exact
+    fixture: `check_batch` 3, VET 2 (1 discarded) — and the record published
+    `kept: 2, keep_rate: 0.667` while the arm's own gate kept 1 of 2 (`0.5`).
+
+    That is not a rounding difference: with a hand-armed
+    `TORTOISE_RENARRATE_KEEP_RATE=0.6` the retry would not fire on a session
+    whose true rate is 0.5 — the population the knob exists for — and the
+    tie-break would call the arm that held more mentions the better yield.
+
+    Non-vacuity: reverting `_arm_metrics` to `batch["candidates"]` makes
+    `candidates` 3 against VET's 2 here and reds this; so would counting the
+    held mention as kept (then `kept` is 2 with `discarded` 1 of a base of 2).
+    """
+    monkeypatch.setenv("TORTOISE_REFERENTIALITY", "1")
+    # One entity is a PRONOUN and the claim references it, so `route_mentions`
+    # HOLDS it (removes it) before VET ever sees the list.
+    second = json.dumps({
+        "entities": [{"name": "it", "kind": "core:org", "lifecycle": "created"},
+                     {"name": "Northwind", "kind": "core:org",
+                      "lifecycle": "created"}],
+        "events": [], "operators": [],
+        "points": [{"content": "It ships from Northwind",
+                    "pointKind": "statement",
+                    "about_entities": ["it", "Northwind"]}],
+        "chain_notes": [], "link_before_create": [],
+    })
+    _, result = _run(monkeypatch,
+                     ["Alice set a budget. Bob ships Friday.",
+                      "Alice set a budget of 40k. It ships from Northwind."],
+                     [_EMPTY_EMBED, second], arbiter=_discarding_arbiter)
+    arm = result["stats"]["renarrate"]["second"]
+    vet = result["vet"]["s2"]["stats"]
+    assert vet["candidates"] == 2, (
+        "the gate saw TWO candidates — one entity was HELD before it, not kept"
+    )
+    assert arm["candidates"] == vet["candidates"], (
+        "`candidates` must be the base the gate's `discarded` is measured over "
+        f"— got {arm['candidates']!r} against VET's {vet['candidates']!r}"
+    )
+    assert arm["discarded"] == vet["discarded"] == 1
+    assert arm["kept"] == 1, "one of the two the gate saw survived it"
+    assert arm["keep_rate"] == 0.5, (
+        "1 of the 2 candidates VET decided over, not 2 of a pre-mention 3"
+    )
+    held = ((result.get("mentions") or {}).get("stats") or {}).get("second") or {}
+    assert held.get("held_surfaces") == 1, (
+        "the held mention is reported on its OWN surface — it is a removal, "
+        "never a keep on the keep-rate's books"
     )
