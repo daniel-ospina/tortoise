@@ -1964,6 +1964,18 @@ def _preamble_index(body: list[ast.stmt]) -> int | None:
             "if sys.version_info < (3, 12):\n    pass\n",
             3,
         ),
+        # ZERO OR MORE `__future__` imports is the walk's OWN claim, and no row
+        # carried two, so `while` -> `if` stayed GREEN (measured, 9 passed). It
+        # cannot false-PASS — one `if` REJECTS a legal two-`__future__` preamble,
+        # i.e. an over-block — but an unpinned claim is the vacuous-arm class this
+        # file keeps removing. The census's `_guard_index` returns 4 here as well
+        # (asserted below), so this row is parity, not a stricter local rule.
+        (
+            '\"\"\"d\"\"\"\nfrom __future__ import annotations\n'
+            'from __future__ import generator_stop\nimport sys\n'
+            "if sys.version_info < (3, 12):\n    pass\n",
+            4,
+        ),
         # the load-bearing rejection: an ALIASED import binds no `sys`
         ("import sys as _sys\nif sys.version_info < (3, 12):\n    pass\n", None),
         # two names in one import
@@ -2435,6 +2447,24 @@ def test_the_advertised_form_filter_is_not_deaf():
     assert _advertise_offenders(rel, "`python3 ...`", census), (
         "the ELIDED form has no path, so no carve-out can exempt it; the census reds "
         "it and the filter must too"
+    )
+    # MULTIPLICITY — the round-7 hole, and the only fail-OPEN arm in this table.
+    # Measured at this head: reverting the sweep's `finditer` to `search` left the
+    # whole file GREEN (204 passed), so the comment above the sweep asserting
+    # "`finditer`, not `search`" pinned nothing. One match per line lets a line
+    # whose FIRST match is a carve-out hide a real offender later on it — a hole
+    # the census does not have. The carve-out is asserted to BE one, so this row
+    # cannot rot into a line carrying no exemption.
+    hiding_carve = "tools/tmpdir_sweep.py"
+    assert hiding_carve in census._CARVE_OUTS, (
+        f"{hiding_carve} is no longer a census carve-out, so this row would test "
+        f"nothing — pick a current exemption from `_CARVE_OUTS`"
+    )
+    hiding = f"# historical: python3 {hiding_carve} --help; python3 {rel} check"
+    assert _advertise_offenders(rel, hiding, census), (
+        "a carve-out match FIRST on the line hid a real offender later on it: the "
+        "sweep must use `finditer`, not `search` (review round 7). The census reds "
+        f"this line; the filter found nothing in {hiding!r}"
     )
     # The RECORD exemption is a third clause, and it is executed by nothing else:
     # both pinned tools carry no `_DELIBERATE_BARE_FORM` line, so deleting the
