@@ -124,6 +124,11 @@ EXPECTED_TEXT_NEEDLES: dict[str, str] = {
 #: A real file in the tree, usable as evidence by any fixture row.
 REAL_EVIDENCE = "docs/evidence/9664-capstone/README.md"
 
+#: A glob that matches real files in the tree — the `_names_artifact` GLOB arm's
+#: subject, i.e. the third `_is_tracked` call site. `_names_artifact` takes the
+#: artifact TOKEN, not the whole `cmd:` sentence (its caller has already cut it).
+_GLOB_EVIDENCE = "docs/evidence/9664-capstone/*.md"
+
 SHA = "e1ba0974ef8452d57ad17ecaff18579d4772cd2b"
 
 
@@ -1813,11 +1818,19 @@ def test_the_bare_path_arm_does_not_read_an_UNRUNNABLE_probe_as_a_held_match(mon
 
     The glob arm's `is True` is pinned above and `_evidence_is_real` has its own
     `None` pin, but `_names_artifact`'s bare-path arm is a THIRD call site of the
-    tri-state and it carried no assertion at all. MEASURED at this head: reverting
-    `if tracked is None:` to `if False:` left the whole suite green at 172 passed,
-    while `_names_artifact(<bare path>)` answered `(True, '')` — a `cmd:` target
-    whose TRACKED probe never ran, accepted as a held artifact of the tree. That is
-    the same fail-open this change closes at the other two sites, one arm over.
+    tri-state and it carried no assertion at all — so a revert of `if tracked is
+    None:` was unobservable, which is the whole reason this pin exists.
+
+    ⛔ MEASURED AT `21c446ab002`, because an earlier revision of this docstring got
+    it wrong: reverting `if tracked is None:` to `if False:` does **not** answer
+    `(True, '')` at this head. The fourth-answer guard later in the SAME arm
+    (`if tracked is not True:`) catches the `None` first, so the arm answers
+    ``(False, "'<path>' cannot be verified: the TRACKED check answered None, which
+    is not a measurement that it is in the tree")``, the row is still REFUSED, and
+    this test reddens on its MESSAGE assertion (`"could not be run here" in why`)
+    rather than on a fail-open. Both guards are load-bearing for different halves:
+    this one for the CAUSE a reader is told, the fourth-answer one for the exit
+    code. Recorded rather than left as a "MEASURED" claim the head falsifies.
 
     ⛔ THE BLANKET `lambda …: None` STUB IN THIS PIN CANNOT REACH THE LEDGER'S EXIT
     CODE — it refuses EVERY path, so a `cmd:` row goes INVALID even with this arm
@@ -1843,10 +1856,14 @@ def test_a_cmd_target_behind_an_UNRUNNABLE_probe_is_REFUSED_end_to_end(monkeypat
 
     The seam pin above drives `_names_artifact` directly; this one pins what the
     RECORD does with the answer — a one-row `verified` ledger citing a `cmd:` target
-    whose TRACKED probe never ran is INVALID. MEASURED with the arm reverted (`if
-    tracked is None:` -> `if False:`): the row is ACCEPTED, so the ledger prints the
-    only clean exit for a file git was never asked about. That is the fail-open this
-    change exists to close, in the one call site a plain truthiness test cannot see.
+    whose TRACKED probe never ran is INVALID. ⛔ MEASURED AT `21c446ab002`: with the
+    arm reverted (`if tracked is None:` -> `if False:`) the row is **still INVALID**
+    — the fourth-answer guard later in the SAME arm refuses it with "the TRACKED
+    check answered None, which is not a measurement that it is in the tree" — so
+    this test reddens on its message assertion (`"TRACKED check could not be run
+    here" in message`), NOT on an accepted row. An earlier revision of this
+    docstring claimed the row was ACCEPTED: that was true before the fourth-answer
+    guard landed in the same change, and is false at this head.
 
     The stub is SELECTIVE on purpose: blanket-`None` would also silence the arms that
     run for every other path, and the row would be refused for the wrong reason — the
@@ -1986,8 +2003,15 @@ def test_an_ABSTAINING_tree_is_accepted_and_prints_the_NOTE(tmp_path, monkeypatc
     [
         ("evidence", lambda: cl._evidence_is_real(REAL_EVIDENCE, REPO_ROOT)),
         ("artifact", lambda: cl._names_artifact(REAL_EVIDENCE, REPO_ROOT, REPO_ROOT)),
+        # ⛔ The THIRD `_is_tracked` call site (#11474 review, F3). It was the one
+        # arm a fourth answer still reached: `is True … is None … else` filed a
+        # truthy non-`True` return under `untracked_seen`, so a reader was told the
+        # MEASURED sentence "every file the glob … is untracked by git" about a value
+        # git never measured. The guard is applied at all three sites or the counter
+        # is wrong about what it counts.
+        ("glob", lambda: cl._names_artifact(_GLOB_EVIDENCE, REPO_ROOT, REPO_ROOT)),
     ],
-    ids=["_evidence_is_real", "_names_artifact_bare_path"],
+    ids=["_evidence_is_real", "_names_artifact_bare_path", "_names_artifact_glob"],
 )
 def test_a_truthy_non_True_TRACKED_answer_is_not_read_as_tracked(site, call, monkeypatch):
     """The FOURTH answer: `is False … is None … return True` ACCEPTED everything else.
@@ -2002,6 +2026,12 @@ def test_a_truthy_non_True_TRACKED_answer_is_not_read_as_tracked(site, call, mon
 
     A refusal, not a crash: the value is NAMED, because "not a measurement" is the
     truth and "not TRACKED by git" would be a cause nobody measured.
+
+    Re-measured at `21c446ab002` for the glob arm (`_names_artifact(_GLOB_EVIDENCE)`):
+    reverting the third guard to the shipped `is None … else` shape answers
+    `(False, "every file the glob … is untracked by git…")` — a refusal that names a
+    cause nobody measured. So that row reddens on its own assertion (`"not a
+    measurement" in why`), not on an exit code, and it is fail-closed either way.
     """
     monkeypatch.setattr(cl, "_is_tracked", lambda resolved, root: 1)
     ok, why = call()
