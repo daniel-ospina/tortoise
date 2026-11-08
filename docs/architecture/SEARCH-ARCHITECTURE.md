@@ -64,10 +64,12 @@ memory cap** and its **`NODE_CREATION_BUFFER` of 16 384 slots** (§7's #1-risk r
 The two constraints that sequence the work differ in kind, and only the second is quoted:
 
 > *"measure and optimise after beta launch"* — the phase split this section implements is recorded in `#4051`
-> comment [`6714119028`](https://github.com/daniel-ospina/tortoise/issues/4051#issuecomment-6714119028), and the
-> four-part decision in the header above is comment
-> [`6713838871`](https://github.com/daniel-ospina/tortoise/issues/4051#issuecomment-6713838871) — **not**
-> `6713312036`, which that comment supersedes.
+> comment [`6714119028`](https://github.com/daniel-ospina/tortoise/issues/4051#issuecomment-6714119028). The
+> header's four-part decision is comment
+> [`6713838871`](https://github.com/daniel-ospina/tortoise/issues/4051#issuecomment-6713838871) **items 1–3**, with
+> **item 4** being that phase correction — because `6713838871`'s own item 4 said *"a budget-derived window
+> **before launch**"*, which `6714119028` supersedes. The four-part decision is **not** `6713312036`, which
+> `6713838871` supersedes.
 
 and, as **this document's** sequencing obligation rather than a quotation: **nothing ships to private-beta until
 the guardrails in §1.5 are in place**, because a window armed without them is a redesign performed in front of
@@ -306,7 +308,7 @@ makes EP recomputation exact (§6.3).
 | **retain closed components / 2-hop closures** | closure is what makes a walk and an EP recompute correct; measured cache studies show 1-/2-hop closure prefetch raises hit ratio for **every** policy tested |
 | **cap the pin: count, bytes, AND a degree ceiling** | unconditional hub pinning is a *measured* anti-pattern ("they can thrash each other"; naive pinning scored 62.4 % miss vs LRU at 60.2 %). Degree is **U-shaped** — helpful mid-tail, harmful at the head; a single huge hub can eat a 77 MB window |
 | **window-local touch counters + admission control** | recency beats static degree ranking, and adaptive policies beat every static one measured; eviction must be budget-triggered, not per-request, or the cycle "demote a leaf → the next query needs it → re-materialise → evict another leaf" becomes a storm. ⚠️ **The counter is WINDOW-LOCAL cache state — a different artifact from `tortoise/read_ledger.py`.** That ledger is TENANT-WIDE and is explicitly not a product input: `STORAGE-ARCHITECTURE.md` §17.4.6 states that reading it for any product decision *"would be a violation"* (it exists to measure `f`). Wiring it as the eviction signal is exactly the violation it names. |
-| **reserve ≈6× the window in provisioned RAM for rebuild peaks** | **third-party measurement — citation owed (§1)**: re-materialising into FalkorDB peaks at **4.9–5.9× the resting size** — a 77 MB window can transiently demand ~380–455 MB, and the engine has **no per-graph memory cap** (**vendor-internal claim — citation owed (§1)**). This is the #1 production risk. Do not shard the window into many small graphs (`NODE_CREATION_BUFFER` costs 16 384 slots each **— vendor-internal, citation owed (§1)**) |
+| **reserve ≈6× the window in provisioned RAM for rebuild peaks** | **third-party measurement — citation owed (§1)**: re-materialising into FalkorDB peaks at **4.9–5.9× the resting size** — a 77 MB window can transiently demand ~377–454 MB, and the engine has **no per-graph memory cap** (**vendor-internal claim — citation owed (§1)**). This is the #1 production risk. Do not shard the window into many small graphs (`NODE_CREATION_BUFFER` costs 16 384 slots each **— vendor-internal, citation owed (§1)**) |
 | **a walk materialises its seeds first** | search returns ids from Postgres; a non-resident seed must be written into the graph before traversing — a write on the query path, which is why the headroom above is mandatory |
 | **label what was truncated** | a confidence within 2 hops of a truncated boundary is **refused**; beyond that it may be returned as degraded. ⚠️ **The two reason strings this rule needs are OWED, not shipped, and each names its own outcome:** the degraded RETURN carries `degraded: "truncated_boundary"`, and the REFUSAL carries `degraded: "insufficient_graph"` (the resident graph cannot support the claim at all). Neither string appears anywhere in the tree at this head, and `STORAGE-ARCHITECTURE.md` §17.3 records `degraded` as one of four terms whose ONE home, `tortoise/status_vocabulary.py`, forbids a fifth, so the *reason* has to attach to `degraded` rather than mint a term. **Required before private-beta (§1.5).** What DOES exist is the marker's on/off mechanism (`residency.py`, `not-hot`, `TORTOISE_RESIDENCY`) and it is currently OFF |
 
@@ -368,7 +370,7 @@ known omissions bias ONE way:** `STORAGE-ARCHITECTURE.md` §2.1 records that it 
 overhead, so the real graph is larger than measured; only the SAMPLING error itself runs both ways.
 
 **The record allowance is not a trade — it is a rounding choice.** The record is **467× cheaper per byte**
-(\$58.33 ÷ \$0.125 = 466.7), so **1 GB costs \$0.13 — 2.2 % of solo's \$5.70 budget — and displaces only ≈2 MB of
+(\$58.33 ÷ \$0.125 = 466.7), so **1 GB costs \$0.125 — printed as \$0.13 — i.e. 2.2 % of solo's \$5.70 budget — and displaces only ≈2 MB of
 window.** Set it by what the product wants to promise and state it beside the window.
 
 ### 8.1 The two states, on the same basis
@@ -416,15 +418,11 @@ prints it.
 
 ---
 
-## 10. Review gate — closed
+## 10. What would reopen this decision
 
-Two independent adversarial reviews (memory competitors / state of practice; engineering claims) both
-returned **STANDS WITH CHANGES**; neither found a case where a RAM-resident index returns better answers
-at 10⁴–10⁶ vectors. A third and fourth pass validated the retention policy (`SOUND WITH CHANGES`) and the
-EP-state question, and their corrections are carried: closed-component retention, capped pinning with a
-degree ceiling, window-local touch counters, 6× rebuild headroom, `null`-not-0.5, and the measured
-`4.9–5.9×` rebuild peak (third-party, §1). The corrections that *changed the decision* are recorded in §1 (no ratio as an
-input), §6.2 (text does not move) and §6.3 (EP state is not stored).
+The review record (four passes; verdicts and corrections) lives on `#4051`; the corrections that *changed the
+decision* are stated where they bite — §1 (no ratio of our own graph is an input), §6.2 (text does not move) and
+§6.3 (EP state is not stored).
 
 **What would reopen this decision:** M2 showing a windowed graph loses retrieval quality beyond an
 accepted bound; or M1 failing the filtered-recall bar; or a measured vendor/cost change that makes a

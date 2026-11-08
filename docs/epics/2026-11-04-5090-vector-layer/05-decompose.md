@@ -191,7 +191,7 @@ requests; its census half is not.
 | **ingress** | **`#10000`** (`P0-blocker`). |
 | **record authority** | **`#7879`** / **`#9548`**. |
 | **`_upsert_document` retired-text embed** | **`#8419`** (OPEN) — root is the **D10 fold** (`#5088`). |
-| **the `M1–M4` measurement ids** | Denote **two disjoint sets** across two live docs; §15 (`STORAGE-ARCHITECTURE.md:1553`) records three of `#4333`'s four as *not worth measuring*. Recorded in `03-scope.md` §7.3 (the review-gate notes) rather than re-filed. |
+| **the `M1–M4` measurement ids** | Denote **two disjoint sets** across two live docs; §15 (`STORAGE-ARCHITECTURE.md`, "Not worth measuring") records three of `#4333`'s four as *not worth measuring*. Recorded in `03-scope.md` §7.3 (the review-gate notes) rather than re-filed. |
 
 ---
 

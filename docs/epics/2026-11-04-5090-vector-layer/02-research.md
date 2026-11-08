@@ -145,6 +145,12 @@ comparables now say what that measurement will probably show, and how to run it:
 
 ## Raw Notes
 
+> ⚠️ **SUPERSEDED 2026-11-07 — read this before acting on any "V1" line below.** V1 is decided: the vector
+> index and the embedding payload move to Postgres (`docs/architecture/SEARCH-ARCHITECTURE.md`, `#4051`). Every
+> "parked with V1" / "when V1 is decided" below is the state this pass was written against, kept as the record
+> and **not** as current text. What stays open is the DIFFERENT question of §14.3 **V3: whether
+> `:Object`/`:Event` carry — and index — embeddings.**
+
 | date | source-tag | finding |
 |---|---|---|
 | 2026-09-24 | `internal-measurement` | 141 MB / 45 MB indices / 12,657 embeddings / exactly one vector index (`Point.embedding`); `Object` 16.96 ms vs `Point` 4.97 ms, both `reason: ok` — §12.1's 2026-09-24 table (141/45 MB), §12.1b (12,657, the index inventory and the full-scan p50s) |
