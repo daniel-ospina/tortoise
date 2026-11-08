@@ -153,6 +153,17 @@ def gr(name: str) -> dict:
 
 ROWS = [gr(n) for n in ("old", "new", "A", "B")]
 
+
+@pytest.fixture(autouse=True)
+def _curation_off_switch_unset(monkeypatch):
+    """The suite must not read an AMBIENT off switch.
+
+    `TORTOISE_CURATE_OFF` is the operator's own variable and a plausible cell-wide
+    export; inherited, it turns 23 green tests red on correct code with messages that
+    read as `run_plan` accounting defects. Every test that wants the switch sets it
+    itself."""
+    monkeypatch.delenv(C.OFF_SWITCH_ENV, raising=False)
+
 GRAPH_ROWS = [
     {"graph_id": "default", "stable_id": "g_0bcdb207ef7336c3", "name": "default",
      "namespace": "team_3326a01ea34ae595d84de5d8f9"},
@@ -1137,6 +1148,7 @@ def test_the_plan_can_emit_row_level_reasons(monkeypatch, tmp_path):
     rows_out = tmp_path / "rows.jsonl"
     rc = mod.main(["plan", "--graph", "org_x_g_old", "--target", "org_x_g_new",
                    "--out", str(tmp_path / "plan.json"), "--rows", str(rows_out),
+                   "--ledger", str(tmp_path / "l.jsonl"),   # never ~/.tortoise/…
                    "--no-verify-read"])
     assert rc == 0
     lines = [json.loads(x) for x in rows_out.read_text().splitlines() if x.strip()]
@@ -1436,3 +1448,25 @@ def test_a_ledger_line_that_is_json_but_not_an_object_is_reported_as_damage(tmp_
         path.write_text(bad + "\n")
         with pytest.raises(C.CurationRefused, match=r"damaged"):
             C.Ledger(path, target="new")
+
+
+def test_a_keyless_point_row_reaches_the_wire_under_the_writers_own_key(tmp_path):
+    """Round-25: a `points` item with no `migrationKey` was keyed with the SOURCE
+    derivation, which hashes only (sourceKind, url) — both absent for a point, so it
+    was a CONSTANT. Two keyless rows collapsed onto one key (the second silently never
+    reached the writer) and the writer recorded a per-row key the planner could never
+    re-derive, so a re-run re-sent it."""
+    a = {"kind": "decision", "content": "first"}
+    b = {"kind": "decision", "content": "second"}
+    sections, skipped, dups = C._pending_sections({"points": [a, b]},
+                                                  C.Ledger(tmp_path / "l.jsonl", target="new"))
+    assert skipped == 0 and dups == 0
+    assert C._fallback_key("points", a) != C._fallback_key("points", b)
+    sent = [{k: v for k, v in row.items() if k != "migrationKey"} for row in sections["points"]]
+    assert sent == [a, b], "a carried row was dropped as a duplicate"
+
+
+def test_the_off_switch_is_not_read_from_an_ambient_export():
+    """Round-25: inherited `TORTOISE_CURATE_OFF` reddened 23 tests on correct code."""
+    assert C.off_switch_active(False) is False
+    assert C.off_switch_active(True) is True

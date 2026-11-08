@@ -1057,7 +1057,15 @@ def _pending_sections(
                 # kinds (create_source merges by url, list_sources groups by
                 # (url, kind)), and a url-only key silently collapsed them onto one
                 # ledger entry — reported as skipped_known on a FIRST run.
-                key = _source_ledger_key(item)
+                #
+                # A POINT/TIMELINE item with no key must NOT come through here: with
+                # neither sourceKind nor url, the source derivation is a CONSTANT, so
+                # (a) two keyless point rows collapse onto one key and the second is
+                # dropped from `sections` and never reaches the writer, and (b) the
+                # writer records a per-row key the planner can never re-derive, so a
+                # re-run re-sends the row. Both are the defect classes this pass
+                # exists to avoid, so the derivation is the WRITER's, per section.
+                key = _fallback_key(section, item)   # == the writer's own derivation
             if key in ledger:
                 continue
             if key in queued:
