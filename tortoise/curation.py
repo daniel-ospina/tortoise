@@ -1222,6 +1222,41 @@ class IngestWriter:
 #: the graph that row describes. Used verbatim (never `_tail`-derived): see
 #: `ledger_scopes` for why an id-space value must never enter a match set.
 _IDENTITY_REF_FIELDS = ("graph_id", "stable_id", "namespace", "name")
+#: The identity fields the resolver matches EXACTLY (case is significant), as opposed
+#: to `name`, which it casefolds.
+_EXACT_ID_FIELDS = ("graph_id", "stable_id", "namespace")
+
+
+def _refs_unique_to(
+    row: Mapping[str, Any],
+    graph_rows: Sequence[Mapping[str, Any]],
+) -> set[str]:
+    """This row's own spellings that name NO OTHER row in the set.
+
+    A value is included only when EXACTLY ONE row carries it across the fields the
+    resolver matches — exactly for ``graph_id``/``stable_id``/``namespace``, casefolded
+    for ``name`` (the rules `canonical_graph_id` already applies). That is what makes a
+    cross-graph match impossible: a ``name`` that happens to equal ANOTHER graph's id is
+    carried by two rows, so it is excluded from both sides. Without the filter the
+    ledger matched a different graph and skipped every row into it — round-37 P2's
+    second instance, measured 2026-11-08.
+    """
+    out: set[str] = set()
+    for fname in _IDENTITY_REF_FIELDS:
+        val = row.get(fname)
+        v = str(val).strip() if val is not None else ""
+        if not v:
+            continue
+        if fname in _EXACT_ID_FIELDS:
+            holders = [r for r in graph_rows
+                       if any(str(r.get(f) or "").strip() == v for f in _EXACT_ID_FIELDS)]
+        else:
+            holders = [r for r in graph_rows
+                       if any(str(r.get(f) or "").strip().casefold() == v.casefold()
+                              for f in (*_EXACT_ID_FIELDS, "name"))]
+        if len(holders) == 1 and holders[0] is row:
+            out.add(v)
+    return out
 
 
 def ledger_scope(
@@ -1249,10 +1284,17 @@ def ledger_scope(
     """
     row = _matched_row(target_graph, graph_rows) if graph_rows else None
     if row is not None:
-        for field in ("graph_id", "stable_id", "namespace"):
-            val = row.get(field)
-            if val and str(val).strip():
-                return str(val)
+        unique = _refs_unique_to(row, graph_rows)
+        for fname in _IDENTITY_REF_FIELDS:
+            val = row.get(fname)
+            v = str(val).strip() if val is not None else ""
+            # ⛔ `default` is the sentinel `_canonical_from_row` refuses: it names the
+            # tenant graph without identifying it, and it is workspace-universal while
+            # the ledger path is per-user. ⛔ and the value must be one THIS row holds
+            # uniquely, or the scope key is a cross-graph match (the P2 above).
+            if not v or v.casefold() == _DEFAULT_SENTINEL or v not in unique:
+                continue
+            return v
     return target_graph
 
 
@@ -1281,8 +1323,10 @@ def ledger_scopes(
     refs = {target_graph}
     row = _matched_row(target_graph, graph_rows) if graph_rows else None
     if row is not None:
-        refs.update(str(row[f]).strip() for f in _IDENTITY_REF_FIELDS
-                    if row.get(f) and str(row[f]).strip())
+        # `_refs_unique_to`, NOT every field verbatim: a `name` that equals another
+        # graph's id is carried by TWO rows, and putting it in the set let graph A's
+        # scope intersect graph B's (round-37 P2, second instance).
+        refs |= _refs_unique_to(row, graph_rows)
     return frozenset(refs)
 
 

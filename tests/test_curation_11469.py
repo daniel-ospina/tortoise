@@ -2600,3 +2600,108 @@ def test_the_ledger_never_matches_a_different_graph_by_a_bare_tail():
     # and its scope set is REFS of its own row — a different row shares none of them
     assert C.ledger_scopes("org_o1_g_x", rows).isdisjoint(C.ledger_scopes("x", rows)), (
         C.ledger_scopes("org_o1_g_x", rows), C.ledger_scopes("x", rows))
+
+
+def test_a_name_that_equals_another_graphs_id_is_not_a_match():
+    """Round-37 P2, second instance — a name is only unique AS a name.
+
+    `mcp_auth.resolve_graph_target` is field-major (id → stable_id → namespace →
+    name), so a name that equals ANOTHER graph's id resolves to that graph. Putting the
+    bare field value in the ledger's match set therefore let graph BETA (whose `name`
+    is graph ALPHA's `graph_id`) share ALPHA's scope. `_refs_unique_to` excludes every
+    value two rows carry, so the sets are disjoint and the guard still refuses.
+    """
+    rows = [{"graph_id": "g_alpha", "stable_id": "g_alpha", "namespace": "org_o1_g_alpha",
+             "name": "alpha"},
+            {"graph_id": "g_beta", "stable_id": "g_beta", "namespace": "org_o1_g_beta",
+             "name": "g_alpha"}]
+    alpha = C.ledger_scopes("g_alpha", rows)
+    beta = C.ledger_scopes("org_o1_g_beta", rows)
+    assert alpha.isdisjoint(beta), (alpha, beta)
+    # and the shared token really is the hazard: BETA names itself with ALPHA's id
+    assert "g_alpha" in rows[1].values()
+
+
+def test_the_ledger_never_records_the_default_sentinel():
+    """`default` names the tenant graph without identifying it (`_canonical_from_row`)
+    and is workspace-universal, while the ledger path is per-user — recording it would
+    scope two tenants' graphs together. The row's own `stable_id` is used instead."""
+    rows = [{"graph_id": "default", "stable_id": "g_tenant1", "namespace": "org_o1"}]
+    assert C.ledger_scope("org_o1", rows) == "g_tenant1"
+
+
+def test_a_disarmed_run_over_an_unmeasurable_points_read_exits_zero(monkeypatch, tmp_path,
+                                                                    capsys):
+    """Round-37 P3 — the switch precedence must cover EVERY census read, not one.
+
+    A disarmed run over a failed points read raised straight out of `cmd_plan` (exit 1,
+    no artifact) — the round-22 defect one arm over, and exactly backwards for the flag
+    an operator flips DURING an incident. The artifact says `census_measured: false`, so
+    the absent census cannot be read as an empty one.
+    """
+    mod = _tool_module()
+
+    def call(name, args):
+        if name == "tortoise_query":
+            return {"result": [], "total": 0}       # an unmeasurable points read
+        return {"result": []}
+    monkeypatch.setattr(mod, "_live_call_tool", call)
+    rc = mod.main(["plan", "--graph", "org_x_g_old", "--target", "org_x_g_new",
+                   "--apply", "--off", "--no-verify-read",
+                   "--ledger", str(tmp_path / "l.jsonl"), "--out", str(tmp_path / "p.json")])
+    assert rc == 0, capsys.readouterr()
+    payload = json.loads((tmp_path / "p.json").read_text())
+    assert payload["census"] is None and payload["census_measured"] is False, payload
+    assert "read returned 0 points" in payload["read_failure"], payload["read_failure"]
+    assert payload["run"]["off"] is True and payload["run"]["applied"] is False
+
+
+def test_an_armed_run_over_an_unmeasurable_points_read_still_fails(monkeypatch, tmp_path):
+    """The counter-arm: the precedence is ONLY the switch. Armed, a failed read is as
+    loud as it was — it must not become a quiet artifact."""
+    mod = _tool_module()
+
+    def call(name, args):
+        if name == "tortoise_query":
+            return {"result": [], "total": 0}
+        return {"result": []}
+    monkeypatch.setattr(mod, "_live_call_tool", call)
+    with pytest.raises(RuntimeError, match="read returned 0 points"):
+        mod.main(["plan", "--graph", "org_x_g_old", "--target", "org_x_g_new",
+                  "--apply", "--no-verify-read", "--ledger", str(tmp_path / "l.jsonl")])
+
+
+def test_the_cli_refuses_a_target_spelling_the_graphs_surface_cannot_resolve(
+        monkeypatch, tmp_path):
+    """Round-37 P3-2 — the SHIPPED shape of the `graphs` section.
+
+    `graphs()` wraps each string from `tortoise_list_graphs()` as `{"namespace": s}`
+    (`sdk.list_graphs() -> list[str]`), so the surface exposes exactly the strings it
+    lists. A `--target` spelled differently from every exposed string is therefore
+    REFUSED by the identity guard — never silently re-sent, and never skipped: that is
+    the honest contract on today's surface, and this arms it.
+    """
+    mod = _tool_module()
+    wire: list[str] = []
+
+    def call(name, args):
+        if name == "tortoise_graph_overview" and args.get("section") == "graphs":
+            return {"result": ["org_x_g_old", "org_x_g_new"]}   # the REAL payload shape
+        if name == "tortoise_graph_overview" and args.get("section") == "status":
+            return {"counts": {"Source": 0}}
+        if name == "tortoise_query":
+            return {"result": [{"id": "p1", "kind": "decision",
+                                "content": "a durable claim"}], "total": 1}
+        if name == "tortoise_ingest":
+            wire.append(args["graph"])
+            return {"created": len(args["bundle"]["points"])}
+        return {"result": []}
+    monkeypatch.setattr(mod, "_live_call_tool", call)
+    base = ["plan", "--graph", "org_x_g_old", "--ledger", str(tmp_path / "l.jsonl"),
+            "--out", str(tmp_path / "p.json"), "--no-verify-read", "--apply"]
+    assert mod.main([*base, "--target", "org_x_g_new"]) == 0
+    assert wire == ["org_x_g_new"], wire
+
+    # a spelling this surface does not expose: a REFUSAL, not a re-send and not a skip
+    assert mod.main([*base, "--target", "g_new"]) == 3
+    assert wire == ["org_x_g_new"], f"an unresolvable spelling reached the wire: {wire}"

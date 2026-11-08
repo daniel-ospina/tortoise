@@ -525,6 +525,40 @@ def cmd_inventory(args: argparse.Namespace) -> int:
     return 0
 
 
+def _disarmed_artifact(args: argparse.Namespace, reason: str) -> int:
+    """A DISARMED run whose census could not be measured: exit 0, failure on the artifact.
+
+    The off switch exists to make pipeline noise stop during an incident — exactly when
+    the reads are failing — so a disarmed run must not become a non-zero exit just
+    because the census it was not going to write from could not be read (round-22
+    contract: "a driver paged on a run that did exactly what it was told"). It must not
+    SWALLOW the failure either: `census_measured: false` and `read_failure` say the
+    census below is absent, not empty, so nobody reads `total_rows` from it.
+    """
+    payload = {
+        # ⛔ `null`, not a zeroed census: a zeroed one is indistinguishable from "the
+        # graph is empty", which is the silent-zero class R7 forbids.
+        "census": None,
+        "census_measured": False,
+        "read_failure": reason,
+        "run": {
+            "applied": False, "off": True, "skipped_known": 0, "written": 0,
+            "target_graph": args.target, "digest": None, "refused": "off-switch active",
+            "stopped": None, "identity": None, "duplicate_rows": 0, "pending": 0,
+        },
+        "rows_written": None,
+        "not_enumerable_by_this_read_path": dict(NOT_ENUMERABLE),
+    }
+    text = json.dumps(payload, indent=2, sort_keys=True)
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as fh:
+            fh.write(text + "\n")
+    print(text)
+    print(f"disarmed (census NOT measured: {reason[:200]}): nothing written, nothing attempted",
+          file=sys.stderr)
+    return 0
+
+
 def cmd_plan(args: argparse.Namespace) -> int:
     if not args.target:
         print("plan: --target <graph> is required (the clean, pack-filed graph)", file=sys.stderr)
@@ -537,9 +571,21 @@ def cmd_plan(args: argparse.Namespace) -> int:
               "identity must be the graph that was actually read", file=sys.stderr)
         return 2
     reader = MCPReader(_live_call_tool, args.graph)
-    counts = reader.counts()
-    points, points_total = reader.read_points(page=args.page, verify=args.verify_read)
-    sources, source_total = reader.read_sources()
+    disarmed = C.off_switch_active(args.off)
+    try:
+        counts = reader.counts()
+        points, points_total = reader.read_points(page=args.page, verify=args.verify_read)
+        sources, source_total = reader.read_sources()
+        # INSIDE the guard too: `graphs()` feeds the identity guard and the ledger
+        # scope, so a failure there is the same census class.
+        graphs = reader.graphs()
+    except Exception as exc:
+        # ⛔ THE SWITCH IS RESOLVED BEFORE THE CENSUS, for EVERY read — not only the
+        # source section. An armed run still raises (a failed read must be loud); a
+        # disarmed run reports the failure on the artifact and exits 0 (round-37 P3).
+        if not disarmed:
+            raise
+        return _disarmed_artifact(args, f"{type(exc).__name__}: {exc}")
     gap = _source_gap(counts, len(sources))
     unreconciled = _unreconciled_sources(len(sources), gap)
     if unreconciled and not C.off_switch_active(args.off):
@@ -551,7 +597,6 @@ def cmd_plan(args: argparse.Namespace) -> int:
         # pages on a run that did exactly what it was told). The unmeasurable census
         # still travels on the artifact rather than being swallowed.
         reader._note(unreconciled)
-    graphs = reader.graphs()
     plan = C.build_plan(points + sources, source_graph=args.graph or "(credential-bound)",
                         target_graph=args.target)
     try:
