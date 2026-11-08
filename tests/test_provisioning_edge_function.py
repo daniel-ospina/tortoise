@@ -429,6 +429,17 @@ def test_edge_function_hook_path_is_gone():
     Attempt). #839's 500 was a platform-capability gap, so keeping a
     fail-closed, unverifiable branch alive only invites someone to
     "re-enable" a path the platform can never call.
+
+    WHY A SHAPE PIN AND NOT ONLY THE NAMES BELOW: the three name assertions are
+    satisfiable by a WORKING re-add — one that spells the secret as a plain
+    literal (`Deno.env.get("AUTH_HOOK_SECRET")`) instead of the deleted
+    `AUTH_HOOK_SECRET_ENV` constant needs no `standardwebhooks` import to read a
+    `webhook-signature` header, and a REAL verifier rejects a bogus signature
+    (401), which is exactly what the runtime harness asserts. Measured on such a
+    mutant (PR #11553 review): every name pin passed. So the delete claim is
+    pinned on the SHAPE too — `authenticateCaller` reads exactly ONE request
+    header, `Authorization`; any second header read is an authentication path
+    beside the user JWT.
     """
     src = EDGE_FN.read_text()
     assert "standardwebhooks" not in src, (
@@ -442,6 +453,19 @@ def test_edge_function_hook_path_is_gone():
     # user JWT, whose identity must match the provisioning target (#802).
     assert "authenticateCaller(req)" in src, (
         "the JWT path is the only caller authentication left"
+    )
+    auth_body = src.split("async function authenticateCaller", 1)[1].split(
+        "Deno.serve", 1
+    )[0]
+    assert auth_body.count("req.headers.get(") == 1, (
+        "authenticateCaller must read exactly ONE request header (Authorization): "
+        "a second header read is an auth path beside the user JWT — e.g. the "
+        "deleted Standard-Webhooks `webhook-signature` path, which a "
+        "plain-literal re-add reintroduces while the name pins above stay green:"
+        f"\n{auth_body}"
+    )
+    assert 'req.headers.get("authorization")' in auth_body, (
+        "the one header authenticateCaller reads must be Authorization"
     )
 
 
@@ -690,12 +714,12 @@ def test_allowlist_declaration_scan_reads_code_not_text():
 
 def test_edge_function_allowlist_parity_with_waitlist_subscribe():
     """EVERY function that declares an allowlist must agree with
-    waitlist-subscribe (the keep-in-sync comment in
-    tenant-provision/index.ts) so a host added for
-    the welcome page in one function can never silently drift from the others
-    (the #1110 failure mode). Local-origin handling deliberately diverges
-    (tenant-provision: any local port; waitlist: 8788 only) and is NOT
-    compared.
+    waitlist-subscribe (the reference array) so a host added for one browser
+    surface can never silently drift from the others (the #1110 failure mode).
+    Local-origin handling is NOT compared — and since #1120 there is nothing
+    left to diverge: tenant-provision declares NO allowlist (it is in
+    SERVER_ONLY_FUNCTIONS), and the remaining declarers share the 8788-only
+    array.
 
     Enumerated rather than named: the guard originally compared two functions,
     and a third (deck-view, #8732) joined them unguarded. Its failure mode is
@@ -792,8 +816,9 @@ def test_edge_function_allowlist_parity_with_waitlist_subscribe():
             )
             assert all(h == want[0] for h in have), (
                 f"{name} {const} must match waitlist-subscribe in EVERY "
-                "declaration — change every declaring function together (see "
-                "the keep-in-sync comment in tenant-provision/index.ts)"
+                "declaration — change every DECLARING function together "
+                "(tenant-provision is excluded by SERVER_ONLY_FUNCTIONS, not by "
+                "an allowlist it no longer has)"
             )
 
 
