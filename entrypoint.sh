@@ -479,6 +479,23 @@ fi
 # helper defined above this line is invisible to the lifted block, which is how a
 # refactor once made the shell arm answer 1 for every input and only the pytest
 # suite noticed.
+_uvicorn_flag_option() {
+    # ⛔ ONE list, because two copies drifted and the drift was a FAIL-OPEN.
+    # `uvicorn.main.main.params` marks these `is_flag=True` (pinned 0.52.1): they
+    # consume NO value, so the token after them is still a token. Every OTHER
+    # long option consumes the next token as its value, which is what makes
+    # `--host --workers=1` a host of "--workers=1" rather than a workers flag.
+    # The count reader had its own copy of this list and omitted `--reload`, so
+    # `--reload --workers 4` read as "no workers value" (the reloader swallowed
+    # it) and the exported count fell through to `$WEB_CONCURRENCY` — caught by
+    # `_AGREEMENT_TABLE`, which is exactly why both arms run one table.
+    case "$1" in
+        --reload|--access-log|--use-colors|--proxy-headers|--server-header\
+        |--date-header|--version|--reset-contextvars|--factory) return 0 ;;
+    esac
+    return 1
+}
+
 _resolve_raw_requested_workers() {
     # uvicorn's own precedence: `--workers N` / `--workers=N` over the argv, else
     # $UVICORN_WORKERS (click's `auto_envvar_prefix` value for that flag), else
@@ -489,9 +506,19 @@ _resolve_raw_requested_workers() {
     # `--lifespan off` guard can ask a DIFFERENT question of the same input —
     # "is this a value the shell can VERIFY?" rather than "what number is it?" —
     # without a second copy of this precedence chain.
-    local _args=("$@") _i=0 _count="" _arg=""
+    local _args=("$@") _i=0 _count="" _arg="" _skip=0
+    # ⛔ ARITY, exactly as the reload scan below does it. A `--workers=1` token is
+    # a workers FLAG only when click reaches it as a TOKEN; `--host --workers=1`
+    # makes it `--host`'s VALUE, so uvicorn reads `$WEB_CONCURRENCY` and runs N
+    # while a membership scan reports 1 — MEASURED on the pinned 0.52.1:
+    # `--host --workers=1` (and `--uds` / `--root-path` / `--app-dir` /
+    # `--forwarded-allow-ips` / `--loop` with it) leaves `Config.workers = 4`
+    # under `WEB_CONCURRENCY=4`. That masked count then certified "one worker"
+    # to the `--lifespan off` guard, which is the fail-open this whole block
+    # exists to close.
     while [ "$_i" -lt "${#_args[@]}" ]; do
         _arg="${_args[$_i]}"
+        if [ "$_skip" = "1" ]; then _skip=0; _i=$((_i + 1)); continue; fi
         case "$_arg" in
             --workers)
                 _i=$((_i + 1))
@@ -499,6 +526,12 @@ _resolve_raw_requested_workers() {
                 ;;
             --workers=*)
                 _count="${_arg#--workers=}"
+                ;;
+            --*=*) : ;;
+            -*)
+                # A long option with no inline value consumes the NEXT token as
+                # its value — unless it is one of uvicorn's FLAGS.
+                _uvicorn_flag_option "$_arg" || _skip=1
                 ;;
         esac
         _i=$((_i + 1))
@@ -658,8 +691,11 @@ for _arg in "$@"; do
     case "$_arg" in
         --reload) _reload_requested=1 ;;
         --*=*) : ;;
-        --access-log|--use-colors|--proxy-headers|--server-header|--date-header|--version|--reset-contextvars|--factory) : ;;
-        --*) _reload_skip=1 ;;
+        -*)
+            # Same predicate the count reader uses — one list, so `--reload` can
+            # never be a value-taking option in one loop and a flag in the other.
+            _uvicorn_flag_option "$_arg" || _reload_skip=1
+            ;;
     esac
 done
 case "$(printf '%s' "${UVICORN_RELOAD:-}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]')" in

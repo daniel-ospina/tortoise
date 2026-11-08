@@ -739,7 +739,8 @@ def _worker_block(source: str) -> str:
     block = source[start:end]
     # The lifted text must DEFINE everything the entrypoint's own calls reach;
     # a helper left above the sentinel is the failure this asserts against.
-    for helper in ("_resolve_raw_requested_workers", "_resolve_requested_workers",
+    for helper in ("_uvicorn_flag_option", "_resolve_raw_requested_workers",
+                   "_resolve_requested_workers",
                    "_count_is_verifiable", "_app_env_file_in_play",
                    "_app_lifespan_disabled"):
         assert f"{helper}() {{" in block, (
@@ -887,6 +888,22 @@ _AGREEMENT_TABLE: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
     (("uvicorn", "app:app", "--workers", "--workers="), {}),
     (("uvicorn", "app:app", "--workers", "--workers="),
      {"WEB_CONCURRENCY": "3"}),
+    # ⛔ ARITY ON THE COUNT READER — the `--reload` lesson applied to `--workers`.
+    # `--host --workers=1` makes `--workers=1` the VALUE of `--host`: click never
+    # sees a workers flag, so uvicorn reads `$WEB_CONCURRENCY` and runs FOUR
+    # (measured on the pinned 0.52.1) while a membership scan reported 1 — and a
+    # masked count is what certified "one worker, nothing to gate" on a
+    # lifespan-off boot. Every string-typed long option reaches it.
+    (("uvicorn", "app:app", "--host", "--workers=1"),
+     {"WEB_CONCURRENCY": "4"}),
+    (("uvicorn", "app:app", "--app-dir", "--workers=1"),
+     {"WEB_CONCURRENCY": "4"}),
+    (("uvicorn", "app:app", "--root-path", "--workers=1"),
+     {"WEB_CONCURRENCY": "4"}),
+    (("uvicorn", "app:app", "--uds", "--workers=1"),
+     {"WEB_CONCURRENCY": "4"}),
+    # …and the control: the value given BEFORE the flag is still a real flag.
+    (("uvicorn", "app:app", "--host", "0.0.0.0", "--workers=2"), {}),
 )
 
 
@@ -1029,6 +1046,17 @@ def test_the_lifespan_off_refusal_covers_counts_the_shell_CANNOT_see():
          {"UVICORN_LIFESPAN": "off"}),
         (("uvicorn", "app:app"), {"UVICORN_LIFESPAN": "off",
                                 "WEB_CONCURRENCY": "\u00a02"}),
+        # ⛔ A MASKED count: `--host --workers=1` makes the `--workers=1` token
+        # `--host`'s VALUE, so uvicorn reads `$WEB_CONCURRENCY` — FOUR, measured
+        # on the pinned 0.52.1 — while a membership scan reads 1 and certifies
+        # "one worker, nothing to gate". The skip walk must see no workers flag
+        # here, so the real count reaches the guard and the boot is refused.
+        (("uvicorn", "app:app", "--host", "--workers=1",
+          "--lifespan", "off"), {"WEB_CONCURRENCY": "4"}),
+        (("uvicorn", "app:app", "--app-dir", "--workers=1",
+          "--lifespan", "off"), {"WEB_CONCURRENCY": "4"}),
+        (("uvicorn", "app:app", "--root-path", "--workers=1",
+          "--lifespan", "off"), {"WEB_CONCURRENCY": "4"}),
     ):
         proc = _run_worker_block(argv, environ)
         assert proc.returncode != 0, (argv, environ, proc.stdout)
@@ -1230,7 +1258,14 @@ def test_lifespan_calls_the_gate_FIRST():
         "Exception", "BaseException", "MultiWorkerRefused", "RuntimeError",
     }
     for node in ast.walk(_lifespan_fn()):
-        if not isinstance(node, ast.Try):
+        # ⛔ `except*` is a DIFFERENT NODE and it swallows just as well:
+        # `ast.TryStar` is NOT a subclass of `ast.Try` (verified), and
+        # `try: raise RuntimeError() / except* RuntimeError:` catches a bare
+        # raise — so `except* MWR: pass` kept the gate at index 0 and PASSED
+        # (mutation-checked). `tools/substrate_map_check.py` carries the same
+        # pair for the same reason (#5086 review P3); this pin had re-learned
+        # aliases and attributes but not the star form.
+        if not isinstance(node, (ast.Try, ast.TryStar)):
             continue
         for handler in node.handlers:
             names = caught_names(handler.type)
