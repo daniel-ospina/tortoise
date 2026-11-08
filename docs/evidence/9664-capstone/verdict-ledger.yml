@@ -372,19 +372,30 @@ measured_at:
 #         runs (a `pytest`/script invocation whose own output is quoted, not a report).
 #
 #       $ env -u TORTOISE_API_KEY uv run python tools/test_lane.py run -- tests/test_9664_capstone_verdict_ledger.py tests/test_9340_graph_tool_argument.py tests/test_pack_selection_by_graph.py tests/test_cross_tenant_read_isolation.py tests/test_onboarding_auto_complete.py tests/test_oauth_consent_page_step4.py tests/test_oauth_consent_bff_routes.py -q
-#       456 passed, 5 failed                       # 461 collected, RE-MEASURED at the head that
-#                                                   # carries this text. Run THROUGH
+#       456 passed, 5 failed                       # 461 collected AT THE HEAD OF THAT RUN,
+#                                                   # which PREDATES this branch's merge of
+#                                                   # `origin/main`. Run THROUGH
 #                                                   # `tools/worktree_report.py run`, so the counts are
 #                                                   # parsed from the real log rather than typed.
-#       per-file collection, summed: 295 (the six contract files: 66 / 54 / 9 / 42 / 65 / 59)
-#                                  + 166 (`test_9664_capstone_verdict_ledger.py`, the ledger pin suite)
-#                                  = 461 = 456 passed + 5 failed.   Counted, not estimated.
-#       ⛔ THE PIN SUITE COLLECTS 166 BECAUSE THE PAIRED C2/E3 TEST IS GONE (2026-11-08 review).
-#       An interim head carried `test_c2_and_e3_cannot_be_graded_differenty`, which made it 167
-#       and the seven-file run 457/462; that test was DELETED because it rested on a false
-#       premise (C2 does not subsume E3 — see C2's own comment) and forbade a legitimate
-#       future state. So the counts here are the ones this head actually prints, and a
-#       reader coming from the PR body should expect 166 rather than 167.
+#       ⛔ THIS HEAD DOES NOT COLLECT 461, so the 456/5 split above is stale BY
+#       CONSTRUCTION - a measurement against a denominator that no longer exists - and not
+#       because anyone did the arithmetic wrong. Two independent edits moved the pin suite.
+#       (a) the paired C2/E3 test is GONE: an interim head carried
+#       `test_c2_and_e3_cannot_be_graded_differently`, which made the suite 167, and it was
+#       DELETED because it rested on a false premise (C2 does not subsume E3 - see C2's own
+#       comment) and forbade a legitimate future state. That takes 167 to 166, which is what
+#       a previous revision of this block recorded. (b) the merge of `origin/main` then
+#       landed 89 more parametrized tests in the same file (114 `def test_`, up from 72),
+#       taking it 166 -> 255.
+#       So the tally at THIS head is a COLLECTION count, and only that:
+#           per-file collection, summed: 295 (the six contract files: 66 / 54 / 9 / 42 / 65 / 59)
+#                                      + 255 (`test_9664_capstone_verdict_ledger.py`, the ledger pin suite)
+#                                      = 550 COLLECTED at this head.   Counted, not estimated.
+#       ⛔ DO NOT DERIVE THE SPLIT BY SUBTRACTION. `550 - 5` is not this head's pass count:
+#       the 5 are docker-lane-only (S2's ACL group) and do not reproduce on a carve-out
+#       host, so the split is HOST-DEPENDENT and must be measured, not inferred. Re-run the
+#       command above at this head to replace 456/5 with a measured pair; until then 456/5
+#       is that earlier run's own output and nothing more.
 #       ⛔ `env -u TORTOISE_API_KEY` IS PART OF THE COMMAND, not noise: with a key in the
 #       environment the MCP stdio transport refuses BY DESIGN (it cannot carry the token),
 #       so `test_cross_tenant_read_isolation.py::test_negative_control_graph_listing_scoping_is_detected`
@@ -393,7 +404,7 @@ measured_at:
 #       their environment, so the environment is named rather than left to the reader; the
 #       `9 passed` this file records for that unit is the keyless reading, and it is the
 #       one the contract-layer claim rests on.
-#       the 5 are `TestCreateGraphWithPacks`, refused by the PRIVATE lane container's ACL layer — see S2.
+#       the 5 are 5 of the 8 `TestCreateGraphWithPacks` tests, refused by the PRIVATE lane container's ACL layer — see S2.
 #       $ TORTOISE_TEST_CARVE_OUT=1 uv run python -m pytest tests/test_7949_c2_door.py tests/test_7949_capstone_measure.py -q
 #       302 passed                                 # 24 (the door census, its pinned-ON/refusal arms
 #                                                  # and the one-hop ledger pins) + 278 (the #7949
@@ -433,11 +444,16 @@ measured_at:
 #
 # (The U3 row quotes the SAME function in its pre-#10025 shape — `Reachable graphs:
 # 'default' (default).` — because that is what the 2026-10-26 run observed; the shape
-# changed in `347cf03cb8` (2026-10-27 — the commit by which #10025 reached main),
-# AFTER that run's deployed build. ⛔ NOT `704fd60ee`, which an earlier draft cited:
-# that sha is an ancestor of NEITHER `origin/main` NOR the deployed `5938deaf`
-# (review finding, this pass), so the citation sent a reader to a tree where the
-# change is absent and made a TRUE observation look unverifiable.
+# changed in `704fd60ee` (2026-10-26 - `feat(10025): a graph's identity is a fixed id`,
+# the commit by which #10025 reached main), AFTER that run's deployed build.
+# ⛔ NOT `347cf03cb8`, which an earlier cut of this paragraph cited: that sha is a
+# TEST-ONLY commit (`tests/test_dry_run_preview.py`, #10167, "count EDGES, not paths")
+# that touches no part of the resolver, and it was cited beside the further false claim
+# that `704fd60ee` is an ancestor of NEITHER `origin/main` NOR the deployed `5938deaf`.
+# The reverse is true and was re-verified this pass: `704fd60ee` IS an ancestor of BOTH.
+# So the earlier citation sent a reader to an unrelated tree AND told them the correct
+# sha was unreachable, which made a TRUE observation look unverifiable. Both halves are
+# the review finding; both are corrected here.
 # `git log -S 'id {stable_id}, graph_id' --all -- tortoise/mcp_auth.py` resolves the
 # reachable commit. The function now renders
 # `(id …, graph_id …)` for the DEFAULT row, and its OTHER arm — taken when the row's
@@ -540,8 +556,8 @@ criteria:
       Needs a signed-in dashboard session, so the UI half cannot be graded here.
       The CONTRACT half is also NOT fully green on this box, and a previous draft
       of this row said it was: `tests/test_pack_selection_by_graph.py` collects 54
-      tests and this pass measured **49 passed / 5 failed**. The 5 are the whole
-      `TestCreateGraphWithPacks` group, all refused with HTTP 503
+      tests and this pass measured **49 passed / 5 failed**. The 5 are 5 of that class's
+      **8** tests (the group collects 8, not 5), all refused with HTTP 503
       "Per-graph ACL provisioning failed - ... default ACL user is open (nopass)",
       because `tools/test_lane.py` starts its container WITHOUT `requirepass` by
       design (its own docstring's stated residual, tracked as #10992 / #10141) -
