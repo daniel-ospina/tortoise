@@ -1159,10 +1159,16 @@ def reconcile_after_replay(projection, *, engine: str,
 # by clearing the lexicon — the #3518 descriptor. So every hit is CLASSIFIED
 # against the module's own predicates: a hit whose node still carries
 # pre-lexicon prose is RESIDUE (a real leak); a hit whose node carries the
-# prefix is a stem collision ONLY when the text the index is declared on adds no
-# token the displayed pair lacks AND the probe token relates to one of the
+# prefix is a stem collision ONLY when (a) the indexed text IS the displayed
+# suffix, EXACTLY — `summary[len(PREFIX):] == _searchText`, the derivation both
+# writers produce, and `_proves_the_lexicon` skips this check because there
+# `topics` proves the pair itself — AND (b) the probe token relates to one of the
 # node's own lexicon tokens — otherwise it is UNEXPLAINED, which vetoes and exits
-# 1. ``lexicon`` is the only bucket that ABSORBS a hit as BENIGN, and it never
+# 1. ⛔ (a) IS DERIVATION, NOT "adds no token the displayed pair lacks"
+# (#11536 review round 11, P2): set CONTAINMENT was the round-9 P1 — a terse
+# utterance with no stopwords is a subset of the lexicon by accident, and the
+# only bucket that never vetoes absorbed it. Restoring containment here is
+# restoring a measured leak path. ``lexicon`` is the only bucket that ABSORBS a hit as BENIGN, and it never
 # fails a run — so it is EARNED three times over (#11536 review rounds 2 and 5),
 # not assumed from the prefix.
 #    ⛔ ``foreign`` ALSO DOES NOT VETO, AND IT IS NOT EXCLUDED FROM CERTIFYING
@@ -2109,10 +2115,19 @@ def probe_fts(g, phrases, *, control: bool = True,
                 "ok": bool(got["hits"]), "hits": got["hits"],
                 "ran": got["ran"], "degraded": got["degraded"],
                 "reason": got["reason"],
-                "note": "one token of a Source whose `summary` carries the display "
-                            "prefix (the witness the lexicon writer emits)"
-                            " — the window selects on that witness, so this"
-                            " proves the READ answers",
+                # ⛔ THE NOTE MUST MATCH THE MEASUREMENT (#11536 review round 11,
+                # P2): it asserted "the READ answers" unconditionally, so on
+                # hits == 0 — the ONE case the control exists to detect — the
+                # machine-readable note said the opposite of the datum beside it
+                # (and of the `uncorroborated` refusal the same run prints).
+                "note": (
+                    "one token of a Source whose `summary` carries the display "
+                    "prefix (the witness the lexicon writer emits) — the window "
+                    "selects on that witness, so a HIT proves the READ answers"
+                    if got["hits"] else
+                    "one token of a Source whose `summary` carries the display "
+                    "prefix — the read returned NOTHING for it, so the index did "
+                    "not answer and this zero corroborates nothing"),
             }
         else:
             empty = source_index_is_empty(g, timeout_ms=timeout_ms)

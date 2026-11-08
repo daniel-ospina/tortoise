@@ -3261,6 +3261,48 @@ def test_a_PROVEN_lexicon_node_explains_the_hit_or_it_is_not_a_collision(
         "the node's own lexicon word")
 
 
+def test_the_control_line_does_not_assert_an_answer_on_a_ZERO(capsys):
+    """#11536 review round 11, P2: the control's own line printed the opposite.
+
+    (1) FAILS on the round-10 tree: `control (one display-prefix Source token —
+        the read answers): 0 hit(s)` printed UNCONDITIONALLY, so on hits == 0 —
+        the one case the control exists to detect — the line asserted the read
+        answered immediately above the `uncorroborated` refusal saying it did
+        not. The `--json` note made the same unconditional claim.
+    (2) REACHABLE: a dropped index or a breaker trip between the probe and the
+        control is exactly the state this arm reports.
+    (3) POLARITY THAT MUST NOT GO RED: a control that DID answer still says so,
+        because a corroborated zero is the whole point of the arm.
+    """
+    def _fts(hits):
+        return {"ran": True, "entity_type": "source", "limit": 50,
+                "probes": [{"phrase": "zebraquux", "hits": 0, "urls": [],
+                            "unresolved": 0, "truncated": False, "ran": True,
+                            "degraded": False, "reason": None, "residue": [],
+                            "lexicon": [], "stale": [], "foreign": [],
+                            "unexplained": [], "unread": []}],
+                "leaked": [], "stale": [], "stem_only": [],
+                "unmeasurable": [], "truncated": [], "unresolved": 0,
+                "certifies": False, "vetoed": "uncorroborated",
+                "control": {"mode": "probe", "ok": bool(hits), "hits": hits,
+                            "note": "control"}}
+
+    _cli._report_fts(_fts(0))
+    out = capsys.readouterr().out
+    assert "read answers" not in out, (
+        "the control line asserted the read answered on a ZERO — the one case "
+        "it exists to detect: " + out)
+    assert "did NOT answer" in out, (
+        "the control line did not name the failure it measured: " + out)
+
+    # (3) the corroborating arm still states its answer.
+    _cli._report_fts(_fts(2))
+    out = capsys.readouterr().out
+    assert "read answers" in out, (
+        "an answering control stopped saying so: " + out)
+    assert "did NOT answer" not in out
+
+
 def test_the_uncorroborated_refusal_names_only_what_the_run_measured(monkeypatch,
                                                                     capsys):
     """#11536 review round 2, P2: a refusal must not assert unmeasured facts.

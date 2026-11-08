@@ -553,8 +553,17 @@ def _report_fts(fts: dict, census_after: int | None = None) -> None:
             # control's window selects on the display-prefix witness, not on a
             # proven lexicon, so "one post-fix lexicon token" claimed a provenance
             # nothing checked. What it establishes is that the READ answers.
-            print(f"          control (one display-prefix Source token — the "
-                  f"read answers): {control['hits']} hit(s)")
+            # ⛔ AND IT MUST NOT ASSERT THE ANSWER ON A ZERO (#11536 review round
+            # 11, P2): hits == 0 is the one case the control exists to detect, and
+            # the line said "the read answers" immediately above the
+            # `uncorroborated` refusal saying it did not.
+            if control.get("ok"):
+                print(f"          control (one display-prefix Source token — the "
+                      f"read answers): {control['hits']} hit(s)")
+            else:
+                print(f"          control (one display-prefix Source token): "
+                      f"{control['hits']} hit(s) — the read did NOT answer for "
+                      f"a token that is present in it")
     if fts["certifies"]:
         if any(p.get("discriminating") for p in fts["probes"]):
             # ⛔ A TOKEN-SCOPED MEASUREMENT CANNOT CARRY A POPULATION CLAIM
