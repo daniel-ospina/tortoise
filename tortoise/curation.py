@@ -663,13 +663,22 @@ def build_plan(
         pack_catalog_note=pack_note,
     )
 
-    keepers: dict[str, str] = {}
+    # The keeper is identified by its INDEX in `rows`, never by `row.node_id`. Point ids
+    # are not unique — the reader admits same-id nodes with different content as a legal
+    # shape (`tools/curate_graph.py`, `test_two_nodes_sharing_an_id_in_one_page_are_not_a
+    # _pagination_shift`) — so a node_id-keyed keeper made every row sharing that id look
+    # like the keeper ITSELF (`keepers[key] == row.node_id`), append the keeper's decision
+    # a second time, and drop the second text with no decision, no reason and no
+    # `--rows` line, while `_pending_sections` reported the pair as a plan-level
+    # `duplicate_rows` repeat. The artifact then said "this plan repeats a row" about a
+    # unique text that was simply left behind (round-35 review finding 1).
+    keepers: dict[str, int] = {}
     first_pass: dict[str, Decision] = {}
-    for row in rows:
+    for index, row in enumerate(rows):
         key = row.stable_key
         if key in keepers:
             continue
-        keepers[key] = row.node_id
+        keepers[key] = index
         first_pass[key] = classify(row, mapping)
     # A keeper that carries NOTHING cannot be "the row of record" for the content:
     # preferring a keeper whose own disposition carries means a real-content row is
@@ -685,16 +694,18 @@ def build_plan(
     # duplicate then inherits a TRUE disposition (``undecidable`` — we cannot say
     # this content is safely left behind, which R8 requires) instead of a
     # confident `not-carried`.
-    for row in rows:
+    for index, row in enumerate(rows):
         key = row.stable_key
         incumbent = first_pass[key]
-        if incumbent.node_id == row.node_id:
+        # Index identity, not `node_id`: a DIFFERENT row that happens to share the
+        # keeper's id is still a candidate to hold the content.
+        if keepers[key] == index:
             continue
         if not str(row.content or "").strip():
             continue
         if not str(incumbent.content or "").strip():
             # The incumbent witnesses nothing: this row becomes the row of record.
-            keepers[key] = row.node_id
+            keepers[key] = index
             first_pass[key] = classify(row, mapping)
             continue
         # The incumbent holds the content: only a CARRYing candidate improves on it.
@@ -702,25 +713,29 @@ def build_plan(
             continue
         candidate = classify(row, mapping)
         if candidate.disposition == CARRY:
-            keepers[key] = row.node_id
+            keepers[key] = index
             first_pass[key] = candidate
 
-    for row in rows:
+    for index, row in enumerate(rows):
         key = row.stable_key
+        keeper_index = keepers[key]
         keeper = first_pass[key]
-        if keepers.get(key) == row.node_id:
+        if keeper_index == index:
             plan.decisions.append(keeper)
             continue
         # A hash shared by two rows whose CONTENT differs proves nothing about them,
         # so the duplicate claim — and the "row of record" the reason used to assert —
-        # is withheld rather than guessed (round-34 finding 2).
+        # is withheld rather than guessed (round-34 finding 2). This now covers the
+        # same-id shape too: the check is the row's IDENTITY against the keeper's, so a
+        # row that merely shares the keeper's `node_id` no longer short-circuits onto the
+        # keeper's decision and its text reaches the artifact as `undecidable`.
         mine, theirs = str(row.content or "").strip(), str(keeper.content or "").strip()
         plan.decisions.append(
             classify(
                 row,
                 mapping,
                 duplicate_of=keeper.disposition,
-                keeper_id=keepers[key],
+                keeper_id=rows[keeper_index].node_id,
                 content_mismatch=bool(mine and theirs and mine != theirs),
             )
         )

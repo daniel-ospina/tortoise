@@ -2182,3 +2182,46 @@ def test_a_stale_hash_never_claims_a_row_of_record_for_another_text():
     )
     folded = {d.node_id: d for d in same.decisions}
     assert folded["k2"].disposition != C.CARRY and "duplicate" in folded["k2"].reason
+
+
+def test_two_rows_sharing_an_id_and_a_hash_cannot_hide_the_second_text(tmp_path):
+    """Round-35 finding 1: the keeper map was keyed by `row.node_id`, and point ids are
+    NOT unique — the reader admits same-id nodes with different content as a legal shape
+    (`test_two_nodes_sharing_an_id_in_one_page_are_not_a_pagination_shift`). So a row that
+    merely shared the keeper's id matched `keepers[key] == row.node_id`, was appended the
+    KEEPER's decision a second time, and its own text reached the artifact NOWHERE — no
+    decision, no reason, no `--rows` line. `_pending_sections` then counted the pair as a
+    plan-level `duplicate_rows` repeat, so the report said "this plan repeats a row" about
+    a unique text that had simply been left behind.
+    """
+    plan = C.build_plan(
+        [row("dup", content="text one", content_hash="H"),
+         row("dup", content="text two", content_hash="H")],
+        source_graph="old", target_graph="new", packs={},
+    )
+    assert len(plan.decisions) == 2, [d.node_id for d in plan.decisions]
+    first, second = plan.decisions
+    assert first.content == "text one"
+    assert second.content == "text two", (
+        "the second row must keep its OWN content, not be replaced by the keeper's: "
+        f"{second.content!r}")
+    assert second.disposition == C.UNDECIDABLE, (
+        "a hash that disagrees with the text proves no duplicate, so the second text is "
+        f"a per-row decision: {second!r}")
+    # The pair is NOT a plan-level repeat: only a row whose content the plan duplicates
+    # may be reported that way, and these two texts differ.
+    _sections, _skipped, duplicates = C._pending_sections(
+        plan.bundle(), C.Ledger(tmp_path / "l.jsonl", target="new"))
+    assert duplicates == 0, (
+        f"distinct texts are not a duplicate repeat (duplicate_rows={duplicates})")
+
+    # Non-vacuity: the same id with the SAME text is a genuine duplicate and must still
+    # fold, so this is an identity guard and not a blanket refusal to detect duplicates.
+    same = C.build_plan(
+        [row("dup", content="A durable claim", content_hash="H"),
+         row("dup", content="A durable claim", content_hash="H")],
+        source_graph="old", target_graph="new", packs={},
+    )
+    assert len(same.decisions) == 2, [d.content for d in same.decisions]
+    assert same.decisions[1].disposition != C.CARRY and "duplicate" in same.decisions[1].reason, (
+        f"a real duplicate must still be detected: {same.decisions[1]!r}")
