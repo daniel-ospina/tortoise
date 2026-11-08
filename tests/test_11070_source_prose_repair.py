@@ -2605,42 +2605,58 @@ def test_a_MULTI_token_probe_is_REFUSED_because_the_FTS_read_OR_joins_it(
 
     monkeypatch.setenv("TORTOISE_IDENTIFIER_TOKENS", "1")
 
-    for phrase in ("the second-latest PR comment", "the", "zx-99", "   ",
-                   # ⛔ WHITESPACE-FREE IS THE UNIT, NOT "TOKENISES TO ONE TERM"
-                   # (#11536 review round 5, P2): the tokenizer DROPS stopwords and
-                   # sub-2-char words, so these pass a count-based check while the
-                   # read sends the RAW string, which RediSearch evaluates as an
-                   # implicit AND — an UNDER-match that reads a still-findable
-                   # sentence as absent. Measured before the fix: both returned
-                   # None from `probe_phrase_rejection`.
-                   "the fridays", "fridays x",
-                   # ⛔ AND THESE TWO ARE THE ONES THAT ACTUALLY PIN THE GUARD
-                   # (#11536 review round 12, P2). `"the fridays"` and
-                   # `"fridays x"` each have TWO alphanumeric runs, so the
-                   # `len(runs) > 1` guard below refuses them on its own and the
-                   # whitespace guard could be deleted with this row still green.
-                   # A single run plus a punctuation-only word is the shape ONLY
-                   # the whitespace guard owns — MEASURED at this head:
-                   # `_indexed_term_runs("friday .") == ['friday']` and the
-                   # tokeniser yields one term, so without the guard they are
-                   # ACCEPTED, and the read then sends `friday .` raw, which
-                   # RediSearch evaluates as an implicit AND that under-matches.
-                   "friday .", "the ."):
-        # ⛔ THE MESSAGE MUST NOT NAME A MECHANISM (#11536 review round 13, P2).
-        # It used to say "the FTS read OR-joins it", which is the reason the
-        # TOKENISER check refuses a phrase — and it is the OPPOSITE of the reason
-        # this row's new fixtures (`"friday ."`, `"the ."`) are refused: those
-        # are a single alphanumeric run, so the whitespace guard refuses them
-        # because the read sends the string RAW and RediSearch evaluates a
-        # space-separated query as an implicit AND that UNDER-matches. A failure
-        # message that misnames the mechanism sends the next debugger to the
-        # wrong guard — in the file whose whole subject is that a disclosure must
-        # not misstate its own evidence. Neutral on purpose, and the row covers
-        # phrases refused for three different reasons.
+    # ⛔ ONE EXPECTED REASON PER FIXTURE, NOT ONE GENERIC MESSAGE (#11536 review
+    # round 14, P2). Two rounds of this row produced a single failure message for
+    # every fixture, and each version was FALSE for some of them: "the read
+    # OR-joins it" is the TOKENISER's reason, and "does not address ONE indexed
+    # term" is inverted for `"the"` — which IS one indexed term and is refused
+    # because a stopword is too COMMON, so it OVER-matches and a REMOVED sentence
+    # still reads present. A debugger sent to the wrong guard is the same
+    # misstated-evidence defect this PR exists to remove, one layer up.
+    # ⛔ AND A PER-FIXTURE REASON PINS EACH GUARD SEPARATELY: a generic message
+    # passes whichever guard happens to fire, so it would not notice the stopword
+    # guard starting to answer for a whitespace phrase (or the reverse).
+    # MEASURED at this head — each string below is the reason
+    # `probe_phrase_rejection` actually returns for that fixture.
+    for phrase, reason in (
+            # the OR-join the tokeniser produces for multi-word input
+            ("the second-latest PR comment", "tokenises to 4 term(s)"),
+            # ⛔ OVER-match, not under-match: one term, but far too common
+            ("the", "search stopword"),
+            # the identifier mechanism turns one typed token into several
+            ("zx-99", "tokenises to 2 term(s)"),
+            # nothing to probe at all
+            ("   ", "it is empty"),
+            # ⛔ WHITESPACE-FREE IS THE UNIT, NOT "TOKENISES TO ONE TERM"
+            # (#11536 review round 5, P2): the tokenizer DROPS stopwords and
+            # sub-2-char words, so these pass a count-based check while the
+            # read sends the RAW string, which RediSearch evaluates as an
+            # implicit AND — an UNDER-match that reads a still-findable
+            # sentence as absent. Measured before the fix: both returned
+            # None from `probe_phrase_rejection`.
+            ("the fridays", "whitespace-separated words"),
+            ("fridays x", "whitespace-separated words"),
+            # ⛔ AND THESE TWO ARE THE ONES THAT ACTUALLY PIN THE GUARD
+            # (#11536 review round 12, P2). `"the fridays"` and
+            # `"fridays x"` each have TWO alphanumeric runs, so the
+            # `len(runs) > 1` guard below refuses them on its own and the
+            # whitespace guard could be deleted with this row still green.
+            # A single run plus a punctuation-only word is the shape ONLY
+            # the whitespace guard owns — MEASURED at this head:
+            # `_indexed_term_runs("friday .") == ['friday']` and the
+            # tokeniser yields one term, so without the guard they are
+            # ACCEPTED, and the read then sends `friday .` raw, which
+            # RediSearch evaluates as an implicit AND that under-matches.
+            ("friday .", "whitespace-separated words"),
+            ("the .", "whitespace-separated words"),
+    ):
         why = probe_phrase_rejection(phrase)
         assert why, (
-            f"{phrase!r} was accepted as a probe — the read does not address ONE "
-            f"indexed term, so a still-findable sentence can read as absent")
+            f"{phrase!r} was accepted as a probe; expected it to be refused for "
+            f"{reason!r}")
+        assert reason in why, (
+            f"{phrase!r} was refused by the WRONG guard — expected {reason!r}, "
+            f"got {why!r}")
     assert probe_phrase_rejection("zebraquux") is None
     assert probe_phrase_rejection("Fridays.") is None, (
         "a single token with punctuation is still ONE token — the read escapes "
