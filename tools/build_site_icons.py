@@ -26,16 +26,30 @@ artwork is ever replaced, re-measure that box — the crop is derived from it.
 Uses `sips` for cropping and resampling (macOS); everything else is stdlib. Run it once
 per asset change; CI only ever reads the resulting bytes:
 
-    python3 tools/build_site_icons.py --source path/to/mark.png
-    python3 tools/build_site_icons.py --source ... --out /tmp/icons --keep /tmp/icons/crops
+    uv run python tools/build_site_icons.py --source path/to/mark.png
+    uv run python tools/build_site_icons.py --source ... --out /tmp/icons --keep /tmp/icons/crops
 """
 
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below. `_guard_index` in
+# tests/test_entry_point_python_guard.py is the DEFINITION of the accepted
+# preamble (`__future__`, `import sys`, this `if`) — do not restate it here.
+# The named invocation carries `--help` because `--source` is REQUIRED: the bare
+# path exits 2 (argparse usage) and would be a second unattributed error, the
+# #5136 rule tests/test_ci_runner_topology.py now pins for its own tool.
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/build_site_icons.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/build_site_icons.py --help`"
+    )
+
 import argparse
 import struct
 import subprocess
-import sys
 import tempfile
 import zlib
 from pathlib import Path
