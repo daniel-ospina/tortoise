@@ -996,7 +996,7 @@ steps:
     - step: S2.3
       condition: >-
         the S2 map left at least one candidate's kind missing or `unclassified`, so
-        `_collect_classify_items` (tortoise/extractor_v2.py:11098, `def _collect_classify_items`) had an item to hand the classifier;
+        `_collect_classify_items` (tortoise/extractor_v2.py:11189, `def _collect_classify_items`) had an item to hand the classifier;
         when the map types every candidate the pass has no work and neither classify pass runs
       idle_evidence: >-
         the run's own classify surface reads enabled=true with empty s2/union, the receipt's
@@ -1118,7 +1118,7 @@ except where noted; the alternative was to omit the provenance and let a reader 
 | 90 of 90 m2 baseline | `tests/eval/write_path/baselines/m2.json` at this `fixtures_hash` |
 | 53/37, 7/8, 5/9, 21/8 split counts | the per-session sums above, partitioned by §2.1 |
 | 9 of 15 shape coverage (60%) | §1.3, `is_positively_bare_definite_description` |
-| 7 unconditional / 1 conditional step (§11) | `tortoise/extractor_v2.py:11098-11120` (`_collect_classify_items`, the collector's item set), `:12982` and `:13131` (the two `if items:` gates, one per classify pass) |
+| 7 unconditional / 1 conditional step (§11) | `tortoise/extractor_v2.py:11189-11211` (`_collect_classify_items`, the collector's item set), `:13065` and `:13214` (the two `if items:` gates, one per classify pass) |
 | 148 / 433 (0.34180), 148 / 383 (0.38642) | `capstone-measured-e0fc940b.log`'s `E3 census` block: `e3 label=Point nodes=338 anchored=141`, `Object 50/0`, `Event 45/7`, no `Document` written (§10.1) |
 | 141/150 (0.940000), 159 turn rows, 29 operator Points | the same census block's `point composition` line — reported, NOT adopted as E3's denominator (§10.1) |
 | 5/25 (20%) vs 13/25 (52%) recovered; 0.4800 raw absolute on n=25 | §10 @ `ecc7bc8ca` (run 1 losses 80.0%/48.0%) and `capstone-measured-e0fc940b.log`'s E5 row (§10.2) |
@@ -1373,8 +1373,8 @@ place a machine reads it.
   be either observed or witnessed **idle** with a basis. The conditional set is read from this record
   at the pre-registration commit; a run log may not declare it.
 - **Why it is not a relaxation**: `S2.3` structurally cannot run on a corpus whose S2 map types every
-  candidate — `_collect_classify_items` (`tortoise/extractor_v2.py:11098-11120`) collects only
-  kind-missing/`unclassified` candidates and both passes sit behind `if items:` (`:12982`, `:13131`).
+  candidate — `_collect_classify_items` (`tortoise/extractor_v2.py:11189-11211`) collects only
+  kind-missing/`unclassified` candidates and both passes sit behind `if items:` (`:13065`, `:13214`).
   The old rule therefore could not be satisfied by **any** legitimate run of the registered corpus,
   so the gate could not return a verdict at all (§11.2's four ordered refusals). Every one of the
   eight still has to be accounted for, and an idle claim needs the run's own four facts — flag ON,
@@ -1469,7 +1469,7 @@ place a machine reads it.
 - **Original value (as §10.8 left it):** `_collect_classify_items` at
   `tortoise/extractor_v2.py:10397`, its extent `:10397-10419`, the two `if items:` gates at
   `:11849`/`:11998`, and the two fail-open `except` arms at `:11862`/`:12009`.
-- **New value:** the same symbols at `:11098`, `:11098-11120`, `:12908`/`:13057` and
+- **New value:** the same symbols at `:11189`, `:11189-11211`, `:12908`/`:13057` and
   `:12921`/`:13068`.
 - **Why:** `main` landed five changes to `extractor_v2.py` while this branch was open, and they
   moved these cites in **two windows** — only the second of which is what this entry's **749**-line
@@ -1478,7 +1478,7 @@ place a machine reads it.
   (`80c912244f`) and are **ancestors of** `04deeaacda`, so they carry the collector from `:10397`
   (as recorded above) to `:10969` at `04deeaacda` — **+572**. The second window: **`#11264`**
   (`482`/`81`) and **`#11361`** (`149`/`37`) are the only commits in `04deeaacda..origin/main` that
-  touch `extractor_v2.py`, and they carry it the rest of the way, `:10969` → `:11098` — **+129**.
+  touch `extractor_v2.py`, and they carry it the rest of the way, `:10969` → `:11189` — **+129**.
   Their **631** insertions and **118** deletions are exactly the **749** changed lines quoted here,
   because `04deeaacda..origin/main` is the only range they are measured over.
   ⚠️ The first cut of this entry attributed the 631/118/749 to all five changes ("inserting **631**
@@ -1490,7 +1490,7 @@ place a machine reads it.
   a **per-symbol** amount at its own commit `80c912244f` — the `def` and its extent by one line
   (`:10397`/`:10397-10419` against a measured `:10398`/`:10398-10420`), and the four gate/arm cites
   by **seven** (`:11849`/`:11998`/`:11862`/`:12009` against a measured
-  `:11856`/`:12005`/`:11869`/`:12016`). Both routes therefore reach the same LINE, `:11098`, at two
+  `:11856`/`:12005`/`:11869`/`:12016`). Both routes therefore reach the same LINE, `:11189`, at two
   different deltas: +572 then +129 from the recorded `:10397` is **701**, while +571 then +129 from
   the measured `:10398` is **700**. Re-deriving the next move must anchor on the measured `:10398`,
   never on the recorded value plus 700. The symbols are unchanged: the collector
@@ -1505,18 +1505,18 @@ place a machine reads it.
 
 ### 10.10 — the §11 cite block re-pointed after `#11368`'s mention-builder consolidation (2026-11-07, `#11368`)
 
-- **Original value (as §10.9 left it):** `_collect_classify_items` at `:11098`, its extent
-  `:11098-11120`, the two `if items:` gates at `:12908`/`:13057`, and the two fail-open `except`
+- **Original value (as §10.9 left it):** `_collect_classify_items` at `:11189`, its extent
+  `:11189-11211`, the two `if items:` gates at `:12908`/`:13057`, and the two fail-open `except`
   arms at `:12921`/`:13068`.
-- **New value:** the same symbols at `:11098`, `:11098-11120`, `:12982`/`:13131` and
-  `:12995`/`:13142`.
+- **New value:** the same symbols at `:11189`, `:11189-11211`, `:13065`/`:13214` and
+  `:13078`/`:13225`.
 - **Why:** `#11368` gave the declared-span verdict ONE home (`_verified_span_source`) and routed
   both mention builders through it, a net **+74** lines (`126` inserted / `52` deleted) confined to
   the mention-builder region (`:12128`–`:12628` — the last hunk is `+12607,22`, so `:12607` is its
   START, and the bound is `:12628`; it must contain BOTH calls the section claims, `:12273` in
   `_mention_record` and `:12624` in `_clamped_mention`). Every cite **below** that region therefore moves
-  by exactly `+74` — `:12908`→`:12982`, `:13057`→`:13131`, `:12921`→`:12995`, `:13068`→`:13142` —
-  while `_collect_classify_items` (`:11098`), which sits **above** it, does not move at all. The
+  by exactly `+74` — `:12908`→`:13065`, `:13057`→`:13214`, `:12921`→`:13078`, `:13068`→`:13225` —
+  while `_collect_classify_items` (`:11189`), which sits **above** it, does not move at all. The
   `+0` on the collector and the `+74` on the four cites below it are one measurement, and quoting
   only one of them is how the next re-derivation anchors on the wrong number.
 - **What moved: nothing else.** No metric, denominator, threshold, class set, corpus pin or `steps`
@@ -1699,9 +1699,9 @@ the condition; the gate reads the declaration below instead of asserting eight.
 
 ### 11.1 The finding, and what it is not
 
-`_collect_classify_items` (`tortoise/extractor_v2.py:11098-11120`) collects only candidates whose kind
+`_collect_classify_items` (`tortoise/extractor_v2.py:11189-11211`) collects only candidates whose kind
 is **missing or the `unclassified` sentinel**. Both classify passes are gated on that list being
-non-empty — `if items:` at `:12982` (the S2 pass) and `:13131` (the post-S4 pass). So S2.3 has work **iff the S2 map left
+non-empty — `if items:` at `:13065` (the S2 pass) and `:13214` (the post-S4 pass). So S2.3 has work **iff the S2 map left
 something untyped** — and that is a property of the candidate set, not of the pipeline's health. A
 corpus whose map assigns a concrete kind to every candidate legitimately idles the pass.
 
@@ -1745,7 +1745,7 @@ evidence or its evidence issue.
    run log, so making a step conditional is a reviewed edit to a hash-pinned artefact rather than a
    lane's local choice. A log whose declaration the frozen record does not confirm is **refused**.
 
-**Why (2) is a witness and not a loophole.** The extractor's fail-open `except` (`:12995`, `classify(S2) failed` / `:13142`, `classify(union) failed`) leaves
+**Why (2) is a witness and not a loophole.** The extractor's fail-open `except` (`:13078`, `classify(S2) failed` / `:13225`, `classify(union) failed`) leaves
 the *same* empty `s2`/`union` block as an idle pass — `#9823` measured that. Accepting a bare empty
 block would therefore hand a **crashed** classify pass the same verdict as a pass with nothing to do,
 which is the fail-open shape a gate may not have. The failure is visible: the extractor appends

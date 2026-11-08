@@ -72,40 +72,26 @@ change that falsifies one of them reds a test instead of being discovered; the
 
 ORDERING OBLIGATION (§4.3 G5's S4 clause, tracked at **#8500**): removing
 ``run_s4`` is a v4 MIGRATION DELIVERABLE, not a cleanup — it must not leave the
-step list before its successor lands, or the pipeline loses gap-filling and the
-E4 merge property in the gap. **#8500's precedence question is settled** (owner,
-2026-11-08, on **#11002**): the repo already states the rule — ``run_s4`` is the
-gap reviewer, the ordering obligation is recorded, and the work is *build the
-successor, prove the property survives, then remove*. What this record does
-state is the measured shipped state: ``run_s4`` is what runs today, so it must
-not be deleted on the strength of the design doc alone.
-
+step list before its successor lands. **#8500's precedence question is settled**
+(owner, 2026-11-08, on **#11002**): build the successor, prove the property
+survives, then remove — and ``run_s4`` is what runs today, so it must not be
+deleted on the strength of the design doc alone.
 ✅ THE SUCCESSOR HAS LANDED (**#11002**) — and *"S2.2 and S2.3 already exist in
-the code"* is NOT the test that it has. The test is the one below, and it is
-met: a stage the pipeline runs ADDS a candidate a coverage check found missing.
-Since #11002 the bounded S2.2 RE-NARRATE does exactly that —
-``_renarrate_trigger`` → ``_arm_extract`` (the ``emphasis`` seam in ``run_s1``)
-re-narrates ONCE, re-extracts, and UNIONS the two arms with
-``merge_embed_lists`` under E4's identity-key rules, so the retry is the
-gap-filler's successor rather than its replacement. Pinned by
-``tests/test_selection_step.py``: a ``coverage_suspect`` arm's missing candidate
-reaches ``result["embed_list"]`` through the retried arm, and the union keeps
-both arms' items (merges-not-replaces).
-
-§4.0 gives S2.2 VET the coverage question S4's removal relies on (*"did we
-account for everything the narrative said?"*), and S2.3 CLASSIFY is the fold's
-other half as this record counts it. Both stages are present in the tree
-(``_vet_gate.apply_vet``, ``kind_classifier.classify_items``) and both are wired
-into ``extract_session_v2`` behind flags: ``TORTOISE_CLASSIFY_LATER`` DEFAULTS OFF, and
-``TORTOISE_VET`` too — but since #10996 S2.2's mechanical half defaults ON.
-Presence is not sufficiency for the FOLD, and that half of this record is
-unchanged:
+the code"* is NOT the test that it has: the test is a stage that ADDS a
+candidate a coverage check found missing, and the bounded S2.2 RE-NARRATE is it
+(``_renarrate_trigger`` → ``_arm_extract``, the ``emphasis`` seam in ``run_s1``:
+fires ONCE, re-extracts, UNIONS both arms with ``merge_embed_lists`` under E4's
+identity-key rules; pinned by ``tests/test_selection_step.py``). The FOLD half is
+unchanged: ``apply_vet`` and ``classify_items`` are wired in behind
+``TORTOISE_CLASSIFY_LATER``/``TORTOISE_VET`` (the latter's mechanical half ON
+since #10996), and VET's coverage signal still only DETECTS — the REMEDY is the
+successor above, not a fold stage. The four bullets below still hold:
 
   * VET's coverage signal only DETECTS, and only in one degenerate case.
-    ``check_batch``'s coverage signals are "reported, never acted on":
     ``coverage_suspect`` fires only when a non-empty narrative produced ZERO
-    candidates. The gate itself does act — it records ``DISCARD`` verdicts and
-    ``apply_vet`` removes them — but VET only REMOVES, never adding a candidate
+    candidates, and the gate itself never acts on it — the PIPELINE does.
+    ``apply_vet`` itself only REMOVES (the ``DISCARD`` verdicts, whose
+    counterfactuals it records) and never adds a candidate
     the NARRATIVE did not yield: the one append path is the Layer-1 entity
     RESTORE from ``prior`` (``vet_gate.py`` Rule 4), which re-emits an entity an
     EARLIER pass discarded, needs a surviving candidate to reference the name,
@@ -15400,13 +15386,13 @@ def _arm_extract(model, edus, *, master, session_date, chunk_size,
     # end of `extract_session_v2`, commented "S2 raw (pre-S4)") is this pass's
     # OUTPUT — the S2 embedding after VET, still pre-S4. With the flag off it is
     # unchanged, which is the pre-existing behaviour.
-    vet_stats: dict = {}
-    vet_pool: dict = {}
+    vet_s2_stats: dict = {}
+    vet_s2_pool: dict = {}
     if vet_enabled and embed_list:
-        embed_list, vet_stats, _w, vet_pool = _run_vet_pass(
+        embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass(
             embed_list, story, arbiter=vet_arbiter)
         warnings_out.extend(_w)
-    vet_batch = (vet_stats or {}).get("batch")
+    vet_batch = (vet_s2_stats or {}).get("batch")
     if isinstance(vet_batch, dict) and vet_batch.get("outcome"):
         # An arbiter's batch-level verdict rides on top of the mechanical
         # signal: it is the only producer of the `RENARRATE` token.
@@ -15417,11 +15403,11 @@ def _arm_extract(model, edus, *, master, session_date, chunk_size,
         "story": story,
         "embed_list": embed_list,
         "batch": batch,
-        "vet_stats": vet_stats,
-        "vet_pool": vet_pool,
+        "vet_stats": vet_s2_stats,
+        "vet_pool": vet_s2_pool,
         "mention_stats": mention_stats,
         "warnings": warnings_out,
-        "metrics": _arm_metrics(story, batch, vet_stats),
+        "metrics": _arm_metrics(story, batch, vet_s2_stats),
         "chunks": chunks,
         "failed_chunks": failed_chunks,
     }
