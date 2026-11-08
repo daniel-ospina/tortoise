@@ -1802,3 +1802,25 @@ def test_an_undecodable_ledger_is_a_refusal_not_a_traceback(tmp_path):
     path.write_bytes(b'{"target": "new", "migrationKey": "\xff\xfe"}\n')
     with pytest.raises(C.CurationRefused, match=r"cannot be read"):
         C.Ledger(path, target="new")
+
+
+def test_a_case_varied_ref_cannot_be_one_rows_id_and_anothers_name():
+    """Round-31 BLOCKING: identity fields were casefolded, while `mcp_auth` matches ids
+    with `==` and casefolds ONLY the name — so `--graph Default` casefolded onto the
+    tenant row's `graph_id: default` in the guard, while the write path read it as the
+    NAME of the `g_deadbeef…` row. The guard's two canonicals differed for ONE graph and
+    the run wrote in place."""
+    rows = [
+        {"graph_id": "default", "stable_id": "g_t0000000000000",
+         "namespace": "team_o1", "name": "house"},                       # the tenant graph
+        {"graph_id": "g_deadbeefdeadbeef", "stable_id": "g_deadbeefdeadbeef",
+         "namespace": "org_o1_g_deadbeefdeadbeef", "name": "default"},   # a graph NAMED "default"
+    ]
+    # the identity match is exact: `Default` is NOT the tenant row's graph id
+    assert C._matched_row("Default", rows) is rows[1]
+    assert C.canonical_graph_id("Default", rows) == C.canonical_graph_id(
+        "org_o1_g_deadbeefdeadbeef", rows)
+    with pytest.raises(C.CurationRefused):
+        C.assert_distinct_graphs("Default", "org_o1_g_deadbeefdeadbeef", graph_rows=rows)
+    # …and a NAME is still case-insensitive, as the surface documents
+    assert C.canonical_graph_id("HOUSE", rows) == C.canonical_graph_id("g_t0000000000000", rows)

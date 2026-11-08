@@ -701,21 +701,28 @@ def _matched_row(ref: str, graph_rows: Sequence[Mapping[str, Any]]) -> Mapping[s
     `_matched_row` returned row 1 for BOTH, `ra is not rb` short-circuited the only
     clause that could see the contradiction. Measured: `plan --graph g_t…
     --target default --apply` exited 0 and issued the ingest, in place on the tenant
-    graph. The field order here mirrors `canonical_graph_id`: the three IDENTITY fields
-    first (skipping the `default` sentinel, which identifies nothing), and `name` only
-    when no identity field matched.
+    graph.
+
+    The field order and the comparison rules mirror `canonical_graph_id` exactly:
+    `graph_id` / `stable_id` / `namespace` are matched **exactly** (not casefolded, as
+    `mcp_auth` does) and in that scan order — so a ref that lands on the `default`
+    sentinel DOES return that row, because that row is where the canonical came from —
+    and `name` alone is matched casefolded, only when no identity field matched.
     """
-    wanted = (ref or "").strip().casefold()
+    wanted = (ref or "").strip()
     if not wanted:
         return None
     for row in graph_rows:
         for fname in ("graph_id", "stable_id", "namespace"):
             val = row.get(fname)
-            if not val or str(val).casefold() != wanted:
+            # EXACT, like `canonical_graph_id` (and `mcp_auth`): casefolding an id here
+            # made the guard claim a ref as one row's id while the write path resolved
+            # it as another row's name.
+            if not val or str(val).strip() != wanted:
                 continue
             return row
     for row in graph_rows:
-        if (row.get("name") or "").casefold() == wanted:
+        if (row.get("name") or "").casefold() == wanted.casefold():
             return row
     return None
 
@@ -734,12 +741,19 @@ def canonical_graph_id(ref: str, graph_rows: Sequence[Mapping[str, Any]] | None)
     if not ref:
         return None
     if graph_rows:
+        # ⛔ Identity fields are compared EXACTLY, not casefolded: `mcp_auth` matches
+        # graph id / stable_id / namespace with `==` and casefolds ONLY the name
+        # (`mcp_auth.py:490-513`). Casefolding the ids here let the guard claim a ref as
+        # one row's ID while the write path resolved it as another row's NAME —
+        # `--graph Default` casefolded onto the tenant row's `graph_id: default` while
+        # `resolve_graph_target` read it as the NAME of the `g_deadbeef…` row, so the
+        # guard's two canonicals differed for ONE graph and the run wrote in place.
         wanted = ref.casefold()
         hits: list[str] = []
         for row in graph_rows:
             for field in ("graph_id", "stable_id", "namespace"):
                 val = row.get(field)
-                if val and str(val).casefold() == wanted:
+                if val and str(val).strip() == ref.strip():
                     canon = _canonical_from_row(row)
                     if canon and canon not in hits:
                         hits.append(canon)
