@@ -931,3 +931,52 @@ def test_the_refusal_gate_does_not_trip_on_a_db_error_that_mentions_graph():
     assert not mod._looks_like_graph_refusal("FalkorDB: graph not found")
     assert not mod._looks_like_graph_refusal("InternalError: unknown error while reading the graph")
     assert mod._looks_like_graph_refusal("unknown graph 'live-v4'")
+
+
+# ── round-12 review findings ──────────────────────────────────────────────
+
+
+def test_the_default_sentinel_is_not_an_identity():
+    """Round-12: `{"graph_id": "default", "namespace": "team_x"}` canonicalised to
+    "default" while a plain `{"namespace": "team_x"}` row gave "x", so two rows
+    describing ONE graph let `--graph default --target team_x` write in place."""
+    rows = [{"namespace": "team_3326a01ea34ae595d84de5d8f9"},
+            {"graph_id": "default", "namespace": "team_3326a01ea34ae595d84de5d8f9",
+             "name": "default"}]
+    # the sentinel resolves to the ROW's real identity, not to the string "default"
+    assert C.canonical_graph_id("default", rows) == "3326a01ea34ae595d84de5d8f9"
+    assert C.canonical_graph_id("team_3326a01ea34ae595d84de5d8f9", rows) == \
+        C.canonical_graph_id("default", rows)
+    with pytest.raises(C.CurationRefused):
+        C.assert_distinct_graphs("default", "team_3326a01ea34ae595d84de5d8f9",
+                                 graph_rows=rows)
+
+
+def test_rows_that_disagree_about_one_ref_are_refused():
+    """Two rows for one ref with different identities must never pick one."""
+    rows = [{"namespace": "team_x"}, {"graph_id": "g_other", "namespace": "team_x"}]
+    assert C.canonical_graph_id("team_x", rows) is None
+    with pytest.raises(C.CurationRefused):
+        C.assert_distinct_graphs("g_other", "team_x", graph_rows=rows)
+
+
+def test_an_unknown_kind_prefix_is_not_pack_ownership():
+    """Round-12: `core:decision` returned pack "core", but no `core` pack exists —
+    a migrated node would assert ownership of a pack that is not installed."""
+    packs = C.pack_kind_map()
+    assert "core" not in set(packs.values())
+    assert C.pack_for("core:decision", "point", packs) != "core"
+    # a REAL namespace still resolves
+    ns = sorted(set(packs.values()))[0]
+    assert C.pack_for(f"{ns}:decision", "point", packs) == ns
+
+
+def test_a_points_refusal_names_its_real_cause():
+    """Round-12: a `_safe` quota envelope reads as "0 rows" (is_error=False), and the
+    refusal discarded the cause, sending the operator to the wrong remedy."""
+    mod = _tool_module()
+
+    def call(_name, args):
+        return {"error": "ERR_QUOTA: budget exceeded", "code": "QUOTA"}
+    with pytest.raises(RuntimeError, match="QUOTA"):
+        mod.MCPReader(call, None).read_points()

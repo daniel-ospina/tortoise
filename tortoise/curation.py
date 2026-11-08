@@ -242,8 +242,12 @@ def pack_for(kind: str | None, node_type: str, mapping: Mapping[tuple[str, str],
     }.get(node_type, "pointKind")
     if ":" in kind:
         namespace, _, bare = kind.partition(":")
-        if namespace:
+        known = {ns for (_, _k), ns in mapping.items() if ns}
+        if namespace and namespace in known:
             return namespace
+        # An UNKNOWN prefix (`core:decision` — there is no `core` pack) is not an
+        # owner: returning it would stamp a migrated node with pack ownership that
+        # does not exist. Fall through to the bare kind's owner instead.
         kind = bare
     return mapping.get((bucket, kind))
 
@@ -582,6 +586,10 @@ def build_plan(
 # ── guards ────────────────────────────────────────────────────────────────
 
 
+#: The tenant graph's `graph_id`: a marker, not an identity.
+_DEFAULT_SENTINEL = "default"
+
+
 def _tail(g: str) -> str:
     """One graph's identity, from any accepted spelling of it.
 
@@ -608,8 +616,18 @@ def _tail(g: str) -> str:
 
 
 def _canonical_from_row(row: Mapping[str, Any]) -> str | None:
-    ident = (row.get("graph_id") or row.get("stable_id") or row.get("namespace")
-             or row.get("name"))
+    # `graph_id` is preferred, EXCEPT the "default" sentinel: that value names the
+    # tenant graph without identifying it, so a row carrying it must fall through to
+    # a spelling that does (`stable_id`, then the namespace). Without this, two rows
+    # describing ONE graph — `{"namespace": "team_x"}` and
+    # `{"graph_id": "default", "namespace": "team_x"}` — canonicalised to "x" and
+    # "default", the guard PASSED, and `--graph default --target team_x --apply`
+    # wrote in place.
+    fields = [row.get("graph_id"), row.get("stable_id"), row.get("namespace"),
+              row.get("name")]
+    ident = next((f for f in fields if f and str(f).casefold() != _DEFAULT_SENTINEL), None)
+    if not ident:
+        ident = next((f for f in fields if f), None)
     if not ident:
         return None
     # EVERY row collapses to its id tail. Returning the namespace string itself
@@ -633,11 +651,21 @@ def canonical_graph_id(ref: str, graph_rows: Sequence[Mapping[str, Any]] | None)
         return None
     if graph_rows:
         wanted = ref.casefold()
+        hits: list[str] = []
         for row in graph_rows:
             for field in ("graph_id", "stable_id", "namespace"):
                 val = row.get(field)
                 if val and str(val).casefold() == wanted:
-                    return _canonical_from_row(row)
+                    canon = _canonical_from_row(row)
+                    if canon and canon not in hits:
+                        hits.append(canon)
+                    break
+        if len(hits) == 1:
+            return hits[0]
+        if len(hits) > 1:
+            # Two rows describe the ref and disagree about WHICH graph it is: never
+            # pick one, because picking wrong is how an in-place write happens.
+            return None
         # Names are matched SEPARATELY so an ambiguous name is a refusal, not a
         # first-match: two graphs with one name must never resolve to whichever
         # row happened to come first.
@@ -688,11 +716,12 @@ def assert_distinct_graphs(
     if ca is None:
         raise CurationRefused(
             f"cannot resolve the source graph {source_graph!r} to a graph id — refusing to run "
-            "a migration whose source identity is unproven (pass the graph id or namespace)")
+            "a migration whose source identity is unproven (pass a spelling a graph row exposes — "
+            "the namespace, or a graph id the surface lists)")
     if cb is None:
         raise CurationRefused(
             f"cannot resolve the target graph {target_graph!r} to a graph id — refusing to run: "
-            "an unproven target could be the archive itself (pass the graph id or namespace)")
+            "an unproven target could be the archive itself (pass a spelling a graph row exposes)")
     if ca == cb:
         raise CurationRefused(
             f"source and target are the same graph ({ca!r}); the old graph is a "
