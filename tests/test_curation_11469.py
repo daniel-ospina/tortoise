@@ -204,6 +204,34 @@ def test_namespace_and_gid_spellings_of_one_graph_are_refused():
                                  graph_rows=NAMESPACE_ROWS)
 
 
+def test_org_and_team_spellings_of_the_tenant_graph_are_one_graph():
+    """`org_<id>` (post-rename) and `team_<id>` (before it) are the SAME graph — the
+    product says so. A guard that misses it approves an in-place run on the default."""
+    tenant = [{"namespace": "org_3326a01ea34ae595d84de5d8f9"},
+              {"namespace": "team_3326a01ea34ae595d84de5d8f9"}]
+    with pytest.raises(C.CurationRefused):
+        C.assert_distinct_graphs("org_3326a01ea34ae595d84de5d8f9",
+                                 "team_3326a01ea34ae595d84de5d8f9", graph_rows=tenant)
+
+
+def test_a_dry_run_with_an_unproven_identity_plans_instead_of_refusing():
+    """The guard is strict where a WRITE can happen; a plan-only run reports."""
+    plan = C.build_plan([row("a", content="Let me look.")], source_graph="live-v4",
+                        target_graph="new", packs={})
+    res = C.run_plan(plan, writer=CountingWriter(), ledger=C.Ledger("/tmp/nonexistent-11469", target="new"),
+                     apply=False, graph_rows=[{"namespace": "org_x_g_deadbeefdeadbeef"}])
+    assert res.identity and "cannot resolve" in res.identity
+    assert res.written == 0
+
+
+def test_a_ledger_for_another_target_is_refused():
+    plan = C.build_plan([row("a", content="Let me look.")], source_graph="old",
+                        target_graph="new", packs={})
+    with pytest.raises(C.CurationRefused):
+        C.run_plan(plan, writer=CountingWriter(), ledger=C.Ledger("/tmp/nonexistent-11469b", target="A"),
+                   apply=False, graph_rows=ROWS)
+
+
 def test_no_rows_does_not_fail_open():
     """With no identity rows, cross-spelling must NOT pass on a string compare."""
     with pytest.raises(C.CurationRefused):
@@ -301,6 +329,51 @@ class FakeCallToolResult:
         self.content = [type("T", (), {"text": json.dumps(payload)})()]
 
 
+class RealCallToolResult:
+    """fastmcp 3.x: snake_case fields, and a write result may carry TWO text parts
+    (the payload, then #10084's graph-resolution disclosure)."""
+
+    def __init__(self, payload, *, disclosure=None, is_error=False):
+        texts = [type("T", (), {"text": json.dumps(payload)})()]
+        if disclosure:
+            texts.append(type("T", (), {"text": disclosure})())
+        self.content = texts
+        self.structured_content = None
+        self.data = None
+        self.is_error = is_error
+
+
+def test_the_real_snake_case_result_shape_is_unwrapped():
+    """Reading only camelCase made every branch dead on the live client, so the
+    accept/refuse decision fell through to 'not a dict ⇒ accepted'."""
+    def call_tool(tool, args):
+        return RealCallToolResult({"created": 1}, disclosure="This write targeted graph 'x'.")
+
+    out = C.IngestWriter(call_tool).write_points("new", [{"migrationKey": "k", "content": "c"}])
+    assert out["written"] == ["k"]
+
+
+def test_a_refusal_in_the_real_shape_is_refused():
+    def call_tool(tool, args):
+        return RealCallToolResult({"error": "ERR_QUOTA"}, is_error=False)
+
+    with pytest.raises(C.CurationRefused):
+        C.IngestWriter(call_tool).write_points("new", [{"migrationKey": "k", "content": "c"}])
+
+
+def test_an_unparseable_result_is_refused_not_assumed_ok():
+    class Weird:
+        is_error = False
+        structured_content = None
+        data = None
+
+        def __init__(self):
+            self.content = [type("T", (), {"text": "not json at all"})()]
+
+    with pytest.raises(C.CurationRefused):
+        C.normalise_tool_result(Weird())
+
+
 def test_a_calltoolresult_object_is_unwrapped_and_a_refusal_refuses():
     """`call_tool` hands back a CallToolResult, so a dict-only check never sees the
     refusal — and the batch gets ledgered as migrated."""
@@ -333,6 +406,26 @@ def test_a_refused_second_batch_keeps_the_first_batch_and_reports_zero_then_reco
     assert res.written == 1, "the accepted batch is reported"
     assert res.refused and "ERR_QUOTA" in res.refused
     assert len(led) == 1, "only the accepted batch is recorded"
+
+
+def test_a_transport_failure_mid_run_reports_what_landed(tmp_path):
+    calls = {"n": 0}
+
+    def call_tool(tool, args):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {"created": 1}
+        raise TimeoutError("connection dropped")
+
+    led = C.Ledger(tmp_path / "l.jsonl", target="new")
+    plan = C.build_plan([row("a", content="Let me look."), row("b", content="Let me look again.")],
+                        source_graph="old", target_graph="new", packs={})
+    plan.decisions = [C.Decision(d.node_id, d.node_type, d.kind, C.CARRY, "test", d.pack,
+                                 d.stable_key, d.content) for d in plan.decisions]
+    res = C.run_plan(plan, writer=C.IngestWriter(call_tool, batch_size=1), ledger=led,
+                     apply=True, graph_rows=ROWS)
+    assert res.written == 1 and "TimeoutError" in (res.refused or "")
+    assert len(led) == 1
 
 
 def test_ingest_refusal_envelope_is_not_a_success():
@@ -425,7 +518,44 @@ def test_bundle_items_carry_content():
                         source_graph="old", target_graph="new", packs={})
     item = plan.bundle()["points"][0]
     assert item["content"] == "We keep the old graph."
-    assert item["ref"] == item["migrationKey"]
+    assert item["migrationKey"].startswith(C.MIGRATION_KEY_PREFIX)
+    assert "ref" not in item, "the bundle mints no bundle-local refs at all"
+
+
+def test_bundle_survives_the_ingest_canonicaliser():
+    """`ref` and `migrationKey` must not be the same string.
+
+    The canonicaliser expands any field VALUE equal to a bundle ref, so
+    `ref == migrationKey` makes each item expand into itself and ingest refuses
+    the whole bundle ("ref expansion exceeded depth 32"). Verified against
+    tortoise.canonical, the module the real `ingest` runs.
+    """
+    from tortoise import canonical
+
+    plan = C.build_plan([row("a", kind="decision", content="We keep the old graph."),
+                         row("b", kind="finding", content="A finding.")],
+                        source_graph="old", target_graph="new", packs={})
+    bundle = {"points": plan.bundle()["points"]}
+    resolved = canonical.resolve_refs(bundle)          # raises on a ref cycle
+    assert len(resolved["points"]) == 2
+    assert canonical.canonical_bundle(bundle)          # deterministic, no raise
+    assert not any("ref" in p for p in bundle["points"]), (
+        "a bundle-local ref is expanded wherever it appears as a field VALUE, so any "
+        "ref we mint can collide with a row's own content/id — omit it instead")
+
+
+def test_a_row_whose_content_looks_like_a_bundle_ref_cannot_cycle():
+    """Adversarial content (`cur0`, a migration key, a node id) must not be able to
+    make the bundle uncanonicalisable — the reason this bundle mints no refs."""
+    from tortoise import canonical
+
+    plan = C.build_plan([row("cur0", kind="decision", content="cur0"),
+                         row("curate-11469:point:decision:x", kind="finding", content="cur1")],
+                        source_graph="old", target_graph="new", packs={})
+    bundle = {"points": plan.bundle()["points"]}
+    resolved = canonical.resolve_refs(bundle)
+    assert len(resolved["points"]) == 2
+    assert canonical.canonical_bundle(bundle)
 
 
 def test_bundle_carries_no_deletion():

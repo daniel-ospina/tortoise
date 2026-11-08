@@ -120,17 +120,32 @@ def normalise_tool_result(res: Any) -> Any:
     """
     if isinstance(res, (dict, list, str, int, float)) or res is None:
         return res
-    is_err = getattr(res, "isError", None)
-    sc = getattr(res, "structuredContent", None)
+    # fastmcp's CallToolResult carries SNAKE_CASE fields (is_error /
+    # structured_content); the camelCase spellings are accepted too so a client
+    # upgrade in either direction keeps reading the same object.
+    is_err = getattr(res, "is_error", getattr(res, "isError", None))
+    sc = getattr(res, "structured_content", getattr(res, "structuredContent", None))
+    if not sc:
+        data = getattr(res, "data", None)
+        if isinstance(data, (dict, list)):
+            sc = data
     if sc:
         payload: Any = sc.get("result", sc) if isinstance(sc, dict) else sc
     else:
-        parts = getattr(res, "content", None) or []
-        text = "".join(getattr(p, "text", "") for p in parts)
-        try:
-            payload = json.loads(text)
-        except json.JSONDecodeError:
-            payload = text
+        parts = [getattr(p, "text", "") for p in (getattr(res, "content", None) or [])]
+        # Parse PER PART: a write result carries the payload as its first text
+        # block and #10084's graph-resolution disclosure as a SECOND one, so a
+        # join of the parts is not JSON and would look like an unreadable result.
+        payload = None
+        for text in parts:
+            try:
+                payload = json.loads(text)
+                break
+            except json.JSONDecodeError:
+                continue
+        if payload is None:
+            # Nothing parseable: refuse rather than assume the call succeeded.
+            raise CurationRefused(f"MCP tool result was not JSON: {''.join(parts)[:400]}")
     if is_err:
         raise CurationRefused(f"MCP tool error: {str(payload)[:400]}")
     return payload
@@ -457,7 +472,15 @@ class Plan:
             "digest": self.digest(),
             "points": [
                 {
-                    "ref": d.stable_key,
+                    # NO `ref` at all. A bundle-local ref is expanded wherever it
+                    # appears as a field VALUE, so ANY ref we mint can collide with
+                    # a row whose content or id happens to equal it — `ref ==
+                    # migrationKey` made every item expand into itself, and a ref
+                    # like "cur0" collides with a row whose content is "cur0" — and
+                    # ingest then refuses the WHOLE bundle ("ref expansion exceeded
+                    # depth 32"). Refs exist to address one item from another (a
+                    # connection); this bundle carries points only, so emitting no
+                    # ref makes the collision impossible rather than unlikely.
                     "migrationKey": d.stable_key,
                     "kind": d.kind or "statement",
                     "content": d.content,
@@ -512,13 +535,28 @@ def build_plan(
 
 
 def _tail(g: str) -> str:
+    """One graph's identity, from any accepted spelling of it.
+
+    Three shapes reach this function and they must collapse together:
+
+    * ``org_<id>_g_<gid>`` — a custom graph: the identity is ``<gid>``;
+    * ``g_<gid>`` / ``<gid>`` — the same graph by id;
+    * ``org_<id>`` and ``team_<id>`` — the TENANT/default graph, which is spelled
+      both ways by the product ("``org_{org_id}`` post-rename and ``team_{org_id}``
+      before it … both spellings are the calling org's own graph"), so the
+      identity is ``<id>``. Missing this made ``--graph org_<id> --target
+      team_<id>`` pass the guard and run in place.
+    """
     g = (g or "").strip().lower()
     if not g:
         return ""
-    t = g.split("_g_")[-1]
-    if t.startswith("g_") and len(t) > 2:
-        t = t[2:]
-    return t
+    if "_g_" in g:
+        t = g.split("_g_")[-1]
+        return t[2:] if t.startswith("g_") and len(t) > 2 else t
+    for prefix in ("org_", "team_", "g_"):
+        if g.startswith(prefix) and len(g) > len(prefix):
+            return g[len(prefix):]
+    return g
 
 
 def _canonical_from_row(row: Mapping[str, Any]) -> str | None:
@@ -681,12 +719,19 @@ class IngestWriter:
                 # the rest is simply not attempted.
                 return {"written": written, "stopped": "off-switch engaged"}
             batch = list(points[i:i + self._batch])
-            res = normalise_tool_result(self._call(self.TOOL, {
-                "graph": target_graph,
-                "promotion_policy": "auto",
-                "granularity": "bulk",
-                "bundle": {"points": batch},
-            }))
+            try:
+                raw = self._call(self.TOOL, {
+                    "graph": target_graph,
+                    "promotion_policy": "auto",
+                    "granularity": "bulk",
+                    "bundle": {"points": batch},
+                })
+            except CurationRefused:
+                raise
+            except Exception as exc:  # transport/timeout AFTER earlier batches landed
+                raise CurationRefused(f"target call failed: {type(exc).__name__}: {exc}",
+                                      written_keys=written) from exc
+            res = normalise_tool_result(raw)
             refused = _ingest_refused(res)
             if refused:
                 # The earlier batches were accepted, so they are reported — a
@@ -756,6 +801,7 @@ class RunResult:
     digest: str
     refused: str | None = None
     stopped: str | None = None
+    identity: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -767,6 +813,7 @@ class RunResult:
             "digest": self.digest,
             "refused": self.refused,
             "stopped": self.stopped,
+            "identity": self.identity,
         }
 
 
@@ -785,11 +832,25 @@ def run_plan(
     touches nothing — that is the mode to use against a target that does not
     exist yet.
     """
-    assert_distinct_graphs(plan.source_graph, plan.target_graph, graph_rows=graph_rows)
+    if ledger.target != plan.target_graph:
+        raise CurationRefused(
+            f"ledger is scoped to {ledger.target!r} but the plan targets "
+            f"{plan.target_graph!r} — a ledger answering for another graph would skip rows "
+            "this target never received")
+    identity_note: str | None = None
+    try:
+        assert_distinct_graphs(plan.source_graph, plan.target_graph, graph_rows=graph_rows)
+    except CurationRefused as exc:
+        if apply:
+            return RunResult(False, False, 0, 0, plan.target_graph, plan.digest(), refused=str(exc))
+        # A dry run writes nothing, so an unproven identity is reported rather than
+        # blocking the plan — the guard is strict exactly where a write can happen.
+        identity_note = str(exc)
     if off_switch_active(off):
         return RunResult(False, True, 0, 0, plan.target_graph, plan.digest(), refused="off-switch active")
     if not apply:
-        return RunResult(False, False, 0, 0, plan.target_graph, plan.digest(), refused="dry run (--apply not given)")
+        return RunResult(False, False, 0, 0, plan.target_graph, plan.digest(),
+                         refused="dry run (--apply not given)", identity=identity_note)
 
     points = plan.bundle()["points"]
     pending = [p for p in points if p["migrationKey"] not in ledger]

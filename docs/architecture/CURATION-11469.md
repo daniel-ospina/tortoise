@@ -25,7 +25,7 @@ Two measured facts govern the risk:
   a migration here is moving the only copy of a tenant's data.
 
 Code: `tortoise/curation.py` (classification + guards + additive writer) and
-`tools/curate_graph.py` (the CLI). Tests: `tests/test_curation_11469.py` (38 tests).
+`tools/curate_graph.py` (the CLI). Tests: `tests/test_curation_11469.py` (47 tests).
 
 ## The inventory — measured 2026-11-08 against `live-v4`
 
@@ -109,10 +109,10 @@ flagged *not enumerated* rather than presented as measure-and-classify results.
 | the target is only added to | `PlanWriter` is a **single-verb** protocol (`write_points`) — additivity is a property of the type, not of the caller's discipline | `test_writer_protocol_declares_no_destructive_verb` |
 | **idempotent** | stable `migrationKey` per content hash → target-side dedup (`ingest` folds by content hash + kind) **and** a local ledger that skips a migrated key before it reaches the wire | `test_second_run_writes_nothing`, `test_duplicate_follows_its_keeper` |
 | **off-switch** | `TORTOISE_CURATE_OFF=1` / `--off`, checked before the run **and before each write batch** | `test_explicit_off_switch_writes_nothing`, `test_env_off_switch_writes_nothing` |
-| **source ≠ target** | compared on the CANONICAL id, where every accepted spelling (graph id, `stable_id`, namespace, case-insensitive NAME) collapses to that graph's id tail — measured against the row shape this server actually returns (namespace strings); a spelling the surface cannot resolve, or an ambiguous name, is a REFUSAL (fail closed) | `test_source_equals_target_refused`, `test_source_equals_target_refused_across_spellings`, `test_the_graph_name_is_the_same_graph_as_its_namespace`, `test_namespace_and_gid_spellings_of_one_graph_are_refused`, `test_no_rows_does_not_fail_open`, `test_unresolvable_target_is_refused_fail_closed`, `test_ambiguous_name_is_refused`, `test_a_name_the_surface_cannot_resolve_is_refused` |
+| **source ≠ target** | compared on the CANONICAL id, where every accepted spelling (graph id, `stable_id`, namespace, case-insensitive NAME, and the tenant graph's `org_<id>` / `team_<id>` pair, which are ONE graph) collapses to that graph's id tail — measured against the row shape this server actually returns (namespace strings); a spelling the surface cannot resolve, or an ambiguous name, is a REFUSAL (fail closed) | `test_source_equals_target_refused`, `test_source_equals_target_refused_across_spellings`, `test_the_graph_name_is_the_same_graph_as_its_namespace`, `test_namespace_and_gid_spellings_of_one_graph_are_refused`, `test_no_rows_does_not_fail_open`, `test_unresolvable_target_is_refused_fail_closed`, `test_ambiguous_name_is_refused`, `test_a_name_the_surface_cannot_resolve_is_refused` |
 | dry by default | `--apply` is required; the default run writes nothing | `test_dry_run_writes_nothing` |
 | a refusal is never recorded as a write | the writer unwraps the tool result (a `CallToolResult` OBJECT, not a dict — a dict-only check never sees a refusal), raises on a refusal envelope, and the ledger is written from the ACCEPTED keys only, scoped per target graph; a partial run reports what already landed | `test_a_refused_write_is_never_recorded`, `test_ingest_refusal_envelope_is_not_a_success`, `test_a_calltoolresult_object_is_unwrapped_and_a_refusal_refuses`, `test_a_refused_second_batch_keeps_the_first_batch_and_reports_zero_then_records_it`, `test_ledger_is_scoped_to_its_target` |
-| the bundle is ingest-valid | every point item carries `content` (ingest Phase-1 refuses a bundle otherwise) | `test_bundle_items_carry_content` |
+| the bundle is ingest-valid | every point item carries `content` (ingest Phase-1 refuses a bundle otherwise) **and** the bundle mints **no** bundle-local `ref` at all — a ref is expanded wherever it appears as a field value, so any ref can collide with a row's own content/id and make the whole bundle uncanonicalisable (`ref == migrationKey` did exactly that) | `test_bundle_items_carry_content`, `test_bundle_survives_the_ingest_canonicaliser`, `test_a_row_whose_content_looks_like_a_bundle_ref_cannot_cycle` |
 | no silent zero | a read that returns 0 rows, or fewer than the reported total, **fails** — an empty census must never look like "nothing to migrate" | `MCPReader.read_points` raises |
 
 ## How to run
@@ -134,6 +134,13 @@ uv run python tools/curate_graph.py plan --graph live-v4 \
 
 Environment: `TORTOISE_MCP_URL` + `TORTOISE_MCP_API_KEY`; `TORTOISE_CURATE_OFF=1` disarms writes.
 
+⚠️ **Known operational limitation, measured 2026-11-08:** `tortoise.mcp_client.call_tool` opens a
+fresh HTTP session per call (by design — the credential is resolved per request, #10605), so a full
+`plan` read is ~32 sequential calls and the hosted endpoint can answer `429 Too Many Requests`
+part-way. The run then fails loudly rather than reporting a partial census (the reader raises), and
+nothing is written — but a production run should be scheduled rather than fired in parallel with a
+busy fleet.
+
 ## Why this pass has not written anything yet (three blockers, all measured)
 
 1. **There is no clean target graph.** `#10175` step 2 ("start a new graph") has not happened; the
@@ -145,8 +152,10 @@ Environment: `TORTOISE_MCP_URL` + `TORTOISE_MCP_API_KEY`; `TORTOISE_CURATE_OFF=1
 3. **15,708 statements have no deciding rule** (above) — carrying them un-reviewed would migrate
    the mess rather than curate it.
 
-None of the three is worked around here: the harness is ready, and the first `--apply` is gated on
-(1) and on a decision about (3).
+None of the three is worked around here: the harness is built and proven by tests, and the first
+`--apply` is gated on (1) and on a decision about (3). A **plan-only** run does not need a resolvable
+target identity (it writes nothing) — it reports the unproven identity instead of refusing, which is
+what makes the `plan` half runnable today; the guard is strict exactly where a write can happen.
 
 ## Explicitly not in this change
 
