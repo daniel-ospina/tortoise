@@ -634,14 +634,75 @@ def test_the_chunk_counters_cover_BOTH_arms(monkeypatch):
     Bound from arm A only, a retry whose SHIPPED narrative came from a second
     arm with a failed chunk still reported `failed_chunks == 0` — the surface
     said "clean" about the arm that shipped (review at `86ed2e9b7`, P2).
+
+    ⛔ THE FIXTURE IS THE PROOF (round-4 review, F3 — a finding about THIS test).
+    The previous fixture could only ever satisfy the `failed` leg as
+    `0 + 0 == 0`: `_Scripted` never raised, so arm B's `failed` was structurally
+    0 and the mutant the test exists to catch — rebinding `failed_chunks =
+    arm["failed_chunks"]` — PASSED it. Here arm B's FIRST chunk raises (a real
+    per-chunk failure, caught by `_arm_extract`'s own handler) while its SECOND
+    chunk still yields a narrative that WINS the tie-break, so the SHIPPED
+    narrative is the arm with the failure and the sum is `0 + 1` — a number no
+    single-arm rebind can produce.
     """
-    _, result = _run(monkeypatch,
-                     ["Alice set a budget.", "Alice set a budget, re-stated."],
-                     [_EMPTY_EMBED, _embed("Northwind")])
-    arms = result["stats"]["renarrate"]["chunks"]
+    monkeypatch.setattr(extractor_v2.time, "sleep", lambda _s: None)
+    monkeypatch.delenv("TORTOISE_RENARRATE_KEEP_RATE", raising=False)
+
+    class _SecondArmS1ChunkFails(_Scripted):
+        """Arm B's first chunk raises; its second chunk still yields a story."""
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._seen: list[str] = []
+            self._fail: str | None = None
+
+        def complete(self, *, system, user, max_tokens=None):
+            if "STORY SUMMARIZER" not in system:
+                return super().complete(system=system, user=user,
+                                        max_tokens=max_tokens)
+            key = system + "\x00" + user
+            if key not in self._seen:
+                self._seen.append(key)
+            if self._fail is None and len(self._seen) == 3:
+                # Arm A's two chunk prompts are distinct; the third DISTINCT
+                # prompt is arm B's first chunk. Keyed on the prompt, never on a
+                # call counter: `_complete` retries the SAME prompt, and a
+                # counter would take the retries — and arm B's second chunk —
+                # down with it, emptying the arm that must win the tie-break.
+                self._fail = key
+            if key == self._fail:
+                self.s1_prompts.append(system)
+                raise RuntimeError("S1 chunk exploded on the retried arm")
+            return super().complete(system=system, user=user,
+                                    max_tokens=max_tokens)
+
+    model = _SecondArmS1ChunkFails(
+        ["Alice budget is 40k.", "Bob ships Friday.",
+         "Emily writes the second narrative."],
+        [_EMPTY_EMBED, _embed("Northwind")])
+    result = extract_session_v2(model, list(CONVERSATION), sdk=None,
+                                session_id="11002-test",
+                                session_date="2026-11-08", chunk_size=1)
+    renarrate = result["stats"]["renarrate"]
+    arms = renarrate["chunks"]
+    assert renarrate["fired"] is True, "the empty first arm fired the retry"
+    assert renarrate["narrative"] == "second", (
+        "the fixture must SHIP the arm whose chunk failed, or the assertion "
+        "below is not about the surface the defect mis-reported"
+    )
     assert set(arms) == {"first", "second"}
     for arm in arms.values():
         assert set(arm) == {"chunks", "failed"}
+    # ⛔ NON-VACUITY FIRST: the sums below are only discriminating because the
+    # two arms disagree. `0 + 0 == 0` is what let the pre-fix rebind pass.
+    assert arms["first"]["failed"] == 0, "arm A's chunks all returned"
+    assert arms["second"]["failed"] == 1, (
+        "arm B really did fail exactly one chunk — without this the `failed` "
+        "leg can be satisfied by 0 + 0 and the mutant goes green"
+    )
+    assert any("S1 chunk failed" in e for e in result["errors"]), (
+        "the failed chunk is still recorded loudly in the run's errors"
+    )
     assert result["stats"]["chunks"] == (arms["first"]["chunks"]
                                          + arms["second"]["chunks"]), (
         "stats['chunks'] must be the sum of both arms' chunk counts"
