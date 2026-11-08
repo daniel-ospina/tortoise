@@ -550,10 +550,70 @@ _resolve_requested_workers() {
 
 TORTOISE_WEB_WORKERS="$(_resolve_requested_workers "$@")"
 export TORTOISE_WEB_WORKERS
+
+# ── Is the reloader going to serve instead of N workers? ──────────────────
+# uvicorn IGNORES `--workers` while reloading — measured on the pinned 0.52.1:
+# `--reload --workers 4` prints `"workers" flag is ignored when reloading is
+# enabled` and starts exactly ONE server process. Reporting 4 here would be the
+# fourth instance of the class this block exists to close (a measurement lying
+# about the topology, in the direction that reads as "safe").
+#
+# Both of uvicorn's inputs for that flag are checked: the token, and click's
+# `auto_envvar_prefix="UVICORN"` value `$UVICORN_RELOAD` — read through CLICK's
+# vocabulary (`t`/`y` are TRUE there), which is the parity contract with
+# `worker_topology._CLICK_TRUE`, pinned by `_AGREEMENT_TABLE`'s reload rows and
+# `test_the_shipped_block_reports_one_worker_while_reloading`.
+_reload_requested=0
+for _arg in "$@"; do
+    case "$_arg" in
+        --reload) _reload_requested=1 ;;
+    esac
+done
+case "$(printf '%s' "${UVICORN_RELOAD:-}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on|t|y) _reload_requested=1 ;;
+esac
+
+# ── Will the app's LIFESPAN run at all? ─────────────────────────────────
+# The multi-worker admission gate is the FIRST statement of
+# `hosted_api._lifespan` (`tortoise/worker_topology.py`, #1677), so turning the
+# lifespan off removes it completely: uvicorn starts N workers, none of them
+# runs the gate, and on an embedded DB they open N DIVERGENT copies of one file.
+# MEASURED on the pinned 0.52.1: `UVICORN_LIFESPAN=off WEB_CONCURRENCY=2` (no
+# TORTOISE_DB_URI) served two server processes and the gate never ran.
+#
+# uvicorn's `<flag> --lifespan` is `type=LIFESPAN_CHOICES` = (auto, on, off),
+# click `Choice` is case-SENSITIVE, and a CLI value beats the envvar — so an
+# exact `off` from either source is the only disabling value that starts.
+_app_lifespan_disabled() {
+    local _want_value=0 _arg="" _value=""
+    for _arg in "$@"; do
+        if [ "$_want_value" = "1" ]; then _value="$_arg"; _want_value=0; continue; fi
+        case "$_arg" in
+            --lifespan=*) _value="${_arg#--lifespan=}" ;;
+            --lifespan) _want_value=1 ;;
+        esac
+    done
+    if [ -z "$_value" ]; then _value="${UVICORN_LIFESPAN:-}"; fi
+    [ "$_value" = "off" ]
+}
+
 if [ "$_IS_SERVER" = "1" ]; then
-    if [ "$TORTOISE_WEB_WORKERS" -gt 1 ]; then
+    if [ "$_reload_requested" = "1" ]; then
+        echo "tortoise: uvicorn workers = 1 (reload; --workers is ignored while reloading)"
+    elif [ "$TORTOISE_WEB_WORKERS" -gt 1 ]; then
+        if _app_lifespan_disabled "$@"; then
+            {
+                echo "tortoise: REFUSING to start ${TORTOISE_WEB_WORKERS} uvicorn workers with the APP LIFESPAN DISABLED (--lifespan off / \$UVICORN_LIFESPAN=off)."
+                echo "tortoise: the multi-worker admission gate is the first statement of hosted_api._lifespan (tortoise/worker_topology.py, #1677), so with the lifespan off it never runs — and N workers on an EMBEDDED database open N divergent copies of one file."
+                echo "tortoise: fix: drop the lifespan override so the gate runs, or run ONE worker (unset WEB_CONCURRENCY / drop --workers)."
+            } >&2
+            exit 1
+        fi
         echo "tortoise: uvicorn workers = ${TORTOISE_WEB_WORKERS} — MULTI-WORKER topology, admission-gated at app startup (tortoise/worker_topology.py, #1677)"
     else
+        if _app_lifespan_disabled "$@"; then
+            echo "tortoise: lifespan DISABLED (--lifespan off) — the multi-worker admission gate cannot run; one worker is serving, so there is nothing to gate"
+        fi
         echo "tortoise: uvicorn workers = 1"
     fi
 fi
