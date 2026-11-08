@@ -11391,17 +11391,20 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # ⚠️ The NUMBER is the claim, not the region. A region-only check passed with §1 re-staled to
     # `:12853` while an unrelated `:12929` sat earlier in the record (measured) — the record states
     # one number at several places, so "appears somewhere before the block" is not "§1 quotes it".
-    # Bound to the base-qualified cite instead, and MADE wording-free rather than described as
-    # such: an earlier `at (?:HEAD|here)` pinned the two spellings the record happened to use, so a
-    # third qualifier (`at the head`) redded with a diagnostic asserting the WRONG NUMBER while
-    # `:12929` was present (measured — the comment claimed a tolerance the code did not have).
+    # HISTORY, because this paragraph describes an arm that no longer ships — the shipping pair is
+    # bound to the literal `at` connector plus a 7–40 hex base (see the regex below), NOT
+    # "wording-free". What it records about the arms before it: an even earlier `at (?:HEAD|here)`
+    # pinned the two spellings the record happened to use, so a third qualifier (`at the head`)
+    # redded with a diagnostic asserting the WRONG NUMBER while `:12929` was present (measured —
+    # the comment claimed a tolerance the code did not have).
     # ⛔ WHAT THIS ARM BINDS, re-measured at the head that carries it — not described from memory.
     # The region must carry the base-qualified PAIR (`:12929` at `a1dff7cec8`), and EVERY `:12929`
     # in it must sit within 60 characters of that base. The §5 block additionally classifies each
     # qualifier it parses and refuses one that is not a base.
-    # ⚠️ A SUPERSEDED arm is described by nothing here any more. An earlier revision of this
-    # comment explained that the qualifier was "any word run" accepting both the live and the base
-    # spelling, because the arm then read was `_found == ["12929"]` over a `(?!`?\d)` lookahead.
+    # ⚠️ A SUPERSEDED arm is PINNED by nothing here any more — it is described a few lines down,
+    # as history, because an earlier revision of this comment explained that the qualifier was
+    # "any word run" accepting both the live and the base spelling: the arm then read was
+    # `_found == ["12929"]` over a `(?!`?\d)` lookahead.
     # ⛔ NOT "a lookahead that excluded bases" — that misreads it in the direction this file keeps
     # having to correct. Measured on that arm's own regex (`7dabb59e0^`): `:12929 at a1dff7cec8`
     # MATCHES, `:12929 at 62248db88` does not, and the record's `` at `a1dff7cec8` `` does not
@@ -11462,12 +11465,15 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
             f"{_label} must quote the vet_enabled line as a BASE-QUALIFIED pair "
             f"(`:12929` at `a1dff7cec8`) — it reads {_found}; re-derive it with "
             "`git grep -n 'vet_enabled = ' -- tortoise/extractor_v2.py`")
-        # ⛔ WORDING-INDEPENDENT, because a deny-list of qualifiers is not a pin (#11519 review):
-        # binding the check to the literal word `at` meant a re-stale written ANY other way
-        # shipped green — measured, `` `:12944` (HEAD) `` in §2 passed. So the arm asserts the two
-        # things a wording cannot dodge: the LIVE number never appears in these regions at all, and
-        # every `:12929` there carries the base it was true at within 60 characters — the same
-        # idiom the neighbouring `:12779` arm already uses for its own number.
+        # ⛔ THE SHIPPING PAIR ARM IS NOT "WORDING-INDEPENDENT" — it is bound to the literal `at`
+        # connector and to a 7–40 lowercase-hex base, so a citation written any other way
+        # (`` `:12929` (a1dff7cec8) ``) reds it. What it DOES assert is the one claim a reword
+        # cannot fake: every `:12929` in the region carries the base it was true at within 60
+        # characters — the same idiom the neighbouring `:12779` arm uses for its own number.
+        # ⛔ And it is NOT a live-number deny-list. "the LIVE number never appears in these regions
+        # at all" was asserted here and is FALSE: no `:12944` rule exists in this file (measured —
+        # injecting `:12944` at `HEAD` into §2 leaves the whole leg GREEN). The hole the record's
+        # citation grammar leaves open is stated in the paragraph below.
         # ⛔ THE LIVE-NUMBER ARM IS DELIBERATELY ABSENT FROM THE *§2* HALF OF THIS LOOP — and the
         # hole is stated here because nothing else in this file catches it: in §2 (A2), a re-stale
         # of any number OTHER than `:12929` to the live/HEAD shape (`:13011` at HEAD) reds NOTHING
