@@ -270,7 +270,7 @@ A read-model cache written through to an aggregate row is the **standard CQRS pa
 4. it is **never the only home**;
 5. it is **recomputed on rebuild, never restored**.
 
-**`Source.reliability` already satisfies all five** — `ONTOLOGY.md` calls it a *"documented cache, never authoritative"* (`#398`). **The `Document` case also satisfies them:** a document is a `:Source` (D10/v3.15, §9.3) and `doc_status` is **RETIRED** (`tortoise/api.py:458`), and its `captured`→`extracted` flip was an unjournalled raw Cypher write — the failure mode rule 2 exists to forbid. **The live counterexample is `Source.updatedAt` set ON MATCH (`:234`).**
+**`Source.reliability` already satisfies all five** — `ONTOLOGY.md` calls it a *"documented cache, never authoritative"* (`#398`). **The `Document` case also satisfies them:** a document is a `:Source` (D10/v3.15, §9.3) and `doc_status` is **RETIRED** (`tortoise/api.py:458`), and its `captured`→`extracted` flip was an unjournalled raw Cypher write — the failure mode rule 2 exists to forbid. **The live counterexample is `Source.updatedAt` set ON MATCH — see the write-pattern row of §3's table, which owns that claim and does not rot with an insertion above it.**
 
 #### ⚠️ The truth set is larger than these three — journal completeness is a PRECONDITION
 

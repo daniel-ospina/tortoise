@@ -251,7 +251,9 @@ RETRACTED_IN_SIBLINGS: dict[str, str] = {
 #: when the name is SECTION-SCOPED ("SEARCH's §7 says …") — the literal is then
 #: ranged to that section's body, so the fact sliding out of §7 reds instead of
 #: passing on a document-wide substring match.
-FACT_STATEMENTS_IN_SIBLINGS: tuple[tuple, ...] = (
+FACT_STATEMENTS_IN_SIBLINGS: tuple[
+    tuple[Path, str, str] | tuple[Path, str, str, str], ...
+] = (
     (
         STORAGE,
         "STORAGE records the vector-trace mechanism",
@@ -292,6 +294,7 @@ FACT_STATEMENTS_IN_SIBLINGS: tuple[tuple, ...] = (
         STORAGE,
         "STORAGE's §14.3 V4 row states the trace mechanism as landed",
         "so a full scan is distinguishable from an index hit",
+        "14.3",
     ),
     (
         INGEST,
