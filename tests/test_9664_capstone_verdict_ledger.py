@@ -4974,6 +4974,12 @@ def test_a_glob_accepted_by_a_later_match_does_not_announce_the_rows_fate(monkey
     assert "REFUSED" not in err, (
         f"this row PASSED (a later match was tracked) — no line may announce a refusal: {err}"
     )
+    # …and the FILE arm's sentence answers the FILE question. The mirror direction is
+    # pinned on the two directory pins: measured, the four renderers' sentences were
+    # freely swappable with the whole suite green (#11474 review).
+    assert "about what" not in err, (
+        f"this renderer asks about a FILE, not what a directory holds: {err}"
+    )
 
 
 def test_an_ABSTAINING_tree_is_accepted_and_prints_the_NOTE(tmp_path, monkeypatch, capsys):
@@ -5609,6 +5615,19 @@ def test_an_EMFILE_on_the_DIRECTORY_probe_cannot_manufacture_a_clean_exit(tmp_pa
     assert "holding no TRACKED file" not in err, (
         f"the fork never ran, so no line may borrow git's measured answer: {err}"
     )
+    # ⛔ AND THE MARKER AND THE QUESTION ARE PINNED ON THIS RENDERER TOO (#11474
+    # review). MEASURED: reverting BOTH directory markers to `REFUSED` — and, in a
+    # separate run, swapping both directory sentences for the file arm's — left every
+    # directory test GREEN, because each assertion read a substring present in both
+    # variants. Fix #1's own commit message claimed "one rule, four renderers"; only
+    # the file renderer was enforcing it. These four assertions are what make the
+    # claim true: the marker names the measurement, and the sentence answers the
+    # DIRECTORY question ("about what {rel} holds") rather than the file one.
+    assert "UNMEASURED" in err, f"the marker names the measurement, not a fate: {err}"
+    assert "REFUSED" not in err, f"no per-path line may announce a verdict: {err}"
+    assert "about what" in err and "holds:" in err, (
+        f"this renderer reports what the DIRECTORY holds, not the file question: {err}"
+    )
 
     # ⛔ OUTSIDE the patched window: with git working, the SAME directory is
     # ACCEPTED when it holds a tracked file, and refused BY THE MEASURED CAUSE when it
@@ -5619,7 +5638,7 @@ def test_an_EMFILE_on_the_DIRECTORY_probe_cannot_manufacture_a_clean_exit(tmp_pa
     assert not ok and "holding no TRACKED file" in why, why
 
 
-def test_an_EMFILE_on_the_DIRECTORY_FOLLOW_UP_probe_also_refuses(tmp_path):
+def test_an_EMFILE_on_the_DIRECTORY_FOLLOW_UP_probe_also_refuses(tmp_path, capsys):
     """The DIRECTORY arm's SECOND `OSError` site — the twin of the file arm's pin.
 
     `_is_tracked_dir` spawns `git ls-files`, and then — only when that answered
@@ -5664,6 +5683,17 @@ def test_an_EMFILE_on_the_DIRECTORY_FOLLOW_UP_probe_also_refuses(tmp_path):
             cl.validate(data, repo_root=repo)
     finally:
         mp.undo()
+
+    # This renderer's OWN sentence and marker, not the file arm's (#11474 review):
+    # measured, both directory markers could be reverted to `REFUSED` with every
+    # directory test green, because no assertion read either one.
+    err = capsys.readouterr().err
+    assert "could not be RUN" in err, f"the cause that was measured must be named: {err}"
+    assert "UNMEASURED" in err, f"the marker names the measurement, not a fate: {err}"
+    assert "REFUSED" not in err, f"no per-path line may announce a verdict: {err}"
+    assert "about what" in err and "holds:" in err, (
+        f"this renderer reports what the DIRECTORY holds: {err}"
+    )
 
 
 def test_a_DIRECTORY_in_the_ABSTAINING_tree_gets_the_FILE_arms_answer(
@@ -5810,6 +5840,14 @@ def test_a_FAILED_ls_files_on_a_DIRECTORY_is_not_the_measured_no(monkeypatch, ca
     )
     err = capsys.readouterr().err
     assert "exited 128" in err, f"the per-path line must name the measurement it took: {err}"
+    # The DIRECTORY renderer's marker and question, which nothing asserted (#11474
+    # review): measured, reverting both directory markers to `REFUSED` and, separately,
+    # swapping both directory sentences for the file arm's left this test green.
+    assert "UNMEASURED" in err, f"the marker names the measurement, not a fate: {err}"
+    assert "REFUSED" not in err, f"no per-path line may announce a verdict: {err}"
+    assert "about what" in err and "holds:" in err, (
+        f"this renderer reports what the DIRECTORY holds, not the file question: {err}"
+    )
 
     # --- exit 1: NOT a documented answer for this form, so it may not borrow the
     # measured sentence either (measured 2026-11-08, git 2.43.0: this form's miss is
