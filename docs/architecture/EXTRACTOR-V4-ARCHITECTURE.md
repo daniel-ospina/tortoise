@@ -700,7 +700,7 @@ unfirable (block at the top of §10).
 > (`TORTOISE_VALUE_GATE`) defaults **ON**, so the VET pass — and `apply_vet` — DOES run on the
 > default arm, keeping everything the `#4899` identifier-only predicate does not fire on (measured:
 > 0 drops of 61 Objects). Judge the fold by that, not by "the flags default OFF"; and presence is not
-> sufficiency, because the fold's **remedy** half is unimplemented in both. VET's **coverage signal**
+> sufficiency: the fold's **remedy** half IS implemented for ONE class and NOT for another (the two halves are stated in the S2.2b note below). VET's **coverage signal**
 > only **detects** (`check_batch`'s `coverage_suspect` — *"reported, never acted on"*, and only for a
 > narrative that produced **zero** candidates). `apply_vet` only **removes** — **except** the Layer-1
 > entity RESTORE from `prior` (`vet_gate.py` **Rule 4**), which re-emits an entity an EARLIER pass
@@ -1182,7 +1182,7 @@ A carve-out scoped only to **user-personal state** (personal bests, schedules, p
 | **Personal state** | *"personal best 5K = 27:12"* | retained (E2 carve-out — **`#1534`**) | retained |
 | **Operational / decision values** | *"p99 latency 480 ms at 3k rps"* | **RETAINED** | retained |
 
-**Operational values are DURABLE.** `STATE_VALUE_CARVE_OUT` (`extractor_v2.py:296-312`) carries an operational-value paragraph — *"a concrete value that is the SUBJECT of a decision, observation, or plan is DURABLE too… Measurements, deadlines/freezes, thresholds/TTLs, versions, and counts are carried VERBATIM"* — covering *"the p95 hit 4.2 seconds"* and *"a ten minute TTL"*. The rule reaches the model: a `VALUE_FIDELITY_RULE` (`:425`) goes into the S2/S4 `{anti_routine}` slot via `_s2s4_rules()` (`:526`), and `_granularity_text()` (`:1414`) appends `STATE_VALUE_CARVE_OUT` to S1.
+**Operational values are DURABLE.** `STATE_VALUE_CARVE_OUT` (`extractor_v2.py:320-336`) carries an operational-value paragraph — *"a concrete value that is the SUBJECT of a decision, observation, or plan is DURABLE too… Measurements, deadlines/freezes, thresholds/TTLs, versions, and counts are carried VERBATIM"* — covering *"the p95 hit 4.2 seconds"* and *"a ten minute TTL"*. The rule reaches the model: a `VALUE_FIDELITY_RULE` (`:425`) goes into the S2/S4 `{anti_routine}` slot via `_s2s4_rules()` (`:526`), and `_granularity_text()` (`:1414`) appends `STATE_VALUE_CARVE_OUT` to S1.
 
 **⇒ The design requires ENFORCEMENT BY DEFAULT — the mechanism is not the gap.** The **S2.2b** identifier-only predicate is the rule in `tortoise/value_gate.py`: `value_gate._REFERENCE` (`#\d{1,6}(?!\d)`) with `identifier_only()` as a whole-residue test, imported by `extractor_v2.py:72`, toggle `_value_gate_enabled()` (`:724`). ⛔ **THE GATE SITE IS `S2.2b`, NOT `E7`** — the `^#\d{3,}$`-style anchored pattern is not the rule. **Enforcement by default is required**, and the predicate is **subordinate to VET** (`_value_gate_enabled()` folds into `vet_enabled`). ⛔ **This is a default and a subordination — not a missing mechanism. Do not build `valueGate`.**
 
