@@ -339,9 +339,10 @@ def test_h9_a_union_only_structural_predicate_is_flagged(tmp_path):
     would use — the `pack_hierarchy._binding` class, latent in the shipped
     catalog and flagged rather than fixed here.
     """
-    from tortoise.projection.edges import _VALID_EDGE_PREDICATES
-
-    from tortoise.projection.edges import STRUCTURAL_WRITE_PREDICATES
+    from tortoise.projection.edges import (
+        _VALID_EDGE_PREDICATES,
+        STRUCTURAL_WRITE_PREDICATES,
+    )
 
     union_only = "aboutPoint"
     assert union_only in STRUCTURAL_WRITE_PREDICATES

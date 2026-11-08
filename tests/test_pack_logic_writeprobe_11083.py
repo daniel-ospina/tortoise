@@ -96,7 +96,10 @@ def test_g1_write_probe_reproduces_the_committed_written_column(sdk):
     rows = [r for section in fresh["packs"].values()
             for r in section["relations"] + section["hierarchies"]]
 
-    census._sdk = lambda: sdk  # noqa: SLF001 — the probe's one injection point
+    # `_sdk` is the probe's ONE injection point, so the private-name touch is
+    # deliberate and carries no `noqa`: `SLF001` is not an enabled rule here, and
+    # RUF100 reds an unused directive (ruff's own lint job caught it).
+    census._sdk = lambda: sdk
     census._run_write_probe(rows, REPO_ROOT / "packs")
 
     committed_rows = {

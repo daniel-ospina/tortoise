@@ -605,7 +605,7 @@ def _diff_hermetic(committed: dict, fresh: dict) -> list[str]:
                 diffs.append(
                     f"{ns}.{surface}: committed={len(c_rows)} fresh={len(f_rows)}")
                 continue
-            for i, (c_row, f_row) in enumerate(zip(c_rows, f_rows)):
+            for i, (c_row, f_row) in enumerate(zip(c_rows, f_rows, strict=True)):
                 c_cells = {k: v for k, v in c_row.items() if k not in skip}
                 f_cells = {k: v for k, v in f_row.items() if k not in skip}
                 for cell in sorted(set(c_cells) | set(f_cells)):
