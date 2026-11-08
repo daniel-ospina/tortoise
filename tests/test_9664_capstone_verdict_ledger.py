@@ -3929,6 +3929,21 @@ def test_the_tool_carries_the_5128_interpreter_guard_first(tool, capsys, monkeyp
     per tool is this block's own failure mode, and `ci_selection.py`'s own tables
     are the single owner of which paths fail closed.
 
+    Find them by QUOTE, not by line number (which rots on every edit, and did:
+    this paragraph named the wrong table for three rounds): the anchor for the
+    reaper is the comment block opening `# #4408: the local-branch reaper`,
+    whose last line is `-> FULL matrix (fail closed) — the safe default for a
+    destructive-ref tool.`; the census's is the block opening
+    `# #4503: the edge census/probe`, ending `-> FULL\n    # matrix (fail closed)`
+    and naming its own pin, `test_edge_census_tool_change_fails_closed_to_full`.
+    ⛔ The CLAIM ITSELF is executed, not asserted —
+    `test_the_two_named_carve_outs_REALLY_do_run_the_census` below drives
+    `select()` on both paths and fails if either stops failing closed. Without it
+    a lane could "fix" this paragraph by deleting the carve-out rows that hold
+    the guarantee and every other arm here would stay green (measured: deleting
+    `"tools/branch_reaper.py",` from `TOOL_CARVEOUTS` left this file at
+    207 passed until that test existed).
+
     So on a `tools/`-only or `docs/`-only diff, every unmirrored arm above is
     ungraded and this pin is the only gate. Measured, both ways: appending a line
     advertising `python3 tools/capstone_ledger.py check` to a tracked DOC leaves
@@ -4228,6 +4243,87 @@ def test_the_tool_carries_the_5128_interpreter_guard_first(tool, capsys, monkeyp
         f"`test_no_doc_or_usage_advertises_the_form_the_guard_refuses` reds on "
         f"it, and that test does not run on a tool-only diff: {offenders}"
     )
+
+
+def _ci_selection_module():
+    """`tools/ci_selection.py`, loaded by path — the owner of the routing claim.
+
+    Loaded the same way `_census_module()` loads the census, so the test below
+    reads the tables that DECIDE routing instead of copying them.
+    """
+    path = REPO_ROOT / "tools" / "ci_selection.py"
+    spec = importlib.util.spec_from_file_location("_ci_selection_for_9664", path)
+    assert spec is not None and spec.loader is not None, path
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_two_named_carve_outs_REALLY_do_run_the_census():
+    """The DECLARED BOUND's routing paragraph, EXECUTED in both directions.
+
+    That paragraph exists so a reader can find out which paths still reach the
+    census on a `tools/`-only diff, and it has been wrong once already: it named
+    `SHARED_MODULES` where `TOOL_CARVEOUTS` holds the guarantee (round 15, P2).
+    Prose about routing cannot grade itself — a re-measured table in a docstring
+    is this block's own failure mode — so the claim is driven through `select()`,
+    the single owner, and BOTH directions are pinned:
+
+      * the two named carve-outs must fail closed to the FULL matrix, i.e. the
+        census DOES run on a diff touching either (the paragraph's claim);
+      * the two tools this pin covers must NOT fail closed, and the census must
+        stay OUT of their selection while THIS file stays IN — otherwise the gap
+        the whole pin exists to fill would not exist and the pin would be
+        redundant rather than load-bearing.
+
+    Non-vacuity, measured: deleting `"tools/branch_reaper.py",` from
+    `TOOL_CARVEOUTS` reds this test (the path falls back under the flat `tools/`
+    prefix, so the selection is no longer full), and so does deleting
+    `"tools/edge_census.py",`. That is the concrete reason this is not prose: the
+    earlier review warned a lane could "fix" the paragraph by deleting the rows
+    that hold the guarantee, and before this arm existed that edit was green.
+    """
+    ci = _ci_selection_module()
+    manifest = ci.load_manifest()
+
+    for rel in ("tools/branch_reaper.py", "tools/edge_census.py"):
+        explain: dict = {}
+        selection = ci.select([rel], "pull_request", manifest, explain)
+        assert explain.get("reasons") == ["unknown-paths"], (
+            f"{rel} no longer routes through the unknown-path fail-closed branch; "
+            f"the DECLARED BOUND paragraph says it does. explain={explain!r}"
+        )
+        assert selection["full"] is True, (
+            f"a diff touching {rel} no longer selects the FULL matrix, so the "
+            f"census no longer runs on the one diff that changes it — the "
+            f"paragraph's operative claim is now FALSE: {selection['surfaces']!r}"
+        )
+        assert selection["test_files"] == "ALL", (
+            f"{rel} is not routed to ALL tests; got {selection['test_files']!r}"
+        )
+
+    # The opposite direction: the pinned tools are NOT fail-closed, which is what
+    # makes this pin the only gate on a tool-only diff.
+    for pinned in PINNED_TOOLS:
+        # `PINNED_TOOLS` holds `pytest.param` objects (they carry the ids the
+        # parametrised arm above shows), so unwrap rather than restate the paths.
+        tool = pinned.values[0] if hasattr(pinned, "values") else pinned
+        rel = tool.relative_to(REPO_ROOT).as_posix()
+        selection = ci.select([rel], "pull_request", manifest)
+        assert selection["full"] is False, (
+            f"{rel} now fails closed to the FULL matrix, so the census would run "
+            f"on its diff and this pin would stop being the only gate — the "
+            f"paragraph's premise (82 files, census OUT) is FALSE: "
+            f"{selection['surfaces']!r}"
+        )
+        assert "test_9664_capstone_verdict_ledger.py" in selection["test_files"], (
+            f"this pin is not selected for a {rel} diff; the paragraph says 82 "
+            f"files INCLUDING this one"
+        )
+        assert "test_entry_point_python_guard.py" not in selection["test_files"], (
+            f"the census IS selected for a {rel} diff, which contradicts the "
+            f"paragraph's routing argument (the pin would then be redundant)"
+        )
 
 
 class _CensusMissingRow:
