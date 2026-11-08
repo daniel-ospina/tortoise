@@ -451,13 +451,22 @@ def test_warning_is_latched_but_the_measurement_is_not(caplog):
     assert proj._vector_indexed_labels == {"Event"}
 
 
-def test_warning_names_the_gap_and_the_open_decision(caplog):
+def test_warning_names_the_gap_and_the_open_question(caplog):
     proj = _bare([_vector_row("Point")])
     with caplog.at_level(logging.WARNING):
         proj._ensure_indexes()
     msgs = [r.getMessage() for r in caplog.records if "#4997" in r.getMessage()]
     assert len(msgs) == 1
-    assert "V1" in msgs[0], "the warning must name the governing open decision"
+    # The warning must name the question that is STILL OPEN. Until V1 was
+    # decided (2026-11-07) that question was V1 (where the index lives); it is
+    # now §14.3 V3 (whether the other served labels carry one), and V1 appears
+    # only as SETTLED. Pinning the bare token `V1` passed on that incidental
+    # mention, so the guard no longer asserted anything about the open
+    # question it is named for — retargeted at the V3 attribution itself.
+    assert "§14.3 V3" in msgs[0], (
+        "the warning must name the OPEN question (§14.3 V3); V1 is settled and "
+        "must not be presented as governing it"
+    )
     for missing in ("Event", "Object", "Source", "Subject"):
         assert missing in msgs[0]
 

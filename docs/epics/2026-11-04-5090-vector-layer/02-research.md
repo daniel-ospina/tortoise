@@ -88,7 +88,7 @@ aboutObjects: "epic #5090, decision V1, filtered ANN, pgvector, FalkorDB HNSW, e
 | | FalkorDB (the cache) | Postgres + `pgvector` (the record) |
 |---|---|---|
 | index residency | **RAM-mandatory.** No spill, no pageable index, no eviction | **page-cached**; need not fit in RAM; only latency degrades |
-| durability | index is **rebuilt on every load**: 116 MB graph, no index → `RESTORE` **7.77 s**; **with** it → **did not complete in >700 s**, instance unresponsive, ~269 % CPU, a `PING` on a second connection timed out. Index build 20k × 384-d: **436.5 s** (`M=16/efC=200`), **191.8 s** (`M=4`), `efConstruction` **inert** | index is a **WAL-logged relation file** — every page goes to WAL at build and every later write is `GenericXLogStart/Finish`. Restart, crash, failover, `pg_upgrade` **replay**, never rebuild. No startup hook |
+| durability | index is **rebuilt on restore, on the serving thread** — the instance stops answering for the rebuild's duration, with no progress line and no error: 30 000 nodes, index-free `DUMP`/`DEL`/`RESTORE` **0.17 s** (worst bystander `PING` **53.3 ms**) vs index-bearing **2.62 s** (bystander **2 497.7 ms** — the outage IS the restore), and at 90 000 nodes it outlived a 10 s client read bound. ⚠️ **The original ">700 s, instance unresponsive" reading is falsified** — that harness's graph carried no populated index, so it measured nothing; the index **is** carried inside the graph key's serialized payload, and the block is avoided by dropping it **before** the `DUMP` (20 000 nodes: **0.069 s** / **69.4 ms** bystander, against **2.955 s** / **2 899.4 ms** raw — `docs/evidence/7846-indexed-graph-restore/README.md` §3, §3a, §4a). Index BUILD is separately CPU-bound: 20k × 384-d = **436.5 s** (`M=16/efC=200`), **191.8 s** (`M=4`), `efConstruction` **inert** | index is a **WAL-logged relation file** — every page goes to WAL at build and every later write is `GenericXLogStart/Finish`. Restart, crash, failover, `pg_upgrade` **replay**, never rebuild. No startup hook |
 | granularity | **per `(label, property)`** — `createNodeIndex('Point','embedding',…)`. 5 served labels ⇒ **4 further resident HNSW structures** if all were indexed | **one** index over a shared table, filtered by `kind`; partial/per-tenant available |
 | measurement honesty | `GRAPH.MEMORY USAGE` reported **2.00 MB for 43.28 MiB** (21.6× blind) | `postgres_storage_footprint()` exists, never run against the deployment |
 
@@ -121,14 +121,16 @@ comparables now say what that measurement will probably show, and how to run it:
 2. **The measurement has a known-good method and a known-good control**: exact ground truth computed
    in-database, swept over **our** filter selectivities, reporting **filtered** recall (never global).
    That makes **E1**, the filtered-ANN recall measurement, cheap and decisive rather than a research
-   project. ⚠️ **E1 is PARKED WITH V1, not in this epic's scope** — it was item 2 of the scope's first
-   revision and the second revision removed it (`03-scope.md` §1's exclusion table and §6; `01-align.md`
-   K3): it is evidence *for a move*, and no move is planned, so a lane must not read this brief as
-   approving it. Its numbers stay here so they are not lost when V1 is taken.
+   project. ⚠️ **E1 is `#4051`'s, not this epic's** — it was item 2 of the scope's first
+   revision and the second revision moved it there (`03-scope.md` §6 row 2; `01-align.md`
+   K3): it is evidence *for a move*, and the location is decided (2026-11-07), so it is no longer
+   consumer-less — `SEARCH-ARCHITECTURE.md` §9 **M1** consumes it as a private-beta gate. Its numbers
+   stay here so they are not lost.
 3. **`hnsw.iterative_scan` is a genuine capability we do not have at all today** — FalkorDB has no
    equivalent. So branch 2 is not strictly a loss: it trades in-graph index residency for **filtered ANN
    we currently cannot do**, paying tail latency for it. ⚠️ This is an argument *for* branch 2 that the
-   record did not carry, and it must be in front of the owner when V1 is decided.
+   record did not carry, and it was to be placed in front of the owner when V1 was decided — V1 was
+   decided on 2026-11-07, so it now belongs to `#4051`'s implementation.
 
 ## Assumptions Register
 
@@ -136,14 +138,20 @@ comparables now say what that measurement will probably show, and how to run it:
 |---|---|---|---|
 | Vectors are stored and unindexed on **two** labels in the 2026-09-24 count (`Object` 7,859 + `Event` 4,798 = 12,657; four served labels are unindexed). ⚠️ NOT a claim that `Source`/`Subject` can never hold one — their writers DO store `embedding` (`_upsert_document` → `:Source`, `_upsert_subject`), which is why the census measures `db.labels()` instead of the index inventory | high | `ENTITY_TYPE_LABELS` (5 served) + `Point`-only DDL (`_ensure_vector_index_api` in `tortoise/projection/__init__.py`: the `CALL db.idx.vector.createNodeIndex('Point', 'embedding'` procedure form, falling back to the `CREATE VECTOR INDEX FOR (p:Point) ON (p.embedding)` Cypher form) | re-run `tools/dod_5090_probe.py --census` on a graph that holds rows |
 | The EMBED rule exists and is **off** by default | high | `embed_gate.RULE_SET is value_gate.RULES` → `True`; flag unset in the 4 shipped surfaces that exist | the arming measurement (scope item 1) |
-| **A cross-store move PRESERVES recall on OUR mix** (this is the `01-align.md` K3 statement; §3's evidence below is *against* it) | **low — the hinge** | 0.942 → 0.401 @ 10 % selectivity (post-filter); 0.63–0.72 (epic's comparable); both **not our corpus** | **E1** (parked with V1) — exact ground truth, our selectivities, filtered recall reported separately |
+| **A cross-store move PRESERVES recall on OUR mix** (this is the `01-align.md` K3 statement; §3's evidence below is *against* it) | **low — the hinge** | 0.942 → 0.401 @ 10 % selectivity (post-filter); 0.63–0.72 (epic's comparable); both **not our corpus** | **E1** (`#4051` — measured, not parked) — exact ground truth, our selectivities, filtered recall reported separately |
 | `hnsw.iterative_scan` compensates enough to be a net win | **low — unmeasured** | recovers 0.847 in one config; costs CPU/memory/tail latency | **E1**, same sweep |
-| The record can serve reads without the graph | medium | 4/4 layers in schema; `record_*` modules exist; **armed** (`record.armed: true` at 2026-11-05T15:07Z, `#9548`) but hosted writes reject `22P02` (`#10593`, OPEN) and no hosted projection is evidenced | serve a query with the graph stopped |
+| The record can serve reads without the graph | medium | 4/4 layers in schema; `record_*` modules exist; **armed** (`record.armed: true` at 2026-11-05T15:07Z, `#9548`) but hosted writes were rejected `22P02` (`#10593`, **CLOSED COMPLETED 2026-11-06T19:51:42Z**) and no hosted projection is evidenced | serve a query with the graph stopped |
 | Arming the gate moves the write rate materially | medium | `#5008` ordered measurement first | scope item 1 |
 | Object/Subject embeddings absent from the record are **re-embed cost, not data loss** | high | an embedding is derivable from its text | a stored vector whose source text is gone |
 | Two `PARTIAL` DoD rows can close without a new mechanism | medium | `#10541` closed COMPLETED with both rows still PARTIAL | the arming measurement |
 
 ## Raw Notes
+
+> ⚠️ **SUPERSEDED 2026-11-07 — read this before acting on any "V1" line below.** V1 is decided: the vector
+> index and the embedding payload move to Postgres (`docs/architecture/SEARCH-ARCHITECTURE.md`, `#4051`). Every
+> "parked with V1" / "when V1 is decided" below is the state this pass was written against, kept as the record
+> and **not** as current text. What stays open is the DIFFERENT question of §14.3 **V3: whether
+> `:Object`/`:Event` carry — and index — embeddings.**
 
 | date | source-tag | finding |
 |---|---|---|
