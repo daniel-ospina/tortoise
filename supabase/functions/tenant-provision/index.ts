@@ -18,8 +18,8 @@
 //
 // ── CALLER AUTH (#802) ─────────────────────────────────────────────────
 // The function is deployed with verify_jwt=false (--no-verify-jwt) so the
-// gateway does not pre-empt the caller check below; the caller is verified
-// HERE, and the public anon key alone is NOT sufficient to mint
+// gateway does not pre-empt the identity/rate logic below; the caller is
+// verified HERE, and the public anon key alone is NOT sufficient to mint
 // orgs/API keys:
 //
 //   A USER JWT (Authorization: Bearer) whose identity (id + email) matches
@@ -291,8 +291,8 @@ Deno.serve(async (req: Request) => {
     }
 
     // Generate a DETERMINISTIC org_id per user — SHA-256(user_id) truncated
-    // to 26 hex chars. Retries (hook redelivery after a lost response, or a
-    // direct-JWT re-invocation) must be true same-payload retries: a fresh
+    // to 26 hex chars. Retries (a re-invocation after a lost response, or a
+    // direct-JWT re-run) must be true same-payload retries: a fresh
     // random id on every call would let provision_team's step-3 INSERT create
     // a SECOND org + membership + api_keys row (code-review P2, PR #847 —
     // the old update_user_team placeholder-only UPDATE could never duplicate,
@@ -322,9 +322,11 @@ Deno.serve(async (req: Request) => {
       // hook"). Fail with a clear, diagnosable error instead (dogfood 2026-08-08).
       // Log the SAME marker the monitor greps (`Provisioning misconfigured`).
       // It used to live only in the response body below, which `function_logs`
-      // never stores — so the monitor's marker arm could not fire even when this
-      // exact condition was happening. The operator-visible text and the greped
-      // text are now one string.
+      // never stores — so THAT NEEDLE could never match, however often this
+      // condition happened. The incident still fired, but off the monitor's
+      // `FASTAPI_URL is not set` needle (the line this branch used to log at
+      // error), which names the SYMPTOM rather than the condition. The
+      // operator-visible text and the greped text are now one string.
       console.error(
         "tenant-provision: Provisioning misconfigured — FASTAPI_URL is not set in Supabase secrets"
       );

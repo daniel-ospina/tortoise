@@ -11414,6 +11414,10 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # sat. Re-reading `extractor_v2.py` AT that base needs history a `fetch-depth: 1` checkout does
     # not have, so the residual is NAMED here rather than implied closed; the durable fix is
     # #11564's (with #11571/#11173 for the neighbouring arms).
+    # ⚠️ NOR does it grade OCCURRENCE COUNT or POSITION: a correct `:12929` at `a1dff7cec8` that is
+    # DUPLICATED, or RELOCATED out of the sentence introducing it, is GREEN (measured). Nothing
+    # false passes — both shapes carry the right number and the right base — so this is a coverage
+    # gap in the record's structure, not a hole a wrong cite can climb through.
     # ⛔ The boundary is located by the SECTION MARKER alone (`^# §0/§2`) — no typography and no
     # extra word: the em-dash reword redded once (measured), and `sha-pinned` in the needle made
     # the word do work it was not doing (only one line matches `^# §0/§2`, verified) while a reword

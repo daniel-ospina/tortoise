@@ -461,9 +461,11 @@ def _console_call_arguments(code: str) -> str:
     A plain `lit in code` substring test cannot tell those two apart, and it was
     MEASURED green over a live inert arm: the monitor greps
     `Provisioning misconfigured`, which appeared ONLY in the 500 response body,
-    while the line actually logged said `FASTAPI_URL is not set`. The arm could
-    never fire while the guard reported it healthy — the same class of defect
-    the guard's own docstring says it exists to prevent, one literal further on.
+    while the line actually logged said `FASTAPI_URL is not set`. That NEEDLE
+    could never match, so the incident only ever fired off the monitor's
+    `FASTAPI_URL is not set` needle — the SYMPTOM, not the condition — while the
+    guard reported the marker healthy. That is the same class of defect the
+    guard's own docstring says it exists to prevent, one literal further on.
 
     Balanced-paren and string-aware: an argument may be a concatenation
     (`"a" + x`), a template literal, or a nested call (`String(e)`), and a `)`
@@ -553,8 +555,8 @@ def test_the_log_monitor_guard_separates_a_log_from_a_response_body():
     rather than on the function being scanned — the same reason
     `test_local_specifier_scan_reads_every_quote_style` exists. MEASURED on the
     pre-fix guard: a plain `lit in src` certified `Provisioning misconfigured`,
-    which appeared ONLY in the 500 response body, so the monitor's marker could
-    never fire while the guard reported healthy.
+    which appeared ONLY in the 500 response body, so that NEEDLE could never
+    match while the guard reported healthy.
     """
     snippet = (
         'console.error("tenant-provision: a REAL log marker:", detail);\n'
