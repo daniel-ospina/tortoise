@@ -219,7 +219,7 @@ fewer. A recall-only test passes while the product under-returns.
 ### 6.2 Text ranking — why the text index does NOT move yet
 
 `ts_rank`/`ts_rank_cd` have **no IDF and no length normalisation**; independent measurement
-vectors puts Postgres full-text **8–23 nDCG@10 points behind BM25**, with its hybrid scoring **below
+puts Postgres full-text **8–23 nDCG@10 points behind BM25**, with its hybrid scoring **below
 vector-only** on all three datasets.
 
 **What this does and does not claim about our own scorer.** The FalkorDB leg is RediSearch's **TF-IDF**
@@ -230,9 +230,17 @@ for.** So this document does **not** claim our leg *is* the comparator. The repo
 leg (`tortoise/bm25.py`,
 `#8488`) found **neither rarity nor length** priced into the scoring, measured on the **embedded
 (falkordblite) lane** — not on the hosted `db.idx.fulltext` leg, which is unmeasured here. What the move
-decisively breaks is the **absolute magnitude**: `db.idx.fulltext` returns scores on a scale this product
-pins thresholds and fusion weights to (`{"vector": 1.5}` + implicit 1.0), so a move invalidates every one
-of them whichever estimator is better, and `to_tsvector` cannot reproduce the product's tokenizer behaviour
+decisively changes is the **order** the fusion consumes, not the score scale: `rrf_fusion` is RANK-based
+(`RRF(d) = Σ w_i / (k + rank_i)`, `search_engine.py:3021` — and it DISCARDS the leg's own score outright,
+`for rank, (pid, _score) in enumerate(ranked)`, `:3091-3093`), so the `{"vector": 1.5}` + implicit 1.0
+weights are multipliers on a rank and a rescale leaves them untouched, and on the multi-leg arm a caller's
+`threshold` is compared against the **fused** score (`sdk.py:38445`), never against the leg's own.
+⚠️ The magnitude does enter ONE arm, and it is stated because a later lane would otherwise be surprised
+by it: when a single leg answers or the read is a full scan, a caller's `threshold` IS compared against
+that **leg's raw score** (`sdk.py:38401`; bounded `0.0–1.0` at `:37470`, shipped default `0.0` = filter
+off) — there a rescale changes which rows clear the floor. Either way a different scorer **re-ranks** the
+lexical leg, and that re-ordering — not a lost scale — is what M3's score distributions must measure.
+Independently of all of it, `to_tsvector` cannot reproduce the product's tokenizer behaviour
 (`ERR-4032` → `err4032` **plus** the adjacency phrase, `#8933`).
 
 **A separate leg the move does not touch:** the in-memory sklearn **TF-IDF** fallback (`tortoise/sparse.py` — what `sparse.py` calls "the embedded
