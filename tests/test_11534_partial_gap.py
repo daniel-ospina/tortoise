@@ -520,3 +520,40 @@ def test_the_detector_s_recall_against_what_s4_actually_added():
     assert len(measured["by_section"]["points"]) == 12
     assert sum(measured["by_section"]["operators"]) == 1
     assert len(measured["by_section"]["operators"]) == 9
+
+
+def test_the_coverage_floor_is_justified_by_the_measured_distribution():
+    """The constant's own rationale, re-derived so it cannot rot.
+
+    ``GAP_COVERAGE_FLOOR``'s comment justifies 0.55 by the population's
+    per-segment coverage distribution, and that comment carried PRE-correction
+    percentiles ("median 0.85, p10 0.40") through two review rounds because no
+    pin re-derived them. This is the pin.
+
+    The read is done through the SHIPPED function, not a re-implementation of
+    its formula: ``coverage_floor=2.0`` is above every attainable coverage, so
+    every segment that clears ``GAP_MIN_CONTENT_TOKENS`` comes back with the
+    coverage the detector computed for it.
+    """
+    root = _repo_root()
+    values: list[float] = []
+    for path in sorted(glob.glob(os.path.join(root, _RECEIPTS, "*.arms.json"))):
+        with open(path, encoding="utf-8") as handle:
+            session = json.load(handle)
+        gaps = vet_gate.partial_gaps(
+            session["embed_list"]["narrative"], session["stories"]["narrative"],
+            coverage_floor=2.0, max_flagged=10_000)
+        values += [entry["coverage"] for entry in gaps["flagged"]]
+    values.sort()
+    assert len(values) == 210, "segments clearing the content-token floor"
+    # a full-coverage MASS plus a low TAIL, and the floor sits in the trough
+    assert sum(1 for v in values if v >= 1.0) == 147
+    assert sum(1 for v in values if v < vet_gate.GAP_COVERAGE_FLOOR) == 35
+    assert sum(1 for v in values if 0.5 <= v < 0.6) == 4
+    # ... and the 35 below the floor IS the pinned flag count for one run
+    # (70 over both runs), so the distribution and the flag rate cannot drift
+    # apart: one number, two independent readings.
+    assert sum(1 for v in values if v < vet_gate.GAP_COVERAGE_FLOOR) * 2 == 70
+    assert values[len(values) // 2] == 1.0
+    assert values[int(0.10 * len(values))] == 0.355
+    assert values[int(0.25 * len(values))] == 0.736

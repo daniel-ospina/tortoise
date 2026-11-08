@@ -394,9 +394,17 @@ def _narrative_statements(narrative: str) -> int:
 # unbuilt mechanism and is not a precondition for this one.
 
 #: Marks a segment as *not accounted for* when its idf-weighted coverage falls
-#: below this floor. Measured, not chosen in the dark: the recorded population's
-#: per-segment coverage is bimodal (median 0.85, p10 0.40), and 0.55 sits in the
-#: trough between "this statement is here" and "this statement is absent".
+#: below this floor. Measured, not chosen in the dark — and RE-DERIVED by
+#: ``tests/test_11534_partial_gap.py``::
+#: ``test_the_coverage_floor_is_justified_by_the_measured_distribution``,
+#: because this comment carried PRE-correction percentiles through two review
+#: rounds (both were unreproducible at the shipped settings, and quoting them
+#: here only gives the next reader a number to re-quote).
+#: Over the 7 committed sessions the population is a full-coverage MASS with a
+#: low TAIL: of the 210 segments that clear ``GAP_MIN_CONTENT_TOKENS``, **147 sit
+#: at exactly 1.0** and **35 fall below this floor**, and ``[0.5, 0.6)`` is the
+#: THINNEST band between the two (4 segments) — the trough 0.55 sits in
+#: (median 1.0, p10 0.355, p25 0.736).
 GAP_COVERAGE_FLOOR = 0.55
 
 #: Segments carrying fewer content words than this are not claims — markdown
@@ -639,11 +647,15 @@ def partial_gaps(embed_list: object, narrative: str, *,
 def check_batch(embed_list: object, narrative: str) -> dict:
     """Level 2 — *did this batch come out right?*
 
-    Two signals, both **reported, never acted on** in v1:
+    Three signals, all **reported, never acted on** in v1:
 
     - **coverage** — candidates emitted vs. statements the narrative carried.
       ``coverage_suspect`` fires only on the unambiguous case (a non-empty
       narrative produced **zero** candidates — a definite loss, no threshold).
+    - **partial coverage** (#11534) — ``partial_gaps``: WHICH clause span no
+      candidate accounts for, with a char span into the narrative. The zero-case
+      signal above cannot see a narrative that yielded 44 candidates and still
+      left a statement uncovered; this one can, and it still only reports.
     - **abstraction** — the candidate count per family, so a session that spent
       itself on one family is visible to the hand review.
 

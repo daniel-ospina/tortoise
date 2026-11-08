@@ -57,10 +57,16 @@ paraphrase of the span, not a copy of it — so a miss is a real miss.
 Tuning, and why these values: coverage is **idf-weighted** (`log((N+1)/(df+0.5))`
 over the batch's own item texts) so a word the batch uses everywhere ("stage",
 "lease") is near-worthless as evidence and a word it never uses scores highest;
-`coverage_floor = 0.55` sits in the trough of a bimodal distribution (per-segment
-coverage: median 0.85, p10 0.40); `min_content_tokens = 4` drops markdown
-headings and bold labels, which are the population's dominant flag class below
-it.
+`coverage_floor = 0.55` sits in the trough of a two-mode distribution — over the
+7 sessions (one run; the detector is deterministic and the S2 list is the same
+object in both artifacts, so the second run only doubles every count) **147 of
+the 210 segments that clear the token floor sit at exactly 1.0** and **35 fall
+below 0.55**, and `[0.5, 0.6)` is the thinnest band between the two (4 segments);
+median **1.0**, p10 **0.355**, p25 **0.736**. Those figures are re-derived by
+`test_the_coverage_floor_is_justified_by_the_measured_distribution`, because an
+earlier draft of this paragraph carried pre-correction percentiles that nothing
+pinned (round 2's finding); `min_content_tokens = 4` drops markdown headings and
+bold labels, which are the population's dominant flag class below it.
 
 **Stemming is symmetric on purpose, and the first version was not.** Coverage
 compares *base forms*, so the stemmer must fold both sides of a pair: an
