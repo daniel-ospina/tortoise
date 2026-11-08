@@ -708,18 +708,20 @@ unfirable (block at the top of §10).
 > narrative (`OUTCOMES` = KEEP/NOOP/DISCARD/MERGE; `MERGE` is a verdict VET records and S3 applies —
 > `#5006`). CLASSIFY
 > only **labels** (`classify_items` returns a kind per **existing** id; `_apply_classify_kinds` adds no
-> item). So **no stage the design folds S4's purpose into can emit a candidate a coverage check found
-> missing** (`run_s4` is today's gap-filler and does exactly that) — removing `run_s4` today DELETES
-> gap-filling instead of relocating it. The universal is scoped to the FOLD on purpose: an unqualified
-> "no shipped stage" would deny the very capability the dash clause says is lost, since `run_s4` *is*
-> a shipped stage. The pre-condition for removal is a stage that can ADD; building it is the migration
-> deliverable.
+> item). So, **before `#11534`, no stage the design folds S4's purpose into could emit a candidate a
+> coverage check found missing** (`run_s4` is today's gap-filler and does exactly that) — removing
+> `run_s4` today DELETES gap-filling instead of relocating it. The universal is written in the PAST
+> tense and scoped to the FOLD on purpose: an unqualified present-tense "no shipped stage" would deny
+> the very capability the dash clause says is lost, since `run_s4` *is* a shipped stage. The
+> pre-condition for removal is a stage that can ADD; building it is the migration deliverable.
 >
-> ⛔ **THE "NO SUCCESSOR STAGE" HALF OF THAT SENTENCE IS QUALIFIED BY `#11534`, BELOW — read the next
-> paragraph before quoting the universal.** A successor that CAN emit a coverage-missing candidate now
-> exists (`S2.2b`, armed OFF, measured reach stated there); what remains unmet is the ADD-by-
-> generalisation class. The unqualified claim is true of the FOLD, and it was never true of "no
-> successor" once this engine half existed.
+> ⛔ **THE FOLD NOW HAS SUCH A STAGE AND ITS REACH IS MEASURED — the present tense is stated here, not
+> assumed above.** `#11534` ships `S2.2b` (`run_partial_gap_fill`, armed OFF) inside S2.2: on the F3
+> population it emits a candidate for **8 of the 12 point** additions `run_s4` makes, and for only
+> **1 of the 9 operator** additions — because an operator addition GENERALISES an already-covered
+> statement at a higher abstraction, survives the coverage gate, and is unreachable by a coverage
+> detector by construction. So the precondition is met for the coverage class only; the measurement,
+> the flag rate and the bounds are `docs/evidence/11534-partial-gap/README.md`.
 >
 > ⚠️ **THAT BUILD IS `#11534`'s, AND IT COVERS ONE OF THE TWO GAP CLASSES — not both.**
 > `S2.2b` (`extractor_v2.run_partial_gap_fill`, behind `TORTOISE_PARTIAL_GAP_FILL`, **default OFF**)

@@ -1,3 +1,14 @@
+---
+title: "Evidence — #11534 the partial-gap detector, scored on the F3 population"
+type: evidence
+domain: platform
+doc_status: final
+created: 2026-11-08
+subjects.team: epistemic-team
+aboutSubjects: Tortoise extraction pipeline, S2.2 coverage
+aboutObjects: "#11534, #11002, #2335, #5087, run_s4, EXTRACTOR-V4-ARCHITECTURE.md §S2.2"
+---
+
 # `#11534` — the partial-gap detector, scored on the F3 population
 
 **What this record is.** The detector `tortoise/vet_gate.py::partial_gaps` adds

@@ -13253,13 +13253,25 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     gap_stage_stats: dict = {}
     if _partial_gap_fill_enabled():
         gap_fill_stats = {"armed": True, "fired": False}
-        if not (story and embed_list):
+        if not (story and any(embed_list.values())):
             # ⛔ ARMED BUT SKIPPED IS RECORDED, NOT SILENT (review round 2, P2).
             # An empty S2 list is the case the issue scopes OUT (it asks about
             # PARTIAL gaps) and it is also the case S4 does the most work on
             # (`s4_full_rescues`, #2335 WI-1b) — so the exclusion has to be
             # visible in the record, or a measurement run cannot tell "armed and
             # skipped" from "not armed" (#9116's ambiguity).
+            #
+            # ⛔ THE PREDICATE IS `any(embed_list.values())`, NOT `embed_list`
+            # (review round 3, P1). The post-VET dict is ALWAYS truthy —
+            # `{"entities": [], "events": [], "points": [], "operators": []}`
+            # is a non-empty mapping — so the falsy-dict test never fired on the
+            # zero-candidate shape at all, and the stage took the *firing* path
+            # instead: with no items every segment scores coverage 0.0, so every
+            # narrative span was flagged and one billed model call went out —
+            # the exact inverse of what this arm's name and the evidence record
+            # assert. This is the SAME predicate the S4 handler uses 140 lines
+            # later for `s4_full_rescues`; sharing it is what stops the two from
+            # diverging again.
             gap_fill_stats["skipped"] = ("no story" if not story
                                          else "empty embed_list")
     if gap_fill_stats.get("armed") and not gap_fill_stats.get("skipped"):

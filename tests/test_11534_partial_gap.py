@@ -152,8 +152,14 @@ def test_detector_is_total_on_malformed_shapes():
     assert all(entry["coverage"] == 0.0 for entry in malformed["flagged"])
     gaps = vet_gate.partial_gaps({}, NARRATIVE)
     assert gaps["flagged_total"] >= 1
-    assert vet_gate.partial_gaps({"points": "a string"}, NARRATIVE)["segments"] \
-        == gaps["segments"]
+    # ⚠️ The `segments` half of this arm was DEAD WEIGHT and is gone (review
+    # round 3, rule 3): `segments` is computed purely from the narrative, so no
+    # mutation of the embed-list path can move it, and asserting it equalled
+    # another dict's `segments` was a tautology. The `flagged`/`coverage` arms
+    # above are the live ones; the malformed-list arm below is a real one.
+    bad_section = vet_gate.partial_gaps({"points": "a string"}, NARRATIVE)
+    assert bad_section["flagged_total"] == gaps["flagged_total"], (
+        "a non-list section value is treated as empty, not as a crash")
     assert vet_gate.narrative_segments(None) == []
 
 
@@ -258,10 +264,12 @@ class _Model:
 
     last_finish_reason = None
 
-    def __init__(self, *, gap_answer: str | None = None, gap_raises: bool = False):
+    def __init__(self, *, gap_answer: str | None = None, gap_raises: bool = False,
+                 s2_answer: dict | None = None):
         self.calls: list[str] = []
         self.gap_answer = gap_answer
         self.gap_raises = gap_raises
+        self.s2_answer = s2_answer
 
     def complete(self, *, system, user, max_tokens=None):
         self.last_finish_reason = "stop"
@@ -281,7 +289,8 @@ class _Model:
             self.calls.append("s4")
             return '{"entities": [], "events": [], "operators": [], "points": []}'
         self.calls.append("s2")
-        return json.dumps(COVERED_ITEMS)
+        return json.dumps(self.s2_answer if self.s2_answer is not None
+                          else COVERED_ITEMS)
 
 
 def _conv():
@@ -333,6 +342,36 @@ def test_the_stage_is_off_by_default(monkeypatch):
     out = v2.extract_session_v2(model, _conv())
     assert "gap_fill" not in model.calls
     assert "partial_gap_fill" not in out["stats"]
+
+
+def test_an_all_empty_s2_batch_is_skipped_without_a_model_call(monkeypatch):
+    """THE ZERO-CANDIDATE POPULATION IS SKIPPED, AND THE SKIP IS RECORDED.
+
+    This arm is why review round 3's P1 existed: the skip predicate tested the
+    post-VET dict's FALSINESS, and that dict is always truthy
+    (`{"entities": [], "events": [], "points": [], "operators": []}` is a
+    non-empty mapping) — so the arm never fired, the stage took its FIRING path
+    instead, every narrative span scored coverage 0.0 and was flagged, and one
+    billed call went out. That is the exact inverse of what the evidence record
+    claims, and nothing exercised it.
+
+    The population is real and the pipeline already anticipates it — a model
+    replying with empty arrays, `apply_vet` discarding every item, or `run_s2`
+    returning a well-formed empty list — and it is the session `run_s4` counts
+    as a full rescue (`s4_full_rescues`, #2335). #11534 scopes itself to PARTIAL
+    gaps, so the correct behaviour is: no call, and `skipped` says why.
+    """
+    empty = {"entities": [], "events": [], "operators": [], "points": []}
+    model = _Model(s2_answer=empty)
+    out = _run(monkeypatch, model)
+    assert "gap_fill" not in model.calls, (
+        "a zero-candidate batch is S4's rescue, not a partial gap — the stage "
+        "must not spend a call on it")
+    stats = out["stats"]["partial_gap_fill"]
+    assert stats["armed"] is True
+    assert stats["skipped"] == "empty embed_list"
+    assert stats["fired"] is False
+    assert "llm" not in stats
 
 
 def test_no_model_call_when_nothing_is_flagged():
@@ -438,7 +477,14 @@ def _measure() -> dict:
     hits = 0
     labels = 0
     by_section: dict[str, list[int]] = {}
-    per_session: dict[str, int] = {}
+    # ⛔ KEYED BY (artifact, session), NOT BY SESSION (review round 3, P2).
+    # Both artifacts carry the same seven session keys, so a plain
+    # `per_session[arm["session"]] = …` made the second run OVERWRITE the
+    # first's row — and the pin below then asserted "both runs agreeing" from a
+    # dict holding one run's numbers. A detector that became run-dependent in
+    # the FIRST artifact would have left that row green, which is exactly the
+    # regression the comment claims to guard.
+    per_session: dict[tuple[str, str], int] = {}
     for artifact in _ARTIFACTS:
         with open(os.path.join(root, artifact), encoding="utf-8") as handle:
             evidence = json.load(handle)
@@ -449,7 +495,8 @@ def _measure() -> dict:
                                          narrative)
             segments += gaps["segments"]
             flagged += gaps["flagged_total"]
-            per_session[arm["session"]] = gaps["flagged_total"]
+            per_session[(os.path.basename(artifact), arm["session"])] = (
+                gaps["flagged_total"])
             span_tokens = [vet_gate._gap_tokens(entry["text"])
                            for entry in gaps["flagged"]]
             for item in arm["legacy"]["added_items"]["items"]:
@@ -491,14 +538,25 @@ def test_the_detector_s_flag_rate_on_the_population():
     assert measured["flagged"] == 70
     rate = measured["flagged"] / measured["segments"]
     assert 0.05 <= rate <= 0.15, f"flag rate {rate:.1%} moved out of range"
-    # per-session counts, both runs agreeing (the detector is deterministic and
-    # the S2 list is the same object in both artifacts)
-    assert measured["per_session"] == {
+    # Per-session counts, pinned PER RUN and then shown to agree. The
+    # detector is deterministic and both artifacts carry the same S2 list, so
+    # agreement is the expected outcome — which is why it is asserted rather
+    # than assumed (review round 3, P2).
+    expected = {
         "wp01_quarry_debug": 1, "wp02_lumen_refactor": 10,
         "wp03_ember_design": 8, "wp04_aurora_perf": 2,
         "wp05_retro_writeup": 5, "wp06_quarry_rollout": 1,
         "wp07_bluepeak_followup": 8,
     }
+    runs: dict[str, dict[str, int]] = {}
+    for (artifact, session), count in measured["per_session"].items():
+        runs.setdefault(artifact, {})[session] = count
+    assert len(runs) == 2, f"both recorded runs must be scored; got {sorted(runs)}"
+    for artifact, rows in runs.items():
+        assert rows == expected, f"{artifact} disagrees with the pinned counts"
+    assert len({tuple(sorted(rows.items())) for rows in runs.values()}) == 1, (
+        "the two recorded runs must agree per session — a divergence here is a "
+        "run-dependent detector, the regression this pin exists to catch")
 
 
 def test_the_detector_s_recall_against_what_s4_actually_added():
