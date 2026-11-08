@@ -262,7 +262,7 @@ FACT_STATEMENTS_IN_SIBLINGS: tuple[
     (
         STORAGE,
         "STORAGE attributes the vector-LOCATION ruling to V1/§12.1c and the embeddings question to V3",
-        "the **V1/§12.1c** decision settles where the vector index LIVES",
+        "settles where the vector index LIVES (Postgres, 2026-11-07), and it does not settle whether these two labels carry embeddings — that is §14.3 **V3**'s question",
     ),
     (
         ONTOLOGY,
@@ -277,7 +277,7 @@ FACT_STATEMENTS_IN_SIBLINGS: tuple[
     (
         STORAGE,
         "STORAGE separates the `#4997` measurement from the live defect",
-        "the unindexed-embeddings defect is real, and its home is the V1/§12.1c decision",
+        "the unindexed-embeddings defect is real, and its home is §14.3 V3",
     ),
     # The linkage a review of this PR found missing: §7 explained the window as a
     # COST question and never said what had previously made a per-tenant memory
