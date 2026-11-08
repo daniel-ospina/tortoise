@@ -341,6 +341,13 @@ def cmd_inventory(args: argparse.Namespace) -> int:
     audit = reader.audit()
     plan = C.build_plan(points + sources, source_graph=args.graph or "(credential-bound)",
                         target_graph=args.target or "(none: inventory only)")
+    if args.rows:
+        # inventory builds the plan (it IS the census), so the row artifact is
+        # available here too — silently dropping the flag is how an operator reviews
+        # a STALE file believing it is this run's.
+        with open(args.rows, "w", encoding="utf-8") as fh:
+            for d in plan.decisions:
+                fh.write(json.dumps(d.as_dict(), sort_keys=True) + "\n")
     report = {
         # NEVER "default": an omitted `graph` reads the CREDENTIAL's own graph
         # (#10084), so a field saying "default" would state the opposite.
@@ -365,6 +372,7 @@ def cmd_inventory(args: argparse.Namespace) -> int:
             ],
         },
         "census": plan.census(),
+        "rows_written": (len(plan.decisions) if args.rows else None),
     }
     text = json.dumps(report, indent=2, sort_keys=True)
     if args.out:
@@ -460,10 +468,21 @@ def main(argv: list[str] | None = None) -> int:
                                   "node id, disposition, the rule's reason, pack) — the artifact "
                                   "a row-by-row review of the plan actually needs")
     ap.add_argument("--ledger", help="ledger path (default ~/.tortoise/curate-11469-ledger.jsonl)")
-    ap.add_argument("--page", type=int, default=PAGE)
+    ap.add_argument("--page-size", "--page", dest="page", type=int, default=PAGE,
+                    help=f"rows per read (default {PAGE}). This is a page SIZE, not a "
+                         "1-based page number: a small value makes the read take many calls")
     ap.add_argument("--apply", action="store_true", help="actually write (default: plan only)")
     ap.add_argument("--off", action="store_true", help="off-switch: write nothing")
     args = ap.parse_args(argv)
+    if args.action == "inventory":
+        ignored = [f for f, v in (("--apply", args.apply), ("--ledger", args.ledger),
+                                  ("--target", args.target))
+                   if v]
+        if ignored:
+            # Silently ignoring a flag is how an operator believes an artifact exists.
+            print(f"inventory does not write: {', '.join(ignored)} apply only to `plan`",
+                  file=sys.stderr)
+            return 2
     return cmd_inventory(args) if args.action == "inventory" else cmd_plan(args)
 
 

@@ -1154,3 +1154,52 @@ def test_two_nodes_sharing_an_id_across_pages_are_not_a_pagination_shift():
         return {"result": pop[off:off + lim], "total": len(pop)}
     rows, total = mod.MCPReader(call, None).read_points(page=2)
     assert len(rows) == 6 and total == 6
+
+
+def test_the_bundle_passes_ingests_phase1_validator():
+    """Round-16: the doc claimed "the bundle is ingest-valid" while every cited test
+    exercised `tortoise.canonical` only — adding an illegal point prop would be a
+    whole-batch Phase-1 refusal at run time with all tests green."""
+    from tortoise.sdk import TortoiseSDK
+    plan = C.build_plan(
+        [row("p1", kind="decision", content="we ship"),
+         row("p2", node_type="operator", kind=None, content="claim A implies claim B"),
+         row("https://x/y", node_type="source", kind="article", content="https://x/y")],
+        source_graph="old", target_graph="new", packs={})
+    # the lane's URI is what `TortoiseSDK()` picks up by default
+    sdk = TortoiseSDK()
+    assert sdk._validate_bundle(plan.bundle(), promotion_policy="auto") == []
+
+
+def test_a_write_flag_on_inventory_is_refused_not_ignored(monkeypatch, capsys):
+    """Round-16: `inventory --apply --ledger --rows` exited 0 having silently ignored
+    every one of them."""
+    mod = _tool_module()
+    monkeypatch.setattr(mod, "_live_call_tool", lambda *a, **k: {"result": []})
+    assert mod.main(["inventory", "--apply"]) == 2
+    assert "apply only to `plan`" in capsys.readouterr().err
+
+
+def test_inventory_writes_the_row_artifact_it_advertises(monkeypatch, tmp_path):
+    mod = _tool_module()
+
+    def call(name, args):
+        if name == "tortoise_query":
+            return {"result": [{"id": "p1", "kind": "decision", "content": "we ship"}],
+                    "total": 1}
+        return {"result": []}
+    monkeypatch.setattr(mod, "_live_call_tool", call)
+    rows_out = tmp_path / "inv.jsonl"
+    assert mod.main(["inventory", "--out", str(tmp_path / "inv.json"),
+                     "--rows", str(rows_out)]) == 0
+    assert len(rows_out.read_text().splitlines()) == 1
+
+
+def test_the_page_flag_is_documented_as_a_page_size():
+    mod = _tool_module()
+    import contextlib
+    import io
+    buf = io.StringIO()
+    with contextlib.suppress(SystemExit), contextlib.redirect_stdout(buf):
+        mod.main(["--help"])
+    assert "page SIZE" in buf.getvalue()
