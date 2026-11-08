@@ -671,9 +671,12 @@ def _report_fts(fts: dict, census_after: int | None = None) -> None:
               f"THE PRE-FIX PROSE {fts['leaked']!r}: the sentence is still "
               f"findable through the Source FTS index. ⛔ ON A CENSUS THIS IS "
               f"THE PRE-REPAIR STATE (nothing has been written yet); AFTER a "
-              f"repair it means the pair was cleared on the node while the "
-              f"indexed tokens survived — do NOT report the repair as done "
-              f"(#11161).", file=sys.stderr)
+              f"repair `residue` means the node was NOT CLEARED — it was left "
+              f"alone, the write matched nothing, or the run never reached it "
+              f"(the node's own pair still holds text, which is why the census "
+              f"counts it). The 'pair is gone but the index entry survived' "
+              f"shape is `stale`, and it has its own refusal. Do NOT report the "
+              f"repair as done (#11161).", file=sys.stderr)
     elif fts["vetoed"] == "stale-index":
         print(f"✗ {len(fts['stale'])} probe(s) still return an episodic session "
               f"`:Source` that carries NO TEXT AT ALL {fts['stale']!r}: the pair "
@@ -682,27 +685,48 @@ def _report_fts(fts: dict, census_after: int | None = None) -> None:
               f"not a stem collision. Re-index the Source label (or delete the "
               f"stale entry) and re-measure.", file=sys.stderr)
     elif fts["vetoed"] == "unmeasurable":
-        print(f"✗ the Source FTS leg did not RUN for {fts['unmeasurable']!r} "
-              f"(the read path's own reason is on the probe line). A leg that "
-              f"did not run returns no hits, exactly as a clean miss does, so "
-              f"its 0 is NOT evidence — fix the read (the index, or the circuit "
-              f"breaker) and re-measure.", file=sys.stderr)
+        # ⛔ "DID NOT RUN" IS TWO STATES (#11536 review round 11, P2).
+        # `unmeasurable` covers `ran=False` AND `ran=True, degraded=True` — and
+        # a dropped index is recorded as the LATTER (`index_missing`), which this
+        # PR's own docstring calls the ordinary shape. The refusal asserted the
+        # first for both while the probe line above printed
+        # `⚠️ UNMEASURABLE (index_missing)`. The module distinguishes `ran` from
+        # `degraded` everywhere else; this branch no longer collapses them.
+        print(f"✗ the Source FTS leg did not MEASURE {fts['unmeasurable']!r} "
+              f"(it did not run, or it ran DEGRADED — the read path's own "
+              f"reason is on the probe line). Such a leg returns no hits, "
+              f"exactly as a clean miss does, so its 0 is NOT evidence — fix "
+              f"the read (the index, or the circuit breaker) and re-measure.",
+              file=sys.stderr)
     elif fts["vetoed"] == "before-truncated":
         # ⛔ ITS OWN BRANCH (#11536 review round 10, P1). With no branch here the
         # veto fell through to the `else:` arm and printed the `uncorroborated`
-        # causes: that "the control did not corroborate the zero" — while the
-        # control HAD answered, printed with its hit count one line above on
-        # stdout — and it told the operator to run `--repair --probe-phrase`,
-        # which is the command they had just run. The verdict was fail-closed
-        # but the diagnosis was false in every clause.
-        print(f"✗ the BEFORE reading's window FILLED "
-              f"({(fts['probes'][0].get('before') or {}).get('hits')} hit(s) is "
-              f"the read's limit), so that leg's residue count is a FLOOR: it "
-              f"did NOT establish that the token matched no pre-fix node, and "
-              f"residue could be sitting past the edge. This is NOT an "
-              f"uncorroborated zero — the control answered — so the fix is a "
-              f"RARER token, not another run. Re-run with a token that appears "
-              f"only in the removed sentence.", file=sys.stderr)
+        # causes: that "the control did not corroborate the zero" and that the
+        # operator should run `--repair --probe-phrase` — the command they had
+        # just run. Fail-closed verdict, false diagnosis.
+        # ⛔ AND IT MUST NAME THE PROBE THAT ACTUALLY FILLED (#11536 review round
+        # 11, P2): this read `probes[0]`, so with two probes where only the
+        # second truncated it printed the FIRST one's hit count as "is the
+        # read's limit". It also asserted "the control answered" without
+        # consulting `control`, so on an UNAVAILABLE control it printed
+        # "the control answered" two lines under "control: not available".
+        filled = [p for p in fts["probes"] if _before_leg_kind(p) == "truncated"]
+        whose = [str(p.get("phrase")) for p in filled]
+        counts = sorted({(p.get("before") or {}).get("hits") for p in filled})
+        control_ok = bool((fts.get("control") or {}).get("ok"))
+        if control_ok:
+            corroboration = ("This is NOT an uncorroborated zero — the control "
+                             "answered — so the fix is a RARER token, not "
+                             "another run.")
+        else:
+            corroboration = ("The control did not corroborate this run either, "
+                             "so fix the READ as well as the token.")
+        print(f"✗ the BEFORE reading's window FILLED for {whose!r} "
+              f"({counts} hit(s) reached the read's limit), so that leg's "
+              f"residue count is a FLOOR: it did NOT establish that the "
+              f"token matched no pre-fix node, and residue could be sitting "
+              f"past the edge. {corroboration} Re-run with a token that "
+              f"appears only in the removed sentence.", file=sys.stderr)
     elif fts["vetoed"] == "truncated":
         print(f"✗ the probe filled the read's window for {fts['truncated']!r} "
               f"({fts['limit']} hits), so its count is a FLOOR and any residue "
@@ -1245,6 +1269,22 @@ def main() -> int:
         if fts_gate:
             # ⛔ NOT "Repair complete." — the census reached 0 and the sentence is
             # still findable. The refusal above says which half failed (#11161).
+            return code
+        if not fts:
+            # ⛔ THE WEAKER SIGN-OFF IS BY-NAME ON BOTH ARMS (#11536 review round
+            # 11, P2). `--assert-clean` REFUSES to certify on the census alone
+            # unless the weaker evidence is accepted by name (`--no-fts-probe`),
+            # while `--repair` without a probe printed the unqualified
+            # "Repair complete." and exited 0 with the FTS half unmeasured —
+            # only a stderr note. That sentence is the very token the new tests
+            # use as the false-PASS marker, so the two arms disagreed about the
+            # same run shape. The repair still happens (the runbook's step 2 is
+            # probe-less on purpose); what it may not do is sign off as complete.
+            print("\nCensus repaired — but the Source FTS half was NOT "
+                  "measured on this run (no --probe-phrase), so this is NOT a "
+                  "verification. Re-run `--dry-run --assert-clean "
+                  "--probe-phrase <token>` to check that the sentence also left "
+                  "the index.")
             return code
         print("\nRepair complete. Re-run --dry-run to confirm 0 candidates.")
     else:
