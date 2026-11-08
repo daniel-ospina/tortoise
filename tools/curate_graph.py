@@ -525,22 +525,34 @@ def cmd_inventory(args: argparse.Namespace) -> int:
     return 0
 
 
-def _disarmed_artifact(args: argparse.Namespace, reason: str) -> int:
-    """A DISARMED run whose census could not be measured: exit 0, failure on the artifact.
+def _disarmed_artifact(
+    args: argparse.Namespace,
+    reason: str,
+    *,
+    census: Any = None,
+    read_failure: str | None = None,
+) -> int:
+    """A DISARMED run that stopped early: exit 0, the reason on the artifact.
 
     The off switch exists to make pipeline noise stop during an incident — exactly when
     the reads are failing — so a disarmed run must not become a non-zero exit just
     because the census it was not going to write from could not be read (round-22
     contract: "a driver paged on a run that did exactly what it was told"). It must not
-    SWALLOW the failure either: `census_measured: false` and `read_failure` say the
-    census below is absent, not empty, so nobody reads `total_rows` from it.
+    SWALLOW the failure either.
+
+    ⛔ `census_measured` is present on BOTH disarmed arms, so a driver answers "was it
+    measured?" uniformly instead of inferring it from a missing key (round-38 P3). When
+    the census WAS measured (`census` given) it travels here in full, because a disarmed
+    run over a damaged LEDGER still read the graph successfully: the two losses are not
+    the same fact and must not be reported as one.
     """
     payload = {
         # ⛔ `null`, not a zeroed census: a zeroed one is indistinguishable from "the
         # graph is empty", which is the silent-zero class R7 forbids.
-        "census": None,
-        "census_measured": False,
-        "read_failure": reason,
+        "census": census,
+        "census_measured": census is not None,
+        "disarmed_reason": reason,
+        "read_failure": read_failure,
         "run": {
             "applied": False, "off": True, "skipped_known": 0, "written": 0,
             "target_graph": args.target, "digest": None, "refused": "off-switch active",
@@ -554,7 +566,8 @@ def _disarmed_artifact(args: argparse.Namespace, reason: str) -> int:
         with open(args.out, "w", encoding="utf-8") as fh:
             fh.write(text + "\n")
     print(text)
-    print(f"disarmed (census NOT measured: {reason[:200]}): nothing written, nothing attempted",
+    label = "census measured" if census is not None else "census NOT measured"
+    print(f"disarmed ({label}: {reason[:200]}): nothing written, nothing attempted",
           file=sys.stderr)
     return 0
 
@@ -585,7 +598,8 @@ def cmd_plan(args: argparse.Namespace) -> int:
         # disarmed run reports the failure on the artifact and exits 0 (round-37 P3).
         if not disarmed:
             raise
-        return _disarmed_artifact(args, f"{type(exc).__name__}: {exc}")
+        return _disarmed_artifact(args, f"{type(exc).__name__}: {exc}",
+                                  read_failure=f"{type(exc).__name__}: {exc}")
     gap = _source_gap(counts, len(sources))
     unreconciled = _unreconciled_sources(len(sources), gap)
     if unreconciled and not C.off_switch_active(args.off):
@@ -597,6 +611,17 @@ def cmd_plan(args: argparse.Namespace) -> int:
         # pages on a run that did exactly what it was told). The unmeasurable census
         # still travels on the artifact rather than being swallowed.
         reader._note(unreconciled)
+    if args.apply and not graphs and not disarmed:
+        # ⛔ An EMPTY `graphs` section silently disabled the rows-authority guard: with no
+        # identity rows the guard falls back to shape, which accepts any id-shaped ref, so
+        # `--target g_new` was written while the ledger filed the key under a SECOND scope
+        # for one graph (round-38 P3). An apply with no identity rows is an unproven
+        # target, and that is a refusal — the same answer as any other unproven identity.
+        # A disarmed apply writes nothing, so it is not refused (the switch wins).
+        print("REFUSED: the `graphs` section returned no identity rows, so the graph "
+              "`--target` names cannot be proven — an applying run is refused rather "
+              "than resolved by shape", file=sys.stderr)
+        return 3
     plan = C.build_plan(points + sources, source_graph=args.graph or "(credential-bound)",
                         target_graph=args.target)
     try:
@@ -616,6 +641,13 @@ def cmd_plan(args: argparse.Namespace) -> int:
             graph_rows=graphs,
         )
     except C.CurationRefused as exc:
+        if disarmed:
+            # ⛔ The switch is TOTAL: a disarmed run over a damaged/unscopable LEDGER is
+            # still exit 0 (nothing was going to be written), and the census it DID
+            # measure travels on the artifact. Pre-fix this arm exited 3 while the failed
+            # -read arm exited 0 — two disarmed runs in one incident, opposite contracts
+            # (round-38 P3).
+            return _disarmed_artifact(args, str(exc), census=plan.census())
         print(f"REFUSED: {exc}", file=sys.stderr)
         return 3
     if args.rows:

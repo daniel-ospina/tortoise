@@ -2705,3 +2705,109 @@ def test_the_cli_refuses_a_target_spelling_the_graphs_surface_cannot_resolve(
     # a spelling this surface does not expose: a REFUSAL, not a re-send and not a skip
     assert mod.main([*base, "--target", "g_new"]) == 3
     assert wire == ["org_x_g_new"], f"an unresolvable spelling reached the wire: {wire}"
+
+
+def test_a_name_never_scopes_a_ledger_even_when_the_id_is_not_exposed():
+    """Round-38 P2 — the shipped `graphs` shape LOSES `graph_id`/`stable_id`.
+
+    `MCPReader.graphs()` wraps a `list[str]` as `{"namespace": s}`, so in production a
+    row usually exposes only its namespace. A name that equals ANOTHER graph's id is
+    therefore not carried by any row in an exact field, and the previous "only unique
+    values" filter judged it unique: ALPHA's `name: g_beta` put `g_beta` in ALPHA's
+    scope, so a run into BETA skipped every row (`applied: True, written: 0`, exit 0)
+    and a run spelled by BETA's id recorded its keys under ALPHA's scope.
+
+    The ledger now resolves through the EXACT id fields only (`_ledger_row`), never
+    through `_matched_row`'s name pass, so an id the exact fields do not name scopes to
+    itself and the guard refuses instead of inheriting another graph's keys.
+    """
+    rows = [{"graph_id": "g_old", "namespace": "org_o1_g_old", "name": "old"},
+            {"namespace": "org_o1_g_beta"},                      # BETA's id is NOT exposed
+            {"graph_id": "g_alpha", "namespace": "org_o1_g_alpha", "name": "g_beta"}]
+    alpha = C.ledger_scopes("org_o1_g_alpha", rows)
+    beta = C.ledger_scopes("org_o1_g_beta", rows)
+    by_beta_id = C.ledger_scopes("g_beta", rows)
+    assert alpha.isdisjoint(beta), (alpha, beta)
+    assert alpha.isdisjoint(by_beta_id), (alpha, by_beta_id)
+    assert "g_beta" not in alpha, alpha
+    assert C.ledger_scope("g_beta", rows) != "g_alpha"
+    # and the unification the feature exists for still holds where the id IS exposed
+    assert C.ledger_scope("org_o1_g_alpha", rows) == "g_alpha"
+
+
+def test_the_default_sentinel_cannot_scope_a_ledger(tmp_path):
+    """Round-38 P3 — excluding the sentinel from the RECORDED key was half the fix.
+
+    It still entered the MATCH set, and the fallback still recorded it, so workspace A's
+    `{"target": "default"}` line made workspace B's run report `written: 0`. `default`
+    is workspace-universal while the ledger file is per-user, so it is not a scope at
+    all: a target identified only by the sentinel is refused, like any unproven
+    identity.
+    """
+    with pytest.raises(C.CurationRefused, match=r"`default` sentinel"):
+        C.Ledger(tmp_path / "l.jsonl", target="default")
+    # a row that carries the sentinel but also a real id is fine — the id is the scope
+    rows = [{"graph_id": "default", "stable_id": "g_tenant1", "namespace": "org_o1"}]
+    assert C.ledger_scope("org_o1", rows) == "g_tenant1"
+    assert "default" not in C.ledger_scopes("org_o1", rows)
+
+
+def test_an_applying_run_with_no_identity_rows_is_refused(monkeypatch, capsys, tmp_path):
+    """Round-38 P3 — an EMPTY `graphs` section silently disabled the rows authority.
+
+    With no identity rows `assert_distinct_graphs` falls back to shape, which accepts
+    any id-shaped ref, so `--target g_new` was WRITTEN while the ledger filed the key
+    under a second scope for the same graph — the re-send the doc said could not
+    happen. An apply with no identity rows is an unproven target: refused.
+    """
+    mod = _tool_module()
+    wire: list[str] = []
+
+    def call(name, args):
+        if name == "tortoise_graph_overview" and args.get("section") == "graphs":
+            return {"result": []}                                # empty, non-erroring
+        if name == "tortoise_graph_overview" and args.get("section") == "status":
+            return {"counts": {"Source": 0}}
+        if name == "tortoise_query":
+            return {"result": [{"id": "p1", "kind": "decision", "content": "c"}], "total": 1}
+        if name == "tortoise_ingest":
+            wire.append(args["graph"])
+            return {"created": 1}
+        return {"result": []}
+    monkeypatch.setattr(mod, "_live_call_tool", call)
+    rc = mod.main(["plan", "--graph", "org_x_g_old", "--target", "org_x_g_new", "--apply",
+                   "--ledger", str(tmp_path / "l.jsonl"), "--no-verify-read"])
+    assert rc == 3, capsys.readouterr()
+    assert "no identity rows" in capsys.readouterr().err
+    assert wire == [], f"an unproven target reached the wire: {wire}"
+
+
+def test_a_disarmed_run_over_a_damaged_ledger_still_exits_zero(monkeypatch, tmp_path,
+                                                               capsys):
+    """Round-38 P3 — the disarmed contract must be TOTAL, not per-arm.
+
+    A disarmed run whose census read failed exited 0, while a disarmed run over a
+    damaged ledger exited 3 — two runs in one incident with opposite contracts. The
+    switch wins for both, and because the census WAS measured in the ledger case it
+    travels on the artifact (`census_measured: true`), so the two losses are not
+    reported as one fact.
+    """
+    mod = _tool_module()
+    led = tmp_path / "l.jsonl"
+    led.write_text("null\n")          # a damaged ledger line: unreadable keys
+
+    def call(name, args):
+        if name == "tortoise_graph_overview" and args.get("section") == "status":
+            return {"counts": {"Source": 0}}
+        if name == "tortoise_query":
+            return {"result": [{"id": "p1", "kind": "decision", "content": "c"}], "total": 1}
+        return {"result": []}
+    monkeypatch.setattr(mod, "_live_call_tool", call)
+    rc = mod.main(["plan", "--graph", "org_x_g_old", "--target", "org_x_g_new", "--apply",
+                   "--off", "--ledger", str(led), "--no-verify-read",
+                   "--out", str(tmp_path / "p.json")])
+    assert rc == 0, capsys.readouterr()
+    payload = json.loads((tmp_path / "p.json").read_text())
+    assert payload["census_measured"] is True and payload["census"], payload
+    assert "damaged" in payload["disarmed_reason"], payload["disarmed_reason"]
+    assert payload["read_failure"] is None

@@ -1221,39 +1221,72 @@ class IngestWriter:
 #: The fields a row exposes as REFS that `mcp_auth.resolve_graph_target` accepts for
 #: the graph that row describes. Used verbatim (never `_tail`-derived): see
 #: `ledger_scopes` for why an id-space value must never enter a match set.
-_IDENTITY_REF_FIELDS = ("graph_id", "stable_id", "namespace", "name")
-#: The identity fields the resolver matches EXACTLY (case is significant), as opposed
-#: to `name`, which it casefolds.
-_EXACT_ID_FIELDS = ("graph_id", "stable_id", "namespace")
+#: The fields a ledger may resolve or record a target through. ⛔ `name` is NOT one of
+#: them, and neither is `_tail`'s derived identity: `mcp_auth.resolve_graph_target` is
+#: field-major and treats a name as the LAST resort, so a bare token that a row carries
+#: only as a NAME resolves to a different graph than the ledger row it was matched
+#: against — measured 2026-11-08, the shipped `graphs` section (`{"namespace": s}`) loses
+#: `graph_id`/`stable_id`, so a name equal to a graph whose id is not exposed looked
+#: unique and two DIFFERENT graphs shared one scope (round-37 P2, second instance).
+#: A name is not an identity, for the same reason `_canonical_from_row` refuses the
+#: `default` sentinel: it may name a graph without identifying it.
+_LEDGER_REF_FIELDS = ("graph_id", "stable_id", "namespace")
+
+
+def _ledger_row(
+    ref: str,
+    graph_rows: Sequence[Mapping[str, Any]] | None,
+) -> Mapping[str, Any] | None:
+    """The row whose EXACT id fields name ``ref`` — never a `name` match.
+
+    ⛔ Deliberately NOT `_matched_row`: that helper falls back to a casefolded `name`
+    match, which is the LAST resort in `mcp_auth.resolve_graph_target`'s field-major
+    order. The two disagree exactly when a graph's NAME equals another graph's ID —
+    and then `_matched_row("g_beta")` returns ALPHA (whose name is `g_beta`) while the
+    write path resolves the same ref to BETA. The identity guard's error direction is a
+    refusal; the LEDGER's is a skip, so it must not inherit that ambiguity: a ref the
+    exact fields do not name gets NO row here, and the caller falls back to the literal
+    spelling (fail-closed — the guard refuses an unproven identity before a write).
+    Measured 2026-11-08 (round-38 P2): with the shipped `graphs` shape losing
+    `graph_id`/`stable_id`, ALPHA's `name: g_beta` made the two graphs share one ledger
+    scope, so a run into BETA skipped every row and a run spelled by BETA's id recorded
+    its keys under ALPHA.
+    """
+    wanted = (ref or "").strip()
+    if not wanted or not graph_rows:
+        return None
+    for row in graph_rows:
+        for fname in _LEDGER_REF_FIELDS:
+            val = row.get(fname)
+            if val is not None and str(val).strip() == wanted:
+                return row
+    return None
 
 
 def _refs_unique_to(
     row: Mapping[str, Any],
     graph_rows: Sequence[Mapping[str, Any]],
 ) -> set[str]:
-    """This row's own spellings that name NO OTHER row in the set.
+    """This row's own ID fields that name NO OTHER row in the set, sentinel excluded.
 
-    A value is included only when EXACTLY ONE row carries it across the fields the
-    resolver matches — exactly for ``graph_id``/``stable_id``/``namespace``, casefolded
-    for ``name`` (the rules `canonical_graph_id` already applies). That is what makes a
-    cross-graph match impossible: a ``name`` that happens to equal ANOTHER graph's id is
-    carried by two rows, so it is excluded from both sides. Without the filter the
-    ledger matched a different graph and skipped every row into it — round-37 P2's
-    second instance, measured 2026-11-08.
+    A value is included only when EXACTLY ONE row carries it in one of
+    `_LEDGER_REF_FIELDS` — the fields the resolver matches exactly. Two exclusions, both
+    required:
+
+    * a value ANOTHER row also carries is not this row's (a row set that spells one
+      graph two ways must not unify, and must not let two graphs share a scope — the
+      wrong direction here is a SKIP, not a refusal);
+    * the `default` sentinel, which names the tenant graph without identifying it and is
+      workspace-universal while the ledger path is per-user.
     """
     out: set[str] = set()
-    for fname in _IDENTITY_REF_FIELDS:
+    for fname in _LEDGER_REF_FIELDS:
         val = row.get(fname)
         v = str(val).strip() if val is not None else ""
-        if not v:
+        if not v or v.casefold() == _DEFAULT_SENTINEL:
             continue
-        if fname in _EXACT_ID_FIELDS:
-            holders = [r for r in graph_rows
-                       if any(str(r.get(f) or "").strip() == v for f in _EXACT_ID_FIELDS)]
-        else:
-            holders = [r for r in graph_rows
-                       if any(str(r.get(f) or "").strip().casefold() == v.casefold()
-                              for f in (*_EXACT_ID_FIELDS, "name"))]
+        holders = [r for r in graph_rows
+                   if any(str(r.get(f) or "").strip() == v for f in _LEDGER_REF_FIELDS)]
         if len(holders) == 1 and holders[0] is row:
             out.add(v)
     return out
@@ -1282,19 +1315,25 @@ def ledger_scope(
     silently inherit another graph's ledger, and ``assert_distinct_graphs`` is what
     refuses an unproven identity before any write.
     """
-    row = _matched_row(target_graph, graph_rows) if graph_rows else None
+    row = _ledger_row(target_graph, graph_rows)
     if row is not None:
         unique = _refs_unique_to(row, graph_rows)
-        for fname in _IDENTITY_REF_FIELDS:
+        for fname in _LEDGER_REF_FIELDS:
             val = row.get(fname)
             v = str(val).strip() if val is not None else ""
-            # ⛔ `default` is the sentinel `_canonical_from_row` refuses: it names the
-            # tenant graph without identifying it, and it is workspace-universal while
-            # the ledger path is per-user. ⛔ and the value must be one THIS row holds
-            # uniquely, or the scope key is a cross-graph match (the P2 above).
-            if not v or v.casefold() == _DEFAULT_SENTINEL or v not in unique:
-                continue
-            return v
+            if v and v in unique:
+                return v
+    if target_graph.strip().casefold() == _DEFAULT_SENTINEL:
+        # ⛔ `default` is NOT a scope: it is workspace-universal while the ledger file is
+        # per-user, so recording it let one workspace's rows be skipped in another
+        # (`applied: True, written: 0`, exit 0). A target whose only identity is the
+        # sentinel is unidentifiable — refuse, the way the identity guard refuses an
+        # unresolvable ref, rather than write a key that answers for every workspace.
+        raise CurationRefused(
+            f"cannot scope the ledger for target {target_graph!r}: it is the `default` "
+            "sentinel, which names the tenant graph without identifying it, and the "
+            "ledger is per-user while `default` is workspace-universal — pass the graph "
+            "id or namespace instead")
     return target_graph
 
 
@@ -1321,7 +1360,7 @@ def ledger_scopes(
     ``graph_id``/``stable_id``/``namespace``, so their sets are disjoint.
     """
     refs = {target_graph}
-    row = _matched_row(target_graph, graph_rows) if graph_rows else None
+    row = _ledger_row(target_graph, graph_rows)
     if row is not None:
         # `_refs_unique_to`, NOT every field verbatim: a `name` that equals another
         # graph's id is carried by TWO rows, and putting it in the set let graph A's
