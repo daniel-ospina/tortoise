@@ -396,7 +396,9 @@ def upsert_tenant_manifest(
     extra_manifests: Mapping[str, str] | None = None,
     status: str = "active",
 ) -> dict:
-    """Validate + store + activate a tenant manifest. Returns the record.
+    """Validate + store a tenant manifest and record its activation state.
+
+    Returns the record.
 
     Raises ValueError on validation failure (caller maps to 422) — the
     graph is never touched on a failed validation.

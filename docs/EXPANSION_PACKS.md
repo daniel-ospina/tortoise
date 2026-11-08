@@ -488,7 +488,10 @@ when a delete surface is added, not a live gap.)
   comes back `disabled`, and one they had `removed` is skipped per entry (it
   used to fall through to the starter branch and abort the whole restore with
   `unknown starter pack`). An artifact predating the `status` field still
-  falls back to its `activated` boolean, so old exports keep their intent.
+  falls back to its `activated` boolean, so old exports keep their intent: a
+  pack it records as `activated: False` is written `disabled` (or, when its
+  manifest is gone and the namespace is otherwise unknown, skipped per entry
+  rather than aborting the restore), and one it records as active stays active.
 - **Concurrency:** both the first configuration and every later one move the
 marker with a conditional compare-and-swap (`_cas_first_selection` /
 `_bump_selection`) *before* any install record is written, so a worker that

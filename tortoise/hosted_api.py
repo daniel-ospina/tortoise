@@ -30298,7 +30298,8 @@ def _split_import_artifact(blob: bytes) -> tuple[dict, bytes]:
 def _pack_config_shape_error(pc) -> str | None:
     """#2040: shared ``pack_config`` legality matrix — single source of truth.
 
-    Check order pinned: dict → schema_version → packs → entry → ns → yaml.
+    Check order pinned: dict → schema_version → packs → entry → ns → yaml
+    → status.
     Returns a human-readable error string for the FIRST violation (the check
     order matters — an operator must get the earliest broken contract), or
     ``None`` when the shape is legal. Used by BOTH the import envelope gate
@@ -30697,6 +30698,28 @@ def _apply_import_pack_config(sdk, payload: dict) -> None:
             reg = _get_registry()
             meta = reg.pack_summaries().get(ns) if reg is not None else None
             if meta is None and ns not in DEFAULT_STARTER_PACKS:
+                # #1936: a pre-``status`` artifact records a pack that the
+                # tenant had REMOVED as ``activated: False`` + ``yaml: null``
+                # — ``delete_tenant_manifest`` drops the :PackManifest from the
+                # source graph, so an export taken before the status field
+                # existed carries no way to tell the two apart. ``activated:
+                # False`` is the only signal it has, and ``_pack_entry_activation``
+                # has already mapped it to ``disabled``. Aborting the WHOLE
+                # restore on that shape is exactly indicator 3 of #1936 — so
+                # skip it per entry, like the explicit ``status='removed'``
+                # path above, instead of raising.
+                #
+                # The fail-loud guard is NOT widened: a namespace the artifact
+                # wanted ACTIVE (``activated`` truthy or absent — the shape the
+                # existing pins use) still raises, so a genuinely unknown
+                # namespace is still a loud 422. Only an entry the artifact
+                # itself marks as switched-off is skipped.
+                if "status" not in pack and pack.get("activated") is False:
+                    _logger.info(
+                        "import pack_config: pack %r was disabled or removed "
+                        "on the source graph — skipped (legacy artifact with "
+                        "no `status` field, `activated` is False)", ns)
+                    continue
                 raise ValueError(f"pack_config references unknown starter pack '{ns}'")
             from tortoise.pack_state import _pack_install_lock, _resolved_graph_name, _target_graph
             g = _target_graph(sdk, None)

@@ -639,6 +639,46 @@ class TestRemovedPackGranularity:
             _apply_import_pack_config(
                 sdk, _pack_entry(namespace="not-a-real-pack", yaml=None))
 
+    def test_legacy_removed_pack_skipped_not_aborted(self, sdk):
+        """A PRE-`status` artifact skips a removed pack instead of aborting.
+
+        ``delete_tenant_manifest`` drops the :PackManifest, so an export taken
+        before the ``status`` field existed records a removed custom pack as
+        ``activated: False`` + ``yaml: null`` with no ``status`` key —
+        byte-identical to a disabled one. Before this test such an artifact hit
+        the starter branch and raised ``unknown starter pack``, aborting the
+        WHOLE restore: indicator 3 of #1936, still live for the artifacts that
+        predate the fix. The artifact is usually the only surviving carrier of
+        the source graph and is sha-authenticated, so "aborts forever" is not
+        recoverable.
+        """
+        from tortoise.hosted_api import _apply_import_pack_config
+        payload = {"pack_config": {"schema_version": 1, "packs": [
+            # removed custom pack: manifest gone, no `status` (legacy export)
+            {"namespace": "gone-ops", "version": "0.1.0",
+             "activated": False, "yaml": None},
+            # a known starter the tenant had disabled, same legacy shape
+            {"namespace": "dev", "version": "0.2.0",
+             "activated": False, "yaml": None},
+        ]}}
+        _apply_import_pack_config(sdk, payload)
+        # the removed entry is skipped: this pass neither creates nor erases it
+        assert _install_status(sdk, "gone-ops") is None
+        # the disabled starter is still carried as `disabled`, not reactivated
+        assert _install_status(sdk, "dev") == "disabled"
+
+    def test_legacy_unknown_namespace_activated_still_raises(self, sdk):
+        """Same legacy shape but `activated: True` — the guard still fires.
+
+        Pins the boundary of the skip above: it must key on `activated is
+        False`, so an unknown namespace the artifact wanted ACTIVE is still a
+        loud error rather than a silent drop."""
+        from tortoise.hosted_api import _apply_import_pack_config
+        with pytest.raises(ValueError, match="unknown starter pack"):
+            _apply_import_pack_config(
+                sdk, _pack_entry(namespace="not-a-real-pack", yaml=None,
+                                 activated=True))
+
 
 class TestStatusShapeGate:
     """`status` is written verbatim onto :PackInstall, so it is constrained
