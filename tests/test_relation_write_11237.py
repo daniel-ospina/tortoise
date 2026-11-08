@@ -236,7 +236,13 @@ def test_the_plan_consumes_only_the_typed_record():
     assert {f.name for f in dataclasses.fields(edge)} == {
         "src_id", "dst_id", "predicate", "write_path", "declared_by",
         "stated_predicate", "mechanism", "label", "src_name", "dst_name",
-        "folded", "direction",
+        "folded",
+        # #11548 review round 4: the direction the edge is WRITTEN with, on the
+        # arm whose writer takes one. It is a closed-vocabulary token
+        # (`->`/`<-`/`<->`/`-`), never prose — the loop above checks it like
+        # every other string field, and this pin is what makes adding a field a
+        # deliberate decision.
+        "direction",
     }
 
 
@@ -250,28 +256,40 @@ def test_the_stated_direction_is_consumed_from_the_registry_map():
     as belief flowing back along a causal edge the narrative stated one way.
     ``direction_flows`` then propagated it both ways.
 
-    The leg consumes the ONE declared map (never a table of its own), the stated
-    verb winning over the record's gloss, and a bare mechanism verb declares no
-    direction at all — ``None``, i.e. "not asked", never a silent guess.
+    The leg consumes the ONE declared map (never a table of its own), and the
+    RULED value wins in every case including ``<->`` meanings — which is why a
+    blanket one-way constant is not the fix (#11548 round 4, P1). The one-way
+    token is reached only where NO candidate declares a direction: a bare
+    ``IMPL``/``NAND`` verb, whose writer default would otherwise be
+    ``bidirectional``.
 
     Mutation: drop ``direction=_direction_for(...)`` from the plan and the first
-    two assertions read ``None``.
+    three assertions read the writer default instead; force the fallback for
+    every meaning and the ``<->`` case goes one-way.
     """
     plan, drops = plan_relation_edges([
         {"src": "retry storm", "dst": "deadline slip", "predicate": "causes"},
         {"src": "retry storm", "dst": "retry budget",
          "predicate": "mutuallySupportive"},
         {"src": "retry budget", "dst": "deadline slip", "predicate": "IMPL"},
-        # the verb is not a declared meaning: its GLOSS is, and it carries the
-        # direction the gloss records.
+        # The verb is not a declared meaning: its GLOSS is, and the gloss's
+        # ruling must reach the edge — not the one-way fallback.
         {"src": "deadline slip", "dst": "retry storm", "predicate": "nuances",
          "semantics": "supports"},
+        {"src": "deadline slip", "dst": "retry budget", "predicate": "resonates",
+         "semantics": "mutuallyExclusive"},
     ], {**INDEX, "retry budget": [("obj-3", "occurrence")]})
     by_stated = {edge.stated_predicate: edge for edge in plan}
     assert by_stated["causes"].direction == "->", by_stated["causes"]
     assert by_stated["mutuallySupportive"].direction == "<->", by_stated
-    assert by_stated["IMPL"].direction is None, "a bare mechanism declares no direction"
+    assert by_stated["IMPL"].direction == "->", (
+        "a bare mechanism declares no direction, so the one-way fallback (a "
+        f"stated relation runs src → dst) applies, never the writer's "
+        f"bidirectional default: {by_stated['IMPL']!r}")
     assert by_stated["nuances"].direction == "->", by_stated["nuances"]
+    assert by_stated["resonates"].direction == "<->", (
+        "the record's `semantics` gloss carries the RULED direction when the "
+        f"verb is outside the vocabulary: {by_stated['resonates']!r}")
     assert not drops, drops
 
     writer = _RecordingWriter()

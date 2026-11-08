@@ -137,6 +137,29 @@ def _edge_counts(sdk) -> dict[tuple[str, str, str, str], int]:
     return counts
 
 
+def _stored_direction(sdk, src_name: str, dst_name: str,
+                      rel: str) -> str | None:
+    """The ``direction`` the GRAPH holds for one edge — a read, not a claim."""
+    rows = sdk._get_proj().g.query(
+        "MATCH (a {name:$a})-[e]->(b {name:$b}) WHERE type(e) = $t "
+        "RETURN e.direction",
+        params={"a": src_name, "b": dst_name, "t": rel}).result_set
+    return str(rows[0][0]) if rows else None
+
+
+def _edge_props_by_id(sdk, src_id: str, dst_id: str) -> list[dict]:
+    """Every property bag on the edge(s) between two ids, whatever the labels.
+
+    Labelled nowhere and filtered by ``id`` on both ends, so it reaches the
+    Subject-targeted edges (``ownedBy``/``managedBy``) the Object→Object read
+    cannot see — the population the ``#10000`` pin used to miss (#11548 P2).
+    """
+    rows = sdk._get_proj().g.query(
+        "MATCH (a {id:$a})-[e]->(b {id:$b}) RETURN properties(e)",
+        params={"a": src_id, "b": dst_id}).result_set
+    return [props or {} for (props,) in rows]
+
+
 _ENTITIES = [
     {"name": "retry storm", "kind": "occurrence", "lifecycle": "created"},
     {"name": "deadline slip", "kind": "occurrence", "lifecycle": "created"},
@@ -192,15 +215,67 @@ def test_relation_leg_writes_object_object_edges(_lane, monkeypatch):
     # folded, so the third meaning is counted, named and reconciled.
     assert (written["written"] + written["dropped"]
             + written["folded"]) == 3, written
-    # ⛔ #11548 round 3 P1: the DIRECTION the statement declares is stored, not
-    # the writer's `bidirectional` default. ``causes`` is IMPL, and ONTOLOGY §8 /
-    # ``SEMANTICS_DIRECTIONS`` rule a causal statement one-way, so a belief run
-    # must not propagate back along it.
-    assert [(e["direction"], e["label"]) for e in written["edges"]
-            if e["predicate"] == "IMPL"] == [("->", "causes")], written
-    directed = _lane["sdk"]._get_proj().g.query(
-        "MATCH (a:Object)-[e:IMPL]->(b:Object) RETURN e.direction").result_set
-    assert [row[0] for row in directed] == ["->"], directed
+    # ⛔ THE DIRECTION IS WRITTEN, NOT INHERITED (#11548 review, P2).
+    # `create_direct_edge` defaults an ABSENT direction to "bidirectional" for
+    # IMPL, so an unpassed direction would let EP propagate belief back along a
+    # claim the story stated one way. `causes` is ruled `->`, so the graph holds
+    # a one-way flow, and the receipt says what it holds.
+    assert _stored_direction(_lane["sdk"], "retry storm", "deadline slip",
+                             "IMPL") == "->", _edges(_lane["sdk"])
+    from tortoise.live import direction_flows
+    assert direction_flows("->") == (True, False)
+    direct_rows = [row for row in written["edges"]
+                   if row["write_path"] == "direct"]
+    assert direct_rows and all(row["direction"] == "->"
+                               for row in direct_rows), written["edges"]
+    # The structural arm's writer records no direction at all — the receipt must
+    # say None rather than invent one for it.
+    structural_rows = [row for row in written["edges"]
+                       if row["write_path"] == "structural"]
+    assert structural_rows and all(row["direction"] is None
+                                   for row in structural_rows), written["edges"]
+
+
+def test_a_ruled_meaning_writes_the_direction_the_registry_rules(
+        _lane, monkeypatch):
+    """⛔ The direction comes from the MEANING's ruling, not one blanket value.
+
+    A blanket one-way token close the "writer's IMPL default" hole and opened a
+    worse one (#11548 review round 4, P1): ``mutuallySupportive`` and
+    ``mutuallyExclusive`` are ruled ``<->`` in
+    ``pack_registry.SEMANTICS_DIRECTIONS`` (ONTOLOGY §8 / #7852) and are
+    reachable on this arm, so writing them one-way makes ``direction_flows``
+    read ``(True, False)`` where the ruling says ``(True, True)`` — a regression
+    against even the writer's own default for IMPL.
+
+    FAILS IF ``_direction_for`` is replaced by a constant, or if it stops
+    consulting the registry table.
+    """
+    from tortoise.live import direction_flows
+    from tortoise.pack_registry import SEMANTICS_DIRECTIONS, SEMANTICS_MECHANISMS
+
+    result = _emission(_ENTITIES, [
+        {"src": "retry budget", "dst": "deadline slip",
+         "predicate": "mutuallySupportive"},
+        {"src": "retry budget", "dst": "retry storm",
+         "predicate": "refutes"},
+    ])
+    cap = _capture(_lane, monkeypatch, result)
+    written = cap["relation_write"]["edges"]
+    assert len(written) == 2, written
+    assert SEMANTICS_DIRECTIONS["mutuallySupportive"] == "<->"
+    assert SEMANTICS_MECHANISMS["mutuallySupportive"] == "IMPL"
+    stored = _stored_direction(
+        _lane["sdk"], "retry budget", "deadline slip", "IMPL")
+    assert stored == "<->", stored
+    assert direction_flows(stored) == (True, True)
+    # …and a one-way ruling is still one-way on the same run: `refutes` is a
+    # NAND-typed meaning ruled `->`, so the mutual reading is not blanket.
+    assert SEMANTICS_DIRECTIONS["refutes"] == "->"
+    assert SEMANTICS_MECHANISMS["refutes"] == "NAND"
+    assert _stored_direction(
+        _lane["sdk"], "retry budget", "retry storm", "NAND") == "->"
+    assert [row["direction"] for row in written] == ["<->", "->"], written
 
 
 def test_relation_leg_is_idempotent_across_a_re_finalise(_lane, monkeypatch):
@@ -259,17 +334,10 @@ def test_relation_leg_names_what_it_refused(_lane, monkeypatch):
     ``transacts`` is in the emission's allowlist but neither in
     ``_VALID_EDGE_PREDICATES`` nor in ``SEMANTICS_MECHANISMS`` — so
     ``relation_write_paths()`` answers ``()`` and nothing may be invented in
-    its place. An endpoint that resolves to NO entity this capture wrote is
-    refused on the same rule — never guessed through.
-
-    ⛔ The name written TWICE under different kinds (``#11235``: Layer-1
-    identity is ``(name, kind)``) is pinned in
-    ``tests/test_relation_write_11237.py::test_ambiguous_endpoint_is_refused_not_guessed``,
-    NOT here: this lane CANNOT express that collision, because ``create_entity``
-    keys an Object by ``(name, label)``, so two OBJECT kinds under one name
-    collapse onto ONE node. The ambiguity that survives a capture is a name
-    written to two different LABELS (an Object and a Subject), and the plan-level
-    file is where that is stated and asserted.
+    its place. An endpoint that resolves to NO entity this capture wrote, and
+    a name this capture wrote TWICE under different kinds (``#11235``: Layer-1
+    identity is ``(name, kind)``), are refused on the same rule — never
+    guessed through.
     """
     ambiguous = [
         {"name": "quarry", "kind": "theme", "lifecycle": "created"},
@@ -295,52 +363,45 @@ def test_relation_leg_carries_no_narrative_text(_lane, monkeypatch):
     The channel's record was already stripped to ``{src, dst, predicate,
     semantics}`` by ``_assemble_relations``; this asserts the write leg adds no
     prose either — every edge property is a short typed token, and no
-    transcript/summary text reaches a property. (The entity NAMES are node
-    identity, not narrative: they are what the edge's endpoints are.)
+    transcript/summary text reaches a property.
 
-    ⛔ The match is ``(a:Object)-[e]->(b)`` — ANY target label — not
-    ``->(b:Object)``: the leg also writes ``ownedBy``/``managedBy`` edges to
-    ``:Subject`` nodes (11 of the 35 on the committed receipt), and the first
-    revision of this assertion read only Object→Object edges, so a prose
-    property on a Subject-target edge would not have reddened the only
-    assertion that pins the P0 rule (#11548 round 3, P2). The Subject edge is
-    part of THIS test's population, so the widening is not vacuous.
-
-    A string property must be a SINGLE TOKEN: a prose fragment under 64
-    characters (*"retry storm ate budget"*) passes a length guard, and a length
-    guard was the earlier half of the rule.
+    ⛔ THE POPULATION IS EVERY EDGE THE LEG WROTE, read by ID on BOTH ends — not
+    ``(a:Object)-[e]->(b:Object)``. The structural arm writes ``ownedBy`` /
+    ``managedBy`` / ``hasPart`` to **Subjects** as well as Objects, and a pin
+    that only reads Object→Object edges left those outside the P0 gate
+    (#11548 review, P2). A short-token guard is also applied to the label, so a
+    sub-64-character prose fragment cannot pass it on the edges it does read.
     """
     story = ("the retry storm causes the deadline slip because the retry "
              "budget was consumed by the failover storm again")
     result = _emission([*_ENTITIES,
-                        {"name": "quarry team", "kind": "team",
-                         "lifecycle": "created"}], [
+        # a SUBJECT: the structural arm writes ``ownedBy``/``managedBy`` to
+        # Subjects, and those edges are outside any Object→Object read.
+        {"name": "lumen auth", "kind": "team", "lifecycle": "created"},
+    ], [
         {"src": "retry storm", "dst": "deadline slip", "predicate": "causes"},
-        {"src": "retry budget", "dst": "quarry team", "predicate": "ownedBy"},
+        {"src": "retry budget", "dst": "retry storm", "predicate": "hasPart"},
+        {"src": "retry storm", "dst": "lumen auth", "predicate": "ownedBy"},
     ])
     result["summary"] = story
     result["embed_list"] = {"summary": story}
     cap = _capture(_lane, monkeypatch, result)
-    assert cap["relation_write"]["write_paths"] == {"direct": 1,
-                                                   "structural": 1}, cap
-    rows = _lane["sdk"]._get_proj().g.query(
-        "MATCH (a:Object)-[e]->(b) RETURN type(e), labels(b), "
-        "properties(e)").result_set
-    assert rows
-    # Anti-vacuity for the WIDENING: a Subject-target edge is in the population.
-    assert any("Subject" in list(labels) for _t, labels, _p in rows), rows
-    for _edge_type, _labels, props in rows:
-        for key, value in (props or {}).items():
-            assert key not in {"summary", "_searchText", "content",
-                               "transcript", "raw"}, (key, props)
-            if isinstance(value, str):
-                assert story not in value, (key, value)
-                assert value != story, (key, value)
-                # A TYPED TOKEN: no whitespace at all, so no prose — however
-                # short — rides a property (#11548 round 3, P2: a 64-char
-                # guard passed "retry storm ate budget").
-                assert not any(ch.isspace() for ch in value), (key, value)
-                assert len(value) <= 64, (key, value)
+    written = cap["relation_write"]["edges"]
+    assert len(written) == 3, written
+    assert any(row["predicate"] == "ownedBy" for row in written), written
+    seen = 0
+    for row in written:
+        for props in _edge_props_by_id(
+                _lane["sdk"], row["src_id"], row["dst_id"]):
+            seen += 1
+            for key, value in props.items():
+                assert key not in {"summary", "_searchText", "content",
+                                   "transcript", "raw"}, (key, props)
+                if isinstance(value, str):
+                    assert story not in value, (key, value)
+                    assert value != story, (key, value)
+                    assert len(value) <= 64, (key, value)
+    assert seen == 3, seen
 
 
 def test_fold_lane_relations_reach_the_commit_leg(_lane, monkeypatch):

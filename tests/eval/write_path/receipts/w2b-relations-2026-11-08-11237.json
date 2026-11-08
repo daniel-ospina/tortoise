@@ -622,7 +622,8 @@
     "operator-edge audit (#2514): 5/15 planted operator edges graded edge_correct (audit dimension only \u2014 not yet a gated metric). #2552: endpoint anchors + mitigation reasons grade verbatim-first with the #2405-style paraphrase band \u2014 a correctly wired edge whose endpoint claim was distilled still grades edge_correct",
     "operator persistence (#2552): 37/37 reified operator Points entered the retrievable memory layer (eventId-stamped) \u2014 a lower numerator is the structural drop the layer-2 WIRE fix closed",
     "quote_fidelity 1.0 is VACUOUS: the corpus gold contains no double-quoted spans (quote_spans_total=0) \u2014 this number is a floor, not a fidelity bar; it will not hold under a future corpus that quotes",
-    "cost not tracked: the extractor seam reported no llm_cost_usd in any session (mock/unknown adapter) \u2014 receipt cost_usd is 0.0 with this note, never a silently-fake measured figure"
+    "cost not tracked: the extractor seam reported no llm_cost_usd in any session (mock/unknown adapter) \u2014 receipt cost_usd is 0.0 with this note, never a silently-fake measured figure",
+    "census provenance (#11237): this receipt was written at 97df9e201d, BEFORE the E6 census row became ATTRIBUTABLE (the write leg's own record, verified in the graph). Its per-session `object_edges` numbers are the older SOURCE-BOUNDED read and are therefore marked `object_edges_basis: incident-source-bounded`; that read counts another session's edge through a shared :Object node (measured: wp05_retro_writeup reported related: 1 while its own leg wrote ZERO), so `aggregate_graph_census` REFUSES those rows from `object_edges_total` and names them in `object_edges_unattributed`. The attributable E6 row is NOT MEASURED on this artifact; the same numbers remain readable as `object_edges_incident`, which is context only. `object_edges_missing` is absent rather than [] because the per-edge graph check never ran on this run \u2014 an empty list would read as a measured `nothing missing`. The aggregate block is the verbatim output of `aggregate_graph_census` over these per-session blocks: every field it does not touch (objects, derivation_edges) recomputes identically to the run's own values."
   ],
   "log": [
     "parser round-trip ok (codex, 26 turns)",
@@ -1219,6 +1220,11 @@
         "object_edges": {
           "IMPL": 1,
           "dependsOn": 1
+        },
+        "object_edges_basis": "incident-source-bounded",
+        "object_edges_incident": {
+          "IMPL": 1,
+          "dependsOn": 1
         }
       },
       "wp02_lumen_refactor": {
@@ -1245,6 +1251,12 @@
           "related": 2,
           "hasPart": 1,
           "dependsOn": 1
+        },
+        "object_edges_basis": "incident-source-bounded",
+        "object_edges_incident": {
+          "related": 2,
+          "hasPart": 1,
+          "dependsOn": 1
         }
       },
       "wp03_ember_design": {
@@ -1268,6 +1280,12 @@
           }
         },
         "object_edges": {
+          "related": 1,
+          "hasPart": 2,
+          "dependsOn": 2
+        },
+        "object_edges_basis": "incident-source-bounded",
+        "object_edges_incident": {
           "related": 1,
           "hasPart": 2,
           "dependsOn": 2
@@ -1298,6 +1316,13 @@
           "IMPL": 2,
           "hasPart": 1,
           "dependsOn": 1
+        },
+        "object_edges_basis": "incident-source-bounded",
+        "object_edges_incident": {
+          "related": 1,
+          "IMPL": 2,
+          "hasPart": 1,
+          "dependsOn": 1
         }
       },
       "wp05_retro_writeup": {
@@ -1321,6 +1346,11 @@
           }
         },
         "object_edges": {
+          "related": 1,
+          "IMPL": 2
+        },
+        "object_edges_basis": "incident-source-bounded",
+        "object_edges_incident": {
           "related": 1,
           "IMPL": 2
         }
@@ -1347,6 +1377,10 @@
         },
         "object_edges": {
           "dependsOn": 2
+        },
+        "object_edges_basis": "incident-source-bounded",
+        "object_edges_incident": {
+          "dependsOn": 2
         }
       },
       "wp07_bluepeak_followup": {
@@ -1370,6 +1404,12 @@
           }
         },
         "object_edges": {
+          "related": 2,
+          "IMPL": 1,
+          "dependsOn": 1
+        },
+        "object_edges_basis": "incident-source-bounded",
+        "object_edges_incident": {
           "related": 2,
           "IMPL": 1,
           "dependsOn": 1
@@ -1398,13 +1438,82 @@
           "identity_excluded": 0
         }
       },
-      "object_edges": {
+      "object_edges": {},
+      "object_edges_total": 0,
+      "object_edges_basis": {
+        "incident-source-bounded": 7
+      },
+      "object_edges_missing": [],
+      "object_edges_unattributed": [
+        {
+          "session_id": "wp01_quarry_debug",
+          "basis": "incident-source-bounded",
+          "object_edges": {
+            "IMPL": 1,
+            "dependsOn": 1
+          }
+        },
+        {
+          "session_id": "wp02_lumen_refactor",
+          "basis": "incident-source-bounded",
+          "object_edges": {
+            "related": 2,
+            "hasPart": 1,
+            "dependsOn": 1
+          }
+        },
+        {
+          "session_id": "wp03_ember_design",
+          "basis": "incident-source-bounded",
+          "object_edges": {
+            "related": 1,
+            "hasPart": 2,
+            "dependsOn": 2
+          }
+        },
+        {
+          "session_id": "wp04_aurora_perf",
+          "basis": "incident-source-bounded",
+          "object_edges": {
+            "related": 1,
+            "IMPL": 2,
+            "hasPart": 1,
+            "dependsOn": 1
+          }
+        },
+        {
+          "session_id": "wp05_retro_writeup",
+          "basis": "incident-source-bounded",
+          "object_edges": {
+            "related": 1,
+            "IMPL": 2
+          }
+        },
+        {
+          "session_id": "wp06_quarry_rollout",
+          "basis": "incident-source-bounded",
+          "object_edges": {
+            "dependsOn": 2
+          }
+        },
+        {
+          "session_id": "wp07_bluepeak_followup",
+          "basis": "incident-source-bounded",
+          "object_edges": {
+            "related": 2,
+            "IMPL": 1,
+            "dependsOn": 1
+          }
+        }
+      ],
+      "object_edges_sessions": [],
+      "object_edges_incident": {
         "IMPL": 6,
         "dependsOn": 8,
         "related": 7,
         "hasPart": 4
       },
-      "object_edges_total": 25
+      "object_edges_incident_total": 25
     }
   },
   "extractor": {
@@ -1824,6 +1933,7 @@
         "reason": "`transacts` binds no declared write path (relation_write_paths() -> ()) \u2014 it is neither in the structural writer's predicate set nor bound to a mechanism, so nothing is written and nothing is inferred in its place",
         "session_id": "wp05_retro_writeup"
       }
-    ]
+    ],
+    "fold_accounting": "absent"
   }
 }

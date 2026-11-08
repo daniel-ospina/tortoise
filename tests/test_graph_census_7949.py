@@ -567,21 +567,15 @@ def test_the_bundle_retracts_the_claim_that_a_graph_census_adds_nothing():
 def test_object_edges_is_a_MEASURED_zero_and_then_counts_what_lands(captured):
     """#11237: the Object→Object row the E6 before-arm of 0 is read against.
 
-    Four separate ways this must fail, because four separate things could go
+    Three separate ways this must fail, because three separate things could go
     silently wrong (#11237 review P2 — before this case NOTHING asserted the
-    block, so deleting it left the whole suite green; #11548 round 3 P1 — the
-    first revision's scope could not ATTRIBUTE an edge to the session that
-    wrote it):
+    block, so deleting it left the whole suite green):
 
-    * the ``object_edges`` key must be PRESENT and empty on a session whose leg
-      recorded no edge — a MISSING key would read as "nothing measured", and
-      the row this issue exists to move starts at exactly 0;
-    * it must be scoped to the ``(src_id, dst_id, predicate)`` triples THIS
-      session's leg handed the writers, not to the session's Object set:
-      Objects are MERGE'd by name, so an Object set also holds nodes a PEER
-      session wrote edges onto;
-    * an edge the graph does NOT hold for a recorded pair reads 0 — the leg's
-      claim is not the measurement;
+    * the ``object_edges`` key must be PRESENT and empty on a session whose graph
+      carries no Object→Object edge — a MISSING key would read as "nothing
+      measured", and the row this issue exists to move starts at exactly 0;
+    * it must be SCOPED to this session's Objects, so an edge written between
+      two of them is what it counts;
     * ``aggregate_graph_census`` must carry the per-type sums AND
       ``object_edges_total`` — the single number the pre-registration reads.
     """
@@ -604,27 +598,34 @@ def test_object_edges_is_a_MEASURED_zero_and_then_counts_what_lands(captured):
     target_id = target["node"]["id"]
     assert sdk.link_entities("related", src[0][0], target_id)
 
-    # ⛔ Before the pair is RECORDED the graph holds the edge and the row does
-    # NOT count it: the row names this session's writes, not every edge
-    # touching an Object the session happens to share.
-    unrecorded = runner.graph_census(sdk, session_id, pids)
-    assert unrecorded["object_edges"] == {}, (
-        "an edge nobody in this session's leg recorded must not be attributed "
-        f"to it: {unrecorded!r}")
-
-    recorded = [{"src_id": str(src[0][0]), "dst_id": str(target_id),
-                 "predicate": "related"}]
-    census = runner.graph_census(sdk, session_id, pids,
-                                 relation_edges=recorded)
-    assert census["object_edges"] == {"related": 1}, census
+    # ⛔ An edge this session's LEG did not write is not this session's E6
+    # work (#11548 review round 3/4, P2). `:Object` is MERGEd by
+    # (name, label), so a source-bounded read over shared nodes reports another
+    # session's edge as this one's — measured on the committed receipt, where
+    # `wp05_retro_writeup` reported `related: 1` while its own leg wrote ZERO.
+    # The row is therefore the leg's own RECORD, verified in the graph; the
+    # source-bounded read survives as `object_edges_incident`, context only.
+    census = runner.graph_census(sdk, session_id, pids)
+    assert census["object_edges"] == {}, census
+    assert census["object_edges_basis"] == "absent", census
+    assert census["object_edges_incident"] == {"related": 1}, census
 
     agg = runner.aggregate_graph_census({session_id: census})
-    assert agg["object_edges"] == {"related": 1}, agg
-    assert agg["object_edges_total"] == 1, agg
+    assert agg["object_edges"] == {}, agg
+    assert agg["object_edges_total"] == 0, agg
+    assert agg["object_edges_basis"] == {"absent": 1}, agg
+    assert agg["object_edges_incident_total"] == 1, agg
 
-    # A pair the leg claims but the graph does not hold is a 0, not a 1.
-    phantom = runner.graph_census(
+    # …and the same edge DOES count once it rides the leg's own record: the
+    # measure is attributable, not blind.
+    recorded = runner.graph_census(
         sdk, session_id, pids,
-        relation_edges=[{"src_id": str(target_id), "dst_id": str(src[0][0]),
-                         "predicate": "related"}])
-    assert phantom["object_edges"] == {}, phantom
+        relation_write={"written": 1, "dropped": 0, "folded": 0,
+                        "edges": [{"src_id": src[0][0], "dst_id": target_id,
+                                   "predicate": "related",
+                                   "stated_predicate": "related",
+                                   "write_path": "structural",
+                                   "direction": None}]})
+    assert recorded["object_edges"] == {"related": 1}, recorded
+    assert recorded["object_edges_missing"] == [], recorded
+    assert recorded["object_edges_basis"] == "write-leg-record-verified", recorded

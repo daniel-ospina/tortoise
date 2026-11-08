@@ -6844,12 +6844,12 @@ def _text_with_a_duplicated_durations_row(path: Path) -> tuple[str, str]:
     lines = path.read_text().splitlines(keepends=True)
     start = lines.index("durations:\n")
     row = lines[start + 1]
-    # ⛔ The key may be PATH-QUALIFIED (`eval/write_path/<file>.py`) — the row
-    # that happened to be first when #11548 added this file's `durations` map is
-    # one of those, and a bare-name-only regex made this helper assert on the
-    # manifest's row ORDER rather than on the behaviour under test (7 red at that
-    # head: this helper raised before any guard could be exercised). The duplicate
-    # guard is about the KEY TEXT, not about how a key is spelled.
+    # ⛔ The key may be PATH-QUALIFIED (`eval/write_path/<file>.py`) — 49 of the
+    # rows are, because `split_fast_gate` looks a weight up by the path relative
+    # to `tests/`. A bare-name-only regex made this helper assert on the map's
+    # ROW ORDER instead of on the guard it tests, and a branch that added such a
+    # row first turned 7 required `core` cases red with a message about the
+    # manifest's layout rather than about duplicates (#11548).
     assert re.match(r"^  [A-Za-z0-9_./\-]+\.py: ", row), row
     return path.read_text().replace(row, row + row, 1), row.split(":", 1)[0].strip()
 

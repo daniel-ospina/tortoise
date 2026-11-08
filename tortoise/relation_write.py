@@ -98,11 +98,16 @@ DIRECTION IS CONSUMED, NOT DEFAULTED
 "bidirectional"`` for IMPL, so a one-way statement (*"the retry storm causes
 the deadline slip"*) would be stored as belief flowing BOTH ways unless the leg
 supplies the direction the statement already declares. It does:
-``SEMANTICS_DIRECTIONS[stated verb]`` (else the record's ``semantics``) rides
-``link_entities(direction=…)`` onto the direct arm, and the written row records
-it. `->` source→target is what ONTOLOGY §8 rules for every IMPL meaning a
-narrative states (``causes``, ``supports``, ``addresses``), and ``live.
-``direction_flows`` reads it back unchanged.
+:func:`_direction_for` reads ``pack_registry.SEMANTICS_DIRECTIONS`` — ONTOLOGY
+§8's RULED table (``causes``/``supports`` → ``->``, ``mutuallySupportive`` →
+``<->``, ``related`` → ``-``) — from the meaning riding the edge (``label``,
+which is the story's verb, else the record's ``semantics`` gloss), then from the
+verb itself, and only for a meaning that declares NO direction does it fall back
+to ``_DIRECTION_STATED`` (the model's one-way token: a stated relation runs
+``src → dst``). The value rides ``link_entities(direction=…)`` onto the direct
+arm, and the written row records it, so a reader can tell a one-way stated claim
+from a writer default without re-deriving it. ``live.direction_flows`` reads it
+back unchanged.
 
 ⚠️ The STRUCTURAL arm (``create_edge``) has no direction slot at all —
 ``link_entities`` REFUSES ``direction`` on that arm (#4282) rather than
@@ -140,11 +145,7 @@ from __future__ import annotations
 
 import dataclasses
 
-from .pack_registry import (
-    SEMANTICS_DIRECTIONS,
-    declared_mechanisms,
-    relation_write_paths,
-)
+from .pack_registry import declared_mechanisms, relation_write_paths
 
 __all__ = [
     "RELATION_DIRECT",
@@ -167,6 +168,19 @@ RELATION_REFUSED = "refused"
 
 #: The two mechanisms an edge can carry without an operator.
 _DIRECT_MECHANISMS = ("IMPL", "NAND")
+
+#: ⛔ THE DIRECTION FALLBACK FOR A STATED RELATION WHOSE MEANING DECLARES NONE.
+#: ``create_direct_edge`` defaults a direction ABSENT to ``bidirectional`` for
+#: IMPL (CYCLE-25), so an IMPL edge written without one propagates belief back
+#: along a claim the story made one way. A stated relation runs ``src → dst``,
+#: so the fallback is the model's own one-way token (``unidirectional``'s
+#: canonical form) — but the fallback is only the FALLBACK: every meaning in
+#: ONTOLOGY §8 has a RULED direction (``pack_registry.SEMANTICS_DIRECTIONS``,
+#: #7852), and writing this constant for a ``mutuallySupportive`` /
+#: ``mutuallyExclusive`` edge would record a one-way flow where the ruling says
+#: both ways — a regression against the writer's own default (#11548 review
+#: round 4, P1). ``_direction_for`` consults the table first.
+_DIRECTION_STATED = "->"
 
 #: Predicates `link_entities` routes AWAY from `create_edge`, so the structural
 #: arm cannot write them FAITHFULLY. `wasDerivedFrom` goes to
@@ -210,10 +224,10 @@ class RelationEdge:
     #: meanings binding the same mechanism between the same pair cannot be two
     #: edges. They are folded here — and NAMED — instead of vanishing.
     folded: tuple[str, ...] = ()
-    #: The direction the stated meaning RECORDS (``SEMANTICS_DIRECTIONS``), handed
-    #: to the direct writer so a one-way statement is not stored as bidirectional
-    #: belief. ``None`` when the statement declares none (a bare ``IMPL``/``NAND``
-    #: verb) or when the arm cannot record one (structural — see the docstring).
+    #: The direction the edge is WRITTEN with, on the arms whose writer takes
+    #: one (``direct``). ``None`` means the writer's default — which for
+    #: ``create_edge`` (structural) is the only option: it records no direction
+    #: property at all.
     direction: str | None = None
 
 
@@ -282,28 +296,39 @@ def _mechanism_for(predicate: str, semantics: str | None) -> str | None:
     return None
 
 
-def _direction_for(predicate: str, semantics: str | None) -> str | None:
-    """The direction this statement RECORDS, from the registry's ONE map.
+def _direction_for(label: str | None, predicate: str,
+                   semantics: str | None = None) -> str:
+    """The direction the edge's MEANING records — the ruled table, not a guess.
 
-    ``SEMANTICS_DIRECTIONS`` is where ONTOLOGY §8 rules the direction of every
-    Layer-2 meaning (``causes``/``supports`` → ``->``, ``mutuallySupportive`` →
-    ``<->``, ``related`` → ``-``). Reading it here is what keeps a one-way
-    narrative statement from being stored as bidirectional belief: the writer's
-    own default (``create_direct_edge``, CYCLE-25) is ``bidirectional`` for
-    IMPL, which is right for an extraction default and wrong for a statement
-    that said *"A causes B"*.
+    ``pack_registry.SEMANTICS_DIRECTIONS`` is ONTOLOGY §8's ruled mapping from a
+    meaning to the direction it records (``->`` / ``<-`` / ``<->`` / ``-``), and
+    ``TortoiseSDK._direction_from_semantics`` is the SDK's one reader of it.
+    Consuming it here is the same rule as the write path's own: the registry
+    decides, this leg does not re-derive. The meaning riding the edge is
+    ``label`` (the story's verb when it is not itself a mechanism), else the
+    verb itself — and the record's ``semantics`` gloss is the LAST candidate
+    before the fallback, because ``_mechanism_for`` can bind a mechanism from
+    the gloss alone when the verb is outside the declared vocabulary: without
+    it, a verb glossed ``mutuallySupportive`` would take the one-way fallback
+    while its ruling says BOTH ways (#11548 round 4, P1 — the ruling must reach
+    the edge however the meaning arrived).
 
-    The stated VERB wins over the record's ``semantics`` because the verb is
-    what the story asserted; ``semantics`` is the model's own gloss on it, used
-    when the verb itself is not in the declared vocabulary. A verb that IS a
-    mechanism (``IMPL``/``NAND``) declares no direction — it is a bare
-    mechanism, not a meaning — so ``None`` is returned and the writer's default
-    stands, named here rather than silently.
+    ⚠️ The fallback (``_DIRECTION_STATED``) is reached only by a meaning that
+    declares NO direction: a bare ``IMPL``/``NAND`` verb, or a verb and gloss
+    both outside the table. It is deliberately NOT the writer's CYCLE-25 default
+    (``bidirectional`` for IMPL): a stated relation runs ``src → dst``.
+
+    ⚠️ A FOLD keeps the FIRST verb's label (``create_direct_edge`` is one edge
+    per (src, tgt, type)), so the surviving meaning's direction is the one
+    written; the absorbed verb is still NAMED on ``collapsed``, so nothing about
+    it is silent.
     """
-    for value in (predicate, semantics):
-        if value and value in SEMANTICS_DIRECTIONS:
-            return SEMANTICS_DIRECTIONS[value]
-    return None
+    from .pack_registry import SEMANTICS_DIRECTIONS
+
+    for meaning in (label, predicate, semantics):
+        if meaning and meaning in SEMANTICS_DIRECTIONS:
+            return SEMANTICS_DIRECTIONS[meaning]
+    return _DIRECTION_STATED
 
 
 def _fold_onto(
@@ -481,8 +506,10 @@ def plan_relation_edges(
                 write_path=RELATION_DIRECT, declared_by=None,
                 stated_predicate=predicate, mechanism=mechanism,
                 label=label, src_name=src, dst_name=dst,
-                direction=_direction_for(predicate, semantics)))
-            continue
+                # The meaning's RULED direction, not the writer's IMPL default
+                # and not a blanket one-way (see ``_direction_for``; the record's
+                # ``semantics`` gloss is consulted before the one-way fallback).
+                direction=_direction_for(label, predicate, semantics)))
             continue
         drops.append(RelationDrop(
             src, dst, predicate,
@@ -532,14 +559,12 @@ def apply_relation_edges(
     for edge in plan:
         try:
             if edge.write_path == RELATION_DIRECT:
-                # ⛔ `direction` is CONSUMED from the registry's one map, never
-                # defaulted here: `create_direct_edge`'s CYCLE-25 default makes
-                # a direction-absent IMPL BIDIRECTIONAL, so a stated *"A causes
-                # B"* would otherwise propagate belief back along the edge.
-                # `None` (a bare IMPL/NAND verb) is passed as "not asked" and
-                # the writer's default stands (#11548 round 3, P1).
+                # ``direction`` is passed ONLY on this arm: ``link_entities``
+                # refuses a parameter the reached writer does not honour, and
+                # ``create_edge`` (structural) records no direction at all.
                 sdk.link_entities(edge.predicate, edge.src_id, edge.dst_id,
-                                  label=edge.label, direction=edge.direction)
+                                  label=edge.label,
+                                  direction=edge.direction)
             else:
                 sdk.link_entities(edge.predicate, edge.src_id, edge.dst_id)
         except Exception as exc:  # noqa: BLE001, RUF100 — fail-open per relation
@@ -597,10 +622,9 @@ def apply_relation_edges(
             "declared_by": edge.declared_by,
             "mechanism": edge.mechanism,
             "label": edge.label,
-            # The direction the edge was WRITTEN with (``None`` = the writer's
-            # default, because the statement declared none or the arm cannot
-            # record one). Absent before #11548 round 3, so a reader could not
-            # tell what direction was stored — and nothing pinned it.
+            # What the graph should hold for this edge — carried on the receipt
+            # so a reader can tell a one-way stated claim from the writer's
+            # IMPL default without re-deriving it (#11548 review, P2).
             "direction": edge.direction,
             "folded": list(edge.folded),
         })
