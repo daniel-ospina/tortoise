@@ -618,8 +618,9 @@ criteria:
       head; that array is the authority for the count, and the family entry at `:880`
       carries `surfaces: []`, so no surface-chooser row intervenes and the step list
       renders directly). The card renders MORE than that list - `HARNESS_INTRO.chatgpt`
-      at `:300` above it and the snippet block `HARNESS_INSTALL.chatgpt` at `:612`
-      around it - so the steps are what renders FIRST, not all that renders, and an
+      at `:300` and the snippet block `HARNESS_INSTALL.chatgpt` at `:612`, both rendered
+      AFTER the list (`main.jsx:10418` opens the step list, `:10437` the intro, `:10442`
+      the snippet) - so the steps are what renders FIRST, not all that renders, and an
       earlier cut of this row said "four", which the array denies. But NO published
       run has ever screenshotted it: the 2026-10-26 run drove a build that had no
       ChatGPT card at all. Rendering it needs a signed-in dashboard session, which
