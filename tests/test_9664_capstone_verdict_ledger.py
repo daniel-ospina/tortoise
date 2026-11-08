@@ -1891,6 +1891,90 @@ PINNED_TOOLS = [
 
 
 @pytest.mark.parametrize("tool", PINNED_TOOLS)
+def _preamble_index(body: list[ast.stmt]) -> int | None:
+    """Index of the `#5128` guard in a tool's module body, or None (#9664).
+
+    The census's `_guard_index` walk, and nothing more: skip EXACTLY ONE module
+    docstring, then ZERO OR MORE `__future__` imports, then exactly ONE **bare**
+    `import sys`, then the `if sys.version_info < (3, 12)` guard.
+
+    Requiring a `__future__` import would red a census-LEGAL tool — measured, 3 of
+    185 tracked `tools/*.py` carry none as their first post-docstring statement —
+    and skipping every leading `ast.Expr` is wrong too: a second bare string literal
+    before the guard passed a skip-all-Expr loop and reded the census.
+
+    `asname is None` is the conjunct nothing else can see, and it is NOT redundant:
+    `import sys as _sys` binds no `sys`, so the guard is a `NameError` at runtime
+    while a name-only comparison passes — and the behavioural arms cannot observe
+    it, because `_run_guard` EXECUTES the guard with `sys` injected into its
+    namespace. Measured: deleting this conjunct and aliasing the import in
+    `tools/build_site_icons.py` left the pin GREEN (`2 passed`) over a tool whose
+    `--help` raises `NameError: name 'sys' is not defined`. A false PASS on the only
+    gate a `tools/`-only diff gets, so the walk is a helper with its own table
+    (`test_the_preamble_walk_rejects_what_the_census_rejects`) rather than an
+    inline chain whose removal nothing notices.
+    """
+    i = 0
+    if (
+        i < len(body)
+        and isinstance(body[i], ast.Expr)
+        and isinstance(body[i].value, ast.Constant)
+        and isinstance(body[i].value.value, str)
+    ):
+        i += 1
+    while (
+        i < len(body)
+        and isinstance(body[i], ast.ImportFrom)
+        and body[i].module == "__future__"
+    ):
+        i += 1
+    # Bounds-checked before each access: a truncated preamble returns None, so the
+    # caller diagnoses it rather than raising an IndexError the reader must decode.
+    if i >= len(body) or not isinstance(body[i], ast.Import):
+        return None
+    if [a.name for a in body[i].names] != ["sys"] or body[i].names[0].asname is not None:
+        return None
+    i += 1
+    if i >= len(body) or not isinstance(body[i], ast.If):
+        return None
+    return i
+
+
+@pytest.mark.parametrize(
+    "source,expected",
+    [
+        ("import sys\nif sys.version_info < (3, 12):\n    pass\n", 1),
+        (
+            '\"\"\"d\"\"\"\nfrom __future__ import annotations\nimport sys\n'
+            "if sys.version_info < (3, 12):\n    pass\n",
+            3,
+        ),
+        # the load-bearing rejection: an ALIASED import binds no `sys`
+        ("import sys as _sys\nif sys.version_info < (3, 12):\n    pass\n", None),
+        # two names in one import
+        ('\"\"\"d\"\"\"\nimport sys, os\nif sys.version_info < (3, 12):\n    pass\n', None),
+        # a SECOND bare string literal is not a docstring the census skips
+        ('\"\"\"d\"\"\"\n\"second\"\nimport sys\nif sys.version_info < (3, 12):\n    pass\n', None),
+        # truncated preambles
+        ("import sys\n", None),
+        ("from __future__ import annotations\n", None),
+    ],
+)
+def test_the_preamble_walk_rejects_what_the_census_rejects(source, expected):
+    """The preamble WALK, executed on synthetic bodies.
+
+    `asname is None` was the one conjunct no other arm could see: both pinned tools
+    import `sys` bare, and the behavioural arms inject `sys` into the exec
+    namespace, so an ALIASED import passes them all while the real tool raises
+    `NameError` at runtime. Its deletion left the whole file GREEN (measured), which
+    is the vacuous-arm class this file's own docstrings keep removing — so the walk
+    is executed here in both directions, not described in a comment above an
+    assertion that nothing can falsify.
+    """
+    assert _preamble_index(list(ast.parse(source).body)) == expected, source
+
+
+@pytest.mark.parametrize("tool", PINNED_TOOLS)
 def test_the_tool_carries_the_5128_interpreter_guard_first(tool, capsys, monkeypatch):
     """The guard must precede EVERY other import, and refuse attributably.
 
@@ -1929,51 +2013,16 @@ def test_the_tool_carries_the_5128_interpreter_guard_first(tool, capsys, monkeyp
     """
     tree = ast.parse(tool.read_text(encoding="utf-8"))
     body = list(tree.body)
-    # Skip EXACTLY ONE module docstring, then ZERO OR MORE `__future__` imports —
-    # which is what the census's `_guard_index` does (one `_is_docstring` check,
-    # then `while _is_future_import(...)`). Requiring a `__future__` import would
-    # red a census-LEGAL tool: measured, 3 of 185 tracked `tools/*.py` carry none
-    # as their first post-docstring statement. Skipping every leading `ast.Expr`
-    # is still wrong and measurably so: a second bare string literal before the
-    # guard passed a skip-all-Expr loop and reded the census.
-    i = 0
-    if (
-        i < len(body)
-        and isinstance(body[i], ast.Expr)
-        and isinstance(body[i].value, ast.Constant)
-        and isinstance(body[i].value.value, str)
-    ):
-        i += 1
-    while (
-        i < len(body)
-        and isinstance(body[i], ast.ImportFrom)
-        and body[i].module == "__future__"
-    ):
-        i += 1
-    # Bounds-checked before each access: a truncated preamble must fail with the
-    # reason below, not an IndexError the reader has to decode.
-    assert i < len(body), (
-        "`import sys` must follow the docstring / any __future__ import (file ends too early)"
-    )
-    assert isinstance(body[i], ast.Import)
-    # `asname is None` matters: `import sys as _sys` binds no `sys` at all, so the
-    # guard below becomes a NameError at runtime while a name-only comparison
-    # passes. The census's `_is_bare_sys_import` requires it too.
-    assert [a.name for a in body[i].names] == ["sys"] and body[i].names[0].asname is None, (
-        f"`import sys` must be a BARE import (no `as` alias); got {ast.dump(body[i])}"
-    )
-    i += 1
-
-    assert i < len(body), (
-        "the #5128 interpreter guard must follow the docstring / __future__ import / "
-        "`import sys` (file ends too early to carry one)"
+    i = _preamble_index(body)
+    assert i is not None, (
+        f"the #5128 preamble must be one module docstring, ZERO OR MORE "
+        f"`__future__` imports, then a BARE `import sys`, then the interpreter "
+        f"guard (the census's `_guard_index` walk); got "
+        f"{[type(n).__name__ for n in body[:4]]} — `_preamble_index`'s table "
+        f"(`test_the_preamble_walk_rejects_what_the_census_rejects`) names each "
+        f"rejection"
     )
     guard = body[i]
-    assert isinstance(guard, ast.If), (
-        f"the #5128 interpreter guard must be the first statement after the "
-        f"docstring / __future__ import / `import sys`; found {type(guard).__name__} "
-        f"(tests/test_entry_point_python_guard.py reds on this)"
-    )
     test = guard.test
     assert isinstance(test, ast.Compare) and isinstance(test.left, ast.Attribute), ast.dump(test)
     assert isinstance(test.left.value, ast.Name), (
