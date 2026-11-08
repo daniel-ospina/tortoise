@@ -521,6 +521,12 @@ _count_is_verifiable() {
     # starts TWO children while both resolvers report 1. Harmless while the app
     # gate runs (the children are `supervised` and refused); NOT harmless with
     # the lifespan off, which is the only caller of this predicate.
+    # ⛔ The locale pin is what makes "ASCII-integer spelling" TRUE rather than
+    # hoped for: `[0-9]` is a collating range, so under `en_US.UTF-8` this same
+    # regex accepts U+0661 U+0662 ("12") and ADMITS a boot that starts twelve
+    # ungated workers. MEASURED on this host, both locales.
+    local LC_ALL=C
+    export LC_ALL
     local _raw
     _raw="$(_resolve_raw_requested_workers "$@")"
     _raw="$(printf '%s' "$_raw" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
@@ -554,6 +560,12 @@ _resolve_requested_workers() {
     # $UVICORN_WORKERS (click's `auto_envvar_prefix` value for that flag), else
     # $WEB_CONCURRENCY, else 1. Both flag forms are handled because `--workers=N`
     # is what a hand-edited CMD usually carries.
+    # ⛔ Locale-pinned for the same measured reason as the two predicates below:
+    # the `case`/`=~` classes on `_count` are COLLATING ranges, so under a UTF-8
+    # locale they treat U+0661 as a digit and this function stops normalising a
+    # value uvicorn's `int()` reads as 12.
+    local LC_ALL=C
+    export LC_ALL
     local _count
     _count="$(_resolve_raw_requested_workers "$@")"
     # Trim ENDS only (never interior whitespace — `1 2` is not 12, it is a value
@@ -601,6 +613,22 @@ _resolve_requested_workers() {
 
 TORTOISE_WEB_WORKERS="$(_resolve_requested_workers "$@")"
 export TORTOISE_WEB_WORKERS
+
+# ── The count predicates are LOCALE-PINNED, and that pin is load-bearing ────
+# `[0-9]` is a COLLATING RANGE, not a byte class: under a UTF-8 locale whose
+# collation folds digits, `[[ "١٢" =~ ^[0-9]+$ ]]` is TRUE and
+# `case … *[!0-9]*` does not match — MEASURED on this host:
+#   LC_ALL=C            -> regex FALSE, `case` matches  -> the count is unreadable
+#   LC_ALL=en_US.utf8   -> regex TRUE,  `case` misses   -> the count reads 12
+# `int("١٢") == 12` too, so an unpinned pair AGREES on a topology nobody
+# measured: with the lifespan off, uvicorn starts twelve ungated children while
+# this block reports one. Same defect class, and the same pin, as `_redact_uri`'s
+# note at the top of this file. The pin lives INSIDE each of the three helpers
+# (`local LC_ALL=C; export LC_ALL`) rather than once here, because `local`
+# restores the caller's value on return — a script-wide `export` would silently
+# change every later command's behaviour, which is a bigger claim than the
+# measurement supports (pinned by
+# `test_the_count_predicates_are_LOCALE_PINNED`).
 
 # ── Is the reloader going to serve instead of N workers? ──────────────────
 # uvicorn IGNORES `--workers` while reloading — measured on the pinned 0.52.1:

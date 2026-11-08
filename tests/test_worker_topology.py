@@ -1044,6 +1044,82 @@ def test_the_lifespan_off_refusal_covers_counts_the_shell_CANNOT_see():
     assert "UNVERIFIED" in proc.stdout, proc.stdout
 
 
+#: A UTF-8 locale whose collation folds decimal digits — the only reason `[0-9]`
+#: is not a byte class in bash. Probed once, so the arm below skips on a host
+#: without it instead of failing for the wrong reason.
+def _collating_utf8_locale() -> str | None:
+    available = subprocess.run(["locale", "-a"], capture_output=True,
+                               text=True, check=False).stdout.split()
+    for name in ("en_US.UTF-8", "en_US.utf8", "C.utf8", "C.UTF-8"):
+        if name not in available:
+            continue
+        # The probe runs the TWO shells the predicate is written in, BOTH under
+        # the locale — probing one construct in the caller's locale and the
+        # other under a nested `LC_ALL=` prefix answered the wrong question
+        # (the `case` matched, the `=~` did not, and the arm skipped on a host
+        # that really does collate).
+        probe = subprocess.run(
+            ["bash", "-c",
+             '[[ "١٢" =~ ^[0-9]+$ ]] || exit 1\n'
+             'case "١٢" in *[!0-9]*) exit 1 ;; esac\n'],
+            env={**os.environ, "LC_ALL": name, "LANG": name},
+            capture_output=True, text=True, check=False)
+        if probe.returncode == 0:
+            return name
+    return None
+
+
+def test_the_count_predicates_are_LOCALE_PINNED():
+    """`[0-9]` is a COLLATING range, and `_redact_uri` already paid for this.
+
+    Under a locale that folds digits, `[[ "١٢" =~ ^[0-9]+$ ]]` is TRUE and
+    `case … *[!0-9]*` does not match — MEASURED on this host: `LC_ALL=C`
+    refuses, `LC_ALL=en_US.utf8` admits. `int("١٢") == 12`, so the unpinned
+    pair agrees that a twelve-worker boot is "one worker" and, with the lifespan
+    off, prints "nothing to gate" and exits 0.
+
+    The fix is the file's own established pin (`_redact_uri`: `local LC_ALL=C;
+    export LC_ALL`), and this arm runs the REAL shipped block under a collating
+    locale so the pin cannot silently rot out of one helper.
+    """
+    locale = _collating_utf8_locale()
+    if locale is None:
+        pytest.skip("no UTF-8 locale on this host folds decimal digits")
+
+    # ⛔ The predicate ITSELF, not `_run_worker_block`'s exit code: on a head that
+    # also runs the pre-exec policy gate, a refusal arrives for a different
+    # reason and the arm stops discriminating (measured: it passed with every
+    # pin removed). `_count_is_verifiable` is the function the lifespan-off
+    # guard asks, so it is the function that must say "unreadable" here.
+    script = (
+        "set -euo pipefail\n"
+        + _worker_block(ENTRYPOINT.read_text())
+        + '\nif _count_is_verifiable "$@"; then echo VERIFIABLE; else echo UNREADABLE; fi\n'
+        + 'printf \'RESOLVED=%s\\n\' "$(_resolve_requested_workers \"$@\")"\n'
+    )
+
+    def run(argv: tuple[str, ...], count: str, name: str) -> str:
+        proc = subprocess.run(
+            ["bash", "-c", script, "entrypoint", *argv],
+            env={"PATH": os.environ.get("PATH", ""), "_IS_SERVER": "1",
+                 "WEB_CONCURRENCY": count, "LC_ALL": name, "LANG": name},
+            capture_output=True, text=True, check=False)
+        assert proc.returncode == 0, (count, name, proc.stderr)
+        return proc.stdout
+
+    for count in ("١٢", "١٢ ", "١٢١"):
+        out = run(("uvicorn", "app:app"), count, locale)
+        assert "UNREADABLE" in out, (count, locale, out)
+        # …and the BANNER may not report a count uvicorn would serve twelve of.
+        assert "RESOLVED=12" not in out, (count, locale, out)
+
+    # The pin is a PIN, not a mutation of the grammar: under `C` the same input
+    # is unreadable for the ordinary reason, and an ASCII count is read in both.
+    for count in ("١٢", "2"):
+        out = run(("uvicorn", "app:app"), count, "C")
+        assert ("VERIFIABLE" in out) is (count == "2"), (count, out)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 6. The wiring — the gate runs FIRST in `_lifespan`
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1108,6 +1184,48 @@ def test_lifespan_calls_the_gate_FIRST():
     # green. `_lifespan` already carries several such blocks BELOW the gate, so
     # swallowing this one is a plausible edit, not a hypothetical. Walk the AST
     # and refuse any enclosing handler that would catch the refusal.
+    #
+    # ⛔ ALIASES ARE RESOLVED, not guessed. The real name arrives through
+    # `from tortoise.worker_topology import …`, so `except MWR:` with
+    # `MultiWorkerRefused as MWR` keeps the gate at index 0 and swallows it —
+    # MUTATION-CHECKED: that shape PASSED the name-only version of this pin.
+    # Same for the reverse alias direction (`assert_multi_worker_admissible`
+    # imported under another name), which is collected below as `gate_names`.
+    module_aliases = {
+        (alias.asname or alias.name): alias.name
+        for node in ast.walk(ast.parse(HOSTED_API.read_text()))
+        if isinstance(node, ast.ImportFrom)
+        for alias in node.names
+    }
+
+    def canonical(name: str) -> str:
+        """Resolve a module-scope alias to the name it was imported as."""
+        return module_aliases.get(name, name)
+
+    gate_names = {
+        local for local, real in module_aliases.items()
+        if real == "assert_multi_worker_admissible"
+    }
+    assert gate_names, (
+        "hosted_api no longer imports the #1677 admission gate at module scope "
+        "— the refusal is unreachable from the app"
+    )
+
+    def caught_names(caught: ast.expr | None) -> set[str]:
+        """Every CATCHABLE name in a handler, with aliases resolved."""
+        if caught is None:                      # bare `except:`
+            return {"BaseException"}
+        elements = caught.elts if isinstance(caught, ast.Tuple) else [caught]
+        found: set[str] = set()
+        for element in elements:
+            if isinstance(element, ast.Name):
+                found.add(canonical(element.id))
+            elif isinstance(element, ast.Attribute):
+                # `except worker_topology.MultiWorkerRefused:` — the qualified
+                # spelling is just as functional as the bare name.
+                found.add(element.attr)
+        return found
+
     swallowing = {
         "Exception", "BaseException", "MultiWorkerRefused", "RuntimeError",
     }
@@ -1115,27 +1233,11 @@ def test_lifespan_calls_the_gate_FIRST():
         if not isinstance(node, ast.Try):
             continue
         for handler in node.handlers:
-            caught = handler.type
-            names: set[str] = set()
-            if caught is None:                      # bare `except:`
-                names = {"BaseException"}
-            elif isinstance(caught, ast.Name):
-                names = {caught.id}
-            elif isinstance(caught, ast.Attribute):
-                # `except worker_topology.MultiWorkerRefused:` — the qualified
-                # spelling is just as functional as the bare name.
-                names = {caught.attr}
-            elif isinstance(caught, ast.Tuple):
-                names = set()
-                for element in caught.elts:
-                    if isinstance(element, ast.Name):
-                        names.add(element.id)
-                    elif isinstance(element, ast.Attribute):
-                        names.add(element.attr)
+            names = caught_names(handler.type)
             if names & swallowing and any(
                     isinstance(inner, ast.Call)
                     and isinstance(inner.func, ast.Name)
-                    and inner.func.id == gate
+                    and canonical(inner.func.id) == "assert_multi_worker_admissible"
                     for inner in ast.walk(node)):
                 raise AssertionError(
                     "hosted_api._lifespan wraps the #1677 admission gate in a "
