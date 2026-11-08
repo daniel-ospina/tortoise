@@ -534,6 +534,160 @@ def test_a_partly_malformed_gap_fill_answer_still_merges_the_valid_section(
                for p in out["embed_list"]["points"])
 
 
+def test_a_wrapped_gap_fill_answer_is_recorded_malformed_not_as_no_claim(
+        monkeypatch):
+    """An UNKNOWN key carrying content is a SHAPE error, not "no claim"
+    (review round 5, P2) — the same silent-drop class as a garbage `points`,
+    reached by a shape `_s4_malformed_sections` cannot see.
+
+    `_s4_malformed_sections` classifies only `_OUTPUT_SCHEMA` keys, so
+    `{"items": [...]}` / `{"claims": [...]}` / a bare unwrapped item passed it
+    untouched; `_s4_section_is_content` then counted it as content (the gate
+    fired) and `merge_embed_lists` — which iterates a FIXED section tuple —
+    dropped it. The run recorded `added_items: 0` with NO error and NO census,
+    indistinguishable from a model that legitimately found nothing, which
+    corrupts the benefit side of the A/B whose cost side is `stats["llm"]`.
+    """
+    wrapped = _Model(gap_answer=json.dumps(
+        {"items": [{"content": _MISSING_POINT}]}))
+    out = _run(monkeypatch, wrapped)
+    stats = out["stats"]["partial_gap_fill"]
+    assert stats["malformed_sections"] == ["items"]
+    assert out["error_census"].get("gap_fill_shape_error") == 1
+    assert any("malformed section 'items'" in e for e in out["errors"])
+    assert stats["added_items"] == 0
+    assert "flagged_before" not in stats, (
+        "nothing usable arrived, so the union was never re-scored — the census "
+        "above is what distinguishes it from 'the spans state no claim'")
+    assert not any(_MISSING_POINT[:40] in (p.get("content") or "")
+                   for p in out["embed_list"]["points"]), (
+        "the dropped content must not have reached the union")
+
+    # A truthy NON-list unknown key is the same class: it carries content and
+    # the merge drops it, so it must be censused too.
+    stringy = _Model(gap_answer=json.dumps({"items": "the spans state a claim"}))
+    out2 = _run(monkeypatch, stringy)
+    assert out2["stats"]["partial_gap_fill"]["malformed_sections"] == ["items"]
+    assert out2["error_census"].get("gap_fill_shape_error") == 1
+
+    # A bare single item (`[{...}]`, which `_parse_json_robust` unwraps to the
+    # item itself) has no section keys at all — also a shape error, also lost
+    # silently before this guard.
+    bare = _Model(gap_answer=json.dumps(
+        [{"content": _MISSING_POINT, "pointKind": "statement"}]))
+    out3 = _run(monkeypatch, bare)
+    stats3 = out3["stats"]["partial_gap_fill"]
+    assert stats3["malformed_sections"], (
+        "an unwrapped item carries content under keys that are not sections")
+    assert out3["error_census"].get("gap_fill_shape_error") >= 1, (
+        "one census bump per dropped section, and a bare item has several")
+
+
+def test_the_statement_index_is_an_ADDRESS_not_the_statement_count():
+    """The docstring used to claim the splitter and `_narrative_statements`
+    "agree only up to the headings" — FALSE, and measured (review round 6, P2).
+
+    `_SENTENCE_SPLIT` breaks a terminator only where whitespace or end-of-string
+    follows it; `narrative_segments` breaks on EVERY `.`/`;`. So a DECIMAL POINT
+    and a terminator immediately followed by markdown (`.**`) each open a segment
+    that `_narrative_statements` does not count — which is why `flagged[].
+    statement` is an address into a different indexing, never the reported count,
+    and why the evidence record's `structural fragments` class exists.
+
+    The behaviour is pinned rather than repaired: changing it would move every
+    number the F3 measurement (#11534) and `docs/evidence/11534-partial-gap/`
+    quote, so a fix is a re-measurement, not a cleanup.
+    """
+    decimal = "The run hit 4.2 second latency. Then it settled."
+    texts = [seg["text"] for seg in vet_gate.narrative_segments(decimal)]
+    assert "The run hit 4" in texts and "2 second latency" in texts, (
+        "the splitter breaks on the decimal point — if this arm now passes as one "
+        "clause, the splitter changed and every measured number must be re-derived")
+    bold = "It works.** The next claim follows here."
+    bold_texts = [seg["text"] for seg in vet_gate.narrative_segments(bold)]
+    assert len(bold_texts) == 2 and bold_texts[0] == "It works", (
+        "`.**` opens a segment here while `_SENTENCE_SPLIT` does not break there")
+    # and the two indices really do disagree on this input
+    assert max(seg["statement"] for seg in vet_gate.narrative_segments(decimal)) + 1 \
+        != vet_gate._narrative_statements(decimal), (
+        "the docstring's invariant would be true if these agreed — it is not")
+
+
+def test_the_census_whitelist_is_the_merges_keep_set():
+    """The dropped-key census asks `_OUTPUT_SCHEMA`, so that set MUST be the set
+    `merge_embed_lists` actually keeps (review round 6, P2).
+
+    They held the same nine keys but nothing compared them. A section added to
+    `merge_embed_lists` alone would make the census classify VALID content as
+    malformed — dropping it and recording a fabricated `gap_fill_shape_error` —
+    and a section added to `_OUTPUT_SCHEMA` alone would pass the census and then
+    be dropped by the merge with no record at all: the round-5 P2 reopened.
+    Pinned here rather than by sharing a constant, because sharing one moves
+    every line in `extractor_v2.py` and re-stales the #7949 bundle's absolute
+    cites — a 311-number re-derivation for a latent hazard a pin closes.
+    """
+    for section in v2._OUTPUT_SCHEMA:
+        merged = v2.merge_embed_lists({}, {section: [{"content": "x"}]})
+        assert merged.get(section), (
+            f"`_OUTPUT_SCHEMA` names {section!r}, so the census treats it as a known "
+            "section — but merge_embed_lists DROPS it, which is exactly the silent "
+            "drop the census exists to catch")
+    assert not any(v2.merge_embed_lists({}, {"items": [{"content": "x"}]})), (
+        "a key outside `_OUTPUT_SCHEMA` is dropped by the merge — which is why the "
+        "census must classify it as malformed rather than let it vanish silently")
+
+
+def _long_narrative_model(narrative, **kw):
+    """`_Model` with an S1 that narrates a DIFFERENT story (the fixture's
+    narrative is fixed at module level, so the >20-flag arm needs its own)."""
+
+    class _LongNarrative(_Model):
+        def complete(self, *, system, user, max_tokens=None):
+            if "STORY SUMMARIZER" in system:
+                self.last_finish_reason = "stop"
+                self.calls.append("s1")
+                return narrative
+            return super().complete(system=system, user=user,
+                                    max_tokens=max_tokens)
+
+    return _LongNarrative(**kw)
+
+
+def test_a_truncated_span_list_is_visible_in_the_record(monkeypatch):
+    """The record must say how many spans the model was SHOWN (review round 5,
+    P2). `partial_gaps` renders at most `GAP_MAX_FLAGGED` (20) spans while
+    `flagged_total`/`flagged_before` are TRUE counts, so on a long session the
+    recorded closure charges the model for spans it never saw — and nothing in
+    the record said so. The cap never binds on the measured F3 population
+    (max 10 flags/session), which is why no existing row caught it.
+    """
+    narrative = "\n".join(
+        f"The zorbix lease of sector {i} requires a distinct frobnicator {i}, "
+        f"though the quux valve {i} stays sealed against backflow {i}."
+        for i in range(30))
+    model = _long_narrative_model(
+        narrative,
+        gap_answer=json.dumps({"entities": [], "points": [], "operators": [],
+                               "events": []}))
+    out = _run(monkeypatch, model)
+    stats = out["stats"]["partial_gap_fill"]
+    assert stats["fired"] is True
+    assert stats["flagged_total"] > vet_gate.GAP_MAX_FLAGGED, (
+        "the fixture must actually overflow the cap, or this row proves nothing")
+    assert stats["spans_shown"] == vet_gate.GAP_MAX_FLAGGED
+    assert stats["spans_truncated"] is True
+
+
+def test_the_span_count_matches_the_gap_when_the_cap_does_not_bind(monkeypatch):
+    """The other half: on the ordinary fixture the two counts must AGREE, so
+    `spans_shown` cannot silently become a second, drifting denominator."""
+    out = _run(monkeypatch, _Model())
+    stats = out["stats"]["partial_gap_fill"]
+    assert stats["flagged_total"] <= vet_gate.GAP_MAX_FLAGGED
+    assert stats["spans_shown"] == stats["flagged_total"]
+    assert stats["spans_truncated"] is False
+
+
 def test_an_all_empty_s2_batch_is_skipped_without_a_model_call(monkeypatch):
     """THE ZERO-CANDIDATE POPULATION IS SKIPPED, AND THE SKIP IS RECORDED.
 

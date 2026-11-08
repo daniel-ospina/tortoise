@@ -546,29 +546,31 @@ def narrative_segments(narrative: str) -> list[dict]:
     segments within that statement.
 
     ⛔ ``statement`` IS AN ADDRESS ONLY — it is **not** comparable to the
-    ``narrative_statements`` count :func:`_narrative_statements` reports, and an
-    earlier version of this docstring was wrong about the ONLY reason why
-    (review, P2). It claimed the two agree "up to the headings"; they do not.
-    Two independent divergences:
+    ``narrative_statements`` count :func:`_narrative_statements` reports. An
+    earlier version of this docstring said the two agree "up to the
+    headings"; they do not, and the in-sentence terminator is the bigger
+    divergence:
 
     * headings — this split runs on the heading-blanked mask
       (:func:`_gap_mask`), so a heading's own ``.`` opens no statement here,
       while ``_narrative_statements`` counts the raw prose;
-    * **in-sentence terminators**, the larger one. ``_SENTENCE_SPLIT``
-      (``[.!?;]+(?:\\s|$)|[\\n\\r]+``) requires the terminator to be followed by
-      whitespace or end-of-text, and this scan does not — any ``.``/``;`` opens
-      a new statement here. Measured: ``"The p95 hit 4.2 seconds under load.
-      Then it recovered."`` reports ``narrative_statements == 2`` while the
-      segments carry statement indices ``0, 1, 2`` (the decimal's ``.`` opened
-      one). A version number, a domain name or a URL does the same.
+    * **in-sentence terminators** — `_SENTENCE_SPLIT` breaks a terminator
+      only where whitespace or end-of-string follows it, while this splitter
+      breaks on EVERY ``.``/``;``: a decimal (`4.2`), a `.**` bold boundary,
+      a version number, a domain name or a URL each open an index here that
+      `_narrative_statements` never counts. Measured: "The p95 hit 4.2
+      seconds under load. Then it recovered." reports
+      `narrative_statements == 2` while the segments carry statement indices
+      0, 1, 2.
 
     So read ``statement`` as a grouping key for the segments in THIS result —
-    stable for a given narrative, and useful because two flagged spans sharing
-    an index came from one sentence of this segmentation — and never as an
-    index into the reported statement count. Changing this splitter to match
-    ``_SENTENCE_SPLIT`` would reconcile them and would also move the flag count,
-    which the recorded measurement (844 segments / 70 flags) is pinned on; the
-    address is what a re-extraction reads, and the count was never the contract.
+    stable for a given narrative, and useful because two flagged spans
+    sharing an index came from one sentence of this segmentation — and never
+    as an index into the reported statement count. ⛔ Do NOT "fix" this by
+    making the splitter match `_SENTENCE_SPLIT`: that reconciles the two and
+    also MOVES the flag count the recorded measurement (844 segments / 70
+    flags) is pinned on. The address is what a re-extraction reads; the count
+    was never this function's contract.
     """
     text = str(narrative or "")
     if not text:

@@ -13404,6 +13404,18 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                 "segments": gaps["segments"],
                 "flagged_total": gaps["flagged_total"],
                 "coverage_floor": gaps["coverage_floor"],
+                # ⛔ THE CAP IS PART OF THE RECORD (review round 5, P2).
+                # `partial_gaps` puts at most `GAP_MAX_FLAGGED` (20) entries in
+                # `flagged`, and `render_partial_gap_prompt` renders exactly
+                # those — while `flagged_total` (and both `flagged_before` /
+                # `flagged_after` below, which come from `check_batch`) is the
+                # TRUE count. On a session with more than 20 flags the recorded
+                # closure therefore charges the model for spans it was never
+                # shown, and nothing in the record says so. These two keys make
+                # the record self-describing: `spans_shown` is the denominator
+                # the call actually had, `flagged_total` the one the gap has.
+                "spans_shown": len(gaps["flagged"]),
+                "spans_truncated": bool(gaps.get("truncated")),
             })
             if gaps["flagged"]:
                 # `fired` is set BEFORE the call: a call that raises was still
@@ -13444,6 +13456,25 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                 # deterministic-append pairing) and DROPPED, while valid
                 # sections still merge — no whole-reject, no silent loss.
                 bad_sections = _s4_malformed_sections(added)
+                # ⛔ AN UNKNOWN KEY CARRYING CONTENT IS MALFORMED HERE (review
+                # round 5, P2) — the SAME defect class as the guard above, by a
+                # different shape. `_s4_malformed_sections` classifies ONLY
+                # `_OUTPUT_SCHEMA` keys (it `continue`s on anything else), while
+                # `_s4_section_is_content` deliberately counts an invented key
+                # as content so the merge gate FIRES. But the merge iterates
+                # `_EMBED_SECTIONS`/its own tuple and DROPS anything outside it,
+                # so the key vanishes with no census: the run records
+                # `added_items: 0` and no `error` — byte-identical to "the spans
+                # state no claim", the false record that branch is reserved for,
+                # for a WRAPPED answer (`{"items": [...]}`, `{"claims": [...]}`,
+                # or a bare item `_parse_json_robust` unwrapped) that is a SHAPE
+                # error, not nothing: `_OUTPUT_SCHEMA` == the merge's keep-set,
+                # pinned by `test_the_census_whitelist...` (round 6), so a section
+                # added to one set and not the other reds that row.
+                if isinstance(added, dict):
+                    bad_sections = bad_sections + [
+                        k for k, v in added.items()
+                        if k not in _OUTPUT_SCHEMA and v]
                 for _sec in bad_sections:
                     errors.append(f"gap-fill output malformed section {_sec!r} — "
                                   "dropped (gap unclosed for it)")
