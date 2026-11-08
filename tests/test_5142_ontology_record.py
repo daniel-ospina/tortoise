@@ -85,21 +85,34 @@ def _section(doc: str, heading: str) -> str:
 
 
 def _changelog() -> str:
-    """The contiguous blockquote run that holds the changelog entries.
+    """EVERY contiguous blockquote block of the changelog, concatenated.
 
-    Every changelog line is a blockquote line (blank separators are a bare
-    ``>``), so the run ends at the first line that is not prefixed with ``>``.
+    Not the first run only: a newest-first entry PREPENDED above the older build
+    records pushes them into a later block, so a first-run reader silently loses
+    the per-field records it is asked about (`#5142`'s among them). Reading every
+    block makes prepending safe, which is how a changelog is written.
     The entries live in `docs/ONTOLOGY-CHANGELOG.md` since #8745 moved them out
     of the model.
     """
+    # ⛔ EVERY entry, not the first blockquote run. The premise above ("the run
+    # ends at the first non-`>` line") died the moment a newest-first entry was
+    # PREPENDED above the older build records: the first run then holds only the
+    # newest entry, and the #5142 per-field record below it became invisible to
+    # this guard — measured: `test_changelog_records_the_format_move` reddened at
+    # a head whose changelog still carried the record verbatim, and :156 reported
+    # the NEW entry's text as the offender.
     doc = _changelog_doc()
-    start = doc.index("> **Changelog")
-    out: list[str] = []
-    for line in doc[start:].splitlines():
-        if not line.startswith(">"):
-            break
-        out.append(line)
-    return "\n".join(out)
+    blocks: list[list[str]] = []
+    current: list[str] = []
+    for line in doc.splitlines():
+        if line.startswith(">"):
+            current.append(line)
+        elif current:
+            blocks.append(current)
+            current = []
+    if current:
+        blocks.append(current)
+    return "\n".join(line for block in blocks for line in block)
 
 
 # --------------------------------------------------------------------------

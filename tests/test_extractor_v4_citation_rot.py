@@ -906,7 +906,7 @@ DESIGN_DOCS: tuple[Path, ...] = (ONTOLOGY, DOC, STORAGE, SEARCH)
 #: Scope: this arm catches three absence forms — the CAPS form, the
 #: `#NNN`-adjacent lowercase form, and the producer-absence form (`no producer`,
 #: `spec-only`). It is NOT "the design documents are free of status prose":
-#: `ONTOLOGY.md:426` (*"**Not written by `_upsert_subject`**"*) and `:446`
+#: `ONTOLOGY.md:429` (*"**Not written by `_upsert_subject`**"*) and `:449`
 #: (*"**Not written by `_upsert_object`**"*) pass it — each ends *"— planned
 #: follow-up"*. That shape was measured (`not written` has 12 corpus
 #: lines, only 2 of them status claims) and deliberately left out.

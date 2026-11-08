@@ -45,23 +45,91 @@ ontology:
       description: A generic work unit on a board (supertype of issue)
       nearMisses:
       - issue
+  # ── Relations ───────────────────────────────────────────────────────────────
+  # #11083 · #2766 — the four rows this pack declared in the legacy `from`/`to`
+  # shape (no `mechanism`, so `relation_write_verdict` returned
+  # `predicate-not-in-allowlist` for every one of them). They were NOT junk: three
+  # name real project-management facts and were simply un-migrated. Each is now
+  # resolved by the owner's rulings of 2026-11-08 (#11083 comments 6932… `00:08`
+  # and `00:33`), under #2766's three-layer convention — mechanism (how it acts),
+  # semantics (the small closed set the machine acts on), label (the domain's own
+  # word). The population stays FOUR: nothing was deleted to make a count green.
+  #
+  # The predicate KEEPS the domain word — that is the ruling, not a preference.
+  # Owner ruling 2026-11-08 (#11083 comment 6714848519), on #2766's three-layer
+  # convention: *"keep each domain word as the **label**, give it the canonical
+  # layer-2 meaning, and it becomes writable."* So every row below is an
+  # un-migrated declaration resolved by giving it a layer-2 meaning while its own
+  # word stays in the vocabulary. A rename to the meaning's own name would DELETE
+  # a domain word: `CORE_OPERATOR_LABELS` unions `SEMANTICS_VALUES` with each
+  # pack's `relations[].predicate`, so a caller (or the extractor) emitting the
+  # retired word would hit `undeclared_relation` and be told to use a different
+  # word — the drift §3.9's declaredness note exists to prevent. ONTOLOGY §8: "Same
+  # semantics + different predicates is correct."
+  #
+  #   * `blocks` + `semantics: dependsOn` + `direction: "<-"`. "A blocks B" means
+  #     B depends on A, so `dependsOn`'s `->` would transfer confidence
+  #     blocker→blocked — the inverse of the truth. Ruling: "`dependsOn`,
+  #     direction flipped".
+  #   * `partOfSprint` + `semantics: hasPart` (`sprint --hasPart--> card`). The
+  #     label stays; §3.7's "no separate `partOf` edge" is about the STRUCTURAL
+  #     edge type, and `venture:partOf` already ships this exact shape
+  #     (`partOf` riding `hasPart` on the operator path).
+  #   * `assignedTo` KEEPS its label with `semantics: managedBy` — the same
+  #     three-layer shape `venture` already ships (`assignedTo`/`managedBy`,
+  #     `partOf`/`hasPart`, `gatedBy`/`dependsOn`). §3.6: `managedBy` is
+  #     operational responsibility (RACI Responsible), `ownedBy` accountability.
+  #   * `onBoard` is RETIRED IN EFFECT, not deleted: a board is a VIEW over
+  #     cards, recomputed from `cardMoved` events, so storing `card → board`
+  #     writes a projection that goes stale on the next move. It keeps its
+  #     declaration with `declarationOnly: true` + the reason, so the word stays
+  #     in the vocabulary and the census PRINTS why it binds no write path
+  #     instead of a silent deletion shrinking the declared population.
   relations:
   - predicate: blocks
-    from: Object
-    to: Object
+    mechanism: IMPL
+    semantics: dependsOn
+    # The ruled carrier for "B depends on A": the row's own sense, so the
+    # confidence runs blocked→blocker instead of `dependsOn`'s `->`.
+    direction: "<-"
+    fromKind: pm:card
+    toKind: pm:card
     cardinality: many_to_many
+    extractable: true
+    nearMisses:
+    - causes
+    - related
   - predicate: partOfSprint
-    from: Object
-    to: Object
-    cardinality: many_to_one
+    mechanism: IMPL
+    semantics: hasPart
+    fromKind: pm:sprint
+    toKind: pm:card
+    cardinality: one_to_many
+    extractable: true
+    nearMisses:
+    - dependsOn
   - predicate: assignedTo
-    from: Object
-    to: Subject
+    mechanism: IMPL
+    semantics: managedBy
+    fromKind: pm:card
+    toKind: Subject
     cardinality: many_to_one
+    extractable: true
+    nearMisses:
+    - ownedBy
+    - related
   - predicate: onBoard
     from: Object
     to: Object
     cardinality: many_to_one
+    declarationOnly: true
+    declarationOnlyReason: >-
+      A board is a VIEW over cards, not a container of them: the cards live in
+      the sprint/backlog and the board shows them in columns, recomputed from
+      cardMoved events. Storing card → board would be a second source of truth
+      for one fact and go stale on the next move (owner ruling 2026-11-08 on
+      #11083). Retired in effect; kept declared so the word survives and the
+      reason is printed rather than the declaration silently deleted.
   memory_granularity: 'Durable: plan/goal/target state — what was decided, what''s
     committed, the reasoning, and milestone outcomes. Ephemeral: card/board status,
     sprint burndown, assignment logistics, issue triage.'

@@ -818,7 +818,7 @@ DERIVED_FROM_RECORD: dict[str, tuple[tuple[str, tuple[str, ...], Any], ...]] = {
 #: scope, exactly as the other two exceptions are pinned.
 EVENT_STREAM_FOLDS: dict[str, tuple[str, ...]] = {
     # BOTH families. `status` is a projection-owned cache on each — §2.6 rules on
-    # `Object.status` explicitly; the Subject twin is `ONTOLOGY.md:421`
+    # `Object.status` explicitly; the Subject twin is `ONTOLOGY.md:424`
     # ("Projection-owned since #1423") and `03-schema.md:95` ("Deliberately
     # absent: `status` on both (a projection-owned cache)"). And an
     # explicit state-op write reaches `:Subject` through the same `_ENTITY_MUTATION_
