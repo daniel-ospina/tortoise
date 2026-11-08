@@ -4952,9 +4952,15 @@ def test_an_ABSTAINING_tree_is_accepted_and_prints_the_NOTE(tmp_path, monkeypatc
 
     `test_the_unrunnable_probe_path_is_not_the_abstention_path` asserts the HELPER's
     return value (`_tracked_unprovable() is True`) and nothing asserted that
-    `_is_tracked` still RETURNS it: MEASURED at this head, reverting that call site to
-    `return False` left the suite green at **173 passed**, so the whole abstention arm
-    could be deleted as dead code and no row would notice (#11474 review).
+    `_is_tracked` still RETURNS it: MEASURED at the head this pin was written against
+    (`21c446ab002`, **before** the pin existed), reverting that call site to
+    `return False` left the whole suite green at 173 passed, so the whole abstention
+    arm could be deleted as dead code and no row would notice (#11474 review).
+
+    ⛔ That measurement is dated rather than restated as a fact about "this head"
+    (#11474 review): at THIS head the revert is **not** green — it reddens this pin
+    (`1 failed / 178 passed`, the pin itself), which is the whole point of adding it.
+    A count copied forward is the one claim a reader can falsify in one command.
 
     Real git, not a stub: a BARE repo over `GIT_DIR` makes `ls-files --error-unmatch`
     exit 1 and `rev-parse --is-inside-work-tree` answer `false` with rc 0 — git is
