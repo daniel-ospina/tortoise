@@ -31,14 +31,18 @@ doc_status: draft
 
 | Function           | Purpose                         | verify_jwt        |
 |--------------------|---------------------------------|-------------------|
-| tenant-provision   | Auth hook (after_user_created)  | false (self-auth) |
+| tenant-provision   | Dashboard BFF only (server-side) | false (self-auth) |
 | waitlist-subscribe | Landing waitlist capture (#373) | false (anon POST) |
 | deck-view          | Gated deck view capture (#8732) | false (anon POST) |
 
-`verify_jwt=false` on tenant-provision is required (auth hooks send no user
-JWT); caller auth is enforced inside the function (#802): the hook's
-Standard-Webhooks signature (`AUTH_HOOK_SECRET`) or a user JWT matching the
-provisioning target. Bare anon-key calls → 401.
+`verify_jwt=false` on tenant-provision stays, because the caller is verified
+**inside** the function: the dashboard's same-origin BFF mints the signed-in
+user's access token (`website/apps/dashboard/functions/api/provision.ts`,
+#3501/#4054) and the JWT's identity must match the provisioning target (#802).
+Bare anon-key calls → 401. There is no CORS surface left (#1120): the browser
+caller is gone, the allowlist/preflight/`Access-Control-*` headers are deleted,
+and an origin-bearing request is refused 403. The `after_user_created` hook path
+was also deleted — it is not a supported Supabase auth hook.
 
 ## Supabase Tables
 

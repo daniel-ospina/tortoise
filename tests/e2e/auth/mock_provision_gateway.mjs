@@ -112,8 +112,8 @@ const server = createServer((req, res) => {
       if (!auth.startsWith("Bearer ") || !auth.slice(7).trim()) {
         return json(res, 401, {
           error:
-            "Unauthorized: expected a signed Supabase auth-hook request or " +
-            "a user JWT matching the provisioning target",
+            "Unauthorized: a user JWT matching the provisioning target is " +
+            "required",
         });
       }
       // Injected fault: a real status from the provision endpoint. Used to

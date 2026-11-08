@@ -277,7 +277,7 @@ jobs:
                   and not f.startswith("website/apps/"),
                   isfile("tests/e2e/test_welcome_page.py", "tests/e2e/conftest.py",
                          "tests/test_waitlist_subscribe.mjs",
-                         "tests/test_tenant_provision_cors.mjs",
+                         "tests/test_tenant_provision_server_only.mjs",
                          # #4481: the blog SSR markdown renderer's harness. Its
                          # subject (website/functions/blog/_lib.ts) already
                          # matches the website/ prefix, but the harness itself
@@ -2209,8 +2209,14 @@ jobs:
         # The only enforcement of "a view never touches the mailing list": the
         # gate writes deck_views, and joining the list stays a separate act.
         run: node --experimental-strip-types tests/test_deck_view.mjs
-      - name: Run tenant-provision CORS runtime harness (#1110)
-        run: node --experimental-strip-types tests/test_tenant_provision_cors.mjs
+      - name: Run tenant-provision server-only runtime harness (#1120)
+        # Replaced the #1111 CORS harness: the browser caller it existed for is
+        # gone, and the function is now reached only by the dashboard BFF. This
+        # executes the real handler and proves the endpoint has no CORS surface
+        # (no allowlist, no preflight answer, no Access-Control-* header), that
+        # an origin-bearing call is refused 403, and that the JWT path still
+        # mints one deterministic org per user.
+        run: node --experimental-strip-types tests/test_tenant_provision_server_only.mjs
       - name: Run blog SSR markdown renderer harness (#4481)
         # Also executes every documented example in docs/blog-authoring.md
         # (#8379 finding 2) — a docs-only edit must reach this step.
