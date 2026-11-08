@@ -1755,7 +1755,15 @@ too — it is in `probes/capstone_measure.py`'s `DOOR_PINNED_ON` and in `accepta
 `origin/main` `a1dff7cec`, and §10.14 records it there as a bullet. ⛔ `91dbc9a88` (`#11449`) is NOT
 that pin: it introduced the **switch** (`tortoise/extractor_v2.py`, plus `.env.example`,
 `config/v4-mechanisms.yml` and its own test) and touches no file in this bundle. `827141f19` is not
-on `main` at all (`git merge-base --is-ancestor 827141f19 origin/main` is false). An earlier revision
+on `main` at all — and because that commit is reachable from no ref, a fresh clone does not have its
+object, so quote the check with the fetch that makes it answer rather than error:
+
+```bash
+git fetch origin 827141f19 && git merge-base --is-ancestor 827141f19 origin/main   # exit 1 = not an ancestor
+```
+
+(Without the fetch, a clone that never had the object prints `fatal: Not a valid object name` — a
+CANNOT-VERIFY read as a verdict, the same defect this sentence is about.) An earlier revision
 of this paragraph credited that pair with the pin — the same defect class as every other claim in
 this record: stated, plausible, and not what the tree says. What THIS entry records is the part that
 landed here: the **§1.6.2 prose** sentence for the pin, and the roll-call restated **positionally**
@@ -1775,13 +1783,15 @@ roll-call read:
 `a1dff7cec`, which is the point of the scope note above: the fourth entry arrived on `main`,
 not here.
 
-**New value.** One pin is named in §1.6.2's **prose** — `TORTOISE_STATE_VALUE_VERBATIM: "1"` —
-and the roll-call is restated **positionally** rather than counted ("the cycle-7 to cycle-11
-review findings are …"), because the count in that paragraph had gone stale three rounds
-running: it said "last five" over a list of six. ⛔ `acceptance_arm.pinned_to` is **not** edited
-by this branch: `origin/main` already carries the fourth entry, so what lands here is prose and
-the roll-call, not a second pin (`git diff origin/main... -- preregistration.json` touches only
-`document_sha256` and `read_back`).
+**New value.** Three things change, and the record's pin set is not one of them. (1) §1.6.2's
+**prose** sentence gains `TORTOISE_STATE_VALUE_VERBATIM` at its shipped default `"1"`; (2) its
+roll-call is restated **positionally** rather than counted ("the cycle-7 to cycle-11 review findings
+are …"), because the count in that paragraph had gone stale three rounds running (it said "last
+five" over a list of six); and (3) `acceptance_arm.read_back` gains the Cycle-11 paragraph — what
+the switch does, that absent already resolves ON, and that the CENSUS found it. ⛔
+`acceptance_arm.pinned_to` is **not** edited by this branch: `origin/main` already carries the fourth
+entry, so what lands here is prose plus the `read_back` narrative, not a second pin
+(`git diff origin/main... -- preregistration.json` touches only `document_sha256` and `read_back`).
 
 **Why.** `#10360`'s write-path guard landed **inside** `path_modules` — `TORTOISE_STATE_VALUE_VERBATIM`,
 read by `extractor_v2._state_value_verbatim_enforced` as `env_flag(..., True)` — so the door's census
