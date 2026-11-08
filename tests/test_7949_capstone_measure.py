@@ -4620,17 +4620,23 @@ def test_the_bare_continuation_cites_name_what_they_say():
             ("12913", "classify_later = kind_classifier is not None or "
                       "_classify_later_enabled()"),
         )),
-        # ⛔ THE CLASSIFY PASS'S OWN FAIL-OPEN PAIR (#10833 review, P2). The
-        # `+33` shift the fold applied to this row moved the first member to
-        # `:10490` and left the second at its PRE-shift value, so `:10453` —
-        # `vet_warnings.extend(_w)` inside the VET block — was printed as the
-        # classify pass's second fail-open `except`. The same sentence one
-        # clause earlier condemns exactly that defect ("a cause citing
-        # `vet_enabled`/`_run_vet_pass` for S2.3 sent the reader to code that
-        # pass never runs"). The two `except` lines are byte-identical, so the
-        # anchors are the pair's own gate lines' company rather than the text:
-        # a reader following `:10620` must land in the `classify_later and
-        # complete_list` block, which the row below holds at `:10599`.
+        # ⛔ THE CLASSIFY PASS'S OWN FAIL-OPEN PAIR (#10833 review, P2). A `+33`
+        # shift applied to this row moved the first member while leaving the
+        # second at its PRE-shift value, so `vet_warnings.extend(_w)` — inside
+        # the VET block — was printed as the classify pass's second fail-open
+        # `except`. The same sentence one clause earlier condemns exactly that
+        # defect ("a cause citing `vet_enabled`/`_run_vet_pass` for S2.3 sent the
+        # reader to code that pass never runs"). The two `except` lines are
+        # byte-identical, so what distinguishes the pair is STRUCTURE, not text:
+        # the row's members must be the fail-opens of `if classify_later and
+        # embed_list:` / `if classify_later and complete_list:` — their next line
+        # appends `classify(S2) failed` / `classify(union) failed` — and NOT the
+        # referentiality-selection fail-opens, which carry a `noqa` directive
+        # naming `BLE001` and `RUF100` and warn `referentiality selection …
+        # candidates kept (fail-open)`. ⛔ The line numbers this comment used to
+        # quote (`10490`/`10453`/`10620`/`10599`) were stale at that head and are
+        # stale here: a comment asserts nothing, so read the anchors from the row,
+        # never from this prose.
         ("docs/00_index.md", "fail-open `except` at", (
             ("13114", "except Exception as e:  # never block capture (P1)"),
             ("13261", "except Exception as e:  # never block capture (P1)"),
@@ -4663,20 +4669,28 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # are pinned here instead. The sentence wraps over three lines and a row
         # scopes to ONE line, so the claim takes three rows.
         # ⛔ RE-DERIVED at `#10982`, not offset: the A-row emitter-key drift arm added
-        # above `STEPS` moved it `:136` -> `:146`, and the same commit's additions
-        # inside the accounting block moved `_step_accounting` `:607` -> `:675` —
-        # TWO different deltas from one commit, which is why the numbers are read
-        # off the tree (`grep -n '^STEPS = ('` / `'^def _step_accounting('`) and
-        # never carried forward as an offset.
+        # above `STEPS` moved that cite, and the same commit's additions inside the
+        # accounting block moved `_step_accounting` — TWO different deltas from one
+        # commit, which is why both numbers are read off the tree
+        # (`grep -n '^STEPS = ('` / `'^def _step_accounting('`) and never carried
+        # forward as an offset.
         #
         # ⛔ AND A THIRD DELTA, from the `origin/main` carry (#11331): `#11298`'s
         # `door` run-block key registered in `_NON_MEASUREMENT_RUN_KEYS` put 15
-        # lines above the accounting block and moved `_step_accounting`
-        # `:675` -> `:690`. Measured off the tree again, not offset: 675 now reads
-        # `block = record.get(RECORD_STEPS_KEY)` and `grep -n '^def _step_accounting('
-        # tools/capstone_verdict_check.py` -> 690. The comment block above the tuple
-        # is where that reasoning has to live, so the shift cannot be avoided by
-        # shortening it — a line count above a cite moves the cite.
+        # lines above the accounting block and moved `_step_accounting` again.
+        # ⛔ AND A FOURTH: `ed3d8761f` moved the def once more. The historical
+        # readings in this block are re-verified by
+        # `git show <sha>:tools/capstone_verdict_check.py | grep -n '^def _step_accounting('`
+        # (`1390485c1` -> 690, `ed3d8761f` -> 699): they read commits that already
+        # happened, so they cannot rot.
+        # ⛔ THE LIVE VALUE IS NOT MAINTAINED IN THIS PROSE — even where a
+        # historical reading happens to equal it, as `ed3d8761f`'s does today.
+        # It went stale four times while it lived here. The row below asserts it;
+        # read it from there, or `grep -n '^def _step_accounting('
+        # tools/capstone_verdict_check.py`.
+        # The comment block above the tuple is where that reasoning has to live,
+        # so the shift cannot be avoided by shortening it — a line count above a
+        # cite moves the cite.
         ("E1-E5-PROOFS.md", 'declares `STEPS = ("S0"', (
             ("146", 'STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", '
                     '"S5", "S6")'),

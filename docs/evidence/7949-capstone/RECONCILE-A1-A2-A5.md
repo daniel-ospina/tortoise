@@ -297,9 +297,10 @@ one arithmetic, and an arithmetic that is right for one base is already wrong fo
 symbol and let the line number be a convenience printed beside it** (`git grep -n 'vet_enabled = '
 -- tortoise/extractor_v2.py`, `git grep -n 'payload_entities.append' -- tortoise/extractor_v2.py` —
 the path matters: unscoped, both patterns also match THIS record and its quoted lines, which is the
-count-of-mentions trap §0 documents). Every number in this paragraph is re-derived at its own sha by the
-`for s in aa414b4d5 8e49ae909 80c912244 d69faaf38` sweep in §5 — a live grep cannot do it (it prints
-`:12779` here), which is the whole point. That is the class of defect §0 exists to catch: a number true at
+count-of-mentions trap §0 documents). Every number this paragraph pins to one of §5's four shas is re-derived at that sha by the
+`for s in aa414b4d5 8e49ae909 80c912244 d69faaf38` sweep in §5 — a live grep cannot do it (scoped,
+`git grep -n 'vet_enabled = ' -- tortoise/extractor_v2.py` prints
+`:12929` at HEAD and `:12779` at `62248db88`, and the sweep covers **neither** of those two bases), which is the whole point. That is the class of defect §0 exists to catch: a number true at
 one base and false at the base the record claims. Which is why the 0.0 pp above is the **armed** result,
 not an unarmed one.
 
@@ -604,7 +605,7 @@ gh issue view 10997 --json state,closedAt                 # CLOSED 21:33:55Z
 gh issue view 11021 --json state,closedAt                 # CLOSED, one second after its merge
 
 # §0/§2 — the sha-pinned cites, each re-derived AT THE SHA IT NAMES (the one read that decides them;
-# a live grep cannot: `git grep -n 'vet_enabled = '` prints :12779 here, which is none of these numbers)
+# a live grep cannot: `git grep -n 'vet_enabled = ' -- tortoise/extractor_v2.py` prints :12929 at HEAD (:12779 at 62248db88), which is none of these numbers)
 for s in aa414b4d5 8e49ae909 80c912244 d69faaf38; do echo "== $s"; \
   git show "$s":tortoise/extractor_v2.py | grep -n 'vet_enabled = (\|os.environ.get("TORTOISE_VET")\|def _hold_endpoint\|_hold_endpoint(hold_store\|def _mint_endpoint\|payload_entities.append({'; done
 # aa414b4d5 → 1153, 8784, 9401, 11351 · 8e49ae909 → 1153, 8785, 9402, 11358
@@ -614,7 +615,7 @@ for s in aa414b4d5 8e49ae909 80c912244 d69faaf38; do echo "== $s"; \
 # §0's four `create_operator` MENTIONS are base-dependent too — the CALL count is 0 either way:
 git show 80c912244:tortoise/extractor_v2.py | grep -c 'create_operator'   # 0
 git show de72cfd45:tortoise/extractor_v2.py | grep -n 'create_operator'  # :8892 :8910 :8917 :9231
-git grep -n 'create_operator' -- tortoise/extractor_v2.py                 # :8938 :8956 :8963 :9343
+git grep -n 'create_operator' -- tortoise/extractor_v2.py                 # :9006 :9024 :9031 :9411 (`62248db88` printed :8938 :8956 :8963 :9343; `91dbc9a888`, #11449, moved all four +68)
 
 # A1 (§1) — the declaration reads, and nothing production writes it
 .venv/bin/python3 -m tortoise pack validate packs/dev      # 6 declared hierarchies, exit 0
