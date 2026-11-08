@@ -312,6 +312,7 @@ def classify_point(
     *,
     duplicate_of: str | None = None,
     keeper_id: str | None = None,
+    content_mismatch: bool = False,
 ) -> Decision:
     """A Point or an operator's disposition.
 
@@ -332,6 +333,20 @@ def classify_point(
     # The keeper's IDENTITY, or an honest admission that the caller did not supply
     # one. Never the disposition — that is what the reason already says.
     who = keeper_id if keeper_id is not None else "a row this pass did not name"
+
+    if duplicate_of is not None and content_mismatch:
+        # A content hash that TWO rows share while their CONTENT differs is not a
+        # duplicate relation — it is a hash that cannot be trusted for this pair. Rows
+        # are folded by hash alone, so the second text used to be reported as an "exact
+        # content duplicate" of a row holding DIFFERENT text, with the reason asserting
+        # that keeper was "the row of record for this content" — a false claim over a
+        # unique text that the carry set then left behind (round-34 finding 2). The
+        # conflict is a per-row decision, not a rule's, so it is UNDECIDABLE.
+        return Decision(row.node_id, row.node_type, row.kind, UNDECIDABLE,
+                        f"shares a content hash with row {who}, whose CONTENT differs — a hash "
+                        "that disagrees with the text cannot establish a duplicate, so this "
+                        "text has no row of record and needs a per-row decision",
+                        pack, key, row.content)
 
     if duplicate_of == CARRY:
         return Decision(row.node_id, row.node_type, row.kind, NOT_CARRIED,
@@ -474,9 +489,11 @@ def classify(
     *,
     duplicate_of: str | None = None,
     keeper_id: str | None = None,
+    content_mismatch: bool = False,
 ) -> Decision:
     if row.node_type in ("point", "operator"):
-        return classify_point(row, packs, duplicate_of=duplicate_of, keeper_id=keeper_id)
+        return classify_point(row, packs, duplicate_of=duplicate_of,
+                              keeper_id=keeper_id, content_mismatch=content_mismatch)
     if row.node_type == "object":
         return classify_object(row, packs)
     if row.node_type == "source":
@@ -685,17 +702,23 @@ def build_plan(
 
     for row in rows:
         key = row.stable_key
+        keeper = first_pass[key]
         if keepers.get(key) == row.node_id:
-            plan.decisions.append(first_pass[key])
-        else:
-            plan.decisions.append(
-                classify(
-                    row,
-                    mapping,
-                    duplicate_of=first_pass[key].disposition,
-                    keeper_id=keepers[key],
-                )
+            plan.decisions.append(keeper)
+            continue
+        # A hash shared by two rows whose CONTENT differs proves nothing about them,
+        # so the duplicate claim — and the "row of record" the reason used to assert —
+        # is withheld rather than guessed (round-34 finding 2).
+        mine, theirs = str(row.content or "").strip(), str(keeper.content or "").strip()
+        plan.decisions.append(
+            classify(
+                row,
+                mapping,
+                duplicate_of=keeper.disposition,
+                keeper_id=keepers[key],
+                content_mismatch=bool(mine and theirs and mine != theirs),
             )
+        )
     return plan
 
 
