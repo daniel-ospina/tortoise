@@ -466,11 +466,16 @@ def test_provision_logging_never_corrupts_the_captured_port():
 # literal substring), each a shape fixture that never dials.
 SEAM_FILES_WITH_ALLOWED_LITERALS = {
     "tests/test_cache_eviction_evictor_pins.py": [
-        # a MOCKED seam: the file never imports `_live_utils` for real — the
-        # `import _live_utils` text this guard selects on is a COMMENT explaining
-        # that the module was stubbed out (#11085's fixture), and the stub's
-        # `docker_port` is never dialled. Declared rather than migrated because
-        # there is nothing here to migrate: the real helper is deliberately absent.
+        # a MOCKED seam, and this reason states the mechanism that actually
+        # neutralises it: the probe body this file `exec`s DOES carry
+        # `from tests import _live_utils` — binding the REAL helper — and the
+        # name is rebound to a `SimpleNamespace` stub before `lane()` is ever
+        # called, so the stub's `docker_port` is the only thing read and nothing
+        # dials. (The text this guard selects on is a COMMENT — the log line
+        # explaining that stubbing — #11085's fixture.) Declared rather than
+        # migrated because there is no live site here to migrate: only a
+        # fixture's deterministic stub value. Pinned by
+        # `test_the_mocked_seam_declaration_describes_the_import_it_really_does`.
         "docker_port=lambda: 6379",
     ],
     "tests/test_search_engine_gaps.py": [
@@ -674,6 +679,55 @@ def test_a_quoted_program_is_not_a_dial_site(tmp_path):
     hits = _port_literals_in_code(dialling)
     assert [ln for ln, _ in hits] == [2], (
         f"the same literal as a REAL constant must still red, got {hits}")
+
+
+def test_the_mocked_seam_declaration_describes_the_import_it_really_does():
+    """#11518 review — an exemption's REASON is what disables a guard.
+
+    The reason is the sentence the next auditor trusts, so it may not assert a
+    fact the file contradicts. This entry's first draft read *"the file never
+    imports `_live_utils` for real … the real helper is deliberately absent"*,
+    and both clauses are false: `tests/test_cache_eviction_evictor_pins.py`
+    compiles the live fixture's own body (`ImportFrom` nodes included) and
+    `exec`s it, which BINDS the real helper, then rebinds the name to a stub
+    (`:1218-1221`). Nothing dials either way — the harm is the claim, because a
+    reason that overstates its own facts is how a REAL dial site is later
+    waved through by a reader who believed it.
+    """
+    rel = "tests/test_cache_eviction_evictor_pins.py"
+    # The REASON lives in the entry's comment block (the dict value is only the
+    # literal), so the reason is read off this file's OWN source between the key
+    # and its literal — asserting on the dict value would pin the literal and
+    # read nothing of the prose, which is exactly how the false claim survived.
+    source = Path(__file__).read_text(encoding="utf-8")
+    key_at = source.index(f'"{rel}": [')
+    reason = source[key_at:source.index("docker_port=lambda: 6379", key_at)]
+
+    # The FACT the reason must describe, re-derived here rather than trusted:
+    # the live fixture imports the real seam (`test_cache_eviction_evictor.py:30`),
+    # the pins file `exec`s a module carrying that import, and the stub is
+    # installed AFTER that exec and BEFORE `lane()` is driven.
+    live = (ROOT / "tests/test_cache_eviction_evictor.py").read_text(encoding="utf-8")
+    assert "from tests import _live_utils" in live, (
+        "the mocked-seam reason rests on the fixture importing the real helper — "
+        "if it stops importing it, re-derive the reason instead of this pin")
+    pins = (ROOT / rel).read_text(encoding="utf-8")
+    exec_at = pins.index("exec(compile(probe_module")
+    rebind_at = pins.index('namespace["_live_utils"] = live_utils_stub')
+    assert exec_at < rebind_at, (
+        f"{rel}: the stub must be installed AFTER the exec that binds the real "
+        "helper, or the fixture would dial a live service")
+
+    for false_claim in ("never imports", "deliberately absent"):
+        assert false_claim not in reason, (
+            f"{rel}'s exemption claims {false_claim!r}, which the file contradicts: "
+            "its exec'd probe body carries `from tests import _live_utils` (binding "
+            "the REAL helper) and the stub is installed afterwards. Say that — the "
+            "reason is what the next auditor reads before trusting this literal.")
+    assert "rebound" in reason, (
+        f"{rel}'s exemption must name the mechanism that makes the literal inert "
+        f"(the stub is rebound over the real helper before any call), not just "
+        f"assert that it is: measured reason: {reason!r}")
 
 
 def test_action_inputs_are_declared():
