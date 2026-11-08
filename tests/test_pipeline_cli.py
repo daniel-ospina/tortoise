@@ -134,13 +134,18 @@ def test_a_foreign_threads_construction_never_decides_this_verdict(
     thread this test does not own must not enter `seen`.
 
     Driving it, not asserting a shape: the foreign constructions are made for
-    real, on worker threads, with the SAME values a leaked hosted-api sweep
-    uses (``_resolve_embedded_db_path()`` for the path arm —
-    `tempfile.gettempdir()`-rooted when /data is unwritable — and a URI for the
-    `from_uri` arm). Before the thread guards these overwrote `seen` and each
-    sibling test's assertion was made about them; with the guards the recorded
-    values are the ones `cmd_run` resolved. Deliberately constructed BEFORE the
-    assertions, so the pin needs no sleep and no scheduling luck to fire.
+    real, on worker threads, with the same SHAPE a leaked hosted-api sweep
+    produces — a temp-rooted non-canonical file for the `__init__` arm (**not**
+    `tempfile.gettempdir()/tortoise.db` itself: that is what
+    `_resolve_embedded_db_path()` falls back to when /data is unwritable,
+    `tortoise/hosted_api.py:1345-1351`, and the CI `TMPDIR` is the session root,
+    so this pin uses its own `tmp_path` file — the assertion is about WHOSE
+    construction is recorded, never about the path's prefix), and a `redis://`
+    URI for the `from_uri` arm. Before the thread guards these overwrote `seen`
+    and each sibling test's assertion was made about them; with the guards the
+    recorded values are the ones `cmd_run` resolved. Deliberately constructed
+    BEFORE the assertions, so the pin needs no sleep and no scheduling luck to
+    fire.
     """
     monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
     monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
@@ -177,12 +182,18 @@ def test_a_foreign_threads_construction_never_decides_this_verdict(
         assert not t.is_alive(), f"the foreign {target.__name__} thread did not finish"
 
     assert not errors, errors
-    # ⛔ BOTH recorders, because the leak is symmetric: a stray thread reaching
+    # ⛔ BOTH arms, because the leak is symmetric: a stray thread reaching
     # `_make_sdk` while `TORTOISE_DB_URI` is set constructs through `from_uri`,
     # which would false-red `test_run_routes_supported_uri_through_from_uri`'s
-    # `assert "uri" not in seen` exactly as the path arm did. Guarding only one
-    # leaves the other deletable with the suite green (measured: removing the
-    # `_from_uri` guard alone left this file at `3 passed`).
+    # `assert seen.get("uri") == uri`; a path-arm construction false-reds
+    # `test_run_uses_embedded_path_when_no_uri`'s
+    # `assert seen.get("path") == DEFAULT_DB_PATH` and its
+    # `assert "uri" not in seen`. Neither sibling can see a foreign write on the
+    # OTHER arm — that is why this test drives both. Naming the tests, not line
+    # numbers, on purpose: a line number here re-stales on the next edit, which
+    # is the `[pin-defensive-claim]` defect this file's own review removed from
+    # `tests/test_runner_ports_6673.py`. Measured: deleting EITHER guard reds
+    # THIS test and nothing else.
     assert seen.get("path") == DEFAULT_DB_PATH, (
         "a construction this test did not make was recorded as its verdict: "
         f"{seen!r}")
