@@ -1372,11 +1372,16 @@ def test_the_10852_obligation_quotes_the_authority_AS_IT_NOW_READS():
 
     The authority is a quoted ruling in `docs/architecture/STORAGE-ARCHITECTURE.md`
     §9.1 — cited by SECTION here and in `cache_projection`, because the LINE form
-    (`:527`, the locator `03b50919dc` gave the citation) rots the moment text is
-    inserted above it: `#4051`'s own §2.0 insertion moved the sentence from `:527`
-    to `:551`, so that line number certified text that was no longer there.
-    The LOCATOR RESOLUTION below is what makes both forms honest — a line has to
-    still hold the sentence, a section has to still exist and still contain it.
+    (`:527`, the locator `03b50919dc` wrote) rots the moment text is inserted
+    above it: `#4051`'s own §2.0 insertion moved the sentence from `:527` to
+    `:551`. ⚠️ **That drift was SILENT**: the old pin never resolved the line —
+    it matched the literal `:527` in `cache_projection`'s docstring and then
+    asserted the quotation existed *somewhere* in the document, so nothing
+    could notice the sentence leaving line 527. It reddened only when the code
+    was RE-CITED to `§9.1`, a spelling its hardcoded literal could not match.
+    Both halves are the pin's job now, and the LOCATOR RESOLUTION below is how:
+    a line has to still hold the sentence, a section has to still exist and
+    still contain it.
 
     That sentence was REWRITTEN
     under us: `#10978` (`b748df7d`) changed it from "§4.4 metadata, not the
@@ -1401,40 +1406,39 @@ def test_the_10852_obligation_quotes_the_authority_AS_IT_NOW_READS():
         encoding="utf-8")
 
     # ⛔ THE LOCATOR IS EITHER A LINE (`:527`) OR A SECTION (`§9.1`), and BOTH are
-    # ACCEPTED — but a locator that is not RESOLVED is not a citation: `:527`
-    # passed for as long as the sentence happened to sit on line 527, and #4051's
-    # own §2.0 insertion moved it to 551 without reddening anything, because the
-    # old pin only asked whether the sentence existed SOMEWHERE in the document.
-    # So the locator is matched here and ranged against the authority below.
-    # ⚠️ The SECTION form carries the tree's own `/D<n>` decision tag
-    # (`§9.1/D1`, spelled that way nine lines above), and it may sit inside the
-    # backticks or after them — all of those are ONE citation, so all of them
-    # parse. An unrecognised spelling is diagnosed as a PARSER gap, never as a
-    # missing quotation (#11481 review: the old arm sent a maintainer hunting for
-    # a mutation that never happened).
+    # ACCEPTED — but a locator that is not RESOLVED is not a citation.
+    # ⚠️ WHAT THE OLD PIN ACTUALLY DID, because it is why this exists: it matched
+    # the literal `STORAGE-ARCHITECTURE.md:527` INSIDE `cache_projection`'s
+    # source, then asserted the quotation appeared SOMEWHERE in the document. So
+    # it never resolved the line at all — it could not notice the sentence moving
+    # away from 527 (this PR's §2.0 insertion pushed it to 551, silently), and it
+    # reddened only when the code was RE-CITED to `§9.1`, a form its hardcoded
+    # literal could not match. The locator is now RANGED against the authority.
+    # ⚠️ The GRAMMAR here is deliberately permissive and the CLASSIFIER is what is
+    # strict: any citation shape parses, so an unrecognised locator is diagnosed
+    # as the PARSER gap it is — never as a missing quotation, which sends a
+    # maintainer hunting for a mutation that did not happen (#11481 review, twice:
+    # the first cut gated the diagnosis on a 24-character window and on `.`
+    # not spanning newlines, so a wrapped or verbose locator still landed on
+    # "restore the quotation").
     source = inspect.getsource(cp)
-    unparsed = re.search(r'STORAGE-ARCHITECTURE\.md.{0,24}?:\s*\*"', source)
     match = re.search(
-        r'STORAGE-ARCHITECTURE\.md(?P<loc>`?\s*§[\d.]+(?:/D\d+)?|:\d+)`?'
-        r'\s*: \*"(?P<quote>[^"]+)"\*',
+        r'STORAGE-ARCHITECTURE\.md(?P<loc>[\s\S]{0,200}?):\s*\*"(?P<quote>[^"]+)"\*',
         source,
     )
-    assert match or unparsed is None, (
-        "the ruling is still quoted in `cache_projection`, but its LOCATOR is not "
-        f"a form this pin parses ({unparsed.group(0)!r}) — accepted forms are "
-        "`STORAGE-ARCHITECTURE.md:NNN` and `STORAGE-ARCHITECTURE.md` §N.N, either "
-        "with an optional `/DN` tag. This is a PARSER gap, not a missing "
-        "quotation: widen the grammar here rather than going looking for a "
-        "mutation that did not happen")
     assert match, (
         "the narrowing's authority is no longer quoted in the source — the pin "
-        "extracts `STORAGE-ARCHITECTURE.md:NNN` (or `STORAGE-ARCHITECTURE.md` "
-        "§N.N) from `cache_projection`, so restore the quotation")
+        "extracts `STORAGE-ARCHITECTURE.md`, a `:NNN` or `§N.N` locator, and the "
+        "quoted sentence from `cache_projection`, so restore the quotation")
     # The quotation wraps across lines in the docstring; the document states it
-    # as one sentence, so compare on normalised whitespace.
+    # as one sentence, so compare on normalised whitespace. The locator is
+    # normalised the same way and stripped of its backticks, because the tree
+    # spells the same citation three ways (`` .md:527` ``, `` .md` §9.1 ``,
+    # `` .md` §9.1/D1 ``, the last two lines above the citation in
+    # `cache_projection.py`).
     quote = " ".join(match.group("quote").split())
-    loc = match.group("loc")
-    if loc.startswith(":"):
+    loc = " ".join(match.group("loc").split()).strip("`").strip()
+    if re.fullmatch(r":\d+", loc):
         # A LINE locator must still HOLD the sentence. Without this arm the line
         # number is decorative: any insertion above it re-points it silently.
         lineno = int(loc[1:])
@@ -1456,8 +1460,17 @@ def test_the_10852_obligation_quotes_the_authority_AS_IT_NOW_READS():
         # this document reads `### 9.1 …`, so the locator is stripped to its number
         # before it is ranged against one, and the `/D<n>` tag is not part of the
         # heading either.
-        cited = loc.lstrip("` §")
-        section = cited.split("/")[0]
+        section_match = re.search(r"§\s*(?P<sec>[\d.]+)(?:/(?P<tag>D\d+))?", loc)
+        assert section_match, (
+            "the ruling is still quoted in `cache_projection`, but its LOCATOR is "
+            f"not one this pin parses ({loc!r}) — accepted forms are "
+            "`STORAGE-ARCHITECTURE.md:NNN` and `STORAGE-ARCHITECTURE.md` §N.N, "
+            "either with an optional `/DN` tag. This is a PARSER gap, not a "
+            "missing quotation: widen the grammar here rather than going looking "
+            "for a mutation that did not happen")
+        section = section_match.group("sec")
+        tag = section_match.group("tag")
+        cited = f"§{section}" + (f"/{tag}" if tag else "")
         heading = re.search(
             rf"^(?P<hashes>#+) {re.escape(section)}\b", authority, re.MULTILINE)
         assert heading, (
@@ -1479,6 +1492,17 @@ def test_the_10852_obligation_quotes_the_authority_AS_IT_NOW_READS():
             f"`cache_projection` cites `{cited}`, but the quotation is not in "
             f"that section: {quote!r}. It was restated or moved (#10978 is the "
             "precedent) — re-cite and re-quote where it now reads")
+        # ⚠️ THE DECISION TAG IS CHECKED, not merely parsed (#11481 review: a tag
+        # that `split("/")` throws away is decorative — `§9.1/D99` passed). This is
+        # a SUBSTRING check against the section's body, which is the strongest
+        # claim it can make: it proves the tag is named in the section cited, not
+        # that the decision id itself is well-formed (the tree has no decision
+        # register to resolve it against).
+        if tag:
+            assert tag in body, (
+                f"`cache_projection` cites `{cited}`, but `{tag}` does not appear "
+                "in that section — the decision tag is part of the citation, and "
+                "a wrong one names a decision this section does not carry")
     # ⚠️ THERE IS NO THIRD, `quote in authority` ARM. Both arms above assert the
     # quotation against a SLICE of `authority`, so each already implies presence
     # in the whole document; a third assertion could never fire, and carrying it
