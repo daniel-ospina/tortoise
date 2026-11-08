@@ -9,12 +9,18 @@ paper's reported accuracies.
 
 The judge model is configured via env, never hardcoded:
 
-    TORTOISE_LME_JUDGE_MODEL   judge model spec (default
-                               ``openai:gpt-4o-2024-08-06`` — the official
-                               judge model). The same official model is
-                               served by OpenRouter: with only
-                               ``OPENROUTER_API_KEY`` set, use
-                               ``openrouter:openai/gpt-4o-2024-08-06``
+    TORTOISE_LME_JUDGE_MODEL   judge model spec. DEFAULT: our own pinned
+                               model (``deepseek-v4-flash``) — the #8486
+                               owner ruling of 2026-10-27 ("progress against
+                               ourselves"; the receipt records
+                               ``unpinned:<model>`` + ``inconclusive``).
+                               The OFFICIAL model is
+                               ``OFFICIAL_JUDGE_MODEL`` =
+                               ``openai:gpt-4o-2024-08-06``: name it to get
+                               a number comparable to a published figure,
+                               e.g. ``openrouter:openai/gpt-4o-2024-08-06``
+                               (the model id is what makes it official, the
+                               transport is a routing detail)
     OPENAI_API_KEY             direct OpenAI key (NOT required when the
                                official model runs through OpenRouter etc.)
 
@@ -511,7 +517,8 @@ class OfficialJudgeModel:
 
 
 class LLMJudge:
-    """Judge backed by an OpenAI-compatible chat model (official gpt-4o)."""
+    """Judge backed by an OpenAI-compatible chat model (the OFFICIAL judge is
+    gpt-4o; the run's default is our own pinned model — #8486)."""
 
     def __init__(self, model, model_id: str, *, model_spec: str | None = None,
                  provider: str | None = None):
@@ -683,14 +690,19 @@ class ScriptedSemanticJudge:
 def build_judge(spec: str | None = None, *, mock: bool = False) -> Judge:
     """Build the judge from env/config. ``mock=True`` returns MockJudge.
 
-    Default model: ``openai:gpt-4o-2024-08-06`` (the official judge model).
-    That default names OpenAI as the provider, but the SAME model is served
-    by OpenRouter too — set
-    ``TORTOISE_LME_JUDGE_MODEL=openrouter:openai/gpt-4o-2024-08-06`` to run
-    the official judge through OpenRouter (the model id is what makes the
-    judge official; the transport is a routing detail — external
-    comparability is unchanged). Fails closed when no provider key is set
-    and mock is off.
+    Default model: ``DEFAULT_JUDGE_MODEL`` = ``deepseek:deepseek-v4-flash`` —
+    the #8486 owner ruling of 2026-10-27 ("progress against ourselves"). It is
+    deliberately NOT the official judge: a run graded by it records
+    ``judge_pin: unpinned:<model>`` and ``verdict: inconclusive``, and must be
+    reported as an internal baseline series.
+
+    To grade with the OFFICIAL judge — the only configuration whose number may
+    be compared to a published figure — name ``OFFICIAL_JUDGE_MODEL``
+    (``openai:gpt-4o-2024-08-06``) or its routed form
+    ``TORTOISE_LME_JUDGE_MODEL=openrouter:openai/gpt-4o-2024-08-06`` (the model
+    id is what makes the judge official; the transport is a routing detail).
+    That needs that provider's KEY as well as the spec — a key alone does not
+    select it. Fails closed when no provider key is set and mock is off.
     """
     if mock:
         return MockJudge()

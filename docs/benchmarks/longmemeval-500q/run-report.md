@@ -96,11 +96,15 @@ named and reachable.
 - The rubric is unchanged (`judge_rubric_id_hash 82d07b0de05daa48`, the
   verbatim `evaluate_qa.py` anscheck prompts). The **grader** is not the
   official one, and the direction of that bias is unknown.
-- **The official judge is still servable** by naming it
-  (`TORTOISE_LME_JUDGE_MODEL=openrouter:openai/gpt-4o-2024-08-06`, or a box
-  holding `OPENAI_API_KEY`). That is the only configuration whose number may
-  be compared to a published figure, and running it is a legal configuration
-  rather than a lane's decision.
+- **The official judge is still servable**, and it takes BOTH the spec and
+  that provider's key: name it
+  (`TORTOISE_LME_JUDGE_MODEL=openrouter:openai/gpt-4o-2024-08-06` with
+  `OPENROUTER_API_KEY`, or `openai:gpt-4o-2024-08-06` with `OPENAI_API_KEY`).
+  Holding a key alone does NOT select it — the default is our own model, so a
+  box with only `OPENAI_API_KEY` still grades nothing until the spec names it
+  and `build_judge` fails closed and says so. That configuration is the only
+  one whose number may be compared to a published figure, and running it is a
+  legal configuration rather than a lane's decision.
 
 **Reader.** The M5 pin (#1525) exists so the code default equals what runs use.
 It named `openrouter:deepseek/deepseek-v4-flash`; `OPENROUTER_API_KEY` is absent

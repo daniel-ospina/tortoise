@@ -6707,7 +6707,9 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="python -m tools.longmem_eval.run",
         description="LongMemEval-S external comparability runner (issue #1144, "
                     "axis 2): ingest haystacks → hybrid retrieval → reader LLM "
-                    "→ official GPT-4o judge, with full methodology provenance.")
+                    "→ judge, with full methodology provenance. The judge "
+                    "defaults to our own pinned model (#8486 ruling); name "
+                    "the OFFICIAL GPT-4o judge for a comparable number.")
     p.add_argument("--split", default=ds.DEFAULT_SPLIT,
                    choices=sorted(ds.SPLIT_FILES), help="dataset split (default s)")
     p.add_argument("--limit", type=int, default=None,

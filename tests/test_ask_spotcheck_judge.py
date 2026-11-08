@@ -325,6 +325,36 @@ def test_fail_fast_passes_with_key(monkeypatch):
     assert _require_judge_key() == "OPENAI_API_KEY"
 
 
+def test_one_judge_spec_serves_the_preflight_and_the_judge(monkeypatch):
+    """#8486: the pre-flight and ``build_judge`` must resolve from ONE spec.
+
+    The pre-flight names the OFFICIAL judge; ``build_judge()`` called with no
+    spec resolves ``DEFAULT_JUDGE_MODEL``, which the #8486 owner ruling of
+    2026-10-27 re-pinned to DeepSeek. With the two unlinked they disagreed
+    about which model was about to grade — measured as two silent failures, both
+    the #2071 decision inverted: a box holding only ``OPENAI_API_KEY`` passed
+    the key check and then died on an uncaught ``ValueError``, and a both-keys
+    box graded with a NON-official judge while printing the official key env.
+    So the fallback is pinned to the OFFICIAL constant, and NO call site may
+    build a judge without it — pinned in SOURCE, because the behavioural path
+    needs a live key to observe.
+    """
+    import tools.ask_spotcheck as _mod
+    from tools.longmem_eval.judge import (
+        DEFAULT_JUDGE_MODEL, OFFICIAL_JUDGE_MODEL)
+
+    monkeypatch.delenv("TORTOISE_LME_JUDGE_MODEL", raising=False)
+    assert _mod._judge_spec() == OFFICIAL_JUDGE_MODEL
+    assert _mod._judge_spec() != DEFAULT_JUDGE_MODEL
+
+    src = Path(_mod.__file__).read_text(encoding="utf-8")
+    bare = re.findall(r"(?:=|\breturn)\s*build_judge\(\s*\)", src)
+    assert bare == [], (
+        "a bare build_judge() resolves DEFAULT_JUDGE_MODEL (the graded-eval "
+        "lane's DeepSeek default), not the judge this tool's pre-flight "
+        "checked — pass _judge_spec()")
+
+
 def test_fail_fast_honors_judge_model_provider(monkeypatch):
     """TORTOISE_LME_JUDGE_MODEL naming another provider checks THAT
     provider's key."""
