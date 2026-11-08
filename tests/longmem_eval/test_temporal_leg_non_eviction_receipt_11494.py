@@ -36,6 +36,8 @@ from __future__ import annotations
 import types
 from typing import ClassVar
 
+import pytest
+
 from tools.longmem_eval import retrieve as R
 
 #: Session A is the semantically nearest one and owns TEN of the twelve
@@ -43,10 +45,20 @@ from tools.longmem_eval import retrieve as R
 #: two of them BELOW the reader window. This is the measured failure shape
 #: ``#10538`` exists for: the window starves every session but A.
 #:
-#: Geometry (the SHIPPED one): ``tr_top_k=12`` ⇒ ``window=12``,
-#: ``DEFAULT_TEMPORAL_LEG_LIMIT=2`` ⇒ ``ceiling=10``. The two promotable
+#: Geometry, PINNED EXPLICITLY rather than inherited: ``tr_top_k=12`` ⇒
+#: ``window=12``, ``temporal_leg_limit=2`` ⇒ ``ceiling=10``. The two promotable
 #: buckets are ``sD``/``d1`` and ``sE``/``e1`` — the only sessions the reader
-#: does not already hold — and both are paid for by evicting ``c1``/``sC``.
+#: does not already hold — and each is paid for by evicting ``c1``/``sC``.
+#:
+#: ⛔ Every other hit is ``point_kind="event"``, NOT a raw
+#: ``session-transcript`` chunk, so ``temporal_leg._reader_order`` short-circuits
+#: on `not any(is_raw_chunk(h))` and the per-session CHUNK cap never applies
+#: here. This fixture therefore pins the WINDOW half of the guard's wiring and
+#: says nothing about the cap half — recorded as a residual on #11494 rather
+#: than claimed.
+GEOMETRY = {"tr_top_k": 12, "temporal_leg_limit": 2, "temporal_leg_weight": 1.0,
+            "temporal_leg_placement": "tail"}
+
 CLUSTERED = (
     [{"id": f"a{i}", "session_id": "sA", "idx": 0, "content": "alpha"}
      for i in range(10)]
@@ -106,6 +118,26 @@ class _Sdk:
         return types.SimpleNamespace(g=_Graph())
 
 
+#: Every env seam ``retrieve_for_question`` reads for this arm. ``GEOMETRY``
+#: passes the first three as explicit args, and ``_read`` passes the fourth, so
+#: no assertion depends on these — the scrub exists so the REASON a row moved
+#: is always visible: an exported counterfactual knob (`PLACEMENT=head` is a
+#: knob a lane exports on purpose for the documented A/B) would otherwise turn
+#: a correct arm into a false red that looks like a broken guard.
+_ENV_SEAMS = (
+    "TORTOISE_LME_TEMPORAL_LEG_NON_EVICTION",
+    "TORTOISE_LME_TEMPORAL_LEG_PLACEMENT",
+    "TORTOISE_LME_TEMPORAL_LEG_LIMIT",
+    "TORTOISE_LME_TEMPORAL_LEG_WEIGHT",
+)
+
+
+@pytest.fixture(autouse=True)
+def _scrub_temporal_env(monkeypatch):
+    for name in _ENV_SEAMS:
+        monkeypatch.delenv(name, raising=False)
+
+
 def _install_pool(monkeypatch, pool: list[dict]) -> None:
     """Wire ``pool`` into the ONE seam every read reaches, plus the annotators.
 
@@ -144,16 +176,33 @@ def _read(monkeypatch, pool: list[dict] | None = None, *,
     # ``temporal_leg=True`` is the point of this module: the leg is tri-state
     # and fail-safe OFF, so without an explicit arm there is no receipt to
     # observe at all (the shipped default leaves the block on the OFF shape).
+    #
+    # The geometry is passed EXPLICITLY: ``temporal_leg_limit``, ``_weight`` and
+    # ``_placement`` each fall back to ``os.environ`` inside
+    # ``retrieve_for_question``, and the repo's conftest restores ``TORTOISE_*``
+    # but does not CLEAR it — so a lane with ``TORTOISE_LME_TEMPORAL_LEG_PLACEMENT``
+    # exported for the documented counterfactual A/B would turn this module's
+    # pinned geometry into a false red. ``_read`` scrubs them too (belt and
+    # braces: the args win, the scrub keeps the reason legible).
     return R.retrieve_for_question(_Sdk(), _question(), ks=(5,), top_k=20,
-                                   tr_top_k=12, pool_size=60,
-                                   temporal_leg=True)
+                                   pool_size=60, temporal_leg=True, **GEOMETRY)
 
 
 def _stats(ret: dict) -> dict:
+    """The receipt block, or a failure that says WHICH way it is missing.
+
+    ``retrieve.py`` always emits a ``temporal_leg_stats`` mapping — the OFF
+    shape (``{"on": False, "applied": False, ...}``) is constructed
+    unconditionally and emitted on every row — so a bare truthiness check
+    cannot tell "the leg never ran" from "someone broke the receipt": both
+    would surface as ``KeyError: 'non_eviction'`` a few lines later, which is
+    exactly the wrong message. Assert the two facts the guard needs.
+    """
     stats = ret.get("temporal_leg_stats")
-    assert stats, (
-        "the temporal leg did not run at all — every assertion below would be "
-        "vacuous, so this must fail loudly rather than pass over an empty block")
+    assert stats, f"no temporal_leg_stats block at all: {sorted(ret)}"
+    assert stats.get("on") is True and "non_eviction" in stats, (
+        "the leg did not reach the armed block, so every assertion below would "
+        f"be vacuous — the receipt is the OFF shape: {stats}")
     return stats
 
 
@@ -169,23 +218,31 @@ def test_the_receipt_reports_the_guard_run_and_its_exact_refusals(monkeypatch):
     """THE accepted shape of #11494: drive the wired reader with the leg armed
     and read the receipt OFF THE RUN.
 
-    Every assertion here is one the five surviving mutants could satisfy
-    statically and cannot satisfy behaviourally:
+    The assertions that survive only by OBSERVATION — each one is a mutant the
+    source-text pins could not see:
 
     * ``rejected`` must be the EXACT list — id, session AND reason — so
-      ``[:1]`` (under-reporting) and ``accepted[:1]`` (truncation) both fail;
+      ``[:1]`` (under-reporting the refusals) fails;
     * the empty-leg ``reason`` must be ``non_eviction_guard``, so
       ``len(...[:0])`` (which drives ``guard_rejected`` back to 0 and the
       reason back to ``no_window_candidates``) fails;
-    * ``targeting`` must be the literal ``"window"``, so ``or "none"[:0]``
-      (which makes a traceless row emit ``""``) fails;
-    * ``applied`` must be ``True`` — read from the guard's own trace, which is
-      the field a knob-derived value would get right here and wrong on the
-      control below.
+    * ``applied`` must be ``True``, read from the guard's own trace, and
+      ``False`` on the inert control below — so a value derived from the knobs
+      instead of the trace fails there.
+
+    ⛔ Not claimed here, because they were measured as unobservable: the
+    ``targeting or "none"`` fallback is unreachable (``temporal_leg_order``
+    always stamps ``"none"`` up front) and ``trace["accepted"]`` is never read
+    by ``retrieve.py``. Both are dead writes on the wired path — see the
+    residual note on #11494.
     """
     ret = _read(monkeypatch)
     stats = _stats(ret)
 
+    # the stated GEOMETRY, pinned from the run rather than asserted in prose:
+    # ``tr_top_k=12`` ⇒ window 12, ``temporal_leg_limit=2`` ⇒ ceiling 10.
+    assert stats["ceiling"] == 10, (
+        f"the documented ceiling (window 12 - budget 2) is not what ran: {stats}")
     # the switch resolved ON (the ruling's default; #10538 owner decision)
     assert stats["non_eviction"] is True, stats
     # the guard actually RAN on this row — not merely "the rule is on"
@@ -278,9 +335,13 @@ def test_an_inert_arm_reports_the_switch_on_but_not_applied(monkeypatch):
     the one a knob-derived implementation ("switch ON and placement is not
     head") gets backwards: it would report ``True`` here.
 
-    It is also the pin that kills the inert branch's ``"on": True`` mutant in
-    the direction it survives today: with the switch resolved OFF the inert
-    branch must report ``on: False``.
+    ⛔ Not claimed: this does NOT kill the inert branch's ``"on": True``
+    mutant. Measured — stamping ``trace["on"] = True`` after every fusion
+    leaves all four tests green, because the receipt's ``non_eviction`` reads
+    the RESOLVED switch (``retrieve.py``: ``"non_eviction": _tl_non_eviction``)
+    and ``non_eviction_applied`` reads only ``trace["applied"]``; nothing on
+    the wired path reads ``trace["on"]``. It is a dead write, recorded as a
+    residual on #11494 — not a pin this module makes.
     """
     ret = _read(monkeypatch, UNCLUSTERED)
     stats = _stats(ret)
@@ -294,13 +355,12 @@ def test_an_inert_arm_reports_the_switch_on_but_not_applied(monkeypatch):
     assert stats["non_eviction_rejected"] == [], stats
     assert _leg(ret)["reason"] == "no_window_candidates", _leg(ret)
 
-    # …and with the switch OFF the inert branch must SAY so. This is the only
-    # shape where the inert branch's ``"on"`` value is observable at all,
-    # which is exactly why the surviving mutant went unnoticed.
+    # …and the switch resolution is still reported honestly on an inert arm,
+    # where nothing else changes. (This pins the RESOLVED SWITCH, not the
+    # trace's ``on`` — see the note above on why the latter is unobservable.)
     off = _stats(_read(monkeypatch, UNCLUSTERED, enved="0"))
     assert off["non_eviction"] is False, (
-        f"the inert branch's ``on`` must be the RESOLVED switch, not a "
-        f"constant: {off}")
+        f"the resolved switch must follow the env on an inert arm too: {off}")
     assert off["non_eviction_applied"] is False, off
 
 
@@ -309,18 +369,25 @@ def test_an_inert_arm_reports_the_switch_on_but_not_applied(monkeypatch):
 def test_the_wired_arm_never_admits_a_session_deleting_pick(monkeypatch):
     """The ruling measured on the WIRED surface, across both switch positions.
 
-    ``_non_eviction_filter`` is unit-tested elsewhere; what was missing is a
-    check that the wiring passes it the RUN's chunk cap and window (a guard
-    measuring a different cap than the reader would admit a pick that deletes a
-    session from the real window — the false PASS #10538's design note calls
-    out). Here the question is asked of the finished read.
+    ``_non_eviction_filter`` is unit-tested elsewhere; what was missing is
+    the question asked of the FINISHED read rather than of the filter's inputs.
+
+    ⛔ Scope of this pin, stated because an earlier draft of this docstring
+    overclaimed it: it pins the **window** half of the guard's wiring. It says
+    NOTHING about the chunk-cap half — every ``CLUSTERED`` hit is
+    ``point_kind="event"``, so ``_reader_order`` short-circuits and the
+    per-session chunk cap never applies, which means a wiring mutant that
+    dropped ``max_chunks_per_session`` would survive here (measured). That is
+    the documented false-PASS shape in ``temporal_leg_fusion_order``'s
+    docstring, and it is recorded as a residual on #11494, not claimed.
 
     The observable is the one the ruling is written in: the set of evidence
     sessions the reader can see BEFORE any promotion. ``window=12`` holds
     ``sA``\u00d710 + ``sB`` + ``sC``; the two promotable buckets (``sD``, ``sE``)
-    sit below it. The unguarded tail splice buys them by EVICTING ``sC`` — two
-    sessions in, one out, and the one lost is base evidence. The guarded arm
-    must keep the base set whole and promote nothing.
+    sit below it. The unguarded tail splice buys them by evicting BOTH ``sB``
+    and ``sC`` — two sessions in, TWO out, so the arm is net-zero on distinct
+    evidence and trades real base evidence for it. The guarded arm must keep
+    the base set whole and promote nothing.
     """
     base_sessions = {c["session_id"] for c in CLUSTERED[:12]}
     assert base_sessions == {"sA", "sB", "sC"}, base_sessions
@@ -331,10 +398,13 @@ def test_the_wired_arm_never_admits_a_session_deleting_pick(monkeypatch):
     unguarded_sessions = {c["session_id"] for c in CLUSTERED
                           if c["id"] in unguarded_ids}
     lost = base_sessions - unguarded_sessions
-    assert lost, (
+    # BOTH base sessions, not one: the arm pays two sessions for two picks.
+    # Pinned exactly, because the weaker `lost` non-empty check would still
+    # pass if a later fixture change quietly halved the measured cost.
+    assert lost == {"sB", "sC"}, (
         f"this fixture is supposed to reproduce the eviction the ruling "
-        f"forbids; it no longer does, so the assertion below would be vacuous: "
-        f"{sorted(unguarded_sessions)}")
+        f"forbids (both sB and sC lost); it no longer does, so the assertion "
+        f"below would be vacuous: kept {sorted(unguarded_sessions)}")
 
     # ── the guarded arm keeps every base evidence session ──
     guarded_ret = _read(monkeypatch)
