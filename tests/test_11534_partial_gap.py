@@ -807,9 +807,11 @@ def test_the_content_floor_s_removal_class_is_measured_not_asserted():
     # the segmentation, then the removal class, then the flag count. Asserting
     # the flag count first made three later rows unreachable — `narrative_segments
     # -> []` and the mask both reddened the count instead of the behaviour they
-    # revert, which is a proof of the wrong thing. `bold * 2 < sub_floor` was dropped: it
-    # is implied by `bold == 68` against the pinned 212 and no mutant of the diff
-    # moves it, so it would have looked like coverage while guarding nothing.
+    # revert, which is a proof of the wrong thing. `bold * 2 < sub_floor` was
+    # dropped: no mutant REACHES it. The empty-segment mutant does move the
+    # expression (`0 * 2 < 0`), but `segments == 422` catches that mutant before
+    # this row is evaluated, and the other four are caught earlier still — so it
+    # could never be the first to fail: coverage that guards nothing.
     assert heading_flags == 0, (
         "a heading reached the flag list — the mask is applied after segmentation")
     assert segments == 422
