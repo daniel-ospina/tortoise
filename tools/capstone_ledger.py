@@ -488,6 +488,18 @@ def _names_artifact(token: str, cwd: Path, root: Path) -> tuple[bool, str]:
                     unrunnable_seen = True
                 else:
                     untracked_seen = True
+            # ⛔ AND THE MIXED CASE NEEDS BOTH CAUSES (#11474 review). `untracked_seen`
+            # winning outright re-emitted the universal sentence "EVERY file the glob
+            # matches is untracked by git" INCLUDING the matches git was never asked
+            # about — the same guess-the-cause defect the comment above says this
+            # branch removes. A measured cause is not a licence to speak for an
+            # unmeasured one: name each.
+            if untracked_seen and unrunnable_seen:
+                return False, (
+                    f"cannot be verified: some files the glob {text!r} matches are "
+                    "untracked by git, and for the rest the TRACKED check could not be "
+                    "run here — so a reader's clone is not shown to have them"
+                )
             if untracked_seen:
                 return False, (
                     f"every file the glob {text!r} matches is untracked by git, so a "
