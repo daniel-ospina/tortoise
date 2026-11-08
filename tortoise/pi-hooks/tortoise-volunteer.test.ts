@@ -677,22 +677,25 @@ test("a THROW out of the resolver is `refused`, not an `inert` latch", async () 
     undefined,
     "a throwing resolver is fail-open",
   );
+  // ⛔ WHAT THIS ROW DOES AND DOES NOT PROVE (#11584 review, round 3). It
+  // proves the CLASSIFICATION: the catch-all must be `refused`, so no
+  // `install-inert` breadcrumb is written. Mutating the catch-all back to
+  // `inert` reds it (measured: 22 pass / 1 fail).
+  //
+  // It does NOT prove the absence of a LATCH, and the earlier version of this
+  // block claimed it did. A NUL command throws identically on every turn, so
+  // "turn 2 returns undefined" is true under either behaviour — adding
+  // `inertLatched = true` to the catch-all (with no breadcrumb) left the whole
+  // suite green, 23/23. The no-latch invariant for this class is owned by
+  // `a TRANSIENT CLI failure does not latch, and writes no install breadcrumb`
+  // above, whose fake CLI fails ONCE and then injects — a shape a
+  // deterministic NUL command cannot express. Assert only what is observable
+  // here rather than vouching for coverage this row does not have.
   assert.equal(
     existsSync(join(crumbs, "pi-install.json")),
     false,
     "a bug in THIS seam is not evidence about the install: no `install-inert` " +
       "breadcrumb, or the operator is told to reinstall a working install",
-  );
-  // …and the seam is NOT latched: a second turn reaches the resolver again
-  // rather than short-circuiting on `inertLatched`.
-  assert.equal(
-    await pi.handlers.before_agent_start({ messageType: "user", prompt: "q" }, SESSION_CTX()),
-    undefined,
-  );
-  assert.equal(
-    existsSync(join(crumbs, "pi-install.json")),
-    false,
-    "still no breadcrumb after a second turn",
   );
 });
 

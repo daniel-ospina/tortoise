@@ -134,7 +134,8 @@ export const DEFAULT_API_URL = "https://api.premiselabs.co";
  * turn costs one bounded wait. The remedy for a machine that exceeds it is to
  * raise `{"volunteer": {"timeoutMs": N}}` — not to reinstall anything.
  * `_LOAD_TIMEOUT_S` is the reflex's own model-load ceiling (90 s, above this
- * one); it is not a promise that this budget covers the load. *
+ * one); it is not a promise that this budget covers the load.
+ *
  * Override per machine with `{"volunteer": {"timeoutMs": N}}` in
  * `~/.pi/agent/tortoise-config.json`. A timeout is a clean no-injection
  * (`status: "timeout"`), and it is NOT an inert install — see
