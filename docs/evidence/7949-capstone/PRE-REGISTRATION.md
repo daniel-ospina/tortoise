@@ -1769,17 +1769,24 @@ roll-call read:
 > then `TORTOISE_IDENTIFIER_TOKENS`, then `TORTOISE_SUBJECT_TAU_HI`/`_LO`): each sits on the acceptance
 > path and was in no pin, no ledger row and no closure.
 
-`preregistration.json`'s `acceptance_arm.pinned_to` agreed, carrying exactly the three `"1"` pins
-(`TORTOISE_S4_DELTA`, `TORTOISE_JSON_MODE`, `TORTOISE_IDENTIFIER_TOKENS`).
+`preregistration.json`'s `acceptance_arm.pinned_to` agreed **at this branch's base**
+`f76b74c3e62`, carrying exactly the three `"1"` pins (`TORTOISE_S4_DELTA`,
+`TORTOISE_JSON_MODE`, `TORTOISE_IDENTIFIER_TOKENS`). It carries FOUR at `origin/main`
+`a1dff7cec`, which is the point of the scope note above: the fourth entry arrived on `main`,
+not here.
 
-**New value.** One pin is added — `TORTOISE_STATE_VALUE_VERBATIM: "1"` — to both published copies
-(§1.6.2 and `acceptance_arm.pinned_to`), and the roll-call is restated **positionally** rather than
-counted ("the cycle-7 to cycle-11 review findings are …"), because the count in that paragraph had
-gone stale three rounds running: it said "last five" over a list of six.
+**New value.** One pin is named in §1.6.2's **prose** — `TORTOISE_STATE_VALUE_VERBATIM: "1"` —
+and the roll-call is restated **positionally** rather than counted ("the cycle-7 to cycle-11
+review findings are …"), because the count in that paragraph had gone stale three rounds
+running: it said "last five" over a list of six. ⛔ `acceptance_arm.pinned_to` is **not** edited
+by this branch: `origin/main` already carries the fourth entry, so what lands here is prose and
+the roll-call, not a second pin (`git diff origin/main... -- preregistration.json` touches only
+`document_sha256` and `read_back`).
 
 **Why.** `#10360`'s write-path guard landed **inside** `path_modules` — `TORTOISE_STATE_VALUE_VERBATIM`,
 read by `extractor_v2._state_value_verbatim_enforced` as `env_flag(..., True)` — so the door's census
-red on `main` (`tests/test_7949_c2_door.py::test_every_env_var_the_capture_path_reads_is_accounted_for`):
+red at this branch's base `f76b74c3e62`
+(`tests/test_7949_c2_door.py::test_every_env_var_the_capture_path_reads_is_accounted_for`):
 the switch was in no pin, no ledger row and no closure. It is a **pin and not an acknowledged
 non-seam**, because its absent state is already ON and its only non-neutral state is an inherited
 `=0`: OFF disarms `_refuse_rewritten_value`, so a point whose value the model **rewrote** is written
