@@ -677,8 +677,21 @@ def test_the_module_docstring_carries_the_record_the_call_site_points_at():
         "flagged the previous 'shipped code is authoritative' sentence for "
         "exactly that)."
     )
-    assert "owner" in doc and "#11002" in doc, (
-        "the settled-precedence sentence must name WHO settled it and WHERE — "
+    # ⛔ SCOPED TO THE PARAGRAPH THAT CARRIES THE CLAIM (round-8 review, F2):
+    # `"owner" in doc and "#11002" in doc` was satisfied by unrelated lines
+    # ("owner-approved" in the S1 stage line, "#11534"'s neighbours), so the
+    # mutant that deletes the attribution — the exact regression this guard
+    # names — left the assertion GREEN. The attribution wraps onto its own line
+    # ((owner, 2026-11-08, on **#11002**)), so the scope is the PARAGRAPH, not
+    # the line. Measured: deleting that parenthetical reds this.
+    _settled_paras = [p for p in doc.split("\n\n")
+                      if "precedence question is settled" in p]
+    assert _settled_paras, (
+        "the record must state that #8500's precedence question is SETTLED, and "
+        "name its home."
+    )
+    assert all("owner" in p and "#11002" in p for p in _settled_paras), (
+        "the settled-precedence PARAGRAPH must name WHO settled it and WHERE — "
         "an unattributed 'settled' is an agent answering an owner-reserved "
         "question one word at a time."
     )

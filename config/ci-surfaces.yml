@@ -4778,11 +4778,12 @@ surfaces:
   # return, so `tier1` is where it must live; `core` is its home for the code
   # diffs that can falsify a claim.
   - test_extractor_v4_s4_stage_claims.py
-  # #11002: the successor's own guard (`core` above, and `tier1` below for the
-  # same docs-only reason as its siblings — this file pins claims about
-  # `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md` §4.4 and the ADD proof, so a
-  # `docs/`-only diff is exactly what can falsify it). Hermetic: a scripted model,
-  # `sdk=None`, no graph, no DB.
+  # #11002: the successor's own guard — `core` ONLY, deliberately not `tier1`.
+  # This file pins CODE behaviour (the ADD proof, the once-per-run bound, the
+  # union, the tie-break) and reads no document at all, so a `docs/`-only diff
+  # cannot falsify anything it asserts; §4.4's tie-break is pinned in `tier1` by
+  # `test_extractor_v4_s4_stage_claims.py`, two lines above. Hermetic: a scripted
+  # model, `sdk=None`, no graph, no DB.
   - test_selection_step.py
   # #8495: the FIFTH guard over the same document — §4.4's per-step failure
   # policy. Pins that every §4.0 canonical step keeps a declared direction, that

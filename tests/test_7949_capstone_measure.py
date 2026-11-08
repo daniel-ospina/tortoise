@@ -4170,8 +4170,7 @@ _BUNDLE_SIBLING_SOURCES = {
 # `_BUNDLE_SOURCES` on purpose: neither pattern reaches `tools/capstone_verdict_
 # check.py` (`_BUNDLE_CITE` matches `sdk|edges|extractor_v2`, the sibling pattern
 # matches `projection/__init__|entities`), so putting a key here would imply the
-# only, so putting a key here would imply the sweep proper reads it when it
-# cannot. These are read by `test_the_bare_continuation_cites_name_what_they_say`
+# sweep proper reads it when it cannot. These are read by `test_the_bare_continuation_cites_name_what_they_say`
 # instead, by phrase — the same mechanism the bare `:NNNN` continuations need.
 _BUNDLE_TOOL_SOURCES = {
     "capstone_verdict_check": _REPO / "tools/capstone_verdict_check.py",
