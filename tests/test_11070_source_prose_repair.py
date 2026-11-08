@@ -3007,10 +3007,17 @@ def test_a_NUMBER_and_an_ACCENTED_word_are_probes_a_STOPWORD_is_not():
     """
     from tortoise.session_source_prose_migration import probe_phrase_rejection
 
-    for accepted in ("4820", "2024", "résumé", "café"):
+    # ⛔ EVERY ACCENTED TOKEN WHOSE ASCII FRAGMENTS ARE ALL TOO SHORT (#11536
+    # review round 11, P2): `año`/`uña`/`eñe` tokenise to ZERO ASCII terms, so the
+    # term-count guard refused them with "the FTS read OR-joins multi-term input"
+    # while `build_or_query('año')` returns `'año'` and the index holds it. The
+    # rule is now decided by what the read will SEND (one unicode run), with
+    # stopwords refused by name instead.
+    for accepted in ("4820", "2024", "résumé", "café", "año", "uña", "eñe",
+                     "Fridays."):
         assert probe_phrase_rejection(accepted) is None, (
             f"{accepted!r} was refused — the read sends it as ONE indexed term")
-    for refused in ("the", "naïve", "zx-99", "friday,"):
+    for refused in ("the", "of", "and", "naïve", "zx-99", "friday,"):
         assert probe_phrase_rejection(refused), (
             f"{refused!r} was accepted — the read does not send it as one term")
 
@@ -5248,6 +5255,50 @@ def test_a_TRUNCATED_BEFORE_read_cannot_certify(monkeypatch, capsys):
                               "urls": ["session:s-post"],
                               "residue": ["session:s-post"]}]}
     assert _cli._merge_probe(hit_before, after)["certifies"] is True
+
+
+def test_the_before_truncated_refusal_names_the_TRUNCATED_probe(capsys):
+    """#11536 review round 11, P2: it read `probes[0]` and asserted the control.
+
+    (1) FAILS on the round-10 tree on two counts. The `before-truncated` veto
+        fires on ANY truncated BEFORE row, but the refusal printed
+        `probes[0]`'s hit count as "the read's limit" — MEASURED with `alpha`
+        (3 hits, fine) beside `beta` (50 = the limit), it printed "(3 hit(s) is
+        the read's limit)", a count that is neither the limit nor the probe the
+        veto was about. And because this arm sits ABOVE `control_ok and not
+        wrote` in the ladder, an `unavailable` control still got "the control
+        answered", which the run had not established.
+    (2) REACHABLE: a multi-probe run is the documented shape, and a control read
+        can fail on the same circuit breaker the leg already separates.
+    (3) POLARITY THAT MUST NOT GO RED: a single truncated probe with a live
+        control still gets the "control answered / RARER token" wording pinned by
+        `test_a_FILLED_before_window_does_not_certify_as_a_BEFORE_zero`.
+    """
+    def _row(phrase, before_hits, truncated):
+        return {"phrase": phrase, "hits": 0, "urls": [], "unresolved": 0,
+                "truncated": False, "ran": True, "degraded": False,
+                "reason": None, "residue": [], "lexicon": [], "stale": [],
+                "foreign": [], "unexplained": [], "unread": [],
+                "before": {"hits": before_hits, "truncated": truncated,
+                           "ran": True, "degraded": False}}
+
+    fts = {"ran": True, "entity_type": "source", "limit": 50,
+           "probes": [_row("alpha", 3, False), _row("beta", 50, True)],
+           "leaked": [], "stale": [], "stem_only": [], "unmeasurable": [],
+           "truncated": [], "unresolved": 0, "certifies": False,
+           "vetoed": "before-truncated",
+           "control": {"mode": "unavailable", "ok": False, "hits": None,
+                       "note": "the control's lexicon read FAILED"}}
+    _cli._report_fts(fts)
+    err = capsys.readouterr().err
+    assert "'beta'" in err and "50 hit(s)" in err, (
+        "the refusal did not name the TRUNCATED probe and its own count: " + err)
+    assert "'alpha'" not in err, (
+        "the refusal named a probe whose window did not fill: " + err)
+    assert "the control answered" not in err, (
+        "the refusal asserted the control answered while it was UNAVAILABLE: "
+        + err)
+    assert "did NOT corroborate it either" in err
 
 
 def test_an_EMPTY_probe_set_cannot_certify(monkeypatch, capsys):

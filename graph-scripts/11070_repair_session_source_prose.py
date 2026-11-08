@@ -695,12 +695,29 @@ def _report_fts(fts: dict, census_after: int | None = None) -> None:
         # stdout — and it told the operator to run `--repair --probe-phrase`,
         # which is the command they had just run. The verdict was fail-closed
         # but the diagnosis was false in every clause.
-        print(f"✗ the BEFORE reading's window FILLED "
-              f"({(fts['probes'][0].get('before') or {}).get('hits')} hit(s) is "
-              f"the read's limit), so that leg's residue count is a FLOOR: it "
-              f"did NOT establish that the token matched no pre-fix node, and "
-              f"residue could be sitting past the edge. This is NOT an "
-              f"uncorroborated zero — the control answered — so the fix is a "
+        # ⛔ NAME THE PROBES THE VETO IS ABOUT (#11536 review round 11, P2): the
+        # veto fires on ANY truncated BEFORE row, so printing `probes[0]` reported
+        # another probe's count as "the read's limit" (measured: `alpha` 3 hits
+        # beside `beta` 50 = the limit). And the control clause is BRANCHED,
+        # because this arm sits above `control_ok and not wrote` in the ladder —
+        # an `unavailable` control still reached it, where "the control answered"
+        # was a fact the run had not established.
+        _truncated = [p for p in fts["probes"]
+                      if _before_leg_kind(p) == "truncated"]
+        _named = ", ".join(
+            f"{p['phrase']!r} ({(p.get('before') or {}).get('hits')} hit(s))"
+            for p in _truncated) or "no probe"
+        _control_note = (
+            "the control answered" if (fts.get("control") or {}).get("ok")
+            else "the control did NOT corroborate it either")
+        _limit = fts.get("limit")
+        _limit_note = (f"{_limit} hits is the read's limit"
+                       if _limit is not None else "the read's limit")
+        print(f"✗ the BEFORE reading's window FILLED for {_named} "
+              f"({_limit_note}), so that leg's residue "
+              f"count is a FLOOR: it did NOT establish that the token matched no "
+              f"pre-fix node, and residue could be sitting past the edge. This "
+              f"is not a repair failure — {_control_note} — so the fix is a "
               f"RARER token, not another run. Re-run with a token that appears "
               f"only in the removed sentence.", file=sys.stderr)
     elif fts["vetoed"] == "truncated":
@@ -785,10 +802,16 @@ def _report_fts(fts: dict, census_after: int | None = None) -> None:
                     "UNPROVEN rather than proven silent — fix that read (the "
                     "index, or the circuit breaker) and re-measure")
             elif control_state.get("hits") == 0:
+                # ⛔ NOT "a post-fix lexicon node" (#11536 review round 11, P2):
+                # this arm is reachable only from a control window selected on the
+                # DISPLAY PREFIX, which the module's own round-10 correction says
+                # does not establish that the indexed text IS the lexicon — a
+                # prefix `summary` over a still-prose `_searchText` satisfies it.
                 causes.append(
-                    "a post-fix lexicon node EXISTS on this graph but its own "
-                    "token was NOT findable, so the Source FTS index did not "
-                    "answer for a token that is present in it")
+                    "a Source whose `summary` carries the display prefix EXISTS "
+                    "on this graph but its own token was NOT findable, so the "
+                    "Source FTS index did not answer for a token that is present "
+                    "in it")
             else:
                 causes.append("the control did not corroborate the zero")
         elif mode == "unavailable":

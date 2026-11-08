@@ -1409,14 +1409,33 @@ def probe_phrase_rejection(phrase: str) -> str | None:
         return None
     # Lazy: `sparse` pulls the tokenizer + identifier machinery, and this module
     # is imported by every whole-journal replay engine's trailing sweep.
-    from tortoise.sparse import build_or_query, tokenize_sparse_query
+    from tortoise.sparse import SPARSE_STOPWORDS, build_or_query, tokenize_sparse_query
 
-    tokens = tokenize_sparse_query(token)
-    if len(tokens) != 1:
-        return (f"it tokenises to {len(tokens)} term(s) {tokens!r}; the FTS read "
-                f"OR-joins multi-term input, so the probe would match on any "
-                f"one of them — pass a SINGLE RARE token that appears only in "
-                f"the pre-fix prose (a stopword-only phrase is not a probe)")
+    # ⛔ ONE-TOKEN-NESS IS DECIDED BY WHAT THE READ WILL SEND (#11536 review
+    # rounds 8, 9 and 11). The ASCII query tokeniser drops stopwords,
+    # sub-2-character and all-digit fragments, and it splits an accented word into
+    # ASCII pieces — so its TERM COUNT is not the read's. Three measured FALSE
+    # BLOCKS came from treating it as one: ``4820`` (round 8), ``résumé`` (round 8)
+    # and ``año``/``uña``/``eñe`` (round 11), each of which
+    # ``build_or_query`` sends as ONE raw term that the index holds. A token that
+    # is a SINGLE unicode run is therefore one term to the read unless a backstop
+    # BELOW refuses it, so it skips the term count; what must NOT be accepted that
+    # way is a SEARCH STOPWORD, which is refused by NAME instead — ``the``/``of``
+    # are common words, so they match almost every node and can evidence nothing.
+    single_run = len(runs) == 1
+    if (single_run and token.lower() == runs[0]
+            and token.lower() in SPARSE_STOPWORDS):
+        return ("it is a search stopword; a probe must be a RARE token that "
+                "appears only in the pre-fix prose")
+
+    if not single_run:
+        tokens = tokenize_sparse_query(token)
+        if len(tokens) != 1:
+            return (f"it tokenises to {len(tokens)} term(s) {tokens!r}; the FTS "
+                    f"read OR-joins multi-term input, so the probe would match on "
+                    f"any one of them — pass a SINGLE RARE token that appears "
+                    f"only in the pre-fix prose (a stopword-only phrase is not a "
+                    f"probe)")
     # ⛔ AFTER the term count, because a phrase that tokenises to SEVERAL terms
     # already has the more specific (OR-join) refusal above — and this one is a
     # DIFFERENT failure that the term count is structurally blind to.
@@ -1469,9 +1488,9 @@ def probe_phrase_rejection(phrase: str) -> str | None:
                 f"absent — pass the bare word, without punctuation")
     built = build_or_query(token)
     if len(built.split("|")) != 1:
-        return (f"the identifier mechanism expands it into several terms "
-                f"({built!r}); pass the plain token without an identifier shape "
-                f"(no digit/dash runs)")
+        return (f"the read expands it into several terms ({built!r}) — either "
+                f"the identifier mechanism (a digit/dash run) or the ASCII "
+                f"tokeniser splitting an accented word; pass the plain token")
     return None
 
 
