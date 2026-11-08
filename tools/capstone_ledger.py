@@ -2281,16 +2281,20 @@ def _tracked_unprovable(probe: subprocess.CompletedProcess[str] | None = None) -
         )
         return True
     if probe is not None and probe.returncode != 0:
-        # git RAN and exited non-zero: there is no repository to ask about. Name THAT,
-        # not a bare absence the probe disproves — while still saying why the rule
-        # cannot run, which is what the reader needs.
+        # git RAN and did not answer `true`. ⛔ NAME THE MEASUREMENT, NOT AN
+        # INFERENCE FROM IT: a non-zero exit does NOT mean "there is no repository
+        # to ask" — `fatal: detected dubious ownership in repository at '<path>'`
+        # exits 128 IN a repository that plainly exists, and saying otherwise quotes
+        # git naming the repository while claiming there is none (#11474 review).
+        # git's own first stderr line is what distinguishes the tarball from the
+        # refusal, so it is carried verbatim rather than summarised.
         first_line = (probe.stderr or "").strip().splitlines()
         detail = f": {first_line[0]}" if first_line else ""
         print(
-            "CAPSTONE-LEDGER: NOTE — git is present but there is no repository to ask "
-            f"(`rev-parse --is-inside-work-tree` exited {probe.returncode}{detail}), so "
-            "git is unavailable here FOR THIS RULE: the TRACKED rule cannot be "
-            "evaluated, and cited paths were checked for existence only",
+            "CAPSTONE-LEDGER: NOTE — git is present but `rev-parse "
+            f"--is-inside-work-tree` did not answer `true` (exited {probe.returncode}"
+            f"{detail}), so the TRACKED rule cannot be evaluated here; cited paths "
+            "were checked for existence only",
             file=sys.stderr,
         )
         return True

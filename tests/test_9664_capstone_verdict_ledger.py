@@ -5062,11 +5062,20 @@ def test_a_probe_that_did_NOT_answer_false_states_the_OTHER_cause(capsys):
         returncode=128, stdout="", stderr="fatal: not a git repository"
     )
 
-    # (1) git could NOT answer: the cause is git's absence, not a measured `false`.
+    # (1) git could NOT answer: the cause is what the PROBE measured, not a `false`
+    # answer and not an inference ("no repository") the exit code does not support —
+    # `fatal: detected dubious ownership in repository at '<path>'` is also rc 128, in
+    # a repository that exists.
     assert cl._tracked_unprovable(could_not_answer) is True
     err = capsys.readouterr().err
-    assert "git is unavailable here" in err, (
-        f"rc 128 is git failing to answer, so the NOTE must say git is unavailable: {err}"
+    assert "did not answer `true`" in err, (
+        f"rc 128 is git failing to answer, and the NOTE must say that: {err}"
+    )
+    assert "exited 128" in err, (
+        f"the NOTE must name the measurement it took — the exit code: {err}"
+    )
+    assert "not a git repository" in err, (
+        f"git's own first stderr line is carried verbatim: {err}"
     )
     assert "git is present and says this is not a work tree" not in err, (
         "git exited 128 — it did NOT answer `false`, so that cause was never measured "
@@ -5140,15 +5149,87 @@ def test_a_TARBALL_on_a_box_WITH_git_does_not_claim_git_is_unavailable(
     # The abstention VERDICT is #11503 Option 1 and is unchanged: this path still counts.
     assert cl._is_tracked(tarball / "held.txt", tarball) is True
     err = capsys.readouterr().err
-    assert "git is present but there is no repository to ask" in err, (
-        "git ran and exited 128 — the NOTE must say it is PRESENT and that the missing "
-        f"thing is the repository, and quote what git said: {err}"
+    assert "did not answer `true`" in err, (
+        "git ran and exited 128 — the NOTE must say what the PROBE measured, not infer "
+        f"'no repository' from a non-zero exit: {err}"
     )
-    assert "not a git repository" in err or "exited 128" in err, (
-        f"the note must name the measurement it took (rc/stderr), not just a verdict: {err}"
+    assert "exited 128" in err, (
+        f"the note must name the measurement it took (the exit code), not just a verdict: {err}"
+    )
+    assert "not a git repository" in err, (
+        "git's own words are what separates a tarball from a repository git REFUSED, "
+        f"so they are carried verbatim: {err}"
     )
     assert "not TRACKED" not in err, (
         f"nothing was measured about this path, so no line may claim a git answer: {err}"
+    )
+
+
+def test_a_repository_git_REFUSES_is_not_reported_as_a_MISSING_repository(tmp_path, monkeypatch, capsys):
+    """A non-zero `rev-parse` is a MEASUREMENT, not the inference "no repository".
+
+    ⛔ THE CAUSE THE INFERENCE GOT WRONG (#11474 review). The renderer read every
+    non-zero `rev-parse --is-inside-work-tree` exit as "there is no repository to ask"
+    — and real git produces that exit IN a repository that exists: `GIT_TEST_ASSUME_
+    DIFFERENT_OWNER=1` makes it print `fatal: detected dubious ownership in repository
+    at '<path>'` and exit **128**. The shipped line therefore claimed no repository
+    while quoting git naming one, which is the guess-the-cause defect this PR removes,
+    on the renderer that was added to remove it.
+
+    The environment hook is git's own (it is how git's test suite simulates a checkout
+    owned by another user); a real ownership change needs root, so this is the
+    hermetic route to the same code path. Set it only AFTER the fixture is built.
+    """
+    import shutil as _shutil
+    import subprocess as _subprocess
+
+    assert _shutil.which("git"), "this pin needs a box WITH git"
+
+    repo = tmp_path / "refused"
+    repo.mkdir()
+    (repo / "held.txt").write_text("held\n", encoding="utf-8")
+    _subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
+
+    # CONTROL: on the same repo, git answers normally. Without this a broken fixture
+    # would look like the refused shape and the pin would pass for the wrong reason.
+    control = _subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "--is-inside-work-tree"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert (control.returncode, control.stdout.strip()) == (0, "true"), control
+
+    monkeypatch.setenv("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
+    refused = _subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "--is-inside-work-tree"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert refused.returncode == 128, (
+        "this pin needs git to REFUSE the repository (rc 128), not: "
+        f"rc={refused.returncode} {refused.stderr}"
+    )
+    assert "dubious ownership" in refused.stderr, refused.stderr
+    # The repository is right there — that is what makes "no repository" a false cause.
+    assert (repo / ".git").is_dir(), (
+        "if the repository were absent this test would be the tarball case over again"
+    )
+
+    # The verdict is the recorded #11503 abstention and is unchanged; only the CAUSE is
+    # at issue here.
+    assert cl._is_tracked(repo / "held.txt", repo) is True
+    err = capsys.readouterr().err
+    assert "exited 128" in err, (
+        f"the note must name the exit code it measured: {err}"
+    )
+    assert "dubious ownership" in err, (
+        f"git's own words must reach the reader, or the cause is guessable only: {err}"
+    )
+    assert "no repository" not in err, (
+        "git named the repository in its own message, so a line claiming there is none "
+        f"is a cause nobody measured — the defect this PR removes: {err}"
     )
 
 
