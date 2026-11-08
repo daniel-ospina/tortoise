@@ -265,10 +265,13 @@ def _merge_probe(before: dict | None, after: dict, *,
     elif unclassified or out.get("unresolved"):
         out["certifies"], out["vetoed"] = False, "unclassified"
     elif out.get("unexplained"):
-        # ⛔ ITS OWN VETO (#11536 review round 2, P1): the hit came back from a
-        # node that PROVES the post-fix lexicon, so the benign bucket was never
-        # earned — the probe token matches none of that node's own lexicon
-        # tokens, which is what a survived PRE-FIX index entry looks like.
+        # ⛔ ITS OWN VETO (#11536 review round 2, P1; route 2 named in round 4):
+        # the hit came back from a node that PROVES the post-fix lexicon, so the
+        # benign bucket was never earned — the probe token matches none of that
+        # node's own lexicon tokens, which is what a survived PRE-FIX index entry
+        # looks like. ⛔ OR a url whose several `:Source` nodes DISAGREE about what
+        # they carry (a repaired twin beside one that is not) — see
+        # `classify_fts_hits`, which labels each node and refuses to pick one.
         out["certifies"], out["vetoed"] = False, "unexplained"
     elif discriminating:
         out["certifies"], out["vetoed"] = True, None
@@ -306,7 +309,7 @@ def _report_fts(fts: dict) -> None:
             # ⚠️ The claim is limited to what was PROVED (#11536 review round 2):
             # the node's pair AND the token's relation to its own lexicon tokens.
             # "The index stems" is not asserted from a token nothing related.
-            print(f"            (stem collision — {len(probe['lexicon'])} hit(s) on "
+            print(f"            (stem collision — {len(probe['lexicon'])} url(s) on "
                   f"nodes whose `_searchText` IS the post-fix lexicon and whose "
                   f"own tokens account for the probe)")
         if probe.get("unexplained"):
@@ -315,21 +318,21 @@ def _report_fts(fts: dict) -> None:
             # too, and there the "node whose own tokens do not account for the
             # probe" reading is false — the proven node's tokens DO account for
             # it; only its url-mate disagreed. The message must not pick one.
-            print(f"            ⛔ {len(probe['unexplained'])} hit(s) that are NOT "
+            print(f"            ⛔ {len(probe['unexplained'])} url(s) that are NOT "
                   f"provably a stem collision: a node that carries the post-fix "
                   f"lexicon but whose OWN tokens do not account for the probe "
                   f"token (a surviving pre-fix index entry, or a stem this "
                   f"check cannot fold), or ONE url whose several nodes "
                   f"disagree about what they carry")
         if probe.get("stale"):
-            print(f"            ⛔ {len(probe['stale'])} hit(s) on an episodic session "
+            print(f"            ⛔ {len(probe['stale'])} url(s) on an episodic session "
                   f"`:Source` that carries NO text at all — a STALE index entry")
         if probe.get("foreign"):
-            print(f"            ({len(probe['foreign'])} hit(s) on Sources outside "
+            print(f"            ({len(probe['foreign'])} url(s) on Sources outside "
                   f"this population, whose own `_searchText` legitimately "
                   f"matched)")
         if probe.get("unread"):
-            print(f"            ⚠️ {len(probe['unread'])} hit(s) could not be "
+            print(f"            ⚠️ {len(probe['unread'])} url(s) could not be "
                   f"classified, so they are not evidence either way")
     control = fts.get("control")
     if control is not None:

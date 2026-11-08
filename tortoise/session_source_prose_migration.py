@@ -1741,10 +1741,15 @@ def probe_fts(g, phrases, *, control: bool = True,
                     # over-claim, one order smaller, that the round-3 rewording
                     # removed (#11536 review round 3). The query is ORDERed so
                     # the window is the same one on every run.
-                    "note": "no usable control TOKEN was found among the "
-                            f"{_CONTROL_LEXICON_WINDOW} post-fix lexicon row(s) "
-                            "the control read returned (none whose tokens are "
-                            "valid single-token probes), and the Source index "
+                    # ⛔ "the window it READS", not "the rows it RETURNED": the
+                    # read may return fewer than the window (a small graph), so
+                    # naming the window as a returned count was the same
+                    # over-claim one order smaller (#11536 review round 4).
+                    "note": "no usable control TOKEN was found within the "
+                            f"{_CONTROL_LEXICON_WINDOW}-row window the control "
+                            "reads (no post-fix lexicon row in it, or none whose "
+                            "tokens are valid single-token probes), and the "
+                            "Source index "
                             "DOES hold entries — so its silence on the probe "
                             "cannot be corroborated (the index is answering, "
                             "but nothing here proves it would answer for a "

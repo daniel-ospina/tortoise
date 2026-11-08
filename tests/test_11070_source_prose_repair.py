@@ -3586,7 +3586,7 @@ def test_TWO_nodes_at_ONE_url_are_BOTH_classified_so_a_prose_twin_cannot_certify
     (1) FAILS on the shipped classifier: ``classify_fts_hits`` folded the hit
         rows into ``props_by_url[url] = props``, so ONE url carrying TWO
         ``:Source`` nodes kept whichever node the engine returned LAST. Here the
-        last row is a REPAIRED twin and the other is a prose-carrying one, so the
+        last row is a REPAIRED twin and the first is a prose-carrying one, so the
         url was classified entirely from the repaired node, the prose node was
         never examined, and ``_merge_probe`` certified while the FTS read that
         produced the rows returned the prose node too — the sentence was still
@@ -3614,10 +3614,15 @@ def test_TWO_nodes_at_ONE_url_are_BOTH_classified_so_a_prose_twin_cannot_certify
     prose_twin = _session_node(url="session:dup", sessionId="dup",
                                summary=PROSE, _searchText=PROSE)
     repaired_twin = _post_fix_node(url="session:dup", sessionId="dup")
-    graph = _RecordingGraph([(repaired_twin,), (prose_twin,)])
+    # ⛔ ORDER IS THE WHOLE TEST (#11536 review round 4, blocking): the pre-fix
+    # fold was `props_by_url[url] = props`, which keeps the LAST row. So the
+    # REPAIRED twin must come LAST for that fold to read the url as benign — with
+    # the prose twin last, the old fold yields `residue` on its own and this row
+    # would pass on the very code it exists to red.
+    graph = _RecordingGraph([(prose_twin,), (repaired_twin,)])
+
     # `friday` is a token BOTH twins carry: the repaired one as lexicon, the
-    # prose one as prose. The REPAIRED twin is FIRST, so it is the one the
-    # pre-fix `props_by_url[url] = props` fold kept — which is the whole bug.
+    # prose one as prose.
     _install_fts(monkeypatch, {"friday": [("session:dup", 1.0),
                                          ("session:dup", 2.0)]})
 
@@ -3774,9 +3779,13 @@ def test_the_control_walks_PAST_a_lexicon_node_whose_tokens_are_ALL_unusable(
     # (#11536 review round 3, note): an unordered `LIMIT` makes the control's
     # availability non-deterministic between two runs over an unchanged graph, and
     # "no usable token" over a window is not a statement about the whole graph.
-    assert "ORDER BY" in m._CONTROL_LEXICON_ROWS, (
-        "the control's window is unordered, so its verdict can differ between "
-        "runs over an unchanged graph")
+    assert "ORDER BY s.url, id(s)" in m._CONTROL_LEXICON_ROWS, (
+        "the control's window is not TOTALLY ordered: a url with two `:Source` "
+        "nodes (no uniqueness on `url`) is a tie, and a tie leaves the window "
+        "free to differ between two runs over an unchanged graph")
+    assert f"LIMIT {m._CONTROL_LEXICON_WINDOW}" in m._CONTROL_LEXICON_ROWS, (
+        "the query's LIMIT is not the constant the note names, so the two can "
+        "drift and the note would state a window the read did not use")
 
     class _Busy(_StoppardThenReal):
         """A graph the index DOES hold entries for, with NO usable control row."""
@@ -3792,7 +3801,7 @@ def test_the_control_walks_PAST_a_lexicon_node_whose_tokens_are_ALL_unusable(
     report = m.probe_fts(_Busy(), ["zebraquux"], control=True)
     assert report["control"]["mode"] == "unavailable"
     note = report["control"]["note"]
-    assert "post-fix lexicon row(s) the control read returned" in note, (
+    assert "window the control reads" in note, (
         f"the note claims a universal about a bounded read: {note}")
     assert str(m._CONTROL_LEXICON_WINDOW) in note, (
         f"the note does not name the window it read: {note}")
