@@ -2780,6 +2780,82 @@ def test_a_PREFIXED_summary_over_a_still_PROSE_index_VETOES(monkeypatch):
     assert m._hit_node_bucket(_repaired_from_record_node(), "fridays") == "lexicon"
 
 
+def test_an_INFLECTED_prose_token_is_not_absorbed_by_the_display_pair(monkeypatch):
+    """#11536 review round 6, P1: the subset check must compare RAW tokens.
+
+    (1) FAILS on the round-5 draft, which folded both sides through `_stem_key`:
+        an index still holding the PROSE `planned` was "explained" by a display
+        pair carrying `planning`, so the node was bucketed `lexicon` — the bucket
+        that never vetoes — and `_merge_probe` certified. MEASURED on that shape
+        before the fix: `_indexed_text_within_the_displayed_pair` -> True,
+        `_hit_node_bucket` -> `lexicon`. The census is structurally blind to it
+        (the `summary` is prefixed), so this guard was the only defence.
+    (2) REACHABLE: any half-applied repair whose re-derived lexicon shares a stem
+        with the prose it replaced — `planning`/`planned`, `rebuild`/`rebuilt`.
+    (3) POLARITY THAT MUST NOT GO RED: stemming is still the correct fold where a
+        PROBE token is related to a lexicon token, and every HEALTHY pair still
+        proves a subset because both sides derive from the same
+        `", ".join(topics)` string.
+    """
+    from tortoise import session_source_prose_migration as m
+
+    leak = _prefix_over_prose_node(
+        summary=SESSION_SOURCE_SUMMARY_PREFIX + ", ".join(
+            ["planning", "migration"]),
+        _searchText="planned migration")
+    assert not m.carries_pre_lexicon_prose(leak), (
+        "the fixture must reach the prefix arm, not be caught as residue")
+    assert not m._indexed_text_within_the_displayed_pair(leak), (
+        "`planned` is not a token of the displayed pair — a stem fold must not "
+        "let the prose index read as the display")
+    assert m._hit_node_bucket(leak, "planned") == "unexplained"
+
+    _install_fts(monkeypatch, {"planned": [("session:s-11070", 1.0)]})
+    report = m.probe_fts(_RecordingGraph([(leak,)]), ["planned"], control=False)
+    assert report["probes"][0]["lexicon"] == []
+    assert report["probes"][0]["unexplained"] == ["session:s-11070"]
+    folded = _cli._merge_probe(
+        {"ran": True, "probes": [{"phrase": "planned", "hits": 1,
+                                   "residue": []}]},
+        dict(report, control={"mode": "probe", "ok": True, "hits": 1}))
+    assert folded["certifies"] is False and folded["vetoed"] == "unexplained"
+
+    # (3) the healthy pairs still prove containment, so nothing is falsely vetoed.
+    for healthy in (_post_fix_node(), _repaired_from_record_node()):
+        assert m._indexed_text_within_the_displayed_pair(healthy)
+
+
+def test_an_IDENTIFIER_SHAPED_token_is_refused_WHATEVER_the_switch_says(
+        monkeypatch):
+    """#11536 review round 6, P2: the one-token guarantee must not depend on a switch.
+
+    (1) FAILS on the round-5 tree: the `build_or_query` backstop fires only while
+        the identifier mechanism is ON, so with the documented outage lever
+        `TORTOISE_IDENTIFIER_TOKENS=0` MEASURED `probe_phrase_rejection('zx-99')`
+        returned None — ACCEPTED — and the read sent `zx\\-99`, one term with no
+        `|`. RediSearch splits the INDEX on non-alphanumerics, so that escaped
+        literal does not address the terms actually indexed: the same UNDER-match
+        class as the whitespace guard, on a run that can certify with no BEFORE
+        reading.
+    (2) REACHABLE: the switch is a supported operator lever, not a mutation.
+    (3) POLARITY THAT MUST NOT GO RED: a single-run token with trailing
+        punctuation (`Fridays.`) is still ONE indexed term and stays accepted.
+    """
+    from tortoise.session_source_prose_migration import probe_phrase_rejection
+
+    for switch in ("1", "0"):
+        monkeypatch.setenv("TORTOISE_IDENTIFIER_TOKENS", switch)
+        for phrase in ("zx-99", "ERR-4032", "abc_def"):
+            assert probe_phrase_rejection(phrase), (
+                f"{phrase!r} was accepted with TORTOISE_IDENTIFIER_TOKENS={switch}: "
+                f"the index splits it into several terms, so the probe "
+                f"UNDER-matches")
+        # the controls: one alphanumeric run is still exactly one token.
+        assert probe_phrase_rejection("zebraquux") is None
+        assert probe_phrase_rejection("Fridays.") is None, (
+            "a single token with trailing punctuation is ONE indexed term")
+
+
 def test_a_hit_on_a_PRE_FIX_node_IS_a_leak(monkeypatch):
     """The other polarity, and it is the one that must RED.
 

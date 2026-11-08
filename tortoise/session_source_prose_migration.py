@@ -117,6 +117,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from collections.abc import Callable, Mapping
 from typing import Any
 
@@ -1155,9 +1156,13 @@ def reconcile_after_replay(projection, *, engine: str,
 # descriptor the post-#10852 writer produces. A leg that called that a leak would
 # report a CORRECT repair as unfinished, and the way an operator silences it is
 # by clearing the lexicon — the #3518 descriptor. So every hit is CLASSIFIED
-# against the module's own predicate: a hit whose node still carries
+# against the module's own predicates: a hit whose node still carries
 # pre-lexicon prose is RESIDUE (a real leak); a hit whose node carries the
-# prefix is a stem collision, reported separately and never as a failure.
+# prefix is a stem collision ONLY when the text the index is declared on adds no
+# token the displayed pair lacks AND the probe token relates to one of the
+# node's own lexicon tokens — otherwise it is UNEXPLAINED, which vetoes and exits
+# 1. ``lexicon`` is the one bucket that never fails a run, so it is EARNED three
+# times over (#11536 review rounds 2 and 5), not assumed from the prefix.
 #
 # ⛔ AND A ZERO FROM A DEAD INSTRUMENT IS NOT A ZERO. Three ways the leg can read
 # ``0`` while measuring nothing:
@@ -1336,6 +1341,21 @@ def probe_phrase_rejection(phrase: str) -> str | None:
                 f"UNDER-matches and a still-findable sentence reads as absent "
                 f"(its extra word(s) drop out of the term count, so that check "
                 f"above cannot catch this) — pass a SINGLE RARE token")
+    # ⛔ BY SHAPE, so the guarantee does not depend on a switch (#11536 review
+    # round 6, P2). The `build_or_query` backstop below fires only while the
+    # identifier mechanism is ON: with ``TORTOISE_IDENTIFIER_TOKENS=0`` (a
+    # documented outage lever) MEASURED ``probe_phrase_rejection('zx-99')``
+    # returned None and the read sent ``zx\-99`` — one term, no ``|`` — while
+    # RediSearch splits the INDEX on non-alphanumerics, so the escaped literal
+    # does not address the terms that are actually indexed. Same UNDER-match
+    # class as the whitespace guard above: a token with more than one alphanumeric
+    # run cannot be ONE indexed term, whatever the switch says.
+    runs = [part for part in re.split(r"[^a-z0-9]+", token.lower()) if part]
+    if len(runs) > 1:
+        return (f"it splits into {len(runs)} alphanumeric runs {runs!r}; the "
+                f"FTS index splits on every non-alphanumeric character, so "
+                f"this cannot address ONE indexed term — pass a SINGLE RARE "
+                f"token (no digits, dashes or punctuation inside it)")
     built = build_or_query(token)
     if len(built.split("|")) != 1:
         return (f"the identifier mechanism expands it into several terms "
@@ -1484,6 +1504,18 @@ def _indexed_text_within_the_displayed_pair(
     Polarity: fail-CLOSED. A pair this cannot read is not proven, and the caller
     vetoes it as ``unexplained``: a false veto is re-measured, a false
     certification is the leak.
+
+    ⛔ RAW TOKENS, NOT STEMS (#11536 review round 6, P1). An earlier draft folded
+    both sides through :func:`_stem_key`, and that is a HOLE rather than a
+    tolerance: an index still holding ``planned`` reads as "explained" by a
+    display pair carrying ``planning``, and MEASURED on that shape the bucket was
+    ``lexicon`` — a prose index certified as a collision. Stemming is the right
+    fold for relating a PROBE token to a lexicon token
+    (:func:`_probe_explains_the_lexicon`), because there the index's own stemming
+    is what answered the query. It is the WRONG fold here, where the question is
+    whether the indexed text IS the displayed text: every healthy pair derives
+    both from the same ``", ".join(topics)`` string, so raw tokens are a subset on
+    a healthy node — and an inflected prose word is exactly the extra.
     """
     search_text = props.get(_SEARCH_TEXT)
     if not isinstance(search_text, str) or not search_text.strip():
@@ -1495,10 +1527,10 @@ def _indexed_text_within_the_displayed_pair(
         return False
     from tortoise.sparse import tokenize_sparse_query  # lazy (see module docs)
 
-    indexed = {_stem_key(token) for token in tokenize_sparse_query(
-        search_text, space_separated_identifiers=False)}
-    displayed = {_stem_key(token) for token in tokenize_sparse_query(
-        summary, space_separated_identifiers=False)}
+    indexed = set(tokenize_sparse_query(
+        search_text, space_separated_identifiers=False))
+    displayed = set(tokenize_sparse_query(
+        summary, space_separated_identifiers=False))
     return bool(displayed) and indexed <= displayed
 
 
