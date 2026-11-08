@@ -1181,6 +1181,13 @@ _FTS_PROBE_LIMIT = 50
 #: The SAME columns as :data:`_SOURCE_ROWS` (so :func:`_row_props` decodes both),
 #: filtered to the urls the FTS read returned — one read for the whole hit set,
 #: so the classifier costs one query per probe, not one per hit.
+#:
+#: ⛔ ONE ROW PER MATCHING NODE, NOT PER DISTINCT URL (#11536 review round 3).
+#: `:Source` declares no uniqueness on `url` (see :func:`find_session_sources_carrying_prose`),
+#: so ONE url can carry TWO nodes — a pre-fix prose twin and a repaired one — and
+#: the FTS index answers for BOTH. Folding these rows into a url-keyed map keeps
+#: whichever row the engine returned last, which is exactly how a prose twin gets
+#: classified as a healthy lexicon node and certified over.
 _HITS_ROWS = (
     "MATCH (s:Source) "
     "WHERE s.url IN $urls "
@@ -1188,16 +1195,22 @@ _HITS_ROWS = (
     "       s.sessionId, s.turn_max_index, id(s)"
 )
 
-#: One post-fix lexicon node's ``_searchText``, for the positive control. Read by
-#: the WITNESS (the ``summary`` prefix), which is the same discriminator
+#: A FEW post-fix lexicon nodes' ``_searchText``, for the positive control. Read
+#: by the WITNESS (the ``summary`` prefix), which is the same discriminator
 #: :func:`carries_pre_lexicon_prose` uses — so the control queries a node the
 #: lexicon writer produced, not one this repair left behind.
+#:
+#: ⛔ A WINDOW, NOT ``LIMIT 1`` (#11536 review round 3): the lexicon is
+#: word-frequency derived (``Counter.most_common``), so the first node's tokens
+#: can all be ordinary words that :func:`probe_phrase_rejection` refuses as probe
+#: tokens — and one unusable node was reported as "no POST-fix lexicon node", a
+#: false statement about the graph that pointed the operator at ``--no-fts-probe``.
 _CONTROL_LEXICON_ROWS = (
     "MATCH (s:Source) "
     "WHERE s.summary STARTS WITH $prefix "
     "AND s._searchText IS NOT NULL "
     "AND s.documentKind IS NULL "
-    "RETURN s._searchText LIMIT 1"
+    "RETURN s._searchText LIMIT 8"
 )
 
 #: The SECOND control: does the index's field hold ANY entry at all, over the
@@ -1455,8 +1468,26 @@ def classify_fts_hits(g, urls, *, phrase: str | None = None,
     be a stale-index leak, because what matched is the index entry the update was
     supposed to remove. ``unexplained`` is that shape — neither provably the
     prose nor provably a stem collision — and it vetoes.
+
+    ⛔ ONE URL CAN CARRY SEVERAL NODES, AND EVERY ONE OF THEM IS CLASSIFIED
+    (#11536 review round 3, P1): ``:Source`` declares no uniqueness on ``url``, and
+    this module already treats a url-mate pair as reachable — so folding the hit
+    rows into a url-keyed map kept whichever node the engine returned LAST and
+    read a url whose other node still carried the pre-fix prose as a benign stem
+    collision. The probe returned BOTH rows; the prose was still retrievable; the
+    run certified. A url is now classified from ALL of its nodes: any residue wins
+    (the leak is live, whichever twin answers), agreement is that bucket, and
+    DISAGREEMENT is ``unexplained`` — a url whose nodes cannot be labelled
+    consistently is not provably benign.
     """
-    wanted = [u for u in (urls or ()) if _addressable(u)]
+    # ⛔ DE-DUPED: the probe returns one row PER HIT, so a url with two nodes
+    # (or two index entries) arrives twice — and a bucket that lists it twice
+    # makes a count read as "two leaks" for one url. The fold is per URL, so the
+    # url is asked once (#11536 review round 3). The addressability predicate is
+    # :func:`_addressable` — the SAME one :func:`source_fts_probe` counts with, so
+    # a row cannot be "resolved" there and dropped here (that drift is how the
+    # empty-string url certified).
+    wanted = list(dict.fromkeys(u for u in (urls or ()) if _addressable(u)))
     out: dict = {"residue": [], "lexicon": [], "stale": [], "foreign": [],
                  "unexplained": [], "unread": []}
     if not wanted:
@@ -1471,27 +1502,48 @@ def classify_fts_hits(g, urls, *, phrase: str | None = None,
                      exc_info=True)
         out["unread"] = list(wanted)
         return out
-    props_by_url = {}
+    # ⛔ EVERY node at the url, not one per url (see the docstring).
+    props_by_url: dict[str, list[dict]] = {}
     for row in rows or ():
         props = _row_props(row)
         if props is not None and isinstance(props.get("url"), str):
-            props_by_url[props["url"]] = props
+            props_by_url.setdefault(props["url"], []).append(props)
     for url in wanted:
-        props = props_by_url.get(url)
-        if props is None:
+        group = props_by_url.get(url) or ()
+        if not group:
             out["unread"].append(url)
-        elif carries_pre_lexicon_prose(props):
+            continue
+        labels = [_hit_node_bucket(props, phrase) for props in group]
+        if "residue" in labels:
+            # One twin still carries the sentence: the leak is live, whichever
+            # node the engine happened to return last.
             out["residue"].append(url)
-        elif _is_proven_lexicon(props):
-            if phrase is None or _probe_explains_the_lexicon(props, phrase):
-                out["lexicon"].append(url)
-            else:
-                out["unexplained"].append(url)
-        elif is_episodic_source_node(props) and _has_no_text(props):
-            out["stale"].append(url)
+        elif len(set(labels)) == 1:
+            out[labels[0]].append(url)
         else:
-            out["foreign"].append(url)
+            # The nodes at this url disagree (say a stale twin and a proven
+            # lexicon one). Nothing proves the benign reading, and the leg's own
+            # polarity is "a false veto is re-measured; a false certification is
+            # the leak" — so it vetoes.
+            out["unexplained"].append(url)
     return out
+
+
+def _hit_node_bucket(props: dict, phrase: str | None) -> str:
+    """One hit-row's bucket — the SAME predicates the census uses.
+
+    Split out so the per-node question and the per-url fold cannot drift: the
+    fold only ever chooses between these labels, it never re-derives one.
+    """
+    if carries_pre_lexicon_prose(props):
+        return "residue"
+    if _is_proven_lexicon(props):
+        if phrase is None or _probe_explains_the_lexicon(props, phrase):
+            return "lexicon"
+        return "unexplained"
+    if is_episodic_source_node(props) and _has_no_text(props):
+        return "stale"
+    return "foreign"
 
 
 def source_index_is_empty(g, *,
@@ -1663,17 +1715,25 @@ def probe_fts(g, phrases, *, control: bool = True,
             elif empty is None:
                 report["control"] = {
                     "mode": "unavailable", "ok": False, "hits": None,
-                    "note": "no POST-fix lexicon node to control with, and the "
+                    "note": "no usable control token was found, and the "
                             "Source index-entry read FAILED — an unreadable "
                             "instrument is not an empty one"}
             else:
                 report["control"] = {
                     "mode": "unavailable", "ok": False, "hits": None,
-                    "note": "no POST-fix lexicon node to control with, and the "
-                            "Source index DOES hold entries — so its silence on "
-                            "the probe cannot be corroborated (the index is "
-                            "answering, but nothing here proves it would answer "
-                            "for a known-present token). Run the measurement on "
-                            "the writing arm (`--repair --probe-phrase …`), which "
+                    # ⛔ NOT "no POST-fix lexicon node" (#11536 review round 3):
+                    # the lexicon is word-frequency derived, so a node CAN exist
+                    # and still yield no token `probe_phrase_rejection` accepts.
+                    # The old wording asserted a fact about the graph the run had
+                    # not measured, and pointed the operator at the weaker
+                    # evidence this leg exists to stop certifying on.
+                    "note": "no usable control TOKEN was found (no post-fix "
+                            "lexicon node, or none whose tokens are valid "
+                            "single-token probes), and the Source index DOES "
+                            "hold entries — so its silence on the probe cannot "
+                            "be corroborated (the index is answering, but "
+                            "nothing here proves it would answer for a "
+                            "known-present token). Run the measurement on the "
+                            "writing arm (`--repair --probe-phrase …`), which "
                             "takes its own BEFORE reading."}
     return report

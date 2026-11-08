@@ -3573,3 +3573,172 @@ def test_an_EMPTY_Source_index_corroborates_a_CLEAR_only_graph(monkeypatch,
     report = m.probe_fts(unreadable, ["zebraquux"], control=True)
     assert report["control"]["ok"] is False
     assert "FAILED" in report["control"]["note"]
+
+
+# ── #11536 review round 3: every hit node is examined, and the skip is stated ──
+
+
+def test_TWO_nodes_at_ONE_url_are_BOTH_classified_so_a_prose_twin_cannot_certify(
+        monkeypatch):
+    """#11536 review round 3, P1 (fail-open): the url-keyed fold kept the last row.
+
+    (1) FAILS on the shipped classifier: ``classify_fts_hits`` folded the hit
+        rows into ``props_by_url[url] = props``, so ONE url carrying TWO
+        ``:Source`` nodes kept whichever node the engine returned LAST. A url
+        whose nodes are a pre-fix prose twin and a repaired one was therefore
+        classified ENTIRELY from the repaired twin, the prose twin was never
+        examined, and ``_merge_probe`` certified — while the FTS read that
+        produced the rows returned the prose node too, i.e. the sentence was
+        still retrievable. That is #11161's own failure mode reached through a
+        different door: the run certifies around a hit it did not look at.
+    (2) REACHABLE: ``:Source`` declares NO uniqueness constraint on ``url``
+        (``find_session_sources_carrying_prose`` says so and dedupes on
+        ``id(s)`` for exactly this reason, #11176), so a second writer's CREATE
+        can leave two nodes at one (label, key) — and the probe's read returns
+        BOTH rows, as it did here.
+    (3) THE OTHER POLARITY: two PROVEN lexicon twins at one url stay a stem
+        collision, so agreement is not punished.
+    """
+    from tortoise import session_source_prose_migration as m
+
+    prose_twin = _session_node(url="session:dup", sessionId="dup",
+                               summary=PROSE, _searchText=PROSE)
+    repaired_twin = _post_fix_node(url="session:dup", sessionId="dup")
+    graph = _RecordingGraph([(prose_twin,), (repaired_twin,)])
+    # `friday` is a token BOTH twins carry: the repaired one as lexicon, the
+    # prose one as prose.
+    _install_fts(monkeypatch, {"friday": [("session:dup", 1.0),
+                                         ("session:dup", 2.0)]})
+
+    report = m.probe_fts(graph, ["friday"], control=False)
+    probe = report["probes"][0]
+    assert probe["hits"] == 2
+    assert probe["residue"] == ["session:dup"], (
+        "a url whose OTHER node still carries the pre-fix prose was classified "
+        f"as benign: {probe}")
+    assert probe["lexicon"] == []
+    assert report["leaked"] == ["friday"]
+
+    folded = _cli._merge_probe(None, report)
+    assert folded["certifies"] is False and folded["vetoed"] == "leaked", (
+        "the fold certified over a url whose prose twin the probe returned")
+
+    # (3) two proven-lexicon twins at one url: agreement, not a false veto.
+    twin_a = _post_fix_node(url="session:dup2", sessionId="dup2")
+    twin_b = _post_fix_node(url="session:dup2", sessionId="dup2")
+    _install_fts(monkeypatch, {"friday": [("session:dup2", 1.0),
+                                         ("session:dup2", 2.0)]})
+    split = m.classify_fts_hits(_RecordingGraph([(twin_a,), (twin_b,)]),
+                               ["session:dup2"], phrase="friday")
+    assert split["lexicon"] == ["session:dup2"] and split["residue"] == [], (
+        "two PROVEN lexicon twins were vetoed — a false veto is re-measured, "
+        "but it must not fire on agreement")
+
+
+def test_nodes_at_one_url_that_DISAGREE_are_unexplained_not_benign(monkeypatch):
+    """#11536 review round 3: disagreement at one url is not provably benign.
+
+    (1) FAILS on a fold that picks one label per url: a url holding a STALE twin
+        (index entry outlived a cleared node) and a proven-lexicon twin would be
+        labelled from whichever came last, so half of what the read returned was
+        bucketed without being examined.
+    (2) REACHABLE: same no-uniqueness argument as the twin test above; here the
+        twins differ in the other direction.
+
+    The leg's own polarity decides the bucket: "a false veto is re-measured; a
+    false certification is the leak".
+    """
+    from tortoise import session_source_prose_migration as m
+
+    stale_twin = _session_node(url="session:mixed", sessionId="mixed",
+                               summary="", _searchText=None,
+                               topics=["friday", "rebuild"])
+    lexicon_twin = _post_fix_node(url="session:mixed", sessionId="mixed")
+    split = m.classify_fts_hits(_RecordingGraph([(stale_twin,),
+                                                (lexicon_twin,)]),
+                               ["session:mixed"], phrase="friday")
+    assert split["unexplained"] == ["session:mixed"], (
+        f"a url whose nodes disagree was bucketed anyway: {split}")
+    assert split["lexicon"] == [] and split["stale"] == []
+
+
+def test_the_control_walks_PAST_a_lexicon_node_whose_tokens_are_ALL_unusable():
+    """#11536 review round 3, note: ``LIMIT 1`` reported a false absence.
+
+    (1) FAILS on the shipped control: ``_CONTROL_LEXICON_ROWS`` read ONE node and
+        rejected its tokens through ``probe_phrase_rejection`` — a token that
+        tokenises to 0 terms is not a probe. The lexicon is word-FREQUENCY
+        derived (``Counter.most_common``), so a node whose ``_searchText`` is
+        ``"the, and, to, of, it"`` yields no usable token, and the run reported
+        "no POST-fix lexicon node to control with" — a statement about the graph
+        it had not measured — while a perfectly usable node sat in the next row.
+        The documented remedy it then offered was ``--no-fts-probe``, i.e. the
+        weaker evidence this leg exists to stop certifying on.
+    (2) REACHABLE: the lexicon writer takes the top word frequencies, and the
+        stopword filter is what makes a high-frequency node's tokens unusable.
+    """
+    from tortoise import session_source_prose_migration as m
+
+    class _StoppardThenReal(_RecordingGraph):
+        """Honours the Cypher ``LIMIT``: rows are all stopwords, then usable.
+
+        ⛔ THE FAKE MUST HONOUR ``LIMIT``, or this row measures nothing: the
+        pre-fix read was ``LIMIT 1``, and a fake that returned every row anyway
+        made the shipped ``LIMIT 1`` look like it walked the window (#11536
+        review round 3). The real server honours the clause, so a fake that
+        ignores it cannot discriminate.
+        """
+
+        ROWS: tuple[tuple[str], ...] = (("the, and, to, of, it",),
+                                       ("migration, plan, friday",))
+
+        def __init__(self):
+            super().__init__([])
+
+        def query(self, cypher, params=None, timeout=None):
+            if "STARTS WITH $prefix" in cypher:
+                limit = 1
+                marker = "RETURN s._searchText LIMIT "
+                if marker in cypher:
+                    limit = int(cypher.split(marker, 1)[1].split()[0])
+                return _Result(self.ROWS[:limit])
+            return super().query(cypher, params=params, timeout=timeout)
+
+    assert m.lexicon_control_token(_StoppardThenReal()) == "migration", (
+        "the control stopped at the first lexicon row and reported the graph "
+        "had no usable node")
+
+
+def test_a_JSON_signoff_STATES_the_leg_it_did_not_measure(monkeypatch, capsys):
+    """#11536 review round 3, note: the `--no-fts-probe` notice was `--json`-blind.
+
+    (1) FAILS on the shipped CLI: the notice sat BELOW the ``--json`` return, so
+        ``--dry-run --assert-clean --no-fts-probe --json`` printed pure JSON with
+        no ``fts_probe`` key at all and NOTHING on either stream said the index
+        was skipped — a machine consumer could not tell "not measured" from
+        "measured and clean", which is the census-only green this flag exists to
+        make auditable.
+    (2) REACHABLE: the documented by-name escape, in the mode a pipeline uses.
+    """
+    _export_a_record_dsn(monkeypatch)
+    graph = _RecordingGraph([(_post_fix_node(),)])
+    _install_fts(monkeypatch, {})
+    _install_cli(monkeypatch, graph, ["--dry-run", "--assert-clean",
+                                      "--no-fts-probe", "--json"])
+    capsys.readouterr()
+    assert _cli.main() == 0
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["fts_probe_skipped"] == "no_fts_probe", (
+        "the JSON sign-off did not state that the FTS leg was skipped")
+    assert "fts_probe" not in payload
+    assert "CENSUS only" in captured.err, (
+        "the skip was silent on stderr too")
+
+    # …and a repair with no probe names its own reason, on the same field.
+    _install_cli(monkeypatch, graph, ["--repair", "--clear-without-record",
+                                      "--json"])
+    capsys.readouterr()
+    assert _cli.main() in (0, 1)
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["fts_probe_skipped"] == "no_probe_phrase"
