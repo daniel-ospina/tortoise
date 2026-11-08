@@ -208,6 +208,19 @@ def _repaired_from_record_node(**overrides):
     return props
 
 
+def _cleared_session_node(**overrides):
+    """A session Source the repair CLEARED — no text, so no index entry to lose."""
+    props = {
+        "url": "session:s-cleared",
+        "sourceKind": "agentSession",
+        "sessionId": "s-cleared",
+        "is_episodic": True,
+        "summary": "",
+    }
+    props.update(overrides)
+    return props
+
+
 def _post_fix_node(**overrides):
     topics = ["migration", "plan", "friday"]
     props = {
@@ -4517,6 +4530,87 @@ def test_an_EMPTY_Source_index_corroborates_a_CLEAR_only_graph(monkeypatch,
     report = m.probe_fts(unreadable, ["zebraquux"], control=True)
     assert report["control"]["ok"] is False
     assert "FAILED" in report["control"]["note"]
+
+
+class _PopulationGraph(_RecordingGraph):
+    """Answers the index-entry read by EVALUATING the statement's predicates.
+
+    ⛔ NOT A STRING-CONTAINS PASS (#11536 review, P3 at `cf302453`): the review's
+    mutation M14 deleted ``documentKind IS NULL`` from
+    :data:`_SOURCE_INDEX_ENTRIES` and **no row reddened** (``exit 0, 122
+    passed``), because every fake in this file answers that read from a
+    hard-coded count. Here the count is COMPUTED over the nodes actually listed,
+    applying each predicate the statement carries — so dropping one lets a node
+    through that the population is supposed to exclude, and the row fails.
+
+    It also answers the positive control's lexicon window (``STARTS WITH
+    $prefix``) from the same nodes, so a document-only graph yields no token.
+    """
+
+    def __init__(self, nodes, **kw):
+        super().__init__([(n,) for n in nodes], **kw)
+        self._nodes = list(nodes)
+
+    def query(self, cypher, params=None, timeout=None):
+        if "RETURN count(s)" in cypher:
+            population = list(self._nodes)
+            if "documentKind IS NULL" in cypher:
+                population = [n for n in population
+                              if n.get("documentKind") is None]
+            if "coalesce(s._searchText, '') <> ''" in cypher:
+                population = [n for n in population
+                              if (n.get("_searchText") or "") != ""]
+            return _Result([(len(population),)])
+        if "STARTS WITH $prefix" in cypher:
+            prefix = (params or {}).get("prefix", "")
+            return _Result([(n.get("_searchText"),) for n in self._nodes
+                            if str(n.get("summary") or "").startswith(prefix)
+                            and n.get("_searchText") is not None])
+        return super().query(cypher, params=params, timeout=timeout)
+
+
+def test_a_DOCUMENT_only_graph_does_not_make_the_index_look_POPULATED(
+        monkeypatch):
+    """#11536 review (P3 at `cf302453`): `documentKind IS NULL` is LOAD-BEARING.
+
+    (1) FAILS if that term is dropped from `_SOURCE_INDEX_ENTRIES` — the mutation
+        the round-8 reviewer ran as M14, which reddened no row: a DOCUMENT is a
+        `:Source` (D10/#5026) whose `_searchText` is the #125 field, so the
+        UNSCOPED count reads 1 on a graph where the probe's own read
+        (`run_fts_query(entity_type="source")`, same discriminator) sees none.
+        The arm then reports a POPULATED index, `unavailable`, and a correctly
+        repaired clear-only graph loses its only corroboration — a false
+        UNMEASURABLE. The drift is fail-CLOSED, which is why it is a P3 and not
+        higher; but it is the "guard whose regression is silent" class this PR
+        exists to close, so it gets a row rather than a comment.
+    (2) REACHABLE: every graph with document Sources — the census module's own
+        §"Leg 1" exists because `is_episodic` is stamped on documents.
+    """
+    from tortoise import session_source_prose_migration as m
+
+    docs_only = _PopulationGraph([_document_node(documentKind="report")])
+    assert m.source_index_is_empty(docs_only) is True, (
+        "a DOCUMENT-only graph read as a POPULATED Source index: the population "
+        "count is not scoped to `documentKind IS NULL`, so the arm reports "
+        "`unavailable` on a graph whose probe read can only see 0")
+
+    # …and the arm the count feeds reports the STRUCTURAL zero, not `unavailable`.
+    _install_fts(monkeypatch, {"zebraquux": []})
+    report = m.probe_fts(docs_only, ["zebraquux"], control=True)
+    assert report["control"]["mode"] == "empty-index", (
+        "the document-only graph did not reach the empty-index corroboration: "
+        f"{report['control']}")
+    assert report["control"]["ok"] is True
+
+    # (3) AND THE SCOPE IS NOT A BLANKET EMPTINESS: a SESSION Source carrying
+    # `_searchText` makes the same read non-empty, so the zero above is measured
+    # against the population rather than asserted by the fake's own shape. (The
+    # CLEARED node beside it contributes 0 — that is the stale-entry case, and it
+    # is the probe's `stale` veto, not this arm.)
+    with_session = _PopulationGraph([_document_node(documentKind="report"),
+                                     _cleared_session_node(),
+                                     _post_fix_node()])
+    assert m.source_index_is_empty(with_session) is False
 
 
 # ── #11536 review round 3: every hit node is examined, and the skip is stated ──

@@ -1305,6 +1305,13 @@ _CONTROL_LEXICON_ROWS = (
 #: ``:Source``, so ``documentKind IS NULL`` must be repeated or a document-only
 #: graph would read as "the index has entries" while the probe's own read sees
 #: none — a false UNMEASURABLE).
+#:
+#: ⛔ THE TERM IS LOAD-BEARING AND IT IS PINNED (#11536 review, P3 at
+#: `cf302453`): deleting it produced no red row in the round-8 mutation battery
+#: (M14 → ``exit 0, 122 passed``), because every fake answered this read from a
+#: hard-coded count. ``test_a_DOCUMENT_only_graph_does_not_make_the_index_look_
+#: POPULATED`` now EVALUATES the statement's predicates over real node shapes, so
+#: the deletion reds it.
 _SOURCE_INDEX_ENTRIES = (
     "MATCH (s:Source) "
     "WHERE s.documentKind IS NULL "
