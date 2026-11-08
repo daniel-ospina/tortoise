@@ -1103,6 +1103,18 @@ def test_the_probe_pins_the_lane_and_reads_it_back():
             f"measures (or can, if its sibling switch moves), and is not "
             f"pinned: an inherited value would be measured under a door whose "
             f"log claims it was pinned (#10983 review round 2)")
+    # Cycle 11 (`#10360` / `#11449`): the carve-out's write-path off-switch. It
+    # is DEFAULT-ON and read PER EMITTED POINT at the v2 emit site, so an
+    # ambient `=0` takes NO judgment at that site — a rewritten value is written
+    # where `main` withholds it and the population grows. Pinned to the SHIPPED
+    # default, so it moves no number; the pin is what makes the population
+    # shell-insensitive. The census row below only proves the read is
+    # CLASSIFIED, so this row names the classification and its reason.
+    assert ("TORTOISE_STATE_VALUE_VERBATIM", "1") in probe.DOOR_PINNED_ON, (
+        "the state-value carve-out's off-switch is not pinned to its shipped "
+        "default: with it off the emit site refuses nothing, so a rewritten "
+        "value is WRITTEN and the measured point population grows under a door "
+        "the log says is pinned (#10360 / #11449)")
 
 
 class _Unpoppable(dict):
