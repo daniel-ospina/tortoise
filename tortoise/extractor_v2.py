@@ -13006,11 +13006,13 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     embed_list = arm["embed_list"]
     vet_s2_stats = arm["vet_stats"]
     vet_s2_pool = arm["vet_pool"]
-    # ⛔ ONE SHAPE ALWAYS (review at `86ed2e9b7`, P2): `{first, second}` on BOTH
-    # returns, with `second` explicitly `None` when no retry ran. The old form
-    # was the arm's FLAT counter dict on a non-retry run and `{first, second}`
-    # on a retried one, so a consumer had to guess which shape it held — the
-    # conditional-shape failure `renarrate`/`relations` exist to avoid.
+    # ⛔ ONE SHAPE ALWAYS (review at `86ed2e9b7`, P2): the ARM keys are
+    # `{first, second}` on BOTH returns, with `second` explicitly `None` when no
+    # retry ran. The old form was the arm's FLAT counter dict on a non-retry run
+    # and `{first, second}` on a retried one, so a consumer had to guess which
+    # shape it held — the conditional-shape failure `renarrate`/`relations`
+    # exist to avoid. The post-S4 union pass may add a THIRD key (`union`, below),
+    # so consumers read the arm keys by membership, never by set equality.
     mention_s2_stats = {"first": arm["mention_stats"], "second": None}
     vet_warnings.extend(arm["warnings"])
     renarrate_stats: dict = {"fired": False}
@@ -15317,6 +15319,14 @@ def _arm_metrics(story: str, batch: dict | None, vet_stats: dict | None) -> dict
         "discarded": min(candidates, discarded),
         "kept": max(0, candidates - min(candidates, discarded)),
         "keep_rate": _keep_rate(candidates, discarded),
+        # The arm's OWN coverage verdict, recorded because §4.4's F3 is defined
+        # over the PRE-retry arm only (review round 3, P2). On a retried run the
+        # SECOND arm's flag is False by construction (the first arm's True is
+        # what fired the retry), so a reader counting "S4 added items while
+        # coverage_suspect is False" against the pipeline's published
+        # `result["vet"]["s2"]` — which is the second arm's block — would count
+        # exactly the sessions the retry DID reach as ones it cannot.
+        "coverage_suspect": bool(b.get("coverage_suspect")),
     }
 
 
@@ -15571,8 +15581,12 @@ def _renarrate_pick(first: dict, second: dict) -> dict:
         "story": narrator["story"],
         "embed_list": merged,
         # The S2 pass's stats are the SECOND arm's — the retried pass, whose
-        # list the union is recorded against. ⛔ Nothing is hidden by that
-        # choice: both arms' full numbers ride `stats["renarrate"]`.
+        # list the union is recorded against — or, when that arm produced NONE
+        # (its S2 raised and `_arm_extract` returned an empty block), the FIRST
+        # arm's: the union then IS the first arm's list, so publishing `{}`
+        # would say "the gate did not run" about a pass that DID run and decided
+        # (review round 3, P2). ⛔ Nothing is hidden by either choice: both arms'
+        # full numbers ride `stats["renarrate"]`.
         # ⛔ SCOPE OF THAT CHOICE (review note, not a finding): these are the
         # NUMBERS only. The VERDICT half does not ride this arm — the shipped
         # union is re-vetted wholesale in the `prior=vet_s2_pool` pass, which
@@ -15584,7 +15598,7 @@ def _renarrate_pick(first: dict, second: dict) -> dict:
         # (an arbiter batch RENARRATE, which `s2_decision_seam` never emits, or
         # a hand-armed `TORTOISE_RENARRATE_KEEP_RATE`), never on the
         # `coverage_suspect` path where the first arm is empty by definition.
-        "vet_stats": second["vet_stats"],
+        "vet_stats": second["vet_stats"] or first["vet_stats"],
         "vet_pool": _merge_arm_pools(first.get("vet_pool") or {},
                                      second.get("vet_pool") or {}),
         # ONE shape with the non-retry path (`{first, second}`); here both arms

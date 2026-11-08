@@ -621,7 +621,7 @@ Normalises the shape **and applies the declared field→type mapping** (§3). Pa
 
 This is v2's S2, with priors in hand. Still proposes only; decides nothing.
 
-**✅ FINDING (2026-09-23) — the code hands extraction the raw alongside the story.** The call is `run_s2(model, story, master, session_date=…, edus=edus, …)` (`extractor_v2.py:15422-15426`) — ⚠️ **this row is the one passage cited HEAD-relative, not at a pin**; `tests/test_7949_capstone_measure.py` resolves it against the tree, so it moves with the code. **`edus` is the raw segmented input, passed together with the computed story.** **⇒ D3-Option 4 holds: the narrative is a **focus**, and the raw is present too.**
+**✅ FINDING (2026-09-23) — the code hands extraction the raw alongside the story.** The call is `run_s2(model, story, master, session_date=…, edus=edus, …)` (`extractor_v2.py:15432-15436`) — ⚠️ **this row is the one passage cited HEAD-relative, not at a pin**; `tests/test_7949_capstone_measure.py` resolves it against the tree, so it moves with the code. **`edus` is the raw segmented input, passed together with the computed story.** **⇒ D3-Option 4 holds: the narrative is a **focus**, and the raw is present too.**
 
 > ⚠️ **What this does to D3.** The open question is not *"may extraction consult the raw?"* — it does. It is the much smaller **"what does the narrative add that the raw does not?"** The measurement (§10) compares **narrative + raw** against **raw alone** — ⛔ **and that shape cannot test loss-by-replacement**, so the D3 question is now two: *what the narrative ADDS* (measured, §10) and *what it LOSES when it replaces the raw* (**not yet measured**). §10's verdict says so. **This paragraph named the ADD question correctly; the error was downstream** — the
 registration then fixed the contrast with *"the same `edus`"* for both arms, which is what makes the falsifier
@@ -719,8 +719,8 @@ unfirable (block at the top of §10).
 > says is lost, since `run_s4` *is* a shipped stage. The pre-condition for removal is a stage
 > that can ADD; the successor above is that stage (`tests/test_selection_step.py` pins the ADD proof
 > and the union), and what still stands between it and the deletion is §4.4's **F3** measurement —
-> `_s4_merge_stats`'s `added_by_s4 > 0` **while** `coverage_suspect` is False, i.e. an episode the
-> retry cannot reach — which is an eval-lane run, not a code change.
+> `_s4_merge_stats`'s `added_by_s4 > 0` **while** the FIRST (pre-retry) arm's `coverage_suspect` is
+> False, i.e. an episode the retry cannot reach — which is an eval-lane run, not a code change.
 > (Pinned: `tests/test_extractor_v4_s4_stage_claims.py`, `tests/test_selection_step.py`.)
 >
 > **On the step *names*:** the code's own stages are **S1–S5** (`[S1] STORY SUMMARY` … `[S5] EMBED`, module
@@ -1039,8 +1039,15 @@ New entities + connections + **metadata**. The metadata includes **lifecycle eve
 **The removal's falsifier — F3, defined here because two places cite it by that name.**
 `run_s4`'s removal (the `#8500` migration deliverable, executed under `#11002`) is gated on **one**
 measurement, and it is an eval-lane run, not a code change. On the frozen corpus, count the sessions
-where `_s4_merge_stats`'s `added_by_s4 > 0` **while** `check_batch`'s `coverage_suspect` is **False**.
-That is an episode where S4 ADDED items in a case the coverage check cannot flag — so the bounded
+where `_s4_merge_stats`'s `added_by_s4 > 0` **while the FIRST (pre-retry) arm's `coverage_suspect` is
+False**. ⛔ **Whose flag, spelled out, because this PR makes it two arms.** A retried run can reach
+`check_batch` twice, and the retried arm's flag is False *by construction* — the first arm's True is
+what fired the retry — so counting against the pipeline's published `result["vet"]["s2"]` (the
+SECOND arm's block) would count exactly the sessions the retry DID reach as ones it cannot. F3 is
+about what the retry could not have been asked to do, so it is the pre-retry arm's verdict; that arm's
+value is on the run's own record at `stats["renarrate"]["first"]["coverage_suspect"]` (and, on a run
+that did not fire, `trigger` is absent and the single arm's flag is the `vet.s2.batch` one).
+That is an episode where S4 ADDED items in a case the coverage check could not flag — so the bounded
 re-narrate above cannot reach it, because the retry's armed-by-construction arm is exactly
 `coverage_suspect`. `> 0` means **do not delete `run_s4`**: the retry is a successor for the
 total-loss case only, and the removal's pre-condition is a stage that can ADD in the cases S4
