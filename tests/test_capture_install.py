@@ -3402,24 +3402,39 @@ def test_cli_install_codex_non_ascii_registration_under_ascii_locale(tmp_path):
 
 
 def test_cli_install_pi_uninstall_never_touches_a_cline_file(cli):
-    """`pi` has no read hook — `--uninstall` must not fall through to the
+    """`pi --uninstall` takes the PI branch — it must never fall through to the
     cline target and rewrite `<dir>/.clinerules/hooks/UserPromptSubmit`.
 
     Mutation: route every `--uninstall` to `_install_read_hook` before the pi
     check (pi lands in that function's cline `else` branch, reads the cline
-    file as if it were a pi registration, and prints a misleading path)."""
+    file as if it were a pi registration, and prints a misleading path).
+
+    #2119: pi NOW has a read seam — the second extension file `install pi`
+    writes — so the branch no longer prints the "pi has no shell-hook read
+    seam" no-op sentence this test used to pin; it removes
+    `~/.pi/agent/extensions/tortoise-volunteer.ts` or says it is absent. The
+    invariant under test is unchanged (the PI branch, not the cline one), so
+    the stdout assertion pins THAT: the pi artifact is named, the cline
+    target is not.
+
+    The cline target is `.clinerules/hooks/UserPromptSubmit` — the path every
+    Cline surface reads since #2124/#11588. The pre-#2124 `.cline/hooks` path
+    this test used to name is the legacy one, so pinning the legacy path left
+    the assertion looking at a file the cline branch no longer writes.
+    """
     run, root, _home = cli
-    seam = root / ".clinerules" / "hooks" / "UserPromptSubmit"
-    seam.parent.mkdir(parents=True)
+    cline = root / ".clinerules" / "hooks" / "UserPromptSubmit"
+    cline.parent.mkdir(parents=True)
     original = json.dumps({"hooks": {"UserPromptSubmit": [
         {"hooks": [{"type": "command", "command": "someone-elses.sh"}]}]}})
-    seam.write_text(original)
+    cline.write_text(original)
 
     r = run("install", "pi", "--uninstall")
 
     assert r.returncode == 0, r.stderr
-    assert "pi has no shell-hook read seam" in r.stdout
-    assert seam.read_text() == original, "the cline hook file was modified"
+    assert capture_install.PI_VOLUNTEER_EXTENSION_NAME in r.stdout, r.stdout
+    assert ".clinerules" not in r.stdout, r.stdout
+    assert cline.read_text() == original, "the cline hook file was modified"
 
 
 def test_cli_install_pi_rerun_does_not_claim_installed(cli):
