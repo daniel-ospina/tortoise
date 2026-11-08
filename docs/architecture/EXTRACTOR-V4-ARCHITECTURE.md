@@ -729,9 +729,10 @@ unfirable (block at the top of §10).
 > ADD-by-generalisation**, and `run_s4`'s removal therefore stays gated on the second half.
 > **`S2.2b`'s own yield is NOT measured** — it depends on whether a model handed a flagged span emits
 > the right item, which needs live sessions and a key, so the coverage half is met by a *trigger*, not
-> by a demonstrated stage. The detector's own cost is measured too — 8.3% of 844 segments flagged,
-> with non-claims (headings, date fragments, asides) the dominant class — which is why the stage is
-> armed OFF. The flag rate, the per-session read-through and the explicit bounds are
+> by a demonstrated stage. The detector's own cost is measured too — 8.3% of 844 segments flagged —
+> but the flagged population is MIXED (7 genuine clause-level elisions, 4 non-claims and 3
+> structural fragments in the 14 of 35 the record enumerates), so the stage's YIELD is unmeasured;
+> that, not a claim about which class dominates, is why it is armed OFF. The flag rate, the
 > `docs/evidence/11534-partial-gap/README.md` §4.
 > (Pinned: `tests/test_extractor_v4_s4_stage_claims.py`.)
 >

@@ -382,9 +382,9 @@ def _narrative_statements(narrative: str) -> int:
 # shapes this proxy cannot see by construction: (a) a **generalisation** — an
 # operator or point that restates a covered statement at a higher abstraction,
 # so no narrative span is uncovered even though the item is new — most of the 8
-# of 9 operators it does NOT reach (the record names 3 explicitly), and (b) a
-# **re-shaped** item. Read a low ``coverage`` as evidence of missing prose, never
-# as a claim that a model should emit something.
+# of 9 operators it does NOT reach (the record names 3), and (b) a **re-shaped**
+# item whose content the candidates already lexically carry. Read a low
+# ``coverage`` as evidence of missing prose, never as a claim a model should emit.
 #
 # ⚠️ The ADDRESS is a char span into the NARRATIVE — not into a source turn, and
 # not a graph span. #11534's body worried that the target needed `#2684`'s span

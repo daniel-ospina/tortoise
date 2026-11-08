@@ -3692,11 +3692,11 @@ def run_s4(model, story: str, search: dict, embed_list: dict,
 #
 # ⛔ DEFAULT OFF (`TORTOISE_PARTIAL_GAP_FILL`), and that is a MEASURED position,
 # not caution: the detector flags 70 of 844 segments (8.3%) over the recorded
-# population and a large share of the flagged spans are non-claims (markdown
-# labels, date fragments, parenthetical asides), so an always-on stage would pay
-# a model call on most sessions to be told, correctly, that the spans are not claims. Arm it
-# to MEASURE it; the recall/precision numbers above are what a default-ON
-# decision has to beat.
+# population, and the flagged population is MIXED — the record's read-through
+# enumerates 7 genuine clause-level elisions, 4 non-claims and 3 structural
+# fragments (14 of 35), so neither precision nor YIELD is measured; an
+# always-on stage would spend a billed call on an unmeasured benefit. Arm it
+# to MEASURE it; the recall numbers above are what default-ON has to beat.
 
 PARTIAL_GAP_TMPL = """You are the COVERAGE REVIEWER for the Tortoise epistemic memory.
 
@@ -3735,8 +3735,8 @@ _GAP_EXISTING_CAP = 60
 
 def _partial_gap_fill_enabled() -> bool:
     """``TORTOISE_PARTIAL_GAP_FILL`` — DEFAULT OFF. See the block comment above:
-    the default is a measured position (flag rate + dominant non-claim classes),
-    not caution. Blank/garbage resolves to the default via ``env_flag``."""
+    the default is a measured position (the flag rate, and a flagged population
+    whose composition and yield are unmeasured), not caution. Blank/garbage resolves to the default via ``env_flag``."""
     return env_flag("TORTOISE_PARTIAL_GAP_FILL", False)
 
 
