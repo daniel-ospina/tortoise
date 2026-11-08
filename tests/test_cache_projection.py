@@ -2272,7 +2272,7 @@ def test_the_fold_vocabulary_is_status_folds_one_home_and_not_a_copy():
         "EVENT_STREAM_FOLDS gained or lost a derived property — every member "
         "needs its own evidence that the record's event stream decides it. "
         "`Subject` joined at #9974: its `status` is the projection-owned cache "
-        "`ONTOLOGY.md:421` reaches (\"Projection-owned since #1423 — the Subject "
+        "`ONTOLOGY.md:424` reaches (\"Projection-owned since #1423 — the Subject "
         "twin of the Object status cache\"; §2.6 rules on the Object half), it "
         "reaches the record only through the same `state.status` write, and "
         "leaving it out left one of the two labels that carry the field "
@@ -2375,7 +2375,7 @@ def test_a_subject_restatus_is_folded_too():
 
     #9974's Subject evidence is the `mutations_for({… "label": "Subject",
     "state": {"status": "archived"}})` measurement on the issue (its headline
-    reproduction is the Object), and `ONTOLOGY.md:421` carries the Subject twin
+    reproduction is the Object), and `ONTOLOGY.md:424` carries the Subject twin
     of the cache — so a fold that stopped at `:Object` would close the issue on
     one of the two labels that rule on the field.
     """
