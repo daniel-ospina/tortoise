@@ -334,10 +334,22 @@ def test_relation_leg_names_what_it_refused(_lane, monkeypatch):
     ``transacts`` is in the emission's allowlist but neither in
     ``_VALID_EDGE_PREDICATES`` nor in ``SEMANTICS_MECHANISMS`` — so
     ``relation_write_paths()`` answers ``()`` and nothing may be invented in
-    its place. An endpoint that resolves to NO entity this capture wrote, and
-    a name this capture wrote TWICE under different kinds (``#11235``: Layer-1
-    identity is ``(name, kind)``), are refused on the same rule — never
-    guessed through.
+    its place. An endpoint that resolves to NO entity this capture wrote is
+    refused on the same rule — never guessed through.
+
+    ⛔ The name written TWICE under different kinds (``#11235``: Layer-1
+    identity is ``(name, kind)``) is NOT pinned here, and the entities below
+    exist only as the collision a later relation WOULD hit: this lane cannot
+    express it, because ``create_entity`` keys an Object by ``(name, label)``,
+    so two kinds under one name collapse onto ONE node and the ambiguity never
+    reaches the plan. The collision that DOES survive a capture is a name
+    written to two different LABELS (an Object and a Subject), and the
+    assertion for it is plan-level —
+    ``tests/test_relation_write_11237.py::test_ambiguous_endpoint_is_refused_not_guessed``
+    — which is also where a change to ``tortoise/relation_write.py`` alone is
+    actually graded. (An earlier revision of this docstring claimed the
+    coverage was here; it was not, and no assertion in this file reads
+    ``#11235``.)
     """
     ambiguous = [
         {"name": "quarry", "kind": "theme", "lifecycle": "created"},
