@@ -1107,6 +1107,18 @@ def test_a_comment_ends_the_LINE_and_the_next_line_is_still_graded(tmp_path):
         "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q "
         '&& echo "I did not run this"',
         'cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q && printf "%s" "NOT RUN"',
+        # ⛔ Root 5: a QUOTED disclaimer in argument position, with a real artifact
+        # after it (`pytest "-q I did not run this" <tracked path>`). Measured at
+        # this head, not inferred: rc=0, `uncovered: 0`. The deferral that stops
+        # root 2's unquoted sibling from false-blocking `pytest "-k not slow"
+        # <tracked path>` cannot also refuse this one — the two tokens are
+        # syntactically IDENTICAL, and telling a flag+VALUE from a SENTENCE is a
+        # semantic judgement, not a grammar. The arm keeps the weaker side on
+        # purpose: the module's own rule, recorded twice, is that "a refusal that
+        # loses the finding is worse than the weaker arm", and exit 1 prints no
+        # report. Without the artifact the same spelling IS refused (pinned by
+        # `_UNREAD_TOKEN_BYPASSES`), so the deferral still closes the naked case.
+        'cmd:uv run pytest "-q I did not run this" tests/test_9664_capstone_verdict_ledger.py',
     ],
 )
 def test_the_known_residual_false_PASSes_are_pinned_as_OPEN(tmp_path, disclaimer):
@@ -1128,7 +1140,7 @@ def test_the_known_residual_false_PASSes_are_pinned_as_OPEN(tmp_path, disclaimer
 
     If #11520 is closed, this test must be INVERTED (EXIT_INVALID), not deleted.
 
-    ⛔ FOUR carriages are recorded, not three — the list read complete while one was
+    ⛔ FIVE carriages are recorded, not four — the list read complete while one was
     missing, which is how this branch's residual prose kept being wrong:
     (root 1) a LATER runner-headed segment, ungraded;
     (root 2) prose appended inside the graded command's own segment, after its
@@ -1138,6 +1150,19 @@ def test_the_known_residual_false_PASSes_are_pinned_as_OPEN(tmp_path, disclaimer
              run this"`), because a decorative/wrapper segment is admitted without
              grading one argument. The WRAPPER half of root 4 is CLOSED — asserted
              at the bottom of this test — and the DECORATIVE half is not.
+    (root 5) a QUOTED disclaimer in argument position beside a real artifact
+             (`pytest "-q I did not run this" <tracked path>`), because the
+             deferral cannot tell a quoted flag+VALUE from a quoted SENTENCE.
+
+    ⛔ WHY NOT `xfail(strict=True)` — the standard idiom for a known defect, and its
+    XPASS would be a tripwire no one can ignore. Two reasons it is not used here:
+    (a) the same parametrized test also asserts the CLOSED halves below, which must
+    never xfail, so root 5 alone would have to be split into its own test; and
+    (b) every other carriage is pinned by the SAME assert-EXIT_CLEAN + documented
+    inversion contract, so one root on a different contract makes the enumeration
+    that this branch kept getting wrong harder to keep complete. The inversion
+    instruction below is the tripwire, and it is checked by the reviewer, not by
+    the runner.
     """
     proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, disclaimer])]))
     assert proc.returncode == cl.EXIT_CLEAN, (
