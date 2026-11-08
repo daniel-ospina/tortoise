@@ -4588,8 +4588,8 @@ def test_the_bare_continuation_cites_name_what_they_say():
     rows = (
         # `each VET pass is gated on the LIST` — the gate AND its call, twice.
         ("docs/00_index.md", "each VET pass is gated on the LIST", (
-            ("15514", "if vet_enabled and embed_list:"),
-            ("15515", "embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass("),
+            ("15535", "if vet_enabled and embed_list:"),
+            ("15536", "embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass("),
             ("13225", "if vet_enabled and complete_list:"),
             ("13226", "complete_list, vet_union_stats, _w, _ = _run_vet_pass("),
         )),
@@ -4772,11 +4772,12 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # naming the call. One claim, two documents, two answers; the row pins
         # the CALL, and the phrase is the sentence that carries it.
         ("probes/capstone_run.py", "(S1,", (
-            # 15401 -> 15429: this branch's own `_arm_metrics` docstring and
-            # `_arm_extract` bindings insert above the call, so the number is
-            # re-derived from the tree rather than carried from the round that
-            # added the row (the row's INTENT is unchanged: pin the CALL).
-            ("15429", "chunk_stories.append(run_s1(model, _edus_to_text(chunk),"),
+            # 15401 -> 15429 -> 15450: this branch's own `_arm_metrics`
+            # docstring/bindings and then the arm record's `None`-coverage
+            # qualifier insert above the call, so the number is re-derived from
+            # the tree each time rather than carried from the round that added
+            # the row (the row's INTENT is unchanged: pin the CALL).
+            ("15450", "chunk_stories.append(run_s1(model, _edus_to_text(chunk),"),
         )),
     )
     # The SAME document states two of its claims as the RULE's own text rather than a

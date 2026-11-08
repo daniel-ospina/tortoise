@@ -139,6 +139,36 @@ def _entity_names(result) -> set[str]:
         "entities") or [] if isinstance(e, dict)}
 
 
+def _raising_second_arm_model():
+    """A model whose SECOND S2 call raises — arm B's transport failure.
+
+    Shared by the two cases that pin what a RETRIED run records about a call
+    that threw: the vet surface must not claim the gate did not run, and the
+    arm must not publish a coverage verdict for a batch that never existed.
+    The first S2 call answers `FirstOnly`, so arm A is a normal arm.
+    """
+    triggers = {"n": 0}
+
+    class _SecondArmS2Down(_Scripted):
+        def complete(self, *, system, user, max_tokens=None):
+            if "STORY SUMMARIZER" in system:
+                return super().complete(system=system, user=user,
+                                        max_tokens=max_tokens)
+            if "GAP REVIEWER" in system:
+                return super().complete(system=system, user=user,
+                                        max_tokens=max_tokens)
+            triggers["n"] += 1
+            if triggers["n"] > 1:
+                raise RuntimeError("provider exploded on the retried arm")
+            return super().complete(system=system, user=user,
+                                    max_tokens=max_tokens)
+
+    return _SecondArmS2Down(
+        ["Alice and Bob met.", "Alice met Bob about the budget."],
+        [_embed("FirstOnly"), _embed("SecondOnly")],
+    )
+
+
 # ── 1. the ADD proof, and the bound ───────────────────────────────────────
 
 def test_a_zero_candidate_arm_re_narrates_exactly_once(monkeypatch):
@@ -312,26 +342,7 @@ def test_a_failed_second_arm_does_not_empty_the_vet_surface(monkeypatch):
     Non-vacuity: on the pre-fix code `result["vet"]["s2"]` is `{}` here.
     """
     monkeypatch.setattr(extractor_v2.time, "sleep", lambda _s: None)
-    triggers = {"n": 0}
-
-    class _SecondArmS2Down(_Scripted):
-        def complete(self, *, system, user, max_tokens=None):
-            if "STORY SUMMARIZER" in system:
-                return super().complete(system=system, user=user,
-                                        max_tokens=max_tokens)
-            if "GAP REVIEWER" in system:
-                return super().complete(system=system, user=user,
-                                        max_tokens=max_tokens)
-            triggers["n"] += 1
-            if triggers["n"] > 1:
-                raise RuntimeError("provider exploded on the retried arm")
-            return super().complete(system=system, user=user,
-                                    max_tokens=max_tokens)
-
-    model = _SecondArmS2Down(
-        ["Alice and Bob met.", "Alice met Bob about the budget."],
-        [_embed("FirstOnly"), _embed("SecondOnly")],
-    )
+    model = _raising_second_arm_model()
     result = extract_session_v2(model, list(CONVERSATION), sdk=None,
                                 session_id="11002-test",
                                 session_date="2026-11-08",
@@ -352,6 +363,66 @@ def test_a_failed_second_arm_does_not_empty_the_vet_surface(monkeypatch):
     assert any("S2 failed" in e for e in result["errors"]), (
         "the failed retried arm is still recorded loudly"
     )
+
+
+def test_a_raising_arm_records_NO_coverage_verdict(monkeypatch):
+    """A failed S2 has NO batch verdict — the arm records `None`, not `True`.
+
+    `check_batch` reads `(embed_list, story)`, and a RAISING S2 leaves the list
+    empty *without saying anything about the narrative's yield*, so its batch is
+    byte-identical to a genuinely empty one — `coverage_suspect=True`, "prose
+    in, ZERO candidates out". That is the very conflation
+    :func:`_renarrate_trigger`'s `s2_failed` exists to refuse, and until now the
+    refusal stopped at the TRIGGER: the arm's published record still carried
+    `True` for a call that threw.
+
+    It is not cosmetic. §4.4 points the next lane at *this key*,
+    `stats["renarrate"][<arm>]["coverage_suspect"]`, as F3's measurement
+    surface, and F3's flag clause is already an INFERENCE rather than a
+    measurement — a fabricated `True` there invents the datum that decides
+    whether `run_s4` may be deleted.
+
+    ⛔ NON-VACUITY: the flag is asserted to be `True` for the SAME batch when
+    the failure is not declared, so the `None` is the qualifier's effect and not
+    a batch that had nothing to report. On the pre-fix code the run's second arm
+    records `True` here and this test is red.
+    """
+    monkeypatch.setattr(extractor_v2.time, "sleep", lambda _s: None)
+    result = extract_session_v2(_raising_second_arm_model(), list(CONVERSATION),
+                                sdk=None, session_id="11002-test",
+                                session_date="2026-11-08",
+                                vet_arbiter=_renarrate_arbiter)
+    renarrate = result["stats"]["renarrate"]
+    assert renarrate["fired"] is True and (
+        renarrate["trigger"] == "arbiter_renarrate")
+    first, second = renarrate["first"], renarrate["second"]
+    assert second["candidates"] == 0, "arm B's S2 raised, so it yielded nothing"
+    assert second["s2_failed"] is True, (
+        "the record must say WHY the flag below is not a verdict"
+    )
+    assert second["coverage_suspect"] is None, (
+        "a call that threw produced no batch, so it has no coverage verdict — "
+        "publishing `True` records 'prose in, zero candidates out' about a call "
+        "that never answered"
+    )
+    assert first["s2_failed"] is False and first["coverage_suspect"] is False, (
+        "arm A answered and emitted candidates — its two-state verdict is "
+        "untouched by the other arm's failure"
+    )
+    # ⛔ The gate itself is unchanged: the SAME batch, judged without the failure
+    # declared, still reads `True`. The `None` above is a RECORD decision.
+    batch = extractor_v2._vet_gate.check_batch(
+        {}, "Alice set a budget. Bob ships Friday.")
+    assert batch["coverage_suspect"] is True, (
+        "`check_batch` must keep flagging the empty batch — the qualifier lives "
+        "in the record, not in the gate"
+    )
+    declared = extractor_v2._arm_metrics(
+        "Alice set a budget. Bob ships Friday.", batch, None, None)
+    assert declared["coverage_suspect"] is True and declared["s2_failed"] is False
+    failed = extractor_v2._arm_metrics(
+        "Alice set a budget. Bob ships Friday.", batch, None, None, s2_failed=True)
+    assert failed["coverage_suspect"] is None and failed["s2_failed"] is True
 
 
 def test_each_trigger_states_its_own_premise():

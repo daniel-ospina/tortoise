@@ -15302,7 +15302,8 @@ def _rate_text(metrics: dict) -> str:
 
 
 def _arm_metrics(story: str, batch: dict | None, vet_stats: dict | None,
-                 applied_discards: int | None = None) -> dict:
+                 applied_discards: int | None = None, *,
+                 s2_failed: bool = False) -> dict:
     """One arm's recorded numbers — what the tie-break and the record read.
 
     ⛔ **Both numbers come from ONE population, and it is the one VET judged.**
@@ -15332,6 +15333,20 @@ def _arm_metrics(story: str, batch: dict | None, vet_stats: dict | None,
 
     ``coverage_suspect`` is read from ``batch`` in both cases, because it is
     defined on the S2 output (see :func:`_renarrate_trigger`).
+
+    ⛔ **But it has THREE states on this record, not two.** ``True``/``False``
+    are `check_batch`'s verdict on a call that ANSWERED; ``None`` says there is
+    no verdict because **S2 raised**. A failed call leaves ``embed_list`` empty
+    *without* saying anything about the narrative's yield, so its batch is
+    byte-identical to a genuinely empty one and `check_batch` flags it — the
+    exact conflation :func:`_renarrate_trigger`'s ``s2_failed`` exists to
+    refuse. Refusing it at the TRIGGER only moves the false datum to the record
+    this module publishes: §4.4 points the next lane at
+    ``stats["renarrate"][<arm>]["coverage_suspect"]`` as F3's measurement
+    surface, and F3's flag clause is already an inference rather than a
+    measurement, so a fabricated ``True`` there invents the datum a `run_s4`
+    deletion rests on. ``s2_failed`` is recorded beside the flag so the
+    ``None`` is explained rather than mysterious (review, P2).
     """
     b = batch if isinstance(batch, dict) else {}
     st = (vet_stats or {}).get("stats") if isinstance(vet_stats, dict) else None
@@ -15354,7 +15369,13 @@ def _arm_metrics(story: str, batch: dict | None, vet_stats: dict | None,
         # so a reader counting "S4 added items while coverage_suspect is False"
         # against the pipeline's published `result["vet"]["s2"]` — the second
         # arm's block — would attribute the wrong arm's verdict to the session.
-        "coverage_suspect": bool(b.get("coverage_suspect")),
+        # ⛔ A call that THREW has no verdict at all (see the docstring): `None`
+        # is the third state, never `True` for a batch that never existed.
+        "coverage_suspect": None if s2_failed else bool(b.get("coverage_suspect")),
+        # Why the flag above may be `None`, recorded so a reader is not left to
+        # infer it (and so F3's `coverage_suspect is False` filter can be
+        # audited: a failed arm is excluded, which is the fail-closed side).
+        "s2_failed": bool(s2_failed),
     }
 
 
@@ -15537,7 +15558,8 @@ def _arm_extract(model, edus, *, master, session_date, chunk_size,
         "vet_pool": vet_s2_pool,
         "mention_stats": mention_stats,
         "warnings": warnings_out,
-        "metrics": _arm_metrics(story, batch, vet_s2_stats, applied_discards),
+        "metrics": _arm_metrics(story, batch, vet_s2_stats, applied_discards,
+                                s2_failed=s2_failed),
         "chunks": chunks,
         "failed_chunks": failed_chunks,
         # A failed S2 call, so the retry's decision can tell "the instrument

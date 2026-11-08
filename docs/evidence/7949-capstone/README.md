@@ -369,7 +369,7 @@ statement that the gate was open". It is not that: `enabled` is the FLAG, comput
 is reached. `vet_enabled` is computed at `extractor_v2.py:12944`, i.e. BEFORE the
 `if not edus:` early return (`:12948`), which emits literally
 `"vet": {"enabled": vet_enabled, "s2": {}, "union": {}}` (`:12979`), and
-each VET pass is gated on the LIST — `if vet_enabled and embed_list:` (`:15514`), `if vet_enabled and
+each VET pass is gated on the LIST — `if vet_enabled and embed_list:` (`:15535`), `if vet_enabled and
 complete_list:` (`:13225`). So a session with the flag ON and an empty list emits `enabled: True`
 with empty counters and no pass ran (a FAILED vet pass leaves the same shape: `_run_vet_pass` returns
 `{}` on its fail-open path, `:12823-12826`). Because `_witness_block` returns the first positive
@@ -1181,9 +1181,9 @@ the same lesson (cite the symbol, not the line).
 | step | call site | witness the probe reads | on the receipt? |
 |---|---|---|---|
 | S0 READ | `_edus_from_conversation` `:12947` | `stats["edus"]`, `stats["chunks"]` | ✅ |
-| S1 NARRATE | `run_s1` `:15429` | `stats["llm"]["by_stage"]["s1"]`, `story_arc` | ✅ (`story_arc` is off-receipt; `by_stage` carries it) |
-| S2.1 EXTRACT | `run_s2` `:15461` | `by_stage["s2"]`, item counts | ✅ (`embed_list` is off-receipt; `by_stage` carries it) |
-| S2.2 VET | `_run_vet_pass` `:15515` | `result["vet"]` — built at `extractor_v2.py:13449-13453`, copied onto the receipt at the meta fold `sdk.py:17188` as `stats["step_witness"]["vet"]` | ✅ reachable (#9116 seam) — and WITNESSED by the shipped post-seam run: `stats["step_witness"]["vet"]` `enabled=true`, `s2={"candidates": 40, "by_outcome": {"KEEP": 40}}` (the SUPERSEDED `e0fc940b5` log is the one that predates the seam) |
+| S1 NARRATE | `run_s1` `:15450` | `stats["llm"]["by_stage"]["s1"]`, `story_arc` | ✅ (`story_arc` is off-receipt; `by_stage` carries it) |
+| S2.1 EXTRACT | `run_s2` `:15482` | `by_stage["s2"]`, item counts | ✅ (`embed_list` is off-receipt; `by_stage` carries it) |
+| S2.2 VET | `_run_vet_pass` `:15536` | `result["vet"]` — built at `extractor_v2.py:13449-13453`, copied onto the receipt at the meta fold `sdk.py:17188` as `stats["step_witness"]["vet"]` | ✅ reachable (#9116 seam) — and WITNESSED by the shipped post-seam run: `stats["step_witness"]["vet"]` `enabled=true`, `s2={"candidates": 40, "by_outcome": {"KEEP": 40}}` (the SUPERSEDED `e0fc940b5` log is the one that predates the seam) |
 | S2.3 CLASSIFY | `_apply_classify_kinds` `:13103` | `result["classify_later"]` — built at `extractor_v2.py:13439-13445`, copied at the same fold as `stats["step_witness"]["classify_later"]` | ✅ reachable (#9116 seam) — and WITNESSED by the shipped post-seam run: `enabled: true`, `s2 = {"adjudication_calls": 1, "assigned_llm": 7, …}` (`assigned_llm` is the evidence it did work, so this is not an idle pass) |
 | S3 RESOLVE | `search_graph` `:13119` | `result["search"]`, copied as `stats["step_witness"]["search"]` (mode/degraded/queries_run/hits); `stats["search_queries"]`/`stats["search_degraded"]` were already on the receipt | ✅ |
 | S5 CONNECT | `execute_embed` `:13356` (+ `run_s4` `:13140` gap filler) | `stats["s4_merge"]` | ✅ (gap-filler counters) — `capstone_measure.py` uses the graph write + `stats["operator_endpoints_minted"]` |
