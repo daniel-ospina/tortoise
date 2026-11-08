@@ -454,17 +454,30 @@ def _wrapper_argument_defect(head: str, args: list[str], cwd: Path, root: Path) 
     # DOES make the verdict box-dependent for `source` wrappers (`.venv` exists on
     # the authoring box and in no clone); that is the cost of not taking a false
     # block, it is disclosed here, and it is tracked on #11520.
-    if head == "source":
+    # ⛔ `.` is the POSIX spelling of `source`, so it gets the SAME arm. Refusing it
+    # while admitting `source .venv/bin/activate` is incoherent — the module's own
+    # rationale for that admission applies verbatim to `. .venv/bin/activate`.
+    # Measured false block: `cmd:. .venv/bin/activate && uv run pytest …` was ACCEPTED
+    # on `origin/main` and REFUSED here as "neither a command nor a shell wrapper"
+    # (third review cycle).
+    if head in {"source", "."}:
         if not args:
             return None
         target = args[0].strip("'\"")
         try:
-            resolved = (cwd / target).resolve()
-        except (OSError, ValueError):
+            # ⛔ `~` MUST be expanded before the join: `cwd / "~/.bashrc"` is
+            # `<repo>/~/.bashrc`, a path that exists on NO box, so a record a lane
+            # really writes (`source ~/.bashrc && …`, `source ~/.nvm/nvm.sh && …`)
+            # was refused with "does not name a file" on every machine — not the
+            # box-dependence disclosed below, but a definite non-resolution.
+            # Measured false block; `origin/main` accepted the shape (third review
+            # cycle). An absolute expanded path wins the join, which is the intent.
+            resolved = (cwd / Path(target).expanduser()).resolve()
+        except (OSError, RuntimeError, ValueError):
             resolved = None
         if resolved is None or not resolved.is_file():
             return (
-                f"{_short(target)} does not name a file, and a failing `source` "
+                f"{_short(target)} does not name a file, and a failing `{head}` "
                 "short-circuits the `&&` — no later segment of this record can have run"
             )
         return None
@@ -496,7 +509,24 @@ def _split_flag(token: str) -> tuple[str, str]:
         if f"-{letter}" in _SCRIPT_FLAGS:
             found = position
     if found is not None:
-        return f"-{token[found]}", token[found + 1 :]
+        remainder = token[found + 1 :]
+        # ⛔ A PURE OPTION CLUSTER IS MORE FLAGS, NOT A BODY. Measured against real
+        # bash: `bash -eu -c CMD` prints its script (it is `-e -u -c CMD`), and
+        # `bash -cu CMD` prints its script too (`-c -u CMD` — the operand-taking
+        # flag takes the NEXT token, not the rest of the group). Reading the
+        # leftover `u` as the script body refused BOTH with "script 'u' is not a
+        # command" (third review cycle): a false block, and exit 1 prints no
+        # uncovered list, so it cost the whole report. The old split only held when
+        # the operand-taking flag happened to be LAST in the group (`-ec`, `-euc`).
+        # A remainder that is anything OTHER than a lowercase option cluster is a
+        # real attached body and is still graded — that is the bypass this arm
+        # exists to close, and `bash -c'NOT RUN'` must stay refused.
+        if remainder and remainder.isalpha() and remainder.islower():
+            for letter in token[1:]:
+                if f"-{letter}" in _OPERAND_SCRIPT_FLAGS:
+                    return f"-{letter}", ""
+            return token, ""
+        return f"-{token[found]}", remainder
     if len(token) > 2:
         return token[:2], token[2:]
     return token, ""
@@ -673,6 +703,13 @@ def _split_segments(text: str) -> list[str]:
 #: graded as a citation — it is not a path — so the entry is a RECORD and the held
 #: artifact carries the verdict. Without this, every `bash -c '…'` row is a false
 #: block, and `exit 1` computes nothing, so it would hide the uncovered list too.
+#: The short/long flags that actually TAKE A SCRIPT OPERAND. Split out from
+#: `_SCRIPT_FLAGS` because the two questions are different: `_SCRIPT_FLAGS` also
+#: carries `-e`, which takes NO operand and is listed only because a shlex-attached
+#: `-eNOT RUN` was a measured bypass. Whether the CLUSTER hands the script off to the
+#: next token ("is an operand-taking flag present?") must not be answered by `-e`.
+_OPERAND_SCRIPT_FLAGS: Final[frozenset[str]] = frozenset({"-c", "--command", "--eval"})
+
 _SCRIPT_FLAGS: Final[frozenset[str]] = frozenset({"-c", "-e", "--command", "--eval"})
 
 #: ⛔ THERE IS DELIBERATELY NO "project label" ARM. An earlier revision of this
@@ -691,7 +728,33 @@ _SCRIPT_FLAGS: Final[frozenset[str]] = frozenset({"-c", "-e", "--command", "--ev
 #: false blocks when they were graded as the command: `set -e && uv run pytest …`,
 #: `export FOO=1 && …`, `source .venv/bin/activate && …` were all ACCEPTED on
 #: `origin/main` and REFUSED once only `cd`/`NAME=value` were normalised.
-_WRAPPER_VERBS: Final[frozenset[str]] = frozenset({"set", "export", "source", "umask", "unset"})
+_WRAPPER_VERBS: Final[frozenset[str]] = frozenset(
+    {
+        "set",
+        "export",
+        "source",
+        ".",
+        "umask",
+        "unset",
+        # ⛔ Shell CONTROL builtins, admitted for the same reason as the rest: they
+        # run nothing that is being cited and they cite nothing themselves. `|| exit
+        # 1` is this repo's OWN recipe — `AGENTS.md`: `uri="$(uv run python
+        # tools/test_lane.py uri)" || exit 1` — so refusing it asserted the record
+        # "may carry commands and wrappers, not prose" while refusing a COMMAND
+        # (third review cycle). Measured false block; `origin/main` accepted all
+        # three shapes, and exit 1 hid the entire uncovered list.
+        # These cannot hide a claim: a record whose ONLY segments are wrappers is
+        # still refused as "names no command" (pinned by
+        # `test_a_record_of_only_wrappers_still_names_no_command`).
+        "exit",
+        "return",
+        "shift",
+        "break",
+        "continue",
+        "pushd",
+        "popd",
+    }
+)
 
 #: DECORATIVE segments: a tail like `… && echo PASS`, or a reader that shows the run
 #: (`… | tail -20 log`, `… && grep -E "passed" out.txt`). They cite nothing; they
@@ -1408,7 +1471,11 @@ def _command_body(raw: str, base: Path, root: Path) -> tuple[str, Path, str]:
         # Both were measured fail-opens on the merged tree, each producing
         # `CAPSTONE-LEDGER-RESULT: CLEAN` and exit 0 from a 22-row ledger.
         if _tokens:
-            head = Path(_tokens[0]).name
+            # ⛔ `Path(".").name` is `""`, not `"."` — so the POSIX `source` spelling
+            # never matched `_WRAPPER_VERBS` and `cmd:. .venv/bin/activate && …` was
+            # refused as prose (third review cycle). Fall back to the raw token when
+            # the path component is empty; every other head resolves as before.
+            head = Path(_tokens[0]).name or _tokens[0]
             if head in _WRAPPER_VERBS or head in _DECORATIVE:
                 # ⛔ The HEAD alone is not enough: read the wrapper's own arguments
                 # (see `_wrapper_argument_defect` for the measured bypass this

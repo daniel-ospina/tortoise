@@ -53,8 +53,7 @@
 #         newline — and EVERY segment must be a shell WRAPPER, a DECORATIVE
 #         reader/printer, or RUNNER-headed. A segment that is none of those is
 #         prose and is refused, so a BARE-prose segment cannot ride along on
-#         either side of the command
-#         cannot ride along (`NOT RUN && uv run pytest …` and
+#         either side of the command (`NOT RUN && uv run pytest …` and
 #         `uv run pytest … && I did not run this` are both refused);
 #         ⛔ WHAT IS *NOT* CLOSED, stated because the previous wording claimed it
 #         was: a LATER segment that is RUNNER-HEADED is admitted without grading

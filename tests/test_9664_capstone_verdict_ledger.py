@@ -1734,6 +1734,131 @@ def test_a_token_the_loop_never_reads_cannot_carry_the_verdict(tmp_path, entry):
     )
 
 
+# ── THIRD review cycle: four measured false blocks ──────────────────
+#
+# Each of these is a record `origin/main` ACCEPTED and this branch REFUSED — and
+# exit 1 prints no uncovered list, so each one cost the whole report. They are
+# pinned individually because they have FOUR distinct roots, and a single test
+# over all of them would let a regression in one hide behind a pass in another.
+
+
+def test_a_flag_cluster_before_a_separate_script_token_is_not_a_body(tmp_path):
+    """`bash -eu -c CMD` is `-e -u -c CMD`; `bash -cu CMD` is `-c -u CMD`.
+
+    ⛔ MEASURED against real bash: both print their script. `_split_flag` took the
+    LAST script flag it found and graded everything after it as the script BODY, so
+    the leftover `u` became "script 'u' is not a command" — the old split only held
+    when the operand-taking flag happened to be LAST in the group (`-ec`, `-euc`,
+    already pinned above). A false block is exit 1, and exit 1 computes NOTHING.
+    """
+    for command in (
+        "cmd:bash -eu -c 'uv run pytest tests/test_9664_capstone_verdict_ledger.py -q'",
+        "cmd:sh -eu -c 'uv run pytest tests/test_9664_capstone_verdict_ledger.py -q'",
+        "cmd:bash -cu 'uv run pytest tests/test_9664_capstone_verdict_ledger.py -q'",
+        "cmd:bash -eux -c 'uv run pytest tests/test_9664_capstone_verdict_ledger.py -q'",
+    ):
+        proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, command])]))
+        assert proc.returncode == cl.EXIT_CLEAN, (
+            f"{command!r} was REFUSED ({proc.returncode}) — a pure option cluster is "
+            f"MORE FLAGS, and the script is the next token\n{proc.stdout}{proc.stderr}"
+        )
+
+
+def test_an_attached_script_body_is_still_graded(tmp_path):
+    """The cluster fix must NOT re-open the `-cBODY` prose bypass it sits beside.
+
+    ⛔ The reason `_split_flag` exists at all is that `bash -c'NOT RUN'` is ONE
+    shlex token. Treating every remainder as "more flags" would restore exactly the
+    fail-open `_UNREAD_TOKEN_BYPASSES` closes, so the two arms are pinned together.
+    """
+    for command in (
+        "cmd:bash -c'NOT RUN - see tools/capstone_ledger.py'",
+        'cmd:bash -e"NOT RUN"',
+        "cmd:bash -cNOTRUNx",
+    ):
+        proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, command])]))
+        assert proc.returncode == cl.EXIT_INVALID, (
+            f"{command!r} was ACCEPTED ({proc.returncode}) — an attached body is "
+            f"graded as a script, and prose names no artifact\n{proc.stdout}{proc.stderr}"
+        )
+
+
+def test_a_control_builtin_tail_is_not_prose(tmp_path):
+    """`|| exit 1` is this repo's OWN recipe, and `.` is POSIX `source`.
+
+    ⛔ MEASURED false block. `AGENTS.md` itself records `uri="$(…)" || exit 1`, and
+    CI docs use `&& exit 0`; `. .venv/bin/activate` is `source` spelled the POSIX way.
+    All were ACCEPTED on `origin/main` and REFUSED here as "neither a command nor a
+    shell wrapper" — while the message asserted the record "may carry commands and
+    wrappers, not prose". `Path(".").name` is `""`, which is why `.` never matched
+    even after it joined `_WRAPPER_VERBS`.
+    """
+    for command in (
+        "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q || exit 1",
+        "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q && exit 0",
+        "cmd:. .venv/bin/activate && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
+        "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q || return 1",
+    ):
+        proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, command])]))
+        assert proc.returncode == cl.EXIT_CLEAN, (
+            f"{command!r} was REFUSED ({proc.returncode}) — a shell CONTROL builtin "
+            f"cites nothing and must not be graded as prose\n{proc.stdout}{proc.stderr}"
+        )
+
+
+def test_a_record_of_only_wrappers_still_names_no_command(tmp_path):
+    """Admitting control builtins must not admit a record made ONLY of them.
+
+    ⛔ This is the pin behind `_WRAPPER_VERBS`' safety claim. If `exit`/`.` could
+    satisfy a row on their own, `cmd:exit 1` would be a one-word verdict — the exact
+    fail-open the whole `cmd:` arm exists to refuse.
+    """
+    for command in (
+        "cmd:exit 1",
+        "cmd:exit 0 && true",
+        "cmd:. .venv/bin/activate",
+        "cmd:export FOO=1 || exit 1",
+    ):
+        proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, command])]))
+        assert proc.returncode == cl.EXIT_INVALID, (
+            f"{command!r} was ACCEPTED ({proc.returncode}) — a record whose only "
+            f"segments are wrappers names no command\n{proc.stdout}{proc.stderr}"
+        )
+
+
+def test_a_tilde_in_a_source_wrapper_is_expanded(tmp_path):
+    """`source ~/.bashrc` must resolve against `$HOME`, not `<repo>/~`.
+
+    ⛔ MEASURED false block: `cwd / "~/.bashrc"` is `<repo>/~/.bashrc`, a path that
+    exists on NO box, so the record was refused on every machine — not the disclosed
+    `.venv` box-dependence, but a definite non-resolution. `HOME` is pinned to a
+    tmp dir here so the test proves the EXPANSION and not the runner's own dotfiles.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".bashrc").write_text("# probe\n", encoding="utf-8")
+    proc = _run_cli(
+        tmp_path,
+        _ledger(
+            [
+                _row(
+                    "A",
+                    evidence=[
+                        REAL_EVIDENCE,
+                        "cmd:source ~/.bashrc && uv run pytest "
+                        "tests/test_9664_capstone_verdict_ledger.py -q",
+                    ],
+                )
+            ]
+        ),
+        env={"HOME": str(home)},
+    )
+    assert proc.returncode == cl.EXIT_CLEAN, (
+        f"`source ~/.bashrc` was REFUSED ({proc.returncode}) with HOME={home} — the "
+        f"`~` is not expanded before the join\n{proc.stdout}{proc.stderr}"
+    )
+
+
 def test_a_deciding_wrapper_argument_is_read_not_skipped(tmp_path):
     """A wrapper's argument is checked where the SHELL's grammar decides it.
 
