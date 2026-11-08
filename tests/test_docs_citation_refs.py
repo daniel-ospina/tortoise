@@ -51,15 +51,22 @@ WHY THIS IS NOT A DUPLICATE OF THE EXISTING CITATION GUARDS
 `tests/test_extractor_v4_citation_rot.py` (#8506) and
 `tests/test_extractor_v4_doc_citations.py` (#8498) already hold this instrument,
 but neither reads this relation. `citation_rot` resolves a quoted `sym` against a
-`file.py:NNNN` whose symbol must still exist in that source file, and it scans SIX
-design documents for the same claim rather than one (`DOC`, `STORAGE`, `ONTOLOGY`,
-`ONTOLOGY_CHANGELOG`, `INGEST`, `EVAL_SPEC` — see its `:76-81`, asserted across
-them at `:248-249`). `doc_citations` does not use `file.py:NNNN` at all: it pins
+`file.py:NNNN` whose symbol must still exist in that source file, and it states
+the same claim across several design documents declared as module constants
+(`DOC`, `STORAGE`, `ONTOLOGY`, `SEARCH`, `ONTOLOGY_CHANGELOG`, `INGEST`,
+`EVAL_SPEC`; the asserted set is `FACT_STATEMENTS_IN_SIBLINGS`) rather than one.
+`doc_citations` does not use `file.py:NNNN` at all: it pins
 that §7's value-gate row names the SHIPPED symbols (`value_gate._REFERENCE` /
 `identifier_only()`) and that those symbols behave as the row says. Neither reads
 a markdown-to-markdown line pointer, and neither covers `docs/scoping/` or
 `docs/research/`, so the regression above was invisible to both. This file is the
 same INSTRUMENT over the missing subject, not a second implementation of theirs.
+⛔ `citation_rot`'s constants are cited here by NAME, never by line number: `origin/main`
+added `SEARCH` and shifted every one of them after this sentence was first
+written — the same rot this file exists to catch, and one it is blind to inside a
+`.py` docstring (see STATED LIMITS). An earlier cut of this paragraph cited them
+as `:76-81` / `:248-249`, which were correct at its own head and dead at the
+merge result.
 
 `tests/test_s2_decision_record_5087.py` (#10072) is the closest precedent for the
 policy side: it pins that a document "must cite siblings by name, not ordinal".
