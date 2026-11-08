@@ -376,12 +376,16 @@ _LEADING_ASSIGNMENT: Final = re.compile(
 #: normalised, only the plain `cd X && …` this repo's own recipes use).
 _CD_SEGMENT: Final = re.compile(r"^cd\s+(\S[^;|&]*)$")
 
-#: The operand a shell CONTROL builtin accepts (`man bash`): one optional integer.
-#: `exit 1`, `return 0`, `shift 2`, `break`, `continue 3`. A prose argument
-#: (`exit "I did not run this"`) does not match, which is the point: the control
-#: builtins were added to `_WRAPPER_VERBS` for `|| exit 1`, and without an argument
-#: grammar they admitted the very prose carriage that set exists to refuse.
-_CONTROL_OPERAND: Final = re.compile(r"^[+-]?\d{1,10}$")
+#: The operand a shell CONTROL builtin accepts (`man bash`): one optional integer,
+#: OR the shell's own status expansion. `exit 1`, `return 0`, `shift 2`, `break`,
+#: `continue 3`, and — measured, `bash -c 'true ; exit $?'` → rc 0 — `exit $?`.
+#: A prose argument (`exit "I did not run this"`) does not match, which is the point:
+#: the control builtins were added to `_WRAPPER_VERBS` for `|| exit 1`, and without an
+#: argument grammar they admitted the very prose carriage that set exists to refuse.
+#: ⛔ `$?`/`${?}` are REQUIRED, not a nicety: refusing them false-blocked `… ; exit $?`
+#: — the idiom this repo's own install scripts use — and exit 1 hides the whole
+#: uncovered report (seventh review cycle).
+_CONTROL_OPERAND: Final = re.compile(r"^(?:[+-]?\d{1,10}|\$\?|\$\{\?\})$")
 #: A bare NAME — an `export`/`unset` operand that is not an assignment.
 _ENV_NAME: Final = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -1464,17 +1468,20 @@ def _command_body(raw: str, base: Path, root: Path) -> tuple[str, Path, str]:
         cd = _CD_SEGMENT.match(body)
         if cd:
             target = cd.group(1).strip().strip("'\"")
-            # ⛔ STRIP ALL THE OPTIONS, REPEATEDLY, so every spelling of one
-            # destination grades identically. `cd -P /tmp`, `cd -L /tmp` and
-            # `cd /tmp` all mean /tmp, but a single-group strip left
-            # `cd -P -L /tmp` with `-L /tmp` still dashed — which the check below
-            # silently `continue`d, so the segment was neither graded nor APPLIED and
-            # the command after it was graded from the UNMOVED directory. Measured
-            # (sixth review cycle): `cmd:cd -P -L /tmp && uv run pytest tests/…` was
-            # ACCEPTED while bash provably runs it from `/tmp`, where the file does
-            # not exist — a record admitted for a command that did not run. `--` ends
-            # option parsing and `-` means OLDPWD.
-            target = re.sub(r"^(?:(?:-[PLe@]+|--)\s*)+", "", target).strip()
+            # ⛔ STRIP THE OPTIONS, so every spelling of one destination grades
+            # identically. `cd -P /tmp`, `cd -PL /tmp` and `cd /tmp` all mean /tmp.
+            # ⛔ `\s+` BETWEEN GROUPS IS LOAD-BEARING. Allowing a zero-width separator
+            # made `-P-L` strip as the two groups `-P` and `-L`, so
+            # `cmd:cd -P-L tests && uv run pytest test_9664_…py -q` was ACCEPTED —
+            # while bash answers `cd: --: invalid option`, rc 2, so the `&&`
+            # short-circuits and the graded command NEVER RAN (seventh review cycle:
+            # the false PASS this branch exists to close, and `origin/main` refuses
+            # it). Measured on this box: `cd -P tests`, `cd -L tests`, `cd -PL tests`,
+            # `cd -LP tests`, `cd -Pe tests` and `cd -- tests` are rc 0; `cd -P-L`,
+            # `cd -L-P`, `cd -P--`, `cd -P@`, `cd -e-L`, `cd -@` are rc 2. So a group is
+            # `-[PLe]+` or `--` and groups are SEPARATED BY WHITESPACE; anything else
+            # dashed is left in the target and refused below.
+            target = re.sub(r"^(?:(?:-[PLe]+|--)\s+)+", "", target).strip()
             # ⛔ A target that is STILL empty or dashed has an UNKNOWABLE working
             # directory (`cd --` is `$HOME`, `cd -` is `$OLDPWD`, and an unrecognised
             # option is neither). Grading a later artifact from the unmoved `cwd`

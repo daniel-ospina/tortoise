@@ -77,7 +77,10 @@
 #         `unset`, `set`, `umask`, `source`/`.` and the control builtins
 #         `exit`/`return`/`shift`/`break`/`continue` each grade their argument, so
 #         `export "I did not run this" && …` and `… && exit "I did not run this"`
-#         are both refused. `pushd`/`popd` are deliberately NOT wrappers: they
+#         are both refused. A control builtin takes AT MOST ONE operand, and that
+#         operand may be the shell's own status expansion (`exit $?`, the idiom this
+#         repo's install scripts use) — refusing that was a measured false block.
+#         `pushd`/`popd` are deliberately NOT wrappers: they
 #         manipulate a directory STACK this parser cannot model, so the working
 #         directory after them is unknowable and no later artifact can be proven to
 #         have resolved from it; a record using them is refused as prose, on the

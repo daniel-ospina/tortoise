@@ -1916,6 +1916,27 @@ def test_a_stacked_cd_option_group_is_stripped_not_skipped(tmp_path):
             f"{command!r} was ACCEPTED ({proc.returncode}) — the `cd` moved to /tmp, "
             f"where the cited artifact does not exist\n{proc.stdout}{proc.stderr}"
         )
+    # ⛔ A MERGED dash group is NOT two groups. `cd -PL tests` is rc 0 but
+    # `cd -P-L tests` is rc 2 (`cd: --: invalid option`), so the `&&` short-circuits
+    # and the graded command never ran. A zero-width separator between groups turned
+    # `-P-L` into `-P` + `-L` and ACCEPTED that record (seventh review cycle) — the
+    # exact false PASS this branch exists to close, and one `origin/main` refuses.
+    for opt in ("-P-L", "-L-P", "-P--", "-P@", "-e-L"):
+        command = f"cmd:cd {opt} tests && uv run pytest test_9664_capstone_verdict_ledger.py -q"
+        proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, command])]))
+        assert proc.returncode == cl.EXIT_INVALID, (
+            f"{command!r} was ACCEPTED ({proc.returncode}) — bash rejects `cd {opt}` "
+            f"with 'invalid option', so the graded command never ran\n"
+            f"{proc.stdout}{proc.stderr}"
+        )
+    # …while every spelling bash DOES accept must be admitted.
+    for opt in ("-P", "-L", "-PL", "-LP", "-Pe", "--"):
+        command = f"cmd:cd {opt} tests && uv run pytest test_9664_capstone_verdict_ledger.py -q"
+        proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, command])]))
+        assert proc.returncode == cl.EXIT_CLEAN, (
+            f"{command!r} was REFUSED ({proc.returncode}) — bash accepts `cd {opt}` "
+            f"(rc 0)\n{proc.stdout}{proc.stderr}"
+        )
 
 
 def test_a_cd_with_no_resolvable_directory_is_refused(tmp_path):
