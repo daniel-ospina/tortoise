@@ -1304,15 +1304,24 @@ def test_a_vacuous_glob_cannot_carry_a_verified_row_BESIDE_a_held_path(tmp_path)
     assert "names no artifact" in proc.stderr, proc.stderr
 
 
-def test_a_checkout_without_git_abstains_AND_PRINTS_IT(monkeypatch, capsys):
-    """No `git` on PATH is an abstention with a NOTE, never a traceback and never a red.
+def test_a_checkout_without_git_REFUSES_and_NAMES_IT(monkeypatch, capsys):
+    """No `git` on PATH REFUSES the row — never a traceback, and never a pass.
 
-    Measured on the mutant that removes the `except OSError` arm: a
-    `FileNotFoundError` escaped `validate()` with no `CAPSTONE-LEDGER: INVALID`
-    marker, so a reader keying on the marker got nothing at all. And the abstention
-    must be PRINTED, because `_tracked_unprovable -> False` turns it into a false red
-    on a legitimate ledger in any git-less checkout (a tarball, a build context).
-    Both directions are asserted here, so either revert reds this test.
+    ⛔ THIS TEST USED TO PIN THE OPPOSITE, and the opposite shipped. It asserted an
+    ABSTENTION (`_tracked_unprovable()` -> True, record not blamed), on the reasoning
+    that a git-less checkout (tarball, build context) must not false-red a legitimate
+    ledger. That reasoning is right about the false red and wrong about the mechanism:
+    `subprocess.run` raises `OSError` for exactly one reason — the probe could not be
+    SPAWNED — and EMFILE/ENOMEM/EAGAIN is the same exception. Measured: with only the
+    `ls-files` probe raising `OSError(EMFILE)` on a box that HAS git, a `.gitignore`d
+    artifact answered `(True, '')` and the record exited **0 CLEAN**. An abstention
+    keyed on the exception class cannot tell "no git here" from "the fork failed",
+    so it fails OPEN in the case that matters.
+
+    What the old test actually needed is preserved and asserted below: NO TRACEBACK,
+    and the reason is PRINTED with the ledger marker. A git-less box still refuses the
+    record — at the sha arm first, and here at the TRACKED arm too — which is the
+    pre-shallow doctrine (`unmeasurable` = nothing measured = refused).
     """
     import types
 
@@ -1321,8 +1330,12 @@ def test_a_checkout_without_git_abstains_AND_PRINTS_IT(monkeypatch, capsys):
 
     monkeypatch.setattr(cl, "subprocess", types.SimpleNamespace(run=_boom))
     monkeypatch.setattr(cl, "_commit_state", lambda sha, repo_root: "exists")
-    assert [row["id"] for row in cl.validate(_ledger([_row("A")]))] == ["A"]
-    assert "git is unavailable here" in capsys.readouterr().err
+    with pytest.raises(cl.InvalidLedger) as excinfo:
+        cl.validate(_ledger([_row("A")]))
+    assert "not TRACKED by git" in str(excinfo.value), str(excinfo.value)
+    err = capsys.readouterr().err
+    assert "could not be RUN" in err, err  # the real cause is named, not guessed
+    assert "Traceback" not in err, err
 
 
 # --- Ported VERBATIM from #11476 (main) at 810eb838c, so its B-arm and forgery
@@ -1595,3 +1608,119 @@ def test_a_long_path_is_truncated_in_the_error_line(tmp_path):
     proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[long])]))
     assert proc.returncode == cl.EXIT_INVALID
     assert "…" in proc.stderr, proc.stderr
+
+
+# ── the fail-open that SHIPPED to main, and the two pins that catch it ──────────
+#
+# `_is_tracked` folded "the probe could not be SPAWNED" into `_tracked_unprovable()`
+# (NOTE printed, record not blamed) and it landed on `main` via #11470. Measured on
+# `origin/main`'s own file: with only `git ls-files` raising `OSError(EMFILE)`, a
+# `.gitignore`d artifact answered `(True, '')` and the record exited 0 CLEAN. These
+# two pins are the ones that were missing there; both are HERMETIC — a temp repo with
+# one committed and one untracked file, never the lane-only `WORKTREE-REPORT.md`.
+
+
+def _hermetic_repo(tmp_path) -> object:
+    """A throwaway git repo with exactly `committed.txt` tracked. Signed-commit-proof."""
+    import subprocess as sp
+
+    repo = tmp_path / "treerepo"
+    repo.mkdir()
+    (repo / "committed.txt").write_text("held\n", encoding="utf-8")
+    (repo / "untracked.txt").write_text("not in any clone\n", encoding="utf-8")
+    git = ["git", "-C", str(repo)]
+    sp.run([*git, "init", "-q"], check=True)
+    sp.run([*git, "add", "committed.txt"], check=True)
+    sp.run(
+        [
+            *git,
+            "-c",
+            "user.email=t@example.com",
+            "-c",
+            "user.name=t",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "-m",
+            "seed",
+        ],
+        check=True,
+    )
+    return repo
+
+
+def test_an_EMFILE_on_the_ls_files_probe_cannot_manufacture_a_clean_exit(tmp_path):
+    """The probe could not RUN. The row must be REFUSED, not counted.
+
+    `OSError` covers both "no `git` binary" and "the fork failed under load", and the
+    shipped guard answered the second with an abstention: `_is_tracked -> True`, so an
+    untracked artifact satisfied `verified`. That is a fail-OPEN — a CLEAN exit made
+    out of a check that never ran — and it is what this pin exists to stop.
+    """
+    import subprocess as sp
+
+    repo = _hermetic_repo(tmp_path)
+    real_run = sp.run
+
+    def explode(argv, *a, **kw):
+        if argv[:2] == ["git", "ls-files"]:
+            raise OSError(24, "Too many open files")
+        return real_run(argv, *a, **kw)
+
+    mp = pytest.MonkeyPatch()
+    mp.setattr(cl.subprocess, "run", explode)
+    mp.setattr(cl, "_commit_state", lambda sha, repo_root=None: "exists")
+    try:
+        data = _ledger([_row("A", evidence=["untracked.txt"])])
+        with pytest.raises(cl.InvalidLedger, match="not TRACKED by git"):
+            cl.validate(data, repo_root=repo)
+    finally:
+        mp.undo()
+    # And with git answering, the same artifact is still refused BY NAME — the refusal
+    # must name the artifact, not degrade every row into "could not be run".
+    ok, why = cl._evidence_is_real("untracked.txt", repo)
+    assert not ok and "not TRACKED" in why, why
+    # The committed file is accepted, so the pin is not passing by refusing everything.
+    ok, why = cl._evidence_is_real("committed.txt", repo)
+    assert ok, why
+
+
+def test_the_unrunnable_probe_path_is_not_the_abstention_path(tmp_path):
+    """The two OSError causes must not share a return value — that sharing WAS the bug.
+
+    `_tracked_unprovable()` is a MEASURED answer ("git says this is not a work tree");
+    `_tracked_unrunnable()` is NOTHING answered. Collapsing them is the fail-open, so
+    this asserts they are distinct at the function level, not just end to end.
+    """
+    assert cl._tracked_unrunnable(OSError(24, "Too many open files"), "x") is False
+    assert cl._tracked_unprovable() is True
+
+
+def test_an_EMFILE_on_the_FOLLOW_UP_probe_also_refuses(tmp_path):
+    """The SECOND `OSError` site, which had no pin at all.
+
+    `_is_tracked` calls `git ls-files`, and then — only when that exits non-zero — a
+    follow-up `git rev-parse --is-inside-work-tree`. Both calls can fail to SPAWN, and
+    both were folded into the abstention, so reverting only the follow-up guard back
+    to the shipped fail-open left the whole suite green (measured: 168 passed). A
+    guard with no pin is a guard the next lane deletes as dead code.
+    """
+    import types
+
+    class _Result:
+        returncode = 1  # ls-files ran and said "no such entry" -> the probe is reached
+        stdout = ""
+        stderr = ""
+
+    def boom_on_rev_parse(argv, **kwargs):
+        if argv[:3] == ["git", "rev-parse", "--is-inside-work-tree"]:
+            raise OSError(24, "Too many open files")
+        return _Result()
+
+    mp = pytest.MonkeyPatch()
+    mp.setattr(cl, "subprocess", types.SimpleNamespace(run=boom_on_rev_parse))
+    try:
+        assert cl._is_tracked(REPO_ROOT / "docs" / "x.md", REPO_ROOT) is False
+    finally:
+        mp.undo()
