@@ -11433,8 +11433,9 @@ def test_the_probes_cross_file_cites_resolve_to_the_symbols_they_name():
     `TORTOISE_VALUE_GATE` comment (the value is at `:1001`), `:4019` is the
     `"probe": "docs/…/capstone_measure.py",` key (the census key is at `:4046`), and
     the `door` entry's `:4164`/`:4299` name NEITHER half of any pair: at this branch's
-    pre-fix head `:4164` is the frozen-sessions GUARD (the `REFUSED` f-string is one line
-    below, at `:4166`) and `:4299` is `"verdict": verdict_word(e5_result),`; on
+    pre-fix head `:4164` is the frozen-sessions GUARD (the `REFUSED` f-string is TWO lines
+    below, at `:4166`, past `:4165`'s `raise SystemExit(`) and `:4299` is
+    `"verdict": verdict_word(e5_result),`; on
     `origin/main` the f-string is at `:4164` and `:4299` is
     `"denominator": e5["raw_n"],`. No single tree makes both halves true. Re-staling any
     one of them reds this arm again.

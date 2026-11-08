@@ -227,7 +227,7 @@ remains is **two product blockers**, not two missing artifacts: `#8617` (step 2a
 ```bash
 uv sync --extra embeddings --extra parity
 .venv/bin/python docs/evidence/9664-capstone/probes/step_premise_census.py
-.venv/bin/python docs/evidence/9664-capstone/probes/u1_probe.py   # needs `uv run tortoise signup` once (2/IP/24h); writes only into the caller's own `default`
+.venv/bin/python docs/evidence/9664-capstone/probes/u1_probe.py   # requires a FRESH org (`uv run tortoise signup`, 2/IP/24h) or move ~/.tortoise/credentials.json aside first — the one write lands in whatever graph that workspace resolves as `default`, and an existing team workspace's `default` IS shared
 uri="$(.venv/bin/python tools/test_lane.py uri)"; eval "$uri"       # a private container — never the canonical store
 .venv/bin/python -m pytest tests/test_9664_premise_census.py -q -p no:cacheprovider   # the census's own guards
 .venv/bin/python -m pytest tests/test_onboarding_auto_complete.py -q -p no:cacheprovider
