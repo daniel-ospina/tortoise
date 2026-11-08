@@ -2041,8 +2041,41 @@ def _materialise(tmp_path: Path, record) -> Path:
 
 
 def test_the_real_machine_record_agrees_with_the_pins():
+    """The record pins its document AND the code lines it cites.
+
+    Round-14 review: this PR added two comment lines inside `DOOR_PINNED_ON`,
+    which moved the `TORTOISE_STATE_VALUE_VERBATIM` entry `:504` -> `:506`, and
+    the record's `door.acceptance_arm.read_back` was left quoting `:504` - a
+    comment line. The field's OWN prose warns that this entry "is NOT
+    cite-neutral" for exactly this reason, and nothing reddened: the checker
+    (`tools/capstone_preregistration_check.py`) never reads `read_back`, and
+    `grep -rn ':506' tests/ tools/` was empty. A field that warns about cite
+    drift cannot be the one place drift goes unwatched, so its
+    `capstone_measure.py` cites are pinned here EXACTLY - the entry line, and the
+    census range's own opening and closing lines - never as a window a shift can
+    slide inside. Kept inside THIS test rather than added as a new one so the
+    file's pinned `cases` count in `config/ci-surfaces.yml` does not move with a
+    guard that costs no runtime.
+    """
     pins = check.parse_pins(PREREG.read_text())
     assert check.check_machine_record(PREREG_DIR, pins) == []
+
+    read_back = json.loads((PREREG_DIR / "preregistration.json").read_text())[
+        "door"]["acceptance_arm"]["read_back"]
+    probe = (PREREG_DIR / "probes" / "capstone_measure.py").read_text().splitlines()
+
+    assert "probes/capstone_measure.py:506" in read_back, (
+        "the record must name the line the TORTOISE_STATE_VALUE_VERBATIM entry is on")
+    assert probe[506 - 1].strip() == '("TORTOISE_STATE_VALUE_VERBATIM", "1"))', (
+        f"capstone_measure.py:506 reads {probe[506 - 1].strip()!r}, not the pinned entry")
+
+    assert ":2726-2728" in read_back, (
+        "the record must name the census range it re-pointed")
+    assert probe[2726 - 1].strip() == "for name, count, anchored in projection.g.query(", (
+        f"capstone_measure.py:2726 reads {probe[2726 - 1].strip()!r}, not the census call")
+    assert "count(r.sourceVersion)" in probe[2728 - 1], (
+        f"capstone_measure.py:2728 reads {probe[2728 - 1].strip()!r}, not the "
+        "anchored count that closes the query")
 
 
 def test_a_missing_machine_record_fails(tmp_path):
