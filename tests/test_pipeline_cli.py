@@ -176,25 +176,39 @@ def test_a_foreign_threads_construction_never_decides_this_verdict(
             errors.append(exc)
 
     for target in (_construct_elsewhere, _route_elsewhere):
-        t = threading.Thread(target=target, name=getattr(target, "__name__", "foreign"),
-                             daemon=True)
+        # ⛔ The PATH arm runs on a NON-DAEMON thread on purpose (`#11495` review 4). Both arms
+        # being daemons made the pin's own claim — *"a construction by a thread this test does not
+        # own must not enter `seen`"* — wider than its evidence: a guard keyed on DAEMON-NESS
+        # instead of thread identity kept this file at `3 passed` while a foreign non-daemon
+        # construction DID enter `seen` (measured: `get_ident() == owner` → `not
+        # current_thread().daemon` ⇒ `3 passed`; with the path arm made non-daemon ⇒ `1 failed`).
+        # The path arm's body is local and fully patched, so it cannot hang; the `from_uri` arm
+        # stays a daemon because an unpatched-`from_uri` mutation must not block interpreter exit.
+        t = threading.Thread(
+            target=target, name=getattr(target, "__name__", "foreign"),
+            daemon=(target is _route_elsewhere))
         t.start()
         t.join(30)
         assert not t.is_alive(), f"the foreign {target.__name__} thread did not finish"
 
     assert not errors, errors
-    # ⛔ BOTH arms, because the leak is symmetric: a stray thread reaching
-    # `_make_sdk` while `TORTOISE_DB_URI` is set constructs through `from_uri`,
-    # which would false-red `test_run_routes_supported_uri_through_from_uri`'s
-    # `assert seen.get("uri") == uri`; a path-arm construction false-reds
-    # `test_run_uses_embedded_path_when_no_uri`'s
-    # `assert seen.get("path") == DEFAULT_DB_PATH` and its
-    # `assert "uri" not in seen`. Neither sibling can see a foreign write on the
-    # OTHER arm — that is why this test drives both. Naming the tests, not line
-    # numbers, on purpose: a line number here re-stales on the next edit, which
-    # is the `[pin-defensive-claim]` defect this file's own review removed from
-    # `tests/test_runner_ports_6673.py`. Measured: deleting EITHER guard reds
-    # THIS test and nothing else.
+    # ⛔ BOTH arms, because the leak is symmetric — and each arm's detector is a DIFFERENT
+    # assertion on a DIFFERENT sibling (`#11495` review 4 corrected this paragraph twice over;
+    # both claims below were false as first written and are proven by injecting the foreign write):
+    #   * path arm (`__init__`) → a stray thread reaching `_make_sdk` while `TORTOISE_DB_URI` is
+    #     UNSET constructs through `__init__`, and false-reds
+    #     `test_run_uses_embedded_path_when_no_uri`'s `assert seen.get("path") == DEFAULT_DB_PATH`
+    #     — NOT its `assert "uri" not in seen`, which a path construction cannot trip;
+    #   * `from_uri` arm → a stray thread reaching `_make_sdk` while the URI IS set false-reds
+    #     `test_run_routes_supported_uri_through_from_uri`'s `assert seen.get("uri") == uri`, and the
+    #     embedded sibling's `assert "uri" not in seen`.
+    # ⛔ SO WHY DRIVE BOTH HERE, if each sibling already detects the other arm? Because those
+    # sibling assertions fire only if a real leak happens to land DURING that test — they are
+    # non-deterministic detectors that this file's own run never trips. This pin is the
+    # DETERMINISTIC one: `deleting EITHER guard reds THIS test and nothing else` (measured).
+    # Naming the tests, not line numbers, on purpose: a line number here re-stales on the next edit,
+    # which is the `[pin-defensive-claim]` defect this file's own review removed from
+    # `tests/test_runner_ports_6673.py`.
     assert seen.get("path") == DEFAULT_DB_PATH, (
         "a construction this test did not make was recorded as its verdict: "
         f"{seen!r}")
