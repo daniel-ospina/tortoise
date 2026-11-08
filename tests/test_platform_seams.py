@@ -801,26 +801,34 @@ def test_install_cline_refuses_when_clinerules_is_a_rules_file(tmp_path):
 
 
 def test_install_cline_refuses_a_dangling_clinerules_symlink(tmp_path):
-    """An IN-ROOT DANGLING `.clinerules` symlink: the symlink-escape guard
-    lets it through (its target resolves inside the root), `exists()` reports
-    it ABSENT, and `mkdir` still refuses to create a directory over the link.
+    """An IN-ROOT DANGLING symlink at a directory the install must CREATE —
+    either `.clinerules` or `.clinerules/hooks`: the symlink-escape guard lets
+    it through (its target resolves inside the root), `exists()` reports it
+    ABSENT, and `mkdir` still refuses to create a directory over the link.
 
-    So the existence-only check was a FALSE PASS for this shape — `--dry-run`
+    So an existence-only check was a FALSE PASS for this shape — `--dry-run`
     printed `would write` and exited 0 while the real run died on
-    `FileExistsError` (measured, #11588 review cycle 2). ``is_symlink()``
-    closes it, which is what makes R7's "prediction and real run agree"
-    invariant true for every shape and not just regular files.
+    `FileExistsError` (measured, #11588 review cycles 2 and 4). ``is_symlink()``
+    over BOTH components closes it, which is what makes R7's "prediction and
+    real run agree" invariant true for every shape — and it was only true for
+    `.clinerules` until the second component was added.
     """
-    (tmp_path / ".clinerules").symlink_to("nope")
     env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
-    dry = _run(["install", "cline", "--dir", str(tmp_path), "--dry-run"], env)
-    real = _run(["install", "cline", "--dir", str(tmp_path)], env)
-    for r in (dry, real):
-        assert r.returncode == 1, (r.returncode, r.stdout, r.stderr)
-        assert "Install failed:" in r.stderr
-        assert "not a directory" in r.stderr
-        assert "Traceback" not in r.stderr
-    assert "would write" not in dry.stdout
+    for blocking in (".clinerules", ".clinerules/hooks"):
+        root = tmp_path / blocking.replace("/", "-")
+        (root / ".clinerules").mkdir(parents=True, exist_ok=True)
+        link = root / blocking
+        if blocking == ".clinerules":
+            link.rmdir()
+        link.symlink_to("nope")
+        dry = _run(["install", "cline", "--dir", str(root), "--dry-run"], env)
+        real = _run(["install", "cline", "--dir", str(root)], env)
+        for r in (dry, real):
+            assert r.returncode == 1, (blocking, r.returncode, r.stdout, r.stderr)
+            assert "Install failed:" in r.stderr
+            assert "not a directory" in r.stderr
+            assert "Traceback" not in r.stderr
+        assert "would write" not in dry.stdout, blocking
 
 
 def test_install_cline_migrates_a_legacy_registration_whose_script_path_lives(
@@ -1453,11 +1461,14 @@ _BOUNDARY_CASES = [
     ("directory-where-file-isadirectoryerror", "codex",
      lambda r: (r / ".codex" / "hooks.json").mkdir(parents=True),
      ["Install failed:", "IsADirectoryError"]),
-    # FileExistsError — a regular FILE where an intermediate dir belongs.
-    ("cline-hooks-as-file-fileexistserror", "cline",
+    # `.clinerules/hooks` as a regular FILE — the component the install has to
+    # create. The read half refuses UP FRONT (#11588 review cycle 4): letting
+    # ``mkdir`` raise meant ``--dry-run`` printed `would write` and exited 0
+    # while the real run refused with FileExistsError.
+    ("cline-hooks-as-file", "cline",
      lambda r: ((r / ".clinerules").mkdir(),
                 (r / ".clinerules" / "hooks").write_text("x")),
-     ["Install failed:", "FileExistsError"]),
+     ["Install failed:", "not a directory"]),
     # `.clinerules` as a regular FILE — Cline's rules-FILE convention, so the
     # hooks DIRECTORY cannot be created there. The read half refuses UP FRONT
     # with the cause and the remedy (#11588 review) instead of letting

@@ -120,8 +120,10 @@ hook script as a module. No MCP tool or public SDK method is touched.
   caught by `test_install_cline_refuses_when_clinerules_is_a_rules_file`, which asserts BOTH runs
   refuse with the actionable message and that the dry run prints no `would write`. The DANGLING-symlink
   form of the same false pass (a link `exists()` reports absent but `mkdir` still refuses) is caught by
-  `test_install_cline_refuses_a_dangling_clinerules_symlink` — that one makes the prediction/real-run
-  agreement hold for every shape, not just regular files.
+  `test_install_cline_refuses_a_dangling_clinerules_symlink` — over **both components the install must
+  create** (`.clinerules` and `.clinerules/hooks`): that is what makes the prediction/real-run
+  agreement hold for every shape, and it was only true for `.clinerules` itself until the second
+  component was added.
 - R8 A DIRECTORY at the LEGACY path refuses an install that never touches it → caught by
   `test_install_cline_ignores_a_directory_at_the_legacy_path` (install succeeds, directory untouched;
   `--uninstall` still refuses via the explicit `is_dir` guard, which returns before any `unlink` —

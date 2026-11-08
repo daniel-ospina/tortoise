@@ -6280,18 +6280,30 @@ def _install_read_hook_impl(args) -> int:
         # the refusal says what to do instead. Uninstall is unaffected: it
         # never creates a directory, and a legacy registration must still be
         # removable from such a project.
+        # BOTH components the install must create are checked, not just
+        # `.clinerules` (#11588 review cycle 4): a file — or an IN-ROOT
+        # dangling symlink — at `.clinerules/hooks` left the dry run promising
+        # a write the real run refused with FileExistsError, i.e. the SAME
+        # false pass one path component lower. `target.parent` is exactly what
+        # the `mkdir` below has to create, so it is the right thing to validate.
         clinerules = root / ".clinerules"
-        if (not uninstall
-                and (clinerules.exists() or clinerules.is_symlink())
-                and not clinerules.is_dir()):
-            print(f"Install failed: {clinerules} is not a directory, so "
-                  f"Cline's hooks directory {target.parent} cannot be created. "
-                  "Cline reads hooks only from a .clinerules/ DIRECTORY, and "
-                  "its rules live there as markdown files — so a REGULAR FILE "
-                  "at that name (Cline's other rules convention) must be moved "
-                  f"to {clinerules}/rules.md, and a symlink must resolve to a "
-                  "directory. Or point --dir at a project whose .clinerules "
-                  "is a directory.", file=_sys.stderr)
+        blocking = next(
+            (p for p in (clinerules, target.parent)
+             if (p.exists() or p.is_symlink()) and not p.is_dir()), None)
+        if not uninstall and blocking is not None:
+            # Name the remedy that fits the component that is blocked: a file
+            # at `.clinerules` is Cline's OTHER rules convention (convert it to
+            # the directory form); a file at `.clinerules/hooks` is simply in
+            # the way of the directory the hook needs.
+            hint = (f"A regular file at `.clinerules` is Cline's other rules "
+                    f"convention — move it to {clinerules}/rules.md. "
+                    if blocking == clinerules else "")
+            print(f"Install failed: {blocking} is not a directory, so Cline's "
+                  f"hooks directory {target.parent} cannot be created. Cline "
+                  "reads hooks only from a .clinerules/ DIRECTORY (its rules "
+                  f"live there as markdown files). {hint}A symlink must resolve "
+                  "to a directory; or point --dir at a project whose "
+                  ".clinerules is a directory.", file=_sys.stderr)
             return 1
 
         if dry:
