@@ -13006,7 +13006,12 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     embed_list = arm["embed_list"]
     vet_s2_stats = arm["vet_stats"]
     vet_s2_pool = arm["vet_pool"]
-    mention_s2_stats = arm["mention_stats"]
+    # ⛔ ONE SHAPE ALWAYS (review at `86ed2e9b7`, P2): `{first, second}` on BOTH
+    # returns, with `second` explicitly `None` when no retry ran. The old form
+    # was the arm's FLAT counter dict on a non-retry run and `{first, second}`
+    # on a retried one, so a consumer had to guess which shape it held — the
+    # conditional-shape failure `renarrate`/`relations` exist to avoid.
+    mention_s2_stats = {"first": arm["mention_stats"], "second": None}
     vet_warnings.extend(arm["warnings"])
     renarrate_stats: dict = {"fired": False}
 
@@ -13041,6 +13046,15 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
         vet_s2_pool = picked["vet_pool"]
         mention_s2_stats = picked["mention_stats"]
         vet_warnings.extend(picked["warnings"])
+        # BOTH S1 passes ran in this run, so the run-level chunk counters cover
+        # both — never the first arm's alone (review at `86ed2e9b7`, P2). Bound
+        # from arm A only, a retry whose SHIPPED narrative came from a second
+        # arm with a failed chunk still reported `failed_chunks == 0`: the
+        # surface said "clean" about the arm that shipped, and disagreed with
+        # `stats["llm"]["calls"]`, which counts both arms. Per-arm counts ride
+        # `stats["renarrate"]["chunks"]`, so the sum stays decomposable.
+        chunks = arm["chunks"] + second["chunks"]
+        failed_chunks = arm["failed_chunks"] + second["failed_chunks"]
         renarrate_stats = {
             "fired": True,
             "trigger": trigger,
@@ -13054,6 +13068,14 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
             "emphasis": emphasis,
             "first": arm["metrics"],
             "second": second["metrics"],
+            # The chunk halves of the same two arms — the population behind the
+            # run-level `stats["chunks"]`/`stats["failed_chunks"]` sum.
+            "chunks": {
+                "first": {"chunks": len(arm["chunks"]),
+                          "failed": arm["failed_chunks"]},
+                "second": {"chunks": len(second["chunks"]),
+                           "failed": second["failed_chunks"]},
+            },
             "merged": picked["merged"],
         }
         # ax-principles: an action names what it did. One line, and it carries
@@ -15199,16 +15221,39 @@ def _renarrate_emphasis(reason: str) -> str:
     return a different narrative. The block therefore re-states the SAME
     declaration `_granularity_text` already carries, at its foremost strength —
     it adds no rule the pack did not declare.
+
+    ⛔ ONE PREMISE PER TRIGGER (review at `86ed2e9b7`, P2). Only
+    `coverage_suspect` means the first story *yielded nothing*; the other two
+    fire on a **quality** judgement about a batch that DID produce candidates
+    (`arbiter_renarrate`: an arbiter called it poor; `keep_rate`: it kept less
+    than a hand-set share of what it extracted). Telling the model it "yielded
+    nothing" on those paths hands it a false premise about its own input, and
+    the old form also leaked a raw enum token into prose. The premise is
+    therefore derived from the reason, and an unknown reason gets the neutral
+    sentence rather than a claim about the input.
     """
+    premise = {
+        "coverage_suspect":
+            "the previous story of this session yielded nothing at extraction",
+        "arbiter_renarrate":
+            "the previous story of this session was judged a poor batch",
+        "keep_rate":
+            "the previous story of this session kept fewer than the configured "
+            "share of the candidates it extracted",
+    }.get(str(reason or "").strip().lower(),
+          "the previous story of this session was judged a poor batch")
     return (
-        "**RE-NARRATE — the previous story of this session yielded nothing at "
-        f"extraction ({reason}).** Re-state this conversation at the FOREMOST "
+        f"**RE-NARRATE — {premise}.** Re-state this conversation at the FOREMOST "
         "granularity the rules above declare: every decision, every event, "
         "every durable belief, and the named participants that carry them "
         "must appear as its OWN self-contained statement, with its subjects "
         "and objects named. Do not fold several facts into one summary "
         "sentence, and do not omit a fact because it reads as minor. Keep "
         "every user-stated value verbatim (the state-value carve-out above)."
+        # The trigger stays machine-readable on its own labelled line instead of
+        # as a parenthetical inside the sentence above: an operator (and the
+        # tests) need to map prompt -> trigger, and prose must not carry an enum.
+        f"\n\nRe-narrate trigger: {str(reason or '').strip() or 'unknown'}."
     )
 
 
@@ -15542,6 +15587,8 @@ def _renarrate_pick(first: dict, second: dict) -> dict:
         "vet_stats": second["vet_stats"],
         "vet_pool": _merge_arm_pools(first.get("vet_pool") or {},
                                      second.get("vet_pool") or {}),
+        # ONE shape with the non-retry path (`{first, second}`); here both arms
+        # are real, so neither side is `None`.
         "mention_stats": {"first": first.get("mention_stats") or {},
                           "second": second.get("mention_stats") or {}},
         "warnings": list(second.get("warnings") or []),

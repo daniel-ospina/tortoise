@@ -621,7 +621,7 @@ Normalises the shape **and applies the declared field→type mapping** (§3). Pa
 
 This is v2's S2, with priors in hand. Still proposes only; decides nothing.
 
-**✅ FINDING (2026-09-23) — the code hands extraction the raw alongside the story.** The call is `run_s2(model, story, master, session_date=…, edus=edus, …)` (`extractor_v2.py:15377-15381`) — ⚠️ **this row is the one passage cited HEAD-relative, not at a pin**; `tests/test_7949_capstone_measure.py` resolves it against the tree, so it moves with the code. **`edus` is the raw segmented input, passed together with the computed story.** **⇒ D3-Option 4 holds: the narrative is a **focus**, and the raw is present too.**
+**✅ FINDING (2026-09-23) — the code hands extraction the raw alongside the story.** The call is `run_s2(model, story, master, session_date=…, edus=edus, …)` (`extractor_v2.py:15422-15426`) — ⚠️ **this row is the one passage cited HEAD-relative, not at a pin**; `tests/test_7949_capstone_measure.py` resolves it against the tree, so it moves with the code. **`edus` is the raw segmented input, passed together with the computed story.** **⇒ D3-Option 4 holds: the narrative is a **focus**, and the raw is present too.**
 
 > ⚠️ **What this does to D3.** The open question is not *"may extraction consult the raw?"* — it does. It is the much smaller **"what does the narrative add that the raw does not?"** The measurement (§10) compares **narrative + raw** against **raw alone** — ⛔ **and that shape cannot test loss-by-replacement**, so the D3 question is now two: *what the narrative ADDS* (measured, §10) and *what it LOSES when it replaces the raw* (**not yet measured**). §10's verdict says so. **This paragraph named the ADD question correctly; the error was downstream** — the
 registration then fixed the contrast with *"the same `edus`"* for both arms, which is what makes the falsifier
@@ -1035,6 +1035,19 @@ New entities + connections + **metadata**. The metadata includes **lifecycle eve
 **What the run COMMITS is the union of both arms' items — the tie-break decides the NARRATIVE only.** The shipped list is `merge_embed_lists` over the two arms (the second wins an identity-key collision, the first arm's items are preserved), so both arms' extractions reach the graph. Only ONE narrative is recorded, because exactly one `story`/`story_arc` reaches S4's prompt and `execute_embed`; which one is what the tie-break above settles. The union is re-vetted wholesale before it ships, so a first-arm flag is re-derived rather than dropped. On the arm armed by construction (`coverage_suspect`) the first list is empty and the union IS the second arm's list; the merge is what keeps the disarmed keep-rate arm from silently dropping the losing narrative's items.
 
 > **OVERRIDES:** §4.4's earlier *"the losing arm's extraction is discarded **with** its narrative"* — **retired by the owner's ruling of 2026-11-08 on `#11002`**: *"the retry must union both attempts with the same identity-key collision rules the existing merge uses — that is what makes it a successor rather than a replacement."* E4's merges-not-replaces property (`#1536`) must survive into the successor, which is why `run_s4`'s removal is still gated on §4.4's F3 measurement.
+
+**The removal's falsifier — F3, defined here because two places cite it by that name.**
+`run_s4`'s removal (the `#8500` migration deliverable, executed under `#11002`) is gated on **one**
+measurement, and it is an eval-lane run, not a code change. On the frozen corpus, count the sessions
+where `_s4_merge_stats`'s `added_by_s4 > 0` **while** `check_batch`'s `coverage_suspect` is **False**.
+That is an episode where S4 ADDED items in a case the coverage check cannot flag — so the bounded
+re-narrate above cannot reach it, because the retry's armed-by-construction arm is exactly
+`coverage_suspect`. `> 0` means **do not delete `run_s4`**: the retry is a successor for the
+total-loss case only, and the removal's pre-condition is a stage that can ADD in the cases S4
+currently rescues. `0` over the corpus is the removal's green light. ⛔ It is not satisfiable by
+reasoning about the code — the count comes from a run — so no lane may delete `run_s4` on the
+strength of this section alone. (The label **F3** is the one the `#11002` issue's risk table and the
+drift marker over the step list already use; this paragraph is its definition of record.)
 
 **⚠️ This section is a SPEC, not a description of what runs — and `#5095` closed HALF of the gap.** The load-bearing instance is S3. `search_graph` degrades instead of raising (correct, `#3679`), and its renderer used to tell the model *"no existing items available; assume everything is new"* (`_render_search_results`, `extractor_v2.py:2353` at `7d348d351` — the revision this citation has always been pinned to) — the inverse of I1, and the duplication-manufacturing direction G3 names.
 

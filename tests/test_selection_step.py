@@ -260,6 +260,36 @@ def test_the_second_narrative_prompt_differs_and_names_the_gap(monkeypatch):
     assert "RE-NARRATE" in second
 
 
+def test_each_trigger_states_its_own_premise():
+    """The emphasis must not tell the model a false premise about its input.
+
+    Only `coverage_suspect` means the first story *yielded nothing*. The other
+    two triggers fire on a QUALITY judgement about a batch that DID produce
+    candidates, so reusing the "yielded nothing" sentence there hands the model
+    a false statement about its own input (review at `86ed2e9b7`, P2). The three
+    premises must therefore be DISTINCT, and only the coverage arm may claim an
+    empty extraction.
+    """
+    coverage = extractor_v2._renarrate_emphasis("coverage_suspect")
+    arbiter = extractor_v2._renarrate_emphasis("arbiter_renarrate")
+    keep_rate = extractor_v2._renarrate_emphasis("keep_rate")
+    assert len({coverage, arbiter, keep_rate}) == 3, (
+        "one premise per trigger — a shared sentence is the false-premise defect"
+    )
+    assert "yielded nothing" in coverage
+    assert "yielded nothing" not in arbiter
+    assert "yielded nothing" not in keep_rate
+    # The machine-readable trigger rides its own labelled line, never the prose.
+    for trigger, block in (("coverage_suspect", coverage),
+                           ("arbiter_renarrate", arbiter),
+                           ("keep_rate", keep_rate)):
+        assert f"Re-narrate trigger: {trigger}." in block
+    # An unknown reason gets the NEUTRAL sentence, never a claim about the input.
+    unknown = extractor_v2._renarrate_emphasis("something_new")
+    assert "yielded nothing" not in unknown
+    assert "Re-narrate trigger: something_new." in unknown
+
+
 def test_run_s1_renders_byte_identically_without_emphasis(monkeypatch):
     """``emphasis=None`` must not move a single byte of S1's prompt.
 
@@ -476,6 +506,61 @@ def test_the_census_stays_absent_when_the_retry_does_not_fire(monkeypatch):
     """A healthy run reports `fired: False` — never a fabricated episode."""
     _, result = _run(monkeypatch, ["Alice set a budget."], [_embed("Northwind")])
     assert result["stats"]["renarrate"] == {"fired": False}
+
+
+def test_the_mentions_surface_keeps_ONE_shape(monkeypatch):
+    """`mentions.stats` is `{first, second}` on both returns, never flat.
+
+    It used to be the arm's FLAT counter dict on a non-retry run and
+    `{first, second}` on a retried one, so a consumer had to guess which shape
+    it held — the conditional-shape failure this file and `relations`/`renarrate`
+    exist to rule out (review at `86ed2e9b7`, P2).
+    """
+    _, healthy = _run(monkeypatch, ["Alice set a budget."], [_embed("Northwind")])
+    _, retried = _run(monkeypatch,
+                      ["Alice set a budget.", "Alice set a budget, re-stated."],
+                      [_EMPTY_EMBED, _embed("Northwind")])
+    assert healthy["stats"]["renarrate"] == {"fired": False}
+    assert retried["stats"]["renarrate"]["fired"] is True
+    for label, res, second_is_none in (("healthy", healthy, True),
+                                       ("retried", retried, False)):
+        stats = (res.get("mentions") or {}).get("stats")
+        assert isinstance(stats, dict), f"{label}: mentions.stats must be a dict"
+        assert set(stats) == {"first", "second"}, (
+            f"{label}: ONE shape — got {sorted(stats)!r}"
+        )
+        assert isinstance(stats["first"], dict), f"{label}: first arm is a dict"
+        assert (stats["second"] is None) is second_is_none, (
+            f"{label}: second is None exactly when no retry ran"
+        )
+
+
+def test_the_chunk_counters_cover_BOTH_arms(monkeypatch):
+    """The run-level chunk counters are the two arms' SUM, never arm A's alone.
+
+    Both S1 passes chunked the transcript, so a retry doubles the population.
+    Bound from arm A only, a retry whose SHIPPED narrative came from a second
+    arm with a failed chunk still reported `failed_chunks == 0` — the surface
+    said "clean" about the arm that shipped (review at `86ed2e9b7`, P2).
+    """
+    _, result = _run(monkeypatch,
+                     ["Alice set a budget.", "Alice set a budget, re-stated."],
+                     [_EMPTY_EMBED, _embed("Northwind")])
+    arms = result["stats"]["renarrate"]["chunks"]
+    assert set(arms) == {"first", "second"}
+    for arm in arms.values():
+        assert set(arm) == {"chunks", "failed"}
+    assert result["stats"]["chunks"] == (arms["first"]["chunks"]
+                                         + arms["second"]["chunks"]), (
+        "stats['chunks'] must be the sum of both arms' chunk counts"
+    )
+    assert result["stats"]["failed_chunks"] == (arms["first"]["failed"]
+                                                + arms["second"]["failed"]), (
+        "stats['failed_chunks'] must be the sum of both arms' failures"
+    )
+    assert arms["second"]["chunks"] > 0, (
+        "the second arm really did chunk the transcript — non-vacuity"
+    )
 
 
 def test_every_return_carries_the_renarrate_channel(monkeypatch):
