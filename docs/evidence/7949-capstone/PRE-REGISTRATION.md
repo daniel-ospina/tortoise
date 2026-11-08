@@ -1698,7 +1698,8 @@ re-cut from the resolved document (§8), and no committed verdict is re-scored.
   `:13071`/`:13218`.
 - **Why:** between `5c866513c` (the head §10.10 was written at) and `origin/main` `5ef5805f0`, the
   ONLY commit touching `extractor_v2.py` is `91dbc9a88` (`#11449`, **+80/−4**, net **+76**), whose
-  hunks sit at `:5190`–`:5286` and `:9923`–`:9943`.
+  hunks START at `:5190`, `:5245`, `:5275`, `:5285`, `:9923` and `:9943` (the first group's added
+  lines run to `:5288`).
   ⛔ **Two deltas from one commit, and the table states both** — this is why a blanket `+76` is a
   wrong re-derivation for part of the block: the first four hunks add **68** lines (`+54`, `+1`,
   `+9`, `+4`) above `:5286`, so the #2684 `_carries_value` pair moves `:5286-5287` → `:5354-5355`
@@ -1709,10 +1710,22 @@ re-cut from the resolved document (§8), and no committed verdict is re-scored.
 - **Also re-derived here, never moved by a §10 entry before:** the step table's `search_graph`
   (`:13000` → `:13076`) and `run_s4` (`:13021` → `:13097`) cites, and the `_IDLE_CITES`
   `classify_later` cause's `classify_later = False` site (`:12847` → `:12923`). The first two named
-  lines that are not the code their sentence claims (`:13000` is `run_s2`'s call, `:13021` is a
-  comment inside `_run_vet_pass`); the third was the only cause line the +76 had not reached.
-- **What moved: nothing else.** No metric, denominator, threshold, class set, corpus pin or `steps`
-  block is touched: the values this record freezes are unchanged and only line citations move.
+  lines that are not the code their sentence claims (`:13000` is `run_s2`'s call; `:13021` is a
+  comment at the call site inside `extract_session_v2` — `_run_vet_pass` itself is `:12774-12811`);
+  the third was the only cause line the +76 had not reached.
+- **The `steps:` block's S2.3 `condition` carries this same cite, and it is re-pointed with it.**
+  That block is operative text, so its CONTENT EPOCH (`_steps_block_epoch`) moves with this commit;
+  what moves is a line NUMBER in the condition's provenance, not the condition, the step set, a
+  metric, a denominator or a threshold — the operative rule is unchanged, which is why this is a
+  §10.14 record rather than a `## Deviations` entry under §8.
+- **The union also pins one switch the base was red on.** `91dbc9a88` introduced
+  `TORTOISE_STATE_VALUE_VERBATIM`, read by nine capture-path modules and resolved `env_flag(SWITCH,
+  True)`; its ABSENT state is not the neutral one to inherit (an ambient `=0` disarms the write
+  path's verbatim-value refusal), so it is pinned to the shipped default in the probe's
+  `DOOR_PINNED_ON` and in this record's `door.acceptance_arm.pinned_to` — the door's C2 closure
+  otherwise refuses the run (`test_every_env_var_the_capture_path_reads_is_accounted_for`).
+- **What moved: nothing else.** No metric, denominator, threshold, class set or corpus pin is
+  touched: the values this record freezes are unchanged and only line citations move.
   `document_sha256` is re-cut in this same commit, per §8's rule for *any* edit to this file.
 
 ## 11. The step set V5 gates over — seven unconditional, one conditional (`#10215`)

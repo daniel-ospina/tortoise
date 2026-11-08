@@ -490,7 +490,15 @@ DOOR_PINNED_ON = (("TORTOISE_S4_DELTA", "1"), ("TORTOISE_JSON_MODE", "1"),
                   # aliases either way (0 of 27 points, 0 turns across the 7
                   # fixtures — measured), so the pin makes the population
                   # insensitive to the shell without moving a number.
-                  ("TORTOISE_IDENTIFIER_TOKENS", "1"))
+                  ("TORTOISE_IDENTIFIER_TOKENS", "1"),
+                  # the union that absorbed `#11449` (`91dbc9a88`): nine capture-path
+                  # modules read this switch, and its ABSENT state is NOT the neutral one
+                  # to inherit — the code resolves `env_flag(SWITCH, True)`, so an ambient
+                  # `=0` DISARMS the write path's verbatim-value refusal (a rewritten
+                  # value is then WRITTEN and the resurrection guard cannot fire), which
+                  # changes the population under a header that would still claim the door
+                  # held. Pinned to the SHIPPED default, exactly as `TORTOISE_S4_DELTA`.
+                  ("TORTOISE_STATE_VALUE_VERBATIM", "1"))
 
 #: Every key a complete read-back carries — the pinned-off set plus the
 #: pinned-to set. A ``door_header``/``door_record`` handed an INCOMPLETE dict is
