@@ -11472,8 +11472,10 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         # characters — the same idiom the neighbouring `:12779` arm uses for its own number.
         # ⛔ And it is NOT a live-number deny-list. "the LIVE number never appears in these regions
         # at all" was asserted here and is FALSE: no rule here refuses the number `:12944` itself,
-        # and §2 refuses nothing else (measured — injecting `:12944` at `HEAD` into §2 leaves the
-        # whole leg GREEN). The one row that reads the number holds the capstone bundle's
+        # and nothing in §2 refuses a live number outside the two the arms beside this one hold —
+        # the `:12929` base PAIR and `:12779` at `62248db88` (measured — injecting `:12944` at
+        # `HEAD` into §2 leaves the whole leg GREEN; re-staling §2's `:12779` to `HEAD` reds, at
+        # the `:12779` arm). The one row that reads the number holds the capstone bundle's
         # `README.md` cite to `vet_enabled = (`, and reads THAT document — never this record
         # (`test_the_bare_continuation_cites_name_what_they_say`). The hole the record's citation
         # grammar leaves open is stated in the paragraph below.
