@@ -3671,18 +3671,21 @@ def test_an_UNMEASURABLE_probe_VETOES_even_when_the_CONTROL_answers(monkeypatch)
         reads — the lexicon read and the index-entry read — go through `g.query`,
         and it never reaches the control's `mode="probe"` arm (which DOES read
         through the patched `run_fts_query` — `source_fts_probe` is called at
-        `session_source_prose_migration.py:2138`). With
-        `control_ok` False the fold falls through to `uncorroborated` — the WRONG
-        VETO FOR THE RIGHT OUTCOME — so none of them pins "the probe's own read did
-        not run".
+        `session_source_prose_migration.py:2138`). ⛔ AND ON THE SHIPPED LADDER
+        THAT TEST IS NOT VETOED AS `uncorroborated` — this arm sits above every
+        control arm, so the fold returns `vetoed="unmeasurable"` for it too. The
+        wrong-veto outcome is what a fold that DROPS this veto reaches; with the
+        arm present, nothing there distinguishes the right refusal from the wrong
+        one, which is why none of them pins "the probe's own read did not run".
         Verified by mutation at this head: with `elif out["unmeasurable"]:`
-        deleted the rest of the suite stays green (128 passed, 4 skipped) and only
-        this test reds, on `certifies is False`; MOVING that veto below arm (b)
-        reds it the same way. ⛔ AND THAT IS ALL THIS FIXTURE PINS: its probe
-        never discriminated, so moving the veto below `elif discriminating:`
-        leaves THIS test green — the claim that its "ORDER in the ladder is
-        pinned" was false, and measured so (`129 passed, 4 skipped` on that
-        mutation). The arm ABOVE `discriminating` is pinned by the adjacent
+        deleted, every test that folds a report carrying a non-empty
+        `unmeasurable` reds on `certifies is False` — this one and the adjacent
+        `test_an_UNMEASURABLE_AFTER_read_VETOES_a_DISCRIMINATING_probe` — and no
+        other test does; MOVING that veto below arm (b) reds this one the same
+        way. ⛔ AND THAT IS ALL THIS FIXTURE PINS: its probe never discriminated,
+        so moving the veto below `elif discriminating:` leaves THIS test green —
+        the claim that its "ORDER in the ladder is pinned" was false. The arm
+        ABOVE `discriminating` is pinned by the adjacent
         `test_an_UNMEASURABLE_AFTER_read_VETOES_a_DISCRIMINATING_probe`.
     (2) REACHABLE: a breaker trip or a `query_failed` between the probe read and
         the control read is the ordinary transient this leg exists for.
