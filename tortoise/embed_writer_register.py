@@ -88,9 +88,16 @@ for the opposite direction (nothing STORED that the declaration omits — added 
 after a second store on an unserved label kept every test green, `#11530`), and
 `tests/test_embed_writer_register.py::test_a_no_live_vector_declaration_executes_no_store_clause`
 for every `NO_LIVE_VECTOR` entry. ⛔ State the residual at its true size: the completeness pin
-resolves the label through the ALIAS each store clause names, so it cannot attribute a label bound
-by interpolation (`CREATE (n:{safe_labels})`) — such an entry must carry a `LABEL_CONSTANTS` entry
-or the pin refuses to pass it silently. The `NO_LIVE_VECTOR` pin proves the
+resolves the label through the ALIAS a store clause of one of `_STORE_ALIAS`'s THREE forms names,
+so it cannot attribute (a) a label bound by interpolation (`CREATE (n:{safe_labels})`), (b) a store
+written through a helper that form list does not name, or (c) a vector carried by a MAP MERGE
+(`SET n += $p` / `SET n = $map` — the shape `_update_entity` itself stores through, which is why
+that entry's completeness rests on `LABEL_CONSTANTS` rather than on the alias rule; closing it
+statically needs data flow, and a naive `SET` rule false-reds `_rebuild_all_replay`, whose
+`SET b`/`SET s` carry the pre-wipe snapshot on `:Batch`/`:Session`). Shapes (a) and (b) RED when
+the clause names an alias — and a `LABEL_CONSTANTS` entry does NOT clear them; only a reviewed
+`STORE_ALIAS_UNATTRIBUTABLE` entry does. Shape (c) passes SILENTLY, so a reviewer of a label-tuple
+entry must read the body for a map merge by hand. The `NO_LIVE_VECTOR` pin proves the
 symbol's own body (plus one hop of module constants) executes no store clause, which is NOT the
 same as proving the writer stores nothing — a door that EXECUTES A CALLER-SUPPLIED statement
 (`sdk::_event_raw_write_door`) carries no marker and is caught only by review.

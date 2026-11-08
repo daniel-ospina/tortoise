@@ -1051,11 +1051,16 @@ _STORE_ALIAS_FORMS = frozenset(
 )
 
 #: Writers whose store alias is legitimately bound in a CALLER rather than in the cited symbol, so
-#: the completeness pin cannot attribute it. Keyed `module::symbol` -> the reason it cannot be
-#: attributed here. ⛔ Empty on purpose: every live entry binds its own alias. An entry appears here
-#: only by a deliberate, reviewed decision — never to buy green, because a writer listed here has
-#: its `stores` tuple trusted for what it OMITS, which is the state row 2 must be told about.
-STORE_ALIAS_UNATTRIBUTABLE: dict[str, str] = {}
+#: the completeness pin cannot attribute it. Keyed `(module::symbol, alias)` -> the reason it cannot
+#: be attributed here. ⛔ PER-ALIAS on purpose: keyed by writer alone, ONE reviewed entry would
+#: excuse every unattributed alias of that writer — including a second, genuinely unserved store
+#: that arrives later — reinstating above the rule exactly the "total, not per-alias" drop that
+#: `#11530`'s fix closed below it.
+#: ⛔ Empty on purpose: every live entry binds its own alias. An entry appears here only by a
+#: deliberate, reviewed decision — never to buy green, because a writer listed here has its `stores`
+#: tuple trusted for what it OMITS, which is the state row 2 must be told about. Pinned live by
+#: `test_every_unattributable_store_alias_is_still_unbound_and_store_shaped`.
+STORE_ALIAS_UNATTRIBUTABLE: dict[tuple[str, str], str] = {}
 
 #: `(alias:Label` — how a Cypher statement binds an alias to a label. `\w+` deliberately does not
 #: match an INTERPOLATED label (`CREATE (n:{safe_labels})`), which no static rule can attribute.
@@ -1103,12 +1108,16 @@ def test_a_declared_label_set_covers_every_label_its_own_store_targets() -> None
         # `SET b.embedding = vecf32(turn.emb)` alongside a resolvable `t` kept this suite at 190
         # passed while `b` stored on unserved `Batch`. A total check (`any alias resolves`) cannot
         # see it.
-        unattributed = sorted(alias for alias in aliases if not bound.get(alias))
-        assert not unattributed or key in STORE_ALIAS_UNATTRIBUTABLE, (
+        unattributed = sorted(
+            alias for alias in aliases if not bound.get(alias)
+            and (key, alias) not in STORE_ALIAS_UNATTRIBUTABLE
+        )
+        assert not unattributed, (
             f"{key}: store clause(s) name alias/es {unattributed}, which its own body never binds "
             "to a label, so this pin cannot attribute them and would pass an UNSERVED store "
-            "silently. Bind the alias, cite a LABEL_CONSTANTS entry, or — only where the alias is "
-            "legitimately bound in a CALLER — add a reasoned STORE_ALIAS_UNATTRIBUTABLE entry."
+            "silently. Bind the alias, or — only where it is legitimately bound in a CALLER — add "
+            "a reasoned STORE_ALIAS_UNATTRIBUTABLE entry keyed (key, alias). ⛔ A `LABEL_CONSTANTS` "
+            "entry does NOT clear this branch (measured): it rescues the no-alias branch above."
         )
         stored = set().union(*(bound.get(alias, set()) for alias in aliases if bound.get(alias)))
         if not stored:
@@ -1127,6 +1136,70 @@ def test_a_declared_label_set_covers_every_label_its_own_store_targets() -> None
     assert covered >= 6, (
         f"the alias rule resolved only {covered} entries — it is inert for the rest, which is the "
         "shape this pin must never become"
+    )
+
+
+def test_the_per_alias_refusal_fires_and_its_exemption_is_per_alias(monkeypatch) -> None:
+    """The two branches of the per-alias rule, DRIVEN — a guard with no caller is revertible.
+
+    Measured before this test existed: emptying `unattributed` (the pre-`#11530` "total"
+    behaviour) left this whole file at `29 passed`, and `STORE_ALIAS_UNATTRIBUTABLE` had no
+    caller at all. So both halves of the fix were revertible in silence — the class this file
+    already fixed once for `STORE_CLAUSE_MARKERS`.
+
+    Synthetic bodies, because no LIVE entry has an unattributable alias (that is the point of
+    the dict being empty): a resolvable store on `t` alongside a store on `b`, which the body
+    never binds.
+    """
+    key = "tortoise.sdk::_write_capture_turns"  # declared stores=("Point",)
+    real = _declared_symbol_bodies
+    bound_ok = 'MATCH (t:Point {id:x}) set_embedding_clause("t")'
+    unbound = "\nSET b.embedding = vecf32($e)"
+
+    def only_this_key(k: str) -> list[str]:
+        return [bound_ok + unbound] if k == key else real(k)
+
+    monkeypatch.setattr(sys.modules[__name__], "_declared_symbol_bodies", only_this_key)
+    with pytest.raises(AssertionError, match="never binds"):
+        test_a_declared_label_set_covers_every_label_its_own_store_targets()
+
+    # ⛔ PER-ALIAS: exempting a DIFFERENT alias of the same writer must NOT clear it.
+    monkeypatch.setitem(STORE_ALIAS_UNATTRIBUTABLE, (key, "zzz"), "synthetic wrong alias")
+    with pytest.raises(AssertionError, match="never binds"):
+        test_a_declared_label_set_covers_every_label_its_own_store_targets()
+
+    # …while exempting the alias the clause actually names clears it.
+    monkeypatch.setitem(STORE_ALIAS_UNATTRIBUTABLE, (key, "b"), "bound in a caller (synthetic)")
+    test_a_declared_label_set_covers_every_label_its_own_store_targets()
+
+
+def test_every_unattributable_store_alias_is_still_unbound_and_store_shaped() -> None:
+    """An exemption must keep earning its place — the sibling `NO_STORE_EXEMPTIONS` standard.
+
+    Keyed `(writer, alias)`, so this asserts both halves of its authority: the alias must still
+    be NAMED by a store clause of that writer (otherwise the entry excuses nothing and the pin
+    has silently stopped covering a store that moved), and it must still be UNBOUND (otherwise
+    the entry now hides a store the alias rule could have attributed, which is strictly worse).
+    """
+    stale: list[str] = []
+    for (key, alias), reason in sorted(STORE_ALIAS_UNATTRIBUTABLE.items()):
+        bodies = _declared_symbol_bodies(key)
+        named = any(
+            alias in found
+            for body in bodies
+            for pattern in _STORE_ALIAS.values()
+            for found in pattern.findall(body)
+        )
+        resolved = any(
+            dict(_ALIAS_LABEL.findall(body)).get(alias) for body in bodies
+        )
+        if not named or resolved:
+            stale.append(f"{(key, alias)} named={named} resolved={resolved} — {reason}")
+    assert not stale, (
+        "these `STORE_ALIAS_UNATTRIBUTABLE` entries no longer excuse an unattributable store: an "
+        "alias that is no longer NAMED by a store clause makes the entry inert, and one that is "
+        "now BOUND hides a store the alias rule could attribute. Re-derive and drop the entry: "
+        + "; ".join(stale)
     )
 
 
