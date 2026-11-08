@@ -142,13 +142,19 @@ class _Sdk:
         return types.SimpleNamespace(g=_Graph())
 
 
-#: Every env seam ``retrieve_for_question`` reads for this arm. ``GEOMETRY``
-#: passes the first three as explicit args, and ``_read`` passes the fourth, so
-#: no assertion depends on these — the scrub exists so the REASON a row moved
-#: is always visible: an exported counterfactual knob (`PLACEMENT=head` is a
-#: knob a lane exports on purpose for the documented A/B) would otherwise turn
-#: a correct arm into a false red that looks like a broken guard.
+#: Every env seam ``retrieve_for_question`` reads for this arm — the master
+#: switch included. ``GEOMETRY`` passes the three knobs as explicit args and
+#: ``_read`` passes the switch, so no assertion depends on these; the scrub
+#: exists so the REASON a row moved is always visible: an exported
+#: counterfactual knob (`PLACEMENT=head` is a knob a lane exports on purpose
+#: for the documented A/B) would otherwise turn a correct arm into a false red
+#: that looks like a broken guard. ``TORTOISE_LME_TEMPORAL_LEG`` is scrubbed
+#: too: it is a no-op today because ``_read`` passes ``temporal_leg=True``
+#: explicitly, but if that arg were ever dropped an ambient ``=1`` would
+#: silently arm the leg and this comment would otherwise claim the seam was
+#: covered.
 _ENV_SEAMS = (
+    "TORTOISE_LME_TEMPORAL_LEG",
     "TORTOISE_LME_TEMPORAL_LEG_NON_EVICTION",
     "TORTOISE_LME_TEMPORAL_LEG_PLACEMENT",
     "TORTOISE_LME_TEMPORAL_LEG_LIMIT",
@@ -215,24 +221,36 @@ def _read(monkeypatch, pool: list[dict] | None = None, *,
 def _stats(ret: dict) -> dict:
     """The receipt block, or a failure that says WHICH way it is missing.
 
-    ``retrieve.py`` always emits a ``temporal_leg_stats`` mapping — the OFF
-    shape (``{"on": False, "applied": False, ...}``) is constructed
-    unconditionally and emitted on every row — so a bare truthiness check
-    cannot tell "the leg never ran" from "someone broke the receipt": both
-    would surface as ``KeyError: 'non_eviction'`` a few lines later, which is
-    exactly the wrong message. Assert the two facts the guard needs.
+    ``retrieve.py`` emits a ``temporal_leg_stats`` mapping on EVERY row: the
+    pre-block initialiser (``{"on": temporal_leg_on, "applied": False,
+    "kind": None, ...}``) runs unconditionally, and the armed literal replaces
+    it only when the leg gate admits the row. So a bare truthiness check — or
+    even ``on`` — cannot tell the failure modes apart:
+
+    * ``on`` is ``True`` from the INITIALISER whenever the caller armed the
+      leg, even if the gate (``is_tr`` / constraint / ``annotated``) then
+      admitted nothing. Reading it as "the armed block ran" misdirects the
+      next reader to the receipt construction when the fault is the WIRING.
+    * ``kind`` is the discriminator that actually works: ``None`` in the
+      pre-block shape, the constraint kind (``"interval"`` here) once the
+      armed block has run.
+
+    Without these, a broken receipt surfaces as ``KeyError: 'non_eviction'`` a
+    few lines later, which names neither fault.
     """
     stats = ret.get("temporal_leg_stats")
     assert stats, f"no temporal_leg_stats block at all: {sorted(ret)}"
-    # Two INDEPENDENT conditions, two messages: collapsing them makes an
-    # armed-but-broken receipt print "the receipt is the OFF shape" next to
-    # ``on: True``, which sends the next reader hunting the resolver/wiring
-    # instead of the receipt block.
     assert stats.get("on") is True, (
-        f"the leg never armed — this is the OFF shape, so every assertion "
-        f"below would be vacuous: {stats}")
+        f"the leg never armed — this is the pre-block shape, so every "
+        f"assertion below would be vacuous: {stats}")
+    # ``kind`` (not ``on``) proves the ARMED block ran: ``on`` comes from the
+    # initialiser and is True for any armed caller whose gate admitted nothing.
+    assert stats.get("kind") is not None, (
+        f"the leg is armed but its gate admitted nothing (is_tr / constraint / "
+        f"annotated) — the receipt block never ran, so look at the WIRING, not "
+        f"the receipt: {stats}")
     assert "non_eviction" in stats, (
-        f"the armed block ran but the receipt field is missing — look at the "
+        f"the armed block ran but dropped the receipt field — look at the "
         f"receipt construction, not the wiring: {sorted(stats)}")
     return stats
 
@@ -334,12 +352,15 @@ def test_the_off_switch_reaches_the_arm_end_to_end(monkeypatch):
     assert off["non_eviction_applied"] is False, (
         f"a waived run must not claim enforcement: {off}")
     assert off["non_eviction_rejected"] == [], off
-    # …and the leg actually did the work it was blocked from doing
-    assert _leg(off_ret)["count"] >= 1, (
-        f"with the guard waived the arm must promote: {_leg(off_ret)}")
+    # …and the leg actually did the work it was blocked from doing. EXACT, not
+    # `>= 1`: the budget is 2 and both promotable buckets are refused under the
+    # guard, so a waived arm that promoted only one of them is a regression the
+    # weaker check would report as "the differential holds".
+    assert _leg(off_ret)["count"] == 2, (
+        f"with the guard waived the arm must promote both picks: {_leg(off_ret)}")
     assert _leg(off_ret)["reason"] is None, (
         f"a promoting leg has no empty-leg reason: {_leg(off_ret)}")
-    assert off_ret["temporal_leg_stats"]["picks"] >= 1, off
+    assert off_ret["temporal_leg_stats"]["picks"] == 2, off
 
     # the differential is the SWITCH's, not the pool's: the SAME fixture, one
     # env value apart, ships different windows.
@@ -348,11 +369,14 @@ def test_the_off_switch_reaches_the_arm_end_to_end(monkeypatch):
     assert _leg(on_ret)["count"] == 0
     assert [r["id"] for r in on_stats["non_eviction_rejected"]] == ["d1", "e1"]
 
-    # the waived arm's promoted ids are the ones the guard refused above.
+    # the waived arm's promoted ids ARE the ones the guard refused above — both
+    # of them. `assert promoted` (any one) would stay green on a regression
+    # that promoted d1 and dropped e1 while reading as though both landed.
     off_ids = [h["id"] for h in off_ret["hits"]]
-    promoted = [pid for pid in ("d1", "e1") if pid in off_ids[:12]]
-    assert promoted, (
-        f"the waived arm promoted neither refused pick: {off_ids[:12]}")
+    promoted = {pid for pid in ("d1", "e1") if pid in off_ids[:12]}
+    assert promoted == {"d1", "e1"}, (
+        f"the waived arm must promote BOTH refused picks: {sorted(promoted)} "
+        f"of the window {off_ids[:12]}")
 
 
 # ── (3) "the rule is ON" and "the rule RAN" are different facts ──
