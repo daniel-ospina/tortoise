@@ -141,9 +141,12 @@ for this issue by its own scope guard ("Out of scope: any parse/retrieval semant
 - **New:** `tools/longmem_eval/haystack_overlap.py` (census + derived verdict + CLI) and its test
   `tests/longmem_eval/test_haystack_overlap_1779.py` (16 tests: 15 hermetic + the real-split pin — a
   count this document's §5 line must match, asserted by
-  `test_the_research_doc_publishes_this_files_REAL_test_count`; registered in `config/ci-surfaces.yml`
-  on the `eval` surface, where `tools/longmem_eval/` is a `SOURCE_PATTERNS` entry, and therefore in
-  the non-gating `on_demand` lane — `python tools/ci_selection.py --integrity` exits 0).
+  `test_the_research_doc_publishes_this_files_REAL_test_count`; registered on the `eval` surface for
+  OWNERSHIP (`tools/longmem_eval/` is a `SOURCE_PATTERNS` entry of it), and independently a non-gating
+  `on_demand` member because `on_demand:` carries `longmem_eval/**` — the subtraction is by PATH
+  (`tools/ci_selection.py:4269`), not by surface; `python tools/ci_selection.py --integrity` exits 0).
+  ⚠️ No CI lane re-derives the pin: the on-demand lane provisions the embedder and FalkorDB but never
+  the dataset cache, so the numbers are re-derived only on a box holding the cached S split (§8).
 - **Corrected:** the unmeasured "5-10×" in `encode_cache.py` (docstring), `README.md` (encode-cache
   section + a new measured-overlap table) and `run.py:7383` (comment) now cite the measured 1.299× /
   23.0% and name the census that produced it. Its ORIGIN —
