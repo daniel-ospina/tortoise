@@ -1,11 +1,19 @@
 """Official LongMemEval answer-check judge (issue #1144, axis 2).
 
 Reimplements the benchmark's official judge (``evaluate_qa.py`` —
-``get_anscheck_prompt``) verbatim: task-specific yes/no templates judged by
-``gpt-4o-2024-08-06`` at temperature 0, max_tokens 10, label = ``'yes' in
-response.lower()``. The template text below is copied from the official
-repository (MIT license) so published numbers are directly comparable to the
-paper's reported accuracies.
+``get_anscheck_prompt``) verbatim: task-specific yes/no templates at
+temperature 0, max_tokens 10, label = ``'yes' in response.lower()``. The
+template text below is copied from the official repository (MIT license) so
+published numbers are directly comparable to the paper's reported
+accuracies.
+
+⛔ The TEMPLATES are the official ones; the MODEL is not, by default. The #8486
+owner ruling (2026-10-27) re-pinned ``DEFAULT_JUDGE_MODEL`` to our own
+``deepseek-v4-flash``, so a default run grades with the official rubric and a
+NON-official model and records ``judge_pin: unpinned:…`` + ``verdict:
+inconclusive``. The official model (``gpt-4o-2024-08-06``, at temperature 0,
+max_tokens 10) is kept named as ``OFFICIAL_JUDGE_MODEL`` and is the only
+configuration whose number may be compared to a published figure.
 
 The judge model is configured via env, never hardcoded:
 

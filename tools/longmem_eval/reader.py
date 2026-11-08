@@ -103,7 +103,7 @@ __all__ = [
 # TRANSPORT (#8486, 2026-11-07): the pin named `openrouter:deepseek/...`, which
 # made the DEFAULT unservable on the boxes we run — no `OPENROUTER_API_KEY`
 # exists on them, so `build_reader()` raised at the named-provider check before
-# a single question loaded (measured `reader.py:199 ValueError: model spec names
+# a single question loaded (measured `reader.py: ValueError: model spec names
 # provider 'openrouter' but its key is not set (OPENROUTER_API_KEY)` on
 # 2026-10-23 and again 2026-11-02). Every run therefore needed an env override,
 # and an override records `reader_pinned: false` — i.e. the pin read as DRIFT

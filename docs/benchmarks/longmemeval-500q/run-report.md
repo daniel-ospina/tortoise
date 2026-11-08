@@ -135,7 +135,7 @@ approximated, never any-hit presented as official.
 | per-question fraction @5 (non-_abs) | PENDING | — | LABELED VARIANT D1+D3 (paper-aligned exclusion) |
 | per-question fraction @5 (`_abs`-inclusive) | PENDING | — | LABELED VARIANT D1 (legacy) |
 | turn-level recall @5 (paper keys) | PENDING | — | LABELED VARIANT D2 (assistant-role turns included) |
-| QA accuracy (official anscheck judge) | PENDING | —/500 | end-to-end reader accuracy — NOT a retrieval metric (§3) |
+| QA accuracy (**official rubric**; judge model per §1.1) | PENDING | —/500 | end-to-end reader accuracy — NOT a retrieval metric (§3) |
 
 The metric-formula machinery (official-vs-any-hit projection, `_abs`
 exclusion, variant separation) is COMMITTED and tested in
@@ -184,7 +184,10 @@ Full per-`k` table + per-question digests: `w7a-500q.variants.json`
 - **Measures:** Tortoise's graph-indexed hybrid retrieval over each
   question's history (isolated per-question corpus — the report's
   `retrieval_scope`), scored with the official LongMemEval retrieval
-  semantics; and end-to-end QA accuracy via the official anscheck judge.
+  semantics; and end-to-end QA accuracy via the official anscheck RUBRIC —
+  graded by the run's judge, which by default is our own pinned model and not
+  the official one (§1.1), so only an explicitly official-graded run is
+  comparable to a published figure.
 - **Does NOT measure:** why-context assembly (the `#3011` B/C/D arms), and
   it does not measure the belief layer's effect on **retrieval** — the
   ranking is hybrid RRF over FTS/vector plus the structural leg, and no

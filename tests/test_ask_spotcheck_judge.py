@@ -354,6 +354,14 @@ def test_one_judge_spec_serves_the_preflight_and_the_judge(monkeypatch):
     # `build_judge` in the module and requires each one to carry an explicit
     # spec (or `mock=True`), so a new call shape — an argument, a comprehension,
     # a default parameter — cannot slip past the pin by looking unfamiliar.
+    #
+    # ⛔ AND THE SHAPES THAT LOOK LIKE AN ARGUMENT BUT ARE NOT (#8486 review):
+    # `build_judge(None)` passes a positional `None` and `build_judge(mock=False)`
+    # passes a FALSY `mock` — both fall through to
+    # ``judge.DEFAULT_JUDGE_MODEL`` (`build_judge`'s `raw_spec = spec or env or
+    # DEFAULT_JUDGE_MODEL`), so skipping on "has an arg" or "has a mock kwarg"
+    # would have re-created the exact split this pin exists to stop. Only a
+    # NON-empty positional spec or a literal `mock=True` counts as explicit.
     def _bare_build_judge_calls(source: str, where: str) -> list[str]:
         tree = ast.parse(source)
         bad = []
@@ -365,9 +373,19 @@ def test_one_judge_spec_serves_the_preflight_and_the_judge(monkeypatch):
                     else getattr(fn, "id", None))
             if name != "build_judge":
                 continue
-            if node.args:
+            # An explicit spec is a positional arg that is NOT a None literal
+            # (`build_judge(None)` inherits the default).
+            has_spec = any(not (isinstance(a, ast.Constant) and a.value is None)
+                           for a in node.args)
+            if has_spec:
                 continue
-            if any(k.arg == "mock" for k in node.keywords):
+            # `mock=True` is explicit; `mock=False` is the default judged by a
+            # real model, so it must still name its spec (`build_judge` only
+            # returns a MockJudge for a TRUTHY `mock`).
+            if any(k.arg == "mock"
+                   and isinstance(k.value, ast.Constant)
+                   and k.value.value is True
+                   for k in node.keywords):
                 continue
             bad.append(f"{where}:{node.lineno}")
         return bad
@@ -394,7 +412,21 @@ def test_one_judge_spec_serves_the_preflight_and_the_judge(monkeypatch):
             f"checks the OFFICIAL judge's key while a different model grades "
             f"(#8486)")
         # …and it must resolve the spec from the ONE owner, not re-derive it.
+        # (This half is satisfied by a comment, so it is a REQUEST, not proof —
+        # the AST scan above is the load-bearing check.)
         assert "_judge_spec" in sibling_src, name
+
+    # ⛔ THE GUARD'S OWN COVERAGE (#8486 review). A source pin whose scope is
+    # narrower than its claim is how the #2071 split survived two rounds, so
+    # the shapes that INHERIT the default are asserted directly: `None` and a
+    # falsy `mock` both reach `judge.DEFAULT_JUDGE_MODEL`.
+    assert _bare_build_judge_calls(
+        "build_judge()\nbuild_judge(None)\nbuild_judge(mock=False)\n"
+        "build_judge(spec=None)\nbuild_judge('')\n", "mutant") != []
+    assert _bare_build_judge_calls(
+        "build_judge(spec)\nbuild_judge(_judge_spec())\n"
+        "build_judge(OFFICIAL_JUDGE_MODEL)\nbuild_judge(mock=True)\n",
+        "explicit") == []
 
 
 def test_probe_live_path_builds_the_judge_it_preflighted(monkeypatch, capsys):
