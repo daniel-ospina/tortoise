@@ -128,12 +128,20 @@ RESIDUALS, NAMED RATHER THAN IMPLIED
   gate, and on an embedded DB they open N divergent files. MEASURED on the
   pinned 0.52.1: ``UVICORN_LIFESPAN=off WEB_CONCURRENCY=2`` served two server
   processes with the gate never entered. ``entrypoint.sh`` refuses that boot, and
-  it also refuses the two shapes where the count it measured is NOT the count
+  it also refuses the shapes where the count it measured is NOT the count
   uvicorn will run: an ``--env-file`` / ``$UVICORN_ENV_FILE`` (uvicorn calls
   ``load_dotenv`` BEFORE reading ``$WEB_CONCURRENCY`` — measured: four workers
   under a banner that said one) and a raw count the shell cannot parse
   (``int()`` accepts Unicode digits and whitespace, so ``$WEB_CONCURRENCY`` of
-  ``'\xc2\xa02'`` starts TWO while both resolvers read 1). What remains is a
+  ``'\xc2\xa02'`` starts TWO while both resolvers read 1). ⛔ Those two are
+  refused only when the LIFESPAN IS OFF — that is the branch that needs them,
+  because the count is then the only guard. With the lifespan ON the boot
+  proceeds and the refusal is raised in-app, which means the parent still exits
+  0 through uvicorn's supervisor (the ``restart policy = "on-failure"`` hole the
+  pre-exec gate exists to close; measured: env file ``WEB_CONCURRENCY=4`` + a
+  raising lifespan -> four ``Application startup failed`` and exit 0). Closing
+  that would mean reading the dotenv from the boot script; it is a declared
+  residual, not a claim of coverage. What remains is a
   DIRECT ``uvicorn tortoise.hosted_api:app --lifespan off --workers N`` that
   bypasses the boot script: it is not gated, and the divergence would be silent
   rather than refused. (It also disables every other startup hook — backup
@@ -568,9 +576,18 @@ def _uri_names_a_shared_backend(value: str | None) -> bool:
     """True when ``value`` is a URI with a scheme this repo routes to a server.
 
     Deliberately the SAME scheme set the connection layer validates
-    (``tortoise.config.SUPPORTED_URI_SCHEMES``), so "is the DB shared" cannot
-    drift from "will this URI be dialled". A value without ``://`` is a
+    (``tortoise.config.SUPPORTED_URI_SCHEMES``). A value without ``://`` is a
     filesystem path (backward compat in ``config.py``) — i.e. embedded.
+
+    ⚠️ The ``rest.strip()`` requirement is a DELIBERATE OVER-REFUSAL, not a
+    mirror of what the app does: `resolve_db_endpoint('rediss://')` really does
+    resolve and dial (measured: host ``localhost`` port ``16379``), so a
+    scheme-only value is reported EMBEDDED here while the app would dial it.
+    Since nothing is provisioned at such a target, and the over-refusal is the
+    fail-closed direction (the embedded arm is the one the acknowledgement may
+    not lift), it is kept and NAMED rather than removed. There is no input in the
+    dangerous direction: ``urlparse`` lowercases and strips the scheme exactly as
+    this does, so ``REDISS://…`` and ``' rediss://…'`` are shared in both.
     """
     if not value:
         return False

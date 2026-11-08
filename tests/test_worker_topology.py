@@ -739,7 +739,8 @@ def _worker_block(source: str) -> str:
     block = source[start:end]
     # The lifted text must DEFINE everything the entrypoint's own calls reach;
     # a helper left above the sentinel is the failure this asserts against.
-    for helper in ("_uvicorn_flag_option", "_resolve_raw_requested_workers",
+    for helper in ("_trim_edges", "_uvicorn_flag_option",
+                   "_resolve_raw_requested_workers",
                    "_resolve_requested_workers",
                    "_count_is_verifiable", "_app_env_file_in_play",
                    "_app_lifespan_disabled"):
@@ -885,6 +886,18 @@ _AGREEMENT_TABLE: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
     # would report a topology uvicorn never starts.
     (("uvicorn", "app:app"), {"WEB_CONCURRENCY": "_10"}),
     (("uvicorn", "app:app"), {"WEB_CONCURRENCY": "10_"}),
+    # ⛔ LEADING whitespace containing a NEWLINE. `sed -e 's/^[[:space:]]*//'` is
+    # line-oriented: it splits the value into records, never removes the leading
+    # run, the digit test then fails and the shell reported 1 while Python
+    # (`str.strip`) and uvicorn (`int`) read N — measured `WEB_CONCURRENCY=$'\n2'`
+    # => shell 1 / Python 2, and the pre-exec gate read the script's own 1 and
+    # PERMITTED a two-worker boot. The trim is now `_trim_edges` (bash pattern
+    # expansion, line-agnostic); these rows keep the class pinned.
+    (("uvicorn", "app:app"), {"WEB_CONCURRENCY": "\n2"}),
+    (("uvicorn", "app:app"), {"WEB_CONCURRENCY": "\r\n2"}),
+    (("uvicorn", "app:app"), {"WEB_CONCURRENCY": "\t\n2"}),
+    (("uvicorn", "app:app"), {"WEB_CONCURRENCY": "\n1_0"}),
+    (("uvicorn", "app:app", "--workers", "\n2"), {}),
     (("uvicorn", "app:app"), {"WEB_CONCURRENCY": "1__0"}),
     (("uvicorn", "app:app"), {"WEB_CONCURRENCY": "1_0_"}),
     # ⛔ A REPEATED flag whose LAST occurrence carries no value: the parser
@@ -1565,3 +1578,46 @@ def test_the_shipped_banner_does_not_claim_a_reloader_for_a_lookalike_value():
     # …and the pre-exec gate refuses the boot, so the lie cannot stand alone.
     assert proc.returncode == 1, (proc.stdout, proc.stderr)
     assert "admission gate refused this boot" in proc.stderr
+
+
+def test_the_shipped_flag_case_is_uvicorns_own():
+    """The shell's flag list must equal `UVICORN_FLAG_OPTIONS`.
+
+    Without this, editing `entrypoint.sh`'s list is invisible: MEASURED —
+    deleting `--factory` from the shell list left the suite green while
+    `uvicorn app:app --factory --reload --workers 4` printed "workers = 4 —
+    MULTI-WORKER topology" (a lying banner) with the gate correctly at rc 0.
+    The shell cannot import Python's set, so the two are pinned together HERE
+    rather than left to a comment.
+
+    The list lives in `_uvicorn_flag_option`'s `case` (shared by the count AND
+    reload readers). Scanned between `case "$1" in` and `esac` and NOT over the
+    whole function, because the surrounding comments mention flag spellings
+    (`--reload --workers 4`) that are not part of the list.
+    """
+    block = _worker_block(ENTRYPOINT.read_text())
+    fn = block.index("_uvicorn_flag_option() {")
+    arms = block[block.index('case "$1" in', fn):block.index("esac", fn)]
+    shell_flags = {
+        tok
+        for raw in arms.replace("\\", " ").replace("|", " ").split()
+        for tok in [raw.strip("()[];:\"'")]
+        if tok.startswith("--")
+    }
+    assert shell_flags, "no flag alternatives found in `_uvicorn_flag_option`"
+    assert shell_flags == set(wt.UVICORN_FLAG_OPTIONS)
+
+
+def test_a_newline_before_a_reload_spelling_does_not_split_the_banner():
+    """`$UVICORN_RELOAD=$'\\ny'` starts the reloader; the banner must say so.
+
+    `sed`'s line-oriented trim could not strip the leading newline, so the shell
+    read the value as unrecognised and printed "workers = 4 — MULTI-WORKER"
+    while click started the reloader and the Python gate permitted it as
+    `reloading=True` — the banner contradicting the gate.
+    """
+    proc = _run_gate_block(
+        ("uvicorn", "app:app", "--workers", "4"), {wt.RELOAD_ENV: "\ny"})
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    assert "reload" in proc.stdout.lower(), proc.stdout
+    assert "MULTI-WORKER" not in proc.stdout, proc.stdout
