@@ -133,7 +133,8 @@ is `deepseek:deepseek-v4-flash` — #1525, with the TRANSPORT repointed off
 `openrouter:` by #8486 on 2026-11-07: no box the fleet runs holds
 `OPENROUTER_API_KEY`, so the openrouter-named default raised before loading a
 question). Requires an
-`OPENROUTER_API_KEY` (the judge needs no `OPENAI_API_KEY` unless the official
+`OPENROUTER_API_KEY` **for the reader override** and a `DEEPSEEK_API_KEY` **for
+the run's default judge** (the judge needs no `OPENAI_API_KEY` unless the official
 judge is named explicitly, because the run default is our own pinned model
 since the #8486 ruling of 2026-10-27, see
 `docs/benchmarks/longmemeval-500q/run-report.md` §1.1);

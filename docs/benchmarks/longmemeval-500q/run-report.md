@@ -300,9 +300,12 @@ are NOT committed in this machinery PR — they land WITH the executed run
 - Embeddings: local sentence-transformers (no API embedding cost); the
   dataset was cached and digest-verified (no re-download).
 - HARD_STOP_USD = 10.00 pre-registered; actual spend = REPLACE_COST
-  (OpenRouter key-usage delta over the run window — reader + judge flow
-  through OpenRouter; caveat: delta includes any concurrent traffic on the
-  key, see the receipt note).
+  (key-usage delta over the run window on the keys the run ACTUALLY uses —
+  `DEEPSEEK_API_KEY` serves both the default reader and the default judge since
+  #8486, and a run that NAMES the official judge through OpenRouter adds that
+  key. Neither lane touches OpenRouter under the default configuration, so a
+  delta read there would report ~$0.00 for a paid run. Caveat: the delta
+  includes any concurrent traffic on the same key, see the receipt note).
 - The v2-extractor lane (the #1509-protocol 500-Q) is the cost/scale item
   NOT run here (§3).
 
@@ -343,6 +346,7 @@ never a silent in-place edit (publication discipline, #2106 §7):
 | 2026-10-21 | #8486 follow-up (doc reconciliation, raised by the PR's fresh-context review): §1's **Ingest mode** row now states `v2` (it still said `deterministic`, which is mutually exclusive with the adjacent **Belief layer** row — the runner refuses `--activate-beliefs` on a deterministic graph, and the #8486 protocol injects `--ingest-mode v2 --activate-beliefs`). §3's ingest-mode note and §4's exact command follow. No metric, gate or receipt value changed — the run is still PENDING. |
 | 2026-10-21 | #8486 follow-up, second pass (same review): §3's **Does NOT measure** bullet dropped its claim that the eval graphs contain no IMPL/NAND operators, and its `dataset_audit.py` attribution — both are false for the `v2` configuration §1 records (the extractor writes IMPL/NAND operators, which is what `--activate-beliefs` promotes and EPs), so the bullet now names what is genuinely unmeasured (why-context assembly, and the belief layer's effect on the RRF retrieval score). §1's **Belief layer** row now defines all four resolved states and reconciles the disclosure bar with them: `partial` is the expected state of a correctly-armed run, and the bar is per question (`questions_with_ep` of `questions`), not all-or-nothing. Pinned by `tests/longmem_eval/test_measurement_posture.py` (the report must define every state the module can return and must not restate the operators claim). No metric, gate or receipt value changed — the run is still PENDING. |
 | 2026-11-07 | #8486 (configuration half, PR #11493) — **seven in-place edits, recorded here per the discipline in the paragraph above**: §1's **Reader** row (`openrouter:deepseek/deepseek-v4-flash` → `deepseek:deepseek-v4-flash`), §1's **Judge** row (`openai/gpt-4o-2024-08-06` → `deepseek:deepseek-v4-flash`), §1's **Cost** row ("OpenRouter key-usage delta" → "provider key-usage delta"), §2's **QA accuracy** metric row ("official anscheck judge" → "**official rubric**; judge model per §1.1" — the rubric is unchanged, the grader is not), §3's **Measures** bullet (the same correction in prose: the anscheck *rubric* is official, the model that applies it is the run's judge), §5's receipt `judge_pin` row (the pre-filled official pin → `PENDING`, with the value a run of the pinned default will record — `unpinned:deepseek-v4-flash` — named in the cell and derived from the judge that graded), and §4's step-5 command (the `TORTOISE_LME_JUDGE_MODEL='openrouter:openai/gpt-4o-2024-08-06'` line removed — the default is now the ruled configuration). The disclosure of what a run of that configuration may and may not claim is **§1.1**, added in the same change. No **observed** metric, gate or receipt *value* changed — `run_status` is still PENDING, every number is still `PENDING`, and the only receipt cell that moved went from a pre-filled value to `PENDING` (an entered value would be a claim no run has earned). The historical 2026-09-04 gate-4 receipt pin in `gate-evidence.json` is retained untouched with an `errata` entry naming the ruling that supersedes it. |
+| 2026-11-07 | #8486, second pass (raised by a fresh-context review of this PR) — **one more in-place edit, recorded here per the same rule**. §6's spend bullet still planned the run as an *OpenRouter* key-usage delta ("reader + judge flow through OpenRouter"); under the configuration §1 records neither lane touches OpenRouter, so a paid run would have recorded ~$0.00 — it now names the keys the run actually uses, with the concurrent-traffic caveat unchanged. No metric, gate or receipt *value* changed — the run is still PENDING. |
 
 ## 10. Handoff to W7-b (#2106)
 

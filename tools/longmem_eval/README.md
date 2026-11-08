@@ -857,7 +857,11 @@ transport the fleet actually runs — so a default-config run is a pinned run.
 (#8486, 2026-11-07: the pin named `openrouter:deepseek/…`, and no box we run
 holds `OPENROUTER_API_KEY`, so the *default* raised at the named-provider check
 before loading a question and every run needed an override — which records
-`reader_pinned: false`. The model is unchanged; only the transport moved.)
+`reader_pinned: false`. The model is unchanged; the transport moved, and with it
+the request shape: the direct DeepSeek lane is served by
+`_ThinkingDisabledTransport`, so every default request also carries
+`thinking:{"type":"disabled"}` — part of the pinned configuration, not a routing
+detail.)
 The prompt constants
 (`_SYSTEM_PROMPT`, `_TYPE_FRAGMENTS`) live in the same module. Every report
 records the reader's resolved identity + the verbatim prompt in its
