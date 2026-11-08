@@ -809,6 +809,11 @@ DUPLICATE_LABEL = "UNKNOWN(duplicate writer name)"
 #: served-set comparison as one, and the row's hold set is built from exactly this prefix.
 AT_RUNTIME_LABEL = "UNKNOWN(labels decided at runtime)"
 
+#: A PARTIAL measurement's prefix — a writer whose own Cypher names MORE than one label
+#: (`_embedding_writers`' `UNKNOWN(two labels: …)` shape). It is a MEASUREMENT, not a gap, so a
+#: declaration may not narrow it (`#11492`): the row holds and names it.
+PARTIAL_LABEL_PREFIX = "UNKNOWN(two labels"
+
 
 @functools.lru_cache(maxsize=8)
 def _embedding_writers(root: Path) -> dict[str, dict]:
@@ -1265,6 +1270,11 @@ REGISTER_MODULE = "tortoise.embed_writer_register"
 #: the same set minus a trailing newline, i.e. it is STRICTER (fail-closed: the entry is simply not
 #: credited), and the instrument re-checks it rather than inheriting an invariant it does not test.
 _OWNER_ISSUE_RE = re.compile(r"#\d+")
+
+#: A Cypher label's SHAPE — the same shape `register.load()` enforces, re-checked at the READ
+#: boundary for the same reason `_OWNER_ISSUE_RE` is: an injected or tampered declaration must be
+#: graded by the instrument, not trusted because the product's own validator would have refused it.
+_STORE_LABEL = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 #: The residual a `MET` on this row does NOT absorb — emitted with the row, so a reader quoting
 #: the verdict cannot read it as "no vector is stored that the rule did not decide".
@@ -1819,6 +1829,13 @@ def _store_reading(
     bad = [label for label in entry if not isinstance(label, str) or not label]
     if bad:
         return None, f"declares stores={entry!r} with non-label members {bad!r}"
+    # A Cypher label's SHAPE, re-checked here rather than inherited from `register.load()` (the
+    # same discipline `_OWNER_ISSUE_RE` follows for `owner_issue`). Without it a tampered
+    # `("Ev ent",)` would be compared as a label and land outside the served set — a `NOT MET` on
+    # a declaration no reader could call valid, i.e. a false hold.
+    shapeless = [label for label in entry if not _STORE_LABEL.fullmatch(label)]
+    if shapeless:
+        return None, f"declares stores={entry!r} with {shapeless!r}, which are not Cypher labels"
     return tuple(entry), None
 
 
@@ -1851,10 +1868,20 @@ def resolved_stored_labels(written: dict[str, str] | None = None,
     writers = embedding_writers() if writers is None else writers
     written = written_labels(writers) if written is None else written
     out: dict = {"labels": {}, "no_vector": [], "at_runtime": [], "undeclared": [],
-                 "violations": {}, "classes": {}, "error": None}
+                 "violations": {}, "classes": {}, "partial": [], "error": None}
+    # ⛔ A PARTIAL measurement is NOT an unresolved one. `UNKNOWN(two labels: Event, Batch)` is the
+    # derivation REPORTING TWO LABELS it did measure — one of which may be unserved — so a
+    # declaration must never replace it: narrowing it to `("Event",)` (or erasing it with
+    # `NO_LIVE_VECTOR`) drops the measured label before the served-set comparison and reads `MET`
+    # (`#11492`'s review, reproduced by injection on an `ungated` writer). These HOLD the row and
+    # are named; no declaration resolves them.
+    out["partial"] = [
+        writer for writer, label in sorted(written.items())
+        if label.startswith(PARTIAL_LABEL_PREFIX)
+    ]
     candidates = [
         writer for writer, label in sorted(written.items())
-        if label.startswith("UNKNOWN")
+        if label.startswith("UNKNOWN") and writer not in out["partial"]
         and writers.get(writer, {}).get("kind") in ("unresolved_write", "ungated")
     ]
     try:
@@ -2018,6 +2045,7 @@ def score_path_bullet() -> Row:
     unresolved_undeclared = [] if resolved["error"] else sorted(
         fn for fn in unknown if writers[fn]["kind"] in ("unresolved_write", "ungated")
         and fn not in resolved["at_runtime"] and fn not in resolved["violations"]
+        and fn not in resolved["partial"]
     )
     duplicates = sorted(w for w, d in writers.items() if d["kind"] == "duplicate")
     unparsed = unparsed_modules(writers)
@@ -2036,7 +2064,7 @@ def score_path_bullet() -> Row:
     # The expression is equivalent to the previous one whenever the register IS readable.
     unexplained = sorted(
         set(unknown) - set(resolved["at_runtime"])
-        - set(resolved["violations"]) - set(duplicates)
+        - set(resolved["violations"]) - set(duplicates) - set(resolved["partial"])
         - {fn for fn in unknown
            if writers[fn]["kind"] in ("unresolved_write", "ungated")}
     )
@@ -2091,10 +2119,16 @@ def score_path_bullet() -> Row:
             "unresolved writers (hold this row at PARTIAL — nothing in the product says which "
             f"label they store on): {unresolved_undeclared}"
         )
+    if resolved["partial"]:
+        notes.append(
+            "writers whose own Cypher names MORE THAN ONE label (hold this row at PARTIAL — a "
+            "PARTIAL measurement is not a gap, so no declaration may narrow it): "
+            f"{resolved['partial']}"
+        )
     if unexplained:
         notes.append(
-            "writers whose label is unresolved and which no declaration can answer (hold this "
-            f"row at PARTIAL): {unexplained}"
+            "writers whose label is unresolved and which this row does not resolve from a "
+            f"declaration (hold this row at PARTIAL): {unexplained}"
         )
     if duplicates:
         notes.append(
@@ -2245,6 +2279,7 @@ def score_path_bullet() -> Row:
         )
     verdict = "NOT MET" if orphans else (
         "PARTIAL" if (unknown or unparsed or duplicates or real_bypasses or register_bypasses
+                      or resolved["partial"]
                       or resolved["at_runtime"] or resolved["violations"]
                       or resolved["error"])
         else "MET")

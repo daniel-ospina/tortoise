@@ -560,6 +560,39 @@ def test_a_census_bypass_holds_row_two_even_when_the_register_RESOLVES_the_write
     assert any("tortoise.y::_store_event" in n for n in row.notes if "BYPASS" in n), row.notes
 
 
+def test_a_PARTIAL_measurement_cannot_be_narrowed_by_a_declaration(monkeypatch):
+    """A two-label `UNKNOWN` is a MEASUREMENT, not a gap — a declaration may not replace it.
+
+    ⛔ `#11492`'s review reproduced the inverse of the whole point: for an `ungated` writer whose
+    own Cypher names TWO labels (`UNKNOWN(two labels: Batch,Event)`, the shape
+    `_embedding_writers` produces), a declaration of `("Event",)` — or `NO_LIVE_VECTOR` — REPLACED
+    the measurement, dropped the measured `Batch` before the served-set comparison, and the row
+    read `MET` with `stored-without-a-query-path: none` while an unserved label had been stored.
+    A PARTIAL measurement has already measured; a declaration's job is to fill a GAP, so these
+    writers hold the row and are named as partial.
+    """
+    writers = {
+        "tortoise.x::_upsert_point": {
+            "callee": probe.SEAM_CALL, "at": "tortoise/x.py:1",
+            "kind": "gated", "label": "Point", "callees": frozenset(),
+        },
+        "tortoise.y::_two_labels": {
+            "callee": "encode_for_store", "at": "tortoise/y.py:2",
+            "kind": "ungated", "label": "UNKNOWN(two labels: Batch,Point)",
+            "callees": frozenset(),
+        },
+    }
+    monkeypatch.setattr(probe, "embedding_writers", lambda: writers)
+    assert "Batch" not in probe.served_labels()
+    for stores in (("Point",), NO_LIVE_VECTOR, None):
+        declared = {} if stores is None else {
+            "tortoise.y::_two_labels": _store_declared("tortoise.y::_two_labels", stores)}
+        monkeypatch.setattr(probe, "declared_writers", lambda declared=declared: declared)
+        row = probe.score_path_bullet()
+        assert row.verdict == "PARTIAL", (stores, row.observed)
+        assert any("MORE THAN ONE label" in n for n in row.notes), (stores, row.notes)
+
+
 def test_a_runtime_label_declaration_holds_row_two_without_calling_it_unresolved(monkeypatch):
     """`#11492` — `labels-at-runtime` holds the row, and it is NOT the "unresolved writers" hold.
 
@@ -642,11 +675,14 @@ def test_an_UNREADABLE_register_is_UNMEASURED_not_a_green_row_two(monkeypatch):
     assert "unresolved writers" not in joined, (
         "an unreadable register resolves NOTHING, so it must not also assert that the product "
         f"declares nothing for these writers: {row.notes}")
-    # The gated writer's own derivation failed, which the register could not have helped with —
-    # so it must still NAME it, or the row holds `PARTIAL` without saying why.
-    assert "no declaration can answer" in joined, (
-        f"the gated writer whose own Cypher named no single label must still be named: {row.notes}")
+    # The gated writer's own derivation named TWO labels, which the register could not have helped
+    # with — so it must still NAME it, or the row holds `PARTIAL` without saying why. ⛔ Which note
+    # names it is the PARTIAL one: a two-label `UNKNOWN` is a MEASUREMENT, not a gap, and `#11492`
+    # moved it out of `unexplained` (and out of every declaration's reach) so no declaration can
+    # narrow it away. The assertion is therefore on the WRITER being named by a hold note, not on
+    # one sentence's wording.
     assert "tortoise.w::_gated_two_labels" in joined, row.notes
+    assert any("MORE THAN ONE label" in n for n in row.notes), row.notes
 
 
 def test_a_malformed_stores_declaration_holds_row_two(monkeypatch):
