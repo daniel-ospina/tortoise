@@ -7930,12 +7930,16 @@ surfaces:
   # #1779: the cross-question haystack-overlap census (`tools/longmem_eval/haystack_overlap.py`)
   # and the pinned measured reuse factors. `tools/longmem_eval/` is a SOURCE_PATTERNS
   # entry of THIS surface, so a census-tool-only change selects `eval` and REPLACES the
-  # `core` fallback (#2938) — without this arm the `@slow` pin that re-derives the
-  # published numbers would be asleep exactly on the change that moves them (the
-  # #1349/#2938 silent-drop class). Registered here and NOT in `core`/`tier1`: as a
-  # `longmem_eval/**` path it is a non-gating `on_demand` member (#10194/#10206), so
-  # this row is surface OWNERSHIP, not shard membership — the eval lane's hermetic
-  # census does not ride the merge gate.
+  # `core` fallback (#2938). ⛔ This row is surface OWNERSHIP, not arming: as a
+  # `longmem_eval/**` path it is a non-gating `on_demand` member (#10194/#10206), and
+  # `on_demand_files()` SUBTRACTS that subtree from `test_files` on every non-full
+  # selection (`tools/ci_selection.py:4269`) — so the `@slow` pin that re-derives the
+  # published numbers does NOT run on a census-tool change with or without this row. It
+  # is re-derived in the on-demand lane (`eval-suite-manual.yml`, #10194). The row is
+  # still correct: it is the ownership answer `--surface-audit`/`classify_test_file`
+  # gives, and every sibling `tests/longmem_eval/**` file is registered the same way.
+  # Do NOT "fix" that gap by dropping `longmem_eval/**` from `on_demand` — that reverses
+  # owner decision A of 2026-10-27 (#10194).
   - longmem_eval/test_haystack_overlap_1779.py
   - test_temporal_aggregate_arm.py  # #2886: guards tools/longmem_eval/retrieve.py's `temporal_aggregate_verdict` adapter — `tools/longmem_eval/` is a SOURCE_PATTERNS entry of this surface, so a retrieve.py-only change selects it (dual-registered with `core` for the core's verdict semantics)
   - test_temporal_leg_replay_wiring_10538.py  # #10538: the offline replay proxy reproduces the SHIPPED temporal wiring — the question's resolved date window is threaded to the leg with the question date as the recency clock (hermetic, no DB/network; TF-IDF proxy over a hand-built pool, no dataset read)

@@ -98,24 +98,30 @@ def test_identical_content_and_date_is_prompt_reuse():
 
 def test_encode_units_use_the_product_renderers():
     """The census counts the text the ingest EMBEDS — turn Points
-    (`_turn_text`) plus raw chunks (`_session_chunks`) — not a re-rendering."""
-    session = [*_session("a"), {"role": "assistant", "content": "b"}]
+    (`_turn_text`) plus raw chunks (`_session_chunks`) — not a re-rendering.
+
+    Four turns at `chunk_turns=2` give TWO chunk windows, so `distinct == slots`
+    is reachable: a mutant that renders both windows from one text reds it
+    (review finding, PR #11577 — one window made that assertion `1 == 1`).
+    """
+    session = [{"role": "user", "content": f"turn {i}"} for i in range(4)]
     instances = [_instance("q1", [session], ["2023-01-01"])]
 
     census = census_overlap(instances, chunk_turns=2)
     e = census["encode_units"]
-    assert e["turn"]["slots"] == 2
-    assert e["chunk"]["slots"] == len(_session_chunks(session, 2))
-    assert e["total"]["slots"] == 2 + len(_session_chunks(session, 2))
+    assert e["turn"]["slots"] == 4
+    assert e["chunk"]["slots"] == len(_session_chunks(session, 2)) == 2
+    assert e["total"]["slots"] == 4 + 2
     # a chunk renders `_session_transcript(window)` while its turn Points render
     # `_turn_text` — two DISJOINT string populations, so a chunk unit can never
     # be served from a turn unit's cache entry. `distinct` per leg summing to
-    # `distinct` for the total is the numeric witness for that disjointness.
-    assert e["chunk"]["distinct"] == e["chunk"]["slots"]
+    # `distinct` for the total is the numeric witness for that disjointness,
+    # and `distinct == slots` per leg is the witness that no two units collide.
+    assert e["chunk"]["distinct"] == e["chunk"]["slots"] == 2
+    assert e["turn"]["distinct"] == e["turn"]["slots"] == 4
     assert (e["turn"]["distinct"] + e["chunk"]["distinct"]
             == e["total"]["distinct"])
-    assert e["total"]["chunk_share_of_units"] == round(
-        e["chunk"]["slots"] / e["total"]["slots"], 4)
+    assert e["total"]["chunk_share_of_units"] == round(2 / 6, 4)
 
 
 def test_turn_text_is_the_ingest_rendering():
