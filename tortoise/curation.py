@@ -78,8 +78,10 @@ SIGNAL_KINDS = frozenset({
     "decision", "option", "finding", "jobToBeDone", "useCase",
     "userJourney",
 })
-#: NOT pointKinds, so deliberately absent above: `requirement` is declared an
-#: **objectKind** by the product-strategy and dev manifests (#7848), and
+#: NOT pointKinds, so deliberately absent above: `requirement` is declared ONCE, as
+#: an **objectKind**, by the product-strategy manifest — `packs/dev/manifest.yaml`
+#: records the #7848 ruling that it is NOT a point kind and that product-strategy
+#: owns the declaration — and
 #: `workflow` is in `pack_registry.CANONICAL_OBJECT_KINDS` /
 #: `extractor_v2.CORE_OBJECT_KEYS` (`core:workflow`) and in no pack's pointKind
 #: list. Carrying either as a Point would type a claim with an object kind.
@@ -638,6 +640,29 @@ def _canonical_from_row(row: Mapping[str, Any]) -> str | None:
     return _tail(str(ident)) or str(ident).strip().casefold() or None
 
 
+def _identity_shape(row: Mapping[str, Any]) -> frozenset[str]:
+    """Which identity FIELDS this row exposes (empty values do not count).
+
+    Rows that describe one graph but expose DIFFERENT fields make the ref→row mapping
+    per-row, which is how two spellings of one graph compare unequal. A row where
+    `graph_id` is the `default` sentinel still COUNTS that field — the sentinel is a
+    normal thing for the tenant row to carry, not a missing field.
+    """
+    fields = ("graph_id", "stable_id", "namespace", "name")
+    return frozenset(f for f in fields if row.get(f))
+
+
+def _matched_row(ref: str, graph_rows: Sequence[Mapping[str, Any]]) -> Mapping[str, Any] | None:
+    """The single row that names ``ref`` in an identity field, or None."""
+    wanted = (ref or "").strip().casefold()
+    for row in graph_rows:
+        for fname in ("graph_id", "stable_id", "namespace", "name"):
+            val = row.get(fname)
+            if val and str(val).casefold() == wanted:
+                return row
+    return None
+
+
 def canonical_graph_id(ref: str, graph_rows: Sequence[Mapping[str, Any]] | None) -> str | None:
     """Resolve any accepted spelling of a graph to one canonical id.
 
@@ -728,6 +753,21 @@ def assert_distinct_graphs(
         raise CurationRefused(
             f"source and target are the same graph ({ca!r}); the old graph is a "
             "read-only historic artifact (#11469)")
+    if graph_rows:
+        # LAST line of the identity argument. Two refs can resolve through DIFFERENT
+        # rows that expose different identity FIELDS for the SAME graph — e.g. one
+        # entry `{"graph_id": "default", "stable_id": "g_<tenant>", "name": "default"}`
+        # and another `{"namespace": "team_<org>"}` — and then their canonicals differ
+        # (`_canonical_from_row` can only use the fields its own row has). Identity is
+        # unprovable in that case, so it is a REFUSAL, not a pass.
+        ra, rb = _matched_row(source_graph, graph_rows), _matched_row(target_graph, graph_rows)
+        if (ra is not None and rb is not None and ra is not rb
+                and _identity_shape(ra) != _identity_shape(rb)):
+            raise CurationRefused(
+                    f"cannot prove {source_graph!r} and {target_graph!r} are distinct graphs: the "
+                    "graph rows expose different identity fields, so the two refs resolve through "
+                    "different rows and may name ONE graph — pass a spelling whose row exposes the "
+                    "same fields (or the graph id both rows agree on)")
 
 
 def off_switch_active(explicit: bool = False) -> bool:

@@ -1231,3 +1231,16 @@ def test_an_illegal_page_size_is_a_usage_error():
     with pytest.raises(SystemExit) as exc:
         mod.main(["inventory", "--page-size", "0"])
     assert exc.value.code == 2
+
+
+def test_one_graph_split_across_two_rows_with_different_fields_is_refused():
+    """Round-18 BLOCKING: the tenant graph listed as `{graph_id: default, stable_id:
+    g_<tenant>, name: default}` and as `{namespace: team_<org>}` gave the two refs
+    DIFFERENT canonicals (each row can only use the fields it has), so
+    `--graph g_<tenant> --target team_<org> --apply` wrote IN PLACE. Identity is
+    unprovable when the matched rows expose different fields, so it must refuse."""
+    rows = [{"graph_id": "default", "stable_id": "g_0bcdb207ef7336c3", "name": "default"},
+            {"namespace": "team_3326a01ea34ae595d84de5d8f9"}]
+    with pytest.raises(C.CurationRefused, match=r"cannot prove"):
+        C.assert_distinct_graphs("g_0bcdb207ef7336c3", "team_3326a01ea34ae595d84de5d8f9",
+                                 graph_rows=rows)
