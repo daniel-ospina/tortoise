@@ -786,6 +786,19 @@ def test_a_cmd_target_that_names_no_held_artifact_is_invalid(tmp_path):
         "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q "
         '&& grep -E "passed" out.txt',
         "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q | tail -20 log",
+        # ⛔ REDIRECTIONS — all four were ACCEPTED on `origin/main` and REFUSED
+        # once `&` was split as a separator, which is the P1 regression the first
+        # review of this branch caught. `&>`/`&>>` put the `&` before the `>`, and
+        # `2>&1`/`>&2` put it after; neither is a separator, and exit 1 prints no
+        # report, so the false block hid the whole uncovered list.
+        "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q 2>&1 | tail -20",
+        "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q > /tmp/o.txt 2>&1",
+        "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q &> /tmp/o.txt",
+        "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q &>> /tmp/o.txt",
+        "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q 2>&1",
+        "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q | tee pytest.log",
+        "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q | logger -t pytest",
+        "cmd:bash -c 'uv run pytest tests/test_9664_capstone_verdict_ledger.py -q 2>&1'",
     ],
 )
 def test_the_commands_agents_md_hands_a_lane_are_not_false_blocked(tmp_path, command):
@@ -889,6 +902,46 @@ def test_prose_on_EITHER_side_of_a_real_command_is_refused(tmp_path):
     ):
         proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, legitimate])]))
         assert proc.returncode == cl.EXIT_CLEAN, (legitimate, proc.stdout + proc.stderr)
+
+
+@pytest.mark.parametrize(
+    "disclaimer",
+    [
+        # Every one of these is a record that disclaims its own work and is
+        # ACCEPTED at this head. They are pinned so the gap is DISCOVERABLE
+        # instead of being assumed closed by the prose around them.
+        "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q "
+        "&& bash I did not run this",
+        "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q && python -c 'NOT RUN'",
+        "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q "
+        "NOT RUN - I did not run this",
+    ],
+)
+def test_the_known_residual_false_PASSes_are_pinned_as_OPEN(tmp_path, disclaimer):
+    """⛔ These still exit 0 — this test pins the GAP, not a guarantee (#11520).
+
+    The `cmd:` arm refuses a bare-prose disclaimer on either side of the command,
+    and on every separator. It does **not** grade a LATER segment that is
+    runner-HEADED (`… && bash I did not run this`, `… && python -c 'NOT RUN'`), nor
+    prose appended INSIDE the graded command's own segment after its artifact
+    token (which is also what a hand-written multi-line YAML scalar folds to —
+    PyYAML joins the lines with a space, so the `newline` separator never sees it).
+
+    ⛔ DO NOT read a green suite as "the disclaimer class is closed". Closing the
+    runner-headed half by grading every runner segment the way the FIRST is graded
+    was measured to re-introduce the false block this whole ruleset exists to
+    remove — `… && git status --short` and `… && git log --oneline` name a
+    SUBCOMMAND in argument position, not a path, and would be refused. That trade
+    is not worth making silently here; the gap is tracked as #11520 instead.
+
+    If #11520 is closed, this test must be INVERTED (EXIT_INVALID), not deleted.
+    """
+    proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, disclaimer])]))
+    assert proc.returncode == cl.EXIT_CLEAN, (
+        disclaimer,
+        "#11520 may have been fixed — invert this pin to EXIT_INVALID rather "
+        "than deleting it: " + proc.stdout + proc.stderr,
+    )
 
 
 @pytest.mark.parametrize(

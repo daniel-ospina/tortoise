@@ -389,6 +389,21 @@ def _split_segments(text: str) -> list[str]:
             current = []
             index += 2
             continue
+        elif char == "&" and (text.startswith("&>", index) or (current and current[-1] == ">")):
+            # ⛔ A REDIRECTION, not a separator (#11506 review, P1 regression).
+            # `&` was split as a separator wherever it appeared, so an ordinary
+            # recorded command carrying a redirection was torn in two and REFUSED:
+            # measured at the pre-fix head, `… -q 2>&1 | tail -20`,
+            # `… -q > /tmp/o.txt 2>&1`, `… -q &> /tmp/o.txt` and `… -q | tee log`
+            # all exited 1 — and exit 1 prints NO report, so the whole uncovered
+            # list disappeared. Every one of them was ACCEPTED on `origin/main`,
+            # so the every-segment rule had introduced a false block of exactly
+            # the class this PR exists to remove.
+            #
+            # `&>`/`&>>` put the `&` BEFORE the `>` (bash); `2>&1`, `>&2`,
+            # `N>&M` and `N>&-` put it AFTER. A bare `&` between words is still a
+            # separator (`a & b` backgrounds `a`); `&&` is matched above.
+            current.append(char)
         elif char in _ONE_CHAR_SEPARATORS:
             segments.append("".join(current))
             current = []
@@ -441,14 +456,17 @@ _DECORATIVE: Final[frozenset[str]] = frozenset(
         "grep",
         "head",
         "jq",
+        "logger",
         "ls",
         "printf",
         "sed",
         "sort",
         "tail",
+        "tee",
         "tr",
         "true",
         "uniq",
+        "wait",
         "wc",
     }
 )
@@ -723,8 +741,15 @@ def _evidence_is_real(
     node-id, or a glob over a named directory). TWO shapes are deliberately
     admitted and confer nothing on their own: a runner with NO argument
     (`cmd:make`), and a `-c` script body, which is graded as a command in its own
-    right rather than trusted. Every segment is graded, on every shell separator,
-    so a record cannot carry a disclaimer on either side of the command.
+    right rather than trusted. Every segment of a compound record must be a shell
+    wrapper, a decorative reader/printer, or runner-headed; a segment that is none
+    of those is prose and is REFUSED, so a bare disclaimer cannot ride on either
+    side of the command. ⛔ NOT closed, and deliberately not claimed: a LATER
+    runner-HEADED segment is admitted without grading its argument position, so
+    `… && bash I did not run this` is still accepted (#11520). Grading every
+    runner segment the way the first is graded re-introduced a false block on
+    `… && git status --short` / `… && git log --oneline`, whose subcommand is not a
+    path — and a false block is the harm this ruleset exists to remove.
 
     ⛔ These two arms are one rule seen from two sides, and NEITHER alone is
     enough — both were measured as fail-open on their own:
@@ -937,12 +962,17 @@ def _command_body(raw: str, base: Path, root: Path) -> tuple[str, Path, str]:
     # can be chained in FRONT of a command — and it can.
     #
     # Prose therefore cannot be dropped, and it cannot sit on EITHER side of the
-    # command: any of those makes the record say something it did not do. Every
-    # segment is graded, so a disclaimer after the `&&` (`… && I did not run this`)
-    # is refused exactly as one before it is, and so is the same thing spelled with
+    # command: any of those makes the record say something it did not do. A segment
+    # that is neither a wrapper, a decorative printer nor runner-headed is prose and
+    # is refused, so a bare disclaimer after the `&&` (`… && I did not run this`) is
+    # refused exactly as one before it is, and so is the same thing spelled with
     # `;`, `||`, `|`, `&` or a newline — those were measured ACCEPTED at the round-2
     # head and produced the same clean 22-row exit. Wrappers and decorative
     # segments are still admitted (`… && echo PASS`, `… | tail -20 log`).
+    # ⛔ RESIDUAL (#11520): a LATER segment that is RUNNER-HEADED skips the argument
+    # grading below, so `… && bash I did not run this` and `… && python -c 'NOT RUN'`
+    # are accepted. Closing it by grading every runner segment false-blocked
+    # `… && git status --short`, so it is tracked rather than bought at that price.
     segments = [segment.strip() for segment in _split_segments(text)]
     # The directory the graded command runs in: `cd X && …` moves it, and a later
     # `cd` moves it again. Resolved against `root` only, so a `cd ../../..` cannot

@@ -46,17 +46,33 @@
 #         TRACKED file, a directory holding tracked files, a pytest node-id, or a
 #         glob over a named directory (a bare `*` names everything, so nothing);
 #       - EVERY shell separator splits the record — `&&`, `||`, `;`, `|`, `&`,
-#         newline — and EVERY segment is graded, so a disclaimer is refused on
-#         either side of the command (`NOT RUN && uv run pytest …` and
+#         newline — and EVERY segment must be a shell WRAPPER, a DECORATIVE
+#         reader/printer, or RUNNER-headed. A segment that is none of those is
+#         prose and is refused, so a bare disclaimer on either side of the command
+#         cannot ride along (`NOT RUN && uv run pytest …` and
 #         `uv run pytest … && I did not run this` are both refused);
+#         ⛔ WHAT IS *NOT* CLOSED, stated because the previous wording claimed it
+#         was: a LATER segment that is RUNNER-HEADED is admitted without grading
+#         its argument position, so `uv run pytest … && bash I did not run this`
+#         and `… && python -c 'NOT RUN'` are still ACCEPTED (measured; open as
+#         #11520). Grading every runner-headed segment the way the FIRST is graded
+#         was measured to re-introduce the false block this ruleset exists to
+#         remove (`… && git status --short`, `… && git log --oneline`: a
+#         subcommand is not a path), so the gap is documented and tracked rather
+#         than closed at that price. Prose appended INSIDE the graded command's own
+#         segment, after its artifact token, is likewise unread;
 #       - a `-c`/`-e` script body is graded as a command in its own right, never
 #         trusted;
 #       - a runner with NO target at all (`cmd:make`) is a record and confers
 #         nothing; a runner with a NON-PATH argument is refused, because a bare
 #         word (`make test`, `make NOT-RUN`) is a claim and not an artifact;
+#       - a REDIRECTION is not a separator: `2>&1`, `>&2`, `&>file`, `&>>file`
+#         stay inside their command. Splitting on every `&` refused ordinary
+#         recorded commands (`… -q 2>&1 | tail -20`) that `origin/main` accepted —
+#         and exit 1 prints no report, so it hid the whole uncovered list;
 #       - shell WRAPPERS (`cd`, `NAME=value`, `set`/`export`/`source`) and
-#         DECORATIVE segments (a printer or a reader: `echo`, `tail`, `cat`,
-#         `grep`) are allowed and cite nothing.
+#         DECORATIVE segments (a printer, a reader, or a sink: `echo`, `tail`,
+#         `cat`, `grep`, `tee`, `logger`) are allowed and cite nothing.
 #   * `criteria_expected` (top level, REQUIRED) pins the denominator, so dropping a
 #     row without moving the count is a refusal.
 #   * YAML merge keys (`<<`) are refused: every row states its own verdict, and a
