@@ -166,14 +166,15 @@ what is new is the item's **abstraction level** (a rule derived from an
 observation). A coverage detector cannot reach that by construction, and neither
 can a stage triggered by coverage.
 
-**Four `points` are missed** (the totals above are 8 of 12), and the two named here
-are the same shape (`wp01` "The hydrate stage shares the
-same code as the wire stage…" — the clause is only 2 content tokens, below the
-floor; `wp05` "The Bluepeak retro is published company-wide" — the content is in
-a covered statement, the item is a re-shaping of it). ⚠️ No numeral is given for
-HOW MANY are named, because a typed count in this record has gone stale every
-time one was written: the four is arithmetic off the pinned totals, and the two
-are examples of the class, not an inventory of it.
+**Four `points` are missed** (the totals above are 8 of 12). Below are examples of
+the two MISS mechanisms, not an inventory of the class: `wp01` "The hydrate stage
+shares the same code as the wire stage…" sits at 2 content tokens, below
+`GAP_MIN_CONTENT_TOKENS`; `wp05` "The Bluepeak retro is published company-wide"
+restates content a covered statement already carries, so the item is a re-shaping
+of it, which is the generalisation class the paragraph above defines as
+unreachable by construction. ⚠️ The four is arithmetic off the pinned totals; how
+many are named here is deliberately NOT stated as a number, because a typed count
+in this record has gone stale every time one was written.
 
 ### What this means for `run_s4`
 

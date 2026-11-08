@@ -1288,7 +1288,7 @@ def test_an_else_branch_call_reds_the_off_switch_check():
 #
 # ⛔ AND IT IS TWO HALVES SINCE `#11534` — a fact this guard itself missed. The
 # record said "no stage … performs S4's gap review-and-fill" in the PRESENT
-# tense while `extractor_v2.run_partial_gap_fill` (S2.2b, DEFAULT OFF) shipped
+# tense while `extractor_v2.run_partial_gap_fill` (S2.2b-ADD, DEFAULT OFF) shipped
 # in the same file, and said "the absence of that stage is pinned by" this very
 # module while widening the allow-list that would have been the pin. The round-6
 # review (P2) found both at `06052ea0dd9e` with every check below GREEN — a
@@ -1325,7 +1325,7 @@ SUCCESSOR_TWO_HALVES = (
      "and dropping the UNMET class lets a coverage trigger pass for a "
      "demonstrated successor"),
     ("NOT measured",
-     "S2.2b's OWN yield is unmeasured (it needs live sessions and a key); a "
+     "S2.2b-ADD's OWN yield is unmeasured (it needs live sessions and a key); a "
      "record that claims the stage's yield is the pre-condition met is "
      "claiming a measurement nobody took"),
 )

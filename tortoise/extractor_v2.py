@@ -13040,7 +13040,7 @@ def _batch_has_candidates(embed_list: object) -> bool:
       run — the exact zeroing `route_mentions`'s own docstring records for the
       unarmed path, which it avoids by writing nothing when unarmed. The armed
       path is where the key appears and where the guard was defeated.
-    * #11534's S2.2b skip (`armed: true, skipped: "empty embed_list"`) never
+    * #11534's S2.2b-ADD skip (`armed: true, skipped: "empty embed_list"`) never
       fires, so the stage spends a billed model call on exactly the
       zero-candidate population it is documented to exclude, and flags every
       narrative span (coverage 0.0) — a measurement run then cannot tell
@@ -13293,7 +13293,7 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
             embed_list, story, arbiter=vet_arbiter)
         vet_warnings.extend(_w)
 
-    # ── S2.2b: the ADD-capable PARTIAL-GAP FILL (#11534) ────────────────────
+    # ── S2.2b-ADD: the ADD-capable PARTIAL-GAP FILL (#11534) ────────────────
     # The coverage question S2.2 Level 2 asks ("did we account for everything the
     # narrative said?") had no INSTRUMENT until `vet_gate.partial_gaps`: the
     # reported `coverage_suspect` fires only on a zero-candidate batch, so a
@@ -13524,7 +13524,7 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                 # session from an EMPTY S2 base (the merge is otherwise the
                 # normal E4 merges-not-replaces on every healthy capture —
                 # counting those would corrupt the measurement).
-                # ⛔ The SAME `_batch_has_candidates` predicate the S2.2b arm
+                # ⛔ The SAME `_batch_has_candidates` predicate the S2.2b-ADD arm
                 # above uses (review round 7, P2). Mapping truthiness was
                 # defeated by `route_mentions`'s `mention_stats` key on every
                 # referentiality-armed run, which silently zeroed this counter.
