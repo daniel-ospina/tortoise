@@ -30589,12 +30589,22 @@ def _apply_import_pack_config(sdk, payload: dict) -> None:
       artifact's own activation state. Starter packs (yaml null) get their
       activation record written at the artifact's state, not force-activated.
     - A pack the source graph had REMOVED (``status: removed``) is SKIPPED —
-      no activation, no overwrite — instead of aborting the restore. This is
-      the #1936 indicator-3 fix: pre-fix such an entry has ``yaml`` null (its
-      ``:PackManifest`` was deleted on the source) so it fell through to the
-      starter branch and raised ``unknown starter pack``, and ONE uninstalled
-      custom pack aborted the whole IMPORT — a failure that belonged to that
-      entry alone.
+      no activation, no overwrite. This is the #1936 indicator-3 fix.
+
+      ⛔ THERE ARE TWO SHAPES and the one a live graph exports is NOT the one
+      that used to abort. ``set_graph_packs`` (``pack_state.py:1156-1165``)
+      marks removal by setting ``:PackInstall.status='removed'`` and KEEPS the
+      ``:PackManifest``, so a real export carries ``removed`` WITH its ``yaml``
+      — and pre-fix THAT shape took the ``yaml_text`` branch and re-installed
+      the pack ``active``, erasing the tombstone (the #8648 widening class).
+      The ``yaml: null`` shape comes from ``delete_tenant_manifest``, which
+      deletes the manifest but has NO caller and no route — the legacy /
+      out-of-band shape, and the one whose pre-fix symptom was the abort: it
+      fell through to the starter branch and raised ``unknown starter pack``,
+      so ONE uninstalled custom pack failed the whole IMPORT.
+
+      Both skip because the resolver returns ``None`` before ``yaml`` is ever
+      read; that ORDERING is the fix, and both shapes are pinned by tests.
 
       ⛔ THE SWAP HAS ALREADY LANDED WHEN THIS RUNS
       (``_restore_into_temp_verify_swap``), so "aborted the restore" is NOT
@@ -30739,13 +30749,19 @@ def _apply_import_pack_config(sdk, payload: dict) -> None:
                     # Keyed on the RESOLVED state, not on the spelling that
                     # produced it. ``want_status`` is ``disabled`` for BOTH
                     # ``{"activated": False}`` and ``{"activated": False,
-                    # "status": "disabled"}`` and for ``status: null`` — the
-                    # three spellings of one artifact. Keying on
-                    # ``status is None`` (a previous attempt) fixed only the
-                    # first two and left ``status: "disabled"`` aborting the
+                    # "status": "disabled"}`` and ``{"activated": False,
+                    # "status": null}`` — the three spellings of one artifact.
+                    # Keying on ``status is None`` (a previous attempt) fixed only
+                    # the first two and left ``status: "disabled"`` aborting the
                     # whole import, which is the #1936 indicator-3 defect this
                     # branch exists to remove: one entry must not fail the
                     # import at artifact granularity.
+                    #
+                    # ⛔ ``status: null`` ALONE is NOT one of these. With
+                    # ``activated`` absent or truthy it resolves to ``active``
+                    # and falls through to the raise below — only
+                    # ``{"activated": False, "status": null}`` is the third
+                    # disabled spelling.
                     #
                     # The fail-loud guard is NOT widened: ``want_status`` is
                     # ``active`` for every entry the artifact wanted

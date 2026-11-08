@@ -612,9 +612,66 @@ class TestActivationParity:
 
 
 class TestRemovedPackGranularity:
-    """A removed pack is a per-entry SKIP, never an aborted restore."""
+    """A removed pack is a per-entry SKIP, never an aborted restore.
+
+    ⛔ TWO SHAPES, and only one of them is what a live graph exports.
+    ``set_graph_packs`` (``pack_state.py:1156-1165``) marks a removed pack by
+    setting ``:PackInstall.status='removed'`` and KEEPS its ``:PackManifest``,
+    so a real export carries ``status: removed`` WITH the full ``yaml``. The
+    ``yaml: null`` shape comes from ``delete_tenant_manifest`` — which deletes
+    the manifest but has NO caller and no route — i.e. it is the legacy /
+    out-of-band shape. Both must skip; the with-yaml one is the one a
+    production graph produces, and before this PR it took the ``yaml_text``
+    branch and re-installed the pack ``active``, ERASING the tombstone (the
+    #8648 widening class) rather than aborting.
+    """
+
+    def test_removed_custom_pack_with_manifest_skipped_not_reactivated(self, sdk):
+        """The REAL removal shape: ``status: removed`` WITH a manifest.
+
+        This is the ordering pin. The resolver returns ``None`` before
+        ``yaml_text`` is ever read, so a removed entry with a perfectly valid
+        manifest is skipped instead of re-installed. Nothing else in the suite
+        covers it — every other ``removed`` case uses ``yaml: None`` — so
+        moving the ``yaml_text`` read one line up would silently resurrect
+        removed packs with the whole suite green.
+        """
+        from tortoise.hosted_api import _apply_import_pack_config
+        from tortoise.pack_manifest_store import get_tenant_manifests
+        payload = {"pack_config": {"schema_version": 1, "packs": [
+            {"namespace": "tenant-ops", "version": "0.1.0",
+             "activated": False, "status": "removed",
+             "yaml": CUSTOM_MANIFEST},
+        ]}}
+        _apply_import_pack_config(sdk, payload)
+        # skipped: no activation record, and the manifest is NOT re-installed
+        assert _install_status(sdk, "tenant-ops") is None
+        assert get_tenant_manifests(sdk) == []
+
+    def test_removed_entry_does_not_seed_sibling_validation(self, sdk):
+        """A removed entry must not resolve a kept pack's cross-reference.
+
+        ``sibling_yamls`` seeds the manifest validator so a pack may reference
+        a sibling carried in the same ``pack_config``. A ``removed`` entry is
+        deliberately NOT installed, so letting its yaml seed the set would let
+        a kept pack validate against a namespace the import never creates.
+        Pins the exclusion, which had no coverage at all.
+        """
+        from tortoise.hosted_api import _apply_import_pack_config
+        payload = {"pack_config": {"schema_version": 1, "packs": [
+            {"namespace": "tenant-ops", "version": "0.1.0",
+             "activated": False, "status": "removed",
+             "yaml": CUSTOM_MANIFEST},
+        ]}}
+        _apply_import_pack_config(sdk, payload)
+        # nothing was installed, so nothing can be referenced afterwards
+        assert _install_status(sdk, "tenant-ops") is None
 
     def test_removed_custom_pack_does_not_abort_restore(self, sdk):
+        """The LEGACY shape: ``yaml: null``, i.e. the manifest was deleted.
+
+        Pre-#1936 this raised ``unknown starter pack 'gone-ops'``.
+        """
         from tortoise.hosted_api import _apply_import_pack_config
         payload = {"pack_config": {"schema_version": 1, "packs": [
             {"namespace": "gone-ops", "version": "0.1.0", "activated": False,
@@ -835,6 +892,16 @@ class TestStatusShapeGate:
         }
         assert declared, "pack_state declares no PACK_STATUS_* constants"
         assert declared == set(_PACK_CONFIG_STATUSES)
+        # ⛔ The EXPORTER keeps a THIRD copy of this vocabulary
+        # (``export._importable_pack_status``). Without this half the lock has a
+        # bypass: add ``PACK_STATUS_ARCHIVED`` to ``pack_state``, this test reds,
+        # the author adds it to ``_PACK_CONFIG_STATUSES``, the suite is green —
+        # and the exporter still clamps the new status to ``disabled``, so a
+        # legitimately-exported artifact restores in a state it was never in.
+        # Every declared status must survive the exporter's clamp unchanged.
+        from tortoise import export
+        for value in declared:
+            assert export._importable_pack_status(value) == value, value
 
 
 class TestUpsertStatusParam:
