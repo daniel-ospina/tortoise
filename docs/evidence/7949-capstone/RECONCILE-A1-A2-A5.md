@@ -168,10 +168,24 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
    all. ⚠️ That command is **self-matching** once this record lands — every hit is then this file's own
    lines — so re-derive it with the file excluded:
    `git grep -rn -E 'hasPart|hierarchies|decomposesInto' -- 'docs/evidence/7949-capstone/' \
-   ':!docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md'` → **exit 1, no output**.
+   ':!docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md'` → **exit 1, no output** at this record's
+   base. ⛔ **SUPERSEDED — read the paragraph above as the state at that base, NOT as the current
+   one, and re-run the command before quoting it.** `#10982` has since given the census exactly the
+   leg gap item (b) below asks for: `probes/capstone_measure.py:2791` pins
+   `A1_RELATION_FAMILIES = ("hasPart",)`, `:2843` adds `_a1_object_edges` (the
+   `MATCH (a:Object)-[r]->(b:Object) RETURN type(r)` count), `:2879` publishes `by_pinned_family`,
+   `:3095` wires it into `result["A1"]`, and `preregistration.json` registers
+   `a1_relation_families` — so *"the census cannot observe the edge"* and *"A1's leg is not in the
+   census at all"* no longer hold, and that reproduce command now exits **0 with 40 lines** (10 in
+   the probe, 22 in `PRE-REGISTRATION.md`, 8 in `preregistration.json`), every one of them that leg.
+   ⚠️ What still stands is the **reading**, not the sentence: the registered scored log
+   (`capstone-measured-9152448d.log`) predates the leg, so its `hasPart` absence is still `0` —
+   re-running it on the pre-registered corpus is `#10984`'s, and this record does not score it.
 4. **The rollup query does not exist.** `git grep -in 'rollup' -- '*.py' '*.md'` over the tree returns
    only unrelated uses (extractor `_rollup_llm`/`_rollup_recovery` stage counters, a CI per-name rollup
-   discussion, a plan doc). There is **no** query of the graph shape "which work items serve this goal,
+   discussion, a plan doc) — plus, since `#10982`, the A-row census's own `rollup_queries` on the A1
+   row, declared `unmeasured` (`probes/capstone_measure.py:3105`): a registered placeholder is not a
+   query. There is **no** query of the graph shape "which work items serve this goal,
    and what evidence supports them", no ground truth, and no scoring — which is the half `#10984` says
    `#11001` does **not** own and is "the half most likely to be dropped".
 
@@ -182,8 +196,10 @@ and re-scope to measurement-only — ⚠️ **not `#10999`**, which this record 
 `closingIssuesReferences`, which is a PR field and cannot be read on an issue) and its remainder, the
 Object→Object **write** path, is **`#11237`** (OPEN). Naming a closed issue as an owner is the same
 orphaning this section warns about for the `v4-mechanisms.yml` row;
-(b) add the declared-edge leg to the census so `0 → N` is observable at
-all; (c) define the rollup query, hand-label its ground truth, pre-state the scoring; (d) re-run on the
+(b) ~~add the declared-edge leg to the census so `0 → N` is observable at all~~ — **DONE by
+`#10982`**, which is why item 3 above is marked superseded: the leg exists, so a lane must not rebuild
+it; the remaining work is the re-run, not the census; (c) define the rollup query, hand-label its
+ ground truth, pre-state the scoring; (d) re-run on the
 pre-registered corpus. **`#10984` is now dispatchable** — its named blocker closed.
 
 ## 2. A2 / `#10985` — STILL-MISSING, and its blocker **landed without moving the number**
@@ -650,9 +666,10 @@ grep -n -i -E 'hierarch|hasPart|part-whole|11001|10984' config/v4-mechanisms.yml
 sed -n '275,283p' docs/evidence/7949-capstone/probes/capstone_measure.py   # `references`, via link_source_to_event
 sed -n '17574p' tortoise/sdk.py                             # the call (`references`'s writer)
 git grep -in 'rollup' -- '*.py' '*.md'                      # no graph rollup query anywhere
-# ⚠️ self-matching once this record lands — exclude it, then the answer is 0:
+# ⚠️ self-matching once this record lands — exclude it; at this head the answer is 40 lines, ALL of
+# them #10982's A1 census leg (probe + the registration), and it was 0 before that leg:
 git grep -rn -E 'hasPart|hierarchies|decomposesInto' -- 'docs/evidence/7949-capstone/' \
-    ':!docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md'    # exit 1 = no output
+    ':!docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md'
 
 # A2 (§2) — the shipped arm moves the share by exactly zero, on a tree that HAS #10997
 .venv/bin/python3 docs/evidence/7949-capstone/probes/e1_e2_probe.py --json-out /tmp/e1e2.json \

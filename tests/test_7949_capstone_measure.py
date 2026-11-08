@@ -4509,11 +4509,14 @@ def test_the_bare_continuation_cites_name_what_they_say():
     occur exactly once in the document — an ambiguous phrase reds instead of
     silently checking the easier of two matches.
 
-    Non-vacuity: measured on this head's parent, where `docs/00_index.md` said
-    `whose call is :9136` and this probe said `:9426-9430` for the vet block,
-    `:9044` for the early return and `:8781` for the `_edus_from_conversation`
-    call: every one of those rows FAILS the two checks below (the number is not
-    on the phrase's line, and the old number carries other code).
+    Non-vacuity: measured WHEN THIS LEG WAS WRITTEN, on the head then current — every one of those
+    rows FAILED the two checks below (the number was not on the phrase's line, and the old number
+    carried other code). The numerals that measurement saw are kept as its record and are
+    deliberately NOT re-derived, because they describe a tree that no longer exists: `docs/00_index.md`
+    then said `whose call is :9136`, and this probe then said `:9426-9430` for the vet block, `:9044`
+    for the early return and `:8781` for the `_edus_from_conversation` call. What has to stay true is
+    the PROPERTY — a row whose number is not on the phrase's line, or whose old number carries other
+    code, reds — and the rows below are the live ones.
 
     A row may name a SOURCE outside the bundle's own three (`_BUNDLE_TOOL_SOURCES`)
     — the `E1-E5-PROOFS.md` rows read `tools/capstone_verdict_check.py`, which
@@ -4597,9 +4600,11 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # ⛔ AND A THIRD DELTA, from the `origin/main` carry (#11331): `#11298`'s
         # `door` run-block key registered in `_NON_MEASUREMENT_RUN_KEYS` put 15
         # lines above the accounting block and moved `_step_accounting`
-        # `:675` -> `:690`. Measured off the tree again, not offset: 675 now reads
-        # `block = record.get(RECORD_STEPS_KEY)` and `grep -n '^def _step_accounting('
-        # tools/capstone_verdict_check.py` -> 690. The comment block above the tuple
+        # `:675` -> `:690`. Measured off the tree again, not offset — and that
+        # measurement does not stay true either: a later insert moved both +9, so
+        # `block = record.get(RECORD_STEPS_KEY)` is at 684 and
+        # `grep -n '^def _step_accounting(' tools/capstone_verdict_check.py` -> 699,
+        # which is what the row below asserts. The comment block above the tuple
         # is where that reasoning has to live, so the shift cannot be avoided by
         # shortening it — a line count above a cite moves the cite.
         ("E1-E5-PROOFS.md", 'declares `STEPS = ("S0"', (
