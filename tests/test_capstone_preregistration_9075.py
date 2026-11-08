@@ -2119,9 +2119,12 @@ def test_the_real_machine_record_agrees_with_the_pins():
     assert re.search(r":2724-2726\s*(?:->|→|to)\s*:2726-2728\b", read_back), (
         "the record must attribute the LAST move of that window to this branch, which "
         "is the half its own +2 comment lines are responsible for")
-    assert ":2713-2715" in read_back, (
-        "the record must name the commit that first moved the window, and the position "
-        "it moved it to")
+    # ⛔ No separate `":2713-2715" in read_back` arm: the SET pin above already requires
+    # that literal, and it is evaluated first, so the smaller arm was UNREACHABLE — a
+    # mutant that removed the window reddened the set row (`missing=['2713-2715']`) and
+    # never reached it (measured, agent-infra#3442 rule 3: an assertion that can never be
+    # the row that reds is not attribution, it is dead weight). The set pin's message
+    # already names the missing range, so nothing is lost by deleting it.
     assert probe[2726 - 1].strip() == "for name, count, anchored in projection.g.query(", (
         f"capstone_measure.py:2726 reads {probe[2726 - 1].strip()!r}, not the census call")
     # Equality, like its two siblings above: a substring let the closing line's SHAPE
