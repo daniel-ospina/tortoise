@@ -3651,11 +3651,14 @@ def test_an_UNMEASURABLE_probe_VETOES_even_when_the_CONTROL_answers(monkeypatch)
         `control_ok and not wrote` and returned `certifies=True, vetoed=None`, so
         `--dry-run --assert-clean` printed ✓ and exited 0 over a probe that
         measured NOTHING — the false PASS #11161 exists to close, on the very leg
-        this PR adds.
+        this file exists to pin.
 
-        ⛔ WHY THE OTHER UNMEASURABLE TESTS DO NOT CATCH THIS. None of them puts
-        the fold in front of a DEGRADED probe row AND an ANSWERING control, which
-        is the pair this test builds. MEASURED at this head: the documented-
+        ⛔ WHY THE PRE-EXISTING UNMEASURABLE TESTS DO NOT CATCH THIS. None of them
+        puts the fold in front of a DEGRADED probe row AND an ANSWERING control,
+        which is the pair this test builds. (The adjacent
+        `test_an_UNMEASURABLE_AFTER_read_VETOES_a_DISCRIMINATING_probe` DOES build
+        that pair — it pins the arm's ORDER, over a BEFORE row that HIT, so it
+        cannot stand in for this one.) MEASURED at this head: the documented-
         contracts test DOES fold over an ANSWERING control
         (`_merge_probe(None, probe_fts(..., control=True))`), but the leg it folds
         is HEALTHY — `unmeasurable == []` for that report — so this veto is never
@@ -3687,8 +3690,10 @@ def test_an_UNMEASURABLE_probe_VETOES_even_when_the_CONTROL_answers(monkeypatch)
         the claim that its "ORDER in the ladder is pinned" was false. The arm
         ABOVE `discriminating` is pinned by the adjacent
         `test_an_UNMEASURABLE_AFTER_read_VETOES_a_DISCRIMINATING_probe`.
-    (2) REACHABLE: a breaker trip or a `query_failed` between the probe read and
-        the control read is the ordinary transient this leg exists for.
+    (2) REACHABLE: a `query_failed` on the PROBE's own query — the control's read
+        is a SEPARATE call, so it still answers (`_breaker_allow` is evaluated per
+        call: `search_engine.py:1615`/`:1653`) — or a breaker still open when the
+        probe read ran that had recovered before the control read.
     """
     from tortoise import search_engine as se
     from tortoise import session_source_prose_migration as m
@@ -3748,9 +3753,9 @@ def test_an_UNMEASURABLE_AFTER_read_VETOES_a_DISCRIMINATING_probe():
         sets BOTH, and arm (a) then certifies a leg whose AFTER read measured
         nothing. MEASURED on that ordering mutation: this fixture's
         `certifies`/`vetoed` go from `False`/`unmeasurable` to `True`/`None`.
-    (2) REACHABLE: a breaker trip or a `query_failed` between the probe read and
-        the control read, on a token that hit before the writes — the same
-        transient the neighbouring test names.
+    (2) REACHABLE: a `query_failed` on the PROBE's own AFTER read, on a token that
+        hit before the writes — the control's read is a separate call, so it
+        still answers, which is the same transient the neighbouring test names.
     """
     before = {"ran": True, "probes": [{"phrase": "zebraquux",
                                        "residue": ["tortoise://n1"]}]}
@@ -3758,7 +3763,9 @@ def test_an_UNMEASURABLE_AFTER_read_VETOES_a_DISCRIMINATING_probe():
              "leaked": [], "truncated": [],
              "probes": [{"phrase": "zebraquux", "residue": [], "stale": False,
                          "unexplained": None, "unread": []}]}
-    folded = _cli._merge_probe(before, after)
+    # `wrote=True` because a BEFORE reading is only taken on a writing run, so
+    # that is the production shape this fixture has to stand for.
+    folded = _cli._merge_probe(before, after, wrote=True)
 
     # THE PREMISE: this fixture really does reach BOTH states at once, so a
     # reordering cannot be mistaken for a fixture that never sees one of them.
