@@ -2905,7 +2905,9 @@ def test_a_record_served_prefer_read_never_opens_the_projection(client):
     this fix the route constructed its handle with ``attach_projection=True``
     *before* the record was consulted, so every record-served read paid a graph
     pool slot for a cold open (connect + version probe + ``_ensure_indexes()``,
-    budgeted by ``probe_setup_timeout()``: 20 s, up to 300 s) it never used —
+    budgeted by the ``graph`` lane's own ``graph_offload_timeout_s()`` —
+    ``probe_setup_timeout()`` + ``CONTROL_PLANE_GRAPH_OFFLOAD_MARGIN_S``, 30 s
+    by default, up to 310 s) it never used —
     and on a restored/DR graph that open could push an answerable read past the
     10 s transport bound into the 504 -32009 "the work may still complete" body
     this change exists to replace.
@@ -2974,8 +2976,10 @@ def test_the_prefer_fallback_opens_the_projection_construction_first(client):
 
     A ``prefer`` fallback does two things with different legitimate costs: the
     RECORD round trip (bounded by the read lane's 8 s) and the cache's COLD OPEN
-    plus hot query. The open is budgeted by ``probe_setup_timeout()`` (20 s, up
-    to 300 s) on the CONSTRUCTION lane; the query alone stays on the read lane.
+    plus hot query. The open is budgeted by the ``graph`` lane's own
+    ``graph_offload_timeout_s()`` (``probe_setup_timeout()`` + the offload
+    margin: 30 s by default, up to 310 s) on the CONSTRUCTION lane; the query
+    alone stays on the read lane.
     This pins the ordering — attach, then the cache read — so a fix that moved
     the open back inside the read submission (re-breaking cycle-2 finding 6) or
     one that skipped the open (leaving the cache unreadable) is red.
@@ -3428,8 +3432,9 @@ def test_the_cold_projection_open_rides_the_construction_lane(
     an ALREADY-ATTACHED projection (the measured store answer is 41–80 ms). The
     cold half of a read — ``Projection.__init__``'s connect, version probe and
     ``_ensure_indexes()``, which on a restored/DR graph BUILDS the index over the
-    whole graph — is budgeted separately by ``probe_setup_timeout()`` (20 s, up
-    to 300 s) on the ``graph`` construction lane.
+    whole graph — is budgeted separately by the ``graph`` construction lane's own
+    ``graph_offload_timeout_s()`` (``probe_setup_timeout()`` +
+    ``CONTROL_PLANE_GRAPH_OFFLOAD_MARGIN_S``: 30 s by default, up to 310 s).
 
     If the attach slid back into the read submission, a HEALTHY store's first
     read after a restore would be refused as a capacity failure: the 8 s bound
