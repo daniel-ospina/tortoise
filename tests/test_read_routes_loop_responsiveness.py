@@ -3275,17 +3275,27 @@ def test_the_read_path_answers_while_the_default_executor_is_stalled(client):
     not be judged by, and it redded a green build: measured on PR #11535's
     `test (c)` (run 42470441311, embedded lane, 4,736 tests in 944 s) the FIRST
     case — `points-list` — exceeded 3.0 s while the other three answered in the
-    same stalled window, which is the signature of a first-touch cost and not of
-    a read queued on the shared pool (a shared-pool queue would have redded all
-    four: the blockers hold for `DEFAULT_EXECUTOR_STALL_S`). So the warm-up pays
-    the cold open ONCE, with the pool free and outside the measurement, and the
-    measured pass then exercises exactly the queueing property this test claims.
+    same stalled window. That is a first-touch cost, not a read queued on the
+    shared pool: put the read leg BACK on the shared pool and the red set is not
+    one case but an ORDERED PREFIX — measured `points-list`, `point-get`,
+    `search` red (3 of the 4) and only `topic-summary` passing, because each red
+    costs a whole `READ_ANSWER_BOUND_S` inside the 12 s
+    `DEFAULT_EXECUTOR_STALL_S` hold, so the last case's window opens only as the
+    hold expires. ONE red, and the first — the CI shape — is what no pool queue
+    produces. The only first-touch variable on this path is the cold open's
+    WORK, and it rides a per-request construction submission
+    (`hosted_api._data_sdk_offloaded` bundles `sdk._get_proj()` into the SAME
+    submission), so there is no first-touch-only SUBMISSION that could queue.
+    So the warm-up pays the cold open ONCE, with the pool free and outside the
+    measurement, and the measured pass then exercises exactly the queueing
+    property this test claims.
 
     It cannot mask the defect it pins: on the pre-#10602 shape the warm-up
     succeeds too (the shared pool is free), and the MEASURED request still has to
     wait behind the blockers — measured `1 failed` with `_read_offload` reverted
     to `asyncio.to_thread` (`shared-pool mutant`), warm-up in place.
     """
+    from tortoise import monitoring
     from tortoise.hosted_api import app
 
     _seed_read_surface()
@@ -3297,6 +3307,18 @@ def test_the_read_path_answers_while_the_default_executor_is_stalled(client):
         f"{sorted(_READ_LANE_CASES - {c[0] for c in _READ_CASES})}")
 
     width = _default_executor_width()
+    #: The warm-up's OWN bound: the cold open's declared budget
+    #: (`probe_setup_timeout()`, 20 s by default). Without it a hung cold open
+    #: spins until the repo-wide ``pytest-timeout`` (300 s) kills the ITEM with a
+    #: message about a timeout instead of about the route — the same rule the
+    #: occupancy wait below follows.
+    warm_up_bound = monitoring.probe_setup_timeout()
+    assert warm_up_bound > READ_ANSWER_BOUND_S, (
+        f"the cold open's declared budget ({warm_up_bound}s) no longer exceeds "
+        f"the read-lane bound ({READ_ANSWER_BOUND_S}s) — the warm-up would then "
+        f"be the STRICTER gate of the two, so the isolation this test rests on "
+        f"is gone and the measured pass would judge a cold open it never paid "
+        f"(#10602)")
     timings: dict[str, float] = {}
     failures: list[str] = []
 
@@ -3310,7 +3332,16 @@ def test_the_read_path_answers_while_the_default_executor_is_stalled(client):
             # the projection cold open, which belongs to the construction lane's
             # `probe_setup_timeout()` budget — not to the read-lane bound below.
             for label, handler, request_kwargs in cases:
-                warm = await ac.request(**request_kwargs())
+                try:
+                    warm = await asyncio.wait_for(ac.request(**request_kwargs()),
+                                                  timeout=warm_up_bound)
+                except TimeoutError:
+                    raise AssertionError(
+                        f"[{label}] the WARM-UP {handler} request did not answer "
+                        f"within {warm_up_bound}s — the cold open's own declared "
+                        f"budget (`probe_setup_timeout()`) — with the shared pool "
+                        f"FREE, so this is a broken read route or a cold-open "
+                        f"regression, NOT the pool (#10602)") from None
                 assert warm.status_code == 200, (
                     f"[{label}] the WARM-UP {handler} request answered "
                     f"{warm.status_code}: {warm.text[:200]} — the read route is "
