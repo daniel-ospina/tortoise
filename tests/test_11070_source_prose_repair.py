@@ -2605,18 +2605,63 @@ def test_a_MULTI_token_probe_is_REFUSED_because_the_FTS_read_OR_joins_it(
 
     monkeypatch.setenv("TORTOISE_IDENTIFIER_TOKENS", "1")
 
-    for phrase in ("the second-latest PR comment", "the", "zx-99", "   ",
-                   # ⛔ WHITESPACE-FREE IS THE UNIT, NOT "TOKENISES TO ONE TERM"
-                   # (#11536 review round 5, P2): the tokenizer DROPS stopwords and
-                   # sub-2-char words, so these pass a count-based check while the
-                   # read sends the RAW string, which RediSearch evaluates as an
-                   # implicit AND — an UNDER-match that reads a still-findable
-                   # sentence as absent. Measured before the fix: both returned
-                   # None from `probe_phrase_rejection`.
-                   "the fridays", "fridays x"):
-        assert probe_phrase_rejection(phrase), (
-            f"{phrase!r} was accepted as a probe — the FTS read OR-joins it, so "
-            f"it measures the OR of its words, not the sentence")
+    # ⛔ ONE EXPECTED REASON PER FIXTURE, NOT ONE GENERIC MESSAGE (#11536 review
+    # round 14, P2). Two rounds of this row produced a single failure message for
+    # every fixture, and each version was FALSE for some of them: "the read
+    # OR-joins it" is the TOKENISER's reason, and "does not address ONE indexed
+    # term" is inverted for `"the"` — which IS one indexed term and is refused
+    # because a stopword is too COMMON, so it OVER-matches and a REMOVED sentence
+    # still reads present. A debugger sent to the wrong guard is the same
+    # misstated-evidence defect this PR exists to remove, one layer up.
+    # ⛔ AND A PER-FIXTURE REASON PINS EACH GUARD SEPARATELY: a generic message
+    # passes whichever guard happens to fire, so it would not notice the stopword
+    # guard starting to answer for a whitespace phrase (or the reverse).
+    # MEASURED at this head — each string below is the reason
+    # `probe_phrase_rejection` actually returns for that fixture.
+    for phrase, reason in (
+            # the OR-join the tokeniser produces for multi-word input
+            ("the second-latest PR comment", "tokenises to 4 term(s)"),
+            # ⛔ OVER-match, not under-match: one term, but far too common
+            ("the", "search stopword"),
+            # the identifier mechanism turns one typed token into several
+            ("zx-99", "tokenises to 2 term(s)"),
+            # nothing to probe at all
+            ("   ", "it is empty"),
+            # ⛔ WHITESPACE-FREE IS THE UNIT, NOT "TOKENISES TO ONE TERM"
+            # (#11536 review round 5, P2): the tokenizer DROPS stopwords and
+            # sub-2-char words, so these pass a count-based check while the
+            # read sends the RAW string, which RediSearch evaluates as an
+            # implicit AND — an UNDER-match that reads a still-findable
+            # sentence as absent. Measured before the fix: both returned
+            # None from `probe_phrase_rejection`.
+            ("the fridays", "whitespace-separated words"),
+            ("fridays x", "whitespace-separated words"),
+            # ⛔ THESE TWO ARE THE SHAPES ONLY THE WHITESPACE GUARD REFUSES
+            # (#11536 review round 12, P2; wording corrected round 17 after the
+            # earlier versions stated an unmeasured mechanism). MEASURED at this
+            # head: `_indexed_term_runs("friday .") == ['friday']`, so
+            # `single_run` is True and the term-count check (`:1438-1445`) is
+            # SKIPPED for it, and `len(runs) > 1` (`:1468`) passes it too; with
+            # the whitespace guard (`:1449-1450`) disabled
+            # `probe_phrase_rejection("friday .")` and `("the .")` both return
+            # None — nothing else refuses them. Without the guard the read also
+            # sends `friday .` raw, which RediSearch evaluates as an implicit AND
+            # that under-matches.
+            # ⛔ THE TWO FIXTURES ABOVE ARE REFUSED BY THIS SAME GUARD AT THIS
+            # HEAD (`:1449` runs before `:1468`), but they are not what PINS it:
+            # with the guard disabled they are caught by `len(runs) > 1` instead,
+            # so their expected reason changes and the row reds on WHICH GUARD
+            # answered — not on an accept.
+            ("friday .", "whitespace-separated words"),
+            ("the .", "whitespace-separated words"),
+    ):
+        why = probe_phrase_rejection(phrase)
+        assert why, (
+            f"{phrase!r} was accepted as a probe; expected it to be refused for "
+            f"{reason!r}")
+        assert reason in why, (
+            f"{phrase!r} was refused by the WRONG guard — expected {reason!r}, "
+            f"got {why!r}")
     assert probe_phrase_rejection("zebraquux") is None
     assert probe_phrase_rejection("Fridays.") is None, (
         "a single token with punctuation is still ONE token — the read escapes "
@@ -3592,6 +3637,167 @@ def test_a_BREAKER_OPEN_read_is_UNMEASURABLE_not_a_clean_zero(monkeypatch):
     assert report["unmeasurable"] == ["zebraquux"], (
         "a probe whose read never ran was reported as a clean zero")
     assert report["leaked"] == []
+
+
+def test_an_UNMEASURABLE_probe_VETOES_even_when_the_CONTROL_answers(monkeypatch):
+    """The fold's `unmeasurable` veto — the leg this whole file exists for.
+
+    (1) FAILS on a `_merge_probe` that drops this veto: the probe's own read was
+        DEGRADED (`ran=True, degraded=True` — the shape `run_fts_query` records
+        for `query_failed` at `search_engine.py:1780`, and for a promoted
+        `index_missing` at `:1776`; the two reasons DIFFER, so this names the
+        FLAGS, not one reason), the
+        CONTROL answered, and `_merge_probe(None, …)` then reached arm (b)
+        `control_ok and not wrote` and returned `certifies=True, vetoed=None`, so
+        `--dry-run --assert-clean` printed ✓ and exited 0 over a probe that
+        measured NOTHING — the false PASS #11161 exists to close, on the very leg
+        this file exists to pin.
+
+        ⛔ WHY THE PRE-EXISTING UNMEASURABLE TESTS DO NOT CATCH THIS. None of them
+        puts the fold in front of a DEGRADED probe row AND an ANSWERING control,
+        which is the pair this test builds. (The adjacent
+        `test_an_UNMEASURABLE_AFTER_read_VETOES_a_DISCRIMINATING_probe` DOES build
+        that pair — it pins the arm's ORDER, over a BEFORE row that HIT, so it
+        cannot stand in for this one.) MEASURED at this head: the documented-
+        contracts test DOES fold over an ANSWERING control
+        (`_merge_probe(None, probe_fts(..., control=True))`), but the leg it folds
+        is HEALTHY — `unmeasurable == []` for that report — so this veto is never
+        reached; its DEGRADED readings are the ones that pass `control=False`
+        (`report["control"] is None`, measured on `breaker_open`/`index_missing`/
+        `query_failed`) and they never reach `_merge_probe` at all. The
+        breaker-open test DOES pass `control=True`, but its fixture does not answer
+        the control's own lexicon read, so that arm reports
+        `mode="unavailable", ok=False` (`note: "no usable control token was
+        found, and the Source index-entry read FAILED …"`). ⛔ AND THE DEGRADED LEG
+        IS NOT WHAT MAKES IT UNAVAILABLE: the identical fixture with a HEALTHY leg
+        reports a byte-identical control block, because THIS fixture's control
+        reads — the lexicon read and the index-entry read — go through `g.query`,
+        and it never reaches the control's `mode="probe"` arm (which DOES read
+        through the patched `run_fts_query` — `source_fts_probe` is called at
+        `session_source_prose_migration.py:2138`). ⛔ AND ON THE SHIPPED LADDER
+        THAT TEST IS NOT VETOED AS `uncorroborated` — this arm sits above every
+        control arm, so the fold returns `vetoed="unmeasurable"` for it too. The
+        wrong-veto outcome is what a fold that DROPS this veto reaches; with the
+        arm present, nothing there distinguishes the right refusal from the wrong
+        one, which is why none of them pins "the probe's own read did not run".
+        Verified by mutation at this head: with `elif out["unmeasurable"]:`
+        deleted, every test that folds a report carrying a non-empty
+        `unmeasurable` reds on `certifies is False` — this one and the adjacent
+        `test_an_UNMEASURABLE_AFTER_read_VETOES_a_DISCRIMINATING_probe` — and no
+        other test does; MOVING that veto below arm (b) reds this one the same
+        way. ⛔ AND THAT IS ALL THIS FIXTURE PINS: its probe never discriminated,
+        so moving the veto below `elif discriminating:` leaves THIS test green —
+        the claim that its "ORDER in the ladder is pinned" was false. The arm
+        ABOVE `discriminating` is pinned by the adjacent
+        `test_an_UNMEASURABLE_AFTER_read_VETOES_a_DISCRIMINATING_probe`.
+    (2) REACHABLE: a `query_failed` on the PROBE's own query — the control's read
+        is a SEPARATE call, so it still answers (`_breaker_allow` is evaluated per
+        call: `search_engine.py:1615`/`:1653`) — or a breaker still open when the
+        probe read ran that had recovered before the control read.
+    """
+    from tortoise import search_engine as se
+    from tortoise import session_source_prose_migration as m
+
+    class _LexiconGraph(_RecordingGraph):
+        """Answers the CONTROL read, so a control token exists and can answer."""
+
+        def query(self, cypher, params=None, timeout=None):
+            if "STARTS WITH $prefix" in cypher:
+                return _Result([("migration, plan, friday",)])
+            return super().query(cypher, params=params, timeout=timeout)
+
+    def fake(graph, query, **kwargs):
+        # THE PROBE's read is the DEGRADED one; the CONTROL's read runs and
+        # answers. Same shape the read path records for `query_failed`.
+        degraded = query == "zebraquux"
+        if kwargs.get("leg_trace") is not None:
+            kwargs["leg_trace"].append({
+                "leg": "fts", "ran": True, "degraded": degraded,
+                "reason": "query_failed" if degraded else "ok"})
+        return [] if degraded else [("session:s-post", 2.0)]
+
+    monkeypatch.setattr(se, "run_fts_query", fake)
+    report = m.probe_fts(_LexiconGraph([(_post_fix_node(),)]), ["zebraquux"],
+                         control=True)
+
+    # THE PREMISE, asserted so a fixture change cannot silently empty this test:
+    # the probe measured nothing, the instrument still answered, and no earlier
+    # veto in the fold's ladder is reached.
+    assert report["unmeasurable"] == ["zebraquux"], (
+        "the fixture did not degrade the PROBE's read: "
+        + repr(report["probes"][0]))
+    assert (report["control"] or {}).get("ok") is True, (
+        # ⛔ THE REASON IS NOT "uncorroborated" (#11536 review P2, MEASURED):
+        # the `unmeasurable` arm sits ABOVE every control arm, so the veto is the
+        # same whatever the control reports (`ok=True`, `ok=False` and `None` all
+        # fold to `vetoed="unmeasurable"`). This premise matters for a different
+        # reason: with a NON-answering control arm (b) could not fire, so with the
+        # veto deleted the fold would refuse as `uncorroborated` and
+        # `certifies is False` would stay GREEN — only the `vetoed` label would
+        # red. The premise is what makes the CERTIFICATION assertion the one that
+        # catches the deletion (verified: veto deleted + control ok=False ->
+        # `certifies=False vetoed="uncorroborated"`).
+        "the fixture did not make the CONTROL answer — with a non-answering "
+        "control arm (b) could not fire, so with the veto deleted the fold would "
+        "refuse as `uncorroborated` and `certifies is False` would stay GREEN; "
+        "only the `vetoed` label would red. This premise is what makes the "
+        "CERTIFICATION assertion the one that catches the deletion: "
+        + repr(report["control"]))
+    assert report["leaked"] == [] and report["stale"] == [], (
+        "the fixture is meant to reach the `unmeasurable` arm alone, not an "
+        "earlier veto: " + repr(report))
+
+    folded = _cli._merge_probe(None, report)
+    assert folded["certifies"] is False, (
+        "a probe whose OWN READ WAS DEGRADED certified — `--dry-run "
+        "--assert-clean` would exit 0 over a leg that measured nothing")
+    assert folded["vetoed"] == "unmeasurable", (
+        "the refusal is not the unmeasured-probe one: "
+        + repr(folded["vetoed"]))
+
+
+def test_an_UNMEASURABLE_AFTER_read_VETOES_a_DISCRIMINATING_probe():
+    """The `unmeasurable` veto sits ABOVE arm (a) — over a probe that DID hit.
+
+    (1) FAILS on a fold whose `unmeasurable` arm is ordered BELOW
+        `elif discriminating:`: `discriminating` is computed from the BEFORE
+        row's residue and the AFTER residue buckets, INDEPENDENT of
+        `degraded` — so a degraded AFTER read over a BEFORE row that DID hit
+        sets BOTH, and arm (a) then certifies a leg whose AFTER read measured
+        nothing. MEASURED on that ordering mutation: this fixture's
+        `certifies`/`vetoed` go from `False`/`unmeasurable` to `True`/`None`.
+    (2) REACHABLE: a `query_failed` on the PROBE's own AFTER read, on a token that
+        hit before the writes — the control's read is a separate call, so it
+        still answers, which is the same transient the neighbouring test names.
+    """
+    before = {"ran": True, "probes": [{"phrase": "zebraquux",
+                                       "residue": ["tortoise://n1"]}]}
+    after = {"unmeasurable": ["zebraquux"], "control": {"ok": True},
+             "leaked": [], "truncated": [],
+             "probes": [{"phrase": "zebraquux", "residue": [], "stale": False,
+                         "unexplained": None, "unread": []}]}
+    # `wrote=True` because a BEFORE reading is only taken on a writing run, so
+    # that is the production shape this fixture has to stand for.
+    folded = _cli._merge_probe(before, after, wrote=True)
+
+    # THE PREMISE: this fixture really does reach BOTH states at once, so a
+    # reordering cannot be mistaken for a fixture that never sees one of them.
+    assert folded["unmeasurable"] == ["zebraquux"], (
+        "the fixture did not degrade the AFTER read: " + repr(folded))
+    assert folded["probes"][0]["discriminating"] is True, (
+        "the fixture's BEFORE row did not HIT, so the `discriminating` arm this "
+        "test is about is never reached: " + repr(folded["probes"][0]))
+    assert folded["leaked"] == [] and not folded.get("stale"), (
+        "an earlier veto in the ladder is reached, not the one under test: "
+        + repr(folded))
+
+    assert folded["certifies"] is False, (
+        "a probe whose AFTER read was DEGRADED certified through arm (a) — the "
+        "veto is ordered below `discriminating`, so the same false PASS survives "
+        "one arm later")
+    assert folded["vetoed"] == "unmeasurable", (
+        "the refusal is not the unmeasured-probe one: "
+        + repr(folded["vetoed"]))
 
 
 def test_a_probe_that_FILLS_the_window_is_TRUNCATED_not_certified(monkeypatch):
@@ -4880,14 +5086,30 @@ def test_a_JSON_signoff_STATES_the_leg_it_did_not_measure(monkeypatch, capsys):
     assert "fts_probe" not in payload
     assert "CENSUS only" in captured.err, (
         "the skip was silent on stderr too")
+    assert "taken by name" in captured.err, (
+        "`--no-fts-probe` IS the by-name acceptance, and the notice must say so: "
+        + captured.err)
 
     # …and a repair with no probe names its own reason, on the same field.
+    # ⛔ AND IT MUST NOT CLAIM A NAME THAT WAS NEVER GIVEN (#11536 review round
+    # 12, P2). `fts_probe_skipped` has two arms; this is the OMISSION one — the
+    # flags were simply left off, which `--repair` does not refuse (only
+    # `--assert-clean` does, at exit 2). The notice used to print "taken by name"
+    # on BOTH arms, i.e. it asserted an operator acceptance that never happened,
+    # in the one message whose job is to state the evidence honestly.
     _install_cli(monkeypatch, graph, ["--repair", "--clear-without-record",
                                       "--json"])
     capsys.readouterr()
     assert _cli.main() in (0, 1)
-    payload = json.loads(capsys.readouterr().out)
+    omitted = capsys.readouterr()
+    payload = json.loads(omitted.out)
     assert payload["fts_probe_skipped"] == "no_probe_phrase"
+    assert "by OMISSION" in omitted.err, (
+        "the omission arm did not disclose that nothing was named: "
+        + omitted.err)
+    assert "taken by name" not in omitted.err, (
+        "the notice claimed a by-name acceptance the operator never gave: "
+        + omitted.err)
 
 
 def test_the_documented_report_contracts_are_the_ones_the_run_RETURNS(monkeypatch):
