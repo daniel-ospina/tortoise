@@ -4,11 +4,11 @@ WHAT IS BEING PINNED, AND WHY IT NEEDS A TEST AT ALL
 ====================================================
 `Dockerfile.hosted` passes no `--workers`, so hosted production runs ONE uvicorn
 worker. Nothing records that decision: uvicorn resolves its worker count as
-`CLI flag -> $WEB_CONCURRENCY -> 1`, so one Fly env var moves the machine to N
-workers with no code change and no signal — and at N>=2 this app duplicates its
-daemons (GitHub issues + Telegram), splits the OAuth CSRF register per process,
-turns the golden signals into per-process numbers, and (on embedded) diverges
-into N database copies. Every one of those is SILENT.
+`CLI flag -> $UVICORN_WORKERS -> $WEB_CONCURRENCY -> 1`, so one Fly env var moves
+the machine to N workers with no code change and no signal — and at N>=2 this app
+duplicates its daemons (GitHub issues + Telegram), splits the OAuth CSRF register
+per process, turns the golden signals into per-process numbers, and (on embedded)
+diverges into N database copies. Every one of those is SILENT.
 
 So the guard is a fail-closed refusal, and the things that could silently undo it
 are pinned here:
@@ -84,6 +84,16 @@ _RELOAD_ARGV = ["uvicorn", "tortoise.hosted_api:app", "--host", "0.0.0.0", "--re
         # to $WEB_CONCURRENCY. `--workers +2` really does start two children.
         ({}, ["uvicorn", "a:a", "--workers", "+2"], 2),
         ({"WEB_CONCURRENCY": " 2 "}, [], 2),
+        # ⛔ `$UVICORN_WORKERS` is click's VALUE for `--workers`, so it beats
+        # `$WEB_CONCURRENCY` and loses only to the CLI. Measured on the pinned
+        # 0.52.1 — the named arm below carries the transcript.
+        ({wt.UVICORN_WORKERS_ENV: "2"}, [], 2),
+        ({wt.UVICORN_WORKERS_ENV: "2", "WEB_CONCURRENCY": "4"}, [], 2),
+        ({wt.UVICORN_WORKERS_ENV: "2"}, ["uvicorn", "a:a", "--workers", "1"], 1),
+        ({wt.UVICORN_WORKERS_ENV: "0", "WEB_CONCURRENCY": "4"}, [], 1),
+        ({wt.UVICORN_WORKERS_ENV: "-2", "WEB_CONCURRENCY": "4"}, [], 1),
+        ({wt.UVICORN_WORKERS_ENV: "", "WEB_CONCURRENCY": "4"}, [], 4),
+        ({wt.UVICORN_WORKERS_ENV: "+2"}, [], 2),
         # `0`/negative are not a topology; uvicorn treats `workers > 1` as the
         # supervisor's switch, so both run in-process.
         ({"WEB_CONCURRENCY": "0"}, [], 1),
@@ -137,6 +147,56 @@ def test_an_explicitly_given_workers_flag_is_final_even_when_non_positive():
     # …and a positive flag still beats the env, so this is not "the flag is ignored".
     assert wt.resolve_effective_workers(
         {"WEB_CONCURRENCY": "4"}, ["uvicorn", "a:a", "--workers", "2"]) == 2
+
+
+def test_uvicorn_workers_envvar_is_the_flags_value_and_is_final():
+    """⛔ ``$UVICORN_WORKERS`` is a REAL input for ``--workers``, and it is FINAL.
+
+    This module reads ``$UVICORN_RELOAD`` because click's
+    ``auto_envvar_prefix="UVICORN"`` makes it a real input for ``--reload``. The
+    same mechanism makes ``UVICORN_WORKERS`` the flag's VALUE whenever the flag
+    is not given — and then uvicorn never consults ``$WEB_CONCURRENCY`` at all
+    (``config.py:352`` reads it only ``if workers is None``, the *parameter*).
+    Ignoring the variable made both resolvers report ``1`` for a machine serving
+    N, the wrong-report defect this branch already fixed once for
+    ``--workers +2``.
+
+    Measured on the pinned uvicorn 0.52.1 (a probe app, counting served
+    children):
+
+        UVICORN_WORKERS=2                      -> parent + TWO children
+        UVICORN_WORKERS=2 WEB_CONCURRENCY=4    -> 2 (not 4)
+        UVICORN_WORKERS=2 … --workers 1        -> 1 in-process (the CLI wins)
+        UVICORN_WORKERS=0 WEB_CONCURRENCY=4    -> 1 in-process (given is final)
+        UVICORN_WORKERS='' WEB_CONCURRENCY=4   -> 4 (empty == absent)
+        UVICORN_WORKERS='+2'                   -> 2 (``int()``'s grammar)
+    """
+    argv_none = ["uvicorn", "tortoise.hosted_api:app"]
+    assert wt.resolve_effective_workers({wt.UVICORN_WORKERS_ENV: "2"}, argv_none) == 2
+    assert wt.resolve_effective_workers(
+        {wt.UVICORN_WORKERS_ENV: "2", "WEB_CONCURRENCY": "4"}, argv_none) == 2
+    # The CLI still wins: it is the same click parameter.
+    assert wt.resolve_effective_workers(
+        {wt.UVICORN_WORKERS_ENV: "2"}, [*argv_none, "--workers", "1"]) == 1
+    # A GIVEN value is final even when non-positive…
+    assert wt.resolve_effective_workers(
+        {wt.UVICORN_WORKERS_ENV: "0", "WEB_CONCURRENCY": "4"}, argv_none) == 1
+    # …while an EMPTY one is not given at all (click's own ``rv != ""`` rule).
+    assert wt.resolve_effective_workers(
+        {wt.UVICORN_WORKERS_ENV: "", "WEB_CONCURRENCY": "4"}, argv_none) == 4
+
+    # ⛔ And the SHIPPED shell half must land the SAME number, because the app
+    # reads ``TORTOISE_WEB_WORKERS`` first: a shell that skipped this variable
+    # would hand the app ``1`` for a machine about to run 2.
+    assert _exported_workers(tuple(argv_none), {wt.UVICORN_WORKERS_ENV: "2"}) == 2
+    assert _exported_workers(
+        tuple(argv_none), {wt.UVICORN_WORKERS_ENV: "2", "WEB_CONCURRENCY": "4"}) == 2
+    assert _exported_workers(
+        tuple([*argv_none, "--workers", "1"]), {wt.UVICORN_WORKERS_ENV: "2"}) == 1
+    assert _exported_workers(
+        tuple(argv_none), {wt.UVICORN_WORKERS_ENV: "0", "WEB_CONCURRENCY": "4"}) == 1
+    assert _exported_workers(
+        tuple(argv_none), {wt.UVICORN_WORKERS_ENV: "", "WEB_CONCURRENCY": "4"}) == 4
 
 
 def test_an_absent_workers_flag_is_not_a_request_for_one():
@@ -224,14 +284,30 @@ def test_a_path_or_an_unsupported_scheme_reads_as_embedded(value):
     assert wt.db_is_shared({"TORTOISE_DB_URI": value}) is False
 
 
-def test_the_cloud_uri_arm_answers_before_the_entrypoint_promotes_it():
-    """`entrypoint.sh` copies FALKORDB_CLOUD_URI into TORTOISE_DB_URI before exec.
+def test_a_cloud_uri_alone_is_an_embedded_boot_because_the_app_never_reads_it():
+    """⛔ ``FALKORDB_CLOUD_URI`` belongs to the BOOT SCRIPT, not to the app.
 
-    A direct `uvicorn ...` invocation (the bypass the gate exists to catch) never
-    runs that promotion, so reading only TORTOISE_DB_URI would call a real
-    managed deployment "embedded" and refuse it for the WRONG reason.
+    ``entrypoint.sh`` promotes it (``export TORTOISE_DB_URI="${FALKORDB_CLOUD_URI}"``)
+    BEFORE ``exec``, so a boot that came through the script always has
+    ``TORTOISE_DB_URI`` set and needs no fallback here. A DIRECT ``uvicorn``
+    invocation — the bypass this gate exists to catch — never runs that
+    promotion, and nothing under ``tortoise/`` reads ``FALKORDB_CLOUD_URI``:
+    ``hosted_api._make_sdk`` dispatches on ``TORTOISE_DB_URI`` alone and
+    otherwise opens ``_resolve_embedded_db_path()``.
+
+    So the arm that used to answer SHARED here answered it for a boot that is in
+    fact EMBEDDED — the one direction that hands ``TORTOISE_MULTI_WORKER`` the
+    embedded refusal it is documented never to lift (N workers on N divergent
+    copies of one file). Re-pinned to the verdict the APP produces.
     """
-    assert wt.db_is_shared(_SHARED_VIA_CLOUD) is True
+    assert wt.db_is_shared(_SHARED_VIA_CLOUD) is False, (
+        "the app never consults FALKORDB_CLOUD_URI, so this boot IS embedded — "
+        "answering 'shared' here is the fail-open the gate exists to prevent"
+    )
+    # The promotion is what makes it shared — and the promotion is VISIBLE to the
+    # app, because it writes TORTOISE_DB_URI.
+    assert wt.db_is_shared(_SHARED) is True
+    assert wt.db_is_shared({**_SHARED_VIA_CLOUD, **_SHARED}) is True
 
 
 def test_an_explicit_embedded_uri_masks_a_stale_cloud_uri():
@@ -255,10 +331,11 @@ def test_an_explicit_embedded_uri_masks_a_stale_cloud_uri():
         "cloud URI is only a FALLBACK and must not answer over it"
     )
 
-    # The fallback still answers when the explicit source is UNSET or EMPTY —
-    # that is the direct-`uvicorn` case this arm exists for.
-    assert wt.db_is_shared({"TORTOISE_DB_URI": "", "FALKORDB_CLOUD_URI": stale_cloud}) is True
-    assert wt.db_is_shared({"FALKORDB_CLOUD_URI": stale_cloud}) is True
+    # The fallback is GONE, not narrowed: with ``TORTOISE_DB_URI`` unset or
+    # empty the app opens the embedded file, so a stale cloud secret must not
+    # upgrade that boot to "shared" (that was the fail-open).
+    assert wt.db_is_shared({"TORTOISE_DB_URI": "", "FALKORDB_CLOUD_URI": stale_cloud}) is False
+    assert wt.db_is_shared({"FALKORDB_CLOUD_URI": stale_cloud}) is False
 
     # The emptiness test is the shell's `-n` (null == the empty string), NOT a
     # strip: `TORTOISE_DB_URI=" "` is non-null to `-n`, so the boot path keeps
@@ -379,6 +456,34 @@ def test_a_stale_cloud_uri_cannot_hand_the_ack_the_embedded_arm():
     assert "does not lift" in reason
 
 
+def test_a_cloud_uri_alone_cannot_hand_the_ack_the_embedded_arm():
+    """The cloud-only shape, end to end — the fail-open this round removes.
+
+    Driven through the PRODUCTION ``observe()``/``refusal_reason()`` pair, so a
+    regression that only fixes the helper (or only the policy) still reds.
+    """
+    measured = wt.observe(
+        {
+            "FALKORDB_CLOUD_URI": _SHARED_VIA_CLOUD["FALKORDB_CLOUD_URI"],
+            wt.ACK_ENV: "1",
+            wt.WEB_CONCURRENCY_ENV: "4",
+        },
+        supervised=False,
+        argv=["uvicorn", "tortoise.hosted_api:app"],
+    )
+    assert measured.shared_db is False, (
+        "a cloud URI the app never reads must not reclassify an embedded boot"
+    )
+    assert measured.acknowledged is True
+    reason = wt.refusal_reason(measured)
+    assert reason is not None, (
+        "the acknowledgement must not be able to run N workers on the embedded "
+        "DB this boot actually opens"
+    )
+    assert "EMBEDDED" in reason
+    assert "does not lift" in reason
+
+
 def test_unlanded_guards_refuse_n_workers_and_the_message_names_every_one():
     """The refusal is a DIAGNOSIS: a lane reading it must not have to re-derive.
 
@@ -471,8 +576,7 @@ def test_the_production_entrypoint_reads_the_live_probe(monkeypatch):
     hardcoded `supervised=False`), which no `Topology(...)`-injecting arm can
     catch.
     """
-    monkeypatch.setenv("FALKORDB_CLOUD_URI", _SHARED_VIA_CLOUD["FALKORDB_CLOUD_URI"])
-    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    monkeypatch.setenv("TORTOISE_DB_URI", _SHARED["TORTOISE_DB_URI"])
     monkeypatch.delenv(wt.ACK_ENV, raising=False)
     monkeypatch.delenv(wt.WORKERS_ENV, raising=False)
     monkeypatch.delenv(wt.WEB_CONCURRENCY_ENV, raising=False)
@@ -589,6 +693,16 @@ _AGREEMENT_TABLE: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
     (("uvicorn", "app:app", "--workers=0"), {"WEB_CONCURRENCY": "4"}),
     # …and an EMPTY value is not "given", so the env var answers (the `-z` case).
     (("uvicorn", "app:app", "--workers="), {"WEB_CONCURRENCY": "4"}),
+    # ⛔ `$UVICORN_WORKERS` is click's VALUE for the flag: it sits BETWEEN the CLI
+    # and `$WEB_CONCURRENCY`, and is FINAL over the latter (measured on the pinned
+    # 0.52.1 — 2 children, not 4). Without these rows the shipped block skipped
+    # the variable and exported 1 for a machine running 2.
+    (("uvicorn", "app:app"), {"UVICORN_WORKERS": "2"}),
+    (("uvicorn", "app:app"), {"UVICORN_WORKERS": "2", "WEB_CONCURRENCY": "4"}),
+    (("uvicorn", "app:app", "--workers", "1"), {"UVICORN_WORKERS": "2"}),
+    (("uvicorn", "app:app"), {"UVICORN_WORKERS": "0", "WEB_CONCURRENCY": "4"}),
+    (("uvicorn", "app:app"), {"UVICORN_WORKERS": "", "WEB_CONCURRENCY": "4"}),
+    (("uvicorn", "app:app"), {"UVICORN_WORKERS": "+2"}),
 )
 
 

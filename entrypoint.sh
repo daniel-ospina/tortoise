@@ -455,9 +455,10 @@ fi
 
 # ── #1677: multi-worker topology — MEASURE the count, then hand it to the app ──
 # `Dockerfile.hosted` passes no `--workers`, so this deployment runs ONE uvicorn
-# worker. Nothing makes that visible: uvicorn resolves its worker count as CLI
-# flag -> $WEB_CONCURRENCY -> 1, so ANY actor that can set one Fly env var moves
-# the machine to N workers with no code change and no signal.
+# worker. Nothing makes that visible: uvicorn resolves its worker count as
+# CLI flag -> $UVICORN_WORKERS -> $WEB_CONCURRENCY -> 1, so ANY actor that can set
+# one Fly env var moves the machine to N workers with no code change and no
+# signal.
 #
 # The REFUSAL is not here. It lives in `tortoise/worker_topology.py`, because it
 # has to be reachable by a direct `uvicorn tortoise.hosted_api:app --workers N`
@@ -473,6 +474,7 @@ fi
 # uvicorn does not read it, so setting it by hand cannot raise the count.
 _resolve_requested_workers() {
     # uvicorn's own precedence: `--workers N` / `--workers=N` over the argv, else
+    # $UVICORN_WORKERS (click's `auto_envvar_prefix` value for that flag), else
     # $WEB_CONCURRENCY, else 1. Both flag forms are handled because `--workers=N`
     # is what a hand-edited CMD usually carries.
     local _args=("$@") _i=0 _count="" _arg=""
@@ -489,6 +491,17 @@ _resolve_requested_workers() {
         esac
         _i=$((_i + 1))
     done
+    # A GIVEN flag value is final (`-z` only falls through for an EMPTY one), and
+    # then click's `auto_envvar_prefix="UVICORN"` makes $UVICORN_WORKERS the
+    # flag's VALUE — so it OUTRANKS $WEB_CONCURRENCY, which uvicorn reads only
+    # when that parameter is `None`. Measured on the pinned uvicorn (0.52.1):
+    # `UVICORN_WORKERS=2 WEB_CONCURRENCY=4` starts TWO children, and an EMPTY
+    # value behaves as absent (click's own `rv != ""` rule). Without this arm
+    # the boot line reported 1 for a machine running N — the same wrong-report
+    # defect `--workers +2` had before the trim below.
+    if [ -z "$_count" ]; then
+        _count="${UVICORN_WORKERS:-}"
+    fi
     if [ -z "$_count" ]; then
         _count="${WEB_CONCURRENCY:-1}"
     fi
