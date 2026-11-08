@@ -599,15 +599,34 @@ OBJECT_DERIVATION_LINK_QUERY = (
     "MATCH (o)-[:extractedFrom|references]->() "
     "RETURN count(DISTINCT ID(o))"
 )
-#: #11237: the Object→Object edges incident to THIS session's Objects, grouped by
-#: type. This is the receipt's read of the S5 Job 1 relation WRITE path — the
-#: graph truth behind "the narrative stated it and an edge landed", rather than
-#: the write leg's own self-report. A before-arm of 0 was the whole point of the
-#: issue (`#11001` §5: 5,314 Objects and zero Object→Object edges), so the row
-#: must be read from the graph, not from the producer's counter.
+#: #11237: the Object→Object edges THIS SESSION'S write leg recorded, verified
+#: against the graph, grouped by type. This is the receipt's read of the S5
+#: Job 1 relation WRITE path — the graph truth behind "the narrative stated it
+#: and an edge landed", rather than the write leg's own counter.
+#:
+#: ⛔ THE SCOPE IS THE LEG'S PAIR LIST; THE COUNT IS THE GRAPH'S. Neither half
+#: alone is a measurement:
+#:
+#:   * scoping by the session's OBJECT SET (the first revision of this query)
+#:     cannot ATTRIBUTE an edge. Objects are ``MERGE``d by name, so a session's
+#:     set contains nodes a PEER wrote edges onto (measured on the committed
+#:     receipt: ``wp05``'s row held a ``related`` edge ``wp07`` wrote) and an
+#:     edge whose source Object no session Point links is counted by NO
+#:     session (``wp03`` wrote three ``hasPart``, its row held two). Bounding
+#:     the source alone made that a source-only join; bounding both endpoints
+#:     still cannot say WHICH session wrote the edge (#11548 round 3, P1).
+#:   * the leg's own counts are a self-report: a line that claims a write it
+#:     never made would read as an edge here.
+#:
+#: So the population is the ``(src_id, dst_id, predicate)`` triples the leg
+#: HANDED the writers (``relation_write.edges[]``), and the number is what the
+#: graph holds for exactly those triples. A leg that claims a write the writer
+#: refused reads 0; a peer's edge on a shared Object is not attributed here; a
+#: duplicated edge still shows up as a count > 1.
 SESSION_OBJECT_EDGES_QUERY = (
-    "MATCH (a:Object) WHERE ID(a) IN $nids "
-    "MATCH (a)-[r]->(b:Object) "
+    "UNWIND $pairs AS p "
+    "MATCH (a:Object)-[r]->(b:Object) "
+    "WHERE a.id = p[0] AND b.id = p[1] AND type(r) = p[2] "
     "RETURN type(r), count(*)"
 )
 #: Anchored/total for one derivation predicate out of this session's nodes.
@@ -685,7 +704,8 @@ SESSION_REFERENCES_ANCHOR_QUERY = (
 )
 
 
-def graph_census(sdk, session_id: str, point_ids: list[str]) -> dict:
+def graph_census(sdk, session_id: str, point_ids: list[str],
+                 relation_edges: list[dict] | None = None) -> dict:
     """The report-only graph census for ONE session (#8444, for `#7949`).
 
     ``point_ids`` is the session's memory layer (claims AND reified operator
@@ -746,15 +766,28 @@ def graph_census(sdk, session_id: str, point_ids: list[str]) -> dict:
                 "identity_excluded": identity}
                if rel == "references" else {}),
         }
-    # #11237: the Object→Object edges this session's Objects carry. Read for
-    # EVERY run (not only a relation-bearing one) so a zero is a MEASUREMENT
-    # rather than an absent key — the row this issue exists to move starts at 0.
+    # #11237: the Object→Object edges THIS session's write leg handed to the
+    # writers. Read for EVERY run (not only a relation-bearing one) so a zero is
+    # a MEASUREMENT rather than an absent key — the row this issue exists to move
+    # starts at 0, and a session that stated nothing must be distinguishable
+    # from a read that failed. See ``SESSION_OBJECT_EDGES_QUERY`` for why the
+    # scope is the leg's pair list and the count is the graph's: an Object SET
+    # cannot attribute an edge, because Objects are MERGE'd by name (#11548
+    # round 3, P1).
     object_edges: dict[str, int] = {}
-    if node_ids:
+    pairs = [
+        [str(edge.get("src_id") or ""), str(edge.get("dst_id") or ""),
+         str(edge.get("predicate") or "")]
+        for edge in (relation_edges or [])
+        if isinstance(edge, dict)
+    ]
+    pairs = [p for p in pairs if all(p)]
+    if pairs:
         for rel, count in g.query(
                 SESSION_OBJECT_EDGES_QUERY,
-                params={"nids": node_ids}).result_set:
-            object_edges[str(rel)] = int(count or 0)
+                params={"pairs": pairs}).result_set:
+            object_edges[str(rel)] = object_edges.get(str(rel), 0) + int(
+                count or 0)
     return {
         "session_id": session_id,
         "objects": {
@@ -770,7 +803,8 @@ def graph_census(sdk, session_id: str, point_ids: list[str]) -> dict:
     }
 
 
-def census_or_error(sdk, session_id: str, point_ids: list[str]) -> dict:
+def census_or_error(sdk, session_id: str, point_ids: list[str],
+                    relation_edges: list[dict] | None = None) -> dict:
     """``graph_census`` with the graph error REPORTED instead of raised.
 
     Fail-closed in the direction that matters: an unreadable graph yields
@@ -778,7 +812,8 @@ def census_or_error(sdk, session_id: str, point_ids: list[str]) -> dict:
     zeros, which would be indistinguishable from a measured empty session.
     """
     try:
-        return graph_census(sdk, session_id, point_ids)
+        return graph_census(sdk, session_id, point_ids,
+                            relation_edges=relation_edges)
     except Exception as exc:  # reported, never swallowed
         return {"session_id": session_id,
                 "error": f"{type(exc).__name__}: {exc}"}
@@ -842,13 +877,22 @@ def aggregate_graph_census(per_session: dict[str, dict]) -> dict:
 
 
 def build_graph_census(sdk, surfaces_by_session: dict[str, dict],
-                       snapshot_errors: dict[str, str] | None = None) -> dict:
+                       snapshot_errors: dict[str, str] | None = None,
+                       relation_edges_by_session: dict[str, list[dict]]
+                       | None = None) -> dict:
     """The report-level census: per session plus one aggregate (#8444).
 
     ``surfaces_by_session`` is the runner's ``snapshot_session`` output per
     session (post-dream), so the census reads exactly the graph the graded
     numbers were taken from. An unreadable session is carried as an ``error``
     entry, never dropped and never zeroed.
+
+    ``relation_edges_by_session`` is ``{session_id: relation_write.edges[]}`` —
+    the ``(src_id, dst_id, predicate)`` triples THIS session's relation write
+    leg handed the writers. It scopes the ``object_edges`` row: Objects are
+    MERGE'd by name, so an Object SET cannot say which session WROTE an edge,
+    and only the pair list can (#11548 round 3, P1). The COUNT still comes from
+    the graph, so a claimed write the writer refused reads 0.
 
     ``snapshot_errors`` maps a session id to the failure that stopped the
     runner reading its snapshot at all. Such a session has NO surface to
@@ -861,6 +905,7 @@ def build_graph_census(sdk, surfaces_by_session: dict[str, dict],
     like any other unreadable one.
     """
     snapshot_errors = dict(snapshot_errors or {})
+    relation_edges_by_session = dict(relation_edges_by_session or {})
     per_session: dict[str, dict] = {}
     for sid, snap in surfaces_by_session.items():
         if sid in snapshot_errors:
@@ -873,6 +918,7 @@ def build_graph_census(sdk, surfaces_by_session: dict[str, dict],
             sdk, sid,
             [p["point_id"]
              for p in snap.get("points", []) + snap.get("operator_nodes", [])],
+            relation_edges=relation_edges_by_session.get(sid),
         )
     return {
         "sessions": per_session,
@@ -1540,8 +1586,14 @@ def run_benchmark(
             # SAME post-dream snapshot the operator audit reads, so the two
             # dimensions cannot describe different graphs. Additive and NOT a
             # `METRIC_VALUES` member — see the block comment on `graph_census`.
+            # #11237: the per-session edge PAIRS the relation leg wrote scope
+            # the `object_edges` row, so it names what THIS session wrote
+            # instead of every edge touching a shared, name-MERGEd Object.
             graph_census_report = build_graph_census(
-                sdk, surfaces_by_session, snapshot_errors=snapshot_errors)
+                sdk, surfaces_by_session, snapshot_errors=snapshot_errors,
+                relation_edges_by_session={
+                    sid: (block.get("edges") or [])
+                    for sid, block in relation_runs.items()})
             notes.extend(graph_census_notes(graph_census_report))
             for result in session_results:
                 result["graph_census"] = graph_census_report["sessions"].get(

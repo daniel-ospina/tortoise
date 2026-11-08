@@ -6844,7 +6844,13 @@ def _text_with_a_duplicated_durations_row(path: Path) -> tuple[str, str]:
     lines = path.read_text().splitlines(keepends=True)
     start = lines.index("durations:\n")
     row = lines[start + 1]
-    assert re.match(r"^  [A-Za-z0-9_.\-]+\.py: ", row), row
+    # ⛔ The key may be PATH-QUALIFIED (`eval/write_path/<file>.py`) — the row
+    # that happened to be first when #11548 added this file's `durations` map is
+    # one of those, and a bare-name-only regex made this helper assert on the
+    # manifest's row ORDER rather than on the behaviour under test (7 red at that
+    # head: this helper raised before any guard could be exercised). The duplicate
+    # guard is about the KEY TEXT, not about how a key is spelled.
+    assert re.match(r"^  [A-Za-z0-9_./\-]+\.py: ", row), row
     return path.read_text().replace(row, row + row, 1), row.split(":", 1)[0].strip()
 
 

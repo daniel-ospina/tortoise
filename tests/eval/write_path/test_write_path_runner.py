@@ -208,22 +208,38 @@ class _CensusResult:
 
 
 class _CensusGraph:
-    """Answers each census query by identity, so no DB is needed."""
+    """Answers each census query by identity, so no DB is needed.
 
-    def __init__(self, object_edge_rows):
-        self.object_edge_rows = object_edge_rows
+    The ``object_edges`` query is answered FAITHFULLY, not from canned rows: it
+    filters the graph's edge set by the ``(src_id, dst_id, predicate)`` triples
+    the caller passed, exactly as the Cypher does. A fake that returned rows
+    regardless of ``pairs`` would make the pair-scoping assertion vacuous — the
+    very hole this stand-in exists to close (#11548 round 3, P1).
+    """
+
+    def __init__(self, edges=(), objects=None):
+        #: ``{(src_id, dst_id, type): n}`` — the graph's own edge set.
+        self.edges = {(str(a), str(b), str(t)): 1 for a, b, t in edges}
+        self.objects = objects or [(11, "the retry storm"), (12, "the slip")]
         self.seen: list[str] = []
+        self.params: list[dict] = []
 
     def query(self, sql, params=None):
         self.seen.append(sql)
+        self.params.append(params or {})
         if sql == runner.SESSION_OBJECT_QUERY:
-            return _CensusResult([(11, "the retry storm"), (12, "the slip")])
+            return _CensusResult(list(self.objects))
         if sql == runner.OBJECT_DERIVATION_LINK_QUERY:
             return _CensusResult([(0,)])
         if sql == runner.SESSION_REFERENCES_ANCHOR_QUERY:
             return _CensusResult([(0, 0, 0, 0)])
         if sql == runner.SESSION_OBJECT_EDGES_QUERY:
-            return _CensusResult(self.object_edge_rows)
+            counts: dict[str, int] = {}
+            for src, dst, predicate in (params or {}).get("pairs") or []:
+                n = self.edges.get((str(src), str(dst), str(predicate)), 0)
+                if n:
+                    counts[str(predicate)] = counts.get(str(predicate), 0) + n
+            return _CensusResult(sorted(counts.items()))
         if "extractedFrom" in sql:
             return _CensusResult([(0, 0)])
         return _CensusResult([])
@@ -245,25 +261,79 @@ def test_graph_census_reports_the_object_object_edges_the_graph_holds():
 
     ``object_edges`` is the write-path lane's own read of the relation channel
     (the before-arm the issue starts from is **0**), so the ONE failure this
-    must not have is a read that silently yields the baseline. Two properties
-    are pinned, and both are what a deleted block would break:
+    must not have is a read that silently yields the baseline. Three properties
+    are pinned, and each is what a deleted block would break:
 
     1. the key is ALWAYS present — an absent key cannot be told apart from a
        session that stated nothing;
-    2. the counts are the ROWS the query returned, and the query is actually
-       issued for a session that has Objects.
+    2. the counts are what the GRAPH holds for the ``(src_id, dst_id,
+       predicate)`` triples this session's leg recorded — the leg's own `written`
+       counter can NOT answer this, and neither can an Object set (Objects are
+       MERGE'd by name, so a peer's edge sits on a node this session also has);
+    3. an edge the graph does NOT hold for a recorded pair reads 0 — a leg that
+       claims a write the writer refused must not be counted.
 
     FAILS IF `graph_census` stops running ``SESSION_OBJECT_EDGES_QUERY``
     (``object_edges`` stays ``{}``) or stops emitting the key (``KeyError``).
     """
-    graph = _CensusGraph([("IMPL", 2), ("hasPart", 1)])
-    census = runner.graph_census(_CensusSDK(graph), "wp01", ["pt-1"])
+    recorded = [
+        {"src_id": "o-1", "dst_id": "o-2", "predicate": "IMPL"},
+        {"src_id": "o-1", "dst_id": "o-2", "predicate": "IMPL"},
+        {"src_id": "o-2", "dst_id": "o-3", "predicate": "hasPart"},
+    ]
+    graph = _CensusGraph(edges=[("o-1", "o-2", "IMPL"),
+                                ("o-2", "o-3", "hasPart"),
+                                # a PEER session's edge onto a shared Object:
+                                # not this session's write, not this row.
+                                ("o-2", "o-9", "related")])
+    census = runner.graph_census(_CensusSDK(graph), "wp01", ["pt-1"],
+                                 relation_edges=recorded)
     assert census["object_edges"] == {"IMPL": 2, "hasPart": 1}, census
     assert runner.SESSION_OBJECT_EDGES_QUERY in graph.seen, graph.seen
 
-    # a session with no Objects is a MEASURED zero, not an absent key
-    bare = runner.graph_census(_CensusSDK(_CensusGraph([])), "wp01", [])
+    # A recorded pair the graph does NOT hold is a MEASURED 0 — "the leg said it
+    # wrote it" is not "the edge exists".
+    claimed_only = runner.graph_census(
+        _CensusSDK(_CensusGraph()),
+        "wp01", ["pt-1"],
+        relation_edges=[{"src_id": "o-1", "dst_id": "o-2",
+                         "predicate": "IMPL"}])
+    assert claimed_only["object_edges"] == {}, claimed_only
+
+    # a session with no Objects AND no stated relations is a MEASURED zero, not
+    # an absent key
+    bare = runner.graph_census(_CensusSDK(_CensusGraph()), "wp01", [])
     assert bare["object_edges"] == {}, bare
+
+
+def test_the_object_edge_row_names_only_the_pair_the_leg_WROTE():
+    """⛔ #11548 round 3 P1: the row must be attributable to its own session.
+
+    The first revision bounded only the SOURCE of the match
+    (``MATCH (a:Object) WHERE ID(a) IN $nids MATCH (a)-[r]->(b:Object)``).
+    Objects are MERGE'd by name, so on the committed receipt ``wp05``'s row
+    reported a ``related`` edge ``wp07`` wrote (an OVER-count) while an edge
+    whose source Object no session Point links was counted by nobody (an
+    UNDER-count: ``wp03`` wrote three ``hasPart``, its row held two). The row is
+    what the E6 pre-registration reads, so it must say which session WROTE the
+    edge.
+
+    Mutation: scope by the session's Object set again (either endpoint bound)
+    and the peer edge below is counted — the graph holds it between two Objects
+    this session's Point links.
+    """
+    shared = [(11, "the retry storm"), (12, "the slip")]
+    graph = _CensusGraph(edges=[("o-1", "o-2", "IMPL"),
+                                ("o-2", "o-1", "related")], objects=shared)
+    census = runner.graph_census(
+        _CensusSDK(graph), "wp05", ["pt-1"],
+        relation_edges=[{"src_id": "o-1", "dst_id": "o-2",
+                         "predicate": "IMPL"}])
+    assert census["object_edges"] == {"IMPL": 1}, (
+        "the `related` edge between two Objects this session's Point links was "
+        f"written by another session and must not be attributed here: {census!r}")
+    # It is still the same Objects population the census reports.
+    assert census["objects"]["total"] == 2, census
 
 
 def test_the_object_edge_row_reaches_the_RUN_LEVEL_total():
@@ -280,12 +350,18 @@ def test_the_object_edge_row_reaches_the_RUN_LEVEL_total():
     `aggregate_graph_census` and this leg reds (KeyError / a short sum).
     """
     one = runner.graph_census(
-        _CensusSDK(_CensusGraph([("IMPL", 2), ("hasPart", 1)])), "s1", ["pt-1"])
+        _CensusSDK(_CensusGraph(edges=[("o-1", "o-2", "IMPL")])), "s1",
+        ["pt-1"],
+        relation_edges=[{"src_id": "o-1", "dst_id": "o-2",
+                         "predicate": "IMPL"}])
     two = runner.graph_census(
-        _CensusSDK(_CensusGraph([("IMPL", 1), ("related", 4)])), "s2", ["pt-2"])
+        _CensusSDK(_CensusGraph(edges=[("p-1", "p-2", "related")])), "s2",
+        ["pt-2"],
+        relation_edges=[{"src_id": "p-1", "dst_id": "p-2",
+                         "predicate": "related"}])
     agg = runner.aggregate_graph_census({"s1": one, "s2": two})
-    assert agg["object_edges"] == {"IMPL": 3, "hasPart": 1, "related": 4}, agg
-    assert agg["object_edges_total"] == 8, agg
+    assert agg["object_edges"] == {"IMPL": 1, "related": 1}, agg
+    assert agg["object_edges_total"] == 2, agg
 
 
 def test_the_relation_write_aggregate_sums_written_dropped_and_folded():

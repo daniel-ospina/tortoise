@@ -25,13 +25,15 @@ entity_index, declared)`` or of a fake writer, so the fast gate can afford it.
 
 SCOPE OF THE RECONCILIATION CLAIM
 ---------------------------------
-``written + dropped + folded`` reconciles with the stated population for the
-case the review named: two DIFFERENT stated verbs binding one mechanism between
-one pair (``create_direct_edge`` is one edge per ``(src, tgt, type)``). A
-literal repeat of the SAME structural statement is skipped by the plan's own
-``seen`` key and is NOT counted as a folded meaning — it is the same edge and
-no meaning was lost. That case cannot arrive from the real producer either:
-``extractor_v2._assemble_relations`` dedups on
+``written + dropped + folded`` reconciles with the stated population on every
+arm, including the two where it did not (#11548 round 3, P2): a second
+DIFFERENT stated verb binding one edge (``create_direct_edge`` is one edge per
+``(src, tgt, type)``; a declared HIERARCHY pair is one declared predicate) is a
+recorded FOLD, and a refused edge that had absorbed a meaning reports one drop
+per LOST MEANING. A literal repeat of the SAME statement is skipped by the
+plan's own identity key and is NOT counted as a folded meaning — it is the same
+edge and no meaning was lost. That case cannot arrive from the real producer
+either: ``extractor_v2._assemble_relations`` dedups on
 ``(src, dst, predicate.casefold())`` upstream (``sdk.py``'s leg is the second
 line of defence, not the first).
 """
@@ -234,8 +236,129 @@ def test_the_plan_consumes_only_the_typed_record():
     assert {f.name for f in dataclasses.fields(edge)} == {
         "src_id", "dst_id", "predicate", "write_path", "declared_by",
         "stated_predicate", "mechanism", "label", "src_name", "dst_name",
-        "folded",
+        "folded", "direction",
     }
+
+
+def test_the_stated_direction_is_consumed_from_the_registry_map():
+    """⛔ #11548 round 3 P1: a one-way statement is not stored bidirectional.
+
+    ``apply_relation_edges`` used to call ``link_entities`` with NO direction, so
+    the direct arm fell through to ``create_direct_edge``'s CYCLE-25 default —
+    ``bidirectional`` for IMPL — and *"the retry storm causes the deadline
+    slip"*, which ``SEMANTICS_DIRECTIONS["causes"]`` records as ``->``, landed
+    as belief flowing back along a causal edge the narrative stated one way.
+    ``direction_flows`` then propagated it both ways.
+
+    The leg consumes the ONE declared map (never a table of its own), the stated
+    verb winning over the record's gloss, and a bare mechanism verb declares no
+    direction at all — ``None``, i.e. "not asked", never a silent guess.
+
+    Mutation: drop ``direction=_direction_for(...)`` from the plan and the first
+    two assertions read ``None``.
+    """
+    plan, drops = plan_relation_edges([
+        {"src": "retry storm", "dst": "deadline slip", "predicate": "causes"},
+        {"src": "retry storm", "dst": "retry budget",
+         "predicate": "mutuallySupportive"},
+        {"src": "retry budget", "dst": "deadline slip", "predicate": "IMPL"},
+        # the verb is not a declared meaning: its GLOSS is, and it carries the
+        # direction the gloss records.
+        {"src": "deadline slip", "dst": "retry storm", "predicate": "nuances",
+         "semantics": "supports"},
+    ], {**INDEX, "retry budget": [("obj-3", "occurrence")]})
+    by_stated = {edge.stated_predicate: edge for edge in plan}
+    assert by_stated["causes"].direction == "->", by_stated["causes"]
+    assert by_stated["mutuallySupportive"].direction == "<->", by_stated
+    assert by_stated["IMPL"].direction is None, "a bare mechanism declares no direction"
+    assert by_stated["nuances"].direction == "->", by_stated["nuances"]
+    assert not drops, drops
+
+    writer = _RecordingWriter()
+    apply_relation_edges(writer, [
+        {"src": "retry storm", "dst": "deadline slip", "predicate": "causes"}],
+        INDEX)
+    _predicate, _src, _dst, kwargs = writer.calls[-1]
+    assert kwargs.get("direction") == "->", writer.calls
+
+
+def test_a_second_verb_on_a_declared_hierarchy_pair_is_a_COUNTED_fold():
+    """A different verb over a declared pair is a FOLD, not a silent ``continue``.
+
+    The structural arm keys ``structural_at`` on the DECLARED predicate, so
+    ``related`` then ``supports`` over a pair the pack declares
+    ``theme → epic hasPart`` both plan the same ``hasPart`` edge. The second one
+    used to vanish through a bare ``continue``: ``written 1, dropped 0,
+    folded 0`` for a population of **2**, with the second meaning nowhere. A
+    literal REPEAT of the same verb is still the same statement and stays
+    deduped (no fold) — the code can now tell the two apart.
+
+    Mutation: back to ``if key in seen: continue`` for a different verb and
+    ``folded`` reads 0 (the two-statement population stops reconciling).
+    """
+    declared = (DeclaredHierarchy(
+        pack="dev", path="Theme \u2192 Epic", predicate="hasPart",
+        from_kind="dev:theme", to_kind="dev:epic", write_path="structural"),)
+    index = {"quarry": [("obj-theme", "dev:theme")],
+             "auth table": [("obj-epic", "dev:epic")]}
+    relations = [
+        {"src": "quarry", "dst": "auth table", "predicate": "related"},
+        {"src": "quarry", "dst": "auth table", "predicate": "supports"},
+    ]
+    plan, drops = plan_relation_edges(relations, index, declared=declared)
+    assert not drops, drops
+    assert len(plan) == 1, plan
+    assert plan[0].predicate == "hasPart", plan[0]
+    assert plan[0].folded == ("supports",), plan[0]
+
+    report = apply_relation_edges(_RecordingWriter(), relations, index,
+                                 declared=declared)
+    assert report["written"] == 1, report
+    assert report["dropped"] == 0, report
+    assert report["folded"] == 1, report
+    assert (report["written"] + report["dropped"]
+            + report["folded"]) == 2, report
+    assert [f["folded"] for f in report["collapsed"]] == [["supports"]], report
+
+    # A LITERAL repeat is the same statement: deduped, not a lost meaning.
+    literal, literal_drops = plan_relation_edges([
+        {"src": "quarry", "dst": "auth table", "predicate": "related"},
+        {"src": "quarry", "dst": "auth table", "predicate": "related"},
+    ], index, declared=declared)
+    assert len(literal) == 1, literal
+    assert literal[0].folded == (), literal[0]
+    assert literal_drops == [], literal_drops
+
+
+def test_a_refused_edge_counts_the_meaning_it_was_carrying():
+    """A refused fold is a LOSS, not a ``written=0, dropped=1`` two-statement hole.
+
+    ``collapsed`` is recorded only for an edge that LANDED (correct — a fold must
+    not be described as absorbed when the writer refused its carrier), so the
+    refused arm used to report ``written 0, dropped 1, folded 0`` for a stated
+    population of **2** with the absorbed verb appearing nowhere. One drop row
+    per lost MEANING restores the invariant on that arm.
+
+    Mutation: drop the ``for folded_verb in edge.folded`` loop and the counts no
+    longer sum to the stated population.
+    """
+    report = apply_relation_edges(
+        _RefusingWriter(),
+        [{"src": "retry storm", "dst": "deadline slip",
+          "predicate": "causes"},
+         {"src": "retry storm", "dst": "deadline slip",
+          "predicate": "supports"}],
+        INDEX, warn=lambda _w: None)
+    assert report["written"] == 0, report
+    assert report["collapsed"] == [], report
+    assert report["folded"] == 0, report
+    # TWO statements, TWO named losses (the carrier AND the meaning it carried).
+    assert report["dropped"] == 2, report
+    assert (report["written"] + report["dropped"]
+            + report["folded"]) == 2, report
+    predicates = [row["predicate"] for row in report["drops"]]
+    assert predicates == ["causes", "supports"], report
+    assert all(row["dst"] == "deadline slip" for row in report["drops"]), report
 
 
 def test_a_predicate_link_entities_inverts_is_refused_not_written():
