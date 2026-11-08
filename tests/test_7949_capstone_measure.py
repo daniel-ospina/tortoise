@@ -10757,16 +10757,28 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         f"extractor_v2.py:10891 reads {ext[10891 - 1].strip()[:90]!r}, not the "
         "comment stating nothing consumes `result[\"relations\"]`")
 
-    # A1's environment block: the record's ONLY directly-falsifiable reproduction
-    # output — the bare-token grep whose four `create_operator` mentions ARE its
-    # evidence that the channel has no producer. It is pinned BOTH ways because a
-    # quoted number with nothing re-checking it is the very rot this record is about:
-    # the quote must be the live lines, and the live lines must be what the quote
-    # says. Measured on `main` before this assert existed, the quote had drifted +68
+    # A1's environment block: the reproduction that states A1's producer claim — the
+    # bare-token grep whose four `create_operator` mentions ARE its evidence that the
+    # channel has no producer. It is pinned BOTH ways because a quoted number with
+    # nothing re-checking it is the very rot this record is about: the quote must be the
+    # live lines, and the live lines must be what the quote says. Measured on `main`
+    # before this assert existed, the quote had drifted +68
     # (`:8938 :8956 :8963 :9343` vs live `:9006 :9024 :9031 :9411`) across two
     # merges and no suite noticed. The HISTORICAL siblings above it in the same block
     # (`de72cfd45` → `:8892 :8910 :8917 :9231`, `80c912244` → 0) are deliberately NOT
     # pinned: they are claims about those commits, and they verify there.
+    #
+    # ⛔ The CALL-shaped arm comes FIRST, because it is the only one that can report the
+    # true failure. A production `create_operator(` call necessarily contains the bare
+    # token, so the mention arm below would fire first and instruct a fixer to RE-DERIVE
+    # the record's line numbers — the wrong repair, aimed at a staleness where the
+    # conclusion itself is false (measured: the call arm could never be reached).
+    assert not re.search(
+        r"\.(create_edge|create_about_edge|create_operator)\(",
+        "\n".join(ext)), (
+        "the record's load-bearing half is the CALL count (0) — a production call "
+        "site makes its 'no producer' conclusion FALSE, not merely stale, so this "
+        "reds before the line-number arm below can misdirect the repair")
     assert re.findall(
         r"git grep -n 'create_operator' -- tortoise/extractor_v2\.py\s+# (.*)",
         text) == [":9006 :9024 :9031 :9411"], (
@@ -10777,11 +10789,35 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         f"extractor_v2.py's create_operator mentions are at {live_mentions}, not the "
         "four the record quotes — an insertion above them moves the quote, so "
         "re-derive the record's block rather than this list")
-    assert not re.search(
-        r"\.(create_edge|create_about_edge|create_operator)\(",
-        "\n".join(ext)), (
-        "the record's load-bearing half is the CALL count (0) — a production call "
-        "site makes its 'no producer' conclusion false, not merely stale")
+
+    # A1's §5 "self-matching" note: its annotation claimed `# exit 1 = no output`, which
+    # ROTTED to 40 lines once #10982 registered the A1 row into the pinned bundle — the
+    # bundle now CITES `hasPart` without producing it, so an unqualified "no output"
+    # would be false while the producer claim it stood for stays true. The count is
+    # therefore re-derived from the tree here instead of being read out of the record:
+    # a re-worded annotation cannot un-state it, and a new bundle mention forces the
+    # record to be re-measured.
+    bundle = _REPO / "docs/evidence/7949-capstone"
+    mention = re.compile(r"hasPart|hierarchies|decomposesInto")
+    per_file = {
+        path.name: sum(1 for line in path.read_text(
+            encoding="utf-8", errors="replace").splitlines() if mention.search(line))
+        for path in sorted(bundle.rglob("*"))
+        # `__pycache__` is a BUILD artifact, not part of the bundle `git grep` reads: a
+        # stale `.pyc` of the probe carries the same bytes and would be counted as a
+        # fourth file (measured — it was, before this filter).
+        if path.is_file() and path.name != "RECONCILE-A1-A2-A5.md"
+        and "__pycache__" not in path.parts and path.suffix != ".pyc"
+    }
+    per_file = {name: n for name, n in per_file.items() if n}
+    assert per_file == {"PRE-REGISTRATION.md": 22, "preregistration.json": 8,
+                        "capstone_measure.py": 10}, (
+        f"the bundle's hasPart/hierarchies mentions are {per_file} — the record's §5 "
+        "self-matching note states them per file; re-derive the note (and this map) "
+        "rather than deleting the qualifier, or it reads as 'no output' when it is not")
+    assert "40 lines, exit 0 — all in the bundle" in text, (
+        "the §5 note must keep the measured shape of its own reproduction — the "
+        "unqualified `# exit 1 = no output` is what rotted")
 
     # A2: the capture path that writes the `references` edge — the record names it
     # THREE times: the prose cite, the amendment parenthetical that states BOTH

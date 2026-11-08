@@ -647,9 +647,15 @@ grep -n -i -E 'hierarch|hasPart|part-whole|11001|10984' config/v4-mechanisms.yml
 sed -n '275,283p' docs/evidence/7949-capstone/probes/capstone_measure.py   # `references`, via link_source_to_event
 sed -n '17574p' tortoise/sdk.py                             # the call (`references`'s writer)
 git grep -in 'rollup' -- '*.py' '*.md'                      # no graph rollup query anywhere
-# ⚠️ self-matching once this record lands — exclude it, then the answer is 0:
+# ⚠️ self-matching, and now no longer empty: exclude this record, and the hits are the
+# BUNDLE's OWN registration of the A1 row (#10982 landed it AFTER this record was written),
+# not a producer — the bundle CITES the predicate, it does not produce it. The producer
+# claim is the call-shaped grep above, which is still empty:
 git grep -rn -E 'hasPart|hierarchies|decomposesInto' -- 'docs/evidence/7949-capstone/' \
-    ':!docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md'    # exit 1 = no output
+    ':!docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md'    # 40 lines, exit 0 — all in the bundle
+                                                            # (PRE-REGISTRATION.md 22,
+                                                            # preregistration.json 8,
+                                                            # probes/capstone_measure.py 10)
 
 # A2 (§2) — the shipped arm moves the share by exactly zero, on a tree that HAS #10997
 .venv/bin/python3 docs/evidence/7949-capstone/probes/e1_e2_probe.py --json-out /tmp/e1e2.json \
