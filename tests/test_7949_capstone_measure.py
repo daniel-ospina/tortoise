@@ -11397,7 +11397,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # `:12929` was present (measured — the comment claimed a tolerance the code did not have).
     # The qualifier is now ANY word run (`[\w]`) — `HEAD`, `the head`, or a base sha — and that
     # is deliberate: it accepts both spellings the record legitimately uses. It replaces an earlier
-    # `(?:`?\d)` lookahead that EXCLUDED bases, so the prose above it ("the qualifier must NOT be
+    # `(?!`?\d)` lookahead that EXCLUDED bases, so the prose above it ("the qualifier must NOT be
     # a base … are excluded") was true of THAT arm and is false of this one: the sentence outlived
     # its mechanism.
     # ⚠️ WHAT THIS ARM DOES NOT DO: it does not grade the base's VALUE. The record pairs
