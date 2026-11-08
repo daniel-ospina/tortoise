@@ -1506,11 +1506,22 @@ def source_index_is_empty(g, *,
     remedy then pointed the operator at ``--no-fts-probe``, i.e. at the weaker
     evidence this leg exists to stop certifying.
 
-    And the zero on such a graph is NOT vacuous, which is what makes certifying it
-    honest rather than an exception: a stale index entry is exactly what would
-    make the index NON-empty, so "the field holds nothing over this population,
-    and the read ran" is positive evidence for the state the repair is supposed
-    to produce. ``None`` means the read itself failed — unreadable is not empty.
+    ⛔ WHAT THIS COUNT ACTUALLY ANSWERS, stated as what it measures (#11536
+    review: the sentence that used to stand here was the INVERSE of its own
+    query). :data:`_SOURCE_INDEX_ENTRIES` counts nodes over this population whose
+    ``_searchText`` is NON-EMPTY, so it answers *"does any Source carry the field
+    the index is DECLARED on"* — Cypher has no verb to count INDEX ENTRIES, and
+    nothing here tries to. A STALE entry is a node the pair was CLEARED from,
+    i.e. one with NO ``_searchText`` at all: it contributes **0** to this count
+    and can never make it non-empty.
+
+    The corroboration is still sound, for the reasons that ARE measured: a
+    surviving entry is caught by the probe itself — it classifies ``stale`` and
+    vetoes, see :func:`classify_fts_hits` — and a dead read is caught by
+    ``leg_trace`` (``degraded`` ⇒ ``unmeasurable``) before this arm is consulted.
+    So ``True`` means: the population carries nothing for the index to build from,
+    AND the read ran. ``None`` means the read itself failed — unreadable is not
+    empty.
     """
     try:
         rows = g.query(_SOURCE_INDEX_ENTRIES,
@@ -1633,18 +1644,21 @@ def probe_fts(g, phrases, *, control: bool = True,
             empty = source_index_is_empty(g, timeout_ms=timeout_ms)
             if empty is True:
                 # A graph whose Source population carries no `_searchText` at all
-                # (a clear-only repair): the probe's zero is structurally
-                # consistent, and a stale entry would have made this non-empty —
-                # so the zero IS evidence, and no weaker a one than the token.
+                # (a clear-only repair): nothing here is left for the index to
+                # build on, so the probe's zero is structurally consistent. ⛔ A
+                # stale entry does NOT appear in this count — it is the node with
+                # the field ABSENT (#11536 review). The arm is sound because the
+                # probe's own `stale` veto catches a surviving entry and
+                # `leg_trace` catches a dead read, not because of the count.
                 report["control"] = {
                     "mode": "empty-index", "ok": True, "hits": 0,
                     "ran": True, "degraded": False,
                     "reason": "no_source_search_text",
                     "note": "no SOURCE on this graph carries `_searchText` (the "
-                            "field the index is declared on), so the index has "
-                            "nothing to return and the probe's 0 is consistent "
-                            "with a repaired graph — a stale entry is exactly "
-                            "what would make it non-empty",
+                            "field the index is declared on) and the read RAN, so "
+                            "the corpus is empty rather than the index being "
+                            "silent: the probe's 0 is consistent with a repaired "
+                            "graph",
                 }
             elif empty is None:
                 report["control"] = {
