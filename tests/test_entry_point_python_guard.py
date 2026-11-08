@@ -1077,10 +1077,11 @@ REFUSAL_WHY: dict[str, str] = {
     ),
     "tools/build_site_icons.py": (
         "1 is this tool's OWN failure status — every refusal is `raise "
-        "SystemExit(<message>)` at seven sites (76/83/95/133/204/225/243), so an "
-        "environment refusal must not wear it, or a caller cannot tell 'the tool "
-        "refused' from 'the interpreter is too old'; 2 is argparse's, and main() "
-        "returns 0 only, so 4 is never returned by anything but the guard"
+        "SystemExit(<message>)` (CPython maps that to status 1), `main()` returns 0 "
+        "only and argparse takes 2, so an environment refusal must not wear 1 or a "
+        "caller cannot tell 'the tool refused' from 'the interpreter is too old'; "
+        "4 is never returned by anything but the guard. Deliberately stated as the "
+        "SHAPE, not as a list of line numbers — a count in this field rots silently"
     ),
 }
 
