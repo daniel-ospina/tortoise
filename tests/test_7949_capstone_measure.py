@@ -10837,6 +10837,18 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         f"the A1 proof command matches {len(_hit.stdout.splitlines())} of the two call shapes (an "
         "UNQUALIFIED and a RECEIVER-qualified call) — it must match both, or it certifies a tree "
         f"that calls the verb; grep said {_hit.stdout!r} exit {_hit.returncode}")
+    # ⛔ …and so is the §5 statement of the SAME command. The record prints it TWICE (its §1
+    # item-2 quote and the §5 reproduction block), and the `re.search` above reads one of them —
+    # so restoring the dot-excluding class in the OTHER copy left the pin GREEN (measured on the
+    # previous round). Graded per occurrence, the rule the mention-count arm applies below; the
+    # pathspec leg of the check stays §1-only because that is the one-line form the reader pastes.
+    _all_a1 = re.findall(r"git grep -nE '([^']*create_edge[^']*)'", text)
+    assert len(_all_a1) == 2, (
+        "the record must state the A1 proof command exactly TWICE (§1 item 2 and the §5 "
+        f"reproduction block) — found {len(_all_a1)}")
+    assert all("[^[:alnum:]_]" in _c and "[^[:alnum:]_.]" not in _c for _c in _all_a1), (
+        "EVERY statement of the A1 proof command must use the non-dot-excluding class — a "
+        f"`[^[:alnum:]_.]` copy is blind to a receiver-qualified call (found {_all_a1})")
     assert "hasPart" in ext[1720 - 1] and '"predicate":' in ext[1720 - 1], (
         f"extractor_v2.py:1720 reads {ext[1720 - 1].strip()[:90]!r}, not the schema "
         "line that spells the predicate allowlist")
@@ -10972,9 +10984,9 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # ⛔ The arm above binds the four LINE NUMBERS; the record also STATES the count in prose.
     # EIGHT statements across SIX spellings — `prints **4** on origin/main` (x2), `in four
     # comments` (x2), `prints exactly four`, `# §0's four create_operator MENTIONS`,
-    # `(four COMMENTS naming`, and the §5 numeral `that is 4 on … origin/main` — so SEVEN
-    # words/numbers are graded by the patterns below plus the numeral. Those were unbound:
-    # measured, editing `:81` to "prints exactly three" left the suite GREEN while `:629`
+    # `(four COMMENTS naming`, and the §5 numeral `that is 4 on … origin/main`. SIX patterns
+    # grade all EIGHT occurrences (the numeral pattern IS one of the six — it is not an extra).
+    # Those were unbound: measured, editing `:81` to "prints exactly three" left the suite GREEN while `:629`
     # still listed four numbers, i.e. the record contradicted its own pinned quote and
     # nothing reddened. A typed count is this bundle's recurring defect (the docstring above
     # says so), so the count is DERIVED here and every prose statement of it is bound.
@@ -11117,12 +11129,18 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # ⚠️ The NUMBER is the claim, not the region. A region-only check passed with §1 re-staled to
     # `:12853` while an unrelated `:12929` sat earlier in the record (measured) — the record states
     # one number at several places, so "appears somewhere before the block" is not "§1 quotes it".
-    # Bound to the base-qualified cite instead, and left wording-free on the qualifier: the landed
-    # text says "at HEAD", the pre-#11519 wording said "here", and both are the same claim.
-    # ⛔ The boundary is located WITHOUT the heading's typography: a literal
-    # `# §0/§2 — …` needle redded on an em-dash→hyphen reword that changed no claim,
-    # with a message asserting the block was GONE (measured).
-    _hdr = re.search(r"^# §0/§2\b[^\n]*sha-pinned", text, re.MULTILINE)
+    # Bound to the base-qualified cite instead, and MADE wording-free rather than described as
+    # such: an earlier `at (?:HEAD|here)` pinned the two spellings the record happened to use, so a
+    # third qualifier (`at the head`) redded with a diagnostic asserting the WRONG NUMBER while
+    # `:12929` was present (measured — the comment claimed a tolerance the code did not have).
+    # The qualifier is now any word run, and "base-qualified" is expressed as its opposite: the
+    # qualifier must NOT be a base (`at 62248db88` / `at `62248db88`` are excluded), which is what
+    # separates the LIVE cite from the historical one in the same sentence.
+    # ⛔ The boundary is located by the SECTION MARKER alone (`^# §0/§2`) — no typography and no
+    # extra word: the em-dash reword redded once (measured), and `sha-pinned` in the needle made
+    # the word do work it was not doing (only one line matches `^# §0/§2`, verified) while a reword
+    # of it redded asserting the block was GONE.
+    _hdr = re.search(r"^# §0/§2\b", text, re.MULTILINE)
     _block_at = _hdr.start() if _hdr else -1
     _s2_at = text.find("## 2. A2")
     assert _block_at > 0 and _s2_at > 0, (
@@ -11138,7 +11156,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         "label true cannot be found, so re-derive these two bounds")
     for _label, _region in (("§2 (A2)", text[_s2_at:_s2_end]),
                             ("the §5 reproduction block", text[_block_at:_block_end])):
-        _found = re.findall(r":(\d+)`? at (?:HEAD|here)\b", _region)
+        _found = re.findall(r":(\d+)`? at (?!`?\d)[\w][\w -]{0,12}", _region)
         assert _found == ["12929"], (
             f"{_label}'s base-qualified live cite must be the vet_enabled line (`:12929`) — it "
             f"reads {_found}; re-derive it with `git grep -n 'vet_enabled = ' -- "
@@ -11313,7 +11331,6 @@ def test_the_records_zero_is_rederived_at_the_bases_it_names():
     """
     record = _REPO / "docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md"
     text = record.read_text(encoding="utf-8")
-    _checked = 0
     for _sha in ("4e6a3ce612bd^", "80c912244"):
         _run = subprocess.run(
             ["git", "grep", "-rn", "-E", "hasPart|hierarchies|decomposesInto", _sha, "--",
@@ -11335,13 +11352,13 @@ def test_the_records_zero_is_rederived_at_the_bases_it_names():
             pytest.fail(
                 f"{_sha} is unreadable in a FULL clone ({_run.stderr.strip()[:200]}) — the record "
                 "names a base nobody can verify")
-        _checked += 1
         assert (_run.returncode, _run.stdout) == (1, ""), (
             f"`{_sha}` returns {_run.stdout.count(chr(10))} hit(s), not the 0 exit-1 the record "
             "states — re-derive §1 item 3's zero; it is measured at BOTH bases it names")
-    assert _checked == 2, (
-        "both bases the record names must have been read — a leg that silently skipped the "
-        "history it exists to check is inert")
+        # (No post-loop `_checked == 2` assert: the ONLY ways out of this body that do not
+        # increment are `pytest.skip`/`pytest.fail`, both of which RAISE, so such an assert
+        # could never fire — an inert arm (measured by reading every path). The invariant is
+        # enforced by those raises themselves, which is where it belongs.)
     _stated_zero = re.search(r"measured at\s+each → (\d+), exit (\d+)", text)
     assert _stated_zero is not None, (
         "§1 item 3 must STATE the result it names its bases for (`measured at each → N, exit N`) "
