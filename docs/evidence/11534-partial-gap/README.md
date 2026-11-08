@@ -94,9 +94,10 @@ asymmetric rule (strip a suffix only when the remainder is long enough) leaves
 ``-ies``→``-y`` and drops a trailing ``e`` from both sides; the residual
 asymmetry (``analysis``/``analyses``) can only add a flag, never hide one.
 
-**What the flagged spans actually are, read end to end** (all 35 from the
-primary run) — this is the honest precision picture, because the labels above
-cannot produce a precision number:
+**What the flagged spans actually are, read end to end** — the classes below
+enumerate **14 of the primary run's 35** flagged spans; the other 21 are NOT
+classified here, so read this as a worklist of what the flags ARE, never as a
+precision figure (the labels above cannot produce one):
 
 * **genuine clause-level elisions** — wp03 "This directly attacks the
   ownership-lookup failure that drives the unactionable-page rate", "This

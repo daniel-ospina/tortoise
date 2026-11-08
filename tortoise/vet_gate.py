@@ -381,9 +381,9 @@ def _narrative_statements(narrative: str) -> int:
 # the narrative made in a clause no candidate carries) and it MISSES the two
 # shapes this proxy cannot see by construction: (a) a **generalisation** — an
 # operator or point that restates a covered statement at a higher abstraction,
-# so no narrative span is uncovered even though the item is new (that is the 1
-# of 9), and (b) a **re-shaped** item whose content the candidates already
-# lexically carry. Read a low ``coverage`` as evidence of missing prose, never
+# so no narrative span is uncovered even though the item is new — most of the 8
+# of 9 operators it does NOT reach (the record names 3 explicitly), and (b) a
+# **re-shaped** item. Read a low ``coverage`` as evidence of missing prose, never
 # as a claim that a model should emit something.
 #
 # ⚠️ The ADDRESS is a char span into the NARRATIVE — not into a source turn, and
@@ -475,10 +475,10 @@ _GAP_STOP = frozenset("""
 #: ``e`` dropped from the stem (so every one of
 #: stage/lease/cache/queue/service/share/state meets its plural).
 #:
-#: What remains asymmetric is disclosed rather than claimed away: a word whose
-#: plural is not ``-s``/``-es``/``-ies`` (``analysis``/``analyses``, ``data``)
-#: still stems differently, which can only make coverage look LOWER — i.e. it can
-#: add a flag, never hide one, and it cannot make the detector miss a gap.
+#: What remains asymmetric is disclosed rather than claimed away, and the class is
+#: WIDER than the one named here before: on the SHIPPED function ``status``/``statuses``,
+#: ``process``/``processes`` and ``class``/``classes`` stem differently too, so it
+#: is not only the non-``-s`` plurals; it can only lower coverage, never raise it.
 _GAP_SUFFIXES = sorted(
     ("ations", "ation", "ments", "ment", "ings", "ing", "ied",
      "ers", "er", "ed", "es", "s", "ly", "al"),
@@ -530,7 +530,7 @@ def _gap_mask(narrative: str) -> str:
     used to attribute an effect to the wrong guard.
     """
     chars = list(narrative)
-    for match in re.finditer(r"(?m)^[ \t]*#+[^\n]*$", narrative):
+    for match in re.finditer(r"(?m)^[ \t]*#{1,6}(?:[ \t][^\n]*)?$", narrative):
         for i in range(match.start(), match.end()):
             chars[i] = " "
     return "".join(chars)

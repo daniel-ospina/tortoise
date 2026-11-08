@@ -3692,9 +3692,9 @@ def run_s4(model, story: str, search: dict, embed_list: dict,
 #
 # ⛔ DEFAULT OFF (`TORTOISE_PARTIAL_GAP_FILL`), and that is a MEASURED position,
 # not caution: the detector flags 70 of 844 segments (8.3%) over the recorded
-# population and the dominant flag classes are non-claims (markdown labels, date
-# fragments, parenthetical asides), so an always-on stage would pay a model call
-# on most sessions to be told, correctly, that the spans are not claims. Arm it
+# population and a large share of the flagged spans are non-claims (markdown
+# labels, date fragments, parenthetical asides), so an always-on stage would pay
+# a model call on most sessions to be told, correctly, that the spans are not claims. Arm it
 # to MEASURE it; the recall/precision numbers above are what a default-ON
 # decision has to beat.
 
@@ -3709,7 +3709,7 @@ WHAT YOU MAY EMIT, AND WHAT YOU MAY NOT
 - Emit ONLY what the UNCOVERED SPANS state, in their own words and at the
   session's own granularity. Do not infer, extend or generalise beyond them.
 - Do NOT re-emit, restate, split or "improve" anything in EXISTING ITEMS.
-- ⛔ MOST UNCOVERED SPANS ARE NOT CLAIMS. A heading, a button label, a date
+- ⛔ MANY UNCOVERED SPANS ARE NOT CLAIMS. A heading, a button label, a date
   fragment, a parenthetical aside and a rhetorical sentence all survive the
   lexical check without stating anything durable. When a span states nothing
   durable, emit NOTHING for it. An empty result is the CORRECT answer here, and
