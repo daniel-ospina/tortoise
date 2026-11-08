@@ -1632,3 +1632,68 @@ def test_apply_separates_a_failed_write_from_an_owner_gated_residual(monkeypatch
     assert rc == topo.EXIT_FAILED == 1, (rc, payload)
     assert payload["owner_gated_only"] is False
     assert payload["exit"] == topo.EXIT_FAILED
+
+
+# ── the refusal this tool prints must name a command that RUNS (#5128, #11483) ──
+
+
+def test_the_refusal_names_an_invocation_that_actually_runs():
+    """★ #11483 review round 4 (P1): a refusal must not name a command that dies.
+
+    `verb` is a REQUIRED positional, so the bare path exits **2** — argparse's own
+    usage-error status — and the tool never runs. An operator on a `<3.12`
+    interpreter then follows an ATTRIBUTABLE refusal into a SECOND unattributed
+    error, which is the exact harm `#5128` exists to prevent.
+
+    The census cannot catch this, which is why it survived to a review round:
+    `_expected_invocation` in `tests/test_entry_point_python_guard.py` returns the
+    bare path for every loose script and its assertion is a SUBSTRING test, so a
+    form that is a PREFIX of a working one passes. This row therefore measures the
+    invocation the refusal ACTUALLY PRINTS, by running it.
+
+    Mutant: delete ` --help` from the refusal's f-string in
+    `tools/ci_runner_topology.py` — the extracted invocation loses its only
+    argument, argparse exits 2 on the missing `verb`, and this row reds on
+    `probe.returncode == 0`.
+    """
+    forced_old_interpreter = (
+        "import runpy, sys\n"
+        "sys.version_info = (3, 9, 6, 'final', 0)\n"
+        "runpy.run_path(sys.argv[1], run_name='__main__')\n"
+    )
+    refusal = subprocess.run(
+        [sys.executable, "-c", forced_old_interpreter, str(TOOL)],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    # 4, not 1: 1 is `EXIT_FAILED`, and a refusal that wears a verdict code reads
+    # to a caller as "the write failed" (#11342).
+    assert refusal.returncode == 4, (
+        f"the guard must refuse an old interpreter with 4, got {refusal.returncode} "
+        f"(stderr={refusal.stderr!r})"
+    )
+
+    named = re.search(r"`(uv run python [^`]+)`", refusal.stderr)
+    assert named is not None, (
+        f"the refusal must name the invocation that works, in backticks: {refusal.stderr!r}"
+    )
+    argv = named.group(1).split()
+    assert argv[:3] == ["uv", "run", "python"], (
+        f"the refusal names `{named.group(1)}`, which is not a `uv run python …` form"
+    )
+
+    # Run what the refusal named, under THIS interpreter: `uv run` adds nothing to
+    # a `--help` probe and would make the row depend on uv being installed.
+    probe = subprocess.run(
+        [sys.executable, *argv[3:]],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert probe.returncode == 0, (
+        f"the refusal names `{named.group(1)}`, which exits {probe.returncode} — a "
+        f"refusal that names a command which dies is a SECOND unattributed error, "
+        f"the harm #5128 exists to prevent (stderr={probe.stderr!r}). `verb` is a "
+        f"required positional, so `--help` is what makes this form resolve."
+    )
