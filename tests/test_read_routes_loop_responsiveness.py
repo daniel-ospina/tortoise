@@ -3277,18 +3277,40 @@ def test_the_read_path_answers_while_the_default_executor_is_stalled(client):
     case — `points-list` — exceeded 3.0 s while the other three answered in the
     same stalled window. That is a first-touch cost, not a read queued on the
     shared pool: put the read leg BACK on the shared pool and the red set is not
-    one case but an ORDERED PREFIX — measured `points-list`, `point-get`,
-    `search` red (3 of the 4) and only `topic-summary` passing, because each red
-    costs a whole `READ_ANSWER_BOUND_S` inside the 12 s
-    `DEFAULT_EXECUTOR_STALL_S` hold, so the last case's window opens only as the
-    hold expires. ONE red, and the first — the CI shape — is what no pool queue
-    produces. The only first-touch variable on this path is the cold open's
-    WORK, and it rides a per-request construction submission
-    (`hosted_api._data_sdk_offloaded` bundles `sdk._get_proj()` into the SAME
-    submission), so there is no first-touch-only SUBMISSION that could queue.
-    So the warm-up pays the cold open ONCE, with the pool free and outside the
-    measurement, and the measured pass then exercises exactly the queueing
-    property this test claims.
+    one case but an ORDERED PREFIX — each red costs a whole
+    `READ_ANSWER_BOUND_S`, so the cases after the first queue behind the
+    earlier ones' timeouts and keep redding while the hold lasts. Measured
+    `points-list`, `point-get`, `search` red and `topic-summary` passing, but
+    ⛔ THE SHAPE THAT CARRIES THE INFERENCE IS THE PREFIX, NOT THE COUNT.
+    `3 × READ_ANSWER_BOUND_S` (9 s) opens the fourth case's window only 3 s
+    before the 12 s `DEFAULT_EXECUTOR_STALL_S` hold expires, and the measured
+    margin was 10 ms (`topic-summary` answered at t=12.00 s with dt=2.99 s of
+    its 3.00 s bound) — so 4-of-4 is what the SAME mechanism predicts on a host
+    a few tens of ms slower, and nothing here may rest on the last case passing.
+    What is NOT host-dependent is the CI shape: ONE red, and the FIRST — which
+    no pool queue produces.
+
+    ⛔ THERE ARE TWO FIRST-TOUCH VARIABLES ON THIS PATH, and the warm-up's bound
+    covers only the first:
+
+    * the cold open's WORK, which rides a per-request construction submission
+      (`hosted_api._data_sdk_offloaded` bundles `sdk._get_proj()` into the SAME
+      submission), so `probe_setup_timeout()` is its declared budget — and it
+      is what the warm-up pays once, with the pool free and outside the
+      measurement;
+    * a request-owned ONE-TIME EMBEDDER LOAD inside `/v1/search`'s callable —
+      `sdk.tortoise_fts_query` calls `EmbeddingModel.get()` synchronously in the
+      worker (`hosted_api._read_offload`'s #4055 note; budgeted
+      `EmbeddingModel._LOAD_TIMEOUT_S`, 90 s and 270 s in the test lane,
+      #6960).
+
+    ⚠️ RECORDED RESIDUAL, not claimed as covered: `warm_up_bound` is the COLD
+    OPEN's budget and sits BELOW that second load's budget, so a cold embedder
+    reds in the warm-up instead of in the measurement — a false red on an
+    environment condition, whose message names the route rather than the
+    embedder. It fails SAFE (the pin is never weakened and no run passes
+    vacuously), and the load is still kept out of the measurement, which is
+    what the queueing assertion below needs.
 
     It cannot mask the defect it pins: on the pre-#10602 shape the warm-up
     succeeds too (the shared pool is free), and the MEASURED request still has to
@@ -3340,8 +3362,10 @@ def test_the_read_path_answers_while_the_default_executor_is_stalled(client):
                         f"[{label}] the WARM-UP {handler} request did not answer "
                         f"within {warm_up_bound}s — the cold open's own declared "
                         f"budget (`probe_setup_timeout()`) — with the shared pool "
-                        f"FREE, so this is a broken read route or a cold-open "
-                        f"regression, NOT the pool (#10602)") from None
+                        f"FREE, so this is a broken read route, a cold-open "
+                        f"regression, or a COLD EMBEDDER load (this bound does "
+                        f"not cover `/v1/search`'s one-time "
+                        f"`EmbeddingModel.get()`), NOT the pool (#10602)") from None
                 assert warm.status_code == 200, (
                     f"[{label}] the WARM-UP {handler} request answered "
                     f"{warm.status_code}: {warm.text[:200]} — the read route is "
