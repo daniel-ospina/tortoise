@@ -3159,9 +3159,14 @@ def test_the_green_does_not_claim_a_BEFORE_reading_that_did_not_MEASURE(monkeypa
     measured = "returned no pre-fix node either"
 
     # (1) the three states that are NOT a measurement must not print as one.
-    for overrides in ({"degraded": True, "reason": "breaker_open"},
-                      {"unread": ["session:s-x"]},
-                      {"unresolved": 1}):
+    # ⛔ EACH STATE GETS ITS OWN WORD (#11536 review round 6): a degraded leg did
+    # not measure; an `unclassified` one DID and could not finish — stamping
+    # "did not measure" over the urls it measured contradicts the line.
+    for overrides, marker in (
+            ({"degraded": True, "reason": "breaker_open"},
+             "BEFORE leg did not measure"),
+            ({"unread": ["session:s-x"]}, "could not fully classify"),
+            ({"unresolved": 1}, "could not fully classify")):
         before = {"ran": True, "probes": [dict({"phrase": "zebraquux", "hits": 0,
                                                 "residue": []}, **overrides)]}
         fts = _cli._merge_probe(before, _after(), wrote=False)
@@ -3170,8 +3175,9 @@ def test_the_green_does_not_claim_a_BEFORE_reading_that_did_not_MEASURE(monkeypa
         out = capsys.readouterr().out
         assert measured not in out, (
             f"the green claimed a BEFORE reading that did not measure: {overrides}")
-        assert "BEFORE leg did not measure" in out, (
-            "the probe line printed a BEFORE count for a leg that did not measure")
+        assert marker in out, (
+            f"the probe line's marker did not name this leg's state ({marker!r}): "
+            + out)
     assert m  # the module import keeps this row's name in the probe diagnostic
 
     # (3) a BEFORE leg that DID measure still states its finding.
