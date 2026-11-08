@@ -919,6 +919,42 @@ def test_install_cline_survives_a_symlink_loop_at_the_legacy_path(tmp_path):
     assert (proj / ".clinerules" / "hooks" / "UserPromptSubmit").is_file()
 
 
+def test_uninstall_cline_ignores_a_FOREIGN_hook_behind_an_outside_symlink(
+        tmp_path):
+    """The legacy candidate is guarded only when the run would really DELETE
+    it (#11588 review cycle 8).
+
+    A FOREIGN `hooks/UserPromptSubmit` behind an out-of-root `.cline` is only
+    ever READ — the migration and the uninstall both skip it — so letting it
+    block refused an install that writes nothing there and an uninstall that
+    left OUR in-root hook installed (measured: rc 1 both ways, with nothing
+    outside the root at risk).
+
+    MUTATION: guard the legacy path on `exists()` alone → RED on both rcs.
+    """
+    outside = tmp_path / "shared-cline"
+    (outside / "hooks").mkdir(parents=True)
+    foreign = outside / "hooks" / "UserPromptSubmit"
+    foreign.write_text("#!/usr/bin/env bash\necho my own hook\n")
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+
+    # Install writes only in-root: it must succeed and leave the foreign file be.
+    r = _run(["install", "cline", "--dir", str(proj)], env)
+    assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+    live = proj / ".clinerules" / "hooks" / "UserPromptSubmit"
+    assert live.is_file()
+    assert foreign.read_text() == "#!/usr/bin/env bash\necho my own hook\n"
+
+    # Uninstall deletes only ours: it must succeed, and the foreign file stays.
+    (proj / ".cline").symlink_to(outside)
+    u = _run(["install", "cline", "--dir", str(proj), "--uninstall"], env)
+    assert u.returncode == 0, (u.returncode, u.stdout, u.stderr)
+    assert not live.exists(), "our in-root hook survived an uninstall"
+    assert foreign.exists(), "a FOREIGN file was deleted"
+
+
 def test_install_cline_refuses_directory_target(tmp_path):
     """A directory sitting at the cline hook path is a clean refusal, not a
     traceback."""

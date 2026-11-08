@@ -6110,43 +6110,51 @@ def _install_read_hook_impl(args) -> int:
     #    path is guarded too: it is never written, but it IS unlinked when it
     #    holds our registration, and a delete through a symlinked `.cline/`
     #    would reach outside the root just as a write would (#2124). ─────
-    # Which candidates are actually WRITTEN or DELETED — and ONLY those
-    # (#11588 review cycle 5). An install writes `target` and retires a legacy
-    # file only when one EXISTS; an uninstall deletes only what exists. A path
-    # the run cannot touch must not block it: guarding `.clinerules` on an
-    # `--uninstall` whose registration sits in-root at `.cline/hooks` refused
-    # the removal of OUR OWN hook (measured: rc 1, hook left in place, where
-    # the base removed it), and guarding a non-existent `.cline` refused an
-    # install that never writes there. Every real write and every real delete
-    # stays guarded: an existing file behind an out-of-root symlink still
-    # refuses, which is what `test_install_refuses_symlinked_intermediate_dir`
-    # and the uninstall half below pin.
+    # Only a path this operation actually WRITES or DELETES is guarded —
+    # and only a delete that will really happen counts (#11588 review cycles
+    # 5 and 8). A path the run cannot touch must not block it: guarding
+    # `.clinerules` on an `--uninstall` whose registration sits in-root at
+    # `.cline/hooks` refused the removal of OUR OWN hook (measured: rc 1, hook
+    # left in place, where the base removed it); guarding a non-existent
+    # `.cline` refused an install that never writes there; and guarding a
+    # FOREIGN file behind an out-of-root `.cline` refused both operations over
+    # a file the run only ever READS (it is never unlinked — ownership fails).
+    # Every real write and every real delete stays guarded, which is what
+    # `test_install_refuses_symlinked_intermediate_dir` and the four
+    # escape-scope tests pin.
     root_r = root.resolve()
-    if uninstall:
-        guarded = [p for p in (target, legacy_target)
-                   if p is not None and p.exists()]
-    else:
-        guarded = [p for p in (target, legacy_target)
-                   if p is not None and (p == target or p.exists())]
-    for candidate in guarded:
-        try:
-            rel_parts = candidate.relative_to(root).parts
-        except ValueError:
-            rel_parts = candidate.parts  # outside root — fall back to leaf
-        cur = root
-        check_paths = [root]
-        for part in rel_parts:
-            cur = cur / part
-            check_paths.append(cur)
-        for cp in check_paths:
-            if cp.is_symlink():
-                resolved = cp.resolve()
-                if resolved != root_r and root_r not in resolved.parents:
-                    print(f"Refusing: {cp} resolves to {resolved} — outside "
-                          f"the install dir {root_r}. Symlinked harness "
-                          "configs are not touched (unlink the symlink first "
-                          "or pass --dir explicitly).", file=_sys.stderr)
-                    return 1
+
+    def _escape_refusal(candidates) -> bool:
+        """True (having printed the refusal) if any candidate escapes root."""
+        for candidate in candidates:
+            try:
+                rel_parts = candidate.relative_to(root).parts
+            except ValueError:
+                rel_parts = candidate.parts  # outside root — fall back to leaf
+            cur = root
+            check_paths = [root]
+            for part in rel_parts:
+                cur = cur / part
+                check_paths.append(cur)
+            for cp in check_paths:
+                if cp.is_symlink():
+                    resolved = cp.resolve()
+                    if resolved != root_r and root_r not in resolved.parents:
+                        print(f"Refusing: {cp} resolves to {resolved} — "
+                              f"outside the install dir {root_r}. Symlinked "
+                              "harness configs are not touched (unlink the "
+                              "symlink first or pass --dir explicitly).",
+                              file=_sys.stderr)
+                        return True
+        return False
+
+    # `target` is written by an install and deleted by an uninstall that has
+    # something to delete. The LEGACY path is handled inside the cline branch,
+    # where ownership is known: it is guarded only when the run would unlink
+    # it (see the note there).
+    if _escape_refusal([target] if not uninstall else
+                       [p for p in (target,) if p.exists()]):
+        return 1
 
     # #2383: uninstall with NO registration present must be a clean no-op —
     # never fall through to the fresh-install write below (a double
@@ -6311,6 +6319,20 @@ def _install_read_hook_impl(args) -> int:
         # the refusal says what to do instead. Uninstall is unaffected: it
         # never creates a directory, and a legacy registration must still be
         # removable from such a project.
+        # The LEGACY path is guarded only when this run would actually UNLINK
+        # it — i.e. when it exists AND is ours (#11588 review cycle 8). A
+        # FOREIGN file behind an out-of-root `.cline` is only ever READ (the
+        # migration and the uninstall both skip it), so letting it block the
+        # operation refused an install that writes nothing there and an
+        # uninstall that leaves OUR in-root hook installed (measured: rc 1 in
+        # both, with nothing outside the root at risk). A file that IS ours
+        # behind that symlink is still refused on both operations, because that
+        # unlink would reach outside the root.
+        if (legacy_target is not None and legacy_target.exists()
+                and _cline_owns_path(legacy_target)
+                and _escape_refusal([legacy_target])):
+            return 1
+
         # BOTH components the install must create are checked, not just
         # `.clinerules` (#11588 review cycle 4): a file — or an IN-ROOT
         # dangling symlink — at `.clinerules/hooks` left the dry run promising

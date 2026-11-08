@@ -119,7 +119,10 @@ hook script as a module. No MCP tool or public SDK method is touched.
   no longer block removal of our own in-root registration. The OTHER half — a delete that WOULD escape
   the root through a symlinked `.cline` — is refused on **both** operations
   (`test_install_refuses_a_symlinked_LEGACY_path_before_deleting_through_it`,
-  `test_uninstall_refuses_a_symlinked_LEGACY_path_before_deleting_through_it`).
+  `test_uninstall_refuses_a_symlinked_LEGACY_path_before_deleting_through_it`) — and the legacy
+  candidate is guarded only when the delete would really happen, so a FOREIGN file behind such a
+  symlink cannot block an operation that only reads it
+  (`test_uninstall_cline_ignores_a_FOREIGN_hook_behind_an_outside_symlink`).
 - R6 A regression in the other harness arms (`claude|codex|devin` share one arm) → caught by their
   unchanged contract tests in the same file.
 - R7 A project whose `.clinerules` is a rules FILE (Cline's other rules convention) gets an install
