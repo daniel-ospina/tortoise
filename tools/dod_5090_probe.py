@@ -1770,8 +1770,9 @@ def score_rule_bullet() -> Row:
 #: of them: a carrier whose value a later pass stores (`add_point`, `_journal_event_raw_write`), a
 #: writer whose body issues no store at all — a read, a read into a dict, comment PROSE
 #: (`_compare_views`, `_graph_fingerprint`, `turn_prior_vectors`, `_index_gate_read`, `_apply_one`),
-#: a WIPE
-#: (`_prewipe_synthetic_write_scope`'s `SET n.embedding = NULL`), and a label interpolated at runtime
+#: or a docstring QUOTING one (`_prewipe_synthetic_write_scope`, whose whole body is a `return`; the
+#: `SET n.embedding = NULL` it quotes is `_rebuild_all_replay`'s, and that writer is NOT among these
+#: fifteen), and a label interpolated at runtime
 #: (`restore_graph`'s `(n:{safe_labels})`) — which is why `NO_LIVE_VECTOR` / `LABELS_AT_RUNTIME`
 #: exist. The two-label pair is NOT among them: `_event_plain_merge` and
 #: `_rebuild_all_replay` keep their `MERGE`s in their own bodies, which is why they derive two.

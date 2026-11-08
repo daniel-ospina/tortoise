@@ -440,7 +440,9 @@ def test_every_embedded_label_has_a_query_path():
 #: statement, and those six are a SAMPLE rather than the set: the other NINE are a carrier a later
 #: pass stores (`add_point`, `_journal_event_raw_write`), a body that issues no store at all — a
 #: read, a read into a dict, comment PROSE (`_compare_views`, `_graph_fingerprint`,
-#: `turn_prior_vectors`, `_index_gate_read`, `_apply_one`), a WIPE (`_prewipe_synthetic_write_scope`),
+#: `turn_prior_vectors`, `_index_gate_read`, `_apply_one`), or a docstring QUOTING one
+#: (`_prewipe_synthetic_write_scope`, whose whole body is a `return`; the `SET n.embedding = NULL` it
+#: quotes is `_rebuild_all_replay`'s, and that writer is NOT among these fifteen),
 #: and a runtime-interpolated label
 #: (`restore_graph`) — so no single one of them may be named as "the" reason). So the product
 #: DECLARES it

@@ -82,9 +82,11 @@ the writer only BUILDS a clause; or — one of them — the statement belongs to
 (`_event_raw_write_door`). ⛔ Those six are a SAMPLE, NOT the set — the other NINE of the fifteen
 fail for reasons none of them names, and a list of six presented as complete leaves the majority
 unexplained: a carrier whose value a later pass stores (`add_point`, `_journal_event_raw_write`), a
-writer whose body issues no store at all — a read, a read into a dict, comment prose
-(`_compare_views`, `_graph_fingerprint`, `turn_prior_vectors`, `_index_gate_read`, `_apply_one`), a
-WIPE (`_prewipe_synthetic_write_scope`'s `SET n.embedding = NULL`), and a label interpolated at
+writer whose body issues no store at all — a read, a read into a dict, comment PROSE
+(`_compare_views`, `_graph_fingerprint`, `turn_prior_vectors`, `_index_gate_read`, `_apply_one`), or
+a docstring QUOTING one (`_prewipe_synthetic_write_scope`, whose whole body is a `return`; the
+`SET n.embedding = NULL` it quotes is `_rebuild_all_replay`'s, and that writer is NOT among these
+fifteen because it derives two labels), and a label interpolated at
 runtime (`restore_graph`'s `(n:{safe_labels})`) — which is why the `NO_LIVE_VECTOR` /
 `LABELS_AT_RUNTIME` dispositions below exist at all. Note the two-label pair is NOT in this list:
 `_event_plain_merge` and
@@ -348,8 +350,10 @@ CLASSES: tuple[str, ...] = (RECOGNISED_PRODUCER, EXEMPT)
 #: ⛔ Those six are a SAMPLE, NOT the set — the other NINE fail for none of them: a carrier whose
 #: value a later pass stores (`add_point`, `_journal_event_raw_write`), a writer whose body issues no
 #: store at all — a read, a read into a dict, comment PROSE (`_compare_views`, `_graph_fingerprint`,
-#: `turn_prior_vectors`, `_index_gate_read`, `_apply_one`), a WIPE
-#: (`_prewipe_synthetic_write_scope`'s `SET n.embedding = NULL`), and a label interpolated at
+#: `turn_prior_vectors`, `_index_gate_read`, `_apply_one`), or a docstring QUOTING one
+#: (`_prewipe_synthetic_write_scope`, whose whole body is a `return` — the `SET n.embedding = NULL`
+#: it quotes is `_rebuild_all_replay`'s, and that writer is NOT among these fifteen), and a label
+#: interpolated at
 #: runtime (`restore_graph`'s `(n:{safe_labels})`). A
 #: second derivation in the grading instrument would be a second owner of the same fact; the field
 #: below makes the fact ONE declaration that every consumer reads (the policy-as-data shape `#11444`
