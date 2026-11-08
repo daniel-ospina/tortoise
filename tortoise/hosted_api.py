@@ -30592,8 +30592,17 @@ def _apply_import_pack_config(sdk, payload: dict) -> None:
       the #1936 indicator-3 fix: pre-fix such an entry has ``yaml`` null (its
       ``:PackManifest`` was deleted on the source) so it fell through to the
       starter branch and raised ``unknown starter pack``, and ONE uninstalled
-      custom pack aborted the WHOLE graph restore — a failure that belonged to
-      that entry alone.
+      custom pack aborted the whole IMPORT — a failure that belonged to that
+      entry alone.
+
+      ⛔ THE SWAP HAS ALREADY LANDED WHEN THIS RUNS (``_restore_into_temp_
+      verify_swap``), so "aborted the restore" is NOT what happened and the
+      distinction is the one an operator cares about: the dump's data is on
+      the graph, then this pass raises, the route answers 422, the ledger is
+      cleared and ``last_import_failed_sha256`` stamped — a restored graph
+      whose pack config was never applied, re-failing on every retry. Pinned
+      by ``tests/test_import_endpoint.py`` ("swap LANDED (pack failure is
+      post-swap)").
 
       ⛔ WHAT THE SKIP DOES *NOT* CLAIM (corrected in review; the earlier
       rationale on this PR was wrong): the ``removed`` ``:PackInstall``
@@ -30714,11 +30723,26 @@ def _apply_import_pack_config(sdk, payload: dict) -> None:
                 # existing pins use) still raises, so a genuinely unknown
                 # namespace is still a loud 422. Only an entry the artifact
                 # itself marks as switched-off is skipped.
-                if "status" not in pack and pack.get("activated") is False:
-                    _logger.info(
+                if pack.get("status") is None and pack.get("activated") is False:
+                    # ``status is None``, NOT ``"status" not in pack`` — the
+                    # resolver above and the shared shape gate both treat an
+                    # explicit ``status: null`` as ABSENT ("the entry predates
+                    # the field"), so keying on key PRESENCE would let the two
+                    # spellings of one artifact behave differently: key-absent
+                    # skipped, ``status: null`` still aborting the import.
+                    #
+                    # ``warning``, not ``info``: this branch cannot tell a
+                    # REMOVED pack from a DISABLED one from a typo'd
+                    # namespace, and it replaces a previous loud ValueError —
+                    # so this line is the only surviving record that the
+                    # namespace's vocabulary was dropped. Same level the
+                    # house convention uses for exactly this event
+                    # (``pack_state``: "unknown in shared catalog — skipped",
+                    # "activation of %r failed — skipped").
+                    _logger.warning(
                         "import pack_config: pack %r was disabled or removed "
-                        "on the source graph — skipped (legacy artifact with "
-                        "no `status` field, `activated` is False)", ns)
+                        "on the source graph — skipped (no `status`, and "
+                        "`activated` is False)", ns)
                     continue
                 raise ValueError(f"pack_config references unknown starter pack '{ns}'")
             from tortoise.pack_state import _pack_install_lock, _resolved_graph_name, _target_graph

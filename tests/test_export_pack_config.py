@@ -474,7 +474,8 @@ class TestApplyImportPackConfig:
 #    vocabulary, the same class #8648 fixed on the seed side). And a pack the
 #    tenant had REMOVED exported as `yaml: null`, fell through to the starter
 #    branch and raised `unknown starter pack` — one uninstalled custom pack
-#    aborted the whole graph restore, at the wrong granularity.
+#    aborted the whole import (post-swap: the dump had landed, the pack config
+#    never applied), at the wrong granularity.
 
 def _install_status(sdk, ns):
     """The graph's raw ``:PackInstall`` status for ``ns`` (None = no record)."""
@@ -660,12 +661,35 @@ class TestRemovedPackGranularity:
             # a known starter the tenant had disabled, same legacy shape
             {"namespace": "dev", "version": "0.2.0",
              "activated": False, "yaml": None},
+            # ⛔ the SAME artifact shape with the null SPELLED: the shape gate
+            # blesses `status: null` as "predates the field" and
+            # `_pack_entry_activation` reads it as absent, so this entry must
+            # behave identically. Keying the skip on key PRESENCE let these two
+            # spellings of one artifact diverge (the key-absent one skipped, the
+            # `status: null` one still aborting) — a review finding, pinned here.
+            {"namespace": "gone-ops-null", "version": "0.1.0",
+             "activated": False, "yaml": None, "status": None},
         ]}}
         _apply_import_pack_config(sdk, payload)
         # the removed entry is skipped: this pass neither creates nor erases it
         assert _install_status(sdk, "gone-ops") is None
+        assert _install_status(sdk, "gone-ops-null") is None
         # the disabled starter is still carried as `disabled`, not reactivated
         assert _install_status(sdk, "dev") == "disabled"
+
+    def test_legacy_skip_does_not_fire_on_explicit_status(self, sdk):
+        """A namespace that CARRIES a real status keeps the loud guard.
+
+        Pins that the skip is keyed on "no status AND activated is False" and
+        cannot swallow an entry whose explicit status says it should be
+        installed — ``active``/``disabled`` on an unknown namespace is still an
+        error (the vocabulary would be dropped), and ``removed`` is handled by
+        the resolver above, not by this branch."""
+        from tortoise.hosted_api import _apply_import_pack_config
+        with pytest.raises(ValueError, match="unknown starter pack"):
+            _apply_import_pack_config(
+                sdk, _pack_entry(namespace="not-a-real-pack", yaml=None,
+                                 activated=False, status="disabled"))
 
     def test_legacy_unknown_namespace_activated_still_raises(self, sdk):
         """Same legacy shape but `activated: True` — the guard still fires.

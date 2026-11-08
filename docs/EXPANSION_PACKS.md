@@ -486,8 +486,10 @@ when a delete surface is added, not a live gap.)
   carries each pack's full `status`, and `_apply_import_pack_config` writes
   that state instead of forcing `active` — a pack the tenant had `disabled`
   comes back `disabled`, and one they had `removed` is skipped per entry (it
-  used to fall through to the starter branch and abort the whole restore with
-  `unknown starter pack`). An artifact predating the `status` field still
+  used to fall through to the starter branch and abort the whole import with
+  `unknown starter pack` — after the swap, so the data had landed but the
+  pack config was never applied and every retry re-failed). An artifact
+  predating the `status` field still
   falls back to its `activated` boolean, so old exports keep their intent: a
   pack it records as `activated: False` is written `disabled` (or, when its
   manifest is gone and the namespace is otherwise unknown, skipped per entry
