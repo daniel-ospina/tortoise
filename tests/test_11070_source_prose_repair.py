@@ -4397,6 +4397,30 @@ def test_the_documented_report_contracts_are_the_ones_the_run_RETURNS(monkeypatc
         "instrument")
     assert degraded["unmeasurable"] == ["zebraquux"]
 
+    # ⛔ AND THE TWO DEGRADED EXITS THE BREAKER CASE DOES NOT COVER (#11536 review
+    # round 8, P2): `run_fts_query` records `ran=True, degraded=True` for BOTH
+    # `index_missing` and `query_failed`, so `any(p["ran"])` still reported
+    # "measured" for a leg that measured nothing. MEASURED on a real FalkorDB: a
+    # missing Source fulltext index does NOT raise — it returns an empty result
+    # set — so `index_missing`-shaped emptiness is the ORDINARY shape of a dropped
+    # index. The report's `ran` must be False there while the row's own `ran`
+    # stays True, or a consumer cannot tell the two apart.
+    for degraded_reason in ("index_missing", "query_failed"):
+        _install_fts(monkeypatch, {}, leg={"leg": "fts", "ran": True,
+                                           "degraded": True,
+                                           "reason": degraded_reason})
+        degraded = m.probe_fts(_LexiconGraph([(_post_fix_node(),)]),
+                               ["zebraquux"], control=False)
+        assert (degraded["probes"][0]["ran"] is True
+                and degraded["probes"][0]["degraded"] is True), (
+            "the read path's own flags must pass through verbatim — this row's "
+            "premise is the shipped `index_missing`/`query_failed` shape")
+        assert degraded["ran"] is False, (
+            f"`ran` documents 'at least one probe was MEASURED', but the "
+            f"{degraded_reason} leg measured nothing and reported True — a "
+            f"consumer reading `ran` concludes the instrument answered")
+        assert degraded["unmeasurable"] == ["zebraquux"]
+
 
 def test_the_reconcile_contract_lists_every_key_the_run_returns():
     """#11536 review note: the repair's ``Returns`` block named ten of FOURTEEN keys.

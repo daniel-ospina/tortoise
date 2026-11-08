@@ -1178,9 +1178,18 @@ def reconcile_after_replay(projection, *, engine: str,
 #    open, an index dropped, or a query that failed all surface to
 #    ``run_fts_query`` as ``[]``. ``leg_trace`` is therefore read on EVERY probe
 #    and a leg that did not run (or ran degraded) is reported as UNMEASURABLE,
-#    never as a clean zero. The positive CONTROL is the second half of the same
-#    guard: one token taken from a POST-fix lexicon node's own ``_searchText``
-#    must still be findable, because that proves the index answers at all.
+#    never as a clean zero.
+#    ⛔ BUT ``leg_trace`` DOES NOT COVER A DROPPED INDEX (#11536 review round 8,
+#    P2), MEASURED on a real FalkorDB: querying a label with NO fulltext index
+#    does not raise — it returns an EMPTY RESULT SET, so the trace records
+#    ``ran=True, degraded=False, reason='empty_results'``, indistinguishable from
+#    a clean miss. So a missing/dropped Source index is caught by the positive
+#    CONTROL below (a known-present lexicon token must still be findable), NOT by
+#    ``unmeasurable``. The two guard different failure classes and neither is a
+#    substitute for the other.
+#    The positive CONTROL is the second half of the same guard: one token taken
+#    from a POST-fix lexicon node's own ``_searchText`` must still be findable,
+#    because that proves the index answers at all.
 # 3. **The read was TRUNCATED** — a hit count that reaches the read's ``LIMIT``
 #    means the probe matched more nodes than were classified, so residue beyond
 #    the window would be invisible. A probe that common is not a probe: it is
@@ -1369,10 +1378,14 @@ def source_fts_probe(g, phrase: str, *,
     the classifier resolves, and ``truncated`` says the window filled — i.e. the
     count is a FLOOR and residue could be hiding past it.
 
-    ``ran``/``degraded``/``reason`` come from the read path's own ``leg_trace``:
-    a breaker-open or index-missing leg returns ``[]`` exactly as a clean miss
-    does, and folding those together is the false PASS this leg exists to
-    prevent.
+    ``ran``/``degraded``/``reason`` come from the read path's own ``leg_trace``,
+    and they cover DIFFERENT failures: a breaker-open leg reports
+    ``ran=False``, and a query that raised reports ``degraded=True``. ⛔ They do
+    NOT cover a missing index (#11536 review round 8, P2) — MEASURED on a real
+    FalkorDB, querying a label with no fulltext index returns an EMPTY RESULT SET
+    with no exception, so the trace says ``ran=True, degraded=False,
+    reason='empty_results'``, exactly as a clean miss does. The positive control
+    is what detects that class; this row cannot.
 
     ``timeout_ms`` is CLAMPED to the server's own cap: the canonical docker lane
     runs ``TIMEOUT_MAX 30000``, and an unclamped 60 000 raised ``ResponseError``
@@ -1706,11 +1719,17 @@ def source_index_is_empty(g, *,
 
     The corroboration is still sound, for the reasons that ARE measured: a
     surviving entry is caught by the probe itself — it classifies ``stale`` and
-    vetoes, see :func:`classify_fts_hits` — and a dead read is caught by
-    ``leg_trace`` (``degraded`` ⇒ ``unmeasurable``) before this arm is consulted.
-    So ``True`` means: the population carries nothing for the index to build from,
-    AND the read ran. ``None`` means the read itself failed — unreadable is not
-    empty.
+    vetoes, see :func:`classify_fts_hits`.
+    ⛔ AND NOT BY ``leg_trace`` (#11536 review round 8, P2): this docstring used
+    to claim "a dead read is caught by ``leg_trace`` (``degraded`` ⇒
+    ``unmeasurable``) before this arm is consulted. So ``True`` means: … AND the
+    read ran". MEASURED on a real FalkorDB and false at the second clause: a
+    missing Source fulltext index does not raise, it returns an empty result set,
+    so the trace reports ``ran=True, degraded=False, reason='empty_results'`` and
+    ``unmeasurable`` never fires. This arm therefore claims only what it counted —
+    that the population carries nothing for the index to build from — and a DEAD
+    READ is caught by the positive control, not here. ``None`` still means the
+    count itself failed: unreadable is not empty.
     """
     try:
         rows = g.query(_SOURCE_INDEX_ENTRIES,
@@ -1832,9 +1851,16 @@ def probe_fts(g, phrases, *, control: bool = True,
     aggregates) and the probe row's ``unresolved``. A consumer reading the
     contract would not know the vetoes existed — the same class as the
     five-key ``classify_fts_hits`` list, on the report the fold is built from.
-    ⛔ ``ran`` is ``any(probe["ran"])``, NOT ``bool(phrases)``: the old code made
-    ``report["ran"]`` True on a breaker-open leg where ``probes[0]["ran"]`` was
-    False, i.e. it reported "measured" for a run that measured nothing.
+    ⛔ ``ran`` IS ``any(probe["ran"] AND NOT probe["degraded"])`` — neither
+    ``bool(phrases)`` nor ``any(probe["ran"])`` (#11536 review round 3 P2, and
+    round 8 P2). `bool(phrases)` reported True on a breaker-open leg where
+    ``probes[0]["ran"]`` was False. But ``any(probe["ran"])`` was STILL wrong on
+    the two DEGRADED exits, because the read path (``run_fts_query``) records
+    ``ran=True, degraded=True`` for BOTH ``index_missing`` and ``query_failed``:
+    measured on the shipped path, an `index_missing` trace gives
+    ``report["ran"] is True`` on a leg that measured nothing, which is exactly
+    what this key is documented NOT to mean. Requiring ``not degraded`` makes the
+    documented meaning true.
 
     ⚠️ ``control`` is only meaningful AFTER a repair has written a lexicon: on a
     graph with no post-fix node it is ``{"ok": False, "hits": None, "note": …}``
@@ -1849,12 +1875,16 @@ def probe_fts(g, phrases, *, control: bool = True,
         got.update(split)
         measured.append(got)
     report: dict = {
-        # ⛔ THE DOCUMENTED MEANING, IMPLEMENTED (#11536 review round 3, P2):
-        # "at least one probe was measured" is `any(p["ran"])`, not "phrases were
-        # asked for". The old `bool(measured)` reported True on a breaker-open
-        # leg where every probe's own `ran` was False — a report that says the
-        # instrument answered when it never ran.
-        "ran": any(p["ran"] for p in measured),
+        # ⛔ THE DOCUMENTED MEANING, IMPLEMENTED (#11536 review round 3 P2, and
+        # round 8 P2): "at least one probe was MEASURED" is
+        # `any(p["ran"] and not p["degraded"])`, not "phrases were asked for"
+        # and not `any(p["ran"])`. `bool(measured)` reported True on a
+        # breaker-open leg where every probe's own `ran` was False. `any(p["ran"])`
+        # then stayed True on the two DEGRADED exits, because `run_fts_query`
+        # records `ran=True, degraded=True` for BOTH `index_missing` and
+        # `query_failed` — a report that says the instrument answered when it
+        # measured nothing.
+        "ran": any(p["ran"] and not p["degraded"] for p in measured),
         "entity_type": FTS_PROBE_ENTITY_TYPE,
         "limit": _FTS_PROBE_LIMIT,
         "probes": measured,
