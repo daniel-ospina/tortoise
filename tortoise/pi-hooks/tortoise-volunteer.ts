@@ -92,10 +92,35 @@ export const EXTENSION_NAME = "tortoise-volunteer.ts";
  *  volunteered context from user text and from capture. */
 export const CUSTOM_TYPE = "tortoise-volunteer";
 export const DEFAULT_API_URL = "https://api.premiselabs.co";
-/** The reflex is a LOCAL CLI call on the turn's critical path: a turn must
- *  never become a wait. A timeout is a clean no-injection, exactly like an
- *  empty graph. */
-export const DEFAULT_TIMEOUT_MS = 3000;
+/**
+ * The reflex's budget, in milliseconds — MEASURED, not a guess (#2119).
+ *
+ * The reflex is a local CLI call on the turn's critical path, and 3000 (the
+ * first value here) was below the cost of a HEALTHY one: `tortoise volunteer`
+ * constructs `EmbeddingModel.get()` for its dense leg, which loads 199 weight
+ * tensors (~8.2 s per invocation on a 10-core box, load average 8 — the model
+ * is per-PROCESS, so every turn pays it), and the whole call measured ~9.0 s
+ * back to back. A budget under that does not bound a pathological seam; it
+ * makes a healthy one INERT ON EVERY TURN — and, worse, reports it as an
+ * `install-inert` breadcrumb, telling the operator to reinstall a working
+ * install. Two end-to-end grades (`tests/test_pi_volunteer_seam.py`) caught
+ * exactly that: 9 s of reflex, 3 s of budget, no injection.
+ *
+ * 30000 is the same ceiling Claude Code gives its equivalent per-turn
+ * injection seam (`UserPromptSubmit` hooks default to 30 s; a timed-out hook
+ * is cancelled and its injected context discarded — docs, fetched 2026-11-08),
+ * and it sits below the reflex's own model-load budget
+ * (`EmbeddingModel._LOAD_TIMEOUT_S = 90 s`, #1349 measured a ~57 s cold load on
+ * a 2 GB VM) so a cold machine still fits. It bounds a BROKEN reflex to one
+ * bounded wait; it does not set the latency of a healthy one — that is ~9 s
+ * here and is the reflex's cost, not this constant's.
+ *
+ * Override per machine with `{"volunteer": {"timeoutMs": N}}` in
+ * `~/.pi/agent/tortoise-config.json`. A timeout is a clean no-injection
+ * (`status: "timeout"`), and it is NOT an inert install — see
+ * :func:`resolveBlock`.
+ */
+export const DEFAULT_TIMEOUT_MS = 30000;
 /** The turn text is SEARCHED, never forwarded whole: `tortoise volunteer`
  *  validates a ≤15 KiB window, so a longer prompt would be refused as a bad
  *  request rather than silently narrowed. */
@@ -311,7 +336,7 @@ export function runReflexCommand(
   prompt: string,
   sessionId: string,
   timeoutMs: number,
-): Promise<{ ok: boolean; stdout: string; error: string }> {
+): Promise<{ ok: boolean; stdout: string; error: string; timedOut: boolean }> {
   return new Promise((resolve) => {
     const args = ["volunteer", "--json"];
     if (sessionId) args.push("--session-id", sessionId);
@@ -321,10 +346,26 @@ export function runReflexCommand(
       { timeout: timeoutMs, maxBuffer: 1 << 20 },
       (error, stdout, stderr) => {
         if (error) {
-          resolve({ ok: false, stdout: String(stdout ?? ""), error: String(stderr ?? "") || error.message });
+          // A TIMEOUT is not a failure of the install, and node reports both
+          // through the same `error` — with an EMPTY stderr, so the existing
+          // `stderr || error.message` fell through to the useless
+          // "Command failed: …" body. `execFile` sets `killed` only when IT
+          // killed the child, and leaves `code` null for a signal death;
+          // `maxBuffer` overflow also sets `killed` but carries
+          // `code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER"`, so excluding a non-null
+          // code keeps a real overflow reportable (measured against node 24).
+          const timedOut = error.killed === true && error.code === null &&
+            error.signal === "SIGTERM";
+          resolve({
+            ok: false,
+            stdout: String(stdout ?? ""),
+            error: String(stderr ?? "").trim() ||
+              (timedOut ? `timed out after ${timeoutMs}ms` : error.message),
+            timedOut,
+          });
           return;
         }
-        resolve({ ok: true, stdout: String(stdout ?? ""), error: "" });
+        resolve({ ok: true, stdout: String(stdout ?? ""), error: "", timedOut: false });
       },
     );
     // A CLI that exits before reading stdin raises EPIPE on the write; that is
@@ -376,8 +417,8 @@ export async function runReflexHosted(
   sessionId: string,
   timeoutMs: number,
   fetchImpl: typeof fetch = fetch,
-): Promise<ReflexResult | null> {
-  if (!apiKey) return null;
+): Promise<{ result: ReflexResult | null; timedOut: boolean }> {
+  if (!apiKey) return { result: null, timedOut: false };
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -393,9 +434,9 @@ export async function runReflexHosted(
       }),
       signal: controller.signal,
     });
-    if (!response.ok) return null;
+    if (!response.ok) return { result: null, timedOut: false };
     const body = (await response.json().catch(() => null)) as Record<string, unknown> | null;
-    if (!body || typeof body !== "object") return null;
+    if (!body || typeof body !== "object") return { result: null, timedOut: false };
     const block = textOf(body.block) || textOf(body.context);
     const surfaced = Array.isArray(body.surfaced)
       ? body.surfaced
@@ -406,9 +447,11 @@ export async function runReflexHosted(
           )
           .filter((label) => label !== "")
       : [];
-    return { block, surfaced };
+    return { result: { block, surfaced }, timedOut: false };
   } catch {
-    return null;
+    // Same distinction as the CLI leg: our OWN abort means the endpoint did not
+    // answer in budget (slow, not absent), which is not an inert install.
+    return { result: null, timedOut: controller.signal.aborted };
   } finally {
     clearTimeout(timer);
   }
@@ -517,12 +560,15 @@ export function sessionKeyOf(ctx: unknown): string {
   return "";
 }
 
-/** What one turn's reflex attempt concluded. Three states, because "the graph
- *  is empty" and "this install cannot run" are different facts and the second
- *  one must leave evidence (#4314). */
+/** What one turn's reflex attempt concluded. Four states, because "the graph
+ *  is empty", "this install cannot run" and "the reflex is merely SLOW" are
+ *  different facts: only the second one is evidence about the install (#4314),
+ *  and reporting a slow-but-healthy reflex as inert sends the operator to
+ *  reinstall something that works. */
 export type ReflexVerdict =
   | { status: "block"; result: ReflexResult }
   | { status: "empty" }
+  | { status: "timeout"; detail: string }
   | { status: "inert"; detail: string };
 
 /**
@@ -530,9 +576,17 @@ export type ReflexVerdict =
  * the hosted endpoint.
  *
  * `empty` is the ordinary answer — the reflex RAN and nothing cleared the
- * confidence gate — and it stays silent. `inert` means nothing could run at
- * all (no candidate resolved, every candidate failed, no hosted key, a
- * refused request): the caller records the breadcrumb.
+ * confidence gate — and it stays silent. `timeout` means a reflex RAN and did
+ * not finish in budget: silence, and NO evidence about the install, because the
+ * install is demonstrably working (it started the process). `inert` means
+ * nothing could run at all (no candidate resolved, every candidate failed, no
+ * hosted key, a refused request): the caller records the breadcrumb.
+ *
+ * A timeout ABORTS the chain rather than falling through to the next candidate.
+ * A slow reflex is slow in the reflex, not in the path it was found on, so the
+ * next candidate would spend the same budget again and multiply the turn's
+ * wait by the size of the chain — the opposite of the bound this constant
+ * exists to provide. Exhausting the chain is what `inert` is for.
  */
 export async function resolveBlock(
   prompt: string,
@@ -545,6 +599,9 @@ export async function resolveBlock(
   let lastError = "";
   for (const command of chain) {
     const run = await runReflexCommand(command, prompt, sessionId, cfg.timeoutMs);
+    if (run.timedOut) {
+      return { status: "timeout", detail: `${command}: ${run.error}` };
+    }
     if (!run.ok) {
       lastError = `${command}: ${run.error || "non-zero exit"}`;
       continue;
@@ -579,10 +636,15 @@ export async function resolveBlock(
     cfg.timeoutMs,
     fetchImpl,
   );
-  if (!hosted) {
+  if (hosted.timedOut) {
+    return { status: "timeout", detail: `POST ${cfg.apiUrl}/v1/context timed out` };
+  }
+  if (!hosted.result) {
     return { status: "inert", detail: `POST ${cfg.apiUrl}/v1/context refused or timed out` };
   }
-  return hosted.block.trim() ? { status: "block", result: hosted } : { status: "empty" };
+  return hosted.result.block.trim()
+    ? { status: "block", result: hosted.result }
+    : { status: "empty" };
 }
 
 /**
@@ -622,7 +684,11 @@ export default function tortoiseVolunteer(
     } catch (error) {
       verdict = { status: "inert", detail: `reflex raised: ${String(error)}` };
     }
-    // An inert install must leave evidence; an empty graph must not (#4314).
+    // An inert install must leave evidence; an empty graph must not (#4314) —
+    // and neither must a SLOW one. A timeout says the reflex ran and the
+    // install works, so the canonical `capture-errors/pi-install.json` slot
+    // stays untouched: an operator who reads "reinstall" off a breadcrumb
+    // written by a working install is being sent to fix nothing.
     if (verdict.status === "inert") {
       recordInstallInert(
         `${verdict.detail} — injected nothing`,
@@ -633,6 +699,7 @@ export default function tortoiseVolunteer(
       return null;
     }
     if (verdict.status === "empty") return null;
+    if (verdict.status === "timeout") return null;
     return verdict.result;
   };
 

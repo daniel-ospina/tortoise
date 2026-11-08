@@ -363,6 +363,98 @@ test("a command that never reads stdin still resolves (EPIPE is not a throw)", a
   assert.equal(run.ok, true);
 });
 
+test("the reflex budget covers a HEALTHY reflex — the 3 s default made this seam inert", () => {
+  // #2119 measured: `tortoise volunteer` constructs `EmbeddingModel.get()`,
+  // which loads 199 weight tensors (~8.2 s, per PROCESS — every turn pays it),
+  // so a whole healthy call is ~9.0 s. The seam first shipped a 3000 ms budget,
+  // i.e. below the cost of a WORKING reflex: it injected nothing on every
+  // turn, wrote a false `install-inert` breadcrumb, and the two end-to-end
+  // grades in `tests/test_pi_volunteer_seam.py` failed on exactly that.
+  //
+  // The floor is the guard, not the exact number: tightening the budget back
+  // under a measured healthy call re-creates inert-by-construction, and
+  // nothing else in this file would notice.
+  assert.ok(
+    DEFAULT_TIMEOUT_MS >= 10000,
+    `DEFAULT_TIMEOUT_MS is ${DEFAULT_TIMEOUT_MS}ms — below the ~9.0 s a HEALTHY ` +
+      `reflex measures (8.2 s of it is the embedder load), so the seam would ` +
+      `be inert on every turn`,
+  );
+});
+
+test("a TIMEOUT is not an inert install: no breadcrumb, and the chain stops", async () => {
+  const home = tmpHome();
+  const crumbs = join(home, "capture-errors");
+  // Candidate 1 never finishes inside the budget; candidate 2 would succeed
+  // and touch `ran`, which must NOT exist — a slow reflex is slow in the
+  // reflex, so re-running the same budget on the next candidate would only
+  // multiply the turn's wait.
+  const slow = fakeCli(join(home, "bin"), `sleep 5`);
+  const ran = join(home, "venv-ran");
+  const venvCli = join(home, "venv", "bin", "tortoise");
+  mkdirSync(join(home, "venv", "bin"), { recursive: true });
+  writeFileSync(
+    venvCli,
+    `#!/bin/sh\ntouch ${JSON.stringify(ran)}\nprintf '%s' '{"block":"## Memory"}'\n`,
+  );
+  chmodSync(venvCli, 0o755);
+  assert.ok(slow.endsWith("tortoise"));
+
+  const cfgPath = join(home, "tortoise-config.json");
+  writeFileSync(cfgPath, JSON.stringify({ volunteer: { timeoutMs: 300 } }));
+  const pi = mockPi();
+  tortoiseVolunteer(pi as never, {
+    env: { PATH: join(home, "bin"), VIRTUAL_ENV: join(home, "venv") },
+    home,
+    configPath: cfgPath,
+    breadcrumbDir: crumbs,
+  });
+  assert.equal(
+    await pi.handlers.before_agent_start({ messageType: "user", prompt: "q" }, SESSION_CTX()),
+    undefined,
+    "a timed-out reflex injects nothing",
+  );
+  assert.equal(existsSync(ran), false, "the chain must abort on the first timeout");
+  assert.equal(
+    existsSync(join(crumbs, "pi-install.json")),
+    false,
+    "a SLOW-but-working reflex must not read as an inert INSTALL (#4314) — the " +
+      "operator would be told to reinstall something that works",
+  );
+
+  // …and the verdict says so, so the distinction is not only observable at the
+  // breadcrumb: `inert` still means "nothing could run at all".
+  const verdict = await resolveBlock(
+    "q",
+    "",
+    readVolunteerConfig({ TORTOISE_COMMAND: slow }, cfgPath),
+    [],
+  );
+  assert.equal(verdict.status, "timeout");
+  assert.match(verdict.status === "timeout" ? verdict.detail : "", /timed out after 300ms/);
+});
+
+test("runReflexCommand reports a timeout as a TIMEOUT, a non-zero exit as a failure", async () => {
+  const home = tmpHome();
+  const slow = await runReflexCommand(fakeCli(join(home, "a"), "sleep 5"), "q", "", 250);
+  assert.equal(slow.ok, false);
+  assert.equal(slow.timedOut, true, "execFile's SIGTERM-kill is the timeout signal");
+  assert.match(slow.error, /timed out after 250ms/, "not the opaque `Command failed: …`");
+
+  const broken = await runReflexCommand(fakeCli(join(home, "b"), "exit 3"), "q", "", 5000);
+  assert.equal(broken.ok, false);
+  assert.equal(broken.timedOut, false, "a real failure is NOT a timeout");
+
+  const fine = await runReflexCommand(
+    fakeCli(join(home, "c"), `printf '%s' '{"block":""}'`),
+    "q",
+    "",
+    5000,
+  );
+  assert.equal(fine.ok, true);
+  assert.equal(fine.timedOut, false);
+});
+
 test("no reflex and no key: an inert breadcrumb lands in the canonical slot; an empty graph leaves none", async () => {
   const home = tmpHome();
   const crumbs = join(home, "capture-errors");
