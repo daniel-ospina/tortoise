@@ -1580,7 +1580,17 @@ exec {self.gh} "$@"
                     # this arm host-version dependent, so a raise above the floor
                     # shipped green on a newer host.
                     f'if [ "$1" = "-c" ]; then exec "{PYTHON}" -c \'import sys; '
-                    f'sys.version_info = {version!r}; exec(sys.argv[1])\' "$2"; fi\n'
+                    # ⛔ SPELLED AS A FULL FIVE-TUPLE, LIKE A REAL `version_info`
+                    # (#11202 review round 13). A bare `{version!r}` produced
+                    # `(3, 12, 0)` — no `releaselevel`/`serial` — so a
+                    # BEHAVIOUR-PRESERVING probe (`>= (3, 12, 0, "final", 0)`, which a
+                    # 3.12.3 interpreter answers True) was reported RED: the fake made
+                    # it False and the arm failed at `uv`'s exit 7. It was also not
+                    # quote-safe: `repr` of any string component emits `'final'`, which
+                    # closes the bash single-quoted `-c` word and leaves python with a
+                    # NameError. Spelling the components removes both.
+                    f'sys.version_info = ({version[0]}, {version[1]}, {version[2]},'
+                    ' "final", 0); exec(sys.argv[1])\' "$2"; fi\n'
                     "exit 0\n"
                 ))
                 self._write_exec(d / "uv", (
