@@ -52,9 +52,11 @@ WHY THIS IS NOT A DUPLICATE OF THE EXISTING CITATION GUARDS
 `tests/test_extractor_v4_doc_citations.py` (#8498) already hold this instrument,
 but neither reads this relation. `citation_rot` resolves a quoted `sym` against a
 `file.py:NNNN` whose symbol must still exist in that source file, and it states
-the same claim across several design documents declared as module constants
-(`DOC`, `STORAGE`, `ONTOLOGY`, `SEARCH`, `ONTOLOGY_CHANGELOG`, `INGEST`,
-`EVAL_SPEC`; the asserted set is `FACT_STATEMENTS_IN_SIBLINGS`) rather than one.
+the same claim across several design documents rather than one — the asserted set
+is `FACT_STATEMENTS_IN_SIBLINGS`, whose entries name `STORAGE`, `ONTOLOGY`,
+`EVAL_SPEC`, `INGEST` and `ONTOLOGY_CHANGELOG` (`DOC` is a declared module
+constant that carries no entry, and `SEARCH` does not exist at this head; the
+paragraph below records that `origin/main` adds it below `ONTOLOGY`).
 `doc_citations` does not use `file.py:NNNN` at all: it pins
 that §7's value-gate row names the SHIPPED symbols (`value_gate._REFERENCE` /
 `identifier_only()`) and that those symbols behave as the row says. Neither reads
