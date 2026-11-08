@@ -531,6 +531,35 @@ def test_a_bypass_in_the_register_holds_row_two(monkeypatch):
     assert any("tortoise.y::_store_event" in n for n in row.notes if "BYPASS" in n), row.notes
 
 
+def test_a_census_bypass_holds_row_two_even_when_the_register_RESOLVES_the_writer(monkeypatch):
+    """The bypass hold is a property of the WRITER, not of the row's ability to resolve its label.
+
+    ⛔ `#11492`'s round-2 review (both reviewers) measured the inverse: `real_bypasses` was derived
+    from the still-unresolved population, so a register declaration that resolved a writer's label
+    also removed it from the population a `bypass` is read from — the better the declaration, the
+    fewer defects the row could see, and a census-class `bypass` on a declared writer would read
+    `MET` in no note. It is now computed over every writer.
+    """
+    writers = _row_two_population()
+    census = dict(probe.WRITER_CENSUS)
+    census["tortoise.y::_store_event"] = (
+        probe.CENSUS_BYPASS, "injected for this test: a REAL bypass")
+    monkeypatch.setattr(probe, "WRITER_CENSUS", census)
+    monkeypatch.setattr(probe, "embedding_writers", lambda: writers)
+    # …and the register DOES resolve that writer, which is the case that used to hide it.
+    monkeypatch.setattr(
+        probe, "declared_writers",
+        lambda: _row_two_declarations(**{
+            "tortoise.y::_store_event": _store_declared(
+                "tortoise.y::_store_event", ("Event",)),
+            "tortoise.z::_reads_a_vector": _store_declared(
+                "tortoise.z::_reads_a_vector", NO_LIVE_VECTOR)}))
+    row = probe.score_path_bullet()
+    assert row.verdict == "PARTIAL", row.observed
+    assert any("REAL BYPASSES" in n for n in row.notes), row.notes
+    assert any("tortoise.y::_store_event" in n for n in row.notes if "BYPASS" in n), row.notes
+
+
 def test_a_runtime_label_declaration_holds_row_two_without_calling_it_unresolved(monkeypatch):
     """`#11492` — `labels-at-runtime` holds the row, and it is NOT the "unresolved writers" hold.
 
@@ -580,17 +609,23 @@ def test_an_UNREADABLE_register_is_UNMEASURED_not_a_green_row_two(monkeypatch):
     def _unreadable():
         raise RuntimeError("register exploded")
 
-    monkeypatch.setattr(probe, "embedding_writers", lambda: {
-        "tortoise.x::_upsert_point": {
-            "callee": probe.SEAM_CALL, "at": "tortoise/x.py:1",
-            "kind": "gated", "label": "Point", "callees": frozenset(),
-        },
-    })
+    # ⛔ The population matters: with only GATED writers there is nothing to mis-attribute, and
+    # the first version of this test injected exactly that — so it stayed green while the row
+    # named all nineteen outside-gate writers as "nothing in the product says which label they
+    # store on" in the same cell that said none was blamed on the product (`#11492`'s round-2
+    # review, blocking). `_row_two_population()` carries the unresolved writers this must not
+    # blame.
+    monkeypatch.setattr(probe, "embedding_writers", _row_two_population)
     monkeypatch.setattr(probe, "declared_writers", _unreadable)
     row = probe.score_path_bullet()
     assert row.verdict == "PARTIAL", row.observed
     assert any("UNMEASURED" in n for n in row.notes), row.notes
     assert any("register exploded" in n for n in row.notes), row.notes
+    joined = " ".join(row.notes)
+    assert "unresolved writers" not in joined, (
+        "an unreadable register resolves NOTHING, so it must not also assert that the product "
+        f"declares nothing for these writers: {row.notes}")
+    assert "no declaration can answer" not in joined, row.notes
 
 
 def test_a_malformed_stores_declaration_holds_row_two(monkeypatch):

@@ -48,8 +48,8 @@ its CLASS cannot express (the `EXEMPT` docstring above says so in its own words:
 needs the difference must carry it"*). Each declaration therefore also carries `stores`: the graph
 labels the writer's vector is stored on, or :data:`NO_LIVE_VECTOR` / :data:`LABELS_AT_RUNTIME`.
 ⛔ It is declared here rather than derived by the instrument because the derivation cannot reach it:
-of the twenty outside-gate writers, the writer's own Cypher names a single label for four, two
-conflicting labels for two, and NO label for fourteen — the label usually lives in the caller's
+of the twenty outside-gate writers, the writer's own Cypher names a single label for three, two
+conflicting labels for two, and NO label for fifteen — the label usually lives in the caller's
 `MATCH` (`_embedding_repair_attempt` writes `set_embedding_clause("e")` inside
 `MATCH (e:Event {eventId:$eid})`). A second derivation in the grader would be a second owner of one
 fact; the field is that fact, declared once (the policy-as-data shape `#11444` applies to row 1).
@@ -257,8 +257,8 @@ CLASSES: tuple[str, ...] = (RECOGNISED_PRODUCER, EXEMPT)
 #:
 #: ⛔ Why this belongs in the declaration and NOT in a derivation inside the instrument: of the
 #: twenty outside-gate writers, the instrument's own label derivation (the `MERGE|CREATE (:Label`
-#: literal in the writer's body) resolves a single label for four, two conflicting labels for two,
-#: and **no label at all for fourteen** — because the label usually lives in the *caller's*
+#: literal in the writer's body) resolves a single label for three, two conflicting labels for two,
+#: and **no label at all for fifteen** — because the label usually lives in the *caller's*
 #: `MATCH`, not in the writer. `_embedding_repair_attempt` writes
 #: `set_embedding_clause("e")` inside `MATCH (e:Event {eventId:$eid})`; `_rebuild_all_replay`'s
 #: vector write is `MATCH (n:Point {id:$pid})` + `set_embedding_clause("n", "$emb")`. A second
@@ -706,9 +706,10 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
             # The label is its CALLER's: the door EXECUTES the caller's statement
             # (`proj.g.query(statement, params={"embedding": …})`), so the store is real and the
             # label is not the door's to name. ⛔ `no-live-vector` would be false — that is the exact
-            # mistake `#11492`'s review caught in this entry. The four call sites today pass an
-            # `(e:Event …)` clause (`tortoise.session_indexer::main`, `ingest_corpus`), but a label
-            # tuple here would be a claim about CALLERS, which nothing in this field re-derives.
+            # mistake `#11492`'s review caught in this entry. ⚠️ The FIVE call sites today
+            # (`session_indexer.py:822` and `sdk.py:36087/36163/36232/36258`) all name an
+            # `(e:Event …)` clause, but only three of them pass an `embedding` at all, and a label
+            # tuple here would be a claim about CALLERS that nothing in this field re-derives.
             stores=LABELS_AT_RUNTIME,
         ),
     ),

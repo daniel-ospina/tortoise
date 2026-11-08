@@ -1828,13 +1828,17 @@ def resolved_stored_labels(written: dict[str, str] | None = None,
     population: a collided identity's label was overwritten by the later definition, so no
     declaration can know it, and resolving one would erase a defect the row reports.
 
-    Returns a dict of five buckets, so the caller reports rather than summarises:
+    Returns a dict of buckets, so the caller reports rather than summarises:
 
     * ``labels`` — ``{writer: (label, …)}`` resolved from the declaration (all compared to served);
     * ``no_vector`` — declared `NO_LIVE_VECTOR` (named; contributes no label);
     * ``at_runtime`` — declared `LABELS_AT_RUNTIME` (HOLDS: no served-set comparison is possible);
     * ``undeclared`` — nothing declares it (HOLDS: the issue's own falsifier);
-    * ``violations`` — ``{writer: why}`` a declaration that does not answer the question (HOLDS).
+    * ``violations`` — ``{writer: why}`` a declaration that does not answer the question (HOLDS);
+    * ``classes`` — ``{writer: cls}`` for every DECLARED writer, so a `bypass` is read from the
+      declaration as well as from the census (row 2 holds on either);
+    * ``error`` — the register could not be read (HOLDS as UNMEASURED; every other bucket is
+      empty, because an unreadable declaration resolves nothing and blames nobody).
 
     Plus ``error``: a register that cannot be read yields NO resolution at all and a NAMED error,
     never an empty declaration (which would render every writer `undeclared` and blame the product
@@ -2001,7 +2005,13 @@ def score_path_bullet() -> Row:
     # depends", which cannot be compared to the served set. The at-runtime writers are ALSO
     # named by their own note below, so they are held once and reported twice, never counted as
     # `unresolved writers` (a different, sharper defect: nothing declares them at all).
-    unresolved_undeclared = sorted(
+    # ⛔ An UNREADABLE register means NOTHING was resolved, so every outside-gate writer is
+    # "unresolved" only in the sense that the instrument could not ask — and naming them as
+    # `unresolved writers` ("nothing in the product says which label they store on") would blame
+    # the PRODUCT for the instrument's own failure in the same cell that says it does not.
+    # `#11492`'s round-2 review measured exactly that contradiction on the live population; the
+    # UNMEASURED note is the whole of what an unreadable register can say.
+    unresolved_undeclared = [] if resolved["error"] else sorted(
         fn for fn in unknown if writers[fn]["kind"] in ("unresolved_write", "ungated")
         and fn not in resolved["at_runtime"] and fn not in resolved["violations"]
     )
@@ -2012,7 +2022,7 @@ def score_path_bullet() -> Row:
     # a `duplicate` (reported by its own note below). `#11492`'s review caught the first draft
     # narrowing the `unresolved writers` note to the declaration population and thereby dropping the
     # `gated` case from the evidence while still holding the row — a `PARTIAL` naming nobody.
-    unexplained = sorted(
+    unexplained = [] if resolved["error"] else sorted(
         set(unknown) - set(unresolved_undeclared) - set(resolved["at_runtime"])
         - set(resolved["violations"]) - set(duplicates)
     )
@@ -2102,6 +2112,12 @@ def score_path_bullet() -> Row:
     # label is unresolved.
     unresolved_writers = {fn: d for fn, d in writers.items()
                           if d["kind"] == "unresolved_write" and fn in unknown}
+    # ⛔ `real_bypasses` is computed over EVERY writer, never over `unresolved_writers`: a
+    # register declaration resolves a writer OUT of `unknown`, and deriving the bypass hold from
+    # that population would mean the better the declaration, the fewer defects the row can see —
+    # a census `bypass` on a declared writer would read `MET` and appear in no note (`#11492`'s
+    # round-2 review, both reviewers, verified by injection). The census class is a property of the
+    # WRITER; whether this row managed to resolve its label is not.
     # `unknown` is STILL wider than this population by three label-keyed groups, and none is a
     # census SUBJECT — but one of them is a census MEMBER, which is why the header says `N of M`
     # and the segments reconcile instead of pretending they are the same set:
@@ -2163,7 +2179,9 @@ def score_path_bullet() -> Row:
             f"UNCLASSIFIED writers (hold this row at PARTIAL — #10541's own "
             f"defect): {unclassified}"
         )
-    real_bypasses = sorted(by_class.get(CENSUS_BYPASS, []))
+    real_bypasses = sorted(
+        fn for fn in writers if _census_class(fn) == CENSUS_BYPASS
+    )
     if real_bypasses:
         notes.append(
             f"REAL BYPASSES (#10541 class 3 — a defect, not an exemption): "

@@ -321,14 +321,14 @@ assertion measures.
 ```text
 $ uv run python tools/test_lane.py run -- tests/test_dod_5090_probe.py -q
 121 passed, 1 skipped in 42.50s   # the #11088 transcript this row was cut from
-                                 # this tree: 158 collected, 157 passed, 1 skipped
+                                 # this tree: 159 collected, 158 passed, 1 skipped
 ```
 
-(115 collected before #11088's round 7; the file collects **158 in the tree this document sits in** —
+(115 collected before #11088's round 7; the file collects **159 in the tree this document sits in** —
 nine added by #11337, with `main` at 122, nineteen added by `#11444`'s writer-register falsifiers, one
-by `#11471`'s GATED-writer bypass arm, and seven by `#11492`'s row-2 register tests
-(`122 + 9 + 19 + 1 + 7 = 158`) — and
-reads 157 passed, 1 skipped on the docker lane. The
+by `#11471`'s GATED-writer bypass arm, and eight by `#11492`'s row-2 register tests
+(`122 + 9 + 19 + 1 + 8 = 159`) — and
+reads 158 passed, 1 skipped on the docker lane. The
 skip is the `<3.12` re-derive. ⚠️ The count is bound to THIS TREE, never to a branch head: a figure
 stated as *"at #11337's head"* is stale against the same tree it sits in as soon as one more test is
 added, and `test_the_census_doc_collects_what_the_file_collects` re-derives it from the file's own
