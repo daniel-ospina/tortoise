@@ -34,19 +34,14 @@ from __future__ import annotations
 
 import sys
 
-# #5128: a bare ambient `python3` (3.9 on the CLT host) would die inside the
-# stdlib calls below with an UNATTRIBUTED error, which reads as "the tool is
-# broken". The refusal names the one form that always resolves: `--help` needs no
-# `--source` token, whereas the bare path exits 2 on argparse's own usage error —
-# a SECOND unattributed error, the exact harm #5128 exists to stop.
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
 if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
-    print(
+    raise SystemExit(
         f"tools/build_site_icons.py requires Python >= 3.12 (got "
         f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
-        f"`uv run python tools/build_site_icons.py --help`",
-        file=sys.stderr,
+        f"`uv run python tools/build_site_icons.py`"
     )
-    raise SystemExit(4)
 
 import argparse
 import struct

@@ -1935,7 +1935,12 @@ def test_a_HEALTHY_SIBLING_at_the_same_url_is_never_written():
     # (which reds on main — #11182 — while this half is missing).
     from tests._embedded import _journal_append
 
-    _journal_append(endpoint.graph_name)
+    # Journal the LOCAL, not `endpoint.graph_name`: they are the same string
+    # (`resolve_db_endpoint` passes `graph_name` through verbatim), and the local
+    # is the one whose literal (`test_11070_dupurl_…`) the ownership census can
+    # PROVE owned. Reaching through the endpoint leaves the census with nothing
+    # decidable, which it now fails closed on (#11217 review round 5).
+    _journal_append(graph_name)
     g = client.select_graph(endpoint.graph_name)
     url = "session:dup-11152"
 
@@ -2283,7 +2288,15 @@ def test_a_duplicate_Session_row_does_not_double_the_census_on_a_REAL_graph():
     proj = SimpleNamespace(graph_name=endpoint.graph_name, db=client)
     # Epic #1647: a raw client bypasses `_assert_test_graph` and the per-test
     # wipe scope, so the graph must be OWNED before a peer can sweep it.
-    _journal_append(endpoint.graph_name)
+    #
+    # Journal the LOCAL, not `endpoint.graph_name`: `resolve_db_endpoint` passes
+    # `graph_name` through verbatim (`graph_name if graph_name is not None`), so
+    # they are the same string — but only the local's literal
+    # (`test_11070_dupsess_…`) carries an owned prefix the ownership census can
+    # PROVE. Reaching through the endpoint leaves the census nothing decidable,
+    # and it fails closed on that (#11217; same repair as the sibling site at
+    # `test_a_HEALTHY_SIBLING_at_the_same_url_is_never_written`).
+    _journal_append(graph_name)
     g = client.select_graph(endpoint.graph_name)
     url = "session:dup-sessions"
 
@@ -2344,7 +2357,11 @@ def test_the_off_switch_reports_the_ROW_level_census_against_a_REAL_graph():
                       username=endpoint.username, password=endpoint.password,
                       ssl=endpoint.ssl)
     proj = SimpleNamespace(graph_name=endpoint.graph_name, db=client)
-    _journal_append(endpoint.graph_name)
+    # Journal the LOCAL, not `endpoint.graph_name` — same value
+    # (`resolve_db_endpoint` passes `graph_name` through verbatim), but only the
+    # local's `test_11070_dupoff_…` literal carries an owned prefix the census
+    # can PROVE; reaching through the endpoint is what it fails CLOSED on.
+    _journal_append(graph_name)
     g = client.select_graph(endpoint.graph_name)
 
     previous = os.environ.pop("TORTOISE_11070_CENSUS_DEDUPE_DISABLED", None)
