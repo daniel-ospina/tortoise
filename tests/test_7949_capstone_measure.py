@@ -11378,3 +11378,85 @@ def test_the_records_zero_is_rederived_at_the_bases_it_names():
     assert _stated_zero.groups() == ("0", "1"), (
         f"the record states `{_stated_zero.group(0)}` while the bases measure 0 hit(s), exit 1 "
         "each — correct the RECORD, not the measurement")
+
+
+#: `capstone_measure.py:N` cites that live in files this bundle does NOT sweep, with the
+#: SYMBOL each one claims is at `:N`. The NUMBER is never typed here — it is read out of the
+#: citing file by the pattern below — so this table cannot itself go stale in the direction
+#: that matters (a typed number is the defect it exists to catch).
+_CROSS_FILE_PROBE_CITES = (
+    (
+        "docs/evidence/7949-capstone/probes/e1_e2_scores.py",
+        re.compile(r"`share_floor`'s `float\(value\)` \(`capstone_measure\.py:(\d+)`\)"),
+        ("return float(value)",),
+        "the `OverflowError` arm names the floor's own `float(value)` conversion",
+    ),
+    (
+        "tools/capstone_verdict_check.py",
+        re.compile(
+            r"written INTO the run block by the emitter\s*\n"
+            r"\s*# \(`capstone_measure\.py:(\d+)`\)"),
+        ('"a_row_census": a_census,',),
+        "#10982's key-set entry names where the emitter writes `a_row_census`",
+    ),
+    (
+        "tools/capstone_verdict_check.py",
+        re.compile(
+            r"``require_door_entered\(runs\)`` BEFORE it reaches ``render_log``\s*\n"
+            r"#: \(``capstone_measure\.py:(\d+)`` vs ``:(\d+)``\)"),
+        ("def render_log(", "require_door_entered(runs)"),
+        "#11298/#11331's `door` entry names the two calls whose ORDER it argues from",
+    ),
+)
+
+
+def test_the_probes_cross_file_cites_resolve_to_the_symbols_they_name():
+    """Three `capstone_measure.py:N` cites sit in files no sweep here reads — so they rotted.
+
+    This PR's own 12-line `DOOR_PINNED_ON` entry at `:504` shifted every line below it by
+    **+2**, and three cites naming the probe from OUTSIDE this bundle moved with it. Two
+    were already stale on `main` by hundreds of lines (measured: `:519` for a value at
+    `:1001`, `:4019` for `:4046`), so the +2 was the smaller half of each defect — the
+    rot was structural, not this PR's: nothing re-checks a `file:line` string that no
+    suite reads, and `grep` for each number finds only the cite itself, so the wrong
+    number is silent in BOTH directions. That is this bundle's own thesis, found inside
+    its own citations.
+
+    ⛔ What is pinned is the PAIR (which line, which symbol), and the line is read OUT of
+    the citing file — never typed here. Typing the number would repeat the defect: the
+    table would go stale exactly as the prose it watches does, and a fixer would be
+    re-pointing two copies of the same fact. The SYMBOL is the durable half, which is
+    why the repair re-points numbers at symbols that did not move.
+
+    Non-vacuity, measured at the pre-fix head: every arm reds there — `:519` is a
+    `TORTOISE_VALUE_GATE` comment (the value is at `:1001`), `:4019` is the
+    `"probe": "docs/…/capstone_measure.py",` key (the census key is at `:4046`), and
+    `:4164`/`:4299` are a `REFUSED` f-string and `"verdict": verdict_word(...)` (the pair
+    the entry means is `:3782`/`:4191`). Re-staling any one of them reds this arm again.
+    """
+    probe = PROBE.read_text(encoding="utf-8").splitlines()
+    for rel, pattern, symbols, claim in _CROSS_FILE_PROBE_CITES:
+        source = (_REPO / rel).read_text(encoding="utf-8")
+        hits = pattern.findall(source)
+        assert len(hits) == 1, (
+            f"{rel} must state this cite exactly ONCE — found {len(hits)} matches of "
+            f"{pattern.pattern!r}. A second copy is a second thing to re-point, and one of "
+            "the two will be missed")
+        nums = hits[0] if isinstance(hits[0], tuple) else (hits[0],)
+        assert len(nums) == len(symbols), (
+            f"the pattern reads {len(nums)} line number(s) but {len(symbols)} symbol(s) are "
+            "pinned — an unpaired number is a cite nothing checks")
+        for num, symbol in zip(nums, symbols, strict=True):
+            line = probe[int(num) - 1].strip()
+            assert symbol in line, (
+                f"{rel} cites capstone_measure.py:{num} — {claim} — but that line reads "
+                f"{line!r}, which does not contain {symbol!r}. Re-derive the number from the "
+                "tree (grep the symbol); do NOT move the symbol to fit the cite")
+            # A cite that lands on the DEFINITION satisfies `symbol in line` too —
+            # `:899` reads `def require_door_entered(runs) -> dict:`, and that is the
+            # function, not the call the entry argues about. The shape is asserted
+            # alongside the token so the pair cannot silently become def-vs-def.
+            assert line.startswith("def ") == symbol.startswith("def "), (
+                f"capstone_measure.py:{num} is cited for {symbol!r}, but that line is "
+                f"{'a definition' if line.startswith('def ') else 'not a definition'} — the "
+                "entry names the renderer's DEFINITION against the gate's CALL")
