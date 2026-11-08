@@ -417,6 +417,15 @@ def _wrapper_argument_defect(head: str, args: list[str], cwd: Path, root: Path) 
     # cycle). Measured: `export`/`unset`/`umask`/`set` refused the same carriage;
     # only the newly-added builtins admitted it.
     if head in {"exit", "return", "shift", "break", "continue"}:
+        # ⛔ AT MOST ONE. `man bash` gives `exit [n]` / `return [n]` / `shift [n]` /
+        # `break [n]` / `continue [n]`, and the shell ENFORCES the arity: measured,
+        # `bash -c 'exit 0 0 && echo RAN'` prints "exit: too many arguments" and the
+        # chain status is 1, so the graded command never ran. Validating each
+        # argument without bounding the COUNT accepted `cmd:exit 0 0 && uv run
+        # pytest …` (sixth review cycle) — a record admitted for a command the shell
+        # refuses, which is the same class of false PASS this branch exists to close.
+        if len(args) > 1:
+            return f"takes at most one integer argument, got {len(args)}"
         for arg in args:
             if not _CONTROL_OPERAND.match(arg):
                 return f"{_short(arg)} is not a numeric argument"
@@ -780,10 +789,14 @@ _WRAPPER_VERBS: Final[frozenset[str]] = frozenset(
         # head without reading its arguments is the exact bypass that function
         # exists to close, and doing it here let `… && exit "I did not run this"`
         # reach `verified` / exit 0 (fifth review cycle).
-        # `pushd`/`popd` are DELIBERATELY absent: their operand is a DIRECTORY, and
-        # grading it on existence is box-dependent (the same cost `source` discloses),
-        # while leaving it ungraded re-opens that prose carriage. A record using them
-        # is refused as prose — the same known-open false block as `mkdir` (#11520).
+        # `pushd`/`popd` are DELIBERATELY absent: they manipulate a directory
+        # STACK whose contents this parser cannot model, so the working directory
+        # after them is UNKNOWABLE and no later artifact can be proven to have
+        # resolved from it. (Their operand being a directory is not the reason — the
+        # `cd` arm grades a directory operand too, and carries the same disclosed
+        # box-dependence as `source`.) A record using them is refused as prose — the
+        # same known-open false block as `mkdir` (#11520), and pinned by
+        # `test_a_pushd_or_popd_segment_is_a_known_false_block`.
         "exit",
         "return",
         "shift",
@@ -1451,47 +1464,68 @@ def _command_body(raw: str, base: Path, root: Path) -> tuple[str, Path, str]:
         cd = _CD_SEGMENT.match(body)
         if cd:
             target = cd.group(1).strip().strip("'\"")
-            # ⛔ STRIP THE OPTIONS FIRST, so every spelling of one destination grades
-            # identically. `cd -P /tmp` and `cd /tmp` both mean /tmp, but the leading
-            # `-` made the flag spelling skip grading ENTIRELY while the bare one was
-            # refused — the verdict turned on a dash (fifth review cycle). `--` ends
-            # option parsing.
-            target = re.sub(r"^(?:-[PLe@]+|--)\s*", "", target).strip()
-            if target and not target.startswith("-"):
-                try:
-                    moved = (root / target).resolve()
-                except (OSError, ValueError):
-                    moved = None
-                # ⛔ THE PRECONDITION IS THE SHELL'S, NOT CONTAINMENT. `cd X` fails iff
-                # X does not exist or is not a directory; when it SUCCEEDS the later
-                # segments ran, so refusing a resolvable `cd /tmp` asserted a "failing
-                # `cd`" that did not fail and threw away the whole uncovered list
-                # (fifth review cycle; `origin/main` accepted the record). Containment
-                # needs no test here: a moved `cwd` outside the tree is still
-                # overridden by the ARTIFACT rule, which requires every named target to
-                # live inside the tree (`_names_artifact`), so `cd /tmp && pytest
-                # tests/x` is refused for naming nothing — the right reason.
-                # ⛔ `is_dir()` is load-bearing: `(root / target).resolve()` does NOT
-                # fail on a name that does not exist — it returns the joined path — so
-                # an existence test alone accepted `cd I did not run this` and graded
-                # the real command afterwards.
-                # ⛔ NOT silently ignored. In the shell a FAILING `cd` short-circuits the
-                # `&&`, so no later segment can have run — and this arm used to
-                # `continue` regardless, leaving `cwd` unchanged and grading the real
-                # command anyway. Measured, `cmd:uv run pytest
-                # tests/test_9664_capstone_verdict_ledger.py -q && cd I did not run
-                # this` was ACCEPTED while the naked `… && I did not run this` was
-                # REFUSED: the same disclaimer, admitted by prefixing it with a `cd`
-                # that cannot succeed.
-                if moved is None or not moved.is_dir():
-                    return (
-                        "",
-                        base,
-                        f"the `cd` segment {segment!r} does not name a directory, and a "
-                        "failing `cd` short-circuits the `&&` — no later segment of "
-                        "this record can have run",
-                    )
-                cwd = moved
+            # ⛔ STRIP ALL THE OPTIONS, REPEATEDLY, so every spelling of one
+            # destination grades identically. `cd -P /tmp`, `cd -L /tmp` and
+            # `cd /tmp` all mean /tmp, but a single-group strip left
+            # `cd -P -L /tmp` with `-L /tmp` still dashed — which the check below
+            # silently `continue`d, so the segment was neither graded nor APPLIED and
+            # the command after it was graded from the UNMOVED directory. Measured
+            # (sixth review cycle): `cmd:cd -P -L /tmp && uv run pytest tests/…` was
+            # ACCEPTED while bash provably runs it from `/tmp`, where the file does
+            # not exist — a record admitted for a command that did not run. `--` ends
+            # option parsing and `-` means OLDPWD.
+            target = re.sub(r"^(?:(?:-[PLe@]+|--)\s*)+", "", target).strip()
+            # ⛔ A target that is STILL empty or dashed has an UNKNOWABLE working
+            # directory (`cd --` is `$HOME`, `cd -` is `$OLDPWD`, and an unrecognised
+            # option is neither). Grading a later artifact from the unmoved `cwd`
+            # would admit a record for a command the shell runs somewhere else, so
+            # this is refused instead — the one case where refusing is the
+            # fail-closed answer rather than the false block.
+            if not target or target.startswith("-"):
+                return (
+                    "",
+                    base,
+                    f"the `cd` segment {segment!r} does not name a directory this "
+                    "ledger can resolve (it is `$HOME`/`$OLDPWD` or an unrecognised "
+                    "option), so no later segment can be proven to have run from it",
+                )
+            try:
+                moved = (root / target).resolve()
+            except (OSError, ValueError):
+                moved = None
+            # ⛔ THE PRECONDITION IS THE SHELL'S, NOT CONTAINMENT. `cd X` fails iff
+            # X does not exist or is not a directory; when it SUCCEEDS the later
+            # segments ran, so refusing a resolvable `cd /tmp` asserted a "failing
+            # `cd`" that did not fail and threw away the whole uncovered list
+            # (fifth review cycle; `origin/main` accepted the record). Containment
+            # needs no test here: a moved `cwd` outside the tree is still
+            # overridden by the ARTIFACT rule, which requires every named target to
+            # live inside the tree (`_names_artifact`), so `cd /tmp && pytest
+            # tests/x` is refused for naming nothing — the right reason.
+            # ⛔ `is_dir()` is load-bearing: `(root / target).resolve()` does NOT
+            # fail on a name that does not exist — it returns the joined path — so
+            # an existence test alone accepted `cd I did not run this` and graded
+            # the real command afterwards.
+            # ⛔ This DOES make the verdict box-dependent for `cd` wrappers (a
+            # `.venv` target exists on the authoring box and in no clone), the same
+            # disclosed cost `source` carries. Tracked with it on #11520.
+            # ⛔ NOT silently ignored. In the shell a FAILING `cd` short-circuits the
+            # `&&`, so no later segment can have run — and this arm used to
+            # `continue` regardless, leaving `cwd` unchanged and grading the real
+            # command anyway. Measured, `cmd:uv run pytest
+            # tests/test_9664_capstone_verdict_ledger.py -q && cd I did not run
+            # this` was ACCEPTED while the naked `… && I did not run this` was
+            # REFUSED: the same disclaimer, admitted by prefixing it with a `cd`
+            # that cannot succeed.
+            if moved is None or not moved.is_dir():
+                return (
+                    "",
+                    base,
+                    f"the `cd` segment {segment!r} does not name a directory, and a "
+                    "failing `cd` short-circuits the `&&` — no later segment of "
+                    "this record can have run",
+                )
+            cwd = moved
             continue
         try:
             _tokens = shlex.split(body)

@@ -1885,6 +1885,79 @@ def test_a_tilde_in_a_source_wrapper_is_expanded(tmp_path):
     )
 
 
+def test_a_stacked_cd_option_group_is_stripped_not_skipped(tmp_path):
+    """A second option group must not turn the `cd` invisible.
+
+    ⛔ MEASURED false PASS (sixth review cycle): stripping exactly ONE option group
+    left `cd -P -L /tmp` with `-L /tmp` still dashed, and the dashed target was
+    silently `continue`d — so the segment was neither graded nor APPLIED and the
+    command after it was graded from the UNMOVED directory. `cmd:cd -P -L /tmp &&
+    uv run pytest tests/…` was ACCEPTED while bash runs it from `/tmp`, where the
+    file does not exist. The single-group `cd -P tools` and the stacked
+    `cd -P -L tools` must also agree.
+    """
+    for command in (
+        "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q && cd -P tools",
+        "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q && cd -P -L tools",
+        "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q && cd -L -- tools",
+    ):
+        proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, command])]))
+        assert proc.returncode == cl.EXIT_CLEAN, (
+            f"{command!r} was REFUSED ({proc.returncode}) — the option groups are not "
+            f"all stripped, so the spellings disagree\n{proc.stdout}{proc.stderr}"
+        )
+    # The false PASS: bash cds to /tmp, so the artifact below cannot resolve there.
+    for command in (
+        "cmd:cd -P -L /tmp && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
+        "cmd:cd -L -- /tmp && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
+    ):
+        proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, command])]))
+        assert proc.returncode == cl.EXIT_INVALID, (
+            f"{command!r} was ACCEPTED ({proc.returncode}) — the `cd` moved to /tmp, "
+            f"where the cited artifact does not exist\n{proc.stdout}{proc.stderr}"
+        )
+
+
+def test_a_cd_with_no_resolvable_directory_is_refused(tmp_path):
+    """`cd --` is `$HOME` and `cd -` is `$OLDPWD`: neither cwd can be known.
+
+    ⛔ Grading a later artifact from the UNMOVED directory would admit a record for
+    a command the shell runs somewhere else, so this is the one `cd` case where
+    refusing is the fail-closed answer rather than the false block. Disclosed in the
+    ledger's NOT-CLOSED block as part of the `cd` box-dependence (#11520).
+    """
+    for command in (
+        "cmd:cd -- && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
+        "cmd:cd - && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
+    ):
+        proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, command])]))
+        assert proc.returncode == cl.EXIT_INVALID, (
+            f"{command!r} was ACCEPTED ({proc.returncode}) — its working directory "
+            f"cannot be determined\n{proc.stdout}{proc.stderr}"
+        )
+
+
+def test_a_pushd_or_popd_segment_is_a_known_false_block(tmp_path):
+    """KNOWN-OPEN (#11520): pushd/popd are refused, and the reason is the STACK.
+
+    ⛔ Not because their operand is a directory — the `cd` arm grades a directory
+    operand too. It is that pushd/popd manipulate a directory STACK this parser
+    cannot model, so the cwd after them is unknowable. Pinned because the refusal is
+    a new false block introduced by this branch (`origin/main` accepted both) and was
+    previously uncovered by any test.
+    """
+    for command in (
+        "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q && popd",
+        "cmd:pushd tools && uv run pytest ../tests/test_9664_capstone_verdict_ledger.py -q",
+    ):
+        proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, command])]))
+        assert proc.returncode == cl.EXIT_INVALID, (
+            f"{command!r} is no longer refused ({proc.returncode}) — the pushd/popd arm "
+            f"CLOSED. Invert this pin and drop the NOT-CLOSED sentence\n"
+            f"{proc.stdout}{proc.stderr}"
+        )
+
+
 def test_a_control_builtin_argument_is_graded_not_skipped(tmp_path):
     """A control builtin's argument has a GRAMMAR, and prose does not match it.
 
@@ -1905,6 +1978,20 @@ def test_a_control_builtin_argument_is_graded_not_skipped(tmp_path):
         assert proc.returncode == cl.EXIT_INVALID, (
             f"{command!r} was ACCEPTED ({proc.returncode}) — a control builtin's "
             f"argument is prose, not an integer\n{proc.stdout}{proc.stderr}"
+        )
+    # ⛔ ARITY: `man bash` allows ONE operand and the shell ENFORCES it. Measured,
+    # `bash -c 'exit 0 0 && echo RAN'` prints "exit: too many arguments" and the
+    # chain status is 1, so the graded command never ran. Validating each argument
+    # without bounding the count admitted these (sixth review cycle).
+    for command in (
+        "cmd:exit 0 0 && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
+        "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q && exit 0 0",
+        "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q && shift 1 2",
+    ):
+        proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, command])]))
+        assert proc.returncode == cl.EXIT_INVALID, (
+            f"{command!r} was ACCEPTED ({proc.returncode}) — the shell refuses more "
+            f"than one argument, so the chain short-circuits\n{proc.stdout}{proc.stderr}"
         )
 
 
