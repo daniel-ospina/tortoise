@@ -96,6 +96,17 @@ named and reachable.
 - The rubric is unchanged (`judge_rubric_id_hash 82d07b0de05daa48`, the
   verbatim `evaluate_qa.py` anscheck prompts). The **grader** is not the
   official one, and the direction of that bias is unknown.
+- **The judge's request body also gains one field**, for the same reason the
+  reader's does: the judge shares the reader's transport declaration
+  (`judge.py` → `self.disables_thinking = api_key_env in
+  THINKING_BY_DEFAULT_KEY_ENVS`), so a `deepseek:` spec adds a top-level
+  `thinking: {"type": "disabled"}` to each grading call. The official call
+  shape is otherwise reproduced verbatim (one user message, no system message,
+  `n=1`, `temperature=0`, `max_tokens=10`, no `response_format`); the `thinking`
+  field is the single deviation, and it exists so the grader does not spend its
+  10-token answer budget on hidden reasoning. Stated here because a run graded
+  under the official model does **not** send it — so the two configurations
+  differ by one request field as well as by model.
 - **The official judge is still servable**, and it takes BOTH the spec and
   that provider's key: name it
   (`TORTOISE_LME_JUDGE_MODEL=openrouter:openai/gpt-4o-2024-08-06` with
@@ -331,7 +342,7 @@ never a silent in-place edit (publication discipline, #2106 §7):
 | (machinery commit) | Report committed in PENDING state: protocol gates 1-4 passed (evidence below); steps 5+ (full 500-Q execution) not run. |
 | 2026-10-21 | #8486 follow-up (doc reconciliation, raised by the PR's fresh-context review): §1's **Ingest mode** row now states `v2` (it still said `deterministic`, which is mutually exclusive with the adjacent **Belief layer** row — the runner refuses `--activate-beliefs` on a deterministic graph, and the #8486 protocol injects `--ingest-mode v2 --activate-beliefs`). §3's ingest-mode note and §4's exact command follow. No metric, gate or receipt value changed — the run is still PENDING. |
 | 2026-10-21 | #8486 follow-up, second pass (same review): §3's **Does NOT measure** bullet dropped its claim that the eval graphs contain no IMPL/NAND operators, and its `dataset_audit.py` attribution — both are false for the `v2` configuration §1 records (the extractor writes IMPL/NAND operators, which is what `--activate-beliefs` promotes and EPs), so the bullet now names what is genuinely unmeasured (why-context assembly, and the belief layer's effect on the RRF retrieval score). §1's **Belief layer** row now defines all four resolved states and reconciles the disclosure bar with them: `partial` is the expected state of a correctly-armed run, and the bar is per question (`questions_with_ep` of `questions`), not all-or-nothing. Pinned by `tests/longmem_eval/test_measurement_posture.py` (the report must define every state the module can return and must not restate the operators claim). No metric, gate or receipt value changed — the run is still PENDING. |
-| 2026-11-07 | #8486 (configuration half, PR #11493) — **five in-place edits, recorded here per the discipline in the paragraph above**: §1's **Reader** row (`openrouter:deepseek/deepseek-v4-flash` → `deepseek:deepseek-v4-flash`), §1's **Judge** row (`openai/gpt-4o-2024-08-06` → `deepseek:deepseek-v4-flash`), §1's **Cost** row ("OpenRouter key-usage delta" → "provider key-usage delta"), §5's receipt `judge_pin` row (the official-anscheck pin → `unpinned:deepseek-v4-flash` under the ruling), and §4's step-5 command (the `TORTOISE_LME_JUDGE_MODEL='openrouter:openai/gpt-4o-2024-08-06'` line removed — the default is now the ruled configuration). The disclosure of what a run of that configuration may and may not claim is **§1.1**, added in the same change. No metric, gate or receipt *value* changed — `run_status` is still PENDING, every number is still `PENDING`, and the historical 2026-09-04 gate-4 receipt pin in `gate-evidence.json` is retained untouched with an `errata` entry naming the ruling that supersedes it. |
+| 2026-11-07 | #8486 (configuration half, PR #11493) — **seven in-place edits, recorded here per the discipline in the paragraph above**: §1's **Reader** row (`openrouter:deepseek/deepseek-v4-flash` → `deepseek:deepseek-v4-flash`), §1's **Judge** row (`openai/gpt-4o-2024-08-06` → `deepseek:deepseek-v4-flash`), §1's **Cost** row ("OpenRouter key-usage delta" → "provider key-usage delta"), §2's **QA accuracy** metric row ("official anscheck judge" → "**official rubric**; judge model per §1.1" — the rubric is unchanged, the grader is not), §3's **Measures** bullet (the same correction in prose: the anscheck *rubric* is official, the model that applies it is the run's judge), §5's receipt `judge_pin` row (the official-anscheck pin → `unpinned:deepseek-v4-flash` under the ruling), and §4's step-5 command (the `TORTOISE_LME_JUDGE_MODEL='openrouter:openai/gpt-4o-2024-08-06'` line removed — the default is now the ruled configuration). The disclosure of what a run of that configuration may and may not claim is **§1.1**, added in the same change. No metric, gate or receipt *value* changed — `run_status` is still PENDING, every number is still `PENDING`, and the historical 2026-09-04 gate-4 receipt pin in `gate-evidence.json` is retained untouched with an `errata` entry naming the ruling that supersedes it. |
 
 ## 10. Handoff to W7-b (#2106)
 

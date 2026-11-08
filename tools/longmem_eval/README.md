@@ -485,7 +485,15 @@ path via `--data` skips the download. Split S = `longmemeval_s_cleaned.json`
    servable comparability configuration). The judge API call replicates
    `evaluate_qa.py` exactly: a single user message (no system message),
    `n=1, temperature=0, max_tokens=10`, no `response_format` (JSON mode
-   would deviate from the official protocol). `--mock` = containment/
+   would deviate from the official protocol). ⚠️ ONE deliberate deviation
+   under the shipped default: the judge shares the reader's transport
+   declaration (`judge.py` → `disables_thinking = api_key_env in
+   reader.THINKING_BY_DEFAULT_KEY_ENVS`), so a `deepseek:` spec — which is
+   what the default is — adds a top-level `thinking: {"type": "disabled"}`
+   to each grading call. Without it the 10-token budget is spent on hidden
+   reasoning and `content` returns empty, which the label rule grades as
+   "no". It is **always absent for the OFFICIAL judge**, whose request stays
+   byte-identical to `evaluate_qa.py`. `--mock` = containment/
    abstention keyword judge.
 5. **Report** (`report.py`) — overall + task-averaged accuracy, the five
    paper categories (Information Extraction, Multi-Session Reasoning,
