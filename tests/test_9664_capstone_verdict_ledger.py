@@ -5498,8 +5498,10 @@ def test_a_truthy_non_True_TRACKED_answer_is_not_read_as_tracked(site, call, mon
 # there was one probe; after it there are two, and the divergence is the bug — one
 # refuses on a spawn failure, the other ABSTAINS (which counts the row). Nothing
 # pinned either half (`grep -c '_is_tracked_dir'` over this file was 0), so both
-# were free to regress. The three tests below pin the three answers, each with a
-# CONTROL so a tool that simply refused every directory could not pass them.
+# were free to regress. The tests below pin the three answers, each with a
+# CONTROL so a tool that simply refused every directory could not pass them — plus the
+# round-3 parity pin: the two arms must reach the SAME answer on ONE tree (the
+# bare/`GIT_DIR` abstaining shape), which is what the divergence was.
 # =============================================================================
 
 
@@ -5583,6 +5585,95 @@ def test_an_EMFILE_on_the_DIRECTORY_probe_cannot_manufacture_a_clean_exit(tmp_pa
     assert ok, why
     ok, why = cl._evidence_is_real("cmd:uv run pytest empty -v", repo)
     assert not ok and "holding no TRACKED file" in why, why
+
+
+def test_a_DIRECTORY_in_the_ABSTAINING_tree_gets_the_FILE_arms_answer(
+    tmp_path, monkeypatch, capsys
+):
+    """⛔ THE PARITY THE DOCSTRING CLAIMED AND THE CODE DID NOT DELIVER (#11474 round 3).
+
+    The abstaining shape was pinned for `_is_tracked` only: `grep -n 'GIT_DIR'` over
+    this file found ONE test and it drives the FILE arm. So the two probes judged one
+    tree TWO WAYS — the directory arm answered `rc 0 -> bool(stdout)` and `rc 1 ->
+    False` from the EXIT CODE alone, without the `rev-parse --is-inside-work-tree` gate
+    the file arm requires before either is a measurement.
+
+    ⛔ MEASURED ON GIT 2.43.0 AT THIS PIN'S OWN FIXTURE — asserted below rather than
+    quoted, so a future git that changes the pair makes this pin say so instead of
+    passing for the wrong reason:
+
+        git ls-files -- ':(literal)held'                            -> rc 0, EMPTY stdout
+        git rev-parse --is-inside-work-tree                         -> `false`, rc 0
+        git ls-files --error-unmatch -- ':(literal)held/inside.txt' -> rc 1
+
+    In the bare/`GIT_DIR` tree the FILE arm therefore abstains
+    (`_tracked_unprovable(probe)` -> `True`, #11503 Option 1, pinned end to end by
+    `test_an_ABSTAINING_tree_is_accepted_and_prints_the_NOTE`) while the DIRECTORY arm
+    read that same rc 0 as a MEASURED "holds no TRACKED file" and REFUSED
+    `cmd:uv run pytest held -v` — the command shape the arm was added for — with a
+    cause git never gave: it could not answer about a work tree at all, and a reader's
+    clone does hold those files.
+
+    ⛔ NON-VACUITY, MEASURED: reverting the probe gate to the shipped
+    `if proc.returncode == 0: return bool(proc.stdout.strip())` reddens the
+    `_is_tracked_dir(...) is True` assertion AND `_evidence_is_real` below (the row is
+    refused with "holding no TRACKED file").
+    """
+    bare = tmp_path / "bare.git"
+    subprocess.run(["git", "init", "--bare", "-q", str(bare)], check=True)
+    tree = tmp_path / "tree"
+    (tree / "held").mkdir(parents=True)
+    (tree / "held" / "inside.txt").write_text("held\n", encoding="utf-8")
+    monkeypatch.setenv("GIT_DIR", str(bare))
+    monkeypatch.setattr(cl, "_commit_state", lambda sha, repo_root=None: "exists")
+
+    # PREMISE, re-measured rather than quoted: `rc 0` with EMPTY stdout is the hazard.
+    dir_form = subprocess.run(
+        ["git", "ls-files", "--", ":(literal)held"],
+        cwd=str(tree),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert dir_form.returncode == 0 and dir_form.stdout == "", (
+        "the divergence is `rc 0 with EMPTY stdout` from the directory form; measured "
+        f"rc={dir_form.returncode} stdout={dir_form.stdout!r}"
+    )
+    probe = subprocess.run(
+        ["git", "rev-parse", "--is-inside-work-tree"],
+        cwd=str(tree),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert probe.returncode == 0 and probe.stdout.strip() == "false", (
+        f"the probe must ANSWER `false`, not fail: rc={probe.returncode} {probe.stdout!r}"
+    )
+
+    # PARITY, on the SAME tree: both arms must reach the abstention.
+    assert cl._is_tracked(tree / "held" / "inside.txt", tree) is True
+    assert cl._is_tracked_dir(tree / "held", tree) is True, (
+        "git answered `false` to the work-tree probe here, so NOTHING was measured "
+        "about what this directory holds — the directory arm may not answer the "
+        "measured `False` its sibling refuses to answer on the same tree"
+    )
+
+    # And the ROW consequence, which is what the pair is FOR. The row carries a PATH
+    # as well as the command: a `cmd:`-only row can never reach `verified` (T8), so a
+    # `cmd:`-only row would refuse here for a reason that has nothing to do with this
+    # pin.
+    ok, why = cl._evidence_is_real("cmd:uv run pytest held -v", tree)
+    assert ok is True, why
+    row = _row("A", evidence=["held/inside.txt", "cmd:uv run pytest held -v"])
+    cl.validate(_ledger([row]), repo_root=tree)
+    err = capsys.readouterr().err
+    assert "git is present and says this is not a work tree" in err, (
+        f"the NOTE must state the cause the probe DID measure: {err}"
+    )
+    assert "holding no TRACKED file" not in err, (
+        "git never got to answer about a work tree, so no line may claim it measured "
+        f"this directory as holding no TRACKED file: {err}"
+    )
 
 
 def test_a_FAILED_ls_files_on_a_DIRECTORY_is_not_the_measured_no(monkeypatch, capsys):

@@ -1314,19 +1314,35 @@ def _is_tracked_dir(resolved: Path, root: Path) -> bool | None:
     so `_commit_state` answers `exists`, the row counts, and nothing was measured. A
     spawn failure is a REFUSAL (`_tracked_dir_unrunnable`), never an abstention.
 
-    ⛔ `returncode == 0` IS THE MEASUREMENT; `1` IS THE OTHER MEASURED ANSWER; EVERY
-    OTHER NON-ZERO IS A FAILURE TO ANSWER. Unlike `_is_tracked`, this probe passes no
-    `--error-unmatch`, so "holds nothing tracked" is **rc 0 with empty stdout**
-    (measured on git 2.43.0 against an empty directory and an untracked one). Exit 1
-    cannot arise from this form in practice; it is admitted as a measured `no` because
-    it is `git ls-files`' documented "nothing matched" answer, and treating it as a
-    spawn-like failure would refuse a directory git had in fact answered about. Every
-    other non-zero (128/129: an unreadable index, a bad repo, a usage error) is routed
-    to `_tracked_dir_unanswered` — ⛔ NOT to the measured sentence: with a corrupt
-    `GIT_INDEX_FILE`, `ls-files -- tests/` exits 128 while `rev-parse
-    --is-inside-work-tree` still answers `true` rc 0, so reading that non-zero as "holds
-    no TRACKED file" tells the reader a cause git never gave — the third collapsed
-    cause this PR removes, one probe over.
+    ⛔ `returncode == 0` WITH OUTPUT IS THE MEASUREMENT. The two "no" answers — **rc 0
+    with empty stdout** (measured on git 2.43.0 against an empty directory and an
+    untracked one; this form passes no `--error-unmatch`, so a miss is rc 0, not 1) and
+    **rc 1** (`git ls-files`' documented "nothing matched") — are measurements **only
+    once git is shown to be answering for a WORK TREE**, and the gate on that is the
+    same `rev-parse --is-inside-work-tree` probe the file arm uses. ⛔ THAT GATE WAS
+    MISSING (#11474 round-3 review, the parity this docstring claimed but the code did
+    not deliver): it answered both from the exit code alone, so in the tree this file's
+    own ABSTAINING pin describes the two probes judged ONE tree TWO WAYS. MEASURED on
+    git 2.43.0 over a bare repo reached by `GIT_DIR` (the pin's own fixture):
+
+        git ls-files -- ':(literal)held'          -> rc 0, EMPTY stdout
+        git rev-parse --is-inside-work-tree       -> `false`, rc 0
+        git ls-files --error-unmatch -- ':(literal)held/inside.txt' -> rc 1
+
+    so the FILE arm abstains there (`_tracked_unprovable(probe)` -> `True`, the
+    #11503 Option 1 answer, pinned end to end) while this arm read that rc 0 as a
+    MEASURED "holds no TRACKED file" and REFUSED the row — with a cause git never gave:
+    git could not answer about a work tree at all, and a reader's clone does hold those
+    files. Fail-closed, so not a fail-open, but it is exactly the fork the `pytest tests/`
+    paragraph below forbids, produced by this probe. Both no-answers now route through
+    the probe: `true` -> measured `False` (today's behaviour, preserved), anything else
+    -> `_tracked_unprovable(probe)`, so the verdict follows the recorded decision
+    instead of this arm inventing its own. Every other non-zero (128/129: an unreadable
+    index, a bad repo, a usage error) is routed to `_tracked_dir_unanswered` — ⛔ NOT to
+    the measured sentence: with a corrupt `GIT_INDEX_FILE`, `ls-files -- tests/` exits
+    128 while `rev-parse --is-inside-work-tree` still answers `true` rc 0, so reading
+    that non-zero as "holds no TRACKED file" tells the reader a cause git never gave —
+    the third collapsed cause this PR removes, one probe over.
 
     ⛔ `-- <rel>` IS A PATHSPEC HERE TOO, AND THAT DIRECTION WAS LIVE (#11474 review,
     the same defect the file probe's `:(literal)` closes). MEASURED on git 2.43.0: with
@@ -1361,16 +1377,18 @@ def _is_tracked_dir(resolved: Path, root: Path) -> bool | None:
         )
     except OSError as exc:
         return _tracked_dir_unrunnable(exc, rel)
-    if proc.returncode == 0:
-        return bool(proc.stdout.strip())
-    if proc.returncode == 1:
-        # Git ran and answered "nothing matched". The only non-zero exit that is an
-        # ANSWER (see the docstring) — it may not be read as a spawn failure.
-        return False
-    # Git failed. `_is_tracked` distinguishes "git answered and refused" from "git
+    if proc.returncode == 0 and proc.stdout.strip():
+        # Git ran and MATCHED: a reader's clone holds a TRACKED file under `rel`. A
+        # `yes` needs no probe — the file arm does not ask for one either.
+        return True
+    # ⛔ NEITHER "NO" ANSWER IS A MEASUREMENT UNTIL GIT IS SHOWN TO BE ANSWERING FOR A
+    # WORK TREE. `_is_tracked` distinguishes "git answered and refused" from "git
     # cannot answer here", so this must too — otherwise a git-less build context
     # refuses `pytest tests/` while accepting a single cited file, which is the
-    # same row judged two ways by the tool's own doctrine.
+    # same row judged two ways by the tool's own doctrine. The pair is REACHABLE, not
+    # theoretical: over a bare repo via `GIT_DIR` this form exits 0 with EMPTY stdout
+    # while the probe answers `false` (measured, git 2.43.0 — see the docstring), which
+    # is exactly the abstaining tree `_is_tracked` accepts.
     try:
         probe = subprocess.run(
             ["git", "rev-parse", "--is-inside-work-tree"],
@@ -1382,7 +1400,11 @@ def _is_tracked_dir(resolved: Path, root: Path) -> bool | None:
     except OSError as exc:
         return _tracked_dir_unrunnable(exc, rel)
     if probe.returncode == 0 and probe.stdout.strip() == "true":
-        # Git IS here and failed to answer for this directory (128/129). Nothing was
+        if proc.returncode in (0, 1):
+            # Git IS here, it ran, and it ANSWERED "nothing matched" — rc 0 with empty
+            # stdout is this form's miss, rc 1 is `ls-files`' documented one. Blame it.
+            return False
+        # Git IS here but failed to answer for this directory (128/129). Nothing was
         # measured, and the row may not borrow the measured-"holds no TRACKED file"
         # sentence for it.
         return _tracked_dir_unanswered(proc.returncode, rel)
