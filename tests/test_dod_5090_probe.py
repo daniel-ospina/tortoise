@@ -4509,13 +4509,34 @@ def _doc_section(text: str, start: str, end: str) -> str:
 #    which is not what an earlier draft said."
 #   "outside the method body, the walk reports a nested `def`'s …"
 # Requiring the negation to sit within two words of a COVERAGE verb closes every
-# one of them. Window measured at THIS head over all 27 `must_red` rows: 0, 1 and
-# 2 all leave the must_red set fully RED (0/27 leak) and keep the real doc a HIT;
-# **3 opens 2 of 27**, starting with "are not missed by the walk". ⚠️ Window 0 is
-# not free either, one set over: it wrongly REDS the three out-of-termset hedge
-# rows in `declared_open`. So 1 and 2 are the clean windows — 0 and 3 each cost a
-# set, in opposite directions. (An earlier draft cited "13/13 inverse rows"; the
-# row set has since grown to 27 and the denominator no longer re-derived —
+# one of THOSE — the stray-negation class, where the cue governed something other
+# than the claim. ⛔ It does NOT close every inverse, and this comment used to say
+# it did (#11437 review, round 6, P1): a negation that governs a SUBORDINATE
+# clause still satisfies the window while the sentence asserts coverage —
+# measured GREEN, and now the four rows of the clause-scope class in
+# `declared_open`:
+#   "…it is not the closure walk that reaches them"   (`walk` is ITSELF a
+#                                                      coverage word, so the
+#                                                      window is satisfied by
+#                                                      the subject of the
+#                                                      pseudo-cleft)
+#   "it is not the body walk that leaves … unvisited"
+#   "it is not true that the walk does not visit …"   (double negation)
+#   "the walk does not visit the body without reaching …"
+# Those need the predicate to know the sentence's SUBJECT, to read a second
+# negation, or to resolve a preposition — scope, not vocabulary — so they are
+# DECLARED and not claimed closed.
+# Window measured at THIS head over all 29 `must_red` rows: 0 and 2 leave the
+# must_red set fully RED (0/29 leak) and keep the real doc a HIT; **3 opens 2 of
+# 29**, starting with "are not missed by the walk". ⛔ Window 0 is not free
+# either, one set over: it wrongly REDS **5** of the 11 `declared_open` rows.
+# And since #11437's round-6 clause-scope rows landed, **window 1 is no longer
+# clean at all** — it wrongly REDS 2 of them (the double-negation and
+# `without`-framed shapes need the second word to find their coverage verb). So
+# at this head **2 is the ONLY clean window**: 0 and 1 each cost `declared_open`
+# rows, 3 costs `must_red` rows. (An earlier draft cited "13/13 inverse rows";
+# the row set has since grown to 29 and the denominator re-derived against it —
+# #11437 review, P3, re-measured round 6.)
 # #11437 review, P3.)
 # ⛔ COST, taken deliberately: window 2 makes "…are never TOUCHED by the walk"
 # RED, because `touched` is not in the coverage list — a false block bought for
@@ -4548,8 +4569,8 @@ _NEGATION_GOVERNS = re.compile(
     r"(?:walk|visit|reach|report)(?:s|es|ed)?\b")
 # ⛔ `_COVERAGE` is RETAINED DELIBERATELY AND IS CURRENTLY IMPLIED, and saying so
 # is the point (#11437 review, P3). Measured: `_NEGATION_GOVERNS` already requires
-# one of the same four verbs AFTER the negation, so on all 80 candidate sentences
-# (the 50 rows across the four sets, plus the 30 sentences of the real §3 under
+# one of the same four verbs AFTER the negation, so on all 88 candidate sentences
+# (the 58 rows across the four sets, plus the 30 sentences of the real §3 under
 # this predicate's own `split(". ")` segmentation) there is no case where the
 # governance test hits and this one does not — dropping the term from
 # `_residual_sentences` changes no verdict. It stays because it is the INDEPENDENT
@@ -4616,7 +4637,20 @@ _AFFIRMED = re.compile(
     r"|\bnot\s+(?:outside|exempt|excluded|omitted|left|out\s+of\s+scope|fail)"
     r"|\b(?:not|never)\s+un(?:visited|reported|reached|walked|covered|mentioned|seen)\b"
     r"|\b(?:not|never)\s+(?:always|necessarily|certain|certainly|sure|clear"
-    r"|definitely|conclusively|guaranteed)\b")
+    r"|definitely|conclusively|guaranteed)\b"
+    # ⛔ The CONCESSIVE-SCOPE class (#11437 review, round 6, P1). `not only
+    # visit` negates a DEGREE, not the visit — and the sentence's own second
+    # clause then ASSERTS the coverage (`… — it also evaluates them`), which is
+    # the inverse. Measured GREEN before this arm, on both a bare concessive
+    # and one carrying its affirmative clause. It is the word-order twin of the
+    # `not the only` row in `must_red`: that row reds only because `walk` sits
+    # four words from `not`, so flipping the clause to `the walk does not only
+    # visit …` satisfies the governance window and the shape was open one
+    # word-order away from a row claiming to close it. Closing it is safe in
+    # this direction because an honest statement of the claim has no twin —
+    # `does not only visit` ALWAYS implies `also visits` — so this arm adds no
+    # false block (measured: 0 of the 10 `must_stay_green` rows move).
+    r"|\b(?:not|never)\s+(?:only|merely|just|simply)\b")
 
 
 def _residual_sentences(s3: str) -> list[str]:
@@ -4645,6 +4679,16 @@ def _residual_sentences(s3: str) -> list[str]:
       Dropping `report` would fix this decoy and red every honest "the scan
       never reports …" rewording — a false block for a false pass, paid for in
       the wrong direction here, so it is declared rather than closed;
+    * a CLAUSE-SCOPE inverse — a negation that governs a SUBORDINATE clause, a
+      second negation, or a preposition rather than the claim. Governance asks
+      only that SOME negation sit within two words of SOME coverage verb, and
+      `walk` is ITSELF a coverage word, so a pseudo-cleft satisfies the window on
+      its own subject: measured GREEN, `"…the body walk visits them; it is not
+      the closure walk that reaches them"`, `"it is not true that the walk does
+      not visit them"` (double negation) and `"the walk does not visit the body
+      without reaching them"`. Closing these needs the predicate to know the
+      sentence's SUBJECT — scope, not vocabulary — so all four are ROWS in
+      `declared_open` below (#11437 review, round 6, P1);
     * an inverse whose REVERSER is outside `_AFFIRMED`'s vocabulary — the list is
       a class pattern for negated reversers and negated privatives now, not four
       literals, but it is still a list. A ROW in `declared_open` below
@@ -4675,10 +4719,20 @@ def _residual_sentences(s3: str) -> list[str]:
     * a statement whose coverage verb is outside the `walk/visit/reach/report`
       list — measured, `"…are never TOUCHED by the walk"` reds, because the
       negation must reach one of those four verbs to be read as governing it
-      (#11437 review, round 3, P1).
+      (#11437 review, round 3, P1);
+    * an HONEST statement whose negation and in-vocabulary verb are separated by
+      PUNCTUATION or by ≥3 words — the governance window is 0–2 `\w+`, and `\w+`
+      cannot span a comma, so the honest `"…are never, in the body walk,
+      visited"` and `"the walk does not, as an earlier draft said, visit …"` both
+      red (#11437 review, round 6, P2). Both are ROWS in `declared_blocks` below.
+      ⛔ This is the price of the window itself, and widening it to 3 is measured
+      to open 2 of the 29 `must_red` rows (`not` + a non-coverage verb, and `not`
+      governing an adjective), so it is declared rather than paid for in the
+      other direction.
 
     ⛔ NOT a false block, and listed here only to correct an earlier claim
-    (#11437 review, P3): a PARTIAL exclusion stated as a HEDGE — `"…are not
+    (#11437 review, P3): a PARTIAL exclusion stated as a HEDGE whose cue is one of
+    `_AFFIRMED`'s eight pseudo-negations — `"…are not
     always visited"` — reds, and that is CORRECT, not a price paid. The pin
     protects a TOTAL claim (the walk does not visit them); a hedge asserts a
     weakened one, which is not the claim, so satisfying the pin with it would be
@@ -4687,6 +4741,14 @@ def _residual_sentences(s3: str) -> list[str]:
     which stays green) — if the total claim has actually stopped being true, the
     pin SHOULD red and both the doc and the predicate need updating. This shape
     is pinned in `must_red`, not here.
+    ⛔ AND ONLY THAT SHAPE (#11437 review, round 6, P2). This paragraph used to
+    say the HEDGE class reds, full stop, 25 lines under the bullet above that
+    declares three hedge rows GREEN — `not substantially` / `not routinely` /
+    `not generally`. Measured, both halves are true and neither is the class:
+    `not always` reds because `always` is IN the termset, `not substantially`
+    satisfies the pin because it is not. The limit is the TERMSET, not the
+    hedge; the three rows in `declared_open` are where it is pinned, and a reader
+    who took this paragraph at face value would delete them as contradictions.
 
     ⛔ The false-GREEN direction is the one that matters: a missed inverse is a
     false PASS in the file whose purpose is to be false-PASS-free, while a false
@@ -5049,6 +5111,19 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
         "inverse: `not the only` governing the object list":
             "a nested `def`'s decorators and parameter defaults are not the "
             "only things the walk visits, and it reports them",
+        # ⛔ The CONCESSIVE-SCOPE class (#11437 review, round 6, P1), which is
+        # the row above one word-order over: `does not only visit` puts the
+        # negation WITHIN the window of the coverage verb, so governance is
+        # satisfied and the whole tabulation above reads it as the claim. Two
+        # rows because the bare form and the form carrying its own affirmative
+        # clause were each measured GREEN separately; the second is the one a
+        # real document would actually contain.
+        "inverse: concessive `does not only visit` (bare)":
+            "the walk does not only visit a nested `def`'s decorators and "
+            "parameter defaults",
+        "inverse: concessive `does not only visit` + its own affirmative":
+            "the body walk does not only visit a nested `def`'s decorators and "
+            "parameter defaults — it also evaluates them",
         # ⛔ And the HEDGE class — the same shape one step out, where the cue is a
         # PSEUDO-NEGATION: `not sure` / `not always` / `not necessarily` govern a
         # coverage verb without asserting the exclusion, because they negate the
@@ -5145,6 +5220,27 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
         "open inverse: reverser outside `_AFFIRMED`'s vocabulary":
             "a nested `def`'s decorators and parameter defaults are not visited "
             "by the body walk; the closure walk handles them",
+        # ⛔ THE CLAUSE-SCOPE CLASS (#11437 review, round 6, P1). Governance asks
+        # only that SOME negation sit within two words of SOME coverage verb — it
+        # does not ask that the negation govern the CLAIM. Every row below
+        # satisfies the window while asserting the INVERSE, and none is a
+        # vocabulary problem, so no arm in `_AFFIRMED` closes them: each needs
+        # the predicate to know what the sentence's SUBJECT is, or to read a
+        # second negation, or to resolve a preposition. Measured GREEN. They are
+        # rows rather than prose because a residual nobody can see is
+        # indistinguishable from a fix.
+        "open scope: pseudo-cleft — `walk` is itself a coverage word":
+            "the body walk visits a nested `def`'s decorators and parameter "
+            "defaults; it is not the closure walk that reaches them",
+        "open scope: pseudo-cleft, negated subject, privative":
+            "it is not the body walk that leaves a nested `def`'s decorators "
+            "and parameter defaults unvisited",
+        "open scope: DOUBLE negation — `not true that … does not visit`":
+            "it is not true that the walk does not visit a nested `def`'s "
+            "decorators and parameter defaults",
+        "open scope: `without`-framed inverse":
+            "the walk does not visit the body without reaching a nested "
+            "`def`'s decorators and parameter defaults",
     }
     for label, sentence in declared_open.items():
         assert sentence != original, f"decoy row {label!r} merely restates the claim"
@@ -5185,6 +5281,16 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
         "false block: exclusion stated as `skipped`":
             "nested def decorators and parameter defaults are skipped by this "
             "walk",
+        # ⛔ The governance WINDOW's own price (#11437 review, round 6, P2), pinned
+        # as rows because prose is what a maintainer deletes: both statements are
+        # HONEST and use only in-vocabulary forms, and both red because `\w+`
+        # cannot span a comma. Measured RED.
+        "false block: honest, negation set off by PUNCTUATION":
+            "nested def decorators and defaults are never, in the body walk, "
+            "visited",
+        "false block: honest, an ASIDE between negation and verb":
+            "the walk does not, as an earlier draft said, visit a nested def's "
+            "decorators and defaults",
     }
     for label, sentence in declared_blocks.items():
         assert sentence != original, (
