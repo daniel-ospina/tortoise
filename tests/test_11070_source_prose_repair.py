@@ -3094,10 +3094,14 @@ def test_the_certify_line_states_ONLY_what_the_run_measured(monkeypatch, capsys)
     capsys.readouterr()
     assert _cli.main() == 0
     out = capsys.readouterr().out
+    # ⛔ assert the ABSENCE claim that would be the over-claim, not a phrase that a
+    # later rewording silently drops (#11536 review round 4: this row passed
+    # vacuously once the wording changed).
     assert "no node still carrying the pre-fix prose is findable" not in out, (
-        "a dry run asserted the Target from a token it never showed was in the "
-        "corpus")
+        "a dry run asserted the Target's before/after property from a token it "
+        "never showed was in the corpus")
     assert "did NOT establish that the token was ever in the corpus" in out
+    assert "0 hit(s)" in out, "the green did not state the count it measured"
 
     # (3) the writing arm, where the token DID hit before, keeps the full claim.
     hit_before = {"ran": True, "probes": [{"phrase": "zebraquux", "hits": 1,
@@ -3110,6 +3114,64 @@ def test_the_certify_line_states_ONLY_what_the_run_measured(monkeypatch, capsys)
     assert "no node still carrying the pre-fix prose is findable" in out, (
         "a probe that watched the sentence LEAVE the index lost the categorical "
         "claim it had earned")
+
+
+def test_the_green_line_claims_only_the_two_data_the_fold_holds(monkeypatch,
+                                                              capsys):
+    """#11536 review round 4, P2: the narrowed green asserted unmeasured specifics.
+
+    (1) FAILS on the shipped narrowed line, in the two states the fold reaches:
+        (a) "the probe token returns NOTHING" is false whenever the hits were
+            classified BENIGN — the ORDINARY record-arm outcome, since the derived
+            lexicon is the transcript's own topic list, so the runbook's own advice
+            (take a token from the removed sentence) lands here; and
+        (b) "this run took no BEFORE reading" is false on a WRITING arm that WROTE
+            NOTHING, whose own probe line prints `0 residue before` two lines above
+            — the operator is told to run the command they just ran.
+    (2) REACHABLE: both are the documented usage — `--repair --probe-phrase` on a
+        graph whose census is already 0.
+    (3) POLARITY THAT MUST NOT GO RED: the dry run still states the absence it did
+        measure, and still refuses to assert the Target.
+    """
+    from tortoise import session_source_prose_migration as m
+
+    class _LexiconGraph(_RecordingGraph):
+        def query(self, cypher, params=None, timeout=None):
+            if "STARTS WITH $prefix" in cypher:
+                return _Result([("migration, plan, friday",)])
+            return super().query(cypher, params=params, timeout=timeout)
+
+    # a BENIGN hit: one row, on a node whose own lexicon accounts for the token
+    _install_fts(monkeypatch, {"fridays": [("session:s-post", 2.0)],
+                               "migration": [("session:s-post", 2.0)]})
+    graph = _LexiconGraph([(_post_fix_node(),)])
+    after = m.probe_fts(graph, ["fridays"], control=True)
+    assert after["probes"][0]["hits"] == 1
+    assert after["probes"][0]["lexicon"] == ["session:s-post"]
+
+    # (a) the DRY RUN must not say the probe returns NOTHING.
+    _cli._report_fts(_cli._merge_probe(None, after))
+    out = capsys.readouterr().out
+    assert "returns NOTHING" not in out, (
+        "the green said the probe returns NOTHING while its own report listed a "
+        "hit")
+    assert "1 hit(s)" in out
+    assert "did NOT establish that the token was ever in the corpus" in out
+
+    # (b) a WRITING arm that wrote NOTHING did take a BEFORE reading.
+    _install_fts(monkeypatch, {"notaword": [], "migration": [("session:s-post", 2.0)]})
+    before = m.probe_fts(graph, ["notaword"], control=False)
+    assert before["probes"][0]["residue"] == []
+    _install_fts(monkeypatch, {"notaword": [], "migration": [("session:s-post", 2.0)]})
+    after_zero = m.probe_fts(graph, ["notaword"], control=True)
+    fts = _cli._merge_probe(before, after_zero, wrote=False)
+    assert fts["certifies"] is True, "a run that wrote nothing lost its certify"
+    _cli._report_fts(fts)
+    out = capsys.readouterr().out
+    assert "took no BEFORE reading" not in out, (
+        "a writing arm that wrote nothing was told it took no BEFORE reading, "
+        "while its own probe line printed `0 residue before`")
+    assert "the BEFORE reading this run took returned no pre-fix node" in out
 
 
 def test_the_control_TOKEN_is_measured_and_never_ECHOED(monkeypatch, capsys):
