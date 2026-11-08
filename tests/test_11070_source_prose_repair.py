@@ -2554,7 +2554,15 @@ def test_a_MULTI_token_probe_is_REFUSED_because_the_FTS_read_OR_joins_it(
 
     monkeypatch.setenv("TORTOISE_IDENTIFIER_TOKENS", "1")
 
-    for phrase in ("the second-latest PR comment", "the", "zx-99", "   "):
+    for phrase in ("the second-latest PR comment", "the", "zx-99", "   ",
+                   # ⛔ WHITESPACE-FREE IS THE UNIT, NOT "TOKENISES TO ONE TERM"
+                   # (#11536 review round 5, P2): the tokenizer DROPS stopwords and
+                   # sub-2-char words, so these pass a count-based check while the
+                   # read sends the RAW string, which RediSearch evaluates as an
+                   # implicit AND — an UNDER-match that reads a still-findable
+                   # sentence as absent. Measured before the fix: both returned
+                   # None from `probe_phrase_rejection`.
+                   "the fridays", "fridays x"):
         assert probe_phrase_rejection(phrase), (
             f"{phrase!r} was accepted as a probe — the FTS read OR-joins it, so "
             f"it measures the OR of its words, not the sentence")
@@ -2658,6 +2666,80 @@ def test_the_REPAIRS_OWN_OUTPUT_is_a_collision_through_the_PREFIX_arm_only(monke
         "the repair's own output was not classified as a stem collision")
     assert split["foreign"] == [], (
         "the repair's own output was reported as OUTSIDE this population")
+
+
+def _prefix_over_prose_node(**overrides):
+    """A node whose DISPLAY pair is post-fix while its INDEX is still the prose.
+
+    The pre-fix writer could not emit this (its two arms move ``summary`` and
+    ``_searchText`` together), so it is the shape a HALF-APPLIED repair or a
+    deferred index update leaves behind — see
+    :func:`test_a_PREFIXED_summary_over_a_still_PROSE_index_VETOES`.
+    """
+    props = _session_node()
+    props["summary"] = (SESSION_SOURCE_SUMMARY_PREFIX
+                        + ", ".join(["migration", "plan", "friday"]))
+    props.update(overrides)
+    return props
+
+
+def test_a_PREFIXED_summary_over_a_still_PROSE_index_VETOES(monkeypatch):
+    """#11536 review round 5, P2: the prefix proves the DISPLAY pair, not the INDEX.
+
+    (1) FAILS on the shipped classifier: `_is_proven_lexicon`'s prefix arm reads
+        only `summary`, and `_probe_explains_the_lexicon` then asked whether the
+        probe token occurs in `_searchText` — which on this shape answers YES for
+        the PROSE's own words. The leak was labelled `lexicon`, the one bucket
+        that never vetoes, and the run certified over a sentence that was still
+        retrievable. Measured before the fix: bucket `lexicon` for the probe
+        `fridays`, whose `friday` stem the display pair ALSO carries — so the old
+        second proof was satisfied rather than merely skipped.
+    (2) REACHABLE: a half-applied repair — `summary` re-derived while
+        `_searchText` was not — and a deferred index update, the same class
+        round 2's P1 was filed for.
+    (3) POLARITY THAT MUST NOT GO RED: the prefix-only arms that ARE healthy. The
+        repair's own record-arm output (`_repaired_from_record_node`) and the
+        canonical post-fix pair (`_post_fix_node`) must stay `lexicon`, and the
+        measured `friday`/`fridays` collision with them must still certify.
+    """
+    from tortoise import session_source_prose_migration as m
+
+    leak = _prefix_over_prose_node()
+    # The two guards that had to stay out of the way, asserted so a future edit
+    # that makes this fixture vacuous is caught here rather than silently.
+    assert not m.carries_pre_lexicon_prose(leak), (
+        "the fixture must reach the prefix arm, not be caught as residue")
+    assert m._carries_the_display_prefix(leak)
+    assert m._is_proven_lexicon(leak), "the prefix arm is meant to prove it"
+    assert not m._indexed_text_within_the_displayed_pair(leak), (
+        "the indexed text is the PROSE — it must not read as within the display")
+
+    split = m.classify_fts_hits(_RecordingGraph([(leak,)]), ["session:s-11070"],
+                               phrase="fridays")
+    assert split["lexicon"] == [], (
+        "a prefix `summary` over a still-prose `_searchText` was certified as a "
+        "benign stem collision — that is the survived-prose leak")
+    assert split["unexplained"] == ["session:s-11070"]
+
+    _install_fts(monkeypatch, {"fridays": [("session:s-11070", 1.0)]})
+    report = m.probe_fts(_RecordingGraph([(leak,)]), ["fridays"], control=False)
+    assert report["probes"][0]["unexplained"] == ["session:s-11070"]
+    assert report["probes"][0]["residue"] == []
+    folded = _cli._merge_probe(
+        {"ran": True, "probes": [{"phrase": "fridays", "hits": 1,
+                                   "residue": []}]},
+        dict(report, control={"mode": "probe", "ok": True, "hits": 1}))
+    assert folded["certifies"] is False and folded["vetoed"] == "unexplained", (
+        "a corroborating control certified over a hit whose INDEX still holds "
+        "the pre-fix prose")
+
+    # (3) the healthy prefix-only shapes keep the benign label.
+    for healthy in (_post_fix_node(), _repaired_from_record_node()):
+        assert m._indexed_text_within_the_displayed_pair(healthy), (
+            f"{healthy['url']} is a HEALTHY pair — its indexed text is within "
+            f"the display, and this fix must not veto it")
+    assert m._hit_node_bucket(_post_fix_node(), "fridays") == "lexicon"
+    assert m._hit_node_bucket(_repaired_from_record_node(), "fridays") == "lexicon"
 
 
 def test_a_hit_on_a_PRE_FIX_node_IS_a_leak(monkeypatch):

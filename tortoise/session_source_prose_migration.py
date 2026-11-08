@@ -1285,6 +1285,17 @@ def probe_phrase_rejection(phrase: str) -> str | None:
     ⚠️ What this CANNOT decide is RARITY — whether the token exists in the
     corpus. That is measured, not declared: the before/after pair on the writing
     arm, and the ``truncated`` flag on a probe that matches too much.
+
+    ⛔ AND ONE TOKEN MEANS ONE WHITESPACE-FREE TOKEN, which the term count alone
+    does not establish (#11536 review round 5, P2). ``tokenize_sparse_query``
+    DROPS stopwords and sub-2-character words, so ``'the fridays'`` tokenises to
+    the single term ``['fridays']`` and passes a count-based check — while the
+    read sends ``build_or_query``'s degenerate branch, the RAW two-word string
+    ``'the fridays'``, which RediSearch evaluates as an implicit AND. That is the
+    OPPOSITE failure from the OR-join above, and the more dangerous one: it
+    UNDER-matches, so a sentence that is still findable reads as ABSENT — and on
+    the arms that can certify without a BEFORE reading (a dry run, or a
+    ``--repair`` whose ``written`` is empty) nothing else contradicts it.
     """
     token = (phrase or "").strip()
     if not token:
@@ -1299,6 +1310,17 @@ def probe_phrase_rejection(phrase: str) -> str | None:
                 f"OR-joins multi-term input, so the probe would match on any "
                 f"one of them — pass a SINGLE RARE token that appears only in "
                 f"the pre-fix prose (a stopword-only phrase is not a probe)")
+    # ⛔ AFTER the term count, because a phrase that tokenises to SEVERAL terms
+    # already has the more specific (OR-join) refusal above — and this one is a
+    # DIFFERENT failure that the term count is structurally blind to.
+    words = token.split()
+    if len(words) != 1:
+        return (f"it is {len(words)} whitespace-separated words {words!r}; the "
+                f"read sends the string RAW and RediSearch evaluates a "
+                f"space-separated query as an implicit AND, so the probe "
+                f"UNDER-matches and a still-findable sentence reads as absent "
+                f"(its extra word(s) drop out of the term count, so that check "
+                f"above cannot catch this) — pass a SINGLE RARE token")
     built = build_or_query(token)
     if len(built.split("|")) != 1:
         return (f"the identifier mechanism expands it into several terms "
@@ -1391,6 +1413,19 @@ def source_fts_probe(g, phrase: str, *,
 #: is not "the post-fix lexicon": a CLEARED node is neither, and folding it into
 #: `lexicon` let the exact shape the leg exists for certify.
 
+def _carries_the_display_prefix(props: Mapping[str, Any]) -> bool:
+    """True when ``summary`` is the display value every post-#10852 writer emits.
+
+    ONE predicate for "which proof did :func:`_is_proven_lexicon` use", because
+    the two arms are NOT interchangeable: the prefix proves only the DISPLAYED
+    pair, while the index is declared on ``_searchText`` — so
+    :func:`_hit_node_bucket` has to know the difference (#11536 review round 5).
+    """
+    summary = props.get(_SUMMARY)
+    return isinstance(summary, str) and summary.startswith(
+        SESSION_SOURCE_SUMMARY_PREFIX)
+
+
 def _is_proven_lexicon(props: Mapping[str, Any]) -> bool:
     """True only when the node's pair is PROVABLY the post-#10852 derivation.
 
@@ -1398,12 +1433,54 @@ def _is_proven_lexicon(props: Mapping[str, Any]) -> bool:
     (:data:`SESSION_SOURCE_SUMMARY_PREFIX` — the witness every writer emits), or
     :func:`_proves_the_lexicon`'s exact ``_searchText == ", ".join(topics)`` for a
     ``record-restore``d node, which has no ``summary`` at all.
+
+    ⚠️ The prefix arm proves the DISPLAY value only — see
+    :func:`_indexed_text_within_the_displayed_pair` for the half it does not.
     """
-    summary = props.get(_SUMMARY)
-    if isinstance(summary, str) and summary.startswith(
-            SESSION_SOURCE_SUMMARY_PREFIX):
+    return (_carries_the_display_prefix(props)
+            or _proves_the_lexicon(props))
+
+
+def _indexed_text_within_the_displayed_pair(
+        props: Mapping[str, Any]) -> bool:
+    """True when the INDEXED text adds no token the DISPLAYED pair lacks.
+
+    ⛔ THE PREFIX PROVES THE DISPLAY VALUE, NOT THE INDEX (#11536 review round 5,
+    P2). :func:`_is_proven_lexicon`'s prefix arm reads only ``summary``, while the
+    FTS index is declared on ``_searchText`` — and the shape that separates them
+    is exactly the leak this leg exists for: a node whose ``summary`` carries
+    :data:`SESSION_SOURCE_SUMMARY_PREFIX` while ``_searchText`` still holds the
+    pre-fix PROSE. :func:`_probe_explains_the_lexicon` then asks whether the probe
+    token occurs in ``_searchText``, which on that shape answers YES for the
+    prose's OWN words — so the leak would be labelled ``lexicon``, the one bucket
+    that never vetoes, and the run would certify over a still-retrievable
+    sentence.
+
+    Every post-#10852 writer derives both values from the SAME ``topics``
+    (``summary = PREFIX + ", ".join(topics)`` and
+    ``_searchText = ", ".join(topics)``), so on a healthy node the indexed tokens
+    are a SUBSET of the displayed ones — and prose words are precisely the extras
+    that break it.
+
+    Polarity: fail-CLOSED. A pair this cannot read is not proven, and the caller
+    vetoes it as ``unexplained``: a false veto is re-measured, a false
+    certification is the leak.
+    """
+    search_text = props.get(_SEARCH_TEXT)
+    if not isinstance(search_text, str) or not search_text.strip():
+        # No indexed text: nothing here could contradict the display, and a blank
+        # index cannot carry the sentence.
         return True
-    return _proves_the_lexicon(props)
+    summary = props.get(_SUMMARY)
+    if not isinstance(summary, str) or not summary.strip():
+        return False
+    from tortoise.sparse import tokenize_sparse_query  # lazy (see module docs)
+
+    indexed = {_stem_key(token) for token in tokenize_sparse_query(
+        search_text, space_separated_identifiers=False)}
+    displayed = {_stem_key(token) for token in tokenize_sparse_query(
+        summary, space_separated_identifiers=False)}
+    return bool(displayed) and indexed <= displayed
 
 
 #: The English suffixes :func:`_stem_key` folds when comparing a probe token with
@@ -1504,13 +1581,17 @@ def classify_fts_hits(g, urls, *, phrase: str | None = None,
     non-episodic source with its own `_searchText`, whose match says nothing about
     this repair).
 
-    ⛔ AND ``lexicon`` IS PROVED TWICE (#11536 review round 2, P1): the node must
-    prove the post-fix pair (:func:`_is_proven_lexicon`) *and*, when *phrase* is
-    given, the probe token must relate to one of that node's OWN lexicon tokens
-    (:func:`_probe_explains_the_lexicon`). A node can prove the lexicon and still
-    be a stale-index leak, because what matched is the index entry the update was
-    supposed to remove. ``unexplained`` is that shape — neither provably the
-    prose nor provably a stem collision — and it vetoes.
+    ⛔ AND ``lexicon`` IS PROVED THRICE (#11536 review round 2, P1; round 5, P2):
+    the node must prove the post-fix pair (:func:`_is_proven_lexicon`); when that
+    proof is the display PREFIX alone, the INDEXED text must add no token the
+    displayed pair lacks (:func:`_indexed_text_within_the_displayed_pair`) — a
+    prefix ``summary`` over a still-prose ``_searchText`` is the leak, not a
+    collision; and, when *phrase* is given, the probe token must relate to one of
+    that node's OWN lexicon tokens (:func:`_probe_explains_the_lexicon`). A node
+    can prove the lexicon and still be a stale-index leak, because what matched is
+    the index entry the update was supposed to remove. ``unexplained`` is that
+    shape — neither provably the prose nor provably a stem collision — and it
+    vetoes.
 
     ⛔ ONE URL CAN CARRY SEVERAL NODES, AND EVERY ONE OF THEM IS CLASSIFIED
     (#11536 review round 3, P1): ``:Source`` declares no uniqueness on ``url``, and
@@ -1581,6 +1662,13 @@ def _hit_node_bucket(props: dict, phrase: str | None) -> str:
     if carries_pre_lexicon_prose(props):
         return "residue"
     if _is_proven_lexicon(props):
+        # ⛔ THE PREFIX ARM PROVES THE DISPLAY PAIR, NOT THE INDEX (#11536 review
+        # round 5, P2): a prefix `summary` over a still-prose `_searchText` would
+        # otherwise be explained by its own PROSE and land in `lexicon`, the
+        # bucket that never vetoes.
+        if (_carries_the_display_prefix(props)
+                and not _indexed_text_within_the_displayed_pair(props)):
+            return "unexplained"
         if phrase is None or _probe_explains_the_lexicon(props, phrase):
             return "lexicon"
         return "unexplained"
