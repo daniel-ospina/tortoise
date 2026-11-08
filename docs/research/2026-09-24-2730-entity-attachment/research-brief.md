@@ -223,6 +223,12 @@ Large-scale record-linkage work treats **name transformation** (nickname → can
 
 ## 5. The contradiction test — run FIRST, per finding
 
+> ⚠️ **SUPERSEDED 2026-11-07 — read this before acting on any "V1" line below.** `STORAGE-ARCHITECTURE.md` §12.1c
+> now reads *"✅ DECIDED 2026-11-07 — the vector index does NOT live in FalkorDB"* and §14.3 V1 reads RESOLVED: the
+> **location** is decided (Postgres/`pgvector`, `docs/architecture/SEARCH-ARCHITECTURE.md`). What is still open is the
+> DIFFERENT question of whether `:Object`/`:Event` carry — and index — embeddings (§14.3 **V3**). Every "rides on V1,
+> which is OPEN" below is the state this brief was written against, kept as the record and **not** as current text.
+
 Each candidate practice below was tested against the recorded decisions **before** cost, quality, or convergence was weighed.
 
 | candidate | contradicts? | verdict | why |
@@ -232,7 +238,7 @@ Each candidate practice below was tested against the recorded decisions **before
 | **Jev as the resolution adjudicator** | ❌ **No** — no recorded decision reaches it; the extractor design names Jev for S2.2/S2.3, and the in-repo precedent this row once cited (E9, the claim gate) **was DELETED by #8175 on 2026-10-14** | **ADOPT (scoped)** | Safe to proceed: it is a decision-only model over a supplied candidate list (X6), it replaces nothing, and the extractor's own fail-closed design carries the precedent now. ⚠️ **(#8175, 2026-10-14: E9 is HISTORICAL — the seam is no longer in-repo, so it must be BUILT: an adapter, a prompt and a parser, not a config flag.)** |
 | **Enforcing the *candidate set* is scoped and recall-measured before any adjudicator is tuned** | ❌ **No** — but it constrains the fix scope against the owner's "downstream of the extractor" sequencing | **ADOPT** | This changes *how* S3 generates candidates; it does not replace S3, and writes stay fail-closed against an unmeasured recall. |
 | **Replacing / forking the resolution step** | ✅ **YES — owner sequencing (2026-09-23): weak names are addressed by the extractor upgrades; this research is downstream** | ⛔ **REFUSED** | Explicitly out of scope. |
-| **Embedding/similarity candidates over `:Object` (the vector leg)** | ⚠️ **CONDITIONAL — `STORAGE-ARCHITECTURE.md` §12.2c + `#4997`, and it RIDES ON V1** | **OWNER QUESTION — rides on V1, which is OPEN, not decided** | Entity vectors would index **7,859 strings that are 62.3 % low-information** (the storage doc's own measurement) — a cost on the dominant line. And all 7,859 Object embeddings **already exist but are unindexed** (`#4997`), so the mechanism is *present and paid for*. **§12.1c records V1 itself as *"NOT DECIDED — owner's call"* and §14.3 lists it under *"Open"***, so this is **not a decided question awaiting implementation and not a reopen** — it is a live owner question this research feeds. Using the vectors for candidate retrieval (a brute-forced 9.26 ms scan) is a **consequence of the V1 ruling**, not a separate adoption. |
+| **Embedding/similarity candidates over `:Object` (the vector leg)** | ⚠️ **CONDITIONAL — `STORAGE-ARCHITECTURE.md` §12.2c + `#4997`, and it RIDES ON V1** | **OWNER QUESTION at the time — V1 is now DECIDED for the location (see the 2026-11-07 note above); what stays open is §14.3 V3** | Entity vectors would index **7,859 strings that are 62.3 % low-information** (the storage doc's own measurement) — a cost on the dominant line. And all 7,859 Object embeddings **already exist but are unindexed** (`#4997`), so the mechanism is *present and paid for*. **§12.1c records V1 itself as *"NOT DECIDED — owner's call"* and §14.3 lists it under *"Open"***, so this is **not a decided question awaiting implementation and not a reopen** — it is a live owner question this research feeds. Using the vectors for candidate retrieval (a brute-forced 9.26 ms scan) is a **consequence of the V1 ruling**, not a separate adoption. |
 | **Quarantine placeholders within a scope, promote only via a declared mapping** | ❌ **No** — the `OVERRIDES` on #4333 protects the *connection* layer, not the placeholder policy; X5 is externally convergent | **ADOPT** | Nothing in the record contradicts it. A `"Produto 1"` resolved globally is *provably wrong* (X5). |
 | **Entity-keyed review queue, post-ingest, fail-closed writes meanwhile** | ❌ **No** | **ADOPT** | Matches `#1370` (*"no subject > wrong subject"*), `#2349` policy 3, and X3. |
 | **A second constant for a similarity threshold** | ✅ **YES — an existing constant** (`tortoise.embeddings.DEFAULT_THRESHOLD = 0.72`) | ⛔ **REFUSED** | Do not invent a second constant; reuse the existing one if/when the vector leg is used. |
@@ -253,7 +259,7 @@ Each candidate practice below was tested against the recorded decisions **before
 |---|---|---|---|---|
 | **1. scoped exact** | `_find_existing_entity` (kind-typed, normalised-name equality) over a **scope-filtered** candidate set | always, first | exact after normalisation *within scope*; `ambiguous → None` (never guess) | §6.2 |
 | **2. alias** | deterministic surface-form folding + roster-driven initials/role expansion + Envelope `entityAliases` | rung 1 misses | auto-link only on an asserted mapping or an unambiguous, scope-internal transform | §6.7 |
-| **3. embedding / similarity** | `compute_embedding(name)` top-k within scope × kind compatibility | rungs 1–2 miss | ⚠️ **OWNER QUESTION — rides on V1** (`STORAGE-ARCHITECTURE.md` §12.1c); if used, reuse `tortoise.embeddings.DEFAULT_THRESHOLD` | §5, §6.2 |
+| **3. embedding / similarity** | `compute_embedding(name)` top-k within scope × kind compatibility | rungs 1–2 miss | ⚠️ **OWNER QUESTION at the time — the LOCATION is now decided (2026-11-07, note above); §14.3 V3 stays open** (`STORAGE-ARCHITECTURE.md` §12.1c); if used, reuse `tortoise.embeddings.DEFAULT_THRESHOLD` | §5, §6.2 |
 | **4. adjudication** | Jev `Choice` SELECT over the scoped candidate set, with the quote + slot + roster | rung 3 lands in the mid band, or rungs 1–3 miss | must return a candidate id **and** the narrative quote; self-reported probability alone never auto-links | §6.3 |
 | **5. review queue** | entity-keyed, post-ingest, evidence-carrying | everything else | never auto-resolved; writes fail closed meanwhile | §6.6 |
 
@@ -366,7 +372,7 @@ The issue's mandate names **alias resolution** explicitly, and it is the one run
 | Jev's value is typed routing/cost, not accuracy | **MEDIUM** ⚠️ emerging | X6 + E9 |
 | No off-the-shelf scoped-ER reference exists | **LOW** ⚠️ single-source | X8 + predecessor X9 |
 
-**Adoption gate line:** `Adoption gate: adopt (scoped candidates · deterministic alias normalisation bound to the opaque id · Jev SELECT · placeholder quarantine · entity review queue) | owner question (entity-vector leg — rides on V1, which §12.1c records as NOT DECIDED) | refuse (scope-first identity key — contradicts #3584; replacing S3 — owner sequencing)`.
+**Adoption gate line:** `Adoption gate: adopt (scoped candidates · deterministic alias normalisation bound to the opaque id · Jev SELECT · placeholder quarantine · entity review queue) | owner question (entity-vector leg — V1's LOCATION is decided 2026-11-07 (Postgres); §14.3 V3, whether Object/Event carry a vector, stays open) | refuse (scope-first identity key — contradicts #3584; replacing S3 — owner sequencing)`.
 
 ---
 

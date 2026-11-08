@@ -77,6 +77,10 @@ ROOT = Path(__file__).resolve().parent.parent
 DOC = ROOT / "docs" / "architecture" / "EXTRACTOR-V4-ARCHITECTURE.md"
 STORAGE = ROOT / "docs" / "architecture" / "STORAGE-ARCHITECTURE.md"
 ONTOLOGY = ROOT / "docs" / "ONTOLOGY.md"
+#: The fourth design document (#4051): the owner's 2026-11-07 ruling made this the
+#: canonical home for the search architecture, so it is bound by the same rule —
+#: a pin states a DESIGN FACT, never a delivery state.
+SEARCH = ROOT / "docs" / "architecture" / "SEARCH-ARCHITECTURE.md"
 ONTOLOGY_CHANGELOG = ROOT / "docs" / "ONTOLOGY-CHANGELOG.md"
 INGEST = ROOT / "docs" / "INGEST_CONTRACT.md"
 EVAL_SPEC = ROOT / "docs" / "epistemic-layer-eval-spec.md"
@@ -845,7 +849,7 @@ _STATUS_LOWER = r"(?:landed|shipped)"
 #:
 #: Defined above the class test that uses it because `STATUS_ABSENCE_DOCS` reads
 #: it — one definition, so the two guards cannot come to disagree about the set.
-DESIGN_DOCS: tuple[Path, ...] = (ONTOLOGY, DOC, STORAGE)
+DESIGN_DOCS: tuple[Path, ...] = (ONTOLOGY, DOC, STORAGE, SEARCH)
 
 #: Absence of work spoken as absence: *"`#3011` has not run"*, *"THE S0 HALF IS
 #: NOT BUILT"*, *"not yet wired"*. A design document states what the design IS;
@@ -1199,9 +1203,17 @@ def test_the_class_check_is_neither_dead_nor_noisy():
     #     an equality between the two names survives that edit untouched
     #     (measured: `DESIGN_DOCS = (DOC, STORAGE)` left all 8 tests green).
     # A guard that can be narrowed without reddening is a guard that will be.
-    assert set(DESIGN_DOCS) == {ONTOLOGY, DOC, STORAGE}, (
+    # The pin is an EQUALITY in both directions on purpose: a document leaving the
+    # set must red this test, and so must one JOINING it, so that widening the
+    # scope is a deliberate edit someone has to write down rather than a side
+    # effect of adding a file to `docs/architecture/`. The last widening was
+    # `SEARCH-ARCHITECTURE.md` (#4051), which the owner's 2026-11-07 ruling made
+    # the canonical search-architecture document — it was measured at 0 hits on
+    # every arm above before it was added, so the guard stays neither dead nor
+    # noisy on it.
+    assert set(DESIGN_DOCS) == {ONTOLOGY, DOC, STORAGE, SEARCH}, (
         "DESIGN_DOCS is the set of documents these guards police; a document "
-        "silently leaving it is the narrowing this assert exists to catch"
+        "silently leaving (or joining) it is the change this assert exists to catch"
     )
     assert set(STATUS_ABSENCE_DOCS) == set(DESIGN_DOCS), (
         "STATUS_ABSENCE_DOCS no longer covers the same documents as the class "

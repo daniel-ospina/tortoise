@@ -229,8 +229,8 @@ pins thresholds and fusion weights to (`{"vector": 1.5}` + implicit 1.0), so a m
 of them whichever estimator is better, and `to_tsvector` cannot reproduce the product's tokenizer behaviour
 (`ERR-4032` → `err4032` **plus** the adjacency phrase, `#8933`).
 
-**A separate leg the move does not touch:** the in-memory sklearn **TF-IDF** fallback (`tortoise/sparse.py`,
-the embedded lane) is outside `db.idx.fulltext` entirely, so "the text index stays" says nothing about it.
+**A separate leg the move does not touch:** the in-memory sklearn **TF-IDF** fallback (`tortoise/sparse.py` — what `sparse.py` calls "the embedded
+backend", a different leg from the falkordblite lane named above) is outside `db.idx.fulltext` entirely, so "the text index stays" says nothing about it.
 
 **Therefore:** the text index **stays** until **M3** measures a BM25-capable Postgres option (extensions
 are candidates, not assumptions) with **score distributions**, not only ranks, plus the identifier
@@ -279,8 +279,9 @@ and it is **strictly tighter** than that ceiling (\$5.70 < \$9). Both are quoted
 against the older **\$9 total-cost ceiling** a complete graph's **RAM line** is **~97 % of it** and its **total is ~122 %** (above it), while against the **\$5.70 storage target** the RAM line is **154 %** and the total **193 %** — and
 the target is what governs the window. **The rule's recorded home is §8**, which quotes the owner's own words
 (`#4051` comment [`6712622492`](https://github.com/daniel-ospina/tortoise/issues/4051#issuecomment-6712622492))
-and derives every threshold from them — so the target is no longer an unhomed figure, and §2.0's marker cites
-that derivation. ⚠️ The owner's words bound **solo** (30 % of \$19 = \$5.70); carrying the rule to pro and team
+and derives every threshold from them — so the target is no longer an unhomed figure. §2.0's marker states the
+same two figures (the §8.1 total of \$11.01 against the \$5.70 target) rather than citing this section; the
+derivation itself is §8 below. ⚠️ The owner's words bound **solo** (30 % of \$19 = \$5.70); carrying the rule to pro and team
 is this document's generalisation, recorded in the same thread (comment
 [`6712718679`](https://github.com/daniel-ospina/tortoise/issues/4051#issuecomment-6712718679)), and the
 thresholds for those two tiers are therefore a derivation, not a quotation.
@@ -307,7 +308,7 @@ makes EP recomputation exact (§6.3).
 | **window-local touch counters + admission control** | recency beats static degree ranking, and adaptive policies beat every static one measured; eviction must be budget-triggered, not per-request, or the cycle "demote a leaf → the next query needs it → re-materialise → evict another leaf" becomes a storm. ⚠️ **The counter is WINDOW-LOCAL cache state — a different artifact from `tortoise/read_ledger.py`.** That ledger is TENANT-WIDE and is explicitly not a product input: `STORAGE-ARCHITECTURE.md` §17.4.6 states that reading it for any product decision *"would be a violation"* (it exists to measure `f`). Wiring it as the eviction signal is exactly the violation it names. |
 | **reserve ≈6× the window in provisioned RAM for rebuild peaks** | **third-party measurement — citation owed (§1)**: re-materialising into FalkorDB peaks at **4.9–5.9× the resting size** — a 77 MB window can transiently demand ~380–455 MB, and the engine has **no per-graph memory cap** (**vendor-internal claim — citation owed (§1)**). This is the #1 production risk. Do not shard the window into many small graphs (`NODE_CREATION_BUFFER` costs 16 384 slots each **— vendor-internal, citation owed (§1)**) |
 | **a walk materialises its seeds first** | search returns ids from Postgres; a non-resident seed must be written into the graph before traversing — a write on the query path, which is why the headroom above is mandatory |
-| **label what was truncated** | a confidence within 2 hops of a truncated boundary is **refused**; beyond that it may be returned as degraded. ⚠️ **The two reason strings this rule needs are OWED, not shipped** — `degraded: "insufficient_graph"` / `degraded: "truncated_boundary"` appear nowhere in the tree at this head, and `STORAGE-ARCHITECTURE.md` §17.3 records `degraded` as one of four terms whose ONE home, `tortoise/status_vocabulary.py`, forbids a fifth, so the *reason* has to attach to `degraded` rather than mint a term. **Required before private-beta (§1.5).** What DOES exist is the marker's on/off mechanism (`residency.py`, `not-hot`, `TORTOISE_RESIDENCY`) and it is currently OFF |
+| **label what was truncated** | a confidence within 2 hops of a truncated boundary is **refused**; beyond that it may be returned as degraded. ⚠️ **The two reason strings this rule needs are OWED, not shipped, and each names its own outcome:** the degraded RETURN carries `degraded: "truncated_boundary"`, and the REFUSAL carries `degraded: "insufficient_graph"` (the resident graph cannot support the claim at all). Neither string appears anywhere in the tree at this head, and `STORAGE-ARCHITECTURE.md` §17.3 records `degraded` as one of four terms whose ONE home, `tortoise/status_vocabulary.py`, forbids a fifth, so the *reason* has to attach to `degraded` rather than mint a term. **Required before private-beta (§1.5).** What DOES exist is the marker's on/off mechanism (`residency.py`, `not-hot`, `TORTOISE_RESIDENCY`) and it is currently OFF |
 
 ⚠️ **The honesty item:** the bounded-cache literature measures **latency and hit rate, not answer
 quality**, and the best trace-aware policy reached ~54 % hit rate for 2-hop expansions. **Whether a
@@ -399,6 +400,11 @@ record and currently carries **solo = \$9**, so nothing here is live until that 
 ---
 
 ## 9. Measurement plan
+
+⛔ **This document's M1–M5 are ITS OWN set, and are not `STORAGE-ARCHITECTURE.md` §15's M1–M9:** there M2 is
+the invoice, M3 the junk share, M4 self-hosting and M5 the (now answered) location question. A bare `M4` in §1.5
+means *rebuild peak* here and *self-hosting* there, so resolve every M-reference against the document that
+prints it.
 
 | # | measurement | decides |
 |---|---|---|

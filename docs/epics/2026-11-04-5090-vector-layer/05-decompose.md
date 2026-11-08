@@ -139,10 +139,11 @@ claim and not an assertion:
   indexes, i.e. more RAM and a surface change. The later **2026-10-08 billing ruling** removes the COST
   argument rather than granting one: retained bytes are revenue, so removing bytes moves the bill by
   **$0.00**. So the census is filed, the removal is the owner's decision, and the surface rule gates it.
-- ✅ **Also in this child — DISCHARGED 2026-11-07:** reconcile `#10976`'s (c) and `#7879`'s *"vectors out"*
-  to the ruled wording at `S3-VECTOR-CENSUS.md` §6. §12.1c now says the location is DECIDED (Postgres,
-  `#4997`), so the *"pending V1"* target this item named is itself stale — a lane should reconcile to
-  *"location decided; the work is `#4051`'s"*, never to *"pending V1"*.
+- ⚠️ **Also in this child — the TARGET is superseded, the reconciliation is still OWED (2026-11-07):** the
+  two comments this item asked for are posted and still read *"pending V1"* (`#10976` comment `6695675706`,
+  `#7879` comment `6695676215`). §12.1c now says the location is DECIDED (Postgres, `#4997`), so what remains
+  is to re-point those two comments at the ruled wording in `S3-VECTOR-CENSUS.md` §6 —
+  *"location decided; the work is `#4051`'s"* — never to *"pending V1"*.
 
 ### C6 — **#11089** `capstone: clickthrough verification for the vector layer`
 

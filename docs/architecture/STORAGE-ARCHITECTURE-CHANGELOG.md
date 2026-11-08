@@ -2216,7 +2216,7 @@ window only after measurement** (the phase split is comment `6714119028`).
 
 **What this reverses in the design document, and what it does not.** `§12.1c` is no longer an OPEN DECISION:
 its recommendation (option 2, vectors to Postgres) is adopted, and what remains open there is the *different*
-question of whether `:Object`/`:Event` ever carry embeddings (§12.2d). **§2.0's 2026-10-08 ruling is SPLIT**,
+question of whether `:Object`/`:Event` ever carry embeddings (§14.3 **V3**). **§2.0's 2026-10-08 ruling is SPLIT**,
 not reversed: its *"keep the limit in falkor high"* clause is narrowed to *complete through private-beta,
 windowed after M2*, and carries an `OVERRIDES:` line; its *"so we don't need to rush with enabling our queries
 to parse both falkor and postgres"* clause is what makes the dual-store **search** path adoptable. ⚠️ **`#7970`'s
