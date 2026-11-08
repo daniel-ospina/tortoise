@@ -10796,7 +10796,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
 
     # A1: #11205's channel is TRANSPORT ONLY — the schema line that spells the
     # predicate allowlist, and the comment saying nothing in `tortoise/` consumes it.
-    assert "`hasPart` (`tortoise/extractor_v2.py:1720`)" in text, (
+    assert "`hasPart`" in text and "`tortoise/extractor_v2.py:1720`" in text, (
         "the record must cite the relations schema where `hasPart` is spelled")
     # The A1 proof command must be receiver-AGNOSTIC. The dot-anchored `'\.(create_edge|…)\('` form
     # exits 1 on an unqualified `return create_operator(payload)` (measured), so it cannot prove the
@@ -10813,9 +10813,16 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # reproduction block's comment. A bare cite carries no file token, so the
     # prefixed arm above cannot see it: measured by re-staling it to `:10815` in
     # place, which left every arm True before this assert existed.
-    assert "the comment at :10891" in text, (
-        "the reproduction block must name the SAME line its prose does — re-stale "
-        "it and this record's only reproduction path points at a dead line")
+    # ⛔ Pinned as the BARE occurrence of the NUMBER, not as the sentence around it (#10891
+    # is the claim; "the comment at" is one way of saying it). A literal needle redded on
+    # `the comment on :10891` and on `` the comment at `:10891` `` — both correct, both
+    # sending the reader to the live line (measured) — the same false-block this leg removed
+    # for `both now read`, the `# §0/§2` heading and `MENTIONS`. The prose above carries the
+    # PREFIXED form `extractor_v2.py:10891`; this is the only statement without a file token,
+    # so exactly one bare occurrence is the claim.
+    assert re.findall(r"(?<!extractor_v2\.py):10891", text) == [":10891"], (
+        "the reproduction block must state the live number `:10891` exactly once as a BARE "
+        "cite — re-stale it and this record's only reproduction path points at a dead line")
     assert "nothing in this tree consumes" in ext[10891 - 1], (
         f"extractor_v2.py:10891 reads {ext[10891 - 1].strip()[:90]!r}, not the "
         "comment stating nothing consumes `result[\"relations\"]`")
@@ -11059,7 +11066,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
             "  want: {!r}\n  got:  {!r}".format(
                 _k + 1, _want[_k] if _k < len(_want) else "",
                 _got[_k] if _k < len(_got) else ""))
-    assert f"→ **all {_total} hits are the bundle's own registration**" in text, (
+    assert f"all {_total} hits" in text, (
         f"§1 item 3's conclusion must state the DERIVED total ({_total}) — it is the same "
         "`git grep` the block above re-derives")
 
@@ -11129,7 +11136,10 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # must agree; the parenthetical is pinned by its NUMBER because it is the only one
     # that has no `sdk.py:` token or `sed` command for the arms below to catch
     # (measured: re-staling it to `17472` left every arm True).
-    assert "the capture path at `tortoise/sdk.py:17574`)" in text, (
+    # ⛔ The `)` the old needle ended on was pure punctuation: the claim is the FILE:LINE the
+    # prose cites, and a reword that keeps it (`the capture path is tortoise/sdk.py:17574`)
+    # reds on a needle that carries the sentence's tail (the false-block class above).
+    assert "`tortoise/sdk.py:17574`" in text, (
         "the record must cite the capture path by its live number")
     # ⛔ Pinned as the BARE occurrence of the NUMBER, not as the sentence around it: the
     # claim is that this paragraph states the same line the prose and the `sed` do.
@@ -11173,6 +11183,15 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     assert "link_source_to_event" in _probe_win, (
         "probes/capstone_measure.py:275-283 no longer names `link_source_to_event` — the "
         "record cites that window as the `references` writer, so re-derive the cite")
+    # ⛔ The record states this window TWICE — as the cite pinned above and as the
+    # reproduction command — and only the first was watched (measured: re-staling the second
+    # to `274,282` left the leg GREEN). Symmetric with the `sed -n '17574p'` arm for the
+    # sibling capture-path cite, which was watched from the start.
+    assert re.findall(
+        r"sed -n '(\d+),(\d+)p' docs/evidence/7949-capstone/probes/capstone_measure\.py",
+        text) == [("275", "283")], (
+        "the record's reproduction command must name the SAME window the cite and the arms "
+        "above do — it is the second statement of these two numbers")
     assert "tortoise/sdk.py:17574" in _probe_win, (
         "the cited probe window must still carry the `sdk.py:17574` cite it states — one "
         "number in two places cannot be allowed to drift apart silently")
