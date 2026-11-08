@@ -92,8 +92,8 @@ fifteen because its own Cypher names two labels), and a label interpolated at ru
 `LABELS_AT_RUNTIME` dispositions below exist at all. Note the two-label pair is NOT in this list:
 `_event_plain_merge` and `_rebuild_all_replay` keep their `MERGE`s in their own bodies, which is
 why their own Cypher NAMES two labels instead of none. A second derivation in the grader would be a
-second owner of one fact; the field is
-that fact, declared once (the policy-as-data shape `#11444` applies to row 1).
+second owner of one fact; the field is that fact, declared once (the policy-as-data shape `#11444`
+applies to row 1).
 ⚠️ **Its residual, stated rather than implied:** a `NO_LIVE_VECTOR` or label-tuple declaration is
 accepted **by name** once `load()` validates it — the instrument cannot re-derive "this writer
 stores nothing" (that is `UNDECIDABLE_WRITE_SHAPES`, data flow, the same limit `exempt` has on row
@@ -339,12 +339,12 @@ CLASSES: tuple[str, ...] = (RECOGNISED_PRODUCER, EXEMPT)
 #: ⛔ Why this belongs in the declaration and NOT in a derivation inside the instrument: of the
 #: twenty outside-gate writers, a `MERGE|CREATE (:Label` literal scan over the writer's OWN body
 #: NAMES a single label for three and two conflicting labels for two, and **no usable label at all
-#: for the other fifteen** — and the instrument never hands those five readings out:
-#: `_embedding_writers` short-circuits `unresolved_write` BEFORE that scan (`continue` at
-#: `tools/dod_5090_probe.py:918`), so four of the five reach `written_labels` flattened to
-#: `UNKNOWN(unresolved producer)` and only `session_indexer::main` (the one `ungated`) reaches it as
-#: a label. ⚠️ Those fifteen fail for SEVERAL reasons — do not name one as "the" reason, and do not
-#: cite the two-label pair among them:
+#: for the other fifteen** — and the instrument hands only ONE of those five readings out as a
+#: label: `_embedding_writers` short-circuits `unresolved_write` before that scan (the
+#: `unresolved_write` branch `continue`s ahead of the own-literal one), so four of the five reach
+#: `written_labels` flattened to `UNKNOWN(unresolved producer)` and only `session_indexer::main`
+#: (the one `ungated` writer) reaches it as a label. ⚠️ Those fifteen fail for SEVERAL reasons —
+#: do not name one as "the" reason, and do not cite the two-label pair among them:
 #: `_event_plain_merge` and `_rebuild_all_replay` keep their `MERGE`s in their own bodies (that is
 #: exactly why their own Cypher NAMES TWO), while the fifteen include a label in a `MATCH` the
 #: derivation does not credit (`_embedding_repair_attempt`'s own `MATCH (e:Event {eventId:$eid})` +
