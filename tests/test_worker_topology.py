@@ -58,6 +58,10 @@ HOSTED_API = REPO_ROOT / "tortoise" / "hosted_api.py"
 #: Marks the start of the pre-exec admission gate in `entrypoint.sh` — the seam
 #: between the count resolvers (section 5) and the refusal (section 6).
 _GATE_SENTINEL = "# ── #1677: the admission gate, BEFORE exec"
+#: entrypoint.sh's own sentinel on the FIRST line of the worker-count block. The
+#: block is several functions now; lifting from a function NAME dropped the
+#: helpers defined above it (see `_worker_block`).
+_BLOCK_SENTINEL = "# ── #1677: the worker-count measurement, from here to the gate sentinel"
 
 _SHARED = {"TORTOISE_DB_URI": "rediss://tortoise.example.cloud:50317/tortoise"}
 _SHARED_VIA_CLOUD = {"FALKORDB_CLOUD_URI": "rediss://tortoise.example.cloud:50317/tortoise"}
@@ -722,11 +726,28 @@ def _worker_block(source: str) -> str:
     ⛔ Ends at the GATE sentinel, not at `exec`: the pre-exec gate spawns an
     interpreter and can legitimately refuse, and these arms are about the COUNT
     resolvers agreeing. :func:`_run_gate_block` executes the gate.
+
+    ⛔ STARTS at a sentinel too, not at a function name: the block's helpers are
+    several now, and pinning the lift to ONE of them silently drops the others —
+    that refactor made the shell arm answer 1 for every input (an undefined
+    helper inside `$( )` yields an empty string) while every Python arm stayed
+    green, and only the agreement rows noticed.
     """
-    start = source.index("_resolve_requested_workers() {")
+    start = source.index(_BLOCK_SENTINEL)
     end = source.index(_GATE_SENTINEL, start)
     assert end > start
-    return source[start:end]
+    block = source[start:end]
+    # The lifted text must DEFINE everything the entrypoint's own calls reach;
+    # a helper left above the sentinel is the failure this asserts against.
+    for helper in ("_resolve_raw_requested_workers", "_resolve_requested_workers",
+                   "_count_is_verifiable", "_app_env_file_in_play",
+                   "_app_lifespan_disabled"):
+        assert f"{helper}() {{" in block, (
+            f"`{helper}` is defined OUTSIDE the lifted entrypoint block — move it "
+            f"below the `{_BLOCK_SENTINEL}` sentinel, or the executed shell arm "
+            "silently loses it"
+        )
+    return block
 
 
 def _run_worker_block(argv: tuple[str, ...], environ: dict[str, str]) -> subprocess.CompletedProcess:
@@ -753,8 +774,13 @@ def _gate_tail(source: str) -> str:
 
     The real composition, so the gate is tested with the count THIS script
     exported rather than an injected one.
+
+    ⛔ Starts at the BLOCK sentinel, the same one `_worker_block` uses: the tail
+    calls the block's helpers, and lifting from a function name left them behind
+    — `command not found`, an empty count, and a gate that silently permitted
+    every boot.
     """
-    start = source.index("_resolve_requested_workers() {")
+    start = source.index(_BLOCK_SENTINEL)
     end = source.index('exec "$@"', start)
     assert end > start
     return source[start:end]
@@ -975,6 +1001,47 @@ def test_the_shipped_block_refuses_a_multi_worker_boot_with_the_lifespan_off():
     proc = _run_worker_block(("uvicorn", "app:app"), {"UVICORN_LIFESPAN": "off"})
     assert proc.returncode == 0, proc.stderr
     assert "lifespan DISABLED" in proc.stdout, proc.stdout
+    assert "verified as ONE worker" in proc.stdout, proc.stdout
+
+
+def test_the_lifespan_off_refusal_covers_counts_the_shell_CANNOT_see():
+    """⛔ The first fix guarded only the counts the boot script can measure.
+
+    uvicorn has a FOURTH count input this script cannot see: `Config.__init__`
+    runs `load_dotenv(dotenv_path=env_file)` BEFORE it reads `$WEB_CONCURRENCY`
+    (`uvicorn/config.py:348-353`), so `--env-file` / click's `$UVICORN_ENV_FILE`
+    (`main.py:191-197`) sets the count AFTER the measurement. MEASURED on the
+    pinned 0.52.1: an env file holding `WEB_CONCURRENCY=4`, with
+    `UVICORN_LIFESPAN=off`, started FOUR server processes and the gate was never
+    entered — while this block reported "one worker is serving".
+
+    And a raw count the shell cannot parse (`int()` also accepts non-ASCII
+    decimal digits and Unicode whitespace — `WEB_CONCURRENCY=$'\xc2\xa02'`
+    starts TWO children) is a NORMALISATION to 1, not a measurement, so
+    "nothing to gate" may not be printed on the strength of it.
+    """
+    for argv, environ in (
+        (("uvicorn", "app:app"), {"UVICORN_LIFESPAN": "off",
+                                "UVICORN_ENV_FILE": "/tmp/four.env"}),
+        (("uvicorn", "app:app", "--env-file", "/tmp/four.env"),
+         {"UVICORN_LIFESPAN": "off"}),
+        (("uvicorn", "app:app", "--env-file=/tmp/four.env", "--workers", "1"),
+         {"UVICORN_LIFESPAN": "off"}),
+        (("uvicorn", "app:app"), {"UVICORN_LIFESPAN": "off",
+                                "WEB_CONCURRENCY": "\u00a02"}),
+    ):
+        proc = _run_worker_block(argv, environ)
+        assert proc.returncode != 0, (argv, environ, proc.stdout)
+        assert "REFUSING" in proc.stderr, (argv, environ, proc.stderr)
+
+    # …and with the lifespan on, an env file is REPORTED as unverified rather
+    # than printed as a count this script cannot know. The app's gate still
+    # refuses the spawned children, so this is a report fix, not a gate.
+    proc = _run_worker_block(("uvicorn", "app:app", "--lifespan", "on"),
+                             {"UVICORN_ENV_FILE": "/tmp/four.env",
+                              "TORTOISE_DB_URI": _SHARED["TORTOISE_DB_URI"]})
+    assert proc.returncode == 0, proc.stderr
+    assert "UNVERIFIED" in proc.stdout, proc.stdout
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1054,8 +1121,17 @@ def test_lifespan_calls_the_gate_FIRST():
                 names = {"BaseException"}
             elif isinstance(caught, ast.Name):
                 names = {caught.id}
+            elif isinstance(caught, ast.Attribute):
+                # `except worker_topology.MultiWorkerRefused:` — the qualified
+                # spelling is just as functional as the bare name.
+                names = {caught.attr}
             elif isinstance(caught, ast.Tuple):
-                names = {e.id for e in caught.elts if isinstance(e, ast.Name)}
+                names = set()
+                for element in caught.elts:
+                    if isinstance(element, ast.Name):
+                        names.add(element.id)
+                    elif isinstance(element, ast.Attribute):
+                        names.add(element.attr)
             if names & swallowing and any(
                     isinstance(inner, ast.Call)
                     and isinstance(inner.func, ast.Name)

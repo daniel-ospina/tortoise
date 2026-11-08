@@ -472,11 +472,23 @@ fi
 #
 # ⚠️ `TORTOISE_WEB_WORKERS` is an OUTPUT of this script, never an operator input:
 # uvicorn does not read it, so setting it by hand cannot raise the count.
-_resolve_requested_workers() {
+# ── #1677: the worker-count measurement, from here to the gate sentinel ──
+# ⛔ THIS LINE IS A TEST SENTINEL (tests/test_worker_topology.py lifts the block
+# between it and the gate sentinel and EXECUTES it). Keep it directly above the
+# first of the block's functions, and add any new helper INSIDE the block — a
+# helper defined above this line is invisible to the lifted block, which is how a
+# refactor once made the shell arm answer 1 for every input and only the pytest
+# suite noticed.
+_resolve_raw_requested_workers() {
     # uvicorn's own precedence: `--workers N` / `--workers=N` over the argv, else
     # $UVICORN_WORKERS (click's `auto_envvar_prefix` value for that flag), else
     # $WEB_CONCURRENCY, else 1. Both flag forms are handled because `--workers=N`
     # is what a hand-edited CMD usually carries.
+    #
+    # The RAW value, split out from `_resolve_requested_workers` below so the
+    # `--lifespan off` guard can ask a DIFFERENT question of the same input —
+    # "is this a value the shell can VERIFY?" rather than "what number is it?" —
+    # without a second copy of this precedence chain.
     local _args=("$@") _i=0 _count="" _arg=""
     while [ "$_i" -lt "${#_args[@]}" ]; do
         _arg="${_args[$_i]}"
@@ -491,20 +503,59 @@ _resolve_requested_workers() {
         esac
         _i=$((_i + 1))
     done
-    # A GIVEN flag value is final (`-z` only falls through for an EMPTY one), and
-    # then click's `auto_envvar_prefix="UVICORN"` makes $UVICORN_WORKERS the
-    # flag's VALUE — so it OUTRANKS $WEB_CONCURRENCY, which uvicorn reads only
-    # when that parameter is `None`. Measured on the pinned uvicorn (0.52.1):
-    # `UVICORN_WORKERS=2 WEB_CONCURRENCY=4` starts TWO children, and an EMPTY
-    # value behaves as absent (click's own `rv != ""` rule). Without this arm
-    # the boot line reported 1 for a machine running N — the same wrong-report
-    # defect `--workers +2` had before the trim below.
     if [ -z "$_count" ]; then
         _count="${UVICORN_WORKERS:-}"
     fi
     if [ -z "$_count" ]; then
         _count="${WEB_CONCURRENCY:-1}"
     fi
+    printf '%s' "$_count"
+}
+
+_count_is_verifiable() {
+    # ⛔ TRUE only when the raw value is an ASCII-integer spelling this shell can
+    # actually READ. `_resolve_requested_workers` normalises anything it cannot
+    # parse to 1, and that normalisation is NOT a measurement: uvicorn's
+    # `int($WEB_CONCURRENCY)` (`config.py:353`) also accepts non-ASCII decimal
+    # digits and Unicode whitespace — MEASURED, `WEB_CONCURRENCY=$'\xc2\xa02'`
+    # starts TWO children while both resolvers report 1. Harmless while the app
+    # gate runs (the children are `supervised` and refused); NOT harmless with
+    # the lifespan off, which is the only caller of this predicate.
+    local _raw
+    _raw="$(_resolve_raw_requested_workers "$@")"
+    _raw="$(printf '%s' "$_raw" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+    case "$_raw" in
+        +*) _raw="${_raw#+}" ;;
+    esac
+    [[ "$_raw" =~ ^[0-9]+(_[0-9]+)*$ ]]
+}
+
+_app_env_file_in_play() {
+    # ⛔ uvicorn's FOURTH count input. `Config.__init__` runs
+    # `load_dotenv(dotenv_path=env_file)` BEFORE it reads `$WEB_CONCURRENCY`
+    # (`config.py:348-353`), so `--env-file` / click's `$UVICORN_ENV_FILE`
+    # (`main.py:191-197`) can set the count AFTER this script measured it.
+    # MEASURED on the pinned 0.52.1: `UVICORN_ENV_FILE=four.env`
+    # (`WEB_CONCURRENCY=4`) with `UVICORN_LIFESPAN=off` started FOUR server
+    # processes with the gate never entered, while this block reported one
+    # worker. With an env file in play, NO count measured here is the count
+    # uvicorn will run.
+    for _arg in "$@"; do
+        case "$_arg" in
+            --env-file) return 0 ;;
+            --env-file=*) return 0 ;;
+        esac
+    done
+    [ -n "${UVICORN_ENV_FILE:-}" ]
+}
+
+_resolve_requested_workers() {
+    # uvicorn's own precedence: `--workers N` / `--workers=N` over the argv, else
+    # $UVICORN_WORKERS (click's `auto_envvar_prefix` value for that flag), else
+    # $WEB_CONCURRENCY, else 1. Both flag forms are handled because `--workers=N`
+    # is what a hand-edited CMD usually carries.
+    local _count
+    _count="$(_resolve_raw_requested_workers "$@")"
     # Trim ENDS only (never interior whitespace — `1 2` is not 12, it is a value
     # uvicorn's `int()` REJECTS), then drop a leading `+`.
     #
@@ -600,20 +651,41 @@ _app_lifespan_disabled() {
 if [ "$_IS_SERVER" = "1" ]; then
     if [ "$_reload_requested" = "1" ]; then
         echo "tortoise: uvicorn workers = 1 (reload; --workers is ignored while reloading)"
-    elif [ "$TORTOISE_WEB_WORKERS" -gt 1 ]; then
-        if _app_lifespan_disabled "$@"; then
+    elif _app_lifespan_disabled "$@"; then
+        # ⛔ With the lifespan off, NOTHING in the app can gate the topology, so
+        # this block must refuse unless the count is PROVABLY one from inputs it
+        # can see. Two ways it may not be:
+        #   * `--env-file` / `$UVICORN_ENV_FILE` — uvicorn loads a dotenv AFTER
+        #     this measurement, so the real count is unknown here (measured: four
+        #     workers served under a banner that said one);
+        #   * a raw count this shell cannot parse (Unicode digits/whitespace).
+        if [ "$TORTOISE_WEB_WORKERS" -gt 1 ]; then
+            _refuse_why="${TORTOISE_WEB_WORKERS} uvicorn workers"
+        elif _app_env_file_in_play "$@"; then
+            _refuse_why="a --env-file / \$UVICORN_ENV_FILE that sets the worker count AFTER this measurement"
+        elif ! _count_is_verifiable "$@"; then
+            _refuse_why="a worker count this boot script cannot read (the value is not an ASCII integer), which uvicorn's int() may still turn into N"
+        else
+            _refuse_why=""
+        fi
+        if [ -n "$_refuse_why" ]; then
             {
-                echo "tortoise: REFUSING to start ${TORTOISE_WEB_WORKERS} uvicorn workers with the APP LIFESPAN DISABLED (--lifespan off / \$UVICORN_LIFESPAN=off)."
+                echo "tortoise: REFUSING to start — the APP LIFESPAN IS DISABLED (--lifespan off / \$UVICORN_LIFESPAN=off) and this boot has ${_refuse_why}."
                 echo "tortoise: the multi-worker admission gate is the first statement of hosted_api._lifespan (tortoise/worker_topology.py, #1677), so with the lifespan off it never runs — and N workers on an EMBEDDED database open N divergent copies of one file."
-                echo "tortoise: fix: drop the lifespan override so the gate runs, or run ONE worker (unset WEB_CONCURRENCY / drop --workers)."
+                echo "tortoise: fix: drop the lifespan override so the gate runs, or run ONE worker (unset WEB_CONCURRENCY / drop --workers / drop --env-file and set the count in the environment)."
             } >&2
             exit 1
         fi
+        echo "tortoise: lifespan DISABLED (--lifespan off) — the multi-worker admission gate cannot run; the count is verified as ONE worker, so there is nothing to gate"
+        echo "tortoise: uvicorn workers = 1"
+    elif _app_env_file_in_play "$@"; then
+        # Truthful, and not a second gate: the app's lifespan gate still runs here
+        # and refuses the spawned children, so this is the REPORT being honest
+        # about what it cannot see (`load_dotenv` happens after this measurement).
+        echo "tortoise: uvicorn workers = UNVERIFIED — --env-file / \$UVICORN_ENV_FILE can set \$WEB_CONCURRENCY AFTER this measurement, so the count above is not the count uvicorn will run; the app's admission gate still refuses a multi-worker boot (tortoise/worker_topology.py, #1677)"
+    elif [ "$TORTOISE_WEB_WORKERS" -gt 1 ]; then
         echo "tortoise: uvicorn workers = ${TORTOISE_WEB_WORKERS} — MULTI-WORKER topology, admission-gated at app startup (tortoise/worker_topology.py, #1677)"
     else
-        if _app_lifespan_disabled "$@"; then
-            echo "tortoise: lifespan DISABLED (--lifespan off) — the multi-worker admission gate cannot run; one worker is serving, so there is nothing to gate"
-        fi
         echo "tortoise: uvicorn workers = 1"
     fi
 fi
