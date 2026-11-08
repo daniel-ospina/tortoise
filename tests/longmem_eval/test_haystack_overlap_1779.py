@@ -339,10 +339,17 @@ def test_census_on_real_s_split():
     refresh that changes the overlap must RED this pin — the numbers are
     quoted in ``tools/longmem_eval/README.md`` and the module docstrings, and a
     silently re-based reuse factor is the "5-10×" fiction all over again.
+
+    ⛔ The skip is bound to `FileNotFoundError` ONLY. `DatasetDigestError` means the
+    cache EXISTS and no longer matches `SPLIT_DIGESTS` (`dataset.py:113-122`) — the
+    drift event this pin advertises as a red — so it must propagate, not be
+    swallowed. Measured (PR #11577 review, two contexts independently): folding it
+    into the skip made a drifted cache report a green SKIP whose reason asserted
+    something false, while three docs claimed the pin reds on exactly that event.
     """
     try:
         instances = lme_dataset.load_dataset(split="s", download=False)
-    except (FileNotFoundError, lme_dataset.DatasetDigestError):
+    except FileNotFoundError:
         pytest.skip("real S split not cached (CI)")
     census = census_overlap(instances)
     for key in ("findings_date", "n_instances", "chunk_turns",
