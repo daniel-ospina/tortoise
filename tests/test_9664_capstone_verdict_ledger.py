@@ -1694,14 +1694,11 @@ def test_a_token_the_loop_never_reads_cannot_carry_the_verdict(tmp_path, entry):
 def test_a_deciding_wrapper_argument_is_read_not_skipped(tmp_path):
     """A wrapper's argument is checked where the SHELL's grammar decides it.
 
-    ⛔ `source` was tried here and WITHDRAWN (second review cycle). `is_file()`
-    proves the target EXISTS, not that sourcing it SUCCEEDS: measured,
-    `source tests/test_9664_capstone_verdict_ledger.py` is a real file that bash
-    refuses (exit 2), so the `&&` short-circuits — and grading it tightly is also
-    BOX-DEPENDENT, because `source .venv/bin/activate` resolves on the authoring box
-    and nowhere in a clone (`.venv` is gitignored). A wrapper that cannot be
-    decided by grammar is admitted as a wrapper that cites nothing, and the
-    residual is pinned (`test_the_deployed_wrapper_head_residual_is_pinned`).
+    ⛔ `source` is gradeable only on EXISTENCE. `is_file()` proves the target is
+    there, not that sourcing it SUCCEEDS, and requiring TRACKED would refuse
+    `source .venv/bin/activate` — a command this branch already pins as a
+    legitimate record. The residual is pinned by
+    `test_source_of_an_existing_but_unsourceable_file_is_a_known_gap`.
     """
     proc = _run_cli(
         tmp_path,
@@ -1721,6 +1718,31 @@ def test_a_deciding_wrapper_argument_is_read_not_skipped(tmp_path):
     assert proc.returncode == cl.EXIT_INVALID, proc.stdout + proc.stderr
 
 
+def test_source_of_an_existing_but_unsourceable_file_is_a_known_gap(tmp_path):
+    """KNOWN-OPEN (#11520): `source` is graded on EXISTENCE, not on success.
+
+    ⛔ Measured: `source tests/test_9664_capstone_verdict_ledger.py` names a real
+    file that bash REFUSES (exit 2), so the `&&` short-circuits and the graded
+    command provably never ran — yet the record is ACCEPTED. Closing it needs the
+    target to be TRACKED and `bash -n` clean, which would refuse
+    `source .venv/bin/activate` (gitignored, and already pinned as a legitimate
+    record). Flagged by the second review cycle; disclosed here instead of bought
+    with a new false block.
+
+    INVERT this pin (EXIT_INVALID) when #11520 is closed — do not delete it.
+    """
+    command = (
+        "cmd:source tests/test_9664_capstone_verdict_ledger.py && uv run pytest "
+        "tests/test_9664_capstone_verdict_ledger.py -q"
+    )
+    proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, command])]))
+    assert proc.returncode != cl.EXIT_INVALID, (
+        f"{command!r} is now REFUSED — if `source` gained a TRACKED/`bash -n` rule, "
+        f"invert this pin and re-check `source .venv/bin/activate` is not refused.\n"
+        f"{proc.stdout}{proc.stderr}"
+    )
+
+
 #: ⛔ DEPLOYED RESIDUAL, pinned as OPEN rather than left for a reader to infer as
 #: closed. Three wrapper heads cannot be decided without a runtime judgement:
 #: * a decorative PRINTER — `echo` may legitimately print any text, and
@@ -1735,7 +1757,6 @@ _DEPLOYED_WRAPPER_HEAD_RESIDUALS = [
     "cmd:echo NOT RUN - I did not run this && uv run pytest "
     "tests/test_9664_capstone_verdict_ledger.py -q",
     "cmd:export NOT RUN && uv run pytest tests/test_9664_capstone_verdict_ledger.py",
-    "cmd:source NOT RUN && uv run pytest tests/test_9664_capstone_verdict_ledger.py",
 ]
 
 

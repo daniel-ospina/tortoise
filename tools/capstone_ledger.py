@@ -439,18 +439,35 @@ def _wrapper_argument_defect(head: str, args: list[str], cwd: Path, root: Path) 
             if not _UMASK_ARG.match(arg):
                 return f"{_short(arg)} is not a umask mask"
         return None
-    # ⛔ `source` is NOT graded here, and that is deliberate. `is_file()` proves the
-    # target EXISTS, not that sourcing it SUCCEEDS — measured, `source
-    # tests/test_9664_capstone_verdict_ledger.py` is a real file that bash refuses
-    # (exit 2), so the `&&` short-circuits and the graded command provably never
-    # ran, yet the record was ACCEPTED. Grading it tightly is also BOX-DEPENDENT:
-    # `source .venv/bin/activate` resolves here and nowhere in a clone, because
-    # `.venv` is gitignored — the "validates on the authoring box, INVALID for every
-    # reader" defect `_is_tracked` exists to prevent. Deciding it needs a runtime
-    # judgement this arm must not make, so it is admitted as a wrapper that cites
-    # nothing and the residual is PINNED as OPEN beside the decorative printers
-    # (`test_the_deployed_wrapper_head_residual_is_pinned`) rather than left for a
-    # reader to infer as closed. Same root as the printers: #11520.
+    # ⛔ `source` is graded on EXISTENCE only, and the limit is named rather than
+    # implied closed. `is_file()` proves the target is there, NOT that sourcing it
+    # SUCCEEDS — `source tests/test_9664_capstone_verdict_ledger.py` is a real file
+    # bash refuses (exit 2), so the `&&` short-circuits and the graded command
+    # provably never ran. That residual is PINNED as OPEN
+    # (`test_source_of_an_existing_but_unsourceable_file_is_a_known_gap`).
+    #
+    # The alternative — requiring the target to be TRACKED and `bash -n` clean —
+    # closes it, but it REFUSES `source .venv/bin/activate`, which is a command a
+    # lane really records and which this branch already pins as a legitimate
+    # record. The module's own rule is that "a refusal that loses the finding is
+    # worse than the weaker arm", so non-existence is what is refused here. THIS
+    # DOES make the verdict box-dependent for `source` wrappers (`.venv` exists on
+    # the authoring box and in no clone); that is the cost of not taking a false
+    # block, it is disclosed here, and it is tracked on #11520.
+    if head == "source":
+        if not args:
+            return None
+        target = args[0].strip("'\"")
+        try:
+            resolved = (cwd / target).resolve()
+        except (OSError, ValueError):
+            resolved = None
+        if resolved is None or not resolved.is_file():
+            return (
+                f"{_short(target)} does not name a file, and a failing `source` "
+                "short-circuits the `&&` — no later segment of this record can have run"
+            )
+        return None
     return None
 
 
