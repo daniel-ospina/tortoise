@@ -1255,8 +1255,15 @@ def _ledger_row(
     wanted = (ref or "").strip()
     if not wanted or not graph_rows:
         return None
-    for row in graph_rows:
-        for fname in _LEDGER_REF_FIELDS:
+    # FIELD-MAJOR, matching `mcp_auth.resolve_graph_target`'s scan order: every
+    # `graph_id` before any `stable_id`, then `namespace`. A ROW-major walk returns a
+    # row whose LATER field equals the ref before one whose EARLIER field does, so the
+    # ledger's notion of the target could disagree with the write path's — measured
+    # 2026-11-08 (round-39 P3): rows `[{graph_id: g_alpha, namespace: LIVE},
+    # {graph_id: LIVE, namespace: org_o1_g_beta}]` resolved `LIVE` to BETA for the write
+    # and to ALPHA here, recording BETA's keys under ALPHA.
+    for fname in _LEDGER_REF_FIELDS:
+        for row in graph_rows:
             val = row.get(fname)
             if val is not None and str(val).strip() == wanted:
                 return row

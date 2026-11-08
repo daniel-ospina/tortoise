@@ -512,6 +512,8 @@ def cmd_inventory(args: argparse.Namespace) -> int:
             ],
         },
         "census": plan.census(),
+        # Uniform with `plan`'s payload: this report's census is measured too.
+        "census_measured": True,
         "rows_written": (len(plan.decisions) if args.rows else None),
     }
     text = json.dumps(report, indent=2, sort_keys=True)
@@ -661,6 +663,11 @@ def cmd_plan(args: argparse.Namespace) -> int:
     else:
         payload_rows = None
     payload = {"census": plan.census(), "run": result.as_dict(),
+               # ⛔ PRESENT ON EVERY PATH, so `payload["census_measured"]` answers "was the
+               # census measured?" instead of KeyError-ing on the most common disarmed run
+               # (the healthy one) — the field was added for that uniformity and only the
+               # two failure arms carried it (round-39 P3).
+               "census_measured": True,
                "rows_written": payload_rows,
                "points_read": len(points), "points_total_reported": points_total,
                "sources_read": len(sources), "sources_total_reported": source_total,

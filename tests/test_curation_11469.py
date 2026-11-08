@@ -2811,3 +2811,49 @@ def test_a_disarmed_run_over_a_damaged_ledger_still_exits_zero(monkeypatch, tmp_
     assert payload["census_measured"] is True and payload["census"], payload
     assert "damaged" in payload["disarmed_reason"], payload["disarmed_reason"]
     assert payload["read_failure"] is None
+
+
+def test_the_ledger_resolves_field_major_like_the_write_path():
+    """Round-39 P3 — `_ledger_row` walked ROW-major while the resolver walks FIELD-major.
+
+    A ROW-major walk returns a row whose LATER field equals the ref before one whose
+    EARLIER field does, so rows `[{graph_id: g_alpha, namespace: LIVE},
+    {graph_id: LIVE, namespace: org_o1_g_beta}]` resolved `LIVE` to BETA on the write
+    path and to ALPHA here: the run wrote into BETA and recorded its keys under ALPHA,
+    and a later run into ALPHA then reported `written: 0` over rows it never received.
+    """
+    rows = [{"graph_id": "g_alpha", "namespace": "LIVE"},
+            {"graph_id": "LIVE", "namespace": "org_o1_g_beta"}]
+    # FIELD-major: `graph_id` on row 2 beats `namespace` on row 1 — the resolver's order
+    scope = C.ledger_scope("LIVE", rows)
+    assert scope != "g_alpha", scope
+    assert scope == "org_o1_g_beta", scope
+    assert C.ledger_scopes("LIVE", rows).isdisjoint(C.ledger_scopes("g_alpha", rows))
+
+
+def test_every_plan_payload_says_whether_the_census_was_measured(monkeypatch, tmp_path):
+    """Round-39 P3 — `census_measured` was on the two FAILURE arms only.
+
+    The field exists so a driver answers "was it measured?" uniformly; the most common
+    disarmed run (healthy `--off`) is exactly the one that lacked it, and a driver doing
+    `payload["census_measured"]` KeyError-ed there while the failure arms were explicit.
+    Both `inventory` and a healthy `plan` (disarmed and armed) now carry it.
+    """
+    mod = _tool_module()
+
+    def call(name, args):
+        if name == "tortoise_graph_overview" and args.get("section") == "status":
+            return {"counts": {"Source": 0}}
+        if name == "tortoise_query":
+            return {"result": [{"id": "p1", "kind": "decision", "content": "c"}], "total": 1}
+        return {"result": []}
+    monkeypatch.setattr(mod, "_live_call_tool", call)
+    assert mod.main(["inventory", "--out", str(tmp_path / "inv.json"),
+                     "--no-verify-read"]) == 0
+    assert json.loads((tmp_path / "inv.json").read_text())["census_measured"] is True
+
+    for extra, out in ((["--off"], "off.json"), ([], "on.json")):
+        assert mod.main(["plan", "--graph", "org_x_g_old", "--target", "org_x_g_new",
+                         *extra, "--no-verify-read", "--out", str(tmp_path / out),
+                         "--ledger", str(tmp_path / "l.jsonl")]) == 0
+        assert json.loads((tmp_path / out).read_text())["census_measured"] is True
