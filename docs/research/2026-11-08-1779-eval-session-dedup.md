@@ -80,8 +80,9 @@ renderers** rather than a re-implementation:
 - encode units — one turn Point per turn (`ingest._turn_text`) and one raw chunk per
   `chunk_turns`-window (`ingest._session_chunks`, `DEFAULT_CHUNK_TURNS = 2`).
 
-`_turn_text` was extracted from the two inline renderings (`ingest.py:219`,
-`ingest_v2.py:615`) in the same change, so both ingest legs and the census share one definition of
+`_turn_text` was extracted from the two inline renderings (`ingest.py:219` and
+`ingest_v2.py:615` on `main`, **before** this PR — their call sites are `ingest.py:229` and
+`ingest_v2.py:616` at this head) in the same change, so both ingest legs and the census share one definition of
 "the text a turn Point embeds" — the census cannot silently measure text the ingest never writes.
 
 Pure and deterministic: no DB, no LLM, no keys, no network beyond the dataset cache. Reproduce:
@@ -138,7 +139,9 @@ for this issue by its own scope guard ("Out of scope: any parse/retrieval semant
 ## 5. What changed in the tree (and what deliberately did not)
 
 - **New:** `tools/longmem_eval/haystack_overlap.py` (census + derived verdict + CLI) and its test
-  `tests/longmem_eval/test_haystack_overlap_1779.py` (13 tests: 12 hermetic + the real-split pin; registered in `config/ci-surfaces.yml`
+  `tests/longmem_eval/test_haystack_overlap_1779.py` (16 tests: 15 hermetic + the real-split pin — a
+  count this document's §5 line must match, asserted by
+  `test_the_research_doc_publishes_this_files_REAL_test_count`; registered in `config/ci-surfaces.yml`
   on the `eval` surface, where `tools/longmem_eval/` is a `SOURCE_PATTERNS` entry, and therefore in
   the non-gating `on_demand` lane — `python tools/ci_selection.py --integrity` exits 0).
 - **Corrected:** the unmeasured "5-10×" in `encode_cache.py` (docstring), `README.md` (encode-cache
@@ -220,7 +223,7 @@ for this issue by its own scope guard ("Out of scope: any parse/retrieval semant
 TORTOISE_LME_CACHE_DIR=~/.cache/tortoise-longmemeval \
   python -m tools.longmem_eval.haystack_overlap --json
 
-# the tests (12 passed, 1 skipped; the @slow pin needs the cached S split)
+# the tests (15 hermetic pass; the @slow pin only runs with the cached S split)
 TORTOISE_TEST_CARVE_OUT=1 TORTOISE_LME_CACHE_DIR=~/.cache/tortoise-longmemeval \
   python -m pytest tests/longmem_eval/test_haystack_overlap_1779.py -q -p no:cacheprovider
 ```

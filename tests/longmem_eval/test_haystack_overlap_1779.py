@@ -8,6 +8,7 @@ granularity verdict (a repeated session with the SAME date must read
 """
 from __future__ import annotations
 
+import ast
 import json
 import sys
 from pathlib import Path
@@ -295,6 +296,33 @@ def test_cli_passes_download_through(tmp_path, monkeypatch, capsys):
     assert main(["--json"]) == 0
     assert seen["download"] is False
     capsys.readouterr()
+
+
+def test_the_research_doc_publishes_this_files_REAL_test_count():
+    """§5 of the research note states this suite's size, so the size is DERIVED.
+
+    Two fix rounds published a stale count after adding tests ("10 tests",
+    then 13 while the file collected 15) — the same "a published number with no
+    instrument standing behind it" class this module exists to retire, and a
+    number no test could red. So the count is parsed from THIS file's AST (not
+    from collection, which depends on the pytest invocation) and compared to
+    the sentence §5 publishes: a new test without a §5 update reds here.
+    """
+    doc = (Path(__file__).resolve().parents[2]
+           / "docs/research/2026-11-08-1779-eval-session-dedup.md")
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    tests = [n for n in tree.body
+             if isinstance(n, ast.FunctionDef) and n.name.startswith("test_")]
+    slow = [n for n in tests
+            if any(isinstance(d, ast.Attribute) and d.attr == "slow"
+                   for d in n.decorator_list)]
+    assert len(slow) == 1, (
+        f"expected exactly one @pytest.mark.slow (the real-split pin), found "
+        f"{len(slow)} — §5 says the count is `N hermetic + the real-split pin`")
+    published = f"{len(tests)} tests: {len(tests) - len(slow)} hermetic"
+    assert published in doc.read_text(encoding="utf-8"), (
+        f"§5 of {doc.name} must publish `{published}` (this file defines "
+        f"{len(tests)} tests, {len(slow)} of them @slow) — the count is stale")
 
 
 @pytest.mark.slow
