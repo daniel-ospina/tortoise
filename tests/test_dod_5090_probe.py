@@ -4526,9 +4526,9 @@ def _doc_section(text: str, start: str, end: str) -> str:
 # Those need the predicate to know the sentence's SUBJECT, to read a second
 # negation, or to resolve a preposition — scope, not vocabulary — so they are
 # DECLARED and not claimed closed.
-# Window measured at THIS head over all 29 `must_red` rows: 0 and 2 leave the
-# must_red set fully RED (0/29 leak) and keep the real doc a HIT; **3 opens 2 of
-# 29**, starting with "are not missed by the walk". ⛔ Window 0 is not free
+# Window measured at THIS head over all 34 `must_red` rows: 0 and 2 leave the
+# must_red set fully RED (0/34 leak) and keep the real doc a HIT; **3 opens 2 of
+# 34**, starting with "are not missed by the walk". ⛔ Window 0 is not free
 # either, one set over: it wrongly REDS **10** of the 16 `declared_open` rows.
 # And since #11437's round-6 clause-scope rows landed, **window 1 is no longer
 # clean at all** — it wrongly REDS 4 of them: the two PSEUDO-CLEFT rows (`walk` is
@@ -4544,8 +4544,18 @@ def _doc_section(text: str, start: str, end: str) -> str:
 # `declared_blocks` row (`coverage verb outside the walk/visit/reach/report`). So
 # at this head **2 is the ONLY clean window**: 0 and 1 each cost `declared_open`
 # rows, 3 costs `must_red` rows. (An earlier draft cited "13/13 inverse rows";
-# the row set has since grown to 29 and the denominator re-derived against it —
+# the row set has since grown to 29, and the denominator re-derived against it —
 # #11437 review, P3, re-measured round 8.)
+# ⛔ EVERY figure in this paragraph was re-derived by MEASUREMENT at the head that
+# added the round-9/10/11 rows, because the counts above are inputs and a stale
+# input misreports coverage even when the verdict is right (#11437 review, P3).
+# The `must_red` set is **34** at this head, not the 29 those rounds inherited: the
+# four verdicts reproduced unchanged at 34/16/15 — window 0 leaks 0/34 and reds
+# 10/16 `declared_open`; window 1 reds 4/16 (the same four identities named
+# above); window 3 opens exactly the two rows named and wrongly GREENs exactly
+# 1/15 `declared_blocks` (`coverage verb outside the walk/visit/reach/report`).
+# Re-derive with the substring substitution on `_NEGATION_GOVERNS`'s window
+# (`{0,2}?` -> `{0,N}?`), re-evaluating ALL FOUR sets — never `must_red` alone.
 # ⛔ COST, taken deliberately: window 2 makes "…are never TOUCHED by the walk"
 # RED, because `touched` is not in the coverage list — a false block bought for
 # that false pass, which is the trade this predicate always takes.
@@ -4846,7 +4856,7 @@ def _residual_sentences(s3: str) -> list[str]:
       visited"` and `"the walk does not, as an earlier draft said, visit …"` both
       red (#11437 review, round 6, P2). Both are ROWS in `declared_blocks` below.
       ⛔ This is the price of the window itself, and widening it to 3 is measured
-      to open 2 of the 29 `must_red` rows (`not` + a non-coverage verb, and `not`
+      to open 2 of the 34 `must_red` rows (`not` + a non-coverage verb, and `not`
       governing an adjective) and to wrongly GREEN 1 `declared_blocks` row, so it
       is declared rather than paid for in the other direction;
     * an HONEST statement stated inside a CONCESSIVE whose cue happens to sit next
@@ -5525,8 +5535,8 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
             "walk",
         # ⛔ THE TWO-WORD SUBJECT FILTER'S EXECUTORS (#11437 review, round 10, P2).
         # `"decorator" in sentence and "default" in sentence` is the only thing
-        # that rejects a claim stating HALF its subject, and 0 of the 69 rows
-        # exercised either conjunct — so deleting one left the file GREEN while a
+        # that rejects a claim stating HALF its subject, and 0 of the 69 rows the
+        # set then held exercised either conjunct — so deleting one left the file GREEN while a
         # §3 that dropped "and parameter defaults" satisfied the pin. Each row
         # below is RED here and GREEN under the matching deletion, which makes the
         # deletion detectable.
@@ -5606,16 +5616,25 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
         f"added freely, but a row that disappears takes its measured shape's "
         f"falsifier with it")
 
-    # …and the FOUR alternatives this test claims an executor for are asserted to
+    # …and the FIVE alternatives this test claims an executor for are asserted to
     # HAVE one: with that alternative removed from `_AFFIRMED`, at least one
-    # `must_red` row must go back to GREEN. `_AFFIRMED` carries EIGHT top-level
-    # alternatives and this loop asserts four, so FOUR are unasserted — and they
+    # `must_red` row must go back to GREEN. `_AFFIRMED` carries NINE top-level
+    # alternatives and this loop asserts FIVE, so FOUR are unasserted — and they
     # are not one class: `inside the walk`, `except that`, the negated-reverser
     # class and the pseudo-negation class. (Round 7 corrected SEVEN→EIGHT and
     # three→four: the concessive arm added in round 6 was invisible to both the
     # count and the guard while being the arm that round's whole justification
     # rested on — the arm added most recently is exactly the one a hand-count
     # misses, #11437 review, round 7, P2.)
+    # ⛔ THE SAME DEFECT RECURRED ONE ROUND LATER, in this very sentence: the
+    # `might not` arm was then added to BOTH `_AFFIRMED` and this loop, and the two
+    # inputs above were left at eight/four while the artifact became nine/five
+    # (#11437 review, round 11, P3). The derived claim survived — `9 - 5 = 4`, the
+    # same four names — which is why the error was invisible: a count can be wrong
+    # on both sides and still subtract to the right answer. Hand-counting an
+    # alternation is exactly the operation this file reds elsewhere, so the INPUTS
+    # are now re-derived rather than eyeballed: count the top-level `|` in
+    # `_AFFIRMED.pattern` (respecting `[`/`(` nesting) and `len()` the tuple below.
     # ⚠️ NONE of those four is "inert belt". Measured by ablating each arm to
     # `\bZZZNEVERMATCH\b` and re-evaluating ALL FOUR row sets (not just
     # `must_red`): the concessive row (label `inverse: except that they are not
