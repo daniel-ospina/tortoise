@@ -142,8 +142,9 @@
 #         `cd [opts] dir` grade alike. ⛔ `cd ""` is a NO-OP, not an unknown cwd —
 #         bash: "A null directory name is the same as the current directory" — so it
 #         is admitted and the cwd is left unchanged, EXCEPT under `-P`: bash's
-#         null-name rule does not survive `-P` (`cd -P ""` exits 1 with
-#         `cd: : No such file or directory`), so that spelling is refused. A `cd`
+#         null-name rule does not survive `-P`, and bash resolves `-L`/`-P` by their
+#         LAST occurrence, so `cd -PL ""` and `cd -P -L ""` are rc 0 while
+#         `cd -LP ""` and `cd -L -P ""` are rc 1 — the latter spellings are refused. A `cd`
 #         with NO directory operand at all (`cd --` is `$HOME`, `cd -` is `$OLDPWD`)
 #         is REFUSED, because that working directory cannot be known from the record
 #         and a later artifact graded from the unmoved directory would admit a record

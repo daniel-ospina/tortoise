@@ -1487,7 +1487,17 @@ def _command_body(raw: str, base: Path, root: Path) -> tuple[str, Path, str]:
         # terminator, not evidence, so it is treated as non-inert.
         if tokens[0] in _CONTROL_BUILTINS:
             return False
-        return tokens[0] in _WRAPPER_VERBS or tokens[0] in _DECORATIVE
+        # ⛔ USE THE LOOP'S OWN HEAD DERIVATION (\`Path(...).name\`). Classifying on
+        # the raw token judged `/bin/echo ok` as running something while the loop
+        # below calls it DECORATIVE — the two halves disagreeing about the head of the
+        # same token list, which is what produced the previous cycle's false block
+        # (final review pass; `origin/main` accepted the record).
+        head = Path(tokens[0]).name or tokens[0]
+        if head in _WRAPPER_VERBS or head in _DECORATIVE:
+            return True
+        # A whitespace-separated ASSIGNMENT LIST (`A=1 B=2`) assigns and runs
+        # nothing; `_LEADING_ASSIGNMENT` only folds ONE, so it fell through above.
+        return all(_ENV_ASSIGNMENT.match(token) for token in tokens)
 
     _last_used = max((i for i, seg in enumerate(segments) if not _runs_nothing(seg)), default=-1)
     # The directory the graded command runs in: `cd X && …` moves it, and a later
@@ -1540,7 +1550,15 @@ def _command_body(raw: str, base: Path, root: Path) -> tuple[str, Path, str]:
             # later segment ran (tenth review cycle). Admitting the `-P` spelling was
             # a false PASS.
             _opts = re.match(r"^(?:(?:-[PLe]+|--)\s+)+", cd.group(1).strip())
-            physical = bool(_opts and "P" in _opts.group(0))
+            # ⛔ bash resolves `-L`/`-P` by their LAST occurrence, not by "contains a
+            # P". Measured: `cd -PL ""` and `cd -P -L ""` and `cd -PeL ""` are rc 0
+            # (they reach the `&&`), while `cd -LP ""`, `cd -L -P ""` and
+            # `cd -LeP ""` are rc 1. Testing `"P" in opts` refused all six, which
+            # false-blocked four legitimate spellings — and `cd -P -L tools` (a REAL
+            # target) is already pinned as admitted, so the two arms disagreed about
+            # the same prefix (final review pass).
+            _modes = [ch for ch in (_opts.group(0) if _opts else "") if ch in "LP"]
+            physical = bool(_modes) and _modes[-1] == "P"
             try:
                 words = shlex.split(target)
             except ValueError:

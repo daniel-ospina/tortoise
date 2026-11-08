@@ -2002,6 +2002,30 @@ def test_a_null_cd_target_is_a_no_op(tmp_path):
             f'{command!r} was ACCEPTED ({proc.returncode}) — `cd -P ""` exits 1 in '
             f"bash, so the graded command never ran\n{proc.stdout}{proc.stderr}"
         )
+    # ⛔ bash resolves `-L`/`-P` by their LAST occurrence, not by "contains a P".
+    # Measured: `cd -PL ""`, `cd -P -L ""` and `cd -PeL ""` are rc 0; `cd -LP ""`,
+    # `cd -L -P ""` and `cd -LeP ""` are rc 1. Testing containment refused all six
+    # and false-blocked four legitimate spellings (final review pass).
+    for opt, reaches in (
+        ("-PL", True),
+        ("-P -L", True),
+        ("-PeL", True),
+        ("-LP", False),
+        ("-L -P", False),
+        ("-LeP", False),
+    ):
+        command = f'cmd:cd {opt} "" && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q'
+        proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, command])]))
+        if reaches:
+            assert proc.returncode == cl.EXIT_CLEAN, (
+                f"{command!r} was REFUSED ({proc.returncode}) — bash reaches the `&&` "
+                f'for `cd {opt} ""` (last of L/P wins)\n{proc.stdout}{proc.stderr}'
+            )
+        else:
+            assert proc.returncode == cl.EXIT_INVALID, (
+                f'{command!r} was ACCEPTED ({proc.returncode}) — `cd {opt} ""` exits 1 '
+                f"in bash (last of L/P wins)\n{proc.stdout}{proc.stderr}"
+            )
 
 
 def test_an_exit_followed_only_by_inert_segments_is_still_last(tmp_path):
