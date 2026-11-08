@@ -1790,7 +1790,8 @@ def probe_fts(g, phrases, *, control: bool = True,
                     "mode": "empty-index", "ok": True, "hits": 0,
                     "ran": True, "degraded": False,
                     "reason": "no_source_search_text",
-                    "note": "no SOURCE on this graph carries `_searchText` (the "
+                    "note": "no SOURCE over the probe's own population "
+                            "(`documentKind IS NULL`) carries `_searchText` (the "
                             "field the index is declared on) and the read RAN, so "
                             "the corpus is empty rather than the index being "
                             "silent: the probe's 0 is consistent with a repaired "
@@ -1821,15 +1822,22 @@ def probe_fts(g, phrases, *, control: bool = True,
                     # read may return fewer than the window (a small graph), so
                     # naming the window as a returned count was the same
                     # over-claim one order smaller (#11536 review round 4).
+                    # ⛔ "THE INDEX IS ANSWERING" IS NOT MEASURED HERE (#11536 review
+                    # round 6, P3): this note is built from the CONTROL's Cypher
+                    # read and the node-property count — neither consults the FTS
+                    # leg, so on a breaker-open run it told the operator the
+                    # instrument was alive two lines under a probe line that said
+                    # `UNMEASURABLE (breaker_open)`. State the property count and
+                    # what it does NOT prove; the fold's own `unmeasurable` veto is
+                    # what speaks to the read.
                     "note": "no usable control TOKEN was found within the "
                             f"{_CONTROL_LEXICON_WINDOW}-row window the control "
                             "reads (no post-fix lexicon row in it, or none whose "
                             "tokens are valid single-token probes), and the "
-                            "Source index "
-                            "DOES hold entries — so its silence on the probe "
-                            "cannot be corroborated (the index is answering, "
-                            "but nothing here proves it would answer for a "
-                            "known-present token). Run the measurement on the "
-                            "writing arm (`--repair --probe-phrase …`), which "
-                            "takes its own BEFORE reading."}
+                            "probe's own population DOES carry `_searchText` (a "
+                            "node-property count) — so nothing here proves the "
+                            "index would answer for a known-present token. Run "
+                            "the measurement on the writing arm "
+                            "(`--repair --probe-phrase …`), which takes its own "
+                            "BEFORE reading."}
     return report
