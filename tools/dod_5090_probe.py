@@ -812,6 +812,13 @@ AT_RUNTIME_LABEL = "UNKNOWN(labels decided at runtime)"
 #: A PARTIAL measurement's prefix — a writer whose own Cypher names MORE than one label
 #: (`_embedding_writers`' `UNKNOWN(two labels: …)` shape). It is a MEASUREMENT, not a gap, so a
 #: declaration may not narrow it (`#11492`): the row holds and names it.
+#: ⛔ SCOPED TO THE KIND THAT REACHES IT (`#11495` review, measured). That shape is produced on the
+#: `gated` / `ungated` path only. An `unresolved_write` writer's own multi-label reading is
+#: FLATTENED to `UNKNOWN(unresolved producer)` by `written_labels` before the hold set is computed,
+#: so it never enters `partial` and its DECLARATION is the only reading row 2 scores — that entry is
+#: bounded by `#11530`'s completeness pin, not by this hold. Do not cite `_event_plain_merge` /
+#: `_rebuild_all_replay` as examples of the narrowing this constant forbids: both are
+#: `unresolved_write`, so both are resolved by declaration, which is the designed answer.
 PARTIAL_LABEL_PREFIX = "UNKNOWN(two labels"
 
 
@@ -1748,8 +1755,12 @@ def score_rule_bullet() -> Row:
 #: (`WriterClass` was `{cls, reason, owner_issue}`). Measured at `810eb838c5`, the label is also not
 #: DERIVABLE per writer: the `MERGE|CREATE (:Label` literal in a writer's OWN body yields one label
 #: for THREE of the twenty, two conflicting labels for two (`_event_plain_merge` `{Event, Source}`,
-#: `_rebuild_all_replay` `{Batch, Session}` — and `Batch`/`Session` are NOT served, so "pick one"
-#: either misses an unserved label or invents a false `NOT MET`), and NO label for fifteen, because
+#: `_rebuild_all_replay` `{Batch, Session}` — and `Batch`/`Session` are NOT served, so a
+#: derivation that "picks one" either misses an unserved label or invents a false `NOT MET`; an
+#: argument against the DERIVATION, not a claim that either writer is held — both are
+#: `unresolved_write`, so `written_labels` flattens their label to the unresolved sentinel before
+#: the hold set is computed and their DECLARATION is the reading this row scores), and NO label for
+#: fifteen, because
 #: the label lives in the caller's `MATCH` (`_embedding_repair_attempt` writes
 #: `set_embedding_clause("e")` inside `MATCH (e:Event {eventId:$eid})`).
 #:

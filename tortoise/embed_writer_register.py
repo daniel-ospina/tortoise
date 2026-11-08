@@ -428,12 +428,20 @@ class WriterClass:
 def _check_stores(key: str, stores: tuple[str, ...] | str) -> None:
     """Refuse a ``stores`` that does not answer row 2's question.
 
-    ⛔ The refusals all point the SAME way — an undeclared label must never be read as "stores
-    nothing": an empty tuple (a shrug), a mutable list (a frozen declaration must not be editable
-    in place by a consumer), a label that is not a Cypher label, and a bare string that is not one
-    of :data:`STORES_DISPOSITIONS` (a typo'd disposition would otherwise read as a LABEL named
-    `"no-vector"` and quietly pass the served-set comparison as unserved — a `NOT MET` on a
-    correct tree, which is the false-hold direction this module refuses elsewhere).
+    ⛔ Two directions, and the refusals below serve one each — do not read them as one:
+
+    * **false PASS** (an unanswerable declaration read as "nothing to compare") — an empty tuple
+      (a shrug), a mutable list or any non-tuple (a frozen declaration must not be editable in
+      place by a consumer).
+    * **false HOLD** (a value that can never match the served set) — a label that is not a Cypher
+      label, and a label declared twice.
+
+    A bare string outside :data:`STORES_DISPOSITIONS` is refused so that no consumer can read a
+    typo'd disposition as a LABEL named ``"no-vector"``. ⛔ NOT because that would read `NOT MET`
+    today: `tools/dod_5090_probe.py::_store_reading` refuses the same string independently and
+    records it in ``violations``, so row 2 holds at `PARTIAL` and names it. The register's own
+    refusal is for the consumer `#11086` has not built yet — the one that will interpolate this
+    field into a query with no instrument behind it.
     """
     if isinstance(stores, str):
         if stores not in STORES_DISPOSITIONS:
