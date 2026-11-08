@@ -30351,8 +30351,16 @@ def _pack_config_shape_error(pc) -> str | None:
                     f"or null (got {type(yaml_text).__name__})")
         # #1936: status legality — the apply path writes it verbatim onto
         # :PackInstall, so an unknown value must fail here, pre-restore.
+        # ⛔ isinstance FIRST: `x not in frozenset` HASHES the operand, so a
+        # JSON object/array (`{"status": {}}`) raises TypeError instead of
+        # returning an error string — and the route catches only
+        # _ImportVerifyError, so that TypeError escapes as a 500 with no
+        # quarantine audit and no ledger stamp, the exact outcome this gate
+        # exists to prevent. Every sibling check in this loop is type-first
+        # for the same reason.
         status = pack.get("status")
-        if status is not None and status not in _PACK_CONFIG_STATUSES:
+        if status is not None and (not isinstance(status, str)
+                                   or status not in _PACK_CONFIG_STATUSES):
             return (f"pack_config packs[{i}] status must be one of "
                     f"{sorted(_PACK_CONFIG_STATUSES)} or absent "
                     f"(got {status!r})")
@@ -30556,8 +30564,11 @@ def _pack_entry_activation(pack: dict, ns: str) -> str | None:
     status = pack.get("status")
     if status is not None:
         # Legality is the shared shape gate's job (_pack_config_shape_error);
-        # a direct caller that bypassed it fails closed here too.
-        if status not in _PACK_CONFIG_STATUSES:
+        # a direct caller that bypassed it fails closed here too. isinstance
+        # FIRST — frozenset membership hashes the operand, so a dict/list
+        # status would raise TypeError rather than this ValueError.
+        if (not isinstance(status, str)
+                or status not in _PACK_CONFIG_STATUSES):
             raise ValueError(
                 f"pack_config pack {ns!r} has invalid status {status!r} "
                 f"(expected one of {sorted(_PACK_CONFIG_STATUSES)})")
@@ -30575,17 +30586,30 @@ def _apply_import_pack_config(sdk, payload: dict) -> None:
       quarantining the import: fail-loudly, never silent partial) WITH the
       artifact's own activation state. Starter packs (yaml null) get their
       activation record written at the artifact's state, not force-activated.
-    - A pack the source graph had REMOVED (``status: removed`` — its
-      ``:PackManifest`` is already gone, so ``yaml`` is null) is SKIPPED with a
-      logged warning and no install record. Before #1936 it fell through to
-      the starter branch and raised ``unknown starter pack``, so ONE
-      uninstalled custom pack aborted the whole graph restore — the failure
-      belonged to that entry, not to the restore. Skipping (rather than
-      writing a ``removed`` tombstone) is deliberate: on the
-      no-marker-with-records arm of ``pack_state.resolved_pack_set`` every
-      record counts regardless of status, so a tombstone would put a removed
-      pack's namespace back INTO the graph's approval set — resurrecting the
-      vocabulary this path exists to leave alone.
+    - A pack the source graph had REMOVED (``status: removed``) is SKIPPED —
+      no activation, no overwrite — instead of aborting the restore. This is
+      the #1936 indicator-3 fix: pre-fix such an entry has ``yaml`` null (its
+      ``:PackManifest`` was deleted on the source) so it fell through to the
+      starter branch and raised ``unknown starter pack``, and ONE uninstalled
+      custom pack aborted the WHOLE graph restore — a failure that belonged to
+      that entry alone.
+
+      ⛔ WHAT THE SKIP DOES *NOT* CLAIM (corrected in review; the earlier
+      rationale on this PR was wrong): the ``removed`` ``:PackInstall``
+      tombstone is NOT absent from a real restore. ``:PackInstall``,
+      ``:PackManifest`` and ``:PackSelection`` are content nodes —
+      ``_EXPORT_SKIP_LABELS`` excludes only ``GraphEventMeta``/``TeamMeta``/
+      ``EpMeta`` — so the dump carries the record and ``restore_graph``
+      CREATEs it with its props, on the temp graph, BEFORE this function runs
+      against the swapped one. The end state after a real import therefore
+      still holds ``status='removed'`` (correct: it matches the source graph,
+      i.e. parity), and on the no-marker-with-records arm of
+      ``pack_state.resolved_pack_set`` that record counts like any other. What
+      the skip actually buys, and all it claims, is that this pass neither
+      overwrites the restored state nor turns a removed pack into a restore
+      failure. It also covers the shape a real restore does NOT produce — a
+      ``removed`` entry declared in ``pack_config`` whose node is absent from
+      the dump.
     - ``pack_config`` ABSENT (pre-v1.1 artifact): loud-mismatch guard — if
       the dump references namespaced kinds NOT in the shared catalog or
       starter set, the vocabulary would be silently dropped → raise. This
@@ -30635,13 +30659,15 @@ def _apply_import_pack_config(sdk, payload: dict) -> None:
             continue
         want_status = _pack_entry_activation(pack, ns)
         if want_status is None:
-            # Removed on the source graph: nothing to restore, nothing to
-            # activate. Logged (never silent) so an operator can see the
-            # entry was carried and deliberately skipped at pack granularity
-            # rather than aborting the restore.
+            # Removed on the source graph: no activation, no overwrite. The
+            # restored :PackInstall record (if the dump carried one) is left
+            # exactly as the swap wrote it — see the docstring: this pass
+            # neither creates nor erases the tombstone. Logged so an operator
+            # can see the entry was carried and deliberately skipped at pack
+            # granularity instead of aborting the restore.
             _logger.info(
                 "import pack_config: pack %r was removed on the source graph "
-                "— skipped (no install record, no activation)", ns)
+                "— skipped (no activation, restored record left untouched)", ns)
             continue
         yaml_text = pack.get("yaml")
         if yaml_text:

@@ -470,8 +470,8 @@ so a re-run cannot resurrect a pack the user removed or disabled.
   ⚠️ **Still open — out-of-band writers change the configurable set WITHOUT
   moving the marker.** `POST /v1/packs/manifests`
   (`pack_manifest_store.upsert_tenant_manifest`, widens) and
-  `hosted_api._apply_import_pack_config` (writes `:PackInstall` directly on
-  restore) write `:PackInstall` directly. On a graph
+  `hosted_api._apply_import_pack_config` (writes `:PackInstall` on restore)
+  write it directly. On a graph
 that has both a `:PackSelection` marker and one of these writers, a `PUT`
 holding revision `N` can therefore still return `200` while erasing a
 namespace added after its read. Until they route through `set_graph_packs` (or

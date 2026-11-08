@@ -511,9 +511,11 @@ class TestActivationParity:
         assert by_ns["tenant-ops"]["status"] == "active"
 
     def test_disabled_starter_is_not_reactivated(self, sdk):
+        """Explicit `status` path (the v1.1 export's own field)."""
         from tortoise.hosted_api import _apply_import_pack_config
         _apply_import_pack_config(sdk, _pack_entry(namespace="dev",
-                                                   activated=False))
+                                                   activated=False,
+                                                   status="disabled"))
         assert _install_status(sdk, "dev") == "disabled"
 
     def test_disabled_custom_pack_is_not_reactivated(self, sdk):
@@ -544,10 +546,14 @@ class TestActivationParity:
         assert _install_status(sdk, "dev") == "active"
 
     def test_legacy_artifact_without_status_honours_activated(self, sdk):
-        """An artifact written before `status` existed still carries intent."""
+        """FALLBACK path: an artifact written before `status` existed carries
+        no `status` key at all, and its `activated` still expresses intent.
+        (Kept distinct from the explicit-status test above — the two paths are
+        different code.)"""
         from tortoise.hosted_api import _apply_import_pack_config
-        _apply_import_pack_config(sdk, _pack_entry(namespace="dev",
-                                                   activated=False))
+        entry = _pack_entry(namespace="dev", activated=False)
+        assert "status" not in entry["pack_config"]["packs"][0]
+        _apply_import_pack_config(sdk, entry)
         assert _install_status(sdk, "dev") == "disabled"
 
     def test_round_trip_preserves_activation(self, sdk, tmp_path):
@@ -587,17 +593,36 @@ class TestRemovedPackGranularity:
         # and the healthy entry really did apply (no abort short-circuit)
         assert _install_status(sdk, "gone-ops") is None
 
-    def test_removed_pack_writes_no_tombstone(self, sdk):
-        """Deliberate: on the no-marker-with-records arm of
-        ``resolved_pack_set`` EVERY record counts regardless of status, so a
-        `removed` tombstone would put the namespace back INTO the approval set
-        — resurrecting the vocabulary the skip exists to leave alone."""
+    def test_removed_pack_writes_no_record_of_its_own(self, sdk):
+        """This WRITE PATH creates no record for a removed pack — it does not
+        claim the end state of a real restore has none.
+
+        ⛔ Corrected in review: `:PackInstall`/`:PackManifest`/`:PackSelection`
+        are CONTENT nodes (`_EXPORT_SKIP_LABELS` excludes only the three Meta
+        labels), so the dump carries the tombstone and `restore_graph` CREATEs
+        it BEFORE this pass runs. A real import therefore ends with
+        `status='removed'` present — parity with the source graph. What the
+        skip guarantees is narrower: this pass neither overwrites the restored
+        state nor aborts. `test_removed_pack_preserves_restored_record` models
+        that real end state."""
         from tortoise.hosted_api import _apply_import_pack_config
-        from tortoise.pack_state import resolved_pack_set
         _apply_import_pack_config(sdk, _pack_entry(
             namespace="gone-ops", activated=False, status="removed"))
         assert _install_status(sdk, "gone-ops") is None
-        assert "gone-ops" not in (resolved_pack_set(sdk).namespaces or frozenset())
+
+    def test_removed_pack_preserves_restored_record(self, sdk):
+        """The REAL restore end state: the dump already restored a
+        `status='removed'` record, and the apply pass must leave it exactly as
+        the swap wrote it (parity) instead of reactivating or erasing it."""
+        from tortoise.hosted_api import _apply_import_pack_config
+        g = sdk._get_proj().g
+        # what restore_graph's CREATE leaves on the swapped graph
+        g.query("MERGE (p:PackInstall {namespace: 'gone-ops'}) "
+                "SET p.version = '0.1.0', p.status = 'removed', "
+                "    p.source = 'custom'")
+        _apply_import_pack_config(sdk, _pack_entry(
+            namespace="gone-ops", activated=False, status="removed"))
+        assert _install_status(sdk, "gone-ops") == "removed"
 
     def test_removed_starter_pack_also_skipped(self, sdk):
         from tortoise.hosted_api import _apply_import_pack_config
@@ -625,6 +650,27 @@ class TestStatusShapeGate:
             {"schema_version": 1,
              "packs": [{"namespace": "dev", "status": "bogus"}]})
         assert err is not None and "status must be one of" in err
+
+    @pytest.mark.parametrize("bad", [{}, [], [1], {"a": 1}, 1, 0, True])
+    def test_non_string_status_is_an_error_string_not_a_crash(self, bad):
+        """⛔ `x not in frozenset` HASHES the operand, so a JSON object/array
+        status raised TypeError — which the import route does not catch → 500
+        with no quarantine audit and no ledger stamp, the exact outcome this
+        pre-restore gate exists to prevent (review finding F1, P1). The check
+        must be type-first, like its `schema_version`/`yaml` siblings."""
+        from tortoise.hosted_api import _pack_config_shape_error
+        err = _pack_config_shape_error(
+            {"schema_version": 1,
+             "packs": [{"namespace": "dev", "status": bad}]})
+        assert err is not None and "status must be one of" in err
+
+    @pytest.mark.parametrize("bad", [{}, [], 1])
+    def test_entry_activation_guard_never_raises_typeerror(self, bad):
+        """The defence-in-depth guard's contract is ValueError, never a
+        TypeError that a caller's `except ValueError` would miss."""
+        from tortoise.hosted_api import _pack_entry_activation
+        with pytest.raises(ValueError, match="invalid status"):
+            _pack_entry_activation({"namespace": "dev", "status": bad}, "dev")
 
     def test_apply_path_fails_closed_on_direct_call(self, sdk):
         """A direct caller bypassing the envelope gate cannot write an

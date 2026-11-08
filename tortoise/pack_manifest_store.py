@@ -410,7 +410,7 @@ def upsert_tenant_manifest(
     vocabulary — ``removed`` is a tombstone expressed by omission, never a
     status a writer accepts.
     """
-    if status not in _CONFIGURABLE_STATUSES:
+    if not isinstance(status, str) or status not in _CONFIGURABLE_STATUSES:
         raise ValueError(
             f"invalid pack status {status!r} (expected one of "
             f"{sorted(_CONFIGURABLE_STATUSES)})")
