@@ -1779,7 +1779,6 @@ re-cut from the resolved document (§8), and no committed verdict is re-scored.
   block is touched; the numbers this record exists to freeze are byte-identical. `document_sha256`
   is re-cut in this same commit, per §8's rule for *any* edit to this file.
 
-
 ### 10.16 — the §11 cite block re-pointed again for `#11002`'s review fix (2026-11-08, `#11002`)
 
 - **Baseline — measured at this branch's head before the fix (`ec7b897d`, the `origin/main` merge):**
