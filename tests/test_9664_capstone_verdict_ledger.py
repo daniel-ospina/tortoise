@@ -4961,8 +4961,8 @@ def test_an_ABSTAINING_tree_is_accepted_and_prints_the_NOTE(tmp_path, monkeypatc
 
     `test_the_unrunnable_probe_path_is_not_the_abstention_path` asserts the HELPER's
     return value (`_tracked_unprovable() is True`) and nothing asserted that
-    `_is_tracked` still RETURNS it: MEASURED at the head this pin was written against
-    (`21c446ab002`, **before** the pin existed), reverting that call site to
+    `_is_tracked` still RETURNS it: MEASURED at the head BEFORE this pin landed
+    (`8bb34e5bb^`, 173 collected), reverting that call site to
     `return False` left the whole suite green at 173 passed, so the whole abstention
     arm could be deleted as dead code and no row would notice (#11474 review).
 
@@ -4971,7 +4971,11 @@ def test_an_ABSTAINING_tree_is_accepted_and_prints_the_NOTE(tmp_path, monkeypatc
     it reddens this pin itself, which is the whole point of adding it. Re-measured at
     the #11474 rebase, and again with the exit-128 pin beside it. No FRESH pass count
     is quoted: a count copied forward is the one claim a reader can falsify in one
-    command, and this file gains a pin most rounds.
+    command, and this file gains a pin most rounds. (The sha here is `8bb34e5bb^` and
+    not `21c446ab002`: that later head already CARRIES the pin and collects 178, so
+    citing it for "before the pin existed" made this paragraph refute its own next
+    one — measured, `git show 21c446ab002:tests/… | grep -c 'def test_an_ABSTAINING'`
+    is 1.)
 
     Real git, not a stub: a BARE repo over `GIT_DIR` makes `ls-files --error-unmatch`
     exit 1 and `rev-parse --is-inside-work-tree` answer `false` with rc 0 — git is
@@ -5223,18 +5227,24 @@ def test_a_git_that_COULD_NOT_ANSWER_is_not_read_as_a_measured_untracked(
 
     ok, why = cl._evidence_is_real("held.txt", repo_root=repo)
     assert ok is False, why
-    assert "did not get an ANSWER" in capsys.readouterr().err, (
-        "the per-path line must name the exit code, because the exit code is the whole "
-        "of what was measured here"
-    )
-    assert "not TRACKED by git" not in why, (
-        f"git never answered for this path, so that sentence is a cause nobody measured: {why}"
+    # ⛔ THE CAUSE IS PINNED ON `err`, AND THE WHOLE OF IT. Two earlier assertions here
+    # could not fire: the exit code — the only thing this arm MEASURED — was never
+    # asserted, so dropping it from the line left the suite green (measured: mutant
+    # `(`git ls-files` exited {returncode})` -> `(git did not answer)` = 181 passed);
+    # and the negatives below were asserted on `why`, which is `_evidence_is_real`'s
+    # ROW-level sentence and structurally cannot carry the PER-PATH line at all.
+    err = capsys.readouterr().err
+    assert "did not get an ANSWER" in err, err
+    assert f"exited {ls_files.returncode}" in err, err
+    assert "not TRACKED" not in err, (
+        "git never answered for this path, so that sentence is a cause nobody "
+        f"measured: {err}"
     )
 
     # And the CALLER's row-level sentence must not pick one of `_is_tracked`'s two
     # `None` causes either — "could not be RUN" is false here, the check DID run.
     assert "did not answer here" in why, why
-    assert "could not be run here" not in why, why
+    assert "not TRACKED" not in why, why
 
 
 @pytest.mark.parametrize(
