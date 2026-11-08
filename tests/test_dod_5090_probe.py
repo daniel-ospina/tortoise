@@ -630,6 +630,15 @@ def test_a_PARTIAL_measurement_cannot_be_narrowed_by_a_declaration(monkeypatch):
     read `MET` with `stored-without-a-query-path: none` while an unserved label had been stored.
     A PARTIAL measurement has already measured; a declaration's job is to fill a GAP, so these
     writers hold the row and are named as partial.
+
+    ⛔ The VERDICT assertion above is not enough on its own (round-3 review, P1): measured at
+    `b8ada30ce1b`, deleting the `writer not in out["partial"]` exclusion — i.e. ALLOWING the
+    narrowing — left this pin and 13 siblings GREEN, because a redundant second net
+    (`or resolved["partial"]` in the verdict) still held the row at `PARTIAL`. The verdict was
+    right for a reason the pin never named. So the pin now also asserts the MEASUREMENT survives
+    the declaration: the writer's resolved label must still be the measured two-label string (not
+    the declared single label), and it must still be in the PARTIAL hold. Those two assertions are
+    what a deleted exclusion reds — verified by mutation in both directions.
     """
     writers = {
         "tortoise.x::_upsert_point": {
@@ -651,6 +660,21 @@ def test_a_PARTIAL_measurement_cannot_be_narrowed_by_a_declaration(monkeypatch):
         row = probe.score_path_bullet()
         assert row.verdict == "PARTIAL", (stores, row.observed)
         assert any("MORE THAN ONE label" in n for n in row.notes), (stores, row.notes)
+        # ⛔ The MEASUREMENT must survive the declaration — this is the property the verdict alone
+        # could not discriminate (see the docstring). Under a deleted `partial` exclusion the
+        # declared single label replaces it and `Batch` is dropped before the served-set compare.
+        scored = probe.scored_labels()
+        assert scored["by_writer"].get("tortoise.y::_two_labels") == \
+            "UNKNOWN(two labels: Batch,Point)", (
+                "a declaration REPLACED a MEASURED two-label label — the measured `Batch` was "
+                "dropped before the served-set comparison, so an unserved label could be stored "
+                f"with `stored-without-a-query-path: none` (got "
+                f"{scored['by_writer'].get('tortoise.y::_two_labels')!r}, stores={stores!r})"
+            )
+        assert "tortoise.y::_two_labels" in scored["resolution"]["partial"], (
+            "a measured two-label writer left the PARTIAL hold — a declaration may fill a GAP, "
+            f"never replace a MEASUREMENT (resolution={scored['resolution']})"
+        )
 
 
 def test_a_gated_writer_with_an_UNSINGLE_label_is_NAMED_not_just_held(monkeypatch):

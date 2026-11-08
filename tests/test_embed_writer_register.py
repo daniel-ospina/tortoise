@@ -1237,6 +1237,38 @@ def test_a_no_live_vector_declaration_executes_no_store_clause() -> None:
     )
 
 
+def test_the_store_clause_markers_still_match_a_real_store() -> None:
+    r"""The marker tuple needs a falsifier in the POSITIVE direction (round-3 review, P1).
+
+    ⛔ Measured at `b8ada30ce1b`: setting `STORE_CLAUSE_MARKERS = ()` left this WHOLE file green
+    (26 passed) — so the guard's primary mechanism could be deleted by any later "cleanup" with
+    nothing red. `test_a_no_live_vector_declaration_executes_no_store_clause` asserts only the
+    ABSENCE of offenders, and the sibling positive pin below covers `STORE_CLAUSE_PATTERNS` — not
+    this tuple. Every `set_embedding_clause(`-shaped store is seen ONLY by these markers, so
+    their detection power was the one thing nothing re-derived.
+
+    The property pinned: each marker is still found in the body of a writer that DECLARES a label,
+    through the SAME reader the guard uses (`_declared_symbol_bodies`). A marker that matches no
+    storing writer cannot see the store it exists for, and a dead marker is exactly what a
+    `no-live-vector` declaration would then hide behind.
+    """
+    assert STORE_CLAUSE_MARKERS, (
+        "the store-clause marker tuple is gone — a `no-live-vector` writer storing only via "
+        "`set_embedding_clause(…)` would pass this suite silently"
+    )
+    labelled = {key for key, entry in EMBED_WRITER_CLASSES.items()
+                if not isinstance(entry.stores, str)}
+    assert labelled, "no declaration names a label — the markers have nothing to be measured against"
+    dead = [marker for marker in STORE_CLAUSE_MARKERS
+            if not any(marker in body
+                       for key in labelled for body in _declared_symbol_bodies(key))]
+    assert not dead, (
+        f"{dead} no longer appears in the body of any writer that DECLARES a label — a marker "
+        "that matches nothing cannot see the store it exists for, and the absence-of-offenders "
+        "pin would stay green over it. Re-derive the marker, or name the store it missed"
+    )
+
+
 def test_the_direct_store_pattern_sees_a_store_and_not_a_wipe() -> None:
     r"""The pattern above needs a falsifier in the POSITIVE direction (round-3 review, P2).
 
