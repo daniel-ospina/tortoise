@@ -117,17 +117,22 @@ def test_g1_write_probe_reproduces_the_committed_written_column(sdk):
         expected = committed_rows[key]
         if row["written"] != expected["written"]:
             mismatched.append((key, "written", expected["written"], row["written"]))
-        if row["written"] == "mediated":
-            if row["written_direction"] != expected["written_direction"]:
-                mismatched.append((key, "written_direction",
-                                   expected["written_direction"],
-                                   row["written_direction"]))
-            # the direction the probe WROTE must be the sense the row DECLARES
-            if row["effective_direction"] is not None and \
-                    row["written_direction"] != row["effective_direction"]:
-                mismatched.append((key, "effective_vs_readback",
-                                   row["effective_direction"],
-                                   row["written_direction"]))
+        # `written_direction` for BOTH shapes: `mediated` carries the operator's
+        # direction, `direct` carries the explicit "no bridge to carry one" token.
+        # Comparing only the mediated half left the direct half unread, and an
+        # empty cell there is indistinguishable from "never measured" (H13b).
+        if row["written"] in ("mediated", "direct") and \
+                row["written_direction"] != expected["written_direction"]:
+            mismatched.append((key, "written_direction",
+                               expected["written_direction"],
+                               row["written_direction"]))
+        # the direction the probe WROTE must be the sense the row DECLARES
+        if row["written"] == "mediated" and \
+                row["effective_direction"] is not None and \
+                row["written_direction"] != row["effective_direction"]:
+            mismatched.append((key, "effective_vs_readback",
+                               row["effective_direction"],
+                               row["written_direction"]))
     assert mismatched == [], (
         "the committed `written` column is not what the graph answers:\n"
         + "\n".join(map(str, mismatched)))
@@ -241,6 +246,30 @@ def test_g3_a_same_kind_row_gets_a_second_node_not_a_self_loop(sdk):
     # …while the shared path still REUSES: that is the cost bound the per-kind
     # cache exists for (create_entity ≈1 s/call, a write ≈0.015 s).
     assert census._mint_endpoint(sdk, "pm:card", cache, minted) == src
+    assert len(minted) == 2
+
+
+def test_g3b_the_endpoint_cache_is_keyed_on_the_NAMESPACED_kind(sdk):
+    """`dev:issue` and `pm:issue` are different declared kinds that share a label.
+
+    The cache was keyed on the BARE label, so both resolved to one node and a row
+    declaring `dev:issue → pm:issue` read back with `s == d` — the exact self-loop
+    false-positive `slot=` closes for `pm:card → pm:card`, one namespace over: a
+    writer that refused a genuine two-issue edge would still read `direct`.
+    """
+    import pack_relation_census as census
+
+    cache: dict[str, str] = {}
+    minted: list[str] = []
+    dev = census._mint_endpoint(sdk, "dev:widget", cache, minted)
+    pm = census._mint_endpoint(sdk, "pm:widget", cache, minted)
+    assert dev != pm, (
+        "two namespaces sharing a kind LABEL collapsed onto ONE node — a row "
+        "declaring a cross-namespace edge would be measured as a self-loop")
+    assert len(minted) == 2
+    # …while the same namespaced kind still REUSES its node: the per-kind cache is
+    # the cost bound this probe exists behind (create_entity ≈1 s/call).
+    assert census._mint_endpoint(sdk, "dev:widget", cache, minted) == dev
     assert len(minted) == 2
 
 

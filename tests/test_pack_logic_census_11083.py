@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -66,6 +67,9 @@ from tortoise.pack_registry import (  # noqa: E402
 )
 
 ARTIFACT = REPO_ROOT / "docs" / "evidence" / "11083" / "pack-relation-census.json"
+
+#: A `file.py:NNNN` citation — the shape that re-stales on every edit above it.
+_LINE_CITE = re.compile(r"[\w/]+\.py:\d+")
 
 
 def _census(**kwargs):
@@ -613,3 +617,178 @@ def test_h10b_the_cleanup_deletes_in_reverse_mint_order(monkeypatch):
         "it collects them in is not insertion-ordered, so \"operators first\" is "
         "hash order")
 
+
+
+# ── H11 — rows ≠ connections, and the difference is MEASURED ────────────────
+def test_h11_the_distinct_denominator_is_measured_not_subtracted_in_prose(artifact):
+    """`pack_hierarchy` calls a `hierarchies[]` entry and a `relations[]` row over
+    the same pack + pair + meaning *"one declaration spelled twice"*.
+
+    So `declared` is a count of ROWS and the distinct-connection denominator is a
+    different number. It used to live only in a paragraph: the PR body quoted
+    `population.distinct_connections` and a per-row `restates_relation` that the
+    artifact did not carry, so the arithmetic was unverifiable from the artifact a
+    reader actually opens. Both are cells now, and this test re-derives them from
+    the module that owns the join rather than from the paragraph.
+    """
+    from tortoise.pack_hierarchy import declared_hierarchy
+
+    rows = [r for s in artifact["packs"].values() for r in s["hierarchies"]]
+    pop = artifact["population"]
+    restated = sum(1 for r in rows if r["restates_relation"])
+    assert pop["restated_hierarchy_rows"] == restated, (
+        "`population.restated_hierarchy_rows` is not the number of hierarchy rows "
+        "that carry `restates_relation` — the denominator is remembered, not derived")
+    assert pop["distinct_connections"] == pop["declared"] - restated, (
+        "distinct connections must be declared − restated; a number that does not "
+        "subtract is the prose claim this cell replaced")
+    assert restated == 4, (
+        f"{restated} hierarchy row(s) restate a `relations[]` row — if this moved, "
+        "the distinct denominator moved with it and the README/body must too")
+    assert pop["distinct_connections"] == 38
+
+    # The per-row flag is the JOIN's answer, not an inference of the census's: it
+    # must agree with `declared_hierarchy()` entry for entry (H7's rule, one
+    # column over). A census that re-derived the join itself would answer twice.
+    expected = {(d.pack, d.predicate, d.from_kind, d.to_kind)
+                for d in declared_hierarchy() if d.restates_relation}
+    got = {(r["pack"], r["predicate"], r["from_kind"], r["to_kind"])
+           for r in rows if r["restates_relation"]}
+    assert got == expected, (
+        "the artifact's `restates_relation` flags disagree with "
+        "`pack_hierarchy.declared_hierarchy()` — two answers to one join")
+
+
+# ── H12 — the probe's cleanup contract is a CELL, not a claim ───────────────
+def test_h12_the_cleanup_contract_is_a_measured_cell(artifact, fresh):
+    """Twice before this PR, a docstring claimed the probe deletes what it mints
+    while no `delete` existed in the file at all; then the artifact's own
+    `layers.written` described a probe that did not exist ("one endpoint pair
+    minted per row on a throwaway graph") and `population.note` — which the PR
+    body named as carrying the cleanup statement — was absent.
+
+    A prose contract cannot be checked by a reader and cannot be reddened by a
+    test. `probe.leftovers` is the MEASURED version: the ids a delete failed on.
+    """
+    probe = artifact["probe"]
+    assert probe is not None, (
+        "the committed artifact carries no `probe` block — the cleanup contract "
+        "an operator checks before a `--uri` run is unverifiable again")
+    assert probe["leftovers"] == [], (
+        f"the probe could not delete {probe['leftovers']} — a residue in whatever "
+        "graph it was pointed at, reported instead of swallowed (and NOT silent)")
+    assert probe["minted"] > 0 and probe["deleted"] == probe["minted"], probe
+    assert fresh["probe"] is None, (
+        "a HERMETIC build has no probe — if it had one, the artifact could have "
+        "been produced without ever touching a graph")
+
+    written = artifact["layers"]["written"]
+    assert "DELETED" in written and "probe.leftovers" in written, (
+        "`layers.written` is the field a reader trusts about how `written` was "
+        "obtained; it must state the deletion and where a failure is reported")
+    assert "per row" not in written.lower(), (
+        "the layer description claims one endpoint pair per ROW — the probe mints "
+        "one node per declared KIND and caches it (the 'fictional probe' defect)")
+
+
+# ── H13 — the sense column reads the RESOLVER, for hierarchies too ──────────
+def _write_pack_with_hierarchy(tmp_path: Path, ns: str) -> Path:
+    packs = tmp_path / "packs"
+    (packs / ns).mkdir(parents=True, exist_ok=True)
+    (packs / ns / "manifest.yaml").write_text(
+        f"namespace: {ns}\n"
+        f"name: {ns}\n"
+        'version: "0.0.1"\n'
+        "tier: free\n"
+        "ontology:\n"
+        "  extends: core\n"
+        "  objectKinds:\n"
+        "  - widget\n"
+        "  relations:\n"
+        "  - predicate: widgetHolds\n"
+        "    mechanism: IMPL\n"
+        "    semantics: holds\n"
+        f"    fromKind: {ns}:widget\n"
+        f"    toKind: {ns}:widget\n"
+        "  hierarchies:\n"
+        "  - path: Widget → Widget\n"
+        "    type: holds\n",
+        encoding="utf-8",
+    )
+    return packs
+
+
+def test_h13_a_hierarchy_declaring_a_RETIRED_spelling_reports_the_RESOLVED_sense(
+        tmp_path):
+    """The hierarchy half read the raw `SEMANTICS_DIRECTIONS` table while its own
+    layer description says the column is `pack_registry.effective_direction`.
+
+    All six shipped rows use `hasPart`, which IS in the table, so nothing is
+    wrong today — but the resolver also applies `SEMANTICS_TRANSITION`, and a
+    hierarchy declaring a retired spelling would report NO sense for a row the
+    writer records `->`. Same one-line rule as the relations path.
+    """
+    assert "holds" not in SEMANTICS_DIRECTIONS, (
+        "the fixture relies on `holds` being ABSENT from the raw table — that "
+        "absence is what makes a table-read report None")
+
+    census = _census()
+    packs = _write_pack_with_hierarchy(tmp_path, "fixture5")
+    fresh = census.build_census(packs)
+    rows = [r for r in fresh["packs"]["fixture5"]["hierarchies"]
+            if r["predicate"] == "holds"]
+    assert len(rows) == 1, (
+        "the fixture's declared hierarchy did not survive pack load — the "
+        "assertion below would then be about nothing")
+    assert rows[0]["effective_direction"] == "->", (
+        "a hierarchy declaring a retired spelling must report the sense the "
+        "writer records (`holds` → `ownedBy` → `->`); reading the raw table "
+        "answers None and the census disagrees with `effective_direction`")
+
+
+def test_h13b_written_direction_tells_NOT_APPLICABLE_from_NOT_MEASURED(artifact):
+    """`written_direction` was populated for the 33 `mediated` rows and `None` for
+    every row written `direct` — so a reader could not tell "this edge carries no
+    operator direction" from "this row was never measured".
+
+    Three states, three readings (#10995's rule applied to a column): a real token
+    for `mediated`, an explicit `n/a` for `direct`, and empty ONLY where nothing
+    was written to read.
+    """
+    census = _census()
+    rows = [r for s in artifact["packs"].values()
+            for r in s["relations"] + s["hierarchies"]]
+    direct = [r for r in rows if r["written"] == "direct"]
+    mediated = [r for r in rows if r["written"] == "mediated"]
+    none = [r for r in rows if r["written"] == "none"]
+    assert direct and mediated and none, (len(direct), len(mediated), len(none))
+    assert {r["written_direction"] for r in direct} == {census.DIRECT_EDGE_DIRECTION}, (
+        "a `direct` row must say the edge carries no operator direction; `None` "
+        "reads as unmeasured")
+    assert all(r["written_direction"] in {"->", "<-", "<->", "-"} for r in mediated)
+    assert all(r["written_direction"] is None for r in none), (
+        "a row nothing was written for has no direction to report — that is the "
+        "ONE state where the cell may be empty")
+
+
+# ── H14 — the UNMEASURED cell's only citation must be FOLLOWABLE ────────────
+def test_h14_the_pipeline_unmeasured_cell_cites_the_SENTENCE_not_a_line(artifact):
+    """The `pipeline.relations_channel` cell is `UNMEASURED` with #11237 as its
+    owner, and the ONLY support for that reading was a line cite —
+    `extractor_v2.py:10815` — generated into the artifact.
+
+    Line 10815 is inside the MITIGATES-strength warning block; the sentence is in
+    the S5 Job 1 block, 76 lines below. A reader following the artifact's only
+    pointer to confirm why the column is unmeasured landed on unrelated code. The
+    body says the fix for exactly this class is to cite the SENTENCE, so the cite
+    is a sentence here — and this test follows it.
+    """
+    assert not _LINE_CITE.search(artifact["pipeline"]["relations_channel"]["why"]), (
+        "the pipeline cell cites a LINE (`file.py:NNNN`), which re-stales on every "
+        "edit above it and which `--write-probe` reproduces into the artifact")
+    why = artifact["pipeline"]["relations_channel"]["why"]
+    assert "nothing in this tree consumes" in why
+    src = (REPO_ROOT / "tortoise" / "extractor_v2.py").read_text()
+    assert "nothing in this tree consumes `result[\"relations\"]`" in src, (
+        "the cited SENTENCE is not in the file it points at — an unfollowable "
+        "citation is the same defect as a stale line number")
