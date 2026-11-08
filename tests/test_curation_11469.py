@@ -2857,3 +2857,33 @@ def test_every_plan_payload_says_whether_the_census_was_measured(monkeypatch, tm
                          *extra, "--no-verify-read", "--out", str(tmp_path / out),
                          "--ledger", str(tmp_path / "l.jsonl")]) == 0
         assert json.loads((tmp_path / out).read_text())["census_measured"] is True
+
+
+def test_the_disarmed_unreconciled_arm_says_the_sources_were_not_measured(monkeypatch,
+                                                                          tmp_path):
+    """Round-40 P3 — `census_measured` was unconditionally True on the plan payload.
+
+    The disarmed arm carries an UNRECONCILABLE source listing through to the artifact
+    (the armed one returns 3 above), so on that arm the source population was not
+    measured. The field exists so a driver reads that from the field alone, with the
+    reason in `read_note` — a blanket True made the two arms indistinguishable.
+    """
+    mod = _tool_module()
+
+    def call(name, args):
+        if name == "tortoise_query":
+            return {"result": [{"id": "p1", "kind": "decision", "content": "c"}], "total": 1}
+        if args.get("section") == "sources":
+            return {"result": []}
+        if args.get("section") == "status":
+            return {"unexpected": "shape"}           # nothing to reconcile the empty listing
+        return {"result": []}
+    monkeypatch.setattr(mod, "_live_call_tool", call)
+    assert mod.main(["plan", "--graph", "org_x_g_old", "--target", "org_x_g_new",
+                     "--apply", "--off", "--no-verify-read",
+                     "--out", str(tmp_path / "p.json"),
+                     "--ledger", str(tmp_path / "l.jsonl")]) == 0
+    payload = json.loads((tmp_path / "p.json").read_text())
+    assert payload["census_measured"] is False, payload["census_measured"]
+    assert payload["census"], "the MEASURED half of the census still travels"
+    assert "cannot be told from an unread one" in (payload["read_note"] or "")

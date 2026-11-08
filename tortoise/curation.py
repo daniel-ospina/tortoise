@@ -1357,7 +1357,9 @@ def ledger_scopes(
     block on the one guard that protects the "skipped before the wire" half of R3.
 
     ⛔ THE SET IS REFS, NOT IDENTITIES. It is the literal spelling plus the spelling
-    fields of the row that spelling RESOLVES THROUGH (`_matched_row`) — the refs
+    fields of the row that spelling RESOLVES THROUGH (`_ledger_row`, which
+    matches EXACT identity fields only — NOT `_matched_row`, whose name fallback would
+    reinstate the cross-graph skip this scope exists to prevent) — the refs
     `mcp_auth.resolve_graph_target` accepts for that one graph, and nothing derived.
     Putting `_tail`'s identity in the set inverted this guard's error direction: a bare
     tail is id-SHAPED but is resolved by the real path as a NAME, so graph A's tail

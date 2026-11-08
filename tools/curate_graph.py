@@ -667,7 +667,12 @@ def cmd_plan(args: argparse.Namespace) -> int:
                # census measured?" instead of KeyError-ing on the most common disarmed run
                # (the healthy one) — the field was added for that uniformity and only the
                # two failure arms carried it (round-39 P3).
-               "census_measured": True,
+               # NOT unconditionally True: the disarmed arm carries an
+               # UNRECONCILABLE source listing through to here (the armed one returns 3
+               # above), and on that arm the source population was not measured — the
+               # driver must be able to read that from this field alone, with the reason
+               # in `read_note` (round-40 review, P3-2).
+               "census_measured": unreconciled is None,
                "rows_written": payload_rows,
                "points_read": len(points), "points_total_reported": points_total,
                "sources_read": len(sources), "sources_total_reported": source_total,
