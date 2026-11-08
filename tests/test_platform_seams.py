@@ -826,6 +826,42 @@ def test_uninstall_cline_removes_the_live_hook_when_dot_cline_leaves_the_root(
     assert not live.exists(), (
         "the live registration survived an uninstall because of a symlink on "
         "the path it does not use")
+def test_install_refuses_a_symlinked_LEGACY_path_before_deleting_through_it(
+        tmp_path):
+    """#2124: the escape guard must cover the LEGACY target too.
+
+    The legacy registration is not merely READ during migration — it is
+    UNLINKED, so a symlinked `<dir>/.cline` would send that delete OUTSIDE the
+    install dir, exactly as a write would (and the old `.cline/hooks` path is
+    precisely the one a user is most likely to have symlinked to a shared hooks
+    directory).
+
+    The file outside is OURS by the marker rule (a dead `exec` line, which
+    `_cline_marker_owns` accepts), so the ownership check passes and the escape
+    guard is the ONLY thing standing between the migration and a delete outside
+    the root. That is what makes this the pin for the guard extension and not
+    for the ownership check.
+
+    MUTATION: drop `legacy_target` from the guard's candidate list
+    (`for candidate in [target]:`) → the install proceeds and unlinks
+    `outside/hooks/UserPromptSubmit` → RED. Before this test existed, all 27
+    cline/symlink cases stayed GREEN under that mutation (measured).
+    """
+    outside = tmp_path / "outside-hooks"
+    (outside / "hooks").mkdir(parents=True)
+    victim = outside / "hooks" / "UserPromptSubmit"
+    victim.write_text("#!/usr/bin/env bash\n"
+                      "exec /nonexistent/volunteer-turn.sh cline\n")
+    proj = tmp_path / "proj"
+    (proj / ".clinerules").parent.mkdir(parents=True, exist_ok=True)
+    (proj / ".cline").symlink_to(outside)
+
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+    r = _run(["install", "cline", "--dir", str(proj)], env)
+
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "Refusing" in r.stderr
+    assert victim.exists(), "the legacy DELETE reached outside the install dir"
 
 
 def test_install_cline_refuses_directory_target(tmp_path):
