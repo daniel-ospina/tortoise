@@ -5207,8 +5207,26 @@ def test_the_pre_registration_cites_the_classify_sites_the_tree_actually_has():
         # A carrier that names the collector's EXTENT must name the right one. (A
         # carrier that names only the single line — the `steps:` condition's folded
         # scalar does — makes no extent claim, so it is not held to this.)
-        ranged = [block for block in extent_carriers
-                  if re.search(r"extractor_v2\.py:\d+-\d+", block)]
+        # ⛔ SHAPE-TOLERANT (review round 5, P2). The first cut matched only
+        # `extractor_v2.py:A-B` with an ASCII hyphen, so a stale extent spelled
+        # `:A–B` (en dash), `:A - B` (spaced) or `:A … extractor_v2.py:B` (two
+        # single cites) escaped BOTH the carrier filter and the equality test —
+        # measured: three such rewrites of a live carrier left this leg `0 failed`.
+        # A block that names TWO OR MORE extractor_v2 positions is making an
+        # extent claim whatever its punctuation, so it is held to the extent; a
+        # block naming exactly one (the `steps:` condition's folded scalar) makes
+        # no extent claim and stays out.
+        _extent_cite = re.compile(r"extractor_v2\.py:(\d+)(?:\s*[-\u2013\u2014]\s*(\d+))?")
+
+        def _extent_numbers(block: str, _re: re.Pattern[str] = _extent_cite) -> list[int]:
+            numbers: list[int] = []
+            for lo, hi in _re.findall(block):
+                numbers.append(int(lo))
+                if hi:
+                    numbers.append(int(hi))
+            return numbers
+
+        ranged = [block for block in extent_carriers if len(_extent_numbers(block)) >= 2]
         assert ranged, (
             f"{doc_name} names `_collect_classify_items` but never its extent "
             f"(tortoise/extractor_v2.py:{collector}-{end}) — the `def` through "
@@ -5220,10 +5238,10 @@ def test_the_pre_registration_cites_the_classify_sites_the_tree_actually_has():
             # ", formerly tortoise/extractor_v2.py:11098-11120" next to the right
             # range left this leg `1 passed`. A stale cite with a correct twin is
             # the same defect, so the block must cite the extent ONCE and right.
-            found = set(re.findall(r"extractor_v2\.py:(\d+-\d+)", block))
-            assert found == {f"{collector}-{end}"}, (
+            found = sorted(_extent_numbers(block))
+            assert found == sorted({collector, end}), (
                 f"{doc_name}: a live carrier naming `_collect_classify_items` cites "
-                f"extent(s) {sorted(found) or ['<none>']} — it must cite exactly "
+                f"position(s) {found or ['<none>']} — it must cite exactly "
                 f"tortoise/extractor_v2.py:{collector}-{end} "
                 "(the `def` through `return items`). A range that runs past the "
                 "body names the next function's lines, and a STALE range left "

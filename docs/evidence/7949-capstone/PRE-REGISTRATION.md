@@ -1718,9 +1718,12 @@ re-cut from the resolved document (§8), and no committed verdict is re-scored.
   what moves is a line NUMBER in the condition's provenance, not the condition, the step set, a
   metric, a denominator or a threshold — the operative rule is unchanged. It is recorded as a §10.14
   ENTRY in §10's own deviations list (a new numbered entry, not a struck-through edit to the operative
-  rows), which is also what keeps this amendment's own epoch legible:
-  `check_steps_block_is_pre_scored` accepts a `steps` block that post-dates the last scored log only
-  when the document carries a deviations entry, and this is that entry.
+  rows). The gate's arm is DOCUMENT-level, not entry-level (`check_steps_block_is_pre_scored` refuses a
+  `steps` block that post-dates the last scored log only when `_document_has_deviations(directory)` is
+  false), and §10.1–§10.13 already clear it — so what this entry does is record THIS move, not
+  single-handedly keep the epoch legible. Stating it the stronger way would have been an
+  over-attribution: measured with §10.14 itself removed from the text, the arm still returns no
+  verdict.
 - **The union also pins one switch the base was red on.** `91dbc9a88` introduced
   `TORTOISE_STATE_VALUE_VERBATIM`, resolved `env_flag(SWITCH, True)` in
   `extractor_v2._state_value_verbatim_enforced` — the ONE module that reads it; the nine
