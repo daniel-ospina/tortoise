@@ -922,8 +922,12 @@ class TestStatusShapeGate:
         than written out again: a hand-written literal set here compares the
         three already-imported names against themselves, so it locks the
         three VALUES and cannot detect an ADDITION — the very drift this test
-        exists to catch (a new ``PACK_STATUS_*`` added there without the gate
-        would 422 a legitimately-exported artifact).
+        exists to catch. What the drift costs now that the exporter clamps
+        (``export._importable_pack_status``): a new ``PACK_STATUS_*`` added
+        there without the gate is NARROWED to ``disabled`` on export, so a
+        legitimately-exported artifact restores in a state it was never in
+        rather than being refused — which is why both halves below are
+        locked.
         """
         from tortoise import pack_state
         from tortoise.hosted_api import _PACK_CONFIG_STATUSES

@@ -498,6 +498,17 @@ when a delete surface is added, not a live gap.)
   pack it records as `activated: False` is written `disabled` (or, when its
   manifest is gone and the namespace is otherwise unknown, skipped per entry
   rather than aborting the restore), and one it records as active stays active.
+  ⚠️ **Claim scope — what that gate does NOT cover (recorded, not silently
+  dropped).** The `status` check governs `pack_config` only. The dump's node
+  props are restored verbatim (`restore_graph` `CREATE`s each node with its
+  props), so a crafted artifact can still land an arbitrary
+  `:PackInstall.status` through the dump; and a `pack_config` entry pairing
+  `activated: false` with `status: "active"` passes the gate and is read as
+  `active` — the widening direction. Neither has a product path: the exporter
+  emits both fields from one record and clamps the status, so they cannot
+  disagree in an artifact it produced. Rejecting the pair, or validating dump
+  props, is a shape-gate change for shapes no in-product writer produces —
+  deliberately left open.
 - **Concurrency:** both the first configuration and every later one move the
 marker with a conditional compare-and-swap (`_cas_first_selection` /
 `_bump_selection`) *before* any install record is written, so a worker that
