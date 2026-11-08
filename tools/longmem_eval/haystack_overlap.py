@@ -164,6 +164,12 @@ def census_overlap(instances: list[dict],
     ``""``) because this is a census of what the reader is HANDED — a
     misaligned instance is a datum, not a reason to refuse. The ingest's own
     alignment checks are `dataset_audit`'s job.
+
+    A ``None`` date and an absent date are the SAME prompt: `_date_anchor`
+    (`extractor_v2.py:1466-1467`) renders ``""`` for any falsy value, so the
+    identity function here is ``str(date or "")`` — not ``str(date)``, which
+    would read ``"None"`` as a date the product never renders (review finding,
+    PR #11577).
     """
     if chunk_turns < 1:
         raise ValueError(f"chunk_turns must be >= 1, got {chunk_turns!r}")
@@ -189,7 +195,7 @@ def census_overlap(instances: list[dict],
         for i, session in enumerate(sessions):
             transcript = _session_transcript(session)
             digest = _sha(transcript)
-            date = str(dates[i]) if i < len(dates) else ""
+            date = str(dates[i] or "") if i < len(dates) else ""
             sid = str(ids[i]) if i < len(ids) else ""
 
             id_counter[sid] += 1
@@ -383,13 +389,17 @@ def main(argv: list[str] | None = None) -> int:
                     help=f"raw-chunk window width (default: {DEFAULT_CHUNK_TURNS})")
     ap.add_argument("--json", action="store_true",
                     help="print the census JSON instead of the summary")
+    ap.add_argument("--download", action="store_true",
+                    help="fetch the split from HuggingFace when it is not cached "
+                         "(default: refuse — a census must not silently pull "
+                         "hundreds of MB)")
     ap.add_argument("--out", type=Path, default=None,
                     help="write the census JSON here")
     args = ap.parse_args(argv)
 
     instances = lme_dataset.load_dataset(
         split=args.split, limit=args.limit, data_path=args.data,
-        download=False)
+        download=args.download)
     census = census_overlap(instances, chunk_turns=args.chunk_turns)
     payload = json.dumps(census, indent=2, sort_keys=True) + "\n"
     if args.out:

@@ -114,10 +114,51 @@ def test_encode_units_use_the_product_renderers():
 
 
 def test_turn_text_is_the_ingest_rendering():
-    """`_turn_text` is the ONE definition of the turn Point's text: the census
-    and both ingest legs import it, so a re-rendering cannot silently measure
-    text the ingest never writes."""
+    """`_turn_text` is the FORMAT of the turn Point's text."""
     assert _turn_text("user", "hello") == "[user] hello"
+
+
+def test_both_ingest_legs_CALL_turn_text_and_keep_no_inline_twin():
+    """The SHARING, not just the format — the half a format pin cannot see.
+
+    Reverting `ingest.py` / `ingest_v2.py` to their inline `f"[{role}] {content}"`
+    twins is byte-identical output, so every other test in this file stays
+    green while the census could measure a rendering the ingest no longer
+    writes (review finding, PR #11577 — the agent-infra#3442 rule: a guard must
+    red on the edit it claims to prevent). Mechanical, like the repo's other
+    enumeration ratchets: each leg must CALL `_turn_text`, and may carry at most
+    the ONE `f"[{role}]` occurrence that is the definition's own body.
+    """
+    root = Path(__file__).resolve().parent.parent.parent / "tools" / "longmem_eval"
+    # (file, `_turn_text` DEFINITIONS, `_turn_text` CALL SITES)
+    for name, defs, calls in (("ingest.py", 1, 1), ("ingest_v2.py", 0, 1)):
+        source = (root / name).read_text(encoding="utf-8")
+        assert source.count("_turn_text(") >= defs + calls, (
+            f"{name} no longer renders its turn Points via _turn_text")
+        assert source.count('f"[{role}]') == defs, (
+            f"{name} carries an inline turn rendering — that is a second "
+            "definition of an encode-cache key, and it renders byte-identically, "
+            "so nothing else would notice")
+
+
+def test_a_none_date_is_the_same_prompt_as_an_absent_date():
+    """The identity function is the PRODUCT's: `_date_anchor`
+    (`extractor_v2.py:1466-1467`) renders `""` for any falsy date, so `None`, `""`
+    and an absent entry are the SAME (undated) prompt — `str(date)` would read
+    `"None"` as a date the product never renders (review finding, PR #11577).
+    """
+    instances = [
+        _instance("q1", [_session("undated")], [None]),
+        _instance("q2", [_session("undated")], [""]),
+        _instance("q3", [_session("undated")], []),   # no date list at all
+    ]
+    census = census_overlap(instances)
+    s = census["sessions"]
+    assert s["distinct_contents"] == 1
+    assert s["distinct_content_date"] == 1          # None == "" == absent
+    assert s["prompt_reuse_factor"] == 3.0
+    assert s["same_date_pairs"] == 3
+    assert census["decision"]["prompt_level_response_cache"]["realizable"] is True
 
 
 def test_hits_are_counted_across_questions_not_within_one():
@@ -188,6 +229,28 @@ def test_cli_json_roundtrip(tmp_path, capsys):
     assert printed == json.loads(out.read_text(encoding="utf-8"))
     assert printed["sessions"]["same_date_pairs"] == 0
     assert printed["sessions"]["distinct_contents"] == 1
+
+
+def test_cli_passes_download_through(tmp_path, monkeypatch, capsys):
+    """`--split m` is only reachable WITH `--download` (the census refuses to
+    pull hundreds of MB implicitly), so the flag must actually reach the loader
+    — the research doc names this invocation as the way to answer the M-split
+    question (review finding, PR #11577)."""
+    seen: dict = {}
+
+    def _fake_load(**kwargs):
+        seen.update(kwargs)
+        return [_instance("q1", [_session("a")], ["d1"])]
+
+    monkeypatch.setattr(lme_dataset, "load_dataset", _fake_load)
+    assert main(["--split", "m", "--download", "--json"]) == 0
+    assert seen["split"] == "m"
+    assert seen["download"] is True
+    capsys.readouterr()
+    # and the DEFAULT is still no download: a census must never pull implicitly
+    assert main(["--json"]) == 0
+    assert seen["download"] is False
+    capsys.readouterr()
 
 
 @pytest.mark.slow

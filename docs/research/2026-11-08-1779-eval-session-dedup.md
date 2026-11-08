@@ -137,9 +137,13 @@ for this issue by its own scope guard ("Out of scope: any parse/retrieval semant
   the non-gating `on_demand` lane — `python tools/ci_selection.py --integrity` exits 0).
 - **Corrected:** the unmeasured "5-10×" in `encode_cache.py` (docstring), `README.md` (encode-cache
   section + a new measured-overlap table) and `run.py:7383` (comment) now cite the measured 1.299× /
-  23.0% and name the census that produced it.
+  23.0% and name the census that produced it. Its ORIGIN —
+  `docs/plans/2026-08-17-1349-embedder-selection.md:63` and its restatement at `:96` — keeps its
+  original text (a plan is the dated record of what was believed) and gains a dated correction note
+  at each site, so the next reader cannot take it as a current premise.
 - **Refactored (no behaviour change):** `ingest._turn_text` — one definition of the turn Point's
-  text, imported by `ingest.py`, `ingest_v2.py` and the census.
+  text, imported by `ingest.py`, `ingest_v2.py` and the census; a mechanical ratchet test reds if
+  either leg re-introduces its inline twin (byte-identical output, so nothing else would notice).
 - **Not done, on purpose:** no session-level cache, no prompt/response cache, no change to
   `chunk_turns`, the date anchor, or any retrieval/parse semantics.
 
