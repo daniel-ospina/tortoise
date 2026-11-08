@@ -2749,7 +2749,7 @@ def test_a_PREFIXED_summary_over_a_still_PROSE_index_VETOES(monkeypatch):
         "the fixture must reach the prefix arm, not be caught as residue")
     assert m._carries_the_display_prefix(leak)
     assert m._is_proven_lexicon(leak), "the prefix arm is meant to prove it"
-    assert not m._indexed_text_within_the_displayed_pair(leak), (
+    assert not m._indexed_text_is_the_displayed_pair(leak), (
         "the indexed text is the PROSE — it must not read as within the display")
 
     split = m.classify_fts_hits(_RecordingGraph([(leak,)]), ["session:s-11070"],
@@ -2773,7 +2773,7 @@ def test_a_PREFIXED_summary_over_a_still_PROSE_index_VETOES(monkeypatch):
 
     # (3) the healthy prefix-only shapes keep the benign label.
     for healthy in (_post_fix_node(), _repaired_from_record_node()):
-        assert m._indexed_text_within_the_displayed_pair(healthy), (
+        assert m._indexed_text_is_the_displayed_pair(healthy), (
             f"{healthy['url']} is a HEALTHY pair — its indexed text is within "
             f"the display, and this fix must not veto it")
     assert m._hit_node_bucket(_post_fix_node(), "fridays") == "lexicon"
@@ -2787,7 +2787,7 @@ def test_an_INFLECTED_prose_token_is_not_absorbed_by_the_display_pair(monkeypatc
         an index still holding the PROSE `planned` was "explained" by a display
         pair carrying `planning`, so the node was bucketed `lexicon` — the bucket
         that never vetoes — and `_merge_probe` certified. MEASURED on that shape
-        before the fix: `_indexed_text_within_the_displayed_pair` -> True,
+        before the fix: `_indexed_text_is_the_displayed_pair` -> True,
         `_hit_node_bucket` -> `lexicon`. The census is structurally blind to it
         (the `summary` is prefixed), so this guard was the only defence.
     (2) REACHABLE: any half-applied repair whose re-derived lexicon shares a stem
@@ -2805,7 +2805,7 @@ def test_an_INFLECTED_prose_token_is_not_absorbed_by_the_display_pair(monkeypatc
         _searchText="planned migration")
     assert not m.carries_pre_lexicon_prose(leak), (
         "the fixture must reach the prefix arm, not be caught as residue")
-    assert not m._indexed_text_within_the_displayed_pair(leak), (
+    assert not m._indexed_text_is_the_displayed_pair(leak), (
         "`planned` is not a token of the displayed pair — a stem fold must not "
         "let the prose index read as the display")
     assert m._hit_node_bucket(leak, "planned") == "unexplained"
@@ -2822,7 +2822,7 @@ def test_an_INFLECTED_prose_token_is_not_absorbed_by_the_display_pair(monkeypatc
 
     # (3) the healthy pairs still prove containment, so nothing is falsely vetoed.
     for healthy in (_post_fix_node(), _repaired_from_record_node()):
-        assert m._indexed_text_within_the_displayed_pair(healthy)
+        assert m._indexed_text_is_the_displayed_pair(healthy)
 
 
 def test_an_IDENTIFIER_SHAPED_token_is_refused_WHATEVER_the_switch_says(
@@ -2901,7 +2901,7 @@ def test_classify_fts_hits_REQUIRES_the_phrase_so_no_proof_can_be_dropped():
     """#11536 review round 7, P2: the default silently dropped two of three proofs.
 
     (1) FAILS on the round-6 tree: `phrase: str | None = None` skipped BOTH
-        `_indexed_text_within_the_displayed_pair` (it early-returns True on absent
+        `_indexed_text_is_the_displayed_pair` (it early-returns True on absent
         indexed text) and `_probe_explains_the_lexicon` (`phrase is None`).
         MEASURED on a node carrying the prefix `summary` and NO `_searchText` — an
         index entry that outlived the property, i.e. the leak shape —
@@ -2958,7 +2958,7 @@ def test_the_subset_guard_sees_the_tokens_the_INDEX_keeps(monkeypatch):
     leak = _prefix_over_prose_node(
         summary=SESSION_SOURCE_SUMMARY_PREFIX + ", ".join(["plan", "friday"]),
         _searchText="plan friday the of and 4820")
-    assert not m._indexed_text_within_the_displayed_pair(leak), (
+    assert not m._indexed_text_is_the_displayed_pair(leak), (
         "the indexed text still carries stopwords and a number the INDEX keeps, "
         "so it is not the displayed pair")
     assert m._hit_node_bucket(leak, "friday") == "unexplained"
@@ -2970,8 +2970,22 @@ def test_the_subset_guard_sees_the_tokens_the_INDEX_keeps(monkeypatch):
 
     # (3) both healthy prefix-only shapes still prove containment.
     for healthy in (_post_fix_node(), _repaired_from_record_node()):
-        assert m._indexed_text_within_the_displayed_pair(healthy), (
+        assert m._indexed_text_is_the_displayed_pair(healthy), (
             f"{healthy['url']} is a HEALTHY pair and must not be vetoed")
+
+    # ⛔ AND CONTAINMENT IS NOT DERIVATION (#11536 review round 9, P1). The
+    # lexicon comes from the SAME transcript as the prose, so a terse utterance
+    # with no stopwords is a SUBSET by accident. MEASURED on this shape, the
+    # subset test returned True and the bucket was `lexicon` — the third proof
+    # cannot help, because on a prose index the text that matched IS the prose.
+    terse = _prefix_over_prose_node(
+        summary=SESSION_SOURCE_SUMMARY_PREFIX + ", ".join(
+            ["migration", "plan", "friday", "invoice", "service", "ready"]),
+        _searchText="migration plan friday invoice service ready")
+    assert not m._indexed_text_is_the_displayed_pair(terse), (
+        "every prose word is also a lexicon word here, so a CONTAINMENT test "
+        "passes — but the indexed text is not the DERIVED pair")
+    assert m._hit_node_bucket(terse, "invoice") == "unexplained"
 
 
 def test_a_NUMBER_and_an_ACCENTED_word_are_probes_a_STOPWORD_is_not():
@@ -3769,7 +3783,12 @@ def test_the_green_does_not_claim_a_BEFORE_reading_that_did_not_MEASURE(monkeypa
             ({"degraded": True, "reason": "breaker_open"},
              "BEFORE leg did not measure"),
             ({"unread": ["session:s-x"]}, "could not fully classify"),
-            ({"unresolved": 1}, "could not fully classify")):
+            ({"unresolved": 1}, "could not fully classify"),
+            # ⛔ AND THE TRUNCATED STATE HAS ITS OWN WORD (#11536 review round 9,
+            # P2): the leg RAN and every hit was classified, only the window
+            # filled — so "did not measure" was false about a count that is a
+            # floor. It was the one state of `_before_leg_kind` with no row.
+            ({"truncated": True, "hits": 50}, "window FILLED")):
         before = {"ran": True, "probes": [dict({"phrase": "zebraquux", "hits": 0,
                                                 "residue": []}, **overrides)]}
         fts = _cli._merge_probe(before, _after(), wrote=False)

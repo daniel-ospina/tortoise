@@ -1164,10 +1164,15 @@ def reconcile_after_replay(projection, *, engine: str,
 # node's own lexicon tokens — otherwise it is UNEXPLAINED, which vetoes and exits
 # 1. ``lexicon`` is the only bucket that ABSORBS a hit as BENIGN, and it never
 # fails a run — so it is EARNED three times over (#11536 review rounds 2 and 5),
-# not assumed from the prefix. (``foreign`` also does not veto, but it claims
-# nothing about this repair: it reports a hit on a Source OUTSIDE this
-# population, and `_merge_probe` keeps it out of the certifying evidence —
-# ``stem_only`` excludes it too.)
+# not assumed from the prefix.
+#    ⛔ ``foreign`` ALSO DOES NOT VETO, AND IT IS NOT EXCLUDED FROM CERTIFYING
+#    (#11536 review round 9, P2 — an earlier version of this note claimed both).
+#    A hit on a Source OUTSIDE this population is neither residue nor proof, and
+#    `_merge_probe` has no predicate that reads it: a probe whose only AFTER hits
+#    are foreign certifies on the strength of the BEFORE/AFTER pair, exactly as
+#    any other non-leak does. The one list it IS kept out of is the `stem_only`
+#    summary, whose contract is "hits, but every one is a lexicon node" — a
+#    foreign hit is not one, and that key is a `--json` report, not a verdict.
 #
 # ⛔ AND A ZERO FROM A DEAD INSTRUMENT IS NOT A ZERO. Three ways the leg can read
 # ``0`` while measuring nothing:
@@ -1379,8 +1384,15 @@ def probe_phrase_rejection(phrase: str) -> str | None:
     # acceptance and the shape guard ask this same question (one predicate per
     # question).
     runs = _indexed_term_runs(token)
-    if len(runs) == 1 and runs[0].isdigit():
-        # A bare number: the read sends it verbatim and the index holds it.
+    if len(runs) == 1 and runs[0].isdigit() and token.lower() == runs[0]:
+        # A bare number — the TOKEN is the run, with no punctuation around it.
+        # ⛔ ``token.lower() == runs[0]`` IS THE GUARD, not a formality (#11536
+        # review round 9, P0): a digit RUN proves nothing about the TOKEN, so
+        # ``'4820,'``, ``'50%'``, ``'-4820'`` and ``'(4820)'`` all have one digit
+        # run while the read would send ``4820\,``, ``50\%``, ``\-4820`` and
+        # ``\(4820\)`` — escaped literals the index does not hold, i.e. the
+        # round-7 P0 re-opened by this very branch. MEASURED before the fix:
+        # every one returned None (ACCEPTED) and built an escaped literal.
         return None
     # Lazy: `sparse` pulls the tokenizer + identifier machinery, and this module
     # is imported by every whole-journal replay engine's trailing sweep.
@@ -1560,15 +1572,15 @@ def _is_proven_lexicon(props: Mapping[str, Any]) -> bool:
     ``record-restore``d node, which has no ``summary`` at all.
 
     ⚠️ The prefix arm proves the DISPLAY value only — see
-    :func:`_indexed_text_within_the_displayed_pair` for the half it does not.
+    :func:`_indexed_text_is_the_displayed_pair` for the half it does not.
     """
     return (_carries_the_display_prefix(props)
             or _proves_the_lexicon(props))
 
 
-def _indexed_text_within_the_displayed_pair(
+def _indexed_text_is_the_displayed_pair(
         props: Mapping[str, Any]) -> bool:
-    """True when the INDEXED text adds no token the DISPLAYED pair lacks.
+    """True when ``_searchText`` IS the lexicon the DISPLAYED pair names.
 
     ⛔ THE PREFIX PROVES THE DISPLAY VALUE, NOT THE INDEX (#11536 review round 5,
     P2). :func:`_is_proven_lexicon`'s prefix arm reads only ``summary``, while the
@@ -1581,41 +1593,43 @@ def _indexed_text_within_the_displayed_pair(
     that never vetoes, and the run would certify over a still-retrievable
     sentence.
 
-    Every post-#10852 writer derives both values from the SAME ``topics``
-    (``summary = PREFIX + ", ".join(topics)`` and
-    ``_searchText = ", ".join(topics)``), so on a healthy node the indexed tokens
-    are a SUBSET of the displayed ones — and prose words are precisely the extras
-    that break it.
+    ⛔ AND IT IS DERIVATION, NOT CONTAINMENT, AND NOT THE QUERY TOKENISER
+    (#11536 review rounds 6 and 9, P1). Three drafts of this guard were each one
+    filter too loose, and all three were measured:
 
-    Polarity: fail-CLOSED. A pair this cannot read is not proven, and the caller
-    vetoes it as ``unexplained``: a false veto is re-measured, a false
-    certification is the leak.
+    * :func:`_stem_key` folded both sides, so an index still holding ``planned``
+      read as "explained" by a display pair carrying ``planning``;
+    * ``tokenize_sparse_query`` drops stopwords, sub-2-character and all-digit
+      tokens that the INDEX keeps, so ``"plan friday the of and 4820"`` read as a
+      subset of ``"plan, friday"`` while ``run_fts_query('4820')`` still returned
+      the node;
+    * set CONTAINMENT is necessary but not sufficient, because the lexicon comes
+      from the same transcript as the prose. On
+      ``summary = PREFIX + "migration, plan, friday, invoice, service, ready"`` /
+      ``_searchText = "migration plan friday invoice service ready"`` (still the
+      PROSE) containment passed, the bucket was ``lexicon``, and the third proof
+      could not help — on a prose index the text that matched IS the prose.
 
-    ⛔ RAW TOKENS, NOT STEMS, AND NOT THE QUERY TOKENISER (#11536 review round 6,
-    P1; round 8, P1). Folding through :func:`_stem_key` is a HOLE rather than a
-    tolerance: an index still holding ``planned`` reads as "explained" by a
-    display pair carrying ``planning``, and MEASURED on that shape the bucket was
-    ``lexicon`` — a prose index certified as a collision. Reusing
-    ``tokenize_sparse_query`` is a hole of the same kind: it drops stopwords,
-    sub-2-character and all-digit tokens, which the INDEX keeps, so
-    ``"plan friday the of and 4820"`` read as a subset of ``"plan, friday"``
-    while ``run_fts_query('4820')`` still returned the node. Both sides are now
-    :func:`_indexed_term_runs`; every healthy pair derives both from the same
-    ``", ".join(topics)`` string, so containment holds there and any extra
-    indexed token — prose word, stopword, number, inflected form — is exactly
-    the leak.
+    The writers make an EXACT relation: :func:`tortoise.sdk._source_search_text`
+    returns ``", ".join(topics)`` and the display value is
+    ``PREFIX + ", ".join(topics)``, so the summary's SUFFIX is what
+    ``_searchText`` must BE. That is the same conclusion
+    ``cache_projection._episodic_source_search_text_is_the_lexicon`` reached.
+
+    Polarity: fail-CLOSED. A pair whose two halves are not the same derivation is
+    not proven, and the caller vetoes it as ``unexplained``: a false veto is
+    re-measured, a false certification is the leak.
     """
-    search_text = props.get(_SEARCH_TEXT)
-    if not isinstance(search_text, str) or not search_text.strip():
-        # No indexed text: nothing here could contradict the display, and a blank
-        # index cannot carry the sentence.
-        return True
     summary = props.get(_SUMMARY)
-    if not isinstance(summary, str) or not summary.strip():
+    if not isinstance(summary, str) or not summary.startswith(
+            SESSION_SOURCE_SUMMARY_PREFIX):
         return False
-    indexed = set(_indexed_term_runs(search_text))
-    displayed = set(_indexed_term_runs(summary))
-    return bool(displayed) and indexed <= displayed
+    search_text = props.get(_SEARCH_TEXT)
+    if not isinstance(search_text, str) or not search_text:
+        # No indexed text at all: nothing here could BE the displayed lexicon,
+        # and a blank index cannot carry the sentence.
+        return False
+    return summary[len(SESSION_SOURCE_SUMMARY_PREFIX):] == search_text
 
 
 #: The English suffixes :func:`_stem_key` folds when comparing a probe token with
@@ -1719,7 +1733,7 @@ def classify_fts_hits(g, urls, *, phrase: str,
     ⛔ AND ``lexicon`` IS PROVED THRICE (#11536 review round 2, P1; round 5, P2):
     the node must prove the post-fix pair (:func:`_is_proven_lexicon`); when that
     proof is the display PREFIX alone, the INDEXED text must add no token the
-    displayed pair lacks (:func:`_indexed_text_within_the_displayed_pair`) — a
+    displayed pair lacks (:func:`_indexed_text_is_the_displayed_pair`) — a
     prefix ``summary`` over a still-prose ``_searchText`` is the leak, not a
     collision; and the probe token must relate to one of that node's OWN lexicon
     tokens (:func:`_probe_explains_the_lexicon`). A node can prove the lexicon and
@@ -1810,7 +1824,7 @@ def _hit_node_bucket(props: dict, phrase: str) -> str:
         # otherwise be explained by its own PROSE and land in `lexicon`, the
         # bucket that never vetoes.
         if (_carries_the_display_prefix(props)
-                and not _indexed_text_within_the_displayed_pair(props)):
+                and not _indexed_text_is_the_displayed_pair(props)):
             return "unexplained"
         if _probe_explains_the_lexicon(props, phrase):
             return "lexicon"

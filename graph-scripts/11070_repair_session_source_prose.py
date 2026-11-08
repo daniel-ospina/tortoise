@@ -478,7 +478,15 @@ def _report_fts(fts: dict, census_after: int | None = None) -> None:
             before = f"{before} " + (
                 "⚠️ BEFORE leg could not fully classify its hits"
                 if before_kind == "unclassified"
-                else "⚠️ BEFORE leg did not measure")
+                # ⛔ A FILLED WINDOW DID MEASURE (#11536 review round 9, P2):
+                # `_before_leg_kind` has its own `truncated` state because the
+                # leg RAN and every hit it returned was classified — only the
+                # WINDOW filled, so its count is a FLOOR. Stamping "did not
+                # measure" over it contradicted both the urls it measured and
+                # the refusal below, which correctly says the window filled.
+                else ("⚠️ BEFORE leg's window FILLED — its count is a FLOOR"
+                      if before_kind == "truncated"
+                      else "⚠️ BEFORE leg did not measure"))
         print(f"          {probe['phrase']!r}: {before} -> "
               f"{len(probe['residue'])} residue url(s) after, "
               f"{probe['hits']} hit(s)"
