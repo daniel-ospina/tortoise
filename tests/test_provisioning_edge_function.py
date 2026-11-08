@@ -16,6 +16,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 from tests._verdict import (
@@ -602,7 +603,7 @@ def test_edge_function_logs_the_refusal_on_the_method_gate():
 
 
 _LOCAL_SPECIFIER_RE = re.compile(
-    r"""(?:from|import)\s*\(?(?:\s|//[^\n]*\n|/\*[\s\S]*?\*/)*["'`](\.{1,2}/[^"'`]+)["'`]"""
+    r"""(?:from|import)\s*\(?(?:\s|//[^\n]*\n|/\*[^*]*\*+(?:[^/*][^*]*\*+)*/)*["'`](\.{1,2}/[^"'`]+)["'`]"""
 )
 
 
@@ -626,6 +627,17 @@ def _local_specifiers(text: str) -> list[str]:
       3. still no comment-interleaved spelling — MEASURED the same way (green
          with a live verifier in `../_shared/_hook.ts`), which is why the comment
          allowance is in the pattern rather than in a promise.
+
+    ⛔ The comment branch is written in the CANONICAL LINEAR form
+    (`/\*[^*]*\*+(?:[^/*][^*]*\*+)*/`), not as a lazy `[\s\S]*?` inside the
+    repetition: the lazy form is ambiguous — a comment's `*/` can either close
+    the current comment or the outer `*` can end here and let the next `/*` start
+    a new one — so a run of empty comments with no trailing literal exhausts the
+    combinations. MEASURED on the lazy form, scanning `import /*a*//*a*/…` with no
+    literal: 0.012 s at 16 repeats, 0.221 s at 20, 3.4 s at 24 — ×4 per two, so
+    minutes by ~28. That is a denial-of-service on the guard itself, not a
+    theoretical note; `test_the_specifier_pattern_cannot_backtrack_exponentially`
+    holds the bound. The canonical form scans 2 000 such comments in 1 ms.
     The general lesson, since this is the third time: the walk is only as good as
     this pattern, so EVERY class the pattern is supposed to see has to appear in
     `test_local_specifier_scan_reads_every_quote_style` — a claim in a comment
@@ -679,6 +691,31 @@ def test_local_specifier_scan_reads_every_quote_style():
         "whatever comment sits between the keyword and the literal — a missed "
         "specifier is a module the closure walk never reads, while the pins "
         "still report green"
+    )
+
+
+def test_the_specifier_pattern_cannot_backtrack_exponentially():
+    """The pattern must be LINEAR in the comment gap, not merely correct.
+
+    A lazy `[\s\S]*?` inside the repetition is ambiguous — the same `*/` can close
+    a comment or terminate the gap so the next `/*` opens one — so a run of empty
+    comments with NO trailing literal makes the engine try every split. Measured
+    on that form: 0.012 s at 16 repeats, 0.221 s at 20, 3.4 s at 24 (×4 per two).
+    The guard runs on repository content, so a pattern that can hang on a comment
+    is a denial of service against every CI run that touches this file.
+
+    24 repeats is chosen deliberately: the ambiguous form needs ~3.4 s there while
+    the canonical form needs microseconds, so the bound below has five orders of
+    magnitude of headroom and still FAILS (rather than hanging) on a regression.
+    """
+    text = "import " + "/*a*/" * 24
+    started = time.perf_counter()
+    assert _local_specifiers(text) == []
+    elapsed = time.perf_counter() - started
+    assert elapsed < 1.0, (
+        "the specifier pattern backtracked exponentially on a comment run "
+        f"({elapsed:.3f}s for 24 empty comments) — it must stay linear, see the "
+        "canonical comment form in `_local_specifiers`' docstring"
     )
 
 
