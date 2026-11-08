@@ -2260,14 +2260,37 @@ def _tracked_unprovable(probe: subprocess.CompletedProcess[str] | None = None) -
     the guess-the-cause defect this change removes one function over, and it was
     FROZEN by this PR's own `#11503` pin, whose docstring says "git is present, ran,
     and answered" while its assertion demanded the opposite sentence. `probe` is what
-    the caller measured; None means "not passed", so `_tracked_unprovable()` keeps its
-    signature for the direct callers.
+    the caller measured.
+
+    ⛔ AND THE TARBALL CASE IS THE THIRD CAUSE, NOT THE FIRST (#11474 review). MEASURED
+    in a directory with no `.git` on a box carrying git 2.43.0: `git ls-files` exits
+    **128** (`fatal: not a git repository`) and so does `rev-parse
+    --is-inside-work-tree` — git was PRESENT and RAN, and said "there is no repository
+    here". The default sentence below said "git is unavailable here" for that case,
+    which is the one thing the probe in hand disproves — and because the genuinely
+    git-ABSENT case now routes to `_tracked_unrunnable`, that falsified default was
+    left as the SOLE production rendering of this renderer. So it is not a default any
+    more: an unanswered probe states what the probe actually measured.
     """
     if probe is not None and probe.returncode == 0 and probe.stdout.strip() == "false":
         print(
             "CAPSTONE-LEDGER: NOTE — git is present and says this is not a work tree, "
             "so the TRACKED rule cannot be evaluated; cited paths were checked for "
             "existence only",
+            file=sys.stderr,
+        )
+        return True
+    if probe is not None and probe.returncode != 0:
+        # git RAN and exited non-zero: there is no repository to ask about. Name THAT,
+        # not a bare absence the probe disproves — while still saying why the rule
+        # cannot run, which is what the reader needs.
+        first_line = (probe.stderr or "").strip().splitlines()
+        detail = f": {first_line[0]}" if first_line else ""
+        print(
+            "CAPSTONE-LEDGER: NOTE — git is present but there is no repository to ask "
+            f"(`rev-parse --is-inside-work-tree` exited {probe.returncode}{detail}), so "
+            "git is unavailable here FOR THIS RULE: the TRACKED rule cannot be "
+            "evaluated, and cited paths were checked for existence only",
             file=sys.stderr,
         )
         return True

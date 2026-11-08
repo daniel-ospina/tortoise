@@ -4948,7 +4948,7 @@ def test_a_glob_accepted_by_a_later_match_does_not_announce_the_rows_fate(monkey
         f"the per-path refusal must name the cause it measured (the probe never ran): {err}"
     )
     assert "not TRACKED" not in err, (
-        "the probe never ran, so no line may borrow git's measured answer: " f"{err}"
+        f"the probe never ran, so no line may borrow git's measured answer: {err}"
     )
     assert "the row does not count" not in err, (
         "the probe cannot know the row's fate — a later tracked match accepted it, so "
@@ -5091,7 +5091,66 @@ def test_a_probe_that_did_NOT_answer_false_states_the_OTHER_cause(capsys):
     )
 
 
-def test_a_git_that_COULD_NOT_ANSWER_is_not_read_as_a_measured_untracked(tmp_path, monkeypatch, capsys):
+def test_a_TARBALL_on_a_box_WITH_git_does_not_claim_git_is_unavailable(
+    tmp_path, monkeypatch, capsys
+):
+    """No repository, but git IS installed — so nothing may say "git is unavailable".
+
+    ⛔ THE THIRD CAUSE REACHING `_tracked_unprovable` (#11474 review). MEASURED in a
+    directory with no `.git` on a box carrying git 2.43.0: `git ls-files` exits **128**
+    (`fatal: not a git repository …`) and `rev-parse --is-inside-work-tree` exits 128
+    too. Git was PRESENT and RAN and said "there is no repository here".
+
+    The renderer's default sentence said *"git is unavailable here"* for that case, and
+    because the genuinely git-ABSENT case now routes to `_tracked_unrunnable`, that
+    falsified default was left as the SOLE production rendering of this renderer — the
+    guess-the-cause defect this PR removes, on the first cause its own docstring listed.
+
+    The CONTROL comes first: this box must actually HAVE git, or the case is not the one
+    this pin is about and a pass would mean nothing.
+    """
+    import shutil as _shutil
+    import subprocess as _subprocess
+
+    assert _shutil.which("git"), (
+        "this pin needs a box WITH git; without it the case is not a tarball"
+    )
+
+    tarball = tmp_path / "unpacked-tarball"
+    tarball.mkdir()
+    (tarball / "held.txt").write_text("held\n", encoding="utf-8")
+
+    # Prove the shape: git answers, and its answer is "no repository" (128), not silence.
+    probe = _subprocess.run(
+        ["git", "rev-parse", "--is-inside-work-tree"],
+        cwd=str(tarball),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert probe.returncode == 128, (
+        f"expected 'not a git repository' (rc 128) from git {_subprocess.run(['git', '--version'], capture_output=True, text=True).stdout.strip()}, "
+        f"got rc {probe.returncode} — the fixture is not a tarball"
+    )
+
+    # The abstention VERDICT is #11503 Option 1 and is unchanged: this path still counts.
+    assert cl._is_tracked(tarball / "held.txt", tarball) is True
+    err = capsys.readouterr().err
+    assert "git is present but there is no repository to ask" in err, (
+        "git ran and exited 128 — the NOTE must say it is PRESENT and that the missing "
+        f"thing is the repository, and quote what git said: {err}"
+    )
+    assert "not a git repository" in err or "exited 128" in err, (
+        f"the note must name the measurement it took (rc/stderr), not just a verdict: {err}"
+    )
+    assert "not TRACKED" not in err, (
+        f"nothing was measured about this path, so no line may claim a git answer: {err}"
+    )
+
+
+def test_a_git_that_COULD_NOT_ANSWER_is_not_read_as_a_measured_untracked(
+    tmp_path, monkeypatch, capsys
+):
     """`git ls-files` exit 128 is a FAILURE to answer, NOT the measured `no` (exit 1).
 
     ⛔ THE THIRD COLLAPSED CAUSE (see `_tracked_unanswered`). `ls-files --error-unmatch`
@@ -5169,8 +5228,7 @@ def test_a_git_that_COULD_NOT_ANSWER_is_not_read_as_a_measured_untracked(tmp_pat
         "of what was measured here"
     )
     assert "not TRACKED by git" not in why, (
-        f"git never answered for this path, so that sentence is a cause nobody "
-        f"measured: {why}"
+        f"git never answered for this path, so that sentence is a cause nobody measured: {why}"
     )
 
     # And the CALLER's row-level sentence must not pick one of `_is_tracked`'s two
