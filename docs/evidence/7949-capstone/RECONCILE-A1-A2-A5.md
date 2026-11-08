@@ -322,7 +322,7 @@ count-of-mentions trap §0 documents). Every number this paragraph pins to one o
 `git grep -n 'vet_enabled = ' -- tortoise/extractor_v2.py` prints
 one line, and its number is a convenience printed BESIDE the symbol rather than a
 `HEAD`-relative claim: `:12929` at `a1dff7cec8`, `:12779` at `62248db88` — so the sweep
-covers **none** of those three — the numbers it re-derives are pinned to the SHAS, never to a
+covers **none** of those two — the numbers it re-derives are pinned to the SHAS, never to a
 `HEAD`-relative delta, which is the same rot in a new coat), which is the whole point. That is the class of defect §0 exists to catch: a number true at
 one base and false at the base the record claims. Which is why the 0.0 pp above is the **armed** result,
 not an unarmed one.
