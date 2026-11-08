@@ -1756,11 +1756,14 @@ def _is_stderr_print(call: ast.Call) -> bool:
         channels — `str(refusal.value) + captured.out + captured.err` — so a
         stdout print IS visible there.
 
-    Demanding `file=sys.stderr` unconditionally is therefore correct for the first
-    case and an over-block for the second: measured, a `print(<message>)` +
-    `raise SystemExit(1)` in `tools/build_site_icons.py` left the whole census
-    GREEN (535 passed) while this pin reded. The requirement is asserted below
-    only where the census's stderr-only arm actually applies.
+    The channel is therefore a CONTRACT only where the census pins one: a stdout
+    print for a tool with a `REFUSAL_CODES` row is unreadable to the census and
+    must red; the same shape for a tool with NO row is legal, and demanding stderr
+    there would red a census-LEGAL guard — the false-red class this pin must not
+    add. Both tools carry a row TODAY (main's #11507 added
+    `tools/build_site_icons.py: 4`), which is why the gate below is a real branch
+    (`_channel_is_wrong`) rather than an inline conditional whose false arm could
+    be inverted with the suite green: it exists for the tool that has no row.
     """
     return any(
         kw.arg == "file"
@@ -1770,6 +1773,50 @@ def _is_stderr_print(call: ast.Call) -> bool:
         and kw.value.value.id == "sys"
         for kw in call.keywords
     )
+
+
+def _channel_is_wrong(print_call: ast.Call, expected_status: int | None) -> bool:
+    """Whether the census would MISREAD this print-shape refusal (#5128).
+
+    TRUE only for the combination the census cannot see: a `print(<message>)` to
+    STDOUT in a tool whose `REFUSAL_CODES` row makes the census RUN the tool and
+    read `probe.stderr`. FALSE for a stderr print (readable) and FALSE for a tool
+    with no row (the census executes the guard node and joins both channels).
+
+    Factored out and table-tested because inlined it was unpinnable: both pinned
+    tools carry a row today, so the false branch is unreachable from them, and
+    inverting the condition (`is not None` -> `is None` — one token, not dead code)
+    while dropping the tool's `file=sys.stderr` left the whole suite GREEN (measured,
+    190 passed). That is the exact defect the arm exists to catch, so the decision
+    itself is executed by `test_the_stderr_requirement_is_gated_on_the_census_pinning`.
+    """
+    return expected_status is not None and not _is_stderr_print(print_call)
+
+
+@pytest.mark.parametrize(
+    "source,pinned,expected",
+    [
+        ('print("m", file=sys.stderr)', 4, False),  # readable by the census's stderr arm
+        ('print("m", file=sys.stdout)', 4, True),  # stdout while the census reads stderr
+        ('print("m")', 4, True),  # the same hole, defaulted
+        ('print("m")', None, False),  # no row: the census joins BOTH channels
+        ('print("m", file=sys.stderr)', None, False),
+    ],
+)
+def test_the_stderr_requirement_is_gated_on_the_census_pinning(source, pinned, expected):
+    """The channel DECISION on its own, because no pinned tool can reach both sides.
+
+    Both tools carry a `REFUSAL_CODES` row (main's #11507 added
+    `tools/build_site_icons.py: 4`), so a pin that only exercised them could not
+    tell "the gate is `is not None`" from "the gate is always true": measured,
+    inverting it to `is None` AND dropping the tool's `file=sys.stderr` left the
+    suite at 190 passed. The `None` rows pin the other direction — a tool with no
+    row must NOT be required to print to stderr, or this pin reds a census-LEGAL
+    guard (the false-red class its docstring says it must not add).
+    """
+    call = ast.parse(source).body[0].value
+    assert isinstance(call, ast.Call)
+    assert _channel_is_wrong(call, pinned) is expected, (source, pinned, expected)
 
 
 def _advertised_bare_forms(rel: str, lines, census) -> list[str]:
@@ -2030,15 +2077,15 @@ def test_the_tool_carries_the_5128_interpreter_guard_first(tool, capsys, monkeyp
         # print is a refusal the census never sees; a tool with no row is graded by
         # executing the guard node, where the census joins stdout AND stderr, so
         # demanding stderr there would red a census-LEGAL guard — the false-red
-        # class this pin must not add (`build_site_icons.py` has no row; measured,
-        # `print(<message>)` + `SystemExit(1)` leaves the census green at 535 passed).
-        if expected_status is not None:
-            assert _is_stderr_print(body_nodes[0].value), (
-                f"the refusal must be printed to `sys.stderr`: the census RUNS this "
-                f"tool and reads `probe.stderr` (its REFUSAL_CODES arm), so a "
-                f"`print(<message>)` to stdout is a refusal the operator and the "
-                f"census both miss: {ast.dump(body_nodes[0].value)}"
-            )
+        # class this pin must not add. The decision is a helper, not an inline
+        # conditional: inlined, its false branch was unreachable from both pinned
+        # tools and invertible with the suite green (see `_channel_is_wrong`).
+        assert not _channel_is_wrong(body_nodes[0].value, expected_status), (
+            f"the refusal must be printed to `sys.stderr`: the census RUNS this "
+            f"tool and reads `probe.stderr` (its REFUSAL_CODES arm), so a "
+            f"`print(<message>)` to stdout is a refusal the operator and the "
+            f"census both miss: {ast.dump(body_nodes[0].value)}"
+        )
         message = body_nodes[0].value.args[0]
     else:
         message = exc.args[0]
@@ -2152,6 +2199,16 @@ def test_the_advertised_form_filter_is_not_deaf():
     assert _advertised_bare_forms(rel, ["`python3 ...`"], census), (
         "the ELIDED form has no path, so no carve-out can exempt it; the census reds "
         "it and the filter must too"
+    )
+    # The RECORD exemption is a third clause, and it is executed by nothing else:
+    # both pinned tools carry no `_DELIBERATE_BARE_FORM` line, so deleting the
+    # clause left the suite GREEN (measured). It is keyed by (path, stripped line),
+    # so the census's own first entry is the only honest subject.
+    record_rel, record_line = sorted(census._DELIBERATE_BARE_FORM)[0]
+    assert not _advertised_bare_forms(record_rel, [record_line], census), (
+        f"a census RECORD exemption must stay exempt ({record_rel!r}): rewriting "
+        f"recorded evidence to satisfy a gate falsifies provenance, which is why the "
+        f"census exempts it"
     )
 
 
