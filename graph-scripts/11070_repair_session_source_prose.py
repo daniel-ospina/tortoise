@@ -69,7 +69,8 @@ Usage:
   #    a known-present token from a POST-fix lexicon node (so a graph that has
   #    only ever been CLEARED — or a tenant with no post-#10852 session — cannot
   #    offer one), or an EMPTY Source index over this population (no `:Source`
-  #    carries `_searchText` at all), which is a measurement, not a default.
+  #    over the probe's own `documentKind IS NULL` population carries
+  #    `_searchText` at all), which is a measurement, not a default.
   #    When neither holds — the index DOES hold entries and there is no lexicon
   #    node to probe — step 3 refuses BY DESIGN: measure the FTS half on the
   #    run that WRITES (`--repair --probe-phrase <token>`, which takes its own
@@ -464,9 +465,10 @@ def _report_fts(fts: dict) -> None:
             # document-bearing graph. Name the population the query asks about.
             print("          control: EMPTY Source index — no Source over the "
                   "probe's own population (`documentKind IS NULL`) carries "
-                  "`_searchText`, the field the index is declared on, and the "
-                  "read RAN, so the corpus is empty rather than the index being "
-                  "silent")
+                  "`_searchText`, the field the index is declared on, and this "
+                  "index-entry read ran, so the population is empty rather than "
+                  "the count being unreadable (the probe line above carries the "
+                  "FTS leg's own state)")
         elif control.get("hits") is None:
             print("          control: not available — "
                   f"{control.get('note')}")
@@ -496,7 +498,13 @@ def _report_fts(fts: dict) -> None:
             # `residue_before`; the third branches on `_before_leg_kind`, the SAME
             # four-state answer the refusals use, rather than re-deriving it.
             hits = sum(int(p.get("hits") or 0) for p in fts["probes"])
-            benign = sum(len(p.get("lexicon") or ()) for p in fts["probes"])
+            # ⛔ DISTINCT URLS, not a sum of per-probe counts (#11536 review round
+            # 6, P3): `--probe-phrase` is repeatable, and two tokens can both be
+            # explained by ONE lexicon node at ONE url — so summing the bucket
+            # lengths reported "across 2 url(s)" for a single url, a count the run
+            # never measured.
+            benign = len({url for p in fts["probes"]
+                          for url in (p.get("lexicon") or ())})
             kinds = [_before_leg_kind(p) for p in fts["probes"]]
             # ⛔ TWO UNITS, NAMED AS TWO (#11536 review round 6, P3): `hits` counts
             # FTS ROWS (one per node) while `benign` counts the `lexicon` bucket,

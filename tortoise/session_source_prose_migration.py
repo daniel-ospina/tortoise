@@ -1675,9 +1675,15 @@ def probe_fts(g, phrases, *, control: bool = True,
          "control": {"mode": "probe" | "empty-index" | "unavailable",
                      # `probe`:      a known-present lexicon token was measured
                      #               (carries ran/degraded/reason too)
-                     # `empty-index`: no Source carries `_searchText` at all and
-                     #               the read RAN — structurally consistent, and
-                     #               the ONLY arm where ok=True with hits=0
+                     # `empty-index`: no Source OVER THE PROBE'S OWN POPULATION
+                     #               (`documentKind IS NULL`) carries `_searchText`,
+                     #               and the index-entry read RAN — structurally
+                     #               consistent, and the ONLY arm where ok=True
+                     #               with hits=0. ⛔ Its `ran`/`degraded` describe
+                     #               THAT Cypher read, never the FTS leg: the two
+                     #               are independent, and a breaker-open FTS read
+                     #               still reaches this arm (the fold's
+                     #               `unmeasurable` veto is what speaks to it).
                      # `unavailable`: nothing corroborates the probe's zero
                      "ok", "hits",          # hits is None when not measured
                      "note",
@@ -1790,12 +1796,20 @@ def probe_fts(g, phrases, *, control: bool = True,
                     "mode": "empty-index", "ok": True, "hits": 0,
                     "ran": True, "degraded": False,
                     "reason": "no_source_search_text",
+                    # ⛔ NEVER "rather than the index being silent" (#11536 review
+                    # round 6, P3): this arm is a Cypher count that does not touch
+                    # the FTS breaker at all, so on a breaker-open run it printed
+                    # a liveness claim directly under the probe's own
+                    # `⚠️ UNMEASURABLE (breaker_open)` — the exact conflation
+                    # removed from the `unavailable` note, in the sibling arm.
+                    # State the property count; the probe line speaks for the read.
                     "note": "no SOURCE over the probe's own population "
-                            "(`documentKind IS NULL`) carries `_searchText` (the "
-                            "field the index is declared on) and the read RAN, so "
-                            "the corpus is empty rather than the index being "
-                            "silent: the probe's 0 is consistent with a repaired "
-                            "graph",
+                            "(`documentKind IS NULL`) carries `_searchText`, the "
+                            "field the index is declared on, and this "
+                            "index-entry read ran — so the population is empty "
+                            "rather than the count being unreadable. That says "
+                            "nothing about the FTS read itself: the probe line "
+                            "above carries that leg's own state",
                 }
             elif empty is None:
                 report["control"] = {

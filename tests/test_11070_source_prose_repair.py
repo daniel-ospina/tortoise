@@ -3207,6 +3207,21 @@ def test_the_green_does_not_claim_a_BEFORE_reading_that_did_not_MEASURE(monkeypa
         "the green mixed a row count with a url count, implying a hit it did not "
         "account for")
 
+    # …and TWO probes explained by the SAME url must still say one url: summing
+    # per-probe bucket lengths reported a url count the run never measured.
+    two_probes = _after()
+    two_probes["probes"] = [
+        dict(two_probes["probes"][0], phrase="migration", hits=1,
+             lexicon=["session:dup"]),
+        dict(two_probes["probes"][0], phrase="planning", hits=1,
+             lexicon=["session:dup"]),
+    ]
+    _cli._report_fts(_cli._merge_probe(before, two_probes, wrote=False))
+    out = capsys.readouterr().out
+    assert "(2 hit(s), across 1 url(s)" in out, (
+        "two tokens explained by one lexicon node at one url were counted as two "
+        "urls")
+
     no_control = _after()
     no_control["control"] = {"mode": "unavailable", "ok": False, "hits": None,
                              "note": "no post-fix lexicon node on this graph"}
@@ -3744,6 +3759,13 @@ def test_an_EMPTY_Source_index_corroborates_a_CLEAR_only_graph(monkeypatch,
         "a CORRECTLY repaired clear-only graph could not be certified")
     out = capsys.readouterr().out
     assert "EMPTY Source index" in out
+    assert "documentKind IS NULL" in report["control"]["note"], (
+        "the empty-index control note does not state the population the query "
+        "asks about — a DOCUMENT is a :Source whose `_searchText` is the #125 "
+        "field, so an unscoped \"no Source carries it\" is false there")
+    assert "the index being silent" not in report["control"]["note"], (
+        "the empty-index note claims the FTS read was live, which this Cypher "
+        "count cannot measure")
     assert "documentKind IS NULL" in out, (
         "the empty-index line does not state the population the query asks about "
         "— a DOCUMENT is a :Source whose `_searchText` is the #125 field, so an "
@@ -3998,6 +4020,10 @@ def test_the_control_walks_PAST_a_lexicon_node_whose_tokens_are_ALL_unusable(
     report = m.probe_fts(_Busy(), ["zebraquux"], control=True)
     assert report["control"]["mode"] == "unavailable"
     note = report["control"]["note"]
+    assert "DOES carry" in note and "answering" not in note, (
+        "the control note claims the index is answering — it is built from a "
+        "Cypher read and a node-property count, neither of which consults the FTS "
+        "leg (#11536 review round 6, P3)")
     assert "window the control reads" in note, (
         f"the note claims a universal about a bounded read: {note}")
     assert str(m._CONTROL_LEXICON_WINDOW) in note, (
