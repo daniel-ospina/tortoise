@@ -2145,7 +2145,7 @@ def _is_tracked(resolved: Path, root: Path) -> bool | None:
     "tracked" while a reader's clone has none of them. Pre-existing, filed as #11499;
     the STAGED / INTENT-TO-ADD half is unchanged here.
 
-    ⛔ `-- <rel>` IS A PATHSPEC, AND BOTH DIRECTIONS WERE LIVE (#11474 review). An
+    ⛔ `-- <rel>` IS A PATHSPEC, AND THE WILDCARD DIRECTION WAS LIVE (#11474 review). An
     earlier revision of this note dismissed it on the PREFIX direction alone ("only
     reachable for a DIRECTORY-shaped name — `docs` answers 0, `docs/ab` answers 1 —
     and no call site reaches this function with a directory"). That argument does not
@@ -2157,6 +2157,16 @@ def _is_tracked(resolved: Path, root: Path) -> bool | None:
     through the probe itself. The pathspec is therefore `:(literal)`, which makes the
     name a name rather than a pattern (measured on that same repo: rc 1, "did not
     match any file(s) known to git").
+
+    ⛔ IT DOES **NOT** CHANGE THE DIRECTORY DIRECTION, and that direction was never
+    live: measured, `git ls-files --error-unmatch -- ':(literal)docs'` answers
+    `docs/00_index.md` with rc 0 — byte-identical behaviour to the bare form. What
+    closes it is the `is_file()` pre-check at every call site (`:478`, `:544`, `:809`),
+    not this line, so a future caller that ever passed a DIRECTORY would need that
+    guard rather than believe this pathspec supplies it. The wildcard hazard is also
+    cheaper to reach than "a file present but unindexed": `docs/00_inde?.md`, which
+    need not exist on disk at all, answered rc 0 by borrowing a tracked
+    `docs/00_index.md`.
     """
     try:
         rel = resolved.relative_to(root)
