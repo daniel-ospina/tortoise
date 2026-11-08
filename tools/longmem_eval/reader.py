@@ -101,22 +101,23 @@ __all__ = [
 # (reader_pinned=false) + warned on stderr — never silent.
 #
 # TRANSPORT (#8486, 2026-11-07): the pin named `openrouter:deepseek/...`, which
-# made the DEFAULT unservable on the boxes we run — no `OPENROUTER_API_KEY`
-# exists on them, so `build_reader()` raised at the named-provider check before
-# a single question loaded (measured `reader.py: ValueError: model spec names
-# provider 'openrouter' but its key is not set (OPENROUTER_API_KEY)` on
-# 2026-10-23 and again 2026-11-02). Every run therefore needed an env override,
-# and an override records `reader_pinned: false` — i.e. the pin read as DRIFT
-# exactly when it WAS the ruling. The pin's own contract is "the code default
-# equals what runs use"; the MODEL is unchanged (`deepseek-v4-flash`), only the
-# transport is now the one the fleet actually holds.
+# made the DEFAULT unservable on the boxes we run — `OPENROUTER_API_KEY` is
+# absent on the box the audit was taken on (#8486 credential audit, 2026-11-02:
+# "ABSENT: OPENAI_API_KEY, OPENROUTER_API_KEY, GEMINI_API_KEY", measured on that
+# box and worktree only — not a fleet-wide census), so `build_reader()` raised at
+# the named-provider check before a single question loaded (also observed
+# 2026-10-23). Every run therefore needed an env override, and an override
+# records `reader_pinned: false` — i.e. the pin read as DRIFT exactly when it WAS
+# the ruling. The pin's own contract is "the code default equals what runs use";
+# the MODEL is unchanged (`deepseek-v4-flash`), only the transport is now the one
+# the audit measured as available.
 #
 # OVERRIDES: the OpenRouter-transport reader pin (M5 #1525's literal spec) — the
-# owner ruled on #8486 (2026-11-03) "we use deepseek … Not OpenAI, not
-# OpenRouter", and the 2026-10-27 follow-up on that issue asked in terms:
-# "point the reader constant at the transport we actually run … either update
-# the constant to the transport in use, or the report will read as an
-# accidental override when it is the ruling".
+# owner's decision recorded on #8486 (2026-11-03) is that the model is DeepSeek,
+# not OpenAI, not OpenRouter, and that no credential request stands; the pin's
+# contract then requires the constant to name the transport the run can actually
+# reach, or every run reads as an accidental override when the override WAS the
+# ruling.
 #
 # A box holding only `OPENROUTER_API_KEY` still serves this model — pass
 # `TORTOISE_LME_READER_MODEL=openrouter:deepseek/deepseek-v4-flash` and the run

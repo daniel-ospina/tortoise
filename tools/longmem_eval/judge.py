@@ -101,15 +101,24 @@ OFFICIAL_JUDGE_MODEL = "openai:gpt-4o-2024-08-06"
 #: #8486 owner ruling (2026-10-27), recorded verbatim on the issue: *"Judge: our
 #: own model (`deepseek-v4-flash`), pinned to an exact snapshot id — not a
 #: floating alias. … What the benchmark is for, for now: progress against
-#: ourselves."* Re-stated 2026-11-03: *"we use deepseek … Not OpenAI, not
-#: OpenRouter. No credential request stands"* — the official
-#: `gpt-4o-2024-08-06` pre-registration *cannot* be honoured on the boxes we
-#: run, and substituting it is the ruling rather than an accident.
+#: ourselves."* The owner re-stated it on 2026-11-03 — *"i have already
+#: mentioned multiple times that we use deepseek and that i want to complete the
+#: p0 and p1 issues before doing an eval"* — and the decision comment recording
+#: that answer draws the consequence in its own words (not a quotation): the
+#: model is DeepSeek, not OpenAI, not OpenRouter, no credential request stands.
+#: So the official `gpt-4o-2024-08-06` pre-registration *cannot* be honoured on
+#: our boxes, and the substitution is the ruling rather than an accident.
 #:
-#: WHY a default and not an env override: the ruling says *"fix as constants,
-#: not env overrides"* — an override is an undeclared configuration, and the
-#: whole point of this ruling is that the configuration a run used is READ OFF
-#: the code, not off whatever the launching shell happened to export.
+#: WHY a default and not an env override: an override is an undeclared
+#: configuration, and the whole point of this ruling is that the configuration a
+#: run used is READ OFF the code, not off whatever the launching shell happened
+#: to export. That sentence is the issue's **ALIGN arm** — the 2026-11-02
+#: analysis blocks and the 2026-11-07 scope comment all state the rule as *"fix
+#: as constants, not env overrides"* — not the wording of the owner's 2026-10-27
+#: ruling, whose own words are *"pinned to an exact snapshot id — not a floating
+#: alias"*. Citing the arm for the arm's argument is the point; attributing it to
+#: the owner is not, and a lane reading the ruling must not find a sentence there
+#: that is not in it.
 #:
 #: The consequence is DELIBERATE and is not a failure: `w7_publish` derives the
 #: pin from the judge that graded, so this judge records

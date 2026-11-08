@@ -5,7 +5,10 @@
 Pipeline per question (fresh isolated graph per question — the benchmark's
 independent-memory protocol, no cross-question contamination):
     ingest haystack sessions → hybrid retrieval (graph + raw sessions) →
-    reader LLM answers from context → official answer-check judge scores.
+    reader LLM answers from context → the run's pinned judge scores it. The
+    RUBRIC is the official `evaluate_qa.py` anscheck one; the GRADER is
+    `judge.DEFAULT_JUDGE_MODEL` (#8486 owner ruling, 2026-10-27), and the
+    official GPT-4o grader only when `judge.OFFICIAL_JUDGE_MODEL` is named.
 
 Resilience (per-question error isolation): each question is wrapped in its
 own try/except — a transient LLM error is retried with exponential backoff

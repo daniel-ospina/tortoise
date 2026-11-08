@@ -19,9 +19,12 @@ comparison from silently following that default — a bare
 pre-flight checked the official key (#8486).
 The graded-eval leg is the exact judge call the eval harness
 makes (``tools/longmem_eval/run.py`` judge call site, ``run_evaluation``)
-— the two lanes' judge calls are byte-identical; only the ``_abs`` marker
+— the two lanes' judge calls are byte-identical **when the eval leg names
+this same spec**; under the shipped default they diverge by design (the
+eval RUN grades with ``DEFAULT_JUDGE_MODEL``, see above), which is why this
+harness names the spec instead of inheriting it. Only the ``_abs`` marker
 short-circuit in ``ask_spotcheck._grade`` (deterministic, precedes the
-judge call) can differ. A second leg measures CI parity: the key-free
+judge call) can differ otherwise. A second leg measures CI parity: the key-free
 MockJudge (containment) verdict vs the semantic verdict on the same
 answers — the expected-class flips are the point of the #2071 owner
 decision.

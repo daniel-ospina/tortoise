@@ -67,14 +67,18 @@ extends: docs/planning/2026-09-01-2080-gbrain-plan.md (DM-11, §6.6, §7 E2E-8),
 > **Annotated addition, errata discipline (§7): no number above is changed.**
 > The Reader and Judge rows were repointed at the configuration the fleet
 > actually runs. Both rows previously named a transport (`openrouter`) that
-> holds no key on any box we run, and a judge (`gpt-4o-2024-08-06`) the owner
-> ruling of 2026-10-27 replaced.
+> holds no key on the box this audit measured, and a judge (`gpt-4o-2024-08-06`)
+> the owner ruling of 2026-10-27 replaced.
 
 **Judge.** The owner ruled on this issue (2026-10-27): *"Judge: our own model
 (`deepseek-v4-flash`), pinned to an exact snapshot id — not a floating alias …
-What the benchmark is for, for now: progress against ourselves."* Re-stated
-2026-11-03: *"we use deepseek … Not OpenAI, not OpenRouter. No credential
-request stands."* The code now defaults to it (`tools/longmem_eval/judge.py`,
+What the benchmark is for, for now: progress against ourselves."* The owner
+re-stated it on 2026-11-03 — *"i have already mentioned multiple times that we
+use deepseek and that i want to complete the p0 and p1 issues before doing an
+eval"* — and the decision comment that records that answer draws the
+consequence in its own words (this is the comment's reading, not a quotation):
+the model is DeepSeek, not OpenAI, not OpenRouter, and no credential request
+stands. The code now defaults to it (`tools/longmem_eval/judge.py`,
 `DEFAULT_JUDGE_MODEL`), and `OFFICIAL_JUDGE_MODEL` keeps the official identity
 named and reachable.
 
@@ -95,7 +99,16 @@ named and reachable.
   the gains the benchmark is meant to show.
 - The rubric is unchanged (`judge_rubric_id_hash 82d07b0de05daa48`, the
   verbatim `evaluate_qa.py` anscheck prompts). The **grader** is not the
-  official one, and the direction of that bias is unknown.
+  official one, and the substitution is **not neutral**: on the 16 labelled
+  triples of the #8486 fitness probe (2026-11-02) `deepseek-v4-flash` agreed
+  with the expected verdict 16/16, but it **over-credited the #1949 near-miss
+  shape** (right core entity, missing qualifier) **6/6** — where gpt-4o grades
+  the real case *no*, and `NEAR_MISS_GRADING = "strict"` is a recorded decision.
+  At the near-miss rate that same probe records (1/50) that is ≈ **+2 points,
+  wrong→right: an UPWARD bias** — the substituted grader can make this run's
+  number look *better* than the official configuration it stands in for. Its
+  direction on the remaining classes is unmeasured (the probe covered those with
+  clearly-correct and clearly-wrong hypotheses only).
 - **The judge's request body also gains one field**, for the same reason the
   reader's does: the judge shares the reader's transport declaration
   (`judge.py` → `self.disables_thinking = api_key_env in
@@ -119,10 +132,11 @@ named and reachable.
 
 **Reader.** The M5 pin (#1525) exists so the code default equals what runs use.
 It named `openrouter:deepseek/deepseek-v4-flash`; `OPENROUTER_API_KEY` is absent
-on every box we hold, so a default-config run raised at the named-provider
-check *before loading a question* (measured on this issue 2026-10-23 and
-2026-11-02: `reader.py: ValueError: model spec names provider 'openrouter' but
-its key is not set`). The constant now names the DeepSeek transport. The **model
+on the box the #8486 credential audit measured (2026-11-02 — one box and
+worktree, not a fleet census), so a default-config run raised at the
+named-provider check *before loading a question* (also observed 2026-10-23:
+`reader.py: ValueError: model spec names provider 'openrouter' but its key is
+not set`). The constant now names the DeepSeek transport. The **model
 is unchanged**; the transport moved, and a box holding only another
 provider's key uses the documented override (which records
 `reader_pinned: false` rather than silently reporting a different endpoint as
@@ -362,6 +376,7 @@ never a silent in-place edit (publication discipline, #2106 §7):
 | 2026-11-08 | #8486, fourth pass (fresh-context review of the third) — **one in-place edit**. §6's three-lane bullet gave key absence as the only way the `stage="ingest"` lane leaves `DEEPSEEK_API_KEY`; two paths are not key-driven — a box holding three providers runs a WEIGHTED rotation (venice 0.50 / openrouter 0.35 / deepseek-direct 0.15, `model_adapters.py::_build_routing_model`) while `resolve_extractor_provider` still reports `deepseek-direct` as primary, and a transient failure only cools that provider for `cooldown_s` (300 s default) before it re-enters the rotation — forward-stickiness belongs to `RoutingModel`, the <3-provider path. The bullet now says the ingest delta must be summed across every key the lane touched. No metric, gate or receipt *value* changed — the run is still PENDING. |
 | 2026-11-08 | #8486, fifth pass (fresh-context review of the fourth) — **no in-place edit of the report's numbers or claims; this row records a correction to the record itself**. The fourth pass amended its own errata row rather than adding one, so the row above now reads as though the fourth pass wrote two things it did not. The fourth pass actually wrote `model_adapters.py::_build_pool` and "fails the lane over and STAYS there"; BOTH were wrong — `_build_pool` is not a symbol in `tortoise/model_adapters.py` (the 3-provider pool builder is `_build_routing_model`), and the rotating pool does not stay failed-over (a transient failure cools that provider for `cooldown_s`, 300 s by default, then re-admits it; forward stickiness is `RoutingModel`'s, the <3-provider branch). The amended facts above are correct and are kept; this row is the trace that they were CORRECTED. No metric, gate or receipt *value* changed — the run is still PENDING. |
 | 2026-11-08 | #8486, sixth pass (fresh-context review of the fifth) — **one in-place edit to §3** in this report, plus one clause in `docs/benchmarks/w7a-comparison-rows-for-2106.md`, both logged here per the rule above. §3's ingest-mode note already scoped `deterministic` correctly ("the pre-#8486 configuration of this run", "superseded for step 5 by #8486"), but it closed by saying *"The v2 (LLM-extraction) 500-Q baseline — `run_protocol` step 5's documented mode — remains pending"*, which left `v2` reading as future work in a report whose §1 ingest mode and §4 command are `v2`. It now states that what is pending is the RUN, that `v2` is what step 5 runs, and that there is no third configuration. The handoff row carried the same clause ("the v2 … 500-Q baseline remains pending — outside this run's bound") while declaring `v2` as this run's mechanism; it now says the run itself is PENDING. No metric, gate or receipt *value* changed — the run is still PENDING. |
+| 2026-11-08 | #8486, seventh pass (fresh-context review of the PR at `393be2d5d58b`) — **two in-place edits, both to §1.1, neither touching a number**: (a) the "the direction of that bias is unknown" bullet now carries the measurement the issue already holds — the #8486 fitness probe's 6/6 over-credit of the #1949 near-miss shape, ≈ +2 points *upward* at the recorded 1/50 rate — because a substituted grader that is known to inflate must not be disclosed as a bias of unknown direction beside the number it inflates; (b) the Judge paragraph's 2026-11-03 citation is split so only the owner's own words are quoted, with the recording comment's consequence stated as that comment's wording. No metric, gate or receipt *value* changed — the run is still PENDING. |
 
 ## 10. Handoff to W7-b (#2106)
 
