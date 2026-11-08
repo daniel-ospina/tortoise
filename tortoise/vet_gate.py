@@ -438,19 +438,40 @@ _GAP_STOP = frozenset("""
 #: Suffix stripping — deliberately the CRUDEST possible stemmer (longest match
 #: wins, one pass). It exists so "shares"/"shared"/"sharing" meet; a real
 #: stemmer would need a dependency this module may not take (it is stdlib-only by
-#: contract — see the module docstring). Over-stemming is the safe direction here:
-#: a token that collides wrongly makes coverage look HIGHER, i.e. it hides a gap
-#: rather than inventing one, which is the same fail direction as the gate.
+#: contract — see the module docstring).
+#:
+#: ⛔ BASE-FORM SYMMETRY IS THE PROPERTY THAT MATTERS, AND THE FIRST VERSION OF
+#: THIS FUNCTION DID NOT HAVE IT (review round 2, P2, measured). A bare
+#: "strip the suffix if the remainder is long enough" rule is ASYMMETRIC: the
+#: plural loses ``es`` *and* the ``e`` (``shares`` → ``shar``) while the singular
+#: keeps its ``e`` (``share`` → ``share``), so the pair the docstring named did
+#: not meet — and the failure is in the direction that INVENTS a gap (lower
+#: coverage), not the direction that hides one. Measured on the recorded
+#: population before the fix: 2 of the 70 flagged spans were this class (both
+#: ``stated`` vs the batch's ``state``). The fix is two normalisations that run on
+#: BOTH sides: ``-ies`` → ``-y`` (so ``policies``/``policy`` meet) and a trailing
+#: ``e`` dropped from the stem (so every one of
+#: stage/lease/cache/queue/service/share/state meets its plural).
+#:
+#: What remains asymmetric is disclosed rather than claimed away: a word whose
+#: plural is not ``-s``/``-es``/``-ies`` (``analysis``/``analyses``, ``data``)
+#: still stems differently, which can only make coverage look LOWER — i.e. it can
+#: add a flag, never hide one, and it cannot make the detector miss a gap.
 _GAP_SUFFIXES = sorted(
-    ("ations", "ation", "ments", "ment", "ings", "ing", "ies", "ied",
+    ("ations", "ation", "ments", "ment", "ings", "ing", "ied",
      "ers", "er", "ed", "es", "s", "ly", "al"),
     key=len, reverse=True)
 
 
 def _gap_stem(word: str) -> str:
+    if len(word) > 5 and word.endswith("ies"):
+        return word[:-3] + "y"                 # policies → policy, both sides
     for suffix in _GAP_SUFFIXES:
-        if len(word) > len(suffix) + 3 and word.endswith(suffix):
-            return word[:-len(suffix)]
+        if len(word) - len(suffix) >= 3 and word.endswith(suffix):
+            word = word[:-len(suffix)]
+            break
+    if len(word) > 3 and word.endswith("e"):
+        word = word[:-1]                        # stage/stages → stag, both sides
     return word
 
 
@@ -471,9 +492,20 @@ def _gap_mask(narrative: str) -> str:
     """`narrative` with markdown HEADINGS blanked, SAME LENGTH.
 
     Same length is the contract: every offset the detector reports is an offset
-    into the ORIGINAL narrative, so a caller can slice it back out. Headings are
-    blanked because a ``## Narrative: …`` line is a title, not a statement, and
-    the population's own headings produced the dominant false-positive class.
+    into the ORIGINAL narrative, so a caller can slice it back out.
+
+    ⚠️ WHAT IT IS FOR, MEASURED (review round 2, P2). An earlier version of this
+    docstring claimed the mask removes *"the population's dominant
+    false-positive class"*. It does not: removing the blanking entirely on the
+    recorded population changes **zero flags** (70 → 70, only the segment count
+    844 → 876), because the heading class is already suppressed by
+    :data:`GAP_MIN_CONTENT_TOKENS` — a heading that survives the split into a
+    colon-free clause is short. What the mask actually buys is **stable statement
+    NUMBERING**: a heading's own ``.`` (``## Root cause (preserved exactly).``)
+    would otherwise open a phantom statement and shift every subsequent index, so
+    the address :func:`narrative_segments` reports would drift with editorial
+    edits to the titles. That is the property it is kept for; the sentence above
+    used to attribute an effect to the wrong guard.
     """
     chars = list(narrative)
     for match in re.finditer(r"(?m)^[ \t]*#+[^\n]*$", narrative):

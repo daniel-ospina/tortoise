@@ -13242,30 +13242,49 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     # `errors`/`vet_warnings`. Nothing is ever dropped because this stage could
     # not run (I2: silent absence is never an outcome).
     gap_fill_stats: dict = {}
-    if _partial_gap_fill_enabled() and story and embed_list:
+    # ⛔ THE ROLLUP LIVES OUTSIDE THE `try`, and that is the S4 handler's own
+    # shape (`_rollup_llm(llm_stats, stage_stats, "s4")` sits after its except).
+    # Inside it, every failure arm lost the spend: `_complete_parsed` re-raises
+    # AFTER 1–3 billed calls and the stats dict already holds `attempts` /
+    # `truncated` / `cost`, so the except jumped straight past the roll-up and
+    # `stats["llm"]` — the declared A/B cost gate — under-reported the armed
+    # arm's cost on exactly the sessions where the stage misbehaved, biasing any
+    # future default-ON decision toward "cheap" (review round 2, P1).
+    gap_stage_stats: dict = {}
+    if _partial_gap_fill_enabled():
+        gap_fill_stats = {"armed": True, "fired": False}
+        if not (story and embed_list):
+            # ⛔ ARMED BUT SKIPPED IS RECORDED, NOT SILENT (review round 2, P2).
+            # An empty S2 list is the case the issue scopes OUT (it asks about
+            # PARTIAL gaps) and it is also the case S4 does the most work on
+            # (`s4_full_rescues`, #2335 WI-1b) — so the exclusion has to be
+            # visible in the record, or a measurement run cannot tell "armed and
+            # skipped" from "not armed" (#9116's ambiguity).
+            gap_fill_stats["skipped"] = ("no story" if not story
+                                         else "empty embed_list")
+    if gap_fill_stats.get("armed") and not gap_fill_stats.get("skipped"):
         try:
             gaps = _vet_gate.partial_gaps(embed_list, story)
-            gap_fill_stats = {
-                "armed": True,
+            gap_fill_stats.update({
                 "segments": gaps["segments"],
                 "flagged_total": gaps["flagged_total"],
                 "coverage_floor": gaps["coverage_floor"],
-                "fired": False,
-            }
+            })
             if gaps["flagged"]:
-                gap_stage_stats: dict = {}
+                # `fired` is set BEFORE the call: a call that raises was still
+                # BILLED, and a record saying `fired: False` while the provider
+                # charged for 1–3 attempts is a false statement about the run
+                # (review round 2, P1, second leg).
+                gap_fill_stats["fired"] = True
                 added = run_partial_gap_fill(model, story, embed_list,
                                              spans=gaps,
                                              stats=gap_stage_stats,
                                              session_date=session_date,
                                              core_only=classify_later)
-                _rollup_llm(llm_stats, gap_stage_stats, "gap_fill")
-                _rollup_recovery(recovery_stats, gap_stage_stats)
                 if gap_stage_stats.get("partial"):
                     errors.append("gap-fill output partial — truncated tail "
                                   "dropped (gap unclosed)")
                     _bump_census_class(error_census, "partial_parse")
-                gap_fill_stats["fired"] = True
                 if isinstance(added, dict) and any(
                         _s4_section_is_content(k, v) for k, v in added.items()):
                     before = _vet_gate.check_batch(embed_list, story)
@@ -13290,6 +13309,15 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                           "kept S2 output")
             _bump_census(error_census, e)
             gap_fill_stats["error"] = f"{type(e).__name__}: {e}"
+    # OUTSIDE the except, so a raise cannot lose the billed attempts.
+    if gap_stage_stats:
+        _rollup_llm(llm_stats, gap_stage_stats, "gap_fill")
+        _rollup_recovery(recovery_stats, gap_stage_stats)
+        gap_fill_stats["llm"] = {
+            "attempts": gap_stage_stats.get("attempts", 0),
+            "retries": gap_stage_stats.get("retries", 0),
+            "completion_tokens": gap_stage_stats.get("completion_tokens", 0),
+        }
 
     # ── classify(S2) (#1695 Task 5): the first classify pass — the pack-
     # domain items the core-only S2 emitted as "unclassified" get their
@@ -13823,11 +13851,18 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     # ``s4_full_rescues`` precedent — a 0 write would fabricate a shape).
     result["stats"]["s4_delta"] = s4_delta
     if gap_fill_stats:
-        # #11534: armed-state + detector counts + whether the call fired and
-        # whether it closed anything. Written only when the stage is ARMED, so
-        # an unarmed run's stats stay byte-identical to pre-#11534 (an
-        # always-present `armed: false` block would change every session's
-        # stats for a stage that did not run).
+        # #11534: the STAGE's armed-state + detector counts + whether the call
+        # fired and whether it closed anything.
+        #
+        # ⚠️ ``written only when armed`` is about THIS key, not about the diff
+        # being invisible on the unarmed arm — the earlier version of this
+        # comment claimed an unarmed run's stats were "byte-identical to
+        # pre-#11534", which is FALSE: ``check_batch`` now reports
+        # ``partial_gaps`` unconditionally (it is a detector, additive by
+        # contract), so ``result["vet"]["s2"|"union"]["batch"]`` carries the new
+        # key on BOTH arms whenever the S2.2 mechanical half runs — which is the
+        # DEFAULT arm (#10996). Pinned by
+        # ``test_the_detector_reports_on_the_unarmed_arm`` (review round 2, P2).
         result["stats"]["partial_gap_fill"] = gap_fill_stats
     if s4_delta_empty:
         result["stats"]["s4_delta_empty"] = s4_delta_empty

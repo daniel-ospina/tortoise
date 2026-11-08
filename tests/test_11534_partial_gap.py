@@ -95,7 +95,10 @@ def test_a_partial_gap_is_flagged_and_names_its_statement():
     assert isinstance(entry["statement"], int)
     assert isinstance(entry["clause"], int)
     assert entry["coverage"] < gaps["coverage_floor"]
-    assert "code" in entry["missing"] or "clean" in entry["missing"]
+    # `missing` carries STEMS (the same lens coverage is computed in), so the
+    # assertion goes through the stemmer rather than guessing its output.
+    missing = set(entry["missing"])
+    assert {vet_gate._gap_stem("code"), vet_gate._gap_stem("shares")} <= missing
 
 
 def test_the_span_address_indexes_the_original_narrative():
@@ -177,13 +180,69 @@ def test_the_flagged_list_is_capped_but_the_count_is_true():
     assert gaps["truncated"] is True
 
 
-def test_markdown_headings_are_not_statements():
-    """The population's dominant false-positive class: `## Narrative: …` is a
-    title, and a detector that treats it as prose flags every session."""
-    headed = ("## Narrative: the wire stage\n\n" + NARRATIVE)
-    assert not any("Narrative:" in text
-                   for text in _flagged_texts(vet_gate.partial_gaps(
-                       COVERED_ITEMS, headed)))
+def test_markdown_headings_are_not_statements(monkeypatch):
+    """A heading spanning a whole clause is blanked before segmentation.
+
+    ⛔ THIS TEST WAS UNFALSIFIABLE IN ITS FIRST FORM (review round 2, P1) and the
+    shape is worth keeping visible: it asserted that no flagged span contained
+    ``"Narrative:"`` — but ``_GAP_CLAUSE`` splits every segment ON the colon, so
+    the segment text is the slice BETWEEN separators and that string can never
+    appear in ANY segment, flagged or not. The assertion was true by
+    construction; with both guards switched off it still passed while
+    ``'## Narrative'`` was demonstrably being flagged.
+
+    The fixture is therefore a heading that is ONE clause, carries >= 4 content
+    words and has NO colon — so the heading is removable only by the mask, and
+    the second half below proves the assertion CAN fail by removing the mask and
+    watching it flag.
+    """
+    heading = "## The wire stage stalled again yesterday"
+    headed = heading + "\n\n" + NARRATIVE
+    masked = vet_gate.partial_gaps(COVERED_ITEMS, headed)
+    assert not any("wire stage stalled again" in text.lower()
+                   for text in _flagged_texts(masked)), (
+        "a blanked heading must not be flagged as uncovered prose")
+
+    # NON-VACUITY — the same fixture with the mask neutralised DOES flag it,
+    # so the assertion above is a behavioural one rather than a tautology.
+    monkeypatch.setattr(vet_gate, "_gap_mask", lambda text: str(text or ""))
+    unmasked = vet_gate.partial_gaps(COVERED_ITEMS, headed)
+    assert any("wire stage stalled again" in text.lower()
+               for text in _flagged_texts(unmasked)), (
+        "with the heading mask removed the heading must be flagged, or this test "
+        "cannot observe the guard it names")
+
+
+def test_the_gap_stem_meets_the_word_forms_each_other():
+    """Base-form SYMMETRY, not just suffix stripping (review round 2, P2).
+
+    The first stemmer stripped a suffix only when the remainder was long enough,
+    which is asymmetric: the plural loses ``es`` AND the ``e`` while the singular
+    keeps its ``e`` — so ``share``/``shares`` (the docstring's own example) did
+    not meet, and the miss lowers coverage, i.e. it INVENTS a gap. Measured
+    before the fix: 2 of the population's 70 flagged spans were this class.
+    """
+    for base, inflected in (("stage", "stages"), ("lease", "leases"),
+                            ("cache", "caches"), ("queue", "queues"),
+                            ("service", "services"), ("share", "shares"),
+                            ("policy", "policies"), ("state", "stated")):
+        assert vet_gate._gap_stem(base) == vet_gate._gap_stem(inflected), (
+            f"{base} and {inflected} must meet — an unequal pair lowers coverage "
+            "and manufactures a gap")
+
+
+def test_the_detector_reports_on_the_unarmed_arm():
+    """The additive key reaches `result["vet"]` WITHOUT the stage being armed.
+
+    Pins the correction of a false invariant: an earlier comment claimed an
+    unarmed run's stats were byte-identical to pre-#11534, while `check_batch`
+    reports `partial_gaps` unconditionally on the default arm (the S2.2
+    mechanical half runs by default, #10996).
+    """
+    batch = vet_gate.check_batch(COVERED_ITEMS, NARRATIVE)
+    assert "partial_gaps" in batch
+    assert set(batch["partial_gaps"]) >= {"segments", "flagged",
+                                           "flagged_total", "coverage_floor"}
 
 
 # ── the ADD-capable stage: a flagged candidate reaches the embed list ─────
@@ -308,7 +367,16 @@ def test_a_failing_gap_fill_keeps_the_s2_output(monkeypatch):
         "S2's own candidates survive a gap-fill failure")
     assert not any("shares the same code" in c for c in contents)
     assert any("gap-fill failed" in e for e in out["errors"])
-    assert out["stats"]["partial_gap_fill"]["error"]
+    stats = out["stats"]["partial_gap_fill"]
+    assert stats["error"]
+    # ⛔ THE FAILURE ARM'S SPEND IS STILL ACCOUNTED (review round 2, P1). The
+    # roll-up sits OUTSIDE the try, as S4's does, and `fired` is set BEFORE the
+    # call — a call that raises was still billed, so a record saying
+    # `fired: False` would be a false statement about the run.
+    assert stats["fired"] is True, (
+        "a gap-fill call that raised was still billed — `fired: False` is false")
+    assert stats["llm"]["attempts"] >= 1
+    assert out["stats"]["llm"]["calls"] >= 1
 
 
 def test_an_empty_answer_is_a_valid_answer(monkeypatch):

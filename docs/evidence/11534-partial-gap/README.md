@@ -62,6 +62,15 @@ coverage: median 0.85, p10 0.40); `min_content_tokens = 4` drops markdown
 headings and bold labels, which are the population's dominant flag class below
 it.
 
+**Stemming is symmetric on purpose, and the first version was not.** Coverage
+compares *base forms*, so the stemmer must fold both sides of a pair: an
+asymmetric rule (strip a suffix only when the remainder is long enough) leaves
+``share``/``shares``, ``stage``/``stages``, ``state``/``stated`` unequal, which
+**lowers** coverage — the direction that invents a gap. Measured before the fix:
+2 of the 70 flagged spans were that class. The shipped stemmer normalises
+``-ies``→``-y`` and drops a trailing ``e`` from both sides; the residual
+asymmetry (``analysis``/``analyses``) can only add a flag, never hide one.
+
 **What the flagged spans actually are, read end to end** (all 35 from the
 primary run) — this is the honest precision picture, because the labels above
 cannot produce a precision number:
@@ -161,6 +170,14 @@ So:
   emits the right item, which needs live sessions and a key. That is why the
   stage ships armed OFF and why the default is the thing a future measurement
   has to beat.
+* **The stage is silent on the zero-candidate population, and that is now
+  RECORDED rather than implied.** `TORTOISE_PARTIAL_GAP_FILL` is armed only when
+  a story and an S2 list exist, so `#11534`'s target (a *partial* gap) excludes
+  the empty-S2 case — which is exactly the session `run_s4` rescues
+  (`s4_full_rescues`, `#2335`). The stage records `armed: true, skipped:
+  "empty embed_list"` there, so a measurement run can tell "armed and skipped"
+  from "not armed" (#9116's ambiguity), and the exclusion is visible instead of
+  being read as "the stage found nothing".
 * **The clause split is crude by design.** `,`/`:`/`—`/`but`/`so`/`though`/
   `while`/`which`/`because`/`and` — a claim split differently than that is
   judged as a larger or smaller unit, and a two-token elision is below the
