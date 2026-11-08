@@ -160,8 +160,8 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
    `INPUT` 68, `NAND` 14, `aboutObject` 248, `aboutSubject` 21, `extractedFrom` 150, `mitigated_by` 11,
    `references` 7 — with **`hasPart` absent**. Because the query is complete, absence from that list is
    `hasPart = 0`, not "not counted". `git grep -rn -E 'hasPart|hierarchies|decomposesInto'
-   docs/evidence/7949-capstone/` → **0 hits before `#10982`** (`4e6a3ce612bd^`; **40** at this
-   record's base): A1's leg is not in the census at all. ⚠️ That command is **self-matching** once
+   docs/evidence/7949-capstone/` → **0 hits before `#10982`** (`4e6a3ce612bd^`; the live count is the §5 note's, not a
+   second typed number here): A1's leg is not in the census at all. ⚠️ That command is **self-matching** once
    this record lands — every hit is then this file's own lines — so re-derive it with the file
    excluded:
    `git grep -rn -E 'hasPart|hierarchies|decomposesInto' -- 'docs/evidence/7949-capstone/' \
@@ -169,7 +169,7 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
    (#10982 landed it after this record was written) — the bundle CITES the predicate, it does not
    produce it; the producer claim is the call-shaped grep above, which is still empty. The **0 hits**
    the `exit 1` in earlier revisions of this record was taken at is the tree *before* `#10982` landed
-   (`4e6a3ce612bd^`; measured there → 0) — at this record's own base the same command is **40**, which
+   (`4e6a3ce612bd^`; measured there → 0) — at this record's own base the command is no longer empty, which
    is the live number below. A bare "pre-diff" would be false here for the record's own reason: the
    `#10982` registration is INSIDE this record's base, so only the commit name is a stable operand.
    The per-file split is stated once, in the §5 note below; the TOTAL is stated in both places, and
