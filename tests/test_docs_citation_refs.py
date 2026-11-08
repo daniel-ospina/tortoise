@@ -38,9 +38,12 @@ labels survive edits and warn when they break.
 
 This test does not ban line numbers — it refuses one that does not land on text.
 Any surviving `:NN` pointer **written in one of the two forms it resolves** is
-therefore kept HONEST: insert a section above it and this reds, naming the citing
-file and the dead target, instead of silently redirecting a future reader to a
-blank line. A pointer outside those forms is not kept honest — see STATED LIMITS.
+therefore kept HONEST **against the one shift it can see**: insert a section above
+it and this reds ONLY when the shift lands on whitespace or past the end of the
+file — a shift onto a DIFFERENT non-blank line stays green, and the pointer then
+silently names whatever row now sits there. This is line PRESENCE, not semantic
+correctness (see STATED LIMITS). A pointer outside those two forms is not kept
+honest at all.
 
 WHY THIS IS NOT A DUPLICATE OF THE EXISTING CITATION GUARDS
 
@@ -86,6 +89,18 @@ STATED LIMITS — deliberate, and measured rather than guessed:
     (`docs/scoping/2026-08-13-317-cross-encoder-scoping.md` and its research
     brief) cite the `265` scope doc's wiring table by its `#317 reranker` ROW
     NAME instead of by `:203`.
+  * Line PRESENCE is the whole check. A pointer is dead only when its line is
+    BLANK or past the end of the file (`_dead_reason`): one that a later insert
+    SHIFTS onto a different non-blank line is reported healthy, and it silently
+    names whatever row now sits there. Measured at this head, not reasoned about:
+    inserting ONE line above the wiring table in
+    ``docs/scoping/2026-08-13-265-content-encryption-scoping.md`` moves the
+    ``265 scoping:128`` pointer this change writes off the `#317 cross-encoder
+    reranker` row and onto the `#160 hosted embeddings` row — against the same
+    guard that reports 0 problems. Cite a row by NAME when it must survive an
+    edit (the policy quoted above); this instrument catches only the whitespace
+    and past-EOF half of the problem, which is the half that is mechanically
+    decidable without inventing a notion of what a row MEANS.
   * The two resolved FORMS are also the instrument's scope, and they are
     narrower than "a pointer into these two directories". A citation written as
     a bare filename with no ``docs/`` prefix (``platform-seams.md:192``), a
