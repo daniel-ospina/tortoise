@@ -25,7 +25,7 @@ Two measured facts govern the risk:
   a migration here is moving the only copy of a tenant's data.
 
 Code: `tortoise/curation.py` (classification + guards + additive writer) and
-`tools/curate_graph.py` (the CLI). Tests: `tests/test_curation_11469.py` (61 tests).
+`tools/curate_graph.py` (the CLI). Tests: `tests/test_curation_11469.py` (66 tests).
 
 ## The inventory — measured 2026-11-08 against `live-v4`
 
@@ -109,7 +109,7 @@ flagged *not enumerated* rather than presented as measure-and-classify results.
 | property | mechanism | test |
 |---|---|---|
 | the old graph is only read | the module has no destructive call at all; the reader exposes no write verb. The property is the WRITER's verb list — a bundle-text grep for "delete" cannot observe a destructive call | `test_writer_protocol_declares_no_destructive_verb` (property), `test_bundle_carries_no_deletion` (supplement) |
-| a read that refuses is never census data | every `graph_overview` section read (including the credential-bound retry) is unwrapped and FAILS CLOSED on an error envelope — an envelope falling through `_rows_from_tool` reads as "0 rows"; `sources_read` is reconciled against `counts.Source` via a reported `source_count_gap`, never called complete | `test_the_inventory_report_names_the_source_filter` |
+| a read that refuses is never census data | every `graph_overview` section read (including the credential-bound retry) is unwrapped and FAILS CLOSED on an error envelope — an envelope falling through `_rows_from_tool` reads as "0 rows"; a transport failure RAISES rather than re-reading a different graph (only a recognised graph refusal may fall back, and notes accumulate per section); `sources_read` is reconciled against `counts.Source` via a reported `source_count_gap`, never called complete | `test_an_error_envelope_is_never_reported_as_zero_rows`, `test_a_transport_failure_does_not_fall_back_to_another_graph`, `test_a_graph_refusal_does_fall_back_and_says_so_once_per_section`, `test_the_inventory_report_names_the_source_filter` |
 | the target is only added to | `PlanWriter` is a **single-verb** protocol (`write_sections`, which writes each bundle SECTION — `points` and `sources` — because a carried Source sent as a Point is re-typed, and a bundle that only ever sent `points` reported success while writing none) — additivity is a property of the type, not of the caller's discipline | `test_writer_protocol_declares_no_destructive_verb`, `test_a_carried_source_is_reached_by_the_writer` |
 | **idempotent** | stable `migrationKey` per content hash → target-side dedup (`ingest` folds by content hash + kind) **and** a local ledger that skips a migrated key before it reaches the wire | `test_second_run_writes_nothing`, `test_duplicate_follows_its_keeper` |
 | **off-switch** | `TORTOISE_CURATE_OFF=1` / `--off`, checked before the run **and before each write batch** | `test_explicit_off_switch_writes_nothing`, `test_env_off_switch_writes_nothing` |

@@ -712,3 +712,86 @@ def test_a_real_content_row_is_not_dropped_for_an_empty_keeper():
     plan = C.build_plan([a, b], source_graph="old", target_graph="new", packs={})
     carried = [d.node_id for d in plan.carry_rows()]
     assert carried == ["b"], carried
+
+
+# ── round-8 review findings ───────────────────────────────────────────────
+
+
+def _tool_module():
+    import importlib.util
+    import sys as _sys
+    from pathlib import Path
+    path = Path(__file__).resolve().parents[1] / "tools" / "curate_graph.py"
+    spec = importlib.util.spec_from_file_location("curate_graph_11469_r8", path)
+    mod = importlib.util.module_from_spec(spec)
+    _sys.modules["curate_graph_11469_r8"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_a_source_ledger_key_cannot_collide_on_the_delimiter(tmp_path):
+    """Round-8 blocking: the key joined (kind, url) with ':', so a kind containing
+    ':' collided with a different (kind, url) pair and one row was reported
+    `skipped_known` on a FIRST run with an EMPTY ledger."""
+    plan = C.build_plan(
+        [row("s1", node_type="source", kind="article", content="https://x/y:z"),
+         row("s2", node_type="source", kind="article:https", content="//x/y:z")],
+        source_graph="old", target_graph="new", packs={})
+    w = CountingWriter()
+    res = C.run_plan(plan, writer=w, ledger=C.Ledger(tmp_path / "l.jsonl", target="new"),
+                     apply=True, graph_rows=ROWS)
+    assert res.skipped_known == 0 and res.written == 2
+
+
+def test_an_error_envelope_is_never_reported_as_zero_rows():
+    """Round-8: no test reached the reader at all, so reverting its fail-closed
+    unwrap reproduced `sources_read: 0` + exit 0 with nothing failing."""
+    mod = _tool_module()
+    reader = mod.MCPReader(lambda name, args: {"error": "ERR_QUOTA", "code": "QUOTA"}, None)
+    with pytest.raises(RuntimeError, match="refused"):
+        reader.read_sources()
+
+
+def test_a_transport_failure_does_not_fall_back_to_another_graph():
+    """Round-8: ANY exception re-read a DIFFERENT graph under the requested graph's
+    identity — a 429 must raise, not silently switch targets."""
+    mod = _tool_module()
+    calls = []
+
+    def call(_name, args):
+        calls.append(args)
+        raise TimeoutError("upstream 429")
+    reader = mod.MCPReader(call, "org_x_g_aaa")
+    with pytest.raises(TimeoutError):
+        reader.read_sources()
+    assert len(calls) == 1, "a transport error must not trigger a second, unbound read"
+
+
+def test_a_graph_refusal_does_fall_back_and_says_so_once_per_section():
+    mod = _tool_module()
+
+    def call(_name, args):
+        if "graph" in args:
+            return {"error": "unknown graph 'org_x_g_aaa'", "code": "GRAPH_WRITE_REFUSED"}
+        return {"result": [{"url": "https://x/y", "sourceKind": "article"}]}
+    reader = mod.MCPReader(call, "org_x_g_aaa")
+    rows, _ = reader.read_sources()
+    assert [r.content for r in rows] == ["https://x/y"]
+    assert reader.note and "credential" in reader.note
+    reader.read_sources()  # the same section twice is ONE note (deduped)
+    reader._section("status")  # a second falling section must APPEND, not overwrite
+    assert reader.note.count("credential") == 2, reader.note
+
+
+def test_an_iserror_result_without_an_error_key_is_a_refusal():
+    """The dangerous sub-case: `isError` says refused, the payload has no `error`
+    key — counting it as a write is how a ledger claims rows that do not exist."""
+    class Result:
+        is_error = True
+        isError = True
+        def __init__(self):
+            self.content = [{"type": "text", "text": '{"created": 3}'}]
+            self.structured_content = {"result": {"created": 3}}
+            self.structuredContent = {"result": {"created": 3}}
+    with pytest.raises(C.CurationRefused):
+        C.normalise_tool_result(Result())

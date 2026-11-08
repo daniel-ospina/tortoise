@@ -945,8 +945,14 @@ def run_plan(
                 # kinds (create_source merges by url, list_sources groups by
                 # (url, kind)), and a url-only key silently collapsed them onto one
                 # ledger entry — reported as skipped_known on a FIRST run.
-                key = (f"{MIGRATION_KEY_PREFIX}source:"
-                       f"{item.get('sourceKind') or '-'}:{item.get('url')}")
+                # …and the pair is HASHED rather than delimiter-joined: a `kind` may
+                # contain the delimiter (`article:https` + `//x/y:z` and `article` +
+                # `https://x/y:z` both used to derive the same key, so one row was
+                # reported `skipped_known` on a first run with an empty ledger).
+                pair = hashlib.sha256(json.dumps(
+                    [item.get("sourceKind") or "", item.get("url") or ""],
+                    sort_keys=True).encode("utf-8")).hexdigest()
+                key = f"{MIGRATION_KEY_PREFIX}source:{pair}"
             if key in ledger or any(k.get("migrationKey") == key for k in keyed):
                 continue
             keyed.append({**item, "migrationKey": key})

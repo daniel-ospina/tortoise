@@ -57,6 +57,7 @@ class MCPReader:
         self._call = call_tool
         self.graph = graph
         self.note: str | None = None
+        self.notes: list[str] = []
 
     def _q(self, **args: Any) -> dict[str, Any]:
         if self.graph:
@@ -116,20 +117,30 @@ class MCPReader:
             return self._checked(self._call("tortoise_graph_overview", args), section)
         try:
             res = C.normalise_tool_result(self._call("tortoise_graph_overview", {**args, "graph": self.graph}))
-        except Exception as exc:  # a refusal, not an empty section
-            self.note = (f"credential-bound read for {section!r}: the explicit graph argument "
-                         f"was refused ({str(exc)[:160]}); used the credential's own graph")
-            return self._checked(self._call("tortoise_graph_overview", args), section)
-        err = _error_of(res)
-        if err:
-            # An error envelope is truthy and does NOT raise; returning it as a
-            # section would present a refusal as census data.
-            self.note = (f"credential-bound read for {section!r}: the explicit graph argument "
-                         f"was refused ({err[:160]}); used the credential's own graph")
+        except Exception as exc:
+            # ONLY a recognised graph-refusal may fall back. A timeout/429 says
+            # nothing about the binding, and re-reading a DIFFERENT graph under the
+            # requested graph's identity is how a census mixes two graphs.
+            reason = str(exc) or type(exc).__name__
+            if not _looks_like_graph_refusal(reason):
+                raise
+            res, reason = None, reason
+        else:
+            reason = _error_of(res)
+        if reason:
+            self._note(f"section {section!r}: the explicit graph argument was refused "
+                       f"({reason[:160]}); read from the credential's own graph instead")
             return self._checked(self._call("tortoise_graph_overview", args), section)
         # An EMPTY result is a legitimate answer (a graph with no sources), so it is
         # returned as-is rather than re-read from a different graph.
         return res
+
+    def _note(self, text: str) -> None:
+        """Notes ACCUMULATE: a single slot kept only the last falling section, so a
+        report could carry one fallback while another section silently used it."""
+        if text not in self.notes:
+            self.notes.append(text)
+        self.note = "; ".join(self.notes)
 
     @staticmethod
     def _checked(raw: Any, section: str) -> Any:
@@ -205,6 +216,19 @@ def _live_call_tool(name: str, args: dict[str, Any] | None = None) -> Any:
     from tortoise import mcp_client
 
     return mcp_client.call_tool(name, args or {})
+
+
+#: A fallback to the credential's own graph is only legitimate when the refusal is
+#: ABOUT the graph argument. Deliberately narrow: a transport failure must raise.
+_GRAPH_REFUSAL_MARKERS = (
+    "graph", "unknown graph", "not found", "no such", "denied", "permission",
+    "forbidden", "unauthor", "not allowed", "scope", "binding",
+)
+
+
+def _looks_like_graph_refusal(reason: str) -> bool:
+    low = (reason or "").lower()
+    return any(m in low for m in _GRAPH_REFUSAL_MARKERS)
 
 
 def _source_gap(counts: Any, read: int) -> int | None:
