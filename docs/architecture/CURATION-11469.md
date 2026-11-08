@@ -73,7 +73,7 @@ row that no rule decides is `undecidable` rather than guessed. The JSON **report
 The dispositions over the **17,420 enumerable rows** (15,842 points + 1,578 sources) must add up to
 that population, and they do: **127 carry · 63 not-carried · 17,230 undecidable** (7+2+1+1+1+115
 carry; 5 duplicate evidence rows + 58 narration statements not-carried; 15,650 statements + 2 diary
-+ 1,578 sources undecidable). These are the numbers the run reported and the ones posted on
+rows + 1,578 sources undecidable). These are the numbers the run reported and the ones posted on
 `#11469`; the class table above is the same measurement broken out by kind, so the two must be read
 as ONE number set — if they ever disagree, the run's report is authoritative and the table is stale.
 
