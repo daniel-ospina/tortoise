@@ -118,7 +118,12 @@ Review Gates:  15/15 ran (4 of them distinct duplication passes); 2 declared dev
 **Decision: PROCEED** — into the children, **not** into closing the epic. The planning pipeline is complete and
 gated; the epic's ten rows are unproven, which is the whole point of a capstone.
 
-⛔ **Three things must be true before the epic can close**, and none is a plan gap:
+⛔ **Four things must be true before the epic can close**, and none is a plan gap:
+
+0. **E6 is carried** — the sixth criterion registered by **`#11083`** (per-pack `declared → writable → written`
+   census, before-arm **0 written on Object→Object**). It was **missing from this pipeline's artifacts** (built on
+   E1–E5 + A1–A5) and is now recorded in `04-plan.md` §7a and the scope's acceptance table. ⚠️ **E6 is `RED` by
+   construction today**, and for the same reason as item 1 below — the wiring — **not** because of pack content.
 
 1. The **wiring residual** (found at the decompose gate): `pack_hierarchy.py`'s applier ships and `extractor_v2.py`
    **never calls it** — no issue owns that call site. **This is the epic's real blocker**, not any closed issue.
