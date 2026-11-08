@@ -4812,11 +4812,13 @@ def test_the_glob_arm_does_not_read_an_UNRUNNABLE_probe_as_a_held_match(monkeypa
 
 
 def test_a_glob_mixing_untracked_and_unrunnable_reports_the_measured_refusal(monkeypatch):
-    """One measured "no tracked match" is a verdict; it outranks "could not ask".
+    """A mixed glob names BOTH causes; it may not speak for the file it never asked about.
 
     Both causes are refusals, so this cannot change an exit code — it fixes WHICH
-    sentence a reader gets, and pins the precedence so the two never collapse back
-    into one branch.
+    sentence a reader gets. ⛔ `untracked_seen` winning outright emitted the universal
+    claim "EVERY file the glob matches is untracked by git" about matches git was
+    never asked about (#11474 review), so the mixed sentence must carry the measured
+    cause AND the unmeasured one, and must not generalise to "every".
     """
     seen: list[str] = []
 
@@ -4833,3 +4835,8 @@ def test_a_glob_mixing_untracked_and_unrunnable_reports_the_measured_refusal(mon
     assert len(seen) >= 2, f"needs two matches to exercise precedence, saw {seen}"
     assert ok is False, why
     assert "untracked by git" in why, why
+    assert "could not be run here" in why, why
+    assert "every file the glob" not in why, (
+        "a mixed glob must not claim EVERY match is untracked: one of them was never "
+        f"measured, and that is the guess-the-cause defect this branch removes: {why}"
+    )
