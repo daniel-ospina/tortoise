@@ -2043,14 +2043,17 @@ def test_the_tool_carries_the_5128_interpreter_guard_first(tool, capsys, monkeyp
     DECLARED BOUND — what this pin mirrors, and what is UNGRADED instead.
 
     It MIRRORS these census arms over the two tools' OWN files: preamble order,
-    floor, guard shape, both refusal shapes, the RENDERED message, the derived
+    floor, guard shape, both refusal shapes, the RENDERED message (read from the
+    text the operator sees, never from the AST's string constants), the derived
     process status, the census `REFUSAL_CODES` row that status must match, and
-    the invocation the refusal names RESOLVING — executed
-    PER TOOL: the named form is run and its stderr is read for argparse's own
-    `usage:`/`error:` pair, not for one tool's exit code, since
+    the invocation the refusal names RESOLVING — executed PER TOOL, on the
+    census's own criterion: a form that ADDS a token is the `--help` class and
+    must exit 0, while a form that adds NONE is the tool's own entry point and is
+    graded on not crashing rather than on its verdict code, since
     `capstone_ledger.py`'s 2 is its UNCOVERED verdict — and the
     advertised-invocation sweep driven by the census's own `_BARE_INVOCATION` +
-    exemption sets, never a copy.
+    exemption sets, never a copy, CALL SITE included (`_WIRED_into_the_pin`
+    drives the pin with the sweep disconnected, so deleting the call cannot pass).
 
     ⛔ EVERYTHING ELSE in `tests/test_entry_point_python_guard.py` is NOT mirrored —
     and this paragraph deliberately does NOT enumerate that set, because a list is
@@ -2286,11 +2289,15 @@ def test_the_tool_carries_the_5128_interpreter_guard_first(tool, capsys, monkeyp
     else:
         message = exc.args[0]
 
-    rendered = "".join(
-        n.value
-        for n in ast.walk(message)
-        if isinstance(n, ast.Constant) and isinstance(n.value, str)
-    )
+    # The message is graded BEHAVIOURALLY — from the text the operator actually sees
+    # on a faked 3.9 host — and NOT from the string constants that happen to appear
+    # in the AST. Measured (review round 16): joining every `ast.Constant` string in
+    # the message left this file at 206 passed GREEN when the subject was moved into
+    # a never-taken branch (`f"{'… requires Python >= 3.12' if False else ''}"`), so a
+    # refusal that no longer names its file in the operator's output satisfied the
+    # "RENDERED message" claim, while the census reded on the identical mutation
+    # (`2 failed`) because it adjudicates `rel in str(refusal.value) + out + err`.
+    said = _refusal_text(guard, capsys, monkeypatch, (3, 9, 6, "final", 0))
     # The message must name the floor, the file, and an invocation at all. ⛔ This
     # clause is a PREFIX test only — `uv run python tools/<name>` is a prefix of
     # BOTH forms — so it cannot distinguish the form that resolves from one that
@@ -2309,15 +2316,14 @@ def test_the_tool_carries_the_5128_interpreter_guard_first(tool, capsys, monkeyp
     # rendered` substring: the invocation clause below already contains that
     # basename, so a substring test would pass on a refusal that named a
     # DIFFERENT tool in its subject line.
-    assert f"tools/{tool.name} requires Python >= 3.12" in rendered, (
-        f"the refusal must name the file and the floor in its subject; renders as "
-        f"{rendered!r} (message node: {ast.dump(message)})"
+    assert f"tools/{tool.name} requires Python >= 3.12" in said, (
+        f"the refusal must name the file and the floor in its subject AS RENDERED; "
+        f"it said {said!r} (message node: {ast.dump(message)})"
     )
-    assert f"uv run python tools/{tool.name}" in rendered, (
-        f"the refusal must name an invocation at all (PREFIX only — whether it "
-        f"RESOLVES is proved per tool in "
-        f"test_the_refusal_names_a_form_that_actually_RESOLVES); renders as "
-        f"{rendered!r} "
+    assert f"uv run python tools/{tool.name}" in said, (
+        f"the refusal must name an invocation at all AS RENDERED (PREFIX only — "
+        f"whether it RESOLVES is proved per tool in "
+        f"test_the_refusal_names_a_form_that_actually_RESOLVES); it said {said!r} "
         f"(message node: {ast.dump(message)})"
     )
 
@@ -2325,7 +2331,6 @@ def test_the_tool_carries_the_5128_interpreter_guard_first(tool, capsys, monkeyp
     # this is asserted BEHAVIOURALLY, because a structural check cannot see the
     # ORDER: `(got {version_info[1]}.{version_info[0]})` renders `(got 9.3)` and
     # reds the census while satisfying any set-of-subscripts test.
-    said = _refusal_text(guard, capsys, monkeypatch, (3, 9, 6, "final", 0))
     assert "(got 3.9)" in said, (
         f"the refusal must name the interpreter it GOT as the operator sees it "
         f"(`(got 3.9)` on a 3.9 host); it said {said!r}"
@@ -2479,9 +2484,13 @@ def test_the_refusal_names_a_form_that_actually_RESOLVES(tool, capsys, monkeypat
         [sys.executable, str(path), *extra], capture_output=True, text=True
     )
     # argparse writes BOTH lines for a usage error; a working form writes neither.
-    # Exit codes are deliberately not compared here: this tool's verdict codes are
-    # its normal output (`capstone_ledger.py` exits 2 = UNCOVERED), and grading a
-    # verdict as a failure is the over-block this arm must not add.
+    # ⛔ "Not a usage error" is NOT "resolves" — the census's #11507 arm asserts
+    # `resolved.returncode == 0` for the named form, and any criterion weaker than
+    # that is a shadow. Measured (review round 16): rewording the icons refusal to
+    # name `--source=/nope.png` left THIS arm at 2 passed GREEN — that run fails
+    # with `/nope.png: not a file` (rc=1), which writes neither argparse line —
+    # while the census reded on the identical mutation. The polarity below is the
+    # census's, split per tool because only one tool adds a token.
     stderr_lower = named.stderr.lower()
     assert "usage:" not in stderr_lower and "error:" not in stderr_lower, (
         f"the invocation the refusal names is a USAGE error — advice that is a "
@@ -2490,6 +2499,15 @@ def test_the_refusal_names_a_form_that_actually_RESOLVES(tool, capsys, monkeypat
         f"{named.stderr[-400:]!r}"
     )
     if extra:
+        # The census's own criterion, for the form the census pins: an invocation
+        # that ADDS tokens is the `--help` class, whose only right answer is 0.
+        assert named.returncode == 0, (
+            f"the invocation the refusal names must RESOLVE — the census asserts "
+            f"`resolved.returncode == 0` for exactly this form, and this pin must "
+            f"not be narrower than the census on the one diff shape where the "
+            f"census does not run: {named_prefix} {' '.join(extra)} -> "
+            f"rc={named.returncode}, {named.stderr[-400:]!r}"
+        )
         # Why the extra token is there at all: the bare path must be the usage
         # error the named form avoids. If it ever stops being one, the advice is
         # no longer necessary and this arm should be revisited rather than kept.
@@ -2500,6 +2518,17 @@ def test_the_refusal_names_a_form_that_actually_RESOLVES(tool, capsys, monkeypat
             f"`{named_prefix}` names {' '.join(extra)}, so the BARE path must be a "
             f"usage error that form avoids; it was not: rc={bare.returncode}, "
             f"{bare.stderr[-300:]!r}"
+        )
+    else:
+        # The named form adds NOTHING, so it IS the tool's own entry point, and its
+        # exit code is a VERDICT (`capstone_ledger.py` exits 2 = UNCOVERED) —
+        # grading that as a failure is the over-block this arm must not add. What is
+        # still graded is that the advice does not CRASH: a traceback is the same
+        # unattributed error as a usage error.
+        assert "Traceback (most recent call last)" not in named.stderr, (
+            f"the refusal names `{named_prefix}` with no extra token, so that must "
+            f"be the tool's working entry point; it raised instead of producing a "
+            f"verdict: rc={named.returncode}, {named.stderr[-400:]!r}"
         )
 
 
@@ -2561,6 +2590,39 @@ def test_the_advertised_form_filter_is_not_deaf():
         f"recorded evidence to satisfy a gate falsifies provenance, which is why the "
         f"census exempts it"
     )
+
+
+def test_the_advertised_form_sweep_is_WIRED_into_the_pin(monkeypatch, capsys):
+    """The sweep's CALL SITE, not only its filter.
+
+    `test_the_advertised_form_filter_is_not_deaf` proves `_advertise_offenders`
+    flags an offender — but it calls the helper DIRECTLY, so its caller can stop
+    calling it and every one of those assertions still passes. Measured (review
+    round 16): replacing the call site with `offenders = []` left this file at
+    **206 passed**, identical to unmutated — because both pinned tools legitimately
+    yield no offenders, so "the sweep ran and found nothing" and "the sweep is
+    gone" are the SAME observation at that site. A recorded claim
+    ("the advertised-invocation sweep driven by the census's own
+    `_BARE_INVOCATION` + exemption sets") could then be deleted silently.
+
+    So the sweep is DISCONNECTED here and the pin is driven directly — the same
+    technique `test_a_pinned_tool_with_NO_census_row_is_a_REFUSAL_not_a_licence`
+    uses for the `REFUSAL_CODES` arm. If the call site is removed, the injected
+    offender never reaches the assertion and this test reds for the reason it
+    exists rather than passing on an empty result.
+    """
+    sentinel = [
+        "tools/capstone_ledger.py:1: `python3 tools/capstone_ledger.py`"
+    ]
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "_advertise_offenders",
+        lambda *args, **kwargs: list(sentinel),
+    )
+    with pytest.raises(AssertionError, match="advertises"):
+        test_the_tool_carries_the_5128_interpreter_guard_first(
+            TOOL, capsys, monkeypatch
+        )
 
 
 def test_capstone_ledgers_refusal_code_is_the_one_the_census_pins():
