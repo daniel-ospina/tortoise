@@ -711,13 +711,26 @@ def effective_direction(rel: dict) -> str | None:
     """
     declared = rel.get("direction")
     canonical = canonical_direction(declared)
-    if canonical is not None and not is_default_direction(declared):
-        return canonical
     semantics = rel.get("semantics")
-    if not isinstance(semantics, str) or not semantics:
-        return None
-    canonical = SEMANTICS_TRANSITION.get(semantics, semantics)
-    return SEMANTICS_DIRECTIONS.get(canonical)
+    meaning = None
+    if isinstance(semantics, str) and semantics:
+        meaning = SEMANTICS_DIRECTIONS.get(
+            SEMANTICS_TRANSITION.get(semantics, semantics))
+    # The meaning outranks a NON-DECLARATION; everything else answers from the
+    # declared token. ⛔ TWO RESIDUALS THE `... and not is_default_direction`
+    # SHAPE LEAVES, both measured against `sdk.create_operator`:
+    #   * a declared `<->` with NO meaning resolves to `None` there while the
+    #     writer STORES `<->` (the semantics step never runs, and `direction` is
+    #     not None, so nothing canonicalizes it) — a census cell claiming no
+    #     sense for an edge the graph holds;
+    #   * a junk token (`sideways`) falls through to the meaning, while the
+    #     writer REFUSES it: `is_default_direction` deliberately does not treat a
+    #     typo as absent, so the meaning never overwrites it and `create_operator`
+    #     raises (`direction must be one of …`). A row whose write path raises has
+    #     no sense to report.
+    if meaning is not None and is_default_direction(declared):
+        return meaning
+    return canonical
 
 
 class _Unset:
@@ -1897,17 +1910,22 @@ class PackRegistry:
                 # a plausible wrong sign in the census — so it is named.
                 # ⛔ The test is `canonical_direction`, not membership in the four
                 # model values: the write path also accepts the two legacy
-                # aliases, and warning those off as "IGNORED" would be false
-                # (the writer honours them). Only junk returns `None` here.
+                # aliases, and warning those off would be false (the writer
+                # honours them). Only junk returns `None` here — and junk is NOT
+                # silently replaced by the meaning: `is_default_direction`
+                # refuses to treat a typo as absent, so `create_operator` never
+                # overwrites it and then REFUSES the write. The message says that,
+                # because "ignored" was a claim the writer does not honour.
                 if "direction" in rel:
                     direction_value = rel.get("direction")
                     if canonical_direction(direction_value) is None:
                         _warn_packs_once(
                             ("relation-direction-invalid", ns, pred),
                             "relation '%s': 'direction' %r is not a recognised "
-                            "direction token (%s) — it will be IGNORED and "
-                            "the direction read from the declared semantics "
-                            "instead (#11083)",
+                            "direction token (%s) — the write path REFUSES it "
+                            "rather than resolving it from the declared "
+                            "semantics, so this relation has no resolvable "
+                            "sense (#11083)",
                             pred, direction_value,
                             ", ".join(sorted(_ACCEPTED_DIRECTION_VALUES)),
                         )

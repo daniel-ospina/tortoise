@@ -474,10 +474,23 @@ def test_h8_a_bad_direction_warns_and_does_not_drop_the_pack(tmp_path, caplog):
     assert "'sideways'" in caplog.text and (
         "is not a recognised direction token" in caplog.text), (
         "the invalid token was ignored SILENTLY — the author is never told which "
-        "value was rejected or that the meaning resolved it instead")
+        "value was rejected")
     row = reg.packs["fixture"].relations[0]
-    assert effective_direction(row) == "->", (
-        "an invalid token is ignored and the meaning resolves the direction")
+    # ⛔ None, NOT the meaning's `->`. The writer does NOT resolve a junk token
+    # from `semantics`: `is_default_direction("sideways")` is False (a typo must
+    # not read as absent), so the meaning never overwrites it and
+    # `create_operator` then REFUSES the write (`direction must be one of …, got
+    # 'sideways'`). A relation whose write path raises has no sense to report;
+    # reporting the meaning's `->` describes a write that cannot happen.
+    assert effective_direction(row) is None, (
+        "the writer refuses an unrecognised direction token rather than reading "
+        "the meaning; the census must report no resolvable sense")
+    # A declared DEFAULT token with NO meaning is the other side of the same
+    # contract: the writer STORES `<->` (the semantics step never runs and the
+    # value is not None, so nothing canonicalizes it), so the census must not
+    # report `None` for an edge the graph holds.
+    assert effective_direction({"direction": "<->"}) == "<->", (
+        "a declared default with no meaning is still the row's recorded direction")
 
 
 def test_h8b_an_empty_declaration_only_reason_warns_and_does_not_drop(
