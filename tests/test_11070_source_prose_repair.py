@@ -2636,18 +2636,22 @@ def test_a_MULTI_token_probe_is_REFUSED_because_the_FTS_read_OR_joins_it(
             # None from `probe_phrase_rejection`.
             ("the fridays", "whitespace-separated words"),
             ("fridays x", "whitespace-separated words"),
-            # ⛔ THESE TWO ARE THE FIXTURES THE WHITESPACE GUARD OWNS (#11536
-            # review round 12, P2). A single alphanumeric run plus a
-            # punctuation-only word is a shape ONLY that guard refuses:
-            # MEASURED, `_indexed_term_runs("friday .") == ['friday']` and the
-            # tokeniser yields one term, so with the guard disabled
+            # ⛔ THESE TWO ARE THE SHAPES ONLY THE WHITESPACE GUARD REFUSES
+            # (#11536 review round 12, P2; wording corrected round 17 after the
+            # earlier versions stated an unmeasured mechanism). MEASURED at this
+            # head: `_indexed_term_runs("friday .") == ['friday']`, so
+            # `single_run` is True and the term-count check (`:1438-1445`) is
+            # SKIPPED for it, and `len(runs) > 1` (`:1468`) passes it too; with
+            # the whitespace guard (`:1449-1450`) disabled
             # `probe_phrase_rejection("friday .")` and `("the .")` both return
-            # None and this row fails on the accept. Without the guard the read
-            # also sends `friday .` raw, which RediSearch evaluates as an
-            # implicit AND that under-matches.
-            # The two fixtures above are answered by a DIFFERENT guard — each has
-            # two alphanumeric runs, so `len(runs) > 1` refuses them — and the
-            # expected reason beside each fixture names which guard answered.
+            # None — nothing else refuses them. Without the guard the read also
+            # sends `friday .` raw, which RediSearch evaluates as an implicit AND
+            # that under-matches.
+            # ⛔ THE TWO FIXTURES ABOVE ARE REFUSED BY THIS SAME GUARD AT THIS
+            # HEAD (`:1449` runs before `:1468`), but they are not what PINS it:
+            # with the guard disabled they are caught by `len(runs) > 1` instead,
+            # so their expected reason changes and the row reds on WHICH GUARD
+            # answered — not on an accept.
             ("friday .", "whitespace-separated words"),
             ("the .", "whitespace-separated words"),
     ):
@@ -3647,12 +3651,19 @@ def test_an_UNMEASURABLE_probe_VETOES_even_when_the_CONTROL_answers(monkeypatch)
         measured NOTHING — the false PASS #11161 exists to close, on the very leg
         this PR adds.
 
-        ⛔ WHY THE OTHER UNMEASURABLE TESTS DO NOT CATCH THIS. They install a leg
-        that applies to EVERY read, so the control is degraded too, `control_ok`
-        is False, and the fold falls through to `uncorroborated` — the WRONG VETO
-        FOR THE RIGHT OUTCOME. That pins "nothing corroborates the zero", never
-        "the probe's own read did not run". Verified by mutation: with
-        `elif out["unmeasurable"]:` deleted the rest of the suite stays green.
+        ⛔ WHY THE OTHER UNMEASURABLE TESTS DO NOT CATCH THIS. None of them puts
+        the fold in front of a DEGRADED probe row AND an ANSWERING control, which
+        is the pair this test builds. MEASURED at this head:
+        `test_the_documented_report_contracts_are_the_ones_the_run_RETURNS` calls
+        `probe_fts(..., control=False)`, so `report["control"]` is None and
+        `control_ok` is False for want of a control at all; the breaker-open test
+        asks for a control but its own read is degraded, so that arm reports
+        `mode="unavailable", ok=False`. With `control_ok` False the fold falls
+        through to `uncorroborated` — the WRONG VETO FOR THE RIGHT OUTCOME — so
+        none of them pins "the probe's own read did not run".
+        Verified by mutation: with `elif out["unmeasurable"]:` deleted the rest of
+        the suite stays green (128 passed, 4 skipped) and only this test reds, on
+        `certifies is False`.
     (2) REACHABLE: a breaker trip or a `query_failed` between the probe read and
         the control read is the ordinary transient this leg exists for.
     """
