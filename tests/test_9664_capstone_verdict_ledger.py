@@ -1908,10 +1908,13 @@ def _preamble_index(body: list[ast.stmt]) -> int | None:
     `import sys`, then the `if sys.version_info < (3, 12)` guard.
 
     Requiring a `__future__` import would red census-LEGAL files — measured at this
-    head, 19 of `graph-scripts/`'s 60 tracked `.py` files (which the census DOES
-    walk) carry none as their first post-docstring statement, against 0 of
-    `tools/`' 185, where the only three that lack one are `__init__.py` and the
-    census excludes those by name — and skipping every leading `ast.Expr` is wrong
+    head over the census's OWN corpus (237 files: 178 under `tools/`, 59 under
+    `graph-scripts/`): 19 of the 59 `graph-scripts/` files carry none as their first
+    post-docstring statement, against 0 of the 178 `tools/` files. (Of the 185
+    tracked `tools/*.py`, 3 are `__init__.py` — excluded by name — and 4 are
+    `RUNTIME_39`, which is why the corpus is 178; of `graph-scripts/`'s 60 tracked,
+    `profile_395_local_ep.py` is `UNGUARDABLE`, which is why it is 59.) Skipping
+    every leading `ast.Expr` is wrong
     too: a second bare string literal
     before the guard passed a skip-all-Expr loop and reded the census.
 
@@ -2022,43 +2025,55 @@ def test_the_tool_carries_the_5128_interpreter_guard_first(tool, capsys, monkeyp
     tools this PR touches are parameterised for that reason — an unpinned second
     file is the same gap one tool over.
 
-    DECLARED BOUND — what this pin does NOT mirror, and why that is not a hole:
-    it mirrors the census's arms over the TWO TOOLS' OWN FILES (preamble order,
+    DECLARED BOUND — what this pin mirrors, and what is UNGRADED instead.
+
+    It MIRRORS these census arms over the two tools' OWN files: preamble order,
     floor, guard shape, inertness at the floor, both refusal shapes, the RENDERED
-    message, the derived process status, the census row that status must match, the
-    invocation the refusal names RESOLVING (executed PER TOOL: the named form is
-    run, and its stderr is read for argparse's own `usage:`/`error:` pair — not for
-    one tool's exit code, since `capstone_ledger.py`'s 2 is its UNCOVERED verdict),
-    and the advertised-invocation sweep driven by the census's own
-    `_BARE_INVOCATION` + exemption sets.
+    message, the derived process status, the census `REFUSAL_CODES` row that
+    status must match, and the invocation the refusal names RESOLVING — executed
+    PER TOOL: the named form is run and its stderr is read for argparse's own
+    `usage:`/`error:` pair, not for one tool's exit code, since
+    `capstone_ledger.py`'s 2 is its UNCOVERED verdict — and the
+    advertised-invocation sweep driven by the census's own `_BARE_INVOCATION` +
+    exemption sets, never a copy.
 
-    It does not mirror the census's `docs/` + `graph-scripts/` + sibling-`tools/`
-    walk, its corpus vacuity, `RUNTIME_39`/`UNGUARDABLE` accuracy, detector
-    self-test or `-m` resolution arms.
+    ⛔ EVERYTHING ELSE in `tests/test_entry_point_python_guard.py` is NOT mirrored —
+    and this paragraph deliberately does NOT enumerate that set, because a list is
+    what went wrong here: two enumerations of "the arms I do not mirror" each came
+    back missing arms that exist, and an unlisted arm reads as a covered one. The
+    rule is the claim: if the assertion is not named in the MIRRORS list above, this
+    file does not grade it.
 
-    ⚠️ ONE OF THOSE EXCLUSIONS IS A REAL HOLE AND IS NAMED AS ONE: the `docs/`
-    sweep, which is why this paragraph no longer says "not a hole" about it.
-    Reaching it needs an edit to `docs/` and NOT to `tests/` — and a docs-only diff
-    selects 82 test files INCLUDING this one and EXCLUDING the census (`select(
-    ['docs/plans/x.md'], 'pull_request', load_manifest())`; the same 82 for
-    `docs/ci/**` and `docs/research/**`), which is precisely why
-    `config/ci-surfaces.yml` registers this file as `tier1`. Measured: appending
-    a line advertising `python3 tools/capstone_ledger.py check` to a tracked doc
-    leaves THIS file GREEN while the census reds
-    `test_no_doc_or_usage_advertises_the_form_the_guard_refuses`. So on a docs-only
-    diff the refusal-ADVERTISING surface is ungraded. That is a routing gap in
-    `tools/ci_selection.py`, not something a pin in this file can close, and it is
-    tracked as #11363 (same root, the `tools/` surface: a diff that never selects
-    the census leaves its #5128 guard unchecked).
+    ⚠️ AND ON THE DIFFS THAT REACH THIS FILE WITHOUT THE CENSUS, those unmirrored
+    arms are UNGRADED, not "closed by selection". That is the whole gap, stated
+    once: this file is `tier1`-registered, so it is selected by diff shapes that do
+    not select the census — measured via `select(…, 'pull_request', load_manifest())`
+    with `census = 'test_entry_point_python_guard.py' in test_files`:
 
-    The REMAINING exclusions ARE closed by selection, and that is the difference
-    this paragraph exists to keep visible: `tests/` edits select 788 files
-    INCLUDING the census, and an edit to another tool or to the census file itself
-    selects the census too — so for those arms the census itself would then run.
-    (Deliberately no arm count: a number here went stale three rounds running as
-    arms were added.) This bound is declared rather than implied because a pin that
-    silently claims parity is how each of six review rounds found it weaker than
-    the census by one more dimension.
+        tools/capstone_ledger.py     82 files, census OUT   <- the tools/ surface
+        tools/build_site_icons.py    82 files, census OUT
+        tools/edge_census.py          3 files, census OUT   <- even this file out
+        tools/branch_reaper.py        3 files, census OUT   <- both OUT: nothing grades it
+        docs/plans/x.md              82 files, census OUT   <- the docs/ surface
+        tests/test_x.py             788 files, census IN
+        graph-scripts/audit_graph.py 788 files, census IN
+
+    So on a `tools/`-only or `docs/`-only diff, every unmirrored arm above is
+    ungraded and this pin is the only gate. Measured, both ways: appending a line
+    advertising `python3 tools/capstone_ledger.py check` to a tracked DOC leaves
+    this file GREEN while the census reds
+    `test_no_doc_or_usage_advertises_the_form_the_guard_refuses`; and the same line
+    appended to a SIBLING tool (`tools/edge_census.py`) likewise leaves it GREEN
+    while the census reds. That is a routing gap in `tools/ci_selection.py`, not
+    something a pin in this file can close; it is tracked as #11363 (same root: a
+    diff that never selects the census leaves its #5128 guard unchecked).
+
+    What IS closed by selection is only this: a `tests/` or `graph-scripts/` edit
+    selects 788 files INCLUDING the census, so those diffs are graded by the census
+    itself rather than by this pin. ⛔ `tools/` and `docs/` are NOT in that set —
+    which is the distinction this paragraph exists to keep visible, and the reason
+    it says "ungraded" instead of "not a hole".
+
     """
     tree = ast.parse(tool.read_text(encoding="utf-8"))
     body = list(tree.body)
