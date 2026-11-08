@@ -1824,6 +1824,17 @@ surfaces:
   # the due predicate and its cost gate live in `tortoise/webhook_delivery.py`,
   # which matches no named surface and falls through to `core`.
   - test_8098_webhook_retry_sweep.py
+  # #8099 (the why half of #2081's indicator 2): the dream-cycle precompute of
+  # why-blocks and the push path that READS them. The assembly/write seam lives
+  # in `tortoise/hosted_api.py` (`_precompute_why_blocks`, called from
+  # `_dream_worker`'s drain — an exact `api` SOURCE_PATTERN), so a hosted
+  # change selects `api` and REPLACES the `core` fallback; this is the arm that
+  # runs the dream→precompute→push ordering pin on such a diff.
+  # DUAL-REGISTERED with `core` (below): `tortoise/why_snapshot.py` is a NEW
+  # module with no SOURCE_PATTERNS entry, and `tortoise/webhook_delivery.py` /
+  # `tortoise/why.py` / `tortoise/volunteer.py` all fall through to `core` —
+  # without that arm a snapshot-module-only change would run no guard at all.
+  - test_why_snapshot_8099.py
   # #3520: the per-session EXTRACTION status (`{status, extractor,
   # outcome_known}`) on BOTH hosted session read surfaces, the `last_error`
   # agreement on the 2xx path, and the appended-at-the-END column positions.
@@ -6320,6 +6331,13 @@ surfaces:
   # and selects `core`. Dual-registered under `api` (above) for the hosted
   # lifecycle half (the arm site, the task tuple, the dispatch wrapper).
   - test_8098_webhook_retry_sweep.py
+  # #8099: the `core` half of the dual registration documented at the `api`
+  # entry. `tortoise/why_snapshot.py` (the precompute + the single bounded
+  # snapshot read) names no SOURCE_PATTERNS entry, so a snapshot-module-only
+  # diff selects `core` via the `tortoise/` fallback — and so do the three
+  # files it pins alongside it (`webhook_delivery.py`'s envelope + page read,
+  # `why.point_ids_in_payload`, `volunteer.why_entry` the ONE wire projection).
+  - test_why_snapshot_8099.py
   # #3520: the `core` half of the dual registration documented at the `api`
   # entry — `tortoise/session_projection.py` (the extraction vocabulary and
   # `session_extraction_status`, the ONE derivation every read surface calls)
@@ -9026,6 +9044,17 @@ carve_out:
 # DECLARED in `tests/test_markers.py::test_no_redirect_stems_registry_exact`.
 # The `core` surface row above is KEPT: a file legitimately sits in both.
 - test_10121_recency_tie.py
+# #8099 (the why half of #2081's indicator 2): the dream-cycle precompute and the
+# push path that reads it. Every test builds a PATH-built store
+# (``TortoiseSDK(<tmpdir>/test.db)``) and asserts on it — ``_fresh_sdk`` even
+# wipes it — and the module carries module-level ``embedded_only``, so a URI-set
+# lane would both SKIP every case and REDIRECT the construction to the shared
+# server (an explicit ``db_path`` alone does NOT win — the #9209 finding), i.e.
+# the wipe and the snapshot counts would land on a graph this file never seeded.
+# Registered with the stem in ``tests._embedded.TEST_NO_REDIRECT_STEMS`` and
+# DECLARED in ``tests/test_markers.py::test_no_redirect_stems_registry_exact``
+# (the pin is ``test_ci_selection.py::test_carve_out_mirrors_test_no_redirect_stems``).
+- test_why_snapshot_8099.py
 # #6884: modules that REQUIRE the docker lane — each one module-skips at import
 # when `TORTOISE_DB_URI` is not a usable URI — in the tier-2 PR legs that means
 # present and EMPTY (`URI=""`), not absent (`if not _is_db_uri(...): pytest.skip(...)`
@@ -9155,6 +9184,7 @@ durations_floors:
   test_calibration.py: {value: 355.0, pinned: true}
   eval/write_path/test_write_path_operator_lane.py: {value: 355.0, pinned: true}
 durations:
+  test_why_snapshot_8099.py: 2.0  # new in #8099 — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT this host's local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `core`/`api` registrations above classify it, and the `carve_out` entry routes it to the URI-unset leg the embedded marker needs. ⚠️ MEASURED LOCALLY as context, NOT as the weight: 10 cases, `testcase/@time` sum 9.96 s on a warm box (whole-file wall 10.26 s; 11.6 s on the first, coldest run), max single case 4.32 s — every case builds and seeds a real embedded SDK, and one drives the real `_dream_worker` drain — so the flat 2.0 UNDERSTATES it by ~5x until a refresh replaces the row (the same understatement every embedded-lane file carries). ⛔ The CASE COUNT is deliberately NOT used as a weight input: `tools/ci_selection.py --integrity` is the authority and `tools/ci_timing.py --refresh-durations` replaces this row from junit once a push-to-main sweep includes it.
   test_s4_reeemit_tax.py: 2.0  # new in #11385 (review P1) — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT this host's local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `core` registration above puts it in `fast_pool()`. What the weight covers: hermetic — a `_FakeModel` returning canned JSON and `tmp_path` receipt files, driven through `run_s4`/`render_s4_prompt`/`merge_embed_lists` in process, plus reads of the two committed `ab-*.json` evidence artifacts; no DB, no graph, no network, no model call, no `gh`. ⛔ NOT a local reading, deliberately: a host measurement on a contended review box was ~18 s whole-file, which is a HOST reading and not a shard-layout input. ⛔ The CASE COUNT is deliberately not quoted: the file has gained cases in every review round, which is exactly how a hand-written count re-stales. `tools/ci_selection.py --integrity` is the authority; `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
   test_evidence_assembly_wiring_2683.py: 2.0  # new in #11448 — the #3400/#4348 trap: a file a PR ADDS cannot carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419). The row must EXIST, not merely default ("a default is not a reading"): the `core`/`sdk`/`eval` registrations above put it in `fast_pool()`, and `--integrity` stays green either way (a 0.90 ratio floor with headroom), so nothing but this row records the weight. ⚠️ MEASURED LOCALLY as context, NOT as the weight: ~5 s for this file alone through `tools/test_lane.py` on a contended lane box (docker lane: one throwaway FalkorDB graph per test + a private lane container), so the flat 2.0 UNDERSTATES it until a refresh replaces the row — the same understatement every `sdk`-fixture file carries. What the weight covers: three tests, each seeding a dedicated graph (four Points — three `statement` Points and one `session-transcript` chunk) and driving the REAL `tools.longmem_eval.retrieve.retrieve_for_question` with a stubbed `hybrid_search`; no reader, no judge, no network, no model (the embedder is pinned out). ⛔ The case count is deliberately not quoted as a weight input — `tools/ci_selection.py --integrity` is the authority, and `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
   test_embed_writer_register.py: 2.0  # new in #11085 — the #3400/#4348 trap: a file a PR ADDS cannot carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419). The row must EXIST, not merely default ("a default is not a reading"): the `core` registration above puts it in `fast_pool()`, and `--integrity` stays green either way (the floor is a 0.90 ratio with headroom), so nothing but this row records the weight. ⚠️ MEASURED LOCALLY as context, NOT as the weight: ~12 s for this file alone on a contended lane box, so the flat 2.0 UNDERSTATES it until a refresh replaces the row. What the weight covers: hermetic — the register is imported in-process and once in a child interpreter (asserting `tortoise.projection`/`pack_state`/`sdk` absent from `sys.modules`), plus an AST walk of `tortoise/**` and one `tmp_path` scratch root per pinned shape and per positive control for the discovery blind spot; no DB, no graph, no network, no model. ⛔ The CASE COUNT is deliberately not quoted (it moves with every review round). `tools/ci_selection.py --integrity` is the authority; `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.

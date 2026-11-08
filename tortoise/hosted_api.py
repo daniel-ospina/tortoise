@@ -4016,6 +4016,41 @@ async def _webhook_retry_sweep_loop(interval: float) -> None:
         await _guarded_step("webhook retry sweep", _webhook_retry_sweep_pass)
 
 
+def _precompute_why_blocks(sdk: TortoiseSDK, dream_result: dict | None) -> dict | None:
+    """#8099: assemble + persist the why-blocks this dream pass made true.
+
+    Called from `_dream_worker`'s `_drain`, INSIDE the per-graph dream lock and
+    inside the dream pool item, AFTER the EP pass — the precompute half of
+    #2081's indicator 2 ("precomputed why-blocks are served from cache, no
+    per-push EP recompute"). The push that follows READS them
+    (`webhook_delivery.dispatch_pending`); nothing assembles on the push path.
+
+    Best-effort BY CONSTRUCTION: a graph hiccup here must never fail a dream
+    (the roots are already drained and a raise would be read as a dream bug),
+    and it must never break delivery (a push without `why` is the pre-#8099
+    envelope, which is valid). The precompute is also skipped wholesale for a
+    graph with no live subscription — `why_snapshot.precompute_for_dream`
+    probes that FIRST and writes nothing, so a tenant that never subscribed
+    pays one read and no graph writes.
+
+    Returns the precompute summary (for logging/tests), or None when the pass
+    was skipped or failed.
+    """
+    import logging
+
+    from tortoise import why_snapshot
+    from tortoise.security import redact_error
+
+    _log = logging.getLogger("tortoise.api")
+    try:
+        if not why_snapshot.enabled():
+            return None
+        return why_snapshot.precompute_for_dream(sdk._get_proj(), dream_result)
+    except Exception as e:  # noqa: BLE001, RUF100 — a dream must never fail here
+        _log.warning("why-block precompute failed: %s", redact_error(e))
+        return None
+
+
 @_embed_metered
 async def _dream_worker(org_id: str, key: str | None = None) -> None:
     """Drain one tenant's queue with debounce, then run incremental dream.
@@ -4074,7 +4109,14 @@ async def _dream_worker(org_id: str, key: str | None = None) -> None:
                 # drain is LOCAL mode (W1; never silently full — the I1
                 # precedence table governs; scheduled stale-first passes call
                 # /v1/dream with mode="stale-first" explicitly).
-                sdk.dream(dirty_only=True, mode="local")
+                result = sdk.dream(dirty_only=True, mode="local")
+                # #8099: precompute the why-blocks this pass made true, so the
+                # push below READS them instead of assembling per event. Runs
+                # INSIDE the lock and INSIDE the pool item on purpose: it is a
+                # graph writer, so it must be serialized with every other dream
+                # on this graph (the dream is the snapshot cache's only writer),
+                # and it must never extend the capture path.
+                _precompute_why_blocks(sdk, result)
 
         await _run_dream_on_pool(_drain, _open_sdk)
         # #2081: push the events this tenant's subscribers are behind on. Runs
