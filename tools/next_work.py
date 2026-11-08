@@ -112,8 +112,9 @@ Usage
     uv run python tools/next_work.py --from snap.json    # replay a snapshot (no network)
     uv run python tools/next_work.py --snapshot-out s.json --top 5
 
-Environment overrides — every one is PRINTED in the run's provenance, so a reader
-can always tell which lever was pulled
+Environment overrides. The two POPULATION levers are PRINTED in the run's
+provenance, so a reader can always tell which one was pulled; the other two are
+resolved paths/pacing and are not rendered
     NEXT_WORK_POPULATION=0    DISARMS the fleet's work-unit rule (#10951). No
                               population rule is consulted at all: every row is
                               admitted on its title and labels exactly as before
@@ -138,7 +139,8 @@ Exit codes
        constituent, is a duplicate of a row already offered (a blocked row owns its
        action target, so a duplicate can be the rank leader), is not a unit of work
        under the fleet's population rule (a CONTAINER, a declared
-       ``standing-constraint``, or already assigned — #10951), or the queue is
+       ``standing-constraint``, already assigned, or unattributable because the
+       shipped program's arm shape changed — #10951), or the queue is
        empty. The block prints ``NONE`` and that is an answer, not an error
     2  INCOMPLETE — one of the things the decision depends on could not be read,
        OR the input contradicts itself:
@@ -150,8 +152,10 @@ Exit codes
            verdict, which is a real answer and lands the row at ``NEEDS-REVIEW``),
            the fleet's work-unit rule (``refresh-candidates.sh`` absent, carrying no
            usable ``POOL_JQ``, or that program refused by ``jq`` — #10951; on a box
-           with neither ``scripts/`` nor ``$AGENT_INFRA_PATH`` this fires on EVERY
-           run unless ``NEXT_WORK_POPULATION=0`` disarms the rule, by design,
+           with neither ``scripts/`` nor ``$AGENT_INFRA_PATH`` this fires on every
+           run that has at least one candidate row — a zero-row run reports
+           ``UNREADABLE — …(no rows)`` and exits 1, because there is nothing to
+           withhold — unless ``NEXT_WORK_POPULATION=0`` disarms the rule, by design,
            because a queue whose eligibility was never measured is not a queue that
            passed. ⛔ THAT SWITCH IS THE ONE DOCUMENTED LEVER THAT RESTORES THE
            PRE-#10951 BEHAVIOUR; it is listed under ``Usage`` above),

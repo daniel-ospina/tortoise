@@ -78,8 +78,7 @@ from tools.queue_resweep import parse_config
 REPO = "daniel-ospina/tortoise"
 
 #: The gate the READY-TO-LAND premise needs, with the live label vocabulary.
-CFG = parse_config(
-    """
+CONFIG_TEXT = """
 queue_rules:
   - name: default
     queue_conditions:
@@ -89,7 +88,8 @@ queue_rules:
       - check-success=docs
       - check-success=test-isolation
 """
-)
+
+CFG = parse_config(CONFIG_TEXT)
 HERE = Path(__file__).resolve().parent
 FIXTURE_RULE = HERE / "fixtures" / "10951" / "pool-rule.sh"
 REPO_ROOT = HERE.parent
@@ -941,10 +941,36 @@ def test_the_json_carries_the_population_provenance():
     import io
     from contextlib import redirect_stdout
 
+    # ⛔ THE FIXTURE CARRIES THE GATE, so the CLI leg below is a REFUSED=false run.
+    # Without it `main` appends "queue gate: the snapshot carries none" and returns
+    # 2 with `refused: true` — under which `next_command is None` is satisfied by the
+    # REFUSAL and proves nothing about the withhold (measured by the reviewer: the
+    # assertion read as evidence but was tautological).
     snap = Snapshot(
         repo=REPO,
         base="main",
+        config_source="fixture:.mergify.yml",
+        gate={
+            "queue_name": CFG.queue_name,
+            "base": CFG.base,
+            "required_checks": list(CFG.required_checks),
+            "required_labels": list(CFG.required_labels),
+            "forbidden_labels": list(CFG.forbidden_labels),
+        },
+        gate_text=CONFIG_TEXT,
         issues=[issue(9700, "epic: a container"), issue(9701, "fix(a): real work")],
+        pulls=[_pull(9702, [9701])],
+        check_runs={
+            "b" * 40: [
+                {"id": i, "name": name, "status": "completed", "conclusion": "success",
+                 "app": {"slug": "github-actions"}}
+                for i, name in enumerate(CFG.required_checks)
+            ]
+        },
+        attestation={"9702": {"verdict": "head"}},
+        merge_tree={"9702": {"clean": True, "why": ""}},
+        claims={},
+        local_holders={},
         population={"9700": REASON_CONTAINER},
         population_source="replay fixture · POOL_JQ sha256:deadbeef",
     )
@@ -979,9 +1005,15 @@ def test_the_json_carries_the_population_provenance():
         with redirect_stdout(buf):
             rc = next_work.main(["--from", str(path), "--repo", REPO, "--json"])
         emitted = json.loads(buf.getvalue())   # the payload is indented
-    assert rc in (0, 1, 2), rc
+    assert rc == 0, (rc, emitted.get("unreadable"))
+    assert emitted["refused"] is False, emitted["unreadable"]
     assert emitted["population"] == {"9700": REASON_CONTAINER}
     assert emitted["population_source"].startswith("replay fixture")
     row = next(u for u in emitted["units"] if u["issue"] == 9700)
     assert row["withheld_by_population"] is True
     assert row["next_command"] is None
+    # …and the CONTROL: the REAL unit in the same payload DOES carry a command, so
+    # the `None` above is the withhold talking, not a blanket refusal.
+    real = next(u for u in emitted["units"] if u["issue"] == 9701)
+    assert real["withheld_by_population"] is False
+    assert real["next_command"] is not None, real
