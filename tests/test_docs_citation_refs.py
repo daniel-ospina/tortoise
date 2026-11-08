@@ -169,7 +169,15 @@ def _dead_reason(lines: list[str], start: int, end: int | None) -> str | None:
     """The reason a citation is dead, or None when it lands on text."""
     last = end if end is not None else start
     if start < 1 or last > len(lines):
-        return f"line {start} is outside the file ({len(lines)} lines)"
+        # Name the bound that is ACTUALLY outside the file. For a `:1-99` range
+        # against a 3-line file the dead end is 99, so reporting `start` would
+        # point a fixer at line 1 — the one line that is fine.
+        bad = start if start < 1 else last
+        cited = f":{start}-{end}" if end is not None else f":{start}"
+        return (
+            f"line {bad} is outside the file "
+            f"({len(lines)} lines; cited as {cited})"
+        )
     if not lines[start - 1].strip():
         return f"line {start} is BLANK"
     return None
