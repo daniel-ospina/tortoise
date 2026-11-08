@@ -127,7 +127,10 @@ Provider wiring already in place: `openrouter` is in
 `tortoise.ingest._PROVIDERS` (OpenRouter base URL + `OPENROUTER_API_KEY`),
 the spec `openrouter:qwen/qwen3.8-max` parses via `_parse_model_spec`, and
 the override records `reader_pinned=false` + warns on stderr (the M5 default
-stays `openrouter:deepseek/deepseek-v4-flash` — #1525). Requires an
+is `deepseek:deepseek-v4-flash` — #1525, with the TRANSPORT repointed off
+`openrouter:` by #8486 on 2026-11-07: no box the fleet runs holds
+`OPENROUTER_API_KEY`, so the openrouter-named default raised before loading a
+question). Requires an
 `OPENROUTER_API_KEY` (and `OPENAI_API_KEY` for the official GPT-4o judge);
 no keys were present at record time, so this config is verified up to spec
 parse + mock-run only, not executed. Cost re-measure + provider routing for
@@ -689,8 +692,9 @@ PASS, (d) FAIL 0.43 < 0.8 — the merge remains BLOCKED on (d).
 
 ### Step 4 (M5 pin flip) — GATED, NOT done
 
-`tools/longmem_eval/reader.py` `READER_MODEL` stays
-`openrouter:deepseek/deepseek-v4-flash`. The flip to
+`tools/longmem_eval/reader.py` `READER_MODEL` is
+`deepseek:deepseek-v4-flash` (transport repointed off `openrouter:` by #8486,
+2026-11-07 — see Step 2's note; the MODEL is unchanged). The flip to
 `openrouter:qwen/qwen3.8-max` is gated on (i) the qwen-serves-via-OpenRouter
 test (landed + green in this change), (ii) the 500-Q/spot-check indicator
 run showing **0/7 content-error recurrences** (gpt4_8279ba02, gpt4_7a0daae1,

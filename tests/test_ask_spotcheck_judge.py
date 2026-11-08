@@ -354,6 +354,61 @@ def test_one_judge_spec_serves_the_preflight_and_the_judge(monkeypatch):
         "lane's DeepSeek default), not the judge this tool's pre-flight "
         "checked — pass _judge_spec()")
 
+    # ⛔ THE #2071 LANE IS THREE MODULES, NOT ONE. The scan above originally
+    # read `tools/ask_spotcheck.py` alone while its docstring claimed "NO call
+    # site may build a judge without it" — so the two SIBLING legs kept the
+    # split (pre-flight on the official key, judge on the DeepSeek default) and
+    # the suite stayed green over it (caught in review, #8486). Every module
+    # that imports the pre-flight must be scanned, and the list is asserted to
+    # be non-trivial so a rename cannot silently shrink the pin to nothing.
+    import tools.ask_spotcheck_consistency as _consistency
+    import tools.ask_spotcheck_probe as _probe
+
+    siblings = {Path(m.__file__).name: m for m in (_probe, _consistency)}
+    assert set(siblings) == {"ask_spotcheck_probe.py",
+                             "ask_spotcheck_consistency.py"}, siblings
+    for name, mod in siblings.items():
+        sibling_src = Path(mod.__file__).read_text(encoding="utf-8")
+        sibling_bare = re.findall(r"(?:=|\breturn)\s*build_judge\(\s*\)",
+                                  sibling_src)
+        assert sibling_bare == [], (
+            f"{name} builds a judge without _judge_spec(): its pre-flight "
+            f"checks the OFFICIAL judge's key while a different model grades "
+            f"(#8486)")
+        # …and it must resolve the spec from the ONE owner, not re-derive it.
+        assert "_judge_spec" in sibling_src, name
+
+
+def test_probe_live_path_builds_the_judge_it_preflighted(monkeypatch, capsys):
+    """The I1 probe's live path must grade with the spec its pre-flight checked.
+
+    The source pin above is structural; this is the behavioural half, and it
+    needs no network: `build_judge` is replaced by a recorder, so the test sees
+    the SPEC ARGUMENT the tool actually passes. With only the official key set
+    (the box shape the split broke), the recorded spec must still be the
+    OFFICIAL one — before this fix it was whatever `DEFAULT_JUDGE_MODEL`
+    happened to be.
+    """
+    import tools.ask_spotcheck_probe as _probe
+    from tools.longmem_eval.judge import (
+        OFFICIAL_JUDGE_MODEL, ScriptedSemanticJudge)
+
+    monkeypatch.delenv("TORTOISE_LME_JUDGE_MODEL", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    for k in ("DEEPSEEK_API_KEY", "OPENROUTER_API_KEY", "GEMINI_API_KEY"):
+        monkeypatch.delenv(k, raising=False)
+
+    seen = []
+
+    def _recorder(spec=None, **kw):
+        seen.append(spec)
+        return ScriptedSemanticJudge(rules=OFFLINE_RULES)
+
+    monkeypatch.setattr(_probe, "build_judge", _recorder)
+    rc = _probe.main(["--fixture", str(FIXTURE)])
+    assert seen == [OFFICIAL_JUDGE_MODEL], seen
+    assert rc == 0
+
 
 def test_fail_fast_honors_judge_model_provider(monkeypatch):
     """TORTOISE_LME_JUDGE_MODEL naming another provider checks THAT

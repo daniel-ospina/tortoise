@@ -266,8 +266,8 @@ INJECTED_READER_SPEC = "injected"
 
 #: The pin a run whose spec names the OFFICIAL LongMemEval model records
 #: (``judge.OFFICIAL_JUDGE_MODEL``, which :func:`judge_pin_for` names
-#: explicitly), the same grading
-#: discipline the published LongMemEval numbers use. The rubric id is the same
+#: explicitly), the same grading discipline the published LongMemEval numbers
+#: use. The rubric id is the same
 #: one the graded eval carries (``JUDGE_RUBRIC_ID`` in
 #: ``tools/longmem_eval/run.py``); the hash is computed with the same 16-hex
 #: convention so the two records are comparable.

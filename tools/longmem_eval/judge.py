@@ -150,10 +150,16 @@ NEAR_MISS_GRADING = "strict"
 # UNIQUE words — that is STRUCTURALLY UNREACHABLE for rubric-style long-gold
 # SSP questions (d6233ab6 79w / 1d4e3b97 68w / b0479f84 63w: a correct
 # paraphrase never clears a ≥½-unique-word overlap bar). DECISION: the
-# spot-check grades EVERY question with this semantic judge (``build_judge()``
-# → the official gpt-4o anscheck — benchmark-identical to the graded eval
-# lane); the lexical bar is DEMOTED to the key-free CI (MockJudge) substitute
-# only. The graded eval is UNTOUCHED (``JUDGE_RUBRIC_ID "longmemeval-official"``
+# spot-check grades EVERY question with this semantic judge
+# (``build_judge(_judge_spec())`` → the OFFICIAL gpt-4o anscheck); the lexical
+# bar is DEMOTED to the key-free CI (MockJudge) substitute
+# only. ⛔ THE SPEC IS NAMED, NEVER INHERITED (#8486): a bare ``build_judge()``
+# resolves ``DEFAULT_JUDGE_MODEL``, and that default was re-pinned to
+# ``deepseek:deepseek-v4-flash`` by the #8486 owner ruling of 2026-10-27 for the
+# graded-eval RUN. A spot-check that inherited it would grade with a
+# non-official judge while this decision record says official — and its key
+# pre-flight would check a key nothing needs. The graded eval is UNTOUCHED
+# (``JUDGE_RUBRIC_ID "longmemeval-official"``
 # and its fingerprint are unchanged — no bump). Historical spot-check
 # aggregates (0.38/0.43) graded the 3 questions under the unreachable bar and
 # are NOT directly comparable (runbook 1987-ask-abstention-check comparability
