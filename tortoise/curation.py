@@ -797,6 +797,31 @@ class PlanWriter(Protocol):
         ...
 
 
+def _source_ledger_key(item: Mapping[str, Any]) -> str:
+    """The ledger key for a Source row.
+
+    ONE definition, used by both `_pending_sections` and `IngestWriter`, because two
+    derivations that disagree mean the ledger never recognises an already-migrated
+    Source. The pair is HASHED rather than delimiter-joined: a `kind` may contain the
+    delimiter (`article:https` + `//x/y:z` and `article` + `https://x/y:z` derive the
+    same string when joined by `:`).
+    """
+    pair = hashlib.sha256(json.dumps(
+        [item.get("sourceKind") or "", item.get("url") or ""],
+        sort_keys=True).encode("utf-8")).hexdigest()
+    return f"{MIGRATION_KEY_PREFIX}source:{pair}"
+
+
+def _fallback_key(section: str, item: Mapping[str, Any]) -> str:
+    """A ledger key for an item a caller passed without one."""
+    if section == "sources":
+        return _source_ledger_key(item)
+    basis = hashlib.sha256(json.dumps(
+        [section, item.get("kind") or "", item.get("content") or ""],
+        sort_keys=True).encode("utf-8")).hexdigest()
+    return f"{MIGRATION_KEY_PREFIX}{section}:{basis}"
+
+
 def _ingest_refused(res: Any) -> str | None:
     """The reason a tool result means "not accepted", or None when it was accepted.
 
@@ -865,8 +890,13 @@ class IngestWriter:
                     # The ledger key is OURS: `:Source` accepts only declared props
                     # (#3998 drops the rest, with a denial log per row).
                     batch = [{k: v for k, v in p.items() if k != "migrationKey"} for p in batch]
+                # …so the accounting keys are captured BEFORE the strip: reading them
+                # back off `started` after the target accepted the write would turn a
+                # real success into a crash (a caller may legally pass a source item
+                # with no `migrationKey`, which is what `plan.bundle()` emits).
+                keys = [str(p.get("migrationKey") or _fallback_key(section, p)) for p in started]
                 self._call_one(target_graph, section, started, written)
-                written.extend(p["migrationKey"] for p in started)
+                written.extend(keys)
         return {"written": written}
 
     def _call_one(self, target_graph: str, section: str, batch: Sequence[Mapping[str, Any]],
@@ -998,7 +1028,8 @@ def _pending_sections(
     for section in ("points", "sources"):
         items = list(bundle.get(section) or [])
         total += len(items)
-        keyed = []
+        keyed: list[Mapping[str, Any]] = []
+        queued: set[str] = set()
         for item in items:
             key = item.get("migrationKey")
             if key is None:
@@ -1008,17 +1039,10 @@ def _pending_sections(
                 # kinds (create_source merges by url, list_sources groups by
                 # (url, kind)), and a url-only key silently collapsed them onto one
                 # ledger entry — reported as skipped_known on a FIRST run.
-                # …and the pair is HASHED rather than delimiter-joined: a `kind` may
-                # contain the delimiter (`article:https` + `//x/y:z` and `article` +
-                # `https://x/y:z` both used to derive the same key, so one row was
-                # reported `skipped_known` on a first run with an empty ledger).
-                pair = hashlib.sha256(json.dumps(
-                    [item.get("sourceKind") or "", item.get("url") or ""],
-                    sort_keys=True).encode("utf-8")).hexdigest()
-                key = f"{MIGRATION_KEY_PREFIX}source:{pair}"
+                key = _source_ledger_key(item)
             if key in ledger:
                 continue
-            if any(k.get("migrationKey") == key for k in keyed):
+            if key in queued:
                 # A DUPLICATE within this read, not a row already in the target. The
                 # live read path groups Sources by (url, sourceKind) — `sdk.list_sources`
                 # returns `count(p)` — so this cannot arise from `read_sources`; it is
@@ -1026,6 +1050,7 @@ def _pending_sections(
                 # `skipped_known` would claim a migration that never happened.
                 duplicates += 1
                 continue
+            queued.add(key)
             keyed.append({**item, "migrationKey": key})
         sections[section] = keyed
     pending_count = sum(len(v) for v in sections.values())

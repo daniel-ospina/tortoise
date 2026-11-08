@@ -76,7 +76,29 @@ class MCPReader:
             args["graph"] = self.graph
         return self._call("tortoise_query", args)
 
-    def read_points(self, *, page: int = PAGE) -> tuple[list[C.Row], int]:
+    def _fingerprint_walk(self, *, page: int = PAGE) -> list[str]:
+        """The id+content sequence of one full walk — used to VERIFY a census.
+
+        Deliberately minimal (no Row construction, no guards): its job is to be the
+        cheapest possible second opinion on "did the population hold still".
+        """
+        out: list[str] = []
+        offset = 0
+        while True:
+            res = C.normalise_tool_result(self._q(offset=offset, limit=page))
+            err = _error_of(res)
+            if err:
+                raise RuntimeError(f"verification pass was refused: {err[:300]}")
+            batch = _rows_from_tool(res)
+            if not batch:
+                break
+            out.extend(f"{r.get('id') or ''}\x00{r.get('content') or ''}" for r in batch)
+            offset += len(batch)
+            if len(batch) < page:
+                break
+        return out
+
+    def read_points(self, *, page: int = PAGE, verify: bool = True) -> tuple[list[C.Row], int]:
         rows: list[C.Row] = []
         refusal: str | None = None
         offset = 0
@@ -159,16 +181,22 @@ class MCPReader:
         if total is not None and len(rows) < total:
             raise RuntimeError(f"incomplete read: {len(rows)} of {total} points — refusing a partial census")
         # A mid-walk mutation that keeps the TOTAL stable and repeats no row (one
-        # retracted, one appended) is invisible to both guards above: the census then
-        # contains a tombstone and omits a live row while looking complete. Re-read the
-        # first and last pages and require them to be unchanged — 2 extra calls, and
-        # it is the only way to see a same-size churn.
+        # retracted, one appended) is invisible to the guards above; the census then
+        # contains a tombstone and omits a live row while looking complete. Re-reading
+        # the LAST page at the end does not help (its snapshot is taken after the
+        # churn), so a SECOND FULL WALK is the only sound check: it costs a second pass
+        # (~2x calls) and is on by default, because a wrong census is worse than a slow
+        # one. `--no-verify-read` opts out.
         if first_page_fp is not None:
             for label, want, args in (
                 ("first", first_page_fp, {"offset": 0, "limit": page}),
                 ("last", last_page_fp, {"offset": last_offsets[0], "limit": last_offsets[1]}),
             ):
                 res2 = C.normalise_tool_result(self._q(**args))
+                err2 = _error_of(res2)
+                if err2:
+                    raise RuntimeError(f"verification read of the {label} page was refused: "
+                                       f"{err2[:300]}")
                 got = tuple(f"{r.get('id') or ''}\x00{r.get('content') or ''}"
                             for r in _rows_from_tool(res2))
                 if got != want:
@@ -176,6 +204,15 @@ class MCPReader:
                         f"the {label} page changed during the walk — the population was mutated "
                         "mid-read (a retraction and an addition of equal size look identical to "
                         "the totals); refusing a census that may hold a tombstone and omit a row")
+        if verify:
+            second = tuple(self._fingerprint_walk(page=page))
+            first = tuple(f"{r.get('id') or ''}\x00{r.get('content') or ''}" for r in rows)
+            if second != first:
+                raise RuntimeError(
+                    "a second read of the same graph returned a DIFFERENT row sequence — the "
+                    "population was mutated mid-walk (a retraction plus an addition leaves the "
+                    "total unchanged and repeats no row, so only a full second pass can see it); "
+                    "refusing a census that may hold a tombstone and omit a live row")
         return rows, (total if total is not None else len(rows))
 
     def _section(self, section: str) -> Any:
@@ -361,7 +398,7 @@ def cmd_inventory(args: argparse.Namespace) -> int:
     counts = reader.counts()
     structure = reader.structure()
     graphs = reader.graphs()
-    points, total = reader.read_points(page=args.page)
+    points, total = reader.read_points(page=args.page, verify=args.verify_read)
     sources, source_total = reader.read_sources()
     audit = reader.audit()
     plan = C.build_plan(points + sources, source_graph=args.graph or "(credential-bound)",
@@ -423,7 +460,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
         return 2
     reader = MCPReader(_live_call_tool, args.graph)
     counts = reader.counts()
-    points, points_total = reader.read_points(page=args.page)
+    points, points_total = reader.read_points(page=args.page, verify=args.verify_read)
     sources, source_total = reader.read_sources()
     graphs = reader.graphs()
     plan = C.build_plan(points + sources, source_graph=args.graph or "(credential-bound)",
@@ -515,6 +552,10 @@ def main(argv: list[str] | None = None) -> int:
                          "1-based page number: a small value makes the read take many calls")
     ap.add_argument("--apply", action="store_true", help="actually write (default: plan only)")
     ap.add_argument("--off", action="store_true", help="off-switch: write nothing")
+    ap.add_argument("--no-verify-read", dest="verify_read", action="store_false",
+                    help="skip the second verification walk. The walk assumes an unchanging "
+                         "population; a same-size churn (one retraction + one addition) is "
+                         "invisible without the second pass, so skipping it is a speed trade")
     args = ap.parse_args(argv)
     if args.action == "inventory":
         ignored = [f for f, v in (("--apply", args.apply), ("--ledger", args.ledger),

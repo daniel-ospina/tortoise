@@ -843,7 +843,7 @@ def test_an_unqualified_read_is_never_labelled_default(monkeypatch, tmp_path):
             return {"result": [{"url": "https://x/y", "sourceKind": "article"}]}
         return {"result": []}
     monkeypatch.setattr(mod, "_live_call_tool", call)
-    rc = mod.main(["inventory", "--out", str(tmp_path / "inv.json")])
+    rc = mod.main(["inventory", "--out", str(tmp_path / "inv.json"), "--no-verify-read"])
     assert rc == 0
     report = json.loads((tmp_path / "inv.json").read_text())
     # the LABEL itself, not just "it ran"
@@ -986,7 +986,7 @@ def test_a_points_refusal_names_its_real_cause():
     def call(_name, args):
         return {"error": "ERR_QUOTA: budget exceeded", "code": "QUOTA"}
     with pytest.raises(RuntimeError, match="QUOTA"):
-        mod.MCPReader(call, None).read_points()
+        mod.MCPReader(call, None).read_points(verify=False)
 
 
 # ── round-13 review findings ──────────────────────────────────────────────
@@ -1077,7 +1077,7 @@ class _ConstantTotalDuplicateSurface:
 def test_a_row_served_twice_is_refused_even_when_the_total_is_stable():
     mod = _tool_module()
     with pytest.raises(RuntimeError, match=r"earlier page"):
-        mod.MCPReader(_ConstantTotalDuplicateSurface(), None).read_points(page=1)
+        mod.MCPReader(_ConstantTotalDuplicateSurface(), None).read_points(page=1, verify=False)
 
 
 def test_two_nodes_sharing_an_id_in_one_page_are_not_a_pagination_shift():
@@ -1089,7 +1089,7 @@ def test_two_nodes_sharing_an_id_in_one_page_are_not_a_pagination_shift():
         return {"result": [{"id": "rv-a", "kind": "decision", "content": "one"},
                            {"id": "rv-a", "kind": "decision", "content": "two"}],
                 "total": 2}
-    rows, total = mod.MCPReader(call, None).read_points(page=500)
+    rows, total = mod.MCPReader(call, None).read_points(page=500, verify=False)
     assert [r.content for r in rows] == ["one", "two"] and total == 2
 
 
@@ -1136,7 +1136,8 @@ def test_the_plan_can_emit_row_level_reasons(monkeypatch, tmp_path):
     monkeypatch.setattr(mod, "_live_call_tool", call)
     rows_out = tmp_path / "rows.jsonl"
     rc = mod.main(["plan", "--graph", "org_x_g_old", "--target", "org_x_g_new",
-                   "--out", str(tmp_path / "plan.json"), "--rows", str(rows_out)])
+                   "--out", str(tmp_path / "plan.json"), "--rows", str(rows_out),
+                   "--no-verify-read"])
     assert rc == 0
     lines = [json.loads(x) for x in rows_out.read_text().splitlines() if x.strip()]
     assert {d["node_id"] for d in lines} == {"p1", "p2"}
@@ -1159,7 +1160,7 @@ def test_two_nodes_sharing_an_id_across_pages_are_not_a_pagination_shift():
         off = int(args.get("offset") or 0)
         lim = int(args.get("limit") or 2)
         return {"result": pop[off:off + lim], "total": len(pop)}
-    rows, total = mod.MCPReader(call, None).read_points(page=2)
+    rows, total = mod.MCPReader(call, None).read_points(page=2, verify=False)
     assert len(rows) == 6 and total == 6
 
 
@@ -1202,7 +1203,7 @@ def test_inventory_writes_the_row_artifact_it_advertises(monkeypatch, tmp_path):
     monkeypatch.setattr(mod, "_live_call_tool", call)
     rows_out = tmp_path / "inv.jsonl"
     assert mod.main(["inventory", "--out", str(tmp_path / "inv.json"),
-                     "--rows", str(rows_out)]) == 0
+                     "--rows", str(rows_out), "--no-verify-read"]) == 0
     assert len(rows_out.read_text().splitlines()) == 1
 
 
@@ -1283,3 +1284,62 @@ def test_the_iserror_fixture_sets_only_the_live_clients_spelling():
     # the word: it is describing the property, not setting it)
     assert not [ln for ln in src.splitlines()
                 if ln.strip().startswith(("self.isError", "isError"))]
+
+
+def test_an_item_without_a_migration_key_is_accounted_not_crashed():
+    """Round-20: the accepted-key report read the key back off the item AFTER the
+    target accepted the write, so a source item with no `migrationKey` — exactly what
+    `plan.bundle()` emits — raised KeyError after a REAL success and escaped unrecorded."""
+    seen = {}
+    def call_tool(_name, args):
+        seen.update(args["bundle"])
+        return {"ok": True, "created": 1}
+    out = C.IngestWriter(call_tool).write_sections(
+        "new", {"sources": [{"url": "https://x/y", "sourceKind": "article"}]})
+    assert seen["sources"] == [{"url": "https://x/y", "sourceKind": "article"}]
+    assert len(out["written"]) == 1 and out["written"][0]
+
+
+def test_a_churn_midway_through_the_walk_is_caught_by_the_second_pass():
+    """Round-20 BLOCKING: a churn that lands after the first page is invisible to a
+    snapshot of the last page, because that snapshot is taken AFTER the churn."""
+    mod = _tool_module()
+    pop = [{"id": f"r{i}", "kind": "decision", "content": f"c{i}"} for i in range(6)]
+    state = {"pages": 0}
+
+    def call(_name, args):
+        state["pages"] += 1
+        # after the walk has passed the first page, retract an ALREADY-READ row and
+        # append a new one: the total never moves and nothing is served twice
+        if state["pages"] == 4:
+            pop.pop(2)
+            pop.append({"id": "R9b", "kind": "decision", "content": "c9b"})
+        off = int(args.get("offset") or 0)
+        lim = int(args.get("limit") or 2)
+        return {"result": pop[off:off + lim], "total": len(pop)}
+
+    with pytest.raises(RuntimeError, match=r"second read|DIFFERENT row sequence|changed during the walk"):
+        mod.MCPReader(call, None).read_points(page=2)
+
+
+def test_a_source_is_written_once_because_the_ledger_key_is_the_same_one(tmp_path):
+    """Round-21 BLOCKING: the writer derived its own key for a source (the plan's key
+    is stripped from the wire), and the two derivations disagreed — so a SECOND apply
+    re-sent a source the ledger already held."""
+    plan = C.build_plan([row("https://x/y", node_type="source", kind="article",
+                             content="https://x/y")],
+                        source_graph="old", target_graph="new", packs={})
+    sent = []
+
+    def call_tool(_name, args):
+        sent.append(args["bundle"])
+        return {"ok": True, "created": 1}
+    led = C.Ledger(tmp_path / "l.jsonl", target="new")
+    first = C.run_plan(plan, writer=C.IngestWriter(call_tool), ledger=led, apply=True,
+                       graph_rows=ROWS)
+    assert first.written == 1 and first.skipped_known == 0
+    second = C.run_plan(plan, writer=C.IngestWriter(call_tool), ledger=led, apply=True,
+                        graph_rows=ROWS)
+    assert (second.written, second.skipped_known, second.pending) == (0, 1, 0), \
+        (second.written, second.skipped_known, second.pending)
+    assert len(sent) == 1, "the source must be sent exactly once across two applies"
