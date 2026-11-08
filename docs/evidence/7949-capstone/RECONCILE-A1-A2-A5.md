@@ -84,7 +84,7 @@ call — but ⚠️ **those four line numbers are `62248db88`'s, not this record
 same grep prints **0** at this record's base `80c912244`, and four at `:8892`, `:8910`, `:8917` and
 `:9231` at `de72cfd45` (the last commit to touch THIS record, `#11326`). ⛔ They have moved a THIRD
 time since: a live read at this record's own head prints `:9006`, `:9024`, `:9031` and `:9411` — the
-`+68` insert §10.14 re-derives the §11 block around sits above all four too, so even `62248db88`'s
+`+68` insert that §10.14 re-derives the §11 block around sits above all four too, so even `62248db88`'s
 numbers are stale as a live read. That is this section's lesson, not a defect in it: **a line number
 is true only at the base it was taken at.** The conclusion that matters —
 **zero calls** — holds at every one of those bases (the call-shaped grep prints nothing at all three); the
