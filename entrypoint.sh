@@ -453,4 +453,63 @@ else
     echo "tortoise: using embedded redislite (local/dev mode)" >&2
 fi
 
+# ── #1677: multi-worker topology — MEASURE the count, then hand it to the app ──
+# `Dockerfile.hosted` passes no `--workers`, so this deployment runs ONE uvicorn
+# worker. Nothing makes that visible: uvicorn resolves its worker count as CLI
+# flag -> $WEB_CONCURRENCY -> 1, so ANY actor that can set one Fly env var moves
+# the machine to N workers with no code change and no signal.
+#
+# The REFUSAL is not here. It lives in `tortoise/worker_topology.py`, because it
+# has to be reachable by a direct `uvicorn tortoise.hosted_api:app --workers N`
+# too — an invocation that never runs this script. One implementation of the
+# policy, one place to change it.
+#
+# What this block adds is the half those callers cannot know: the count uvicorn
+# WILL run, measured from the CMD argv the way uvicorn resolves it, exported so
+# the app's refusal can name the real number, and logged once at boot so an
+# ambient WEB_CONCURRENCY stops being an invisible fact.
+#
+# ⚠️ `TORTOISE_WEB_WORKERS` is an OUTPUT of this script, never an operator input:
+# uvicorn does not read it, so setting it by hand cannot raise the count.
+_resolve_requested_workers() {
+    # uvicorn's own precedence: `--workers N` / `--workers=N` over the argv, else
+    # $WEB_CONCURRENCY, else 1. Both flag forms are handled because `--workers=N`
+    # is what a hand-edited CMD usually carries.
+    local _args=("$@") _i=0 _count="" _arg=""
+    while [ "$_i" -lt "${#_args[@]}" ]; do
+        _arg="${_args[$_i]}"
+        case "$_arg" in
+            --workers)
+                _i=$((_i + 1))
+                _count="${_args[$_i]:-}"
+                ;;
+            --workers=*)
+                _count="${_arg#--workers=}"
+                ;;
+        esac
+        _i=$((_i + 1))
+    done
+    if [ -z "$_count" ]; then
+        _count="${WEB_CONCURRENCY:-1}"
+    fi
+    # `0` and a non-numeric value are not ours to reinterpret: uvicorn treats
+    # `workers > 1` as the supervisor's switch (so `0` runs in-process) and would
+    # raise on garbage. Normalise both to 1, so this measurement can never
+    # DISAGREE with the server that actually starts.
+    case "$_count" in
+        ''|0|*[!0-9]*) _count=1 ;;
+    esac
+    printf '%s' "$_count"
+}
+
+TORTOISE_WEB_WORKERS="$(_resolve_requested_workers "$@")"
+export TORTOISE_WEB_WORKERS
+if [ "$_IS_SERVER" = "1" ]; then
+    if [ "$TORTOISE_WEB_WORKERS" -gt 1 ]; then
+        echo "tortoise: uvicorn workers = ${TORTOISE_WEB_WORKERS} — MULTI-WORKER topology, admission-gated at app startup (tortoise/worker_topology.py, #1677)"
+    else
+        echo "tortoise: uvicorn workers = 1"
+    fi
+fi
+
 exec "$@"

@@ -267,6 +267,12 @@ from tortoise.session_projection import (  # #5498: the ONE session projection
 from tortoise.session_schema import demo_session_id  # #3554: the ONE demo-session id derivation
 from tortoise.supabase_control import _service_key  # #3677
 
+# #1677: the multi-worker admission gate. Imported at module scope (not inside
+# ``_lifespan``) so the refusal cannot be shadowed by a function-local import,
+# and so `tests/test_boot_regressions.py`'s "no redundant local module imports"
+# guard sees the one binding. See ``tortoise/worker_topology.py``.
+from tortoise.worker_topology import assert_multi_worker_admissible
+
 # #4179: the team-account and user-account restore windows derive from the ONE
 # authority (tortoise/retention.py). Do not hard-code a window here — see
 # docs/retention-and-deletion.md. USER_ACCOUNT_DELETE_GRACE_HOURS is the env
@@ -2575,6 +2581,25 @@ async def _lifespan(app):
     ``TORTOISE_EMBEDDER_WARMUP=0`` skips the thread entirely, so the test
     suite's opt-out is not silently bypassed by the hosted lifespan.
     """
+    # ── #1677: MULTI-WORKER ADMISSION — FIRST, before anything in this lifespan
+    # touches a shared resource. `Dockerfile.hosted` passes no `--workers`, so
+    # this deployment runs one worker; but uvicorn also takes the count from
+    # `$WEB_CONCURRENCY`, so an ambient env var silently moves the machine to N
+    # workers where the daemons duplicate (GitHub issues, Telegram), the OAuth
+    # CSRF register (``_GITHUB_STATES``) splits per process, the golden signals
+    # become per-process, and an embedded DB diverges into N copies. This call
+    # is the ONE gate: it measures the topology (the count the entrypoint
+    # resolved plus a direct probe for uvicorn's supervisor parent, so a bypass
+    # that never ran `entrypoint.sh` is caught too) and refuses a topology this
+    # deployment has not been proved in.
+    #
+    # Raising HERE is deliberate, not incidental: uvicorn's supervisor treats a
+    # worker's ``STARTUP_FAILURE`` as fatal for the whole parent, so a
+    # misconfiguration is a loud, deploy-blocking refusal instead of a machine
+    # that half-works. That matches `entrypoint.sh`'s existing "Refusing to start
+    # with no durable DB" posture.
+    assert_multi_worker_admissible()
+
     # ── #2850: every app instance starts from a clean health-probe state.
     # A probe worker wedged during a previous app instance (TestClient reuse
     # in-process, or an in-process reload) must not survive into this one.
