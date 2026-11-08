@@ -506,6 +506,63 @@ def test_edge_function_logs_the_refusal_on_the_method_gate():
     )
 
 
+_LOCAL_SPECIFIER_RE = re.compile(
+    r"""(?:from|import)\s*\(?\s*["'`](\.{1,2}/[^"'`]+)["'`]"""
+)
+
+
+def _local_specifiers(text: str) -> list[str]:
+    """Every RELATIVE module specifier `text` names, in ANY quote style.
+
+    Relative means the specifier starts with `./` or `../`; a URL
+    (`https://esm.sh/…`) or a bare package specifier is not local, and this
+    function's reachable code does not include it.
+
+    Template literals count — `` import(`../_shared/x.ts`) `` is a specifier like
+    any other. That quote class is spelled out here, with its own snippet test,
+    because it is the part of this pattern that was WRONG twice: the first
+    revision matched only `from "../_shared/…"` (missing `./_hook.ts`, single
+    quotes and `import(`), and the second still missed the backtick — MEASURED
+    invisible (19 passed) against a full verifier in `../_shared/_hook.ts`,
+    which the wholesale directory sweep cannot reach either.
+    """
+    return [match.group(1) for match in _LOCAL_SPECIFIER_RE.finditer(text)]
+
+
+def test_local_specifier_scan_reads_every_quote_style():
+    """The closure walk's front door, pinned on snippets.
+
+    The walk below is only as good as this pattern, and this pattern has now
+    been wrong twice in the same direction — a quote style it did not know. A
+    snippet test is the only place that can fail on the pattern itself rather
+    than on the function being scanned, so the quote class is asserted directly.
+    """
+    text = "\n".join(
+        [
+            'import { a } from "./_a.ts";',
+            "import { b } from '../_shared/b.ts';",
+            "const c = await import(`../_shared/c.ts`);",
+            'const d = await import("../_shared/d.ts");',
+            'import {\n  e,\n} from "../_shared/e.ts";',
+            'export * from "../_shared/f.ts";',
+            'import "https://esm.sh/@supabase/supabase-js@2";',
+            'import { z } from "npm:zod@3";',
+        ]
+    )
+    assert _local_specifiers(text) == [
+        "./_a.ts",
+        "../_shared/b.ts",
+        "../_shared/c.ts",
+        "../_shared/d.ts",
+        "../_shared/e.ts",
+        "../_shared/f.ts",
+    ], (
+        "every relative specifier must be seen whatever the quote style is — a "
+        "missed specifier is a module the closure walk never reads, while the "
+        "pins still report green"
+    )
+
+
 def test_edge_function_hook_path_is_gone():
     """#1120: the `after_user_created` auth-hook path (AUTH_HOOK_SECRET /
     Standard-Webhooks) is DELETED, not merely disabled.
@@ -606,12 +663,26 @@ def test_edge_function_hook_path_is_gone():
     #   test. A restore reusing the OLD env name IS caught by the Phase-2 arms
     #   (they assert 401 and get the hook path's non-401); one that invents a name
     #   is not caught by either side.
-    #   THAT RESIDUAL IS BOUNDED BY A DIFFERENT SURFACE, not by a test here: the
-    #   branch cannot authenticate in production unless that secret is actually
-    #   provisioned, and provisioning is gated in `supabase-deploy.yml` (the
-    #   required-secret check) with `tenant-provision-monitor.yml` watching the
-    #   logged refusals. No test in THIS file pins the deployment's secret
-    #   inventory, and this comment does not claim otherwise.
+    #   THAT RESIDUAL IS BOUNDED BY A DIFFERENT SURFACE, not by a test here, and
+    #   by exactly ONE surface: the branch cannot authenticate in production
+    #   unless that secret is actually provisioned, and NOTHING IN THIS REPO
+    #   GATES THAT. Measured, because an earlier revision of this paragraph
+    #   named two gates that do not bind:
+    #     · `supabase-deploy.yml`'s required-secret check verifies exactly
+    #       FASTAPI_URL / FASTAPI_INTERNAL_KEY / TORTOISE_SECRET_PEPPER (its own
+    #       `required=(...)` line), and THIS SAME PR's comment above it states
+    #       AUTH_HOOK_SECRET is "deliberately NOT required" — so the deploy
+    #       passes with a hook secret absent, and the step is dispatch-only;
+    #     · `tenant-provision-monitor.yml` counts `refused a browser-origin call`
+    #       (emitted ONLY when an `Origin` header is present) and pages on
+    #       `FASTAPI_URL is not set` / `Provisioning misconfigured` /
+    #       `provision_team failed` / `tenant-provision error` — a restored
+    #       verifier is server-to-server and can provision successfully, so it
+    #       emits none of them.
+    #   The bound that DOES hold is the first one: `supabase secrets set` is an
+    #   out-of-band operator action, so the secret is absent unless a human puts
+    #   it there, and its absence FAILS CLOSED. No test in THIS file pins the
+    #   deployment's secret inventory, and this comment claims no gate.
     #   These pins are therefore defence in depth over the literal and idiomatic
     #   spellings of a restore — useful, cheap, and NOT claimed to be complete.
     # ⛔ AND OVER THE FUNCTION'S REACHABLE CODE, not just this file, because a
@@ -625,10 +696,15 @@ def test_edge_function_hook_path_is_gone():
     # A SECOND round showed the fix for that was too narrow: matching only
     # `from "../_shared/…"` missed a SIBLING module (`./_hook.ts`), single quotes,
     # `../other-fn/x.ts` and dynamic `import(`, so a verifier in
-    # `tenant-provision/_hook.ts` stayed invisible. The closure is therefore
-    # derived from EVERY relative specifier in either quote style (plus
-    # `import(`), resolved TRANSITIVELY, and the function's own directory is
-    # swept wholesale so a module the regex still misses cannot be left unscanned:
+    # `tenant-provision/_hook.ts` stayed invisible. A THIRD round found the
+    # pattern still missed a TEMPLATE LITERAL (`` import(`../_shared/x.ts`) ``),
+    # which is outside the swept directory and was measured invisible (19
+    # passed) against a full verifier. The closure is therefore derived from
+    # EVERY relative specifier in all three quote styles, via
+    # `_local_specifiers()` — which carries its own snippet test, because the
+    # quote class is exactly what was wrong twice — resolved TRANSITIVELY, and
+    # the function's own directory is swept wholesale so a module the pattern
+    # still misses cannot be left unscanned:
     closure: list[tuple[str, str]] = []
     seen: set[Path] = set()
     queue: list[Path] = [EDGE_FN]
@@ -640,9 +716,7 @@ def test_edge_function_hook_path_is_gone():
         seen.add(real)
         text = real.read_text()
         closure.append((str(real.relative_to(_REPO_ROOT)), text))
-        for rel in re.findall(
-            r'''(?:from|import)\s*\(?\s*["'](\.{1,2}/[^"']+)["']''', text
-        ):
+        for rel in _local_specifiers(text):
             dep = (real.parent / rel).resolve()
             assert dep.is_file(), (
                 f"{real.name} imports a missing local module: {rel} — a rename "
