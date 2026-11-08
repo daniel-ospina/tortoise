@@ -10690,3 +10690,70 @@ def test_the_control_arm_definition_names_the_frozen_records_divergence():
     assert ">\n> ⛔ **`PRE-REGISTRATION.md`" in doc, (
         "the disclosure must be a separate quoted paragraph, not wedged into a "
         "sentence")
+
+
+def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
+    """`RECONCILE-A1-A2-A5.md`'s LIVE cites, which no sweep reads.
+
+    Rule 3 of agent-infra#3442: this PR re-points five cites in this record
+    (`extractor_v2.py:10815`->`:10891`, `sdk.py:17472`->`:17574`,
+    `sdk.py:16414-16428`->`:16516-16530` x3, `probes/capstone_measure.py:2238-2243`
+    ->`:2724-2726`) and, measured before this pin existed, re-staling ANY of them
+    left every suite green: the record is in no `_BUNDLE_DOCS` entry and
+    `grep -rn RECONCILE tests/` returned nothing. A record whose whole thesis is
+    that "a claim nothing re-checks can rot silently" cannot leave its own numbers
+    unwatched.
+
+    It is pinned HERE rather than by adding the record to `_BUNDLE_DOCS`, because
+    the record also carries amendment paragraphs that quote numbers at an OLD base
+    on purpose (`:8880` at `80c912244`, `:9433` at `d69faaf38`); sweeping the whole
+    document would either red on those or need a historical marker plus its exact
+    cite list, i.e. more pinned surface than the claims this PR touches. This leg
+    binds only what the PR re-derived, and it is discriminating in both directions:
+    re-staling a cite in the RECORD reds it, and an insertion in the CODE above the
+    cited line reds it too.
+    """
+    record = _REPO / "docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md"
+    text = record.read_text(encoding="utf-8")
+    sdk = (_REPO / "tortoise/sdk.py").read_text(encoding="utf-8").splitlines()
+    ext = (_REPO / "tortoise/extractor_v2.py").read_text(encoding="utf-8").splitlines()
+    probe = PROBE.read_text(encoding="utf-8").splitlines()
+
+    # A1: #11205's channel is TRANSPORT ONLY — the schema line that spells the
+    # predicate allowlist, and the comment saying nothing in `tortoise/` consumes it.
+    assert "`hasPart` (`tortoise/extractor_v2.py:1720`)" in text, (
+        "the record must cite the relations schema where `hasPart` is spelled")
+    assert "hasPart" in ext[1720 - 1] and '"predicate":' in ext[1720 - 1], (
+        f"extractor_v2.py:1720 reads {ext[1720 - 1].strip()[:90]!r}, not the schema "
+        "line that spells the predicate allowlist")
+    assert "`extractor_v2.py:10891`" in text, (
+        "the record must cite the comment that says nothing consumes the channel")
+    assert "nothing in this tree consumes" in ext[10891 - 1], (
+        f"extractor_v2.py:10891 reads {ext[10891 - 1].strip()[:90]!r}, not the "
+        "comment stating nothing consumes `result[\"relations\"]`")
+
+    # A2: the capture path that writes the `references` edge — the record names it
+    # TWICE (prose and the `sed -n '<n>p'` that reproduces it), so the two must agree.
+    assert "the capture path at `tortoise/sdk.py:17574`)" in text, (
+        "the record must cite the capture path by its live number")
+    assert re.findall(r"sed -n '(\d+)p' tortoise/sdk\.py", text) == ["17574"], (
+        "the record's reproduction command must name the SAME line the prose does")
+    assert sdk[17574 - 1].strip() == "proj.link_source_to_event(source_key, event_id)", (
+        f"sdk.py:17574 reads {sdk[17574 - 1].strip()!r}, not the references writer")
+
+    # A2's Object mint: the write seam that routes creation by kind, cited THREE
+    # times as a range. Both endpoints are claims — the classifier opens it, the
+    # object arm's `is_episodic=False)` closes it.
+    assert len(re.findall(r"`?(?:tortoise/)?sdk\.py:16516-16530`?", text)) == 3, (
+        "the record names this seam three times — the mint, the route, and the "
+        "reproduction command — and all three must move together")
+    assert sdk[16516 - 1].strip() == "_ekind = _payload_entity_kind(e)", (
+        f"sdk.py:16516 reads {sdk[16516 - 1].strip()!r}, not the classifier call")
+    assert sdk[16530 - 1].strip() == "is_episodic=False)", (
+        f"sdk.py:16530 reads {sdk[16530 - 1].strip()!r}, not the object arm's close")
+
+    # A5: the census query the "cannot observe the edge" gap rests on.
+    assert "`probes/capstone_measure.py:2724-2726`" in text
+    span = probe[2724 - 1:2726]
+    assert any("MATCH ()-[r]->() RETURN type(r)" in ln for ln in span), (
+        f"capstone_measure.py:2724-2726 carries {span!r}, not the relationship census")
