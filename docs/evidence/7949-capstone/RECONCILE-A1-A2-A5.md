@@ -175,9 +175,13 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
    operand, never "today's tree minus a diff".
    The per-file split is stated once, in the §5 note below; the TOTAL is stated in both places, and
    the pin binds both to the same DERIVED value rather than to two typed numbers.
-4. **The rollup query does not exist.** `git grep -in 'rollup' -- '*.py' '*.md'` over the tree returns
-   only unrelated uses (extractor `_rollup_llm`/`_rollup_recovery` stage counters, a CI per-name rollup
-   discussion, a plan doc). There is **no** query of the graph shape "which work items serve this goal,
+4. **The rollup query does not exist.** `git grep -in 'rollup' -- '*.py' '*.md'` over the tree is
+   **self-matching** — this record names the word — and beyond that returns only unrelated uses:
+   extractor `_rollup_llm`/`_rollup_recovery` stage counters, a CI per-name rollup discussion, the
+   pinned bundle's own probe strings, and several plan docs (the set grows; this record types no
+   total, because a count nothing re-derives is this record's recurring defect — the §5 reproduction
+   block carries the commands, and item 3 above is what that costs when a number hangs on the wrong
+   operand). There is **no** query of the graph shape "which work items serve this goal,
    and what evidence supports them", no ground truth, and no scoring — which is the half `#10984` says
    `#11001` does **not** own and is "the half most likely to be dropped".
 

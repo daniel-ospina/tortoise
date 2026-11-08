@@ -10725,11 +10725,19 @@ def _call_sites(src: str) -> list[tuple[int, str]]:
     """
     names = {"create_edge", "create_about_edge", "create_operator"}
     toks = list(tokenize.generate_tokens(io.StringIO(src).readline))
-    return [(a_line.start[0], a_line.string)
-            for prev, a_line, b_line in zip(toks, toks[1:], toks[2:])
-            if a_line.type == tokenize.NAME and a_line.string in names
-            and b_line.type == tokenize.OP and b_line.string == "("
-            and not (prev.type == tokenize.NAME and prev.string == "def")]
+    out: list[tuple[int, str]] = []
+    for i, (a_line, b_line) in enumerate(zip(toks, toks[1:])):
+        if not (a_line.type == tokenize.NAME and a_line.string in names
+                and b_line.type == tokenize.OP and b_line.string == "("):
+            continue
+        # ⛔ Indexed, not a `zip(toks, toks[1:], toks[2:])` triple: that form binds the verb to
+        # `toks[1:]`, so a call at the FIRST token of the source was invisible (measured — the
+        # helper answered `[]` for `create_operator(p)` while every later line was caught).
+        prev = toks[i - 1] if i else None
+        if prev is not None and prev.type == tokenize.NAME and prev.string == "def":
+            continue
+        out.append((a_line.start[0], a_line.string))
+    return out
 
 
 def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
@@ -10827,6 +10835,15 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         f"the record's load-bearing half is the CALL count (0) — a production call site "
         f"makes its 'no producer' conclusion FALSE, not merely stale (found {_calls}); this "
         "reds before the line-number arm below can misdirect the repair")
+    # The helper's own two degenerate cases, so the detector cannot go inert silently: a call at the
+    # FIRST token of the source (which a `zip(toks, toks[1:], toks[2:])` form missed — measured),
+    # and a DEFINITION, which is not a call site.
+    assert _call_sites("create_operator(payload)\n") == [(1, "create_operator")], (
+        "`_call_sites` must see a call at the FIRST token of the source — a triple-zip over "
+        "`(toks, toks[1:], toks[2:])` cannot, and answered `[]` there")
+    assert _call_sites("def create_operator(payload):\n    pass\n") == [], (
+        "a `def` is not a call site — counting it tells a fixer the record's conclusion is FALSE "
+        "when only the function's own definition is present")
     # The four shapes the tokenized arm must separate, each MEASURED on a live tree (the
     # first two are what a regex could not do, in both directions):
     #   `sdk.create_edge(payload)`      -> red (receiver-qualified call; a dot-EXCLUDING
@@ -10877,6 +10894,42 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         "80c912244" in text[_zero_at:_zero_at + 260], (
         "the zero must name BOTH bases it was measured at — one of them is this record's own, "
         "and `#10982` landed after both")
+    # …and the RESULT is re-derived, not merely named. `measured at each → 0, exit 1` is a typed
+    # number, and a typed number nothing re-checks is this record's own recurring defect: flipping
+    # it to `9, exit 0` left every arm above green (measured).
+    for _sha in ("4e6a3ce612bd^", "80c912244"):
+        _run = subprocess.run(
+            ["git", "grep", "-rn", "-E", "hasPart|hierarchies|decomposesInto", _sha, "--",
+             "docs/evidence/7949-capstone/",
+             ":!docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md"],
+            cwd=str(_REPO), capture_output=True, text=True)
+        if _run.returncode not in (0, 1):
+            # A sha that cannot be READ is not a zero. Licence the skip by the clone's own shape
+            # (`fetch-depth: 1` cannot contain an ancestor), or fail: an absent object in a FULL
+            # clone means the base the record names is WRONG, and skipping would hide it forever.
+            _shallow = subprocess.run(
+                ["git", "rev-parse", "--is-shallow-repository"],
+                cwd=str(_REPO), capture_output=True, text=True).stdout.strip()
+            if _shallow == "true":
+                pytest.skip(
+                    f"{_sha} is not in this shallow clone — §1 item 3's `0 hits` at that base "
+                    "is UNCHECKED here, not disproved; re-derive it on a full clone")
+            pytest.fail(
+                f"{_sha} is unreadable in a FULL clone ({_run.stderr.strip()[:200]}) — the record "
+                "names a base nobody can verify")
+        assert (_run.returncode, _run.stdout) == (1, ""), (
+            f"`{_sha}` returns {_run.stdout.count(chr(10))} hit(s), not the 0 exit-1 the record "
+            "states — re-derive §1 item 3's zero; it is measured at BOTH bases it names")
+    # …and the RECORD's typed result must be the one just measured. Without this, a record that said
+    # `9, exit 0` passed every arm above while the loop proved the opposite (measured), because the
+    # loop re-derived the BASES but never read the number hanging on them.
+    _stated_zero = re.search(r"measured at\s+each → (\d+), exit (\d+)", text)
+    assert _stated_zero is not None, (
+        "§1 item 3 must STATE the result it names its bases for (`measured at each → N, exit N`) — "
+        "naming the bases without the number is what left the claim unwatched")
+    assert _stated_zero.groups() == ("0", "1"), (
+        f"the record states `{_stated_zero.group(0)}` while the loop above measured 0 hit(s), "
+        "exit 1 at each base — correct the RECORD, not the measurement")
     live_mentions = [i for i, line in enumerate(ext, 1) if "create_operator" in line]
     assert live_mentions == [9006, 9024, 9031, 9411], (
         f"extractor_v2.py's create_operator mentions are at {live_mentions}, not the "
@@ -10990,11 +11043,13 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # Bound to the base-qualified cite instead, and left wording-free on the qualifier: the landed
     # text says "at HEAD", the pre-#11519 wording said "here", and both are the same claim.
     _block_at = text.find("# §0/§2 — the sha-pinned cites")
-    _s1_at = text.find("## 1. A1")
-    assert _block_at > 0 and _s1_at > 0, (
-        "the record's §1 section or its §0/§2 reproduction block is GONE — both are where the "
-        "sha-pinned and live cites live")
-    for _label, _region in (("§1", text[_s1_at:_block_at]),
+    _s2_at = text.find("## 2. A2")
+    assert _block_at > 0 and _s2_at > 0, (
+        "the record's §2 (A2) section or its §0/§2 reproduction block is GONE — both are where "
+        "the sha-pinned and live cites live")
+    # Bounded at §2, not §1: the cite this arm binds (`:12929`, `:12779`) lives under `## 2. A2`,
+    # so a §1 label told every failure the wrong section (measured).
+    for _label, _region in (("§2 (A2)", text[_s2_at:_block_at]),
                             ("the §5 reproduction block", text[_block_at:])):
         _found = re.findall(r":(\d+)`? at (?:HEAD|here)\b", _region)
         assert _found == ["12929"], (
@@ -11017,7 +11072,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # Both SITES must still carry it — deleting either one left the suite green (measured), and
     # the old number is exactly what a reader meets in each place. Per-REGION, never a count: one
     # qualified mention per region is the claim.
-    for _label, _region in (("§1", text[_s1_at:_block_at]),
+    for _label, _region in (("§2 (A2)", text[_s2_at:_block_at]),
                             ("the §5 reproduction block", text[_block_at:])):
         assert re.search(r":12779`? at `?62248db88", _region), (
             f"{_label} must carry the historical `:12779` qualified by the base it was true at — "
