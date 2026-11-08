@@ -841,12 +841,13 @@ def test_a_stores_declaration_that_does_not_answer_is_refused():
     """`#11492`: every declaration answers row 2's question, and `load()` refuses a shrug.
 
     Row 2 is *"is every stored vector on a label the query leg can serve?"*, and the one fact it
-    needs — WHERE the vector lands — cannot be derived for most writers (the store is not a
-    `MERGE|CREATE (:Label` in the writer's own body: for five it is a `MATCH` the derivation does not
-    credit, for nine there is no label statement in the writer at all, and for one the statement is
-    its caller's), so it is DECLARED. The refusals below are what keeps that declaration from
-    degrading into a default: an empty tuple ("unspecified") and a missing field would both read to
-    the grader as *nothing to compare*, i.e. a silent pass for the one writer nobody checked.
+    needs — WHERE the vector lands — cannot be derived for most writers (a store is not always a
+    `MERGE|CREATE (:Label` in the writer's own body: the label may sit in a `MATCH` the derivation
+    does not credit, in a module-level constant, behind a property-map merge, in another writer, or
+    in the caller's own statement), so it is DECLARED. The refusals below are what keeps that
+    declaration from degrading into a default: an empty tuple ("unspecified") and a missing field
+    would both read to the grader as *nothing to compare*, i.e. a silent pass for the one writer
+    nobody checked.
 
     ⛔ The directions are not symmetric and the message says so: a label that is not a Cypher label
     can never match the served set (the false-hold direction), while an empty tuple or a non-tuple

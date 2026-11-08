@@ -1759,12 +1759,15 @@ def score_rule_bullet() -> Row:
 #: derivation that "picks one" either misses an unserved label or invents a false `NOT MET`; an
 #: argument against the DERIVATION, not a claim that either writer is held — both are
 #: `unresolved_write`, so `written_labels` flattens their label to the unresolved sentinel before
-#: the hold set is computed and their DECLARATION is the reading this row scores), and NO label for
-#: fifteen. ⚠️ Of those fifteen, FIVE name the label in their OWN `MATCH` (the derivation credits
-#: `MERGE|CREATE` only, because a `MATCH` is a read — `_embedding_repair_attempt` writes
-#: `set_embedding_clause("e")` inside its own `MATCH (e:Event {eventId:$eid})`), NINE name no label
-#: statement in their own body at all (a journal entry, a read, a delegated store, a clause builder,
-#: an interpolated label), and ONE — `_event_raw_write_door` — executes its CALLER's statement.
+#: the hold set is computed and their DECLARATION is the reading this row scores), and no usable
+#: label for the other fifteen. ⚠️ Those fifteen fail for SEVERAL reasons — do not name one as
+#: "the" reason: a label in a `MATCH` the derivation does not credit because a `MATCH` is a read
+#: (`_embedding_repair_attempt`'s own `MATCH (e:Event {eventId:$eid})`), a store clause held in a
+#: module constant (`_write_capture_turns` executing `_TURN_WRITE_CYPHER`), a property-map merge over
+#: a constant tuple (`_update_entity`'s `_CANONICAL_ENTITY_ID_PROPS`), a store delegated to another
+#: writer, a writer that only BUILDS a clause, and one whose statement is its caller's
+#: (`_event_raw_write_door`). The two-label pair is NOT among them: `_event_plain_merge` and
+#: `_rebuild_all_replay` keep their `MERGE`s in their own bodies, which is why they derive two.
 #:
 #: So the register now DECLARES it (`WriterClass.stores`: a label tuple, or `NO_LIVE_VECTOR` /
 #: `LABELS_AT_RUNTIME`) and this row reads that declaration. Same shape as `#11444`, not a second
