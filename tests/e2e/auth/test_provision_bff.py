@@ -174,10 +174,20 @@ def _gateway_fault(**kwargs) -> None:
 
 
 def _post_provision(cookie: str | None, payload: dict):
-    """POST /api/provision. Deliberately sends NO Authorization header."""
+    """POST /api/provision. Deliberately sends NO Authorization header.
+
+    It DOES send `Origin`, because a browser does — on a same-origin POST too —
+    which is exactly why the BFF has to strip it (#1120). Without it the
+    `seen["origin"] is None` assertion downstream is a constant: `None` whether
+    or not the BFF forwards the header, so the P0 shape (a forwarded Origin
+    making the server-only Edge Function 403 every live signup) would pass
+    green. Sending it is what makes that assertion — and the mock gateway's
+    emulated 403 arm — able to fail (review finding F1).
+    """
     data = json.dumps(payload).encode()
     req = urllib.request.Request(f"{APP}/api/provision", method="POST", data=data)
     req.add_header("Content-Type", "application/json")
+    req.add_header("Origin", APP)
     if cookie:
         req.add_header("Cookie", cookie)
     try:

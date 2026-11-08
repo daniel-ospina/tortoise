@@ -419,6 +419,54 @@ def test_edge_function_refuses_browser_origin_calls():
     ), "the origin refusal must run before token verification"
 
 
+def test_the_log_monitor_counts_only_literals_the_function_emits():
+    """#1120: the monitor's counted literals must be things the function can
+    actually LOG — otherwise the arm is an inert enforcer.
+
+    This is not hypothetical: it is the must-fix that a review round filed against
+    this very PR. The monitor counted `rejected origin not in allowlist`, emitted
+    by the two CORS deny branches the PR deletes; after the deletion the count sat
+    at 0 for ever while the workflow appeared to watch signup. Re-pointing the
+    grep fixed that instance — this test pinning the COUPLING is what stops the
+    next agent from re-breaking it by editing either file alone (the monitor greps
+    a literal; the function is the only thing that emits it).
+
+    Reads the workflow'S OWN greps rather than a copy of their text, so a marker
+    added to the monitor is checked too.
+    """
+    monitor = (
+        _REPO_ROOT / ".github" / "workflows" / "tenant-provision-monitor.yml"
+    ).read_text()
+    counted = re.findall(r'grep -Fc "([^"]+)"', monitor)
+    markers = re.findall(r'^\s+-e "([^"]+)"', monitor, re.MULTILINE)
+    assert counted, "the monitor must count at least one literal (a count of nothing is not a guard)"
+    assert markers, "the monitor must list at least one single-line marker"
+    src = EDGE_FN.read_text()
+    for lit in counted + markers:
+        assert lit in src, (
+            f"the monitor greps for {lit!r} but tenant-provision never logs it — "
+            "an arm whose condition can never fire. Point the monitor at a literal "
+            "the function emits, or delete the arm."
+        )
+
+
+def test_edge_function_logs_the_refusal_on_the_method_gate():
+    """#1120 (review F2): the refusal must be logged on the METHOD-GATE path too.
+
+    A browser client must send `Authorization` + `Content-Type: application/json`,
+    so it PREFLIGHTS first and its real request never leaves the browser. The
+    preflight is answered by the method gate — before the origin gate — so a
+    refusal logged only after the method gate means the monitor's count can never
+    fire for the class it names ("a client regressed to calling from a page").
+    """
+    src = EDGE_FN.read_text()
+    gate = src[src.index('req.method !== "POST"') : src.index("authenticateCaller(req)")]
+    assert "refused a browser-origin call" in gate, (
+        "the method gate must log the browser-origin refusal (the monitor counts "
+        "that literal, and a preflighted browser call never gets past this gate)"
+    )
+
+
 def test_edge_function_hook_path_is_gone():
     """#1120: the `after_user_created` auth-hook path (AUTH_HOOK_SECRET /
     Standard-Webhooks) is DELETED, not merely disabled.
