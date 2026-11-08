@@ -241,8 +241,10 @@ def test_h3d_the_effective_direction_of_a_row_reports_the_DECLARATION():
     assert effective_direction({}) is None, (
         "absence is not a default: a reader must decide what it means")
     assert effective_direction({"direction": "sideways"}) is None, (
-        "an invalid token is not a direction — it falls through to the meaning, "
-        "and with no meaning it is None, never a plausible `->`")
+        "a junk token resolves to `None` — and the WRITER refuses it rather than "
+        "reading the meaning, so it is not 'no direction, fall through to the "
+        "meaning'; a reader that did the latter would report a sense for a row "
+        "the write door rejects (#11083 review)")
 
 
 def test_h3e_a_LEGACY_token_is_honoured_exactly_as_the_writer_honours_it():

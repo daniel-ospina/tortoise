@@ -698,11 +698,11 @@ def effective_direction(rel: dict) -> str | None:
        retired spelling is resolved here exactly as `sdk.create_operator`
        resolves it, so the census and the writer cannot disagree about a row.
 
-    ``None`` means the row declares no resolvable direction (no ``direction``
-    and no meaning, or a meaning outside the closed vocabulary). It is never a
-    default: a caller that needs a token must decide what absence means, which
-    is what stops a plausible-looking `->` from standing in for a declaration
-    nobody made.
+    ``None`` means the row declares no RESOLVABLE direction: no ``direction`` and
+    no meaning, a meaning outside the closed vocabulary, or a ``direction`` token
+    the vocabulary does not recognise. It is never a default: a caller that needs
+    a token must decide what absence means, which is what stops a plausible-
+    looking `->` from standing in for a declaration nobody made.
 
     ⛔ This does NOT duplicate `TortoiseSDK._direction_from_semantics`: that one
     answers "which way does this MEANING run" for a WRITE, and cannot answer
