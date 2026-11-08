@@ -24643,6 +24643,35 @@ def _one_free_org_detail(org_id: str | None) -> dict:
     }
 
 
+#: #1981: the marker `provision_team` raises when its DB-level one-free-org
+#: backstop refuses (migration 20261108000001). Declared ONCE, here, because the
+#: RAISE text IS the wire contract between SQL and this lane — PostgREST carries
+#: a RAISE EXCEPTION's message in the RPC error body, which is exactly why
+#: `supabase_control.rpc` surfaces it (#1709). The pair is pinned in lockstep
+#: by `tests/test_free_team_entitlement.py::TestAtomicProvisionBackstop`.
+_ONE_FREE_ORG_RPC_MARKER = "one_free_org_limit:"
+
+
+def _one_free_org_blocker_from_rpc(exc: BaseException) -> str | None:
+    """#1981: the blocking org id if *exc* is the RPC's entitlement refusal,
+    else ``None`` (the caller then treats it as a generic failure).
+
+    Matched on the marker SUBSTRING, not on an exact message: the RPC error is
+    wrapped by `supabase_control.rpc` as ``"Supabase control-plane RPC failed
+    (provision_team): HTTP 402: <RAISE text>"``, and a non-JSON body degrades
+    to a bare ``"HTTP 402"`` with no text at all. "Marker absent" therefore
+    means "not the entitlement refusal" — never "an unknown org".
+    """
+    text = str(exc or "")
+    index = text.find(_ONE_FREE_ORG_RPC_MARKER)
+    if index < 0:
+        return None
+    rest = text[index + len(_ONE_FREE_ORG_RPC_MARKER):].split()
+    # RAISE text ends at the org id; take the first token rather than inventing
+    # a value (an empty tail degrades to a 500, not to a 402 naming nothing).
+    return rest[0] if rest else None
+
+
 async def _assert_free_org_allowance(user_id: str, *, pool: str = "auth") -> None:
     """#2810: THE one entitlement chokepoint — raise the structured 402 unless
     *user_id* may own one more free org.
@@ -25106,6 +25135,23 @@ async def _create_org_supabase_lane(cp, name: str, user: dict) -> dict:
     except HTTPException:
         raise
     except Exception as e:
+        # #1981: the DB-level backstop inside `provision_team` refused — a
+        # concurrent worker (uvicorn `--workers N`, or a second machine on the
+        # same project) provisioned this user's free org in the window the
+        # in-process `_org_create_lock` cannot span. It is the SAME rule as the
+        # `_assert_free_org_allowance` gate above, so it must surface as the
+        # SAME structured 402 — never a 500 and never a bare string (#2789: the
+        # dashboard dialog reads `code`).
+        blocking_org_id = _one_free_org_blocker_from_rpc(e)
+        if blocking_org_id is not None:
+            # The eager default-graph init ran BEFORE the RPC, so the refusal
+            # leaves a materialized-but-unowned namespace. Drop it: the org
+            # never existed, so nothing may be left pointing at its graph. The
+            # #3390 write-ahead journal line is what keeps a FAILED drop
+            # attributable to a sweep (it is not rolled back).
+            _drop_org_graph(org_id, graph_name)
+            raise HTTPException(status_code=402,  # noqa: B904
+                                detail=_one_free_org_detail(blocking_org_id))
         # 0011 unique index: a concurrent duplicate name surfaces as a
         # PostgREST 409 → 409 (the ControlPlaneError mapping below is for
         # the registry path).
@@ -38103,6 +38149,16 @@ async def _create_onboarding_org_lane(org: dict, name: str,
         except HTTPException:
             raise
         except Exception as e:
+            # #1981: the DB-level backstop inside `provision_team` refused —
+            # the SAME rule as the `_assert_free_org_allowance` gate this lane
+            # already runs under the per-user lock, so it answers with the SAME
+            # structured 402 the wizard renders its dialog from (#2789).
+            # Without this branch a cross-worker refusal would surface as a 400
+            # "Team create failed: …" and the wizard would show a dead end.
+            blocking_org_id = _one_free_org_blocker_from_rpc(e)
+            if blocking_org_id is not None:
+                raise HTTPException(status_code=402,  # noqa: B904
+                                    detail=_one_free_org_detail(blocking_org_id))
             # 0011 unique index: a duplicate org name surfaces as a
             # PostgREST 409 → 409 (registry sdk.org_create raises
             # ControlPlaneError → 400; 409 is the closer contract — review

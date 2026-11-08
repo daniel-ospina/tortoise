@@ -589,7 +589,331 @@ RESET app.current_org_id;
 RESET ROLE;
 
 -- ============================================================================
--- SECTION 8 — cleanup (audit rows exempt; append-only)
+-- SECTION 8 — #1981: the one-free-org entitlement is ATOMIC inside the RPC
+-- ============================================================================
+-- `provision_team` re-checks the entitlement in its OWN transaction, under a
+-- cross-process advisory lock, so a second APP WORKER (or machine) cannot
+-- provision a second free org for the same person. What is asserted here is the
+-- RPC's DECISION MATRIX and the contract `hosted_api` maps:
+--   * free org + an owned free org already exists  -> refused, marker
+--     `one_free_org_limit:<blocking org>` (NOT a 500), and NOTHING written;
+--   * paid tier (`p_tier <> 'free'`)               -> allowed (the #2789
+--     "buy a subscription for a NEW organization" exit — the gap this backstop
+--     must never close);
+--   * re-provision of the org's OWN id (replay)    -> allowed;
+--   * identity path (p_user_id NULL)               -> allowed (no person);
+--   * collaborator-only, paid, and pending_payment -> allowed (the predicate
+--     mirrors `supabase_control.owned_free_org_ids`, which counts OWNERSHIP of
+--     an org with no active paid subscription and excludes pending_payment);
+--   * past_due / trialing                          -> refused (they ARE paying).
+-- Every fixture id here ends in `-1981` (cleanup at the end of this section,
+-- idempotent re-runs).
+
+DELETE FROM public.api_keys WHERE org_id LIKE '%-1981';
+DELETE FROM public.org_memberships WHERE org_id LIKE '%-1981' OR identity LIKE '%1981%';
+DELETE FROM public.organizations WHERE id LIKE '%-1981';
+DELETE FROM auth.users WHERE email LIKE '%1981test%';
+
+INSERT INTO auth.users (instance_id, id, aud, role, email, encrypted_password,
+                        email_confirmed_at, raw_app_meta_data, raw_user_meta_data)
+VALUES ('00000000-0000-0000-0000-000000000000'::uuid,
+        'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb1'::uuid,
+        'authenticated', 'authenticated', 'user-e-1981test@example.com', '',
+        now(), '{}'::jsonb, '{}'::jsonb),
+       ('00000000-0000-0000-0000-000000000000'::uuid,
+        'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb2'::uuid,
+        'authenticated', 'authenticated', 'user-f-1981test@example.com', '',
+        now(), '{}'::jsonb, '{}'::jsonb),
+       ('00000000-0000-0000-0000-000000000000'::uuid,
+        'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb3'::uuid,
+        'authenticated', 'authenticated', 'user-g-1981test@example.com', '',
+        now(), '{}'::jsonb, '{}'::jsonb),
+       ('00000000-0000-0000-0000-000000000000'::uuid,
+        'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb4'::uuid,
+        'authenticated', 'authenticated', 'user-h-1981test@example.com', '',
+        now(), '{}'::jsonb, '{}'::jsonb),
+       ('00000000-0000-0000-0000-000000000000'::uuid,
+        'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb5'::uuid,
+        'authenticated', 'authenticated', 'user-i-1981test@example.com', '',
+        now(), '{}'::jsonb, '{}'::jsonb),
+       ('00000000-0000-0000-0000-000000000000'::uuid,
+        'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb6'::uuid,
+        'authenticated', 'authenticated', 'user-j-1981test@example.com', '',
+        now(), '{}'::jsonb, '{}'::jsonb)
+ON CONFLICT (id) DO NOTHING;
+
+-- The guard must still BE in the live body: a later `CREATE OR REPLACE` that
+-- re-issues provision_team from an older text would silently drop the backstop
+-- and this suite would otherwise stay green.
+DO $$ BEGIN
+  PERFORM tests.assert(
+    (SELECT prosrc FROM pg_proc
+      WHERE proname='provision_team' AND pronamespace='public'::regnamespace)
+      LIKE '%pg_advisory_xact_lock%',
+    '#1981: provision_team must keep the cross-process advisory lock');
+  PERFORM tests.assert(
+    (SELECT prosrc FROM pg_proc
+      WHERE proname='provision_team' AND pronamespace='public'::regnamespace)
+      LIKE '%one_free_org_limit:%',
+    '#1981: provision_team must keep the one_free_org_limit marker');
+END $$;
+
+-- ── 8a. a user's FIRST free org provisions; the SECOND is refused ───────────
+SELECT public.provision_team(
+    p_user_id  := 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb1'::uuid,
+    p_identity := NULL,
+    p_org_id   := 'org-e-free-1981', p_org_name := 'e-free-1981',
+    p_api_key  := NULL, p_key_hash := NULL, p_lookup_hash := NULL,
+    p_graph_name := 'org_org-e-free-1981');
+
+DO $$
+DECLARE
+  v_msg   text;
+  v_state text;
+BEGIN
+  PERFORM tests.assert(
+    (SELECT count(*) FROM public.organizations
+      WHERE id='org-e-free-1981') = 1,
+    '#1981: the first free org provisions');
+  PERFORM tests.assert(
+    (SELECT count(*) FROM public.org_memberships
+      WHERE org_id='org-e-free-1981'
+        AND user_id='bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb1'::uuid
+        AND role='owner' AND status='active') = 1,
+    '#1981: the first free org gets an ACTIVE OWNER membership');
+
+  BEGIN
+    PERFORM public.provision_team(
+        p_user_id  := 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb1'::uuid,
+        p_identity := NULL,
+        p_org_id   := 'org-e-blocked-1981', p_org_name := 'e-blocked-1981',
+        p_api_key  := NULL, p_key_hash := NULL, p_lookup_hash := NULL,
+        p_graph_name := 'org_org-e-blocked-1981');
+    RAISE EXCEPTION 'ASSERTION FAILED: #1981 second free org must be refused';
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_msg = MESSAGE_TEXT, v_state = RETURNED_SQLSTATE;
+    IF v_state <> 'PT402' THEN
+      RAISE;  -- an unrelated failure must not read as the gate firing
+    END IF;
+    PERFORM tests.assert(
+      v_msg = 'one_free_org_limit:org-e-free-1981',
+      '#1981: the refusal must carry the marker + the BLOCKING org id, got: '
+      || coalesce(v_msg, '<null>'));
+  END;
+END $$;
+
+-- atomicity: the refusal wrote NOTHING (the gate runs before the first INSERT)
+DO $$ BEGIN
+  PERFORM tests.assert(
+    (SELECT count(*) FROM public.organizations
+      WHERE id='org-e-blocked-1981') = 0,
+    '#1981: a refused provision must write NO organizations row');
+  PERFORM tests.assert(
+    (SELECT count(*) FROM public.org_memberships
+      WHERE org_id='org-e-blocked-1981') = 0,
+    '#1981: a refused provision must write NO membership row');
+END $$;
+
+-- ── 8b. replay of the org's OWN provision stays idempotent ──────────────────
+-- The target org id is EXCLUDED from the predicate (`m.org_id <> p_org_id`), so
+-- a retry that re-lands an org the user already owns is not mistaken for a
+-- second allowance. (Sequenced BEFORE the paid provision below: once a user
+-- owns another counted org, even a self-replay is refused — which is exactly
+-- what the Python gate does, since it counts owned orgs without knowing the
+-- lane's target.)
+SELECT public.provision_team(
+    p_user_id  := 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb1'::uuid,
+    p_identity := NULL,
+    p_org_id   := 'org-e-free-1981', p_org_name := 'e-free-1981',
+    p_api_key  := NULL, p_key_hash := NULL, p_lookup_hash := NULL,
+    p_graph_name := 'org_org-e-free-1981');
+
+-- ── 8c. the PAID exit (#2789 design 2) is never gated ───────────────────────
+SELECT public.provision_team(
+    p_user_id  := 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb1'::uuid,
+    p_identity := NULL,
+    p_org_id   := 'org-e-paid-1981', p_org_name := 'e-paid-1981',
+    p_api_key  := NULL, p_key_hash := NULL, p_lookup_hash := NULL,
+    p_graph_name := 'org_org-e-paid-1981',
+    p_tier     := 'pro');
+
+DO $$ BEGIN
+  PERFORM tests.assert(
+    (SELECT count(*) FROM public.organizations
+      WHERE id IN ('org-e-paid-1981','org-e-free-1981')) = 2,
+    '#1981: the paid exit + the self-replay must both land');
+END $$;
+
+-- ── 8d. the IDENTITY path has no person to gate ────────────────────────────
+-- (Distinct identities on purpose: `uq_member_identity_active` already allows an
+-- identity ONE active owner org — that anchor, not the entitlement, is what keeps
+-- one person from accumulating orgs on this path.)
+SELECT public.provision_team(
+    p_user_id  := NULL, p_identity := 'anon-1981-identity-a',
+    p_org_id   := 'org-ident-1981', p_org_name := 'ident-1981',
+    p_api_key  := NULL, p_key_hash := NULL, p_lookup_hash := NULL,
+    p_graph_name := 'org_org-ident-1981');
+SELECT public.provision_team(
+    p_user_id  := NULL, p_identity := 'anon-1981-identity-b',
+    p_org_id   := 'org-ident2-1981', p_org_name := 'ident2-1981',
+    p_api_key  := NULL, p_key_hash := NULL, p_lookup_hash := NULL,
+    p_graph_name := 'org_org-ident2-1981');
+
+DO $$ BEGIN
+  PERFORM tests.assert(
+    (SELECT count(*) FROM public.organizations
+      WHERE id IN ('org-ident-1981','org-ident2-1981')) = 2,
+    '#1981: the identity path is not gated (no user holds an allowance)');
+END $$;
+
+-- ── 8e. collaborator-only user CAN own their own free org (#2789's trap) ────
+SELECT public.provision_team(
+    p_user_id  := 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb2'::uuid,
+    p_identity := NULL,
+    p_org_id   := 'org-f-free-1981', p_org_name := 'f-free-1981',
+    p_api_key  := NULL, p_key_hash := NULL, p_lookup_hash := NULL,
+    p_graph_name := 'org_org-f-free-1981');
+INSERT INTO public.org_memberships (user_id, org_id, org_name, graph_name,
+                                    role, status)
+VALUES ('bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb3'::uuid, 'org-f-free-1981',
+        'f-free-1981', 'org_org-f-free-1981', 'member', 'active')
+ON CONFLICT (user_id, org_id) DO NOTHING;
+SELECT public.provision_team(
+    p_user_id  := 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb3'::uuid,
+    p_identity := NULL,
+    p_org_id   := 'org-g-free-1981', p_org_name := 'g-free-1981',
+    p_api_key  := NULL, p_key_hash := NULL, p_lookup_hash := NULL,
+    p_graph_name := 'org_org-g-free-1981');
+
+DO $$ BEGIN
+  PERFORM tests.assert(
+    (SELECT count(*) FROM public.organizations
+      WHERE id='org-g-free-1981') = 1,
+    '#1981: a COLLABORATOR on a free org still provisions their own');
+END $$;
+
+-- ── 8f. subscription_status decides: paid/pending allow, paying refuses ─────
+-- paid (active) owned org does not consume the allowance
+SELECT public.provision_team(
+    p_user_id  := 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb4'::uuid,
+    p_identity := NULL,
+    p_org_id   := 'org-h-free-1981', p_org_name := 'h-free-1981',
+    p_api_key  := NULL, p_key_hash := NULL, p_lookup_hash := NULL,
+    p_graph_name := 'org_org-h-free-1981');
+UPDATE public.organizations SET subscription_status='active'
+ WHERE id='org-h-free-1981';
+SELECT public.provision_team(
+    p_user_id  := 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb4'::uuid,
+    p_identity := NULL,
+    p_org_id   := 'org-h2-free-1981', p_org_name := 'h2-free-1981',
+    p_api_key  := NULL, p_key_hash := NULL, p_lookup_hash := NULL,
+    p_graph_name := 'org_org-h2-free-1981');
+
+-- pending_payment is not real yet — it does not consume the allowance
+SELECT public.provision_team(
+    p_user_id  := 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb5'::uuid,
+    p_identity := NULL,
+    p_org_id   := 'org-i-free-1981', p_org_name := 'i-free-1981',
+    p_api_key  := NULL, p_key_hash := NULL, p_lookup_hash := NULL,
+    p_graph_name := 'org_org-i-free-1981');
+UPDATE public.organizations SET subscription_status='pending_payment'
+ WHERE id='org-i-free-1981';
+SELECT public.provision_team(
+    p_user_id  := 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb5'::uuid,
+    p_identity := NULL,
+    p_org_id   := 'org-i2-free-1981', p_org_name := 'i2-free-1981',
+    p_api_key  := NULL, p_key_hash := NULL, p_lookup_hash := NULL,
+    p_graph_name := 'org_org-i2-free-1981');
+
+DO $$ BEGIN
+  PERFORM tests.assert(
+    (SELECT count(*) FROM public.organizations
+      WHERE id IN ('org-h2-free-1981','org-i2-free-1981')) = 2,
+    '#1981: a paid org and a pending_payment org do not consume the allowance');
+END $$;
+
+-- past_due / trialing ARE paying (`_BILLING_ACTIVE_STATUSES`): like `active`
+-- they do NOT consume the allowance — parity with `owned_free_org_ids` and the
+-- #1877 twin, both of which exclude the whole paying window.
+SELECT public.provision_team(
+    p_user_id  := 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb6'::uuid,
+    p_identity := NULL,
+    p_org_id   := 'org-j-pd-1981', p_org_name := 'j-pd-1981',
+    p_api_key  := NULL, p_key_hash := NULL, p_lookup_hash := NULL,
+    p_graph_name := 'org_org-j-pd-1981');
+UPDATE public.organizations SET subscription_status='past_due'
+ WHERE id='org-j-pd-1981';
+SELECT public.provision_team(
+    p_user_id  := 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb6'::uuid,
+    p_identity := NULL,
+    p_org_id   := 'org-j-tr-1981', p_org_name := 'j-tr-1981',
+    p_api_key  := NULL, p_key_hash := NULL, p_lookup_hash := NULL,
+    p_graph_name := 'org_org-j-tr-1981');
+UPDATE public.organizations SET subscription_status='trialing'
+ WHERE id='org-j-tr-1981';
+SELECT public.provision_team(
+    p_user_id  := 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb6'::uuid,
+    p_identity := NULL,
+    p_org_id   := 'org-j-3-1981', p_org_name := 'j-3-1981',
+    p_api_key  := NULL, p_key_hash := NULL, p_lookup_hash := NULL,
+    p_graph_name := 'org_org-j-3-1981');
+
+DO $$ BEGIN
+  PERFORM tests.assert(
+    (SELECT count(*) FROM public.organizations
+      WHERE id IN ('org-j-pd-1981','org-j-tr-1981','org-j-3-1981')) = 3,
+    '#1981: past_due / trialing are paying — they do not consume the allowance');
+END $$;
+
+-- 'canceled' is NOT paying, so it COUNTS as free: this pins that the backstop
+-- preserves the acceptance ruled on #2789 §2 (create A → buy B → cancel B ends
+-- with two free orgs) instead of silently closing it into a refusal.
+UPDATE public.organizations SET subscription_status='canceled'
+ WHERE id='org-i2-free-1981';
+DO $$
+DECLARE
+  v_msg   text;
+  v_state text;
+BEGIN
+  BEGIN
+    PERFORM public.provision_team(
+        p_user_id  := 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb5'::uuid,
+        p_identity := NULL,
+        p_org_id   := 'org-i3-free-1981', p_org_name := 'i3-free-1981',
+        p_api_key  := NULL, p_key_hash := NULL, p_lookup_hash := NULL,
+        p_graph_name := 'org_org-i3-free-1981');
+    RAISE EXCEPTION 'ASSERTION FAILED: #1981 a canceled org must still count as free';
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_msg = MESSAGE_TEXT, v_state = RETURNED_SQLSTATE;
+    IF v_state <> 'PT402' THEN
+      RAISE;
+    END IF;
+    PERFORM tests.assert(
+      v_msg = 'one_free_org_limit:org-i2-free-1981',
+      '#1981: canceled must count as free (blocking org reported: '
+      || coalesce(v_msg, '<null>') || ')');
+  END;
+END $$;
+
+-- ============================================================================
+-- SECTION 9 — cleanup (audit rows exempt; append-only)
+-- ============================================================================
+DELETE FROM public.api_keys WHERE org_id LIKE '%-1981';
+DELETE FROM public.org_memberships WHERE org_id LIKE '%-1981' OR identity LIKE '%1981%';
+DELETE FROM public.organizations WHERE id LIKE '%-1981';
+DELETE FROM auth.users WHERE email LIKE '%1981test%';
+
+DO $$ BEGIN
+  PERFORM tests.assert(
+    NOT EXISTS (SELECT 1 FROM public.organizations WHERE id LIKE '%-1981'),
+    'cleanup: no #1981 fixture organizations left');
+  PERFORM tests.assert(
+    NOT EXISTS (SELECT 1 FROM public.org_memberships WHERE org_id LIKE '%-1981'),
+    'cleanup: no #1981 fixture memberships left');
+END $$;
+
+-- ============================================================================
+-- SECTION 10 — cleanup (audit rows exempt; append-only)
 -- ============================================================================
 DELETE FROM public.api_keys WHERE org_id LIKE '%-770';
 DELETE FROM public.org_memberships WHERE org_id LIKE '%-770' OR identity LIKE '%770%';
