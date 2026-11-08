@@ -4508,11 +4508,12 @@ def _doc_section(text: str, start: str, end: str) -> str:
 #   "Reported by the walk: a nested `def`'s decorators and parameter defaults,
 #    which is not what an earlier draft said."
 #   "outside the method body, the walk reports a nested `def`'s …"
-# Requiring the negation to sit within two words of a COVERAGE verb closes every
-# one of THOSE — the stray-negation class, where the cue governed something other
-# than the claim. ⛔ It does NOT close every inverse, and this comment used to say
-# it did (#11437 review, round 6, P1): a negation that governs a SUBORDINATE
-# clause still satisfies the window while the sentence asserts coverage —
+# Requiring the negation to sit within two words of a COVERAGE verb closes THOSE
+# three — the strays whose cue governed NO coverage verb at all. ⛔ IT CLOSES ONLY
+# THOSE, and two later review rounds have had to narrow this claim (#11437 review,
+# rounds 6 and 14, P1 and P2). It does not close an inverse whose negation DOES
+# govern a coverage verb: a negation that governs a SUBORDINATE clause still
+# satisfies the window while the sentence asserts coverage —
 # measured GREEN, and now the four rows of the clause-scope class in
 # `declared_open`:
 #   "…it is not the closure walk that reaches them"   (`walk` is ITSELF a
@@ -4526,12 +4527,12 @@ def _doc_section(text: str, start: str, end: str) -> str:
 # Those need the predicate to know the sentence's SUBJECT, to read a second
 # negation, or to resolve a preposition — scope, not vocabulary — so they are
 # DECLARED and not claimed closed.
-# Window measured at THIS head over all 47 `must_red` rows: 0 and 2 leave the
-# must_red set fully RED (0/47 leak) and keep the real doc a HIT; **3 opens 2 of
-# 47**, starting with "are not missed by the walk". ⛔ Window 0 is not free
-# either, one set over: it wrongly REDS **10** of the 16 `declared_open` rows.
+# Window measured at THIS head over all 49 `must_red` rows: 0 and 2 leave the
+# must_red set fully RED (0/49 leak) and keep the real doc a HIT; **3 opens 2 of
+# 49**, starting with "are not missed by the walk". ⛔ Window 0 is not free
+# either, one set over: it wrongly REDS **10** of the 22 `declared_open` rows.
 # And since #11437's round-6 clause-scope rows landed, **window 1 is no longer
-# clean at all** — it wrongly REDS 4 of them: the two PSEUDO-CLEFT rows (`walk` is
+# clean at all** — it wrongly REDS 4 of the 22: the two PSEUDO-CLEFT rows (`walk` is
 # itself a coverage word, so the cleft's own SUBJECT satisfies the window and the
 # predicate needs the second word to find the real verb), the `only ever` ADVERB
 # row, and the NOUN complement (`not only the walk's business`). ⚠️ The double-negation and `without`-framed rows are GREEN at window
@@ -4549,21 +4550,37 @@ def _doc_section(text: str, start: str, end: str) -> str:
 # ⛔ EVERY figure in this paragraph was re-derived by MEASUREMENT at the head that
 # added the round-9/10/11 rows, because the counts above are inputs and a stale
 # input misreports coverage even when the verdict is right (#11437 review, P3).
-# The `must_red` set is **47** at this head, not the 29 those rounds inherited: the
-# four verdicts reproduced unchanged at 47/16/15 — window 0 leaks 0/47 and reds
-# 10/16 `declared_open`; window 1 reds 4/16 (the same four identities named
+# The `must_red` set is **49** at this head, not the 29 those rounds inherited: the
+# four verdicts reproduced unchanged at 49/22/16 — window 0 leaks 0/49 and reds
+# 10/22 `declared_open`; window 1 reds 4/22 (the same four identities named
 # above); window 3 opens exactly the two rows named and wrongly GREENs exactly
-# 1/15 `declared_blocks` (`coverage verb outside the walk/visit/reach/report`).
-# ⛔ Round 12 added SEVEN rows (the six cue-only pseudo-negations and `_DEFEATED`'s
-# `incorrect`) and round 13 SIX more (the `un…` privative alternation's unrowed
-# words), each previously pinned by pattern text alone — see `must_red` — and the
-# sweep was RE-RUN over all four sets at BOTH 41/13/16/15 and 47/13/16/15: every
-# verdict above is byte-for-byte the same, only the denominators moved
-# (0/34 -> 0/41 -> 0/47, 2 of 34 -> 2 of 41 -> 2 of 47). Stated because "the rows
-# grew and the verdicts did not" is exactly the kind of claim this paragraph
-# exists to have measured rather than assumed.
+# 1/16 `declared_blocks` (`coverage verb outside the walk/visit/reach/report`).
+# ⛔ Round 12 added seven rows of `must_red` (the six cue-only pseudo-negations and
+# `_DEFEATED`'s `incorrect`), round 13 six more (the `un…` privative alternation's
+# unrowed words) and round 14 nine more (two `must_red`, six `declared_open` and
+# one `declared_blocks`), each previously pinned by pattern text alone — see
+# `must_red` — and the sweep was RE-RUN over all four sets at BOTH 41/13/16/15 and
+# 47/13/16/15: every verdict above is byte-for-byte the same, only the
+# denominators moved (0/34 -> 0/41 -> 0/47 -> 0/49, 2 of 34 -> 2 of 41 ->
+# 2 of 47 -> 2 of 49). Stated because "the rows grew and the verdicts did not" is
+# exactly the kind of claim this paragraph exists to have measured rather than
+# assumed. ⚠️ The historical deltas are written as history, not as live counts
+# (the file's convention: a quotation must not match the live-figure pin below).
 # Re-derive with the substring substitution on `_NEGATION_GOVERNS`'s window
 # (`{0,2}?` -> `{0,N}?`), re-evaluating ALL FOUR sets — never `must_red` alone.
+# ⛔ AND THIS PARAGRAPH NOW HAS AN EXECUTOR (#11437 review, round 14, P2): the
+# four lines below are parsed by the pin in
+# `test_the_residual_pin_separates_the_claim_from_its_inverse` and compared to a
+# sweep it RE-RUNS. Before that pin, fifteen single-figure mutations of this
+# paragraph (0/47 -> 0/48, 3 opens 2 -> 3 opens 3, 10/16 -> 11/16, 4/16 -> 5/16,
+# 1/15 -> 2/15, 47 -> 48, …) each left the whole file GREEN — the denominators
+# ARE pinned by the `N `must_red` rows` sentence, but the verdicts read off them
+# were not, in the paragraph whose whole purpose is to record why 2 is the only
+# clean window. Edit a figure here and the pin reds; re-derive it by measurement:
+#   window 0: must_red leak 0/49; declared_open wrongly red 10/22; declared_blocks wrongly green 0/16; real doc HIT
+#   window 1: must_red leak 0/49; declared_open wrongly red 4/22; declared_blocks wrongly green 0/16; real doc HIT
+#   window 2: must_red leak 0/49; declared_open wrongly red 0/22; declared_blocks wrongly green 0/16; real doc HIT
+#   window 3: must_red leak 2/49; declared_open wrongly red 0/22; declared_blocks wrongly green 1/16; real doc HIT
 # ⛔ COST, taken deliberately: window 2 makes "…are never TOUCHED by the walk"
 # RED, because `touched` is not in the coverage list — a false block bought for
 # that false pass, which is the trade this predicate always takes.
@@ -4602,8 +4619,8 @@ _NEGATION_GOVERNS = re.compile(
     r"(?:walk|visit|reach|report)(?:s|es|ed|ing)?\b")
 # ⛔ `_COVERAGE` is RETAINED DELIBERATELY AND IS CURRENTLY IMPLIED, and saying so
 # is the point (#11437 review, P3). Measured: `_NEGATION_GOVERNS` already requires
-# one of the same four verbs AFTER the negation, so on all 121 candidate sentences
-# (the 91 rows across the four sets — 47 / 13 / 16 / 15 — plus the 30 sentences of
+# one of the same four verbs AFTER the negation, so on all 130 candidate sentences
+# (the 100 rows across the four sets — 49 / 13 / 22 / 16 — plus the 30 sentences of
 # the real §3 under
 # this predicate's own `split(". ")` segmentation) there is no case where the
 # governance test hits and this one does not — dropping the term from
@@ -4672,7 +4689,19 @@ _NEGATION_GOVERNS = re.compile(
 # `must_stay_green`, `declared_open` and `declared_blocks` row unmoved.
 _AFFIRMED = re.compile(
     r"\binside the walk\b|\btherefore reported\b|\bskipped\b|\bexcept that\b"
-    r"|\bnot\s+(?:outside|exempt|excluded|omitted|left|out\s+of\s+scope|fail)"
+    # ⛔ THE CUE IS `(?:not|never)`, LIKE EVERY SIBLING ARM (#11437 review,
+    # round 14, P2). This arm was the only one in the alternation that spelled a
+    # single literal cue, so a reverser that IS in the vocabulary, governed by
+    # `never`, was accepted as a valid residual while asserting coverage —
+    # measured GREEN, the false-PASS direction this file says matters:
+    #   "a nested `def`'s decorators and parameter defaults are never outside
+    #    the walk"                                    (`never outside` = inside)
+    #   "the walk never fails to report a nested `def`'s decorators and
+    #    parameter defaults"                           (`never fails` = always)
+    # Both are RED with this spelling and GREEN with the old one; zero rows move
+    # in any of the four sets, because the arm is an AND-side refusal. The two
+    # shapes are now `must_red` rows, so a revert reds instead of re-opening them.
+    r"|\b(?:not|never)\s+(?:outside|exempt|excluded|omitted|left|out\s+of\s+scope|fail)"
     r"|\b(?:not|never)\s+un(?:visited|reported|reached|walked|covered|mentioned|seen)\b"
     r"|\b(?:not|never)\s+(?:always|necessarily|certain|certainly|sure|clear"
     r"|definitely|conclusively|guaranteed)\b"
@@ -4868,7 +4897,7 @@ def _residual_sentences(s3: str) -> list[str]:
       visited"` and `"the walk does not, as an earlier draft said, visit …"` both
       red (#11437 review, round 6, P2). Both are ROWS in `declared_blocks` below.
       ⛔ This is the price of the window itself, and widening it to 3 is measured
-      to open 2 of the 47 `must_red` rows (`not` + a non-coverage verb, and `not`
+      to open 2 of the 49 `must_red` rows (`not` + a non-coverage verb, and `not`
       governing an adjective) and to wrongly GREEN 1 `declared_blocks` row, so it
       is declared rather than paid for in the other direction;
     * an HONEST statement stated inside a CONCESSIVE whose cue happens to sit next
@@ -5221,6 +5250,18 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
         "inverse: not omitted from the walk":
             "a nested `def`'s decorators and parameter defaults are not omitted "
             "from the walk; the walk reports them",
+        # ⛔ THE SAME CLASS, CUED WITH `never` (#11437 review, round 14, P2).
+        # Both were measured GREEN at the previous head because this arm's cue was
+        # the single literal `not` while every sibling spells `(?:not|never)` — so
+        # its closure of the negated-reverser class was a claim about one cue
+        # word, not about the class. Each row goes GREEN when `not` is restored in
+        # place of `(?:not|never)`, which is the mutant that re-opened them.
+        "inverse: `never outside the walk` (negated reverser, `never` cue)":
+            "a nested `def`'s decorators and parameter defaults are never "
+            "outside the walk",
+        "inverse: `never fails to report` (negated reverser, `never` cue)":
+            "the walk never fails to report a nested `def`'s decorators and "
+            "parameter defaults",
         # ⛔ The NEGATED PRIVATIVE — a double negative that asserts coverage.
         # #11443 measured all three of these GREEN (#11437 review, P1).
         # ⚠️ MEASURED, and the correction matters (#11437 review, P3): the two
@@ -5577,6 +5618,33 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
         "open concessive: a NOUN complement (`not only the walk's business`)":
             "a nested `def`'s decorators and parameter defaults are not only the "
             "walk's business — the walk visits them",
+        # ⛔ THE STRAY-NEGATION CLASS IS NOT CLOSED BY THE GOVERNANCE WINDOW, and
+        # the paragraph that claims it is has been corrected beside this set
+        # (#11437 review, round 14, P2). The window asks only that SOME negation
+        # sit within two words of SOME coverage verb — it does not ask that the
+        # negation govern the CLAIM'S object, nor that the claim be unqualified.
+        # Every row below was measured GREEN at the head that reported it, and
+        # each ASSERTS that the walk covers the subject, so each is an inverse
+        # the pin accepts — the direction that matters.
+        "open scope: negation governs a DIFFERENT object of the coverage verb":
+            "the body walk does not report the closure's frames, but it does "
+            "report a nested `def`'s decorators and parameter defaults",
+        "open scope: two walks named, the second asserts coverage":
+            "the closure walk does not report decorators and parameter "
+            "defaults; the body walk reports a nested `def`'s decorators and "
+            "parameter defaults",
+        "open scope: a TEMPORAL marker bounds the negation (`until`)":
+            "the walk does not report a nested `def`'s decorators and parameter "
+            "defaults until the outer method runs",
+        "open scope: a TEMPORAL marker bounds the negation (`unless`)":
+            "the walk does not report a nested `def`'s decorators and parameter "
+            "defaults unless the outer method runs",
+        "open scope: a TEMPORAL marker bounds the negation (`once`)":
+            "the walk does not report a nested `def`'s decorators and parameter "
+            "defaults once the outer method runs",
+        "open scope: an EXCLUSIVE complement (`anything but`)":
+            "the walk does not visit anything but a nested `def`'s decorators "
+            "and parameter defaults",
     }
     for label, sentence in declared_open.items():
         assert sentence != original, f"decoy row {label!r} merely restates the claim"
@@ -5593,6 +5661,16 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
     declared_blocks = {
         "false block: coverage verb outside the walk/visit/reach/report list":
             "nested def decorators and defaults are never touched by the walk",
+        # ⛔ AND THE CUE'S SPELLING (#11437 review, round 14, P3). The cue list
+        # is `\b(?:not|never|outside)\b`, so an honest exclusion whose negation
+        # is `cannot` (or a contraction) has none of those tokens and reds. The
+        # bullet above enumerates three SPELLINGS, so a fourth was neither
+        # declared nor closed — an inference, not a result. The census doc's own
+        # voice uses `cannot` three times, so a §3 rewording in its register lands
+        # here; the row makes that a measured false block rather than a gap.
+        "false block: the negation cue is spelled `cannot` (outside not/never/outside)":
+            "the walk cannot reach a nested `def`'s decorators and parameter "
+            "defaults",
         "false block: `never inside the walk`":
             "nested def decorators and defaults are never inside the walk",
         # ⛔ Both measured RED and declared open in the docstring above (#11437
@@ -5758,6 +5836,138 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
             f"count, so re-measure the sweep at {len(must_red)} before "
             f"restating it")
 
+    # ⛔ THE WINDOW SWEEP IS RE-RUN HERE, AND THE PARAGRAPH IS READ AS A RESULT
+    # (#11437 review, round 14, P2 — category A, a false PASS on the record that
+    # justifies the window). The paragraph above states a sweep whose verdicts
+    # are the reason window 2 ships; measured before this pin, FIFTEEN
+    # single-figure mutations of it stayed GREEN — `0/47 -> 0/48`,
+    # `3 opens 2 -> 3 opens 3`, `10/16 -> 11/16`, `4/16 -> 5/16`, `1/15 -> 2/15`,
+    # `**47** -> **48**` and the rest — because the only figures the pins read were
+    # the two `N `must_red` rows` sentences and the census tuple. The denominators
+    # were pinned; the VERDICTS read off them were a hand-measurement. So the
+    # sweep is not restated, it is re-derived: the `{0,N}?` substitution is applied
+    # to `_NEGATION_GOVERNS` and every window is re-evaluated over ALL FOUR sets,
+    # then compared to the four lines the paragraph states.
+    _census_doc_path = (Path(__file__).resolve().parent.parent / "docs" / "epics"
+                        / "2026-11-04-5090-vector-layer" / "S3-VECTOR-CENSUS.md")
+    _real_s3_text = _doc_section(
+        _census_doc_path.read_text(encoding="utf-8"), "## 3.", "## 4.")
+    _window_pattern = _NEGATION_GOVERNS.pattern
+    assert "{0,2}?" in _window_pattern, (
+        "the governance window is no longer `{0,2}?`, so the substitution below "
+        "would replace nothing and measure the SAME verdict four times under "
+        "four names — the vacuous-pin shape this file reds elsewhere")
+    _measured_sweep = {}
+    for _window in (0, 1, 2, 3):
+        monkeypatch.setattr(
+            sys.modules[__name__], "_NEGATION_GOVERNS",
+            re.compile(_window_pattern.replace("{0,2}?", "{0,%d}?" % _window)))
+        _measured_sweep[_window] = (
+            sum(1 for _s in must_red.values() if not _red(_s)),
+            sum(1 for _s in declared_open.values() if _red(_s)),
+            sum(1 for _s in declared_blocks.values() if not _red(_s)),
+            "HIT" if _residual_sentences(_real_s3_text) else "MISS",
+        )
+    monkeypatch.setattr(sys.modules[__name__], "_NEGATION_GOVERNS",
+                        re.compile(_window_pattern))
+    _stated_sweep = re.findall(
+        r"window (\d): must_red leak (\d+)/(\d+); declared_open wrongly red "
+        r"(\d+)/(\d+); declared_blocks wrongly green (\d+)/(\d+); real doc "
+        r"(HIT|MISS)", _own_source)
+    assert len(_stated_sweep) == 4, (
+        f"the window-sweep table in this file has {len(_stated_sweep)} of the "
+        f"four lines the pin parses (windows 0-3 in the form 'window N: "
+        f"must_red leak a/b; declared_open wrongly red c/d; declared_blocks "
+        f"wrongly green e/f; real doc HIT|MISS'), so the verdicts that justify "
+        f"this window are unpinned — restore the table or retire this pin "
+        f"deliberately")
+    for (_window, _leak, _leak_of, _open, _open_of,
+         _blocked, _blocked_of, _hit) in _stated_sweep:
+        _want = (int(_leak), int(_open), int(_blocked), _hit)
+        assert _want == _measured_sweep[int(_window)], (
+            f"window {_window} is stated as must_red leak {_leak}/{_leak_of}, "
+            f"declared_open wrongly red {_open}/{_open_of}, declared_blocks "
+            f"wrongly green {_blocked}/{_blocked_of}, real doc {_hit} — and the "
+            f"re-run measures {_measured_sweep[int(_window)]}. Re-measure, do "
+            f"not re-word (#11437 review, round 14, P2)")
+        assert (int(_leak_of), int(_open_of), int(_blocked_of)) == \
+            (len(must_red), len(declared_open), len(declared_blocks)), (
+            f"window {_window}'s denominators are stated as "
+            f"{_leak_of}/{_open_of}/{_blocked_of} and the sets hold "
+            f"{len(must_red)}/{len(declared_open)}/{len(declared_blocks)}")
+    # …and the paragraph's CONCLUSION — that 2 is the only clean window — is a
+    # measurement, not a summary. A window is clean when no `must_red` row leaks,
+    # no `declared_open` row is wrongly red and the real doc is still a HIT.
+    _clean_windows = [
+        _w for _w, (_l, _o, _b, _h) in _measured_sweep.items()
+        if (_l, _o, _h) == (0, 0, "HIT")]
+    assert _clean_windows == [2], (
+        f"the paragraph claims 2 is the ONLY clean window and the re-run finds "
+        f"{_clean_windows} — recompute the sweep before shipping the window")
+
+    # ⛔ AND THE CANDIDATE-SENTENCE TOTAL, THE ONE POPULATION THE `_COVERAGE`
+    # KEEP-DECISION RESTS ON (#11437 review, round 14, P3). The paragraph above
+    # justifies retaining `_COVERAGE` with "on all N candidate sentences there is
+    # no case where the governance test hits and this one does not", where N is
+    # the four sets PLUS the real §3's `split(". ")` sentences. Both figures were
+    # re-cut by ARITHMETIC each round and read by no assertion: measured, `121 ->
+    # 122` and `30 -> 31` each left the file GREEN. They are derived here, so a
+    # row or a §3 sentence moves them visibly.
+    _s3_sentence_count = len(_real_s3_text.lower().split(". "))
+    _stated_candidates = re.findall(r"on all (\d+) candidate sentences", _own_source)
+    assert _stated_candidates, (
+        "the `_COVERAGE` justification sentence ('on all N candidate sentences') "
+        "is gone, so the population it claims is unpinned")
+    for _figure in _stated_candidates:
+        assert int(_figure) == sum(_sizes) + _s3_sentence_count, (
+            f"the `_COVERAGE` paragraph states {_figure} candidate sentences and "
+            f"the derivation gives {sum(_sizes)} rows + {_s3_sentence_count} §3 "
+            f"sentences = {sum(_sizes) + _s3_sentence_count} — re-measure, do "
+            f"not re-add")
+    _stated_s3_sentences = re.findall(r"plus the (\d+) sentences of", _own_source)
+    assert _stated_s3_sentences, (
+        "the candidate-total sentence no longer states its §3 addend")
+    for _figure in _stated_s3_sentences:
+        assert int(_figure) == _s3_sentence_count, (
+            f"the paragraph states {_figure} §3 sentences and the real doc's own "
+            f"`split('. ')` segmentation gives {_s3_sentence_count}")
+
+    # ⛔ AND THE TWO ALTERNATION SIZES THE PROSE USES AS ARGUMENTS (#11437
+    # review, round 14, P3). "The `un…` list has SEVEN executors, one per word"
+    # and "of this alternation's nine cues, exactly one is the termset's" are
+    # counts a reader uses to decide whether an arm is already covered — the same
+    # class as the NINE/FIVE tally above, and unpinned until now (measured: every
+    # one of them could be changed by one and the file stayed GREEN). They are
+    # DERIVED out of the shipped pattern, so adding or removing a cue without
+    # touching the prose reds.
+    _count_words = {3: "THREE", 4: "FOUR", 5: "FIVE", 6: "SIX", 7: "SEVEN",
+                    8: "EIGHT", 9: "NINE", 10: "TEN"}
+    _word_counts = {_w: _n for _n, _w in _count_words.items()}
+    _privative = re.search(r"un\(\?:(\w+(?:\|\w+)*)\)", _AFFIRMED.pattern)
+    assert _privative, (
+        "the `un…` privative alternation is no longer a single group of "
+        "`word|word|…`, so its size cannot be derived — the 'SEVEN executors' "
+        "claim is then unpinned")
+    _privative_count = len(_privative.group(1).split("|"))
+    _pseudo = re.search(r"\(\?:(always\|necessarily\|[^)]*)\)", _AFFIRMED.pattern)
+    assert _pseudo, (
+        "the pseudo-negation alternation is no longer a single group, so the "
+        "'nine cues' claims cannot be derived")
+    _pseudo_count = len(_pseudo.group(1).split("|"))
+    for _pattern, _derived in (
+            (r"`un…` list has (\w+) executors", _privative_count),
+            (r"alternation's (\w+) cues", _pseudo_count),
+            (r"`_AFFIRMED`'s (\w+) pseudo-negations", _pseudo_count),
+            (r"the other (\w+) — are this file", _pseudo_count - 1)):
+        _stated = re.findall(_pattern, _own_source)
+        assert _stated, (
+            f"the sentence matching {_pattern!r} is gone, so the count it "
+            f"states is unpinned — restore it or retire this pin deliberately")
+        for _figure in _stated:
+            assert _word_counts.get(_figure.upper()) == _derived, (
+                f"a sentence in this file states {_figure} where the pattern "
+                f"holds {_derived} — re-derive the count from `_AFFIRMED`")
+
     # …and the FIVE alternatives this test claims an executor for are asserted to
     # HAVE one: with that alternative removed from `_AFFIRMED`, at least one
     # `must_red` row must go back to GREEN. `_AFFIRMED` carries NINE top-level
@@ -5862,7 +6072,7 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
     _unasserted_arms = (
         r"\binside the walk\b",
         r"\bexcept that\b",
-        r"\bnot\s+(?:outside|exempt|excluded|omitted|left|out\s+of\s+scope|fail)",
+        r"\b(?:not|never)\s+(?:outside|exempt|excluded|omitted|left|out\s+of\s+scope|fail)",
         r"\b(?:not|never)\s+(?:always|necessarily|certain|certainly|sure|clear"
         r"|definitely|conclusively|guaranteed)\b")
     assert _top_level_alternatives(_pinned_affirmed.pattern) == 9, (
