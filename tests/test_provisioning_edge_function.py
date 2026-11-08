@@ -444,6 +444,61 @@ def test_edge_function_refuses_browser_origin_calls():
     )
 
 
+_CONSOLE_CALL_RE = re.compile(r"console\s*\.\s*(?:error|warn|log|info|debug)\s*\(")
+
+
+def _console_call_arguments(code: str) -> str:
+    """The ARGUMENTS of every `console.*(…)` call in `code`, concatenated.
+
+    Why the monitor's literals are checked HERE and not against the whole file:
+    the monitor greps `function_logs`, and Supabase fills that table with
+    CONSOLE OUTPUT only — an HTTP response body is never a log line
+    (`function_edge_logs` holds request/response *metadata*, not bodies). So a
+    literal that exists only inside a `json({ error: … })` body can never
+    satisfy a log grep.
+
+    A plain `lit in code` substring test cannot tell those two apart, and it was
+    MEASURED green over a live inert arm: the monitor greps
+    `Provisioning misconfigured`, which appeared ONLY in the 500 response body,
+    while the line actually logged said `FASTAPI_URL is not set`. The arm could
+    never fire while the guard reported it healthy — the same class of defect
+    the guard's own docstring says it exists to prevent, one literal further on.
+
+    Balanced-paren and string-aware: an argument may be a concatenation
+    (`"a" + x`), a template literal, or a nested call (`String(e)`), and a `)`
+    inside a string must not close the span early. Callers strip comments first
+    (`_strip_ts_comments`), so a `//` inside an argument cannot swallow the rest
+    of the line.
+    """
+    spans: list[str] = []
+    for match in _CONSOLE_CALL_RE.finditer(code):
+        start = match.end()
+        depth = 1
+        i, n = start, len(code)
+        quote: str | None = None
+        while i < n and depth:
+            ch = code[i]
+            if quote:
+                if ch == "\\":
+                    i += 2
+                    continue
+                if ch == quote:
+                    quote = None
+                i += 1
+                continue
+            if ch in "\"'`":
+                quote = ch
+                i += 1
+                continue
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+            i += 1
+        spans.append(code[start : i - 1 if depth == 0 else n])
+    return "\n".join(spans)
+
+
 def test_the_log_monitor_counts_only_literals_the_function_emits():
     """#1120: the monitor's counted literals must be things the function can
     actually LOG — otherwise the arm is an inert enforcer.
@@ -458,6 +513,12 @@ def test_the_log_monitor_counts_only_literals_the_function_emits():
 
     Reads the workflow'S OWN greps rather than a copy of their text, so a marker
     added to the monitor is checked too.
+
+    "THINGS THE FUNCTION CAN LOG" means a `console.*(...)` ARGUMENT — not any
+    occurrence in the file. The weaker whole-file substring test certified a
+    literal that existed only in a JSON response body, which `function_logs`
+    can never contain (see `_console_call_arguments`), so the arm stayed dead
+    while the guard reported healthy.
     """
     monitor = (
         _REPO_ROOT / ".github" / "workflows" / "tenant-provision-monitor.yml"
@@ -470,13 +531,47 @@ def test_the_log_monitor_counts_only_literals_the_function_emits():
     # the monitor's grep in a comment), so a raw `in src` is satisfied with every
     # emit site deleted (review F2). `_strip_ts_comments` is this module's own
     # helper for exactly this hazard — the same reason the allowlist sweep uses it.
-    src = _strip_ts_comments(EDGE_FN.read_text())
+    # LOG SITES, not any code: a literal in a `json({…})` body is not a log line,
+    # so it must not satisfy a grep that reads `function_logs` (the P2 this round).
+    logged = _console_call_arguments(_strip_ts_comments(EDGE_FN.read_text()))
     for lit in counted + markers:
-        assert lit in src, (
-            f"the monitor greps for {lit!r} but tenant-provision never logs it — "
-            "an arm whose condition can never fire. Point the monitor at a literal "
-            "the function emits, or delete the arm."
+        assert lit in logged, (
+            f"the monitor greps for {lit!r} but tenant-provision never LOGS it — "
+            "an arm whose condition can never fire. The literal must appear inside a "
+            "`console.error/warn/log/info/debug(...)` argument: Supabase's "
+            "`function_logs` carries console output only, so a literal that exists "
+            "only in a JSON response body can never satisfy a log grep. Log it, or "
+            "point the monitor at a literal the function logs."
         )
+
+
+def test_the_log_monitor_guard_separates_a_log_from_a_response_body():
+    """The guard above is only as good as its log-vs-body split, so pin the SPLIT.
+
+    A snippet test is the only place that can fail on the guard's own mechanism
+    rather than on the function being scanned — the same reason
+    `test_local_specifier_scan_reads_every_quote_style` exists. MEASURED on the
+    pre-fix guard: a plain `lit in src` certified `Provisioning misconfigured`,
+    which appeared ONLY in the 500 response body, so the monitor's marker could
+    never fire while the guard reported healthy.
+    """
+    snippet = (
+        'console.error("tenant-provision: a REAL log marker:", detail);\n'
+        "console.error(\n  \"multi-line \" + \"concatenated LOG marker\"\n);\n"
+        'return json({ error: "a BODY-ONLY marker" }, 500);\n'
+    )
+    logged = _console_call_arguments(snippet)
+    assert "a REAL log marker" in logged
+    assert "concatenated LOG marker" in logged, (
+        "a multi-line / concatenated console argument must still count as logged"
+    )
+    assert "a BODY-ONLY marker" not in logged, (
+        "a literal that exists only in a response body must NOT satisfy the guard "
+        "— Supabase's `function_logs` carries console output only"
+    )
+    # The pre-fix mechanism was a whole-text substring test, and it DID accept the
+    # body-only literal — so this test pins a real difference, not a restatement.
+    assert "a BODY-ONLY marker" in snippet
 
 
 def test_edge_function_logs_the_refusal_on_the_method_gate():

@@ -320,7 +320,14 @@ Deno.serve(async (req: Request) => {
       // localhost:8000 was the old default — it points at the edge
       // function's own container and threw uncaught (500 "Error invoking
       // hook"). Fail with a clear, diagnosable error instead (dogfood 2026-08-08).
-      console.error("tenant-provision: FASTAPI_URL is not set in Supabase secrets");
+      // Log the SAME marker the monitor greps (`Provisioning misconfigured`).
+      // It used to live only in the response body below, which `function_logs`
+      // never stores — so the monitor's marker arm could not fire even when this
+      // exact condition was happening. The operator-visible text and the greped
+      // text are now one string.
+      console.error(
+        "tenant-provision: Provisioning misconfigured — FASTAPI_URL is not set in Supabase secrets"
+      );
       return json(
         { error: "Provisioning misconfigured (FASTAPI_URL missing). Please contact support." },
         500
