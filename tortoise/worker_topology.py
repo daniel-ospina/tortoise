@@ -336,15 +336,25 @@ class Topology:
     def is_multi_worker(self) -> bool:
         """True when this process is one of N>1 workers.
 
-        ``workers > 1`` is the direct answer. The supervised-parent arm exists
-        for the case the count cannot express — ``uvicorn.run(workers=N)`` from a
-        script, where neither argv nor ``$WEB_CONCURRENCY`` carries N — and is
-        suppressed for a ``--reload`` child, which uvicorn guarantees is exactly
-        one worker.
+        **The reload arm is checked FIRST, and that order is load-bearing.**
+        uvicorn's own dispatch does the same: ``main.py`` branches on
+        ``should_reload`` BEFORE ``workers > 1``, and prints ``"workers" flag is
+        ignored when reloading is enabled``. Measured on the pinned 0.52.1:
+        ``--reload --workers 4`` starts the reloader and exactly ONE served
+        child. So a reloading process is single-worker even when the command line
+        names a count, and putting the count first would refuse a topology
+        uvicorn is not running — with a message ("N>=4 … on an EMBEDDED
+        database") that is simply false, and on the embedded arm that is the
+        unstartable-with-no-escape defect this module already fixed once.
+
+        Otherwise ``workers > 1`` is the direct answer; the supervised-parent arm
+        covers the case the count cannot express — ``uvicorn.run(workers=N)`` from
+        a script, where neither argv nor ``$WEB_CONCURRENCY`` carries N — and is
+        suppressed for a reload child, which is always exactly one worker.
         """
-        if self.workers > 1:
-            return True
-        return self.supervised and not self.reloading
+        if self.reloading:
+            return False
+        return self.workers > 1 or self.supervised
 
 
 def observe(environ: Mapping[str, str] | None = None,
@@ -480,6 +490,11 @@ if __name__ == "__main__":
     # A --reload child on an embedded DB is a ONE-worker topology: not gated.
     assert refusal_reason(
         observe(_embedded, supervised=True, argv=["uvicorn", "a:a", "--reload"])) is None
+    # …and reload wins over a named count, because uvicorn ignores it (measured:
+    # `--reload --workers 4` serves exactly one child).
+    assert refusal_reason(observe(
+        _embedded, supervised=True,
+        argv=["uvicorn", "a:a", "--reload", "--workers", "4"])) is None
     # shared + N>=2 needs the acknowledgement.
     assert refusal_reason(observe({**_shared}, supervised=False, argv=_argv2)) is not None
     assert refusal_reason(
