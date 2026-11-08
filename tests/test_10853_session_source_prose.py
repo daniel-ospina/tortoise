@@ -1364,13 +1364,19 @@ def test_the_10852_obligation_quotes_the_authority_AS_IT_NOW_READS():
     delete it: it made the decision PROVENANCE-correct instead (the lexicon
     `_searchText` is projected on a post-#10000 row, `summary` stays declined),
     so the obligation is moot and the forward-merge dropped it. The CITATION is
-    not moot and must not go with it: `STORAGE-ARCHITECTURE.md:527` — "§4.6
+    not moot and must not go with it: `STORAGE-ARCHITECTURE.md` §9.1 — "§4.6
     metadata, not the S1 narrative" — is precisely why a §4.6-metadata value is
     projected while the narrative is not, i.e. why this door's test is on the
     row's PROVENANCE rather than on the column's NAME. So the same three
     properties are held, now for the narrowing that actually shipped.
 
-    The authority is a quoted ruling in `docs/architecture/STORAGE-ARCHITECTURE.md:527`.
+    The authority is a quoted ruling in `docs/architecture/STORAGE-ARCHITECTURE.md`
+    §9.1 — cited by SECTION here and in `cache_projection`, because the LINE form
+    (`:527`, which is what `#10978` left on `main`) rots the moment text is
+    inserted above it: `#4051`'s own §2.0 insertion moved the sentence to `:551`,
+    so the line number that certified it a day earlier addressed the wrong text.
+    The LOCATOR RESOLUTION below is what makes both forms honest — a line has to
+    still hold the sentence, a section has to still exist and still contain it.
     That line was REWRITTEN
     under us: `#10978` (`b748df7d`) changed it from "§4.4 metadata, not the
     prose" to "§4.6 metadata, not the S1 narrative", so the merge landed four
@@ -1393,19 +1399,61 @@ def test_the_10852_obligation_quotes_the_authority_AS_IT_NOW_READS():
     authority = (root / "docs/architecture/STORAGE-ARCHITECTURE.md").read_text(
         encoding="utf-8")
 
+    # ⛔ THE LOCATOR IS EITHER A LINE (`:527`) OR A SECTION (`§9.1`), and BOTH are
+    # ACCEPTED — but a locator that is not RESOLVED is not a citation: `:527`
+    # passed for as long as the sentence happened to sit on line 527, and #4051's
+    # own §2.0 insertion moved it to 551 without reddening anything, because the
+    # old pin only asked whether the sentence existed SOMEWHERE in the document.
+    # So the locator is matched here and ranged against the authority below.
     match = re.search(
-        r'STORAGE-ARCHITECTURE\.md:527`: \*"(?P<quote>[^"]+)"\*',
+        r'STORAGE-ARCHITECTURE\.md(?P<loc>`? §[\d.]+|:\d+)`?: \*"(?P<quote>[^"]+)"\*',
         inspect.getsource(cp),
     )
     assert match, (
         "the narrowing's authority is no longer quoted in the source — the pin "
-        "extracts `STORAGE-ARCHITECTURE.md:527` from `cache_projection`, so "
-        "restore the quotation")
+        "extracts `STORAGE-ARCHITECTURE.md:527` (or `STORAGE-ARCHITECTURE.md` "
+        "§9.1) from `cache_projection`, so restore the quotation")
     # The quotation wraps across lines in the docstring; the document states it
     # as one sentence, so compare on normalised whitespace.
     quote = " ".join(match.group("quote").split())
+    loc = match.group("loc")
+    if loc.startswith(":"):
+        # A LINE locator must still HOLD the sentence. Without this arm the line
+        # number is decorative: any insertion above it re-points it silently.
+        lineno = int(loc[1:])
+        lines = authority.splitlines()
+        assert 0 < lineno <= len(lines), (
+            f"`cache_projection` cites `STORAGE-ARCHITECTURE.md{loc}`, which is "
+            f"past the end of the authority ({len(lines)} lines) — cite the "
+            "SECTION (`§9.1`) instead, which does not rot")
+        assert quote in " ".join(lines[lineno - 1].split()), (
+            f"`cache_projection` cites `STORAGE-ARCHITECTURE.md{loc}` but line "
+            f"{lineno} no longer contains the quotation {quote!r} — the sentence "
+            "moved, so the line number addresses the wrong text. Cite the "
+            "SECTION instead (`§9.1`), as the rest of the tree does")
+    else:
+        # A SECTION locator must still NAME a section, and the sentence must live
+        # INSIDE it — presence anywhere in the document would certify a citation
+        # to the wrong section, the same rot class #10978 corrected (§4.4 → §4.6).
+        # ⚠️ The `§` belongs to the CITATION, not to the heading: every heading in
+        # this document reads `### 9.1 …`, so the locator is stripped to its number
+        # before it is ranged against one.
+        section = loc.lstrip("` §")
+        heading = re.search(
+            rf"^#+ {re.escape(section)}\b", authority, re.MULTILINE)
+        assert heading, (
+            f"`cache_projection` cites `{section}` but the authority has no such "
+            "heading — a section citation to a section the document does not "
+            "carry sends the reader nowhere")
+        body = authority[heading.end():]
+        following = re.search(r"^#+ ", body, re.MULTILINE)
+        body = body[:following.start()] if following else body
+        assert quote in " ".join(body.split()), (
+            f"`cache_projection` cites `{section}`, but the quotation is not in "
+            f"that section: {quote!r}. It was restated or moved (#10978 is the "
+            "precedent) — re-cite and re-quote where it now reads")
     assert quote in authority, (
-        "the narrowing quotes a sentence `STORAGE-ARCHITECTURE.md:527` "
+        "the narrowing quotes a sentence the authority "
         f"no longer contains: {quote!r}. The ruling was restated (#10978 is the "
         "precedent) — re-quote the authority as it now reads rather than leaving "
         "the citation resting on a sentence that is gone.")
