@@ -199,6 +199,40 @@ test("an inert verdict is LATCHED — one probe per process, not per turn", asyn
   assert.equal(JSON.parse(readFileSync(breadcrumb, "utf8")).recorded_at, stamped);
 });
 
+test("an EXHAUSTED chain is a timeout, never an inert install", async () => {
+  // `resolveBlock`'s `remaining <= 0` branch: the chain is out of budget before
+  // a candidate can start. It must report `timeout` — a no-injection that
+  // neither latches the seam nor writes the `install-inert` breadcrumb — and
+  // never `inert`, which would tell the operator to reinstall a working install
+  // (#11584 finding 1's exact failure class).
+  //
+  // Reached with NO new seam: `timeoutMs: 0` makes `deadline` already past, and
+  // the test builds the config object itself, so `positiveInt`'s `n > 0` clamp
+  // (tortoise-volunteer.ts:209) is not in the path. Discriminating: mutating
+  // this branch's `timeout` to `inert` reds this row.
+  const home = tmpHome();
+  const cli = fakeCli(join(home, "bin"), "sleep 1; exit 1");
+  assert.ok(cli.endsWith("tortoise"));
+
+  const verdict = await resolveBlock(
+    "q",
+    "",
+    { ...readVolunteerConfig({}, join(home, "absent.json")), timeoutMs: 0 },
+    [cli],
+  );
+
+  assert.equal(
+    verdict.status,
+    "timeout",
+    "an exhausted chain is a clean no-injection, not an `inert` install",
+  );
+  assert.match(
+    verdict.status === "timeout" ? verdict.detail : "",
+    /spent its 0ms budget/,
+    "the detail must name the exhausted budget rather than a candidate failure",
+  );
+});
+
 test("the reflex chain shares ONE deadline across candidates", async () => {
   // Review finding 5: Pi counts as busy while `before_agent_start` runs, so a
   // budget PER candidate made the turn's wait N × timeoutMs.
@@ -206,13 +240,13 @@ test("the reflex chain shares ONE deadline across candidates", async () => {
   // ⛔ SCOPE, stated rather than implied (#11584 review, round 7). This row
   // proves the SHARED-DEADLINE arithmetic: two failing candidates cannot spend
   // the budget twice. It does NOT reach `resolveBlock`'s `remaining <= 0`
-  // branch (the exit-at-budget race), and mutating THAT branch's `timeout` to
-  // `inert` leaves the suite green (measured 24/24). So the claim that an
-  // exhausted chain is a TIMEOUT and never `inert` is correct in the code and
-  // UNPROVEN by any row — a KNOWN RESIDUAL with no owner, recorded here rather
-  // than vouched for. Closing it needs an injectable clock or per-attempt
-  // runner seam plus a row asserting no `install-inert` breadcrumb on that
-  // path; it is not worth a new seam today, but it must not read as covered.
+  // branch (the exit-at-budget race) — that branch is owned by
+  // `an EXHAUSTED chain is a timeout, never an inert install` below, which
+  // reaches it directly. An earlier version of this comment called that branch
+  // unreachable without a new clock/runner seam; that was false. A config
+  // literal with `timeoutMs: 0` reaches it with no seam at all, because a test
+  // builds the config object directly and so bypasses `positiveInt`'s `n > 0`
+  // clamp (tortoise-volunteer.ts:209). Do not re-open that residual.
   const home = tmpHome();
   // ⛔ NON-TIMEOUT failures, on purpose (#11584 review, round 6). The first
   // version of this row used a `sleep 5` first candidate, which ABORTS the
