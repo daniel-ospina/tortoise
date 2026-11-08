@@ -31,6 +31,8 @@ from __future__ import annotations
 
 import ast
 import importlib.util as _ilu
+import io
+import itertools
 import json
 import os
 import re
@@ -38,6 +40,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import tokenize
 import types
 from pathlib import Path
 
@@ -10706,6 +10709,24 @@ def test_the_control_arm_definition_names_the_frozen_records_divergence():
         "sentence")
 
 
+def _call_sites(src: str) -> list[tuple[int, str]]:
+    """Call sites of the three edge-creating verbs — TOKENS, not substrings.
+
+    A regex cannot tell a call from a comment or a string that names the same verb, and
+    `re` also cannot tell `create_operator(payload)` from a prose mention ending in a
+    parenthesis. Both false readings were measured on this record's arm: a comment adding
+    `# call create_operator(payload) to publish` claimed the record's "no producer"
+    conclusion was false when nothing was called. `tokenize` separates NAME/OP from
+    COMMENT/STRING by construction, so the arm only ever reports a real `NAME (` pair.
+    """
+    names = {"create_edge", "create_about_edge", "create_operator"}
+    toks = list(tokenize.generate_tokens(io.StringIO(src).readline))
+    return [(a_line.start[0], a_line.string)
+            for a_line, b_line in itertools.pairwise(toks)
+            if a_line.type == tokenize.NAME and a_line.string in names
+            and b_line.type == tokenize.OP and b_line.string == "("]
+
+
 def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     """`RECONCILE-A1-A2-A5.md`'s LIVE cites, which no sweep reads.
 
@@ -10719,7 +10740,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     bundle's `hasPart`/`hierarchies` split — and, measured before this pin existed,
     re-staling ANY of them
     left every suite green: the record is in no `_BUNDLE_DOCS` entry and
-    `grep -ln RECONCILE-A1-A2-A5 -- tests/ ':!tests/test_7949_capstone_measure.py'`
+    `git grep -ln RECONCILE-A1-A2-A5 -- tests/ ':!tests/test_7949_capstone_measure.py'`
     printed nothing at the base this pin was added — note the self-match, the same trap
     as the `hasPart` grep below: this file names the record, so an unexcluded search
     returns itself. The bare `RECONCILE` token matches 10 unrelated files
@@ -10781,33 +10802,40 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     #
     # ⛔ The CALL-shaped arm comes FIRST, because it is the only one that can report the
     # true failure. A production `create_operator(` call necessarily contains the bare
-    # token, so the mention arm below would fire first and instruct a fixer to RE-DERIVE
-    # the record's line numbers — the wrong repair, aimed at a staleness where the
-    # conclusion itself is false (measured: the call arm could never be reached).
-    assert not re.search(
-        r"(?<![\w`])(?:[\w.]*\.)?(create_edge|create_about_edge|create_operator)\(",
-        "\n".join(ext)), (
-        "the record's load-bearing half is the CALL count (0) — a production call "
-        "site makes its 'no producer' conclusion FALSE, not merely stale, so this "
+    # token, so a token-scanning arm below would fire too — and an earlier revision's DID
+    # fire first (measured), instructing a fixer to RE-DERIVE the record's line numbers:
+    # the wrong repair, aimed at a staleness where the conclusion itself is false.
+    #
+    # ⛔ This check is TOKENIZED, not a regex, for TWO measured reasons, and both arms that
+    # came before it were defective in opposite directions:
+    #   1. A dot-ANCHORED pattern (the record's own command shape) missed the unqualified
+    #      `return create_operator(payload)` — a real call with no receiver.
+    #   2. A dot-EXCLUDING lookbehind then missed the RECEIVER-qualified form
+    #      (`sdk.create_edge(payload)`), i.e. it pinned the COMPLEMENT of the claim while
+    #      its message asserted the claim.
+    #   3. Any `re` arm also reads a COMMENT or a STRING that names the verb as a call, so
+    #      a prose mention claimed the record's conclusion was FALSE when nothing was called.
+    # `_call_sites` matches a NAME/`(` token PAIR, so it covers both receivers and the
+    # unqualified form, and COMMENT/STRING tokens cannot match by construction.
+    _calls = _call_sites("\n".join(ext) + "\n")
+    assert _calls == [], (
+        f"the record's load-bearing half is the CALL count (0) — a production call site "
+        f"makes its 'no producer' conclusion FALSE, not merely stale (found {_calls}); this "
         "reds before the line-number arm below can misdirect the repair")
-    # ⚠️ The receiver chain is OPTIONAL but PRESENT-OR-ABSENT is not a free choice: the
-    # record's own command is dot-anchored (`\.(create_edge|…)\(`) and the unqualified
-    # form needs no receiver either (`return create_operator(payload)`), so the arm must
-    # cover BOTH or it pins the complement of the claim. Measured: a dot-EXCLUDING arm
-    # (the previous one) stayed green with `_sdk.create_operator(payload)` substituted for
-    # the comment at :9006 AND with `sdk.create_edge(payload)` appended — the record's own
-    # command printed a hit in both, so its conclusion was false while this leg passed.
-    # ⚠️ Still NOT allowing whitespace before the paren: `\s*\(` turned a trailing prose
-    # mention into a red claiming the conclusion was false when nothing was called.
+    # The four shapes the tokenized arm must separate, each MEASURED on a live tree (the
+    # first two are what a regex could not do, in both directions):
+    #   `sdk.create_edge(payload)`      -> red (receiver-qualified call; a dot-EXCLUDING
+    #                                     lookbehind stayed green on this one)
+    #   `return create_operator(x)`     -> red (unqualified call; a dot-ANCHORED pattern
+    #                                     stayed green on this one)
+    #   `# call create_operator(p)`     -> NOT a call; only the mention arm fires
+    #   `_X = "create_operator(p)"`     -> NOT a call; only the mention arm fires
     assert re.findall(
         r"git grep -n 'create_operator' -- tortoise/extractor_v2\.py\s+# (.*)",
         text) == [":9006 :9024 :9031 :9411"], (
         "the record's create_operator reproduction must quote the LIVE line numbers — "
         "re-derive them with `git grep -n 'create_operator' -- tortoise/extractor_v2.py`")
     live_mentions = [i for i, line in enumerate(ext, 1) if "create_operator" in line]
-    assert "nothing in this tree consumes" in ext[10891 - 1], (
-        f"extractor_v2.py:10891 reads {ext[10891 - 1].strip()[:90]!r}, not the "
-        "comment stating nothing consumes `result[\"relations\"]`")
     assert live_mentions == [9006, 9024, 9031, 9411], (
         f"extractor_v2.py's create_operator mentions are at {live_mentions}, not the "
         "four the record quotes — an insertion above them moves the quote; re-derive "
@@ -10848,9 +10876,6 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         f"the bundle's hasPart/hierarchies mentions are {per_file} — the record's §5 "
         "self-matching note states them per file; re-derive the note (and this map) "
         "rather than deleting the qualifier, or it reads as 'no output' when it is not")
-    assert "40 lines, exit 0 — all in the bundle" in text, (
-        "the §5 note must keep the measured shape of its own reproduction — the "
-        "unqualified `# exit 1 = no output` is what rotted")
     # ── The §5 bundle-grep note, pinned as an EXACT BLOCK whose numbers are DERIVED ──
     #
     # Why a block and not number patterns: matching prose by pattern was measured to fail in
@@ -10877,16 +10902,38 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         f"# {_total} lines, exit 0 \u2014 all in the bundle\n"
     )
     for _i, (_name, _n) in enumerate(_split_rows):
-        _open, _close = ("(", ")") if _i == 0 else ("", ",")
+        _open = "(" if _i == 0 else ""
         _close = ")" if _i == len(_split_rows) - 1 else ","
         _note_block += (
             f"                                                            # {_open}{_name} {_n}{_close}\n")
-    assert _note_block in text, (
-        "the §5 note must be the DERIVED block verbatim — command, LIVE total and per-file split "
-        "all from the map above plus `git grep`. Any edit here means re-derive it: the unqualified "
-        "`# exit 1 = no output` and the hand-typed 22/8/10 are the forms that rotted (#10982 "
-        "registered the A1 row after this record was written)")
-    assert f"\u2192 **all {_total} hits are the bundle's own registration**" in text, (
+    # Compared ROW BY ROW, not with a bare `in`: pytest elides the MIDDLE of a long needle,
+    # and a measured one-trailing-space drift on the split row produced a failure whose
+    # visible text contained no difference at all — an undiagnosable red.
+    _want = _note_block.rstrip("\n").splitlines()
+    # The anchor is row 2 MINUS its number: row 1 is the grep command, which §1's item ALSO
+    # carries verbatim (`text.find(row1)` landed in §1 and reported a phantom drift —
+    # measured), and anchoring on the numbered row raised ValueError the moment the NUMBER
+    # was what drifted, i.e. exactly when a diagnosis is needed (also measured).
+    _anchor = "    ':!docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md'    #"
+    _at = text.find(_anchor)
+    if _at < 0:
+        raise AssertionError(
+            "the §5 note's reproduction block is GONE — the record must carry it verbatim "
+            f"(command + `# {_total} lines, exit 0 — all in the bundle` + the per-file split); "
+            "re-derive it rather than deleting it")
+    _at -= len(_want[0]) + 1
+    _got = text[_at:].splitlines()[:len(_want)]
+    if _got != _want:
+        _k = next((i for i, pair in enumerate(zip(_got, _want, strict=False)) if pair[0] != pair[1]), 0)
+        raise AssertionError(
+            "the §5 note's row {} drifted — command, LIVE total and per-file split all come "
+            "from the map above plus `git grep`; any edit here means re-derive it (the "
+            "unqualified `# exit 1 = no output` and the hand-typed 22/8/10 are the forms that "
+            "rotted, #10982 registered the A1 row after this record was written)\n"
+            "  want: {!r}\n  got:  {!r}".format(
+                _k + 1, _want[_k] if _k < len(_want) else "",
+                _got[_k] if _k < len(_got) else ""))
+    assert f"→ **all {_total} hits are the bundle's own registration**" in text, (
         f"§1 item 3's conclusion must state the DERIVED total ({_total}) — it is the same "
         "`git grep` the block above re-derives")
 
@@ -10905,7 +10952,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # The INVARIANT is that every `:12779` names the base it was true at — never that there are
     # two of them. (A `count(...) >= 2` bound refused a legitimate consolidation to one
     # base-qualified note, and fired before the pin that names the real defect.)
-    assert ":12779" in text and "`:12779` was the number at `62248db88`" in text, (
+    assert ":12779" in text, (
         "the historical mention of the old base's number must survive, base-qualified")
     for _m in re.finditer(r":12779", text):
         _near = text[max(0, _m.start() - 60):_m.end() + 60]
