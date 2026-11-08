@@ -1268,3 +1268,61 @@ def test_a_long_path_is_truncated_in_the_error_line(tmp_path):
     proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[long])]))
     assert proc.returncode == cl.EXIT_INVALID
     assert "…" in proc.stderr, proc.stderr
+
+
+# ── guards with NO discriminating pin (measured by mutation, review round) ──
+
+
+def test_a_quoted_script_body_with_a_chain_is_one_command(tmp_path):
+    """`bash -c 'a && b'` is ONE command; splitting the raw string breaks it.
+
+    `text.split("&&")` cuts a quoted script body mid-quote, so `shlex` rejects the
+    halves and the row is refused as "not a parseable command" — exit 1, which
+    prints no uncovered list at all. Measured on a legitimate record, and it lands
+    on the exact shape `_SCRIPT_FLAGS` exists to accept (`bash -c '…'`), which
+    `origin/main` accepted before this branch added a shape gate. Reverting
+    `_split_on_chain` to `text.split("&&")` reds this and nothing else.
+    """
+    proc = _run_cli(
+        tmp_path,
+        _ledger(
+            [_row("A", evidence=[REAL_EVIDENCE, "cmd:bash -c 'uv run pytest x.py && echo done'"])]
+        ),
+    )
+    assert proc.returncode == cl.EXIT_CLEAN, proc.stderr
+
+
+def test_a_vacuous_glob_cannot_carry_a_verified_row_BESIDE_a_held_path(tmp_path):
+    """The glob-vacuity guard only ever matters on a row that ALREADY holds an artifact.
+
+    Every `cmd:sh ./*` string in this file sits on a row citing no held artifact, so
+    the row rule refuses it with or without the glob arm — which left the arm
+    unpinned: `_glob_names_a_directory -> True` kept the whole suite green. Measured
+    end-to-end on that mutant, a 22-row all-`verified` ledger citing `README.md`
+    plus `cmd:sh ./*` exited **0** with an empty uncovered list — the false PASS the
+    arm was added to refuse.
+    """
+    proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, "cmd:sh ./*"])]))
+    assert proc.returncode == cl.EXIT_INVALID, proc.stdout + proc.stderr
+    assert "names no artifact" in proc.stderr, proc.stderr
+
+
+def test_a_checkout_without_git_abstains_AND_PRINTS_IT(monkeypatch, capsys):
+    """No `git` on PATH is an abstention with a NOTE, never a traceback and never a red.
+
+    Measured on the mutant that removes the `except OSError` arm: a
+    `FileNotFoundError` escaped `validate()` with no `CAPSTONE-LEDGER: INVALID`
+    marker, so a reader keying on the marker got nothing at all. And the abstention
+    must be PRINTED, because `_tracked_unprovable -> False` turns it into a false red
+    on a legitimate ledger in any git-less checkout (a tarball, a build context).
+    Both directions are asserted here, so either revert reds this test.
+    """
+    import types
+
+    def _boom(argv, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory", "git")
+
+    monkeypatch.setattr(cl, "subprocess", types.SimpleNamespace(run=_boom))
+    monkeypatch.setattr(cl, "_commit_state", lambda sha, repo_root: "exists")
+    assert [row["id"] for row in cl.validate(_ledger([_row("A")]))] == ["A"]
+    assert "git is unavailable here" in capsys.readouterr().err

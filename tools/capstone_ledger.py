@@ -613,6 +613,49 @@ def _evidence_is_real(entry: str, repo_root: Path = REPO_ROOT) -> tuple[bool, st
     return True, ""
 
 
+def _split_on_chain(text: str) -> list[str]:
+    """Split a recorded command on the `&&` separators that are OUTSIDE quotes.
+
+    ⛔ Splitting the raw string shatters a quoted script body: `bash -c 'uv run
+    pytest x.py -q && echo done'` is ONE command, and `text.split("&&")` cuts it
+    mid-quote so `shlex` rejects the halves and the row is refused as "not a
+    parseable command" — exit 1, which prints no uncovered list at all. Measured
+    on a legitimate record, and it lands on the exact shape `_SCRIPT_FLAGS` exists
+    to accept (`bash -c '…'`), which `origin/main` accepted before this branch
+    added a shape gate. Only a separator the SHELL would treat as one splits here.
+    """
+    segments: list[str] = []
+    current: list[str] = []
+    quote: str | None = None
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if quote is not None:
+            current.append(char)
+            if char == "\\" and quote == '"' and index + 1 < len(text):
+                # A backslash escapes only inside double quotes, and it must take
+                # the escaped character with it so an escaped quote cannot end the
+                # quote early.
+                current.append(text[index + 1])
+                index += 2
+                continue
+            if char == quote:
+                quote = None
+        elif char in "\"'":
+            quote = char
+            current.append(char)
+        elif text.startswith("&&", index):
+            segments.append("".join(current))
+            current = []
+            index += 2
+            continue
+        else:
+            current.append(char)
+        index += 1
+    segments.append("".join(current))
+    return [segment.strip() for segment in segments]
+
+
 def _command_body(raw: str, root: Path) -> tuple[str, Path]:
     """The part of a `cmd:` entry that has to be a RUNNABLE command, and the
     directory it runs in.
@@ -652,7 +695,7 @@ def _command_body(raw: str, root: Path) -> tuple[str, Path]:
     # `&& echo PASS` tail), and grading the first segment false-blocked
     # `cd tools && uv run …`; scanning for the first RUNNER-shaped segment accepts
     # both and still refuses prose, which never contains one at all.
-    segments = [segment.strip() for segment in text.split("&&")]
+    segments = _split_on_chain(text)
     # The directory the graded command runs in: `cd X && …` moves it, and a later
     # `cd` moves it again. Resolved against `root` only, so a `cd ../../..` cannot
     # walk the check out of the tree.
