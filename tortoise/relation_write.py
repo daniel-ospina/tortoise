@@ -112,6 +112,19 @@ RELATION_REFUSED = "refused"
 #: The two mechanisms an edge can carry without an operator.
 _DIRECT_MECHANISMS = ("IMPL", "NAND")
 
+#: ⛔ THE DIRECTION FALLBACK FOR A STATED RELATION WHOSE MEANING DECLARES NONE.
+#: ``create_direct_edge`` defaults a direction ABSENT to ``bidirectional`` for
+#: IMPL (CYCLE-25), so an IMPL edge written without one propagates belief back
+#: along a claim the story made one way. A stated relation runs ``src → dst``,
+#: so the fallback is the model's own one-way token (``unidirectional``'s
+#: canonical form) — but the fallback is only the FALLBACK: every meaning in
+#: ONTOLOGY §8 has a RULED direction (``pack_registry.SEMANTICS_DIRECTIONS``,
+#: #7852), and writing this constant for a ``mutuallySupportive`` /
+#: ``mutuallyExclusive`` edge would record a one-way flow where the ruling says
+#: both ways — a regression against the writer's own default (#11548 review
+#: round 4, P1). ``_direction_for`` consults the table first.
+_DIRECTION_STATED = "->"
+
 
 @dataclasses.dataclass(frozen=True)
 class RelationEdge:
@@ -134,6 +147,11 @@ class RelationEdge:
     #: meanings binding the same mechanism between the same pair cannot be two
     #: edges. They are folded here — and NAMED — instead of vanishing.
     folded: tuple[str, ...] = ()
+    #: The direction the edge is WRITTEN with, on the arms whose writer takes
+    #: one (``direct``). ``None`` means the writer's default — which for
+    #: ``create_edge`` (structural) is the only option: it records no direction
+    #: property at all.
+    direction: str | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -199,6 +217,30 @@ def _mechanism_for(predicate: str, semantics: str | None) -> str | None:
         if mechanism in _DIRECT_MECHANISMS:
             return mechanism
     return None
+
+
+def _direction_for(label: str | None, predicate: str) -> str:
+    """The direction the edge's MEANING records — the ruled table, not a guess.
+
+    ``pack_registry.SEMANTICS_DIRECTIONS`` is ONTOLOGY §8's ruled mapping from a
+    meaning to the direction it records (``->`` / ``<-`` / ``<->`` / ``-``), and
+    ``TortoiseSDK._direction_from_semantics`` is the SDK's one reader of it.
+    Consuming it here is the same rule as the write path's own: the registry
+    decides, this leg does not re-derive. The meaning riding the edge is
+    ``label`` (the story's verb when it is not itself a mechanism), else the
+    verb itself.
+
+    ⚠️ A FOLD keeps the FIRST verb's label (``create_direct_edge`` is one edge
+    per (src, tgt, type)), so the surviving meaning's direction is the one
+    written; the absorbed verb is still NAMED on ``collapsed``, so nothing about
+    it is silent.
+    """
+    from .pack_registry import SEMANTICS_DIRECTIONS
+
+    for meaning in (label, predicate):
+        if meaning and meaning in SEMANTICS_DIRECTIONS:
+            return SEMANTICS_DIRECTIONS[meaning]
+    return _DIRECTION_STATED
 
 
 def _stated_verdict(predicate: str, mechanism: str | None) -> tuple[str, ...]:
@@ -339,7 +381,10 @@ def plan_relation_edges(
                 src_id=src_id, dst_id=dst_id, predicate=mechanism,
                 write_path=RELATION_DIRECT, declared_by=None,
                 stated_predicate=predicate, mechanism=mechanism,
-                label=label, src_name=src, dst_name=dst))
+                label=label, src_name=src, dst_name=dst,
+                # The meaning's RULED direction, not the writer's IMPL default
+                # and not a blanket one-way (see ``_direction_for``).
+                direction=_direction_for(label, predicate)))
             continue
         drops.append(RelationDrop(
             src, dst, predicate,
@@ -381,8 +426,12 @@ def apply_relation_edges(
     for edge in plan:
         try:
             if edge.write_path == RELATION_DIRECT:
+                # ``direction`` is passed ONLY on this arm: ``link_entities``
+                # refuses a parameter the reached writer does not honour, and
+                # ``create_edge`` (structural) records no direction at all.
                 sdk.link_entities(edge.predicate, edge.src_id, edge.dst_id,
-                                  label=edge.label)
+                                  label=edge.label,
+                                  direction=edge.direction)
             else:
                 sdk.link_entities(edge.predicate, edge.src_id, edge.dst_id)
         except Exception as exc:  # noqa: BLE001, RUF100 — fail-open per relation
@@ -427,6 +476,10 @@ def apply_relation_edges(
             "declared_by": edge.declared_by,
             "mechanism": edge.mechanism,
             "label": edge.label,
+            # What the graph should hold for this edge — carried on the receipt
+            # so a reader can tell a one-way stated claim from the writer's
+            # IMPL default without re-deriving it (#11548 review, P2).
+            "direction": edge.direction,
             "folded": list(edge.folded),
         })
     by_path: dict[str, int] = {}

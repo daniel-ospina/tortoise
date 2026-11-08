@@ -1653,11 +1653,23 @@ surfaces:
   # channel #10999 left as transport only. Pins that a stated entity↔entity
   # relation lands as an Object→Object edge through the REAL capture commit
   # (resolved names → ids, the registry's own write-path verdict, idempotent
-  # re-finalise), that a refused relation is NAMED, and that no narrative text
-  # reaches an edge property (⛔ #10000, P0). Senses exactly the writers it
-  # registers against: `tortoise/sdk.py` (api, the commit leg),
-  # `tortoise/extractor_v2.py` (ep, the producer) and the new
-  # `tortoise/relation_write.py` (core fallback).
+  # re-finalise, the direction it was told to write), that a refused relation is
+  # NAMED, and that no narrative text reaches an edge property (⛔ #10000, P0).
+  #
+  # ⚠️ WHAT THIS REGISTRATION DOES AND DOES NOT DELIVER (#11548 review, P2 —
+  # corrected twice): it is BOOKKEEPING ONLY. Measured on this head:
+  # `eval/**` is on-demand (`ci_selection.on_demand_files()` contains this
+  # path), and an on-demand file is exempt from BOTH halves of the gate —
+  # `select()` subtracts it, and `integrity()` skips it
+  # (`tools/ci_selection.py`, the `on_demand` branch), so removing every row
+  # that lists it still leaves `--integrity` clean. It does not make the lane
+  # run on a PR and it is not what keeps `--integrity` green. The lane itself
+  # is deliberately NON-GATING — owner decision **#10194**, guarded by
+  # `tests/test_10194_eval_suite_non_gating.py::test_no_subtree_file_is_in_any_gating_leg`
+  # — and it runs in `eval-suite-manual.yml`. Do not restore a "runs on this
+  # change" or an "integrity needs this row" claim: the first is coverage the
+  # selector does not deliver, the second is false, and asserting either is how
+  # a reader comes to believe #10194 was reverted.
   - eval/write_path/test_write_path_relation_lane.py
   # #9077 (E4): the operator-receipt EVIDENCE gate — the checker that refuses a
   # numerator (`tools/operator_receipt_check.py`) plus the runner/grading

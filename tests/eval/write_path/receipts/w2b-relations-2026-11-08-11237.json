@@ -1219,7 +1219,13 @@
         "object_edges": {
           "IMPL": 1,
           "dependsOn": 1
-        }
+        },
+        "object_edges_basis": "incident-source-bounded",
+        "object_edges_incident": {
+          "IMPL": 1,
+          "dependsOn": 1
+        },
+        "object_edges_missing": []
       },
       "wp02_lumen_refactor": {
         "session_id": "wp02_lumen_refactor",
@@ -1245,7 +1251,14 @@
           "related": 2,
           "hasPart": 1,
           "dependsOn": 1
-        }
+        },
+        "object_edges_basis": "incident-source-bounded",
+        "object_edges_incident": {
+          "related": 2,
+          "hasPart": 1,
+          "dependsOn": 1
+        },
+        "object_edges_missing": []
       },
       "wp03_ember_design": {
         "session_id": "wp03_ember_design",
@@ -1271,7 +1284,14 @@
           "related": 1,
           "hasPart": 2,
           "dependsOn": 2
-        }
+        },
+        "object_edges_basis": "incident-source-bounded",
+        "object_edges_incident": {
+          "related": 1,
+          "hasPart": 2,
+          "dependsOn": 2
+        },
+        "object_edges_missing": []
       },
       "wp04_aurora_perf": {
         "session_id": "wp04_aurora_perf",
@@ -1298,7 +1318,15 @@
           "IMPL": 2,
           "hasPart": 1,
           "dependsOn": 1
-        }
+        },
+        "object_edges_basis": "incident-source-bounded",
+        "object_edges_incident": {
+          "related": 1,
+          "IMPL": 2,
+          "hasPart": 1,
+          "dependsOn": 1
+        },
+        "object_edges_missing": []
       },
       "wp05_retro_writeup": {
         "session_id": "wp05_retro_writeup",
@@ -1323,7 +1351,13 @@
         "object_edges": {
           "related": 1,
           "IMPL": 2
-        }
+        },
+        "object_edges_basis": "incident-source-bounded",
+        "object_edges_incident": {
+          "related": 1,
+          "IMPL": 2
+        },
+        "object_edges_missing": []
       },
       "wp06_quarry_rollout": {
         "session_id": "wp06_quarry_rollout",
@@ -1347,7 +1381,12 @@
         },
         "object_edges": {
           "dependsOn": 2
-        }
+        },
+        "object_edges_basis": "incident-source-bounded",
+        "object_edges_incident": {
+          "dependsOn": 2
+        },
+        "object_edges_missing": []
       },
       "wp07_bluepeak_followup": {
         "session_id": "wp07_bluepeak_followup",
@@ -1373,7 +1412,14 @@
           "related": 2,
           "IMPL": 1,
           "dependsOn": 1
-        }
+        },
+        "object_edges_basis": "incident-source-bounded",
+        "object_edges_incident": {
+          "related": 2,
+          "IMPL": 1,
+          "dependsOn": 1
+        },
+        "object_edges_missing": []
       }
     },
     "aggregate": {
@@ -1404,7 +1450,15 @@
         "related": 7,
         "hasPart": 4
       },
-      "object_edges_total": 25
+      "object_edges_total": 25,
+      "object_edges_basis": "incident-source-bounded (this run: no per-session attributable read)",
+      "object_edges_incident": {
+        "IMPL": 6,
+        "dependsOn": 8,
+        "related": 7,
+        "hasPart": 4
+      },
+      "object_edges_missing": []
     }
   },
   "extractor": {
@@ -1824,6 +1878,7 @@
         "reason": "`transacts` binds no declared write path (relation_write_paths() -> ()) \u2014 it is neither in the structural writer's predicate set nor bound to a mechanism, so nothing is written and nothing is inferred in its place",
         "session_id": "wp05_retro_writeup"
       }
-    ]
+    ],
+    "fold_accounting": "absent"
   }
 }
