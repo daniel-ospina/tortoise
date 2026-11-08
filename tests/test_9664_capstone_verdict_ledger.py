@@ -1873,6 +1873,35 @@ def test_the_carriage_total_is_the_list_it_summarises():
         "how a listed carriage reads as closed"
     )
 
+    # ⛔ THE SAME TOTAL IS STATED TWICE, so BOTH statements are read. The first
+    # instance of this defect was in the section's OPENING sentence — "There are
+    # FIVE such carriages" over an enumeration that ran to (6) — and the
+    # closing-summary anchor above cannot see it; a pin that checks one of two
+    # statements of one number leaves the other exactly as unread as the total was
+    # before this test existed. (The quoted "FIVE carriages remain open" in the
+    # summary's own prose is a DIFFERENT axis — #11520's ROOTS, not this list — so
+    # the anchor stays on the phrasing that states THIS list's total.)
+    intro = re.search(
+        r"\b([A-Z]+) carriages are enumerated below",
+        text[: text.index(start_anchor)],
+    )
+    assert intro, (
+        "the carriage section's opening no longer states a total in the anchored "
+        "phrasing — restore it, or delete this half of the pin AND the opening's "
+        "number, so the total is stated in exactly one place instead of drifting "
+        "in two"
+    )
+    claimed_intro = spelled.get(intro.group(1))
+    assert claimed_intro is not None, (
+        f"the opening's total {intro.group(1)!r} is not a number this pin reads "
+        "(extend the map, do not delete the pin)"
+    )
+    assert claimed_intro == len(ordinals), (
+        f"the section's opening claims {intro.group(1)} carriages but the section "
+        f"enumerates {len(ordinals)} — this total has drifted twice, in two "
+        "different sentences, and both are now checked"
+    )
+
 
 def test_wrapper_flags_and_option_names_the_shell_REJECTS_are_refused(tmp_path):
     """A flag bash rejects makes the `&&` short-circuit, so the command NEVER RAN.

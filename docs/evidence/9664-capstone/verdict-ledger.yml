@@ -85,10 +85,14 @@
 #         ⛔ WHERE THAT CLOSURE STOPS, stated because the previous wording claimed
 #         it was total and the claim was FALSE — this artifact is validated by the
 #         tool itself, so an over-claim here is a false attestation, not a typo. A
-#         wrapper argument that is INERT DATA is NOT graded. There are FIVE such
-#         carriages, each measured against bash, and each admitted DELIBERATELY
-#         (bash executes nothing in these positions, so refusing would be a false
-#         block):
+#         wrapper argument is NOT graded. SIX carriages are enumerated below,
+#         (1)-(6). Five of them, (1)-(5), are INERT DATA: each is measured against
+#         bash and each is admitted DELIBERATELY, because bash executes nothing in
+#         that position and refusing the record would be a false block. The sixth,
+#         (6), sits in the same ungraded ARGUMENT POSITION but carries the OPPOSITE
+#         harm — a measured FALSE PASS — so it is declared and pinned rather than
+#         closed. All six are tracked on #11520, and every one is pinned by a test
+#         that reds if it changes state:
 #           (1) a later RUNNER-HEADED segment (root 4 above);
 #           (2) prose INSIDE the graded command's own segment;
 #           (3) a `#` COMMENT;
@@ -139,8 +143,9 @@
 #         the same inert position as `set --`'s operands reached without `--`, and
 #         closing it means admitting ANY bare word to `set`, which re-opens the
 #         bare-prose carriage this arm exists to refuse. The price is not paid until
-#         a spelling that separates the two is measured; it is filed with root 5's
-#         class.
+#         a spelling that separates the two is measured; it is filed on #11520 with
+#         root 5's class (that root numbers the FALSE BLOCKS, a DIFFERENT axis from
+#         this list's carriages (1)-(6)).
 #         A control builtin takes AT MOST ONE operand, and that
 #         operand may be the shell's own status expansion (`exit $?`, the idiom this
 #         repo's install scripts use) — refusing that was a measured false block.
@@ -148,8 +153,8 @@
 #         manipulate a directory STACK this parser cannot model, so the working
 #         directory after them is unknowable and no later artifact can be proven to
 #         have resolved from it; a record using them is refused as prose, on the
-#         same known-open false block as `mkdir` (root 5), and pinned. The DECORATIVE
-#         half is open
+#         same known-open false block as `mkdir` (#11520 root 5), and pinned. The
+#         DECORATIVE half is open
 #         because requiring shell-shaped arguments from
 #         `echo`/`printf`/… must first be measured against the accepted
 #         `… && echo PASS`. SIX carriages are enumerated above — this list's own
