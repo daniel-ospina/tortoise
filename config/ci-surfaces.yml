@@ -7316,6 +7316,14 @@ surfaces:
   - test_csp_plan_doc_consistency.py
   sdk:
   - test_stdlib_shadow_guard.py  # #10060 N1: repo-wide guard — see the note on the `api` entry
+  # #8290: the RESERVED-namespace half lives in `tortoise/ids.py`, which
+  # `SOURCE_PATTERNS` maps to the NAMED surface `sdk` — and a named-surface match
+  # REPLACES the `core` fallback, so the `api`+`core` rows above do NOT run on an
+  # `ids.py` diff. Measured (#8290 review, P2): `--changed-files tortoise/ids.py`
+  # selects `['sdk']`, and with only the api+core rows NONE of those 246 selected
+  # files could red if the reservation were deleted — the exclusion would silently
+  # become a filter over ids the write doors admit, the exact hole the P1 closed.
+  - test_demo_session_read_exclusion_8290.py
   # #5140 finding 12 (the `sdk` arm; the `core` row is in that block). NOT
   # because of `tortoise/sdk.py`: that module is a `SHARED_MODULES` entry, so a
   # `sdk.py`-only diff selects the FULL matrix anyway (the same NOTE sits above
