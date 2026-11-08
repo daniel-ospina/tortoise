@@ -67,8 +67,8 @@ claim nothing supports. **The seam has since LANDED (#9116), so this module no
 longer reports them as unobservable-by-construction.** Pre-seam, ``capture_session``'s
 receipt could not carry them and the failure was ONE LAYER UP from where it was
 first attributed: ``extract_session_v2`` built the surfaces
-(``result["classify_later"]`` at ``tortoise/extractor_v2.py:13415-13421`` and
-``result["vet"]`` at ``:13425-13429``) while the meta fold dropped them with
+(``result["classify_later"]`` at ``tortoise/extractor_v2.py:13425-13431`` and
+``result["vet"]`` at ``:13435-13439``) while the meta fold dropped them with
 ``"stats": out.get("stats") or {}``. The fold now calls
 ``_capture_stats_with_step_witness`` (``tortoise/sdk.py:17188``), which copies each
 stage's own counts onto ``stats["step_witness"]`` and drops no candidate text — so
@@ -1757,8 +1757,8 @@ _IDLE_CITES: dict[str, str] = {
         "BEFORE the `if not edus:` early return that emits {'enabled': "
         "vet_enabled, 's2': {}, 'union': {}} (tortoise/extractor_v2.py:12944, the "
         "flag; :12948, the early return; :12979, its vet surface), and each VET "
-        "pass is gated on the LIST — `if vet_enabled and embed_list:` (:15429), "
-        "`if vet_enabled and complete_list:` (:13201) — so "
+        "pass is gated on the LIST — `if vet_enabled and embed_list:` (:15439), "
+        "`if vet_enabled and complete_list:` (:13211) — so "
         "a block that says enabled=true proves the FLAG, never that the pass "
         "ran. A FAILED vet pass leaves the same empty stats (`_run_vet_pass` "
         "returns {} on its fail-open path, :12823-12826)."
@@ -1771,11 +1771,11 @@ _IDLE_CITES: dict[str, str] = {
         "{'enabled': classify_later, 's2': {}, 'union': {}, "
         "'restamp_overrides': 0, 'slot_rekeys': 0} (:12975-12978), and each "
         "classify pass is gated on the LIST and then on a NON-EMPTY item set — "
-        "`if classify_later and embed_list:` (:13074) around `if items:` "
-        "(:13077), `if classify_later and complete_list:` (:13216) around "
-        "`if items:` (:13226) — so a block that says enabled=true proves the "
+        "`if classify_later and embed_list:` (:13084) around `if items:` "
+        "(:13087), `if classify_later and complete_list:` (:13226) around "
+        "`if items:` (:13236) — so a block that says enabled=true proves the "
         "FLAG, never that the pass ran. A FAILED classify pass leaves the same "
-        "empty stats (its fail-open `except` at :13090 / :13237)."
+        "empty stats (its fail-open `except` at :13100 / :13247)."
     ),
 }
 
@@ -1787,7 +1787,7 @@ def _pass_ran(block: dict) -> bool | None:
     where the two were confused. ``extract_session_v2`` emits ``result["vet"]``
     and ``result["classify_later"]`` UNCONDITIONALLY — on the flag-OFF arm and on
     the early-return path the block is ``{"enabled": False, "s2": {}, "union":
-    {}}`` (:12975-12978, :12979, :13415-13429) — so an acceptance test of "a non-empty dict"
+    {}}`` (:12975-12978, :12979, :13425-13439) — so an acceptance test of "a non-empty dict"
     reports S2.2/S2.3 WITNESSED on a run measured with the flags OFF, printing
     ``enabled=false, s2={}`` beside the word WITNESSED.
 
@@ -1798,8 +1798,8 @@ def _pass_ran(block: dict) -> bool | None:
     ``if not edus:`` early return (``:12948``) emits literally ``"vet": {"enabled":
     vet_enabled, "s2": {}, "union": {}}`` (``:12979``) — with the flag ON. The
     passes themselves are gated on the LIST, not the flag: ``if vet_enabled and
-    embed_list:`` (``:15429``) and ``if vet_enabled and complete_list:``
-    (``:13201``). So a session whose conversation produced no list emits
+    embed_list:`` (``:15439``) and ``if vet_enabled and complete_list:``
+    (``:13211``). So a session whose conversation produced no list emits
     ``enabled: True`` with empty counters and no pass ever ran; so does a pass
     that FAILED, because ``_run_vet_pass`` returns ``{}`` stats on its fail-open
     exception path (``extractor_v2.py:12823-12826``). ``enabled: true`` therefore

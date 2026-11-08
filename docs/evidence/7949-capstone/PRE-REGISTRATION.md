@@ -1118,7 +1118,7 @@ except where noted; the alternative was to omit the provenance and let a reader 
 | 90 of 90 m2 baseline | `tests/eval/write_path/baselines/m2.json` at this `fixtures_hash` |
 | 53/37, 7/8, 5/9, 21/8 split counts | the per-session sums above, partitioned by §2.1 |
 | 9 of 15 shape coverage (60%) | §1.3, `is_positively_bare_definite_description` |
-| 7 unconditional / 1 conditional step (§11) | `tortoise/extractor_v2.py:11189-11211` (`_collect_classify_items`, the collector's item set), `:13077` and `:13226` (the two `if items:` gates, one per classify pass) |
+| 7 unconditional / 1 conditional step (§11) | `tortoise/extractor_v2.py:11189-11211` (`_collect_classify_items`, the collector's item set), `:13087` and `:13236` (the two `if items:` gates, one per classify pass) |
 | 148 / 433 (0.34180), 148 / 383 (0.38642) | `capstone-measured-e0fc940b.log`'s `E3 census` block: `e3 label=Point nodes=338 anchored=141`, `Object 50/0`, `Event 45/7`, no `Document` written (§10.1) |
 | 141/150 (0.940000), 159 turn rows, 29 operator Points | the same census block's `point composition` line — reported, NOT adopted as E3's denominator (§10.1) |
 | 5/25 (20%) vs 13/25 (52%) recovered; 0.4800 raw absolute on n=25 | §10 @ `ecc7bc8ca` (run 1 losses 80.0%/48.0%) and `capstone-measured-e0fc940b.log`'s E5 row (§10.2) |
@@ -1374,7 +1374,7 @@ place a machine reads it.
   at the pre-registration commit; a run log may not declare it.
 - **Why it is not a relaxation**: `S2.3` structurally cannot run on a corpus whose S2 map types every
   candidate — `_collect_classify_items` (`tortoise/extractor_v2.py:11189-11211`) collects only
-  kind-missing/`unclassified` candidates and both passes sit behind `if items:` (`:13065`, `:13214`).
+  kind-missing/`unclassified` candidates and both passes sit behind `if items:` (`:13087`, `:13236`).
   The old rule therefore could not be satisfied by **any** legitimate run of the registered corpus,
   so the gate could not return a verdict at all (§11.2's four ordered refusals). Every one of the
   eight still has to be accounted for, and an idle claim needs the run's own four facts — flag ON,
@@ -1469,7 +1469,7 @@ place a machine reads it.
 - **Original value (as §10.8 left it):** `_collect_classify_items` at
   `tortoise/extractor_v2.py:10397`, its extent `:10397-10419`, the two `if items:` gates at
   `:11849`/`:11998`, and the two fail-open `except` arms at `:11862`/`:12009`.
-- **New value:** the same symbols at `:11189`, `:11189-11211`, `:12908`/`:13057` and
+- **New value:** the same symbols at `:11098`, `:11098-11120`, `:12908`/`:13057` and
   `:12921`/`:13068`.
 - **Why:** `main` landed five changes to `extractor_v2.py` while this branch was open, and they
   moved these cites in **two windows** — only the second of which is what this entry's **749**-line
@@ -1478,7 +1478,7 @@ place a machine reads it.
   (`80c912244f`) and are **ancestors of** `04deeaacda`, so they carry the collector from `:10397`
   (as recorded above) to `:10969` at `04deeaacda` — **+572**. The second window: **`#11264`**
   (`482`/`81`) and **`#11361`** (`149`/`37`) are the only commits in `04deeaacda..origin/main` that
-  touch `extractor_v2.py`, and they carry it the rest of the way, `:10969` → `:11189` — **+129**.
+  touch `extractor_v2.py`, and they carry it the rest of the way, `:10969` → `:11098` — **+129**.
   Their **631** insertions and **118** deletions are exactly the **749** changed lines quoted here,
   because `04deeaacda..origin/main` is the only range they are measured over.
   ⚠️ The first cut of this entry attributed the 631/118/749 to all five changes ("inserting **631**
@@ -1490,7 +1490,7 @@ place a machine reads it.
   a **per-symbol** amount at its own commit `80c912244f` — the `def` and its extent by one line
   (`:10397`/`:10397-10419` against a measured `:10398`/`:10398-10420`), and the four gate/arm cites
   by **seven** (`:11849`/`:11998`/`:11862`/`:12009` against a measured
-  `:11856`/`:12005`/`:11869`/`:12016`). Both routes therefore reach the same LINE, `:11189`, at two
+  `:11856`/`:12005`/`:11869`/`:12016`). Both routes therefore reach the same LINE, `:11098`, at two
   different deltas: +572 then +129 from the recorded `:10397` is **701**, while +571 then +129 from
   the measured `:10398` is **700**. Re-deriving the next move must anchor on the measured `:10398`,
   never on the recorded value plus 700. The symbols are unchanged: the collector
@@ -1505,18 +1505,18 @@ place a machine reads it.
 
 ### 10.10 — the §11 cite block re-pointed after `#11368`'s mention-builder consolidation (2026-11-07, `#11368`)
 
-- **Original value (as §10.9 left it):** `_collect_classify_items` at `:11189`, its extent
-  `:11189-11211`, the two `if items:` gates at `:12908`/`:13057`, and the two fail-open `except`
+- **Original value (as §10.9 left it):** `_collect_classify_items` at `:11098`, its extent
+  `:11098-11120`, the two `if items:` gates at `:12908`/`:13057`, and the two fail-open `except`
   arms at `:12921`/`:13068`.
-- **New value:** the same symbols at `:11189`, `:11189-11211`, `:13065`/`:13214` and
-  `:13078`/`:13225`.
+- **New value:** the same symbols at `:11098`, `:11098-11120`, `:12982`/`:13131` and
+  `:12995`/`:13142`.
 - **Why:** `#11368` gave the declared-span verdict ONE home (`_verified_span_source`) and routed
   both mention builders through it, a net **+74** lines (`126` inserted / `52` deleted) confined to
   the mention-builder region (`:12128`–`:12628` — the last hunk is `+12607,22`, so `:12607` is its
   START, and the bound is `:12628`; it must contain BOTH calls the section claims, `:12273` in
   `_mention_record` and `:12624` in `_clamped_mention`). Every cite **below** that region therefore moves
-  by exactly `+74` — `:12908`→`:13065`, `:13057`→`:13214`, `:12921`→`:13078`, `:13068`→`:13225` —
-  while `_collect_classify_items` (`:11189`), which sits **above** it, does not move at all. The
+  by exactly `+74` — `:12908`→`:12982`, `:13057`→`:13131`, `:12921`→`:12995`, `:13068`→`:13142` —
+  while `_collect_classify_items` (`:11098`), which sits **above** it, does not move at all. The
   `+0` on the collector and the `+74` on the four cites below it are one measurement, and quoting
   only one of them is how the next re-derivation anchors on the wrong number.
 - **What moved: nothing else.** No metric, denominator, threshold, class set, corpus pin or `steps`
@@ -1689,6 +1689,38 @@ last — so the pinned artifact stays green under the stricter rule.
 `UNMEASURED(...)` register changes: the cell is re-ordered and nothing else, `document_sha256` is
 re-cut from the resolved document (§8), and no committed verdict is re-scored.
 
+### 10.14 — the §11 cite block re-pointed after `#11002`'s re-narrate seam moved `extractor_v2.py` (2026-11-08, `#11002`)
+
+- **Original value, MEASURED at `origin/main` (`f76b74c3e6`) by content:** `_collect_classify_items`
+  at `:11174` (extent `:11174-11196`, the `return items` that ends it), the two `if items:` gates at
+  `:13058`/`:13207`, and the two fail-open `except` arms at `:13071`/`:13218`.
+  ⚠️ This is deliberately NOT §10.10's recorded New value (`:11098`/`:12982`/`:13131`/`:12995`/`:13142`):
+  **all five of those cites are 76 lines behind `origin/main`'s own tree.** One uniform `+76` across
+  five cites is a single unrecorded move after `#11368`, not five drifts. That move is `main`'s, and it
+  is **disclosed here, not silently reconciled** — §10.10 keeps its recorded bytes, and this entry
+  anchors on the MEASURED value, exactly as §10.9's own closing paragraph requires (*"re-deriving the
+  next move must anchor on the measured `:10398`, never on the recorded value plus 700"*).
+- **New value:** the same symbols at `:11189`, `:11189-11211`, `:13087`/`:13236` and
+  `:13100`/`:13247`.
+- **Why:** `#11002` adds the bounded re-narrate, and its inserts land on **both sides** of the
+  collector, so the collector and the classify cites do not move by the same amount:
+  * **above the collector — `+15`.** `run_s1`'s `emphasis` seam: its docstring block (+10) and the
+    one appended block in the granularity slot (+5). The module-record hunks in the same commit net to
+    **zero** (−3/+3), which is why the delta is `+15` and not the commit's insert size.
+  * **between the collector and the classify passes — a further `+14`.** Two windows, both inside
+    `extract_session_v2`: the retry itself (**`+4`** — `_arm_extract` is lifted out of
+    `extract_session_v2`, +11 across that hunk, and the retried prefix is de-indented one level inside
+    the function it became, −7), and the review repair this same PR carries (**`+10`** — the
+    `failed_chunks` rebind onto the shipped narrative, +5, and the two per-arm counts in
+    `stats["renarrate"]`, +5). The four gate/arm cites therefore move **`+29`**.
+  Each number was verified by CONTENT at each head (the `def`, the `return items` that ends it, the two
+  `if items:` gates, the two `except` arms), never by adding an offset — the failure this section has
+  already recorded twice. The two totals reconcile with the unrecorded `+76` only when it is counted:
+  `:11098 + 76 + 15 = :11189` and `:12982 + 76 + 29 = :13087`.
+- **What moved: nothing else.** No metric, denominator, threshold, class set, corpus pin or `steps`
+  block is touched; the numbers this record exists to freeze are byte-identical. `document_sha256` is
+  re-cut in this same commit, per §8's rule for *any* edit to this file.
+
 ## 11. The step set V5 gates over — seven unconditional, one conditional (`#10215`)
 
 **Why this section exists.** `tools/capstone_verdict_check.py`'s V5 and `probes/capstone_run.py`'s G5
@@ -1701,7 +1733,7 @@ the condition; the gate reads the declaration below instead of asserting eight.
 
 `_collect_classify_items` (`tortoise/extractor_v2.py:11189-11211`) collects only candidates whose kind
 is **missing or the `unclassified` sentinel**. Both classify passes are gated on that list being
-non-empty — `if items:` at `:13077` (the S2 pass) and `:13226` (the post-S4 pass). So S2.3 has work **iff the S2 map left
+non-empty — `if items:` at `:13087` (the S2 pass) and `:13236` (the post-S4 pass). So S2.3 has work **iff the S2 map left
 something untyped** — and that is a property of the candidate set, not of the pipeline's health. A
 corpus whose map assigns a concrete kind to every candidate legitimately idles the pass.
 
@@ -1745,7 +1777,7 @@ evidence or its evidence issue.
    run log, so making a step conditional is a reviewed edit to a hash-pinned artefact rather than a
    lane's local choice. A log whose declaration the frozen record does not confirm is **refused**.
 
-**Why (2) is a witness and not a loophole.** The extractor's fail-open `except` (`:13090`, `classify(S2) failed` / `:13237`, `classify(union) failed`) leaves
+**Why (2) is a witness and not a loophole.** The extractor's fail-open `except` (`:13100`, `classify(S2) failed` / `:13247`, `classify(union) failed`) leaves
 the *same* empty `s2`/`union` block as an idle pass — `#9823` measured that. Accepting a bare empty
 block would therefore hand a **crashed** classify pass the same verdict as a pass with nothing to do,
 which is the fail-open shape a gate may not have. The failure is visible: the extractor appends

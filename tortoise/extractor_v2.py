@@ -13040,6 +13040,11 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
         vet_s2_stats = picked["vet_stats"]
         vet_s2_pool = picked["vet_pool"]
         mention_s2_stats = picked["mention_stats"]
+        # …and the S1 loss count follows the NARRATIVE, not the first arm
+        # (review round 3, F3): `failed_chunks` reaches `stats["failed_chunks"]`
+        # as "how much of the shipped narrative's S1 was lost", so an arm whose
+        # story never ships must not report its own clean count over one that did.
+        failed_chunks = picked["failed_chunks"]
         vet_warnings.extend(picked["warnings"])
         renarrate_stats = {
             "fired": True,
@@ -13054,6 +13059,11 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
             "emphasis": emphasis,
             "first": arm["metrics"],
             "second": second["metrics"],
+            # Per-arm S1 losses, beside the numbers above: the shipped narrative's
+            # count is the one at `stats["failed_chunks"]`, and this is what lets
+            # a reader see the OTHER arm's without diffing `errors`.
+            "first_failed_chunks": arm["failed_chunks"],
+            "second_failed_chunks": second["failed_chunks"],
             "merged": picked["merged"],
         }
         # ax-principles: an action names what it did. One line, and it carries
@@ -15542,8 +15552,29 @@ def _renarrate_pick(first: dict, second: dict) -> dict:
         "vet_stats": second["vet_stats"],
         "vet_pool": _merge_arm_pools(first.get("vet_pool") or {},
                                      second.get("vet_pool") or {}),
-        "mention_stats": {"first": first.get("mention_stats") or {},
-                          "second": second.get("mention_stats") or {}},
+        # ⛔ The SHAPE of `mentions.stats` is part of that channel's contract, and
+        # returning `{"first": …, "second": …}` here changed it *exactly* on the
+        # runs this mechanism acted on (review round 3, F4): the channel is flat
+        # everywhere else, so a consumer reading `held_surfaces`/`by_rule` at the
+        # top level raised `KeyError` on the retried path only — a shape break on
+        # the always-present family `vet`/`classify_later`/`identity` belong to.
+        # So the SHIPPED narrative's own stats are flattened in, unchanged, and
+        # the per-arm numbers ride a new key beside them: additive, never a
+        # re-shape. `union` is spread on top by the union pass, exactly as it is
+        # on the un-retried path.
+        "mention_stats": {
+            **(narrator.get("mention_stats") or {}),
+            "arms": {"first": first.get("mention_stats") or {},
+                     "second": second.get("mention_stats") or {}},
+        },
+        # The SHIPPED narrative's own S1 chunk losses. Reporting the FIRST arm's
+        # count here was wrong on the retried path (review round 3, F3): when the
+        # second narrative wins the tie-break its `story` is what reaches S4's
+        # prompt and `execute_embed`, so a loss the shipped narrative suffered
+        # must not be reported as zero. Nothing is hidden by following the
+        # narrative: both arms' `errors` ride the shared list, and each arm's
+        # count is recorded under `stats["renarrate"]`.
+        "failed_chunks": narrator.get("failed_chunks") or 0,
         "warnings": list(second.get("warnings") or []),
         "merged": {
             "first_items": raw["s2_items"],

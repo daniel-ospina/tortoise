@@ -86,13 +86,26 @@ def _embed(name: str) -> str:
 
 
 class _Scripted:
-    """A model whose S1/S2 answers are scripted per call, recorded in order."""
+    """A model whose S1/S2 answers are scripted per call, recorded in order.
+
+    ``s1_fail_if`` is a substring that makes an S1 call RAISE, matched against the
+    prompt's ``user`` half. It is matched by CONTENT rather than by call index so a
+    scripted loss lands on one specific CHUNK regardless of how many attempts
+    `_complete` spends retrying: index-based scripting cannot distinguish "the
+    chunk that failed" from "the retry of it", and a single raise is absorbed by
+    the retry, leaving `failed_chunks == 0`. `_arm_extract` counts a chunk that
+    exhausts its attempts as a loss and keeps going (`S1 chunk failed: …`), so the
+    arm that lost it still produces a narrative from the chunks that survived.
+    """
 
     last_finish_reason = None
 
-    def __init__(self, s1_answers, s2_answers):
+    def __init__(self, s1_answers, s2_answers, s1_fail_if: str | None = None,
+                 s1_fail_unless: str | None = None):
         self.s1_answers = list(s1_answers)
         self.s2_answers = list(s2_answers)
+        self.s1_fail_if = s1_fail_if
+        self.s1_fail_unless = s1_fail_unless
         self.s1_prompts: list[str] = []
         self.s2_prompts: list[str] = []
         self.other_stages: list[str] = []
@@ -101,6 +114,10 @@ class _Scripted:
         self.last_finish_reason = "stop"
         if "STORY SUMMARIZER" in system:
             self.s1_prompts.append(system)
+            if (self.s1_fail_if and self.s1_fail_if in user
+                    and not (self.s1_fail_unless
+                             and self.s1_fail_unless in system)):
+                raise RuntimeError("Fatal: 400 bad request")
             idx = min(len(self.s1_prompts), len(self.s1_answers)) - 1
             return self.s1_answers[idx]
         if "GAP REVIEWER" in system:
@@ -114,15 +131,20 @@ class _Scripted:
 
 
 def _run(monkeypatch, s1_answers, s2_answers, *, arbiter=None,
-         keep_rate: str | None = None):
+         keep_rate: str | None = None, chunk_size: int = 50,
+         conversation=None, s1_fail_if: str | None = None,
+         s1_fail_unless: str | None = None):
     if keep_rate is None:
         monkeypatch.delenv("TORTOISE_RENARRATE_KEEP_RATE", raising=False)
     else:
         monkeypatch.setenv("TORTOISE_RENARRATE_KEEP_RATE", keep_rate)
-    model = _Scripted(s1_answers, s2_answers)
-    result = extract_session_v2(model, list(CONVERSATION), sdk=None,
+    model = _Scripted(s1_answers, s2_answers, s1_fail_if=s1_fail_if,
+                      s1_fail_unless=s1_fail_unless)
+    result = extract_session_v2(model, list(conversation or CONVERSATION),
+                                sdk=None,
                                 session_id="11002-test",
                                 session_date="2026-11-08",
+                                chunk_size=chunk_size,
                                 vet_arbiter=arbiter)
     return model, result
 
@@ -543,3 +565,90 @@ def test_a_threshold_that_is_not_a_rate_disarms(monkeypatch, raw):
 def test_a_threshold_in_range_arms(monkeypatch):
     monkeypatch.setenv("TORTOISE_RENARRATE_KEEP_RATE", "0.85")
     assert extractor_v2._renarrate_threshold() == 0.85
+
+
+# ── 6. the shipped run's own report follows the NARRATIVE ─────────────────
+
+def test_the_reported_s1_losses_are_the_shipped_narratives(monkeypatch):
+    """`failed_chunks` counts the losses of the story that SHIPS (review F3).
+
+    When the second narrative wins §4.4's tie-break its `story` is what reaches
+    S4's prompt and `execute_embed`. Reporting the FIRST arm's S1 loss count over
+    it says the run lost nothing while its own `errors` name the loss — so the
+    count has to follow the narrative, and both arms' counts stay in the record.
+    """
+    # `chunk_size=1` over this 2-message conversation → one chunk per message. The
+    # marked chunk fails in the FIRST arm only (the retried arm's prompt carries
+    # the emphasis block, which is what `s1_fail_unless` keys on), so the loss
+    # belongs to a narrative that does NOT ship and the count must be 0 — while
+    # the old first-arm binding reports 1. Matched by CONTENT, so `_complete`'s own
+    # retries are spent on the failing chunk rather than on a healthy one.
+    lossy = [{"role": "user", "content": "LOSS-MARKER Alice set the budget."},
+             {"role": "user", "content": "Bob will ship on Friday."}]
+    model, result = _run(
+        monkeypatch,
+        ["Alice set a budget."],
+        [_EMPTY_EMBED, _embed("Northwind")],
+        chunk_size=1,
+        conversation=lossy,
+        s1_fail_if="LOSS-MARKER",
+        s1_fail_unless=extractor_v2._renarrate_emphasis("coverage_suspect"),
+    )
+    renarrate = result["stats"]["renarrate"]
+    assert renarrate["fired"] is True
+    assert renarrate["narrative"] == "second", (
+        "arm 1 yielded nothing, so the second narrative must win the tie-break"
+    )
+    assert renarrate["first_failed_chunks"] == 1
+    assert renarrate["second_failed_chunks"] == 0
+    assert result["stats"]["failed_chunks"] == 0, (
+        "the SHIPPED narrative lost nothing — a 1 here is the first arm's count, "
+        "which describes a narrative the run did not commit"
+    )
+    assert any("S1 chunk failed" in e for e in result.get("errors") or []), (
+        "the loss is real and recorded — it is in `errors` and in "
+        "`stats['renarrate']['first_failed_chunks']`, which is what makes the "
+        "other arm's 0 the honest number for the shipped narrative"
+    )
+    assert _entity_names(result) == {"Northwind"}, "the union still shipped"
+
+
+def test_the_mentions_channel_keeps_one_shape_when_the_retry_fires(monkeypatch):
+    """`mentions.stats` is a FLAT stats dict on BOTH paths (review F4).
+
+    It is a per-run evidence channel of the same family as `vet`/`classify_later`:
+    a consumer reads `held_surfaces`/`by_rule` straight off it. Returning
+    `{"first": …, "second": …}` only when the retry fired re-shaped the channel on
+    exactly the runs the mechanism acted on, so such a reader raised `KeyError`
+    there and nowhere else. The per-arm numbers are ADDITIVE, under `arms`.
+    """
+    _, idle = _run(monkeypatch, ["Alice set a budget."], [_embed("Northwind")])
+    assert idle["stats"]["renarrate"] == {"fired": False}
+
+    # The channel is only populated when the referentiality pass is armed; with
+    # it off `route_mentions` returns the list UNCHANGED by design, and the
+    # comparison below would be between two empty dicts.
+    monkeypatch.setenv("TORTOISE_REFERENTIALITY", "1")
+    _, idle_armed = _run(monkeypatch, ["Alice set a budget."], [_embed("Northwind")])
+    _, fired = _run(
+        monkeypatch,
+        ["Alice set a budget.", "Alice set a budget, reconsidered."],
+        [_EMPTY_EMBED, _embed("Northwind")],
+    )
+    assert fired["stats"]["renarrate"]["fired"] is True
+
+    idle_stats = idle_armed["mentions"]["stats"]
+    fired_stats = fired["mentions"]["stats"]
+    assert idle_stats, (
+        "the channel carries the referentiality pass's own stats even when the "
+        "retry does not fire — otherwise this guard compares two empty dicts"
+    )
+    missing = set(idle_stats) - set(fired_stats)
+    assert not missing, (
+        f"firing the retry dropped {sorted(missing)} from `mentions.stats`: the "
+        "channel changed shape on the runs it acted on"
+    )
+    assert "first" not in fired_stats and "second" not in fired_stats, (
+        "the arms are nested under `arms`, never spread over the flat channel"
+    )
+    assert set(fired_stats["arms"]) == {"first", "second"}
