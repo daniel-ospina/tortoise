@@ -457,10 +457,16 @@ def _report_fts(fts: dict) -> None:
     control = fts.get("control")
     if control is not None:
         if control.get("mode") == "empty-index":
-            print("          control: EMPTY Source index — no Source on this "
-                  "graph carries `_searchText`, the field the index is declared "
-                  "on, and the read RAN, so the corpus is empty rather than the "
-                  "index being silent")
+            # ⛔ THE SCOPE OF THE MEASUREMENT, IN THE SENTENCE (#11536 review round
+            # 6, P3): `_SOURCE_INDEX_ENTRIES` counts `documentKind IS NULL` nodes,
+            # and a DOCUMENT is a `:Source` whose `_searchText` is the #125 Document
+            # FTS field — so "no Source on this graph carries it" was false on any
+            # document-bearing graph. Name the population the query asks about.
+            print("          control: EMPTY Source index — no Source over the "
+                  "probe's own population (`documentKind IS NULL`) carries "
+                  "`_searchText`, the field the index is declared on, and the "
+                  "read RAN, so the corpus is empty rather than the index being "
+                  "silent")
         elif control.get("hits") is None:
             print("          control: not available — "
                   f"{control.get('note')}")
@@ -492,8 +498,15 @@ def _report_fts(fts: dict) -> None:
             hits = sum(int(p.get("hits") or 0) for p in fts["probes"])
             benign = sum(len(p.get("lexicon") or ()) for p in fts["probes"])
             kinds = [_before_leg_kind(p) for p in fts["probes"]]
-            counts = (f" ({hits} hit(s), {benign} on nodes whose own lexicon "
-                      f"accounts for the token)")
+            # ⛔ TWO UNITS, NAMED AS TWO (#11536 review round 6, P3): `hits` counts
+            # FTS ROWS (one per node) while `benign` counts the `lexicon` bucket,
+            # which holds URLS. On the url-mate pair this module declares reachable
+            # (two lexicon nodes at one url) the old wording read "(2 hit(s), 1 on
+            # nodes whose own lexicon accounts for the token)" — implying one hit
+            # was unaccounted for, while the stem-collision line above said the
+            # url's nodes DO account for the probe.
+            counts = (f" ({hits} hit(s), across {benign} url(s) whose nodes' own "
+                      f"lexicon accounts for the token)")
             head = ("          ✓ no node carrying the pre-fix prose is findable "
                     "through the Source FTS index")
             tail = (" Re-measure with a single rare token taken from the removed "

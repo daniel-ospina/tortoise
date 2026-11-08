@@ -3194,6 +3194,19 @@ def test_the_green_does_not_claim_a_BEFORE_reading_that_did_not_MEASURE(monkeypa
     # infer "a token that is not in the corpus", which is FALSE when the BEFORE leg
     # ran and matched a benign node — and nothing pinned the correction, so a revert
     # went green. This is the `uncorroborated` arm, the one that prints it.
+    # (5) TWO UNITS, NAMED AS TWO (#11536 review round 6, P3): `hits` counts FTS
+    # rows, `lexicon` holds urls — so the url-mate pair (two lexicon nodes at one
+    # url, which this module declares reachable) must not read as one accounted-for
+    # hit beside one unexplained one.
+    dup = _after()
+    dup["probes"][0].update({"hits": 2, "lexicon": ["session:dup"],
+                             "urls": ["session:dup", "session:dup"]})
+    _cli._report_fts(_cli._merge_probe(before, dup, wrote=False))
+    out = capsys.readouterr().out
+    assert "(2 hit(s), across 1 url(s)" in out, (
+        "the green mixed a row count with a url count, implying a hit it did not "
+        "account for")
+
     no_control = _after()
     no_control["control"] = {"mode": "unavailable", "ok": False, "hits": None,
                              "note": "no post-fix lexicon node on this graph"}
@@ -3731,6 +3744,10 @@ def test_an_EMPTY_Source_index_corroborates_a_CLEAR_only_graph(monkeypatch,
         "a CORRECTLY repaired clear-only graph could not be certified")
     out = capsys.readouterr().out
     assert "EMPTY Source index" in out
+    assert "documentKind IS NULL" in out, (
+        "the empty-index line does not state the population the query asks about "
+        "— a DOCUMENT is a :Source whose `_searchText` is the #125 field, so an "
+        "unscoped \"no Source on this graph\" is false there")
 
     # …and a non-empty index with no lexicon node to probe stays uncorroborated.
     busy = _IndexGraph([(cleared,)], empty=False)
