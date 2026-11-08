@@ -48,16 +48,21 @@ REPRODUCE — the script is IN THE TREE, not on the authoring box
 MEASUREMENT — 1. what the org can reach
 ---------------------------------------
     == 1. tortoise_list_graphs (what this org can reach) ==
+    tortoise_list_graphs {}
     OK ["org_a28284790cff4144b699e4b4fb"]
 
 One graph: the default, addressable by its namespace.
 
+(EVERY `name {json}` line below is the script's own REQUEST ECHO, and every `OK`/`ERROR`
+line is the tool's response — the script prints both, so this file can be diffed line for
+line against a re-run rather than trusted as narration. Long responses are cut at a
+fixed width by the script itself and marked `…` where this file cuts further.)
+
 MEASUREMENT — 2. NEGATIVE CONTROL: the write, with an EXPLICIT NON-DEFAULT graph (U1's case)
 -------------------------------------------------------------------------------------------
     == 2. NEGATIVE CONTROL — write with explicit non-default graph 'capstone-9664-nod' ==
-    tortoise_create_point {"kind":"statement",
-                           "content":"capstone-9664 U1 probe: explicit non-default graph (must not exist)",
-                           "graph":"capstone-9664-nod"}
+    tortoise_create_point {"kind": "statement", "content": "capstone-9664 U1 probe: explicit
+        non-default graph (must not exist)", "graph": "capstone-9664-nod"}
     ERROR No graph 'capstone-9664-nod' is reachable from this workspace. Reachable graphs:
           'default' (id g_dfa9a45dc4234801, graph_id 'default').
 
@@ -65,33 +70,34 @@ REFUSED BY OUR CODE (`tortoise/mcp_auth.py`), not by the host, and the message N
 graphs that ARE reachable. The shape a caller gets here is the same one U3 recorded for a
 foreign READ — which is why this row is NOT regraded on it: a refusal proves the resolver
 refuses, and U1's accept arm (a write landing in an EXISTING second graph) is a different
-observable (see 4).
+observable (see 5).
 
 MEASUREMENT — 3. POSITIVE CONTROL: is this org's write path even live?
 ---------------------------------------------------------------------
 Without this, "the probe string is absent" could mean "search returns nothing on a new org".
 
     == 3. POSITIVE CONTROL — write into 'default', then read it back ==
-    tortoise_create_point {"kind":"statement",
-                           "content":"capstone-9664 positive control: this string MUST be findable"}
+    tortoise_create_point {"kind": "statement", "content": "capstone-9664 positive control: this
+        string MUST be findable"}
     OK {"id":"1a1b99d2bfc-1ceb72af6103","content":"capstone-9664 positive control: this string
-        MUST be findable","pointKind":"statement", … "createdAt":"2026-11-08T05:24:07.799623+00:00"}
+        MUST be findable","pointKind":"statement", … "createdAt":"2026-11-08T05:24:07.799623+00:00" …}
 
-    tortoise_search {"query":"positive control","limit":5}
+    tortoise_search {"query": "positive control", "limit": 5}
     OK [{"id":"1a1b99d2bfc-1ceb72af6103","content":"capstone-9664 positive control: this string
-        MUST be findable","match_source":"rrf", … "scores":{"fts":1.5,"vector":0.7099…}}]
+        MUST be findable","match_source":"rrf", … "scores":{"fts":1.5,"vector":0.7099…} …}]
 
 The write path is live and retrieval finds what landed.
 
 MEASUREMENT — 4. the fail-open half: nothing landed from the refused write
 --------------------------------------------------------------------------
     == 4. FAIL-OPEN HALF — the negative probe string must be absent ==
-    tortoise_search {"query":"capstone-9664 U1 probe","limit":5}
-    OK [{"id":"1a1b99d2bfc-1ceb72af6103","content":"capstone-9664 positive control: this string
-        MUST be findable", …}]
+    tortoise_search {"query": "capstone-9664 U1 probe", "limit": 5}
+    OK '[{"id":"1a1b99d2bfc-1ceb72af6103","content":"capstone-9664 positive control: this string
+        MUST be findable", … "scores":{"fts":0.2083…,"vector":0.70563…
 
     controls: refused=True pos_write=True pos_found=True neg_absent=True
-    PROBE-RESULT: REFUSED-AND-ABSENT        # exit 0
+    PROBE-RESULT: REFUSED-AND-ABSENT
+    [shell] exit 0          # the exit status is the shell's, not a line the script prints
 
 The one hit is the POSITIVE CONTROL point, which shares the "capstone-9664" token — the
 NEGATIVE probe's text (`…explicit non-default graph (must not exist)`) appears in no result.
@@ -102,7 +108,8 @@ The verdict is mechanical and consults EVERY control — `neg_absent` requires t
 SUCCEEDED and returned the positive-control point, so a dead index or an error payload cannot
 be mistaken for an absence. (Review round 2 caught the first version: it checked only the
 negative half, so a stubbed failing search still printed `REFUSED-AND-ABSENT` and exited 0 —
-an unmeasured fail-open half reported as measured.)
+an unmeasured fail-open half reported as measured. Review round 3 caught the pair of
+mislabelled `status` variables that made this block self-contradicting when a search errored.)
 
 MEASUREMENT — 5. why U1's accept arm / U2 / U4 still cannot be measured (the 402, verbatim)
 -------------------------------------------------------------------------------------------
@@ -111,7 +118,7 @@ graph, and a minted free org cannot hold one. Measured, not inferred:
 
     $ POST https://api.premiselabs.co/v1/organizations/<org_id>/graphs  {"name":"capstone-u2-dup"}
     402 {"detail":"Custom graphs require the Builder plan. Upgrade to create multiple graphs.
-                   Need more? Contact support@premiselabs.co."}
+    [wrapped here for width; the payload has no newline] Need more? Contact support@premiselabs.co."}
 
 So the missing thing on those rows is named exactly: a paid tier that permits a second graph
 (Builder), or an owner-provided org that already has two. It is NOT a credential — a credential

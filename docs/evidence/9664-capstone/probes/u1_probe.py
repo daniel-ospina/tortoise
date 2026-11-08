@@ -3,7 +3,9 @@
 
 WHY THIS IS IN THE TREE (and not in /tmp)
 -----------------------------------------
-The measurement this script produces is cited by `verdict-ledger.yml` rows U1/U2/U4.
+The measurement this script produces is cited by `verdict-ledger.yml` rows U1/U2/U4
+(they cite `../step11-write-half-trace.txt`, which is the transcript THIS script
+emits — run it and the blocks match line for line, request echoes included).
 An evidence artifact whose only reproduction path is a file on the authoring box is
 not evidence — a reviewer's clone cannot run it, and `tools/capstone_ledger.py`
 refuses a `cmd:` entry naming a path outside the tree. So the script lives beside
@@ -65,6 +67,10 @@ def _creds() -> tuple[str, str]:
 
 
 async def _call(session: ClientSession, name: str, args: dict) -> tuple[str, str]:
+    # ECHO THE REQUEST: the recorded transcript in ../step11-write-half-trace.txt
+    # carries these lines, so a re-run must emit them or the trace stops being a
+    # transcript and becomes narration (review round 3).
+    print(f"{name} {json.dumps(args)}")
     result = await session.call_tool(name, args)
     text = "\n".join(getattr(c, "text", "") for c in result.content)
     return ("ERROR" if result.isError else "OK"), text
@@ -92,12 +98,12 @@ async def main() -> int:
         print(status, pos[:300], "\n")
         status_pos, found = await _call(session, "tortoise_search",
                                         {"query": "positive control", "limit": 5})
-        print(status, found[:700], "\n")
+        print(status_pos, found[:700], "\n")
 
         print("== 4. FAIL-OPEN HALF — the negative probe string must be absent ==")
         status_neg, absent = await _call(session, "tortoise_search",
                                          {"query": "capstone-9664 U1 probe", "limit": 5})
-        print(status, repr(absent[:400]))
+        print(status_neg, repr(absent[:400]))
 
     # The verdict is mechanical so a re-run cannot be read optimistically, and it
     # consults EVERY control — including the positive one, whose only job is to

@@ -153,8 +153,9 @@ measured_at:
 #     U3 is the exception and is `verified`: its outcome IS a refusal, which the
 #     2026-10-26 run obtained, so it needs neither a credential nor a second graph.
 # A credential WAS minted on 2026-11-08 (`uv run tortoise signup`) and it did not
-# unblock those rows; the write half of the ugly cases was measured with it and the
-# accept half stayed unreachable for the tier reason above.
+# unblock those rows: U1's write half was DELIVERED with it (refused by our resolver,
+# no silent fallback), U2/U4 were not attempted at all, and all three ACCEPT halves
+# stayed unreachable for the tier reason above — measured, not assumed.
 
 criteria:
   # ── §C — the issue's own "Done means" list, VERBATIM ────────────────────────
