@@ -1426,6 +1426,11 @@ def test_an_untracked_artifact_is_invalid(tmp_path):
             "user.email=t@example.com",
             "-c",
             "user.name=t",
+            # Hermetic: a box whose GLOBAL config sets `commit.gpgsign = true` would
+            # otherwise fail this SETUP with "cannot run gpg" before the property is
+            # ever exercised.
+            "-c",
+            "commit.gpgsign=false",
             "commit",
             "-q",
             "-m",
@@ -1679,8 +1684,13 @@ def test_an_EMFILE_on_the_ls_files_probe_cannot_manufacture_a_clean_exit(tmp_pat
             raise OSError(24, "Too many open files")
         return real_run(argv, *a, **kw)
 
+    import types
+
     mp = pytest.MonkeyPatch()
-    mp.setattr(cl.subprocess, "run", explode)
+    # `types.SimpleNamespace`, NOT `cl.subprocess.run`: the latter mutates the real
+    # `subprocess` module object, so every module in the process is patched for the
+    # duration and any concurrent machinery that shells out sees this fake.
+    mp.setattr(cl, "subprocess", types.SimpleNamespace(run=explode))
     mp.setattr(cl, "_commit_state", lambda sha, repo_root=None: "exists")
     try:
         data = _ledger([_row("A", evidence=["untracked.txt"])])
