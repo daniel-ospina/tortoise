@@ -279,7 +279,7 @@ shrink a tenant's own graph bytes; it only spreads the *fixed* lines. **The wind
 
 ⚠️ **Where the \$5.70 comes from, because the document it amends records a different ceiling.** `STORAGE-ARCHITECTURE.md` §1
 records the product constraint as *"a \$19 price with < \$9 total cost per user"*, and its M2 row prices against a
-"​\$9 → \$19 budget"; the **30 %-of-price** target here is the owner's 2026-11-07 sizing rule for the
+"\$9 → \$19 budget"; the **30 %-of-price** target here is the owner's 2026-11-07 sizing rule for the
 **storage AND shared-project lines together** (the owner's words cover falkor and postgres in one budget, §8),
 and it is **strictly tighter** than that ceiling (\$5.70 < \$9). Both are quoted so neither is mistaken for the other:
 against the older **\$9 total-cost ceiling** a complete graph's **RAM line** is **~97 % of it** and its **total is ~122 %** (above it), while against the **\$5.70 storage target** the RAM line is **154 %** and the total **193 %** — and

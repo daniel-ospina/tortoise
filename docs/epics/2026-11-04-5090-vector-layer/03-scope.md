@@ -33,9 +33,9 @@ aboutObjects: "epic #5090, embed gate, vector index, unindexed embeddings, test-
    1,536 bytes are cost with no benefit. The rule that says so **is written** (`tortoise/embed_gate.py`) and
    it is **switched off** — nobody turned it on or measured the effect. **That is ours.**
 2. **Where do the numbers physically live?** **Not ours.** That is the storage architecture (`#4333`), and
-   the decision's home is §14.3. Its deciding input — the fraction of a tenant's stock the cache actually
-   holds — is **not an input** to the 2026-11-07 ruling (`docs/architecture/SEARCH-ARCHITECTURE.md` §1: no
-   decision rests on a measured proportion of our graph), so this epic
+   the decision's home is §14.3. The input §17.4.6 names (`f`, the fraction of a tenant's stock the cache
+   actually holds) is **not an input** to the 2026-11-07 ruling (`docs/architecture/SEARCH-ARCHITECTURE.md` §1:
+   no decision rests on a measured proportion of our graph), so this epic
    **carries** that decision as recorded in `STORAGE-ARCHITECTURE.md` §14.3 and worked in `#4051`, and does not spend it.
 
 **What is left for this epic is small, and every item is something nobody else owns:**
