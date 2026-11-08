@@ -3380,8 +3380,14 @@ def test_a_BREAKER_OPEN_read_is_UNMEASURABLE_not_a_clean_zero(monkeypatch):
         dropped index) yields 0 hits and the run certifies a leak as repaired.
     (2) REACHABLE: `run_fts_query` short-circuits to `[]` on a breaker that is
         open, and returns `[]` with `reason="index_missing"` when the index is
-        gone — both are recorded in `leg_trace`, which is the only signal that
-        separates them from a genuine zero.
+        gone. ⛔ ONLY THE BREAKER IS SEPARATED BY ``leg_trace`` — this docstring
+        used to say "both are recorded in `leg_trace`, which is the only signal
+        that separates them from a genuine zero", and MEASURED on a real
+        FalkorDB that is false for a dropped index: querying a label with NO
+        fulltext index does not raise, it returns an EMPTY RESULT SET, so the
+        trace reports ``ran=True, degraded=False, reason='empty_results'`` —
+        indistinguishable from a clean miss. A dropped index is caught by the
+        positive CONTROL, never by ``unmeasurable`` (#11536 review round 8, P2).
     """
     from tortoise import session_source_prose_migration as m
 
@@ -3619,6 +3625,43 @@ def test_a_PARTIAL_repair_does_not_state_the_POPULATION_claim_from_one_token(
         "census still listed one: " + out)
     assert "the census still lists 1 node(s)" in out, (
         "the narrowed line did not say what the census DID measure: " + out)
+
+
+def test_the_CLI_passes_the_census_it_measured_INTO_the_sign_off(monkeypatch):
+    """#11536 review round 8, P2: the fix's PRODUCTION WIRING was unpinned.
+
+    (1) FAILS on the pre-fix call site: replacing
+        `_report_fts(fts, report.get("census_after"))` with `_report_fts(fts)` —
+        the exact pre-fix call — left the ENTIRE suite green (MEASURED: mutation
+        M5, 115 passed / 0 failed). So the P2 the previous commit closes could be
+        reverted at its only production site with nothing red, which is the
+        "verification step that cannot fail" class this leg exists to close.
+    (2) REACHABLE: every `--dry-run`/`--repair` run that passes `--probe-phrase`
+        reaches this call — it is the operator's sign-off line.
+    """
+    seen: list = []
+    monkeypatch.setattr(_cli, "_report_fts",
+                        lambda fts, census_after=None: seen.append(census_after))
+    _export_a_record_dsn(monkeypatch)
+    _install_fts(monkeypatch, {"zebraquux": [("session:pre", 3.0)]})
+    graph = _RecordingGraph([(_post_fix_node(),)])
+    monkeypatch.setattr(_cli, "reconcile_session_source_prose",
+                        lambda *a, **k: {
+                            "candidates": [], "repaired": [],
+                            "empty_sessions": [], "no_record": [],
+                            "no_reader": [], "no_session_id": [],
+                            "unaddressable": [], "left_alone": [],
+                            "written": [{"url": "session:pre"}], "notes": {},
+                            "census_before": 2, "census_after": 1,
+                            "dry_run": False})
+    _install_cli(monkeypatch, graph,
+                 ["--repair", "--clear-without-record",
+                  "--probe-phrase", "zebraquux"])
+    _cli.main()
+    assert seen == [1], (
+        "the sign-off was not handed the census this run MEASURED, so the "
+        "narrowed line is unreachable in production even though the function "
+        f"supports it — got {seen!r}")
 
 
 def test_the_green_does_not_claim_a_BEFORE_reading_that_did_not_MEASURE(monkeypatch,
@@ -4201,7 +4244,15 @@ def test_an_EMPTY_Source_index_corroborates_a_CLEAR_only_graph(monkeypatch,
         nodes whose `_searchText` is NON-empty, so a STALE entry — a node the pair
         was cleared from — contributes 0 to it and can never make it non-empty.
         What makes the arm sound is that a surviving entry is caught by the probe
-        itself (`stale`), and a dead read by `leg_trace` (`unmeasurable`).
+        itself (`stale`), and — ⛔ NOT by ``leg_trace`` (#11536 review round 8,
+        P2; this rationale is the test-side copy of the one corrected on the
+        arm): ``leg_trace`` reports ``ran=True, degraded=False,
+        reason='empty_results'`` for a label with NO fulltext index, so
+        ``unmeasurable`` never fires on a dropped index. A dead read is the
+        positive CONTROL's job, and this arm deliberately has no control (it runs
+        no FTS read at all) — it is sound because when no Source over
+        ``documentKind IS NULL`` carries ``_searchText`` there is nothing for the
+        index to hold.
 
     (3) AND THE GUARD SURVIVES: an index that DOES hold entries, with no lexicon
         node to probe, still cannot corroborate — the emptiness arm is a
