@@ -52,7 +52,8 @@
 #       - EVERY shell separator splits the record — `&&`, `||`, `;`, `|`, `&`,
 #         newline — and EVERY segment must be a shell WRAPPER, a DECORATIVE
 #         reader/printer, or RUNNER-headed. A segment that is none of those is
-#         prose and is refused, so a bare disclaimer on either side of the command
+#         prose and is refused, so a BARE-prose segment cannot ride along on
+#         either side of the command
 #         cannot ride along (`NOT RUN && uv run pytest …` and
 #         `uv run pytest … && I did not run this` are both refused);
 #         ⛔ WHAT IS *NOT* CLOSED, stated because the previous wording claimed it
@@ -68,7 +69,17 @@
 #         in a `#` COMMENT is ungraded too — the identical words outside a comment
 #         are refused, but `… -q  # NOT RUN` is ACCEPTED (#11520 root 3), because
 #         grading comment content is the prose scan this module deliberately
-#         rejects;
+#         rejects. ⛔ And a disclaimer carried as a TRUSTED HEAD's ARGUMENT is
+#         accepted too (#11520 root 4): a segment headed by a wrapper verb or a
+#         decorative reader is admitted without grading one argument, so
+#         `… && echo "I did not run this"` and `… && printf "%s" "NOT RUN"` yield a
+#         `verified` row and `uncovered: 0`. The WRAPPER half of that root is
+#         closed (a wrapper's argument IS graded, so
+#         `export "I did not run this" && …` is refused); the DECORATIVE half is
+#         open because requiring shell-shaped arguments from
+#         `echo`/`printf`/… must first be measured against the accepted
+#         `… && echo PASS`. Four carriages, all tracked in #11520 and all pinned —
+#         the list is enumerated because an unlisted carriage reads as closed;
 #       - a `-c`/`-e` script body is graded as a command in its own right, never
 #         trusted;
 #       - a runner with NO target at all (`cmd:make`) is a record and confers

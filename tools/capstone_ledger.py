@@ -503,11 +503,18 @@ def _split_segments(text: str) -> list[str]:
     must follow whitespace, start, or a separator), and a quoted `#` is not either
     — `-k 'issue#123'` still parses.
 
-    A backslash escapes only inside DOUBLE quotes, and it must take the escaped
-    character with it — otherwise `bash -c "echo \\" && echo x"` ends the quote
-    early and the command is split at the wrong place. (Ported from the peer lane's
-    `_split_on_chain` at 35ea7658e, which handles that case; this branch's first
-    version did not.)
+    ⛔ A backslash escapes in TWO places, not one, and the shipped code handles
+    both — the docstring said only the first for a round after the second landed,
+    which is how a maintainer deletes the branch that keeps a legitimate record
+    whole. (1) inside DOUBLE quotes it must take the escaped character with it —
+    otherwise `bash -c "echo \\" && echo x"` ends the quote early and the command
+    is split at the wrong place (ported from the peer lane's `_split_on_chain` at
+    35ea7658e, which handles that case; this branch's first version did not).
+    (2) UNQUOTED, `\\` + newline is a LINE CONTINUATION: bash joins the lines, so
+    `cmd:… -q \\` NEWLINE `  --maxfail=1` is ONE command and splitting it there is a
+    measured false block (exit 1, and exit 1 prints no uncovered list). Both are
+    pinned in `test_the_commands_agents_md_hands_a_lane_are_not_false_blocked`
+    (the `… -q \\` NEWLINE and `… && \\` NEWLINE params).
     """
     segments: list[str] = []
     current: list[str] = []
@@ -938,8 +945,12 @@ def _evidence_is_real(
     own right rather than trusted. Every segment of a compound record must be a
     shell
     wrapper, a decorative reader/printer, or runner-headed; a segment that is none
-    of those is prose and is REFUSED, so a bare disclaimer cannot ride on either
-    side of the command. ⛔ NOT closed, and deliberately not claimed: a LATER
+    of those is prose and is REFUSED, so a BARE-prose segment cannot ride on
+    either side of the command. ⛔ NOT closed, and deliberately not claimed: a
+    disclaimer carried as a TRUSTED HEAD's ARGUMENT is accepted too — a
+    decorative/wrapper segment is admitted without grading one argument, so
+    `… && echo "I did not run this"` still exits 0 (#11520 root 4; the wrapper
+    half is closed, so `export "I did not run this" && …` is refused). And a LATER
     runner-HEADED segment is admitted without grading its argument position, so
     `… && bash I did not run this` is still accepted (#11520). Grading every
     runner segment the way the first is graded re-introduced a false block on
@@ -1203,8 +1214,8 @@ def _command_body(raw: str, base: Path, root: Path) -> tuple[str, Path, str]:
     # Prose therefore cannot be dropped, and it cannot sit on EITHER side of the
     # command: any of those makes the record say something it did not do. A segment
     # that is neither a wrapper, a decorative printer nor runner-headed is prose and
-    # is refused, so a bare disclaimer after the `&&` (`… && I did not run this`) is
-    # refused exactly as one before it is, and so is the same thing spelled with
+    # is refused, so a BARE-prose segment after the `&&` (`… && I did not run this`)
+    # is refused exactly as one before it is, and so is the same thing spelled with
     # `;`, `||`, `|`, `&` or a newline — those were measured ACCEPTED at the round-2
     # head and produced the same clean 22-row exit. Wrappers and decorative
     # segments are still admitted (`… && echo PASS`, `… | tail -20 log`).

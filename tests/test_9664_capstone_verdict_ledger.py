@@ -1045,6 +1045,18 @@ def test_a_comment_ends_the_LINE_and_the_next_line_is_still_graded(tmp_path):
         "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q "
         " # NOT RUN - I did not run this",
         "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q ; # NOT RUN",
+        # ⛔ A disclaimer carried INSIDE a trusted head's argument (#11520 root 4).
+        # A segment headed by a _WRAPPER_VERB or a _DECORATIVE reader is admitted
+        # WITHOUT grading one argument, so the disclaimer rides in as that head's
+        # parameter and the record still exits 0 with `uncovered: 0`. Measured at
+        # `cc63f614` and still at this head; the WRAPPER half (`export "I did not
+        # run this" && …`) has since been closed and is asserted REFUSED below.
+        # Closing the decorative half means requiring shell-shaped arguments from
+        # `echo`/`printf`/…, which must first be measured against the accepted
+        # `… && echo PASS` — so it is recorded, not closed at that price.
+        "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q "
+        '&& echo "I did not run this"',
+        'cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q && printf "%s" "NOT RUN"',
     ],
 )
 def test_the_known_residual_false_PASSes_are_pinned_as_OPEN(tmp_path, disclaimer):
@@ -1065,6 +1077,17 @@ def test_the_known_residual_false_PASSes_are_pinned_as_OPEN(tmp_path, disclaimer
     is not worth making silently here; the gap is tracked as #11520 instead.
 
     If #11520 is closed, this test must be INVERTED (EXIT_INVALID), not deleted.
+
+    ⛔ FOUR carriages are recorded, not three — the list read complete while one was
+    missing, which is how this branch's residual prose kept being wrong:
+    (root 1) a LATER runner-headed segment, ungraded;
+    (root 2) prose appended inside the graded command's own segment, after its
+             artifact token (what a folded multi-line YAML scalar also becomes);
+    (root 3) a disclaimer carried in a `#` comment;
+    (root 4) a disclaimer carried as a TRUSTED HEAD's argument (`&& echo "I did not
+             run this"`), because a decorative/wrapper segment is admitted without
+             grading one argument. The WRAPPER half of root 4 is CLOSED — asserted
+             at the bottom of this test — and the DECORATIVE half is not.
     """
     proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, disclaimer])]))
     assert proc.returncode == cl.EXIT_CLEAN, (
@@ -1072,6 +1095,16 @@ def test_the_known_residual_false_PASSes_are_pinned_as_OPEN(tmp_path, disclaimer
         "#11520 may have been fixed — invert this pin to EXIT_INVALID rather "
         "than deleting it: " + proc.stdout + proc.stderr,
     )
+
+    # Root 4's WRAPPER half is closed: a wrapper verb's argument is graded, so a
+    # quoted sentence behind `export` is prose. Pinned here so the closed half
+    # cannot silently reopen while the decorative half stays documented as open.
+    for closed in (
+        'cmd:export "I did not run this" && uv run pytest tests/ -q',
+        'cmd:source "I did not run this" && uv run pytest tests/ -q',
+    ):
+        proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, closed])]))
+        assert proc.returncode == cl.EXIT_INVALID, (closed, proc.stdout + proc.stderr)
 
 
 def test_a_subcommand_verb_is_admitted_per_runner_and_nowhere_else(tmp_path):
