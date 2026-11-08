@@ -273,6 +273,16 @@ FACT_STATEMENTS_IN_SIBLINGS: tuple[tuple[Path, str, str], ...] = (
         "STORAGE separates the `#4997` measurement from the live defect",
         "the unindexed-embeddings defect is real, and its home is the V1/§12.1c decision",
     ),
+    # The linkage a review of this PR found missing: §7 explained the window as a
+    # COST question and never said what had previously made a per-tenant memory
+    # cap impossible, so a later lane could re-derive the index-rebuild block as
+    # live (`#7846`'s body still reads that way). The claim is pinned here because
+    # deleting it silently returns the document to that state.
+    (
+        SEARCH,
+        "SEARCH's §7 states that the vector move is what makes the window feasible, not merely cheaper",
+        "a graph dump has **no vector index to rebuild at all**",
+    ),
     (
         STORAGE,
         "STORAGE's §14.3 V4 row states the trace mechanism as landed",

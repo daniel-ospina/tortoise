@@ -309,6 +309,25 @@ ceiling) — bounded by a small known tenant count, and the window is armed when
 safe ship before private-beta regardless**, so the eventual switch is a configuration change with measured
 justification, not a redesign in front of customers.
 
+⭐ **What the §12.1c decision buys that the window cannot buy itself: a per-tenant memory cap becomes
+expressible.** A cap needs eviction, and eviction needs a demoted subgraph to come back cheaply — the
+`DUMP` → `DEL` → `RESTORE` cycle. While the HNSW index lived *in the graph*, that cycle was
+**instance-blocking**: the restore **rebuilds the index on the serving thread**, so the whole engine stops
+answering for the rebuild's duration, with no progress line and no error — 30 000 nodes, index-free
+`RESTORE` **0.17 s** (worst bystander `PING` **53.3 ms**) against index-bearing **2.62 s** (bystander
+**2 497.7 ms**, i.e. the outage IS the restore), and at 90 000 nodes it outlived a 10 s client read bound
+(`docs/evidence/7846-indexed-graph-restore/README.md` §3, §3a, §4a; `#7846`). ⚠️ **Read that record, not the
+`#7846` issue body** — the body's "permanent wedge" does **not** reproduce (its first harness's graph carried
+no populated index, so it measured nothing), the index **is** carried inside the graph key's serialized
+payload (a restored shard is not vector-blind), and the block is avoidable by dropping the index **before**
+the `DUMP` (**0.069 s** / **69.4 ms** bystander at 20 000 nodes, against **2.955 s** / **2 899.4 ms** raw).
+With the index and its payload in Postgres (§12.1c), a graph dump has **no vector index to rebuild at all**,
+so that whole class of block is gone rather than mitigated — ⚠️ measured for the VECTOR index; whether a
+fulltext or range index blocks a restore the same way is not measured in that record. **So §7's window is a
+scheduling question, not a feasibility one**, and the residual cost is exactly what §1.5 item 3 already
+reserves: re-materialising a window still peaks at **4.9–5.9×** its resting size (the table above), and that
+peak is a graph-memory peak, not an index one.
+
 **The unit of retention is a CLOSED component, not a node.** A retained hub whose neighbours were evicted
 pays for the node and still cannot complete the walk. Retaining closed neighbourhoods (1–2 hops) also
 makes EP recomputation exact (§6.3).
