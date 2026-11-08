@@ -666,9 +666,9 @@ def test_the_arm_counts_what_vet_APPLIED_not_what_it_said(monkeypatch):
                     "about_entities": ["Alpha"]}],
         "chain_notes": [], "link_before_create": [],
     })
-    model, result = _run(monkeypatch,
-                         ["Alice and Bob met.", "Alice and Bob met again."],
-                         [embedded], arbiter=_downgraded_discard_arbiter)
+    _model, result = _run(monkeypatch,
+                          ["Alice and Bob met.", "Alice and Bob met again."],
+                          [embedded], arbiter=_downgraded_discard_arbiter)
     renarrate = result["stats"]["renarrate"]
     assert renarrate["fired"] is True, (
         "the fixture must reach a recorded arm — an arbiter batch RENARRATE "
