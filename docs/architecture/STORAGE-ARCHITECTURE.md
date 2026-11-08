@@ -1439,7 +1439,7 @@ follows is the evidence each ruling rests on, which is design.
   | 9 | `session_schema.py::audit_session_retrofit` | live-vs-recorded edge-count reconciliation for captured Sessions | **ops audit** |
   | 10 | `assembly.py::docker_resolver_port` | the `alias_objects` alias harvest inside the resolver port | **off by default** (`TORTOISE_ASK_CONNECTED_ASSEMBLY`) |
   | 11 | `assembly.py::docker_walker_port` | the `spine_rows` spine slices inside the walker port (`collect_slices` only delegates) | **off by default** (`TORTOISE_ASK_CONNECTED_ASSEMBLY`) |
-  | 12 | `sdk.py::TortoiseSDK._entity_key_expansion_pass` | the entity-key alias harvest | **off by default** (`entity_key_expansion: bool = False`) |
+  | 12 | `sdk.py::TortoiseSDK._entity_key_alias_harvest` | the entity-key alias harvest — extracted from `_entity_key_expansion_pass` by #2518 so ONE harvest feeds both the sparse pass and the dense-leg parity pass (`TORTOISE_ENTITY_KEY_DENSE`) | **off by default** (`entity_key_expansion: bool = False`, and the dense half needs `TORTOISE_ENTITY_KEY_DENSE` too) |
   | 13 | `subgraph.py::_CYPHER_ABOUT` | the `#3011` 1-hop hub read | **eval harness** |
   | 14 | `subgraph.py::_CYPHER_SIBLINGS` | the `#3011` 2-hop sibling read (the `#5010` cap site) | **eval harness** |
   | 15 | `aggregate.py::collect_anchor_census` | the aggregative-verdict anchor census | **eval harness** |
