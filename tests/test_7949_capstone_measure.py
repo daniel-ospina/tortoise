@@ -4557,8 +4557,9 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # `vet_enabled`/`_run_vet_pass` for S2.3 sent the reader to code that
         # pass never runs"). The two `except` lines are byte-identical, so the
         # anchors are the pair's own gate lines' company rather than the text:
-        # a reader following the anchor must land in the `classify_later and
-        # complete_list` block, which the row below sits inside.
+        # a reader following the first anchor must land in the `classify_later
+        # and embed_list` block and the second in the `classify_later and
+        # complete_list` block — one per classify pass.
         ("docs/00_index.md", "fail-open `except` at", (
             ("13071", "except Exception as e:  # never block capture (P1)"),
             ("13218", "except Exception as e:  # never block capture (P1)"),

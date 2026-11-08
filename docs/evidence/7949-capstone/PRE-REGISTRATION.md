@@ -1704,8 +1704,11 @@ re-cut from the resolved document (§8), and no committed verdict is re-scored.
   bundle: the re-points this entry made outside §11 sit in two OTHER bands — the `#2684` row in
   `docs/00_index.md` carries `extractor_v2.py:5286`/`:5287` → `:5354`/`:5355` (**+68**), and the
   sdk.py sites in the inventory below move **+102**. So the file carries THREE bands, a cite's
-  delta depends on which insert it sits under, and a row's delta must be read from the document —
-  and the band — that row lives in. Cites ABOVE the first insert did not move at all (`:88-89`,
+  delta depends on which insert it sits under — and ⛔ ONE cite sits under TWO of them, so its
+  delta is COMPOSED rather than banded: the `vet_enabled = (` line the record reads live as
+  `:12779` is `:12929` at this head (**+150** = `#11368`'s +74 and then this PR's +76). A row's
+  delta must therefore be read from the document — AND the band — that row lives in. Cites ABOVE
+  the first insert did not move at all (`:88-89`,
   `:296-312`, `:1154`, `:1720` are still correct), which is why the bundled cites were
   re-derived one by one rather than offset in a batch. ⛔ **`RECONCILE-A1-A2-A5.md` sits behind
   NO test at all** — the grading tests sweep `_BUNDLE_DOCS` (README, E1-E5-PROOFS, both probes,
