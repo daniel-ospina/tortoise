@@ -667,6 +667,29 @@ def _shared_identity_value(
     return None
 
 
+def _namespace_shaped(value: Any) -> bool:
+    """Does this value look like a graph NAMESPACE rather than a bare name?
+
+    Accepts the three spellings the product uses — ``org_<id>_g_<gid>``, ``g_<gid>``,
+    ``org_<id>``/``team_<id>`` — plus an id tail. A bare name (``live-v4``) does NOT
+    qualify: `MCPReader.graphs()` wraps every string the surface returns as
+    ``{"namespace": s}``, so a name delivered in the namespace field is
+    indistinguishable from a namespace VALUE, and the row set then maps two spellings
+    of ONE graph to two rows with disjoint values — the last-clause check cannot see it
+    (the shapes are identical and nothing is shared) and the guard passes an in-place
+    write. Measured: `rows = [{"namespace": "org_o1_g_old"},
+    {"namespace": "live-v4"}]` with `--graph live-v4 --target org_o1_g_old --apply`
+    returned 0 and wrote once.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return False
+    low = text.casefold()
+    if "_g_" in low:
+        return True
+    return any(low.startswith(p) and len(low) > len(p) for p in ("org_", "team_", "g_"))
+
+
 def _matched_row(ref: str, graph_rows: Sequence[Mapping[str, Any]]) -> Mapping[str, Any] | None:
     """The single row that names ``ref`` in an identity field, or None."""
     wanted = (ref or "").strip().casefold()
@@ -769,6 +792,21 @@ def assert_distinct_graphs(
             f"source and target are the same graph ({ca!r}); the old graph is a "
             "read-only historic artifact (#11469)")
     if graph_rows:
+        # ⛔ A row set that puts a BARE NAME in `namespace` cannot map refs to graphs at
+        # all: `MCPReader.graphs()` wraps every string the surface returns as
+        # `{"namespace": s}`, so `live-v4` and `org_o1_g_old` arrive as two
+        # shape-identical rows with disjoint values — nothing is shared, the shapes
+        # match, and the two checks below cannot fire while the pair is ONE graph.
+        # Measured: that row set passed and `--apply` wrote to the source in place.
+        # Fail closed: an untrustworthy row set proves nothing.
+        bad = [(r.get("namespace")) for r in graph_rows
+               if r.get("namespace") and not _namespace_shaped(r.get("namespace"))]
+        if bad:
+            raise CurationRefused(
+                f"a graph row exposes {bad[0]!r} in `namespace`, which is not a namespace "
+                "spelling — the row set cannot prove which graph a spelling names, and a "
+                "pair that is really ONE graph would pass. Re-run against a surface that "
+                "returns namespaces (or pass the graph id / namespace)")
         # LAST line of the identity argument. Two refs can resolve through DIFFERENT
         # rows that expose different identity FIELDS for the SAME graph — e.g. one
         # entry `{"graph_id": "default", "stable_id": "g_<tenant>", "name": "default"}`
@@ -1086,8 +1124,12 @@ def _pending_sections(
             # (`p.get("migrationKey") or _fallback_key(...)`), so `""`/`0`/`False` here
             # would give the planner and the writer two different keys — the round-25
             # defect one spelling over, with the same two consequences.
-            key = item.get("migrationKey")
-            if not key:
+            # A truthy key is STRINGIFIED because the writer does
+            # (`str(p.get("migrationKey") or …)`): a non-string key (5) was looked up
+            # as `5` and recorded as `"5"`, so the row stayed pending forever and a
+            # re-run re-sent it — the round-26 divergence, one type over.
+            key = str(item["migrationKey"]) if item.get("migrationKey") else None
+            if key is None:
                 # Sources carry no key on the node (#3998), so their ledger key is
                 # derived from the url, which is what the target merges on.
                 # kind AND url: two Source rows can share a url with different

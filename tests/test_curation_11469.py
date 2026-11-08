@@ -13,7 +13,9 @@ it), so the properties below are the reason this pass is safe to run at all:
 
 from __future__ import annotations
 
+import ast as _ast
 import json
+import pathlib as _pathlib
 
 import pytest
 
@@ -1636,10 +1638,7 @@ def test_the_suite_pins_the_ambient_off_switch_fixture():
 # the call sites out of the SOURCE and require the names to exist on the real
 # surface, so the next rename is caught here instead of at the endpoint.
 
-import ast
-import pathlib
-
-REPO = pathlib.Path(__file__).resolve().parent.parent
+REPO = _pathlib.Path(__file__).resolve().parent.parent
 CLI_SRC = REPO / "tools" / "curate_graph.py"
 CURATION_SRC = REPO / "tortoise" / "curation.py"
 MCP_SERVER_SRC = REPO / "tortoise" / "mcp_server.py"
@@ -1649,15 +1648,15 @@ def _first_arg_strings(func_names, *paths):
     """String literals passed as the FIRST argument to any of `func_names(...)`."""
     found = set()
     for path in paths:
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call) or not node.args:
+        tree = _ast.parse(path.read_text(encoding="utf-8"))
+        for node in _ast.walk(tree):
+            if not isinstance(node, _ast.Call) or not node.args:
                 continue
             func = node.func
-            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+            name = (func.attr if isinstance(func, _ast.Attribute) else getattr(func, "id", None))
             if name in func_names:
                 arg = node.args[0]
-                if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                if isinstance(arg, _ast.Constant) and isinstance(arg.value, str):
                     found.add(arg.value)
     return found
 
@@ -1666,12 +1665,12 @@ def _declared_overview_sections():
     """`mcp_server._OVERVIEW_SECTIONS`, read from source — importing that module
     needs an ambient-free env (`TORTOISE_API_KEY` exported makes it raise), which
     is exactly the ambient-state trap this suite already pins against."""
-    tree = ast.parse(MCP_SERVER_SRC.read_text(encoding="utf-8"))
+    tree = _ast.parse(MCP_SERVER_SRC.read_text(encoding="utf-8"))
     for node in tree.body:
-        if (isinstance(node, ast.Assign) and len(node.targets) == 1
-                and isinstance(node.targets[0], ast.Name)
+        if (isinstance(node, _ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], _ast.Name)
                 and node.targets[0].id == "_OVERVIEW_SECTIONS"):
-            return tuple(ast.literal_eval(node.value))
+            return tuple(_ast.literal_eval(node.value))
     raise AssertionError("mcp_server defines no _OVERVIEW_SECTIONS")
 
 
@@ -1700,3 +1699,47 @@ def test_every_overview_section_the_reader_asks_for_is_advertised():
     declared = _declared_overview_sections()
     assert {"audit", "status", "structure", "sources", "graphs"} <= set(declared), declared
     assert used <= set(declared), f"not an overview section: {sorted(used - set(declared))}"
+
+# ── round-29 review findings ──────────────────────────────────────────────
+
+
+def test_a_row_set_that_puts_a_bare_name_in_namespace_cannot_prove_distinctness():
+    """Round-29: `MCPReader.graphs()` wraps every string the surface returns as
+    `{"namespace": s}`, so a NAME arrives in the namespace field and a pair that is ONE
+    graph becomes two shape-identical rows with disjoint values — nothing shared, shapes
+    equal, both guard clauses silent, and `--apply` wrote to the source in place."""
+    rows = [{"namespace": "org_o1_g_old"}, {"namespace": "live-v4"}]
+    with pytest.raises(C.CurationRefused, match=r"not a namespace"):
+        C.assert_distinct_graphs("live-v4", "org_o1_g_old", graph_rows=rows)
+    # the real surface's shape (namespaces only) is unaffected
+    ok = [{"namespace": "org_o1_g_old"}, {"namespace": "org_o1_g_new"}]
+    C.assert_distinct_graphs("org_o1_g_old", "org_o1_g_new", graph_rows=ok)
+
+
+def test_a_non_string_migration_key_is_stringified_on_both_sides(tmp_path):
+    """Round-29: the planner kept the raw `5` while the writer recorded `"5"`, so the
+    row stayed pending forever and every re-run re-sent it."""
+    sections, _skipped, _dups = C._pending_sections({"points": [
+        {"kind": "decision", "content": "a", "migrationKey": 5}]},
+        C.Ledger(tmp_path / "l.jsonl", target="new"))
+    key = sections["points"][0]["migrationKey"]
+    assert key == "5" and isinstance(key, str)
+    led = C.Ledger(tmp_path / "l.jsonl", target="new")
+    led.record([key])
+    again, skipped2, _ = C._pending_sections({"points": [
+        {"kind": "decision", "content": "a", "migrationKey": 5}]},
+        C.Ledger(tmp_path / "l.jsonl", target="new"))
+    assert again["points"] == [] and skipped2 == 1, "a re-run must recognise the key"
+
+
+def test_the_graph_name_resolves_to_the_same_canonical_as_its_namespace():
+    """Round-29: the cited test could not fail for NAME resolution — with name matching
+    deleted the pair is simply unresolvable and the guard refuses anyway, so it stayed
+    green. This one asserts the resolution itself."""
+    rows = [{"graph_id": "g_2b7e4c9d1a6f8035", "name": "live-v4",
+             "namespace": "org_3326_g_2b7e4c9d1a6f8035"}]
+    by_name = C.canonical_graph_id("live-v4", rows)
+    by_ns = C.canonical_graph_id("org_3326_g_2b7e4c9d1a6f8035", rows)
+    assert by_name is not None and by_name == by_ns
+    with pytest.raises(C.CurationRefused):
+        C.assert_distinct_graphs("live-v4", "org_3326_g_2b7e4c9d1a6f8035", graph_rows=rows)
