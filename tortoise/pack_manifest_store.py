@@ -46,8 +46,8 @@ from threading import Lock
 import yaml
 
 from tortoise.pack_state import (
-    PACK_INSTALL_LABEL,
     _CONFIGURABLE_STATUSES,
+    PACK_INSTALL_LABEL,
     _pack_install_lock,
     _resolved_graph_name,
     _target_graph,

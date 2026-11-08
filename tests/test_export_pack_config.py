@@ -709,8 +709,8 @@ class TestStatusShapeGate:
             PACK_STATUS_DISABLED,
             PACK_STATUS_REMOVED,
         )
-        assert _PACK_CONFIG_STATUSES == {
-            PACK_STATUS_ACTIVE, PACK_STATUS_DISABLED, PACK_STATUS_REMOVED}
+        assert {
+            PACK_STATUS_ACTIVE, PACK_STATUS_DISABLED, PACK_STATUS_REMOVED} == _PACK_CONFIG_STATUSES
 
 
 class TestUpsertStatusParam:
