@@ -401,8 +401,17 @@ def _report_fts(fts: dict) -> None:
         # degraded leg states a measurement the run never took — the same
         # conflation the refusals were fixed for, on the one line the operator reads
         # first.
-        if residue_before is not None and _before_leg_kind(probe) != "clean-zero":
-            before = f"{before} ⚠️ BEFORE leg did not measure"
+        before_kind = _before_leg_kind(probe)
+        if residue_before is not None and before_kind != "clean-zero":
+            # ⛔ THE MARKER MUST MATCH THE KIND (#11536 review round 6): a leg that
+            # RAN and returned hits it could not classify DID measure, so stamping
+            # "did not measure" beside the very urls it measured contradicted the
+            # line it annotates. `unmeasured`/`unknown` are the only kinds that did
+            # not measure; `unclassified` measured and could not finish.
+            before = f"{before} " + (
+                "⚠️ BEFORE leg could not fully classify its hits"
+                if before_kind == "unclassified"
+                else "⚠️ BEFORE leg did not measure")
         print(f"          {probe['phrase']!r}: {before} -> "
               f"{len(probe['residue'])} residue url(s) after, "
               f"{probe['hits']} hit(s)"
