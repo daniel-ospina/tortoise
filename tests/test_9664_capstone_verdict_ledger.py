@@ -25,6 +25,7 @@ stop being reported.
 from __future__ import annotations
 
 import importlib.util
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -163,8 +164,6 @@ def _row(cid, verdict="verified", **extra):
 
 
 def _run_cli(tmp_path, data, env=None):
-    import os
-
     ledger = tmp_path / "ledger.yml"
     ledger.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
     environment = dict(os.environ)
@@ -346,6 +345,45 @@ def test_advisory_reports_but_does_not_enforce_with_its_OWN_exit_code(tmp_path):
         "cmd:NOT RUN - see tools/capstone_ledger.py for the intended command",
         "cmd:bash -c 'verified manually by reading pyproject.toml'",
         "cmd:NOT RUN && uv run pytest tests/test_9664_capstone_verdict_ledger.py",
+        "cmd:I verified this by hand, screenshots are in the issue",
+        "cmd:uv run pytest",
+        "cmd:cat /etc/hostname",
+        # Cycle-2 attack: prose that MENTIONS a real file used to pass a token
+        # scan, including prose that says the work was NOT done.
+        "cmd:we did not run this; the suite lives in tests/test_9664_capstone_verdict_ledger.py",
+        # Cycle-3 attack (measured, all exited 0 before the argument-position rule):
+        # prepend ONE runner word to the cycle-2 prose and the token scan found the
+        # named file again. The decision now happens at the first argument.
+        "cmd:sh NOT RUN - see tools/capstone_ledger.py",
+        "cmd:env NOT RUN - see tools/capstone_ledger.py",
+        "cmd:timeout 1 NOT RUN - see tools/capstone_ledger.py",
+        "cmd:make I did not run anything, see docs/evidence/9664-capstone/README.md",
+        "cmd:bash not executed, ref tools/capstone_ledger.py",
+        # The vacuous glob: names the repo root, therefore no artifact in particular.
+        "cmd:sh *",
+        "cmd:git *",
+        "cmd:uv run pytest *.yml",
+        # The same vacuity spelled with `.`/`..`: a raw text split called these literal
+        # directory components, so each passed while resolving to the ROOT.
+        "cmd:sh ./*",
+        "cmd:sh docs/../*",
+        "cmd:sh tests/..//*",
+        "cmd:sh */../*",
+        # An absolute glob cannot be resolved against the tree at all.
+        "cmd:sh /tmp/*",
+        # A `..` AT OR AFTER the first wildcard climbs back out to the root: every
+        # match is root-level (the `./*` class, one wildcard deep).
+        "cmd:sh docs/*/../../*",
+        "cmd:sh tests/*/../../*",
+        "cmd:sh docs/[a-z]*/../../*",
+        "cmd:sh docs/evidence/*/../../../*",
+        # ⚠️ NOT a pin on the `RUNNERS` gate, even though it looks like one: this
+        # row cites the `cmd:` entry ALONE, so `validate` refuses it for the
+        # separate reason that a `verified` row needs a held artifact — that refusal
+        # is present whether or not the shape gate runs. The gate's own pin is
+        # `test_a_prose_cmd_is_refused_beside_a_held_artifact` below, which is the
+        # configuration of the false pass this branch exists to close.
+        "cmd:see tools/capstone_ledger.py",
     ],
 )
 def test_a_cmd_entry_cannot_alone_satisfy_verified(tmp_path, command):
@@ -362,7 +400,7 @@ def test_a_cmd_entry_cannot_alone_satisfy_verified(tmp_path, command):
 
 
 def test_a_cmd_entry_is_accepted_alongside_a_held_artifact(tmp_path):
-    """The record may keep the command it ran; the HELD artifact is what counts."""
+    """A real command survives the wrapper; the HELD artifact is what carries it."""
     proc = _run_cli(
         tmp_path,
         _ledger(
@@ -371,7 +409,7 @@ def test_a_cmd_entry_is_accepted_alongside_a_held_artifact(tmp_path):
                     "A",
                     evidence=[
                         REAL_EVIDENCE,
-                        "cmd:bash -c 'verified manually by reading pyproject.toml'",
+                        "cmd:bash -c 'uv run pytest tests/test_9664_capstone_verdict_ledger.py -q'",
                     ],
                 )
             ]
@@ -380,14 +418,117 @@ def test_a_cmd_entry_is_accepted_alongside_a_held_artifact(tmp_path):
     assert proc.returncode == cl.EXIT_CLEAN, proc.stdout + proc.stderr
 
 
-def test_only_an_EMPTY_cmd_entry_is_refused(tmp_path):
-    """No parse rule survives: an unmatched quote is a shell-valid record's business,
-    not the ledger's, and refusing it hid the whole uncovered list."""
+@pytest.mark.parametrize(
+    "script",
+    [
+        "cmd:bash -c 'verified manually by reading pyproject.toml'",
+        "cmd:bash -c 'NOT RUN - see tools/capstone_ledger.py'",
+        "cmd:uv run python -c 'nothing was executed'",
+        "cmd:sh -c 'see docs/evidence/9664-capstone/README.md'",
+    ],
+)
+def test_prose_wrapped_in_a_shell_script_is_refused(tmp_path, script):
+    """⛔ THE `-c` SCRIPT IS GRADED AS A COMMAND IN ITS OWN RIGHT.
+
+    Leaving it ungraded made the shape gate ONE WORD WIDE: the prose this arm
+    refuses naked was accepted as soon as it was wrapped in `bash -c`. Measured
+    at the previous head — `cmd:bash -c 'NOT RUN - see tools/capstone_ledger.py'`
+    beside a held artifact validated the row, `uncovered: 0`, exit 0.
+
+    The script is therefore required to start with a program that RUNS something,
+    exactly like the outer command. That rule is fail-closed on purpose: a
+    legitimate `bash -c 'echo hi'` is also refused, because `echo` cannot be
+    admitted to `RUNNERS` without re-admitting `cmd:echo NOT RUN …` in its
+    cheapest form. A false block costs a re-recorded entry; a false pass costs the
+    artifact's whole purpose.
+    """
+    proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, script])]))
+    assert proc.returncode == cl.EXIT_INVALID, (script, proc.stdout + proc.stderr)
+    assert "must START with a program that runs something" in proc.stderr, proc.stderr
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cmd:uv run python tools/test_lane.py run -- x -q",
+        # The most precise citation shape must not be a false block.
+        "cmd:uv run python -m pytest tests/test_9664_capstone_verdict_ledger.py::TestX::test_y -q",
+        "cmd:uv run pytest tests/test_9664_capstone_*.py",
+        # A runner's own literal argument (a duration / an env assignment) must not
+        # be mistaken for the target, or `timeout`/`env` become false blocks.
+        "cmd:timeout 300 uv run python tools/capstone_ledger.py check",
+        "cmd:env TORTOISE_CAPSTONE_LEDGER=off uv run python tools/capstone_ledger.py check",
+        # Globs over a NAMED directory stay legal, however they are spelled —
+        # `docs/./*` normalises to `docs/*`, so refusing it would be a false block.
+        "cmd:uv run pytest ./tests/test_9664_capstone_*.py",
+        "cmd:uv run python docs/./*.md",
+        "cmd:uv run python docs/**/*.md",
+        # A runner declared in `_CHAIN_WORDS` must be reachable at position 0 too,
+        # and the chain example in the docstring must not be a false block.
+        "cmd:uvx pytest tests/test_9664_capstone_verdict_ledger.py",
+        "cmd:poetry run pytest tests/test_9664_capstone_verdict_ledger.py",
+    ],
+)
+def test_a_cmd_entry_that_names_a_real_artifact_is_accepted(command):
+    """The ENTRY is accepted — it is not a false block.
+
+    Asserted on `_evidence_is_real` rather than through the CLI because the ROW
+    rule is different and stricter: a `verified` row must also hold at least one
+    TRACKED artifact (main's arm, kept here), so a `cmd:`-only row is INVALID for
+    that reason and could not distinguish "the entry was refused" from "the row
+    has no held artifact". This test is about the entry.
+    """
+    ok, why = cl._evidence_is_real(command)
+    assert ok, why
+
+
+@pytest.mark.parametrize("runnerless", ["cmd:npm", "cmd:verified", "cmd:look at tools/x.py"])
+def test_a_cmd_entry_must_start_with_a_runner(tmp_path, runnerless):
+    proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[runnerless])]))
+    assert proc.returncode == cl.EXIT_INVALID, proc.stdout + proc.stderr
+
+
+def test_a_cmd_entry_that_names_a_real_script_is_accepted(tmp_path):
+    """The rule must not be so tight that a real script record fails."""
+    proc = _run_cli(
+        tmp_path,
+        _ledger(
+            [
+                _row(
+                    "A",
+                    evidence=[
+                        REAL_EVIDENCE,
+                        "cmd:bash -c 'uv run pytest tests/test_9664_capstone_verdict_ledger.py -q'",
+                    ],
+                )
+            ]
+        ),
+    )
+    assert proc.returncode == cl.EXIT_CLEAN, proc.stdout + proc.stderr
+
+
+def test_an_empty_cmd_entry_is_refused_and_prose_is_still_refused(tmp_path):
+    """An empty `cmd:` is refused; a shell-valid record is not invalidated.
+
+    ⛔ The `cmd:'unbalanced` case is REFUSED here, and that is the merged decision
+    rather than an oversight: accepting any unparseable text as a record reopens
+    the hole this branch exists to close, because prose with an apostrophe
+    (`cmd:I don't run this`) is unparseable too. The shell-valid-but-unparseable
+    case that actually occurs — a trailing `#` note containing an apostrophe — is
+    handled by stripping the comment (see
+    `test_a_cmd_entry_with_a_shell_comment_or_apostrophe_is_accepted`), so a real
+    record still round-trips to a clean exit.
+    """
     for empty in ["cmd:", "cmd:   "]:
         proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, empty])]))
         assert proc.returncode == cl.EXIT_INVALID, (empty, proc.stdout + proc.stderr)
+        assert "names no command" in proc.stderr
+    # Prose that merely fails to parse is not a command: refused, with a named
+    # reason and no traceback.
     proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, "cmd:'unbalanced"])]))
-    assert proc.returncode == cl.EXIT_CLEAN, proc.stdout + proc.stderr
+    assert proc.returncode == cl.EXIT_INVALID, proc.stdout + proc.stderr
+    assert "CAPSTONE-LEDGER: INVALID" in proc.stderr
+    assert "Traceback" not in proc.stderr
 
 
 @pytest.mark.parametrize("escape", ["/etc/hostname", "..", ".", "docs"])
@@ -426,7 +567,7 @@ def test_a_sha_that_names_no_commit_is_invalid(monkeypatch):
     arm genuinely cannot fire here, and a test that pretended otherwise would be
     green for the wrong reason.
     """
-    monkeypatch.setattr(cl, "_commit_state", lambda sha: "absent")
+    monkeypatch.setattr(cl, "_commit_state", lambda sha, repo_root: "absent")
     data = _ledger([_row("A")])
     data["measured_at"]["sha"] = "deadbeef" * 5
     with pytest.raises(cl.InvalidLedger) as excinfo:
@@ -447,7 +588,7 @@ def test_an_unprovable_sha_is_not_a_defect(monkeypatch):
     the wiring, for the same reason the `absent` arm is: a shallow clone cannot
     produce the input that decides it.
     """
-    monkeypatch.setattr(cl, "_commit_state", lambda sha: "unprovable")
+    monkeypatch.setattr(cl, "_commit_state", lambda sha, repo_root: "unprovable")
     data = _ledger([_row("A")])
     data["measured_at"]["sha"] = "0" * 40
     # `validate` RAISES on a problem and returns the normalized rows otherwise, so
@@ -469,34 +610,685 @@ def test_dropping_rows_without_moving_the_pin_is_invalid(tmp_path):
     assert "criteria_expected" in proc.stderr
 
 
+def test_an_unresolvable_evidence_entry_is_invalid_not_a_traceback(tmp_path):
+    """`validate`'s contract is "the rows, or `InvalidLedger` naming every defect".
+
+    Two entries broke it by raising out of the file-system layer instead: an
+    absolute glob (`Path.glob` -> NotImplementedError) and a NUL byte
+    (`Path.resolve` -> ValueError). Both exited 1, so the closed exit SET held — but
+    the `CAPSTONE-LEDGER: INVALID` marker a log reader or a caller keys on was
+    replaced by a traceback, and an in-process caller catching `InvalidLedger`
+    crashed instead.
+    """
+    for entry in (
+        "cmd:sh /tmp/*",
+        # The cmd arm's own guard, reached via the NUL byte rather than the absolute
+        # pre-check: narrow the `except` to `(OSError,)` and THIS is the case that
+        # reds, which is what makes the guard actually pinned.
+        "cmd:sh docs/evidence/9664-capstone/READ\x00ME.md",
+        "docs/evidence/9664-capstone/READ\x00ME.md",
+        # `is_file()` stats the path, so an over-long component raises OSError from
+        # OUTSIDE a guard that wraps only `resolve()`.
+        "tools/" + "a" * 400 + ".py",
+        # ⛔ The two shapes below are what pin `_names_artifact`'s OWN guard. The
+        # bare-path over-long entry above exercises `_evidence_is_real`'s path arm,
+        # never this one, and the NUL entry only covers the ValueError half — so
+        # narrowing that `except` to `(ValueError,)` (or dropping the shlex
+        # `except ValueError`) left the whole suite green while the CLI tracebacked.
+        "cmd:sh tools/" + "a" * 400 + ".py",
+        "cmd:sh docs/*  'unclosed",
+    ):
+        proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[entry])]))
+        assert proc.returncode == cl.EXIT_INVALID, proc.stdout + proc.stderr
+        assert "Traceback" not in proc.stderr, proc.stderr
+        assert "CAPSTONE-LEDGER: INVALID" in proc.stderr, proc.stderr
+
+
+def test_a_cmd_entry_naming_an_absolute_path_outside_the_tree_is_invalid(tmp_path):
+    """T5 in the `cmd:` arm, which had NO pin.
+
+    The suite's only absolute-path case is a bare `"/etc/hostname"`, so it pins the
+    PATH arm and never `_names_artifact`. MEASURED: deleting `_names_artifact`'s
+    `resolved.is_relative_to(root)` accepted `cmd:sh <abs path outside>` as
+    `verified` — exit 0, `UNCOVERED LIST: empty — the only clean exit` — while the
+    whole suite stayed green.
+
+    The target is built in `tmp_path` (which is outside this checkout on every box),
+    not `/etc/hostname`, so the pin cannot go vacuous on a host that lacks it.
+    """
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.md").write_text("x", encoding="utf-8")
+
+    for entry in (f"cmd:sh {outside / 'secret.md'}", f"cmd:uv run python {outside / 'secret.md'}"):
+        data = _ledger([_row("A", evidence=[entry])])
+        with pytest.raises(cl.InvalidLedger) as excinfo:
+            cl.validate(data, repo_root=REPO_ROOT)
+        assert "`cmd:` evidence" in str(excinfo.value)
+
+
+def test_a_cmd_target_that_is_not_a_regular_file_is_invalid(tmp_path):
+    """T6 in the `cmd:` arm via a BARE PATH — the member that had no pin.
+
+    The glob half is pinned (`test_a_glob_whose_matches_are_all_directories_…`),
+    but `_names_artifact`'s `is_file()` is a SEPARATE clause for bare paths, and
+    nothing pinned it: changing it to `exists()` left the whole suite green while
+    a one-row `verified` ledger citing `cmd:sh docs` exited **0** with
+    `UNCOVERED LIST: empty — the only clean exit` — a directory (or a FIFO) counted
+    as held evidence. That is the false PASS this artifact exists to refuse.
+    """
+    tree = tmp_path / "tree"
+    (tree / "docs" / "sub").mkdir(parents=True)
+    os.mkfifo(tree / "pipe")
+
+    for entry in ("cmd:sh docs", "cmd:sh pipe"):
+        with pytest.raises(cl.InvalidLedger):
+            cl.validate(_ledger([_row("A", evidence=[entry])]), repo_root=tree)
+
+    # End to end: the empty-uncovered-list shape must not be reachable at all.
+    proc = _run_cli(tmp_path, _ledger([_row("A", evidence=["cmd:sh docs"])]))
+    assert proc.returncode == cl.EXIT_INVALID, proc.stdout + proc.stderr
+    assert "UNCOVERED LIST" not in proc.stdout, proc.stdout
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        # Unparseable YAML: `load_ledger`'s `except Exception` is the only guard.
+        "not: [valid: yaml",
+        # A root-level list: `isinstance(data, dict)` is the only guard.
+        "- just\n- a list\n",
+        # `measured_at` not a mapping, and a row that is not a mapping: each has its
+        # own `isinstance(…, dict)` guard, and neither was pinned.
+        "version: 1\nissue: 9664\ncriteria_expected: 1\nmeasured_at: garbage\ncriteria: []\n",
+        "version: 1\nissue: 9664\ncriteria_expected: 1\nmeasured_at: {ref: r, sha: "
+        + SHA
+        + ", date: 2026-11-07}\ncriteria:\n  - 42\n",
+    ],
+)
+def test_a_malformed_ledger_is_invalid_with_no_traceback(tmp_path, payload):
+    """T7 for the LEDGER SHAPE, not just for evidence entries.
+
+    Dropping any one of those four guards left the suite green and made the CLI
+    print an `AttributeError`/`yaml.YAMLError` traceback instead of the
+    `CAPSTONE-LEDGER: INVALID` marker that a log reader — and an in-process caller
+    catching `InvalidLedger` — keys on.
+    """
+    ledger = tmp_path / "ledger.yml"
+    ledger.write_text(payload, encoding="utf-8")
+    proc = subprocess.run(
+        [sys.executable, str(TOOL), "check", "--ledger", str(ledger)],
+        capture_output=True,
+        text=True,
+        cwd=str(REPO_ROOT),
+        check=False,
+    )
+    assert proc.returncode == cl.EXIT_INVALID, proc.stdout + proc.stderr
+    assert "Traceback" not in proc.stderr, proc.stderr
+    assert "CAPSTONE-LEDGER: INVALID" in proc.stderr, proc.stderr
+
+
+def test_a_glob_whose_matches_are_all_directories_names_no_artifact(tmp_path):
+    """T6 in the GLOB arm, which had NO pin: `is_file()` is the only clause
+    refusing a glob whose in-tree matches are all DIRECTORIES.
+
+    MEASURED: deleting `resolved_match.is_file()` accepted `cmd:sh .github/w*`
+    (-> `.github/workflows`) as `verified` with an EMPTY uncovered list, and the
+    whole suite stayed green — the over-long/NUL entries and the symlink test never
+    produce a directory-only match.
+    """
+    tree = tmp_path / "tree"
+    (tree / "docs" / "only-a-directory").mkdir(parents=True)
+    data = _ledger([_row("A", evidence=["cmd:sh docs/*"])])
+    with pytest.raises(cl.InvalidLedger) as excinfo:
+        cl.validate(data, repo_root=tree)
+    assert "no file of this tree matches" in str(excinfo.value)
+
+
+def test_a_glob_whose_only_match_resolves_outside_the_tree_is_invalid(tmp_path):
+    """T6's last member, and the one declared class member that had NO pin.
+
+    The glob arm's per-match `is_relative_to(root)` reads like belt-and-braces next
+    to the literal-prefix check, but it is the ONLY thing refusing a glob whose
+    PREFIX is a genuine in-tree directory while every match under it is a symlink
+    pointing outside. MEASURED: deleting that one clause left the whole suite
+    green and let `cmd:sh pure/*` (a directory holding one symlink pointing out of
+    the tree) validate as `verified` with an EMPTY uncovered list — a false PASS on
+    a citation that names no artifact of this tree.
+
+    ⛔ The link target is part of the FIXTURE, not `/etc/hostname`: a dangling
+    target is refused whether or not the containment clause is present (measured),
+    so a host-shaped target would make this test pass vacuously on any box that
+    lacks it — including the box a developer runs the suite on.
+    """
+    tree = tmp_path / "tree"
+    (tree / "pure").mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.md").write_text("x", encoding="utf-8")
+    os.symlink(outside / "secret.md", tree / "pure" / "evil.md")
+
+    with pytest.raises(cl.InvalidLedger) as glob_excinfo:
+        cl.validate(_ledger([_row("A", evidence=["cmd:sh pure/*"])]), repo_root=tree)
+    assert "no file of this tree matches" in str(glob_excinfo.value)
+
+    # The same tree via a bare path: the link names a file that IS not in the tree.
+    with pytest.raises(cl.InvalidLedger):
+        cl.validate(_ledger([_row("B", evidence=["pure/evil.md"])]), repo_root=tree)
+
+
+def test_usage_outcomes_never_borrow_a_verdict_code(tmp_path):
+    """`--help` exited 0 (== CLEAN) and a bad flag exited 2 (== UNCOVERED).
+
+    A caller branching on the exit status read "a help screen was printed" as "the
+    ledger is clean", and a typo'd flag as "uncovered rows exist". Both mean "no
+    verdict was computed", so both now answer EXIT_USAGE and the other four codes
+    keep one meaning each.
+    """
+    for argv in (["--help"], ["-h"], ["check", "--nope"]):
+        proc = subprocess.run(
+            [sys.executable, str(TOOL), *argv],
+            capture_output=True,
+            text=True,
+            cwd=str(REPO_ROOT),
+            check=False,
+        )
+        assert proc.returncode == cl.EXIT_USAGE, (argv, proc.returncode, proc.stderr)
+        assert proc.returncode not in {cl.EXIT_CLEAN, cl.EXIT_UNCOVERED}
+
+
 def test_the_committed_ledger_pins_its_denominator():
     data = cl.load_ledger(LEDGER)
     assert data["criteria_expected"] == 22
     assert len(data["criteria"]) == 22
 
 
-def test_a_shallow_checkout_is_unprovable_never_absent(monkeypatch):
-    """CI test jobs check out at `fetch-depth: 1`, where an ANCESTOR sha is not in
-    the object database. Blaming the record for that reds the required check on a
-    legitimate ledger (#9075 r4 P1), so the third outcome must exist."""
-    monkeypatch.setattr(cl, "_commit_state", cl._commit_state)  # real impl, no stub
-    assert cl._commit_state("0" * 40) in {"absent", "unprovable"}
-    # The shallow probe is what decides: a missing object in a shallow clone is
-    # `unprovable`, and only a full clone may say `absent`.
-    shallow = cl._commit_state("0" * 40)
-    if shallow == "absent":
-        pytest.skip("this checkout is not shallow, so `absent` is the correct answer here")
-    assert shallow == "unprovable"
+def test_an_omitted_denominator_pin_is_invalid(tmp_path):
+    """The pin must be enforced by the TOOL, not only by one test on one file.
 
-
-def test_a_ledger_without_criteria_expected_is_invalid(tmp_path):
-    """OPTIONAL was no pin: a 9-row ledger omitting the key exits 0 and prints
-    "UNCOVERED LIST: empty" — the denominator computed from the record itself."""
+    Measured before this: a ledger that simply left the key out exited 0, so
+    "drop the uncovered rows AND delete the block" reached a clean exit — the
+    committed artifact was protected by a property of itself, not of the check.
+    """
     data = _ledger([_row("A")])
     del data["criteria_expected"]
     proc = _run_cli(tmp_path, data)
     assert proc.returncode == cl.EXIT_INVALID, proc.stdout + proc.stderr
     assert "criteria_expected" in proc.stderr
+
+
+@pytest.mark.parametrize("coerced", [True, False, 1.9])
+def test_a_non_integer_denominator_is_invalid_not_coerced(tmp_path, coerced):
+    """`True` IS an int in Python and `int(1.9)` truncates to 1: either would pass
+    as a one-row pin against a one-row ledger, which is the shrink this pins.
+
+    ⚠️ The QUOTED string `"1"` used to be in this list and is deliberately NOT any
+    more: a quoted count is the same count, main accepted it, and refusing it was a
+    fail-closed regression that bought no protection (`test_a_quoted_count_is_…`).
+    """
+    data = _ledger([_row("A")], criteria_expected=coerced)
+    proc = _run_cli(tmp_path, data)
+    assert proc.returncode == cl.EXIT_INVALID, proc.stdout + proc.stderr
+    assert "INTEGER" in proc.stderr
+
+
+@pytest.mark.parametrize("quoted", ["1", " 1 "])
+def test_a_quoted_count_is_the_same_count(tmp_path, quoted):
+    """`criteria_expected: "1"` pins the same denominator as `criteria_expected: 1`.
+
+    Main `810eb838c` accepted it; an earlier revision of this branch refused it,
+    which was a gratuitous fail-closed regression (exit 1 also hides every
+    uncovered row). Kept permissive, and pinned so it cannot silently re-tighten.
+    """
+    data = _ledger([_row("A")], criteria_expected=quoted)
+    proc = _run_cli(tmp_path, data)
+    assert proc.returncode == cl.EXIT_CLEAN, (quoted, proc.stdout + proc.stderr)
+
+
+def test_a_shallow_checkout_is_unprovable_never_absent(tmp_path):
+    """CI test jobs check out at `fetch-depth: 1`, where an ANCESTOR sha is not in
+    the object database. Blaming the record reds the required check on a legitimate
+    ledger (#9075 r4 P1), so the third outcome has to exist.
+
+    Built as a REAL depth-1 clone rather than skipped. The previous version ran
+    against the live checkout and skipped whenever it was not shallow — which is
+    every developer box and most CI legs — so it asserted nothing on the path that
+    decides. This also pins `_commit_state`'s `repo_root` argument: the same sha is
+    `unprovable` in the shallow clone and `exists` in the full one, so a function
+    that ignored the tree it was asked about could not return both.
+    """
+
+    def git(*args: str, cwd: Path) -> str:
+        return subprocess.run(
+            ["git", *args],
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    git("init", "-q", cwd=origin)
+    git("config", "user.email", "pins@example.com", cwd=origin)
+    git("config", "user.name", "pins", cwd=origin)
+    git("config", "commit.gpgsign", "false", cwd=origin)
+    (origin / "f.txt").write_text("one", encoding="utf-8")
+    git("add", "f.txt", cwd=origin)
+    git("commit", "-qm", "one", cwd=origin)
+    ancestor = git("rev-parse", "HEAD", cwd=origin)
+    (origin / "f.txt").write_text("two", encoding="utf-8")
+    git("commit", "-qam", "two", cwd=origin)
+
+    # `file://` forces the real transport; a plain local-path clone silently
+    # ignores `--depth` and would make this test pass for the wrong reason.
+    shallow = tmp_path / "shallow"
+    subprocess.run(
+        ["git", "clone", "-q", "--depth", "1", f"file://{origin}", str(shallow)],
+        check=True,
+        capture_output=True,
+    )
+    full = tmp_path / "full"
+    subprocess.run(
+        ["git", "clone", "-q", f"file://{origin}", str(full)], check=True, capture_output=True
+    )
+
+    assert cl._commit_state("0" * 40, repo_root=shallow) == "unprovable"
+    assert cl._commit_state("0" * 40, repo_root=full) == "absent"
+    # The ancestor the ledger legitimately cites: unprovable where history is
+    # truncated, and NOT blamed there — which is the whole fix.
+    assert cl._commit_state(ancestor, repo_root=shallow) == "unprovable"
+    assert cl._commit_state(ancestor, repo_root=full) == "exists"
+
+
+# ── the REAL committed ledger ──────────────────────────────────────────────
+
+
+def test_committed_ledger_is_valid_and_has_the_issue_denominator():
+    rows = cl.validate(cl.load_ledger(LEDGER))
+    assert [row["id"] for row in rows] == EXPECTED_IDS
+    assert len(rows) == 22
+
+
+def test_committed_ledger_uncovered_set_is_pinned():
+    rows = cl.validate(cl.load_ledger(LEDGER))
+    assert [row["id"] for row in cl.uncovered(rows)] == EXPECTED_UNCOVERED
+
+
+def test_committed_ledger_exits_uncovered():
+    """The capstone is NOT done; the tool must say so, and say why."""
+    proc = subprocess.run(
+        [sys.executable, str(TOOL), "check"],
+        capture_output=True,
+        text=True,
+        cwd=str(REPO_ROOT),
+        check=False,
+    )
+    assert proc.returncode == cl.EXIT_UNCOVERED, proc.stdout + proc.stderr
+    assert "criteria: 22" in proc.stdout
+
+
+def test_committed_ledger_quotes_every_criterion_verbatim():
+    """A paraphrased criterion drifts from the thing being accepted.
+
+    The issue body is not readable offline, so the floor is pinned in two layers:
+    a structural one (non-empty, not a shorthand label) and — the layer that
+    actually catches a defect — a distinctive fragment per row, quoted from
+    #9664's own body. A row that shortens or rewrites the cell it quotes loses
+    its needle and fails here.
+    """
+    rows = cl.validate(cl.load_ledger(LEDGER))
+    for row in rows:
+        assert len(row["text"]) > 8, row["id"]
+        assert row["text"].lower() not in {"step 1", "done", "n/a", "tbd"}, row["id"]
+
+
+@pytest.mark.parametrize("cid", EXPECTED_IDS)
+def test_committed_ledger_keeps_each_criterion_cell(cid):
+    rows = {row["id"]: row for row in cl.validate(cl.load_ledger(LEDGER))}
+    assert cid in rows, cid
+    present = EXPECTED_TEXT_NEEDLES[cid]
+    assert present in rows[cid]["text"], (
+        f"{cid} no longer contains the issue's own wording: {present!r}\n"
+        f"row text: {rows[cid]['text']!r}"
+    )
+
+
+def test_a_prose_cmd_is_refused_beside_a_held_artifact(tmp_path):
+    """⛔ THE PIN ON THE `cmd:` SHAPE GATE — the false pass this PR exists to close.
+
+    This is deliberately NOT a `cmd:`-only row. A `cmd:`-only row is refused by
+    `validate`'s held-artifact rule whether or not the shape gate runs, so it pins
+    nothing here (measured: neutralising the gate in place left such a test green).
+
+    The real configuration is a row that DOES hold a tracked artifact — and
+    `docs/evidence/9664-capstone/README.md` is available to every row, so it is the
+    cheapest way to manufacture a green ledger — plus a `cmd:` whose text says the
+    work was not done. Before the gate this validated at `verified: 22`,
+    `uncovered: 0`, exit 0. Mutation-verified: with the `RUNNERS` check removed this
+    test fails and the row is CLEAN.
+    """
+    for prose in [
+        "cmd:NOT RUN - see tools/capstone_ledger.py for the intended command",
+        "cmd:verified manually by reading pyproject.toml",
+        "cmd:see tools/capstone_ledger.py",
+    ]:
+        proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, prose])]))
+        assert proc.returncode == cl.EXIT_INVALID, (prose, proc.stdout + proc.stderr)
+        assert "must START with a program that runs something" in proc.stderr, proc.stderr
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # ⛔ These pin `_command_body`'s NORMALISATIONS, each of which was
+        # mutation-tested as UNPINNED: reverting the backtick unwrap, the leading
+        # `NAME=value` strip, or the `cd`-aware cwd each left the whole suite green
+        # while the shape gate false-blocked a real record. A false block is exit 1,
+        # and exit 1 computes NOTHING — it hides every uncovered row.
+        "cmd:`uv run pytest tests/test_9664_capstone_verdict_ledger.py -q`",
+        "cmd:TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
+        "cmd:TORTOISE_DB_URI='docker://:f@localhost:6379/x' uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
+        # `cd` moves the cwd: `../tests/...` only resolves INSIDE tools/, so a
+        # validator that dropped the `cd` and resolved at the root refuses it.
+        "cmd:cd tools && uv run pytest ../tests/test_9664_capstone_verdict_ledger.py -q",
+        "cmd:cd tools && uv run python capstone_ledger.py check",
+    ],
+)
+def test_a_wrapped_command_is_not_a_false_block(tmp_path, command):
+    """The shell WRAPPER around a real command must not invalidate the record."""
+    proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, command])]))
+    assert proc.returncode == cl.EXIT_CLEAN, (command, proc.stdout + proc.stderr)
+
+
+def test_a_script_containing_a_quoted_and_channel_is_accepted(tmp_path):
+    """`&&` INSIDE a quoted `-c` script must not be split.
+
+    A plain `text.split('&&')` cuts inside the quotes, so the record came back as
+    `bash -c 'uv run pytest …` — unparseable, therefore INVALID, therefore exit 1,
+    which computes NOTHING and hides the whole uncovered list. Mutation-verified:
+    reverting `_split_chains` to `split("&&")` reddens this test.
+    """
+    proc = _run_cli(
+        tmp_path,
+        _ledger(
+            [
+                _row(
+                    "A",
+                    evidence=[
+                        REAL_EVIDENCE,
+                        "cmd:bash -c 'uv run pytest "
+                        "tests/test_9664_capstone_verdict_ledger.py -q && echo done'",
+                    ],
+                )
+            ]
+        ),
+    )
+    assert proc.returncode == cl.EXIT_CLEAN, proc.stdout + proc.stderr
+
+
+def test_a_glob_whose_matches_are_all_untracked_is_refused(monkeypatch):
+    """A glob is satisfied by a TRACKED match, not by whatever `glob` yields first.
+
+    Two halves, both mutation-verified: (a) the tracked rule reaches the glob arm at
+    all, and (b) it looks for ANY tracked match rather than refusing on the first
+    untracked one — the order-dependent verdict that made the same tree accepted or
+    refused depending on the filenames.
+    """
+    # (a) every match untracked -> refused
+    monkeypatch.setattr(cl, "_is_tracked", lambda resolved, root: False)
+    ok, why = cl._evidence_is_real("cmd:uv run python docs/evidence/9664-capstone/*.md", REPO_ROOT)
+    assert ok is False, why
+    assert "untracked" in why, why
+
+    # (b) ONE tracked match is enough, whatever the enumeration order
+    monkeypatch.setattr(
+        cl,
+        "_is_tracked",
+        lambda resolved, root: resolved.name == "README.md",
+    )
+    ok, why = cl._evidence_is_real("cmd:uv run python docs/evidence/9664-capstone/*.md", REPO_ROOT)
+    assert ok is True, why
+
+
+def test_a_cd_that_would_leave_the_tree_is_refused(tmp_path):
+    """Honouring `cd` must not let a record walk the check out of the checkout."""
+    proc = _run_cli(
+        tmp_path,
+        _ledger(
+            [
+                _row(
+                    "A",
+                    evidence=[REAL_EVIDENCE, "cmd:cd ../../.. && uv run pytest tests/x.py"],
+                )
+            ]
+        ),
+    )
+    assert proc.returncode == cl.EXIT_INVALID, proc.stdout + proc.stderr
+    assert "names no artifact of this tree" in proc.stderr, proc.stderr
+
+
+def test_a_cmd_target_that_is_not_tracked_is_refused(monkeypatch):
+    """The TRACKED rule applies to a `cmd:` target, not only to a bare path entry.
+
+    Both arms make the same claim — "an artifact a reader's clone holds" — so a
+    gitignored `WORKTREE-REPORT.md` must not count as a named artifact through the
+    command arm while the path arm refuses it. Asserted on the wiring: `_is_tracked`
+    is monkeypatched, so this needs no gitignored file on disk.
+    """
+    monkeypatch.setattr(cl, "_is_tracked", lambda resolved, root: False)
+    ok, why = cl._evidence_is_real(f"cmd:uv run python {REAL_EVIDENCE}", REPO_ROOT)
+    assert ok is False, why
+    assert "not TRACKED by git" in why, why
+
+
+def test_commit_state_is_unmeasurable_when_git_cannot_be_asked(monkeypatch):
+    """No `git` on PATH is NOT "this clone is shallow" — they must not be folded.
+
+    Folding them was a measured fail-open: with git unreachable, a forged
+    `measured_at.sha` rendered as provenance with no diagnostic. Mutation-verified:
+    changing this branch's `unmeasurable` back to `unprovable` reddens this test.
+    """
+
+    def no_git(*args, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory", "git")
+
+    monkeypatch.setattr(cl.subprocess, "run", no_git)
+    assert cl._commit_state("0" * 40) == "unmeasurable"
+
+
+def test_commit_state_is_unmeasurable_when_the_shallow_probe_also_fails(monkeypatch):
+    """A failing shallow PROBE is also "could not be asked", not "shallow".
+
+    Mutation-verified: changing that branch's `unmeasurable` to `unprovable`
+    reddens exactly this test (ported from #11474's mutation-proven pair).
+    """
+
+    class _Failed:
+        returncode = 128
+        stdout = ""
+
+    monkeypatch.setattr(cl.subprocess, "run", lambda *a, **k: _Failed())
+    assert cl._commit_state("0" * 40) == "unmeasurable"
+
+
+def test_an_unmeasurable_sha_is_a_defect(monkeypatch):
+    """`validate` must REFUSE `unmeasurable` — the state is worthless unhandled.
+
+    Mutation-verified: removing the `elif state == "unmeasurable"` branch leaves
+    every other test green and lets a forged sha through as `uncovered: 0`.
+    """
+    monkeypatch.setattr(cl, "_commit_state", lambda sha, repo_root=cl.REPO_ROOT: "unmeasurable")
+    data = _ledger([_row("A")])
+    data["measured_at"]["sha"] = "deadbeef" * 5
+    with pytest.raises(cl.InvalidLedger) as excinfo:
+        cl.validate(data)
+    assert "cannot be verified" in str(excinfo.value)
+
+
+# --- Ported from the peer lane's 35ea7658e (three commits on top of this same
+# rebase head, written independently against the same review findings). Kept
+# because each pins something this branch did not: the `absent` arm END TO END in
+# a real full clone, the quoted-script split, the unquoted chain, a vacuous glob
+# beside a HELD path, and the PRINTED git-unavailable abstention.
+
+
+def test_a_fabricated_sha_is_refused_end_to_end_in_a_full_clone(tmp_path):
+    """HERMETIC, and the arm the wiring pin above cannot reach by itself.
+
+    `test_a_sha_that_names_no_commit_is_invalid` pins `validate`'s DECISION with the
+    state machine stubbed, because the live checkout's DEPTH is not a property a
+    deterministic test may depend on: on this box the shared `.git` is a FULL clone
+    (`git rev-parse --is-shallow-repository` -> false, so a forged sha already
+    answers `absent` here), while a CI shard's depth-1 checkout answers `unprovable`
+    for the same input. That leaves the real path — a full clone, a forged sha,
+    `validate` calling `_commit_state` — with no end-to-end pin at all.
+    `_commit_state` honouring `repo_root` is what makes this reachable: a temp FULL
+    clone answers `absent`, so the refusal fires for real rather than by stubbing.
+
+    The cited artifact is committed in that same temp repo, so the ONLY defect is
+    the sha — otherwise this would pass on the tracked rule instead, for the wrong
+    reason.
+    """
+    import subprocess as sp
+
+    repo = tmp_path / "fullrepo"
+    repo.mkdir()
+    (repo / "held.txt").write_text("held\n", encoding="utf-8")
+    git = ["git", "-C", str(repo)]
+    sp.run([*git, "init", "-q"], check=True)
+    sp.run([*git, "add", "held.txt"], check=True)
+    # `commit.gpgsign=false` is part of being HERMETIC: this fixture SEEDS a commit,
+    # so on a box that signs commits it would ERROR (exit 128, "gpg failed to sign
+    # the data") instead of asserting — a pin failing for a reason unrelated to its
+    # arm. The sibling temp-repo fixture in this file already configures it.
+    sp.run(
+        [
+            *git,
+            "-c",
+            "user.email=t@example.com",
+            "-c",
+            "user.name=t",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "-m",
+            "seed",
+        ],
+        check=True,
+    )
+    assert (
+        sp.run(
+            [*git, "rev-parse", "--is-shallow-repository"], capture_output=True, text=True
+        ).stdout.strip()
+        == "false"
+    ), "this fixture must be a FULL clone, or `absent` is unreachable"
+
+    data = _ledger([_row("A", evidence=["held.txt"])])
+    data["measured_at"]["sha"] = "deadbeef" * 5
+    with pytest.raises(cl.InvalidLedger) as excinfo:
+        cl.validate(data, repo_root=repo)
+    # The refusal is the SHA, not a tracked-artifact complaint.
+    assert "names no commit" in str(excinfo.value), str(excinfo.value)
+    assert "TRACKED" not in str(excinfo.value), str(excinfo.value)
+
+
+def test_a_quoted_script_body_with_a_chain_is_one_command(tmp_path):
+    """`bash -c 'a && b'` is ONE command; splitting the raw string breaks it.
+
+    `text.split("&&")` cuts a quoted script body mid-quote, so `shlex` rejects the
+    halves and the row is refused as "not a parseable command" — exit 1, which
+    prints no uncovered list at all. Measured on a legitimate record, and it lands
+    on the exact shape `_SCRIPT_FLAGS` exists to accept (`bash -c '…'`), which
+    `origin/main` accepted before this branch added a shape gate. Reverting
+    `_split_on_chain` to `text.split("&&")` reds this and nothing else.
+    """
+    proc = _run_cli(
+        tmp_path,
+        _ledger(
+            [
+                _row(
+                    "A",
+                    evidence=[
+                        REAL_EVIDENCE,
+                        "cmd:bash -c 'uv run pytest "
+                        "tests/test_9664_capstone_verdict_ledger.py -q && echo done'",
+                    ],
+                )
+            ]
+        ),
+    )
+    assert proc.returncode == cl.EXIT_CLEAN, proc.stderr
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # The discriminating case for BOTH halves of the splitter: `cd tools` moves
+        # the effective directory, so the second segment's `../tests/...` only
+        # resolves if the chain WAS split AND the `cd` was applied.
+        "cmd:cd tools && uv run pytest ../tests/test_9664_capstone_verdict_ledger.py -q",
+        "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q && echo PASS",
+        "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q && uv run pytest tests/test_ci_manifest.py -q",
+    ],
+)
+def test_a_real_unquoted_chain_is_split_and_each_segment_graded(tmp_path, command):
+    """A bare `&&` IS a separator, and the chained record is the normal case.
+
+    The quoted-body test above pins the mirror-image half (`&&` inside quotes must
+    NOT split). Replacing the splitter with `return [text.strip()]` — never split
+    at all — left all 150 tests green while refusing `cd tools && uv run …` as
+    "must START with a program that runs something", which is exit 1 and prints no
+    uncovered list: the exact false block this round exists to remove. A pin in one
+    direction only is not a pin on the contract.
+    """
+    proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, command])]))
+    assert proc.returncode == cl.EXIT_CLEAN, proc.stdout + proc.stderr
+
+
+def test_a_vacuous_glob_cannot_carry_a_verified_row_BESIDE_a_held_path(tmp_path):
+    """The glob-vacuity guard only ever matters on a row that ALREADY holds an artifact.
+
+    Every `cmd:sh ./*` string in this file sits on a row citing no held artifact, so
+    the row rule refuses it with or without the glob arm — which left the arm
+    unpinned: `_glob_names_a_directory -> True` kept the whole suite green. Measured
+    end-to-end on that mutant, a 22-row all-`verified` ledger citing `README.md`
+    plus `cmd:sh ./*` exited **0** with an empty uncovered list — the false PASS the
+    arm was added to refuse.
+    """
+    proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, "cmd:sh ./*"])]))
+    assert proc.returncode == cl.EXIT_INVALID, proc.stdout + proc.stderr
+    assert "names no artifact" in proc.stderr, proc.stderr
+
+
+def test_a_checkout_without_git_abstains_AND_PRINTS_IT(monkeypatch, capsys):
+    """No `git` on PATH is an abstention with a NOTE, never a traceback and never a red.
+
+    Measured on the mutant that removes the `except OSError` arm: a
+    `FileNotFoundError` escaped `validate()` with no `CAPSTONE-LEDGER: INVALID`
+    marker, so a reader keying on the marker got nothing at all. And the abstention
+    must be PRINTED, because `_tracked_unprovable -> False` turns it into a false red
+    on a legitimate ledger in any git-less checkout (a tarball, a build context).
+    Both directions are asserted here, so either revert reds this test.
+    """
+    import types
+
+    def _boom(argv, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory", "git")
+
+    monkeypatch.setattr(cl, "subprocess", types.SimpleNamespace(run=_boom))
+    monkeypatch.setattr(cl, "_commit_state", lambda sha, repo_root: "exists")
+    assert [row["id"] for row in cl.validate(_ledger([_row("A")]))] == ["A"]
+    assert "git is unavailable here" in capsys.readouterr().err
+
+
+# --- Ported VERBATIM from #11476 (main) at 810eb838c, so its B-arm and forgery
+# pins are not lost in the rebase. These are not new tests: every one below is
+# byte-identical to main and pins an arm that existed on main and that THIS
+# branch (before the rebase) did not have — the tracked-path rule, the merge-key
+# refusal, the reserved report token, the printed-field flattening, NUL and
+# ENAMETOOLONG handling.
 
 
 def test_an_absolute_wildcard_is_refused_not_crashed(tmp_path):
@@ -539,8 +1331,12 @@ def test_a_merge_key_is_refused_by_name(tmp_path):
         check=False,
     )
     assert proc.returncode == cl.EXIT_INVALID, proc.stdout + proc.stderr
-    assert "merge key" in proc.stderr
-    assert "not parseable YAML" not in proc.stderr
+    # ⛔ The MESSAGE is the assertion, not just the exit code: without the refusal
+    # the same file is still INVALID, but as "not parseable YAML" — a different
+    # defect that happens to share a code. Mutation-verified: neutralising the merge
+    # tag check leaves the exit code at 1 and changes only this text.
+    assert "merge key" in proc.stderr, proc.stderr
+    assert "not parseable YAML" not in proc.stderr, proc.stderr
 
 
 def test_an_untracked_artifact_is_invalid(tmp_path):
@@ -552,16 +1348,14 @@ def test_an_untracked_artifact_is_invalid(tmp_path):
     resolver would have stayed green in CI while a gitignored lane artifact counted
     as held evidence.
     """
-    import subprocess as sp
-
     repo = tmp_path / "treerepo"
     repo.mkdir()
     (repo / "committed.txt").write_text("held\n", encoding="utf-8")
     (repo / "untracked.txt").write_text("not in any clone\n", encoding="utf-8")
     git = ["git", "-C", str(repo)]
-    sp.run([*git, "init", "-q"], check=True)
-    sp.run([*git, "add", "committed.txt"], check=True)
-    sp.run(
+    subprocess.run([*git, "init", "-q"], check=True)
+    subprocess.run([*git, "add", "committed.txt"], check=True)
+    subprocess.run(
         [
             *git,
             "-c",
@@ -759,56 +1553,3 @@ def test_a_long_path_is_truncated_in_the_error_line(tmp_path):
     proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[long])]))
     assert proc.returncode == cl.EXIT_INVALID
     assert "…" in proc.stderr, proc.stderr
-
-
-# ── the REAL committed ledger ──────────────────────────────────────────────
-
-
-def test_committed_ledger_is_valid_and_has_the_issue_denominator():
-    rows = cl.validate(cl.load_ledger(LEDGER))
-    assert [row["id"] for row in rows] == EXPECTED_IDS
-    assert len(rows) == 22
-
-
-def test_committed_ledger_uncovered_set_is_pinned():
-    rows = cl.validate(cl.load_ledger(LEDGER))
-    assert [row["id"] for row in cl.uncovered(rows)] == EXPECTED_UNCOVERED
-
-
-def test_committed_ledger_exits_uncovered():
-    """The capstone is NOT done; the tool must say so, and say why."""
-    proc = subprocess.run(
-        [sys.executable, str(TOOL), "check"],
-        capture_output=True,
-        text=True,
-        cwd=str(REPO_ROOT),
-        check=False,
-    )
-    assert proc.returncode == cl.EXIT_UNCOVERED, proc.stdout + proc.stderr
-    assert "criteria: 22" in proc.stdout
-
-
-def test_committed_ledger_quotes_every_criterion_verbatim():
-    """A paraphrased criterion drifts from the thing being accepted.
-
-    The issue body is not readable offline, so the floor is pinned in two layers:
-    a structural one (non-empty, not a shorthand label) and — the layer that
-    actually catches a defect — a distinctive fragment per row, quoted from
-    #9664's own body. A row that shortens or rewrites the cell it quotes loses
-    its needle and fails here.
-    """
-    rows = cl.validate(cl.load_ledger(LEDGER))
-    for row in rows:
-        assert len(row["text"]) > 8, row["id"]
-        assert row["text"].lower() not in {"step 1", "done", "n/a", "tbd"}, row["id"]
-
-
-@pytest.mark.parametrize("cid", EXPECTED_IDS)
-def test_committed_ledger_keeps_each_criterion_cell(cid):
-    rows = {row["id"]: row for row in cl.validate(cl.load_ledger(LEDGER))}
-    assert cid in rows, cid
-    present = EXPECTED_TEXT_NEEDLES[cid]
-    assert present in rows[cid]["text"], (
-        f"{cid} no longer contains the issue's own wording: {present!r}\n"
-        f"row text: {rows[cid]['text']!r}"
-    )
