@@ -366,9 +366,11 @@ def judge_pin_for(spec: str) -> str:
     # ``judge.DEFAULT_JUDGE_MODEL`` again: that default was re-pinned to DeepSeek
     # by the #8486 owner ruling (2026-10-27), and deriving "official" from it
     # would have minted ``JUDGE_PIN`` for a DeepSeek-graded run — the exact R12
-    # fail-open ``#9992`` closed, re-opened by a one-line default change. This
-    # benchmark's pre-registration is unchanged: it grades with the OFFICIAL
-    # judge.
+    # fail-open ``#9992`` closed, re-opened by a one-line default change. This is
+    # NOT a claim about what this benchmark pre-registers: #11460 re-registered
+    # the ask lane onto ``PREREGISTERED_JUDGE_SPEC``, whose pin is
+    # ``unpinned:<spec>``; this constant only keeps the OFFICIAL identity
+    # nameable (and unmixable with a DeepSeek run) for the LongMemEval receipts.
     official = judge_model_id(OFFICIAL_JUDGE_MODEL)
     if model == official or model.endswith("/" + official):
         return JUDGE_PIN

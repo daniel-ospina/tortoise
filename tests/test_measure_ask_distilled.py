@@ -44,7 +44,7 @@ from tests.eval.ask import corpus as ask_corpus
 from tests.eval.ask import generate_corpus
 from tools.longmem_eval import measure_ask_distilled as m
 from tools.longmem_eval import w7_publish
-from tools.longmem_eval.judge import MockJudge
+from tools.longmem_eval.judge import DEFAULT_JUDGE_MODEL, MockJudge
 from tortoise.ask_lane import _reset_ask_reader_cache_for_tests
 
 # ── stubs ─────────────────────────────────────────────────────────────────
@@ -532,7 +532,7 @@ def test_the_committed_protocol_is_registered_to_the_owner_ruled_judge(
     committed = m.load_preregistration()
     spec = m.PREREGISTERED_JUDGE_SPEC
     assert committed["judge"]["model_spec"] == spec
-    assert committed["judge"]["model_spec"] != m.DEFAULT_JUDGE_MODEL
+    assert committed["judge"]["model_spec"] != DEFAULT_JUDGE_MODEL
     # the pin travels WITH the spec — a DeepSeek run can never claim the
     # official label (the OVERRIDES line on #2281/#11460) …
     assert committed["judge"]["pin"] == f"unpinned:{spec}"
@@ -1387,12 +1387,13 @@ def test_a_mock_judge_can_never_carry_the_official_pin(tmp_path):
     # (#8486, 2026-11-07): the run default was re-pinned to DeepSeek by the owner
     # ruling of 2026-10-27, and deriving "official" from it would have handed
     # `JUDGE_PIN` to a DeepSeek-graded run — the R12 fail-open #9992 closed.
-    from tools.longmem_eval.judge import (DEFAULT_JUDGE_MODEL,
-                                          OFFICIAL_JUDGE_MODEL)
+    from tools.longmem_eval.judge import (
+        DEFAULT_JUDGE_MODEL as _RUN_DEFAULT_JUDGE_MODEL,
+        OFFICIAL_JUDGE_MODEL)
     assert m.judge_pin_for(OFFICIAL_JUDGE_MODEL) == m.JUDGE_PIN
-    assert m.judge_pin_for(DEFAULT_JUDGE_MODEL) == (
-        f"unpinned:{DEFAULT_JUDGE_MODEL}")
-    assert m.judge_pin_for(DEFAULT_JUDGE_MODEL) != m.JUDGE_PIN
+    assert m.judge_pin_for(_RUN_DEFAULT_JUDGE_MODEL) == (
+        f"unpinned:{_RUN_DEFAULT_JUDGE_MODEL}")
+    assert m.judge_pin_for(_RUN_DEFAULT_JUDGE_MODEL) != m.JUDGE_PIN
     # the official judge is the MODEL, not the transport
     assert m.judge_pin_for("openrouter:openai/gpt-4o-2024-08-06") == m.JUDGE_PIN
 
