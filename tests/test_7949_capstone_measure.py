@@ -10750,9 +10750,12 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     ->`:2724-2726`), `extractor_v2.py:1720` unchanged, the `create_operator`
     reproduction quote this PR re-derived (`:8938 :8956 :8963 :9343` ->
     `:9006 :9024 :9031 :9411`, drifted +68 unnoticed since #11449 — the neighbouring
-    #11376 did not move these lines), the `:12929` `vet_enabled` live-cite, and the
-    bundle's `hasPart`/`hierarchies` split — and, measured before this pin existed,
-    re-staling ANY of them
+    #11376 did not move these lines), the `:12929` `vet_enabled` live-cite, the
+    bundle's `hasPart`/`hierarchies` split, and the four further LIVE cites a fresh
+    review found still unwatched (`pack_hierarchy.py:419`, the
+    `probes/capstone_measure.py:275-283` window and the `sdk.py:17574` cite it carries
+    INSIDE it, `identity_hold.py:125`, `value_gate.py:81`) — and, measured before
+    this pin existed, re-staling ANY of them
     left every suite green: the record is in no `_BUNDLE_DOCS` entry and
     `git grep -ln RECONCILE-A1-A2-A5 -- tests/ ':!tests/test_7949_capstone_measure.py'`
     printed nothing at the base this pin was added — note the self-match, the same trap
@@ -10784,6 +10787,12 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     sdk = (_REPO / "tortoise/sdk.py").read_text(encoding="utf-8").splitlines()
     ext = (_REPO / "tortoise/extractor_v2.py").read_text(encoding="utf-8").splitlines()
     probe = PROBE.read_text(encoding="utf-8").splitlines()
+    pack_hierarchy = (_REPO / "tortoise/pack_hierarchy.py").read_text(
+        encoding="utf-8").splitlines()
+    identity_hold = (_REPO / "tortoise/identity_hold.py").read_text(
+        encoding="utf-8").splitlines()
+    value_gate = (_REPO / "tortoise/value_gate.py").read_text(
+        encoding="utf-8").splitlines()
 
     # A1: #11205's channel is TRANSPORT ONLY — the schema line that spells the
     # predicate allowlist, and the comment saying nothing in `tortoise/` consumes it.
@@ -10865,14 +10874,6 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         "a COMMENT naming the verb is not a call site")
     assert _call_sites('_X = "create_operator(payload)"\n') == [], (
         "a STRING naming the verb is not a call site")
-    # The four shapes the tokenized arm must separate, each MEASURED on a live tree (the
-    # first two are what a regex could not do, in both directions):
-    #   `sdk.create_edge(payload)`      -> red (receiver-qualified call; a dot-EXCLUDING
-    #                                     lookbehind stayed green on this one)
-    #   `return create_operator(x)`     -> red (unqualified call; a dot-ANCHORED pattern
-    #                                     stayed green on this one)
-    #   `# call create_operator(p)`     -> NOT a call; only the mention arm fires
-    #   `_X = "create_operator(p)"`     -> NOT a call; only the mention arm fires
     # The LIVE run is the LEADING `:NNNN` group, not the whole comment: #11519's landing
     # appends the PROVENANCE of the four numbers (`(`62248db88` printed :8938 …; #11449,
     # moved all four +68)`), which is a claim about two other bases and must not be read as
@@ -10925,25 +10926,35 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         f"extractor_v2.py's create_operator mentions are at {live_mentions}, not the "
         "four the record quotes — an insertion above them moves the quote; re-derive "
         "the record's block (its `create_operator` line AND this list) rather than the list")
-    # ⛔ The arm above binds the four LINE NUMBERS; the record also STATES the count in prose
-    # in four places — `prints **4** on origin/main`, `in four comments`, `prints exactly
-    # four`, and §0's `four create_operator MENTIONS`. Those were unbound: measured, editing
-    # `:81` to "prints exactly three" left the suite GREEN while `:629` still listed four
-    # numbers, i.e. the record contradicted its own pinned quote and nothing reddened. A
-    # typed count is this bundle's recurring defect (the docstring above says so), so the
-    # count is DERIVED here and every prose statement of it is bound. The `0` at
-    # `80c912244` and the `56 lines / 59 occurrences` at `62248db88` are sha-pinned readings
-    # — they read commits that already happened and cannot rot — so they are not bound.
+    # ⛔ The arm above binds the four LINE NUMBERS; the record also STATES the count in prose,
+    # SIX times across FIVE spellings — `prints **4** on origin/main` (x2), `in four comments`
+    # (x2), `prints exactly four`, `# §0's four create_operator MENTIONS`, and
+    # `(four COMMENTS naming`. Those were unbound: measured, editing `:81` to "prints exactly
+    # three" left the suite GREEN while `:629` still listed four numbers, i.e. the record
+    # contradicted its own pinned quote and nothing reddened. A typed count is this bundle's
+    # recurring defect (the docstring above says so), so the count is DERIVED here and every
+    # prose statement of it is bound.
+    #
+    # ⛔ Graded PER OCCURRENCE (`re.findall` + `all`), not with `in text`: two of the
+    # spellings appear TWICE, so a bare membership test is satisfied by the SURVIVOR and one
+    # edited copy passed with the suite green (measured — the same false PASS this assertion
+    # exists to close, one level down). A spelling that stops appearing entirely also reds,
+    # via the `_found` emptiness check.
+    #
+    # The `0` at `80c912244` and the `56 lines / 59 occurrences` at `62248db88` are sha-pinned
+    # readings — they read commits that already happened and cannot rot — so they are not bound.
     _n = len(live_mentions)
     _words = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"]
-    for _count_claim in (f"prints **{_n}** on `origin/main`",
-                         f"names `sdk.create_operator` in {_words[_n]} comments",
-                         f"prints exactly {_words[_n]}",
-                         f"# §0's {_words[_n]} `create_operator` MENTIONS"):
-        assert _count_claim in text, (
-            f"the record states the create_operator mention count as {_n}, but does not "
-            f"say {_count_claim!r} — the derived count and every prose statement of it "
-            "must agree (a typed count that nothing re-checks is what rotted here)")
+    for _count_pat in (r"prints \*\*(\d+)\*\* on `origin/main`",
+                       r"names `sdk\.create_operator` in (\w+) comments",
+                       r"prints exactly (\w+)",
+                       r"§0's (\w+) `create_operator` MENTIONS",
+                       r"\((\w+) COMMENTS naming"):
+        _found = re.findall(_count_pat, text)
+        assert _found and all(_v in (str(_n), _words[_n]) for _v in _found), (
+            f"the record states the create_operator mention count as {_n}, but "
+            f"{_count_pat!r} yields {_found} — EVERY occurrence must agree with the derived "
+            "count (a typed count that nothing re-checks is what rotted here)")
 
     # A1's §5 "self-matching" note: its annotation claimed `# exit 1 = no output`, which
     # ROTTED to 40 lines once #10982 registered the A1 row into the pinned bundle — the
@@ -11104,18 +11115,60 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # A2: the capture path that writes the `references` edge — the record names it
     # THREE times: the prose cite, the amendment parenthetical that states BOTH
     # numbers moved together, and the `sed -n '<n>p'` that reproduces it. All three
-    # must agree; the parenthetical is pinned as a phrase because it is the only one
+    # must agree; the parenthetical is pinned by its NUMBER because it is the only one
     # that has no `sdk.py:` token or `sed` command for the arms below to catch
     # (measured: re-staling it to `17472` left every arm True).
     assert "the capture path at `tortoise/sdk.py:17574`)" in text, (
         "the record must cite the capture path by its live number")
-    assert "both now read `17574`" in text, (
-        "the amendment parenthetical must state the SAME live number — it is the "
-        "only one of the three that carries neither a `sdk.py:` token nor a sed")
+    # ⛔ Pinned as the BARE occurrence of the NUMBER, not as the sentence around it: the
+    # claim is that this paragraph states the same line the prose and the `sed` do.
+    # The prose carries it as `sdk.py:17574` and the recipe as `sed -n '17574p'`, so the
+    # amendment paragraph is the ONE remaining bare statement of it. A literal
+    # `"both now read `17574`"` needle redded on every number-preserving reword
+    # (`the two now agree on `17574``, `both now read `:17574`` — measured), which is the
+    # same false-block this PR fixed for the `# §0/§2` heading one arm above.
+    _bare = [c for c in re.findall(r".{0,12}17574", text)
+             if not c.endswith("sdk.py:17574") and "sed -n '" not in c]
+    assert len(_bare) == 1, (
+        "the amendment paragraph must state the live number `17574` exactly ONCE as a BARE "
+        f"cite — it is the only one of the three statements that carries neither a `sdk.py:` "
+        f"token nor a sed (found {_bare}); re-derive it with `grep -n '^ *proj\\.link_source_to_event' "
+        "tortoise/sdk.py`")
     assert re.findall(r"sed -n '(\d+)p' tortoise/sdk\.py", text) == ["17574"], (
         "the record's reproduction command must name the SAME line the prose does")
     assert sdk[17574 - 1].strip() == "proj.link_source_to_event(source_key, event_id)", (
         f"sdk.py:17574 reads {sdk[17574 - 1].strip()!r}, not the references writer")
+
+    # ── The four LIVE cites a fresh review found STILL unwatched ─────────────────────
+    #
+    # ⛔ Why these and not others: the record is in no `_BUNDLE_DOCS` entry, and each of
+    # these four is a LIVE (un-stamped) cite in it that appeared in NO test. Measured at
+    # `54ec77db0e`: `git grep -n -- 'pack_hierarchy.py:419' -- tests/` (and the other
+    # three) printed nothing, i.e. the record's thesis — "a claim nothing re-checks can
+    # rot silently" — was still true of its own text here. The `capstone_measure.py`
+    # window is the proven-rotten one: the record says this very cite was stale-corrected
+    # once and moved again by `#11459`'s +102 insertion.
+    #
+    # The window is pinned by the TWO facts it asserts, not its prose: it must still name
+    # `link_source_to_event` and it must still carry the `sdk.py:17574` cite INSIDE it
+    # (that nested cite is the same number the prose above pins, so the two cannot drift
+    # apart silently).
+    _probe_win = "\n".join(probe[275 - 1:283])
+    assert "link_source_to_event" in _probe_win, (
+        "probes/capstone_measure.py:275-283 no longer names `link_source_to_event` — the "
+        "record cites that window as the `references` writer, so re-derive the cite")
+    assert "tortoise/sdk.py:17574" in _probe_win, (
+        "the cited probe window must still carry the `sdk.py:17574` cite it states — one "
+        "number in two places cannot be allowed to drift apart silently")
+    assert pack_hierarchy[419 - 1].strip() == "def apply_hierarchy_edges(", (
+        f"tortoise/pack_hierarchy.py:419 reads {pack_hierarchy[419 - 1].strip()!r}, not the "
+        "declaration the record names as the thing that writes the hierarchy edges")
+    assert identity_hold[125 - 1].strip() == 'HOLD_ENDPOINT = "operator_endpoint"', (
+        f"tortoise/identity_hold.py:125 reads {identity_hold[125 - 1].strip()!r}, not the "
+        "HOLD's one declared kind")
+    assert value_gate[81 - 1].strip() == 'return is_truthy(os.environ.get(ENV_FLAG, "1"))', (
+        f"tortoise/value_gate.py:81 reads {value_gate[81 - 1].strip()!r}, not the default-ON "
+        "the record cites")
 
     # A2's Object mint: the write seam that routes creation by kind, cited THREE
     # times as a range. Both endpoints are claims — the classifier opens it, the
