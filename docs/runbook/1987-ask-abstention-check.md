@@ -114,7 +114,9 @@ model that reproduced the failing commits (qwen3.8-max, verified 2026-08-30
 on the #2027 evidence):
 
 ```bash
-# step 5 (full 500-Q baseline) with the strong reader + official judge:
+# step 5 (full 500-Q baseline) with the strong reader; the judge is the run's
+# default (our own pinned model — #8486 ruling 2026-10-27; name
+# TORTOISE_LME_JUDGE_MODEL=openai:gpt-4o-2024-08-06 for the official judge):
 TORTOISE_LME_READER_MODEL='openrouter:qwen/qwen3.8-max' \
   uv run python -m tools.longmem_eval.run_protocol run 5
 # or directly (same reader, explicit knobs):
@@ -131,7 +133,10 @@ is `deepseek:deepseek-v4-flash` — #1525, with the TRANSPORT repointed off
 `openrouter:` by #8486 on 2026-11-07: no box the fleet runs holds
 `OPENROUTER_API_KEY`, so the openrouter-named default raised before loading a
 question). Requires an
-`OPENROUTER_API_KEY` (and `OPENAI_API_KEY` for the official GPT-4o judge);
+`OPENROUTER_API_KEY` (the judge needs no `OPENAI_API_KEY` unless the official
+judge is named explicitly — the run default is our own pinned model since the
+#8486 ruling of 2026-10-27, see `docs/benchmarks/longmemeval-500q/run-report.md`
+§1.1);
 no keys were present at record time, so this config is verified up to spec
 parse + mock-run only, not executed. Cost re-measure + provider routing for
 the ask lane (eval-only; deepseek-direct 400s on non-deepseek specs) remain the

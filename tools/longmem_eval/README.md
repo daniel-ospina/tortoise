@@ -5,7 +5,9 @@ histories) against Tortoise as an external comparability measurement: ingest
 each question's chat history into the graph → hybrid retrieval (graph points
 
 + raw session transcripts) → reader LLM answers from retrieved context →
-official GPT-4o answer-check judge. Reports overall + per-category accuracy,
+answer-check judge (our own pinned model by default since the #8486 owner
+ruling of 2026-10-27; the **official GPT-4o** judge is one explicit override
+away — see the env table below). Reports overall + per-category accuracy,
 retrieval recall@k, context tokens and latency, with the full methodology in
 a provenance JSON. **No "#1" claims — published numbers carry their
 methodology** (design-locked 2026-08-15, issue #1144 axis 2).
@@ -667,8 +669,8 @@ uv run python -m tools.longmem_eval.run_protocol smoke --mock
 
 - The dataset (~tens of MB; auto-downloaded to the cache dir — needs
   network) and
-- provider keys (reader: e.g. `OPENROUTER_API_KEY`; official judge:
-  `OPENAI_API_KEY`).
+- provider keys (reader: e.g. `OPENROUTER_API_KEY`; judge: `DEEPSEEK_API_KEY`
+  for the default, or `OPENAI_API_KEY` if you name the official judge).
 
 The full 500-question run is `@pytest.mark.slow` (never in CI); the
 committed mini fixture + `--mock --skip-preflight` exercises the entire
