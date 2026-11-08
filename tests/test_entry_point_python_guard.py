@@ -1037,6 +1037,8 @@ REFUSAL_CODES: dict[str, int] = {
     "tools/gen_placement_table.py": 2,
     "tools/test_design_map_check.py": 2,
     "tools/cache_evict.py": 1,
+    "tools/ci_runner_topology.py": 4,
+    "tools/capstone_ledger.py": 1,
 }
 
 #: Why THAT code is the right one for THAT file — quoted in the failure message, so
@@ -1058,6 +1060,19 @@ REFUSAL_WHY: dict[str, str] = {
         "1 IS this tool's usage code (CACHE_EVICTION_EXIT_USAGE) — its verdicts are "
         "2/3/4 — so exit 1 is CORRECT here, whatever shape the guard uses to reach "
         "it, and it must not be normalised to 2"
+    ),
+    "tools/ci_runner_topology.py": (
+        "1/2/3 are VERDICTS a wrapper branches on (EXIT_FAILED=1 is literally \"a write "
+        "did not take, the read-back failed, … a violation survived\", EXIT_USAGE, "
+        "EXIT_OWNER_GATED), so an environment refusal must not wear any of them; the "
+        "guard takes 4, which the tool otherwise never returns"
+    ),
+    "tools/capstone_ledger.py": (
+        "the set 0-4 is CLOSED and fully spent (CLEAN/INVALID/UNCOVERED/DISABLED/"
+        "ADVISORY), so there is no spare code; 1 (EXIT_INVALID) is reused on purpose "
+        "— it is the fail-closed neighbour, and closing a row is not reaching a "
+        "verdict. Adding 5 to the tool's set would change a documented public "
+        "contract to satisfy a lint, which is the wrong trade"
     ),
 }
 
