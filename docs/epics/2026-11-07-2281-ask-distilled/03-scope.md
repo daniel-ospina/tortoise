@@ -24,7 +24,7 @@ governingAgreement: "epic #2281; docs/ONTOLOGY.md v3.31; STORAGE-ARCHITECTURE.md
 > `/tmp/2281-scope.md`, not at this copy.)
 >
 > `#11461` committed the 2026-09-06 text with mechanical changes only — a rewritten frontmatter;
-> `markdownlint` fixes (bullet markers, blank lines, one cell whose `|` is escaped); and two
+> `markdownlint` fixes (blank lines, one line re-wrapped, one table cell whose `|` is escaped); and two
 > bolding/wording edits (`#2080 W5` → `Workstream **#2080 W5**`, `#2104 indicator (4)` →
 > `indicator **(4)** of #2104`) — and appended **§7** and **§8**: the decision-state table re-measured on
 > `main = dbbf5d874`, and the workstream → child map.
@@ -484,6 +484,8 @@ short sequence, and only the first of them is this epic's own **pre-publication*
 
 **Why this document exists at all** (the #9701 class, re-measured here): a decomposition recorded only as
 prose in comments is invisible to every selector that reads the API. `gh api …/issues/2281/sub_issues`
-returned `[]` while the epic had three children, and the 2026-10-19 comment itself said so — *"the
-sub-issue API returns 0 because the children are tracked in prose"*. The 2026-11-07 wave that produced
+returned `[]` while the epic had three children, and a **2026-10-23** comment said so in its own words —
+*"the sub-issue API returns 0 because the children are tracked in prose"* (`6359826172`; it cites the
+2026-10-19 decomposition comment `6257642547` for the children themselves, which does not mention the
+sub-issue API at all). The 2026-11-07 wave that produced
 this file also attached all five children as real sub-issues.
