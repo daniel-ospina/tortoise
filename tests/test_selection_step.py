@@ -538,11 +538,21 @@ def _downgraded_discard_arbiter(items, narrative):
 
 
 def _discarding_arbiter_without_batch_verdict(items, narrative):
-    """The same downgraded discard, with NO batch token — only the rate can fire."""
+    """The same downgraded discard, with NO batch token — only the rate can fire.
+
+    ⛔ Raises when the victim is not in the projected view rather than returning
+    no verdicts (#11517 review P2): "the arbiter was never consulted" and "the
+    discard was correctly ignored" are DIFFERENT outcomes, and a helper that
+    fails open makes the test that depends on it silently vacuous — a renamed
+    fixture entity or a change to the projection would keep it green forever.
+    """
     victim = _entity_victim(items, "Alpha")
-    return {"verdicts": ([{"id": victim, "outcome": "DISCARD",
-                            "rule_id": "test.downgrade", "reason": "review"}]
-                          if victim else [])}
+    assert victim is not None, (
+        "fixture drift: the arbiter's projected view no longer offers the "
+        "'Alpha' entity this test discards — the assertions below would then "
+        "hold with no verdict issued at all")
+    return {"verdicts": [{"id": victim, "outcome": "DISCARD",
+                          "rule_id": "test.downgrade", "reason": "review"}]}
 
 
 def _discard_beta_arbiter(items, narrative):
@@ -712,6 +722,13 @@ def test_a_phantom_discard_does_not_arm_the_keep_rate_threshold(monkeypatch):
     assert result["stats"]["renarrate"] == {"fired": False}, (
         "no candidate left the arm, so no threshold can be under")
     assert len(model.s1_prompts) == 1, "the retry was never spent"
+    # ⛔ NON-VACUITY: the verdict REALLY was a DISCARD and the guard REALLY
+    # downgraded it. Without this pair the two assertions above also hold on a
+    # fixture where the arbiter issued nothing at all (measured, #11517 review
+    # P2) — i.e. where the rate was never at risk.
+    assert (result["vet"]["s2"]["stats"] or {}).get("discarded") == 1, (
+        "the gate's own block must report the verdict it issued")
+    assert any("Layer-1 referential integrity" in w for w in result["warnings"])
 
 
 def test_the_arm_denominator_is_the_list_vet_judged(monkeypatch):
@@ -760,9 +777,43 @@ def test_the_arm_denominator_is_the_list_vet_judged(monkeypatch):
         "the population VET judged: 3 entities minus the held mention, plus "
         "the point — a batch-based denominator would report 4")
     assert first["candidates"] == (result["vet"]["s2"]["stats"] or {})["candidates"]
-    assert first["discarded"] == 1 and first["kept"] == 2
-    assert first["kept"] + first["discarded"] == first["candidates"], (
-        "the two halves must partition the ONE population they are a rate of")
+    assert first["discarded"] == 1 and first["kept"] == 2, (
+        "Beta is unreferenced, so its discard is APPLIED — and both halves are "
+        "counted over the same 3-candidate population VET judged")
+
+
+def test_the_fallback_denominator_is_the_list_the_arm_EMITS():
+    """VET off-path: `candidates` is counted over the arm's OWN list, not the batch.
+
+    `check_batch` is captured BEFORE :func:`route_mentions` (deliberately — the
+    coverage signal must exist with every switch off), so on a referentiality
+    armed run the capture holds the held mention and the arm's emitted list does
+    not. The VET branch already reports VET's own population; this pins that the
+    fallback branch reports the arm's, so `candidates` means ONE thing either
+    way (#11517 review P2: it used to mean two, measured 4 vs 3).
+
+    Driven at the function's own contract: `_arm_metrics` takes the capture for
+    `coverage_suspect` and `arm_list` for the denominator, and the two are
+    allowed to disagree by exactly the held mention.
+    """
+    story = "Alice and Bob met."
+    batch = {"candidates": 4, "coverage_suspect": False}   # pre-`route_mentions`
+    emitted = {"entities": [{"name": "Alpha", "kind": "core:org"},
+                            {"name": "Beta", "kind": "core:org"}],
+               "points": [{"content": "the Alpha rollout moves to Q3",
+                           "pointKind": "statement"}]}
+    fallback = extractor_v2._arm_metrics(story, batch, {}, arm_list=emitted)
+    assert fallback["candidates"] == 3, (
+        "two entities and one point — the list this arm emitted")
+    assert fallback["discarded"] == 0 and fallback["keep_rate"] == 1.0, (
+        "nothing was removed on the VET-off path, so no rate can be under 1.0")
+    assert fallback["coverage_suspect"] is False, (
+        "`coverage_suspect` still comes from the capture — it is a property of "
+        "S2's OUTPUT, and moving it to the emitted list would lose a retry")
+    # The pre-fix shape, for the discriminator: the capture's count is 4.
+    assert extractor_v2._arm_metrics(story, batch, {})["candidates"] == 4, (
+        "the captured batch really is one larger — otherwise this test cannot "
+        "tell the two denominators apart")
 
 
 def test_the_mentions_surface_keeps_ONE_shape(monkeypatch):

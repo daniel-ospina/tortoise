@@ -15302,7 +15302,8 @@ def _rate_text(metrics: dict) -> str:
 
 
 def _arm_metrics(story: str, batch: dict | None, vet_stats: dict | None,
-                 applied_discards: int | None = None) -> dict:
+                 applied_discards: int | None = None,
+                 arm_list: object | None = None) -> dict:
     """One arm's recorded numbers — what the tie-break and the record read.
 
     ⛔ **Both numbers come from ONE population, and it is the one VET judged.**
@@ -15326,9 +15327,17 @@ def _arm_metrics(story: str, batch: dict | None, vet_stats: dict | None,
        that cost?" — and §4.2's hand calibration reads THIS one, because the
        threshold it sets is compared against a rate over shipped candidates.
 
-    When VET did not run (off-path, or fail-open), nothing was removed, so the
-    denominator falls back to `check_batch`'s count and ``discarded`` is 0 — the
-    two lists are the same list on that path.
+    When VET did not run (off-path, or fail-open) nothing was removed, so
+    ``discarded`` is 0 — and the denominator is counted over ``arm_list``,
+    **this arm's emitted list**, with the same `check_batch` predicate VET's own
+    count uses. ⛔ It is NOT the captured ``batch``, which was computed BEFORE
+    :func:`route_mentions` (that ordering is deliberate and stays: the coverage
+    signal is a fact about S2's output and must exist with every switch off), and
+    on a referentiality-armed run the two differ by the held mention — so feeding
+    the batch in here would make ``candidates`` mean one population on the VET
+    branch and another on this one (measured: 4 vs the 3 the arm emitted). The
+    capture is used only for ``coverage_suspect``, which is defined on S2's
+    output. ``arm_list`` omitted (an older caller) falls back to the capture.
 
     ``coverage_suspect`` is read from ``batch`` in both cases, because it is
     defined on the S2 output (see :func:`_renarrate_trigger`).
@@ -15339,7 +15348,9 @@ def _arm_metrics(story: str, batch: dict | None, vet_stats: dict | None,
         candidates = max(0, int(st.get("candidates") or 0))
         discarded = max(0, int(applied_discards or 0))
     else:
-        candidates = max(0, int(b.get("candidates") or 0))
+        emitted = b if arm_list is None else (
+            _vet_gate.check_batch(arm_list, story) or {})
+        candidates = max(0, int(emitted.get("candidates") or 0))
         discarded = 0
     return {
         "narrative_chars": len(story or ""),
@@ -15537,7 +15548,11 @@ def _arm_extract(model, edus, *, master, session_date, chunk_size,
         "vet_pool": vet_s2_pool,
         "mention_stats": mention_stats,
         "warnings": warnings_out,
-        "metrics": _arm_metrics(story, batch, vet_s2_stats, applied_discards),
+        # `embed_list`, not `batch`: on the VET-off path the denominator is
+        # counted over the list this arm EMITS (`route_mentions` has already
+        # run), so `candidates` means one population on both branches.
+        "metrics": _arm_metrics(story, batch, vet_s2_stats, applied_discards,
+                                arm_list=embed_list),
         "chunks": chunks,
         "failed_chunks": failed_chunks,
         # A failed S2 call, so the retry's decision can tell "the instrument

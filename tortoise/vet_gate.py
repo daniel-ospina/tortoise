@@ -966,12 +966,24 @@ def applied_discards(before: object, after: object,
     narrative in a tie-break, and can fire a hand-armed threshold on a removal
     that never occurred.
 
-    Counts by the SAME two questions the applied pass answers, so it cannot
+    Counts by the SAME questions the applied pass answers, so it cannot
     disagree with the output it describes: the item carried a ``DISCARD``
-    verdict (``_item_id`` on ``before``, the list those ids came from) **and** it
-    is absent from ``after`` (:func:`_survives`, the value equality
-    :func:`removal_pool` rests on — which is also what makes a downgraded
-    discard correctly count as ZERO here).
+    verdict (``_item_id`` on ``before``, the list those ids came from) **and**
+    it is gone from ``after``. Absence is read by **identity** first, because
+    that is the relation :func:`apply_vet` keeps survivors by (it re-emits the
+    same dicts), and it is the only one that answers *"how many items left?"*:
+    value equality answers *"is this content still represented?"* — the right
+    question for :func:`removal_pool`, the wrong one here, because two
+    value-identical candidates with one discarded leave a twin that makes the
+    survivor test say *kept* for an item that in fact left. Measured on
+    `tests/test_vet_gate_5005.py`'s own shape (`3 before → 2 after`, one
+    DISCARD): the value relation reads **0** removed, identity reads **1**.
+
+    Value equality is still the fallback where identity carries no information —
+    a section where NOT ONE ``before`` item reappears by identity was rebuilt
+    with copies, and then :func:`_survives` is the only relation left (its NaN
+    caveat is unchanged). It is also what makes a downgraded discard count as
+    ZERO here: that item is in ``after`` by identity.
 
     Collateral prunes are deliberately NOT counted: an operator pruned because
     it referenced a removed item carries no verdict of its own, and counting it
@@ -982,6 +994,10 @@ def applied_discards(before: object, after: object,
     them — the same direction as :func:`apply_vet`'s own guards.
     """
     decisions = decisions if isinstance(decisions, Mapping) else {}
+    originals: dict[str, list[Any]] = {}
+    for section, _index, item in _iter_items(before):
+        originals.setdefault(section, []).append(item)
+    survivors: dict[str, list[Any]] = {}
     removed = 0
     for section, index, item in _iter_items(before):
         decision = decisions.get(_item_id(section, index, item))
@@ -989,7 +1005,18 @@ def applied_discards(before: object, after: object,
             continue
         if str(decision.get("outcome") or "").strip().upper() != DISCARD:
             continue
-        if not _survives(section, item, after):
+        if section not in survivors:
+            survivors[section] = list(_section_items(after, section))
+        kept = survivors[section]
+        if any(other is item for other in kept):
+            continue
+        # Identity is the applier's own relation, so it decides whenever this
+        # section kept ANYTHING by identity; otherwise the list was rebuilt with
+        # copies and value equality is the only relation left.
+        if any(any(other is original for other in kept)
+               for original in originals[section]):
+            removed += 1
+        elif not _survives(section, item, after):
             removed += 1
     return removed
 

@@ -389,6 +389,37 @@ def test_discarding_one_of_two_identical_items_keeps_the_edge():
         "the surviving twin still provides the endpoint — the edge must stay")
 
 
+def test_applied_discards_counts_a_removal_a_value_twin_would_hide():
+    """The arm's loss is counted by IDENTITY, not by value equality (#11517 review P2).
+
+    `applied_discards` answers *"how many candidates left the list?"*, and the
+    survivor test it started on (`_survives`) answers *"is this content still
+    represented?"* — the right question for `removal_pool`, the wrong one here.
+    The fixture above is the discriminator: `apply_vet` really drops one of two
+    value-identical points, so the content still appears while the ITEM is gone.
+    Measured on the value relation: 0 removed (the twin is found); identity: 1.
+
+    The arm's `keep_rate` is built on this number, and an over-stated yield can
+    suppress a keep-rate retry that should have fired — the same class of wrong
+    number the arm exists to stop, in the other direction.
+    """
+    el = {"entities": [], "events": [],
+          "points": [{"content": "same text", "pointKind": "statement"},
+                     {"content": "same text", "pointKind": "statement"},
+                     {"content": "other", "pointKind": "statement"}],
+          "operators": []}
+    decisions = vg.vet_candidates(el, narrative="n")["decisions"]
+    first = next(i for i, d in decisions.items()
+                 if d["section"] == "points" and d["index"] == 0)
+    decisions[first] = {"outcome": vg.DISCARD}
+    new, _warnings = vg.apply_vet(el, decisions)
+    assert len(el["points"]) == 3 and len(new["points"]) == 2, (
+        "NON-VACUITY: the applier really removed one item")
+    assert vg.applied_discards(el, new, decisions) == 1, (
+        "one candidate left the list — a value-equality test finds the twin and "
+        "reports 0, which is the defect this pins")
+
+
 def test_target_precedence_matches_execute_embed_no_over_prune():
     """execute_embed resolves a MITIGATES target as ``target or target_edge``
     — the *first* one present, not a union. An operator carrying both (where
