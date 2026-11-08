@@ -68,7 +68,7 @@ landing from a branch. **So: an ancestry `1` and a `--all` grep both fail to ans
 no longer prints its base number.** `#11205` (S5 Job 1, `316a572ce2`, 2026-11-06T22:40:32Z) added an
 **entity↔entity `relations` channel** to the extractor contract, whose predicate allowlist includes
 `hasPart` (`tortoise/extractor_v2.py:1720`). It does **not** discharge A1: it is **transport only** —
-nothing in `tortoise/` consumes `result["relations"]` (`extractor_v2.py:10815`, and
+nothing in `tortoise/` consumes `result["relations"]` (`extractor_v2.py:10891`, and
 `git grep -n 'result\["relations"\]' -- tortoise/` prints that comment and no consumer at all), and
 materialising them as Object→Object edges is **`#11237`** (OPEN). ⚠️ **The scope is `tortoise/`, and it is
 load-bearing:** tree-wide the channel HAS a reader — `tests/test_10999_batch_story_relations.py` names
@@ -274,7 +274,7 @@ def is `:3104` at `d69faaf38`; `git grep -n '_hold_endpoint(' -- tortoise/extrac
 def and the one call), which fabricates a `statement` **Point** from an operator ref. A2's population is
 the **Object** mint: every emitted entity is appended unfiltered at the
 `payload_entities.append({` site (`extractor_v2.py:8880` at `80c912244`; **`:9433` at `d69faaf38`**)
-(`payload_entities.append({"name": name, "kind": kind, …})`) and minted at `sdk.py:16414-16428`. Nothing
+(`payload_entities.append({"name": name, "kind": kind, …})`) and minted at `sdk.py:16516-16530`. Nothing
 filters it, and the tree's own registry says so in `#10997`'s own words —
 `config/v4-mechanisms.yml`'s `failure_policy` row is still **`state: not-implemented`**, its note reads
 *"the gate covers the MINTED candidate only"*, and it still carries the pin built to red the day a create
@@ -350,7 +350,8 @@ named a Subject and the spine relabelled it an Object.
 mints SUBJECT-kind entities as Objects"*) is the **report** whose own closure says **"No code change
 remains"** and names `#5230` as the landing, so cite it for the diagnosis, not for the code. At the head
 this record is measured on,
-the write seam routes by kind (`tortoise/sdk.py:16414-16428`): `_ekind = _payload_entity_kind(e)` →
+the write seam routes by kind (`tortoise/sdk.py:16516-16530` at HEAD; it was `16414-16428` at
+`316a572ce2`, before `#11459` moved it `+102`): `_ekind = _payload_entity_kind(e)` →
 `_is_subject = is_subject_kind(_ekind or "")` → `create_entity("subject", …)` **or**
 `create_entity("object", …)`. `#4938` (CLOSED 2026-09-28T15:02:50Z), `#1370` (CLOSED
 2026-09-26T12:35:33Z) and `#1509` (CLOSED 2026-10-10T12:36:56Z) are closed too. So the relabelling is
@@ -626,7 +627,7 @@ git grep -nE '\.(create_edge|create_about_edge|create_operator)\(' tortoise/extr
                                                           # origin/main since #11205 (four COMMENTS naming
                                                           # sdk.create_operator) and 0 at this base — a
                                                           # count is only as good as the base it was taken at
-git grep -n 'result\["relations"\]' -- tortoise/        # ONE hit, the comment at :10815 — no production
+git grep -n 'result\["relations"\]' -- tortoise/        # ONE hit, the comment at :10891 — no production
                                                           # consumer of #11205's channel (⚠️ the `-- tortoise/`
                                                           # scope is the claim: unscoped it also matches the
                                                           # reader below)
@@ -668,7 +669,7 @@ grep -n -A 12 '"label_counts"' docs/evidence/7949-capstone/capstone-measured-915
 grep -n -A 12 '"relationship_counts"' docs/evidence/7949-capstone/capstone-measured-9152448d.log
 git grep -n -A 14 '_ekind = _payload_entity_kind(e)' -- tortoise/sdk.py   # the kind→label routing at the
                                                           # write seam (#5230/#1370's fix); symbol, not a
-                                                          # line — the -A 14 reproduces sdk.py:16414-16428
+                                                          # line — the -A 14 reproduces sdk.py:16516-16530
 for n in 4934 4938 1370 1509; do gh issue view $n --json state,closedAt -q '.state+" "+(.closedAt//"-")'; done
 # #4889's 13-type hosted census is QUOTED from its scoping comment, not re-derived here:
 gh issue view 4889 --json comments -q '.comments[].body' | grep -n -A 3 'CONTAINS` 35,046'
