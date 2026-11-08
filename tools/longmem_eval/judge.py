@@ -3,9 +3,10 @@
 Reimplements the benchmark's official judge (``evaluate_qa.py`` —
 ``get_anscheck_prompt``) verbatim: task-specific yes/no templates at
 temperature 0, max_tokens 10, label = ``'yes' in response.lower()``. The
-template text below is copied from the official repository (MIT license) so
-published numbers are directly comparable to the paper's reported
-accuracies.
+template text below is copied from the official repository (MIT license), so the
+RUBRIC is bit-identical to the paper's: a run graded by the ``OFFICIAL`` model is
+therefore directly comparable to the paper's reported accuracies. The copied
+text does not confer comparability on any other model — see the ruling below.
 
 ⛔ The TEMPLATES are the official ones; the MODEL is not, by default. The #8486
 owner ruling (2026-10-27) re-pinned ``DEFAULT_JUDGE_MODEL`` to our own
