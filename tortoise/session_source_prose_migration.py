@@ -1162,8 +1162,12 @@ def reconcile_after_replay(projection, *, engine: str,
 # prefix is a stem collision ONLY when the text the index is declared on adds no
 # token the displayed pair lacks AND the probe token relates to one of the
 # node's own lexicon tokens — otherwise it is UNEXPLAINED, which vetoes and exits
-# 1. ``lexicon`` is the one bucket that never fails a run, so it is EARNED three
-# times over (#11536 review rounds 2 and 5), not assumed from the prefix.
+# 1. ``lexicon`` is the only bucket that ABSORBS a hit as BENIGN, and it never
+# fails a run — so it is EARNED three times over (#11536 review rounds 2 and 5),
+# not assumed from the prefix. (``foreign`` also does not veto, but it claims
+# nothing about this repair: it reports a hit on a Source OUTSIDE this
+# population, and `_merge_probe` keeps it out of the certifying evidence —
+# ``stem_only`` excludes it too.)
 #
 # ⛔ AND A ZERO FROM A DEAD INSTRUMENT IS NOT A ZERO. Three ways the leg can read
 # ``0`` while measuring nothing:
@@ -1291,6 +1295,30 @@ _SOURCE_INDEX_ENTRIES = (
 )
 
 
+def _indexed_term_runs(text: str) -> list[str]:
+    """The RAW alphanumeric runs of *text*, in the INDEX's own sense.
+
+    ⛔ NOT :func:`~tortoise.sparse.tokenize_sparse_query` (#11536 review round 8,
+    P1/P2). That function is the QUERY parser: it DROPS stopwords,
+    sub-2-character tokens and all-digit tokens. That is right for turning an
+    operator's phrase into a single probe, and WRONG for asking what text a node
+    carries — the Source FULLTEXT index keeps all three. Comparing tokenised
+    forms therefore made a ``_searchText`` of ``"plan friday the of and 4820"``
+    read as a subset of the displayed ``"plan, friday"`` (MEASURED: guard True,
+    bucket ``lexicon``, while ``run_fts_query('4820')`` still returned the node)
+    — the guard's contract, reopened one filter wider.
+
+    ⛔ ``\\W`` IS UNICODE-AWARE ON PURPOSE (#11536 review round 8, P2): an
+    accented letter stays INSIDE its run, because the index holds ``résumé`` as
+    ONE term (MEASURED: ``run_fts_query('résumé')`` returns the node,
+    ``'resum'`` returns nothing). Splitting on ASCII ``[^a-z0-9]`` counted the
+    accent as a separator, which false-blocked ``résumé``/``naïve`` with a
+    reason that was factually wrong while letting ``café`` through only because
+    its accent happened to be trailing.
+    """
+    return [part for part in re.split(r"[\W_]+", text.lower()) if part]
+
+
 def probe_phrase_rejection(phrase: str) -> str | None:
     """Why *phrase* cannot serve as an FTS probe, or ``None`` when it can.
 
@@ -1324,6 +1352,15 @@ def probe_phrase_rejection(phrase: str) -> str | None:
     corpus. That is measured, not declared: the before/after pair on the writing
     arm, and the ``truncated`` flag on a probe that matches too much.
 
+    ⛔ AND A BARE NUMBER IS ACCEPTED (#11536 review round 8, P2). The tokeniser
+    drops all-digit tokens along with the stopwords, but that is the PHRASE
+    parser's rule, not the index's: ``build_or_query('4820')`` takes the
+    degenerate branch and returns ``'4820'``, and MEASURED ``run_fts_query('4820')``
+    returns the still-prose node. A number copied out of the removed sentence is
+    the most discriminating token there is, so refusing it was a false block —
+    and the reason it printed ("OR-joins multi-term input") named a mechanism
+    that cannot apply to a single term.
+
     ⛔ AND ONE TOKEN MEANS ONE WHITESPACE-FREE TOKEN, which the term count alone
     does not establish (#11536 review round 5, P2). ``tokenize_sparse_query``
     DROPS stopwords and sub-2-character words, so ``'the fridays'`` tokenises to
@@ -1338,6 +1375,13 @@ def probe_phrase_rejection(phrase: str) -> str | None:
     token = (phrase or "").strip()
     if not token:
         return "it is empty"
+    # The index's own term runs — computed ONCE, because both the bare-number
+    # acceptance and the shape guard ask this same question (one predicate per
+    # question).
+    runs = _indexed_term_runs(token)
+    if len(runs) == 1 and runs[0].isdigit():
+        # A bare number: the read sends it verbatim and the index holds it.
+        return None
     # Lazy: `sparse` pulls the tokenizer + identifier machinery, and this module
     # is imported by every whole-journal replay engine's trailing sweep.
     from tortoise.sparse import build_or_query, tokenize_sparse_query
@@ -1367,8 +1411,9 @@ def probe_phrase_rejection(phrase: str) -> str | None:
     # RediSearch splits the INDEX on non-alphanumerics, so the escaped literal
     # does not address the terms that are actually indexed. Same UNDER-match
     # class as the whitespace guard above: a token with more than one alphanumeric
-    # run cannot be ONE indexed term, whatever the switch says.
-    runs = [part for part in re.split(r"[^a-z0-9]+", token.lower()) if part]
+    # run cannot be ONE indexed term, whatever the switch says. ``runs`` is
+    # :func:`_indexed_term_runs`' unicode-aware split, so an accented letter is
+    # not counted as a separator.
     if len(runs) > 1:
         return (f"it splits into {len(runs)} alphanumeric runs {runs!r}; the "
                 f"FTS index splits on every non-alphanumeric character, so "
@@ -1546,17 +1591,19 @@ def _indexed_text_within_the_displayed_pair(
     vetoes it as ``unexplained``: a false veto is re-measured, a false
     certification is the leak.
 
-    ⛔ RAW TOKENS, NOT STEMS (#11536 review round 6, P1). An earlier draft folded
-    both sides through :func:`_stem_key`, and that is a HOLE rather than a
+    ⛔ RAW TOKENS, NOT STEMS, AND NOT THE QUERY TOKENISER (#11536 review round 6,
+    P1; round 8, P1). Folding through :func:`_stem_key` is a HOLE rather than a
     tolerance: an index still holding ``planned`` reads as "explained" by a
     display pair carrying ``planning``, and MEASURED on that shape the bucket was
-    ``lexicon`` — a prose index certified as a collision. Stemming is the right
-    fold for relating a PROBE token to a lexicon token
-    (:func:`_probe_explains_the_lexicon`), because there the index's own stemming
-    is what answered the query. It is the WRONG fold here, where the question is
-    whether the indexed text IS the displayed text: every healthy pair derives
-    both from the same ``", ".join(topics)`` string, so raw tokens are a subset on
-    a healthy node — and an inflected prose word is exactly the extra.
+    ``lexicon`` — a prose index certified as a collision. Reusing
+    ``tokenize_sparse_query`` is a hole of the same kind: it drops stopwords,
+    sub-2-character and all-digit tokens, which the INDEX keeps, so
+    ``"plan friday the of and 4820"`` read as a subset of ``"plan, friday"``
+    while ``run_fts_query('4820')`` still returned the node. Both sides are now
+    :func:`_indexed_term_runs`; every healthy pair derives both from the same
+    ``", ".join(topics)`` string, so containment holds there and any extra
+    indexed token — prose word, stopword, number, inflected form — is exactly
+    the leak.
     """
     search_text = props.get(_SEARCH_TEXT)
     if not isinstance(search_text, str) or not search_text.strip():
@@ -1566,12 +1613,8 @@ def _indexed_text_within_the_displayed_pair(
     summary = props.get(_SUMMARY)
     if not isinstance(summary, str) or not summary.strip():
         return False
-    from tortoise.sparse import tokenize_sparse_query  # lazy (see module docs)
-
-    indexed = set(tokenize_sparse_query(
-        search_text, space_separated_identifiers=False))
-    displayed = set(tokenize_sparse_query(
-        summary, space_separated_identifiers=False))
+    indexed = set(_indexed_term_runs(search_text))
+    displayed = set(_indexed_term_runs(summary))
     return bool(displayed) and indexed <= displayed
 
 

@@ -2935,6 +2935,72 @@ def test_classify_fts_hits_REQUIRES_the_phrase_so_no_proof_can_be_dropped():
     assert m._hit_node_bucket(_post_fix_node(), "fridays") == "lexicon"
 
 
+def test_the_subset_guard_sees_the_tokens_the_INDEX_keeps(monkeypatch):
+    """#11536 review round 8, P1: the guard must not use the QUERY tokeniser.
+
+    (1) FAILS on the round-7 tree, which compared `tokenize_sparse_query` forms.
+        That function is the PHRASE parser: it DROPS stopwords, sub-2-character
+        tokens and all-digit tokens — all of which the Source FULLTEXT index
+        keeps. So a `_searchText` of `"plan friday the of and 4820"` read as a
+        subset of the displayed `"plan, friday"`: MEASURED, the guard returned
+        True, `_hit_node_bucket` returned `lexicon`, and a
+        `--dry-run --assert-clean --probe-phrase friday` exited 0 while
+        `run_fts_query('4820')` — and `'the'`, `'of'`, `'and'` — still returned
+        the node. The census cannot see it either (the `summary` is prefixed),
+        so this guard was the only defence and the benign bucket absorbed it.
+    (2) REACHABLE: pre-fix prose is ordinary English; stopwords and numbers are
+        in it.
+    (3) POLARITY THAT MUST NOT GO RED: a healthy pair derives BOTH sides from the
+        same `", ".join(topics)` string, so containment still holds there.
+    """
+    from tortoise import session_source_prose_migration as m
+
+    leak = _prefix_over_prose_node(
+        summary=SESSION_SOURCE_SUMMARY_PREFIX + ", ".join(["plan", "friday"]),
+        _searchText="plan friday the of and 4820")
+    assert not m._indexed_text_within_the_displayed_pair(leak), (
+        "the indexed text still carries stopwords and a number the INDEX keeps, "
+        "so it is not the displayed pair")
+    assert m._hit_node_bucket(leak, "friday") == "unexplained"
+
+    _install_fts(monkeypatch, {"friday": [("session:s-11070", 1.0)]})
+    report = m.probe_fts(_RecordingGraph([(leak,)]), ["friday"], control=False)
+    assert report["probes"][0]["lexicon"] == []
+    assert report["probes"][0]["unexplained"] == ["session:s-11070"]
+
+    # (3) both healthy prefix-only shapes still prove containment.
+    for healthy in (_post_fix_node(), _repaired_from_record_node()):
+        assert m._indexed_text_within_the_displayed_pair(healthy), (
+            f"{healthy['url']} is a HEALTHY pair and must not be vetoed")
+
+
+def test_a_NUMBER_and_an_ACCENTED_word_are_probes_a_STOPWORD_is_not():
+    """#11536 review round 8, P2: two false blocks, and one refusal that is RIGHT.
+
+    (1) FAILS on the round-7 tree on both counts. The term-count guard refused
+        `4820`/`2024` with "tokenises to 0 term(s) … the FTS read OR-joins
+        multi-term input" — a mechanism that cannot apply to a single term —
+        although `build_or_query('4820')` returns `'4820'` and MEASURED
+        `run_fts_query('4820')` returns the still-prose node. And the shape guard
+        split on ASCII `[^a-z0-9]`, so `résumé` was refused as "2 alphanumeric
+        runs" while the index holds it as ONE term (MEASURED:
+        `run_fts_query('résumé')` -> 1 hit, `'resum'` -> 0 hits).
+    (2) REACHABLE: prose carries numbers, and non-English sessions carry accents.
+    (3) AND A REFUSAL THAT IS CORRECT, pinned so a future widening cannot accept
+        it: `naïve` builds `na|ve` because the ASCII tokeniser splits the accent,
+        and MEASURED that OR-join returns 0 hits — an UNDER-match, not a probe.
+        `the` stays refused as a stopword.
+    """
+    from tortoise.session_source_prose_migration import probe_phrase_rejection
+
+    for accepted in ("4820", "2024", "résumé", "café"):
+        assert probe_phrase_rejection(accepted) is None, (
+            f"{accepted!r} was refused — the read sends it as ONE indexed term")
+    for refused in ("the", "naïve", "zx-99", "friday,"):
+        assert probe_phrase_rejection(refused), (
+            f"{refused!r} was accepted — the read does not send it as one term")
+
+
 def test_a_hit_on_a_PRE_FIX_node_IS_a_leak(monkeypatch):
     """The other polarity, and it is the one that must RED.
 
