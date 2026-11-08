@@ -303,7 +303,6 @@ def test_off_switch_stops_a_run_between_batches():
         calls.append(args)
         return {"filed": 1}
 
-    writer = C.IngestWriter(call_tool, batch_size=1, armed=lambda: armed["v"])
     points = [{"migrationKey": f"k{i}", "content": "c"} for i in range(3)]
     # arm for the first batch, then flip the switch mid-run
     armed["v"] = True
@@ -385,7 +384,7 @@ def test_a_calltoolresult_object_is_unwrapped_and_a_refusal_refuses():
         writer.write_points("new", [{"migrationKey": "k", "content": "c"}])
 
 
-def test_a_refused_second_batch_keeps_the_first_batch_and_reports_zero_then_records_it(tmp_path):
+def test_a_refused_second_batch_reports_the_first_batch_and_records_it(tmp_path):
     """A partial run must not claim it wrote nothing, and must not lose the batch
     that DID land."""
     calls = {"n": 0}
@@ -481,6 +480,23 @@ def test_empty_evidence_is_not_carried():
     """An empty evidence row would otherwise be carried as an empty point."""
     d = C.classify(row(kind="evidence", content="   "), {})
     assert d.disposition == C.NOT_CARRIED and "empty" in d.reason
+
+
+def test_an_empty_signal_kind_is_not_carried():
+    """The empty rule is checked BEFORE the kind rules, for every kind."""
+    for kind in ("decision", "option", "finding", "useCase", "jobToBeDone"):
+        d = C.classify(row(kind=kind, content="   "), {})
+        assert d.disposition == C.NOT_CARRIED, kind
+
+
+def test_a_carried_source_is_sent_as_a_source_not_a_point():
+    """A document is a :Source (D10). Writing it as a Point re-types it and gives
+    it a document-vocabulary pointKind."""
+    plan = C.build_plan([row("s1", node_type="source", kind="article", content="https://x/y")],
+                        source_graph="old", target_graph="new", packs={})
+    bundle = plan.bundle()
+    assert bundle["points"] == []
+    assert bundle["sources"] and bundle["sources"][0]["url"] == "https://x/y"
 
 
 def test_namespaced_signal_kind_is_still_signal():

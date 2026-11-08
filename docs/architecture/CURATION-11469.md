@@ -25,7 +25,7 @@ Two measured facts govern the risk:
   a migration here is moving the only copy of a tenant's data.
 
 Code: `tortoise/curation.py` (classification + guards + additive writer) and
-`tools/curate_graph.py` (the CLI). Tests: `tests/test_curation_11469.py` (47 tests).
+`tools/curate_graph.py` (the CLI). Tests: `tests/test_curation_11469.py` (49 tests).
 
 ## The inventory — measured 2026-11-08 against `live-v4`
 
@@ -81,8 +81,10 @@ report, and a row that no rule decides is `undecidable` rather than guessed.
 ### ⚠️ The finding that decides the shape of this work
 
 **A deterministic rule set cannot select the signal out of 15,708 statements.** Not one statement in
-this graph matches a narration marker — the narration rule selects nothing at all — and the remaining
-rules (decision / evidence / operator / …) select 127 rows. The 15,708 are claims, plausible and
+this graph matches a narration marker — the narration rule selects nothing at all — and the
+non-statement kind rules (decision 7, option 2, finding 1, jobToBeDone 1, useCase 1, evidence 115)
+select the 127 carried rows. Operators (3,727) are carried by a rule too but are not enumerated by
+this read path, so they are not part of that 127. The 15,708 statements are claims, plausible and
 unjudged. Two options, and this issue does not choose between them:
 
 1. a **semantic pass** (search/embedding-similarity clustering + a reviewer) that proposes a
@@ -118,18 +120,20 @@ flagged *not enumerated* rather than presented as measure-and-classify results.
 ## How to run
 
 ```bash
-# inventory (read-only) — the table above
+# inventory (read-only) — the table above (a name is fine here: nothing is written)
 uv run python tools/curate_graph.py inventory --graph live-v4 --out /tmp/inventory.json
 
 # plan against a target (writes nothing without --apply)
-uv run python tools/curate_graph.py plan --graph live-v4 \
-    --target org_<org>_g_<clean-graph-id> --out /tmp/plan.json
+uv run python tools/curate_graph.py plan \
+    --graph org_<org>_g_<source-gid> --target org_<org>_g_<clean-gid> --out /tmp/plan.json
 
-# apply (additive, idempotent, off-switchable) — the SOURCE and TARGET must be given
-# as a graph id or namespace: a bare name is refused unless the surface exposes name
-# rows, because the identity guard must not guess which graph a name means
-uv run python tools/curate_graph.py plan --graph live-v4 \
-    --target org_<org>_g_<clean-graph-id> --apply
+# apply (additive, idempotent, off-switchable). BOTH graphs must be given in an
+# IDENTITY spelling — a namespace (org_<org>_g_<gid>) or g_<gid>. A bare NAME
+# (live-v4) is refused, because this surface returns namespaces only and the guard
+# must not guess which graph a name means; --graph is mandatory for --apply, so the
+# source identity is always the graph that was actually read.
+uv run python tools/curate_graph.py plan \
+    --graph org_<org>_g_<source-gid> --target org_<org>_g_<clean-gid> --apply
 ```
 
 Environment: `TORTOISE_MCP_URL` + `TORTOISE_MCP_API_KEY`; `TORTOISE_CURATE_OFF=1` disarms writes.

@@ -229,6 +229,13 @@ def cmd_plan(args: argparse.Namespace) -> int:
     if not args.target:
         print("plan: --target <graph> is required (the clean, pack-filed graph)", file=sys.stderr)
         return 2
+    if args.apply and not args.graph:
+        # A write must name the graph that was READ. Omitting --graph reads the
+        # credential's own graph, and fabricating a name for it would have the
+        # identity guard compare a graph nobody read.
+        print("plan --apply: --graph <source graph id or namespace> is required — the source "
+              "identity must be the graph that was actually read", file=sys.stderr)
+        return 2
     reader = MCPReader(_live_call_tool, args.graph)
     points, _ = reader.read_points(page=args.page)
     sources = reader.read_sources()
@@ -255,6 +262,14 @@ def cmd_plan(args: argparse.Namespace) -> int:
         with open(args.out, "w", encoding="utf-8") as fh:
             fh.write(text + "\n")
     print(text)
+    if result.refused and not result.applied and args.apply:
+        # A refused WRITE (or a refused identity) is a failure, not a successful
+        # plan: a scripted driver must not read exit 0 as "migrated".
+        print(f"REFUSED: {result.refused}", file=sys.stderr)
+        return 3
+    if result.applied and result.refused:
+        print(f"REFUSED mid-run: {result.refused} (accepted={result.written})", file=sys.stderr)
+        return 3
     return 0
 
 

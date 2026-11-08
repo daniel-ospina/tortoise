@@ -320,6 +320,11 @@ def classify_point(row: Row, packs: Mapping[tuple[str, str], str], *, duplicate_
                         "carried as a claim, its edges are the ingest contract's job (#888 W4)",
                         pack, key, row.content)
 
+    if not (row.content or "").strip():
+        return Decision(row.node_id, row.node_type, row.kind, NOT_CARRIED,
+                        "empty content — nothing to carry (checked before every kind rule: an "
+                        "empty row would otherwise be carried as an empty point)", pack, key, row.content)
+
     if row.bare_kind in SIGNAL_KINDS:
         return Decision(row.node_id, row.node_type, row.kind, CARRY,
                         f"{row.bare_kind} — an owner-level artifact the curated graph exists to keep",
@@ -329,11 +334,6 @@ def classify_point(row: Row, packs: Mapping[tuple[str, str], str], *, duplicate_
         return Decision(row.node_id, row.node_type, row.kind, UNDECIDABLE,
                         "agent diary — narration shaped like a narrative, but it is an authored "
                         "artifact, so neither rule decides it", pack, key, row.content)
-
-    if not (row.content or "").strip():
-        return Decision(row.node_id, row.node_type, row.kind, NOT_CARRIED,
-                        "empty content — nothing to carry (checked before every kind rule: an "
-                        "empty row would otherwise be carried as an empty point)", pack, key, row.content)
 
     if row.bare_kind == "evidence":
         return Decision(row.node_id, row.node_type, row.kind, CARRY,
@@ -470,17 +470,20 @@ class Plan:
             "migrationKeyPrefix": MIGRATION_KEY_PREFIX,
             "sourceGraph": self.source_graph,
             "digest": self.digest(),
+            # NO `ref` at all. A bundle-local ref is expanded wherever it appears
+            # as a field VALUE, so ANY ref we mint can collide with a row whose
+            # content or id happens to equal it — `ref == migrationKey` made every
+            # item expand into itself, and a ref like "cur0" collides with a row
+            # whose content is "cur0" — and ingest then refuses the WHOLE bundle
+            # ("ref expansion exceeded depth 32"). Refs exist to address one item
+            # from another (a connection); this bundle mints none, which makes the
+            # collision impossible rather than unlikely.
+            #
+            # SOURCES GO IN THEIR OWN SECTION: a carried Source is provenance
+            # (D10 — a document IS a :Source). Writing it as a Point would re-type
+            # it and give it a document-vocabulary pointKind.
             "points": [
                 {
-                    # NO `ref` at all. A bundle-local ref is expanded wherever it
-                    # appears as a field VALUE, so ANY ref we mint can collide with
-                    # a row whose content or id happens to equal it — `ref ==
-                    # migrationKey` made every item expand into itself, and a ref
-                    # like "cur0" collides with a row whose content is "cur0" — and
-                    # ingest then refuses the WHOLE bundle ("ref expansion exceeded
-                    # depth 32"). Refs exist to address one item from another (a
-                    # connection); this bundle carries points only, so emitting no
-                    # ref makes the collision impossible rather than unlikely.
                     "migrationKey": d.stable_key,
                     "kind": d.kind or "statement",
                     "content": d.content,
@@ -488,6 +491,17 @@ class Plan:
                     "pack": d.pack,
                 }
                 for d in self.carry_rows()
+                if d.node_type in ("point", "operator")
+            ],
+            "sources": [
+                {
+                    "migrationKey": d.stable_key,
+                    "url": d.content,
+                    "sourceKind": d.kind,
+                    "pack": d.pack,
+                }
+                for d in self.carry_rows()
+                if d.node_type == "source"
             ],
         }
 
@@ -604,13 +618,6 @@ def canonical_graph_id(ref: str, graph_rows: Sequence[Mapping[str, Any]] | None)
     return None
 
 
-def _same_graph(a: str, b: str, graph_rows: Sequence[Mapping[str, Any]] | None = None) -> bool:
-    ca = canonical_graph_id(a, graph_rows)
-    cb = canonical_graph_id(b, graph_rows)
-    if ca and cb:
-        return ca == cb
-    return bool(a) and a.strip().casefold() == b.strip().casefold()
-
 
 def assert_distinct_graphs(
     source_graph: str,
@@ -726,12 +733,15 @@ class IngestWriter:
                     "granularity": "bulk",
                     "bundle": {"points": batch},
                 })
-            except CurationRefused:
-                raise
+                # Unwrapping is INSIDE the guard: `normalise_tool_result` raises on
+                # the `isError` path, and a refusal there must still report the
+                # batches that already landed.
+                res = normalise_tool_result(raw)
+            except CurationRefused as exc:
+                raise CurationRefused(str(exc), written_keys=written) from exc
             except Exception as exc:  # transport/timeout AFTER earlier batches landed
                 raise CurationRefused(f"target call failed: {type(exc).__name__}: {exc}",
                                       written_keys=written) from exc
-            res = normalise_tool_result(raw)
             refused = _ingest_refused(res)
             if refused:
                 # The earlier batches were accepted, so they are reported — a
