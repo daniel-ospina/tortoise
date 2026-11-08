@@ -317,12 +317,16 @@ pass:
 | The plugin's hosted leg is `POST /v1/context` (`apiKey` config, the ONLY reflex path for a user with no local CLI) | **It never worked.** `runHosted` posted `{prompt}`; `POST /v1/context` requires `window: [{role, content}]` (`VolunteerContextRequest`, `tortoise/hosted_api.py`), so every hosted turn was a 422 — and the fail-open catch turns that into an empty injection with no signal anywhere. Graded now by `tests/test_openclaw_seam.py::test_hosted_body_is_the_contract_the_server_validates`, which executes the plugin under a stubbed `fetch` and validates the emitted body with the SERVER's own model (a hand-copy of the shape would have re-encoded the bug). |
 | "Cross-turn dedupe" = the plugin's block digest | **Incomplete.** The digest only suppresses an IDENTICAL block; a block that changes by one pointer re-surfaces the rest. The reflex has a stage-5 re-mention suppression that reads `prior_context` — and no CLI seam could supply it, because `tortoise volunteer` had no `--prior-context` (only `--session-id`, which the pipeline validates and never consults). The CLI now takes `--prior-context` (and `prior_context` in its JSON contract dict), and the plugin passes the block it injected last turn. Both polarities are pinned: `tests/test_platform_seams.py::test_volunteer_cli_prior_context_suppresses_a_re_mention`. The sibling seams still do not pass it — Hermes' `--session-id` claim is the same false premise (#8957), and the one-shot shell hooks have nowhere to keep a prior block. |
 
-Note on what remains UNGRADED: #2120's scope item "W3 harness seam entry
-(ingest + inject graded)" depends on the harness's graded-reflex bars, which
-are still the NULL reflex pending #8125 (`tests/eval/harness/runner.py`
-logs "graded seam lands with the W4 reflex delivery"). No per-seam matrix row
-can be blessed before that without a `--bless-protocol` change that #8125
-owns.
+Note on what remains UNDELIVERED: #2120's scope item "W3 harness seam entry
+(ingest + inject graded)" is not built — `git grep -ln openclaw -- tests/eval/`
+matches nothing, so the W3 harness has no OpenClaw row. It is no longer
+BLOCKED: `tests/eval/harness/corpus.py:33` sets `"reflex": "graded"` (#8125's
+activation, landed in 8ac79e12f1) and the CI-gating echo lane's baseline
+carries it (`tests/eval/harness/baselines/m2.json:6`). The one lane still on
+the NULL reflex is the llm product lane (`baselines/main.json:6`), and
+re-blessing THAT needs a keyed product-lane run — a different, narrower
+blocker than the sweep this note used to claim. So the row is buildable now;
+only the product lane's blessing still waits on #8125.
 
 ## Frameworks (#2125) — SDK-level middleware, injection only
 

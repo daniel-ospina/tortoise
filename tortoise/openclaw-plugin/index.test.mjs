@@ -266,12 +266,18 @@ test("register: hands the reflex the block it injected last turn (continuity)", 
   const second = await hook({ prompt: "beta" }, { trigger: "user", sessionKey: "s1" });
   assert.deepEqual(second, { prependContext: "block-for:beta" });
 
+  // Continuity is ONE TURN DEEP, as the README states: turn 3 carries TURN 2's
+  // block only, so turn 1's is no longer an input and can fire again. Pinned so
+  // the documented boundary cannot be quietly overstated a second time.
+  const third = await hook({ prompt: "delta" }, { trigger: "user", sessionKey: "s1" });
+  assert.deepEqual(third, { prependContext: "block-for:delta" });
+
   // A different session starts clean — continuity is per session key.
   const other = await hook({ prompt: "gamma" }, { trigger: "user", sessionKey: "s2" });
   assert.deepEqual(other, { prependContext: "block-for:gamma" });
 
   const calls = readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l));
-  assert.equal(calls.length, 3);
+  assert.equal(calls.length, 4);
   // Turn 1 has nothing to suppress; turn 2 carries TURN 1's block, which is
   // the reflex's only re-mention-suppression input.
   assert.deepEqual(calls[0], {
@@ -284,7 +290,14 @@ test("register: hands the reflex the block it injected last turn (continuity)", 
     session_id: "s1",
     prior_context: "block-for:alpha",
   });
+  // …and turn 3 carries only turn 2's block: the depth is one turn, not the
+  // whole session (see the README's "one turn deep" boundary).
   assert.deepEqual(calls[2], {
+    window: [{ role: "user", content: "delta" }],
+    session_id: "s1",
+    prior_context: "block-for:beta",
+  });
+  assert.deepEqual(calls[3], {
     window: [{ role: "user", content: "gamma" }],
     session_id: "s2",
     prior_context: null,

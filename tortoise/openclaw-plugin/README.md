@@ -43,10 +43,13 @@ The earlier `platform-seams.md` row for #2120 (`~/.openclaw/*.claw` +
 * **Cross-turn dedupe.** The same injected block is never repeated within one
   session key, and the block itself is handed back to the reflex as
   `prior_context` on the next turn — `tortoise volunteer`'s JSON contract
-  locally, the `POST /v1/context` body hosted — so a pointer this session
-  already surfaced is suppressed even when the block changes.
-  `prior_context` is the reflex's only re-mention-suppression input; a session
-  id alone suppresses nothing.
+  locally, the `POST /v1/context` body hosted — so a pointer the last injected
+  block carried is suppressed when the next block differs.
+  Continuity is **one turn deep**: `createContinuity` remembers the last block
+  per session key, not a session-wide ledger of every pointer surfaced, so a
+  pointer surfaced two or more turns ago can fire again. `prior_context` is the
+  reflex's only re-mention-suppression input; a session id alone suppresses
+  nothing.
 * **No credentials required for capture.** Captured turns go to a local spool,
   **one file per session** — `$OPENCLAW_STATE_DIR/tortoise/turns/<session>.jsonl`
   (default `~/.openclaw/tortoise/turns/`) — which
