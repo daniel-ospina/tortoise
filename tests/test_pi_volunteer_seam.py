@@ -298,6 +298,55 @@ def test_a_repair_never_turns_on_the_read_seam(home):
         "the user had explicitly opted out — it must refresh, never introduce")
 
 
+@pytest.mark.parametrize("shape", ["directory", "fifo", "dangling-symlink"])
+def test_a_repair_never_reports_success_over_a_broken_seam_shape(home, shape):
+    """A NON-REGULAR path at the seam must refuse loudly, never read "current".
+
+    The repair gate asks "is there anything at this path?", and the first cut of
+    it used `is_file()` — so a directory, a FIFO or a symlink whose target was
+    moved made the gate report ABSENT, the artifact installer never ran, and
+    `hooks upgrade` printed "already current — nothing to do" and exited **0**
+    while `detect_artifact_install` still returned a blocking
+    `not-a-regular-file` for that same path. A silent false SUCCESS over a
+    blocking finding, in a command whose whole contract is "fail loudly"
+    (`capture_install.py`: "Refusals are the product").
+
+    The gate is `os.path.lexists`, so every shape reaches the guards that
+    classify it: a refusal with a non-zero exit, and the finding still reported.
+    """
+    from types import SimpleNamespace
+
+    from tortoise.__main__ import _upgrade_artifact_seam
+    from tortoise import hook_install
+
+    assert _install(home).ok
+    root = _ext_dir(home)
+    seam = root / VOLUNTEER_EXTENSION.name
+    seam.unlink()                                    # the user opted OUT
+    if shape == "directory":
+        seam.mkdir()
+    elif shape == "fifo":
+        os.mkfifo(seam)
+    else:
+        os.symlink(str(home.parent / "moved-away" / "src.ts"), seam)
+
+    blocking_before = [f.kind for f in
+                       hook_install.detect_artifact_install(root, "pi") if f.blocking]
+    assert "not-a-regular-file" in blocking_before, (
+        "precondition: this shape is a blocking finding for `hooks status`")
+
+    rc = _upgrade_artifact_seam(
+        SimpleNamespace(harness="pi", dry_run=False), root, home)
+
+    assert rc != 0, (
+        "the repair reported SUCCESS over a shape `hooks status` calls blocking — "
+        "the user is told to run this very command and then told nothing is wrong")
+    blocking_after = [f.kind for f in
+                      hook_install.detect_artifact_install(root, "pi") if f.blocking]
+    assert blocking_after == blocking_before, (
+        "a refused repair must leave the finding in place rather than claim a fix")
+
+
 def test_a_repair_still_refreshes_an_installed_read_seam(home):
     """…but drift in an OPTED-IN seam is exactly what the repair is for.
 

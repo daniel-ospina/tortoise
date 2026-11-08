@@ -1946,7 +1946,19 @@ def _install_pi(
     # is not reported as drift by `detect_artifact_install`, so skipping here
     # leaves ``hooks status`` consistent with what ``hooks upgrade`` will do: a
     # capture-only install stays capture-only until the user opts in.
-    read_seam_present = (ext_dir / PI_VOLUNTEER_EXTENSION_NAME).is_file()
+    # ⛔ ``lexists``, NOT ``is_file``: the gate asks "is there anything at this
+    # path?", because the shapes where ``is_file()`` is False are exactly the
+    # broken ones the repair exists to diagnose. With ``is_file()`` a broken
+    # symlink, a directory or a FIFO left the gate closed, so the artifact
+    # installer never ran, ``result.actions`` was empty and this function
+    # printed "already current — nothing to do" and exited 0 — while
+    # `detect_artifact_install` still reported a blocking `not-a-regular-file`
+    # for that same path. A silent false SUCCESS over a blocking finding, and a
+    # regression from the pre-gate behaviour (a valid-but-broken symlink was
+    # repaired; a directory produced the documented loud refusal). Present in
+    # any shape => let `_install_pi_volunteer_artifact` apply its guards, which
+    # is where those shapes are classified.
+    read_seam_present = os.path.lexists(ext_dir / PI_VOLUNTEER_EXTENSION_NAME)
     if introduce_read_seam or read_seam_present:
         v_changed, v_actions, v_error = _install_pi_volunteer_artifact(
             ext_dir, home, dry_run=dry_run)

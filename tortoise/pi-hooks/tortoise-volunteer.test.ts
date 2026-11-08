@@ -535,14 +535,31 @@ test("a REFUSED hosted request is not an inert install: no breadcrumb, no latch"
   const cfgPath = join(home, "tortoise-config.json");
   writeFileSync(cfgPath, JSON.stringify({ apiKey: "tt_live_key" }));
   // No CLI anywhere, so the seam falls through to the hosted transport.
+  // The fetch is STATEFUL: the first turn is refused (402), every later turn
+  // answers. That is what makes the no-latch assertion discriminating — a
+  // handler that latches on `refused` would still pass a one-turn test, and a
+  // latched seam silently disables per-turn injection for the whole Pi process
+  // after a transient 402, which is the user-visible failure being fixed.
+  let calls = 0;
+  const fetchStub = (async () => {
+    calls += 1;
+    if (calls === 1) {
+      return { ok: false, status: 402, statusText: "Payment Required" } as Response;
+    }
+    return {
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      json: async () => ({ block: "## Memory\nquota restored", surfaced: [] }),
+    } as unknown as Response;
+  }) as typeof fetch;
   const pi = mockPi();
   tortoiseVolunteer(pi as never, {
     env: { PATH: join(home, "empty-bin") },
     home,
     configPath: cfgPath,
     breadcrumbDir: crumbs,
-    fetchImpl: (async () =>
-      ({ ok: false, status: 402, statusText: "Payment Required" }) as Response) as typeof fetch,
+    fetchImpl: fetchStub,
   });
 
   assert.equal(
@@ -555,6 +572,19 @@ test("a REFUSED hosted request is not an inert install: no breadcrumb, no latch"
     false,
     "a REFUSED request must not read as an inert INSTALL — the operator would be " +
       "told to reinstall something that works",
+  );
+
+  // …and it must NOT latch: the very next turn, with the endpoint answering,
+  // has to inject. A latched seam is dead for the rest of the process.
+  const second = (await pi.handlers.before_agent_start(
+    { messageType: "user", prompt: "another question" },
+    SESSION_CTX(),
+  )) as { message?: { content?: string } } | undefined;
+  assert.ok(second?.message, "a `refused` turn must not latch the seam OFF");
+  assert.match(
+    String(second?.message?.content ?? ""),
+    /quota restored/,
+    "the second turn must reach the endpoint again after a transient 402",
   );
 
   // The verdict names the real cause, and is distinct from both `inert` and
