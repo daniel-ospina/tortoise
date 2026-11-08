@@ -126,15 +126,18 @@ CLUSTERED = (
 #:   later session sits two slots EARLIER when the cap is tight — ``t9`` is
 #:   INSIDE the 12-slot window at ``cap=1`` (0-based reader index 10) and just
 #:   OUTSIDE it at ``cap=3`` (index 12);
-#: * ``t9`` is a PICK (``temporal_leg_limit=4`` ⇒ ceiling 8; the ``head``
-#:   exclusion is the buckets of ``candidates[:max(head + 1, window)]`` — the
-#:   first TWELVE, i.e. ``sA``'s five dates plus ``t0..t5`` — so the spread
-#:   reaches ``p6..p9``), and its visibility decides WHICH ruling condition
-#:   refuses it: already-visible (1) or would-evict (3).
+#: * ``t9`` is a PICK (``temporal_leg_limit=4`` ⇒ ceiling 8, so ``promotable``
+#:   starts at index 8 — ``p2..p9`` — and the BUCKET exclusion then drops
+#:   ``p2..p5``: ``held_buckets`` is sampled over
+#:   ``candidates[:max(head + 1, window)]``, the first TWELVE, i.e. ``sA``'s
+#:   five dates plus ``t0..t5``, so those six sessions' buckets are held and the
+#:   spread reaches ``p6..p9``), and its visibility decides WHICH ruling
+#:   condition refuses it: already-visible (1) or would-evict (3).
 #:
-#: Both arms REFUSE it, so ``applied``/``picks``/the reason NAME are identical —
-#: the discriminator is the reason VALUE. That is why the assertion below reads
-#: the reason rather than a count.
+#: Both arms REFUSE all four picks (``p6..p9``), so ``applied``, ``picks`` and
+#: the first THREE refusal rows are identical — the discriminator is the REASON
+#: of the last row, condition (1) vs condition (3). That is why the assertion
+#: below reads the reason rather than a count.
 CHUNK_BEARING = (
     [{"id": f"a{i}", "session_id": "sA",
       "idx": [0, 1, 2, 3, 4, 0][i], "content": "alpha"}
