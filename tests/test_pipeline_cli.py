@@ -57,8 +57,10 @@ def _patch_projection(monkeypatch, seen):
     ⛔ ONLY this thread's constructions are recorded, and that is load-bearing.
     ``FalkorProjection.__init__`` is patched process-globally, so a background
     retention sweep left running by an earlier test in the same shard
-    (``hosted_api._event_retention_sweep`` -> ``_org_sdk(...)._get_proj()``,
-    lines 2032-2033) also constructs one — and THAT site resolves through the
+    (``hosted_api._sweep_events`` — driven by ``_event_retention_loop`` and
+    spawned via ``run_on_daemon_worker``, ``hosted_api.py:1989``/``:2310``/
+    ``:2329`` — -> ``_org_sdk(...)._get_proj()``, lines 2032-2033) also
+    constructs one — and THAT site resolves through the
     server policy ``_resolve_embedded_db_path`` (``/data/tortoise.db``, falling
     back to ``tempfile.gettempdir()/tortoise.db`` when ``/data`` is unwritable),
     never ``config.resolve_db_path``. A last-write-wins recorder then reports
