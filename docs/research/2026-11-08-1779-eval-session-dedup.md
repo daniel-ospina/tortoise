@@ -15,8 +15,10 @@ existing cache with.
 ## 0. Headline findings
 
 1. **The "5-10× redundant encodes" the repo asserted is not measurable and is wrong.**
-   `tools/longmem_eval/encode_cache.py:4`, `tools/longmem_eval/README.md` and
-   `tools/longmem_eval/run.py:7383` all cited it; it traces to
+   The module docstring of `tools/longmem_eval/encode_cache.py` (line 4 **on `main`, before this
+   PR** — this PR rewrote that line, so the citation is a historic location, not a live one),
+   `tools/longmem_eval/README.md` and a comment in `run.py`'s HNSW spot-check (`:7383` **on
+   `main`**, likewise rewritten here) all cited it; it traces to
    `docs/plans/2026-08-17-1349-embedder-selection.md:63`, where it was asserted, never measured.
    **Measured:** one pass over the 500-question S split emits **371,095** encode units of which
    **285,608** are distinct — a **1.299×** reuse factor, i.e. **23.0%** of those units are
@@ -32,12 +34,14 @@ existing cache with.
    **prompt-identity reuse is exactly 1.000×** — a prompt-level response cache, and a session-level
    extraction cache (the same identity condition, different payload), have nothing to hit.
 3. **The one realizable lever is the text→embedding cache that already exists**, at the measured
-   **1.299×** (and ~all-hits on a REPEAT pass with the same `(model, prompt)`, which is where its
-   value actually is: the HNSW spot-check runs two full passes, and a crashed burn resumes).
+   **1.299×** — and its larger value is on REPEAT passes with the same `(model, prompt)`, where the
+   disk cache is ~all hits (a crashed burn resumes off the same file). ⛔ The HNSW spot-check is NOT
+   evidence for that: its two passes are the **winner and the control**, each with its own
+   `cache_path_for` namespace, so neither can hit the other's entries.
 4. **Recorded residual — measured, not dedup:** the raw-chunk leg is **124,345 of 371,095** encode
    units (**33.5%**) and is unreachable by any text-keyed cache: a chunk is rendered by
-   `_session_transcript(window)` (`ingest.py:95-104`) while its turn Points render `_turn_text`
-   (`[role] content`, `ingest.py:91-98`), so the chunk text is a new string even though it covers
+   `_session_transcript(window)` (`ingest.py:105-112`) while its turn Points render `_turn_text`
+   (`[role] content`, `ingest.py:95-102`), so the chunk text is a new string even though it covers
    the same turns. Removing it is a chunking/rendering decision (`chunk_turns`, #1540), not a cache.
 5. **The LLM-budget lever is provider-side prefix caching, and the harness already meters it.**
    Providers cache prompt *prefixes* on an exact match (Anthropic: "the system checks if a prompt
@@ -110,10 +114,10 @@ first place.
 
 Two sanity readings that keep the 1.000× honest rather than an artifact of unique dates: the corpus
 carries **18,360 distinct date values over 23,867 slots** (dates are heavily reused *across*
-different sessions) — produced by the census as its own `dates` readout (`distinct` / `slots`), since
-a number cited in prose with no producer is the drift this document exists to retire — and 13
-duplicate slots are *within* a single question. The re-dating is a
-property of the duplication, not of the date population.
+different sessions), and 13 duplicate slots are *within* a single question. The date population is
+its own census cell (`CENSUS["dates"]`, printed by the CLI as `dates`) and is pinned like every
+other published number — a number quoted in prose with no producer is the drift this document exists
+to retire. The re-dating is a property of the duplication, not of the date population.
 
 ## 4. Verdict — the granularity decision #1779 asked for
 
@@ -164,9 +168,13 @@ for this issue by its own scope guard ("Out of scope: any parse/retrieval semant
    ingest renders per session (turn Points + raw chunks) because those are the only units derivable
    from the dataset. A `v2` run ALSO embeds LLM-derived extraction Point texts (`ingest_v2` →
    `sdk.create_point`; `encode_cache` wraps `tortoise.embeddings` process-wide), so the true
-   whole-run denominator is larger and the published 23.0% is a SUBSET share. It does not move the
-   verdict: extraction text is a function of (session content, session date), so it cannot be reused
-   across a re-dated repeat either — only the magnitude changes.
+   whole-run denominator is larger and the published 23.0% is a SUBSET share.
+   **Its reuse is UNMEASURED, and it could go either way.** The embedded text is the extracted claim
+   string (`ingest_v2.py:216`), while the session date rides on separate point properties (`when` /
+   `validFrom`, `:259-261`) — so a re-dated repeat COULD emit an identical claim string and hit a
+   text-keyed cache, which would make the true share **larger** than 23.0%. Nothing in a
+   dataset-only census can settle it; a run with `--model` + `ingest_v2` and the cache's own hit
+   counters can.
 
 ## 7. Research provenance
 

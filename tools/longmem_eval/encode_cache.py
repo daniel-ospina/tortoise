@@ -23,9 +23,12 @@ the same in its own words.
 What the cache actually buys, in the measured order of magnitude: (a) ~23% of
 encode units *within one pass*; (b) the much larger share across REPEAT passes
 — the disk persistence is keyed per ``(model, prompt)``, so a second pass with
-the same config is ~all hits (the HNSW spot-check runs two full passes; a
-crashed burn resumes); (c) nothing at the LLM level: cross-question *sessions*
-do repeat (5,403 of 23,867 slots) but every repeated pair carries a different
+the same config is ~all hits, and a crashed burn resumes off the same file.
+⛔ The HNSW spot-check is NOT a demonstration of this: its two passes are the
+WINNER and the CONTROL, each built with its own ``cache_path_for`` namespace,
+so neither can hit the other's entries; (c) nothing at the LLM level:
+cross-question *sessions* do repeat (5,403 of 23,867 slots) but every repeated
+pair carries a different
 session date, and the date is prompt-visible (``extractor_v2._date_anchor``),
 so prompt-identity reuse is exactly 1.000x — a prompt-level response cache has
 nothing to hit (see ``haystack_overlap.CENSUS``).

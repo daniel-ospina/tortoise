@@ -268,7 +268,7 @@ def test_census_on_real_s_split():
         pytest.skip("real S split not cached (CI)")
     census = census_overlap(instances)
     for key in ("findings_date", "n_instances", "chunk_turns",
-                "sessions", "encode_units"):
+                "sessions", "dates", "encode_units"):
         assert census[key] == CENSUS[key], key
     # the numbers the verdict turns on, restated so a change reads as itself
     assert census["sessions"]["same_date_pairs"] == 0

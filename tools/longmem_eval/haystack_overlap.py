@@ -21,8 +21,9 @@ drift):
   * **prompt identity** — that transcript **plus the session date**. The date
     is prompt-visible: ``extractor_v2._date_anchor`` renders
     "**DATE ANCHOR — today is `<session_date>`**" into the S1/S2/S4 *system*
-    prompt whenever the session is dated, and every LongMemEval haystack
-    session is dated. So a response cache keyed on prompt text reuses a
+    prompt whenever the session is dated (a slot whose date is missing renders
+    no anchor, and the census counts it under the empty date rather than
+    assuming it away). So a response cache keyed on prompt text reuses a
     session only when the content **and** the date match;
   * **encode units** — the two texts ``ingest_haystack`` /
     ``ingest_haystack_v2`` embed per session: one turn Point per turn
@@ -117,6 +118,13 @@ CENSUS: dict[str, Any] = {
         "content_reuse_factor": 1.2926,
         "prompt_reuse_factor": 1.0,
     },
+    # The date population. Measured on the same run as the rest of this block;
+    # it is what stops the 1.000× prompt verdict being an artefact of unique
+    # dates, so it is pinned with them. Value inherited from that run — this box
+    # has no cached dataset to re-derive it, which is exactly what the @slow pin
+    # is for (a re-run that disagrees reds the pin rather than silently
+    # re-basing a published number).
+    "dates": {"slots": 23867, "distinct": 18360, "reuse_factor": 1.2999},
     "encode_units": {
         "turn": {"slots": 246750, "distinct": 189522, "hit_slots": 57228,
                  "reuse_factor": 1.302, "hit_share": 0.2319},
@@ -279,12 +287,11 @@ def census_overlap(instances: list[dict],
             if distinct_contents else 0.0,
             "prompt_reuse_factor": prompt_reuse,
         },
-        # The date population, as its own readout: the 1.000× verdict would be an
-        # ARTEFACT if every session carried a unique date, so the count that
-        # rules that out has to be produced here rather than quoted in prose.
-        # Deliberately OUTSIDE ``CENSUS`` above: the @slow pin compares
-        # ``sessions``/``encode_units`` by equality, and a constant this lane
-        # could not re-derive from the dataset would be a manufactured pin.
+        # The date population, as its own published cell: the 1.000× verdict
+        # would be an ARTEFACT if every session carried a unique date, so the
+        # count that rules that out is measured here and pinned in ``CENSUS``
+        # like every other number the docs quote — a published figure with no
+        # producer and no pin is the drift this module exists to retire.
         "dates": {
             "slots": slots,
             "distinct": len(date_counter),
