@@ -3190,6 +3190,23 @@ def test_the_green_does_not_claim_a_BEFORE_reading_that_did_not_MEASURE(monkeypa
     out = capsys.readouterr().out
     assert measured in out
 
+    # (4) THE PARENTHETICAL ITSELF (#11536 review round 5, P3): the refusal used to
+    # infer "a token that is not in the corpus", which is FALSE when the BEFORE leg
+    # ran and matched a benign node — and nothing pinned the correction, so a revert
+    # went green. This is the `uncorroborated` arm, the one that prints it.
+    no_control = _after()
+    no_control["control"] = {"mode": "unavailable", "ok": False, "hits": None,
+                             "note": "no post-fix lexicon node on this graph"}
+    fts = _cli._merge_probe(before, no_control, wrote=False)
+    assert fts["vetoed"] == "uncorroborated"
+    _cli._report_fts(fts)
+    err = capsys.readouterr().err
+    assert "not in the corpus" not in err, (
+        "the refusal inferred that the token is absent from the corpus, which the "
+        "BEFORE reading did not measure")
+    assert "BEFORE hit(s)" in err, (
+        "the parenthetical does not state the BEFORE hit count it measured")
+
 
 def test_the_green_line_claims_only_the_two_data_the_fold_holds(monkeypatch,
                                                               capsys):
@@ -3548,7 +3565,17 @@ def test_the_sentence_LEAVES_the_Source_FTS_index_on_a_REAL_graph():
         assert m.source_fts_probe(g, control)["hits"] > 0, (
             "the re-derived lexicon is NOT findable — the session was "
             "un-indexed (#3518)")
-        assert m.probe_fts(g, ["zebraquux"], control=True)["leaked"] == [], (
+        # ⛔ NOT `leaked` ALONE (#11536 review round 5, P3). `leaked` is built from
+        # `residue` only, and an entry that survived the record arm's `_searchText`
+        # REWRITE classifies `unexplained` — so the sentence could still be
+        # retrievable while this row stayed green. Mirror the clear arm: assert the
+        # ENGINE dropped the entry and that no bucket holds it.
+        record_after = m.probe_fts(g, ["zebraquux"], control=True)
+        assert record_after["probes"][0]["hits"] == 0, (
+            "the probe still returns a node after the record arm — inspect "
+            "whether it is a surviving index entry, which is the #11161 leak")
+        assert record_after["leaked"] == [] and \
+            record_after["unexplained"] == [], (
             "the prose's token still returns a node after the record arm")
     finally:
         _live_utils.drop_test_graph(proj)
