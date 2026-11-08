@@ -4047,6 +4047,21 @@ class TestSiteIconAndSocialPreviewContract:
     # rejects the degenerate case is the PAIR: one flat colour trips this floor AND
     # the dominant-colour floor below. Neither alone is enough to describe a mark.
     ICON_MIN_COLOURS = 2
+    # How much of the canvas the mark must span. The artwork's own padding put it at
+    # 68% (#11318 shipped that straight downscale) and in a tab strip it read as a
+    # small glyph on a slab; `tools/build_site_icons.py` crops it to 84%. 80% is the
+    # floor, not the target: it is the point at which the mark stops reading as small
+    # next to a neighbour whose glyph fills its tile, and it sits above 68% so a
+    # re-export of the unpadded artwork reds instead of quietly undoing this.
+    MARK_WIDTH_FLOOR = 0.80
+    # The tile's corner pixels. 0 = the tab background shows through the rounded corner;
+    # apple-touch-icon is the exception and must stay opaque (iOS masks it itself).
+    ROUNDED_CORNER_ALPHA = 0
+    # Transparent corners alone do not make a rounded tile — four punched pixels would
+    # pass. This is how far along each edge the first fully-opaque pixel must sit, as a
+    # fraction of the side: an arc of radius r reaches an edge at exactly r, so with the
+    # builder's 21% this measures 21%, while a nibbled square measures under 1%.
+    CORNER_INSET_FLOOR = 0.10
     # ...and no single colour may cover more than this fraction of its canvas.
     ICON_MAX_DOMINANT = 0.95
 
@@ -4058,8 +4073,8 @@ class TestSiteIconAndSocialPreviewContract:
         return struct.unpack(">II", data[16:24])
 
     @staticmethod
-    def _png_palette(data: bytes) -> dict[tuple[int, ...], int]:
-        """How many pixels of each colour a PNG really holds — stdlib only.
+    def _png_pixels(data: bytes) -> tuple[int, int, list[list[tuple[int, ...]]]]:
+        """Decode an 8-bit PNG to (width, height, rows of pixel tuples) — stdlib only.
 
         ⛔ WHY A DECODER LIVES IN A TEST. `/blog/og-image.png` was a 4.6 KB
         placeholder: two colours, 99.2% of the canvas flat background, a bare accent
@@ -4069,6 +4084,14 @@ class TestSiteIconAndSocialPreviewContract:
         pixels can tell it apart from art. No imaging library is in the dev env, and
         adding one for a guard would make the fast lane depend on a wheel — so this
         decodes 8-bit PNGs (the only depth this repo writes) directly.
+
+        ⛔ ONE DECODER, TWO CONSUMERS. `_png_palette` counts colours and the rounded-tile
+        guard reads GEOMETRY and ALPHA out of the same rows. A second decoder for the
+        second question is how the two drift, and this file already carries the cost of
+        one reader being right in one place and wrong in another (the source-order meta
+        readers). Alpha stays in the tuple, so a transparent pixel is its own colour: a
+        decoder that silently dropped the alpha channel reds the colour floor rather
+        than passing a blank tile.
         """
         assert data[:8] == b"\x89PNG\r\n\x1a\n", "not a PNG"
         pos = 8
@@ -4114,7 +4137,7 @@ class TestSiteIconAndSocialPreviewContract:
             f"PNG image data does not expand to the {expected} B its IHDR geometry "
             f"({width}x{height}, {channels} channel(s)) declares — refusing to decode it")
         prev = bytearray(stride)
-        counts: dict[tuple[int, ...], int] = {}
+        rows: list[list[tuple[int, ...]]] = []
         off = 0
         for _ in range(height):
             ftype = raw[off]
@@ -4137,10 +4160,20 @@ class TestSiteIconAndSocialPreviewContract:
                     else:
                         raise AssertionError(f"bad PNG filter {ftype}")
             prev = line
+            row: list[tuple[int, ...]] = []
             for x in range(0, stride, channels):
                 px = tuple(line[x:x + channels])
-                if colour == 3:
-                    px = palette[px[0]]
+                row.append(palette[px[0]] if colour == 3 else px)
+            rows.append(row)
+        return width, height, rows
+
+    @classmethod
+    def _png_palette(cls, data: bytes) -> dict[tuple[int, ...], int]:
+        """How many pixels of each colour a PNG really holds."""
+        _w, _h, rows = cls._png_pixels(data)
+        counts: dict[tuple[int, ...], int] = {}
+        for row in rows:
+            for px in row:
                 counts[px] = counts.get(px, 0) + 1
         return counts
 
@@ -5093,6 +5126,110 @@ class TestSiteIconAndSocialPreviewContract:
         for name, data in drawn:
             problems = self._icon_mark_violations(name, data)
             assert not problems, "\n".join(problems)
+
+    def test_the_icon_is_a_rounded_tile_and_the_mark_fills_it(self):
+        """The tab icon is a ROUNDED tile whose MARK fills it — the shape, not the size.
+
+        Both claims are the owner's report in #11486, and both were invisible to every
+        assertion above: the shipped icon was a 256x256 opaque SQUARE whose triangle
+        spanned 68% of the canvas, so it passed the size check, the decode, the pixel
+        floors, the ICO directory checks and the wordmark ban, and still looked like a
+        hard slab with a small glyph next to neighbours whose art fills their tile.
+
+        Measured on the bytes, not on the markup: a page that declares a 256x256 icon
+        says nothing about what is drawn inside it.
+
+        `apple-touch-icon.png` is asserted the OTHER way round on purpose — iOS applies
+        its own rounded mask to that file, so a pre-rounded image would be rounded twice
+        and show dark corners on a light home screen.
+        """
+        def alpha_of(px: tuple[int, ...]) -> int:
+            """A pixel's alpha; a PNG with no alpha channel is opaque by definition.
+
+            ⛔ MEASURED, because the first version REQUIRED four channels here and the
+            apple-touch assertion went through the same helper — so an apple-touch that
+            was opaque and square (exactly what its message demands) but saved as colour
+            type 2 redded with "an icon with no alpha channel cannot have a rounded
+            corner", which is the opposite of that file's contract. The old asset set was
+            colour type 2, so an honest re-export tripped it.
+            """
+            return px[3] if len(px) == 4 else 255
+
+        def check_tile(label: str, data: bytes) -> None:
+            w, h, rows = self._png_pixels(data)
+            # The TAB icons are the ones that must be rounded, and a 3-channel PNG cannot
+            # be: there is no alpha to carry the corner. (apple-touch is checked apart.)
+            assert all(len(px) == 4 for row in rows for px in row), (
+                f"{label} has no alpha channel — a tab icon must be a rounded tile, and a "
+                "PNG without transparency can only be a square. Rebuild it with "
+                "tools/build_site_icons.py")
+            corners = ((0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1))
+            for x, y in corners:
+                alpha = alpha_of(rows[y][x])
+                assert alpha == self.ROUNDED_CORNER_ALPHA, (
+                    f"{label} is opaque at its ({x},{y}) corner (alpha {alpha}) — a "
+                    "hard square edge, which is the shape #11486 reports as a slab. "
+                    "Rebuild it with tools/build_site_icons.py, which masks the corners")
+
+            # ...and the tile is ROUNDED, not merely nibbled. "Corner is transparent" is
+            # satisfied by four punched pixels on a square slab (measured green), so the
+            # arc is measured as an inset along each edge, in fractions of the side: a
+            # radius-r arc reaches the edge at exactly r.
+            floor = int(self.CORNER_INSET_FLOOR * w)
+            edges = {
+                "top": [(x, 0) for x in range(w)],
+                "bottom": [(x, h - 1) for x in range(w)],
+                "left": [(0, y) for y in range(h)],
+                "right": [(w - 1, y) for y in range(h)],
+            }
+            for edge, line in edges.items():
+                for start, step in ((0, 1), (len(line) - 1, -1)):
+                    inset = 0
+                    i = start
+                    while 0 <= i < len(line) and alpha_of(rows[line[i][1]][line[i][0]]) < 255:
+                        inset += 1
+                        i += step
+                    assert inset >= floor, (
+                        f"{label} is fully opaque {inset}px in from the {edge} corner — "
+                        f"under the {floor}px ({self.CORNER_INSET_FLOOR:.0%} of {w}) a "
+                        "rounded tile needs, so the corner is nibbled rather than rounded "
+                        "and the tab still reads as a square slab (#11486)")
+
+            # The ground is whatever opaque colour covers the most pixels; the mark is
+            # everything far from it. Both are measured, so no colour is hardcoded.
+            opaque = [px for row in rows for px in row if px[3] == 255]
+            assert opaque, f"{label} has no fully opaque pixel at all"
+            counts: dict[tuple[int, ...], int] = {}
+            for px in opaque:
+                counts[px[:3]] = counts.get(px[:3], 0) + 1
+            ground = max(counts, key=lambda c: counts[c])
+            xs = [x for y in range(h) for x in range(w)
+                  if rows[y][x][3] == 255
+                  and sum(abs(rows[y][x][i] - ground[i]) for i in range(3)) > 60]
+            assert xs, f"{label} shows nothing that is not its ground colour"
+            span = (max(xs) - min(xs) + 1) / w
+            assert span >= self.MARK_WIDTH_FLOOR, (
+                f"{label}'s mark spans {span:.0%} of the canvas width ({(1 - span) / 2:.0%} "
+                f"padding each side) — under the {self.MARK_WIDTH_FLOOR:.0%} floor, so in a "
+                "tab strip it reads as a small glyph on a slab (#11486). The artwork "
+                "carries its own padding; tools/build_site_icons.py crops it out rather "
+                "than shrinking the mark to fit it")
+
+        check_tile(self.ICON_PNG, (self.WEB / self.ICON_PNG).read_bytes())
+        for i, entry in enumerate(self._ico_entries((self.WEB / self.ICON_ICO).read_bytes())):
+            if not entry["is_png"]:
+                continue
+            w, h = entry["declared"]
+            check_tile(f"{self.ICON_ICO} entry {i} ({w}x{h})", entry["payload"])
+
+        # ...and apple-touch is the exception, asserted rather than skipped.
+        apple = (self.WEB / self.ICON_APPLE).read_bytes()
+        w, h, rows = self._png_pixels(apple)
+        for x, y in ((0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)):
+            assert alpha_of(rows[y][x]) == 255, (
+                f"{self.ICON_APPLE} is transparent at ({x},{y}) — iOS masks this file "
+                "itself, so pre-rounded corners render as dark notches on a light home "
+                "screen. It is the one icon that must stay a full-bleed square")
 
     def test_the_wordmark_is_never_used_as_an_icon(self):
         """`/logo.png` is a 400x244 wordmark — a tab renders it as a squashed bar.

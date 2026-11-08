@@ -394,6 +394,69 @@ DEFAULT_TR_TOP_K = 12
 TEMPORAL_LEG_PLACEMENTS = ("tail", "head")
 DEFAULT_TEMPORAL_LEG_PLACEMENT = "tail"
 
+#: #10538: the leg's NON-EVICTION guard switch — owner ruling 2026-11-07 made
+#: non-eviction a HARD CONDITION of the arm (dedupe to unique sessions, a
+#: per-session cap, never crop the anchor), so the guard is ON by default and
+#: this knob exists only to reproduce a PRE-RULING number byte-for-byte (the
+#: committed retention receipt is measured on the unguarded splice).
+#: ``TORTOISE_LME_TEMPORAL_LEG_NON_EVICTION=0`` (or ``off``/``false``/``no``)
+#: turns it off; anything else — including an absent or unreadable value —
+#: resolves ON, because a typo in a run's env must never silently waive a
+#: ruling. The stamp lands in ``temporal_leg_stats["non_eviction"]`` and in
+#: the run fingerprint, so a guarded row and an unguarded row are never
+#: mixed in one checkpoint.
+DEFAULT_TEMPORAL_LEG_NON_EVICTION = True
+
+#: Values that turn the guard OFF. Deliberately an explicit allow-list rather
+#: than "anything not truthy": the guard's default is ON, so a fail-open
+#: parse would turn a typo into a waiver of the ruling.
+_TEMPORAL_LEG_NON_EVICTION_FALSY = frozenset({"0", "off", "false", "no"})
+
+
+def resolve_temporal_leg_non_eviction(explicit: bool | None = None,
+                                      env: str | None = None) -> bool:
+    """Resolve the #10538 non-eviction guard: explicit arg > env > ON.
+
+    Fail-safe by construction in the direction the ruling requires: only an
+    explicit falsy value turns the guard off, so an absent, empty, mistyped
+    or unreadable value leaves a hard condition of the arm ENFORCED. An
+    explicit ``True``/``False`` wins over the environment (the caller's own
+    decision), which is the same precedence
+    :func:`resolve_temporal_leg_placement` uses.
+    """
+    if explicit is not None:
+        return bool(explicit)
+    if env is None:
+        return DEFAULT_TEMPORAL_LEG_NON_EVICTION
+    return str(env).strip().lower() not in _TEMPORAL_LEG_NON_EVICTION_FALSY
+
+
+def non_eviction_applied(trace: dict | None) -> bool:
+    """Did the #10538 guard ACTUALLY run on this row? — the GUARD's own answer.
+
+    ``temporal_leg_fusion_order``'s ``guard_trace["applied"]`` is the only
+    source. Deriving it from the knobs instead ("the switch resolved ON and the
+    placement is not ``head``") reports ``True`` on two shapes where the guard
+    never ran, because the guard is scoped to the DATE-WINDOW arm's tail
+    placement and to nothing else:
+
+    * the ``#2976`` ANCHOR arm — measured AS-IS, deliberately unguarded, and the
+      trace says so (``applied: False``, ``targeting: "anchor"``);
+    * an INERT leg — no picks (or weight 0), so the guard was never reached and
+      the fusion caller stamps ``applied: False`` on that path too (the key is
+      always present; only its VALUE distinguishes "ran" from "not needed").
+
+    The receipt is the ON/OFF reconstruction surface, so a field claiming
+    ENFORCEMENT on a row where nothing was enforced is exactly the false PASS
+    the deliberate scope declaration in ``temporal_leg_fusion_order`` exists to
+    prevent — a reader would take the anchor arm's published numbers as
+    guard-clean when they are unguarded by decision.
+
+    ``on`` (the resolved switch) stays reported separately, because the two
+    facts differ: the rule can be ON and not have applied to this arm.
+    """
+    return bool((trace or {}).get("applied"))
+
 
 def resolve_temporal_leg_placement(explicit: str | None = None,
                                    env: str | None = None) -> str:
@@ -1535,6 +1598,15 @@ def retrieve_for_question(
     temporal_leg_weight: float | None = None,
     temporal_leg_limit: int | None = None,
     temporal_leg_placement: str | None = None,
+    # ``temporal_leg_non_eviction`` (#10538, owner ruling 2026-11-07) is the
+    # arm's HARD CONDITION: the promotion may widen the set of evidence
+    # sessions the reader window holds, never trade one for another. ON by
+    # default; only an explicit falsy value (arg or
+    # ``TORTOISE_LME_TEMPORAL_LEG_NON_EVICTION=0``) reproduces the pre-ruling
+    # splice, which is what the committed retention receipt was measured on.
+    # ``None`` = env, resolved through :func:`resolve_temporal_leg_non_eviction`
+    # (one resolver, so the run fingerprint certifies the arm that ran).
+    temporal_leg_non_eviction: bool | None = None,
     # R6 (#1545): rerank knobs — the post-fusion cross-encoder + MMR stage,
     # OFF by default (the V3 baseline path is byte-identical; no rerank keys
     # off-path, D2). ``rerank`` tri-state: True/False explicit, None = env
@@ -2167,12 +2239,25 @@ def retrieve_for_question(
         _tl_placement = resolve_temporal_leg_placement(
             temporal_leg_placement,
             os.environ.get("TORTOISE_LME_TEMPORAL_LEG_PLACEMENT"))
+        # #10538 non-eviction guard (owner ruling 2026-11-07): resolved from the
+        # SAME env the fingerprint reads (one resolver, one answer), default ON.
+        _tl_non_eviction = resolve_temporal_leg_non_eviction(
+            temporal_leg_non_eviction,
+            os.environ.get("TORTOISE_LME_TEMPORAL_LEG_NON_EVICTION"))
+        _tl_guard_trace: dict[str, Any] = {}
         _tl_order, _tl_picks = temporal_leg_fusion_order(
             annotated, anchors=tr_constraint.anchors,
             window=effective_top_k, limit=_tl_limit,
             bucket_cap=DEFAULT_TEMPORAL_LEG_BUCKET_CAP,
             weight=_tl_weight, date_window=_tl_date_window,
-            placement=_tl_placement)
+            placement=_tl_placement, non_eviction=_tl_non_eviction,
+            guard_trace=_tl_guard_trace,
+            # the guard must judge the window the READER gets, i.e. the RUN's
+            # raw-chunk cap — the same value the pool is deduped with a few
+            # dozen lines below (``_dedup_pool(annotated, …)``). Passing this
+            # module's default instead would let the guard clear a pick that
+            # deletes a session from the real window (false PASS, #10538).
+            max_chunks_per_session=max_chunks_per_session)
         _tl_dated = sum(1 for h in annotated if h.get("session_date"))
         temporal_leg_stats = {
             "on": True,
@@ -2197,6 +2282,37 @@ def retrieve_for_question(
             # carry the arm (the same reason the CLAMPED budget above is
             # reported rather than the knob value).
             "placement": _tl_placement,
+            # #10538 non-eviction guard (owner ruling 2026-11-07): whether the
+            # rule was ENFORCED on this row, and — when it was — every pick it
+            # refused, with which of the three conditions refused it. The
+            # rejection list is the guard's own evidence: an empty leg whose
+            # cause is the guard reads ``non_eviction_guard`` below, and this
+            # block is where the ids come from.
+            #
+            # The two fields answer DIFFERENT questions and must not be
+            # collapsed: ``non_eviction`` is the RESOLVED SWITCH (the rule's
+            # state — True on the ``head`` counterfactual too, because the rule
+            # is ON there as well), while ``non_eviction_applied`` is whether
+            # the rule actually RAN on this row. It is read from the guard's
+            # own trace, never re-derived from the knobs: the guard runs only
+            # on the DATE-WINDOW arm's tail placement, so a knob-derived value
+            # would claim enforcement on the unguarded ``#2976`` anchor arm and
+            # on an inert leg. See :func:`non_eviction_applied`.
+            "non_eviction": _tl_non_eviction,
+            "non_eviction_applied": non_eviction_applied(_tl_guard_trace),
+            # WHICH target selected the picks — ``"window"`` (the #10538 arm the
+            # guard governs), ``"anchor"`` (the #2976 arm, unguarded by
+            # decision) or ``"none"``. It is what makes ``applied: False``
+            # legible: without it a scoped-out row and a row whose guard ran
+            # and admitted everything look the same in the receipt.
+            # ``or "none"`` keeps the DOCUMENTED three-value domain true at this
+            # surface even if a future caller builds the trace itself without
+            # stamping the inert value (``temporal_leg_order`` now always
+            # stamps it — review cycle 4).
+            "non_eviction_targeting": (_tl_guard_trace.get("targeting")
+                                        or "none"),
+            "non_eviction_rejected": list(
+                _tl_guard_trace.get("rejected") or []),
         }
         if _tl_picks:
             _tl_by_id = {h["id"]: h for h in annotated}
@@ -2205,7 +2321,7 @@ def retrieve_for_question(
             legs.append({"leg": "temporal", "ran": True, "degraded": False,
                          "reason": None, "count": len(_tl_picks)})
         else:
-            # honest trace reason — the six distinct empty-leg causes
+            # honest trace reason — the seven distinct empty-leg causes
             # (``no_window_candidates`` is the #10538 windowed miss)
             # (never launder a budget/anchor/weight miss as "no dates").
             legs.append({"leg": "temporal", "ran": True, "degraded": False,
@@ -2214,7 +2330,9 @@ def retrieve_for_question(
                              anchors=len(tr_constraint.anchors),
                              weight=_tl_weight,
                              budget=_tl_limit,
-                             date_window=bool(_tl_date_window)),
+                             date_window=bool(_tl_date_window),
+                            guard_rejected=len(
+                                _tl_guard_trace.get("rejected") or [])),
                          "count": 0})
 
     # ── deduped pool (the retrieval contract: ret["hits"] == pool) ──

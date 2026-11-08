@@ -5083,6 +5083,36 @@ def test_the_capstone_gate_change_selects_core_not_tier1():
     assert r["full"] is False, r
 
 
+def test_the_capstone_preregistration_gate_change_selects_core_not_tier1():
+    # #10982 review F2 (P2): the OTHER capstone gate,
+    # `tools/capstone_preregistration_check.py`, owns the arms in
+    # `tests/test_capstone_a_rows_10982.py` — the closed `REGISTERED_NON_BAR_ROWS`
+    # register, the completeness arms and the floor-clause comparators. That file
+    # was registered `core` ONLY (its three siblings are dual core + tier1), and
+    # `tools/` is a flat NON_PYTHON_PREFIXES entry matching no SOURCE_PATTERNS row,
+    # so a diff touching ONLY the gate came back `changed == []`, took `select()`'s
+    # docs-only early return and selected NO surface — the arms that pin the gate's
+    # own false-PASS fix never ran on the edit that changes it. Reachable, not
+    # hypothetical: §7 item 1 of the record says registering a further bar-less row
+    # is a TOOL change, i.e. exactly this diff.
+    #
+    # MEASURED before the rows (2026-11-07, `select()` in-process):
+    # `_sel(["tools/capstone_preregistration_check.py"])` -> surfaces=[],
+    # full=False, `test_capstone_a_rows_10982.py` ABSENT.
+    # Mutation check: removing the CORE_ALSO row fails assert 1; removing the
+    # `tier1` row fails the docs-only leg below.
+    r = _sel(["tools/capstone_preregistration_check.py"])
+    assert "core" in r["surfaces"], r
+    assert "test_capstone_a_rows_10982.py" in r["test_files"], r
+    assert r["full"] is False, r
+    # …and the docs-only leg: a PR that selects NO surface still runs the arms, via
+    # the curated `tier1` list — the case the `core` registration alone cannot cover
+    # (a surface's `test_files` only run when that surface is selected).
+    docs_only = _sel(["docs/architecture/S2-DECISION-SEAM.md"])
+    assert docs_only["surfaces"] == [], docs_only
+    assert "test_capstone_a_rows_10982.py" in docs_only["test_files"], docs_only
+
+
 def test_the_capstone_evidence_bundle_selects_core_not_tier1():
     # PR #9196 review P1: the S2 verdict's deciding artifacts are committed TEXT
     # — `s2-wiring-census.log` (the census output), `e2e-chain-probe.log` (the
@@ -16762,12 +16792,15 @@ def test_surface_audit_maps_tortoise_api_source_as_api_pin(tmp_path):
 
 
 def test_window_arm_receipt_edit_selects_eval():
-    """#10538 (fresh-context review, cycle 1, P1): the receipts a ruling rests on
-    must be under the gate.
+    """#10538 (fresh-context review, cycle 1, P1): the receipts an open verdict
+    is argued from must be under the gate.
 
     `docs/scoping/receipts/2026-11-03-10538-window-arm-retention.json` is a
-    COMMITTED build artifact: the owner ruling on #10538 (`window-exit` vs
-    `ab-head-ab`) and the #9097 exit measurement are argued from its numbers. A
+    COMMITTED build artifact: the still-open PLACEMENT verdict (tail vs head) and
+    the #9097 exit measurement are argued from its numbers. (The NON-EVICTION
+    question is NOT open — the owner ruled `window-exit` on 2026-11-07 and the
+    guard ships on — which is why this receipt is pinned to the PRE-RULING
+    splice; see `tools/longmem_eval/window_arm_baseline.py`.) A
     docs-only diff selects NO surface (tier 1), so before the exact-path
     SOURCE_PATTERNS entry a hand-edited receipt — or an instrument change that
     re-emits different numbers — ran nothing that gates. The instrument

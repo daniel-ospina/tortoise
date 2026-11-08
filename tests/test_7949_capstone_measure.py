@@ -4588,12 +4588,27 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # refusal. A hand-recheck did not hold across one commit, so the numbers
         # are pinned here instead. The sentence wraps over three lines and a row
         # scopes to ONE line, so the claim takes three rows.
+        # ⛔ RE-DERIVED at `#10982`, not offset: the A-row emitter-key drift arm added
+        # above `STEPS` moved it `:136` -> `:146`, and the same commit's additions
+        # inside the accounting block moved `_step_accounting` `:607` -> `:675` —
+        # TWO different deltas from one commit, which is why the numbers are read
+        # off the tree (`grep -n '^STEPS = ('` / `'^def _step_accounting('`) and
+        # never carried forward as an offset.
+        #
+        # ⛔ AND A THIRD DELTA, from the `origin/main` carry (#11331): `#11298`'s
+        # `door` run-block key registered in `_NON_MEASUREMENT_RUN_KEYS` put 15
+        # lines above the accounting block and moved `_step_accounting`
+        # `:675` -> `:690`. Measured off the tree again, not offset: 675 now reads
+        # `block = record.get(RECORD_STEPS_KEY)` and `grep -n '^def _step_accounting('
+        # tools/capstone_verdict_check.py` -> 690. The comment block above the tuple
+        # is where that reasoning has to live, so the shift cannot be avoided by
+        # shortening it — a line count above a cite moves the cite.
         ("E1-E5-PROOFS.md", 'declares `STEPS = ("S0"', (
-            ("136", 'STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", '
+            ("146", 'STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", '
                     '"S5", "S6")'),
         ), "capstone_verdict_check"),
-        ("E1-E5-PROOFS.md", "_step_accounting` (`:607`) refuses a GREEN row whose", (
-            ("607", "def _step_accounting("),
+        ("E1-E5-PROOFS.md", "_step_accounting` (`:699`) refuses a GREEN row whose", (
+            ("699", "def _step_accounting("),
         ), "capstone_verdict_check"),
         # ⛔ A SECOND DOCUMENT PRINTS THE SAME DECLARATION (#10601 review round 2).
         # `docs/00_index.md`'s capstone row cites this gate too, and it moved
@@ -4603,7 +4618,7 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # and the rows above covered ONE document. Every doc that prints a
         # `tools/*.py` number needs its own row here, not just the first one.
         ("docs/00_index.md", "declares the eight steps", (
-            ("136", 'STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", '
+            ("146", 'STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", '
                     '"S5", "S6")'),
         ), "capstone_verdict_check"),
         # ⛔ THE VET BLOCK'S OWN "BEFORE" CLAIM (#10833 review, P2 — the SECOND
@@ -7137,6 +7152,20 @@ def test_the_frozen_records_stale_E4_sentence_is_disclosed_and_not_edited():
 
     Non-vacuity: the pre-fix README carries no disclosure at all, so the README
     assertions red.
+
+    ⛔ AND THE `#11298` DISCLOSURE IS A SEPARATE ARM, because it was SILENTLY LOST once
+    (#11331). The `origin/main` carry resolved the conflicted record as "ours' blob
+    plus main's new TOP-LEVEL sections" — a method that, by construction, cannot
+    carry a change main made INSIDE an existing key. `#11298` appended a suffix to
+    `criteria[E4].post_registration_measurement` recording that **5 of 15** is the
+    row's figure at this head, read from the FROZEN-corpus receipt the probe SELECTS,
+    and the merge dropped it: the cell came out byte-identical to the pre-merge base
+    while `corpus_rows.E4.reconciles_with` and `PRE-REGISTRATION.md` §1.6.3 both went
+    on asserting the 5-of-15 figure. Nothing redded — arm (a) below only asserts the
+    2/15 sentence is PRESENT, which is true either way. Measured, then fixed, so this
+    arm pins the half that was lost: the frozen receipt the selector picks, the figure
+    it reads, and the cross-reference. It reds on the pre-fix cell (verified: that
+    cell carries neither `5 OF 15` nor `w2b-operator-2026-10-24-8503-b`).
     """
     doc = (PREREG.parent / "PRE-REGISTRATION.md").read_text()
     record = json.loads(PREREG.read_text())
@@ -7148,6 +7177,25 @@ def test_the_frozen_records_stale_E4_sentence_is_disclosed_and_not_edited():
         "discloses; re-cut the disclosure, do NOT edit the hash-pinned record")
     e4 = next(c for c in record["criteria"] if c["id"] == "E4")
     assert "edge_correct=2 of 15" in e4["post_registration_measurement"], e4
+
+    # (a2) …AND it carries the current-head disclosure `#11298` appended (#11331).
+    # A cell that satisfies (a) alone is the state a union merge produced by dropping
+    # this suffix, which is why the two halves are asserted apart.
+    cell = e4["post_registration_measurement"]
+    assert "5 OF 15" in cell, (
+        "criteria[E4].post_registration_measurement no longer names 5 of 15 as the "
+        "row's figure at this head — `corpus_rows.E4.reconciles_with` and "
+        "PRE-REGISTRATION.md §1.6.3 both assert that figure, so the record and the "
+        "document now describe different numbers. Restore the `#11298` disclosure "
+        "(do not delete the 2/15 sentence it sits beside) (#11331)")
+    assert "w2b-operator-2026-10-24-8503-b.json" in cell, (
+        "the E4 disclosure must name the FROZEN-corpus receipt the probe SELECTS by "
+        "corpus_hash (`select_e4_receipt()`), not only the non-frozen one whose 2/15 "
+        "it is disclosing — a figure with no receipt behind it is what the "
+        "reconciliation exists to prevent (#11331)")
+    assert "corpus_rows.E4.reconciles_with" in cell, (
+        "the E4 disclosure must point at the reconciliation record that explains why "
+        "2/15 and 5/15 are both true of different corpus revisions (#11331)")
 
     # (b) the bundle discloses it, in the section a reader of that E4 row lands in.
     section = readme.split("## E4 — the committed operator receipt", 1)[1]

@@ -169,12 +169,39 @@ scheduling it is follow-up work on #10912.
 
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — an environment
+# refusal must never wear a VERDICT code (#11342). The real hazard here is
+# `datetime.UTC` (3.11+), which this file reads AT CALL TIME (`_dt.UTC` inside
+# `fetch_queue_probe` and `_age_seconds`); without this guard an old interpreter
+# reaches a call and dies with an unattributable AttributeError instead of naming
+# the floor. 4 is free: `EXIT_OK` / `EXIT_FAILED` / `EXIT_USAGE` /
+# `EXIT_OWNER_GATED` below are the verdicts a wrapper branches on, and a refusal
+# that exited 1 would read to a caller as "the write failed".
+#
+# ⛔ `--help` IS PART OF THE NAMED INVOCATION ON PURPOSE. `verb` is a REQUIRED
+# positional (`census`/`check`/`apply`), so the bare path exits 2 with
+# "the following arguments are required: verb" — measured, and it is argparse's
+# own usage-error status, not this tool running. A refusal that names a command
+# which itself dies is the SECOND unattributed error this guard exists to
+# prevent. The census's `_expected_invocation` returns the bare path and its
+# assertion is a SUBSTRING test, so `--help` satisfies it while being the one
+# form that always resolves and needs no token. Do not trim it back.
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    print(
+        f"tools/ci_runner_topology.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/ci_runner_topology.py --help`",
+        file=sys.stderr,
+    )
+    raise SystemExit(4)
+
 import argparse
 import datetime
 import json
 import os
 import subprocess
-import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -265,6 +292,10 @@ EXIT_USAGE = 2
 #: Every planned write landed AND the pool was read back, but a residual this tool MUST NOT heal
 #: remains (it is owner-gated: `#6897/#9878`). Not a failure — re-run with `--strip-non-x64`.
 EXIT_OWNER_GATED = 3
+#: The interpreter refused before doing any work (#5128): this file needs >= 3.12. Deliberately
+#: distinct from every verdict above, so a wrapper branching on the code cannot read an environment
+#: refusal as "the write failed" / "a violation survived" / "an owner decision remains" (#11342).
+EXIT_INTERPRETER = 4
 
 #: "read the cap from the environment" — distinct from an explicit `None` (an ILLEGAL cap). Using
 #: `None` as the default would make "no cap configured" and "bad cap configured" one value, and the

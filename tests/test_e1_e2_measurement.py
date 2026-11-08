@@ -1517,12 +1517,14 @@ def test_a_matching_corpus_sha_pin_binds_without_a_path(monkeypatch):
 
 def test_the_real_pre_registration_schema_names_why_it_cannot_score_this_run(
         monkeypatch):
-    """#9507's artifact, read from DISK: every refusal AND the four floors it drops.
+    """#9507's artifact, read from DISK: every refusal AND every floor it drops.
 
     Pre-fix this run printed only `prereg-error=TypeError: e1 is absent`, which
     blames a malformed artifact and says nothing about the reasons it cannot be
-    this run's bar (a different corpus, a 30-Object floor against 25, and the four
-    `denominator_floors` keys this binding cannot evaluate). The artifact is the
+    this run's bar (a different corpus, a 30-Object floor against 25, and the
+    `denominator_floors` keys this binding cannot evaluate — four `e*` when this pin
+    was written, thirteen since `#10982` added the nine `A`-row floors to the same
+    block). The artifact is the
     COMMITTED `preregistration.json`, not a hand-reduced copy: a copy that kept only
     `e1_objects` could not see the drop this test exists to catch, and a copy cannot
     notice the record changing (#9513 review P2).
@@ -1530,7 +1532,17 @@ def test_the_real_pre_registration_schema_names_why_it_cannot_score_this_run(
     artifact = json.loads(_PREREG_ARTIFACT.read_text(encoding="utf-8"))
     # The floors are what this pin is about; if the record grows a key the probe
     # CAN read, or drops one, this is the line that says so.
-    assert sorted(artifact["denominator_floors"]) == [
+    #
+    # ⚠️ The pin owns the `e`-FAMILY, not the whole map. `#10982` registered the five
+    # `A`-rows in the SAME block — `denominator_floors` carries fourteen keys in two
+    # families, five `e*` and nine `a*` (PRE-REGISTRATION §3.7 "Floors, in one
+    # place"; §10.11), and the A-floors belong to rows THIS binding never scores. A
+    # whole-map equality would red this file every time an A-row floor is added, for
+    # a record change that cannot move an E verdict; partitioning by family (the
+    # `startswith("a")` partition `tests/test_capstone_a_rows_10982.py` already uses)
+    # keeps the discriminating half — a DROPPED or RENAMED `e*` key still reds here.
+    e_floors = sorted(k for k in artifact["denominator_floors"] if k.startswith("e"))
+    assert e_floors == [
         "e1_min_before_share", "e1_objects", "e2b_surviving_units",
         "e3_derived_nodes", "e5_rate_min_sentences"], artifact["denominator_floors"]
     assert artifact["corpus"]["path"] == "tests/eval/write_path"
@@ -1539,8 +1551,15 @@ def test_the_real_pre_registration_schema_names_why_it_cannot_score_this_run(
     assert "declared_path=tests/eval/write_path" in text, text
     assert "declared_floor=30 objects=25" in text, text
     assert "corpus-path" in text and "below-floor" in text, text
-    assert ("floor_unconsumed=e1_min_before_share,e2b_surviving_units,"
-            "e3_derived_nodes,e5_rate_min_sentences") in text, text
+    # DERIVED from the record, not hand-listed: the invariant this leg holds is that
+    # the probe names EVERY floor it cannot evaluate — the four `e*` keys beside
+    # `e1_objects` AND, since `#10982`, the nine `a*` ones. A hard-coded list would
+    # have to be edited beside the record (and would silently stop noticing a floor
+    # the probe dropped); deriving it means a key the record adds appears in the
+    # expectation and in the probe's own line together, or this assert reds.
+    unconsumed = ",".join(sorted(k for k in artifact["denominator_floors"]
+                                 if k != "e1_objects"))
+    assert f"floor_unconsumed={unconsumed}" in text, text
     assert "prereg-error=" in text, text    # the prose bar is not consumable
     assert "result=UNPREREGISTERED" in text, text
     findings, _ = check.check(text)

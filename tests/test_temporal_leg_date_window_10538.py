@@ -275,7 +275,13 @@ def test_the_budget_is_spent_below_the_reader_window_not_on_visible_ids():
 
     order, picks = temporal_leg_fusion_order(
         pool, anchors=(), window=window, limit=2,
-        date_window=("2023-04-10", "2023-04-20"))
+        date_window=("2023-04-10", "2023-04-20"),
+        # the SUBJECT here is the bucket-level exclusion (which buckets the
+        # budget lands on), so the arm is measured on the PRE-RULING splice:
+        # the #10538 non-eviction guard refuses these picks outright on this
+        # pool (they displace b1/c1), which would make the bucket question
+        # here unaskable. The guarded behaviour is asserted immediately below.
+        non_eviction=False)
 
     assert picks == ["d1", "e1"], (
         f"the budget was spent on a bucket the reader already holds: {picks}")
@@ -287,6 +293,23 @@ def test_the_budget_is_spent_below_the_reader_window_not_on_visible_ids():
         f"{[(p, bucket_of[p]) for p in picks]}")
     assert order != [c["id"] for c in pool], (
         "the windowed arm reported picks but moved nothing")
+
+    # ⛔ AND the ruling's gate on the same pool (owner decision 2026-11-07):
+    # those two net-new sessions are paid for by EVICTING b1/sB and c1/sC from
+    # the reader window, so the guarded arm refuses both and the fused order is
+    # byte-identical. Widening by two while dropping two is net-zero on
+    # distinct sessions and can trade a gold session for a non-gold one — the
+    # exact trade non-eviction forbids.
+    g_trace: dict = {}
+    g_order, g_picks = temporal_leg_fusion_order(
+        pool, anchors=(), window=window, limit=2,
+        date_window=("2023-04-10", "2023-04-20"), guard_trace=g_trace)
+    assert g_picks == [], g_picks
+    assert g_order == [c["id"] for c in pool], (
+        "a fully-refused arm must leave the fused order byte-identical")
+    assert [r["id"] for r in g_trace["rejected"]] == ["d1", "e1"], g_trace
+    assert all(r["reason"].startswith("evicts:")
+               for r in g_trace["rejected"]), g_trace
 
 
 def test_the_head_placement_arm_declines_on_an_unclustered_window():
@@ -578,7 +601,7 @@ def test_unattributed_slots_count_against_the_majority_they_are_not_excluded_fro
     base = [c["id"] for c in pool]
     order, picks = temporal_leg_fusion_order(
         pool, anchors=(), window=12, limit=2,
-        date_window=("2023-04-10", "2023-04-20"))
+        date_window=("2023-04-10", "2023-04-20"), non_eviction=False)
     assert picks == [], (
         f"5 attributed slots of a 12-wide window is not a majority "
         f"(5*2 < 12); the unattributed slots must count against it: {picks}")
@@ -593,8 +616,22 @@ def test_unattributed_slots_count_against_the_majority_they_are_not_excluded_fro
     ]
     order2, picks2 = temporal_leg_fusion_order(
         clustered, anchors=(), window=12, limit=2,
-        date_window=("2023-04-10", "2023-04-20"))
+        date_window=("2023-04-10", "2023-04-20"), non_eviction=False)
     assert picks2 == ["y1"], (
         f"7 of 12 slots in one session is a majority and the net-new session "
         f"must be promoted: {picks2}")
     assert order2 != base, "the windowed pick moved nothing on the control pool"
+
+    # ⛔ #10538 ruling (2026-11-07) — the SELECTION above is not the gate. On
+    # this control pool the only slot y1 can take is z1's, and z1/sZ holds
+    # exactly one visible slot, so promoting it DELETES sZ from the reader
+    # window. The guard therefore refuses the pick the denominator test just
+    # proved is selected: selection and admission are two different questions,
+    # and keeping both assertions on one pool is what pins that difference.
+    g_trace: dict = {}
+    g_order, g_picks = temporal_leg_fusion_order(
+        clustered, anchors=(), window=12, limit=2,
+        date_window=("2023-04-10", "2023-04-20"), guard_trace=g_trace)
+    assert g_picks == [], g_picks
+    assert g_order == base, "a fully-refused arm must move nothing"
+    assert g_trace["rejected"][0]["reason"] == "evicts:sZ", g_trace

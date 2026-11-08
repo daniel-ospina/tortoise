@@ -1049,3 +1049,281 @@ def test_a_node_that_becomes_SERVABLE_leaves_the_held_list():
     assert deleted_ids, "the second pass evicted nothing, so the arm is not exercised"
     assert not (deleted_ids & held_ids), (
         f"deleted AND reported as unservable: {sorted(deleted_ids & held_ids)}")
+
+
+def test_a_journalled_lane_graph_name_must_be_in_the_ownership_vocabulary(monkeypatch):
+    """#11373 P1 — the journal reclaims ONLY a name `_SWEEP_OWNED_PREFIXES` covers.
+
+    `owns_by_ownership_record` is a PREFIX predicate, and it is what BOTH halves of
+    the sweep apply: `_sweep_drop` deletes only names it covers, and the E2E-7 leak
+    census `_owned_survivors` counts through the same filter. So journalling a name
+    outside the vocabulary (`evict_…`, this fixture's pre-fix shape) bought the
+    PEER-protection half only — `_peer_journaled_graphs` reads journal names
+    prefix-blind — while the reclamation half stayed inert: the sweep put the graph
+    in `preserved` and then consumed the journal anyway, so a run interrupted before
+    its `finally:` leaked that graph PERMANENTLY, and the census could not even
+    report it.
+
+    ⛔ `tests/test_derived_names.py`'s raw-client census is not evidence about this: it
+    checks that a per-run `os.urandom` and a `_journal_append(` CALL appear in the same
+    block, never the vocabulary of the name journalled. This pin is what settles it.
+
+    Hermetic on purpose (no engine): the live suite `test_cache_eviction_evictor.py`
+    `allow_module_level`-skips without a URI, so a pin living there would not run in
+    the PR lane that this defect would have merged through — and it cannot be imported
+    here for the same reason, since the skip fires at import. So the fixture is COMPILED
+    from that file with its decorators and module-level skip removed, its three I/O
+    surfaces stubbed, and EXECUTED: the verdict is the name it actually journals versus
+    the name it actually mints, not a reading of its source text.
+    """
+    import ast
+    import os
+    from pathlib import Path
+
+    from tests._embedded import _SWEEP_OWNED_PREFIXES, owns_by_ownership_record
+
+    # The shape `test_cache_eviction_evictor.py`'s `lane` fixture builds INLINE (they
+    # must agree; the AST coupling at the bottom of this test asserts it).
+    name = f"test_evict_{os.urandom(6).hex()}"
+    # ⛔ No `name.startswith("test_")` row here: `name` is built with that prefix
+    # two lines up, so it was true by construction and could never red. The
+    # predicate below is the one that discriminates (the sweep's own
+    # `owns_by_ownership_record` against `_SWEEP_OWNED_PREFIXES`), and the
+    # executed COUPLING block at the bottom holds the fixture to the same name at
+    # runtime.
+    assert owns_by_ownership_record(name), (
+        f"{name!r} is OUTSIDE the ownership vocabulary {_SWEEP_OWNED_PREFIXES} — "
+        "journalling it reclaims nothing and leaks the graph on an interrupted run")
+
+    # The PRE-FIX shape, asserted as the thing that must stay unowned: if this ever
+    # flips, the fixture's prefix rationale has changed and this pin says so.
+    assert owns_by_ownership_record(f"evict_{os.urandom(6).hex()}") is False, (
+        "the bare `evict_` prefix is now ownership-covered — re-read #11373 P1 "
+        "before assuming the fixture's `test_` prefix is still load-bearing")
+
+    # ⛔ COUPLING — and it is EXECUTED, not read off the source. Three static drafts were
+    # each measured wrong here (#11373 review, three rounds), and the reason is the same
+    # every time: a static pass can only answer "what does the text say", while the
+    # property is "what NAME is journalled at runtime".
+    #   1. a whole-file substring — GREEN when the f-string moved to a helper that still
+    #      contained the line, RED when the local was merely renamed;
+    #   2. a set of identifier NAMES assigned an owned name somewhere in `lane` — GREEN
+    #      when an owned assignment was followed by an `evict_…` one, or when the two sat
+    #      in different branches, because it never asked which assignment wins;
+    #   3. a static pass over `Assign`-to-`Name` only — blind to `AnnAssign`, walrus,
+    #      tuple targets, `for`/`with`/`except as`, so every one of those rebound the name
+    #      to an unowned one with the pin still GREEN; and it never related the journalled
+    #      name to the name the graph is actually MINTED under, so renaming the mint local
+    #      leaked an unowned graph on EVERY run (teardown deleted a name never created).
+    # Every one of those is the same consequence: the journal is INERT for reclamation,
+    # `_sweep_drop` preserves the graph and consumes the record anyway, and the graph
+    # leaks permanently (#11373 P1).
+    # So this compiles `lane` on its own, stubs the three things it touches that would
+    # otherwise do I/O, and runs it: whatever the source looks like, the pin asserts what
+    # is JOURNALLED, what is MINTED, and that the two are the same owned, per-run name.
+    #
+    # ⛔ SCOPE, stated rather than implied: this pins the VOCABULARY half (an owned name),
+    # the per-run half, and that the journal names the graph that is minted. It does NOT
+    # pin WHERE the name is built — the sibling census owns the same-block half, and
+    # genuinely cannot see a helper extraction whose block keeps prose naming
+    # `os.urandom` (measured; #11182 masked only the ownership half). Extraction is not a
+    # leak by itself, so leaving it to the census is deliberate.
+    import sys
+    import types
+
+    live_src = (Path(__file__).resolve().parent / "test_cache_eviction_evictor.py").read_text(
+        encoding="utf-8")
+    module_ast = ast.parse(live_src)
+    assert any(isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == "lane"
+               for n in module_ast.body), (
+        "`test_cache_eviction_evictor.py` no longer defines a top-level `lane` fixture, "
+        "so this coupling cannot execute the block it pins — re-read #11373 P1 instead "
+        "of deleting it")
+    # Compile the module's IMPORTS, its defs and its LITERAL constants — but not the
+    # module-level `pytest.skip(allow_module_level=True)`, and not a non-literal constant
+    # (`TURN_INSTRUMENT = …[...]`, which would drag a real import in). The imports are
+    # included because the fixture file has `import os` at module level, and a helper that
+    # uses it is the NATURAL extraction — dropping them made that refactor die inside the
+    # helper and reported it as this probe's own breakage (measured). `_live_utils` is
+    # overridden after the exec, so the real one never reaches the fixture.
+    # Decorators say how the SUITE uses these objects, not what they build, so they go.
+    probe_body = []
+    for node in module_ast.body:
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            probe_body.append(node)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            node.decorator_list = []
+            probe_body.append(node)
+        elif isinstance(node, ast.Assign):
+            try:
+                ast.literal_eval(node.value)
+            except (ValueError, SyntaxError, TypeError):
+                continue
+            probe_body.append(node)
+    probe_module = ast.Module(body=probe_body, type_ignores=[])
+
+    # ONE ORDERED LOG, not two sets: the property is that the ownership record exists
+    # BEFORE the graph does. Reading two collections after `gen.close()` cannot tell
+    # "journalled in setup" from "journalled in the teardown" (measured: moving the call
+    # into `finally:` left the earlier draft GREEN), and it cannot see a MINT that
+    # precedes the journal — either way an interrupted run leaves a graph with no
+    # ownership record, which is #11373 P1 exactly.
+    events: list[tuple[str, str]] = []
+
+    class _Graph:
+        def query(self, *a, **k):
+            return None
+
+    class _FalkorDB:
+        def _record(self, name):
+            events.append(("mint", name))
+            return _Graph()
+
+        select_graph = _record
+        create_graph = _record
+
+    deletes: list[str] = []
+    redis_stub = types.ModuleType("redis")
+    # ⛔ VARIADIC, not `name`: `redis.delete` takes `*names`, and a one-argument stub let
+    # `client.delete(graph_name, "test_evict_a_live_peer")` through GREEN — destroying a
+    # peer's LIVE owned graph is exactly the #11373 harm, so the stub must see every name.
+    redis_stub.Redis = lambda *a, **k: types.SimpleNamespace(
+        delete=lambda *names, **k2: deletes.extend(names))
+    falkordb_stub = types.ModuleType("falkordb")
+    falkordb_stub.FalkorDB = lambda *a, **k: _FalkorDB()
+    live_utils_stub = types.SimpleNamespace(
+        service_host=lambda: "127.0.0.1",
+        docker_port=lambda: 6379,
+        docker_password=lambda: "",
+    )
+
+    import tests._embedded as embedded
+
+    def _journal_ok(name):
+        events.append(("journal", name))
+
+    monkeypatch.setitem(sys.modules, "redis", redis_stub)
+    monkeypatch.setitem(sys.modules, "falkordb", falkordb_stub)
+    monkeypatch.setattr(embedded, "_journal_append", _journal_ok)
+
+    # NOTE: no `from __future__ import annotations` node is injected here, and adding one
+    # is a no-op: `compile(..., dont_inherit=False)` picks up the CALLING module's future
+    # flags, and this file carries `from __future__ import annotations` at its own top, so
+    # the exec'd fixture's annotations are ALREADY lazy (measured: deleting the injection
+    # leaves this pin green). The earlier draft injected one and claimed the probe would
+    # otherwise die with a `NameError` — that claim did not reproduce; the injection was
+    # inert and left the assignment above as a dead store.
+    namespace: dict = {}
+    exec(compile(probe_module, "<lane fixture>", "exec"), namespace)
+    # The module's own `from tests import _live_utils` just bound the REAL helper, which
+    # would dial a live service. Replace it AFTER the exec — `lane` resolves it from the
+    # module globals at CALL time, so the stub is what the fixture actually sees.
+    namespace["_live_utils"] = live_utils_stub
+
+    def _run_lane():
+        """Drive the fixture to its `yield`; return the log AS OF that point."""
+        del events[:], deletes[:]
+        try:
+            gen = namespace["lane"]()
+            next(gen)
+            at_yield = list(events)
+            setup_deletes = list(deletes)
+            gen.close()
+        except (NameError, TypeError, AttributeError, StopIteration) as exc:
+            raise AssertionError(
+                f"this probe no longer reaches `lane`'s yield ({exc!r}) — extend the "
+                "stubs/probe above, do not drop the pin") from exc
+        assert events == at_yield, (
+            "`lane`'s TEARDOWN minted or journalled: the ownership record must be "
+            "written in the setup path, because `finally:` does not run on an "
+            f"interrupted run — the teardown added {events[len(at_yield):]}")
+        assert setup_deletes == [], (
+            f"`lane` DELETED {setup_deletes} during setup — deleting is the teardown's "
+            "job; a setup-path delete would drop a graph whose record it still needs")
+        return at_yield
+
+    first_run = _run_lane()
+    mints = [name for kind, name in first_run if kind == "mint"]
+    assert len(mints) == 1, (
+        f"`lane` minted {len(mints)} graphs ({mints}) — this probe relates ONE mint to "
+        f"its journal record: measured {first_run}")
+    minted_name = mints[0]
+    # The PROPERTY, not an exact sequence: a second journal of the SAME name is legal and
+    # idempotent (`tests/_embedded.py`: "Duplicate entries (per-test seam re-appends) are
+    # idempotent — dedupe once"), so requiring `["journal", "mint"]` exactly would red a
+    # correct fixture. What must hold is that the record exists BEFORE the graph does.
+    before_mint = first_run[:first_run.index(("mint", minted_name))]
+    assert ("journal", minted_name) in before_mint, (
+        "`lane` must JOURNAL the graph name BEFORE it MINTS the graph — an interrupted "
+        "run must still leave the ownership record the sweep reads: measured "
+        f"{first_run}")
+    assert owns_by_ownership_record(minted_name), (
+        f"`lane` mints {minted_name!r}, which is OUTSIDE the ownership vocabulary "
+        f"{_SWEEP_OWNED_PREFIXES} — `_sweep_drop` preserves it and consumes the journal "
+        "anyway, so an interrupted run leaks it permanently (#11373 P1)")
+    assert deletes == [minted_name], (
+        f"`lane`'s teardown deleted {deletes}, not the graph it created "
+        f"({minted_name!r}) — deleting a name that was never created leaves the real "
+        "graph behind while looking cleaned up (#11373 P1)")
+    # The SET, not just "the minted name is in there": `_sweep_drop` DETACH+DELETEs every
+    # journalled name the vocabulary covers (`unique = dict.fromkeys(names)` → `owned` →
+    # `_drop_one_graph`), so a name this fixture journals but never creates is still
+    # dropped at session end — and if it names a live peer's graph, that peer's graph is
+    # destroyed. Measured green without this arm (an extra `_journal_append("test_…")`
+    # after the mint). A duplicate journal of the SAME name stays legal.
+    journalled_names = {name for kind, name in first_run if kind == "journal"}
+    assert journalled_names == {minted_name}, (
+        f"`lane` journalled {sorted(journalled_names)} but minted only {minted_name!r} — "
+        "the sweep drops EVERY owned name in the journal, so journalling a graph this "
+        "fixture never created can delete a peer's live graph (#11373 P1)")
+
+    # Compare MINT to MINT. Reading the second run's first EVENT compared a decoy journal
+    # against the first run's mint, so a FIXED name passed whenever anything else was
+    # journalled first (measured); and an empty second run raised IndexError instead of
+    # asserting. Both are fixed by deriving the second run's mint explicitly.
+    second_mints = [name for kind, name in _run_lane() if kind == "mint"]
+    assert second_mints, (
+        "`lane`'s second invocation minted no graph at all — the per-run arm cannot tell "
+        "a FIXED name from a cached one unless a second run mints (#11373 P1)")
+    assert second_mints[0] != minted_name, (
+        f"`lane` minted {minted_name!r} twice — the name is FIXED, not per-run, so two "
+        "concurrent sessions DETACH each other's live writes (#11373 P1)")
+
+    # ⛔ A CALL IN THE RIGHT POSITION IS NOT A RECORD. `_journal_append` raises
+    # `RuntimeError` by design when the write fails, so the caller drops what it created
+    # (`tests/_embedded.py`, #3214) — and a fixture that swallows that and mints anyway
+    # leaves an UNOWNED graph, the same permanent leak. The stub above never fails, so a
+    # drive with a raising stub is what actually pins the "stop at the first unowned
+    # mint" contract (measured: the swallowing shape was GREEN without this drive).
+    def _journal_fails(name):
+        raise RuntimeError(f"journal write failed for {name!r}")
+
+    monkeypatch.setattr(embedded, "_journal_append", _journal_fails)
+    # ⛔ AND every namespace binding that ALIASED the happy-path stub — BY IDENTITY, not
+    # by name. The module attribute covers an in-function `from tests._embedded import
+    # _journal_append` (read at CALL time), but a fixture that hoists that import froze
+    # the HAPPY-path stub into the exec'd namespace, so patching only the module left
+    # this drive calling the stub — and a correct fixture was then accused of minting
+    # after a failed journal (measured). A name-keyed rebind (`setitem(namespace,
+    # "_journal_append", …)`) covered only the literal key: the same hoist spelled
+    # `as _lane_journal`, or `_LANE_JOURNAL = _journal_append`, freezes the SAME object
+    # under another key and the drive stayed falsely RED (measured on a CORRECT fixture).
+    # Swapping every value that `is` the stub is spelling-independent by construction.
+    rebound = [key for key, value in namespace.items() if value is _journal_ok]
+    for key in rebound:
+        monkeypatch.setitem(namespace, key, _journal_fails)
+    del events[:], deletes[:]
+    try:
+        gen = namespace["lane"]()
+        next(gen)
+    except RuntimeError:
+        pass
+    else:
+        gen.close()
+        raise AssertionError(
+            "`lane` MINTS a graph even when `_journal_append` raises — a swallowed "
+            "journal failure leaves an UNOWNED graph the sweep preserves and can never "
+            "report (#11373 P1, tests/_embedded.py::_journal_append)")
+    assert not [e for e in events if e[0] == "mint"], (
+        f"`lane` created {events} after the journal write failed — no graph may exist "
+        "without an ownership record (#11373 P1)")

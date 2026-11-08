@@ -1366,8 +1366,9 @@ SOURCE_PATTERNS = {
              # above. The suite is registered on `eval` below.
              "tools/operator_receipt_check.py",
              # #10538 (fresh-context review P1): the window arm's RETENTION
-             # receipt is a COMMITTED build artifact whose numbers a ruling and
-             # the #9097 exit measurement are argued from, and a docs-only diff
+             # receipt is a COMMITTED build artifact whose numbers the PLACEMENT
+             # verdict (tail vs head — still open) and the #9097 exit measurement
+             # are argued from, and a docs-only diff
              # selects NO surface — so a hand-edited receipt, or an instrument
              # change that re-emits different numbers, ran nothing that gates.
              # Registering the TEST file alone does not fix this half (the
@@ -2445,6 +2446,24 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # this is a cost/home fix, not a hole fix. Pinned by
              # tests/test_ci_selection.py::test_the_capstone_gate_change_selects_core_not_tier1.
              "tools/capstone_verdict_check.py",
+             # #10982 review F2: the OTHER capstone gate — the pre-registration
+             # checker (`tools/capstone_preregistration_check.py`), which owns the
+             # completeness arms, the closed `REGISTERED_NON_BAR_ROWS` register and
+             # the floor-clause comparators. `tools/` is a flat
+             # NON_PYTHON_PREFIXES entry, so a diff touching ONLY this file came
+             # back `changed == []`, took `select()`'s docs-only early return and
+             # selected NO surface — while the arms that pin its new behaviour live
+             # in `tests/test_capstone_a_rows_10982.py`, which is `core`-registered
+             # and NOT in the `tier1` curated list (measured before this row:
+             # `select(['tools/capstone_preregistration_check.py'])` ->
+             # surfaces=[], full=False, `test_capstone_a_rows_10982.py` ABSENT).
+             # That is the reachable class, not a hypothetical one: §7 item 1 of the
+             # record says registering a further bar-less row IS A TOOL CHANGE, and
+             # the tool change is exactly this diff. Same #1349/#3332/#3616
+             # silent-drop class and same remedy as
+             # `tools/capstone_verdict_check.py` above, so `core` is the right lane
+             # (its pins are hermetic: markdown/JSON/YAML parses, no DB).
+             "tools/capstone_preregistration_check.py",
              # #4030: `supabase/config.toml` is the committed LOCAL-stack config,
              # and every env var it resolves by `env(NAME)` substitution must be
              # declared in `.env.example` — the guard for that pair
