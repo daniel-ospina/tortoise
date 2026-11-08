@@ -686,11 +686,22 @@ test("a THROW out of the resolver is `refused`, not an `inert` latch", async () 
   // block claimed it did. A NUL command throws identically on every turn, so
   // "turn 2 returns undefined" is true under either behaviour — adding
   // `inertLatched = true` to the catch-all (with no breadcrumb) left the whole
-  // suite green, 23/23. The no-latch invariant for this class is owned by
+  // suite green, 23/23.
+  //
+  // ⛔ AND NOTHING ELSE OWNS IT EITHER (measured, round 4). The row
   // `a TRANSIENT CLI failure does not latch, and writes no install breadcrumb`
-  // above, whose fake CLI fails ONCE and then injects — a shape a
-  // deterministic NUL command cannot express. Assert only what is observable
-  // here rather than vouching for coverage this row does not have.
+  // does NOT cover this class: it drives the SHARED `refused` branch, where a
+  // latch is caught (21 pass / 2 fail). A latch written INSIDE the catch block
+  // is caught by nobody — `verdict = {status:"refused",…}; inertLatched = true;`
+  // there leaves the suite green 23/23, which is why an earlier version of this
+  // paragraph was wrong to name that row as the owner while citing the very
+  // measurement that disproved it. This is a KNOWN RESIDUAL with no owner.
+  // It is not a hole in the shipped behaviour (the catch block does not latch);
+  // it is a hole in the ability of the suite to catch someone making it latch.
+  // Closing it needs a transient resolver throw — a stub that throws on turn 1
+  // and answers on turn 2 — which this file does not yet have.
+  // Assert only what is observable here rather than vouching for coverage this
+  // row does not have.
   assert.equal(
     existsSync(join(crumbs, "pi-install.json")),
     false,
