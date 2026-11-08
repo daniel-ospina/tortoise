@@ -645,7 +645,7 @@ git grep -n 'create_operator' -- tortoise/extractor_v2.py                 # :902
 # A1 (§1) — the declaration reads, and nothing production writes it
 .venv/bin/python3 -m tortoise pack validate packs/dev      # 6 declared hierarchies, exit 0
 git grep -n apply_hierarchy_edges                          # 9 in the test file + __all__ + def
-git grep -n plan_hierarchy_edges                           # 9 in the test file + :59/:78/:353/:447
+git grep -n plan_hierarchy_edges                           # 9 in the test file + :59/:78/:365/:459
 git grep -nE '(^|[^[:alnum:]_])(create_edge|create_about_edge|create_operator)[[:space:]]*\(' \
   tortoise/extractor_v2.py                                 # no output, exit 1 — the class must NOT
                                                           # exclude `.`: a dot-EXCLUDING one exits 1 on
