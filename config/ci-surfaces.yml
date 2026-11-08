@@ -4285,6 +4285,18 @@ surfaces:
   # file pins it. Hermetic: no DB, no network, no `gh`; every surface is a fake or
   # a replayed snapshot.
   - test_next_work.py
+  # #10951: the queue consumer's POPULATION guard — `tools/next_work.py` drives the
+  # fleet's ONE work-unit rule (`POOL_JQ` in agent-infra's `refresh-candidates.sh`)
+  # by extracting and EXECUTING it, so a container (`epic:`, `design(…)`, `coord:`,
+  # `measure(…)`) or a declared `standing-constraint` is never handed a dispatch
+  # command. This file pins that seam: the two surfaces withhold the SAME rows over
+  # one fixture, every container spelling the repo emits is withheld while the
+  # bare-word collisions (`Measure …`, `lane-actions: …`) stay pickable, an
+  # unreadable rule withholds EVERY row rather than none, a replay without verdicts
+  # is INCOMPLETE, and the off-switch is reported as OFF instead of passing for a
+  # measurement. Hermetic apart from `jq` (which every runner carries): no DB, no
+  # network, no `gh`, no agent-infra checkout — the rule is supplied as bytes.
+  - test_10951_population.py
   # #6884: pins the `uri_requiring` declaration (re-derived BEHAVIOURALLY — it
   # runs the failing `pytest --collect-only` with an EMPTY TORTOISE_DB_URI and
   # compares) and
