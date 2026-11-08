@@ -192,11 +192,16 @@ def _in_scope(target: Path, root: Path) -> bool:
 def _dead_reason(lines: list[str], start: int, end: int | None) -> str | None:
     """The reason a citation is dead, or None when it lands on text."""
     last = end if end is not None else start
-    if start < 1 or last > len(lines):
+    if start < 1 or start > len(lines) or last > len(lines):
         # Name the bound that is ACTUALLY outside the file. For a `:1-99` range
         # against a 3-line file the dead end is 99, so reporting `start` would
         # point a fixer at line 1 — the one line that is fine.
-        bad = start if start < 1 else last
+        # ⛔ THE START IS GATED AGAINST THE FILE TOO (measured, #11559 review).
+        # An INVERTED range — `:9-3` on a 3-line file — puts the START past EOF
+        # while `last` is INSIDE it, so testing only `last` fell through to
+        # `lines[start - 1]` and raised IndexError: a traceback naming no
+        # citation at all, from a typo a reader can easily type.
+        bad = start if (start < 1 or start > len(lines)) else last
         cited = f":{start}-{end}" if end is not None else f":{start}"
         return (
             f"line {bad} is outside the file "
@@ -333,6 +338,29 @@ def test_the_guard_reports_a_pointer_that_lands_on_whitespace(tmp_path: Path):
 
     assert len(problems) == 2, problems
     assert all("line 2 is BLANK" in p for p in problems), problems
+
+
+def test_the_past_eof_arm_handles_an_inverted_range_without_crashing():
+    """An INVERTED range (`:9-3`) puts the START past EOF and the END inside it.
+
+    The past-EOF gate used to test only `last`, so this shape fell through to
+    `lines[start - 1]` and raised IndexError — a traceback that names NO citation,
+    from a typo a reader can type (`:9-3`, `:5-0`). It must report instead, blaming
+    the START, which is the bound actually outside the file.
+    """
+    inverted = _dead_reason(["a", "", "c"], 9, 3)
+    assert inverted is not None, "an inverted range must not be reported healthy"
+    assert "line 9 is outside the file" in inverted, inverted
+
+    # The ordinary past-EOF range still blames the END — the bound that is out.
+    past_end = _dead_reason(["a", "", "c"], 1, 99)
+    assert past_end is not None and "line 99 is outside the file" in past_end, past_end
+
+
+def test_the_past_eof_arm_reports_a_zero_start():
+    """`\u200b:0` is outside the file at the START; it must name 0, not crash."""
+    zero = _dead_reason(["a", "", "c"], 0, None)
+    assert zero is not None and "line 0 is outside the file" in zero, zero
 
 
 def test_the_guard_ignores_targets_outside_its_declared_scope(tmp_path: Path):
