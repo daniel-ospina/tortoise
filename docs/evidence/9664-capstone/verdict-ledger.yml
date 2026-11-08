@@ -152,8 +152,14 @@
 #         half is open
 #         because requiring shell-shaped arguments from
 #         `echo`/`printf`/… must first be measured against the accepted
-#         `… && echo PASS`. FIVE carriages, all tracked in #11520 and all pinned —
-#         the list is enumerated because an unlisted carriage reads as closed;
+#         `… && echo PASS`. SIX carriages are enumerated above — this list's own
+#         numbering (1)–(6), i.e. the five inert-data positions plus (6)'s FALSE
+#         PASS — all tracked in #11520 and all pinned, the list being enumerated
+#         because an unlisted carriage reads as closed. ⛔ The FIVE in the pin's
+#         docstring (`test_the_known_residual_false_PASSes_are_pinned_as_OPEN`,
+#         "FIVE carriages remain open") is a DIFFERENT axis, not a disagreement: it
+#         numbers by ROOT, and its root 6 (`set -o <invalid>`) is CLOSED, whereas
+#         root 6 of THIS list is the reader/sink head declared above;
 #       - a `-c`/`-e` script body is never TRUSTED, and the ATTACHED spelling is
 #         REFUSED: `bash -c'uv run pytest tools/x.py'` AND
 #         `bash -c'NOT RUN - see tools/x.py'` are both invalid, with or without an

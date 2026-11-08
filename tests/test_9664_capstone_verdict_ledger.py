@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -1813,6 +1814,63 @@ def test_the_assignment_carriage_is_open_and_declared(tmp_path):
         "the ledger no longer declares the assignment carriage — a carriage that "
         "is open but UNLISTED reads as closed, which is the drift this pin exists "
         "to prevent"
+    )
+
+
+def test_the_carriage_total_is_the_list_it_summarises():
+    """The arm's stated total must equal its own enumerated ordinals.
+
+    ⛔ MEASURED, review of `4f9209849b`: the ledger enumerated `(1)`–`(6)` — the
+    sixth added as a FALSE PASS, deliberately listed because "an unlisted carriage
+    reads as closed" — while the paragraph that summarises the arm still said
+    "FIVE carriages". Nothing reddened: `test_the_assignment_carriage_is_open_and
+    _declared` asserts the ORDINAL ("`NAME=value` is the FIFTH carriage"), never
+    the total, so the summary was the one number in the artifact with no reader.
+    An UNDERCOUNTED total is the same harm as an unlisted entry by a shorter
+    route: a reader who trusts the number has no reason to look for an entry
+    above it.
+
+    Nothing is hard-coded: the ordinals and the total are both READ from the
+    ledger, so adding a `(7)` fails here until the summary says SEVEN. Both
+    anchors are asserted, so a reworded section fails loudly instead of silently
+    checking nothing.
+    """
+    text = LEDGER.read_text(encoding="utf-8")
+    start_anchor = "(1) a later RUNNER-HEADED segment"
+    assert start_anchor in text, (
+        "the carriage section moved — update this pin's anchor, do not delete the "
+        "pin: the total it checks is what reads as 'complete' to a reader"
+    )
+    section = text[text.rindex("\n", 0, text.index(start_anchor)) + 1 :]
+
+    ordinals = [int(m.group(1)) for m in re.finditer(r"(?m)^\s*#\s*\((\d)\)\s", section)]
+    assert ordinals, (
+        "no numbered carriage markers found in the ledger section — the "
+        "enumeration itself is gone, so the total cannot be checked"
+    )
+    assert ordinals == list(range(1, len(ordinals) + 1)), (
+        f"the carriage list is no longer numbered 1..N consecutively: {ordinals!r}"
+    )
+
+    spelled = {
+        "ONE": 1, "TWO": 2, "THREE": 3, "FOUR": 4, "FIVE": 5,
+        "SIX": 6, "SEVEN": 7, "EIGHT": 8, "NINE": 9, "TEN": 10,
+    }
+    summary = re.search(r"\b([A-Z]+) carriages are enumerated above", section)
+    assert summary, (
+        "the arm's closing summary no longer states a total — reword it back or "
+        "update this pin, but a summary that says no number cannot be checked "
+        "and the enumeration then reads as whatever the reader assumes"
+    )
+    claimed = spelled.get(summary.group(1))
+    assert claimed is not None, (
+        f"the summary's total {summary.group(1)!r} is not a number this pin reads "
+        "(extend the map, do not delete the pin)"
+    )
+    assert claimed == len(ordinals), (
+        f"the arm's summary claims {summary.group(1)} carriages but the section "
+        f"enumerates {len(ordinals)} — a total that undercounts its own list is "
+        "how a listed carriage reads as closed"
     )
 
 
