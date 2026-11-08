@@ -1599,12 +1599,19 @@ def test_a_long_path_is_truncated_in_the_error_line(tmp_path):
     assert "…" in proc.stderr, proc.stderr
 
 
-def _refusal_exit_status(exc: ast.expr | None) -> int | None:
+def _refusal_exit_status(exc: ast.Call) -> int | None:
     """The PROCESS status a guard's `raise SystemExit(...)` leaves behind (#11342).
+
+    The caller has ALREADY pinned the shape this function is handed — a one-argument
+    `raise SystemExit(<msg>)` with no keywords (the assertions above the only call
+    site) — so the no-argument spellings are not this function's business: a
+    `SystemExit()` guard is refused there, by name, before it reaches here. Guarding
+    for them here as well was an unreachable branch behind an assert, which is why
+    it is gone rather than mirrored.
 
     Mirrors CPython's own conversion — `.code` becomes a status via `0 if code is
     None else (code if isinstance(code, int) else 1)` — and the OS then keeps
-    only the low 8 bits. Both steps matter: `SystemExit()`, `SystemExit(None)`,
+    only the low 8 bits. Both steps matter: `SystemExit(None)`,
     `SystemExit(False)`, `SystemExit(0)`, `SystemExit(256)` and `SystemExit(768)`
     all leave the process at **0**, so a bare `code != 0` would report a guard
     that prints the full refusal and then exits CLEAN as passing.
@@ -1624,8 +1631,6 @@ def _refusal_exit_status(exc: ast.expr | None) -> int | None:
     and the refusal would be a `NameError` traceback (`EXIT_INVALID` is assigned
     at :151 under a guard at :113), which the census reds.
     """
-    if not (isinstance(exc, ast.Call) and exc.args):
-        return 0  # `raise SystemExit` / `SystemExit()` leaves `.code` as None
     arg = exc.args[0]
     # An f-string is a MESSAGE, and CPython prints a str argument then exits 1.
     # `raise SystemExit(f"…")` is the shape both pinned tools use.
