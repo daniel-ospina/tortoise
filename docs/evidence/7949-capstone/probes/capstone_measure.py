@@ -491,9 +491,12 @@ DOOR_PINNED_ON = (("TORTOISE_S4_DELTA", "1"), ("TORTOISE_JSON_MODE", "1"),
                   # fixtures — measured), so the pin makes the population
                   # insensitive to the shell without moving a number.
                   ("TORTOISE_IDENTIFIER_TOKENS", "1"),
-                  # the union that absorbed `#11449` (`91dbc9a88`): nine capture-path
-                  # modules read this switch, and its ABSENT state is NOT the neutral one
-                  # to inherit — the code resolves `env_flag(SWITCH, True)`, so an ambient
+                  # the union that absorbed `#11449` (`91dbc9a88`): `extractor_v2` is
+                  # the ONLY module that reads this switch (`_state_value_verbatim_enforced`,
+                  # the module's one `env_flag` read — the nine modules the closure test
+                  # names are the path it SCANNED, not the readers), and its ABSENT state is
+                  # NOT the neutral one to inherit: the code resolves
+                  # `env_flag(SWITCH, True)`, so an ambient
                   # `=0` DISARMS the write path's verbatim-value refusal (a rewritten
                   # value is then WRITTEN and the resurrection guard cannot fire), which
                   # changes the population under a header that would still claim the door

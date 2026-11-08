@@ -1373,8 +1373,8 @@ place a machine reads it.
   be either observed or witnessed **idle** with a basis. The conditional set is read from this record
   at the pre-registration commit; a run log may not declare it.
 - **Why it is not a relaxation**: `S2.3` structurally cannot run on a corpus whose S2 map types every
-  candidate — `_collect_classify_items` (`tortoise/extractor_v2.py:11174-11196`) collects only
-  kind-missing/`unclassified` candidates and both passes sit behind `if items:` (`:13058`, `:13207`).
+  candidate — `_collect_classify_items` (`tortoise/extractor_v2.py:11098-11120`) collects only
+  kind-missing/`unclassified` candidates and both passes sit behind `if items:` (`:12982`, `:13131`).
   The old rule therefore could not be satisfied by **any** legitimate run of the registered corpus,
   so the gate could not return a verdict at all (§11.2's four ordered refusals). Every one of the
   eight still has to be accounted for, and an idle claim needs the run's own four facts — flag ON,
@@ -1719,11 +1719,19 @@ re-cut from the resolved document (§8), and no committed verdict is re-scored.
   metric, a denominator or a threshold — the operative rule is unchanged, which is why this is a
   §10.14 record rather than a `## Deviations` entry under §8.
 - **The union also pins one switch the base was red on.** `91dbc9a88` introduced
-  `TORTOISE_STATE_VALUE_VERBATIM`, read by nine capture-path modules and resolved `env_flag(SWITCH,
-  True)`; its ABSENT state is not the neutral one to inherit (an ambient `=0` disarms the write
+  `TORTOISE_STATE_VALUE_VERBATIM`, resolved `env_flag(SWITCH, True)` in
+  `extractor_v2._state_value_verbatim_enforced` — the ONE module that reads it; the nine
+  modules the door's closure test names are the capture path it SCANNED, not the readers.
+  Its ABSENT state is not the neutral one to inherit (an ambient `=0` disarms the write
   path's verbatim-value refusal), so it is pinned to the shipped default in the probe's
   `DOOR_PINNED_ON` and in this record's `door.acceptance_arm.pinned_to` — the door's C2 closure
   otherwise refuses the run (`test_every_env_var_the_capture_path_reads_is_accounted_for`).
+- **§10.5 is deliberately LEFT FROZEN, and unchanged by this commit.** Its prose still cites
+  `:11098-11120` and the gates `:12982`/`:13131` — the values it recorded for its own move. Each
+  §10.N freezes ONE move (see §10.10's tail), so re-pointing it here would make one entry describe
+  two heads; the fact that no pin reads a §10 entry is a convenience, not a licence. Where a §10
+  entry is BELIEVED wrong about an earlier move, the correction belongs to **#11425**'s set, not to
+  this re-derivation.
 - **What moved: nothing else.** No metric, denominator, threshold, class set or corpus pin is
   touched: the values this record freezes are unchanged and only line citations move.
   `document_sha256` is re-cut in this same commit, per §8's rule for *any* edit to this file.

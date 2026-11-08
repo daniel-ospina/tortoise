@@ -5190,11 +5190,35 @@ def test_the_pre_registration_cites_the_classify_sites_the_tree_actually_has():
             # the record states the condition in one folded scalar; the RANGE and
             # the two gates are the document's table/text, not the record's.
             continue
-        assert f"tortoise/extractor_v2.py:{collector}-{end}" in text, (
-            f"{doc_name} does not cite the collector's extent as "
-            f"tortoise/extractor_v2.py:{collector}-{end} (the `def` through "
-            f"`return items`) — a range that runs past the body names the next "
-            "function's lines")
+        # ⛔ THE EXTENT IS BOUND PER LIVE CARRIER, for the same reason the gates
+        # below are (review round 2, P1): there are two live carriers — the §9
+        # provenance row and §11.1's prose — so a whole-document `in text` check is
+        # satisfied by whichever ONE of them is right. Measured at
+        # `a4b5fe28c`: mutating the §11.1 extent alone (`:11174-11196` ->
+        # `:11175-11196`) left this leg `1 passed`, and so did mutating the §9 row's
+        # end alone; only a gate cite in the same sentence red it. The pin a
+        # re-derivation leans on has to fail for the carrier that is wrong.
+        extent_carriers = [block for block in _live_blocks(text)
+                           if "_collect_classify_items" in block]
+        assert extent_carriers, (
+            f"{doc_name} has no live (non-§10) block naming `_collect_classify_items` "
+            "— the collector cite must sit in live prose, not only in a change-control "
+            "entry that `_without_change_history` strips")
+        # A carrier that names the collector's EXTENT must name the right one. (A
+        # carrier that names only the single line — the `steps:` condition's folded
+        # scalar does — makes no extent claim, so it is not held to this.)
+        ranged = [block for block in extent_carriers
+                  if re.search(r"extractor_v2\.py:\d+-\d+", block)]
+        assert ranged, (
+            f"{doc_name} names `_collect_classify_items` but never its extent "
+            f"(tortoise/extractor_v2.py:{collector}-{end}) — the `def` through "
+            "`return items` is the claim §11's argument rests on")
+        for block in ranged:
+            assert f"tortoise/extractor_v2.py:{collector}-{end}" in block, (
+                f"{doc_name}: a live carrier naming `_collect_classify_items` cites "
+                f"an extent that is not tortoise/extractor_v2.py:{collector}-{end} "
+                "(the `def` through `return items`) — a range that runs past the "
+                "body names the next function's lines")
         # ⛔ EVERY LIVE CARRIER MUST NAME BOTH GATES, not just one of them anywhere
         # in the file. With two live carriers (the §9 provenance row and §11.1's prose)
         # a single whole-document check is satisfied by whichever one is correct,
