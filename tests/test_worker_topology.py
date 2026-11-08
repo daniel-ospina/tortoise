@@ -799,6 +799,13 @@ _AGREEMENT_TABLE: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
     (("uvicorn", "app:app", "--workers", "0"), {}),
     (("uvicorn", "app:app", "--workers", "-2"), {}),
     (("uvicorn", "app:app", "--reload"), {}),                   # always one worker
+    # ⛔ `--reload` never changes the COUNT — it changes the VERDICT
+    # (`is_multi_worker` checks the reload arm first). Pinned at a count above 1
+    # so both arms must keep reporting the requested 4 while the banner reports
+    # the ONE child uvicorn actually serves; the banner needs its own reload line
+    # precisely because this number is not the topology.
+    (("uvicorn", "app:app", "--reload", "--workers", "4"), {}),
+    (("uvicorn", "app:app", "--reload", "--workers", "4"), {"WEB_CONCURRENCY": "3"}),
     # ⛔ The flag is FINAL even when non-positive: `$WEB_CONCURRENCY` is its
     # DEFAULT, not its fallback (uvicorn `config.py:352` reads it only
     # `if workers is None`). Without these rows the two resolvers disagreed here
@@ -1141,6 +1148,69 @@ def test_the_shipped_gate_refuses_a_count_that_came_from_web_concurrency():
     assert wt.ACK_ENV in proc.stderr
 
 
-def test_the_shipped_gate_sees_the_reload_token_as_one_worker():
-    proc = _run_gate_block(("uvicorn", "app:app", "--reload"), {})
+#: Every spelling click's ``BoolParamType`` accepts as TRUE — read from
+#: ``worker_topology._CLICK_TRUE``, uvicorn's own flag grammar — plus casing and
+#: surrounding whitespace, because click's ``str_to_bool`` strips and lowercases.
+#:
+#: Driven from the Python constant ON PURPOSE: ``entrypoint.sh``'s reload detector
+#: is a hand-written ``case``, so a spelling added to ``_CLICK_TRUE`` without the
+#: shell keeping up would make the boot line lie (4 workers announced for the one
+#: child a reloader serves) — and these arms red instead.
+_CLICK_TRUE_SPELLINGS = tuple(sorted(wt._CLICK_TRUE)) + ("TRUE", "  Yes  ")
+
+#: Spellings click REJECTS. uvicorn exits before an app runs on these, so the
+#: reloader never starts — both halves must read them as NOT a reload, and the
+#: gate must stay refused (fail-closed), or a typo would become an exemption from
+#: the embedded-divergence arm the acknowledgement cannot lift.
+_RELOAD_REJECTED = ("enabled", "yess", "0", "false", "no", "off", "")
+
+
+def test_the_shipped_gate_sees_the_reload_token_as_one_worker_above_one():
+    """The pre-exec gate's reload arm, at a count that is REFUSED without it.
+
+    ⛔ The count matters: `--reload` ALONE resolves to one worker with or without
+    any exemption, so an arm shaped that way could not red (the shape this test
+    replaced). Here the count is 4, and the same argv without the token is refused
+    by the very next assertion — so the permit is caused by the exemption, and
+    dropping the argv from the gate's `observe()` (or narrowing
+    `reload_is_requested`) turns this red.
+    """
+    proc = _run_gate_block(("uvicorn", "app:app", "--reload", "--workers", "4"), {})
     assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    # The banner and the gate must agree: one child serves, so neither half may
+    # announce a multi-worker topology.
+    assert "workers = 1 (reload" in proc.stdout, proc.stdout
+    assert "MULTI-WORKER" not in proc.stdout, proc.stdout
+
+    # Control: the SAME count with no reload input is refused on an embedded DB.
+    control = _run_gate_block(("uvicorn", "app:app", "--workers", "4"), {})
+    assert control.returncode == 1, (control.stdout, control.stderr)
+    assert "EMBEDDED" in control.stderr, control.stderr
+
+
+@pytest.mark.parametrize("spelling", _CLICK_TRUE_SPELLINGS)
+def test_the_shipped_gate_exempts_every_click_true_reload_spelling(spelling):
+    """`$UVICORN_RELOAD` is the flag's value — so the gate must read it as a reload.
+
+    Both halves are asserted on the same boot: the banner reports the ONE child
+    uvicorn serves, and the gate PERMITS at a count (4) it refuses without the
+    variable. That is the parity contract between ``entrypoint.sh``'s ``case`` arm
+    and :data:`worker_topology._CLICK_TRUE` — the vocabulary the flag is actually
+    parsed with (click 8.4.2 ``BoolParamType.bool_states``).
+    """
+    argv = ("uvicorn", "app:app", "--workers", "4")
+    proc = _run_gate_block(argv, {wt.RELOAD_ENV: spelling})
+    assert proc.returncode == 0, (spelling, proc.stdout, proc.stderr)
+    assert "workers = 1 (reload" in proc.stdout, (spelling, proc.stdout)
+
+    control = _run_gate_block(argv, {})
+    assert control.returncode == 1, (spelling, control.stdout, control.stderr)
+
+
+@pytest.mark.parametrize("spelling", _RELOAD_REJECTED)
+def test_a_spelling_click_rejects_does_not_exempt_the_shipped_gate(spelling):
+    """A typo is not an acknowledgement — both halves stay on the refusing side."""
+    proc = _run_gate_block(("uvicorn", "app:app", "--workers", "4"),
+                           {wt.RELOAD_ENV: spelling})
+    assert proc.returncode == 1, (spelling, proc.stdout, proc.stderr)
+    assert "MULTI-WORKER" in proc.stdout, (spelling, proc.stdout)
