@@ -1134,3 +1134,23 @@ def test_the_plan_can_emit_row_level_reasons(monkeypatch, tmp_path):
     lines = [json.loads(x) for x in rows_out.read_text().splitlines() if x.strip()]
     assert {d["node_id"] for d in lines} == {"p1", "p2"}
     assert all(d["reason"] and d["disposition"] for d in lines)
+
+
+def test_two_nodes_sharing_an_id_across_pages_are_not_a_pagination_shift():
+    """Round-15: an id fan-out whose twins sort onto DIFFERENT pages (created at
+    different times) is the more likely half of a legal shape — the guard must key on
+    the node's content, not its id."""
+    mod = _tool_module()
+    pop = [{"id": "dup", "kind": "decision", "content": "first"},          # 0
+           {"id": "a", "kind": "decision", "content": "a"},                # 1
+           {"id": "b", "kind": "decision", "content": "b"},                # 2
+           {"id": "c", "kind": "decision", "content": "c"},                # 3
+           {"id": "dup", "kind": "decision", "content": "second"},         # 4
+           {"id": "d", "kind": "decision", "content": "d"}]                # 5
+
+    def call(_name, args):
+        off = int(args.get("offset") or 0)
+        lim = int(args.get("limit") or 2)
+        return {"result": pop[off:off + lim], "total": len(pop)}
+    rows, total = mod.MCPReader(call, None).read_points(page=2)
+    assert len(rows) == 6 and total == 6

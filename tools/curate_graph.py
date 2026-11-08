@@ -81,7 +81,10 @@ class MCPReader:
         refusal: str | None = None
         offset = 0
         total = None
-        seen: dict[str, int] = {}
+        # id -> (first offset, content fingerprint). Point ids are NOT unique (colliding
+        # ids are a tested, legal shape), so an id alone cannot tell "the same node
+        # served twice" from "two nodes sharing an id" — the CONTENT can.
+        seen: dict[str, tuple[int, str]] = {}
         totals: set[int] = set()
         while True:
             res = C.normalise_tool_result(self._q(offset=offset, limit=page))
@@ -106,17 +109,23 @@ class MCPReader:
                 break
             for r in batch:
                 rid = str(r.get("id") or "")
-                if rid in seen and seen[rid] != offset:
-                    # The SAME row served by an EARLIER page: the walk repeated rather
-                    # than advanced, so it also skipped one. (Two nodes sharing an `id`
-                    # within one page is a legal graph shape — create_point(id=X) is
-                    # not unique — and must not be reported as a concurrency problem.)
-                    raise RuntimeError(
-                        f"row {rid!r} returned in an earlier page (offset {seen[rid]}) and again "
-                        f"at offset {offset} — the population shifted mid-walk; refusing a census "
-                        "that both skips and repeats rows")
-                seen.setdefault(rid, offset)
                 content = str(r.get("content") or "")
+                fingerprint = f"{r.get('kind') or r.get('pointKind') or ''}\x00{content}"
+                prior = seen.get(rid)
+                if prior is not None:
+                    first_offset, first_fp = prior
+                    if first_offset != offset and first_fp == fingerprint:
+                        # The SAME node, with the SAME content, served by an EARLIER
+                        # page: the walk repeated rather than advanced, so it also
+                        # skipped one. Two DIFFERENT nodes that merely share an id are
+                        # a legal shape (create_point(id=X) is not unique) and repeat
+                        # the id with different content.
+                        raise RuntimeError(
+                            f"row {rid!r} returned in an earlier page (offset {first_offset}) with "
+                            f"identical content and again at offset {offset} — the population "
+                            "shifted mid-walk; refusing a census that both skips and repeats rows")
+                else:
+                    seen[rid] = (offset, fingerprint)
                 rows.append(C.Row(
                     node_id=str(r.get("id") or ""),
                     node_type="operator" if r.get("is_operator") else "point",
