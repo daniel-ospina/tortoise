@@ -3231,7 +3231,7 @@ def test_a_checkout_without_git_REFUSES_and_NAMES_IT(monkeypatch, capsys):
     with pytest.raises(cl.InvalidLedger) as excinfo:
         cl.validate(_ledger([_row("A")]))
     msg = str(excinfo.value)
-    assert "could not be run here" in msg, msg
+    assert "did not answer here" in msg, msg
     # ⛔ It must NOT claim git answered. On this box git was never asked, and the file
     # is tracked and present in every clone — reporting it "not TRACKED by git" is the
     # same guess-the-cause defect this change exists to remove, one layer up.
@@ -4709,7 +4709,7 @@ def test_an_EMFILE_on_the_ls_files_probe_cannot_manufacture_a_clean_exit(tmp_pat
     mp.setattr(cl, "_commit_state", lambda sha, repo_root=None: "exists")
     try:
         data = _ledger([_row("A", evidence=["untracked.txt"])])
-        with pytest.raises(cl.InvalidLedger, match="could not be run here"):
+        with pytest.raises(cl.InvalidLedger, match="did not answer here"):
             cl.validate(data, repo_root=repo)
     finally:
         mp.undo()
@@ -4797,7 +4797,7 @@ def test_the_glob_arm_does_not_read_an_UNRUNNABLE_probe_as_a_held_match(monkeypa
     assert ok is False, why
     # ⛔ And it must say nothing was MEASURED — not that git answered "untracked",
     # which would be the collapsed-cause defect one layer down.
-    assert "could not be run here" in why, why
+    assert "did not answer here" in why, why
     assert "untracked" not in why, why
 
 
@@ -4815,7 +4815,7 @@ def test_the_bare_path_arm_does_not_read_an_UNRUNNABLE_probe_as_a_held_match(mon
     (`if tracked is not True:`) catches the `None` first, so the arm answers
     ``(False, "'<path>' cannot be verified: the TRACKED check answered None, which
     is not a measurement that it is in the tree")``, the row is still REFUSED, and
-    this test reddens on its MESSAGE assertion (`"could not be run here" in why`)
+    this test reddens on its MESSAGE assertion (`"did not answer here" in why`)
     rather than on a fail-open. Both guards are load-bearing for different halves:
     this one for the CAUSE a reader is told, the fourth-answer one for the exit
     code. Recorded rather than left as a "MEASURED" claim the head falsifies.
@@ -4835,7 +4835,7 @@ def test_the_bare_path_arm_does_not_read_an_UNRUNNABLE_probe_as_a_held_match(mon
     # ⛔ And it must name the UNMEASURED cause: `not TRACKED` is the sentence for
     # git's MEASURED "no" (the `False` arm owns it), and collapsing the two is the
     # guess-the-cause defect this function exists to remove.
-    assert "could not be run here" in why, why
+    assert "did not answer here" in why, why
     assert "not TRACKED" not in why, why
 
 
@@ -4868,7 +4868,7 @@ def test_a_cmd_target_behind_an_UNRUNNABLE_probe_is_REFUSED_end_to_end(monkeypat
     with pytest.raises(cl.InvalidLedger) as excinfo:
         cl.validate(_ledger([_row("A", evidence=[entry])]), repo_root=REPO_ROOT)
     message = str(excinfo.value)
-    assert "TRACKED check could not be run here" in message, message
+    assert "TRACKED check did not answer here" in message, message
     assert asked and asked[0] == "README.md", asked
 
 
@@ -4896,7 +4896,7 @@ def test_a_glob_mixing_untracked_and_unrunnable_reports_the_measured_refusal(mon
     assert len(seen) >= 2, f"needs two matches to exercise precedence, saw {seen}"
     assert ok is False, why
     assert "untracked by git" in why, why
-    assert "could not be run here" in why, why
+    assert "did not answer here" in why, why
     assert "every file the glob" not in why, (
         "a mixed glob must not claim EVERY match is untracked: one of them was never "
         f"measured, and that is the guess-the-cause defect this branch removes: {why}"
@@ -4957,10 +4957,12 @@ def test_an_ABSTAINING_tree_is_accepted_and_prints_the_NOTE(tmp_path, monkeypatc
     `return False` left the whole suite green at 173 passed, so the whole abstention
     arm could be deleted as dead code and no row would notice (#11474 review).
 
-    ⛔ That measurement is dated rather than restated as a fact about "this head"
-    (#11474 review): at THIS head the revert is **not** green — it reddens this pin
-    (`1 failed / 178 passed`, the pin itself), which is the whole point of adding it.
-    A count copied forward is the one claim a reader can falsify in one command.
+    ⛔ That measurement is DATED rather than restated as a fact about "this head"
+    (#11474 review): at any head that CARRIES this pin the revert is **not** green —
+    it reddens this pin itself, which is the whole point of adding it. Re-measured at
+    the #11474 rebase, and again with the exit-128 pin beside it. No FRESH pass count
+    is quoted: a count copied forward is the one claim a reader can falsify in one
+    command, and this file gains a pin most rounds.
 
     Real git, not a stub: a BARE repo over `GIT_DIR` makes `ls-files --error-unmatch`
     exit 1 and `rev-parse --is-inside-work-tree` answer `false` with rc 0 — git is
@@ -5009,6 +5011,94 @@ def test_an_ABSTAINING_tree_is_accepted_and_prints_the_NOTE(tmp_path, monkeypatc
         "git answered (it is present and said 'not a work tree'), so no line may claim "
         f"it measured this path as untracked: {err}"
     )
+
+
+def test_a_git_that_COULD_NOT_ANSWER_is_not_read_as_a_measured_untracked(tmp_path, monkeypatch, capsys):
+    """`git ls-files` exit 128 is a FAILURE to answer, NOT the measured `no` (exit 1).
+
+    ⛔ THE THIRD COLLAPSED CAUSE (see `_tracked_unanswered`). `ls-files --error-unmatch`
+    exits **1** for "no match" and **128** when it cannot read its own index — and in
+    that second state `git rev-parse --is-inside-work-tree` still answers `true` rc 0.
+    The old `returncode != 0` test therefore read a failure-to-answer as the MEASURED
+    sentence, so a file every clone has was refused with *"is not TRACKED by git, so a
+    reader's clone does not have it"* — the same guess-the-cause defect `_is_tracked`
+    was fixed for, one cause over, and it is what `_tracked_unrunnable` does NOT cover
+    because nothing raised.
+
+    Real git, no `subprocess` stub: a valid repo with a TRACKED file, then
+    `GIT_INDEX_FILE` pointed at bytes that are not an index. The CONTROL assertion
+    comes first and is the reason this pin can fail for the right cause — without it, a
+    spelling mistake in the path would make the arm look covered while git was never
+    given a bad index at all.
+    """
+    import subprocess as sp
+
+    repo = tmp_path / "answered"
+    repo.mkdir()
+    (repo / "held.txt").write_text("held\n", encoding="utf-8")
+    git = ["git", "-C", str(repo)]
+    sp.run([*git, "init", "-q"], check=True)
+    sp.run([*git, "add", "held.txt"], check=True)
+    sp.run(
+        [
+            *git,
+            "-c",
+            "user.email=t@example.com",
+            "-c",
+            "user.name=t",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "-m",
+            "seed",
+        ],
+        check=True,
+    )
+
+    # CONTROL: with its real index, git answers, and the answer is "tracked".
+    assert cl._is_tracked(repo / "held.txt", repo) is True
+
+    corrupt = tmp_path / "index.bin"
+    corrupt.write_bytes(b"not a git index")
+    monkeypatch.setenv("GIT_INDEX_FILE", str(corrupt))
+
+    # The shape the arm exists for, asserted on git itself rather than assumed: the
+    # work-tree probe still SUCCEEDS (so the failure cannot route to the abstention),
+    # while the path probe FAILS rather than answering "no match".
+    probe = sp.run([*git, "rev-parse", "--is-inside-work-tree"], capture_output=True, text=True)
+    assert (probe.returncode, probe.stdout.strip()) == (0, "true"), (
+        "this pin needs git to still answer for the TREE, or the arm is unreachable "
+        f"and the assertion below would pass for the wrong reason: {probe}"
+    )
+    ls_files = sp.run(
+        [*git, "ls-files", "--error-unmatch", "--", "held.txt"],
+        capture_output=True,
+        text=True,
+    )
+    assert ls_files.returncode not in (0, 1), (
+        "this pin needs a FAILED probe (not 'no match'), not: "
+        f"rc={ls_files.returncode} {ls_files.stderr}"
+    )
+
+    # The seam: nothing was measured, so neither a `True` nor a `False` may be invented.
+    assert cl._is_tracked(repo / "held.txt", repo) is None
+
+    ok, why = cl._evidence_is_real("held.txt", repo_root=repo)
+    assert ok is False, why
+    assert "did not get an ANSWER" in capsys.readouterr().err, (
+        "the per-path line must name the exit code, because the exit code is the whole "
+        "of what was measured here"
+    )
+    assert "not TRACKED by git" not in why, (
+        f"git never answered for this path, so that sentence is a cause nobody "
+        f"measured: {why}"
+    )
+
+    # And the CALLER's row-level sentence must not pick one of `_is_tracked`'s two
+    # `None` causes either — "could not be RUN" is false here, the check DID run.
+    assert "did not answer here" in why, why
+    assert "could not be run here" not in why, why
 
 
 @pytest.mark.parametrize(
