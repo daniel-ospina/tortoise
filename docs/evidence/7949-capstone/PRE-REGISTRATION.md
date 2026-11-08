@@ -1713,8 +1713,12 @@ re-cut from the resolved document (§8), and no committed verdict is re-scored.
   arithmetic: `extractor_v2.py:10815`→`:10891` (twice: the prose and the grep annotation beside
   it), the payload-entity write seam in `tortoise/sdk.py` (`_payload_entity_kind`→`create_entity`)
   `:16414-16428`→`:16516-16530` (three times: the mint sentence, the routing sentence
-  and the `-A 14` annotation), §0's `create_operator` annotation
-  `:8938/:8956/:8963/:9343`→`:9006/:9024/:9031/:9411`, and the two "a live grep cannot do it
+  and the `-A 14` annotation), the capture-path call in `tortoise/sdk.py` (`link_source_to_event`)
+  `:17472`→`:17574` (**+102**, a different band again; twice: the prose and the `sed -n '17574p'`
+  reproduce command), §0's `create_operator` annotation
+  `:8938/:8956/:8963/:9343`→`:9006/:9024/:9031/:9411`, the census enumeration in
+  `probes/capstone_measure.py` `:2238-2243`→`:2713-2716` (stale on `main` too — the number
+  described `_seam_cause`, not the `MATCH ()-[r]->()` query), and the two "a live grep cannot do it
   (it prints `:12779` here)" clauses→`:12929`. Every number was verified by CONTENT at this head (the `def`,
   the `return items` that ends it, the two `if items:` gates, the two `except` arms, the two
   result blocks' opening braces and their closing `}`), never by adding an offset.
