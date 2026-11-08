@@ -10962,14 +10962,18 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # → `:1735`, `grep -n 'nothing in this tree consumes'` → `:10906`).
     assert "`hasPart`" in text and "`tortoise/extractor_v2.py:1735`" in text, (
         "the record must cite the relations schema where `hasPart` is spelled")
-    # ⛔ BOTH SIDES' shapes survive (#11519 review, P3): main split this into two membership
-    # tests, and the branch's side bound the PREDICATE to the CITE in one literal. Two independent
-    # memberships cannot tell "`hasPart`" in one sentence and the cite in another from a record
-    # that says both about the same line, so the adjacency is asserted as well — it holds today
-    # (`RECONCILE-A1-A2-A5.md:70`) and is the form a reader follows.
-    assert "`hasPart` (`tortoise/extractor_v2.py:1735`)" in text, (
-        "the record must bind the `hasPart` mention to the cite it names — a reword that moves "
-        "the two into separate sentences leaves both membership arms above green")
+    # ⛔ BOTH SIDES' shapes survive (#11519 review): main split this into two membership tests,
+    # and side1 bound the PREDICATE to the CITE. Two memberships cannot tell a record that names
+    # `hasPart` in one sentence and the cite in another. But side1's form was a LITERAL, and
+    # `#11546` (de1e2c9b2) removed exactly that needle by name — *"needles whose claim is a number
+    # or a token and whose tail was prose"* — so restoring it verbatim re-introduced the false
+    # block it was retired for: measured, the same clause reworded `` `hasPart` —
+    # `tortoise/extractor_v2.py:1735` `` REDDED while asserting the two had "separate sentences",
+    # which was false of that edit. Bound by a reword-TOLERANT pattern instead: no sentence
+    # boundary between the mention and the cite, clause punctuation otherwise free.
+    assert re.search(r"`hasPart`[^.\n]{0,80}`tortoise/extractor_v2\.py:1735`", text), (
+        "the record must bind the `hasPart` mention to the cite it names within one clause — "
+        "separate sentences leave both membership arms above green")
     # The A1 proof command must match BOTH shapes its sentence covers, and must stay on ONE line WITH
     # its pathspec. Two measured ways to pin the COMPLEMENT instead: a dot-ANCHORED `'\.(verb)\('`
     # exits 1 on an unqualified `return create_operator(payload)`, and a `[^[:alnum:]_.]` class
@@ -11301,10 +11305,22 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         # things a wording cannot dodge: the LIVE number never appears in these regions at all, and
         # every `:12929` there carries the base it was true at within 60 characters — the same
         # idiom the neighbouring `:12779` arm already uses for its own number.
-        assert ":12944" not in _region, (
-            f"{_label} names the LIVE `:12944` — the record cites this symbol at the base it was "
-            "true at (`:12929` at `a1dff7cec8`), never at the tree, which is the shape `#11555` "
-            "retired: true only until the next insertion above it")
+        # ⛔ NOT a single-number deny-list (#11519 review, P3): rejecting only `:12944` let every
+        # OTHER HEAD-relative number through — measured GREEN on `:12941`, `:12950` and `:13011`,
+        # each `(HEAD)`-qualified and three-to-several-hundred lines off the live one, which reads
+        # exactly like rot to a reader. And a bare `":12944" not in` ALSO false-blocked a
+        # sha-qualified live read (`:12944` at `b3efd0153`), which the record's policy permits —
+        # what it forbids is a `HEAD`-RELATIVE number. So the rule is the qualifier, not the
+        # number: any `:NNNN` in these regions whose next 40 characters name HEAD is the retired
+        # shape. The policy sentence that SAYS `never to \`HEAD\`` is not matched — no `:NNNN`
+        # precedes it (measured: 0 hits in both regions on the current record).
+        _head_relative = re.findall(
+            r":\d{3,5}[^.\n]{0,40}(?:HEAD|this tree|the tree)", _region, re.IGNORECASE)
+        assert _head_relative == [], (
+            f"{_label} carries a HEAD-relative number ({_head_relative}) — the record cites this "
+            "symbol at the base it was true at (`:12929` at `a1dff7cec8`), never relative to a "
+            "moving tree, which is the shape `#11555` retired: true only until the next insertion "
+            "above it")
         for _m in re.finditer(r":12929", _region):
             _near = _region[max(0, _m.start() - 60):_m.end() + 60]
             assert "a1dff7cec8" in _near, (
@@ -11318,8 +11334,19 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # definition is itself indented inside its function. What IS asserted is uniqueness in the
     # FILE, which is the invariant that keeps the record's symbol citation unambiguous; a rename
     # or a second assignment of the same name is what breaks it.
+    # ⛔ A SPELLING IS NOT A DEFINITION (#11519 review, P3 — twice). A literal `startswith` scan
+    # counted one spelling, so a second assignment written `vet_enabled: bool = (False)` stayed
+    # green while the message named exactly that as the invariant, and a docstring line carrying
+    # the text redded as a "second assignment". A looser LINE pattern then over-matched the KEYWORD
+    # ARGUMENT uses (`vet_enabled=vet_enabled,` at :12999 and :13039, measured), which are not
+    # assignments at all. So count DEFINITIONS in the AST: an Assign/AnnAssign whose target is the
+    # bare name `vet_enabled`. That is the invariant the message states, measured the way it says.
     _vet_lines = [
-        i for i, line in enumerate(ext, 1) if line.strip().startswith("vet_enabled = (")]
+        node.lineno
+        for node in ast.walk(ast.parse("\n".join(ext)))
+        if isinstance(node, (ast.Assign, ast.AnnAssign))
+        and any(isinstance(t, ast.Name) and t.id == "vet_enabled"
+                for t in (node.targets if isinstance(node, ast.Assign) else [node.target]))]
     assert len(_vet_lines) == 1, (
         f"`vet_enabled = (` must appear exactly once in extractor_v2.py; found "
         f"{_vet_lines} — the record cites this symbol, so a second assignment or a rename is "
