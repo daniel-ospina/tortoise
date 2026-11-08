@@ -613,13 +613,25 @@ def _uncovered_corpus_points(graph, covered_ids, *, chunk_size: int = 500) -> in
     return max(total - covered, 0)
 
 
-def _query_vecs(oracle, queries, seed: int, space: str | None = None):
+def _query_vecs(oracle, queries, seed: int, *, space: str):
     """Precompute one query vector per query, in the CORPUS's space.
 
-    ``space`` is the single space ``_corpus_embedding_space`` resolved for this
-    run — the query side must never pick a space of its own, or the arm
-    compares two spaces (the defect below). ``None`` resolves it ambiently for
-    callers that do not own a corpus decision (``task0_probe.py``, test spies).
+    ``space`` is REQUIRED: it is the single space ``_corpus_embedding_space``
+    resolved for this run's corpus, and the query side must never pick a space
+    of its own, or the arm compares two spaces (the defect below). There is no
+    default and no ambient fallback, deliberately: a default of ``None`` that
+    re-derived the space from ``EmbeddingModel.get()`` is the SAME ambient
+    decision this module exists to remove, one call site away, and the
+    omission is invisible where it happens. ``task0_probe.py`` omitted it and
+    scored model-encoded queries against its own centroid corpus in the
+    canonical dev env (``uv sync --extra embeddings``) — the two-space arm at
+    nDCG@10 ≈0.108, with nothing in that tool's output naming the space. Every
+    caller owns its corpus decision and states it here.
+
+    ``space == EMBED_SPACE_UNKNOWN`` encodes nothing (there is no trustworthy
+    corpus space to follow); ``run_eval`` still reports metrics for such a
+    run, but they are declared non-statements and the gate refuses to compare
+    them.
 
     When ``--model`` was passed, ``_inject_probe_model`` already loaded the
     candidate, so the loaded singleton IS the candidate.
@@ -633,8 +645,6 @@ def _query_vecs(oracle, queries, seed: int, space: str | None = None):
     space has no model to encode with, so the branch that used to "degrade the
     whole arm" was unreachable — a dead path, and its test could not fail.)
     """
-    if space is None:
-        space, _ = _corpus_embedding_space(seeded_synthetic=True)
     model = _loaded_embedding_model() if space == EMBED_SPACE_MODEL else None
     if space == EMBED_SPACE_MODEL and model is None:
         raise RuntimeError(

@@ -95,6 +95,22 @@ measured, and never from ambient availability:
 
 Labels are untouched: the oracle grades from HIDDEN topics and per-topic live
 ids, never from embeddings, so re-encoding cannot move a relevance judgment.
+
+**Enforced at the call site, not by convention.** `_query_vecs()` takes `space`
+as a REQUIRED argument: there is no default and no ambient fallback, because a
+default that re-derived the space from `EmbeddingModel.get()` is the same
+ambient decision one call site away, and the omission is invisible where it
+happens. `tests/eval/retrieval/task0_probe.py` — which seeds its own corpus and
+prints fused-nDCG verdicts — had taken exactly such a default: in the canonical
+dev env it encoded every query with the loaded model and scored those vectors
+against its own centroid corpus. Measured on one box, same corpus (60 points),
+same seed, real bge loaded: `fused_ndcg10_at_depth` **0.5587** pre-fix, with no
+space field in the tool's JSON at all; **0.7313** after, with
+`corpus_embedding_space: model`, `corpus_reembedded: 60`,
+`corpus_points_unverified: 0`. A probe tool is a second consumer of the arm, so
+it carries the same one-space rule (resolve from the corpus it seeded, re-embed
+when the space is the model's, and report `unknown` when the index holds vectors
+it did not write).
 `provenance.corpus_embedding_space`, `provenance.corpus_reembedded` and
 `provenance.corpus_points_unverified` state
 which space a report measured, and the corpus fingerprint (`embeddings_hash`)

@@ -594,6 +594,30 @@ def test_corpus_embedding_space_follows_the_corpus_not_the_environment():
             "an ambient model must not launder an unverified corpus's space"
 
 
+def test_query_vecs_requires_an_explicit_space():
+    """No ambient default: `space` is required, so no caller can acquire the
+    two-space arm by OMISSION (review ISSUE 1 at abdf5fa0f773).
+
+    The pre-fix signature defaulted to ``space=None`` and then re-derived the
+    space from ``EmbeddingModel.get()`` — the exact ambient decision this
+    module exists to remove, restored as a default one call site away.
+    ``task0_probe.py`` took that default: it seeds the oracle's CENTROID corpus
+    and, in the canonical dev env, encoded its queries with the loaded model.
+    Nothing at the call site said so, and the tool's output did not either.
+    """
+    oracle = run_module.build_topic_oracle(42)
+    queries = [{"id": "q001", "query": "pricing tiers enterprise"}]
+    stub = _StubModel()
+
+    with (patch.object(run_module, "_loaded_embedding_model", return_value=stub),
+          pytest.raises(TypeError, match="space")):
+        run_module._query_vecs(oracle, queries, 42)
+    assert stub.calls == [], (
+        "an omitted space must not fall back to the ambient model — it must not "
+        "run at all"
+    )
+
+
 def test_query_vecs_propagate_a_model_encode_failure():
     """In the model space the corpus is ALREADY re-embedded (`_reembed_corpus`
     runs first), so a query-encode failure must propagate: falling back to
@@ -923,4 +947,59 @@ def test_run_gating_another_model_refuses_instead_of_scoring(tmp_path):
     assert same["gate_vs_baseline"]["verdict"] in ("SHIP", "WARN", "BLOCK"), (
         "a matching model id must reach the pre-registered gate, not a refusal: "
         + str(same["gate_vs_baseline"])
+    )
+
+
+@pytest.mark.skipif(not _has_embedded(), reason="embedded FalkorDBLite unavailable")
+def test_task0_probe_owns_its_corpus_decision(tmp_path):
+    """The depth/k-sweep/ceiling probe SEEDS its own corpus, so it must resolve
+    and STATE the arm's space instead of letting `_query_vecs` pick one
+    ambiently from `EmbeddingModel.get()` (review ISSUE 1 at abdf5fa0f773).
+
+    `task0_probe.py` seeded the oracle's CENTROID corpus and passed no space, so
+    in the canonical dev env it encoded every query with the loaded model and
+    scored those vectors against centroids — the two-space arm at nDCG@10
+    ≈0.108 — while its result dict carried no space field at all, leaving a
+    reader of the JSON unable to tell the arm was dead. Here the corpus must be
+    re-encoded into the model space (read back from the graph, not merely
+    labelled) and the result must say which space it measured.
+    """
+    from tests.eval.retrieval import task0_probe
+    from tortoise.embeddings import _truncate_for_embedding
+    from tortoise.sdk import TortoiseSDK
+
+    class _Args:
+        db = str(tmp_path / "task0.db")
+        corpus_size = 60
+        seed = 42
+        depth = 10
+        quiet = True
+
+    stub = _StubModel()
+    sdk = TortoiseSDK(_Args.db)
+    try:
+        with patch.object(run_module, "_loaded_embedding_model", return_value=stub):
+            result = task0_probe._probe(sdk, _Args())
+        stored = sdk._get_proj().g.query(
+            "MATCH (n:Point {id: 'p-0000000'}) RETURN n.content, n.embedding"
+        ).result_set
+    finally:
+        sdk.close()
+
+    assert result["corpus_embedding_space"] == run_module.EMBED_SPACE_MODEL, (
+        "a probe that seeds the corpus itself must resolve the space FROM that "
+        "corpus and say so"
+    )
+    assert result["corpus_reembedded"] == result["corpus_size"] == 60
+    assert result["corpus_points_unverified"] == 0
+    assert result["synthetic_query_vectors"] is False, (
+        "the query side must follow the re-embedded corpus, not the ambient "
+        "loader"
+    )
+
+    content, embedded = stored[0]
+    expected = stub.encode([_truncate_for_embedding(content, 512)])[0]
+    assert max(abs(float(a) - float(b)) for a, b in zip(embedded, expected, strict=True)) < 1e-5, (
+        "the stored corpus vector must be the one THIS run's model produced — "
+        "a centroid vector here is the two-space arm back again"
     )

@@ -97,6 +97,14 @@ that produced vector nDCG@10 0.108 (vs 0.826 sound) and a **BLOCK verdict on
 unmodified code** — see
 `docs/benchmarks/1144-retrieval-eval-embedding-space-2026-11-08.md`.
 
+The rule is ENFORCED, not documented: `_query_vecs()` requires `space` and has
+no ambient default, so a caller cannot acquire the two-space arm by omission.
+`task0_probe.py` (depth curve, k-sweep, ceiling — it prints fused-nDCG verdicts)
+seeds its own corpus and therefore owns the same decision: it resolves the
+space from that corpus, re-embeds when the space is the model's, reports
+`corpus_embedding_space` / `corpus_reembedded` / `corpus_points_unverified` in
+its JSON, and reads `unknown` when the index holds vectors it did not write.
+
 ## Full run (authoritative — Docker FalkorDB >= 4.x)
 
 ```bash
