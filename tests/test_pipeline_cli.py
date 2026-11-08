@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 import types
 from unittest import mock  # noqa: F401
 
@@ -51,19 +52,40 @@ def _register_connector(monkeypatch, module_name, ingested=1):
 
 
 def _patch_projection(monkeypatch, seen):
-    """Record whether cmd_run uses from_uri (URI) or __init__ (path)."""
+    """Record whether cmd_run uses from_uri (URI) or __init__ (path).
+
+    ⛔ RECORD ONLY THIS THREAD'S CONSTRUCTIONS — the patch is on the CLASS, so
+    it is process-wide, while the verdict is about ONE test's ``cmd_run``. The
+    suite runs beside threads it does not own: a hosted-api retention sweep
+    leaked from an earlier ``TestClient`` test in the same xdist worker reaches
+    ``_make_sdk`` → ``_resolve_embedded_db_path()``, whose unwritable-``/data``
+    fallback is ``tempfile.gettempdir()/tortoise.db``, and constructs a
+    ``FalkorProjection`` with it. Unfiltered, that foreign construction lands
+    in ``seen`` and the assertion is made about ANOTHER thread's path.
+
+    Measured 2026-11-08 (PR #11495, required check `test (f)`): ``seen["path"]``
+    read ``/tmp/tt_nmrzy6yn/tortoise.db`` — TMPDIR, not ``~/.tortoise`` — while
+    ``resolve_db_path()`` was correct; the captured log carried
+    ``event retention sweep skipped for …: 'FalkorProjection' object has no
+    attribute 'g'``. That attribute error is the sweep tripping over THIS
+    patch, i.e. the proof that the write came from the sweep thread.
+    """
     from tortoise.projection import FalkorProjection
+
+    owner = threading.get_ident()
 
     class _FakeProj:
         def close(self):
             pass
 
     def _from_uri(cls, u, graph_name=None):
-        seen["uri"] = u
+        if threading.get_ident() == owner:
+            seen["uri"] = u
         return _FakeProj()
 
     def _init_path(self, path, *a, **k):
-        seen["path"] = path
+        if threading.get_ident() == owner:
+            seen["path"] = path
         return None
 
     monkeypatch.setattr(FalkorProjection, "from_uri", classmethod(_from_uri))
@@ -104,3 +126,49 @@ def test_run_uses_embedded_path_when_no_uri(monkeypatch, tmp_path):
 
     assert "uri" not in seen
     assert seen.get("path") == DEFAULT_DB_PATH
+
+
+def test_a_foreign_threads_construction_never_decides_this_verdict(
+        monkeypatch, tmp_path):
+    """The pin for the hold above: a `FalkorProjection` built by a thread this
+    test does not own must not enter `seen`.
+
+    Driving it, not asserting a shape: the foreign construction is made for
+    real, on a worker thread, with the SAME path a leaked hosted-api sweep
+    uses (``_resolve_embedded_db_path()`` — `tempfile.gettempdir()`-rooted
+    when /data is unwritable). Before the thread guard this overwrote
+    `seen["path"]` and `test_run_uses_embedded_path_when_no_uri`'s assertion
+    was made about it; with the guard the recorded path is the one `cmd_run`
+    resolved. Deliberately constructed BEFORE the assertion, so the pin needs
+    no sleep and no scheduling luck to fire.
+    """
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+    monkeypatch.setattr(pipeline_cli, "CONFIG_PATH", _write_config(tmp_path, "t3"))
+    _register_connector(monkeypatch, "t3", ingested=1)
+    from tortoise.config import DEFAULT_DB_PATH
+    from tortoise.projection import FalkorProjection
+    seen: dict = {}
+    _patch_projection(monkeypatch, seen)
+
+    pipeline_cli.cmd_run("t3")
+
+    foreign = str(tmp_path / "foreign-thread-store.db")
+    errors: list[BaseException] = []
+
+    def _construct_elsewhere():
+        try:
+            FalkorProjection(foreign)
+        except BaseException as exc:  # pragma: no cover - reported, not raised
+            errors.append(exc)
+
+    t = threading.Thread(target=_construct_elsewhere, name="foreign-ctor",
+                         daemon=True)
+    t.start()
+    t.join(30)
+
+    assert not t.is_alive(), "the foreign construction thread did not finish"
+    assert not errors, errors
+    assert seen.get("path") == DEFAULT_DB_PATH, (
+        "a construction this test did not make was recorded as its verdict: "
+        f"{seen!r}")
