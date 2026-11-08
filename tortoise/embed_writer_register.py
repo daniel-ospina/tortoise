@@ -19,8 +19,8 @@ rule exists to close.
 
 * **Not a second rule set.** It speaks to *writer classification* — a different axis from *what earns
   a vector*, which is `value_gate.RULES` (`embed_gate.RULE_SET is value_gate.RULES`). This module
-  holds no pattern, no predicate and no rule id, and it imports **nothing from `tortoise`** — see
-  "leaf" below.
+  holds no *rule* pattern, no predicate and no rule id — its only regex is the `owner_issue` format
+  check (`_OWNER_ISSUE`) — and it imports **nothing from `tortoise`** — see "leaf" below.
 * **Not a licence to change a writer.** It declares what each writer already does. Nothing consults
   it to decide a write yet; that is `#11086`'s seam.
 * **Not an audit log.** The evidence for each entry is the seam, cited in `reason` — never a line
@@ -47,12 +47,46 @@ no wider. Two write shapes are worth naming, because the difference is the diffe
 claim and a slogan:
 
 * **Container keys are SEEN — the LITERAL-ASSIGNMENT form** (`record["embedding"] = …`), for every
-  module discovery walks. This shape was invisible to the
-  instrument's clause regex until `#11274`, so a writer using it added nothing to the population and
-  this register's guard stayed green over it; discovery now decides it on the AST, and the four
-  live instances it had been missing (`api::add_point`, `consistency::_graph_fingerprint`,
-  `sdk::_index_gate_read`, `sdk::_write_capture_turns`) are declared here. ⚠️ "Every module discovery
-  walks" is not every module in `tortoise/`: the walk SKIPS `tortoise/embeddings.py` on purpose (the
+  module discovery walks AND inside a `def`: the walk visits `def`s
+  (`probe._embedding_writers`), so a container key in a MODULE body or in a MODULE-LEVEL CLASS body
+  is ABSENT wherever that module sits — pinned as `INVISIBLE_SHAPES`'
+  `module_scope_container_key` and `class_scope_container_key`. ⛔ The scope that decides this is the
+  WALK's, not the `class` keyword: a class body nested inside a `def` is part of that def's SUBTREE,
+  so the AST pass does reach it and that writer is declared — pinned as the `class_inside_a_def`
+  control, because "CLASS scope is absent" read as a statement about `class` over-claims in exactly
+  the direction this paragraph exists to avoid. This shape was invisible to the
+  instrument's clause regex until `#11274`, so a writer carrying NOTHING ELSE the instrument
+  matches — neither the `_EMBED_WRITE` regex nor a recognised producer call (`encode_for_row`,
+  `encode_for_store`, `compute_session_embedding`) — added nothing to the population and this
+  register's guard stayed green over it; discovery now decides the shape on the AST. The four live
+  instances it had been missing (`api::add_point`, `consistency::_graph_fingerprint`,
+  `sdk::_index_gate_read`, `sdk::_write_capture_turns`) are declared here. ⚠️ Membership is NOT
+  evidence the shape was seen: a writer can be in this population for another reason. 
+  `sdk::_journal_event_raw_write` holds the shape (`record["embedding"] = …`) and is ALSO matched by
+  `_EMBED_WRITE` on the `embedding=None` in its SIGNATURE, and — because the `encode_for_row` branch
+  assigns `gated` WITHOUT consulting the write predicate OR the shape — the population ALSO takes
+  every writer that reaches the seam by CALL: `api::_point`, `projection::_revise_point`,
+  `projection.entities::_upsert_point_props`, `projection.entities::_upsert_subject`,
+  `projection.entities::_upsert_object`, `projection.entities::_upsert_document`,
+  `projection.entities::_upsert_event`, `sdk::create_point`, `sdk::update_point`. ⛔ That list is
+  not counted here and is not its own authority — the INSTRUMENT is:
+  `tests/test_embed_writer_register.py::test_the_seam_CALL_population_is_the_one_the_register_names`
+  re-derives it at HEAD and reds when this sentence loses a member or names one discovery does not
+  class that way. (The sentence itself is prose a lane edits — a pin can read it, not rewrite it;
+  the red is what makes the edit unavoidable, which is the whole mechanism.) It
+  had to be re-derived once already: this paragraph named four of the CALL population
+  (`api::_point`, `projection::_revise_point`, `sdk::create_point`, `sdk::update_point` — none of them
+  an AST exemplar) while the other five reach the seam by the `encode_for_row` CALL
+  branch, one file over — and they do NOT hold the container-key shape (`set_embedding_clause(…)`
+  for subject/object/document, a Cypher graph-property SET (`n.embedding=…`) fed from the params
+  dict for `_upsert_point_props`, the CALL itself for `_upsert_event`), which is exactly why the
+  shape-blind branch had to admit them and why a census of
+  that shape cannot count them — so "every" read as a complete extension of a
+  population a `#11086` reader would then have under-counted. Membership and visibility are different
+  questions; the writers whose membership the AST pass actually bought are `api::add_point`,
+  `consistency::_graph_fingerprint`, `sdk::_index_gate_read` and `sdk::_write_capture_turns` (the
+  four named at the start of this bullet), and nothing else.
+  ⚠️ "Every module discovery walks" is not every module in `tortoise/`: the walk SKIPS `tortoise/embeddings.py` on purpose (the
   seam primitives are not write paths), and two functions there use exactly this form —
   `stamp_journal_embedding` (`payload["embedding"] = vec`) and `_drop_journalled_embedding`
   (`payload["embedding"] = None`). They are the seam, so they are declared nowhere and found
@@ -61,15 +95,26 @@ claim and a slogan:
   carries a vector is data flow, not syntax, and ~60 functions merge a props map. So the honest
   statement is not "no writer can bypass silently" but: **every writer discovery finds outside the
   gate is declared, and the shapes discovery cannot decide are named rather than assumed absent** —
-  which is why `sdk::_update_entity`, the live map-merge instance, carries the NAMED `#4094`
-  exemption instead of being read as "no write at all".
+  which is why `sdk::_update_entity`, one live map-merge instance, carries the NAMED `#4094`
+  exemption instead of being read as "no write at all" — and `sdk::update_point` is the other
+  KNOWN instance: a `SET n += $props` merge that carries a caller-supplied vector verbatim, classed
+  `gated` and declared nowhere (read the closure-claim caveat below for what that does and does not
+  mean). ⚠️ "Known" is load-bearing: the shape is undecidable by syntax (above), so neither this
+  sentence nor the instrument can say these are the ONLY two — a reader scoping the residual must
+  not read two as the complete population.
 
 **Leaf, and it must stay one.** `04-plan.md` §5: a leaf must not live under `tortoise/projection/`,
 whose `__init__` is the head of the `projection → pack_state → sdk → projection` cycle where a
 module-scope read of the config constants is a **reproduced `ImportError`**
-(`projection/__init__.py:1466-1481`). This module imports only the standard library, so importing it
-can never enter that cycle — pinned in a subprocess by
-`test_the_register_imports_without_entering_the_projection_cycle`.
+(`tortoise.projection.__init__::_config_classes` records the reproduced `ImportError`, both for a
+module-scope call and for a module-scope read of the constants). This module imports only the
+standard library — pinned by
+`test_the_register_is_not_a_second_rule_set`, which reads this file's own `import` statements — so
+importing it can never ENTER that cycle, which
+`test_the_register_imports_without_entering_the_projection_cycle` proves separately in a subprocess
+by asserting that `tortoise.projection`, `tortoise.pack_state` and `tortoise.sdk` never reach
+`sys.modules` (a narrower claim than "imports nothing from `tortoise`": the package `__init__` still
+loads `tortoise` and its config).
 
 **⚠️ What the closure claim does NOT cover — read this before quoting `#11086`.** "No silent
 bypass" holds for the population **discovery decides**, and that population is bounded by the
@@ -81,19 +126,35 @@ census), and it named the shape it deliberately will not decide:
 not syntax). Measured at this head, further shapes are still ABSENT from the census — not
 unclassified, absent, which is why the guard in `tests/test_embed_writer_register.py` stays green
 for them: an inline property map (`MERGE (n:Point {…, embedding: $e})`), a whole-node replace
-(`SET n = $map`), a property name INTERPOLATED into the clause, and the container-HELPER /
+(`SET n = $map`), a property name INTERPOLATED into the clause, the container-HELPER /
 COMPUTED-KEY forms a regex and a literal-slice test both miss
-(`clean.setdefault("embedding", None)`, `d[KEY] = v`) — and those forms are not hypothetical.
-⚠️ The SHAPE is what is blind, not necessarily the WRITER carrying it: the interpolation is live in
-`tortoise.cache_projection::node_statement` and the helper in `tortoise.sdk::_emit_event`, and BOTH
-of those writers are genuinely ABSENT from the census (neither holds a decidable statement, so
-neither is in `WRITER_CENSUS` or this register at all); by contrast the computed key in
-`tortoise.sdk::update_point` is in the instrument's **discovered map** (`embedding_writers()`) as
-`gated` — it carries no `WRITER_CENSUS` row at all, and that table's class vocabulary
-(`recognised_producer`/`exempt`/`bypass`) cannot spell `gated` — while
-`tortoise.hosted_backup::restore_graph` is IN `WRITER_CENSUS` and is declared here off its
-`set_embedding_clause`, NOT off its whole-node replace. The full list is
-`tests/test_embed_writer_register.py::INVISIBLE_SHAPES`, which is the authority: a count written
+(`clean.setdefault("embedding", None)`, `d[KEY] = v`), and a DICT LITERAL carrying a constant
+`"embedding"` key (`**{**payload, "embedding": v}`) — the regex cannot read it (no `=` follows the
+key) and the AST pass never visits it (its targets are assignments, not an `ast.Dict` handed to a
+call) — and those forms are not hypothetical. ⚠️ The SHAPE is what is blind, not necessarily the
+WRITER carrying it: the interpolation is live in `tortoise.cache_projection::node_statement` and the
+helper in `tortoise.sdk::_emit_event`, and BOTH of those writers are genuinely ABSENT from the
+census (neither holds a decidable statement, so neither is in `WRITER_CENSUS` or this register at
+all); by contrast the computed key in `tortoise.sdk::update_point` is in the instrument's
+**discovered map** (`embedding_writers()`) as `gated` — it carries no `WRITER_CENSUS` row at all,
+and that table's class vocabulary (`recognised_producer`/`exempt`/`bypass`) cannot spell `gated` —
+while `tortoise.hosted_backup::restore_graph` is IN `WRITER_CENSUS` and is declared here off its
+`set_embedding_clause`, NOT off its whole-node replace. The dict literal has carriers through
+ANOTHER door too, and they are INSTANCES, not the population: `tortoise.sdk::_session_event_write`
+and `tortoise.sdk::_embedding_repair_attempt` hold the `**{**…, "embedding": …}` spelling and are in
+the discovered map as `unresolved_write` because their bodies ALSO call `set_embedding_clause(`, so
+their membership is not evidence the literal was seen — exactly the distinction the
+`sdk::_journal_event_raw_write` bullet below draws. The same blind class also travels as a
+PARAMS dict literal carrying a constant `"embedding"` key — built inline (`params={…}`) in
+`tortoise.projection.entities::_event_plain_merge`, `_upsert_subject`, `_upsert_object` and
+`_upsert_document`, and built into a local then handed on by name (`params = {…}` → `params=params`)
+in `_upsert_point_props`; the fifth of that family, `_upsert_event`, holds NO such literal — it
+computes the vector and hands it to `_event_plain_merge`, which builds the dict — and a reader must
+not take two as the complete set, nor take any quoted spelling as a literal to grep: the SHAPE is
+what this paragraph names, not an instance list and not a search string. The authority
+for SHAPES is
+`tests/test_embed_writer_register.py::INVISIBLE_SHAPES`, which holds both the shapes neither pass can
+spell AND the SCOPES the walk never enters: a count written
 here re-stales with every shape added, so this paragraph names forms and instances and does not
 count them.
 ⚠️ `tortoise.sdk::_journal_event_raw_write` is
@@ -102,7 +163,11 @@ it is not evidence that a literal subscript is what gets a carrier seen; the wri
 owe their visibility to `#11274`'s AST pass are the ones the container-key bullet above names as
 found — not every container-key declaration in the table. A writer is also
 excluded from the declaration requirement when discovery classes it `gated` (a bare call to anything
-*named* `encode_for_row`), `producer`, `duplicate` (two same-named defs in one module) or when its
+*named* `encode_for_row`), `producer`, `duplicate` (two same-named defs in one module that BOTH
+reach `_put` — `_put` is only reached for a def discovery CLASSIFIES, so a colliding def that is a
+pure reader never reaches it and the discovered def's own kind stays in the map, leaving an
+`unresolved_write`/`ungated` sibling CAUGHT rather than excused; the test header's collision note
+carries the measured cases) or when its
 module will not parse. ⛔ **The `gated` escape is not hypothetical, and it is the widest one:**
 `tortoise.sdk::create_point` and `tortoise.sdk::update_point` reach `encode_for_row` on the normal
 path, so discovery classes them `gated` and owes them no declaration — yet **a caller-supplied
@@ -399,8 +464,9 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
             "CALLER-supplied vector OVER the server one, in the journal payload. That is the "
             "`#5004` carrier contract, not a producer: the key stays PRESENT so an explicit "
             "`None` means 'this id has no vector', and a foreign vector is restored verbatim "
-            "with NO attestation. The server vector is stamped by `tortoise.api::_point` (its "
-            "own entry). ⛔ A caller-supplied `embedding` is NOT refused by the SDK — "
+            "with NO attestation. The server vector is stamped by `tortoise.api::_point` (its own "
+            "`gated` classification, not an entry here). ⛔ A caller-supplied `embedding` is NOT "
+            "refused by the SDK — "
             "`create_point`/`update_point` store one VERBATIM by a recorded decision "
             "(`tortoise.sdk::_sanitize_props` rejects the embedding IDENTITY props, not "
             "`embedding` itself; `_create_map[\"embedding\"]` is assigned AFTER the props "
@@ -553,19 +619,32 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
 #: (`tortoise.session_indexer::main`). A ``gated`` writer needs no declaration — the gate decides the
 #: write it GATES. ⛔ That is not the same sentence as "the gate decides every vector this writer
 #: stores": the module docstring's caveat refutes the wider one for `create_point`/`update_point`,
-#: whose caller-supplied vector is stored verbatim — `create_point` calls `encode_for_row`
-#: UNCONDITIONALLY (`tortoise/sdk.py:13821-13824`) and then discards the result (`if "embedding" in
-#: props:` replaces it at `:14023-14026`, and `_create_map["embedding"] = _embedding_expr` at
-#: `:14057` assigns the caller branch last), while `update_point` genuinely skips the derive
-#: (`:18651-18652`) — so on one path the gate RUNS and its verdict is OVERWRITTEN, on the other it is not
-#: called at all. Neither outcome is "the gate decides this vector".
+#: whose caller-supplied vector is stored verbatim. On the CREATE path `create_point` calls
+#: `encode_for_row` (the derive is behind no `props` guard) and then discards the DERIVED result
+#: **when the caller supplied one** (`if "embedding" in props:` pops the caller vector, and
+#: `_create_map["embedding"] = _embedding_expr` is assigned AFTER the props loop, so the caller
+#: branch wins — with no caller vector the derived one is what gets stored) — but that derive is NOT
+#: reached on every call, so the verb is not "unconditionally": a `dedup=True` HIT returns at the
+#: dedup fold BEFORE it, and its props leg hands `props` (a caller vector included) to
+#: `update_point`, which skips its own derive for the same key (`"embedding" in props`) and merges
+#: it verbatim. So on the create path the gate RUNS and its verdict is OVERWRITTEN, and where the
+#: caller supplied a vector on the update path it is not called at all — including `create_point`'s
+#: own `dedup=True` delegation, which is the MCP door's default. A content-only revise DOES reach
+#: `encode_for_row` (`update_point` derives when `content` arrives without `embedding`), which is
+#: part of why `update_point` classes as `gated`; neither outcome is "the gate decides this vector".
+#: ⛔ Symbols only, never a line number: this block is comment prose
+#: and nothing re-derives it, which is the rot `WriterClass.reason`'s rule exists to prevent.
 #: ⛔ The difference between those two sentences is load-bearing and is stated in the module
 #: docstring: the census's discovery is a source-text regex PLUS the AST pass that decides the
 #: LITERAL container key (`rec["embedding"] = …`), and writers neither can spell (a map-merge, a
 #: COMPUTED dict-key form (`d[KEY] = v`), an inline property map, a clause held in a module constant
-#: or an INTERPOLATED property name) are ABSENT from this population rather than declared here — one
-#: is live in `tortoise/` today (`cache_projection::node_statement`), and `#11274` NAMES the shape
-#: discovery will not decide (`UNDECIDABLE_WRITE_SHAPES`) instead of guessing at it.
+#: or an INTERPOLATED property name) are found BY SHAPE in no case — where one of them does reach the
+#: population it is for ANOTHER reason, and the live instances named here differ exactly so:
+#: `sdk::_update_entity` (a map-merge) arrives as an `unresolved_write` and is declared here as
+#: `exempt` under the named `#4094` exemption, `sdk::update_point`'s computed key arrives as `gated`
+#: and is therefore declared nowhere, and `cache_projection::node_statement`'s interpolated property
+#: arrives not at all. `#11274` NAMES the shape discovery will not decide
+#: (`UNDECIDABLE_WRITE_SHAPES`) instead of guessing at it.
 #: Forward — every writer DISCOVERY FINDS outside the gate is declared (never "every writer", see the
 #: docstring's closure-claim caveat):
 #: `tests/test_embed_writer_register.py::test_every_writer_the_instrument_finds_outside_the_gate_is_declared`.
