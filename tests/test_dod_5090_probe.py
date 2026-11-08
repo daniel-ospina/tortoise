@@ -829,8 +829,17 @@ def test_a_malformed_stores_declaration_holds_row_two(monkeypatch):
     tampered register — and the row must grade the shape itself rather than inherit an invariant it
     does not test (`declaration_violations`' own discipline, one row over). An empty tuple in
     particular is the shrug that would otherwise read as "nothing to compare".
+
+    ⛔ `("Ev ent",)` and `("Event\n",)` are here for the SHAPE branch specifically (final review,
+    P2). Every other member of this list is caught by an EARLIER arm — `empty` / `not tuple` /
+    `bare string` / a non-string member — so the label-shape regex was reached by nothing, and
+    deleting it left the whole suite green (measured: 189 passed, 1 skipped, identical to the
+    unmutated run). A space and a trailing newline are the two shapes `register._LABEL` and
+    `_STORE_LABEL` reject that no earlier arm sees, so they are what makes that branch
+    load-bearing. The direction is fail-CLOSED either way (a bad shape can never collide with a
+    served label), so this pins the NAMED hold rather than a false pass.
     """
-    for bad in ((), [], "Event", 3, ("",), ("Event", 3)):
+    for bad in ((), [], "Event", 3, ("",), ("Event", 3), ("Ev ent",), ("Event\n",)):
         monkeypatch.setattr(probe, "embedding_writers", _row_two_population)
         monkeypatch.setattr(
             probe, "declared_writers",
