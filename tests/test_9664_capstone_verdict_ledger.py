@@ -4930,6 +4930,17 @@ def test_a_glob_accepted_by_a_later_match_does_not_announce_the_rows_fate(monkey
     assert ok is True, why
     err = capsys.readouterr().err
     assert "REFUSED" in err, "the per-path refusal must still be PRINTED, not silent"
+    # ⛔ THE CAUSE IS THE HALF THAT WAS UNPINNED (#11474 review). MEASURED: replacing
+    # `_tracked_unrunnable`'s line with the MEASURED sentence ("… so {rel} is not
+    # TRACKED by git") — the exact defect its docstring forbids — left all 179 tests
+    # green, because nothing asserted the text of the line this test exists to read.
+    # A renderer whose cause is unpinned is a renderer free to borrow the other one.
+    assert "could not be RUN" in err, (
+        f"the per-path refusal must name the cause it measured (the probe never ran): {err}"
+    )
+    assert "not TRACKED" not in err, (
+        "the probe never ran, so no line may borrow git's measured answer: " f"{err}"
+    )
     assert "the row does not count" not in err, (
         "the probe cannot know the row's fate — a later tracked match accepted it, so "
         f"the per-path line must not claim the row was refused: {err}"
@@ -4979,7 +4990,15 @@ def test_an_ABSTAINING_tree_is_accepted_and_prints_the_NOTE(tmp_path, monkeypatc
     # And the ROW consequence, which is what the helper's value is FOR.
     cl.validate(_ledger([_row("A", evidence=["held.txt"])]), repo_root=tree)
     err = capsys.readouterr().err
-    assert "git is unavailable here" in err, err
+    assert "git is present and says this is not a work tree" in err, (
+        "git WAS asked and answered `false` (rc 0) — the NOTE must say that, not claim "
+        f"git was unavailable, which is the cause it did not measure: {err}"
+    )
+    assert "git is unavailable here" not in err, (
+        "this is the BARE/`GIT_DIR` arm: git ran and said 'not a work tree'. The "
+        "abstention VERDICT is #11503 Option 1 and is unchanged, but its printed "
+        f"CAUSE may not be one that was never measured: {err}"
+    )
     assert "not TRACKED" not in err, (
         "git answered (it is present and said 'not a work tree'), so no line may claim "
         f"it measured this path as untracked: {err}"

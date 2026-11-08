@@ -2080,7 +2080,16 @@ def _short(text: str, limit: int = 120) -> str:
 
 
 def _is_tracked(resolved: Path, root: Path) -> bool | None:
-    """`True` tracked · `False` git answered "no" · `None` the probe could not RUN.
+    """`True` tracked · `False` measured-not-tracked · `None` the probe could not RUN.
+
+    ⛔ `False` covers TWO measured facts, and only the first is git's own answer: git
+    said "no", OR the path is not under `root` at all (the `ValueError` arm below) —
+    a structural fact about this repo, true of every clone, and therefore not a claim
+    about what git measured. It is not spelled `None` because `None` renders as "the
+    TRACKED check could not be run here", which would be FALSE about a path we simply
+    declined to ask about, and it is not raised because `_evidence_is_real` calls this
+    outside its `try` — the arm is unreachable by construction anyway, since all three
+    call sites pre-check `is_relative_to(root)` (#11474 review).
 
     The third value exists so the CALLER can tell the two refusals apart in the message
     it prints: `False` is a measurement ("not TRACKED by git"), `None` is the absence of
@@ -2112,6 +2121,12 @@ def _is_tracked(resolved: Path, root: Path) -> bool | None:
     try:
         rel = resolved.relative_to(root)
     except ValueError:
+        # NOT a git answer: git is never asked about a path outside `root`. Unreachable
+        # by construction — every call site pre-checks `is_relative_to(root)` before
+        # calling — so this is a structural refusal kept as a guard, and the sentence it
+        # produces downstream ("is not TRACKED by git, so a reader's clone does not have
+        # it") is TRUE of an outside-root path. See the docstring's `False` note: the
+        # value is the MEASURED-not-tracked one, of which git's "no" is only one cause.
         return False
     try:
         proc = subprocess.run(
@@ -2138,7 +2153,9 @@ def _is_tracked(resolved: Path, root: Path) -> bool | None:
     if probe.returncode == 0 and probe.stdout.strip() == "true":
         # Git IS here and it refused this path: the file is untracked. Blame it.
         return False
-    return _tracked_unprovable()
+    # Hand the probe to the renderer so the NOTE names the cause THAT WAS MEASURED:
+    # `false` with rc 0 is git present and answering, not git absent.
+    return _tracked_unprovable(probe)
 
 
 def _tracked_unrunnable(exc: OSError, rel: Path) -> None:
@@ -2166,13 +2183,33 @@ def _tracked_unrunnable(exc: OSError, rel: Path) -> None:
     return None
 
 
-def _tracked_unprovable() -> bool:
+def _tracked_unprovable(probe: subprocess.CompletedProcess[str] | None = None) -> bool:
     """Git cannot answer here at all (no `.git`, a tarball, a build context).
 
     The record is not blamed — but the abstention is PRINTED, because a CLEAN
     verdict byte-identical to one where the rule ran is how a check quietly stops
     checking. (`_commit_state` takes the same doctrine; see its docstring.)
+
+    ⛔ TWO CAUSES REACH THIS, AND THEY ARE NOT THE SAME FACT (#11474 review). A tarball
+    (no repository) leaves git unable to answer at all; a BARE repo reached over
+    `GIT_DIR` leaves git **present, having RUN and ANSWERED `false`** to
+    `rev-parse --is-inside-work-tree`. Both abstain — that verdict is #11503 Option 1
+    and is deliberately unchanged — but printing *"git is unavailable here"* for the
+    second tells a reader git was never asked when it was asked and replied. That is
+    the guess-the-cause defect this change removes one function over, and it was
+    FROZEN by this PR's own `#11503` pin, whose docstring says "git is present, ran,
+    and answered" while its assertion demanded the opposite sentence. `probe` is what
+    the caller measured; None means "not passed", so `_tracked_unprovable()` keeps its
+    signature for the direct callers.
     """
+    if probe is not None and probe.returncode == 0 and probe.stdout.strip() == "false":
+        print(
+            "CAPSTONE-LEDGER: NOTE — git is present and says this is not a work tree, "
+            "so the TRACKED rule cannot be evaluated; cited paths were checked for "
+            "existence only",
+            file=sys.stderr,
+        )
+        return True
     print(
         "CAPSTONE-LEDGER: NOTE — git is unavailable here, so the TRACKED rule cannot "
         "be evaluated; cited paths were checked for existence only",
