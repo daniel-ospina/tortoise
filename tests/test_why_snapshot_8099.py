@@ -221,7 +221,6 @@ def test_push_path_assembles_nothing_and_computes_no_beliefs(monkeypatch):
     actually came from the SNAPSHOT (the booby trap is not merely unvisited).
     """
     import tortoise.ep as ep_mod
-    import tortoise.why_snapshot as ws_mod
 
     sdk = _fresh_sdk()
     planted = _plant_claim(sdk, "Ledger reconciliation closed on time")
@@ -235,15 +234,15 @@ def test_push_path_assembles_nothing_and_computes_no_beliefs(monkeypatch):
     def _boom_ep(*a, **k):
         raise AssertionError("the push path called the EP engine")
 
-    # ⛔ BOTH HOMES (#8099 review F3). The alias only intercepts callers that
-    # resolve through ``why_snapshot``'s namespace (i.e. ``precompute``, already
-    # run). The mutation this test exists to catch is a NEW
-    # ``from .why import assemble_why_blocks`` inside ``webhook_delivery`` —
-    # `_page_why_entries` already imports its sibling that way two lines up —
-    # and that resolves through ``tortoise.why`` at CALL time, so trapping the
-    # defining module is the half that can actually red for it.
+    # ⛔ ONE HOME, and it is the one that can red (#8099 review F5). The mutation
+    # this test exists to catch is a NEW ``from .why import assemble_why_blocks``
+    # inside ``webhook_delivery`` — ``_page_why_entries`` already imports its
+    # sibling that way two lines up — and that resolves through ``tortoise.why``
+    # at CALL time. Trapping ``why_snapshot``'s module-level alias as well was
+    # DEAD: ``precompute`` ran at ``:229`` (above), and it is the only consumer
+    # of that binding, so nothing after this line could reach it — a guard no
+    # mutant can red is not a guard (agent-infra#3442 rule 2).
     monkeypatch.setattr("tortoise.why.assemble_why_blocks", _boom_assembly)
-    monkeypatch.setattr(ws_mod, "assemble_why_blocks", _boom_assembly)
     monkeypatch.setattr(ep_mod.TortoiseEP, "compute_confidence", _boom_ep)
     transport = FakeTransport()
     summary = wd.dispatch_pending(proj, transport=transport)
@@ -555,24 +554,103 @@ def test_a_section_17_1_refusal_is_not_swallowed(monkeypatch):
     graph hiccup, and the push keeps serving whatever blocks happened to exist.
 
     This is the rule `webhook_delivery._run` states for its own writes (#9233).
+
+    ⛔ ONE ARM PER RE-RAISE, and each arm is driven SPECIFICALLY (#8099 review F2).
+    The module docstring declares a CLOSED set of four handlers — `ensure_schema`,
+    `_drop`, `purge_stale` and `precompute`'s MERGE — and the first version of
+    this test replaced the whole ``_run`` gateway, so the first refusal raised in
+    `ensure_schema` and short-circuited the path: deleting ANY one of the other
+    three arms still passed. That is a mutant that reds through an unrelated row
+    (agent-infra#3442 rule 2), and it hid the two arms where the swallowed
+    alternative is silent data loss dressed as hygiene (`dropped 0` /
+    `purged 0` are the CORRECT-LOOKING returns).
+
+    Each case below refuses exactly one STATEMENT SHAPE and lets every other
+    statement through, then proves that shape is reached by the refusal itself.
     """
     from tortoise.projection import DirectCacheWriteRefused
 
+    def _gateway(monkeypatch, match):
+        real = ws._run
+
+        def _run(proj, cypher, params=None):
+            if match(cypher):
+                raise DirectCacheWriteRefused(f"refused: {cypher.split()[0]}")
+            return real(proj, cypher, params=params)
+
+        monkeypatch.setattr(ws, "_run", _run)
+
+    # ── arm 1: ensure_schema's index DDL ─────────────────────────────────
     sdk = _fresh_sdk()
-    planted = _plant_claim(sdk, "A refused write never landed")
+    planted = _plant_claim(sdk, "A refused index write never landed")
     proj = sdk._get_proj()
+    _gateway(monkeypatch, lambda c: c.lstrip().startswith("CREATE INDEX"))
+    try:
+        with pytest.raises(DirectCacheWriteRefused):
+            ws.precompute(proj, [planted["claim"], planted["support"]])
+    finally:
+        monkeypatch.undo()
+    assert _snapshot_count(sdk) == 0, (
+        "the refusal was swallowed and the pass went on to write anyway")
+    assert not getattr(proj, ws._SCHEMA_ATTR, False), (
+        "a refused index DDL must not be remembered as created")
+    sdk.close()
 
-    def _refuse(*a, **k):
-        raise DirectCacheWriteRefused("declared-and-refused (test)")
-
-    monkeypatch.setattr(ws, "_run", _refuse)
+    # ── arm 2: the MERGE (precompute's write arm) ────────────────────
+    sdk = _fresh_sdk()
+    planted = _plant_claim(sdk, "A refused snapshot write never landed")
+    proj = sdk._get_proj()
+    # A first pass creates the index, so `ensure_schema` is a no-op and the
+    # ONLY refusal on the second pass is the MERGE.
+    assert ws.precompute(proj, [planted["claim"]])["written"] == 1
+    _gateway(monkeypatch, lambda c: "MERGE (w:WhySnapshot" in c)
     try:
         with pytest.raises(DirectCacheWriteRefused):
             ws.precompute(proj, [planted["claim"]])
     finally:
         monkeypatch.undo()
-    # The store was never touched, so nothing is served and nothing is stale.
-    assert _snapshot_count(sdk) == 0
+    assert ws.read_blocks(proj, [planted["claim"]]), (
+        "precondition: the earlier snapshot survived the refused refresh")
+    sdk.close()
+
+    # ── arm 3: `_drop` —— a refused DELETE is not "dropped 0" ────────
+    sdk = _fresh_sdk()
+    planted = _plant_claim(sdk, "A refused drop never landed")
+    proj = sdk._get_proj()
+    assert ws.precompute(proj, [planted["claim"]])["written"] == 1
+    # The point is GONE, so `_vanished` asks for its snapshot to be dropped.
+    proj.g.query("MATCH (n:Point {id:$id}) DETACH DELETE n",
+                 params={"id": planted["claim"]})
+    _gateway(monkeypatch,
+             lambda c: c.lstrip().startswith("MATCH (w:WhySnapshot)") and "DELETE" in c)
+    try:
+        with pytest.raises(DirectCacheWriteRefused):
+            ws.precompute(proj, [planted["claim"]], purge=False)
+    finally:
+        monkeypatch.undo()
+    sdk.close()
+
+    # ── arm 4: `purge_stale` —— a refused purge is not "purged 0" ───
+    sdk = _fresh_sdk()
+    planted = _plant_claim(sdk, "A refused purge never landed")
+    proj = sdk._get_proj()
+    assert ws.precompute(proj, [planted["claim"]], purge=False)["written"] == 1
+    # Backdate the snapshot so the retention sweep wants it.
+    proj.g.query(
+        "MATCH (w:WhySnapshot) SET w.assembled_at = $ts",
+        params={"ts": "2000-01-01T00:00:00+00:00"},
+    )
+    _gateway(monkeypatch, lambda c: "LIMIT 5000 DELETE w" in c)
+    try:
+        with pytest.raises(DirectCacheWriteRefused):
+            # Called directly, so the sweep runs over the BACKDATED row — a pass
+            # that re-stamps it first would make the refusal vacuous.
+            ws.purge_stale(proj)
+    finally:
+        monkeypatch.undo()
+    assert _snapshot_count(sdk) == 1, (
+        "the refused purge left the snapshot in place but reported success")
+    sdk.close()
 
 
 # ── the kill switch gates the READ too (review F2) ────────────────────────
@@ -650,3 +728,117 @@ def test_a_blockless_assembly_never_drops_a_live_points_snapshot(failure):
         f"be driven by an existence read: {summary}")
     assert _snapshot_count(sdk) == 1, "the good snapshot was deleted"
     assert ws.read_blocks(proj, [pid]), "the surviving snapshot is no longer served"
+
+
+# ── the declared bounds: each one must be able to RED (#8099 review F3) ───
+
+def test_payload_id_extraction_is_ordered_deduped_and_depth_bounded():
+    """FAILING VALUE: a payload walk that is not depth-bounded
+    (``PAYLOAD_MAX_DEPTH``) — ``point_ids_in_payload``'s own docstring sells the
+    bound as the defence against an attacker-shaped payload, and no test could
+    red its deletion, so the guard was dead weight that read as a proof the walk
+    is bounded (agent-infra#3442 rule 3).
+
+    Also pins the ORDER contract (first appearance, de-duplicated) that makes the
+    pushed ``why`` list deterministic, and the ``set`` half of it, whose iteration
+    order varies across processes unless the walk sorts it.
+    """
+    from tortoise.why import PAYLOAD_MAX_DEPTH, point_ids_in_payload
+
+    shallow = "pt_" + "a" * 8
+    deep = "pt_" + "b" * 8
+
+    # Order + de-duplication: first appearance wins, one entry per id.
+    payload = {
+        "id": shallow,
+        "source_id": shallow,
+        "target_ids": [shallow, "not-an-id", "pt_" + "c" * 8],
+    }
+    assert point_ids_in_payload(payload) == [shallow, "pt_" + "c" * 8]
+
+    # Depth bound. The outer dict is depth 0, so the leaf below sits at
+    # `depth` = number of wrappers + 1; one wrapper per level.
+    over = {"a": {"b": {"c": {"d": {"e": {"f": {"id": deep}}}}}}}
+    under = {"a": {"b": {"id": deep}}}
+    assert deep in point_ids_in_payload(under), (
+        "precondition: the leaf inside the bound is found")
+    assert point_ids_in_payload(over) == [], (
+        f"a payload nested deeper than PAYLOAD_MAX_DEPTH={PAYLOAD_MAX_DEPTH} "
+        "was walked — the depth bound did not apply")
+
+    # A `set` is walked in SORTED order: its natural iteration order varies
+    # across processes (PYTHONHASHSEED), which would make the pushed `why` list
+    # vary between identical deliveries (#8099 review F3 sub-note). Six ids, so a
+    # walk that iterates the set as-is produces an ascending permutation by
+    # chance ~1 in 720 rather than every other run.
+    members = {f"pt_{n}{n}{n}{n}{n}{n}{n}{n}" for n in range(6)}
+    as_set = point_ids_in_payload({"targets": members})
+    assert sorted(members) == sorted(as_set), "precondition: every id is extracted"
+    assert as_set == sorted(as_set), (
+        f"a set payload produced a non-deterministic order: {as_set}")
+
+
+def test_page_read_of_why_ids_is_bounded(monkeypatch):
+    """FAILING VALUE: a push page that reads EVERY id it extracted from a batch
+    (``MAX_WHY_IDS_PER_PAGE`` deleted) — one operator event fanning out to N
+    targets would turn a single delivery into an unbounded ``IN`` list.
+    """
+    sdk = _fresh_sdk()
+    planted = _plant_claim(sdk, "The page read is bounded")
+    proj = sdk._get_proj()
+    ws.precompute(proj, [planted["claim"], planted["support"]])
+    assert len(ws.read_blocks(proj, [planted["claim"], planted["support"]])) == 2
+
+    monkeypatch.setattr(ws, "MAX_WHY_IDS_PER_PAGE", 1)
+    got = ws.read_blocks(proj, [planted["claim"], planted["support"]])
+    assert len(got) == 1, f"the page read served {len(got)} ids despite the cap"
+    assert set(got) == {planted["claim"]}, (
+        "the cap must truncate in the CALLER's order, not arbitrarily")
+    sdk.close()
+
+
+def test_points_per_pass_is_bounded(monkeypatch):
+    """FAILING VALUE: a dream pass assembling every id it was handed
+    (``MAX_POINTS_PER_PASS`` deleted) — one pathological backlog turning a
+    background pass unbounded.
+    """
+    sdk = _fresh_sdk()
+    planted = _plant_claim(sdk, "The pass assembles a bounded point set")
+    proj = sdk._get_proj()
+    monkeypatch.setattr(ws, "MAX_POINTS_PER_PASS", 1)
+    summary = ws.precompute(proj, [planted["claim"], planted["support"]],
+                            purge=False)
+    assert summary["points"] == 1, f"the pass assembled {summary['points']} points"
+    assert summary["written"] == 1
+    assert _snapshot_count(sdk) == 1
+    sdk.close()
+
+
+def test_pending_event_read_is_bounded(monkeypatch):
+    """FAILING VALUE: a pending-event half that reads an unbounded backlog
+    (``MAX_PENDING_EVENTS`` raised to the whole log, or the ``limit`` dropped
+    from the ``read_after`` call) — the pass would then walk every event a
+    subscriber is behind on.
+    """
+    import inspect
+
+    from tortoise import event_store
+
+    assert (inspect.signature(ws.pending_point_ids)
+            .parameters["limit"].default == ws.MAX_PENDING_EVENTS), (
+        "the dream pass calls pending_point_ids() without a limit, so the "
+        "DEFAULT is the bound")
+    assert ws.MAX_PENDING_EVENTS > 0
+
+    sdk = _fresh_sdk()
+    proj = sdk._get_proj()
+    seen: dict = {}
+
+    def _read_after(proj_, cursor, limit=None, **kwargs):
+        seen["limit"] = limit
+        return []
+
+    monkeypatch.setattr(event_store, "read_after", _read_after)
+    ws.pending_point_ids(proj, min_cursor=7, limit=3)
+    assert seen["limit"] == 3, f"the bound was not passed through: {seen}"
+    sdk.close()

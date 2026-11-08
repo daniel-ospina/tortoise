@@ -958,7 +958,11 @@ def point_ids_in_payload(payload: object, *,
     real Point node produces no block (the caller's existence anchor).
 
     Order is first-appearance, de-duplicated — deterministic for a given
-    payload, which is what makes the pushed ``why`` list deterministic.
+    payload, which is what makes the pushed ``why`` list deterministic. The
+    ``set``/``frozenset`` branch is walked in SORTED order for exactly that
+    reason: a set's iteration order varies across processes (``PYTHONHASHSEED``),
+    so an unsorted walk would push the same event's ``why`` list in a different
+    order on a different worker (#8099 review F3 sub-note).
     """
     seen: list[str] = []
 
@@ -971,7 +975,13 @@ def point_ids_in_payload(payload: object, *,
         elif isinstance(value, dict):
             for cell in value.values():
                 walk(cell, depth + 1)
-        elif isinstance(value, (list, tuple, set)):
+        elif isinstance(value, (set, frozenset)):
+            # Sorted by rendered form: elements need not be mutually orderable
+            # (a set can hold a str and a dict), so the key is the type name
+            # plus repr, which is total and stable within a process.
+            for cell in sorted(value, key=lambda c: (type(c).__name__, repr(c))):
+                walk(cell, depth + 1)
+        elif isinstance(value, (list, tuple)):
             for cell in value:
                 walk(cell, depth + 1)
 
