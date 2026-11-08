@@ -363,14 +363,14 @@ def test_graph_census_counts_only_the_edges_this_session_wrote():
     assert any("RAISED" in note for note in notes), notes
 
     # …and a capture that never entered the leg is a THIRD state, a measured
-    # absence rather than a zero dressed up as a measurement.
+    # absence rather than a zero dressed up as a measurement. It is counted in
+    # the aggregate's basis map (below) and deliberately NOT a note: most runs
+    # of most corpora state no relations at all, so a note per such run would
+    # train a reader to skip the channel.
     absent = runner.graph_census(_CensusSDK(_CensusGraph([])), "wp01", [])
     assert absent["object_edges"] == {}, absent
     assert absent["object_edges_basis"] == "absent", absent
-    unanswered = runner.graph_census_notes({
-        "aggregate": runner.aggregate_graph_census({"wp01": absent}),
-        "sessions": {"wp01": absent}})
-    assert any("did not run" in note for note in unanswered), unanswered
+    assert absent["object_edges_missing"] == [], absent
 
 
 def test_the_aggregate_keeps_the_two_measures_apart():
@@ -404,6 +404,72 @@ def test_the_aggregate_keeps_the_two_measures_apart():
     assert aggregate["object_edges_incident_total"] == 5, aggregate
     assert aggregate["object_edges_missing"][0]["predicate"] == "NAND", \
         aggregate
+
+
+def test_the_object_edge_row_reaches_the_RUN_LEVEL_total():
+    """`object_edges_total` is the single number the E6 row is read against.
+
+    `graph_census`'s per-session block is only half the instrument: the receipt
+    carries `graph_census.aggregate`, and `object_edges_total` is what a reader
+    compares with the pre-registration's before-arm of **0**. A census that
+    counted per session but whose aggregate dropped the sum would publish the
+    baseline as the corpus total — the "a zero is a measurement" failure one
+    layer up.
+
+    Mutation: delete the `object_edges`/`object_edges_total` arms of
+    `aggregate_graph_census` and this leg reds (KeyError / a short sum).
+    """
+    one = runner.graph_census(
+        _CensusSDK(_CensusGraph([("IMPL", 2), ("hasPart", 1)])), "s1", ["pt-1"])
+    two = runner.graph_census(
+        _CensusSDK(_CensusGraph([("IMPL", 1), ("related", 4)])), "s2", ["pt-2"])
+    agg = runner.aggregate_graph_census({"s1": one, "s2": two})
+    assert agg["object_edges"] == {"IMPL": 3, "hasPart": 1, "related": 4}, agg
+    assert agg["object_edges_total"] == 8, agg
+
+
+def test_the_relation_write_aggregate_sums_written_dropped_and_folded():
+    """The run-level block SUMS the three outcomes and keeps each one's session.
+
+    `relation_write.apply_relation_edges` promises that `written + dropped +
+    folded` reconciles with the stated population; the run-level block is where
+    a reader checks it across the corpus, so a bucket that quietly stopped
+    being summed would make the corpus total understate what the leg did
+    (#11548 review — `runner.py::_aggregate_relation_write` had NO assertion:
+    deleting it left the suite green).
+
+    `folded` counts MEANINGS (one edge can absorb two verbs), so it is summed
+    from each row's own `folded` list rather than from the row count.
+
+    Mutation: drop any of the three from the sum and the totals disagree with
+    the per-session blocks.
+    """
+    runs = {
+        "s1": {"written": 1, "dropped": 0, "folded": 0,
+               "write_paths": {"direct": 1}, "edges": [], "drops": [],
+               "collapsed": []},
+        "s2": {"written": 3, "dropped": 1, "folded": 2,
+               "write_paths": {"structural": 2, "direct": 1},
+               "edges": [{"predicate": "hasPart"}],
+               "drops": [{"predicate": "transacts", "src": "a", "dst": "b",
+                          "reason": "no path"}],
+               "collapsed": [{"src": "a", "dst": "b", "predicate": "IMPL",
+                              "kept": "causes",
+                              "folded": ["supports", "refutes"],
+                              "reason": "one edge per (src, tgt, type)"}]},
+    }
+    block = runner._aggregate_relation_write(runs)
+    assert block["written"] == 4, block
+    assert block["dropped"] == 1, block
+    assert block["folded"] == 2, block
+    assert block["written"] + block["dropped"] + block["folded"] == 7, block
+    assert block["write_paths"] == {"structural": 2, "direct": 2}, block
+    # The per-statement records keep their SESSION, so a named refusal/fold can
+    # be traced to the capture that made it.
+    assert [row["session_id"] for row in block["drops"]] == ["s2"], block
+    assert [row["session_id"] for row in block["collapsed"]] == ["s2"], block
+    # Pure: same receipts -> same block.
+    assert runner._aggregate_relation_write(runs) == block
 
 
 def test_failed_run_receipt_allows_null_pin_and_empty_metrics():

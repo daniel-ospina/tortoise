@@ -782,9 +782,6 @@ def graph_census(sdk, session_id: str, point_ids: list[str],
     #
     # ``object_edges_incident`` keeps the older source-bounded read as CONTEXT
     # only (see ``SESSION_OBJECT_EDGES_QUERY`` for why it is not the number).
-    #
-    # ``object_edges_incident`` keeps the older source-bounded read as CONTEXT
-    # only (see ``SESSION_OBJECT_EDGES_QUERY`` for why it is not the number).
     object_edges: dict[str, int] = {}
     object_edges_missing: list[dict] = []
     block = relation_write if isinstance(relation_write, dict) else None
@@ -1012,7 +1009,6 @@ def graph_census_notes(census: dict | None) -> list[str]:
     # entered it, contributes nothing to `object_edges_total` — so a reader who
     # saw only the total would read an unmeasured row as the pre-registration's
     # before-arm of 0 (#11548 review round 4, P2).
-    basis = aggregate.get("object_edges_basis") or {}
     raised = sorted(
         sid for sid, entry in (census.get("sessions") or {}).items()
         if (entry or {}).get("object_edges_basis") == "leg-raised")
@@ -1023,14 +1019,11 @@ def graph_census_notes(census: dict | None) -> list[str]:
             "row is NOT answerable for them: " + "; ".join(
                 f"{sid}: {(census.get('sessions') or {}).get(sid, {}).get('object_edges_error')}"
                 for sid in raised))
-    unanswered = int(basis.get("absent") or 0)
-    if unanswered:
-        notes.append(
-            f"relation write leg did not run for {unanswered} of "
-            f"{aggregate.get('sessions')} session(s) (no relation-write block "
-            "on the capture, and no leg failure warning) — they contribute "
-            "nothing to object_edges_total, which is a lower bound on the "
-            "channel's work, not a measured zero")
+    # A capture that never entered the leg (`absent`) is NOT a note: the
+    # aggregate's `object_edges_basis` counts it, and most runs of most corpora
+    # state no relations at all, so a note per such run would be noise that
+    # trains a reader to skip the channel. A RAISED leg is different — that is
+    # a failure, and it is named above.
     errored = list(aggregate.get("sessions_errored") or [])
     if not errored:
         return notes

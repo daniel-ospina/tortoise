@@ -167,6 +167,14 @@ _ENTITIES = [
 ]
 
 
+# ⛔ The PURE-PLAN guards for this module live in
+# `tests/test_relation_write_11237.py`, not here: `eval/**` is `on_demand` by an
+# owner decision (#10194), and the on-demand subtraction runs AFTER surface
+# selection — so a change to `tortoise/relation_write.py` ALONE (surface `core`)
+# runs no file under `tests/eval/` at all, and an `eval/**` row on `core` is a row
+# that can never select it. What stays here is the graph-level lane (a REAL
+# capture commits the edges), which is the product-number half and is on demand.
+
 def test_relation_leg_writes_object_object_edges(_lane, monkeypatch):
     """A stated relation LANDS as an edge between the two resolved Objects.
 
@@ -349,96 +357,6 @@ def test_relation_leg_names_what_it_refused(_lane, monkeypatch):
     assert _edges(_lane["sdk"]) == set()
 
 
-def test_ambiguous_endpoint_is_refused_not_guessed():
-    """⛔ ``#11235``: identity is ``(name, kind)`` — a collision is NOT resolved.
-
-    Plan-level because the GRAPH cannot express this collision: ``create_entity``
-    keys an Object by ``(name, label)``, so two OBJECT kinds under one name
-    collapse onto one node. The ambiguity that survives a capture is a name
-    written to TWO DIFFERENT LABELS (an Object and a Subject), and the leg must
-    decline it rather than pick the one it happens to see — ``extractor_v2``
-    already warns that such an endpoint is ambiguous; this is the write-side
-    half that refuses to settle it by accident.
-    """
-    from tortoise.relation_write import plan_relation_edges
-
-    index = {
-        "lumen auth": [("obj-1", "organization"), ("subj-1", "organization")],
-        "deadline slip": [("obj-2", "occurrence")],
-    }
-    edges, drops = plan_relation_edges(
-        [{"src": "lumen auth", "dst": "deadline slip",
-          "predicate": "related"}], index)
-    assert edges == [], edges
-    assert len(drops) == 1
-    assert "#11235" in drops[0].reason, drops[0].reason
-
-
-def test_a_writer_refusal_names_the_pair_and_the_verb_the_story_used():
-    """A refusal's drop row carries the two NAMES and the STATED verb (#11548 P2).
-
-    Plan-level drops have always carried ``(src, dst, predicate, reason)``. The
-    WRITER's refusal arm passed the stated verb as ``src`` and an empty ``dst``
-    and the mechanism as ``predicate``, so a receipt had two drop shapes and a
-    reader could not tell which pair (or which stated verb) was lost. FAILS IF
-    that arm goes back to ``(edge.stated_predicate, "", edge.predicate, …)``.
-    """
-    from tortoise.relation_write import apply_relation_edges
-
-    class _Refusing:
-        def link_entities(self, *_a, **_kw):
-            raise RuntimeError("graph refused")
-
-    warnings: list[str] = []
-    index = {
-        "retry storm": [("obj-1", "occurrence")],
-        "deadline slip": [("obj-2", "occurrence")],
-    }
-    report = apply_relation_edges(
-        _Refusing(),
-        [{"src": "retry storm", "dst": "deadline slip",
-          "predicate": "causes"}],
-        index, warn=warnings.append)
-    assert report["written"] == 0, report
-    assert report["dropped"] == 1, report
-    drop = report["drops"][0]
-    assert (drop["src"], drop["dst"]) == ("retry storm", "deadline slip"), drop
-    assert drop["predicate"] == "causes", drop
-    assert "graph refused" in drop["reason"], drop
-    assert any("not written" in w for w in warnings), warnings
-
-
-def test_a_fold_is_recorded_only_when_its_edge_was_written():
-    """A fold describes a WRITTEN edge — a refused edge must not report one.
-
-    ``create_direct_edge`` is one edge per (src, tgt, type), so a second stated
-    verb binding the same mechanism is FOLDED onto the first. The fold record
-    used to be built from the PLAN, so an edge the writer then refused produced
-    ``written=0, dropped=1, folded=1`` — the lost meaning described as safely
-    absorbed. FAILS IF ``collapsed`` is built from ``plan`` instead of from what
-    landed.
-    """
-    from tortoise.relation_write import apply_relation_edges
-
-    class _Refusing:
-        def link_entities(self, *_a, **_kw):
-            raise RuntimeError("graph refused")
-
-    index = {
-        "retry storm": [("obj-1", "occurrence")],
-        "deadline slip": [("obj-2", "occurrence")],
-    }
-    report = apply_relation_edges(
-        _Refusing(),
-        [{"src": "retry storm", "dst": "deadline slip", "predicate": "causes"},
-         {"src": "retry storm", "dst": "deadline slip",
-          "predicate": "supports"}],
-        index, warn=lambda _w: None)
-    assert report["written"] == 0, report
-    assert report["collapsed"] == [], report
-    assert report["folded"] == 0, report
-
-
 def test_relation_leg_carries_no_narrative_text(_lane, monkeypatch):
     """⛔ #10000 (P0): the edge carries the TYPED relation, never the story.
 
@@ -516,37 +434,3 @@ def test_fold_lane_relations_reach_the_commit_leg(_lane, monkeypatch):
     edges = _edges(_lane["sdk"])
     assert ("IMPL", "retry storm", "deadline slip", "causes") in edges, edges
     assert ("related", "retry budget", "retry storm", "") in edges, edges
-
-
-def test_a_declared_hierarchy_fixes_the_predicate():
-    """The DECLARED pair wins over the verb the story used (consumed, not inferred).
-
-    ``#11001`` built ``pack_hierarchy.plan_hierarchy_edges`` for exactly this
-    pairing and recorded that nothing called it. The relation leg is that call
-    site: when the pack declares ``theme → epic`` on ``hasPart``, a story that
-    merely says the two are ``related`` must land the DECLARED predicate — the
-    declaration is the pack's own claim about how its levels relate.
-
-    Pure plan-level assertion (no graph): the oracle is the unit under test, and
-    ``apply_hierarchy_edges`` already has its own suite.
-    """
-    from tortoise.pack_hierarchy import DeclaredHierarchy
-    from tortoise.relation_write import plan_relation_edges
-
-    declared = (DeclaredHierarchy(
-        pack="dev", path="Theme \u2192 Epic", predicate="hasPart",
-        from_kind="dev:theme", to_kind="dev:epic",
-        write_path="structural"),)
-    index = {
-        "quarry": [("obj-theme", "dev:theme")],
-        "auth table": [("obj-epic", "dev:epic")],
-    }
-    edges, drops = plan_relation_edges(
-        [{"src": "quarry", "dst": "auth table", "predicate": "related"}],
-        index, declared=declared)
-    assert not drops, drops
-    assert len(edges) == 1
-    assert edges[0].predicate == "hasPart"
-    assert edges[0].declared_by == "dev"
-    assert edges[0].stated_predicate == "related"
-    assert edges[0].write_path == "structural"
