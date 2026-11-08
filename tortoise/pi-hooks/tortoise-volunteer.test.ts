@@ -205,6 +205,38 @@ test("the reflex chain shares ONE deadline across candidates", async () => {
   // out of budget is a TIMEOUT (no injection, install fine) — never `inert`,
   // which writes a "reinstall" breadcrumb over a working install.
   const home = tmpHome();
+  // ⛔ NON-TIMEOUT failures, on purpose (#11584 review, round 6). The first
+  // version of this row used a `sleep 5` first candidate, which ABORTS the
+  // chain under EITHER implementation — so reverting `resolveBlock` to a
+  // per-candidate budget left the whole suite green (measured 23/23) while the
+  // comment above claimed the shared deadline was pinned. Two candidates that
+  // each FAIL (sleep, then non-zero exit) is what distinguishes them: measured
+  // per-candidate 2424 ms / 1 fail vs shared-deadline 2005 ms / pass.
+  const first = fakeCli(join(home, "a"), "sleep 1.2\nexit 1");
+  const second = fakeCli(join(home, "b"), "sleep 1.2\nexit 1");
+  const cfgPath = join(home, "tortoise-config.json");
+  writeFileSync(cfgPath, JSON.stringify({ volunteer: { timeoutMs: 2000 } }));
+  const started = Date.now();
+  const verdict = await resolveBlock(
+    "p",
+    "",
+    readVolunteerConfig({}, cfgPath),
+    [first, second],
+  );
+  const elapsed = Date.now() - started;
+  assert.equal(verdict.status, "timeout", JSON.stringify(verdict));
+  assert.ok(
+    elapsed < 2500,
+    `the chain must not spend a budget per candidate (took ${elapsed}ms; ` +
+      "2 x 2000ms of budget would exceed 3000ms)",
+  );
+});
+
+test("a TIMEOUT aborts the chain rather than trying the next candidate", async () => {
+  // The other half of the same bound, and the invariant the row above was
+  // originally named for: a SLOW first candidate must not fall through to a
+  // second one, which would multiply the turn's wait by the chain's size.
+  const home = tmpHome();
   const slow = fakeCli(join(home, "slow"), "sleep 5");
   const quick = fakeCli(join(home, "quick"), `printf '%s' '{"block":"x"}'`);
   const cfgPath = join(home, "tortoise-config.json");
@@ -218,7 +250,7 @@ test("the reflex chain shares ONE deadline across candidates", async () => {
   );
   const elapsed = Date.now() - started;
   assert.equal(verdict.status, "timeout", JSON.stringify(verdict));
-  assert.ok(elapsed < 1500, `the chain must not spend a budget per candidate (took ${elapsed}ms)`);
+  assert.ok(elapsed < 1500, `the chain must abort on the first timeout (took ${elapsed}ms)`);
 });
 
 test("the prompt is bounded in BYTES, not characters", async () => {
