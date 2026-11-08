@@ -435,12 +435,14 @@ condition), have nothing to hit. The numbers are pinned by
 (@slow; skipped in CI, which has no dataset), so a dataset refresh reds the pin
 instead of silently re-basing them.
 
-**Recorded residual, NOT dedup:** the chunk leg is 124,345 of the 371,095 encode
-units (33.5%) and is *unreachable by any text-keyed cache* — a chunk renders
-`_session_transcript(window)` while its turn Points render `_turn_text`
-(`[role] content`), so the chunk text is a new string even though it covers the
-same turns. Reducing it is a chunking/rendering decision (retrieval semantics,
-the `chunk_turns` knob of #1540), not a cache.
+**Recorded residual — NOT reducible by dedup:** the chunk leg is 124,345 of the 371,095 encode
+units (33.5%) and **no chunk text is ever a turn text** (`distinct` per leg sums to `distinct` for
+the total: 189,522 + 96,086 = 285,608), because a chunk renders `_session_transcript(window)` while
+its turn Points render `_turn_text` (`[role] content`). Those units therefore cannot be served from
+the turn Points' cache entries. The cache still serves **28,259 of them** (22.7% of the leg — 33.1%
+of every cross-unit cache hit in the corpus); what a cache cannot do is remove the **96,086 distinct
+chunk texts**, which is a chunking/rendering decision (retrieval semantics — the `chunk_turns` knob
+of #1540).
 
 ## Dataset
 

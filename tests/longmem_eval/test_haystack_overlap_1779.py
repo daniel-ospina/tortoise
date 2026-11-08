@@ -106,9 +106,13 @@ def test_encode_units_use_the_product_renderers():
     assert e["turn"]["slots"] == 2
     assert e["chunk"]["slots"] == len(_session_chunks(session, 2))
     assert e["total"]["slots"] == 2 + len(_session_chunks(session, 2))
-    # the chunk leg is a SECOND rendering of the same turns: distinct texts, so
-    # a text-keyed cache can never dedupe it (the recorded residual)
+    # a chunk renders `_session_transcript(window)` while its turn Points render
+    # `_turn_text` — two DISJOINT string populations, so a chunk unit can never
+    # be served from a turn unit's cache entry. `distinct` per leg summing to
+    # `distinct` for the total is the numeric witness for that disjointness.
     assert e["chunk"]["distinct"] == e["chunk"]["slots"]
+    assert (e["turn"]["distinct"] + e["chunk"]["distinct"]
+            == e["total"]["distinct"])
     assert e["total"]["chunk_share_of_units"] == round(
         e["chunk"]["slots"] / e["total"]["slots"], 4)
 
@@ -159,6 +163,46 @@ def test_a_none_date_is_the_same_prompt_as_an_absent_date():
     assert s["prompt_reuse_factor"] == 3.0
     assert s["same_date_pairs"] == 3
     assert census["decision"]["prompt_level_response_cache"]["realizable"] is True
+
+
+def test_chunk_turns_MUST_be_honoured_not_merely_echoed():
+    """The window width the census MEASURES, not the one it reports.
+
+    The previous fixture was a 2-turn session with `chunk_turns=2`, where any
+    window >= 2 yields exactly one chunk — so "honours the argument" and
+    "ignores it and uses the default" were indistinguishable, and a mutant
+    threading `DEFAULT_CHUNK_TURNS` instead of `chunk_turns` survived every
+    test (review finding, PR #11577). The echoed `census["chunk_turns"]` is the
+    ARGUMENT, so it cannot witness this either: only the slot count can.
+    """
+    session = [{"role": "user", "content": f"turn {i}"} for i in range(3)]
+    instances = [_instance("q1", [session], ["2023-01-01"])]
+
+    per_turn = census_overlap(instances, chunk_turns=1)["encode_units"]["chunk"]
+    whole = census_overlap(instances, chunk_turns=3)["encode_units"]["chunk"]
+    assert per_turn["slots"] == 3      # 3 one-turn windows
+    assert whole["slots"] == 1         # one window covering all 3 turns
+    assert per_turn["slots"] != whole["slots"]
+
+
+def test_cli_chunk_turns_reaches_the_census(tmp_path, capsys):
+    """And the FLAG reaches the measurement (the same class the review found on
+    `--download`): `main(["--chunk-turns", "1"])` must change the chunk leg."""
+    data = tmp_path / "mini.json"
+    data.write_text(json.dumps([_instance(
+        "q1",
+        [[{"role": "user", "content": f"turn {i}"} for i in range(3)]],
+        ["d1"])]), encoding="utf-8")
+
+    assert main(["--data", str(data), "--chunk-turns", "1", "--json"]) == 0
+    per_turn = json.loads(capsys.readouterr().out)
+    assert per_turn["chunk_turns"] == 1
+    assert per_turn["encode_units"]["chunk"]["slots"] == 3
+
+    assert main(["--data", str(data), "--chunk-turns", "3", "--json"]) == 0
+    whole = json.loads(capsys.readouterr().out)
+    assert whole["chunk_turns"] == 3
+    assert whole["encode_units"]["chunk"]["slots"] == 1
 
 
 def test_hits_are_counted_across_questions_not_within_one():

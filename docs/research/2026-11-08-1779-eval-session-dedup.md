@@ -38,11 +38,13 @@ existing cache with.
    disk cache is ~all hits (a crashed burn resumes off the same file). ⛔ The HNSW spot-check is NOT
    evidence for that: its two passes are the **winner and the control**, each with its own
    `cache_path_for` namespace, so neither can hit the other's entries.
-4. **Recorded residual — measured, not dedup:** the raw-chunk leg is **124,345 of 371,095** encode
-   units (**33.5%**) and is unreachable by any text-keyed cache: a chunk is rendered by
-   `_session_transcript(window)` (`ingest.py:105-112`) while its turn Points render `_turn_text`
-   (`[role] content`, `ingest.py:95-102`), so the chunk text is a new string even though it covers
-   the same turns. Removing it is a chunking/rendering decision (`chunk_turns`, #1540), not a cache.
+4. **Recorded residual — NOT reducible by dedup:** the raw-chunk leg is **124,345 of 371,095** encode
+   units (**33.5%**) and **no chunk text is ever a turn text** (`distinct` per leg sums to `distinct` for
+   the total: 189,522 + 96,086 = 285,608), because a chunk renders `_session_transcript(window)`
+   (`ingest.py:105-112`) while its turn Points render `_turn_text` (`[role] content`, `ingest.py:95-102`).
+   So those units cannot be served from the turn Points' cache entries — but the cache DOES serve
+   **28,259** of them (22.7% of the leg, **33.1% of every cross-unit hit**); what it cannot remove is the
+   **96,086 distinct chunk texts**, which is a chunking/rendering decision (`chunk_turns`, #1540).
 5. **The LLM-budget lever is provider-side prefix caching, and the harness already meters it.**
    Providers cache prompt *prefixes* on an exact match (Anthropic: "the system checks if a prompt
    prefix … is already cached"; order is tools → system → messages) — so the eval's constant
@@ -154,9 +156,12 @@ for this issue by its own scope guard ("Out of scope: any parse/retrieval semant
 
 ## 6. Residuals and what would change the answer
 
-1. **Chunk leg (33.5% of encode units).** Unreachable by a text-keyed cache (different rendering).
-   A real lever, but a chunking/rendering decision — #1540's knob — and it changes what a raw chunk
-   *is*, so it belongs to a retrieval-semantics issue, not here.
+1. **Chunk leg (33.5% of encode units).** NOT reducible by dedup: a chunk renders
+   `_session_transcript(window)` while its turn Points render `_turn_text`, so the two legs are
+   disjoint string populations and a chunk unit can never be served from a turn unit's cache entry
+   (the cache still hits 28,259 chunk units — 33.1% of all hits). What is left is the 96,086 distinct
+   chunk texts: a chunking/rendering decision — #1540's knob — and it changes what a raw chunk *is*,
+   so it belongs to a retrieval-semantics issue, not here.
 2. **Provider prefix caching.** Already discounted by the providers and already metered
    (`prompt_cache_hit_tokens` → `cache_read_per_1m`). Answerable from any real run's report; no
    measurement was possible in this lane (no LLM keys, no spend authorisation).
