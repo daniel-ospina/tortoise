@@ -149,9 +149,10 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
    no structural edge of ANY kind" would be **false** — `references` is a valid structural predicate
    (`docs/ONTOLOGY.md` §3.9), and the measured run writes **7** of them (`(Source)-[:references]->…`,
    produced by `_EdgeHandlers.link_source_to_event` — `probes/capstone_measure.py:275-283`, reached from
-   the capture path at `tortoise/sdk.py:17472`). (The probe's own docstring cites `sdk.py:17472` too —
-   `#11212` corrected a stale `:17465` there while this lane ran, so there is nothing to fix at the
-   probe.) What is missing is the *declared part-whole* edge, not every structural
+   the capture path at `tortoise/sdk.py:17574`). (The probe's own docstring cites that same line —
+   `#11212` corrected a stale `:17465` there while this lane ran, and `#10274` re-derived it once more
+   after the `#9116`/`#11205`/`#11264`/`#11361` inserts moved the writer, which is why the number here
+   and the probe's agree again.) What is missing is the *declared part-whole* edge, not every structural
    edge — and saying otherwise would send a lane off to build a writer the graph already has (the "second
    producer" the epic forbids).
 3. **The census cannot observe the edge even if it existed.** `probes/capstone_measure.py:2238-2243`
@@ -644,7 +645,7 @@ uv run python tools/collision_preflight.py 10984 --repo .    # the dispatch-time
 grep -n -i -E 'hierarch|hasPart|part-whole|11001|10984' config/v4-mechanisms.yml      # no output
 # …and the structural edges that DO exist on the capture path, which is why the claim above is scoped:
 sed -n '275,283p' docs/evidence/7949-capstone/probes/capstone_measure.py   # `references`, via link_source_to_event
-sed -n '17472p' tortoise/sdk.py                             # the call (`references`'s writer)
+sed -n '17574p' tortoise/sdk.py                             # the call (`references`'s writer)
 git grep -in 'rollup' -- '*.py' '*.md'                      # no graph rollup query anywhere
 # ⚠️ self-matching once this record lands — exclude it, then the answer is 0:
 git grep -rn -E 'hasPart|hierarchies|decomposesInto' -- 'docs/evidence/7949-capstone/' \
