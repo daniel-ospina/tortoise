@@ -637,8 +637,12 @@ def _normalise_shapes(raw: dict[str, Any], snap: Snapshot) -> None:
     `local_holders`; `claim_ns`; `repo`/`base`/`config_source`/`collected_at`; each
     pull's `number`, `labels`, `closing_issues`, `refs_issues`, `draft`, `base`,
     `head`, `head_ref`, `title`, `fold_line`; the ELEMENTS of a pull's three list
-    fields; and each ISSUE element — its `number` (a non-bool positive int),
-    `priority` and `title`. Judged by their READERS instead: `gate_text`, and the
+    fields; each ISSUE element — its `number` (a non-bool positive int),
+    `priority` and `title` — and, since #10951, its `labels` and `assignees` plus
+    their ELEMENTS (a nameless label is normalised to the empty name and RECORDED,
+    so one malformed element cannot kill the rule but does refuse the run).
+    `population` and `population_source` are judged in `from_json`, not here: they
+    exist only on a REPLAY. Judged by their READERS instead: `gate_text`, and the
     entry VALUES of `attestation`/`merge_tree`/`check_runs` — one that reads as an
     abstention becomes a POSITION (NEEDS-REVIEW / NEEDS-TEST at exit 0/1, never a
     command), and one the reader cannot handle at all exits 2 through the outer frame
@@ -1712,8 +1716,9 @@ def next_action(unit: Unit, repo: str) -> str | None:
 #:
 #:     NEXT_WORK_PACE=0.2s uv run python tools/next_work.py
 #:
-#: Environment overrides (every one of them is PRINTED in the run's provenance, so
-#: a reader can always tell which lever was pulled):
+#: Environment overrides. The two POPULATION levers are PRINTED in the run's
+#: provenance (see the module docstring's ``Usage`` block); the other two are a
+#: resolved path and a pacing number and are NOT rendered:
 #:     NEXT_WORK_POPULATION=0    DISARMS the fleet's work-unit rule (#10951). No
 #:                               population rule is consulted at all: every row is
 #:                               admitted on its title and labels, exactly as before

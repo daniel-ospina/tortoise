@@ -324,6 +324,11 @@ def test_a_nameless_label_element_does_not_take_the_run_down(monkeypatch):
     assert not any("population:" in u for u in snap.unreadable), snap.unreadable
     assert snap.population == {}
     assert units_by_issue(snap)[7501].pickable is True
+    # ⛔ THE OTHER HALF OF THAT PROMISE (#10951 review, F3). "The rule survives" is
+    # pinned above; "the run is REFUSED" was pinned by nothing, so deleting the
+    # recording kept the suite green while a hand-written snapshot with
+    # `labels: [{"id": 1}]` would have run clean at exit 0/1 with no warning.
+    assert any("labels element has no name" in u for u in snap.unreadable), snap.unreadable
 
 
 # ── (e) an unreadable rule withholds everything ────────────────────────────
@@ -833,12 +838,25 @@ def test_a_superseded_container_is_not_reported_as_population_withheld():
 
 
 def test_a_zero_row_queue_still_names_the_rule_it_would_have_used(monkeypatch):
-    """`the source is printed ALWAYS` is a render property, not a non-empty-run one."""
+    """`the source is printed ALWAYS` is a render property, not a non-empty-run one.
+
+    BOTH branches are pinned: the rule-present one (the digest) and the no-rule one
+    (`UNREADABLE …(no rows)`), because deleting the second left the suite green while
+    making the docstring's "the source is printed" false again — zero rows are the
+    one population where nothing else would ever notice.
+    """
     monkeypatch.setenv("NEXT_WORK_POOL_JQ_SH", str(FIXTURE_RULE))
     monkeypatch.delenv("NEXT_WORK_POPULATION", raising=False)
     snap = Snapshot(issues=[])
     _population_verdicts(REPO_ROOT, snap)
     assert "sha256:" in snap.population_source
+
+    monkeypatch.setenv("NEXT_WORK_POOL_JQ_SH", "/nonexistent/refresh-candidates.sh")
+    monkeypatch.delenv("AGENT_INFRA_PATH", raising=False)
+    no_rule = Snapshot(issues=[])
+    _population_verdicts(REPO_ROOT, no_rule)
+    assert no_rule.population_source.startswith("UNREADABLE"), no_rule.population_source
+    assert no_rule.unreadable == [], "zero rows means nothing to withhold, so nothing is refused"
 
 
 # ── the two reporting arms the fourth round found unpinned ────────────────
