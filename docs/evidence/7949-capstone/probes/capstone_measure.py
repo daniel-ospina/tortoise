@@ -474,7 +474,19 @@ DOOR_PINNED_OFF = ("TORTOISE_SESSION_EXTRACTOR", "TORTOISE_EXTRACTOR",
                    # (measured: 0.90 -> bound at the defaults, suspected with
                    # TORTOISE_SUBJECT_TAU_HI=0.99). Absent is the shipped
                    # default, so pinning them UNSET matches today's behaviour.
-                   "TORTOISE_SUBJECT_TAU_HI", "TORTOISE_SUBJECT_TAU_LO")
+                   "TORTOISE_SUBJECT_TAU_HI", "TORTOISE_SUBJECT_TAU_LO",
+                   # `#11002`: the bounded re-narrate's KEEP-RATE arm
+                   # (`extractor_v2._renarrate_threshold`). UNSET is the shipped
+                   # default and the only state the registered corpus was scored
+                   # under: unset/blank/non-numeric/out-of-range all read as
+                   # DISARMED by construction, while an armed value (0 < v <= 1)
+                   # fires the retry — an EXTRA S1+S2 band whose union can add
+                   # candidates — on any session whose batch keep-rate falls under
+                   # it. So an ambient value changes both the population and the
+                   # cost of what a run measures, under a header that would still
+                   # claim the door held. The other trigger arm
+                   # (`coverage_suspect`) needs no threshold and is not a switch.
+                   "TORTOISE_RENARRATE_KEEP_RATE")
 
 #: Seams pinned to an EXPLICIT value because their ABSENT state is not neutral.
 #: ``TORTOISE_S4_DELTA`` is DEFAULT-ON (``env_flag(..., True)``); an ambient

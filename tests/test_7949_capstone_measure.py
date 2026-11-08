@@ -10792,15 +10792,20 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
 
     # A1: #11205's channel is TRANSPORT ONLY — the schema line that spells the
     # predicate allowlist, and the comment saying nothing in `tortoise/` consumes it.
-    assert "`hasPart` (`tortoise/extractor_v2.py:1720`)" in text, (
+    # ⛔ RE-DERIVED for `#11002`'s rebase, not offset by hand: this branch inserts
+    # above BOTH anchors (the G5 record at the module head and the `run_s1`
+    # emphasis seam), so the schema line moved `:1720` → `:1735` and the comment
+    # `:10891` → `:10906` — the same **+15** §10.15 records for the collector.
+    # Measured off the tree (`grep -n`), and the record moved with it.
+    assert "`hasPart` (`tortoise/extractor_v2.py:1735`)" in text, (
         "the record must cite the relations schema where `hasPart` is spelled")
-    assert "hasPart" in ext[1720 - 1] and '"predicate":' in ext[1720 - 1], (
-        f"extractor_v2.py:1720 reads {ext[1720 - 1].strip()[:90]!r}, not the schema "
+    assert "hasPart" in ext[1735 - 1] and '"predicate":' in ext[1735 - 1], (
+        f"extractor_v2.py:1735 reads {ext[1735 - 1].strip()[:90]!r}, not the schema "
         "line that spells the predicate allowlist")
-    assert "`extractor_v2.py:10891`" in text, (
+    assert "`extractor_v2.py:10906`" in text, (
         "the record must cite the comment that says nothing consumes the channel")
-    assert "nothing in this tree consumes" in ext[10891 - 1], (
-        f"extractor_v2.py:10891 reads {ext[10891 - 1].strip()[:90]!r}, not the "
+    assert "nothing in this tree consumes" in ext[10906 - 1], (
+        f"extractor_v2.py:10906 reads {ext[10906 - 1].strip()[:90]!r}, not the "
         "comment stating nothing consumes `result[\"relations\"]`")
 
     # A2: the capture path that writes the `references` edge — the record names it
@@ -10829,13 +10834,13 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # anchored count closes it. A one-line insertion above the call therefore moves
     # every endpoint and reds — a window test on the MATCH token alone did NOT
     # (measured in review: one inserted line above :2724 left this arm GREEN while
-    # the record's `2724-2726` was stale at both ends).
-    assert "`probes/capstone_measure.py:2724-2726`" in text
-    assert probe[2724 - 1].strip() == "for name, count, anchored in projection.g.query(", (
-        f"capstone_measure.py:2724 reads {probe[2724 - 1].strip()!r}, not the census call")
-    assert "MATCH ()-[r]->() RETURN type(r)" in probe[2725 - 1], (
-        f"capstone_measure.py:2725 reads {probe[2725 - 1].strip()!r}, not the "
+    # the record's `2736-2738` was stale at both ends).
+    assert "`probes/capstone_measure.py:2736-2738`" in text
+    assert probe[2736 - 1].strip() == "for name, count, anchored in projection.g.query(", (
+        f"capstone_measure.py:2736 reads {probe[2736 - 1].strip()!r}, not the census call")
+    assert "MATCH ()-[r]->() RETURN type(r)" in probe[2737 - 1], (
+        f"capstone_measure.py:2737 reads {probe[2737 - 1].strip()!r}, not the "
         "relationship census query")
-    assert "count(r.sourceVersion)" in probe[2726 - 1], (
-        f"capstone_measure.py:2726 reads {probe[2726 - 1].strip()!r}, not the "
+    assert "count(r.sourceVersion)" in probe[2738 - 1], (
+        f"capstone_measure.py:2738 reads {probe[2738 - 1].strip()!r}, not the "
         "anchored count that closes the query")

@@ -1689,7 +1689,6 @@ last — so the pinned artifact stays green under the stricter rule.
 `UNMEASURED(...)` register changes: the cell is re-ordered and nothing else, `document_sha256` is
 re-cut from the resolved document (§8), and no committed verdict is re-scored.
 
-<<<<<<< HEAD
 ### 10.14 — the §11 cite block re-pointed after `#11449`'s state-value insert moved `extractor_v2.py` (2026-11-08, `#11449`)
 
 - **Original value (as §10.10 left it):** `_collect_classify_items` at `:11098`, its extent
@@ -1745,8 +1744,8 @@ re-cut from the resolved document (§8), and no committed verdict is re-scored.
 - **What moved: nothing else.** No metric, denominator, threshold, class set or corpus pin is
   touched: the values this record freezes are unchanged and only line citations move.
   `document_sha256` is re-cut in this same commit, per §8's rule for *any* edit to this file.
-=======
-### 10.14 — the §11 cite block re-pointed for `#11002` (2026-11-08, `#11002`)
+
+### 10.15 — the §11 cite block re-pointed for `#11002` (2026-11-08, `#11002`)
 
 - **Baseline — measured at THIS branch's base, `f76b74c3e`:** `_collect_classify_items` at
   `:11174`, its extent `:11174-11196`, the two `if items:` gates at `:13058`/`:13207`, and the two
@@ -1756,9 +1755,10 @@ re-cut from the resolved document (§8), and no committed verdict is re-scored.
 - **Why the baseline is NOT §10.10's `:11098`.** §10.9 and §10.10 record the moves `#11264`/`#11361`
   and `#11368` made, and they are left **byte-identical to `main`** here — they are history, and
   editing their "New value" for a later change is what the note below forbids. The drift between
-  them and this branch's base is `main`'s own (`:11098` → `:11174`, **+76**) and it never received a
-  §10.N entry, so §10.14 records it as the baseline this change actually landed on rather than
-  pretending the anchor is still `:11098`.
+  them and this branch's base is `main`'s own (`:11098` → `:11174`, **+76**), and it is owned by
+  `main`'s own §10.14 (`#11449`'s state-value insert) rather than by this entry — each §10.N freezes
+  ONE move, so §10.15 states the baseline it actually landed on (`:11174`) instead of re-describing
+  a move another entry already owns under a second number.
 - **The deltas are measured, per symbol, and there are two of them.** `#11002`'s insertions are not
   all below the collector — its G5 record at the module head, its `run_s1` `emphasis` seam and its
   review-round repairs all sit **above** it — so the collector moves **+15** while the four cites
@@ -1774,7 +1774,6 @@ re-cut from the resolved document (§8), and no committed verdict is re-scored.
 - **What moved: nothing else.** No metric, denominator, threshold, class set, corpus pin or `steps`
   block is touched; the numbers this record exists to freeze are byte-identical. `document_sha256`
   is re-cut in this same commit, per §8's rule for *any* edit to this file.
->>>>>>> fb7366aa0 (fix(re-narrate): rebase onto main, and the six findings a fresh review found (#11002))
 
 ## 11. The step set V5 gates over — seven unconditional, one conditional (`#10215`)
 
