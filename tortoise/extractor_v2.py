@@ -13059,6 +13059,40 @@ def _batch_has_candidates(embed_list: object) -> bool:
     return False
 
 
+def _candidate_section_counts(embed_list: object) -> dict[str, int]:
+    """Per-section CANDIDATE counts over ``_CANDIDATE_SECTIONS``.
+
+    ⛔ **``vet_gate.check_batch`` CANNOT ANSWER THIS**, and using it to did
+    produce a false zero (#11554 review, P1). ``check_batch`` counts through
+    ``_iter_items``, which walks ``vet_gate.SECTIONS`` — ``entities``,
+    ``events``, ``points`` — and ``operators`` is **not** in that table
+    (``vet_gate.py:178-182``), because VET's question is about candidates it can
+    gate and an operator is not one. This stage, by contrast, DOES merge
+    operators (``_CANDIDATE_SECTIONS``, ``merge_embed_lists``) and
+    :func:`render_partial_gap_prompt` explicitly authorises the model to emit
+    them. So an operator-only answer — a *valid* answer — merged its item and
+    then recorded ``added_items: 0``, which is precisely the "a garbage answer
+    scores as a legitimate zero-benefit session" defect this file's round-4
+    guard closed for malformed answers, arriving here through the counter
+    instead of through the model. ``flagged_before``/``flagged_after`` cannot
+    disclose it either: the detector is lexical over candidate text and an
+    operator's own text is not part of what it scores.
+
+    The counting predicate is the extractor's own (``name`` or ``content``,
+    non-empty) — the rule ``vet_gate._item_text`` names the extractor as the
+    authority for — so the three VET sections count exactly as ``check_batch``
+    counted them and ``added_items`` does not shift meaning for a points-only
+    answer.
+    """
+    counts: dict[str, int] = {}
+    for section in _CANDIDATE_SECTIONS:
+        counts[section] = sum(
+            1 for item in _section_list(embed_list, section)
+            if isinstance(item, Mapping)
+            and str(item.get("name") or item.get("content") or "").strip())
+    return counts
+
+
 def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                        session_id: str | None = None, chunk_size: int = 50,
                        master: dict | None = None,
@@ -13271,6 +13305,17 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     # end of this function, commented "S2 raw (pre-S4)") is this pass's OUTPUT —
     # the S2 embedding after VET, still pre-S4. With the flag off it is
     # unchanged, which is the pre-existing behaviour.
+    #
+    # ⛔ AND WITH #11534's ``TORTOISE_PARTIAL_GAP_FILL`` ARMED IT IS NO LONGER
+    # VET'S OUTPUT ALONE (review, P2): ``run_partial_gap_fill`` rebinds
+    # ``embed_list`` to the union (:func:`merge_embed_lists`) BEFORE the
+    # ``result["s2_embed"] = embed_list`` assignment, so the list carries
+    # S2.2b-ADD's additions too. Nothing here re-labels it — ``s2_embed`` stays
+    # "S2 raw, pre-S4" in the sense that matters (no S4 item is in it) — but any
+    # reader that treats the count as S2.1's OWN output now over-counts by the
+    # stage's additions on that arm, and ``stats["partial_gap_fill"]``
+    # (``added_items``/``added_by_section``) is the only field that separates
+    # them. The ``sdk.py`` step witness says so at its ``map`` label.
     vet_s2_stats: dict = {}
     vet_s2_pool: dict = {}
     # ── S2.2 referentiality (#11021): a mention is RECORDED ON ITS CLAIM, never
@@ -13411,14 +13456,35 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                 if isinstance(added, dict) and any(
                         _s4_section_is_content(k, v) for k, v in added.items()):
                     before = _vet_gate.check_batch(embed_list, story)
+                    # ⛔ ``added_items`` is counted over ``_CANDIDATE_SECTIONS``
+                    # and NOT off ``check_batch["candidates"]`` (#11554 review,
+                    # P1): that counter walks ``vet_gate.SECTIONS``, which has no
+                    # ``operators`` entry, so an operator-only answer — which the
+                    # prompt explicitly authorises and ``merge_embed_lists``
+                    # merges — recorded ``added_items: 0`` while the item WAS
+                    # added. The benefit record then read zero for the exact half
+                    # of the measurement (1 of 9 operators) `run_s4`'s removal is
+                    # gated on. See :func:`_candidate_section_counts`.
+                    before_counts = _candidate_section_counts(embed_list)
                     embed_list = merge_embed_lists(embed_list, added)
                     after = _vet_gate.check_batch(embed_list, story)
+                    after_counts = _candidate_section_counts(embed_list)
                     gap_fill_stats["flagged_before"] = before["partial_gaps"][
                         "flagged_total"]
                     gap_fill_stats["flagged_after"] = after["partial_gaps"][
                         "flagged_total"]
-                    gap_fill_stats["added_items"] = (
-                        after["candidates"] - before["candidates"])
+                    gap_fill_stats["added_items"] = sum(
+                        after_counts.values()) - sum(before_counts.values())
+                    # Per-section, where it moved: an operator-only answer adds
+                    # items and (by construction) never moves flagged_before/
+                    # flagged_after, so without this the run cannot say WHICH
+                    # section grew — and the operator half is the finding.
+                    added_by_section = {
+                        section: after_counts[section] - before_counts[section]
+                        for section in _CANDIDATE_SECTIONS
+                        if after_counts[section] != before_counts[section]}
+                    if added_by_section:
+                        gap_fill_stats["added_by_section"] = added_by_section
                 else:
                     # TWO different runs land here, and ONLY ONE of them is
                     # "the spans state no claim" — `malformed_sections` above is

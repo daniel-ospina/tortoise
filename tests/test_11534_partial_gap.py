@@ -89,6 +89,27 @@ def _flagged_texts(gaps: dict) -> list[str]:
     return [entry["text"] for entry in gaps["flagged"]]
 
 
+#: The fixture the ORDERING row needs: a population where narrative order and
+#: coverage order DISAGREE. ``GAPPED_ITEMS`` cannot serve it — its two flags
+#: already arrive least-covered-first, so a row asserting only
+#: ``coverages == sorted(coverages)`` stays GREEN with the sort deleted. Here the
+#: FIRST sentence is partly covered (coverage > 0) while the later ones are
+#: covered by nothing (0.0), so the least-covered span sits LAST in narrative
+#: order.
+_ORDER_NARRATIVE = (
+    "The lease is keyed by batch id with a thirty-second expiry, and the audit "
+    "trail is written by the wire stage. The hydrate stage reconciles the retry "
+    "ledger against the poison queue on every restart.")
+_ORDER_ITEMS = {
+    "entities": [],
+    "events": [],
+    # covers only the first two content words of the first clause: enough to
+    # move that segment's coverage off 0.0, not enough to reach the floor.
+    "points": [{"content": "The lease is keyed"}],
+    "operators": [],
+}
+
+
 # ── the detector: does it name the uncovered statement? ────────────────────
 
 
@@ -106,9 +127,15 @@ def test_a_partial_gap_is_flagged_and_names_its_statement():
     entry = gaps["flagged"][0]
     assert "hydrate stage" in entry["text"]
     assert "code" in entry["text"]
-    # ... and it names a STATEMENT, not just a count
-    assert isinstance(entry["statement"], int)
-    assert isinstance(entry["clause"], int)
+    # ... and it names a STATEMENT, not just a count. ⛔ THE ADDRESS IS PINNED TO
+    # ITS VALUE, not to `isinstance(..., int)` (review, P2): a constant index
+    # (`statement=0, clause=0` for every segment) kept an isinstance-only row
+    # green while destroying the field the checklist actually asks for — the
+    # same name-vs-assertion gap round 5 fixed elsewhere in this file.
+    assert (entry["statement"], entry["clause"]) == (2, 0), (
+        "the hydrate/code clause is the THIRD sentence of NARRATIVE (2) and its "
+        "first clause (0); see test_the_statement_address_is_an_ordinal for why "
+        "the index is this function's own ordinal and not the reported count")
     assert entry["coverage"] < gaps["coverage_floor"]
     # `missing` carries STEMS (the same lens coverage is computed in), so the
     # assertion goes through the stemmer rather than guessing its output.
@@ -221,6 +248,41 @@ def test_the_flagged_list_is_capped_but_the_count_is_true():
     assert gaps["truncated"] is True
 
 
+def test_the_flagged_list_is_ordered_least_covered_first():
+    """The ordering is LOAD-BEARING and was pinned by nothing (review, P2).
+
+    ``partial_gaps`` documents ascending coverage, and two consumers depend on
+    it rather than merely preferring it: ``render_partial_gap_prompt`` enumerates
+    the spans in list order, and ``flagged[:max_flagged]`` truncates AFTER the
+    sort — so with the sort removed, a session flagging more than
+    ``GAP_MAX_FLAGGED`` spans hands the model the first 20 in NARRATIVE order
+    instead of the 20 least-covered. Deleting the one sort line therefore
+    changes which spans the stage ever sees.
+
+    ⛔ ``GAPPED_ITEMS`` CANNOT PIN THIS, and the first form of this row used it:
+    that fixture's two flags already arrive least-covered-first, so the row
+    stayed GREEN with the sort line deleted (caught by mutation).
+    ``_ORDER_ITEMS`` is built for the job — its least-covered spans sit LAST in
+    narrative order — and the `starts` assertion below is what makes the row
+    discriminate: it fails the moment the output is narrative-ordered again.
+    """
+    gaps = vet_gate.partial_gaps(_ORDER_ITEMS, _ORDER_NARRATIVE)
+    coverages = [entry["coverage"] for entry in gaps["flagged"]]
+    starts = [entry["start"] for entry in gaps["flagged"]]
+    assert len(coverages) >= 2, "non-vacuity: the ordering needs two entries"
+    assert coverages == sorted(coverages), (
+        "ascending coverage: the least accounted-for span comes first")
+    assert starts != sorted(starts), (
+        "non-vacuity of the ASSERTION ITSELF: on this fixture narrative order "
+        "and coverage order differ, so this row passes only if the sort ran")
+    # The cap takes the k LOWEST, not the first k in narrative order.
+    capped = vet_gate.partial_gaps(_ORDER_ITEMS, _ORDER_NARRATIVE, max_flagged=1)
+    assert [e["coverage"] for e in capped["flagged"]] == [coverages[0]]
+    assert capped["flagged"][0]["start"] != min(starts), (
+        "the single span kept is a least-covered one, NOT the first span")
+    assert capped["truncated"] is True
+
+
 def test_markdown_headings_are_not_statements(monkeypatch):
     """A heading spanning a whole clause is blanked before segmentation.
 
@@ -273,12 +335,19 @@ def test_the_gap_stem_meets_the_word_forms_each_other():
 
 
 def test_the_detector_reports_on_the_unarmed_arm():
-    """The additive key reaches `result["vet"]` WITHOUT the stage being armed.
+    """`check_batch` carries the additive key on the default arm.
 
     Pins the correction of a false invariant: an earlier comment claimed an
     unarmed run's stats were byte-identical to pre-#11534, while `check_batch`
     reports `partial_gaps` unconditionally on the default arm (the S2.2
     mechanical half runs by default, #10996).
+
+    ⛔ THIS ROW DOES NOT PIN THE `_run_vet_pass` -> `stats["batch"]` THREADING,
+    and its first sentence used to claim it did (review, P2): the body only calls
+    `check_batch` and never builds a `result`, so a narrowing of that copy would
+    have left this row green while the key stopped reaching `result["vet"]`.
+    `test_the_stage_is_off_by_default` runs the unarmed pipeline and is the row
+    that pins it.
     """
     batch = vet_gate.check_batch(COVERED_ITEMS, NARRATIVE)
     assert "partial_gaps" in batch
@@ -356,6 +425,38 @@ def test_a_flagged_candidate_reaches_the_embed_list(monkeypatch):
     assert stats["flagged_after"] < stats["flagged_before"], (
         "the stage's own claim is that it CLOSES a gap; flagged_after must fall")
     assert stats["added_items"] >= 1
+
+
+def test_an_operator_only_answer_is_not_recorded_as_zero_additions(monkeypatch):
+    """A VALID operator-only answer adds an item and must not record 0 (P1).
+
+    ``added_items`` used to be ``check_batch["candidates"]`` after-minus-before,
+    and that counter walks ``vet_gate.SECTIONS`` — entities, events, points —
+    which has no ``operators`` entry. This stage DOES merge operators and the
+    prompt explicitly authorises them, so an operator-only answer merged its
+    item, left ``candidates`` unchanged, and recorded ``added_items: 0``: a
+    false zero for the operator half of the measurement — the half (1 of 9)
+    `run_s4`'s removal is gated on. ``flagged_before``/``flagged_after`` cannot
+    disclose it either (the detector scores candidate TEXT, and no span is
+    un-covered merely because an operator is absent), which is why the row
+    asserts them UNCHANGED alongside the non-zero addition.
+    """
+    op = {"kind": "causes",
+          "source": {"name": "the hydrate stage"},
+          "target": {"name": "the wire stage"},
+          "content": "the hydrate stage shares code with the wire stage"}
+    model = _Model(gap_answer=json.dumps(
+        {"entities": [], "events": [], "operators": [op], "points": []}))
+    out = _run(monkeypatch, model)
+    assert model.calls.count("gap_fill") == 1, "the stage must have fired"
+    stats = out["stats"]["partial_gap_fill"]
+    assert out["embed_list"]["operators"], (
+        "non-vacuity: the operator must actually be in the embed list")
+    assert stats["added_items"] == 1
+    assert stats["added_by_section"] == {"operators": 1}
+    # the detector cannot see this addition — the very reason a separate count
+    # is needed, and the reason `added_items: 0` was so believable.
+    assert stats["flagged_before"] == stats["flagged_after"]
 
 
 def test_coverage_suspect_is_false_on_that_fixture():

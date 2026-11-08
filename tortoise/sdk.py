@@ -8385,6 +8385,13 @@ def _capture_step_witness(out: dict, *, committed: int) -> dict:
                   "story_arc_chars": len(out.get("story_arc") or "")},
         # S2.1 — the map's candidates, counted on the PRE-S4 list (``s2_embed``
         # is S2's own output; ``embed_list`` is what S4 left of it).
+        # ⛔ ON THE ``TORTOISE_PARTIAL_GAP_FILL`` ARM THIS COUNT IS NOT S2.1's
+        # OWN OUTPUT (#11534 review, P2): S2.2b-ADD rebinds ``embed_list`` to the
+        # union of S2.1's candidates and the spans it filled BEFORE ``s2_embed``
+        # is assigned, so the count includes that stage's additions. "Pre-S4"
+        # still holds — no S4 item is in it — but a reader attributing the whole
+        # number to S2.1 over-counts on that arm; ``stats["partial_gap_fill"]``
+        # (``added_items`` / ``added_by_section``) is what separates them.
         "map": {"items": _step_embed_counts(
             out.get("s2_embed") if out.get("s2_embed") is not None
             else out.get("embed_list"))},

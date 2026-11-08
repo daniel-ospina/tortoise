@@ -541,16 +541,34 @@ def narrative_segments(narrative: str) -> list[dict]:
 
     Every entry is ``{"statement": i, "clause": j, "start": s, "end": e,
     "text": t}`` where ``s``/``e`` index the ORIGINAL narrative, so the caller
-    can re-read exactly the bytes the detector judged. ``statement`` is the
-    :func:`_narrative_statements` sentence index it belongs to; ``clause``
-    orders the segments within that statement.
+    can re-read exactly the bytes the detector judged. ``statement`` is a
+    SENTENCE ORDINAL in this function's own segmentation; ``clause`` orders the
+    segments within that statement.
 
-    The statement index is derived from the same character class
-    :func:`_narrative_statements` splits on (``[.!?;\n\r]``), except that the
-    split runs on the heading-blanked mask so a heading's own ``.`` cannot open a
-    phantom statement — the two therefore agree only up to the headings, and this
-    function's ``statement`` is an ADDRESS, not the reported
-    ``narrative_statements`` count.
+    ⛔ ``statement`` IS AN ADDRESS ONLY — it is **not** comparable to the
+    ``narrative_statements`` count :func:`_narrative_statements` reports, and an
+    earlier version of this docstring was wrong about the ONLY reason why
+    (review, P2). It claimed the two agree "up to the headings"; they do not.
+    Two independent divergences:
+
+    * headings — this split runs on the heading-blanked mask
+      (:func:`_gap_mask`), so a heading's own ``.`` opens no statement here,
+      while ``_narrative_statements`` counts the raw prose;
+    * **in-sentence terminators**, the larger one. ``_SENTENCE_SPLIT``
+      (``[.!?;]+(?:\\s|$)|[\\n\\r]+``) requires the terminator to be followed by
+      whitespace or end-of-text, and this scan does not — any ``.``/``;`` opens
+      a new statement here. Measured: ``"The p95 hit 4.2 seconds under load.
+      Then it recovered."`` reports ``narrative_statements == 2`` while the
+      segments carry statement indices ``0, 1, 2`` (the decimal's ``.`` opened
+      one). A version number, a domain name or a URL does the same.
+
+    So read ``statement`` as a grouping key for the segments in THIS result —
+    stable for a given narrative, and useful because two flagged spans sharing
+    an index came from one sentence of this segmentation — and never as an
+    index into the reported statement count. Changing this splitter to match
+    ``_SENTENCE_SPLIT`` would reconcile them and would also move the flag count,
+    which the recorded measurement (844 segments / 70 flags) is pinned on; the
+    address is what a re-extraction reads, and the count was never the contract.
     """
     text = str(narrative or "")
     if not text:
