@@ -10786,6 +10786,12 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # predicate allowlist, and the comment saying nothing in `tortoise/` consumes it.
     assert "`hasPart` (`tortoise/extractor_v2.py:1720`)" in text, (
         "the record must cite the relations schema where `hasPart` is spelled")
+    # The A1 proof command must be receiver-AGNOSTIC. The dot-anchored `'\.(create_edge|…)\('` form
+    # exits 1 on an unqualified `return create_operator(payload)` (measured), so it cannot prove the
+    # sentence it sits under — and the tokenized arm below already names that shape.
+    assert r"(^|[^[:alnum:]_.])(create_edge|create_about_edge|create_operator)[[:space:]]*\(" in text, (
+        "the record's A1 proof command must catch an UNQUALIFIED call as well as a receiver-qualified "
+        "one — a dot-anchored form exits 1 on `return create_operator(payload)`, so it proves nothing")
     assert "hasPart" in ext[1720 - 1] and '"predicate":' in ext[1720 - 1], (
         f"extractor_v2.py:1720 reads {ext[1720 - 1].strip()[:90]!r}, not the schema "
         "line that spells the predicate allowlist")
@@ -10844,6 +10850,18 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     assert _call_sites("def create_operator(payload):\n    pass\n") == [], (
         "a `def` is not a call site — counting it tells a fixer the record's conclusion is FALSE "
         "when only the function's own definition is present")
+    # The four shapes the comment above claims the arm separates, each asserted rather than described:
+    # the docstring's own two false readings (a receiver-qualified call missed by a dot-EXCLUDING
+    # lookbehind, a comment read as a call) were UNBOUND — reintroducing either left the suite green
+    # (measured), because the live tree has neither shape.
+    assert _call_sites("sdk.create_edge(payload)\n") == [(1, "create_edge")], (
+        "a RECEIVER-qualified call is a call site")
+    assert _call_sites("return create_operator(x)\n") == [(1, "create_operator")], (
+        "an UNQUALIFIED call is a call site")
+    assert _call_sites("# call create_operator(payload)\n") == [], (
+        "a COMMENT naming the verb is not a call site")
+    assert _call_sites('_X = "create_operator(payload)"\n') == [], (
+        "a STRING naming the verb is not a call site")
     # The four shapes the tokenized arm must separate, each MEASURED on a live tree (the
     # first two are what a regex could not do, in both directions):
     #   `sdk.create_edge(payload)`      -> red (receiver-qualified call; a dot-EXCLUDING
@@ -10894,42 +10912,11 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         "80c912244" in text[_zero_at:_zero_at + 260], (
         "the zero must name BOTH bases it was measured at — one of them is this record's own, "
         "and `#10982` landed after both")
-    # …and the RESULT is re-derived, not merely named. `measured at each → 0, exit 1` is a typed
-    # number, and a typed number nothing re-checks is this record's own recurring defect: flipping
-    # it to `9, exit 0` left every arm above green (measured).
-    for _sha in ("4e6a3ce612bd^", "80c912244"):
-        _run = subprocess.run(
-            ["git", "grep", "-rn", "-E", "hasPart|hierarchies|decomposesInto", _sha, "--",
-             "docs/evidence/7949-capstone/",
-             ":!docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md"],
-            cwd=str(_REPO), capture_output=True, text=True)
-        if _run.returncode not in (0, 1):
-            # A sha that cannot be READ is not a zero. Licence the skip by the clone's own shape
-            # (`fetch-depth: 1` cannot contain an ancestor), or fail: an absent object in a FULL
-            # clone means the base the record names is WRONG, and skipping would hide it forever.
-            _shallow = subprocess.run(
-                ["git", "rev-parse", "--is-shallow-repository"],
-                cwd=str(_REPO), capture_output=True, text=True).stdout.strip()
-            if _shallow == "true":
-                pytest.skip(
-                    f"{_sha} is not in this shallow clone — §1 item 3's `0 hits` at that base "
-                    "is UNCHECKED here, not disproved; re-derive it on a full clone")
-            pytest.fail(
-                f"{_sha} is unreadable in a FULL clone ({_run.stderr.strip()[:200]}) — the record "
-                "names a base nobody can verify")
-        assert (_run.returncode, _run.stdout) == (1, ""), (
-            f"`{_sha}` returns {_run.stdout.count(chr(10))} hit(s), not the 0 exit-1 the record "
-            "states — re-derive §1 item 3's zero; it is measured at BOTH bases it names")
-    # …and the RECORD's typed result must be the one just measured. Without this, a record that said
-    # `9, exit 0` passed every arm above while the loop proved the opposite (measured), because the
-    # loop re-derived the BASES but never read the number hanging on them.
-    _stated_zero = re.search(r"measured at\s+each → (\d+), exit (\d+)", text)
-    assert _stated_zero is not None, (
-        "§1 item 3 must STATE the result it names its bases for (`measured at each → N, exit N`) — "
-        "naming the bases without the number is what left the claim unwatched")
-    assert _stated_zero.groups() == ("0", "1"), (
-        f"the record states `{_stated_zero.group(0)}` while the loop above measured 0 hit(s), "
-        "exit 1 at each base — correct the RECORD, not the measurement")
+    # §1 item 3's RESULT (`measured at each → 0, exit 1`) is re-derived in its OWN test — see
+    # `test_the_records_zero_is_rederived_at_the_bases_it_names`. It is not here on purpose: it
+    # READS TWO HISTORICAL BASES, and `pytest.skip` ABORTS the test function, so on CI's
+    # `fetch-depth: 1` checkout a skip there would have killed every assert below it in THIS one
+    # (23 of them, measured) — including arms that need no history at all.
     live_mentions = [i for i, line in enumerate(ext, 1) if "create_operator" in line]
     assert live_mentions == [9006, 9024, 9031, 9411], (
         f"extractor_v2.py's create_operator mentions are at {live_mentions}, not the "
@@ -11047,10 +11034,16 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     assert _block_at > 0 and _s2_at > 0, (
         "the record's §2 (A2) section or its §0/§2 reproduction block is GONE — both are where "
         "the sha-pinned and live cites live")
-    # Bounded at §2, not §1: the cite this arm binds (`:12929`, `:12779`) lives under `## 2. A2`,
-    # so a §1 label told every failure the wrong section (measured).
-    for _label, _region in (("§2 (A2)", text[_s2_at:_block_at]),
-                            ("the §5 reproduction block", text[_block_at:])):
+    # Bounded at the NEXT heading, not at the block: `text[_s2_at:_block_at]` spans §2→§5, so a
+    # decoy cite in §3/§4 was reported as "§2 (A2)"'s (measured) — the same mis-labelling the
+    # §1→§2 rename fixed, at the far end. The §5 region is bounded the same way for the same reason.
+    _s2_end = text.find("\n## ", _s2_at + 1)
+    _block_end = text.find("\n## ", _block_at + 1)
+    assert _s2_end > _s2_at and _block_end > _block_at, (
+        "§2 or the §0/§2 block is now the LAST section — the heading bound that makes the region "
+        "label true cannot be found, so re-derive these two bounds")
+    for _label, _region in (("§2 (A2)", text[_s2_at:_s2_end]),
+                            ("the §5 reproduction block", text[_block_at:_block_end])):
         _found = re.findall(r":(\d+)`? at (?:HEAD|here)\b", _region)
         assert _found == ["12929"], (
             f"{_label}'s base-qualified live cite must be the vet_enabled line (`:12929`) — it "
@@ -11072,8 +11065,8 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # Both SITES must still carry it — deleting either one left the suite green (measured), and
     # the old number is exactly what a reader meets in each place. Per-REGION, never a count: one
     # qualified mention per region is the claim.
-    for _label, _region in (("§2 (A2)", text[_s2_at:_block_at]),
-                            ("the §5 reproduction block", text[_block_at:])):
+    for _label, _region in (("§2 (A2)", text[_s2_at:_s2_end]),
+                            ("the §5 reproduction block", text[_block_at:_block_end])):
         assert re.search(r":12779`? at `?62248db88", _region), (
             f"{_label} must carry the historical `:12779` qualified by the base it was true at — "
             "deleting it leaves the old number unmarked where a reader meets it")
@@ -11125,3 +11118,61 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     assert "count(r.sourceVersion)" in probe[2726 - 1], (
         f"capstone_measure.py:2726 reads {probe[2726 - 1].strip()!r}, not the "
         "anchored count that closes the query")
+
+
+def test_the_records_zero_is_rederived_at_the_bases_it_names():
+    """§1 item 3's `0 hits` — a claim about TWO HISTORICAL bases, so it is read there.
+
+    ⛔ Split out of the cite pin on purpose. `pytest.skip` ABORTS the test function, and CI
+    checks this repo out with a bare `actions/checkout@v4` (`python-ci.yml`, default
+    `fetch-depth: 1`), where neither base is in the clone:
+
+      * `4e6a3ce612bd^` — the pre-`#10982` tree, where the record exists but the bundle has not
+        yet registered the predicate;
+      * `80c912244` — this record's own base.
+
+    A skip inside the cite pin therefore killed every assert BELOW it — 23 of them, measured,
+    including arms that need no history at all. Here a skip costs exactly this leg, and says so.
+
+    The claim itself: `measured at each → 0, exit 1`. Both halves are re-derived, because a typed
+    number nothing re-checks is the defect this whole record exists to catch — flipping the
+    record to `9, exit 0` left every arm of the cite pin green (measured).
+    """
+    record = _REPO / "docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md"
+    text = record.read_text(encoding="utf-8")
+    _checked = 0
+    for _sha in ("4e6a3ce612bd^", "80c912244"):
+        _run = subprocess.run(
+            ["git", "grep", "-rn", "-E", "hasPart|hierarchies|decomposesInto", _sha, "--",
+             "docs/evidence/7949-capstone/",
+             ":!docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md"],
+            cwd=str(_REPO), capture_output=True, text=True)
+        if _run.returncode not in (0, 1):
+            # A sha that cannot be READ is not a zero. Licence the skip by the clone's own shape
+            # (a depth-1 checkout cannot contain an ancestor), or fail: an absent object in a FULL
+            # clone means the base the record names is WRONG, and skipping would hide it forever.
+            _shallow = subprocess.run(
+                ["git", "rev-parse", "--is-shallow-repository"],
+                cwd=str(_REPO), capture_output=True, text=True).stdout.strip()
+            if _shallow == "true":
+                pytest.skip(
+                    f"{_sha} is not in this shallow clone — THIS LEG only (the two historical "
+                    "bases of §1 item 3's `0 hits`) is UNCHECKED here, not disproved; re-derive "
+                    "it on a full clone. The cite pin above needs no history and still runs.")
+            pytest.fail(
+                f"{_sha} is unreadable in a FULL clone ({_run.stderr.strip()[:200]}) — the record "
+                "names a base nobody can verify")
+        _checked += 1
+        assert (_run.returncode, _run.stdout) == (1, ""), (
+            f"`{_sha}` returns {_run.stdout.count(chr(10))} hit(s), not the 0 exit-1 the record "
+            "states — re-derive §1 item 3's zero; it is measured at BOTH bases it names")
+    assert _checked == 2, (
+        "both bases the record names must have been read — a leg that silently skipped the "
+        "history it exists to check is inert")
+    _stated_zero = re.search(r"measured at\s+each → (\d+), exit (\d+)", text)
+    assert _stated_zero is not None, (
+        "§1 item 3 must STATE the result it names its bases for (`measured at each → N, exit N`) "
+        "— naming the bases without the number is what left the claim unwatched")
+    assert _stated_zero.groups() == ("0", "1"), (
+        f"the record states `{_stated_zero.group(0)}` while the bases measure 0 hit(s), exit 1 "
+        "each — correct the RECORD, not the measurement")
