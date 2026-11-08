@@ -1849,12 +1849,18 @@ def test_the_cli_exit_codes_pin_every_failure_arm(monkeypatch, tmp_path, capsys)
                 "--out", str(tmp_path / f"p{i}.json"), "--apply"]
         capsys.readouterr()   # drain the previous arm's stderr, so the check is per-arm
         assert mod.main(args) == 3, f"{needle} must be a failure exit"
+        # WHICH arm fired, not just that some arm returned 3. Without this the stop arm
+        # is unpinned: with the NO-OP arm present, re-keying it back to
+        # `applied and stopped` still exits 3 (the NO-OP arm catches it) and only the
+        # DIAGNOSTIC is wrong — a stop reported as "nothing accepted", which sends an
+        # operator to the wrong cause. Measured: that mutant survived until this line.
+        err = capsys.readouterr().err
+        assert needle in err, f"{needle} must be the arm that fired, got: {err!r}"
         if needle == "REFUSED":
             # Round-33 follow-up 1: the refusal above accepted NO key, so the run must
             # not be announced as a mid-run refusal (that message means "some of it
             # landed") — a driver reading stderr would be told a partial migration
             # happened when nothing did. Pre-fix this arm printed "REFUSED mid-run".
-            err = capsys.readouterr().err
             assert "REFUSED:" in err and "mid-run" not in err
 
 
