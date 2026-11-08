@@ -168,8 +168,9 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
    (#10982 landed it after this record was written) — the bundle CITES the predicate, it does not
    produce it; the producer claim is the call-shaped grep above, which is still empty. On the
    **pre-diff tree** the same command was **0 hits** — that is the base the `exit 1` in earlier
-   revisions of this record was taken at, and it no longer holds here. The count and its per-file
-   split are stated once, in the §5 note below.
+   revisions of this record was taken at, and it no longer holds here. The per-file split is
+   stated once, in the §5 note below; the TOTAL is stated in both places, and the pin binds
+   both to the same derived value rather than to two typed numbers.
 4. **The rollup query does not exist.** `git grep -in 'rollup' -- '*.py' '*.md'` over the tree returns
    only unrelated uses (extractor `_rollup_llm`/`_rollup_recovery` stage counters, a CI per-name rollup
    discussion, a plan doc). There is **no** query of the graph shape "which work items serve this goal,
