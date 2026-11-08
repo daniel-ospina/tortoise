@@ -832,8 +832,8 @@ def test_every_seam_exemption_is_consulted():
     guard does not select the file, so the row can never be read again, and
     `test (e)` is GREEN with the row and GREEN without it. Measured at this
     head before the retirement: 8 rows, 7 live, and
-    `tests/test_cache_eviction_evictor_pins.py` the one dead — pinned as a
-    REASON by `test_the_mocked_seam_declaration_describes_the_import_it_really_does`,
+    `tests/test_cache_eviction_evictor_pins.py` the one dead — its exclusion is
+    pinned by `test_the_mocked_seam_is_excluded_by_the_population_predicate`,
     never as a consultation, so both tests that mentioned it were green.
 
     The executor is the point. The first two assertions fail the PREDICATE in
@@ -950,6 +950,42 @@ def test_the_mocked_seam_is_excluded_by_the_population_predicate():
                for ln in mentions), (
         f"{rel} has a `_live_utils` mention that is neither a comment nor the "
         f"stub key: {mentions}")
+
+
+def test_every_test_name_the_docstrings_name_exists():
+    """#11437 review — a pointer to a renamed test rots with nothing to red.
+
+    The docstring above carried a stale pointer for the whole life of commit
+    8491aaeb8fe, which is the commit that renamed the named test away: a grep for
+    it returned only the pointer itself, so the exemption's justification became
+    unfollowable in the one file whose own doctrine (#10951) is that an
+    exemption's reason may not assert a fact the file contradicts. Nothing
+    redded, by construction — prose has no executor.
+
+    This is the cheap executor: it walks THIS file's own AST (no repo walk; the
+    seam population above is already the file's single 1,440-file read), pulls
+    every backticked test-name reference out of the docstrings, and requires each
+    to be a test defined here or the stem of a sibling `tests/<name>.py`. A name
+    that is neither is a rename nobody followed, or a test that never existed.
+    """
+    this = Path(__file__)
+    tree = ast.parse(this.read_text(encoding="utf-8"))
+    defined = {n.name for n in ast.walk(tree)
+               if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+               and n.name.startswith("test_")}
+    referenced: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef)):
+            referenced.update(
+                re.findall(r"`(test_[A-Za-z0-9_]+)`", ast.get_docstring(node) or ""))
+    dangling = sorted(
+        name for name in referenced
+        if name not in defined and not (this.parent / f"{name}.py").exists())
+    assert not dangling, (
+        "these docstrings name a test that does not exist — a rename was not "
+        "followed, or the name was never real, so a reader following the "
+        "pointer greps and finds only the pointer itself:\n  "
+        + "\n  ".join(dangling))
 
 
 def test_action_inputs_are_declared():
