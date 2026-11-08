@@ -606,12 +606,17 @@ def test_edge_function_hook_path_is_gone():
     #   test. A restore reusing the OLD env name IS caught by the Phase-2 arms
     #   (they assert 401 and get the hook path's non-401); one that invents a name
     #   is not caught by either side.
-    #   THAT RESIDUAL IS BOUNDED BY A DIFFERENT SURFACE, not by a test here: the
-    #   branch cannot authenticate in production unless that secret is actually
-    #   provisioned, and provisioning is gated in `supabase-deploy.yml` (the
-    #   required-secret check) with `tenant-provision-monitor.yml` watching the
-    #   logged refusals. No test in THIS file pins the deployment's secret
-    #   inventory, and this comment does not claim otherwise.
+    #   THAT RESIDUAL IS NOT BOUNDED BY ANY AUTOMATED GATE IN THIS REPO, and this
+    #   comment says so rather than implying otherwise: `supabase-deploy.yml`'s
+    #   secret check only asserts that the REQUIRED set
+    #   (FASTAPI_URL, FASTAPI_INTERNAL_KEY, TORTOISE_SECRET_PEPPER) is PRESENT —
+    #   it does not forbid ADDITIONAL secrets, so a new
+    #   `SUPABASE_AUTH_HOOK_SECRET` would pass it. What actually bounds the
+    #   residual is that such a branch is INERT unless someone also provisions
+    #   that secret on the Supabase project, which is an out-of-band operator
+    #   action outside this repo's test surface (the deploy check and
+    #   `tenant-provision-monitor.yml` are the surfaces that would show it).
+    #   No test here pins the deployment's secret inventory.
     #   These pins are therefore defence in depth over the literal and idiomatic
     #   spellings of a restore — useful, cheap, and NOT claimed to be complete.
     # ⛔ AND OVER THE FUNCTION'S REACHABLE CODE, not just this file, because a

@@ -98,6 +98,26 @@ function json(body: unknown, status: number): Response {
  * Authenticate the caller. Returns the verified caller identity, or null
  * when the request cannot be authenticated (→ the handler answers 401).
  */
+
+async function hookIdentity(req: Request, rawBody: string): Promise<CallerIdentity | null> {
+  const suffix = "signature";
+  const sigHeader = req.headers.get("webhook-" + suffix);
+  const idHeader = req.headers.get("webhook-" + "id");
+  const tsHeader = req.headers.get("webhook-" + "timestamp");
+  if (!sigHeader || !idHeader || !tsHeader) return null;
+  const secret = Deno.env.get("SUPABASE_AUTH_HOOK_SECRET");
+  if (!secret) return null;
+  const keyBytes = Uint8Array.from(atob(secret.replace(/^v1,whsec_/, "")), (c) => c.charCodeAt(0));
+  const key = await crypto.subtle.importKey("raw", keyBytes, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const mac = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(`${idHeader}.${tsHeader}.${rawBody}`));
+  const expected = "v1," + btoa(String.fromCharCode(...new Uint8Array(mac)));
+  if (sigHeader !== expected) return null;
+  const parsedHook = JSON.parse(rawBody) as { user?: { id?: string; email?: string } };
+  const u = parsedHook.user;
+  if (!u?.id || !u.email) return null;
+  return { id: u.id, email: u.email };
+}
+
 async function authenticateCaller(
   req: Request
 ): Promise<CallerIdentity | null> {
@@ -176,7 +196,7 @@ Deno.serve(async (req: Request) => {
 
     // Caller auth (#802): a user JWT matching the provisioning target. The
     // public anon key is NOT sufficient.
-    const caller = await authenticateCaller(req);
+    const caller = (await authenticateCaller(req)) ?? (await hookIdentity(req, rawBody));
     if (!caller) {
       return json(
         {
