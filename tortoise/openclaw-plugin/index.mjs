@@ -42,7 +42,44 @@ import { dirname, join } from "node:path";
 export const PLUGIN_ID = "tortoise";
 export const DEFAULT_TIMEOUT_MS = 800;
 export const DEFAULT_API_URL = "https://api.premiselabs.co";
-export const MAX_PROMPT_CHARS = 15000;
+
+// The reflex's WINDOW bound, mirrored from the service it talks to (the plugin is
+// JS, the reflex is Python — and `test_openclaw_seam.py` pins these numbers
+// against `tortoise/volunteer.py` so a drift cannot pass silently).
+//
+// A CHARACTER count is not a byte bound, and the difference is not academic:
+// `validate_request` charges the UTF-8 BYTES of each turn's content plus
+// `PER_TURN_OVERHEAD_BYTES` against `MAX_WINDOW_BYTES`, so a 15,000-CHARACTER
+// slice sends ~30 KB for accented text and ~45 KB for CJK — over the cap — and
+// the refusal lands in the fail-open boundary as an empty injection. The symptom
+// is a silent no-op in exactly the long prompt the bound exists for.
+// `tortoise/framework.py::_bounded_window` states the same rule on the Python
+// side of the same contract.
+export const REFLEX_MAX_WINDOW_BYTES = 15 * 1024;
+export const REFLEX_PER_TURN_OVERHEAD_BYTES = 64;
+/** Content budget for the ONE turn this plugin sends. */
+export const REFLEX_PROMPT_MAX_BYTES =
+  REFLEX_MAX_WINDOW_BYTES - REFLEX_PER_TURN_OVERHEAD_BYTES;
+
+/**
+ * Bound a prompt to the reflex's BYTE budget, keeping the TAIL.
+ *
+ * Tail, not head, for the same reason `framework.py` keeps it: the ask being
+ * answered is at the END of the turn, and that is what the reflex resolves
+ * against. Slicing BYTES (not characters) is what keeps a multibyte prompt
+ * inside the bound it was truncated to; the continuation-byte walk stops the
+ * slice from splitting a codepoint into a U+FFFD, which would corrupt the
+ * window the reflex tokenizes.
+ */
+export function boundedPrompt(text) {
+  const encoded = Buffer.from(String(text ?? ""), "utf8");
+  if (encoded.length <= REFLEX_PROMPT_MAX_BYTES) return encoded.toString("utf8");
+  let start = encoded.length - REFLEX_PROMPT_MAX_BYTES;
+  // UTF-8 continuation bytes are 10xxxxxx — step over them so the first byte
+  // kept is a sequence START.
+  while (start < encoded.length && (encoded[start] & 0xc0) === 0x80) start += 1;
+  return encoded.subarray(start).toString("utf8");
+}
 
 /** OpenClaw's state dir: `$OPENCLAW_STATE_DIR`, else `~/.openclaw`. */
 export function stateDir(env = process.env, home = homedir()) {
@@ -268,7 +305,7 @@ export default function register(api) {
   api.on("before_prompt_build", async (event, ctx) => {
     try {
       if (ctx?.trigger && ctx.trigger !== "user") return undefined;
-      const prompt = textOf(event?.prompt).slice(0, MAX_PROMPT_CHARS);
+      const prompt = boundedPrompt(textOf(event?.prompt));
       if (!prompt.trim()) return undefined;
       const sessionKey = textOf(ctx?.sessionKey) || "openclaw";
       const session = {

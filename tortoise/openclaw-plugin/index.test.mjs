@@ -10,6 +10,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import register, {
+  boundedPrompt,
+  REFLEX_PROMPT_MAX_BYTES,
   captureRecords,
   createContinuity,
   createDedupe,
@@ -352,4 +354,54 @@ test("runHosted: no key, a refused request and a non-JSON body are all ''", asyn
   } finally {
     globalThis.fetch = realFetch;
   }
+});
+
+test("boundedPrompt: the window is bounded in BYTES, so a multibyte prompt is not refused", () => {
+  // 15,000 CJK characters is 45,000 UTF-8 bytes. A CHARACTER slice passed it
+  // through, the reflex's `validate_request` refused the window
+  // (`WINDOW_TOO_LARGE_BYTES`), and the fail-open catch turned that into an
+  // empty injection — the silent-no-op class this seam exists to avoid.
+  const long = "字".repeat(15000) + "END";
+  const bounded = boundedPrompt(long);
+  assert.ok(Buffer.byteLength(bounded, "utf8") <= REFLEX_PROMPT_MAX_BYTES);
+  // …and the bound is not "achieved" by corrupting the text: no replacement
+  // char (a split codepoint), and the ask at the END of the turn survives.
+  assert.ok(!bounded.includes("\uFFFD"));
+  assert.ok(bounded.endsWith("END"));
+  // A prompt inside the budget is returned untouched — the bound must not
+  // rewrite ordinary turns (nor normalise them).
+  assert.equal(boundedPrompt("short á prompt"), "short á prompt");
+});
+
+test("register: a long multibyte prompt reaches the reflex inside its byte budget", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "tortoise-oc-"));
+  const log = join(dir, "payloads.jsonl");
+  const bin = join(dir, "fake-tortoise.sh");
+  writeFileSync(
+    bin,
+    `#!${process.execPath}\n` +
+      `const fs = require("node:fs");\n` +
+      `let raw = "";\n` +
+      `process.stdin.on("data", (c) => { raw += c; });\n` +
+      `process.stdin.on("end", () => {\n` +
+      `  fs.appendFileSync(${JSON.stringify(log)}, raw + "\\n");\n` +
+      `  process.stdout.write("block");\n` +
+      `});\n`,
+  );
+  chmodSync(bin, 0o755);
+
+  const api = fakeApi({ command: bin });
+  register(api);
+  const hook = api.hooks.get("before_prompt_build");
+  // 12,000 CJK chars = 36,000 bytes: over the reflex's 15,296-byte content
+  // budget, comfortably under the old 15,000-CHARACTER slice, so only a byte
+  // bound can keep this inside the contract.
+  const prompt = "字".repeat(12000) + " the actual question";
+  await hook({ prompt }, { trigger: "user", sessionKey: "long" });
+
+  const sent = JSON.parse(readFileSync(log, "utf8").trim());
+  const content = sent.window[0].content;
+  assert.ok(Buffer.byteLength(content, "utf8") <= REFLEX_PROMPT_MAX_BYTES);
+  assert.ok(content.endsWith("the actual question"));
+  assert.ok(!content.includes("\uFFFD"));
 });

@@ -40,12 +40,12 @@ The earlier `platform-seams.md` row for #2120 (`~/.openclaw/*.claw` +
 * **Fail-open.** Every handler catches. Unreachable API, missing key, timeout,
   empty graph or nothing above the confidence gate ⇒ nothing is injected and the
   turn proceeds untouched. A reflex failure can never break an OpenClaw turn.
-* **Cross-turn dedupe.** The same injected block is never repeated within one
-  session key, and the block itself is handed back to the reflex as
-  `prior_context` on the next turn — `tortoise volunteer`'s JSON contract
-  locally, the `POST /v1/context` body hosted — so a pointer the last injected
-  block carried is suppressed when the next block differs — **except on an
-  explicit ask** (a wh-question, a trailing "?", or "remind me what X was"),
+* **Cross-turn dedupe.** A block identical to the one just injected is not
+  injected again on the next turn (per session key), and the block itself is
+  handed back to the reflex as `prior_context` — `tortoise volunteer`'s JSON
+  contract locally, the `POST /v1/context` body hosted — so a pointer the last
+  injected block carried is suppressed when the next block differs — **except on
+  an explicit ask** (a wh-question, a trailing "?", or "remind me what X was"),
   which deliberately re-fires (`volunteer._is_explicit_ask`): the user asked
   for it again. Measured, not assumed: a turn 3 phrased as a question re-fires
   with correct continuity in place, so that carve-out is not a continuity

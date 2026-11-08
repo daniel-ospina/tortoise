@@ -846,3 +846,41 @@ def test_real_seam_both_directions_over_a_seeded_graph(tmp_path):
         {"role": "user", "content": _RE_MENTION},
         {"role": "assistant", "content": "Noted."},
     ], f"the plugin's spool and the parser drifted: {parse_openclaw(spools[0])!r}"
+
+
+def _plugin_int_constant(name: str) -> int:
+    """Read an integer constant out of the shipped ``index.mjs``.
+
+    The plugin is JavaScript and the reflex is Python, so its window bound is
+    MIRRORED rather than imported. A mirror that drifts is not a smaller bound —
+    it is no bound at all: a narrower one silently truncates turns it could have
+    sent, a wider one builds a window the validator REJECTS, and the rejection
+    is swallowed by the fail-open boundary as an empty injection. Parse digits
+    and ``*`` only (no ``eval``) — the constants are written as ``15 * 1024``.
+    """
+    src = ENTRY.read_text(encoding="utf-8")
+    match = re.search(rf"export const {name}\s*=\s*([0-9*\s]+);", src)
+    assert match, f"{name} is not a plain integer expression in {ENTRY}"
+    value = 1
+    for part in match.group(1).split("*"):
+        value *= int(part.strip())
+    return value
+
+
+def test_plugin_window_budget_is_the_reflexs_own_constant():
+    """The plugin's byte budget must equal the reflex's, not restate a guess.
+
+    ``validate_request`` (tortoise/volunteer.py) charges the UTF-8 bytes of each
+    turn's content plus ``PER_TURN_OVERHEAD_BYTES`` against ``MAX_WINDOW_BYTES``;
+    the plugin sends ONE turn, so its content budget is
+    ``MAX_WINDOW_BYTES - PER_TURN_OVERHEAD_BYTES``. Measured before #11583's fix:
+    a 15,000-CHARACTER slice sent 45,000 bytes for CJK, the reflex refused it,
+    and the fail-open catch made the turn look like "nothing to inject".
+    """
+    from tortoise.volunteer import MAX_WINDOW_BYTES, PER_TURN_OVERHEAD_BYTES
+
+    assert _plugin_int_constant("REFLEX_MAX_WINDOW_BYTES") == MAX_WINDOW_BYTES
+    assert (
+        _plugin_int_constant("REFLEX_PER_TURN_OVERHEAD_BYTES")
+        == PER_TURN_OVERHEAD_BYTES
+    )
