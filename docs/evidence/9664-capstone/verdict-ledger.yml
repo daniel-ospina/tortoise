@@ -142,10 +142,17 @@ measured_at:
 # removed rather than annotated, because an un-reproducible count in an evidence
 # artifact is exactly as harmful as no count.
 #
-# What is missing is a RUN, and the only thing that blocks one is a credential:
-# steps 1–4 and 6–10 need a signed-in Tortoise session and, from step 4 on, a
-# ChatGPT Plus/Pro session where a HUMAN completes the OAuth consent — which is
-# #9664's own step-4 text ("human does the Pro auth").
+# What is missing is a RUN. Two DIFFERENT things block one, and conflating them is
+# how the capstone read as "just mint a credential":
+#   * steps 1-4 and 6-10 need a signed-in Tortoise session and, from step 4 on, a
+#     ChatGPT Plus/Pro session where a HUMAN completes the OAuth consent — which is
+#     #9664's own step-4 text ("human does the Pro auth");
+#   * the four #9340 ugly cases need, beyond a credential, a SECOND graph (the
+#     accept arm of U1) — a minted free org may hold one, measured 402 "Custom
+#     graphs require the Builder plan" (step11-write-half-trace.txt).
+# A credential WAS minted on 2026-11-08 (`uv run tortoise signup`) and it did not
+# unblock those rows; the write half of the ugly cases was measured with it and the
+# accept half stayed unreachable for the tier reason above.
 
 criteria:
   # ── §C — the issue's own "Done means" list, VERBATIM ────────────────────────
@@ -377,23 +384,51 @@ criteria:
   # ── §B — the four #9340 ugly cases, VERBATIM ───────────────────────────────
   - id: U1
     text: "an explicit non-default graph"
+    # CORRECTED 2026-11-08 — this row said the journey was blocked by "a hosted-org
+    # credential usable from the SDK/HTTP surface ... plus a second graph to target".
+    # A later draft of this row fixed only the FIRST half (a credential was minted
+    # and the write was delivered over `/mcp`), regraded the row `verified`, and
+    # that was a FALSE PASS: the refusal it measured is indistinguishable from
+    # "an unknown graph is refused", which is not this case — `#9340` lists an
+    # explicit non-default graph as the ACCEPT arm (id -> namespace -> unique name),
+    # and only the other three ugly cases have a refusal as their outcome (which is
+    # why U3 is verified on one). A half-measured criterion has no home in this
+    # ledger's vocabulary ("there is no `partial`"), so the row stays `blocked` and
+    # the measurement went into the reason instead of into a verdict.
     verdict: blocked
     reason: >-
       Contract green at this head (tests/test_9340_graph_tool_argument.py, 66
-      passed). The journey case has never run: from the ChatGPT venue a write
-      carrying `graph` is refused by OpenAI before it reaches us (#10084), so the
-      call must come from a client that can deliver it — missing by name: a
-      hosted-org credential usable from the SDK/HTTP surface (no `tt_` key and no
-      OAuth token on this box) plus a second graph to target.
+      passed). The journey case has never run. TWO things are missing, and this
+      pass closed only one of them: (1) a client that can DELIVER the write — the
+      2026-10-26 run's writes were stopped by OpenAI's safety checks before any
+      Tortoise code ran (#10084) — and (2) a SECOND graph to write INTO. On (1):
+      `uv run tortoise signup` (#663) minted a live org and the step-11 probe was
+      delivered over the served `/mcp` surface, where OUR resolver refused it with
+      `No graph 'capstone-9664-nod' is reachable from this workspace. Reachable
+      graphs: 'default' ...` and the probe string did NOT land in `default` — so
+      the write path is proven present, correctly refusing, and free of silent
+      fallback (`step11-write-half-trace.txt`). On (2), which is what keeps this
+      row uncovered: the ACCEPT arm needs an existing non-default graph, and a
+      minted free org may hold ONE — measured `402 "Custom graphs require the
+      Builder plan"`. Missing by name: a paid tier that permits a second graph, or
+      an owner-provided org that already has two. This is the same missing thing as
+      U2/U4, and grading this row `verified` off the refusal half would have graded
+      one blocker two ways.
 
   - id: U2
     text: "a duplicate graph name"
     verdict: blocked
     reason: >-
       Contract green (test_a_duplicate_name_is_refused_with_the_candidates, 66
-      passed). Never attempted in a run: the write shape cannot be delivered from
-      the ChatGPT venue. Same missing thing as U1 — a hosted-org credential on a
-      client that is not ChatGPT, plus two graphs sharing a name.
+      passed). Never attempted in a run, and not replayable from a minted org: a
+      duplicate NAME needs a SECOND graph, and creating one on the free tier is
+      refused — measured 2026-11-08, `POST /v1/organizations/<org>/graphs` ->
+      `402 {"detail":"Custom graphs require the Builder plan. Upgrade to create
+      multiple graphs. Need more? Contact support@premiselabs.co."}`
+      (step11-write-half-trace.txt). Missing by name: a paid
+      tier that permits a second graph, or an owner-provided org that already has
+      two. This supersedes "no `tt_` key on this box" — a key exists and was used;
+      the wrong reason left on a row is how a blocker reads as unfixable.
 
   - id: U3
     text: "a graph id from another workspace"
@@ -414,8 +449,10 @@ criteria:
     reason: >-
       Contract green (test_a_soft_deleted_graph_stops_resolving_on_the_next_call,
       66 passed). Never attempted in a run: it needs a graph that can be created
-      and then deleted from the same client that writes to it — same missing
-      credential as U1, plus a second graph.
+      and then deleted from the same client that writes to it — i.e. a SECOND
+      graph, which the free tier refuses `402 "Custom graphs require the Builder
+      plan"` (measured 2026-11-08, step11-write-half-trace.txt). Same missing
+      thing as U2: a paid tier, or an owner-provided org with two graphs.
 
   # ── §D — the four "Evidence and verdict" requirements, VERBATIM ────────────
   - id: E1
