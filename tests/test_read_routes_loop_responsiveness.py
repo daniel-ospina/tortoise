@@ -3209,8 +3209,10 @@ async def _warm_up_paying_the_cold_phases(ac, label: str, handler: str,
     measurement:
 
     * the **projection cold open** (connect, version probe, ``_ensure_indexes()``
-      and, on a restored/DR graph, the index BUILD) — declared budget
-      ``probe_setup_timeout()``, which is ``bound``;
+      and, on a restored/DR graph, the index BUILD) — declared budget the
+      ``graph`` lane's own ``graph_offload_timeout_s()``
+      (``probe_setup_timeout()`` + ``CONTROL_PLANE_GRAPH_OFFLOAD_MARGIN_S``,
+      30 s by default), which is ``bound``;
     * **``/v1/search``'s one-time embedder load** (#4055). ``sdk.tortoise_fts_query``
       calls ``EmbeddingModel.get()`` synchronously ON THE READ WORKER, so the
       ``attach_projection`` bundling that assigns the cold open to the
@@ -3485,9 +3487,11 @@ def test_the_read_path_answers_while_the_default_executor_is_stalled(client):
     FIRST request after `_seed_read_surface()` carries the cold open (connect,
     version probe, `_ensure_indexes()` and, on a restored/DR graph, the index
     BUILD) — which this module's own `_PROJECTION_ATTACHING_READS` note budgets
-    at `probe_setup_timeout()` (20 s, up to 300 s) and assigns to the `graph`
-    construction lane, explicitly "NOT inside the read lane's 8 s saturation
-    bound" (#10602 cycle-2 review P1). Measuring that request inside
+    at the `graph` lane's wait bound, `graph_offload_timeout_s()` (the probe's
+    `probe_setup_timeout()` allowance PLUS a margin: 30 s by default, up to
+    310 s at the knob's ceiling), and assigns to the `graph` construction lane,
+    explicitly "NOT inside the read lane's 8 s saturation bound" (#10602
+    cycle-2 review P1). Measuring that request inside
     `READ_ANSWER_BOUND_S` judged the cold open by a bound the module says it must
     not be judged by, and it redded a green build: measured on PR #11535's
     `test (c)` (run 42470441311, embedded lane, 4,736 tests in 944 s) the FIRST
@@ -3512,9 +3516,11 @@ def test_the_read_path_answers_while_the_default_executor_is_stalled(client):
 
     * the cold open's WORK, which rides a per-request construction submission
       (`hosted_api._data_sdk_offloaded` bundles `sdk._get_proj()` into the SAME
-      submission), so `probe_setup_timeout()` is its declared budget — and it
-      is what the warm-up pays once, with the pool free and outside the
-      measurement;
+      submission), so the `graph` lane's OWN bound is its declared budget —
+      `graph_offload_timeout_s()`, which `_graph_offload` resolves exactly when
+      the caller passes no `timeout=` (#3773): `probe_setup_timeout()` PLUS
+      `CONTROL_PLANE_GRAPH_OFFLOAD_MARGIN_S`, 30 s by default. It is what the
+      warm-up pays once, with the pool free and outside the measurement;
     * a request-owned ONE-TIME EMBEDDER LOAD inside `/v1/search`'s callable —
       `sdk.tortoise_fts_query` calls `EmbeddingModel.get()` synchronously in the
       worker (`hosted_api._read_offload`'s #4055 note; budgeted
@@ -3567,8 +3573,15 @@ def test_the_read_path_answers_while_the_default_executor_is_stalled(client):
         f"{sorted(_READ_LANE_CASES - {c[0] for c in _READ_CASES})}")
 
     width = _default_executor_width()
-    #: The warm-up's OWN bound, and the bound of the COLD OPEN only
-    #: (`probe_setup_timeout()`, 20 s by default). Without it a hung cold open
+    #: The warm-up's OWN bound, and the bound of the COLD OPEN only — the
+    #: `graph` lane's declared budget for it, ``graph_offload_timeout_s()``
+    #: (= ``probe_setup_timeout()`` + ``CONTROL_PLANE_GRAPH_OFFLOAD_MARGIN_S``:
+    #: 30 s by default, up to 310 s at the knob's ceiling), because
+    #: ``_data_sdk_offloaded(..., attach_projection=True)`` rides ``_graph_offload``
+    #: with no ``timeout=`` override and ``_graph_offload`` resolves exactly that
+    #: (#3773). It must NOT be narrowed to ``probe_setup_timeout()``: that is the
+    #: PROBE lane's allowance, so the cold open would be judged by a number its
+    #: own lane never gave it. Without any bound a hung cold open
     #: spins until the repo-wide ``pytest-timeout`` (300 s) kills the ITEM with a
     #: message about a timeout instead of about the route — the same rule the
     #: occupancy wait below follows. The OTHER cold phase on this path
@@ -3576,7 +3589,7 @@ def test_the_read_path_answers_while_the_default_executor_is_stalled(client):
     #: constant here: `_warm_up_paying_the_cold_phases` stops judging the wait
     #: while that load is in flight, because it is setup and its own
     #: ``_LOAD_TIMEOUT_S`` is its budget — the same rule `_read_offload` applies.
-    warm_up_bound = monitoring.probe_setup_timeout()
+    warm_up_bound = monitoring.graph_offload_timeout_s()
     assert warm_up_bound > READ_ANSWER_BOUND_S, (
         f"the cold open's declared budget ({warm_up_bound}s) no longer exceeds "
         f"the read-lane bound ({READ_ANSWER_BOUND_S}s) — the warm-up would then "
@@ -3594,7 +3607,8 @@ def test_the_read_path_answers_while_the_default_executor_is_stalled(client):
             # COLD-WARM-UP, with the pool still free and OUTSIDE the
             # measurement (see the docstring). Each route's first request pays
             # the projection cold open, which belongs to the construction lane's
-            # `probe_setup_timeout()` budget — not to the read-lane bound below;
+            # `graph_offload_timeout_s()` budget — not to the read-lane bound
+            # below;
             # `/v1/search` additionally pays a one-time embedder load, which the
             # helper stops judging while it is in flight.
             for label, handler, request_kwargs in cases:
