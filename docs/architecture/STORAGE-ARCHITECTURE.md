@@ -1642,7 +1642,7 @@ For the record, since two members of the design rest on it:
 
 ### 17.1 The write-path rule
 
-**§3 states the rule for the derived TABLES — *"Writes go to the truth first, then project"* (`:295`) — and the hybrid extends it to the CACHE. The REQUIREMENT, stated as a rule:** **every write goes to the truth store first, and the cache is projected from it.** The rule is not optional, and its reason is definitional:
+**§3 states the rule for the derived TABLES — *"Writes go to the truth first, then project"* — and the hybrid extends it to the CACHE. The REQUIREMENT, stated as a rule:** **every write goes to the truth store first, and the cache is projected from it.** The rule is not optional, and its reason is definitional:
 
 > **A derived cache that is also written to directly is not derived.**
 

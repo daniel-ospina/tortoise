@@ -247,7 +247,11 @@ RETRACTED_IN_SIBLINGS: dict[str, str] = {
 #: `done`, `open`, `closed`). A delivery-state pin reds the moment the document
 #: says the same thing in design language, which punishes the edit it should
 #: reward.
-FACT_STATEMENTS_IN_SIBLINGS: tuple[tuple[Path, str, str], ...] = (
+#: An entry is ``(doc, name, literal)``, or ``(doc, name, literal, section)``
+#: when the name is SECTION-SCOPED ("SEARCH's §7 says …") — the literal is then
+#: ranged to that section's body, so the fact sliding out of §7 reds instead of
+#: passing on a document-wide substring match.
+FACT_STATEMENTS_IN_SIBLINGS: tuple[tuple, ...] = (
     (
         STORAGE,
         "STORAGE records the vector-trace mechanism",
@@ -282,6 +286,7 @@ FACT_STATEMENTS_IN_SIBLINGS: tuple[tuple[Path, str, str], ...] = (
         SEARCH,
         "SEARCH's §7 says a graph dump has no vector index to rebuild at all",
         "a graph dump has **no vector index to rebuild at all**",
+        "7",
     ),
     (
         STORAGE,
@@ -426,15 +431,38 @@ def test_the_sibling_documents_do_not_carry_the_retracted_claims():
 
 
 def test_the_sibling_documents_still_state_the_design_facts():
-    missing = [
-        f"{doc.name}: {name}"
-        for doc, name, literal in FACT_STATEMENTS_IN_SIBLINGS
-        if literal not in doc.read_text(encoding="utf-8")
-    ]
+    """Each pinned fact must still live where its NAME says it does.
+
+    ⛔ An entry may carry a fourth element, a section number. When it does, the
+    literal is RANGED to that section's body rather than the whole document —
+    because a name that claims "SEARCH's §7 says …" is falsified by the sentence
+    surviving one section up, while a document-wide `in` check stays green. That
+    is the same defect the `cache_projection` locator pin was rewritten to close
+    (`tests/test_10853_session_source_prose.py`: a locator that is not RESOLVED
+    is not a citation), and it is the reason this arm exists rather than a bare
+    presence scan.
+    """
+    missing: list[str] = []
+    for entry in FACT_STATEMENTS_IN_SIBLINGS:
+        doc, name, literal = entry[0], entry[1], entry[2]
+        section = entry[3] if len(entry) > 3 else None
+        if section is None:
+            body = doc.read_text(encoding="utf-8")
+            where = "its OWN document"
+        else:
+            try:
+                body = _section_body(doc, section)
+            except AssertionError:
+                missing.append(f"{doc.name}: {name} — §{section} does not exist")
+                continue
+            where = f"§{section} of its own document"
+        if literal not in body:
+            missing.append(f"{doc.name}: {name} — not found in {where}")
     assert not missing, (
-        "the corrected sibling passages no longer state the fact in their "
-        "OWN document — a passage was silently deleted rather than corrected, or "
-        "moved to a document that does not own the claim:\n  - "
+        "the corrected sibling passages no longer state the fact where the pin "
+        "names it — a passage was silently deleted rather than corrected, moved "
+        "to a document that does not own the claim, or slid out of the section "
+        "the pin is about:\n  - "
         + "\n  - ".join(missing)
     )
 
