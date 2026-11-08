@@ -1556,9 +1556,6 @@ def test_a_long_path_is_truncated_in_the_error_line(tmp_path):
     assert "…" in proc.stderr, proc.stderr
 
 
-_UNRESOLVED = object()
-
-
 def _refusal_exit_status(exc: ast.expr | None) -> int | None:
     """The PROCESS status a guard's `raise SystemExit(...)` leaves behind (#11342).
 
@@ -1572,7 +1569,9 @@ def _refusal_exit_status(exc: ast.expr | None) -> int | None:
     The argument is RESOLVED with `ast.literal_eval`, not pattern-matched on
     `ast.Constant`: `-256` parses as `UnaryOp(USub, Constant(256))`, which leaves
     the process at **0** while a Constant-only check calls it "a message" and
-    returns 1 — the same fail-open, one node type over.
+    returns 1 — the same fail-open, one node type over. No separate `_UNRESOLVED`
+    sentinel exists: an unresolvable argument IS the ``None`` return, and two
+    spellings of one state is a trap for the next editor.
 
     `literal_eval` folds sign and number literals but NOT arithmetic: `0 + 0`,
     `2 ** 8`, `len('')` and `int(0)` all raise `ValueError`, so they — and every
@@ -1580,7 +1579,7 @@ def _refusal_exit_status(exc: ast.expr | None) -> int | None:
     deliberate rather than a gap: the guard is the first statement after
     `import sys`, so a module-level constant it named would be assigned BELOW it
     and the refusal would be a `NameError` traceback (`EXIT_INVALID` is assigned
-    at :138 under a guard at :101), which the census reds.
+    at :151 under a guard at :113), which the census reds.
     """
     if not (isinstance(exc, ast.Call) and exc.args):
         return 0  # `raise SystemExit` / `SystemExit()` leaves `.code` as None
@@ -1676,24 +1675,36 @@ def _is_stderr_print(call: ast.Call) -> bool:
     )
 
 
-def _refusal_text(guard: ast.If, capsys, monkeypatch) -> str:
-    """Run the guard ALONE on a faked 3.9 interpreter and return what it says.
+def _run_guard(guard: ast.If, monkeypatch, version: tuple[int, ...]) -> str:
+    """Execute the guard ALONE with `sys.version_info` faked, return what it says.
+
+    Returns the refusal text appended to whichever channel carried it, or "" when
+    the guard did not refuse (i.e. it was INERT — what must happen at the floor).
 
     This is BEHAVIOURAL on purpose. A structural check of the message can pin the
     floor, the file and an invocation and still accept `(got 9.3)` — the two
     subscripts in the wrong order render a value the census's own `"(got 3.9)"`
     assertion rejects, and no set-membership test on the AST can see the order or
-    the separator. Executing the guard closes ordering, separators, formatting
-    and the `(got …)` wording at once, by construction with the census.
+    the separator. Executing the guard closes ordering, separators and formatting
+    at once.
     """
     module = ast.Module(body=[guard], type_ignores=[])
     code = compile(module, f"<guard@{guard.lineno}>", "exec")
-    monkeypatch.setattr(sys, "version_info", (3, 9, 6, "final", 0))
-    with pytest.raises(SystemExit) as refused:
+    monkeypatch.setattr(sys, "version_info", version)
+    refused: SystemExit | None = None
+    try:
         # The node is parsed from a TRACKED file; nothing here is input.
         exec(code, {"sys": sys})
+    except SystemExit as exc:
+        refused = exc
+    return "" if refused is None else str(refused.code)
+
+
+def _refusal_text(guard: ast.If, capsys, monkeypatch, version: tuple[int, ...]) -> str:
+    """What the guard SAYS on a faked interpreter, across every channel."""
+    said = _run_guard(guard, monkeypatch, version)
     captured = capsys.readouterr()
-    return str(refused.value) + captured.out + captured.err
+    return said + captured.out + captured.err
 
 
 PINNED_TOOLS = [
@@ -1722,9 +1733,17 @@ def test_the_tool_carries_the_5128_interpreter_guard_first(tool, capsys, monkeyp
     """
     tree = ast.parse(tool.read_text(encoding="utf-8"))
     body = list(tree.body)
-    # Skip the module docstring, the `__future__` import, and `import sys`.
+    # Skip EXACTLY ONE module docstring — not every leading `ast.Expr`, which is
+    # what the census's `_guard_index` anchors on. Measured: a second bare string
+    # literal before the `__future__` import passed a skip-all-Expr loop and reded
+    # the census.
     i = 0
-    while i < len(body) and isinstance(body[i], ast.Expr):  # docstring
+    if (
+        i < len(body)
+        and isinstance(body[i], ast.Expr)
+        and isinstance(body[i].value, ast.Constant)
+        and isinstance(body[i].value.value, str)
+    ):
         i += 1
     assert i < len(body) and isinstance(body[i], ast.ImportFrom), "no __future__ import"
     assert body[i].module == "__future__", body[i].module
@@ -1732,8 +1751,13 @@ def test_the_tool_carries_the_5128_interpreter_guard_first(tool, capsys, monkeyp
     # Bounds-checked before each access: a truncated preamble must fail with the
     # reason below, not an IndexError the reader has to decode.
     assert i < len(body), "`import sys` must follow __future__ (file ends too early)"
-    assert isinstance(body[i], ast.Import), "`import sys` must follow __future__"
-    assert [a.name for a in body[i].names] == ["sys"], body[i].names
+    assert isinstance(body[i], ast.Import)
+    # `asname is None` matters: `import sys as _sys` binds no `sys` at all, so the
+    # guard below becomes a NameError at runtime while a name-only comparison
+    # passes. The census's `_is_bare_sys_import` requires it too.
+    assert [a.name for a in body[i].names] == ["sys"] and body[i].names[0].asname is None, (
+        f"`import sys` must be a BARE import (no `as` alias); got {ast.dump(body[i])}"
+    )
     i += 1
 
     assert i < len(body), (
@@ -1796,6 +1820,22 @@ def test_the_tool_carries_the_5128_interpreter_guard_first(tool, capsys, monkeyp
     )
 
     raises = [n for n in body_nodes if isinstance(n, ast.Raise)]
+    # ★ An `else:` clause is a SILENT NO-OP, and a worse fail-open than a bad
+    # message: `if old: raise … else: raise SystemExit(0)` passes every assertion
+    # about the body, and then the tool does NOTHING at all on the interpreter the
+    # guard is meant to pass — no work, no message, exit 0. Measured: the pin was
+    # green and the tool ran `exit 0` with no output. The census reds it because its
+    # floor probe raises out of the guard; this pin is the only gate on a
+    # `tools/`-only diff, so it must red it too.
+    assert not guard.orelse, (
+        f"the guard must carry NO `else` clause: it would run at the floor, on the "
+        f"interpreter the guard exists to PASS — measured, `else: raise "
+        f"SystemExit(0)` makes the tool a silent no-op with a green pin: "
+        f"{[type(n).__name__ for n in guard.orelse]}"
+    )
+    assert _run_guard(guard, monkeypatch, (3, 12, 0, "final", 0)) == "", (
+        "the guard must be INERT at the floor — it refused on a 3.12 interpreter"
+    )
     assert len(raises) == 1, "the guard must refuse on an old interpreter"
     raise_node = raises[0]
     exc = raise_node.exc
@@ -1865,7 +1905,7 @@ def test_the_tool_carries_the_5128_interpreter_guard_first(tool, capsys, monkeyp
     # this is asserted BEHAVIOURALLY, because a structural check cannot see the
     # ORDER: `(got {version_info[1]}.{version_info[0]})` renders `(got 9.3)` and
     # reds the census while satisfying any set-of-subscripts test.
-    said = _refusal_text(guard, capsys, monkeypatch)
+    said = _refusal_text(guard, capsys, monkeypatch, (3, 9, 6, "final", 0))
     assert "(got 3.9)" in said, (
         f"the refusal must name the interpreter it GOT as the operator sees it "
         f"(`(got 3.9)` on a 3.9 host); it said {said!r}"
@@ -1884,6 +1924,15 @@ def test_the_tool_carries_the_5128_interpreter_guard_first(tool, capsys, monkeyp
         f"`(got 3.9)` is the same unattributed error on any other interpreter, "
         f"and the census cannot see it because it fakes 3.9; found "
         f"{sorted(components)}, renders as {rendered!r}"
+    )
+    # A SECOND interpreter, because one faked version cannot tell an interpolated
+    # message from a hard-coded string: `(got 3.9)` written as a literal passes the
+    # 3.9 run. Measured: the census has the same single-version blind spot, so on a
+    # tool-only diff this is the only place the difference can be caught.
+    said_310 = _refusal_text(guard, capsys, monkeypatch, (3, 10, 9, "final", 0))
+    assert "(got 3.10)" in said_310, (
+        f"the refusal must INTERPOLATE the interpreter it got — a hard-coded "
+        f"`(got 3.9)` passes a single-version probe: on 3.10 it said {said_310!r}"
     )
 
     # The census's `test_no_doc_or_usage_advertises_the_form_the_guard_refuses`
