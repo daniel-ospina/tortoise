@@ -615,5 +615,234 @@ def test_hosted_body_is_the_contract_the_server_validates(tmp_path):
     assert request.prior_context == "the-block-we-injected"
 
     # …and the body this replaces is refused, so the pin is not vacuous.
-    with pytest.raises(Exception):
+    # Pydantic's own ValidationError is the precise shape of the 422 — a blind
+    # ``Exception`` would also pass on an import error or a typo in the model.
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
         VolunteerContextRequest.model_validate({"prompt": "what do we know?"})
+
+# ── the REAL-SEAM grade (issue #2120 indicator 5 / the S3 verification row) ──
+#
+# The seam matrix's Verification section defines the grade as "executes the
+# SHIPPED <seam> against a seeded embedded graph and asserts the per-harness
+# output contract carries the reflex block".  Every other harness seam is
+# graded with a FAKED reflex (a shell hook cannot be handed an in-process SDK);
+# for OpenClaw that gap was the one #2120 acceptance indicator still unmet —
+# the shipped handlers were graded against a stub, so "the reflex block reaches
+# `prependContext`" was an inference about the stub rather than a measurement
+# of the pipeline.  `test_framework_middleware.py` (#2125) sets the pattern for
+# grading through the REAL reflex; this is the OpenClaw twin, and it grades
+# BOTH directions of the seam in one run:
+#
+#   OUT   shipped `before_prompt_build` → REAL `tortoise volunteer` → the
+#         seeded graph's own point text lands in `prependContext`;
+#   OUT'  the re-mention turn is suppressed by the REAL reflex's stage-5
+#         suppression, fed `prior_context` by the plugin's OWN continuity map
+#         (not by the test), while a pointer the session has not seen yet still
+#         gets through — and a fresh plugin instance re-fires the suppressed
+#         one, so the silence is attributable to continuity and not to the
+#         digest dedupe, a cold cache, or an error;
+#   IN    shipped `llm_output` → the per-session spool the REAL
+#         `parse_openclaw` files (`tortoise sessions import --harness
+#         openclaw`).
+#
+# THE SECOND CLAIM IS ADDED MID-RUN ON PURPOSE.  With a static graph the
+# re-mention turn's block is byte-identical to the first turn's, so `createDedupe`
+# alone returns nothing and a continuity assertion passes vacuously — measured:
+# with `priorContext: ""` hard-wired in the plugin the naive test still passed.
+# Making the graph grow (via the reflex shim, on the second invocation) makes the
+# second block DIFFERENT, so only `prior_context` can suppress the old pointer.
+#
+# Everything runs on the embedded lane (an explicit `db_path` beats an env URI),
+# so the module needs no TORTOISE_DB_URI and no server.
+
+_SEED_CLAIM = "The CI pipeline deploys via GitHub Actions on main merge."
+_SEED_EXTRA = "The release calendar is frozen during the audit window."
+_FIRST_PROMPT = "How is CI deploy triggered?"
+#: An IMPLICIT re-mention — no wh-word, no trailing "?", not an aux-initial
+#: question — because an explicit ask deliberately re-fires
+#: (`volunteer._is_explicit_ask`), which would make suppression unreachable.
+_RE_MENTION = ("So CI deploys via GitHub Actions on main merge, and the "
+               "release calendar is frozen during the audit window.")
+
+_SEED = """
+import os, sys
+from tortoise.sdk import TortoiseSDK
+sdk = TortoiseSDK(db_path=os.environ["TORTOISE_DB_PATH"])
+proj = sdk._get_proj()
+
+def add(stmt):
+    ev = sdk.create_point("evidence", stmt + " [supporting record]")
+    claim = sdk.create_point("statement", stmt)
+    sdk.create_operator("IMPL", ev["id"], [claim["id"]])
+    for pid in (claim["id"], ev["id"]):
+        proj.g.query(
+            "MATCH (n:Point {id:$id}) SET n.confidence=0.9231, "
+            "n.posterior_alpha=12.0, n.posterior_beta=1.0", params={"id": pid})
+
+add(os.environ["TORTOISE_SEED_CLAIM"])
+if len(sys.argv) > 1:
+    add(sys.argv[1])
+sdk.close()
+"""
+
+#: `execFile(command, ["volunteer"])` means the reflex must be ONE executable,
+#: so the grade addresses it through a shim — exactly what a user with a
+#: non-PATH `tortoise` configures.  On its SECOND invocation it grows the graph
+#: (see the note above); afterwards it is a plain passthrough.
+_SHIM = """#!/bin/sh
+n=0
+[ -f "$TORTOISE_SHIM_STATE" ] && n=$(cat "$TORTOISE_SHIM_STATE")
+n=$((n + 1))
+echo "$n" > "$TORTOISE_SHIM_STATE"
+if [ "$n" = "2" ]; then
+  "$TORTOISE_SHIM_PY" "$TORTOISE_SEED_SCRIPT" "$TORTOISE_SEED_EXTRA" >/dev/null 2>&1
+fi
+exec "$TORTOISE_SHIM_PY" -m tortoise "$@"
+"""
+
+_REAL_SEAM_DRIVER = """
+const entry = await import(process.env.TORTOISE_ENTRY_URL);
+const plugin = entry.default;
+
+function harness() {
+  const handlers = {};
+  // `timeoutMs`: the plugin's shipped default is 800 ms and a local reflex is
+  // measured at ~10 s/turn on this box (#8959, its own issue).  An explicit
+  // budget here grades the SEAM's contract instead of re-reporting that defect.
+  const api = {
+    config: { command: process.env.TORTOISE_COMMAND, capture: true, timeoutMs: 120000 },
+    on(name, fn) { handlers[name] = fn; },
+  };
+  return { handlers, api };
+}
+
+function turn(handlers, prompt, sessionKey) {
+  return handlers.before_prompt_build(
+    { prompt, sessionId: sessionKey },
+    { trigger: "user", sessionKey, agentId: "agent-1" },
+  );
+}
+
+const first = harness();
+plugin(first.api);
+const injected = await turn(first.handlers, process.env.TORTOISE_FIRST_PROMPT, "sess-real");
+const reMention = await turn(first.handlers, process.env.TORTOISE_RE_MENTION, "sess-real");
+
+// direction IN: the shipped capture handler owns the spool write
+await first.handlers.llm_output(
+  {
+    prompt: process.env.TORTOISE_RE_MENTION,
+    assistantTexts: ["Noted."],
+    sessionId: "sess-real",
+  },
+  { sessionKey: "sess-real", agentId: "agent-1" },
+);
+
+// A FRESH instance starts with NO continuity: the re-mention must re-fire.
+const second = harness();
+plugin(second.api);
+const fresh = await turn(second.handlers, process.env.TORTOISE_RE_MENTION, "sess-real");
+
+console.log(JSON.stringify({
+  first: injected?.prependContext ?? null,
+  second: reMention?.prependContext ?? null,
+  fresh: fresh?.prependContext ?? null,
+}));
+"""
+
+
+@pytest.mark.skipif(
+    _node_version() is None or _node_version() < _NODE_MIN,
+    reason="node >= 22.18 required for the .mjs loader (esm + node:test)")
+def test_real_seam_both_directions_over_a_seeded_graph(tmp_path):
+    """#2120 indicator 5 (and the S3 verification row): the SHIPPED plugin,
+    driven through the REAL `tortoise volunteer` reflex over a seeded embedded
+    graph, injects that graph's own point text — its re-mention turn is
+    suppressed by the reflex on the plugin's own continuity input — and its
+    capture handler writes a spool the REAL `parse_openclaw` files."""
+    node = shutil.which("node")
+    db = tmp_path / "real-seam.db"
+    spool_dir = tmp_path / "spool"
+    home = tmp_path / "home"
+    home.mkdir()
+
+    seed_script = tmp_path / "seed.py"
+    seed_script.write_text(_SEED)
+    shim = tmp_path / "tortoise-shim"
+    shim.write_text(_SHIM)
+    shim.chmod(0o755)
+    driver = tmp_path / "real-seam.mjs"
+    driver.write_text(_REAL_SEAM_DRIVER)
+
+    env = {
+        **os.environ,
+        "TORTOISE_DB_PATH": str(db),
+        "TORTOISE_DB_URI": "",          # embedded lane, never a shared graph
+        "HOME": str(home),              # no user-global creds => the local leg
+        "PYTHONPATH": str(REPO_ROOT),
+        "TORTOISE_SECRET_PEPPER": "test-static-pepper",
+        "TORTOISE_SEED_CLAIM": _SEED_CLAIM,
+        "TORTOISE_SEED_EXTRA": _SEED_EXTRA,
+        "TORTOISE_SEED_SCRIPT": str(seed_script),
+        "TORTOISE_COMMAND": str(shim),
+        "TORTOISE_SHIM_PY": sys.executable,
+        "TORTOISE_SHIM_STATE": str(tmp_path / "shim-count"),
+        "TORTOISE_ENTRY_URL": ENTRY.as_uri(),
+        "TORTOISE_FIRST_PROMPT": _FIRST_PROMPT,
+        "TORTOISE_RE_MENTION": _RE_MENTION,
+        "TORTOISE_OPENCLAW_SPOOL_DIR": str(spool_dir),
+        # This box exports a real key; `command` wins over it, but clearing it
+        # keeps the run from depending on that precedence.
+        "TORTOISE_API_KEY": "",
+    }
+    # Turn 1 needs the SINGLE-claim graph, so seeding is a separate step: the
+    # shim adds the second claim on reflex invocation #2.
+    subprocess.run(
+        [sys.executable, str(seed_script)], env=env, check=True,
+        capture_output=True, timeout=600, cwd=str(REPO_ROOT))
+
+    proc = subprocess.run(
+        [node, str(driver)], capture_output=True, text=True, timeout=900,
+        env=env, cwd=str(tmp_path))
+    assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}"
+    out = json.loads(proc.stdout)
+
+    # ── direction OUT: the REAL reflex's block reaches prependContext ─────
+    assert out["first"], (
+        "the shipped handler injected nothing through the REAL reflex — the "
+        f"seam is silently dead:\n{proc.stderr}")
+    assert _SEED_CLAIM in out["first"], (
+        "the block did not carry the seeded graph's own text, so this grades "
+        f"the stub, not the seam: {out['first']!r}")
+    assert _SEED_EXTRA not in out["first"], (
+        "the second claim must NOT be in the graph yet, or the re-mention turn "
+        f"cannot distinguish continuity from the digest dedupe: {out['first']!r}")
+
+    # ── continuity: the reflex suppresses what this session already saw ───
+    assert out["second"] is not None, (
+        "the re-mention turn injected NOTHING: that is the digest dedupe (a "
+        "byte-identical block) or a dead reflex, not continuity — the second "
+        f"claim should have got through: {out!r}")
+    assert _SEED_CLAIM not in out["second"], (
+        "the re-mention re-fired a pointer this session already injected: the "
+        f"plugin did not hand the reflex its prior_context: {out['second']!r}")
+    assert _SEED_EXTRA in out["second"], (
+        "the not-yet-surfaced pointer did not get through, so the block was "
+        f"empty/failed for an unrelated reason: {out['second']!r}")
+
+    # ── …and the control: without continuity the SAME turn re-fires ───────
+    assert out["fresh"] and _SEED_CLAIM in out["fresh"], (
+        "a fresh plugin instance (no continuity) did not re-fire, so "
+        "`second`'s silence is not attributable to continuity at all: "
+        f"{out!r}")
+
+    # ── direction IN: the shipped capture handler's spool is fileable ─────
+    spools = sorted(spool_dir.glob("*.jsonl"))
+    assert len(spools) == 1, (
+        f"expected ONE file per session in {spool_dir}, got {spools}")
+    assert parse_openclaw(spools[0]) == [
+        {"role": "user", "content": _RE_MENTION},
+        {"role": "assistant", "content": "Noted."},
+    ], f"the plugin's spool and the parser drifted: {parse_openclaw(spools[0])!r}"
