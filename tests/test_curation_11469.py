@@ -1624,3 +1624,79 @@ def test_the_suite_pins_the_ambient_off_switch_fixture():
     assert C.OFF_SWITCH_ENV not in os.environ, (
         "an inherited TORTOISE_CURATE_OFF reached a test: the autouse "
         "_curation_off_switch_unset fixture is what keeps the suite hermetic")
+
+
+# ── the wire the CLI is actually written against (round-28) ──────────────
+#
+# Every surface this pass talks to is INJECTED, so each existing test answers with
+# its own fake — and a fake matches whatever name it is given. That made the suite
+# green over a wire nothing had checked: renaming a tool (or asking for a section
+# the server does not advertise) would red nothing here and die in production at
+# the first read of a run that is the only copy of the data. These two pins read
+# the call sites out of the SOURCE and require the names to exist on the real
+# surface, so the next rename is caught here instead of at the endpoint.
+
+import ast
+import pathlib
+
+REPO = pathlib.Path(__file__).resolve().parent.parent
+CLI_SRC = REPO / "tools" / "curate_graph.py"
+CURATION_SRC = REPO / "tortoise" / "curation.py"
+MCP_SERVER_SRC = REPO / "tortoise" / "mcp_server.py"
+
+
+def _first_arg_strings(func_names, *paths):
+    """String literals passed as the FIRST argument to any of `func_names(...)`."""
+    found = set()
+    for path in paths:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not node.args:
+                continue
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+            if name in func_names:
+                arg = node.args[0]
+                if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                    found.add(arg.value)
+    return found
+
+
+def _declared_overview_sections():
+    """`mcp_server._OVERVIEW_SECTIONS`, read from source — importing that module
+    needs an ambient-free env (`TORTOISE_API_KEY` exported makes it raise), which
+    is exactly the ambient-state trap this suite already pins against."""
+    tree = ast.parse(MCP_SERVER_SRC.read_text(encoding="utf-8"))
+    for node in tree.body:
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id == "_OVERVIEW_SECTIONS"):
+            return tuple(ast.literal_eval(node.value))
+    raise AssertionError("mcp_server defines no _OVERVIEW_SECTIONS")
+
+
+def test_every_tool_the_curation_code_names_is_on_the_registry():
+    """A tool name in this pass is a production dependency, not a label."""
+    from tortoise.tool_registry import TOOL_REGISTRY
+
+    used = _first_arg_strings({"call_tool"}, CLI_SRC, CURATION_SRC)
+    used |= _first_arg_strings({"_call"}, CLI_SRC)
+    # `IngestWriter.TOOL` is a class attribute, not a call argument.
+    used.add(C.IngestWriter.TOOL)
+    # NON-VACUITY: the extraction must have found the real call sites, or this
+    # test would pass over an empty set the moment a helper is renamed.
+    assert {"tortoise_query", "tortoise_graph_overview", "tortoise_ingest"} <= used, used
+    served = {t.name for t in TOOL_REGISTRY}
+    assert used <= served, f"not on the served surface: {sorted(used - served)}"
+
+
+def test_every_overview_section_the_reader_asks_for_is_advertised():
+    """`graph_overview` answers an unknown section with an error ENVELOPE, which
+    the reader fails closed on — so a bad section name is a dead run, not a
+    silently empty census. Pin the names against the server's own tuple."""
+    used = _first_arg_strings({"_section"}, CLI_SRC)
+    # NON-VACUITY: all five sections the two verbs read must be present.
+    assert {"status", "structure", "sources", "graphs", "audit"} <= used, used
+    declared = _declared_overview_sections()
+    assert {"audit", "status", "structure", "sources", "graphs"} <= set(declared), declared
+    assert used <= set(declared), f"not an overview section: {sorted(used - set(declared))}"

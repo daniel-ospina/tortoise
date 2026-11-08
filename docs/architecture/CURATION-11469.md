@@ -25,7 +25,7 @@ Two measured facts govern the risk:
   a migration here is moving the only copy of a tenant's data.
 
 Code: `tortoise/curation.py` (classification + guards + additive writer) and
-`tools/curate_graph.py` (the CLI). Tests: `tests/test_curation_11469.py` (121 tests).
+`tools/curate_graph.py` (the CLI). Tests: `tests/test_curation_11469.py` (123 tests).
 
 ## The inventory — measured 2026-11-08 against `live-v4`
 
@@ -64,11 +64,18 @@ row that no rule decides is `undecidable` rather than guessed. The JSON **report
 | `point:useCase` | 1 | **carry** | strategy artifact |
 | `point:evidence` | 120 | **carry** (115) / not-carried (5) | evidence is signal; the 5 are exact duplicates of a carried evidence row (the keeper carries it) |
 | `point:diary` | 2 | **undecidable** | agent diary: authored, but narrative-shaped |
-| `point:statement` | 15,708 | **not-carried 0 / undecidable 15,708** | **not one** matches a turn-narration marker; every one is a claim this rule set cannot judge |
+| `point:statement` | 15,708 | **not-carried 58 / undecidable 15,650** | 58 match a turn-narration marker (`curation.NARRATIVE_MARKERS`, pinned by `test_narrative_statement_is_not_carried`); the other 15,650 are claims this rule set cannot judge |
 | `source:agentSession` | 1,578 | **undecidable** | §9.1/D1 (`#10000`) says the raw tier lives in Postgres — but this tenant's record holds **0 rows**, so "do not carry it" would leave the transcript with no home |
 | `object` (bare definite) | majority of 5,379 (**not enumerated** — sample only) | **not-carried** | `#11021`/`#11211`: a noun phrase that refers to nothing is not an entity. Biased 1,000-row sample: **96%** drop-shaped; `#5333`'s full census on the same graph: **83%** of 7,870 objects |
 | `event` (session container) | 4,670 | **undecidable** | same only-copy problem as Sources |
 | `operator` | 3,727 (**not enumerated** — count only) | **carry** (rule) | the rule carries the operator row as a claim; edges are the ingest contract's job (#888 W4), not built here |
+
+The dispositions over the **17,420 enumerable rows** (15,842 points + 1,578 sources) must add up to
+that population, and they do: **127 carry · 63 not-carried · 17,230 undecidable** (7+2+1+1+1+115
+carry; 5 duplicate evidence rows + 58 narration statements not-carried; 15,650 statements + 2 diary
++ 1,578 sources undecidable). These are the numbers the run reported and the ones posted on
+`#11469`; the class table above is the same measurement broken out by kind, so the two must be read
+as ONE number set — if they ever disagree, the run's report is authoritative and the table is stale.
 
 ### Defects already measured on the source (audit, read-only)
 
@@ -82,12 +89,12 @@ row that no rule decides is `undecidable` rather than guessed. The JSON **report
 
 ### ⚠️ The finding that decides the shape of this work
 
-**A deterministic rule set cannot select the signal out of 15,708 statements.** Not one statement in
-this graph matches a narration marker — the narration rule selects nothing at all — and the
-non-statement kind rules (decision 7, option 2, finding 1, jobToBeDone 1, useCase 1, evidence 115)
-select the 127 carried rows. Operators (3,727) are carried by a rule too but are not enumerated by
-this read path, so they are not part of that 127. The 15,708 statements are claims, plausible and
-unjudged. Two options, and this issue does not choose between them:
+**A deterministic rule set cannot select the signal out of 15,708 statements.** Only 58 of them
+match a narration marker — those are `not-carried` — and the remaining **15,650** match no rule at
+all. The non-statement kind rules (decision 7, option 2, finding 1, jobToBeDone 1, useCase 1,
+evidence 115) select the 127 carried rows. Operators (3,727) are carried by a rule too but are not
+enumerated by this read path, so they are not part of that 127. The 15,650 unjudged statements are
+claims, plausible and unclassified. Two options, and this issue does not choose between them:
 
 1. a **semantic pass** (search/embedding-similarity clustering + a reviewer) that proposes a
    carry-set for review; or
@@ -163,8 +170,8 @@ busy fleet.
    `live-v4` is at its cap, so a write there is refused by the venue's node cap (the credential
    cannot be re-targeted: `tortoise/mcp_auth.py::_retarget_refusal`). A graph-bound
    credential refusing a re-target is a property of the venue, not a bug to route around.
-3. **15,708 statements have no deciding rule** (above) — carrying them un-reviewed would migrate
-   the mess rather than curate it.
+3. **15,650 statements have no deciding rule** (above; the other 58 are not-carried by the
+   narration rule) — carrying them un-reviewed would migrate the mess rather than curate it.
 
 None of the three is worked around here: the harness is built and proven by tests, and the first
 `--apply` is gated on (1) and on a decision about (3). A **plan-only** run does not need a resolvable

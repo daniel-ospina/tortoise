@@ -179,6 +179,13 @@ class MCPReader:
                                  else " — check the credential/graph binding")
             )
         if total is not None and len(rows) < total:
+            # `total` is not `structure.total`, and it does not count tombstones: the
+            # paginated read answers it from `sdk.paginated_query`, which computes
+            # `count(n)` with the SAME WHERE clause (same terminal-status exclusion,
+            # #1391) as the page it serves. So a correct full walk cannot red here
+            # because of retracted rows — the two numbers describe ONE population,
+            # which is what makes a shortfall a failed read rather than a filter
+            # disagreement between two surfaces.
             raise RuntimeError(f"incomplete read: {len(rows)} of {total} points — refusing a partial census")
         # A mid-walk mutation that keeps the TOTAL stable and repeats no row (one
         # retracted, one appended) is invisible to the guards above; the census then
