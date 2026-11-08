@@ -160,7 +160,9 @@ def test_g1c_the_written_column_distinguishes_a_bridge_from_an_edge():
 
     `create_operator` writes `(o1)-[:INPUT]->(op)-[:IMPL]->(o2)`, never
     `(o1)-[:p]->(o2)`. A census asking only "written?" reports 41/42 and hides
-    that the direct Object→Object class is 10 of 42.
+    that the direct Object→Object class is 8 of 42 — 2 relations and 6
+    hierarchies (the `pm` rows that keep their Domain words ride the operator
+    path, so they read `mediated`, not `direct`).
     """
     committed = json.loads(ARTIFACT.read_text())
     counts = committed["written_counts"]

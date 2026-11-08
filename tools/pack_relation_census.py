@@ -72,6 +72,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from collections import Counter
 from pathlib import Path
@@ -435,11 +436,36 @@ def _sdk(uri: str | None = None):
     `--write-probe` write into an unspecified target with no confirmation — while
     two docstrings claimed the opposite. Reaching a real graph now takes an
     explicit `--uri`; the default mints its own store and removes it on close.
+
+    An explicit `--uri` is bound through `TORTOISE_DB_URI` for the constructor
+    call, because that is the only door `TortoiseSDK` opens for a URI — its first
+    positional parameter is the embedded store's FILE path, not a URI. The
+    previous value is restored immediately: the SDK captures the URI at
+    construction, so this function leaves the process environment as it found it.
     """
     from tortoise.sdk import TortoiseSDK
 
     if uri:
-        return TortoiseSDK(uri)
+        # ⛔ NOT `TortoiseSDK(uri)`: its first positional parameter is `db_path`,
+        # the EMBEDDED store's FILE path, so a URI handed there never reaches
+        # `FalkorProjection.from_uri` — it becomes a `_db_path` of
+        # "docker://…" and the first graph touch refuses a *relative path*, a
+        # message about the one thing that was not wrong. The SDK opens a URI
+        # only through `TORTOISE_DB_URI` (read by `__init__` while `db_path is
+        # None`), so the URI is bound THERE and the previous value restored: the
+        # SDK captures it at construction, and a probe that leaks an env
+        # mutation into the rest of the process is the same class of implicit
+        # target this file refuses. Same fix, same reason, as
+        # `tools/purge_test_residue.py` (#4028 review P1).
+        previous = os.environ.get("TORTOISE_DB_URI")
+        os.environ["TORTOISE_DB_URI"] = uri
+        try:
+            return TortoiseSDK()
+        finally:
+            if previous is None:
+                os.environ.pop("TORTOISE_DB_URI", None)
+            else:
+                os.environ["TORTOISE_DB_URI"] = previous
     import atexit
     import shutil
     import tempfile
@@ -452,7 +478,7 @@ def _sdk(uri: str | None = None):
 
 
 def _mint_endpoint(sdk, kind_ref: str | None, cache: dict,
-                   minted: set[str] | None = None,
+                   minted: list[str] | None = None,
                    *, slot: str = "") -> str:
     """One endpoint per declared KIND, minted once and reused — but never the same
     NODE on both sides of one row.
@@ -486,7 +512,7 @@ def _mint_endpoint(sdk, kind_ref: str | None, cache: dict,
             "object", name, objectKind=label)["node"]["id"]
     cache[key] = node_id
     if minted is not None:
-        minted.add(node_id)
+        minted.append(node_id)
     return node_id
 
 
@@ -511,7 +537,7 @@ def _read_back(sdk, src: str, dst: str, predicate: str) -> tuple[str, str | None
     return "none", None
 
 
-def _delete_minted(sdk, minted: set[str]) -> list[str]:
+def _delete_minted(sdk, minted: list[str]) -> list[str]:
     """Delete what the probe minted. Returns the ids it could NOT remove.
 
     ⛔ This exists because two docstrings claimed it without it existing: there
@@ -519,8 +545,14 @@ def _delete_minted(sdk, minted: set[str]) -> list[str]:
     and ~N operator Points into whatever graph it was pointed at. A claim about
     cleanup is only true if the cleanup is here, and a FAILED cleanup must be
     loud — a silent leftover is the residue class #5084 exists to stop.
-    Operators are deleted first (reverse mint order): their `INPUT`/`IMPL` edges
-    detach with them, so the entities have nothing left pointing at them.
+
+    `minted` is an INSERTION-ORDERED `list`, not a set — that is what makes the
+    next sentence true rather than a claim about hash order: operators are minted
+    after the endpoints they bridge, so `reversed(minted)` deletes the operator
+    Points first and their `INPUT`/`IMPL` edges detach with them, leaving the
+    entities with nothing pointing at them. (Today `delete_entity` issues
+    `DETACH DELETE`, so the order cannot matter yet; it would the moment a
+    non-`DETACH` delete is added, and a comment is not where that gets decided.)
     """
     leftovers: list[str] = []
     for node_id in reversed(list(minted)):
@@ -549,7 +581,7 @@ def _run_write_probe(rows: list[dict], packs_dir: Path,
     """
     sdk = _sdk(uri)
     cache: dict[str, str] = {}
-    minted: set[str] = set()
+    minted: list[str] = []
     try:
         for row in rows:
             if row["write_path"] is None:
@@ -578,7 +610,7 @@ def _run_write_probe(rows: list[dict], packs_dir: Path,
                     )
                     op_id = (written_op or {}).get("id")
                     if op_id:
-                        minted.add(op_id)
+                        minted.append(op_id)
             except Exception as exc:  # a refusal is a RESULT, not a crash
                 row["written"] = "none"
                 row["written_error"] = f"{type(exc).__name__}: {exc}"[:300]

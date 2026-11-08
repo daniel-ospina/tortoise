@@ -34,12 +34,17 @@ What is pinned, and the failure each pin catches:
   H9  a row whose union verdict claims `structural` while the structural WRITER
       refuses the predicate is FLAGGED, proven on a fixture relation — the
       `pack_hierarchy._binding` class, latent in the shipped catalog.
+  H10 `--uri` binds the URI the SDK actually opens (through `TORTOISE_DB_URI`,
+      the only door it counts — its first positional parameter is the embedded
+      store's file path) and the probe collects its mints in MINT ORDER, so the
+      cleanup's "operators first" is an order and not hash order.
 
 Hermetic by construction: this file imports no SDK and touches no graph.
 """
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -510,3 +515,101 @@ def test_h9b_no_shipped_row_hits_the_latent_class(artifact):
         if r["path_disagreement"]
     ]
     assert offenders == [], offenders
+
+
+# ── H10 — `--uri` reaches the graph it names, and the cleanup has an ORDER ───
+def test_h10_the_uri_option_binds_the_uri_the_sdk_actually_opens(monkeypatch):
+    """`--uri` was advertised three times (module docstring, `--help`, README) and
+    reached a real graph zero times.
+
+    `TortoiseSDK`'s first positional parameter is `db_path` — the EMBEDDED
+    store's FILE path — so `TortoiseSDK(uri)` set `_db_path="docker://…"` and
+    left `_db_uri=None`: the first graph touch then raised `ValueError: …
+    relative path` from a layer that never saw a URI, i.e. the documented "probe
+    a real graph" path died on a message about the one parameter that was
+    correct. The SDK opens a URI only through `TORTOISE_DB_URI`, so that door is
+    pinned here — as is the RESTORE, because a probe that leaves its URI in the
+    environment changes which graph the next reader in the process writes to
+    (the residue class #5084 exists to stop).
+    """
+    census = _census()
+    seen: dict = {}
+
+    class _FakeSDK:
+        def __init__(self, *args, **kwargs):
+            seen["args"] = args
+            seen["kwargs"] = kwargs
+            seen["env"] = os.environ.get("TORTOISE_DB_URI")
+
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://previous:6379/peer_graph")
+    monkeypatch.setattr("tortoise.sdk.TortoiseSDK", _FakeSDK)
+    census._sdk("docker://:pw@localhost:6379/census_target")
+
+    assert (seen["args"], seen["kwargs"]) == ((), {}), (
+        "the URI was handed to `TortoiseSDK`'s first positional parameter — which "
+        "is `db_path`, an embedded FILE path — so it never reached "
+        "`FalkorProjection.from_uri` and `--uri` probed whatever the env named")
+    assert seen["env"] == "docker://:pw@localhost:6379/census_target", (
+        "the URI never became the one the SDK opens (`TORTOISE_DB_URI` while "
+        "`db_path` is None is the only door it counts)")
+    assert os.environ["TORTOISE_DB_URI"] == "docker://previous:6379/peer_graph", (
+        "the probe left its URI in the process environment — the SDK captured it "
+        "at construction, so the mutation has no purpose after that and only "
+        "redirects the next reader")
+
+
+def test_h10b_the_cleanup_deletes_in_reverse_mint_order(monkeypatch):
+    """`_delete_minted` deletes operators first, *in reverse mint order*.
+
+    `minted` was a `set`, so `reversed(list(minted))` was reverse-HASH order and
+    the docstring's claim was provably false — harmless only because
+    `delete_entity` issues `DETACH DELETE` today, and load-bearing the moment a
+    non-`DETACH` delete is added. Driven through `_run_write_probe` (not
+    `_delete_minted` directly) because the defect would be the CALLER's
+    container, not the loop.
+    """
+    census = _census()
+    issued: list[str] = []
+    deleted: list[str] = []
+
+    class _FakeSDK:
+        def create_entity(self, kind, name, objectKind=None):
+            node_id = f"node-{len(issued)}"
+            issued.append(node_id)
+            return {"node": {"id": node_id}}
+
+        def create_operator(self, mechanism, src, targets, label=None,
+                            semantics=None, direction=None):
+            op_id = f"op-{len(issued)}"
+            issued.append(op_id)
+            return {"id": op_id}
+
+        def delete_entity(self, node_id):
+            deleted.append(node_id)
+            return True
+
+        def close(self):
+            pass
+
+    rows = [
+        census._relation_row("dev", {
+            "predicate": "blocks",
+            "mechanism": "IMPL",
+            "semantics": "dependsOn",
+            "direction": "<-",
+            "fromKind": "dev:widget",
+            "toKind": "dev:gadget",
+        })
+        for _ in range(2)
+    ]
+    monkeypatch.setattr(census, "_sdk", lambda uri=None: _FakeSDK())
+    monkeypatch.setattr(census, "_read_back",
+                        lambda sdk, src, dst, predicate: ("mediated", "<-"))
+    census._run_write_probe(rows, REPO_ROOT / "packs", None)
+
+    assert len(issued) > 2, issued
+    assert deleted == list(reversed(issued)), (
+        "the probe did not delete its mints in reverse mint order — the container "
+        "it collects them in is not insertion-ordered, so \"operators first\" is "
+        "hash order")
+
