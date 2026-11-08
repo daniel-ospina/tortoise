@@ -29,6 +29,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -2694,22 +2695,30 @@ def test_the_reader_head_carriage_enumerates_every_decorative_head(tmp_path):
     come from measurement plus the code, and neither can disagree with reality
     without this test going red.
     """
-    # MEASURED, in an empty cwd so no stray file can make a reader succeed: a head is
-    # INERT iff it exits 0 on BOTH a bare-word operand and a path that cannot exist.
+    # MEASURED, in a FRESH EMPTY DIRECTORY PER HEAD: a head is INERT iff it exits 0 on
+    # BOTH a bare-word operand and a path that cannot exist.
+    # ⛔ WHY PER HEAD AND NOT ONE SHARED CWD — measured, review of `85cbdb99d`: the
+    # `tee` probe CREATES the file the bare-word operand names, so every head measured
+    # after it ran in a directory that was no longer empty and `uniq`/`wc` then exited 0
+    # on the bare word (measuring them 0/1 instead of 1/1). The bucket happened to come
+    # out the same, but the instrument's stated purity was false, and a head whose ONLY
+    # failing shape is the bare word would have been silently bucketed INERT — the
+    # under-declaration this pin exists to prevent, passing green.
     # (The bare-word shape alone is not a discriminator — `cat "x"`'s rc depends on
     # whether a file of that name happens to exist in the cwd.)
     inert = set()
     for head in sorted(cl._DECORATIVE):
         rcs = set()
         for operand in _SENTINEL_OPERANDS:
-            rcs.add(
-                subprocess.run(
-                    ["bash", "-c", f"{head} {operand}"],
-                    cwd=tmp_path,
-                    capture_output=True,
-                    check=False,
-                ).returncode
-            )
+            with tempfile.TemporaryDirectory() as probe_cwd:
+                rcs.add(
+                    subprocess.run(
+                        ["bash", "-c", f"{head} {operand}"],
+                        cwd=probe_cwd,
+                        capture_output=True,
+                        check=False,
+                    ).returncode
+                )
         if rcs == {0}:
             inert.add(head)
     # A vacuous measurement would silently put every head in one bucket: assert that

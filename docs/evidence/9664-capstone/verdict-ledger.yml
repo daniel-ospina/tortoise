@@ -123,12 +123,18 @@
 #               jq,sort,wc,head,tail,cut,tr,uniq}` placed BEFORE the graded
 #               command is admitted with ANY operand, and those heads FAIL on an
 #               operand that does not resolve, so the `&&` short-circuits exactly as
-#               the wrapper family does. Measured at `22668a11`, and re-measured at
-#               this head for `cat`, `grep`, `cut` and `uniq` (the rest are admitted by
-#               the SAME branch — `_wrapper_argument_defect` returns None for any
-#               `_DECORATIVE` head — and all are pinned by
-#               `test_a_reader_head_before_the_command_is_a_known_false_PASS`), each
-#               reaching `uncovered: 0` / CLEAN / exit 0:
+#               the wrapper family does. Measured at `22668a11` and re-measured at this
+#               head, each reaching `uncovered: 0` / CLEAN / exit 0 in the examples
+#               below. ⛔ WHAT IS PINNED, exactly: the DECLARATION of this set is
+#               pinned by `test_the_reader_head_carriage_enumerates_every_decorative_head`
+#               (it must equal `_DECORATIVE` minus the measured-inert six), and THREE
+#               of the fourteen — `cat`, `grep`, `cut` — are pinned BEHAVIOURALLY by
+#               `test_a_reader_head_before_the_command_is_a_known_false_PASS`. The other
+#               eleven are declared and derived from the same code branch
+#               (`_wrapper_argument_defect` returns None for any `_DECORATIVE` head,
+#               measured in-process for all twenty); they are NOT individually
+#               probe-pinned, and this list must not be read as fourteen behavioural
+#               pins:
 #                 ⛔ `cut`, `tr` and `uniq` were MISSING from this set while
 #                 `_DECORATIVE` admitted them too — measured, `cut "I did not run
 #                 this" && …` graded CLEAN while bash exited 1, so an enumeration
