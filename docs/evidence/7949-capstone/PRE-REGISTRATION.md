@@ -1699,7 +1699,10 @@ re-cut from the resolved document (§8), and no committed verdict is re-scored.
 - **Why:** between `5c866513c` (the head §10.10 was written at) and `origin/main` `5ef5805f0`, the
   ONLY commit touching `extractor_v2.py` is `91dbc9a88` (`#11449`, **+80/−4**, net **+76**), whose
   hunks START at `:5190`, `:5245`, `:5275`, `:5285`, `:9923` and `:9943` (the first group's added
-  lines run to `:5288`).
+  lines run to `:5288`). The gross is the DEFAULT-CONTEXT view (`git show --numstat`); a `-U0`
+  recount reports `+79/−3`, because the one `"""` line this commit rewrites is rendered as a
+  delete+add pair only when context is included. Same net `+76`, and the 68/76 split below is
+  identical under either view.
   ⛔ **Two deltas from one commit, and the table states both** — this is why a blanket `+76` is a
   wrong re-derivation for part of the block: the first four hunks contribute **68** NET lines
   (`+54`, `+2−1`, `+9`, `+4` — the second is a two-for-one replacement) above `:5286`, so the #2684 `_carries_value` pair moves `:5286-5287` → `:5354-5355`

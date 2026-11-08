@@ -5264,8 +5264,13 @@ def test_the_pre_registration_cites_the_classify_sites_the_tree_actually_has():
         # (`capstone-measured-9152448d.log:271` … `:299-309`) out of the extractor's
         # numbers, and it fixes the over-block the line test caused on a row citing the
         # extent AND a log range.
-        # ACCEPTED RESIDUALS, declared rather than chased — all three are shapes this
-        # document never produces, and each needs semantics, not punctuation, to resolve:
+        # ACCEPTED RESIDUALS, declared rather than chased — each needs semantics, not
+        # punctuation, to resolve. ⛔ Residual 1 is NOT hypothetical: §9's own table row
+        # (`PRE-REGISTRATION.md:1130`, `capstone-measured-9152448d.log:271` … `:299-309`)
+        # is exactly that shape, it lives in the SAME live block as the extent row, and
+        # the nearest-preceding-token rule is what keeps its `:299-309` out of the
+        # extractor's numbers — measured, removing the exclusion yields
+        # `[299, 309, 11174, 11196]` and reds. So do not read that branch as dead code:
         #   1. a bare range that FOLLOWS another file's cite on the same line
         #      (`per \`README.md:44\`, was formerly \`:11098-11120\``) — the same shape
         #      that keeps §9's `:299-309` out, so it is not counted;
