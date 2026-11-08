@@ -165,12 +165,16 @@ def _resolve_shorthand(
 ) -> tuple[Path | None, str | None]:
     """The single `docs/<kind>/` record labelled `<number>`, or (None, why not).
 
-    The label is a hyphen-delimited NUMBER TOKEN in the path — not a prefix of the
-    FILENAME. `docs/research/` is NESTED: the `#265` brief this change edits is
+    The label is a `-<number>-` token in the path — hyphen-WRAPPED, neither a
+    prefix nor a suffix of the FILENAME. `docs/research/` is NESTED: the `#265`
+    brief this change edits is
     `docs/research/2026-08-13-265-encryption/axis-research.md`, where the number
     lives in the DIRECTORY and the filename carries none. A `*-265-*.md` filename
     glob (one level or recursive) therefore reports a correct shorthand as
-    unresolvable, so the match is made against the path's tokens instead.
+    unresolvable, so the match is made against the path's `-<number>-` tokens
+    instead. A number that is the path's FIRST or LAST token (e.g.
+    `265-foo/x.md`, `foo-265.md`) does not match and is reported as unresolvable
+    — fail-closed, and no such path exists in the tree today.
     """
     candidates = sorted(
         path
