@@ -37,6 +37,8 @@ import re
 import sys
 from pathlib import Path
 
+from tests._docs_drift_step import EXPECTED_DOCS_DRIFT_STEP
+
 ROOT = Path(__file__).resolve().parent.parent
 GENERATOR = ROOT / "tools" / "mcp_rename_table.py"
 DOC = ROOT / "docs" / "product" / "mcp-rename-table.md"
@@ -1118,35 +1120,22 @@ def test_docs_only_edit_of_the_generated_doc_is_guarded_by_the_docs_job() -> Non
     # pin GREEN). Exactness is what closes the family — `|| true`, `; true`, an
     # `echo` decoy, and a commented-out command alike, since `_code` has already
     # filtered comments.
-    expected = (
-        "pip install -e . --quiet\n"
-        "python3 tools/bridge_table.py --check\n"
-        "python3 tools/mcp_rename_table.py --check\n"
-        "python3 tools/sdk_surface.py --check\n"
-        # #5086: the doc↔tree guard joins the same step for the same `#4454`
-        # reason (a docs-only edit selects no surface), plus one of its own: its
-        # `measured_at_commit` ancestry claim needs HISTORY, and this job is the
-        # one that checks out at `fetch-depth: 0` (#5086 review P1-1). Listed
-        # here, not exempted: the exactness of this assertion is the point.
-        "python3 tools/substrate_map_check.py --check\n"
-        # #11084 / #2820: two more doc↔tree guards join the same step for the
-        # same `#4454` reason — a docs-only edit of either map selects no
-        # surface, and `docs` is the required, `paths:`-free context. `#2820`'s
-        # needs HISTORY for its anchor-ancestry claim for the same reason its
-        # #5086 sibling above does.
-        "python3 tools/problem_map_check.py --check\n"
-        # #11084: the surface map's guard, BOTH arms — the check, and the
-        # self-test that proves the check still catches a consistent shrink.
-        # `test_design_map_check.py` takes no `--check` flag (it is verify-only
-        # with no other mode), so its invocation is listed without one.
-        "python3 tools/test_design_map_check.py\n"
-        "python3 tools/test_design_map_check.py --self-test"
-    )
+    # ONE list, shared with `tests/test_merge_throughput.py` (#11412 root 2): the
+    # two copies were hand-typed and byte-identical, so an added invocation reded
+    # BOTH shards on every PR at once. The list, its order and the reason each
+    # command is there live in `tests/_docs_drift_step.py`, so an addition is ONE
+    # edit and cannot move one pin without the other — including the map guard's
+    # TWO arms, which `#11084` extended the step with.
+    #
+    # The count is deliberately NOT in this message: saying "the five verify-only
+    # commands" is the drift that made the duplicated copies stale, because an
+    # invocation added later does not necessarily carry a `--check` flag.
+    expected = EXPECTED_DOCS_DRIFT_STEP
     assert _code(str(step.get("run", ""))).strip() == expected, (
-        "the drift step must invoke EXACTLY the installer, the five `--check` "
-        "commands and the map guard's two arms — no shell operator, no "
-        "`echo` decoy, no wrapper, no "
-        f"trailing anything, or a real failure reports green (#2656); got "
+        "the drift step must invoke EXACTLY the commands in "
+        "`tests/_docs_drift_step.py`, in that order — no shell operator, no "
+        "`echo` decoy, no wrapper, no trailing anything, or a real failure "
+        f"reports green (#2656); got "
         f"{_code(str(step.get('run', '')))!r}"
     )
     assert not docs_job.get("continue-on-error"), (

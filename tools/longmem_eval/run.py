@@ -5,7 +5,10 @@
 Pipeline per question (fresh isolated graph per question — the benchmark's
 independent-memory protocol, no cross-question contamination):
     ingest haystack sessions → hybrid retrieval (graph + raw sessions) →
-    reader LLM answers from context → official answer-check judge scores.
+    reader LLM answers from context → the run's pinned judge scores it. The
+    RUBRIC is the official `evaluate_qa.py` anscheck one; the GRADER is
+    `judge.DEFAULT_JUDGE_MODEL` (#8486 owner ruling, 2026-10-27), and the
+    official GPT-4o grader only when `judge.OFFICIAL_JUDGE_MODEL` is named.
 
 Resilience (per-question error isolation): each question is wrapped in its
 own try/except — a transient LLM error is retried with exponential backoff
@@ -6707,7 +6710,9 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="python -m tools.longmem_eval.run",
         description="LongMemEval-S external comparability runner (issue #1144, "
                     "axis 2): ingest haystacks → hybrid retrieval → reader LLM "
-                    "→ official GPT-4o judge, with full methodology provenance.")
+                    "→ judge, with full methodology provenance. The judge "
+                    "defaults to our own pinned model (#8486 ruling); name "
+                    "the OFFICIAL GPT-4o judge for a comparable number.")
     p.add_argument("--split", default=ds.DEFAULT_SPLIT,
                    choices=sorted(ds.SPLIT_FILES), help="dataset split (default s)")
     p.add_argument("--limit", type=int, default=None,
@@ -7184,12 +7189,18 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--reader-model", default=None,
                    help="reader model spec <provider>:<model> "
                         "(env TORTOISE_LME_READER_MODEL; default "
-                        "openrouter:deepseek/deepseek-v4-flash — the M5 "
-                        "pinned reader, #1525; an override records "
-                        "reader_pinned=false + warns on stderr)")
+                        "deepseek:deepseek-v4-flash — the M5 pinned "
+                        "reader, #1525, on the transport the #8486 "
+                        "ruling names; an override records reader_pinned=false + "
+                        "warns on stderr)")
     p.add_argument("--judge-model", default=None,
                    help="judge model spec (env TORTOISE_LME_JUDGE_MODEL; "
-                        "default openai:gpt-4o-2024-08-06 — the official judge)")
+                        "default deepseek:deepseek-v4-flash — the #8486 "
+                        "owner ruling of 2026-10-27 (internal baseline "
+                        "series; the receipt records unpinned:<model> + "
+                        "verdict inconclusive). The OFFICIAL judge "
+                        "openai:gpt-4o-2024-08-06 is still servable by "
+                        "naming it)")
     p.add_argument("--output", default=None,
                    help="report JSON path (default "
                         "longmemeval_<split>_<ts>.report.json in CWD)")
