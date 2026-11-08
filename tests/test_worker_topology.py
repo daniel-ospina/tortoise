@@ -272,6 +272,43 @@ def test_the_reload_grammar_is_clicks_own():
     assert frozenset({"1", "true", "yes", "on"}) == TRUTHY
 
 
+def test_a_reload_spelling_click_accepts_is_not_a_multi_worker_refusal():
+    """⛔ The CONSEQUENCE of the flag grammar, not just the predicate.
+
+    ``test_the_reload_grammar_is_clicks_own`` pins the SET, and
+    ``test_uvicorn_reload_envvar_is_its_other_input_for_the_reloader`` pins the
+    literal, but the round-6 finding was the REFUSAL — reached through
+    ``observe()`` -> ``is_multi_worker`` -> ``refusal_reason``. An arm that stops
+    at the predicate leaves the wiring free to mis-read it and no test reds, so
+    this one asserts the verdict.
+
+    ``y``/``t`` are click's spellings for TRUE and are NOT in
+    ``tortoise.env_truthy.TRUTHY``; read through the repo's vocabulary they left
+    ``reloading=False``, so the reloader's single served child was refused as a
+    supervised multi-worker. On an EMBEDDED database that is unstartable with no
+    escape hatch at all — the acknowledgement deliberately does not lift the
+    embedded arm — which is why this is the arm that must red on the pre-fix
+    code (measured: it does, ``Topology(... reloading=False)``).
+
+    Measured on the pinned uvicorn 0.52.1: ``UVICORN_RELOAD=y`` prints
+    "Started reloader process" and serves exactly ONE child.
+    """
+    argv_without_token = ["uvicorn", "tortoise.hosted_api:app"]
+    for spelling in ("y", "Y", "t", "T"):
+        # EMBEDDED (`{}`): the arm no acknowledgement can lift.
+        topology = wt.observe({wt.RELOAD_ENV: spelling}, supervised=True,
+                              argv=argv_without_token)
+        assert topology.reloading is True, spelling
+        assert topology.is_multi_worker is False, spelling
+        assert wt.refusal_reason(topology) is None, spelling
+
+    # …and the exemption stays NARROW: the same child with no reload input, or
+    # with a value click rejects, is still gated (fail-closed).
+    for not_a_reload in ({}, {wt.RELOAD_ENV: "enabled"}, {wt.RELOAD_ENV: "n"}):
+        assert wt.refusal_reason(wt.observe(
+            not_a_reload, supervised=True, argv=argv_without_token)) is not None, not_a_reload
+
+
 def test_a_supervised_child_asked_for_reload_by_env_is_one_worker():
     """The env route and the token route must reach the SAME verdict."""
     argv_without_token = ["uvicorn", "tortoise.hosted_api:app"]
