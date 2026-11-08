@@ -4557,8 +4557,8 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # the row's members must be the fail-opens of `if classify_later and
         # embed_list:` / `if classify_later and complete_list:` — their next line
         # appends `classify(S2) failed` / `classify(union) failed` — and NOT the
-        # referentiality-selection fail-opens, which carry the
-        # `# noqa: BLE001, RUF100` suffix and warn `referentiality selection …
+        # referentiality-selection fail-opens, which carry a `noqa` directive
+        # naming `BLE001` and `RUF100` and warn `referentiality selection …
         # candidates kept (fail-open)`. ⛔ The line numbers this comment used to
         # quote (`10490`/`10453`/`10620`/`10599`) were stale at that head and are
         # stale here: a comment asserts nothing, so read the anchors from the row,
@@ -4595,20 +4595,25 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # are pinned here instead. The sentence wraps over three lines and a row
         # scopes to ONE line, so the claim takes three rows.
         # ⛔ RE-DERIVED at `#10982`, not offset: the A-row emitter-key drift arm added
-        # above `STEPS` moved it `:136` -> `:146`, and the same commit's additions
-        # inside the accounting block moved `_step_accounting` `:607` -> `:675` —
-        # TWO different deltas from one commit, which is why the numbers are read
-        # off the tree (`grep -n '^STEPS = ('` / `'^def _step_accounting('`) and
-        # never carried forward as an offset.
+        # above `STEPS` moved that cite, and the same commit's additions inside the
+        # accounting block moved `_step_accounting` — TWO different deltas from one
+        # commit, which is why both numbers are read off the tree
+        # (`grep -n '^STEPS = ('` / `'^def _step_accounting('`) and never carried
+        # forward as an offset.
         #
         # ⛔ AND A THIRD DELTA, from the `origin/main` carry (#11331): `#11298`'s
         # `door` run-block key registered in `_NON_MEASUREMENT_RUN_KEYS` put 15
-        # lines above the accounting block and moved `_step_accounting`
-        # `:675` -> `:690`. Measured off the tree again, not offset: 675 now reads
-        # `block = record.get(RECORD_STEPS_KEY)` and `grep -n '^def _step_accounting('
-        # tools/capstone_verdict_check.py` -> 690. The comment block above the tuple
-        # is where that reasoning has to live, so the shift cannot be avoided by
-        # shortening it — a line count above a cite moves the cite.
+        # lines above the accounting block and moved `_step_accounting` again.
+        # ⛔ AND A FOURTH: `ed3d8761f` moved the def once more (measured off the
+        # tree: `1390485c1` -> 690, `ed3d8761f` -> 699).
+        # ⛔ THE NUMERALS THEMSELVES ARE DELIBERATELY NOT RESTATED HERE. The row
+        # below asserts them; this prose used to copy them and went stale the
+        # moment a commit landed above the block — which is why there are now
+        # four deltas and not three. Read the value from the `_step_accounting`
+        # row, or `grep -n '^def _step_accounting(' tools/capstone_verdict_check.py`.
+        # The comment block above the tuple is where that reasoning has to live,
+        # so the shift cannot be avoided by shortening it — a line count above a
+        # cite moves the cite.
         ("E1-E5-PROOFS.md", 'declares `STEPS = ("S0"', (
             ("146", 'STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", '
                     '"S5", "S6")'),
