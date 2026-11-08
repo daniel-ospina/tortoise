@@ -64,8 +64,8 @@ def _patch_projection(monkeypatch, seen):
     in ``seen`` and the assertion is made about ANOTHER thread's path.
 
     Measured 2026-11-08 (PR #11495, required check `test (f)`): ``seen["path"]``
-    read ``/tmp/tt_nmrzy6yn/tortoise.db`` — TMPDIR, not ``~/.tortoise`` — while
-    ``resolve_db_path()`` was correct; the captured log carried
+    read ``/tmp/tt_nmrzy6yn/tortoise.db`` — the run's temp root, not
+    ``~/.tortoise`` — while ``resolve_db_path()`` was correct; the captured log carried
     ``event retention sweep skipped for …: 'FalkorProjection' object has no
     attribute 'g'``. That attribute error is the sweep tripping over THIS
     patch, i.e. the proof that the write came from the sweep thread.
@@ -137,16 +137,15 @@ def test_a_foreign_threads_construction_never_decides_this_verdict(
     real, on worker threads, with the same SHAPE a leaked hosted-api sweep
     produces — a temp-rooted non-canonical file for the `__init__` arm (**not**
     `tempfile.gettempdir()/tortoise.db` itself: that is what
-    `_resolve_embedded_db_path()` falls back to when /data is unwritable
-    (`tortoise/hosted_api.py` — cited by symbol, because that file's fallback
-    moved under this comment once already), and the CI `TMPDIR` is the session root,
-    so this pin uses its own `tmp_path` file — the assertion is about WHOSE
-    construction is recorded, never about the path's prefix), and a `redis://`
-    URI for the `from_uri` arm. Before the thread guards these overwrote `seen`
-    and each sibling test's assertion was made about them; with the guards the
-    recorded values are the ones `cmd_run` resolved. Deliberately constructed
-    BEFORE the assertions, so the pin needs no sleep and no scheduling luck to
-    fire.
+    `_resolve_embedded_db_path()` falls back to when /data is unwritable, cited
+    by symbol because that file's fallback moved under this comment once
+    already; this pin uses its own `tmp_path` file, and the assertion is about
+    WHOSE construction is recorded, never about the path's prefix), and a
+    `redis://` URI for the `from_uri` arm. Before the thread guards these
+    overwrote `seen` and each sibling test's assertion was made about them; with
+    the guards the recorded values are the ones `cmd_run` resolved. Deliberately
+    constructed BEFORE the assertions, so the pin needs no sleep and no
+    scheduling luck to fire.
     """
     monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
     monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
