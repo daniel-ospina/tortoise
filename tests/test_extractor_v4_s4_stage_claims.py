@@ -669,12 +669,18 @@ def test_the_module_docstring_carries_the_record_the_call_site_points_at():
         "the record must state the removal-ordering obligation: `run_s4` is a "
         "v4 migration deliverable, not a cleanup."
     )
-    assert "OPEN QUESTION" in doc, (
-        "the record must leave #8500's precedence question OPEN — which side is "
-        "authoritative until the migration lands is the OWNER's ruling, not an "
-        "agent-authored claim (the #8601 review flagged the previous 'shipped "
-        "code is authoritative' sentence as answering a question #8500 reserves "
-        "to the owner)."
+    assert "precedence question is settled" in doc, (
+        "the record must state that #8500's precedence question is SETTLED, and "
+        "name its home. ⚠️ It must NOT answer the question itself: the ruling is "
+        "the OWNER's (2026-11-08, on #11002), so the record cites the ruling "
+        "rather than asserting an agent-authored precedence (the #8601 review "
+        "flagged the previous 'shipped code is authoritative' sentence for "
+        "exactly that)."
+    )
+    assert "owner" in doc and "#11002" in doc, (
+        "the settled-precedence sentence must name WHO settled it and WHERE — "
+        "an unattributed 'settled' is an agent answering an owner-reserved "
+        "question one word at a time."
     )
     assert "never enter this extractor at all" in doc, (
         "the record must SCOPE its bypass enumeration to the route that reaches "
@@ -1268,17 +1274,28 @@ def test_an_else_branch_call_reds_the_off_switch_check():
 # It has not, and the trap is that the fold's two stages DO exist in the shipped
 # tree (`_vet_gate.apply_vet` and `kind_classifier.classify_items`), so "the
 # fold's stages are present" reads as "the successor landed" — and a lane then
-# deletes `run_s4` believing gap-filling moved. What decides it is the REMEDY
-# half: neither stage can ADD an item a coverage check found missing. These
-# tests pin that half, so the pre-condition for removal stays measurable
-# instead of inferable from a stage list.
+# deletes `run_s4` believing gap-filling moved. What decided it WAS the REMEDY
+# half: neither fold stage can ADD an item a coverage check found missing.
+# ⛔ #11002 resolved that half — the bounded re-narrate can ADD — so the record's
+# verdict is now "the successor HAS landed" and the ordering obligation's
+# pre-condition is MET. What remains before `run_s4` leaves is §4.4's F3
+# measurement (S4's `added_by_s4 > 0` while `coverage_suspect` is False), not a
+# code change. These tests pin both halves: the LANDED verdict with its ADD
+# proof, and the FOLD stages' unchanged inability to produce candidates — so a
+# future lane cannot read a stage list as "gap-filling moved" a second time.
 
 #: §4.0's fold: the clause that gives S2.2 VET the coverage question S4's
 #: removal relies on. If the design re-assigns that purpose, the record's
 #: basis moved and this must be re-derived (not deleted).
 FOLD_STATEMENT = "did we account for everything the narrative said?"
 #: The clause that closes the "S2.2/S2.3 exist ⇒ successor landed" misreading.
-SUCCESSOR_ABSENT = "THE SUCCESSOR HAS NOT LANDED"
+#: ⛔ RETARGETED at #11002, not deleted: the record's verdict flipped from "the
+#: successor is ABSENT" to "the successor HAS LANDED", because the bounded
+#: re-narrate is the ADD-capable stage the removal pre-condition names. The
+#: TRAP half is unchanged and still required — the fold's stages existing is
+#: still not the test; the test is that a `coverage_suspect` arm's missing
+#: candidate reaches the payload through a stage the pipeline runs.
+SUCCESSOR_LANDED = "THE SUCCESSOR HAS LANDED"
 #: The SCOPE the successor conclusion must carry. `run_s4` is itself a shipped
 #: stage that emits exactly the candidates a coverage check found missing, so an
 #: unqualified "no shipped stage can emit …" universal denies the capability its
@@ -1363,16 +1380,17 @@ def _successor_clause_violations(doc: str) -> list[str]:
     conclusion's universal true of the FOLD rather than of every shipped stage.
     """
     problems: list[str] = []
-    if SUCCESSOR_ABSENT not in doc:
+    if SUCCESSOR_LANDED not in doc:
         problems.append(
-            "the G5 record no longer states that the successor has NOT landed; "
-            "the ordering obligation then reads as satisfiable by S2.2/S2.3 "
-            "merely existing, and `run_s4` is deleted believing gap-filling moved")
+            "the G5 record no longer states that the successor HAS landed; the "
+            "record then reads as if the ADD-capable stage were still missing "
+            "(#11002 landed it — `_renarrate_trigger`/`_arm_extract`), and either "
+            "the removal pre-condition looks unsatisfiable or the ordering "
+            "obligation looks satisfiable by S2.2/S2.3 merely existing")
     for required, why in (
         ("is NOT the test that it has",
          "the record must name the trap: the fold's stages EXIST, which is not "
-         "the successor landing"),
-        ("apply_vet",
+         "the successor landing"),        ("apply_vet",
          "the record must name the gate's symbol that cannot add (removal-only)"),
         ("classify_items",
          "the record must name the classifier's symbol that labels only"),
@@ -1713,7 +1731,10 @@ def test_classify_labels_and_never_adds_items():
     )
 
 
-def test_the_record_states_the_successor_has_not_landed():
+def test_the_record_states_the_successor_has_landed():
+    """#11002 retargeted this from "has NOT landed": the bounded re-narrate is
+    the ADD-capable stage the ordering obligation was waiting for, so a record
+    still claiming its absence would contradict the code and the ADD proof."""
     doc = _module_docstring(EXTRACTOR.read_text(encoding="utf-8"))
     problems = _successor_clause_violations(doc)
     assert not problems, "; ".join(problems)
@@ -1736,7 +1757,7 @@ def test_the_successor_checks_red_on_the_mutations_they_exist_to_catch():
     )
     # The whole clause cut, and — separately — the trap sentence reworded away
     # while the heading survives (a heading-only membership check stays green).
-    cut = source.replace(SUCCESSOR_ABSENT, "")
+    cut = source.replace(SUCCESSOR_LANDED, "")
     assert _successor_clause_violations(_module_docstring(cut)), (
         "removing the successor clause must red the check — otherwise the "
         "ordering obligation can be left reading as satisfiable again"
