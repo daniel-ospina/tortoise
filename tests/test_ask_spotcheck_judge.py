@@ -28,6 +28,7 @@ composed fixture ships in-repo).
 """
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
@@ -348,19 +349,39 @@ def test_one_judge_spec_serves_the_preflight_and_the_judge(monkeypatch):
     assert _mod._judge_spec() != DEFAULT_JUDGE_MODEL
 
     src = Path(_mod.__file__).read_text(encoding="utf-8")
-    bare = re.findall(r"(?:=|\breturn)\s*build_judge\(\s*\)", src)
-    assert bare == [], (
-        "a bare build_judge() resolves DEFAULT_JUDGE_MODEL (the graded-eval "
-        "lane's DeepSeek default), not the judge this tool's pre-flight "
-        "checked — pass _judge_spec()")
 
-    # ⛔ THE #2071 LANE IS THREE MODULES, NOT ONE. The scan above originally
-    # read `tools/ask_spotcheck.py` alone while its docstring claimed "NO call
-    # site may build a judge without it" — so the two SIBLING legs kept the
-    # split (pre-flight on the official key, judge on the DeepSeek default) and
-    # the suite stayed green over it (caught in review, #8486). Every module
-    # that imports the pre-flight must be scanned, and the list is asserted to
-    # be non-trivial so a rename cannot silently shrink the pin to nothing.
+    # ⛔ AST, NOT A REGEX (review finding): a regex keyed on `=`/`return` sees
+    # only the call shapes someone happened to write. This walks every CALL to
+    # `build_judge` in the module and requires each one to carry an explicit
+    # spec (or `mock=True`), so a new call shape — an argument, a comprehension,
+    # a default parameter — cannot slip past the pin by looking unfamiliar.
+    def _bare_build_judge_calls(source: str, where: str) -> list[str]:
+        tree = ast.parse(source)
+        bad = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            fn = node.func
+            name = (fn.attr if isinstance(fn, ast.Attribute)
+                    else getattr(fn, "id", None))
+            if name != "build_judge":
+                continue
+            if node.args:
+                continue
+            if any(k.arg == "mock" for k in node.keywords):
+                continue
+            bad.append(f"{where}:{node.lineno}")
+        return bad
+
+    assert _bare_build_judge_calls(src, "ask_spotcheck.py") == []
+
+    # ⛔ THE #2071 LANE IS THREE MODULES, NOT ONE. The scan originally read
+    # `tools/ask_spotcheck.py` alone while the claim was "NO call site may build
+    # a judge without it" — so the two SIBLING legs kept the split (pre-flight
+    # on the official key, judge on the DeepSeek default) and the suite stayed
+    # green over it (caught in review, #8486). Every module that imports the
+    # pre-flight is scanned, and the LIST IS ASSERTED, so a rename cannot
+    # silently shrink the pin to an empty set.
     import tools.ask_spotcheck_consistency as _consistency
     import tools.ask_spotcheck_probe as _probe
 
@@ -369,9 +390,7 @@ def test_one_judge_spec_serves_the_preflight_and_the_judge(monkeypatch):
                              "ask_spotcheck_consistency.py"}, siblings
     for name, mod in siblings.items():
         sibling_src = Path(mod.__file__).read_text(encoding="utf-8")
-        sibling_bare = re.findall(r"(?:=|\breturn)\s*build_judge\(\s*\)",
-                                  sibling_src)
-        assert sibling_bare == [], (
+        assert _bare_build_judge_calls(sibling_src, name) == [], (
             f"{name} builds a judge without _judge_spec(): its pre-flight "
             f"checks the OFFICIAL judge's key while a different model grades "
             f"(#8486)")
