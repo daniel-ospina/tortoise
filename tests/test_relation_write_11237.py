@@ -621,3 +621,160 @@ def test_a_writer_that_returns_False_is_a_REFUSAL_not_a_write():
     assert folded["folded"] == 0, folded
     assert sorted(row["predicate"] for row in folded["drops"]) == \
         ["causes", "supports"], folded
+
+
+class _DeclaringRegistry:
+    """A catalog that declares a MEANING for verbs no shipped pack does.
+
+    ``plan_relation_edges(registry=…)`` is the documented seam for "a test
+    passes its own catalog". Using it here keeps the case hermetic: a pack
+    rename cannot turn a write-path guard into a pack test, and the verbs below
+    are deliberately NOT ONTOLOGY §8 meanings — the pack row is the ONLY thing
+    that declares what they mean, which is exactly the population round 8
+    measured as wrong.
+    """
+
+    def __init__(self, rows):
+        self._rows = [dict(row) for row in rows]
+
+    def list_relations(self):
+        return [dict(row) for row in self._rows]
+
+
+DIRECTION_ROWS = (
+    # `splitsInto` is not a meaning: its ROW declares `hasPart`, ruled `<->`.
+    {"predicate": "splitsInto", "mechanism": "IMPL", "semantics": "hasPart",
+     "pack": "testpack"},
+    # `settlesInto` → `related`, ruled `-` (the connection exists, NO confidence
+    # transfers). Stored one-way it would propagate belief the ruling denies.
+    {"predicate": "settlesInto", "mechanism": "IMPL", "semantics": "related",
+     "pack": "testpack"},
+    # A RETIRED spelling as the declared meaning: `funds` collapses onto
+    # `transacts` (SEMANTICS_TRANSITION) — the canonicalisation must happen on
+    # the row's word too, or the retired spelling silently rules nothing.
+    {"predicate": "tradesFor", "mechanism": "IMPL", "semantics": "funds",
+     "pack": "testpack"},
+)
+
+DIRECTION_INDEX = {
+    "retry storm": [("obj-1", "occurrence")],
+    "deadline slip": [("obj-2", "occurrence")],
+    "retry budget": [("obj-3", "occurrence")],
+    "quarry": [("obj-4", "occurrence")],
+    "auth table": [("obj-5", "occurrence")],
+    "lumen auth": [("obj-6", "occurrence")],
+}
+
+DIRECTION_RELATIONS = [
+    {"src": "retry storm", "dst": "deadline slip", "predicate": "splitsInto"},
+    {"src": "retry budget", "dst": "quarry", "predicate": "settlesInto"},
+    {"src": "auth table", "dst": "lumen auth", "predicate": "tradesFor"},
+]
+
+
+def test_a_pack_declared_meaning_fixes_the_direction_the_leg_writes():
+    """⛔ The row that LICENSED the write also rules its DIRECTION (#11548).
+
+    ``_direction_for`` chose from ``(label, predicate, semantics)`` — the STORY's
+    verb and the record's optional gloss — and the pack relation row's own
+    ``semantics:`` was never a candidate. That is the declaration
+    ``_mechanism_for`` reads and ``relation_write_paths`` vetoes on, i.e. the row
+    that made the write licensed in the first place, and its MEANING was dropped
+    before the direction was chosen. Measured on the shipped catalog before the
+    fix: ``partOf`` (``semantics: hasPart``, ruled ``<->``) and ``competesWith``
+    (``opposes`` → ``mutuallyExclusive``, ``<->``) wrote ``->``; ``protects`` /
+    ``marks`` (``related``) and ``funds`` (``transacts``) wrote ``->`` where the
+    ruling is ``-``. ``live.direction_flows`` reads those tokens back unchanged,
+    so EP propagated belief along edges the declaration says carry none.
+
+    It was also NON-DETERMINISTIC by gloss: ``marks`` wrote ``-`` when the model
+    happened to restate ``semantics: related`` and ``->`` when it did not — one
+    pack declaration, two graphs. The declaration is the authority on what its
+    verb means (the rule ``_mechanism_for`` already follows for the mechanism
+    half of the same triple, #7852), so it is consulted FIRST and the gloss no
+    longer decides what a declared verb means.
+
+    Mutation: drop the declared candidate from ``_direction_for`` (the pre-fix
+    shape) and all three verbs read the one-way fallback.
+    """
+    registry = _DeclaringRegistry(DIRECTION_ROWS)
+    plan, drops = plan_relation_edges(DIRECTION_RELATIONS, DIRECTION_INDEX,
+                                      registry, declared=())
+    assert not drops, drops
+    by_stated = {edge.stated_predicate: edge for edge in plan}
+    assert by_stated["splitsInto"].direction == "<->", by_stated["splitsInto"]
+    assert by_stated["settlesInto"].direction == "-", by_stated["settlesInto"]
+    assert by_stated["tradesFor"].direction == "-", by_stated["tradesFor"]
+
+    # The gloss is NOT the authority for a declared verb: restating `supports`
+    # on a verb its row declares `hasPart` must not change the stored direction
+    # (the non-determinism the pre-fix lookup produced).
+    for gloss in ("supports", "refutes", None):
+        rel = {"src": "retry storm", "dst": "deadline slip",
+               "predicate": "splitsInto"}
+        if gloss:
+            rel["semantics"] = gloss
+        glossed, glossed_drops = plan_relation_edges(
+            [rel], DIRECTION_INDEX, registry, declared=())
+        assert not glossed_drops, glossed_drops
+        assert glossed[0].direction == "<->", (gloss, glossed[0])
+
+    # …and the ruled token is what reaches the WRITER, not just the plan.
+    writer = _RecordingWriter()
+    apply_relation_edges(writer, DIRECTION_RELATIONS, DIRECTION_INDEX,
+                         registry, declared=())
+    assert [kw["direction"] for _p, _s, _d, kw in writer.calls] == [
+        "<->", "-", "-"], writer.calls
+
+
+def test_declared_meanings_reads_the_row_that_licenses_the_write():
+    """⛔ The Layer-2 HALF of the declaration, from the registry (never here).
+
+    ``declared_mechanisms`` answers "which mechanism does this verb declare";
+    nothing answered "which MEANING", so the direction lookup had no way to
+    reach the row that licensed the write and fell back to the story's verb —
+    the defect the case above pins on the write path. This is the accessor's own
+    contract: the row's ``semantics`` CANONICALIZED through the ONE transition
+    table, filtered to the closed vocabulary, never a word invented here.
+
+    Mutation: return the row's ``semantics`` verbatim and the retired-spelling
+    arm reads ``funds`` instead of ``transacts``; drop the ``SEMANTICS_VALUES``
+    filter and an out-of-vocabulary word is reported as a meaning.
+    """
+    from tortoise.pack_registry import declared_meanings
+
+    registry = _DeclaringRegistry(DIRECTION_ROWS)
+    assert declared_meanings(label="splitsInto", registry=registry) == [
+        ("hasPart", "the pack relation 'splitsInto' (testpack)")], \
+        declared_meanings(label="splitsInto", registry=registry)
+    # A RETIRED spelling is canonicalized on BOTH halves of the declaration.
+    assert declared_meanings(label="tradesFor", registry=registry) == [
+        ("transacts", "the pack relation 'tradesFor' (testpack)")], \
+        declared_meanings(label="tradesFor", registry=registry)
+    # A verb no row declares declares NO meaning — never "unknown".
+    assert declared_meanings(label="nuances", registry=registry) == [], \
+        declared_meanings(label="nuances", registry=registry)
+    # A word outside the closed vocabulary is not a meaning this reader can rule.
+    assert declared_meanings(
+        label="splitsInto",
+        registry=_DeclaringRegistry([{"predicate": "splitsInto",
+                                      "semantics": "sideways"}])) == [], \
+        "an out-of-vocabulary meaning must not be reported as declared"
+    # The three-state sentinel, spelled the same way as `declared_mechanisms`:
+    # `None` is "known absent", NOT "load the default".
+    assert declared_meanings(label="splitsInto", registry=None) == []
+
+    # NEVER raises, and a row it cannot read does not truncate the ones after it.
+    assert declared_meanings(label="splitsInto", registry=object()) == []
+
+    class _BadRow(dict):
+        def get(self, key, default=None):
+            if key == "predicate":
+                raise RuntimeError("row will not read")
+            return super().get(key, default)
+
+    mixed = _DeclaringRegistry([_BadRow({"predicate": "x"}),
+                               dict(DIRECTION_ROWS[0])])
+    assert declared_meanings(label="splitsInto", registry=mixed) == [
+        ("hasPart", "the pack relation 'splitsInto' (testpack)")], \
+        declared_meanings(label="splitsInto", registry=mixed)

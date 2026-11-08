@@ -100,14 +100,21 @@ the deadline slip"*) would be stored as belief flowing BOTH ways unless the leg
 supplies the direction the statement already declares. It does:
 :func:`_direction_for` reads ``pack_registry.SEMANTICS_DIRECTIONS`` — ONTOLOGY
 §8's RULED table (``causes``/``supports`` → ``->``, ``mutuallySupportive`` →
-``<->``, ``related`` → ``-``) — from the meaning riding the edge (``label``,
-which is the story's verb, else the record's ``semantics`` gloss), then from the
-verb itself, and only for a meaning that declares NO direction does it fall back
-to ``_DIRECTION_STATED`` (the model's one-way token: a stated relation runs
-``src → dst``). The value rides ``link_entities(direction=…)`` onto the direct
-arm, and the written row records it, so a reader can tell a one-way stated claim
-from a writer default without re-deriving it. ``live.direction_flows`` reads it
-back unchanged.
+``<->``, ``related`` → ``-``) — from the MEANING in the order it is declared:
+the pack relation row's own ``semantics:`` (``declared_meanings``, the same row
+that supplies the mechanism and canonicalised through ``SEMANTICS_TRANSITION``),
+then the meaning riding the edge (``label``, which is the story's verb), then the
+verb itself, then the record's ``semantics`` gloss, and only for a meaning that
+declares NO direction does it fall back to ``_DIRECTION_STATED`` (the model's
+one-way token: a stated relation runs ``src → dst``). The row comes first
+because it is the DECLARATION that licensed the write — the authority
+``_mechanism_for`` already consults for the mechanism half of the same triple
+(#7852) — and because keying on the model's optional gloss made the stored
+direction non-deterministic: the same pack verb landed ``-`` when the model
+restated the gloss and ``->`` when it did not. The value rides
+``link_entities(direction=…)`` onto the direct arm, and the written row records
+it, so a reader can tell a one-way stated claim from a writer default without
+re-deriving it. ``live.direction_flows`` reads it back unchanged.
 
 ⚠️ The STRUCTURAL arm (``create_edge``) has no direction slot at all —
 ``link_entities`` REFUSES ``direction`` on that arm (#4282) rather than
@@ -163,7 +170,11 @@ from __future__ import annotations
 
 import dataclasses
 
-from .pack_registry import declared_mechanisms, relation_write_paths
+from .pack_registry import (
+    declared_meanings,
+    declared_mechanisms,
+    relation_write_paths,
+)
 
 __all__ = [
     "RELATION_DIRECT",
@@ -197,7 +208,11 @@ _DIRECT_MECHANISMS = ("IMPL", "NAND")
 #: #7852), and writing this constant for a ``mutuallySupportive`` /
 #: ``mutuallyExclusive`` edge would record a one-way flow where the ruling says
 #: both ways — a regression against the writer's own default (#11548 review
-#: round 4, P1). ``_direction_for`` consults the table first.
+#: round 4, P1; round 8: the pack row's declared meaning was never a candidate
+#: either, so ``partOf``/``contains`` (``hasPart``) and
+#: ``protects``/``marks``/``funds`` (``related``/``transacts``) wrote ``->``).
+#: ``_direction_for`` consults the table — over the DECLARED meaning first —
+#: before it ever reaches this token.
 _DIRECTION_STATED = "->"
 
 #: Predicates `link_entities` routes AWAY from `create_edge`, so the structural
@@ -330,7 +345,22 @@ def _drop_once(
     drops.append(RelationDrop(src, dst, predicate, reason))
 
 
-def _mechanism_for(predicate: str, semantics: str | None) -> str | None:
+def _registry_seam(registry: object) -> dict:
+    """``{"registry": …}`` when the caller NAMED a catalog, else ``{}``.
+
+    ⛔ The two seams' ``None`` conventions are OPPOSITE, and passing one through
+    to the other silently disables the pack half of the declaration:
+    ``plan_relation_edges(registry=None)`` means "read the process-wide catalog"
+    (``pack_hierarchy``'s convention), while
+    ``declared_mechanisms(registry=None)`` means "already known ABSENT" — its
+    third state is :data:`pack_registry._UNSET`, spelled by OMITTING the kwarg.
+    So the plan's ``None`` becomes "no kwarg" here, never ``registry=None``.
+    """
+    return {} if registry is None else {"registry": registry}
+
+
+def _mechanism_for(predicate: str, semantics: str | None,
+                   registry: object = None) -> str | None:
     """The mechanism this verb/semantics DECLARES, from the registry (never here).
 
     A verb that IS a mechanism (``IMPL``/``NAND``) declares itself. Otherwise
@@ -338,11 +368,16 @@ def _mechanism_for(predicate: str, semantics: str | None) -> str | None:
     rows and ONTOLOGY §8's map, so a second table here would be exactly the
     re-derivation the issue forbids. Deterministic: the first declaration the
     registry returns, in its own order.
+
+    ``registry`` is the SAME catalog ``plan_relation_edges`` was given (see
+    :func:`_registry_seam`), so the leg reads ONE catalog — the mechanism and
+    the hierarchy cannot answer from different ones.
     """
     if predicate in _DIRECT_MECHANISMS:
         return predicate
     try:
-        found = declared_mechanisms(label=predicate, semantics=semantics)
+        found = declared_mechanisms(label=predicate, semantics=semantics,
+                                    **_registry_seam(registry))
     except Exception:  # noqa: BLE001, RUF100 — a registry read must never abort a write
         return None
     for mechanism, _source in found or ():
@@ -351,38 +386,92 @@ def _mechanism_for(predicate: str, semantics: str | None) -> str | None:
     return None
 
 
+def _declared_meaning_for(predicate: str, registry: object = None) -> str | None:
+    """The MEANING the pack relation for ``predicate`` DECLARES, else ``None``.
+
+    The other half of the same row :func:`_mechanism_for` reads
+    (``pack_registry.declared_meanings``, canonicalised through
+    ``SEMANTICS_TRANSITION`` there): ``predicate: partOf`` with
+    ``semantics: hasPart`` means ``hasPart``, whatever the model did or did not
+    restate. A second derivation of that row here — or of the retired-spelling
+    transition — is what this module's header forbids, so the registry answers and
+    this leg consumes.
+
+    ⛔ A registry read that RAISES is reported as ``None``, i.e. as "the
+    declaration was not obtained" rather than aborting a capture that was
+    otherwise fine (the same defensive arm as :func:`_mechanism_for`; every
+    current caller is in-process). Deterministic: the first declaration in the
+    registry's own order.
+    """
+    try:
+        found = declared_meanings(label=predicate, **_registry_seam(registry))
+    except Exception:  # noqa: BLE001, RUF100 — a registry read must never abort a write
+        return None
+    for meaning, _source in found or ():
+        return meaning
+    return None
+
+
 def _direction_for(label: str | None, predicate: str,
-                   semantics: str | None = None) -> str:
+                   semantics: str | None = None,
+                   declared: str | None = None) -> str:
     """The direction the edge's MEANING records — the ruled table, not a guess.
 
     ``pack_registry.SEMANTICS_DIRECTIONS`` is ONTOLOGY §8's ruled mapping from a
     meaning to the direction it records (``->`` / ``<-`` / ``<->`` / ``-``), and
     ``TortoiseSDK._direction_from_semantics`` is the SDK's one reader of it.
     Consuming it here is the same rule as the write path's own: the registry
-    decides, this leg does not re-derive. The meaning riding the edge is
-    ``label`` (the story's verb when it is not itself a mechanism), else the
-    verb itself — and the record's ``semantics`` gloss is the LAST candidate
-    before the fallback, because ``_mechanism_for`` can bind a mechanism from
-    the gloss alone when the verb is outside the declared vocabulary: without
-    it, a verb glossed ``mutuallySupportive`` would take the one-way fallback
-    while its ruling says BOTH ways (#11548 round 4, P1 — the ruling must reach
-    the edge however the meaning arrived).
+    decides, this leg does not re-derive.
+
+    The candidates, in the order the meaning is DECLARED, strongest first:
+
+    1. ``declared`` — the MEANING the pack relation row fixes for this verb
+       (:func:`_declared_meaning_for`). The row is what licensed the write: it
+       is the declaration ``_mechanism_for`` reads for the mechanism half of the
+       same triple, so it is the authority on the meaning half too. It also
+       makes the result DETERMINISTIC: keyed on the model's optional gloss
+       instead, ``marks`` wrote ``-`` when the model happened to restate
+       ``semantics: related`` and ``->`` when it did not — one declaration, two
+       graphs (#11548 review round 8).
+    2. ``label`` — the story's verb, when it is not itself a mechanism.
+    3. ``predicate`` — the verb as stated, a mechanism included.
+    4. ``semantics`` — the RECORD's own gloss, the last candidate: it is the
+       model's restatement, and it still rules where nothing declares the verb
+       (a verb outside the declared vocabulary glossed ``mutuallySupportive``).
+
+    Every candidate is CANONICALIZED through ``SEMANTICS_TRANSITION`` first, the
+    way ``declared_mechanisms`` canonicalizes both spellings: a retired word
+    (``funds`` → ``transacts``, ``opposes`` → ``mutuallyExclusive``) is ruled by
+    the canonical meaning's direction, and reading the pre-canonical spelling
+    would compare nothing (that is how ``funds`` was stored one-way where the
+    ruling is ``-``).
 
     ⚠️ The fallback (``_DIRECTION_STATED``) is reached only by a meaning that
     declares NO direction: a bare ``IMPL``/``NAND`` verb, or a verb and gloss
-    both outside the table. It is deliberately NOT the writer's CYCLE-25 default
-    (``bidirectional`` for IMPL): a stated relation runs ``src → dst``.
+    and declaration all outside the table. It is deliberately NOT the writer's
+    CYCLE-25 default (``bidirectional`` for IMPL): a stated relation runs
+    ``src → dst``.
 
-    ⚠️ A FOLD keeps the FIRST verb's label (``create_direct_edge`` is one edge
-    per (src, tgt, type)), so the surviving meaning's direction is the one
-    written; the absorbed verb is still NAMED on ``collapsed``, so nothing about
-    it is silent.
+    ⚠️ A FOLD keeps the FIRST verb's label and direction (``create_direct_edge``
+    is one edge per (src, tgt, type)), so the surviving meaning's direction is the
+    one written; the absorbed verb is still NAMED on ``collapsed``, so nothing
+    about it is silent.
     """
-    from .pack_registry import SEMANTICS_DIRECTIONS
+    from .pack_registry import SEMANTICS_DIRECTIONS, SEMANTICS_TRANSITION
 
-    for meaning in (label, predicate, semantics):
-        if meaning and meaning in SEMANTICS_DIRECTIONS:
-            return SEMANTICS_DIRECTIONS[meaning]
+    for meaning in (declared, label, predicate, semantics):
+        if not isinstance(meaning, str) or not meaning:
+            continue
+        try:
+            ruled = SEMANTICS_DIRECTIONS.get(
+                SEMANTICS_TRANSITION.get(meaning, meaning))
+        except Exception:  # noqa: BLE001, RUF100 — a `str` SUBCLASS may raise
+            # on `__hash__`; a meaning this lookup cannot read declares nothing,
+            # and it must not abort the caller's write (same rule as the
+            # registry reads above).
+            continue
+        if ruled:
+            return ruled
     return _DIRECTION_STATED
 
 
@@ -533,7 +622,7 @@ def plan_relation_edges(
             continue
 
         # ── 2. the story's own verb, through the registry's verdict ────────
-        mechanism = _mechanism_for(predicate, semantics)
+        mechanism = _mechanism_for(predicate, semantics, registry)
         paths = _stated_verdict(predicate, mechanism)
         if not paths:
             _drop_once(
@@ -594,9 +683,12 @@ def plan_relation_edges(
                 stated_predicate=predicate, mechanism=mechanism,
                 label=label, src_name=src, dst_name=dst,
                 # The meaning's RULED direction, not the writer's IMPL default
-                # and not a blanket one-way (see ``_direction_for``; the record's
-                # ``semantics`` gloss is consulted before the one-way fallback).
-                direction=_direction_for(label, predicate, semantics)))
+                # and not a blanket one-way (see ``_direction_for``): the pack
+                # row's declared MEANING first, then the verb, and the record's
+                # ``semantics`` gloss only where nothing declares one.
+                direction=_direction_for(
+                    label, predicate, semantics,
+                    _declared_meaning_for(predicate, registry))))
             continue
         # ── 3. NOTHING this leg can write — and the reason must be the real one
         #
