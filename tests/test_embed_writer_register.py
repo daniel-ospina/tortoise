@@ -843,9 +843,10 @@ def test_a_stores_declaration_that_does_not_answer_is_refused():
     Row 2 is *"is every stored vector on a label the query leg can serve?"*, and the one fact it
     needs — WHERE the vector lands — cannot be derived for most writers (a store is not always a
     `MERGE|CREATE (:Label` in the writer's own body: the label may sit in a `MATCH` the derivation
-    does not credit, in a module-level constant, behind a property-map merge, in another writer, or
-    in the caller's own statement — and those are a SAMPLE: the body may hold no store at all (a
-    read, a read into a dict, comment prose, or a docstring quoting one — `_compare_views`,
+    does not credit, in a module-level constant, behind a property-map merge, behind a store
+    delegated to another writer (`_index_process_unit`), in a writer that only BUILDS a clause
+    (`set_embedding_clause`), or in the caller's own statement — and those are a SAMPLE: the body may
+    hold no store at all (a read, a read into a dict, or comment prose — `_compare_views`,
     `_graph_fingerprint`, `turn_prior_vectors`, `_index_gate_read`, `_apply_one`), carry a value a
     later pass stores (`add_point`), quote a wipe it does not own (`_prewipe_synthetic_write_scope`,
     whose whole body is a `return` — the `SET n.embedding = NULL` it quotes is

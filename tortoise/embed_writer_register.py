@@ -77,8 +77,9 @@ derivation deliberately does not credit, because a `MATCH` is a read (`_embeddin
 writes `set_embedding_clause("e")` inside its own `MATCH (e:Event {eventId:$eid})`); or the store
 clause is held in a module-level constant the per-writer scan does not open (`_write_capture_turns`
 executes `_TURN_WRITE_CYPHER`); or it is a property-map merge over a constant tuple
-(`_update_entity`'s `_CANONICAL_ENTITY_ID_PROPS`); or the store is delegated to another writer; or
-the writer only BUILDS a clause; or — one of them — the statement belongs to its caller
+(`_update_entity`'s `_CANONICAL_ENTITY_ID_PROPS`); or the store is delegated to another writer
+(`_index_process_unit` → `_session_event_write`); or the writer only BUILDS a clause
+(`set_embedding_clause`); or — one of them — the statement belongs to its caller
 (`_event_raw_write_door`). ⛔ Those six are a SAMPLE, NOT the set — the other NINE of the fifteen
 fail for reasons none of them names, and a list of six presented as complete leaves the majority
 unexplained: a carrier whose value a later pass stores (`add_point`, `_journal_event_raw_write`), a
@@ -349,8 +350,9 @@ CLASSES: tuple[str, ...] = (RECOGNISED_PRODUCER, EXEMPT)
 #: derivation does not credit (`_embedding_repair_attempt`'s own `MATCH (e:Event {eventId:$eid})` +
 #: `set_embedding_clause("e")`), a store clause held in a module constant (`_write_capture_turns`
 #: executing `_TURN_WRITE_CYPHER`), a property-map merge over a constant tuple
-#: (`_update_entity`'s `_CANONICAL_ENTITY_ID_PROPS`), a store delegated to another writer, a writer
-#: that only BUILDS a clause, and one whose statement is its caller's (`_event_raw_write_door`).
+#: (`_update_entity`'s `_CANONICAL_ENTITY_ID_PROPS`), a store delegated to another writer
+#: (`_index_process_unit` → `_session_event_write`), a writer that only BUILDS a clause
+#: (`set_embedding_clause`), and one whose statement is its caller's (`_event_raw_write_door`).
 #: ⛔ Those six are a SAMPLE, NOT the set — the other NINE fail for none of them: a carrier whose
 #: value a later pass stores (`add_point`, `_journal_event_raw_write`), a writer whose body issues no
 #: store at all — a read, a read into a dict, comment PROSE (`_compare_views`, `_graph_fingerprint`,

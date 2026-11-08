@@ -436,7 +436,8 @@ def test_every_embedded_label_has_a_query_path():
 #: carried NO label (Case B), and the label is not derivable per writer either (15 of the 20
 #: outside-gate writers name no USABLE label in their own Cypher, and they fail for SEVERAL
 #: different reasons — a `MATCH` the derivation does not credit, a module constant, a property-map
-#: merge over a constant tuple, a delegated store, a clause builder, or ONE carrying the caller's
+#: merge over a constant tuple, a delegated store (`_index_process_unit` → `_session_event_write`),
+#: a clause builder (`set_embedding_clause`), or ONE carrying the caller's
 #: statement, and those six are a SAMPLE rather than the set: the other NINE are a carrier a later
 #: pass stores (`add_point`, `_journal_event_raw_write`), a body that issues no store at all — a
 #: read, a read into a dict, comment PROSE (`_compare_views`, `_graph_fingerprint`,
