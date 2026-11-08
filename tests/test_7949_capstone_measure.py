@@ -4560,12 +4560,13 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # referentiality-selection fail-opens, which carry a `noqa` directive
         # naming `BLE001` and `RUF100` and warn `referentiality selection …
         # candidates kept (fail-open)`. ⛔ Of the numbers this comment used to
-        # quote, THREE were CORRECT at the head it stood at — `10490`/`10620` were
-        # the row's own members and `10599` the `classify_later and complete_list`
-        # gate — and only `:10453` was wrong: it is the `TORTOISE_CLASSIFY_LATER`
-        # comment line, and `vet_warnings.extend(_w)` sat at `:10465`/`:10587`.
-        # All four are stale at this head. A comment asserts nothing, so read the
-        # anchors from the row, never from this prose.
+        # quote, THREE were CORRECT at `76a89034e`, the fold head they were
+        # written for — `10490`/`10620` were the row's own members and `10599` the
+        # `classify_later and complete_list` gate — and only `:10453` was wrong: it
+        # is the `TORTOISE_CLASSIFY_LATER` comment line, and
+        # `vet_warnings.extend(_w)` sat at `:10465`/`:10587`. All four are dead at
+        # this head. A comment asserts nothing, so read the anchors from the row,
+        # never from this prose.
         ("docs/00_index.md", "fail-open `except` at", (
             ("13071", "except Exception as e:  # never block capture (P1)"),
             ("13218", "except Exception as e:  # never block capture (P1)"),

@@ -618,7 +618,6 @@ for s in aa414b4d5 8e49ae909 80c912244 d69faaf38; do echo "== $s"; \
 git show 80c912244:tortoise/extractor_v2.py | grep -c 'create_operator'   # 0
 git show de72cfd45:tortoise/extractor_v2.py | grep -n 'create_operator'  # :8892 :8910 :8917 :9231
 # the previous base printed :8938 :8956 :8963 :9343 (`62248db88`); `91dbc9a888` (#11449) moved all four +68
-# — kept off the command's own line so a pin on that line matches exactly
 git grep -n 'create_operator' -- tortoise/extractor_v2.py                 # :9006 :9024 :9031 :9411
 
 # A1 (§1) — the declaration reads, and nothing production writes it
