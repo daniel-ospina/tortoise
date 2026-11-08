@@ -265,6 +265,14 @@ def test_an_undeclared_writer_is_a_refusal_not_a_default():
     with pytest.raises(UnclassifiedWriterKey) as excinfo:
         register.classify(missing)
     assert missing in str(excinfo.value)
+    # The refusal's REMEDY is the only instruction the next declaration's author reads, so it
+    # must name the field that is now REQUIRED. `stores` (#11492) is defaultless: a remedy of
+    # `WriterClass(cls, reason, "#N")` raises a bare TypeError at module import instead of this
+    # register's designed, NAMED refusal — the failure mode the message exists to prevent.
+    assert "stores" in str(excinfo.value), (
+        "the refusal tells an author how to declare a writer; `stores` is required, so a remedy "
+        f"that omits it cannot be followed: {str(excinfo.value)!r}"
+    )
     assert register.undeclared([missing, *EMBED_WRITER_CLASSES]) == (missing,)
 
 

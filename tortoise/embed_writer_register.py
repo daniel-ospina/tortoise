@@ -882,7 +882,9 @@ def classify(writer: str) -> WriterClass:
         raise UnclassifiedWriterKey(
             f"{writer!r} carries no declaration in `tortoise/embed_writer_register.py` — an "
             "unclassified writer is a REFUSAL, not a default: declare it (class, reason, owning "
-            "issue) or stop it storing a vector outside the gate"
+            "issue, stores) or stop it storing a vector outside the gate. `stores` answers DoD row "
+            "2 and is required: a label tuple, or the register's `NO_LIVE_VECTOR` / "
+            "`LABELS_AT_RUNTIME` disposition (#11492)"
         ) from None
 
 
