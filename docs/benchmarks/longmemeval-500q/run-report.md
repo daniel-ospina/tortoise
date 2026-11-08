@@ -112,10 +112,21 @@ on every box we hold, so a default-config run raised at the named-provider
 check *before loading a question* (measured on this issue 2026-10-23 and
 2026-11-02: `reader.py: ValueError: model spec names provider 'openrouter' but
 its key is not set`). The constant now names the DeepSeek transport. The **model
-is unchanged**; only the transport moved, and a box holding only another
+is unchanged**; the transport moved, and a box holding only another
 provider's key uses the documented override (which records
 `reader_pinned: false` rather than silently reporting a different endpoint as
 the pin).
+
+Two things moved with it, and only one of them is the endpoint. The reader
+class is a function of the **key env**, not of the model id
+(`reader.py` → `transport = _ThinkingDisabledTransport if key_env in
+THINKING_BY_DEFAULT_KEY_ENVS else OpenAICompatModel`, with
+`THINKING_BY_DEFAULT_KEY_ENVS = {"DEEPSEEK_API_KEY"}`), so under the new pin
+the request body also gains a top-level `thinking: {"type": "disabled"}`.
+That is required, not incidental: a reasoning-by-default provider would
+otherwise spend the bounded answer budget on hidden reasoning instead of the
+answer. Recorded here because a pinned instrument is only reproducible if the
+request shape is disclosed with it.
 
 ## 2. Official metric + labeled variants (R12: never mixed)
 
@@ -320,6 +331,7 @@ never a silent in-place edit (publication discipline, #2106 §7):
 | (machinery commit) | Report committed in PENDING state: protocol gates 1-4 passed (evidence below); steps 5+ (full 500-Q execution) not run. |
 | 2026-10-21 | #8486 follow-up (doc reconciliation, raised by the PR's fresh-context review): §1's **Ingest mode** row now states `v2` (it still said `deterministic`, which is mutually exclusive with the adjacent **Belief layer** row — the runner refuses `--activate-beliefs` on a deterministic graph, and the #8486 protocol injects `--ingest-mode v2 --activate-beliefs`). §3's ingest-mode note and §4's exact command follow. No metric, gate or receipt value changed — the run is still PENDING. |
 | 2026-10-21 | #8486 follow-up, second pass (same review): §3's **Does NOT measure** bullet dropped its claim that the eval graphs contain no IMPL/NAND operators, and its `dataset_audit.py` attribution — both are false for the `v2` configuration §1 records (the extractor writes IMPL/NAND operators, which is what `--activate-beliefs` promotes and EPs), so the bullet now names what is genuinely unmeasured (why-context assembly, and the belief layer's effect on the RRF retrieval score). §1's **Belief layer** row now defines all four resolved states and reconciles the disclosure bar with them: `partial` is the expected state of a correctly-armed run, and the bar is per question (`questions_with_ep` of `questions`), not all-or-nothing. Pinned by `tests/longmem_eval/test_measurement_posture.py` (the report must define every state the module can return and must not restate the operators claim). No metric, gate or receipt value changed — the run is still PENDING. |
+| 2026-11-07 | #8486 (configuration half, PR #11493) — **five in-place edits, recorded here per the discipline in the paragraph above**: §1's **Reader** row (`openrouter:deepseek/deepseek-v4-flash` → `deepseek:deepseek-v4-flash`), §1's **Judge** row (`openai/gpt-4o-2024-08-06` → `deepseek:deepseek-v4-flash`), §1's **Cost** row ("OpenRouter key-usage delta" → "provider key-usage delta"), §5's receipt `judge_pin` row (the official-anscheck pin → `unpinned:deepseek-v4-flash` under the ruling), and §4's step-5 command (the `TORTOISE_LME_JUDGE_MODEL='openrouter:openai/gpt-4o-2024-08-06'` line removed — the default is now the ruled configuration). The disclosure of what a run of that configuration may and may not claim is **§1.1**, added in the same change. No metric, gate or receipt *value* changed — `run_status` is still PENDING, every number is still `PENDING`, and the historical 2026-09-04 gate-4 receipt pin in `gate-evidence.json` is retained untouched with an `errata` entry naming the ruling that supersedes it. |
 
 ## 10. Handoff to W7-b (#2106)
 

@@ -7,7 +7,8 @@ docs/planning/2026-08-31-2071-scoping-package.md):
   1. the 21-question composition is COMMITTED (reproducibility gap closed)
      with the 0a995998 int-answer quirk cleaned;
   2. ``ask_spotcheck._grade`` routes EVERY question to the semantic judge
-     (``build_judge()`` — the official gpt-4o anscheck, benchmark-identical
+     (``build_judge(_judge_spec())`` — the official gpt-4o anscheck, the spec
+     named explicitly and never inherited from the run default; benchmark-identical
      to the graded eval); the word-overlap bar is REMOVED from the live
      path (no callers remain — pinned both behaviorally and in source);
   3. the no-key runtime contract: fail-fast pre-flight names the judge
@@ -351,17 +352,23 @@ def test_one_judge_spec_serves_the_preflight_and_the_judge(monkeypatch):
 
     # ⛔ AST, NOT A REGEX (review finding): a regex keyed on `=`/`return` sees
     # only the call shapes someone happened to write. This walks every CALL to
-    # `build_judge` in the module and requires each one to carry an explicit
-    # spec (or `mock=True`), so a new call shape — an argument, a comprehension,
-    # a default parameter — cannot slip past the pin by looking unfamiliar.
+    # `build_judge` in the module and requires the spec it passes to BE
+    # `_judge_spec()` — the single owner the pre-flight and the grader both read
+    # — or a literal `mock=True`. Two blank spots closed together here:
     #
-    # ⛔ AND THE SHAPES THAT LOOK LIKE AN ARGUMENT BUT ARE NOT (#8486 review):
-    # `build_judge(None)` passes a positional `None` and `build_judge(mock=False)`
-    # passes a FALSY `mock` — both fall through to
-    # ``judge.DEFAULT_JUDGE_MODEL`` (`build_judge`'s `raw_spec = spec or env or
-    # DEFAULT_JUDGE_MODEL`), so skipping on "has an arg" or "has a mock kwarg"
-    # would have re-created the exact split this pin exists to stop. Only a
-    # NON-empty positional spec or a literal `mock=True` counts as explicit.
+    #   • SHAPES THAT LOOK LIKE AN ARGUMENT BUT ARE NOT (#8486 review):
+    #     `build_judge(None)` passes a positional `None` and
+    #     `build_judge(mock=False)` passes a FALSY `mock` — both fall through to
+    #     ``judge.DEFAULT_JUDGE_MODEL`` (`build_judge`'s `raw_spec = spec or env
+    #     or DEFAULT_JUDGE_MODEL`, and its MockJudge branch needs a TRUTHY
+    #     `mock`), so skipping on "has an arg" or "has a mock kwarg" re-created
+    #     the exact split this pin exists to stop.
+    #   • A SPEC THAT IS NOT THE OWNER'S (#8486 review):
+    #     `build_judge(OFFICIAL_JUDGE_MODEL)` — or any other literal — passes an
+    #     EXPLICIT spec, so a "has an argument ⇒ explicit" rule waved it
+    #     through while the pre-flight checked the env-resolved spec and the
+    #     grader graded another. Same defect one step along: the pin has to
+    #     check WHO decides the spec, not that somebody did.
     def _bare_build_judge_calls(source: str, where: str) -> list[str]:
         tree = ast.parse(source)
         bad = []
@@ -373,15 +380,14 @@ def test_one_judge_spec_serves_the_preflight_and_the_judge(monkeypatch):
                     else getattr(fn, "id", None))
             if name != "build_judge":
                 continue
-            # An explicit spec is a positional arg that is NOT a None literal
-            # (`build_judge(None)` inherits the default).
-            has_spec = any(not (isinstance(a, ast.Constant) and a.value is None)
-                           for a in node.args)
-            if has_spec:
+            # The spec must BE the owner's: the first positional argument has to
+            # be a CALL to `_judge_spec()`, not a literal, a name, or `None`.
+            first = node.args[0] if node.args else None
+            if (isinstance(first, ast.Call)
+                    and getattr(first.func, "id", None) == "_judge_spec"):
                 continue
-            # `mock=True` is explicit; `mock=False` is the default judged by a
-            # real model, so it must still name its spec (`build_judge` only
-            # returns a MockJudge for a TRUTHY `mock`).
+            # `mock=True` is the one other explicit form; `mock=False` is the
+            # default judged by a real model, so it still has to name its spec.
             if any(k.arg == "mock"
                    and isinstance(k.value, ast.Constant)
                    and k.value.value is True
@@ -396,9 +402,15 @@ def test_one_judge_spec_serves_the_preflight_and_the_judge(monkeypatch):
     # `tools/ask_spotcheck.py` alone while the claim was "NO call site may build
     # a judge without it" — so the two SIBLING legs kept the split (pre-flight
     # on the official key, judge on the DeepSeek default) and the suite stayed
-    # green over it (caught in review, #8486). Every module that imports the
-    # pre-flight is scanned, and the LIST IS ASSERTED, so a rename cannot
-    # silently shrink the pin to an empty set.
+    # green over it (caught in review, #8486).
+    #
+    # The set is ENUMERATED HERE, not derived from the tree, and that is what the
+    # assertion below pins: it is the two modules that import the pre-flight
+    # today (verified: `_require_judge_key`/`_judge_spec` importers in `tools/`
+    # are exactly these), so a rename cannot silently shrink the scan to an
+    # empty set. ⛔ A FOURTH IMPORTER WOULD NOT BE SCANNED — if one appears,
+    # extend this tuple; the comment says what is checked rather than claiming
+    # "every module", which is the over-claim a previous round shipped.
     import tools.ask_spotcheck_consistency as _consistency
     import tools.ask_spotcheck_probe as _probe
 
@@ -408,24 +420,28 @@ def test_one_judge_spec_serves_the_preflight_and_the_judge(monkeypatch):
     for name, mod in siblings.items():
         sibling_src = Path(mod.__file__).read_text(encoding="utf-8")
         assert _bare_build_judge_calls(sibling_src, name) == [], (
-            f"{name} builds a judge without _judge_spec(): its pre-flight "
-            f"checks the OFFICIAL judge's key while a different model grades "
+            f"{name} builds a judge without `_judge_spec()` as its spec: its "
+            f"pre-flight checks one judge's key while a different model grades "
             f"(#8486)")
-        # …and it must resolve the spec from the ONE owner, not re-derive it.
-        # (This half is satisfied by a comment, so it is a REQUEST, not proof —
-        # the AST scan above is the load-bearing check.)
-        assert "_judge_spec" in sibling_src, name
+        # ⛔ NO SUBSTRING CHECK HERE (review finding): `assert "_judge_spec" in
+        # sibling_src` was TRUE for a module whose only mention was a docstring
+        # or an import, so it stayed green over a call site that re-derived its
+        # own spec — a claim satisfied by prose is not a check. The AST scan
+        # above is now the load-bearing half for BOTH defects (a missing spec
+        # and a spec that is not the owner's), so a second, weaker assertion
+        # would only invite the same false confidence back.
 
     # ⛔ THE GUARD'S OWN COVERAGE (#8486 review). A source pin whose scope is
     # narrower than its claim is how the #2071 split survived two rounds, so
-    # the shapes that INHERIT the default are asserted directly: `None` and a
-    # falsy `mock` both reach `judge.DEFAULT_JUDGE_MODEL`.
+    # the shapes that INHERIT the default — or that pass a spec the pre-flight
+    # did not resolve — are asserted directly.
     assert _bare_build_judge_calls(
         "build_judge()\nbuild_judge(None)\nbuild_judge(mock=False)\n"
-        "build_judge(spec=None)\nbuild_judge('')\n", "mutant") != []
+        "build_judge(spec=None)\nbuild_judge('')\n"
+        "build_judge(OFFICIAL_JUDGE_MODEL)\nbuild_judge(spec)\n",
+        "mutant") != []
     assert _bare_build_judge_calls(
-        "build_judge(spec)\nbuild_judge(_judge_spec())\n"
-        "build_judge(OFFICIAL_JUDGE_MODEL)\nbuild_judge(mock=True)\n",
+        "build_judge(_judge_spec())\nbuild_judge(mock=True)\n",
         "explicit") == []
 
 

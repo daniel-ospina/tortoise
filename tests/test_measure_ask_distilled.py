@@ -689,11 +689,14 @@ def test_the_scorer_BUILDS_the_judge_it_records(tmp_path, monkeypatch):
     """#11460 review P1-1 — the recorded spec and the judge that GRADES must be
     the same spec.
 
-    ``build_judge`` has its own fallback (the official LongMemEval judge).
-    Resolving only the RECORDED spec let a run with no ``--judge`` be graded by
-    gpt-4o while the record — and therefore the bar's config check — named
-    DeepSeek: a false PASS on the one clause that exists to prove who graded the
-    numbers. This pins that ``score`` builds from the resolved spec.
+    ``build_judge`` has its own fallback, and since #8486 that fallback is the
+    owner-ruled DeepSeek default (``deepseek:deepseek-v4-flash``) rather than
+    the official LongMemEval judge — which is exactly why this ordering matters
+    MORE now, not less: the two fallbacks disagree on purpose. Resolving only
+    the RECORDED spec let a run with no ``--judge`` be graded by one judge while
+    the record — and therefore the bar's config check — named another: a false
+    PASS on the one clause that exists to prove who graded the numbers. This
+    pins that ``score`` builds from the resolved spec.
     """
     root = _small_corpus(tmp_path)
     run = m.run_sealed(corpus_root=root,
