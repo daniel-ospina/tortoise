@@ -2046,12 +2046,17 @@ class GitHubRows(list):
 #: Rendered bound on the stderr tail ``gh_json`` reports for a failed read. The
 #: refusal that carries it is read through a 320-character window by the harness, and
 #: the gate composes ~180 characters of its OWN prose in front of the cause — so the
-#: whole cause gets roughly 140. 100 leaves room for the arm's own prefix ("gh issue
-#: list FAILED (1 exit): ", "gh issue list returned no parsable JSON: ") and was
-#: measured for every arm by `test_every_board_read_failure_fits_the_window_its_readers_apply`
+#: whole cause gets roughly 140. 99 leaves room for the arm's own prefix ("gh issue
+#: list FAILED (1 exit): ", "gh issue list returned no parsable JSON: ") and is
+#: measured for every arm — AT EACH ARM'S OWN MAXIMUM CAUSE LENGTH, not only at short
+#: fixtures — by `test_every_board_read_failure_fits_the_window_its_readers_apply`
 #: (#11202 review round 4: 200 overran the window on the refusal arm, where the cause
-#: and not only the tail is what carries the words).
-_GH_SAID_BOUND = 100
+#: and not only the tail is what carries the words; round 14: 100 composed the
+#: UNPARSABLE arm to 321 against a 320 window once the fixture carried a body at
+#: `_bounded_repr`'s own maximum instead of the short `<html>nope</html>` body — the
+#: cut removed only the final `)` of `#8175`, so the defect was the CLAIM, not the
+#: rendering).
+_GH_SAID_BOUND = 99
 
 
 def _gh_said(stderr: str, stdout: str = "") -> str:
