@@ -32,6 +32,7 @@ from __future__ import annotations
 import ast
 import importlib.util as _ilu
 import io
+import itertools
 import json
 import os
 import re
@@ -10726,13 +10727,16 @@ def _call_sites(src: str) -> list[tuple[int, str]]:
     names = {"create_edge", "create_about_edge", "create_operator"}
     toks = list(tokenize.generate_tokens(io.StringIO(src).readline))
     out: list[tuple[int, str]] = []
-    for i, (a_line, b_line) in enumerate(zip(toks, toks[1:])):
+    for i, (a_line, b_line) in enumerate(itertools.pairwise(toks)):
         if not (a_line.type == tokenize.NAME and a_line.string in names
                 and b_line.type == tokenize.OP and b_line.string == "("):
             continue
-        # ⛔ Indexed, not a `zip(toks, toks[1:], toks[2:])` triple: that form binds the verb to
+        # ⛔ `itertools.pairwise`, and indexed — NOT `zip(toks, toks[1:])` (ruff RUF007/B905 red
+        # on it, measured) and NOT `zip(toks, toks[1:], toks[2:])`: that triple binds the verb to
         # `toks[1:]`, so a call at the FIRST token of the source was invisible (measured — the
         # helper answered `[]` for `create_operator(p)` while every later line was caught).
+        # `pairwise` starts at `toks[0]` and `enumerate` keeps `i` == the verb's own index, so
+        # `prev` is the token BEFORE the verb in both forms.
         prev = toks[i - 1] if i else None
         if prev is not None and prev.type == tokenize.NAME and prev.string == "def":
             continue
