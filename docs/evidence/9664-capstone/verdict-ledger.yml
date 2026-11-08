@@ -607,7 +607,10 @@ criteria:
     verdict: blocked
     reason: >-
       The card exists at this head (`website/apps/dashboard/src/harnesses.js` -
-      the `chatgpt` chooser family with its four setup steps), but NO published
+      `HARNESS_STEPS('chatgpt')` with its **seven** rendered setup steps,
+      `:271-279`; the family entry at `:880` carries `surfaces: []`, so the steps
+      are the only thing that renders and the count is what a run would check -
+      an earlier cut of this row said "four", which the array denies), but NO published
       run has ever screenshotted it: the 2026-10-26 run drove a build that had no
       ChatGPT card at all. Rendering it needs a signed-in dashboard session, which
       this lane does not have (`env | grep -ci -e chatgpt` -> 0).
