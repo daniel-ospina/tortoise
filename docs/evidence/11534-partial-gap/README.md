@@ -83,10 +83,14 @@ that was false on this very population (review round 4). Those figures are re-de
 `test_the_coverage_floor_is_justified_by_the_measured_distribution`, because an
 earlier draft of this paragraph carried pre-correction percentiles that nothing
 pinned (round 2's finding); `min_content_tokens = 4` drops `**bold label**` and
-date-fragment segments, which are the class it removes below it — measured: 68 of
-the 212 sub-floor segments carry a bold label (32.1%), a plurality rather than a
-dominant class, and headings are masked out before segmentation so they can never
-be a flag class at all (0 of 416 flagged at `min_content_tokens=1` begin with `#`).
+date-fragment segments, which are the class it removes below it. Measured, on the
+seven recordings: 68 of the 212 sub-floor segments carry a bold label (32.1%) — a
+plurality, not a dominant class — and headings are masked out *before* segmentation,
+so they can never be a flag class at all (0 of the 103 flags at
+`min_content_tokens=1` begin with `#`). Both figures are re-derived by
+`test_the_content_floor_s_removal_class_is_measured_not_asserted`, because an earlier
+draft of this very sentence restated them from a review comment and the numbers did
+not reproduce.
 
 **Stemming is symmetric on purpose, and the first version was not.** Coverage
 compares *base forms*, so the stemmer must fold both sides of a pair: an
@@ -170,9 +174,12 @@ observation). A coverage detector cannot reach that by construction, and neither
 can a stage triggered by coverage.
 
 **Four `points` are missed** (the totals above are 8 of 12). Below are examples of
-the two MISS mechanisms, not an inventory of the class: `wp01` "The hydrate stage
-shares the same code as the wire stage…" sits at 2 content tokens, below
-`GAP_MIN_CONTENT_TOKENS`; `wp05` "The Bluepeak retro is published company-wide"
+the two MISS mechanisms, not an inventory of the class: `wp01` — the addition "The
+hydrate stage shares the same code as the wire stage…" carries 8 content tokens, and
+the clause it paraphrases ("it shares the same code") only 2, so its best overlap is
+2 of 8 = 0.25, under the record's 0.30 rule. The miss is the **overlap threshold**,
+not `GAP_MIN_CONTENT_TOKENS`: at `min_content_tokens=1` the clause is flagged and
+recall is unchanged at 9 of 21; `wp05` "The Bluepeak retro is published company-wide"
 restates content a covered statement already carries, so the item is a re-shaping
 of it, which is the generalisation class the paragraph above defines as
 unreachable by construction. ⚠️ The four is arithmetic off the pinned totals; how

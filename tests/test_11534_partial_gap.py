@@ -760,6 +760,59 @@ def test_the_coverage_floor_is_justified_by_the_measured_distribution():
     assert values[int(0.25 * len(values))] == 0.736
 
 
+def test_the_content_floor_s_removal_class_is_measured_not_asserted():
+    """`GAP_MIN_CONTENT_TOKENS`'s rationale, re-derived (review round 12, P3).
+
+    The constant's comment used to call "markdown headings and bold labels" the
+    population's **dominant** flag class. Neither half survives its own
+    population, and the first attempt to fix it installed two numerals ("0 of
+    416", "6 of 432") that no invocation of the shipped function reproduces —
+    the exact rot the paragraph it sits in warns about.
+
+    So both halves are pinned against the SHIPPED defaults here, and the record
+    and the comment quote these numbers instead of restating a count:
+
+    * **headings can never be a flag class** while :func:`vet_gate._gap_mask`
+      runs — it blanks them before segmentation, so even at
+      ``min_content_tokens=1`` (103 flags over the seven recordings) not one
+      flag begins with ``#``;
+    * **bold labels are a plurality, not a dominant class**: 68 of the 212
+      sub-floor segments carry ``**`` (32.1%).
+    """
+    root = _repo_root()
+    flagged_at_one = 0
+    heading_flags = 0
+    segments = 0
+    sub_floor = 0
+    bold = 0
+    for path in sorted(glob.glob(os.path.join(root, _RECEIPTS, "*.arms.json"))):
+        with open(path, encoding="utf-8") as handle:
+            session = json.load(handle)
+        gaps = vet_gate.partial_gaps(
+            session["embed_list"]["narrative"], session["stories"]["narrative"],
+            min_content_tokens=1, max_flagged=10_000)
+        flagged_at_one += gaps["flagged_total"]
+        heading_flags += sum(1 for entry in gaps["flagged"]
+                             if entry["text"].lstrip().startswith("#"))
+        for segment in vet_gate.narrative_segments(
+                session["stories"]["narrative"]):
+            segments += 1
+            if len(vet_gate._gap_tokens(segment["text"])) < (
+                    vet_gate.GAP_MIN_CONTENT_TOKENS):
+                sub_floor += 1
+                if "**" in segment["text"]:
+                    bold += 1
+    # (a) headings are masked out before segmentation, so no flag can be one
+    assert flagged_at_one == 103, "flags at min_content_tokens=1, shipped floor"
+    assert heading_flags == 0, (
+        "a heading reached the flag list — the mask is applied after segmentation")
+    # (b) the removal class is a plurality at most (one recording = 422 segments)
+    assert segments == 422
+    assert sub_floor == 212
+    assert bold == 68, "68 of 212 = 32.1%: a plurality, not a dominant class"
+    assert bold * 2 < sub_floor, "'dominant' is a majority claim; this is not one"
+
+
 def test_the_heading_mask_does_not_eat_issue_numbered_lines(monkeypatch):
     """The mask is NARROW, not merely present (review round 9, P2).
 
