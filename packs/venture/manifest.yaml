@@ -375,6 +375,15 @@ ontology:
     fromKind: venture:investment
     toKind: Subject
     cardinality: many_to_one
+    # #11083 — the per-edge sense ruling (c) requires. `ownedBy`'s target is
+    # deliberately open (Subject or Object), so the PREDICATE no longer says
+    # which end owns which; `<-` records it: the SOURCE (the investment) is the
+    # ownership interest, the target (the company) is what it is a stake in.
+    # Without this row the table default (`ownedBy` -> `->`) would assert the
+    # company owns the investment — the opposite of the pack's own sentence
+    # (`packs/venture/manifest.yaml` kindDefs.fundingAgreement comment: "the
+    # fund's stake in — and ongoing relationship with — a company it backs").
+    direction: "<-"
     # Weakest-supported relation (implied by portfolio/shareholder language
     # rather than an attested verb) — declared extractable for consistency with
     # its siblings; gate it if #2787 wires `extractable` into enforcement.

@@ -105,6 +105,11 @@ class DeclaredHierarchy:
     to_kind: str        # 'dev:epic'
     write_path: str     # HIERARCHY_STRUCTURAL | HIERARCHY_OPERATOR
     mechanism: str | None = None  # the declared mechanism, when the row binds one
+    #: The pack's ``relations[]`` declares this same pack + pair + meaning, so the
+    #: two entries are ONE declaration spelled twice (see ``_matching_row``).
+    #: Solved here, by the function that owns the join, so a consumer that needs
+    #: the DISTINCT-connection denominator does not re-derive it in prose.
+    restates_relation: bool = False
 
 
 @dataclasses.dataclass(frozen=True)
@@ -320,6 +325,13 @@ def _resolve(registry) -> tuple[tuple[DeclaredHierarchy, ...], tuple[dict, ...]]
                 to_kind=to_kind,
                 write_path=write_path,
                 mechanism=mechanism,
+                # ONE resolver for the join: `_matching_row` is the function
+                # whose docstring calls the two shapes "one declaration spelled
+                # twice", and a consumer that re-derived it (e.g. by comparing
+                # rows itself) would be the second answer to one question this
+                # module exists to remove.
+                restates_relation=_matching_row(
+                    pack, predicate, from_kind, to_kind) is not None,
             ))
     return tuple(declared), tuple(diagnostics)
 

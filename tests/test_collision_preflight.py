@@ -11536,8 +11536,26 @@ class HolderGateTests(unittest.TestCase):
 
         The causes are DERIVED from the module under test (stub `_capture` at each
         failure class), so this cannot drift from the wording the code emits.
+
+        ⛔ AND THE LONGEST CAUSE IS THE ONE THAT MUST BE DRIVEN (#11202 review round
+        14). The short `<html>nope</html>` body understated the UNPARSABLE arm, which
+        composes to 321 against this 320 window once `_gh_said` returns its full
+        `_GH_SAID_BOUND` — measured, and the reason `_GH_SAID_BOUND` is 99. So every
+        arm that CARRIES a payload is driven at that payload's maximum: the unparsable
+        body at a 400-char body, the unparsable stderr at a 400-char stderr, and the
+        403 at a 400-char cause behind its own `Fetching page 2 of 19...` prefix.
+        `unparsable body` is the ONE arm driven at BOTH ends, because it is the arm whose
+        short fixture hid the overrun. `timeout (armed)` is single-fixture and stays
+        that way: it carries no payload to lengthen — its cause is composed inside
+        `gh_json` — so there is no longer variant of it to drive.
+
+        Stated as the property each arm actually has rather than as a uniform rule:
+        a docstring that claims more coverage than the table below delivers is the
+        defect class this whole change exists to remove, and "each arm at its maximum
+        as well as a short one" was false for three of these four arms (#11529 review).
         """
         fs = self.cp.fleet_state
+        at_max = "x" * 400     # longer than _bounded_repr's bound: the bound decides
         cases = {
             "timeout (armed)": ("", fs.GH_READ_TIMEOUT_RC, ""),
             "refused (403)": (
@@ -11545,6 +11563,10 @@ class HolderGateTests(unittest.TestCase):
                 "API rate limit exceeded for user ID 1. " + "x" * 400,
             ),
             "unparsable body": ("<html>nope</html>", 0, ""),
+            # ⛔ THE ARM THE SHORT FIXTURE HID: an unparsable body/stderr that fills
+            # `_gh_said`'s whole bound is the longest cause any arm can carry.
+            "unparsable body (at the repr bound)": (at_max, 0, ""),
+            "unparsable stderr (at the repr bound)": ("", 0, at_max),
         }
         for label, reply in cases.items():
             with self.subTest(case=label), mock.patch.object(

@@ -548,6 +548,13 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     # set in two homes (tests/test_ci_selection.py::
     # test_carve_out_mirrors_test_no_redirect_stems).
     "test_semantics_write_path_7852",
+    # #11083: the per-pack relation census's `written` column, measured over a real
+    # store. The fixture builds `TortoiseSDK(<tmpfile>)` and reads the graph back
+    # off that store, so a URI-set lane would redirect the construction and the
+    # read-back assertions would be gone. Mirror of the `carve_out:` entry in
+    # config/ci-surfaces.yml; the two registries are one set in two homes
+    # (tests/test_ci_selection.py::test_carve_out_mirrors_test_no_redirect_stems).
+    "test_pack_logic_writeprobe_11083",
     # #7852 v3.25: the four-value direction STORAGE vocabulary. The fixture builds
     # `TortoiseSDK(<tmpfile>)` and reads EP message state off the live graph, so a
     # URI-set lane would redirect the construction to the server and the embedded

@@ -25032,14 +25032,21 @@ class TortoiseSDK:
         """The model direction a Layer-2 semantics value records (#7852).
 
         ``SEMANTICS_DIRECTIONS`` is the single source of truth, and its values are
-        drawn from the model's four-value vocabulary (`->` / `<->` / `-` — no
-        ruled semantics produces `<-`), so this returns the recorded direction
-        UNCHANGED — including `-` for the
+        drawn from the model's four-value vocabulary (`->` / `<-` / `<->` / `-`),
+        so this returns the recorded direction UNCHANGED — including `-` for the
         neutral meanings (`related`, `transacts`), which must be stored as `-`
         rather than fall through to the mutual default: `-` means the
         connection exists and NO confidence transfers (owner ruling), and a
         fall-through to `bidirectional` would propagate confidence along an
         edge the model declares belief-free.
+
+        ⚠️ `<-` IS produced by a table value since #11083: `produces` records
+        `<-` (target→source), because production runs producer → product and the
+        shipped declaration is `asset → program`. An earlier revision of this
+        docstring asserted no ruled semantics produced `<-`; that sentence became
+        false when `produces` returned as a Layer-2 meaning (owner ruling
+        2026-11-05, `OVERRIDES:` on #7848), so it is corrected here rather than
+        left to mislead the next reader of the table.
         """
         from tortoise.pack_registry import SEMANTICS_DIRECTIONS
         return SEMANTICS_DIRECTIONS.get(semantics)

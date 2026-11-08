@@ -804,6 +804,23 @@ def _module_name(path: Path, root: Path) -> str:
 #: maps every `duplicate` onto it — the stored `label` is never read for one.
 DUPLICATE_LABEL = "UNKNOWN(duplicate writer name)"
 
+#: The label a writer declared `LABELS_AT_RUNTIME` carries in the SCORED map (`#11492`). It is an
+#: `UNKNOWN…` spelling on purpose: the value is not a label, so it must never reach the
+#: served-set comparison as one, and the row's hold set is built from exactly this prefix.
+AT_RUNTIME_LABEL = "UNKNOWN(labels decided at runtime)"
+
+#: A PARTIAL measurement's prefix — a writer whose own Cypher names MORE than one label
+#: (`_embedding_writers`' `UNKNOWN(two labels: …)` shape). It is a MEASUREMENT, not a gap, so a
+#: declaration may not narrow it (`#11492`): the row holds and names it.
+#: ⛔ SCOPED TO THE KIND THAT REACHES IT (`#11495` review, measured). That shape is produced on the
+#: `gated` / `ungated` path only. An `unresolved_write` writer's own multi-label reading is
+#: FLATTENED to `UNKNOWN(unresolved producer)` by `written_labels` before the hold set is computed,
+#: so it never enters `partial` and its DECLARATION is the only reading row 2 scores — that entry is
+#: bounded by `#11530`'s completeness pin, not by this hold. Do not cite `_event_plain_merge` /
+#: `_rebuild_all_replay` as examples of the narrowing this constant forbids: both are
+#: `unresolved_write`, so both are resolved by declaration, which is the designed answer.
+PARTIAL_LABEL_PREFIX = "UNKNOWN(two labels"
+
 
 @functools.lru_cache(maxsize=8)
 def _embedding_writers(root: Path) -> dict[str, dict]:
@@ -907,7 +924,17 @@ def _embedding_writers(root: Path) -> dict[str, dict]:
             elif len(labels) > 1:
                 # Two labels in one writer's Cypher: picking one would report a
                 # stored label as covered while the other may be unserved.
-                label = "UNKNOWN(two labels: " + ",".join(sorted(labels)) + ")"
+                # ⛔ BUILT FROM `PARTIAL_LABEL_PREFIX`, never a hand-retyped copy of it
+                # (`#11495`'s review, measured). This line used to spell the literal out, and
+                # `scored_labels()`'s `out["partial"]` arm —
+                # `label.startswith(PARTIAL_LABEL_PREFIX)` — is its ONLY consumer, so
+                # drifting the two apart left the WHOLE suite green (retyping just this line to
+                # `"UNKNOWN(2 labels: "` kept 194 passed, 2 skipped) while a two-label
+                # MEASUREMENT silently stopped being held, and a declaration could then narrow it
+                # before the served-set comparison and read `MET`. That is the false PASS this
+                # row's comment above exists to forbid. Deriving from the constant makes that
+                # drift impossible rather than merely tested.
+                label = f"{PARTIAL_LABEL_PREFIX}: " + ",".join(sorted(labels)) + ")"
                 _put(f"{module}::{node.name}", {
                     "callee": callee, "at": f"{rel}:{node.lineno}",
                     "kind": kind, "label": label,
@@ -1261,6 +1288,11 @@ REGISTER_MODULE = "tortoise.embed_writer_register"
 #: credited), and the instrument re-checks it rather than inheriting an invariant it does not test.
 _OWNER_ISSUE_RE = re.compile(r"#\d+")
 
+#: A Cypher label's SHAPE — the same shape `register.load()` enforces, re-checked at the READ
+#: boundary for the same reason `_OWNER_ISSUE_RE` is: an injected or tampered declaration must be
+#: graded by the instrument, not trusted because the product's own validator would have refused it.
+_STORE_LABEL = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
 #: The residual a `MET` on this row does NOT absorb — emitted with the row, so a reader quoting
 #: the verdict cannot read it as "no vector is stored that the rule did not decide".
 ROW_SCOPE_NOTE = (
@@ -1326,10 +1358,13 @@ def _cited_seams(reason: str) -> set[tuple[str, str]]:
 def declared_writers() -> dict[str, dict]:
     """The PRODUCT's declaration, read from `tortoise/embed_writer_register.py`.
 
-    ``{module::symbol: {"cls", "owner_issue", "reason"}}``, the fields COERCED to text so a
-    malformed entry becomes a NAMED violation instead of a `TypeError` that aborts all four
-    rows (which `main()`'s exit contract could not tell from "a row was NOT MET"). Keys are
-    normalised by :func:`_normalise_declared_keys`, one layer up.
+    ``{module::symbol: {"cls", "owner_issue", "reason", "stores"}}``, the TEXT fields COERCED to
+    text so a malformed entry becomes a NAMED violation instead of a `TypeError` that aborts all
+    four rows (which `main()`'s exit contract could not tell from "a row was NOT MET"). ⛔ ``stores``
+    is passed through UNINTERPRETED and uncoerced (`#11492`): it is the one field whose shape is
+    the declaration's answer, so the reader that grades it must see the raw value — a reader that
+    coerced it would turn a malformed declaration into a plausible one. Keys are normalised by
+    :func:`_normalise_declared_keys`, one layer up.
 
     Imported LAZILY and read-only: the register is a leaf module (standard library only, pinned
     by its own `test_the_register_imports_without_entering_the_projection_cycle`), so this read
@@ -1348,6 +1383,7 @@ def declared_writers() -> dict[str, dict]:
             "cls": str(getattr(record, "cls", "") or ""),
             "owner_issue": str(getattr(record, "owner_issue", "") or ""),
             "reason": str(getattr(record, "reason", "") or ""),
+            "stores": getattr(record, "stores", None),
         }
         for key, record in register.EMBED_WRITER_CLASSES.items()
     }
@@ -1705,6 +1741,253 @@ def score_rule_bullet() -> Row:
 
 
 # ── Bullet 2 — "no vector is stored without a path to query it" ─────────────
+#: ── Row 2 reads the SAME product register row 1 reads (`#11492`) ─────────────
+#: `#11444` taught row 1 to read `tortoise/embed_writer_register.py` and `#11492` left row 2
+#: untouched: the same nineteen writers were judged two ways in one file — row 1 said *"every
+#: writer routes or is a named exception"*, row 2 said *"unresolved writers: [19 names]"* — because
+#: row 2 built its hold from the `unknown` set and never read the declaration. One population, two
+#: readings, and the one that holds the epic shut was the one that knew least.
+#:
+#: ⛔ **Row 2 asks a DIFFERENT question, so the fix is not "reuse row 1's class".** Row 2 asks
+#: *"is every stored vector on a label the query leg can serve?"*, and the fact it needs is WHICH
+#: LABEL each writer stores to — which no class expresses. `#11492` required the reading to be
+#: decided rather than assumed, and it is **Case B**: the register classified but carried no label
+#: (`WriterClass` was `{cls, reason, owner_issue}`). Measured at `810eb838c5`, the label is also not
+#: DERIVABLE per writer: the `MERGE|CREATE (:Label` literal in a writer's OWN body yields one label
+#: for THREE of the twenty, two conflicting labels for two (`_event_plain_merge` `{Event, Source}`,
+#: `_rebuild_all_replay` `{Batch, Session}` — and `Batch`/`Session` are NOT served, so a
+#: derivation that "picks one" either misses an unserved label or invents a false `NOT MET`; an
+#: argument against the DERIVATION, not a claim that either writer is held — both are
+#: `unresolved_write`, so `written_labels` flattens their label to the unresolved sentinel before
+#: the hold set is computed and their DECLARATION is the reading this row scores), and NO label for
+#: fifteen. ⚠️ Of those fifteen, FIVE name the label in their OWN `MATCH` (the derivation credits
+#: `MERGE|CREATE` only, because a `MATCH` is a read — `_embedding_repair_attempt` writes
+#: `set_embedding_clause("e")` inside its own `MATCH (e:Event {eventId:$eid})`), NINE name no label
+#: statement in their own body at all (a journal entry, a read, a delegated store, a clause builder,
+#: an interpolated label), and ONE — `_event_raw_write_door` — executes its CALLER's statement.
+#:
+#: So the register now DECLARES it (`WriterClass.stores`: a label tuple, or `NO_LIVE_VECTOR` /
+#: `LABELS_AT_RUNTIME`) and this row reads that declaration. Same shape as `#11444`, not a second
+#: one: **policy as declared data, read by the instrument** — the field's settled pattern (OPA,
+#: *Philosophy*: policy is decoupled from the service *"so that the people responsible for policy
+#: can read, write, analyze, version, distribute, and in general manage policy separate from the
+#: service itself"*), and the same one-owner rule that keeps `route_calls()` from holding a second
+#: spelling of the register's own seam list. The vocabulary itself is read from the register
+#: (:func:`stores_dispositions`), never re-spelled here.
+#:
+#: ⛔ What is NOT weakened (the issue's falsifiers, each pinned in
+#: `tests/test_dod_5090_probe.py`):
+#:   * a writer whose vector lands on a label `run_vector_query` does not serve still holds the
+#:     row — a declared label outside `served_labels()` lands in `stored-without-a-query-path` and
+#:     the row reads `NOT MET`, so that set can become non-empty again;
+#:   * a writer NOTHING declares still holds the row as `unresolved writers` — an undeclared writer
+#:     is a hole, never a silent pass (`#11492`'s own falsifier);
+#:   * a `bypass` in the declaration holds the row. ⛔ `#11492` found that a bypass was only NOTED
+#:     before — `real_bypasses` never reached the verdict — so the note and the hold are now the
+#:     same condition;
+#:   * a `duplicate` identity and an unparseable module are DIFFERENT defects and are not resolved
+#:     by any declaration (a collided writer's label was overwritten, so no label is knowable).
+#: ⚠️ The residual, stated rather than implied: a `NO_LIVE_VECTOR` or label-tuple declaration is
+#: accepted BY NAME once it is shaped as one (`_store_reading`). The instrument cannot re-derive
+#: "this writer stores no live vector" — that is `UNDECIDABLE_WRITE_SHAPES`, data flow — so a false
+#: `NO_LIVE_VECTOR` for a writer that DOES store is indistinguishable here from a correct one.
+#: That is row 1's `exempt` residual one row over, and its mitigation is the same one: the register
+#: is product code under review, and the register's own suite re-derives BOTH halves at HEAD —
+#: `::test_every_declared_label_re_derives_at_this_head` for every declared label, and
+#: `::test_a_no_live_vector_declaration_executes_no_store_clause` for every `NO_LIVE_VECTOR` entry.
+#: ⛔ State the residual at its true size (round-1 review): the `NO_LIVE_VECTOR` scan proves the
+#: writer's own body executes no store clause, which is NOT the same as proving it stores nothing —
+#: a door that EXECUTES A CALLER-SUPPLIED statement (`sdk::_event_raw_write_door`) carries no
+#: marker and is caught only by review. The pin narrows that half; it does not close it.
+ROW2_REGISTER_MODULE = REGISTER_MODULE
+
+
+def stores_dispositions() -> dict[str, str]:
+    """The two NON-label dispositions, read from the register that DEFINES them.
+
+    ⛔ Not literals held here. `NO_LIVE_VECTOR` / `LABELS_AT_RUNTIME` are the register's own
+    vocabulary, and a copy in this file would drift in the FALSE-HOLD direction: a renamed
+    disposition would leave every correct `no-live-vector` declaration reading as an unusable one,
+    holding a row on a correct tree. Same reasoning as :func:`route_calls`, one vocabulary over.
+    """
+    from tortoise import embed_writer_register as register
+
+    return {"no_vector": register.NO_LIVE_VECTOR,
+            "at_runtime": register.LABELS_AT_RUNTIME}
+
+
+def _store_reading(
+    entry: object, dispositions: dict[str, str]
+) -> tuple[tuple[str, ...] | str | None, str | None]:
+    """How to READ one declaration's ``stores`` — ``(reading, violation)``.
+
+    ⛔ No `writer` parameter, on purpose: every violation string below is written WITHOUT a key,
+    and both call sites prefix the writer when they record it. Passing the writer in made it read
+    as though this function attributed the message, while it never did (a dead parameter — measured
+    by AST, `#11492`'s review), and the next editor interpolating it would silently change the
+    malformed-`stores` note text.
+
+    ``reading`` is a label tuple, a disposition string, or ``None`` for "nothing usable", and
+    ``violation`` is the NAMED reason (empty when the declaration is shaped as a declaration).
+
+    ⛔ Every unusable shape is a VIOLATION, never an unresolved label: an empty tuple, a LIST (a
+    frozen declaration must not be editable in place by a consumer — `register.load()` refuses one
+    for the same reason), a bare string outside the vocabulary, a non-string member — each is a
+    declaration that tried to answer row 2's question and did not, and reading any of them as
+    "stores nothing" is exactly the silent pass the falsifier forbids. `#11492` grades a TAMPERED
+    or INJECTED register too, so this checks the shape itself rather than inheriting
+    `register.load()`'s invariant.
+    """
+    if isinstance(entry, str):
+        if entry in (dispositions["no_vector"], dispositions["at_runtime"]):
+            return entry, None
+        return None, (
+            f"declares stores={entry!r}, which is neither a label tuple nor one of "
+            f"{sorted(dispositions.values())}"
+        )
+    if not isinstance(entry, tuple):
+        return None, (
+            f"carries no usable `stores` declaration ({type(entry).__name__}) — row 2 cannot say "
+            "which label its vector lands on, and that is a hole in the DECLARATION"
+        )
+    if not entry:
+        return None, (
+            "declares an EMPTY stores tuple — a shrug is not an answer; say "
+            f"{dispositions['no_vector']!r} if the writer stores no live vector"
+        )
+    bad = [label for label in entry if not isinstance(label, str) or not label]
+    if bad:
+        return None, f"declares stores={entry!r} with non-label members {bad!r}"
+    # A Cypher label's SHAPE, re-checked here rather than inherited from `register.load()` (the
+    # same discipline `_OWNER_ISSUE_RE` follows for `owner_issue`). Without it a tampered
+    # `("Ev ent",)` would be compared as a label and land outside the served set — a `NOT MET` on
+    # a declaration no reader could call valid, i.e. a false hold.
+    shapeless = [label for label in entry if not _STORE_LABEL.fullmatch(label)]
+    if shapeless:
+        return None, f"declares stores={entry!r} with {shapeless!r}, which are not Cypher labels"
+    return tuple(entry), None
+
+
+def resolved_stored_labels(written: dict[str, str] | None = None,
+                           writers: dict[str, dict] | None = None) -> dict:
+    """Row 2's register read: resolve the writers whose own Cypher named NO label (#11492).
+
+    ``written`` is :func:`written_labels`' derivation — the MEASUREMENT, which always wins where it
+    succeeded. This only fills the gaps it left, and only for the population a declaration is owed
+    for (`unresolved_write` ∪ `ungated`, the same tuple row 1 scores). ⛔ `duplicate` is NOT in that
+    population: a collided identity's label was overwritten by the later definition, so no
+    declaration can know it, and resolving one would erase a defect the row reports.
+
+    Returns a dict of buckets, so the caller reports rather than summarises:
+
+    * ``labels`` — ``{writer: (label, …)}`` resolved from the declaration (all compared to served);
+    * ``no_vector`` — declared `NO_LIVE_VECTOR` (named; contributes no label);
+    * ``at_runtime`` — declared `LABELS_AT_RUNTIME` (HOLDS: no served-set comparison is possible);
+    * ``undeclared`` — nothing declares it (HOLDS: the issue's own falsifier);
+    * ``violations`` — ``{writer: why}`` a declaration that does not answer the question (HOLDS);
+    * ``classes`` — ``{writer: cls}`` for every DECLARED writer, so a `bypass` is read from the
+      declaration as well as from the census (row 2 holds on either);
+    * ``error`` — the register could not be read (HOLDS as UNMEASURED; every bucket the
+      DECLARATION feeds is empty, because an unreadable declaration resolves nothing and blames
+      nobody) — but ``partial`` is deliberately NOT one of them: it is measured from the CENSUS,
+      before the register is touched, so it survives the failure boundary. ⛔ Keep it there: moving
+      that computation inside the `try` (to make this sentence literally true) would delete the
+      `MORE THAN ONE label` evidence on the error path, which is the "a `PARTIAL` that names
+      nobody" defect the row's own comments and its pin exist to prevent.
+
+    Plus ``error``: a register that cannot be read yields NO resolution at all and a NAMED error,
+    never an empty declaration (which would render every writer `undeclared` and blame the product
+    for the instrument's failure).
+    """
+    writers = embedding_writers() if writers is None else writers
+    written = written_labels(writers) if written is None else written
+    out: dict = {"labels": {}, "no_vector": [], "at_runtime": [], "undeclared": [],
+                 "violations": {}, "classes": {}, "partial": [], "contradictions": [],
+                 "error": None}
+    # ⛔ A PARTIAL measurement is NOT an unresolved one. `UNKNOWN(two labels: Event, Batch)` is the
+    # derivation REPORTING TWO LABELS it did measure — one of which may be unserved — so a
+    # declaration must never replace it: narrowing it to `("Event",)` (or erasing it with
+    # `NO_LIVE_VECTOR`) drops the measured label before the served-set comparison and reads `MET`
+    # (`#11492`'s review, reproduced by injection on an `ungated` writer). These HOLD the row and
+    # are named; no declaration resolves them.
+    out["partial"] = [
+        writer for writer, label in sorted(written.items())
+        if label.startswith(PARTIAL_LABEL_PREFIX)
+    ]
+    candidates = [
+        writer for writer, label in sorted(written.items())
+        if label.startswith("UNKNOWN") and writer not in out["partial"]
+        and writers.get(writer, {}).get("kind") in ("unresolved_write", "ungated")
+    ]
+    try:
+        declared = _normalise_declared_keys(declared_writers())
+        dispositions = stores_dispositions()
+    except Exception as exc:  # noqa: BLE001, RUF100 — fail-closed, and NAMED
+        out["error"] = f"{type(exc).__name__}: {exc}"
+        return out
+    # Every declared CLASS, unfiltered by population: a `bypass` anywhere in the declaration is a
+    # defect this row HOLDS on (`#11492` — before it, a bypass only produced a note), and reading it
+    # here rather than from the census alone means a bypass declared for a writer whose label
+    # derives fine is still named.
+    out["classes"] = {w: str(entry.get("cls") or "") for w, entry in declared.items()}
+    for writer in candidates:
+        if writer not in declared:
+            out["undeclared"].append(writer)
+            continue
+        reading, violation = _store_reading(declared[writer].get("stores"), dispositions)
+        if violation:
+            out["violations"][writer] = violation
+        elif reading == dispositions["no_vector"]:
+            out["no_vector"].append(writer)
+        elif reading == dispositions["at_runtime"]:
+            out["at_runtime"].append(writer)
+        else:
+            out["labels"][writer] = reading
+    # ⛔ A declaration is read for EVERY declared writer, not only for the ones whose derivation
+    # failed. Where the derivation SUCCEEDED, a declaration that disagrees with the measured label
+    # is a CONTRADICTION — never overwrite the measurement, and never drop the claim either: the
+    # contradiction itself is the finding. `#11492`'s last review measured the false pass this
+    # closes: a live-register writer declared `stores=("Event", "Batch")` (a shape
+    # `register.load()` accepts) was skipped as "derivation already won", so `Batch` never reached
+    # the served-set comparison and the row could read `MET` over a declared unserved label.
+    # Neither side is assumed right — part of the derivation is a heuristic (module-label stem, a
+    # documented override) — so the row reports both sides instead of picking a winner.
+    for writer, entry in sorted(declared.items()):
+        if writer in candidates or writer in out["violations"]:
+            continue
+        measured = {label.strip() for label in written.get(writer, "").split(",") if label.strip()}
+        if not measured or written.get(writer, "").startswith("UNKNOWN"):
+            continue  # no concrete label on this row's side to disagree with
+        reading, violation = _store_reading(entry.get("stores"), dispositions)
+        if violation:
+            # ⛔ The FOURTH shape, and the same drop as the `at_runtime` arm above: an unusable
+            # declaration returns `(None, violation)`, and discarding the violation left `None`
+            # neither a disposition nor a tuple, so it fell straight through with no contradiction
+            # recorded. `('Point', 'Batch', 3)` then read `MET` — a declaration naming a second,
+            # unserved label, dropped before the served-set comparison because one member was
+            # malformed. This row grades a TAMPERED or INJECTED register too (`_store_reading`'s own
+            # docstring says so), so `register.load()`'s refusal is not available as a defence here.
+            out["violations"][writer] = violation
+        elif reading == dispositions["no_vector"]:
+            out["contradictions"].append(
+                f"{writer}: declares {dispositions['no_vector']!r} but its own Cypher measures "
+                f"{sorted(measured)}")
+        elif reading == dispositions["at_runtime"]:
+            # ⛔ The THIRD arm, and the one this check first shipped without: `LABELS_AT_RUNTIME` is a
+            # `str`, so it satisfied neither arm above and the declaration was silently DROPPED — a
+            # contradiction accepted as agreement, and the row free to read `MET`. It contradicts a
+            # MEASURED label exactly as the other two do: the derivation resolved `Point`, while the
+            # declaration says the label is not statically knowable. Latent only while both live
+            # `at_runtime` writers are candidates whose derivation failed; one writer edit away from
+            # a false `MET` in the epic's published evidence (review finding, P1).
+            out["contradictions"].append(
+                f"{writer}: declares {dispositions['at_runtime']!r} but its own Cypher measures "
+                f"{sorted(measured)}")
+        elif isinstance(reading, tuple) and not set(reading) <= measured:
+            out["contradictions"].append(
+                f"{writer}: declares {sorted(reading)} but its own Cypher measures "
+                f"{sorted(measured)}")
+    return out
 
 
 def written_labels(writers: dict[str, dict] | None = None) -> dict[str, str]:
@@ -1762,23 +2045,195 @@ def served_labels() -> set[str]:
     return {entity_label(t) for t in VALID_ENTITY_TYPES}
 
 
+def scored_labels(
+    written: dict[str, str] | None = None, writers: dict[str, dict] | None = None
+) -> dict:
+    """The map **row 2 SCORES**: the derivation, with the register's declarations filled in.
+
+    Returns ``{"labels", "by_writer", "unresolved", "resolution"}``. ⛔ This is the ONE place the two inputs are combined,
+    and it exists because combining them in two places is how a row and its own pin disagree:
+    `written_labels()` is the pure MEASUREMENT (it never reads the register) and stays that way, so a
+    caller that wants what the row scored — the row itself, or a test pinning the row's implication —
+    must come through here. `#11492`'s review caught the first draft claiming in a comment that
+    resolving in place made `written_labels()`' own callers see the resolved map; it could not, and a
+    pin built on that belief would have reddened the next lane on a CORRECT tree.
+
+    Rules, in one place:
+
+    * a label the DERIVATION resolved wins, always — the register is a supplement, never a
+      replacement (`#11444`);
+    * a writer whose derivation failed and whose declaration names labels contributes those labels;
+    * a writer declared `NO_LIVE_VECTOR` contributes NO label (it has no store of its own);
+    * a writer declared `LABELS_AT_RUNTIME` stays unresolved, named by its own disposition;
+    * a writer nothing declares, or one whose declaration does not answer, stays unresolved;
+    * a `duplicate` identity stays unresolved regardless of any declaration — its label was
+      overwritten, which no declaration can repair;
+    * ⛔ **a declaration that CONTRADICTS a measured label HOLDS the row** (not "is ignored"). The
+      derivation is still never overwritten, but a declared label the writer's own Cypher does not
+      name is a disagreement between the product and the measurement — and silently discarding it
+      was a FALSE PASS `#11492`'s last review measured: a live-register writer declared
+      `stores=("Event", "Batch")` (a shape `register.load()` accepts) was dropped because its
+      derivation had succeeded, so `Batch` never reached the served-set comparison and the row could
+      read `MET` over a declared unserved label. Neither side is assumed right — the derivation is a
+      heuristic in part (module-label stem, a documented override), the declaration is product
+      judgement — so the row reports the contradiction instead of picking a winner.
+    """
+    writers = embedding_writers() if writers is None else writers
+    written = written_labels(writers) if written is None else dict(written)
+    resolved = resolved_stored_labels(written, writers)
+    # The SERVED-SET comparison's subject: every label a write path stores a vector on. A
+    # multi-label declaration contributes EACH label, never a joined string — `#11492`'s first
+    # draft joined them into one value, which then failed the comparison as a "label" named
+    # `Point, Subject, Object, Source, Event` and read `NOT MET` on a correct tree.
+    labels: set[str] = {label for label in written.values() if not label.startswith("UNKNOWN")}
+    for declared_labels in resolved["labels"].values():
+        labels.update(declared_labels)
+    for writer in resolved["no_vector"]:
+        # A `no-live-vector` declaration contributes NO label — that is what makes
+        # `stored-without-a-query-path` a statement about STORES rather than about names.
+        written.pop(writer, None)
+    # `unresolved` is row 2's HOLD set: every writer whose label is still not a label after the
+    # declaration was read. A writer the register resolved is NOT in it (that is the whole fix).
+    unresolved = {fn: label for fn, label in written.items() if label.startswith("UNKNOWN")}
+    for writer, declared_labels in resolved["labels"].items():
+        unresolved.pop(writer, None)
+        written[writer] = ", ".join(declared_labels)
+    for writer in resolved["at_runtime"]:
+        # Kept OUT of `written`'s resolved set and named by its own disposition: the value is not a
+        # label, so it must never reach the served-set comparison as one.
+        written.pop(writer, None)
+        unresolved[writer] = AT_RUNTIME_LABEL
+    return {"labels": labels, "by_writer": written, "unresolved": unresolved,
+            "resolution": resolved}
+
+
 def score_path_bullet() -> Row:
     """Bullet 2 — every label a write path embeds is one the query path serves."""
     writers = embedding_writers()
-    written = written_labels(writers)
+    # ── #11492: the map this row SCORES — the derivation with the product register's declared
+    # labels filled in, through the ONE combinator (:func:`scored_labels`). ⛔ The DERIVED label
+    # still wins wherever it exists: the register is a SUPPLEMENT to the measurement, never a
+    # replacement (`#11444`'s third verification checkbox, one row over).
+    scored = scored_labels(writers=writers)
+    written, labels, unknown, resolved = (
+        scored["by_writer"], scored["labels"], scored["unresolved"], scored["resolution"])
     served = served_labels()
-    labels = {label for label in written.values() if not label.startswith("UNKNOWN")}
-    unknown = {fn: label for fn, label in written.items() if label.startswith("UNKNOWN")}
+    # ⛔ `unknown` is row 2's OWN hold set, and it is computed AFTER resolution: a writer the
+    # register resolved is no longer unknown (that is the whole fix), while a writer declared
+    # `labels-at-runtime` still is — the declaration answered WHERE the vector lands with "it
+    # depends", which cannot be compared to the served set. The at-runtime writers are ALSO
+    # named by their own note below, so they are held once and reported twice, never counted as
+    # `unresolved writers` (a different, sharper defect: nothing declares them at all).
+    # ⛔ An UNREADABLE register means NOTHING was resolved, so every outside-gate writer is
+    # "unresolved" only in the sense that the instrument could not ask — and naming them as
+    # `unresolved writers` ("nothing in the product says which label they store on") would blame
+    # the PRODUCT for the instrument's own failure in the same cell that says it does not.
+    # `#11492`'s round-2 review measured exactly that contradiction on the live population; the
+    # UNMEASURED note is the whole of what an unreadable register can say.
+    unresolved_undeclared = [] if resolved["error"] else sorted(
+        fn for fn in unknown if writers[fn]["kind"] in ("unresolved_write", "ungated")
+        and fn not in resolved["at_runtime"] and fn not in resolved["violations"]
+        and fn not in resolved["partial"]
+    )
     duplicates = sorted(w for w, d in writers.items() if d["kind"] == "duplicate")
     unparsed = unparsed_modules(writers)
+    # A writer whose label is unresolved and which NO note above accounts for: a `gated` writer
+    # whose own Cypher named NO single label (label `UNKNOWN`, one label — NOT the
+    # `UNKNOWN(two labels: …)` shape, which is a MEASUREMENT: it is subtracted via
+    # `resolved["partial"]` and named by its own "MORE THAN ONE label" note), or a `duplicate`
+    # (reported by its own note below). `#11492`'s review caught the first draft narrowing the
+    # `unresolved writers` note to the declaration population and thereby dropping the `gated` case
+    # from the evidence while still holding the row — a `PARTIAL` naming nobody.
+    #
+    # ⛔ Subtracted BY KIND, never emptied on `resolved["error"]` (round-2 review, P2): the two
+    # note populations have DIFFERENT subjects. `unresolved_undeclared` is about writers only the
+    # register could have declared, so an unreadable register makes it unknowable and it is emptied
+    # above. A `gated` writer's label came from its OWN Cypher and the register was never consulted
+    # for it — its declaration is unaffected by whether the register could be read, so emptying this
+    # set would re-create the very defect the comment above records: a `PARTIAL` that names nobody.
+    # The expression is equivalent to the previous one whenever the register IS readable.
+    unexplained = sorted(
+        set(unknown) - set(resolved["at_runtime"])
+        - set(resolved["violations"]) - set(duplicates) - set(resolved["partial"])
+        - {fn for fn in unknown
+           if writers[fn]["kind"] in ("unresolved_write", "ungated")}
+    )
     orphans = labels - served
     notes = [
         f"written labels: {sorted(labels)}",
         f"served labels (run_vector_query vocabulary): {sorted(served)}",
         f"stored-without-a-query-path: {sorted(orphans) or 'none'}",
     ]
-    if unknown:
-        notes.append(f"unresolved writers (hold this row at PARTIAL): {sorted(unknown)}")
+    if resolved["error"]:
+        notes.append(
+            "#11492 — labels resolved from the product register "
+            f"({ROW2_REGISTER_MODULE}): UNMEASURED ({resolved['error']}) — the register could "
+            "not be read, so NO writer is resolved and none is blamed on the product"
+        )
+    elif (resolved["labels"] or resolved["no_vector"] or resolved["at_runtime"]
+          or resolved["undeclared"] or resolved["violations"]):
+        # The histogram row 1 prints over its own population, one row over: a reader must be able
+        # to see that a `MET` here rests on DECLARED labels rather than derived ones.
+        notes.append(
+            "#11492 — labels resolved from the product register "
+            f"({ROW2_REGISTER_MODULE}): {len(resolved['labels'])} label-resolved · "
+            f"{len(resolved['no_vector'])} declared no-live-vector · "
+            f"{len(resolved['at_runtime'])} labels-at-runtime · "
+            f"{len(resolved['undeclared'])} undeclared · "
+            f"{len(resolved['violations'])} malformed"
+            + ("; " + ", ".join(
+                f"{w}={', '.join(v)}" for w, v in sorted(resolved['labels'].items()))
+               if resolved["labels"] else "")
+            + ("; " + ", ".join(resolved["no_vector"])
+               if resolved["no_vector"] else "")
+        )
+    if resolved["at_runtime"]:
+        notes.append(
+            "writers whose stored label is decided at RUNTIME (hold this row at PARTIAL — the "
+            "declaration cannot name a label, so no served-set comparison is possible): "
+            f"{resolved['at_runtime']}"
+        )
+    if resolved["violations"]:
+        notes.append(
+            "malformed stores declarations (hold this row at PARTIAL — a declaration that did "
+            "not answer WHERE the vector lands): "
+            + ", ".join(f"{w}: {why}" for w, why in sorted(resolved["violations"].items()))
+        )
+    # ⛔ `#11492` round-2/round-3 review. The two note populations have DIFFERENT subjects and are
+    # gated DIFFERENTLY, one layer up — do not "restore" them to a shared rule:
+    #   * `unresolved_undeclared` is about writers only the REGISTER could have declared, which is
+    #     unknowable when the register cannot be read → it is EMPTIED on `resolved["error"]`, so an
+    #     unreadable register cannot print "nothing in the product says which label they store on"
+    #     in the same cell that says it blames nobody. The blame belongs to the instrument.
+    #   * `unexplained` is about a writer whose label came from its OWN Cypher and named NO single
+    #     label (`gated`, label `UNKNOWN`) — the register was never consulted for it, so an
+    #     unreadable register does not excuse dropping it → it is subtracted BY KIND, never emptied,
+    #     or the row holds `PARTIAL` while naming nobody (the defect round 1 fixed). ⛔ The
+    #     `UNKNOWN(two labels: …)` shape is NOT here: it is a MEASUREMENT, removed by
+    #     `- set(resolved["partial"])` and named by its own "MORE THAN ONE label" note — deleting
+    #     that note as "redundant" would re-create a `PARTIAL` naming nobody, one branch over.
+    if unresolved_undeclared:
+        notes.append(
+            "unresolved writers (hold this row at PARTIAL — nothing in the product says which "
+            f"label they store on): {unresolved_undeclared}"
+        )
+    if resolved["contradictions"]:
+        notes.append(
+            "declarations that CONTRADICT the writer's own Cypher (hold this row at PARTIAL — the "
+            "declaration is not ignored and the measurement is not overwritten; the disagreement "
+            f"is the finding): {'; '.join(resolved['contradictions'])}"
+        )
+    if resolved["partial"]:
+        notes.append(
+            "writers whose own Cypher names MORE THAN ONE label (hold this row at PARTIAL — a "
+            "PARTIAL measurement is not a gap, so no declaration may narrow it): "
+            f"{resolved['partial']}"
+        )
+    if unexplained:
+        notes.append(
+            "writers whose label is unresolved and which this row does not resolve from a "
+            f"declaration (hold this row at PARTIAL): {unexplained}"
+        )
     if duplicates:
         notes.append(
             "duplicate writer identities (hold this row at PARTIAL — the later "
@@ -1805,18 +2260,31 @@ def score_path_bullet() -> Row:
     # and reported a collision as "#10541's own defect". This row is quoted
     # into #5090's body as evidence, so the misattribution is what a reader
     # sees (review at `adde2763f`, blocking).
+    # ⛔ `#11492` narrowed this population: it is the writers row 2 could STILL not resolve —
+    # `unresolved_write` AND still in `unknown` — because once the product declares a label the
+    # writer's label IS resolved, and the census's job (give a scored answer for a writer whose
+    # label the vocabulary could not resolve) is discharged by the declaration instead. The
+    # `kind` gate is kept for the reason below: a `duplicate` identity is a DIFFERENT defect with
+    # no key it could ever have in `WRITER_CENSUS`, so it is never a census subject even when its
+    # label is unresolved.
     unresolved_writers = {fn: d for fn, d in writers.items()
-                          if d["kind"] == "unresolved_write"}
-    # `unknown` is wider than this population by TWO label-keyed groups, and
-    # neither is a census subject: the `duplicate` identities above, and
-    # `gated`/`ungated` writers whose label derivation still failed (`UNKNOWN`,
-    # or the `UNKNOWN(two labels: …)` shape) — those have their ROUTE resolved,
-    # which is what `kind` records, so the three #10541 route classes cannot
-    # apply to them. Because the two populations CAN differ, the note below
-    # names the one it counted (`N of M UNKNOWN-labelled writers`) rather than
-    # claiming "the unresolved set": a total that silently omits a writer this
-    # row listed four notes up is the same defect shape the population fix
-    # above removes.
+                          if d["kind"] == "unresolved_write" and fn in unknown}
+    # ⛔ `real_bypasses` is computed over EVERY writer, never over `unresolved_writers`: a
+    # register declaration resolves a writer OUT of `unknown`, and deriving the bypass hold from
+    # that population would mean the better the declaration, the fewer defects the row can see —
+    # a census `bypass` on a declared writer would read `MET` and appear in no note (`#11492`'s
+    # round-2 review, both reviewers, verified by injection). The census class is a property of the
+    # WRITER; whether this row managed to resolve its label is not.
+    # `unknown` is STILL wider than this population by three label-keyed groups, and none is a
+    # census SUBJECT — but one of them is a census MEMBER, which is why the header says `N of M`
+    # and the segments reconcile instead of pretending they are the same set:
+    #   * `duplicate` identities — a collided name has no census key, ever;
+    #   * `gated`/`ungated` writers whose label derivation failed — their ROUTE is resolved, which
+    #     is what `kind` records, so the three #10541 route classes cannot apply to them;
+    #   * a writer declared `labels-at-runtime` — unresolved by DECLARATION rather than by a gap.
+    #     ⛔ It IS counted here when its `kind` is `unresolved_write` (both of `#11492`'s runtime
+    #     writers are), and its census class is the one that applies. An earlier wording of this
+    #     comment claimed the opposite; the note is the artifact, so it names what it counts.
     # An out-of-vocabulary class (a typo'd or retired entry) is NOT a class: it
     # would otherwise fall through BOTH `by_class` (gated on CENSUS_CLASSES) and a
     # `unclassified` gated only on `is None` — the shape this code had before the
@@ -1832,9 +2300,18 @@ def score_path_bullet() -> Row:
             by_class.setdefault(cls, []).append(fn)
     if unresolved_writers:
         notes.append(
-            "#10541 census over the writers labelled UNKNOWN(unresolved "
-            f"producer) — {len(unresolved_writers)} of {len(unknown)} "
-            "UNKNOWN-labelled writers: "
+            # ⛔ THE HEADER NAMES THE PROPERTY, NEVER ONE LABEL (`#11495`'s review, measured).
+            # `unresolved_writers` is `kind == "unresolved_write" and fn in unknown`, and
+            # `scored_labels()` puts a writer declared `labels-at-runtime` into `unknown` with
+            # `AT_RUNTIME_LABEL` — so a census SUBJECT can carry `UNKNOWN(unresolved producer)`
+            # OR `UNKNOWN(labels decided at runtime)`. The header used to say the former, and on
+            # the LIVE tree BOTH of its two subjects carried the latter, i.e. the note
+            # contradicted the runtime note four cells to its left inside one published row.
+            # "whose label is STILL UNKNOWN" is exactly the predicate the population is built
+            # from, so no segment on the line can falsify it.
+            "#10541 census over the writers whose label is STILL UNKNOWN (neither "
+            f"the derivation nor a declaration resolved it) — {len(unresolved_writers)} of "
+            f"{len(unknown)} UNKNOWN-labelled writers: "
             # A middle dot, not `" | "`: `Row.observed` joins these notes into
             # ONE markdown table cell, and a pipe there used to split a
             # 4-column row into seven. `_table` now escapes the character at
@@ -1868,7 +2345,9 @@ def score_path_bullet() -> Row:
             f"UNCLASSIFIED writers (hold this row at PARTIAL — #10541's own "
             f"defect): {unclassified}"
         )
-    real_bypasses = sorted(by_class.get(CENSUS_BYPASS, []))
+    real_bypasses = sorted(
+        fn for fn in writers if _census_class(fn) == CENSUS_BYPASS
+    )
     if real_bypasses:
         notes.append(
             f"REAL BYPASSES (#10541 class 3 — a defect, not an exemption): "
@@ -1887,8 +2366,36 @@ def score_path_bullet() -> Row:
     # COMPLETE measurement. Re-classing the writer does not make the vocabulary
     # resolve it, so the row keeps holding. The open fork is recorded on
     # #10541 — flipping this is a decision, not a cleanup.
+    # ⛔ #11492: what DOES move it, and what still cannot.
+    #   * a writer RESOLVED from the product register (`resolved['labels']` / `no_vector`)
+    #     is no longer in `unknown`, so the hold it used to create is gone — that is
+    #     reading (b) applied to THIS row's question, not row 1's class reused: the
+    #     declaration states a LABEL, and the label is compared to the served set here.
+    #   * a declared label OUTSIDE the served set is `orphans`, i.e. `NOT MET` — the
+    #     falsifier's whole point (`stored-without-a-query-path` can go non-empty again).
+    #   * `at_runtime`, a malformed declaration, and an UNREADABLE register all HOLD: the
+    #     first cannot be compared to the served set at all, and the last two are holes in
+    #     the declaration rather than answers. A `MET` over a register nobody could read is
+    #     the UNMEASURED-is-not-nothing misattribution row 1 refuses, one row over.
+    #   * a `bypass` in the declaration HOLDS — `#11492` found it was only NOTED before
+    #     (`real_bypasses` never reached the verdict), so the note and the hold are now one
+    #     condition. It is read from the DECLARATION as well as the census: the register is
+    #     where a class is declared, and `CENSUS_BYPASS` is the instrument's own vocabulary.
+    register_bypasses = sorted(
+        writer for writer in writers
+        if str((resolved.get("classes") or {}).get(writer, "")) == CENSUS_BYPASS
+    )
+    if register_bypasses:
+        notes.append(
+            "REAL BYPASSES (hold this row at PARTIAL — a bypass is a DEFECT, never an "
+            f"exemption): {register_bypasses}"
+        )
     verdict = "NOT MET" if orphans else (
-        "PARTIAL" if (unknown or unparsed or duplicates) else "MET")
+        "PARTIAL" if (unknown or unparsed or duplicates or real_bypasses or register_bypasses
+                      or resolved["partial"] or resolved["contradictions"]
+                      or resolved["at_runtime"] or resolved["violations"]
+                      or resolved["error"])
+        else "MET")
     return Row(
         bullet=2,
         text=BULLETS[1],

@@ -31,6 +31,8 @@ from __future__ import annotations
 
 import ast
 import importlib.util as _ilu
+import io
+import itertools
 import json
 import os
 import re
@@ -38,6 +40,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import tokenize
 import types
 from pathlib import Path
 
@@ -4559,9 +4562,13 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # appends `classify(S2) failed` / `classify(union) failed` — and NOT the
         # referentiality-selection fail-opens, which carry a `noqa` directive
         # naming `BLE001` and `RUF100` and warn `referentiality selection …
-        # candidates kept (fail-open)`. ⛔ The line numbers this comment used to
-        # quote (`10490`/`10453`/`10620`/`10599`) were stale at that head and are
-        # stale here: a comment asserts nothing, so read the anchors from the row,
+        # candidates kept (fail-open)`. ⛔ Of the numbers this comment used to
+        # quote, THREE were CORRECT at `76a89034e`, the fold head they were
+        # written for — `10490`/`10620` were the row's own members and `10599` the
+        # `classify_later and complete_list` gate — and only `:10453` was wrong: it
+        # is the `TORTOISE_CLASSIFY_LATER` comment line, and
+        # `vet_warnings.extend(_w)` sat at `:10465`/`:10587`. All four are dead at
+        # this head. A comment asserts nothing, so read the anchors from the row,
         # never from this prose.
         ("docs/00_index.md", "fail-open `except` at", (
             ("13071", "except Exception as e:  # never block capture (P1)"),
@@ -10706,15 +10713,64 @@ def test_the_control_arm_definition_names_the_frozen_records_divergence():
         "sentence")
 
 
+def _call_sites(src: str) -> list[tuple[int, str]]:
+    """Call sites of the three edge-creating verbs — TOKENS, not substrings.
+
+    A regex cannot tell a call from a comment or a string that names the same verb, and
+    `re` also cannot tell `create_operator(payload)` from a prose mention ending in a
+    parenthesis. Both false readings were measured on this record's arm: a comment adding
+    `# call create_operator(payload) to publish` claimed the record's "no producer"
+    conclusion was false when nothing was called. `tokenize` separates NAME/OP from
+    COMMENT/STRING by construction, so the arm only ever reports a real `NAME (` pair.
+
+    A `def` is NOT a call site: `def create_operator(payload)` is the same NAME/`(` PAIR, and
+    counting it told a fixer the record's conclusion was FALSE when only the function's own
+    definition was present (measured) — the wrong diagnosis, since a definition produces
+    nothing.
+    """
+    names = {"create_edge", "create_about_edge", "create_operator"}
+    toks = list(tokenize.generate_tokens(io.StringIO(src).readline))
+    out: list[tuple[int, str]] = []
+    for i, (a_line, b_line) in enumerate(itertools.pairwise(toks)):
+        if not (a_line.type == tokenize.NAME and a_line.string in names
+                and b_line.type == tokenize.OP and b_line.string == "("):
+            continue
+        # ⛔ Indexed, not a `zip(toks, toks[1:], toks[2:])` triple: that form binds the verb to
+        # `toks[1:]`, so a call at the FIRST token of the source was invisible (measured — the
+        # helper answered `[]` for `create_operator(p)` while every later line was caught).
+        prev = toks[i - 1] if i else None
+        if prev is not None and prev.type == tokenize.NAME and prev.string == "def":
+            continue
+        out.append((a_line.start[0], a_line.string))
+    return out
+
+
 def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     """`RECONCILE-A1-A2-A5.md`'s LIVE cites, which no sweep reads.
 
-    Rule 3 of agent-infra#3442: this PR re-points five cites in this record
-    (`extractor_v2.py:10815`->`:10891`, `sdk.py:17472`->`:17574`,
+    Rule 3 of agent-infra#3442: this leg pins the record's LIVE cites — the four
+    #11509 re-pointed (`extractor_v2.py:10815`->`:10891`, `sdk.py:17472`->`:17574`,
     `sdk.py:16414-16428`->`:16516-16530` x3, `probes/capstone_measure.py:2238-2243`
-    ->`:2724-2726`) and, measured before this pin existed, re-staling ANY of them
+    ->`:2724-2726`), `extractor_v2.py:1720` unchanged, the `create_operator`
+    reproduction quote this PR re-derived (`:8938 :8956 :8963 :9343` ->
+    `:9006 :9024 :9031 :9411`, drifted +68 unnoticed since #11449 — the neighbouring
+    #11376 did not move these lines), the `:12929` `vet_enabled` live-cite, the
+    bundle's `hasPart`/`hierarchies` split, and the four further LIVE cites a fresh
+    review found still unwatched (`pack_hierarchy.py:419`, the
+    `probes/capstone_measure.py:275-283` window and the `sdk.py:17574` cite it carries
+    INSIDE it, `identity_hold.py:125`, `value_gate.py:81`) — and, measured before
+    this pin existed, re-staling ANY of them
     left every suite green: the record is in no `_BUNDLE_DOCS` entry and
-    `grep -rn RECONCILE tests/` returned nothing. A record whose whole thesis is
+    `git grep -ln RECONCILE-A1-A2-A5 -- tests/ ':!tests/test_7949_capstone_measure.py'`
+    printed nothing at the base this pin was added — note the self-match, the same trap
+    as the `hasPart` grep below: this file names the record, so an unexcluded search
+    returns itself. The bare `RECONCILE` token matches 10 unrelated files
+    (`_BILLING_RECONCILE_INFLIGHT` and friends), so the record's NAME, excluded, is the
+    claim. ⚠️ No numeral is stated for the count: a typed count is this bundle's
+    recurring defect, and every one written so far undercounted the cites a later
+    commit added (`five` here went stale the moment the `create_operator` quote and
+    the `vet_enabled` cite landed). The enumeration above is the claim; the asserts
+    below are what bind it. A record whose whole thesis is
     that "a claim nothing re-checks can rot silently" cannot leave its own numbers
     unwatched.
 
@@ -10723,38 +10779,519 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     on purpose (`:8880` at `80c912244`, `:9433` at `d69faaf38`); sweeping the whole
     document would either red on those or need a historical marker plus its exact
     cite list, i.e. more pinned surface than the claims this PR touches. This leg
-    binds only what the PR re-derived, and it is discriminating in both directions:
-    re-staling a cite in the RECORD reds it, and an insertion in the CODE above a
-    cited line reds it too — every arm pins its cited line EXACTLY (a range pins
-    both endpoints and its middle), never a window that a shift can slide inside.
+    binds only what the PR re-derived, and for THOSE cites it is discriminating in
+    both directions: re-staling a cite in the RECORD reds it, and an insertion in
+    the CODE above a cited line reds it too — every arm pins its cited line EXACTLY
+    (a 3-line range pins both endpoints AND its middle; a longer one pins both
+    endpoints, which is sufficient because an interior insertion moves the closing
+    endpoint), never a window that a shift can slide inside.
+
+    ⛔ SCOPE, stated so this docstring does not claim more than the arms bind: the record
+    carries FURTHER live cites this leg does NOT pin — among them
+    `pack_hierarchy.py:59`/`:78`/`:353`/`:447` and `extractor_v2.py:1154`, each stated once
+    or twice and watched by nothing (measured: re-staling any of them leaves this file
+    green). They are recorded on #11173, the open root for capstone cite drift, whose
+    durable fix is putting RECONCILE in a sweep (`_BUNDLE_DOCS`) rather than growing this
+    leg cite by cite. A reviewer who finds another one is finding a TRUE gap in the
+    record's coverage — not a defect in the arms listed here, and not a reason to add a
+    pin to this micro PR.
     """
     record = _REPO / "docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md"
     text = record.read_text(encoding="utf-8")
     sdk = (_REPO / "tortoise/sdk.py").read_text(encoding="utf-8").splitlines()
     ext = (_REPO / "tortoise/extractor_v2.py").read_text(encoding="utf-8").splitlines()
     probe = PROBE.read_text(encoding="utf-8").splitlines()
+    pack_hierarchy = (_REPO / "tortoise/pack_hierarchy.py").read_text(
+        encoding="utf-8").splitlines()
+    identity_hold = (_REPO / "tortoise/identity_hold.py").read_text(
+        encoding="utf-8").splitlines()
+    value_gate = (_REPO / "tortoise/value_gate.py").read_text(
+        encoding="utf-8").splitlines()
+
+    # ⛔ The CALL-shaped arm comes FIRST, because it is the only one that can report the
+    # true failure. A production `create_operator(` call necessarily contains the bare
+    # token, so a token-scanning arm below would fire too — and an earlier revision's DID
+    # fire first (measured), instructing a fixer to RE-DERIVE the record's line numbers:
+    # the wrong repair, aimed at a staleness where the conclusion itself is false.
+    #
+    # ⛔ This check is TOKENIZED, not a regex, for THREE measured reasons — the first two
+    # defective in opposite directions, the third a limitation of `re` itself:
+    #   1. A dot-ANCHORED pattern (the record's own command shape) missed the unqualified
+    #      `return create_operator(payload)` — a real call with no receiver.
+    #   2. A dot-EXCLUDING lookbehind then missed the RECEIVER-qualified form
+    #      (`sdk.create_edge(payload)`), i.e. it pinned the COMPLEMENT of the claim while
+    #      its message asserted the claim.
+    #   3. Any `re` arm also reads a COMMENT or a STRING that names the verb as a call, so
+    #      a prose mention claimed the record's conclusion was FALSE when nothing was called.
+    # `_call_sites` matches a NAME/`(` token PAIR, so it covers both receivers and the
+    # unqualified form, and COMMENT/STRING tokens cannot match by construction.
+    _calls = _call_sites("\n".join(ext) + "\n")
+    assert _calls == [], (
+        f"the record's load-bearing half is the CALL count (0) — a production call site "
+        f"makes its 'no producer' conclusion FALSE, not merely stale (found {_calls}); this "
+        "reds before the line-number arm below can misdirect the repair")
+    # The helper's own two degenerate cases, so the detector cannot go inert silently: a call at the
+    # FIRST token of the source (which a `zip(toks, toks[1:], toks[2:])` form missed — measured),
+    # and a DEFINITION, which is not a call site.
+    assert _call_sites("create_operator(payload)\n") == [(1, "create_operator")], (
+        "`_call_sites` must see a call at the FIRST token of the source — a triple-zip over "
+        "`(toks, toks[1:], toks[2:])` cannot, and answered `[]` there")
+    assert _call_sites("def create_operator(payload):\n    pass\n") == [], (
+        "a `def` is not a call site — counting it tells a fixer the record's conclusion is FALSE "
+        "when only the function's own definition is present")
+    # The four shapes the comment above claims the arm separates, each asserted rather than described:
+    # the docstring's own two false readings (a receiver-qualified call missed by a dot-EXCLUDING
+    # lookbehind, a comment read as a call) were UNBOUND — reintroducing either left the suite green
+    # (measured), because the live tree has neither shape.
+    assert _call_sites("sdk.create_edge(payload)\n") == [(1, "create_edge")], (
+        "a RECEIVER-qualified call is a call site")
+    assert _call_sites("return create_operator(x)\n") == [(1, "create_operator")], (
+        "an UNQUALIFIED call is a call site")
+    assert _call_sites("# call create_operator(payload)\n") == [], (
+        "a COMMENT naming the verb is not a call site")
+    assert _call_sites('_X = "create_operator(payload)"\n') == [], (
+        "a STRING naming the verb is not a call site")
 
     # A1: #11205's channel is TRANSPORT ONLY — the schema line that spells the
     # predicate allowlist, and the comment saying nothing in `tortoise/` consumes it.
-    assert "`hasPart` (`tortoise/extractor_v2.py:1720`)" in text, (
+    assert "`hasPart`" in text and "`tortoise/extractor_v2.py:1720`" in text, (
         "the record must cite the relations schema where `hasPart` is spelled")
+    # The A1 proof command must match BOTH shapes its sentence covers, and must stay on ONE line WITH
+    # its pathspec. Two measured ways to pin the COMPLEMENT instead: a dot-ANCHORED `'\.(verb)\('`
+    # exits 1 on an unqualified `return create_operator(payload)`, and a `[^[:alnum:]_.]` class
+    # EXCLUDES the dot so it exits 1 on `sdk.create_edge(payload)` — the exact false reading the
+    # tokenized arm below was written for. Wrapped, the command loses its pathspec and greps the whole
+    # tree (measured: 133 hits, exit 0, where the record states no output). The pattern is READ OUT of
+    # the record and proved on both samples, so a future tidy cannot re-install the complement.
+    _a1_cmd = re.search(
+        r"git grep -nE '([^']*create_edge[^']*)' tortoise/extractor_v2\.py", text)
+    assert _a1_cmd is not None, (
+        "§1 item 2 must print its A1 proof command on ONE line with its pathspec — split across two "
+        "lines it drops `tortoise/extractor_v2.py` and greps the whole tree")
+    _a1 = _a1_cmd.group(1)
+    # ⚠️ Structural BEFORE behavioural: the class that decides both halves is the dotted one. A `[^…_.]`
+    # class excludes the `.` that precedes a receiver, so it is blind to `sdk.create_edge(payload)`;
+    # dropping the `(^|…)` alternation and anchoring on `\.` is blind to the bare call instead.
+    assert "[^[:alnum:]_]" in _a1 and "[^[:alnum:]_.]" not in _a1, (
+        f"the A1 proof command's class reads {_a1!r} — a dot-EXCLUDING class is blind to a "
+        "receiver-qualified call, which is the false reading the tokenized arm exists to catch")
+    # …and BEHAVIOUR, through `grep -E` itself: `re` does not speak POSIX classes, so proving this
+    # pattern with `re` would prove nothing about the command the record hands the reader.
+    _probe = Path(tempfile.mkdtemp()) / "a1_probe.py"
+    _probe.write_text(
+        "return create_operator(payload)\nsdk.create_edge(payload)\n", encoding="utf-8")
+    _hit = subprocess.run(["grep", "-nE", _a1, str(_probe)], capture_output=True, text=True)
+    assert _hit.returncode == 0 and len(_hit.stdout.splitlines()) == 2, (
+        f"the A1 proof command matches {len(_hit.stdout.splitlines())} of the two call shapes (an "
+        "UNQUALIFIED and a RECEIVER-qualified call) — it must match both, or it certifies a tree "
+        f"that calls the verb; grep said {_hit.stdout!r} exit {_hit.returncode}")
+    # ⛔ …and so is the §5 statement of the SAME command. The record prints it TWICE (its §1
+    # item-2 quote and the §5 reproduction block), and the `re.search` above reads one of them —
+    # so restoring the dot-excluding class in the OTHER copy left the pin GREEN (measured on the
+    # previous round). Graded per occurrence, the rule the mention-count arm applies below; the
+    # pathspec leg of the check stays §1-only because that is the one-line form the reader pastes.
+    _all_a1 = re.findall(r"git grep -nE '([^']*create_edge[^']*)'", text)
+    assert len(_all_a1) == 2, (
+        "the record must state the A1 proof command exactly TWICE (§1 item 2 and the §5 "
+        f"reproduction block) — found {len(_all_a1)}")
+    assert all("[^[:alnum:]_]" in _c and "[^[:alnum:]_.]" not in _c for _c in _all_a1), (
+        "EVERY statement of the A1 proof command must use the non-dot-excluding class — a "
+        f"`[^[:alnum:]_.]` copy is blind to a receiver-qualified call (found {_all_a1})")
     assert "hasPart" in ext[1720 - 1] and '"predicate":' in ext[1720 - 1], (
         f"extractor_v2.py:1720 reads {ext[1720 - 1].strip()[:90]!r}, not the schema "
         "line that spells the predicate allowlist")
     assert "`extractor_v2.py:10891`" in text, (
         "the record must cite the comment that says nothing consumes the channel")
+    # The SAME line is cited a SECOND time as a bare `:10891`, inside the
+    # reproduction block's comment. A bare cite carries no file token, so the
+    # prefixed arm above cannot see it: measured by re-staling it to `:10815` in
+    # place, which left every arm True before this assert existed.
+    # ⛔ Pinned as the BARE occurrence of the NUMBER, not as the sentence around it (#10891
+    # is the claim; "the comment at" is one way of saying it). A literal needle redded on
+    # `the comment on :10891` and on `` the comment at `:10891` `` — both correct, both
+    # sending the reader to the live line (measured) — the same false-block this leg removed
+    # for `both now read`, the `# §0/§2` heading and `MENTIONS`. The prose above carries the
+    # PREFIXED form `extractor_v2.py:10891`; this is the only statement without a file token,
+    # so exactly one bare occurrence is the claim.
+    assert re.findall(r"(?<!extractor_v2\.py):10891", text) == [":10891"], (
+        "the reproduction block must state the live number `:10891` exactly once as a BARE "
+        "cite — re-stale it and this record's only reproduction path points at a dead line")
     assert "nothing in this tree consumes" in ext[10891 - 1], (
         f"extractor_v2.py:10891 reads {ext[10891 - 1].strip()[:90]!r}, not the "
         "comment stating nothing consumes `result[\"relations\"]`")
 
+    # A1's environment block: the reproduction that states A1's producer claim — the
+    # bare-token grep whose four `create_operator` mentions ARE its evidence that the
+    # channel has no producer. It is pinned BOTH ways because a quoted number with
+    # nothing re-checking it is the very rot this record is about: the quote must be the
+    # live lines, and the live lines must be what the quote says. Measured on `main`
+    # before this assert existed, the quote had drifted +68
+    # (`:8938 :8956 :8963 :9343` vs live `:9006 :9024 :9031 :9411`) across two
+    # merges and no suite noticed. The HISTORICAL siblings above it in the same block
+    # (`de72cfd45` → `:8892 :8910 :8917 :9231`, `80c912244` → 0) are deliberately NOT
+    # pinned: they are claims about those commits, and they verify there.
+    #
+    # The LIVE run is the LEADING `:NNNN` group, not the whole comment: #11519's landing
+    # appends the PROVENANCE of the four numbers (`(`62248db88` printed :8938 …; #11449,
+    # moved all four +68)`), which is a claim about two other bases and must not be read as
+    # live. Pinning the whole tail pinned one PR's wording instead of the invariant, and
+    # redded on a re-worded history while every live number was correct.
+    _quote = re.findall(
+        r"git grep -n 'create_operator' -- tortoise/extractor_v2\.py\s+# (.*)", text)
+    assert len(_quote) == 1, (
+        "the record must carry EXACTLY ONE `git grep -n 'create_operator' -- "
+        f"tortoise/extractor_v2.py` reproduction (found {len(_quote)}) — a second one states "
+        "numbers no arm below re-derives")
+    _live_run = re.match(r"((?::\d+[ ]*)+)", _quote[0])
+    assert _live_run is not None, (
+        "the create_operator reproduction must open with the LIVE line numbers it quotes — "
+        f"it reads {_quote[0][:70]!r}; re-derive them with `git grep -n 'create_operator' -- "
+        "tortoise/extractor_v2.py`")
+    assert _live_run.group(1).split() == [
+        f":{i}" for i, line in enumerate(ext, 1) if "create_operator" in line], (
+        "the record's create_operator reproduction must quote the LIVE line numbers, in the "
+        f"tree's order ({_live_run.group(1).split()}) — re-derive them with "
+        "`git grep -n 'create_operator' -- tortoise/extractor_v2.py`")
+    _trailing = _quote[0][_live_run.end():].strip()
+    assert not _trailing or re.match(r"^\(`[0-9a-f]{7,}` printed", _trailing), (
+        "any number the create_operator quote carries BESIDES the live run must be introduced "
+        "by a BASE-QUALIFIED parenthetical (`(\u0060<sha>\u0060 printed …)`) — a bare second "
+        f"run reads as live while it is history (got {_trailing[:70]!r})")
+    # §1 item 3's `0 hits` claim belongs to the EXCLUDED command AND to a named base. As first
+    # written it hung on the UN-excluded grep (`docs/evidence/7949-capstone/`), which at
+    # `4e6a3ce612bd^` returns this record's OWN lines (18 of them, measured) — so the claim was
+    # false as written and nothing watched it. Measured: un-excluded at `4e6a3ce612bd^` → 18,
+    # excluded there → 0/exit 1, at the record's own base `80c912244` → 0 both ways (`#10982`
+    # landed after BOTH bases).
+    # ⛔ Located by the NUMBER TOKEN alone, not by the sentence's leading word: `The **0
+    # hits**` redded on `Its **0 hits**` — a reword that keeps the number and the emphasis —
+    # with a diagnostic asserting the zero was not stated at all (measured, and false).
+    _zero_at = text.find("**0 hits**")
+    assert _zero_at > 0, (
+        "§1 item 3 must state the pre-#10982 zero, base-qualified")
+    assert ":!docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md" in text[max(0, _zero_at - 900):_zero_at], (
+        "the `0 hits` claim must hang on the EXCLUDED command — the un-excluded one returns "
+        "this record's own lines at the sha it names, so the claim would be false as written")
+    assert "4e6a3ce612bd^" in text[_zero_at:_zero_at + 260] and \
+        "80c912244" in text[_zero_at:_zero_at + 260], (
+        "the zero must name BOTH bases it was measured at — one of them is this record's own, "
+        "and `#10982` landed after both")
+    # §1 item 3's RESULT (`measured at each → 0, exit 1`) is re-derived in its OWN test — see
+    # `test_the_records_zero_is_rederived_at_the_bases_it_names`. It is not here on purpose: it
+    # READS TWO HISTORICAL BASES, and `pytest.skip` ABORTS the test function, so on CI's
+    # `fetch-depth: 1` checkout a skip there would have killed every assert below it in THIS one
+    # (an earlier revision of this comment typed that count; it has grown since — a typed count is
+    # this bundle's recurring defect, so the tail is named, not counted) — including arms that need
+    # no history at all.
+    live_mentions = [i for i, line in enumerate(ext, 1) if "create_operator" in line]
+    assert live_mentions == [9006, 9024, 9031, 9411], (
+        f"extractor_v2.py's create_operator mentions are at {live_mentions}, not the "
+        "four the record quotes — an insertion above them moves the quote; re-derive "
+        "the record's block (its `create_operator` line AND this list) rather than the list")
+    # ⛔ The arm above binds the four LINE NUMBERS; the record also STATES the count in prose.
+    # EIGHT statements across SIX spellings — `prints **4** on origin/main` (x2), `in four
+    # comments` (x2), `prints exactly four`, `# §0's four create_operator MENTIONS`,
+    # `(four COMMENTS naming`, and the §5 numeral `that is 4 on … origin/main`. SIX patterns
+    # grade all EIGHT occurrences (the numeral pattern IS one of the six — it is not an extra).
+    # Those were unbound: measured, editing `:81` to "prints exactly three" left the suite GREEN while `:629`
+    # still listed four numbers, i.e. the record contradicted its own pinned quote and
+    # nothing reddened. A typed count is this bundle's recurring defect (the docstring above
+    # says so), so the count is DERIVED here and every prose statement of it is bound.
+    #
+    # ⛔ Graded PER OCCURRENCE (`re.findall` + `all`), not with `in text`: two of the
+    # spellings appear TWICE, so a bare membership test is satisfied by the SURVIVOR and one
+    # edited copy passed with the suite green (measured — the same false PASS this assertion
+    # exists to close, one level down). A spelling that stops appearing entirely also reds,
+    # via the `_found` emptiness check.
+    #
+    # ⛔ `re.IGNORECASE`, because the claim is the NUMBER: `MENTIONS` -> `mentions` is an
+    # editorial reword that moves no number, and a case-sensitive pattern redded on it with a
+    # misleading `yields []` diagnostic (measured) — the same false-block this PR removed for
+    # the `# §0/§2` heading and the `both now read` parenthetical. Every other token in these
+    # patterns is already lower-case, so the tolerance cannot admit a wrong value.
+    #
+    # The `0` at `80c912244` and the `56 lines / 59 occurrences` at `62248db88` are sha-pinned
+    # readings — they read commits that already happened and cannot rot — so they are not bound.
+    _n = len(live_mentions)
+    _words = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"]
+    for _count_pat in (r"prints \*\*(\d+)\*\* on `origin/main`",
+                       r"names `sdk\.create_operator` in (\w+) comments",
+                       r"prints exactly (\w+)",
+                       r"§0's (\w+) `create_operator` MENTIONS",
+                       r"\((\w+) COMMENTS naming",
+                       # the §5 numeral, which the record wraps across a COMMENT COLUMN
+                       # (`that is 4 on` / newline + ~57 spaces + `# origin/main`) — a
+                       # plain `\s+` cannot cross the `# `, so the continuation is named.
+                       r"that is (\d+) on\s+#\s+origin/main"):
+        _found = re.findall(_count_pat, text, re.IGNORECASE)
+        # ⛔ `.lower()` on the MATCH, not just `re.IGNORECASE` in the pattern: the flag makes the
+        # pattern match `Four`, but `_found` returns the raw text, so a case-sensitive membership
+        # test redded a number-preserving reword (`in four comments` -> `in Four comments`) with a
+        # message asserting the count disagreed when `Four == 4` (measured).
+        assert _found and all(_v.lower() in (str(_n), _words[_n]) for _v in _found), (
+            f"the record states the create_operator mention count as {_n}, but "
+            f"{_count_pat!r} yields {_found} — EVERY occurrence must agree with the derived "
+            "count (a typed count that nothing re-checks is what rotted here)")
+
+    # A1's §5 "self-matching" note: its annotation claimed `# exit 1 = no output`, which
+    # ROTTED to 40 lines once #10982 registered the A1 row into the pinned bundle — the
+    # bundle now CITES `hasPart` without producing it, so an unqualified "no output"
+    # would be false while the producer claim it stood for stays true. The count is
+    # therefore re-derived from the tree here instead of being read out of the record:
+    # a re-worded annotation cannot un-state it, and a new bundle mention forces the
+    # record to be re-measured.
+    mention = re.compile(r"hasPart|hierarchies|decomposesInto")
+    # Enumerated through the INDEX, not by walking the directory: the record's own command
+    # is `git grep`, which reads tracked files only. A `rglob` walk is NOT equivalent in
+    # either direction — an untracked `PRE-REGISTRATION.md~` reds the pin while the
+    # recorded command still prints 40 (a false red), and a same-named file under a
+    # subdirectory (`corpus/capstone_measure.py`) collapsed into the `probes/` entry under
+    # a BASENAME key, so the true 42 lines passed as 40 (a FALSE GREEN on exactly the
+    # number this pin exists to protect). Keys are relative paths for that reason.
+    tracked = subprocess.run(
+        ["git", "ls-files", "-z", "--", "docs/evidence/7949-capstone/"],
+        cwd=str(_REPO), capture_output=True, text=True, check=True,
+    ).stdout.split("\x00")
+    per_file = {}
+    for relpath in (p for p in tracked if p):
+        if relpath == "docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md":
+            continue
+        path = _REPO / relpath
+        if not path.is_file():
+            continue
+        n = sum(1 for line in path.read_text(
+            encoding="utf-8", errors="replace").splitlines() if mention.search(line))
+        if n:
+            per_file[relpath.removeprefix("docs/evidence/7949-capstone/")] = n
+    assert per_file == {"PRE-REGISTRATION.md": 22, "preregistration.json": 8,
+                        "probes/capstone_measure.py": 10}, (
+        f"the bundle's hasPart/hierarchies mentions are {per_file} — the record's §5 "
+        "self-matching note states them per file; re-derive the note (and this map) "
+        "rather than deleting the qualifier, or it reads as 'no output' when it is not")
+    # ── The §5 bundle-grep note, pinned as an EXACT BLOCK whose numbers are DERIVED ──
+    #
+    # Why a block and not number patterns: matching prose by pattern was measured to fail in
+    # every direction, and each failure cost a review round — a re-worded second statement
+    # (`21 lines in PRE-REGISTRATION.md`, number BEFORE the name) bypassed it (false PASS); an
+    # unrelated command's `12 lines, exit 0` tripped it (false BLOCK); a `count(...) == 2` bound
+    # refused the de-duplication the record's own amendment prescribes; and a combined needle
+    # reported a dropped historical qualifier as a wrong LIVE number (an inverted message whose
+    # repair would INTRODUCE the re-stale). A block has one failure mode and one repair.
+    #
+    # The numbers are interpolated from `per_file`, so the record's two statements of the total
+    # cannot disagree — they are the same DERIVED value, not two typed ones.
+    #
+    # ⚠️ STATED RESIDUAL: this pins what the record ASSERTS at these cites. It is NOT a proof
+    # that the document contains no other sentence stating a different number — a newly written
+    # contradictory sentence, in a word order nobody anticipated, is a review-time defect and
+    # not something substring matching can see. A reviewer constructed exactly that; the honest
+    # answer is to name the residual here, not to chase it with a wider regex that false-blocks.
+    _total = sum(per_file.values())
+    _split_rows = list(per_file.items())
+    _note_block = (
+        "git grep -rn -E 'hasPart|hierarchies|decomposesInto' -- 'docs/evidence/7949-capstone/' \\\n"
+        "    ':!docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md'    "
+        f"# {_total} lines, exit 0 \u2014 all in the bundle\n"
+    )
+    for _i, (_name, _n) in enumerate(_split_rows):
+        _open = "(" if _i == 0 else ""
+        _close = ")" if _i == len(_split_rows) - 1 else ","
+        _note_block += (
+            f"                                                            # {_open}{_name} {_n}{_close}\n")
+    # Compared ROW BY ROW, not with a bare `in`: pytest elides the MIDDLE of a long needle,
+    # and a measured one-trailing-space drift on the split row produced a failure whose
+    # visible text contained no difference at all — an undiagnosable red.
+    _want = _note_block.rstrip("\n").splitlines()
+    # The anchor is row 2 MINUS its number: row 1 is the grep command, which §1's item ALSO
+    # carries verbatim (`text.find(row1)` landed in §1 and reported a phantom drift —
+    # measured), and anchoring on the numbered row raised ValueError the moment the NUMBER
+    # was what drifted, i.e. exactly when a diagnosis is needed (also measured).
+    _anchor = "    ':!docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md'    #"
+    _at = text.find(_anchor)
+    if _at < 0:
+        raise AssertionError(
+            "the §5 note's reproduction block is GONE — the record must carry it verbatim "
+            f"(command + `# {_total} lines, exit 0 — all in the bundle` + the per-file split); "
+            "re-derive it rather than deleting it")
+    _at -= len(_want[0]) + 1
+    _got = text[_at:].splitlines()[:len(_want)]
+    if _got != _want:
+        _k = next((i for i, pair in enumerate(zip(_got, _want, strict=False)) if pair[0] != pair[1]), 0)
+        raise AssertionError(
+            "the §5 note's row {} drifted — command, LIVE total and per-file split all come "
+            "from the map above plus `git grep`; any edit here means re-derive it (the "
+            "unqualified `# exit 1 = no output` and the hand-typed 22/8/10 are the forms that "
+            "rotted, #10982 registered the A1 row after this record was written)\n"
+            "  want: {!r}\n  got:  {!r}".format(
+                _k + 1, _want[_k] if _k < len(_want) else "",
+                _got[_k] if _k < len(_got) else ""))
+    # ⛔ The number is the claim; the surrounding words are not. `all 40 hits` redded on
+    # `40 hits, all of them the bundle's own registration` — which states the derived total
+    # correctly (measured) — so only the number and its unit are required.
+    assert f"{_total} hits" in text, (
+        f"§1 item 3's conclusion must state the DERIVED total ({_total}) — it is the same "
+        "`git grep` the block above re-derives")
+
+    # §0/§5's `vet_enabled` live-cite, pinned as SEPARATE exact claims so each failure names
+    # the defect it actually is. The combined needle used to conflate the live number with the
+    # historical qualifier: dropping the parenthetical wrote `:12929` correctly and was still
+    # told it had quoted the WRONG live line — a message whose repair would INTRODUCE the
+    # re-stale (measured).
+    # ⚠️ The NUMBER is the claim, not the region. A region-only check passed with §1 re-staled to
+    # `:12853` while an unrelated `:12929` sat earlier in the record (measured) — the record states
+    # one number at several places, so "appears somewhere before the block" is not "§1 quotes it".
+    # Bound to the base-qualified cite instead, and MADE wording-free rather than described as
+    # such: an earlier `at (?:HEAD|here)` pinned the two spellings the record happened to use, so a
+    # third qualifier (`at the head`) redded with a diagnostic asserting the WRONG NUMBER while
+    # `:12929` was present (measured — the comment claimed a tolerance the code did not have).
+    # The qualifier is now any word run, and "base-qualified" is expressed as its opposite: the
+    # qualifier must NOT be a base (`at 62248db88` / `at `62248db88`` are excluded), which is what
+    # separates the LIVE cite from the historical one in the same sentence.
+    # ⛔ The boundary is located by the SECTION MARKER alone (`^# §0/§2`) — no typography and no
+    # extra word: the em-dash reword redded once (measured), and `sha-pinned` in the needle made
+    # the word do work it was not doing (only one line matches `^# §0/§2`, verified) while a reword
+    # of it redded asserting the block was GONE.
+    _hdr = re.search(r"^# §0/§2\b", text, re.MULTILINE)
+    _block_at = _hdr.start() if _hdr else -1
+    _s2_at = text.find("## 2. A2")
+    assert _block_at > 0 and _s2_at > 0, (
+        "the record's §2 (A2) section or its §0/§2 reproduction block is GONE — both are where "
+        "the sha-pinned and live cites live")
+    # Bounded at the NEXT heading, not at the block: `text[_s2_at:_block_at]` spans §2→§5, so a
+    # decoy cite in §3/§4 was reported as "§2 (A2)"'s (measured) — the same mis-labelling the
+    # §1→§2 rename fixed, at the far end. The §5 region is bounded the same way for the same reason.
+    _s2_end = text.find("\n## ", _s2_at + 1)
+    _block_end = text.find("\n## ", _block_at + 1)
+    assert _s2_end > _s2_at and _block_end > _block_at, (
+        "§2 or the §0/§2 block is now the LAST section — the heading bound that makes the region "
+        "label true cannot be found, so re-derive these two bounds")
+    for _label, _region in (("§2 (A2)", text[_s2_at:_s2_end]),
+                            ("the §5 reproduction block", text[_block_at:_block_end])):
+        _found = re.findall(r":(\d+)`? at (?!`?\d)[\w][\w -]{0,12}", _region)
+        assert _found == ["12929"], (
+            f"{_label}'s base-qualified live cite must be the vet_enabled line (`:12929`) — it "
+            f"reads {_found}; re-derive it with `git grep -n 'vet_enabled = ' -- "
+            "tortoise/extractor_v2.py`")
+    assert ext[12929 - 1].strip().startswith("vet_enabled = ("), (
+        f"extractor_v2.py:12929 reads {ext[12929 - 1].strip()[:80]!r}, not the "
+        "vet_enabled computation the record cites")
+    # The INVARIANT is that every `:12779` names the base it was true at — never that there are
+    # two of them. (A `count(...) >= 2` bound refused a legitimate consolidation to one
+    # base-qualified note, and fired before the pin that names the real defect.)
+    assert ":12779" in text, (
+        "the historical mention of the old base's number must survive, base-qualified")
+    for _m in re.finditer(r":12779", text):
+        _near = text[max(0, _m.start() - 60):_m.end() + 60]
+        assert "62248db88" in _near, (
+            f"`:12779` at offset {_m.start()} does not name the base it was true at — "
+            "an unqualified occurrence is a re-stale presented as live")
+    # Both SITES must still carry it — deleting either one left the suite green (measured), and
+    # the old number is exactly what a reader meets in each place. Per-REGION, never a count: one
+    # qualified mention per region is the claim.
+    for _label, _region in (("§2 (A2)", text[_s2_at:_s2_end]),
+                            ("the §5 reproduction block", text[_block_at:_block_end])):
+        assert re.search(r":12779`? at `?62248db88", _region), (
+            f"{_label} must carry the historical `:12779` qualified by the base it was true at — "
+            "deleting it leaves the old number unmarked where a reader meets it")
+    # ⛔ No phrase pin here on purpose: the loop above is the claim (EVERY occurrence names
+    # its base). Pinning "both" as two exact sentences redded on a re-worded pair that kept
+    # both base-qualified — and this paragraph's own note says the invariant is never the
+    # count.
+
     # A2: the capture path that writes the `references` edge — the record names it
-    # TWICE (prose and the `sed -n '<n>p'` that reproduces it), so the two must agree.
-    assert "the capture path at `tortoise/sdk.py:17574`)" in text, (
+    # THREE times: the prose cite, the amendment parenthetical that states BOTH
+    # numbers moved together, and the `sed -n '<n>p'` that reproduces it. All three
+    # must agree; the parenthetical is pinned by its NUMBER because it is the only one
+    # that has no `sdk.py:` token or `sed` command for the arms below to catch
+    # (measured: re-staling it to `17472` left every arm True).
+    # ⛔ No backticks in the needle: `tortoise/sdk.py:17574` is the citation, and the code
+    # span around it is Markdown styling. The `16516-16530` arm below has always allowed
+    # optional backticks (`r"`?(?:tortoise/)?sdk\.py:16516-16530`?"`); this one arm did not,
+    # so an unstyled citation redded the same way (measured).
+    assert re.search(r"`?tortoise/sdk\.py:17574`?", text), (
         "the record must cite the capture path by its live number")
+    # ⛔ Pinned as the BARE occurrence of the NUMBER, not as the sentence around it: the
+    # claim is that this paragraph states the same line the prose and the `sed` do.
+    # The prose carries it as `sdk.py:17574` and the recipe as `sed -n '17574p'`, so the
+    # amendment paragraph is the ONE remaining bare statement of it. A literal
+    # `"both now read `17574`"` needle redded on every number-preserving reword
+    # (`the two now agree on `17574``, `both now read `:17574`` — measured), which is the
+    # same false-block this PR fixed for the `# §0/§2` heading one arm above.
+    _bare = [c for c in re.findall(r".{0,12}17574", text)
+             if not c.endswith("sdk.py:17574") and "sed -n '" not in c]
+    assert len(_bare) == 1, (
+        "the amendment paragraph must state the live number `17574` exactly ONCE as a BARE "
+        f"cite — it is the only one of the three statements that carries neither a `sdk.py:` "
+        f"token nor a sed (found {_bare}); re-derive it with `grep -n '^ *proj\\.link_source_to_event' "
+        "tortoise/sdk.py`")
     assert re.findall(r"sed -n '(\d+)p' tortoise/sdk\.py", text) == ["17574"], (
         "the record's reproduction command must name the SAME line the prose does")
     assert sdk[17574 - 1].strip() == "proj.link_source_to_event(source_key, event_id)", (
         f"sdk.py:17574 reads {sdk[17574 - 1].strip()!r}, not the references writer")
+
+    # ── The four LIVE cites a fresh review found STILL unwatched ─────────────────────
+    #
+    # ⛔ Why these and not others: the record is in no `_BUNDLE_DOCS` entry, and each of
+    # these four is a LIVE (un-stamped) cite in it that appeared in NO test. Measured at
+    # `54ec77db0e`: `git grep -n -- 'pack_hierarchy.py:419' -- tests/` (and the other
+    # three) printed nothing, i.e. the record's thesis — "a claim nothing re-checks can
+    # rot silently" — was still true of its own text here. The `capstone_measure.py`
+    # window is the proven-rotten one: the record says this very cite was stale-corrected
+    # once and moved again by `#11459`'s +102 insertion.
+    #
+    # ⛔ Pinned at BOTH ENDPOINTS, exactly as the 2724-2726 arm above pins its three lines:
+    # a substring test over the 9-line slice was GREEN against a 1-2 line insertion above the
+    # window (measured) — the content simply slid along inside the shifted slice, so the arm
+    # added BECAUSE this cite rots by insertion did not detect an insertion. The two content
+    # facts below then hold the window's MEANING, and the record-side assert holds its number.
+    assert probe[275 - 1].strip() == 'ANCHOR_OUT = ("extractedFrom",)', (
+        f"capstone_measure.py:275 reads {probe[275 - 1].strip()!r}, not the window's opening line")
+    assert probe[283 - 1].strip() == "#: is on the same link, but the DERIVED node is its TARGET.", (
+        f"capstone_measure.py:283 reads {probe[283 - 1].strip()!r}, not the window's closing line")
+    _probe_win = "\n".join(probe[275 - 1:283])
+    assert "link_source_to_event" in _probe_win, (
+        "probes/capstone_measure.py:275-283 no longer names `link_source_to_event` — the "
+        "record cites that window as the `references` writer, so re-derive the cite")
+    # ⛔ The record states this window TWICE — as the cite pinned above and as the
+    # reproduction command — and only the first was watched (measured: re-staling the second
+    # to `274,282` left the leg GREEN). Symmetric with the `sed -n '17574p'` arm for the
+    # sibling capture-path cite, which was watched from the start.
+    assert re.findall(
+        r"sed -n '(\d+),(\d+)p' docs/evidence/7949-capstone/probes/capstone_measure\.py",
+        text) == [("275", "283")], (
+        "the record's reproduction command must name the SAME window the cite and the arms "
+        "above do — it is the second statement of these two numbers")
+    assert "tortoise/sdk.py:17574" in _probe_win, (
+        "the cited probe window must still carry the `sdk.py:17574` cite it states — one "
+        "number in two places cannot be allowed to drift apart silently")
+    assert pack_hierarchy[419 - 1].strip() == "def apply_hierarchy_edges(", (
+        f"tortoise/pack_hierarchy.py:419 reads {pack_hierarchy[419 - 1].strip()!r}, not the "
+        "declaration the record names as the thing that writes the hierarchy edges")
+    assert identity_hold[125 - 1].strip() == 'HOLD_ENDPOINT = "operator_endpoint"', (
+        f"tortoise/identity_hold.py:125 reads {identity_hold[125 - 1].strip()!r}, not the "
+        "HOLD's one declared kind")
+    assert value_gate[81 - 1].strip() == 'return is_truthy(os.environ.get(ENV_FLAG, "1"))', (
+        f"tortoise/value_gate.py:81 reads {value_gate[81 - 1].strip()!r}, not the default-ON "
+        "the record cites")
+    # ⛔ The RECORD side of all four, so a re-stale in the record reds too: every other cite
+    # arm in this leg is two-directional (it pins the code line AND the record's citation of
+    # it), and these four were code-side only — a record re-stale passed (measured), which
+    # contradicts the docstring's "re-staling a cite in the RECORD reds it". The window's
+    # RANGE is asserted as the range its endpoints were just verified at, so the record cannot
+    # name a different window than the one pinned above.
+    for _cite in ("`pack_hierarchy.py:419`", "`probes/capstone_measure.py:275-283`",
+                  "`identity_hold.py:125`", "`tortoise/value_gate.py:81`"):
+        assert _cite in text, (
+            f"the record must still cite {_cite} — the arm below pins the line it names, "
+            "so deleting the citation would leave the pin asserting something no reader is "
+            "sent to")
+    # ⛔ `value_gate.py:81` is stated TWICE — the prefixed cite in §2 and the BARE
+    # parenthetical in the §5 reproduction block (`# the default-ON itself
+    # (value_gate.py:81)`). The loop above watches the prefixed one only, so re-staling the
+    # §5 copy shipped GREEN (measured) — the same asymmetry the `275-283` `sed` line had.
+    assert re.findall(r"(?<!tortoise/)value_gate\.py:81", text) == ["value_gate.py:81"], (
+        "the record states `value_gate.py:81` a second time in the §5 reproduction block, "
+        "bare — that copy must name the same line the §2 cite does")
 
     # A2's Object mint: the write seam that routes creation by kind, cited THREE
     # times as a range. Both endpoints are claims — the classifier opens it, the
@@ -10783,3 +11320,61 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     assert "count(r.sourceVersion)" in probe[2726 - 1], (
         f"capstone_measure.py:2726 reads {probe[2726 - 1].strip()!r}, not the "
         "anchored count that closes the query")
+
+
+def test_the_records_zero_is_rederived_at_the_bases_it_names():
+    """§1 item 3's `0 hits` — a claim about TWO HISTORICAL bases, so it is read there.
+
+    ⛔ Split out of the cite pin on purpose. `pytest.skip` ABORTS the test function, and CI
+    checks this repo out with a bare `actions/checkout@v4` (`python-ci.yml`, default
+    `fetch-depth: 1`), where neither base is in the clone:
+
+      * `4e6a3ce612bd^` — the pre-`#10982` tree, where the record exists but the bundle has not
+        yet registered the predicate;
+      * `80c912244` — this record's own base.
+
+    A skip inside the cite pin therefore killed every assert BELOW it — the whole tail of that
+    function, measured,
+    including arms that need no history at all. Here a skip costs exactly this leg, and says so.
+
+    The claim itself: `measured at each → 0, exit 1`. Both halves are re-derived, because a typed
+    number nothing re-checks is the defect this whole record exists to catch — flipping the
+    record to `9, exit 0` left every arm of the cite pin green (measured).
+    """
+    record = _REPO / "docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md"
+    text = record.read_text(encoding="utf-8")
+    for _sha in ("4e6a3ce612bd^", "80c912244"):
+        _run = subprocess.run(
+            ["git", "grep", "-rn", "-E", "hasPart|hierarchies|decomposesInto", _sha, "--",
+             "docs/evidence/7949-capstone/",
+             ":!docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md"],
+            cwd=str(_REPO), capture_output=True, text=True)
+        if _run.returncode not in (0, 1):
+            # A sha that cannot be READ is not a zero. Licence the skip by the clone's own shape
+            # (a depth-1 checkout cannot contain an ancestor), or fail: an absent object in a FULL
+            # clone means the base the record names is WRONG, and skipping would hide it forever.
+            _shallow = subprocess.run(
+                ["git", "rev-parse", "--is-shallow-repository"],
+                cwd=str(_REPO), capture_output=True, text=True).stdout.strip()
+            if _shallow == "true":
+                pytest.skip(
+                    f"{_sha} is not in this shallow clone — THIS LEG only (the two historical "
+                    "bases of §1 item 3's `0 hits`) is UNCHECKED here, not disproved; re-derive "
+                    "it on a full clone. The cite pin above needs no history and still runs.")
+            pytest.fail(
+                f"{_sha} is unreadable in a FULL clone ({_run.stderr.strip()[:200]}) — the record "
+                "names a base nobody can verify")
+        assert (_run.returncode, _run.stdout) == (1, ""), (
+            f"`{_sha}` returns {_run.stdout.count(chr(10))} hit(s), not the 0 exit-1 the record "
+            "states — re-derive §1 item 3's zero; it is measured at BOTH bases it names")
+        # (No post-loop `_checked == 2` assert: the ONLY ways out of this body that do not
+        # increment are `pytest.skip`/`pytest.fail`, both of which RAISE, so such an assert
+        # could never fire — an inert arm (measured by reading every path). The invariant is
+        # enforced by those raises themselves, which is where it belongs.)
+    _stated_zero = re.search(r"measured at\s+each → (\d+), exit (\d+)", text)
+    assert _stated_zero is not None, (
+        "§1 item 3 must STATE the result it names its bases for (`measured at each → N, exit N`) "
+        "— naming the bases without the number is what left the claim unwatched")
+    assert _stated_zero.groups() == ("0", "1"), (
+        f"the record states `{_stated_zero.group(0)}` while the bases measure 0 hit(s), exit 1 "
+        "each — correct the RECORD, not the measurement")

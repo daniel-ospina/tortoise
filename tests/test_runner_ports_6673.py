@@ -464,20 +464,13 @@ def test_provision_logging_never_corrupts_the_captured_port():
 # its *consumer* on the dead literal makes the probe pass and the client dial
 # nothing, which is worse than not migrating at all. Entries are (path, the
 # literal substring), each a shape fixture that never dials.
+#
+# ⛔ Every key must be a member of the population this guard SCANS — asserted by
+# `test_no_declared_exemption_outlives_the_membership_that_earned_it`. An entry for a
+# file the census does not select exempts nothing and is worse than absent: it reads as a
+# live declaration, so the next auditor trusts a guard that is not running on that file,
+# and the literal it names is scanned by nothing at all.
 SEAM_FILES_WITH_ALLOWED_LITERALS = {
-    "tests/test_cache_eviction_evictor_pins.py": [
-        # a MOCKED seam, and this reason states the mechanism that actually
-        # neutralises it: the probe body this file `exec`s DOES carry
-        # `from tests import _live_utils` — binding the REAL helper — and the
-        # name is rebound to a `SimpleNamespace` stub before `lane()` is ever
-        # called, so the stub's `docker_port` is the only thing read and nothing
-        # dials. (The text this guard selects on is a COMMENT — the log line
-        # explaining that stubbing — #11085's fixture.) Declared rather than
-        # migrated because there is no live site here to migrate: only a
-        # fixture's deterministic stub value. Pinned by
-        # `test_the_mocked_seam_declaration_describes_the_import_it_really_does`.
-        "docker_port=lambda: 6379",
-    ],
     "tests/test_search_engine_gaps.py": [
         # a MOCKED non-local host (the probe is stubbed)
         "docker://:falkordb@test-host:6379/tortoise_test",
@@ -613,6 +606,19 @@ def _port_literals_in_code(path: Path) -> list[tuple[int, str]]:
     return hits
 
 
+def _seam_files() -> list[Path]:
+    """The population the split-brain guard SCANS: every file whose raw text carries the
+    seam import substring.
+
+    ONE definition, read by both the guard and the liveness pin below, so a declaration and
+    its measurement cannot drift into two sources of truth.
+    """
+    return sorted(
+        p for p in (ROOT / "tests").rglob("*.py")
+        if "import _live_utils" in p.read_text()
+    )
+
+
 def test_no_migrated_file_still_hardcodes_a_lane_port():
     """A file that reads the #6673 seam must not ALSO hardcode a docker-lane
     port wherever the code can use it.
@@ -621,10 +627,7 @@ def test_no_migrated_file_still_hardcodes_a_lane_port():
     *consumer* on the dead literal makes the probe pass and the client dial
     nothing — the failure mode this change exists to remove, one level up.
     """
-    seam_files = sorted(
-        p for p in (ROOT / "tests").rglob("*.py")
-        if "import _live_utils" in p.read_text()
-    )
+    seam_files = _seam_files()
     assert seam_files, "the seam must be imported somewhere"
 
     offenders: dict[str, list[str]] = {}
@@ -646,6 +649,31 @@ def test_no_migrated_file_still_hardcodes_a_lane_port():
         "SEAM_FILES_WITH_ALLOWED_LITERALS with its reason:\n"
         + "\n".join(f"  {k}:\n    " + "\n    ".join(v)
                     for k, v in sorted(offenders.items()))
+    )
+
+
+def test_no_declared_exemption_outlives_the_membership_that_earned_it():
+    """An exemption's authority is its file's MEMBERSHIP — so the membership is asserted.
+
+    `SEAM_FILES_WITH_ALLOWED_LITERALS` disables a guard for one file, and its reason is the
+    sentence the next auditor trusts. When the file leaves the scanned population the entry
+    keeps reading as a live declaration while exempting nothing: the guard is not running on
+    that file at all, so the literal the entry names is scanned by nothing, and a REAL dial
+    site added there later inherits an exemption written for the opposite shape.
+
+    Measured: `tests/test_cache_eviction_evictor_pins.py` was a member only because a COMMENT
+    spelled the import as a statement-shaped substring; `#11492` reworded that comment so the
+    prose stops spelling it (the file STUBS the seam, it does not read it), which correctly
+    retired its membership — and left its exemption behind, inert and still asserting *"the
+    text this guard selects on is a COMMENT"* about text no longer in the file.
+    """
+    members = {p.relative_to(ROOT).as_posix() for p in _seam_files()}
+    orphans = sorted(set(SEAM_FILES_WITH_ALLOWED_LITERALS) - members)
+    assert not orphans, (
+        "these `SEAM_FILES_WITH_ALLOWED_LITERALS` entries exempt a file the census does not "
+        "scan, so each one disables nothing AND reads as a live declaration — a real dial "
+        "site added to that file later would inherit an exemption written for the opposite "
+        f"shape. Delete the entry (the file no longer needs it): {orphans}"
     )
 
 
@@ -681,53 +709,106 @@ def test_a_quoted_program_is_not_a_dial_site(tmp_path):
         f"the same literal as a REAL constant must still red, got {hits}")
 
 
-def test_the_mocked_seam_declaration_describes_the_import_it_really_does():
-    """#11518 review — an exemption's REASON is what disables a guard.
+def _membership_refusal(rel: str, members: set[str], exemptions) -> str | None:
+    """The pins file's census-membership rule, as a FUNCTION so both arms can be DRIVEN.
 
-    The reason is the sentence the next auditor trusts, so it may not assert a
-    fact the file contradicts. This entry's first draft read *"the file never
-    imports `_live_utils` for real … the real helper is deliberately absent"*,
-    and both clauses are false: `tests/test_cache_eviction_evictor_pins.py`
-    compiles the live fixture's own body (`ImportFrom` nodes included) and
-    `exec`s it, which BINDS the real helper, then rebinds the name to a stub
-    (`:1218-1221`). Nothing dials either way — the harm is the claim, because a
-    reason that overstates its own facts is how a REAL dial site is later
-    waved through by a reader who believed it.
+    ⛔ Extracted because a rule whose only call site is the live tree has no falsifier —
+    `#11492`'s cycle-2 review measured that: the `or rel in SEAM_FILES_WITH_ALLOWED_LITERALS`
+    arm was added so a LEGITIMATE exemption clears the rule, but on the live tree that arm is
+    never the deciding term (the file is not a member), so reverting to a bare
+    `assert rel not in members` left this whole file at `71 passed`. The defect that
+    re-creates is cycle 1's: a pin that reds on a legitimate exemption while its message
+    offers a remedy that cannot clear it, leaving no route but deleting the pin.
+
+    Returns ``None`` when the state is admissible, else the refusal message.
+    """
+    if rel not in members or rel in exemptions:
+        return None
+    return (
+        f"{rel} is back in the scanned population. It STUBS the seam, so its `docker_port` "
+        "stub is not a split-brain offender. Two remedies actually clear this rule: keep the "
+        "prose from spelling the import statement-shaped (the state `#11492` restored), or add "
+        "a SEAM_FILES_WITH_ALLOWED_LITERALS entry with a reason that states the "
+        "exec-then-rebind mechanism — which "
+        "`test_no_declared_exemption_outlives_the_membership_that_earned_it` then requires to "
+        "stay a member. ⛔ Membership is decided by a RAW-TEXT scan, so adding the exemption "
+        "alone cannot satisfy a bare `rel not in members`: that spelling named a remedy which "
+        "left the pin red, with no route but deleting it."
+    )
+
+
+def test_the_mocked_seam_is_really_mocked_and_needs_no_exemption():
+    """#11518 review, retargeted by `#11492`: this file STUBS the seam, so it needs no exemption.
+
+    The original pin read an exemption's REASON prose out of this dict and asserted it told the
+    truth. There is no exemption any more — and the reason it can be gone is the fact this pin
+    now asserts directly, because it is the fact that makes absence correct:
+
+      * `tests/test_cache_eviction_evictor.py` really imports the seam, and the pins file
+        `exec`s that fixture's own body, so the exec BINDS the real helper;
+      * the stub is installed AFTER that exec and BEFORE `lane()` is driven, so nothing dials;
+      * therefore the file is a MOCK of the seam, not a reader of it — and a reader is the only
+        thing the split-brain census has any business scanning.
+
+    The literal is asserted present so this pin cannot rot into vacuity: if the stub is ever
+    replaced by a real `_live_utils` read, the census membership is the thing to re-derive —
+    not this exemption, which no longer exists.
     """
     rel = "tests/test_cache_eviction_evictor_pins.py"
-    # The REASON lives in the entry's comment block (the dict value is only the
-    # literal), so the reason is read off this file's OWN source between the key
-    # and its literal — asserting on the dict value would pin the literal and
-    # read nothing of the prose, which is exactly how the false claim survived.
-    source = Path(__file__).read_text(encoding="utf-8")
-    key_at = source.index(f'"{rel}": [')
-    reason = source[key_at:source.index("docker_port=lambda: 6379", key_at)]
-
-    # The FACT the reason must describe, re-derived here rather than trusted:
-    # the live fixture imports the real seam (`test_cache_eviction_evictor.py:30`),
-    # the pins file `exec`s a module carrying that import, and the stub is
-    # installed AFTER that exec and BEFORE `lane()` is driven.
     live = (ROOT / "tests/test_cache_eviction_evictor.py").read_text(encoding="utf-8")
     assert "from tests import _live_utils" in live, (
-        "the mocked-seam reason rests on the fixture importing the real helper — "
-        "if it stops importing it, re-derive the reason instead of this pin")
+        "the mocked-seam fixture must still import the real helper — if it stops, this file is "
+        "no longer a mock of anything and the whole arrangement needs re-deriving")
     pins = (ROOT / rel).read_text(encoding="utf-8")
     exec_at = pins.index("exec(compile(probe_module")
     rebind_at = pins.index('namespace["_live_utils"] = live_utils_stub')
     assert exec_at < rebind_at, (
         f"{rel}: the stub must be installed AFTER the exec that binds the real "
         "helper, or the fixture would dial a live service")
+    assert "docker_port=lambda: 6379" in pins, (
+        f"{rel}: the deterministic stub port is the reason no exemption is needed — if it is "
+        "replaced by a real seam read, re-derive whether the census now selects this file")
+    # ⛔ The file must stay OUT of the scanned population: it stubs the seam rather than reading
+    # it, and `docker_port=lambda: 6379` is a deliberate stub value, not a dial target. The
+    # census decides membership over RAW TEXT, so the pins file's own prose must not spell the
+    # import as a statement-shaped substring — which is exactly what `#11492` reworded.
+    members = {p.relative_to(ROOT).as_posix() for p in _seam_files()}
+    refusal = _membership_refusal(rel, members, SEAM_FILES_WITH_ALLOWED_LITERALS)
+    assert refusal is None, refusal
+    # ⛔ NON-MEMBERSHIP COSTS THE SCAN, and this file DOES reach the seam at runtime (it
+    # `exec`s the fixture's body, which binds the real helper, and stubs it after). It left
+    # the population when `#11492` reworded the prose, so the split-brain guard now scans it
+    # by nothing — and re-entering would red the pin above instead of re-arming the guard.
+    # Restore the COVERAGE here, where the exemption used to be: the deliberate stub must
+    # remain the file's ONLY port literal, so a real lane DSN added there is still caught.
+    literals = _port_literals_in_code(ROOT / rel)
+    assert [line for _, line in literals] == ["docker_port=lambda: 6379,"], (
+        f"{rel} is outside the scanned population, so this pin is the only guard over its "
+        f"port literals — expected exactly the deliberate stub, found {literals!r}. A second "
+        "literal here is a candidate split-brain offender the census can no longer see.")
 
-    for false_claim in ("never imports", "deliberately absent"):
-        assert false_claim not in reason, (
-            f"{rel}'s exemption claims {false_claim!r}, which the file contradicts: "
-            "its exec'd probe body carries `from tests import _live_utils` (binding "
-            "the REAL helper) and the stub is installed afterwards. Say that — the "
-            "reason is what the next auditor reads before trusting this literal.")
-    assert "rebound" in reason, (
-        f"{rel}'s exemption must name the mechanism that makes the literal inert "
-        f"(the stub is rebound over the real helper before any call), not just "
-        f"assert that it is: measured reason: {reason!r}")
+
+def test_the_exemption_remedy_actually_clears_the_membership_rule():
+    """`#11492` cycle-2 review: the exemption arm is DRIVEN, never merely published.
+
+    Three states, so neither the `or` clause nor its removal can be silent:
+
+    * member with NO exemption -> REFUSED (the split-brain guard still bites),
+    * member WITH an exemption -> admissible (the remedy the message names really clears it),
+    * non-member -> admissible (no exemption owed) — the live tree's own state.
+
+    ⛔ Deleting the `or rel in SEAM_FILES_WITH_ALLOWED_LITERALS` arm reds the second case, which
+    is the state the arm exists for and the one the live tree cannot exercise.
+    """
+    rel = "tests/fake_member_of_the_scanned_population.py"
+    assert _membership_refusal(rel, {rel}, {}) is not None, (
+        "a scanned member with NO exemption must still be refused — the split-brain guard has "
+        "to keep biting, or this rule has been relaxed into a no-op")
+    assert _membership_refusal(rel, {rel}, {rel: ["# stubbed seam"]}) is None, (
+        "a SEAM_FILES_WITH_ALLOWED_LITERALS entry must CLEAR the rule — the pin's message "
+        "names that as a remedy, and a remedy that cannot clear it is the cycle-1 defect")
+    assert _membership_refusal(rel, set(), {}) is None, (
+        "a file outside the scanned population owes no exemption")
 
 
 def test_action_inputs_are_declared():

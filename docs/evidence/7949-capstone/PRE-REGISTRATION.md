@@ -281,10 +281,15 @@ to the EMPTY SET while sitting on the write path (`bind_point_subjects`, inside
 `TORTOISE_SUBJECT_TAU_HI=0.99`) — so the arm seams, the mention arm, the per-turn embed
 rewrite, the request's `response_format`, the change-feed writer, the identifier-token writer and the
 confidence-gated subject binder are inside the derived
-surface, not hand-listed beside it. That list grew one review round at a time (the last four are
-`TORTOISE_CONTEXT_ENRICH`/`TORTOISE_JSON_MODE`, then `TORTOISE_CHANGE_FEED`, then
-`TORTOISE_IDENTIFIER_TOKENS` in cycle 9, then `TORTOISE_SUBJECT_TAU_HI`/`_LO` in cycle 10, each found by a
-measured mutation that left the previous derivation green), which is the honest reason to state
+surface, not hand-listed beside it. That list grew one review round at a time — named POSITIONALLY,
+because a count in this sentence went stale every time it was written: `TORTOISE_CONTEXT_ENRICH` /
+`TORTOISE_JSON_MODE` (cycle 7), then `TORTOISE_CHANGE_FEED` (cycle 8), then `TORTOISE_IDENTIFIER_TOKENS`
+(cycle 9), then `TORTOISE_SUBJECT_TAU_HI`/`_LO` (cycle 10), then `TORTOISE_STATE_VALUE_VERBATIM`
+(cycle 11) — and the DISCOVERY ROUTES are not the same, so neither is generalised: cycles 7–10 were
+each found by a measured mutation that left the previous derivation green, while cycle 11 was found by
+the **CENSUS** (the switch landed inside `path_modules` and redded this closure for every PR until it
+was classified), which is the closure doing its own job rather than a mutation finding it. That is the
+honest reason to state
 it as a CLOSURE over the reads INSIDE those modules rather than as a list somebody curated — not
 a closure over everything the path reaches, which is the gap #11410 records. Every one is written in-process, **read back**, and a run whose read-back
 disagrees is **refused** (`probes/capstone_measure.py`); the measurement switches were

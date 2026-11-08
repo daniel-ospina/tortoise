@@ -47,7 +47,7 @@ recorded, because each one on its own is a trap:
 |---|---|---|---|---|
 | `#11213` | `#11001` | **MERGED** 2026-11-06T19:13:23Z | `e918f3d6d` | ✅ `merge-base --is-ancestor` → 0 |
 | `#11211` | (part of `#11021` — **not** a PR close) | **MERGED** 2026-11-06T20:27:05Z | `aa414b4d5` | ✅ `merge-base --is-ancestor` → 0 |
-| `#11212` | `#10997` | **MERGED** 2026-11-06T21:33:54Z | `80c912244` | ✅ **`80c912244` IS the `origin/main` tip** — but ❌ `merge-base --is-ancestor 78e8abae6` still exits **1**, because the landing was **squashed** |
+| `#11212` | `#10997` | **MERGED** 2026-11-06T21:33:54Z | `80c912244` | ✅ **`80c912244` is an ANCESTOR of `origin/main`** (`merge-base --is-ancestor 80c912244 origin/main` → 0) — it was the tip when this record was measured, and it is no longer (a commit count here would be stale the day after it was written), so the DURABLE test is the ancestor one, never tip-equality. And ❌ `merge-base --is-ancestor 78e8abae6` still exits **1**, because the landing was **squashed** |
 | `#11205` | `#10999` (closed by its own merge commit — `Closes #10999` rode `316a572ce2`'s message; ⛔ `closingIssuesReferences` is empty because the keyword rode the commit, **not** the PR body, so the empty field is **not** evidence of a manual close) | **MERGED** 2026-11-06T22:40:32Z — **after the base, before this record merged** | `316a572ce2` | ✅ `merge-base --is-ancestor` → 0; and it is the landing that moved one of §5's own counts (below) |
 
 ⛔ **`git merge-base --is-ancestor` is a ONE-SIDED landing test: exit `1` is not a landing test, and
@@ -139,8 +139,14 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
    **CLOSED**; its remainder is **`#11237`**, OPEN).
 2. **`extractor_v2.py` calls none of the three edge-creating verbs**, so it cannot be the producer of any
    Object→Object edge, including the declared `hasPart` pairs:
-   `git grep -nE '\.(create_edge|create_about_edge|create_operator)\(' tortoise/extractor_v2.py` → **no
-   output**. This is `#10984`'s own third bullet, still true after the merge.
+   `git grep -nE '(^|[^[:alnum:]_])(create_edge|create_about_edge|create_operator)[[:space:]]*\(' tortoise/extractor_v2.py` → **no output**, exit 1. This is `#10984`'s own third bullet, still true
+   after the merge. ⚠️ **This spelling is the one printed here on purpose**, and it must stay on ONE
+   line: the earlier `'\.(create_edge|…)\('` form exits 1 on an UNQUALIFIED
+   `return create_operator(payload)`, while a `[^[:alnum:]_.]` class (which EXCLUDES the dot) exits 1
+   on the receiver-qualified `sdk.create_edge(payload)` — each is blind to one half (both measured), and
+   a wrap across two lines drops the pathspec and greps the whole tree. The tokenized pin in
+   `tests/test_7949_capstone_measure.py` is the complete check; this command is its
+   hand-reproducible form.
    ⛔ **Do not use the bare token count.** `grep -c -E 'create_edge|create_about_edge|create_operator'`
    printed **0** at this record's base and prints **4** on `origin/main`, because `#11205`'s explanation
    names `sdk.create_operator` in four comments — a count of *mentions*, not of calls. The call-shaped
@@ -159,15 +165,29 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
    scored census (`capstone-measured-9152448d.log:299-309`) lists 9 types — `CONTAINS` 309, `IMPL` 65,
    `INPUT` 68, `NAND` 14, `aboutObject` 248, `aboutSubject` 21, `extractedFrom` 150, `mitigated_by` 11,
    `references` 7 — with **`hasPart` absent**. Because the query is complete, absence from that list is
-   `hasPart = 0`, not "not counted". `git grep -rn -E 'hasPart|hierarchies|decomposesInto'
-   docs/evidence/7949-capstone/` → **0 hits on the pre-diff tree**: A1's leg is not in the census at
-   all. ⚠️ That command is **self-matching** once this record lands — every hit is then this file's own
-   lines — so re-derive it with the file excluded:
+   `hasPart = 0`, not "not counted". ⚠️ The bare `git grep -rn -E
+   'hasPart|hierarchies|decomposesInto' -- 'docs/evidence/7949-capstone/'` is **self-matching** — at
+   `4e6a3ce612bd^` every one of its hits is this file's own lines — so the operand has to name the
+   bundle alone, with this file excluded:
    `git grep -rn -E 'hasPart|hierarchies|decomposesInto' -- 'docs/evidence/7949-capstone/' \
-   ':!docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md'` → **exit 1, no output**.
-4. **The rollup query does not exist.** `git grep -in 'rollup' -- '*.py' '*.md'` over the tree returns
-   only unrelated uses (extractor `_rollup_llm`/`_rollup_recovery` stage counters, a CI per-name rollup
-   discussion, a plan doc). There is **no** query of the graph shape "which work items serve this goal,
+   ':!docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md'` → **all 40 hits are the bundle's own registration**
+   (#10982 landed it after this record was written) — the bundle CITES the predicate, it does not
+   produce it; the producer claim is the call-shaped grep above, which is still empty. The **0 hits**
+   the `exit 1` in earlier revisions of this record was taken at is that EXCLUDED command in the tree
+   *before* `#10982` landed (`4e6a3ce612bd^`, and at this record's own base `80c912244`; measured at
+   each → 0, exit 1): A1's leg was not in the census at all when this record was written. A bare
+   "pre-diff" would be false here for the record's own reason: `#10982` landed after BOTH of those
+   bases, so its registration is already inside the CURRENT tree — only the commit name is a stable
+   operand, never "today's tree minus a diff".
+   The per-file split is stated once, in the §5 note below; the TOTAL is stated in both places, and
+   the pin binds both to the same DERIVED value rather than to two typed numbers.
+4. **The rollup query does not exist.** `git grep -in 'rollup' -- '*.py' '*.md'` over the tree is
+   **self-matching** — this record names the word — and beyond that returns only unrelated uses:
+   extractor `_rollup_llm`/`_rollup_recovery` stage counters, a CI per-name rollup discussion, the
+   pinned bundle's own probe strings, and several plan docs (the set grows; this record types no
+   total, because a count nothing re-derives is this record's recurring defect — the §5 reproduction
+   block carries the commands, and item 3 above is what that costs when a number hangs on the wrong
+   operand). There is **no** query of the graph shape "which work items serve this goal,
    and what evidence supports them", no ground truth, and no scoring — which is the half `#10984` says
    `#11001` does **not** own and is "the half most likely to be dropped".
 
@@ -300,7 +320,9 @@ the path matters: unscoped, both patterns also match THIS record and its quoted 
 count-of-mentions trap §0 documents). Every number this paragraph pins to one of §5's four shas is re-derived at that sha by the
 `for s in aa414b4d5 8e49ae909 80c912244 d69faaf38` sweep in §5 — a live grep cannot do it (scoped,
 `git grep -n 'vet_enabled = ' -- tortoise/extractor_v2.py` prints
-`:12929` at HEAD and `:12779` at `62248db88`, and the sweep covers **neither** of those two bases), which is the whole point. That is the class of defect §0 exists to catch: a number true at
+`:12929` at `a1dff7cec8` and `:12779` at `62248db88`, and the sweep covers **neither** of those two
+bases — pinned to the two shas, never to `HEAD`, because a `HEAD`-relative number is the same rot in a
+new coat), which is the whole point. That is the class of defect §0 exists to catch: a number true at
 one base and false at the base the record claims. Which is why the 0.0 pp above is the **armed** result,
 not an unarmed one.
 
@@ -592,7 +614,9 @@ gh pr view 10850 --json state,mergedAt,closingIssuesReferences,body \
   --jq '{state, mergedAt, closing: [.closingIssuesReferences[].number], firstLine: (.body|split("\n")[0])}'   # CLOSED, null, [10812], "Closes #10812."
 gh pr view 10562 --json state,mergedAt,closingIssuesReferences,body \
   --jq '{state, mergedAt, closing: [.closingIssuesReferences[].number], firstLine: (.body|split("\n")[0])}'   # CLOSED, null, [8447], "Closes #8447"
-git rev-parse origin/main                                 # 80c912244 — the squash commit IS the tip
+git rev-parse origin/main                                 # NOT 80c912244 any more — origin/main moves.
+                                                          # The durable test is the ancestor one:
+                                                          # git merge-base --is-ancestor 80c912244 origin/main → 0
 git fetch origin 78e8abae6b2cabc67d2cba75c53bfe7757c232e6   # BY SHA: the branch moved on, so
                                                           # without this the next line exits 128
                                                           # "Not a valid object name" — a sha read is
@@ -605,7 +629,7 @@ gh issue view 10997 --json state,closedAt                 # CLOSED 21:33:55Z
 gh issue view 11021 --json state,closedAt                 # CLOSED, one second after its merge
 
 # §0/§2 — the sha-pinned cites, each re-derived AT THE SHA IT NAMES (the one read that decides them;
-# a live grep cannot: `git grep -n 'vet_enabled = ' -- tortoise/extractor_v2.py` prints :12929 at HEAD (:12779 at 62248db88), which is none of these numbers)
+# a live grep cannot: `git grep -n 'vet_enabled = ' -- tortoise/extractor_v2.py` prints :12929 at a1dff7cec8, :12779 at 62248db88, neither of which is one of these numbers)
 for s in aa414b4d5 8e49ae909 80c912244 d69faaf38; do echo "== $s"; \
   git show "$s":tortoise/extractor_v2.py | grep -n 'vet_enabled = (\|os.environ.get("TORTOISE_VET")\|def _hold_endpoint\|_hold_endpoint(hold_store\|def _mint_endpoint\|payload_entities.append({'; done
 # aa414b4d5 → 1153, 8784, 9401, 11351 · 8e49ae909 → 1153, 8785, 9402, 11358
@@ -615,13 +639,18 @@ for s in aa414b4d5 8e49ae909 80c912244 d69faaf38; do echo "== $s"; \
 # §0's four `create_operator` MENTIONS are base-dependent too — the CALL count is 0 either way:
 git show 80c912244:tortoise/extractor_v2.py | grep -c 'create_operator'   # 0
 git show de72cfd45:tortoise/extractor_v2.py | grep -n 'create_operator'  # :8892 :8910 :8917 :9231
-git grep -n 'create_operator' -- tortoise/extractor_v2.py                 # :9006 :9024 :9031 :9411 (`62248db88` printed :8938 :8956 :8963 :9343; `91dbc9a888`, #11449, moved all four +68)
+# the previous base printed :8938 :8956 :8963 :9343 (`62248db88`); `91dbc9a888` (#11449) moved all four +68
+git grep -n 'create_operator' -- tortoise/extractor_v2.py                 # :9006 :9024 :9031 :9411
 
 # A1 (§1) — the declaration reads, and nothing production writes it
 .venv/bin/python3 -m tortoise pack validate packs/dev      # 6 declared hierarchies, exit 0
 git grep -n apply_hierarchy_edges                          # 9 in the test file + __all__ + def
 git grep -n plan_hierarchy_edges                           # 9 in the test file + :59/:78/:353/:447
-git grep -nE '\.(create_edge|create_about_edge|create_operator)\(' tortoise/extractor_v2.py   # no output
+git grep -nE '(^|[^[:alnum:]_])(create_edge|create_about_edge|create_operator)[[:space:]]*\(' \
+  tortoise/extractor_v2.py                                 # no output, exit 1 — the class must NOT
+                                                          # exclude `.`: a dot-EXCLUDING one exits 1 on
+                                                          # `sdk.create_edge(payload)`, a dot-ANCHORED
+                                                          # one on the bare call (both measured)
                                                           # ⛔ NOT the bare token count: that is 4 on
                                                           # origin/main since #11205 (four COMMENTS naming
                                                           # sdk.create_operator) and 0 at this base — a
@@ -638,18 +667,24 @@ git grep -o 'result\["relations"\]' -- tests/ | wc -l    # 59 OCCURRENCES (both 
 git grep -n -o 'result\["relations"\]' -- tests/ \
   | cut -d: -f2 | sort | uniq -d                          # the 3 extra: the doubly-named :1551, :1579, :161
 grep -c '^  - id:' config/v4-mechanisms.yml                 # 13 — and none for the hierarchy mechanism
-tools/who-is-on.sh 10984 --repo .                           # exit 0 = complete answer (2 holders on a
-                                                          # clean checkout); exit 2 = a surface could not
-                                                          # be queried — never read either as "nobody"
+tools/who-is-on.sh 10984 --repo .                           # exit 0 = complete answer; exit 2 = a
+                                                          # surface could not be queried — never read
+                                                          # either as "nobody"
 uv run python tools/collision_preflight.py 10984 --repo .    # the dispatch-time gate (exit 0 = clear)
 grep -n -i -E 'hierarch|hasPart|part-whole|11001|10984' config/v4-mechanisms.yml      # no output
 # …and the structural edges that DO exist on the capture path, which is why the claim above is scoped:
 sed -n '275,283p' docs/evidence/7949-capstone/probes/capstone_measure.py   # `references`, via link_source_to_event
 sed -n '17574p' tortoise/sdk.py                             # the call (`references`'s writer)
 git grep -in 'rollup' -- '*.py' '*.md'                      # no graph rollup query anywhere
-# ⚠️ self-matching once this record lands — exclude it, then the answer is 0:
+# ⚠️ self-matching, and now no longer empty: exclude this record, and the hits are the
+# BUNDLE's OWN registration of the A1 row (#10982 landed it AFTER this record was written),
+# not a producer — the bundle CITES the predicate, it does not produce it. The producer
+# claim is the call-shaped grep above, which is still empty:
 git grep -rn -E 'hasPart|hierarchies|decomposesInto' -- 'docs/evidence/7949-capstone/' \
-    ':!docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md'    # exit 1 = no output
+    ':!docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md'    # 40 lines, exit 0 — all in the bundle
+                                                            # (PRE-REGISTRATION.md 22,
+                                                            # preregistration.json 8,
+                                                            # probes/capstone_measure.py 10)
 
 # A2 (§2) — the shipped arm moves the share by exactly zero, on a tree that HAS #10997
 .venv/bin/python3 docs/evidence/7949-capstone/probes/e1_e2_probe.py --json-out /tmp/e1e2.json \
