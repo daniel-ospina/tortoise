@@ -1990,12 +1990,18 @@ _SUPERSEDE_REFUSAL_MARKERS = (
 def _aggregate_relation_write(runs: dict[str, dict]) -> dict:
     """Sum the per-session `relation_write` receipts into one run-level block.
 
-    ``#11237``: the S5 Job 1 channel's WRITE half. Two things are kept apart on
-    purpose, because collapsing them would let one hide a loss:
+    ``#11237``: the S5 Job 1 channel's WRITE half. Three outcomes are kept apart
+    on purpose, because collapsing any two would let one hide a loss:
 
     * ``written`` / ``dropped`` — what the leg DID, summed over sessions;
     * ``drops`` — every individual refusal WITH its session and reason, so a
-      verb that binds no declared path is visible rather than counted.
+      verb that binds no declared path is visible rather than counted;
+    * ``collapsed`` / ``folded`` — a stated MEANING absorbed onto an edge that
+      did land (``create_direct_edge`` is one edge per (src, tgt, type), so two
+      verbs binding one mechanism cannot be two edges). ``folded`` counts
+      meanings, so it is the third term that makes
+      ``written + dropped + folded`` reconcile with the stated population. A
+      fold is recorded only for an edge that was actually WRITTEN.
 
     ``edges`` keeps the per-edge record (ids, predicate written, the story's own
     verb, the write path, and the declaring pack when one fixed the predicate).
@@ -2005,10 +2011,17 @@ def _aggregate_relation_write(runs: dict[str, dict]) -> dict:
     write_paths: dict[str, int] = {}
     edges: list[dict] = []
     drops: list[dict] = []
+    collapsed: list[dict] = []
     for session_id in sorted(runs):
         block = runs[session_id] or {}
         written += int(block.get("written") or 0)
         dropped += int(block.get("dropped") or 0)
+        # #11548 review P2: a FOLDED meaning is its own outcome — neither
+        # written as its own edge nor dropped — so it is summed and carried
+        # with its session like a drop, or the run-level accounting
+        # (written + dropped + folded == stated) would not reconcile.
+        collapsed.extend({**fold, "session_id": session_id}
+                         for fold in (block.get("collapsed") or []))
         for path, count in (block.get("write_paths") or {}).items():
             write_paths[str(path)] = write_paths.get(str(path), 0) + int(
                 count or 0)
@@ -2020,9 +2033,11 @@ def _aggregate_relation_write(runs: dict[str, dict]) -> dict:
         "sessions": sorted(runs),
         "written": written,
         "dropped": dropped,
+        "folded": sum(len(fold.get("folded") or []) for fold in collapsed),
         "write_paths": write_paths,
         "edges": edges,
         "drops": drops,
+        "collapsed": collapsed,
     }
 
 
@@ -2451,8 +2466,13 @@ def validate_receipt(receipt: dict) -> list[str]:
         if not isinstance(relation_write, dict):
             issues.append("receipt.relation_write: expected an object")
         else:
-            for key in ("written", "dropped"):
+            for key in ("written", "dropped", "folded"):
                 value = relation_write.get(key)
+                if value is None and key == "folded":
+                    # additive (#11237): a receipt written before the fold
+                    # accounting existed carries no `folded` — absent is not
+                    # invalid, so the older receipts keep validating.
+                    continue
                 if isinstance(value, bool) or not isinstance(value, int):
                     issues.append(
                         f"receipt.relation_write.{key}: expected an int, got "

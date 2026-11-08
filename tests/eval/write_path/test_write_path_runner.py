@@ -187,6 +187,85 @@ def test_receipt_rejects_partial_metrics_on_completed_run():
     assert any("missing metrics" in i for i in issues)
 
 
+def test_receipt_rejects_a_non_int_relation_write_count():
+    """#11237: the additive `relation_write` block is shape-checked (#11548 P2).
+
+    FAILS IF `validate_receipt`'s `relation_write` arm is deleted: a receipt
+    whose counts arrived as strings then validates as if it were intact, and a
+    reader downstream does arithmetic on a string.
+    """
+    report = _completed_report()
+    report["relation_write"] = {"written": "35", "dropped": 1}
+    receipt = runner.build_receipt(report)
+    assert receipt.get("relation_write") is not None, receipt.keys()
+    issues = runner.validate_receipt(receipt)
+    assert any("relation_write.written" in i for i in issues), issues
+
+
+class _CensusResult:
+    def __init__(self, rows):
+        self.result_set = rows
+
+
+class _CensusGraph:
+    """Answers each census query by identity, so no DB is needed."""
+
+    def __init__(self, object_edge_rows):
+        self.object_edge_rows = object_edge_rows
+        self.seen: list[str] = []
+
+    def query(self, sql, params=None):
+        self.seen.append(sql)
+        if sql == runner.SESSION_OBJECT_QUERY:
+            return _CensusResult([(11, "the retry storm"), (12, "the slip")])
+        if sql == runner.OBJECT_DERIVATION_LINK_QUERY:
+            return _CensusResult([(0,)])
+        if sql == runner.SESSION_REFERENCES_ANCHOR_QUERY:
+            return _CensusResult([(0, 0, 0, 0)])
+        if sql == runner.SESSION_OBJECT_EDGES_QUERY:
+            return _CensusResult(self.object_edge_rows)
+        if "extractedFrom" in sql:
+            return _CensusResult([(0, 0)])
+        return _CensusResult([])
+
+
+class _CensusSDK:
+    def __init__(self, graph):
+        self._graph = graph
+
+    def _get_proj(self):
+        class _Proj:
+            g = self._graph
+        _Proj.g = self._graph
+        return _Proj()
+
+
+def test_graph_census_reports_the_object_object_edges_the_graph_holds():
+    """#11237: the E6 row is READ off the graph — a broken read must not look like 0.
+
+    ``object_edges`` is the write-path lane's own read of the relation channel
+    (the before-arm the issue starts from is **0**), so the ONE failure this
+    must not have is a read that silently yields the baseline. Two properties
+    are pinned, and both are what a deleted block would break:
+
+    1. the key is ALWAYS present — an absent key cannot be told apart from a
+       session that stated nothing;
+    2. the counts are the ROWS the query returned, and the query is actually
+       issued for a session that has Objects.
+
+    FAILS IF `graph_census` stops running ``SESSION_OBJECT_EDGES_QUERY``
+    (``object_edges`` stays ``{}``) or stops emitting the key (``KeyError``).
+    """
+    graph = _CensusGraph([("IMPL", 2), ("hasPart", 1)])
+    census = runner.graph_census(_CensusSDK(graph), "wp01", ["pt-1"])
+    assert census["object_edges"] == {"IMPL": 2, "hasPart": 1}, census
+    assert runner.SESSION_OBJECT_EDGES_QUERY in graph.seen, graph.seen
+
+    # a session with no Objects is a MEASURED zero, not an absent key
+    bare = runner.graph_census(_CensusSDK(_CensusGraph([])), "wp01", [])
+    assert bare["object_edges"] == {}, bare
+
+
 def test_failed_run_receipt_allows_null_pin_and_empty_metrics():
     receipt = runner.build_receipt(runner._failed_report(
         "w2b-x", "2026-09-01T00:00:00Z", "abc", "sha256:y",
