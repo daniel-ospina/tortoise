@@ -144,14 +144,18 @@ def test_edge_function_parses():
         the .ts bytes as JavaScript. Reproduced in this repo's tree (exit 1),
         which made the guard red on a healthy tree and therefore
         indistinguishable from version noise.
-      * **also a false GREEN on 24.21.0, from the SAME bytes**, if the file is
-        not under the checkout: copy it to a temp dir and `--check` exits 0 on
-        the clean file AND still 0 after appending `const oops: number = ;`.
-        So `--check`'s answer depends on WHERE the file sits, not just on the
-        node version — one more reason the one-step form cannot be a guard, and
-        why "it worked on my host" is not evidence about this one. Reproduce:
+      * **not a guard on 24.21.0 in ANY location** — measured, and the reason
+        the one-step form cannot be trusted: a CLEAN file exits 1 ("Unexpected
+        strict mode reserved word" at the first `interface`) and so does a
+        BROKEN one (`const oops: number = ;` appended), in the checkout and in
+        a temp dir alike — the location does NOT change the answer on this
+        host, so the flag separates neither good from bad input nor version
+        noise from a real defect. Reproduce:
         `cp supabase/functions/tenant-provision/index.ts /tmp/x/index.ts &&
-        node --experimental-strip-types --check /tmp/x/index.ts`.
+        node --experimental-strip-types --check /tmp/x/index.ts` (exit 1).
+        (An earlier draft of this note claimed a LOCATION-dependent false
+        GREEN on 24.21.0 — that does not reproduce on v24.21.0; recorded here
+        because the repro command is the thing a maintainer will run.)
       * **false GREEN on 22.10.0, 22.13.0 and 23.1.x** — the same clean file
         exits 0, and still exits 0 after appending `const oops: number = ;`. A
         broken function would have merged green.
