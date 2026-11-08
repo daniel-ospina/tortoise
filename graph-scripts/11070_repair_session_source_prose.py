@@ -59,9 +59,20 @@ Usage:
   #    summary — the index read OR-joins multi-term input, so a phrase or a
   #    common word measures nothing), or accept the weaker evidence BY NAME with
   #    `--no-fts-probe`. A probe that still hits exits 1; so does a probe whose
-  #    zero cannot be corroborated (the FTS read did not run, or no post-fix
-  #    lexicon node exists to prove the index answers at all) — a zero from a
-  #    dead instrument is not a zero (#11161).
+  #    zero cannot be corroborated — a zero from a dead instrument is not a zero
+  #    (#11161).
+  #
+  #    ⚠️ WHAT CORROBORATES THE ZERO, AND WHEN STEP 3 CANNOT. Two things can:
+  #    a known-present token from a POST-fix lexicon node (so a graph that has
+  #    only ever been CLEARED — or a tenant with no post-#10852 session — cannot
+  #    offer one), or an EMPTY Source index over this population (no `:Source`
+  #    carries `_searchText` at all), which is a measurement, not a default.
+  #    When neither holds — the index DOES hold entries and there is no lexicon
+  #    node to probe — step 3 refuses BY DESIGN: measure the FTS half on the
+  #    run that WRITES (`--repair --probe-phrase <token>`, which takes its own
+  #    BEFORE reading, so "the sentence left the index" is observed rather than
+  #    inferred), and treat a later re-verification as the census-only sign-off
+  #    it is — taken by name with `--no-fts-probe`, never by silence.
 
 ⚠️ THE RECORD SCOPE IS NEVER GUESSED. ``--record-dsn`` on the WRITING arm
 (``--repair``) requires ``--org-id`` and ``--graph-id``: a wrong (or defaulted)
@@ -205,6 +216,7 @@ def _merge_probe(before: dict | None, after: dict) -> dict:
         # had examined sat in the result.
         row["discriminating"] = (bool(prior) and not got["residue"]
                                  and not got.get("stale")
+                                 and not got.get("unexplained")
                                  and not got.get("unread"))
         probes.append(row)
     out = dict(after)
@@ -226,6 +238,12 @@ def _merge_probe(before: dict | None, after: dict) -> dict:
         out["certifies"], out["vetoed"] = False, "truncated"
     elif unclassified or out.get("unresolved"):
         out["certifies"], out["vetoed"] = False, "unclassified"
+    elif out.get("unexplained"):
+        # ⛔ ITS OWN VETO (#11536 review round 2, P1): the hit came back from a
+        # node that PROVES the post-fix lexicon, so the benign bucket was never
+        # earned — the probe token matches none of that node's own lexicon
+        # tokens, which is what a survived PRE-FIX index entry looks like.
+        out["certifies"], out["vetoed"] = False, "unexplained"
     elif discriminating or control_ok:
         out["certifies"], out["vetoed"] = True, None
     else:
@@ -249,8 +267,17 @@ def _report_fts(fts: dict) -> None:
             # hits are REPAIRED nodes whose `_searchText` is the topic lexicon.
             # Reporting them as a leak would read as "the repair failed" and
             # invite an operator to clear the descriptor #3518 exists to provide.
+            # ⚠️ The claim is limited to what was PROVED (#11536 review round 2):
+            # the node's pair AND the token's relation to its own lexicon tokens.
+            # "The index stems" is not asserted from a token nothing related.
             print(f"            (stem collision — {len(probe['lexicon'])} hit(s) on "
-                  f"nodes whose `_searchText` is the post-fix lexicon)")
+                  f"nodes whose `_searchText` IS the post-fix lexicon and whose "
+                  f"own tokens account for the probe)")
+        if probe.get("unexplained"):
+            print(f"            ⛔ {len(probe['unexplained'])} hit(s) on a node that "
+                  f"carries the post-fix lexicon but whose OWN tokens do not "
+                  f"account for the probe token — a surviving pre-fix index "
+                  f"entry, or a stem this check cannot fold")
         if probe.get("stale"):
             print(f"            ⛔ {len(probe['stale'])} hit(s) on an episodic session "
                   f"`:Source` that carries NO text at all — a STALE index entry")
@@ -318,12 +345,60 @@ def _report_fts(fts: dict) -> None:
               f"nothing examined is NOT evidence the sentence is gone: re-measure "
               f"(the read may be under load), or repair the stale index entry.",
               file=sys.stderr)
+    elif fts["vetoed"] == "unexplained":
+        print(f"✗ {len(fts['unexplained'])} probe(s) came back from a node that "
+              f"PROVES it carries the post-fix lexicon, while the probe token "
+              f"matches none of that node's OWN lexicon tokens "
+              f"{fts['unexplained']!r}. That is not a stem collision: either the "
+              f"index still holds the PRE-FIX entry behind a repaired node (the "
+              f"leak #11161 names), or the engine relates two words this check "
+              f"cannot fold. Re-measure with a token you know is in the "
+              f"lexicon, or inspect the node's `_searchText` against its index "
+              f"entry before signing off.", file=sys.stderr)
     else:
-        print("✗ the probe's 0 cannot be corroborated, so it is NOT evidence "
-              "of a repair: it returned no PRE-FIX node BEFORE the repair "
-              "either (a token that is not in the corpus), and no post-fix "
-              "lexicon node exists to prove the Source FTS index answers at "
-              "all.\n"
+        # ⛔ THE REFUSAL MUST NOT ASSERT WHAT THE RUN NEVER ESTABLISHED (#11536
+        # review round 2, P2). Two causes used to be printed as FACT on every
+        # documented step-3 dry run: that the probe "returned no PRE-FIX node
+        # BEFORE the repair either" — a dry run takes no BEFORE reading at all
+        # (this report prints "—" for it two lines above) — and that "no
+        # post-fix lexicon node exists", which is one of several states a
+        # control can be in (its own read may simply not have run). Each cause is
+        # now branched on the measurement that settles it.
+        took_before = any(p.get("residue_before") is not None
+                          for p in fts["probes"])
+        causes: list[str] = []
+        if took_before:
+            causes.append(
+                "it returned no PRE-FIX node BEFORE the repair either (a token "
+                "that is not in the corpus)")
+        else:
+            causes.append(
+                "NO BEFORE READING WAS TAKEN — this is a DRY RUN, and only the "
+                "run that writes takes one, so this run cannot tell a token "
+                "that was never in the corpus from one that LEFT it")
+        control_state = fts.get("control") or {}
+        mode = control_state.get("mode")
+        if mode == "probe":
+            if not control_state.get("ran", True) or control_state.get("degraded"):
+                causes.append(
+                    "the CONTROL read did not run either "
+                    f"(reason={control_state.get('reason')!r}), so the index is "
+                    "UNPROVEN rather than proven silent — fix that read (the "
+                    "index, or the circuit breaker) and re-measure")
+            elif control_state.get("hits") == 0:
+                causes.append(
+                    "a post-fix lexicon node EXISTS on this graph but its own "
+                    "token was NOT findable, so the Source FTS index did not "
+                    "answer for a token that is present in it")
+            else:
+                causes.append("the control did not corroborate the zero")
+        elif mode == "unavailable":
+            causes.append(
+                f"the control is UNAVAILABLE ({control_state.get('note')})")
+        else:
+            causes.append("no control was measured on this run")
+        print("✗ the probe's 0 cannot be corroborated, so it is NOT evidence of "
+              "a repair: " + "; and ".join(causes) + ".\n"
               "  Measure it on the run that writes — `--repair --probe-phrase "
               "<token>` takes the BEFORE reading itself — or pass `--no-fts-probe` "
               "to accept the census-only sign-off by name.", file=sys.stderr)

@@ -1327,6 +1327,68 @@ def _is_proven_lexicon(props: Mapping[str, Any]) -> bool:
     return _proves_the_lexicon(props)
 
 
+#: The English suffixes :func:`_stem_key` folds when comparing a probe token with
+#: a node's own lexicon tokens. The Source FTS index stems (FalkorDB/Snowball)
+#: and this repo ships no stemmer, so the comparison is an APPROXIMATION — see
+#: :func:`_probe_explains_the_lexicon` for why its polarity is the safe one.
+_STEM_SUFFIXES = ("ings", "ing", "ies", "ied", "es", "ed", "s", "d")
+
+
+def _stem_key(token: str) -> str:
+    """A small, DOCUMENTED approximation of the index's English stemmer.
+
+    `fridays` -> `friday` (the measured stem collision), `planning` -> `plan`
+    (doubled final consonant), `stories` -> `story`. It is deliberately NOT a
+    real stemmer: the only consumer requires an EQUALITY test between a probe
+    token and a node's own lexicon tokens, and an approximation that folds too
+    little fails toward VETO (see :func:`_probe_explains_the_lexicon`).
+    """
+    text = str(token or "").strip().lower()
+    if len(text) > 5 and text.endswith(("ies", "ied")):
+        text = text[:-3] + "y"
+    else:
+        for suffix in _STEM_SUFFIXES:
+            if len(text) - len(suffix) >= 4 and text.endswith(suffix):
+                text = text[: -len(suffix)]
+                break
+    if len(text) >= 4 and text[-1] == text[-2] and text[-1] not in "aeiou":
+        text = text[:-1]
+    return text
+
+
+def _probe_explains_the_lexicon(props: Mapping[str, Any], phrase: str) -> bool:
+    """True when THIS node's own indexed text can explain the probe's hit.
+
+    ⛔ THE BENIGN LABEL MUST BE **PROVED**, NOT DEFAULTED (#11536 review round
+    2, P1). A node can prove it carries the post-fix lexicon
+    (:func:`_is_proven_lexicon`) and STILL be the leak: if the index entry
+    outlived a property update, the token that matched is one of the REMOVED
+    prose's, not one of the lexicon's — and `lexicon` is a bucket that never
+    vetoes. So the hit is a stem collision only when the probe token relates to a
+    token of the text the index is declared on (``_searchText``), compared through
+    :func:`_stem_key`.
+
+    ⚠️ The fold is an approximation, and its failure direction is deliberate: a
+    pair it cannot relate lands in ``unexplained``, which VETOES — the safe
+    polarity for a verification gate (a false veto is re-measured; a false
+    certification is the leak #11161 exists for). The opposite error, relating
+    two tokens the engine does NOT relate, would need an English suffix fold to
+    invent a match, and where it does match the engine's stemmer matches too — so
+    it cannot hide a stale entry behind a token whose stem is absent.
+    """
+    text = props.get(_SEARCH_TEXT)
+    if not isinstance(text, str) or not text.strip():
+        return False
+    from tortoise.sparse import tokenize_sparse_query  # lazy (see module docs)
+
+    indexed = {_stem_key(token) for token in tokenize_sparse_query(
+        text, space_separated_identifiers=False)}
+    asked = tokenize_sparse_query(phrase, space_separated_identifiers=False)
+    if not indexed or not asked:
+        return False
+    return all(_stem_key(token) in indexed for token in asked)
+
+
 def _has_no_text(props: Mapping[str, Any]) -> bool:
     """True when the node's two indexed text columns both carry nothing."""
     for key in (_SUMMARY, _SEARCH_TEXT):
@@ -1336,7 +1398,7 @@ def _has_no_text(props: Mapping[str, Any]) -> bool:
     return True
 
 
-def classify_fts_hits(g, urls, *,
+def classify_fts_hits(g, urls, *, phrase: str | None = None,
                       timeout_ms: int = CACHE_READ_TIMEOUT_MS) -> dict:
     """Split *urls* into RESIDUE (still pre-fix prose) and LEXICON (repaired).
 
@@ -1358,10 +1420,18 @@ def classify_fts_hits(g, urls, *,
     outlived the property), and ``foreign`` is a Source outside this population (a
     non-episodic source with its own `_searchText`, whose match says nothing about
     this repair).
+
+    ⛔ AND ``lexicon`` IS PROVED TWICE (#11536 review round 2, P1): the node must
+    prove the post-fix pair (:func:`_is_proven_lexicon`) *and*, when *phrase* is
+    given, the probe token must relate to one of that node's OWN lexicon tokens
+    (:func:`_probe_explains_the_lexicon`). A node can prove the lexicon and still
+    be a stale-index leak, because what matched is the index entry the update was
+    supposed to remove. ``unexplained`` is that shape — neither provably the
+    prose nor provably a stem collision — and it vetoes.
     """
     wanted = [u for u in (urls or ()) if isinstance(u, str) and u]
     out: dict = {"residue": [], "lexicon": [], "stale": [], "foreign": [],
-                 "unread": []}
+                 "unexplained": [], "unread": []}
     if not wanted:
         return out
     try:
@@ -1386,7 +1456,10 @@ def classify_fts_hits(g, urls, *,
         elif carries_pre_lexicon_prose(props):
             out["residue"].append(url)
         elif _is_proven_lexicon(props):
-            out["lexicon"].append(url)
+            if phrase is None or _probe_explains_the_lexicon(props, phrase):
+                out["lexicon"].append(url)
+            else:
+                out["unexplained"].append(url)
         elif is_episodic_source_node(props) and _has_no_text(props):
             out["stale"].append(url)
         else:
@@ -1463,7 +1536,7 @@ def probe_fts(g, phrases, *, control: bool = True,
         {"ran": bool,                # at least one probe was measured
          "entity_type": "source", "limit": 50,
          "probes": [{phrase, hits, urls, truncated, ran, degraded, reason,
-                     residue, lexicon, unread}, ...],
+                     residue, lexicon, stale, foreign, unexplained, unread}, ...],
          "leaked": [phrase, ...],          # residue still findable — a LEAK
          "stem_only": [phrase, ...],       # hits, but every one is a lexicon node
          "unmeasurable": [phrase, ...],    # the leg did not run / is degraded
@@ -1478,7 +1551,8 @@ def probe_fts(g, phrases, *, control: bool = True,
     measured: list[dict] = []
     for phrase in phrases:
         got = source_fts_probe(g, phrase, timeout_ms=timeout_ms)
-        split = classify_fts_hits(g, got["urls"], timeout_ms=timeout_ms)
+        split = classify_fts_hits(g, got["urls"], phrase=phrase,
+                                  timeout_ms=timeout_ms)
         got.update(split)
         measured.append(got)
     report: dict = {
@@ -1493,9 +1567,13 @@ def probe_fts(g, phrases, *, control: bool = True,
         # gone but the index entry survived" are different repairs.
         "leaked": [p["phrase"] for p in measured if p["residue"]],
         "stale": [p["phrase"] for p in measured if p["stale"]],
+        # ⛔ `unexplained` IS NOT `stem_only` (#11536 review round 2, P1): a hit
+        # on a proven-lexicon node whose own tokens do NOT explain the probe is
+        # the stale-entry candidate, not a benign collision.
         "stem_only": [p["phrase"] for p in measured
                       if p["hits"] and not p["residue"] and not p["stale"]
-                      and not p["unread"]],
+                      and not p["unread"] and not p["unexplained"]],
+        "unexplained": [p["phrase"] for p in measured if p["unexplained"]],
         "unmeasurable": [p["phrase"] for p in measured
                          if not p["ran"] or p["degraded"]],
         "truncated": [p["phrase"] for p in measured if p["truncated"]],

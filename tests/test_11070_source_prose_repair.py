@@ -2592,7 +2592,7 @@ def test_a_hit_on_a_CLEARED_node_is_a_STALE_INDEX_LEAK_not_a_stem_collision(monk
 
     split = m.classify_fts_hits(graph, ["session:cleared"])
     assert split == {"residue": [], "lexicon": [], "stale": ["session:cleared"],
-                     "foreign": [], "unread": []}, (
+                     "foreign": [], "unexplained": [], "unread": []}, (
         "a CLEARED node's surviving index entry was classified as the post-fix "
         "lexicon — that is the #11161 leak reported as a stem collision")
 
@@ -2666,6 +2666,151 @@ def test_a_hit_with_no_addressable_url_cannot_certify(monkeypatch):
     folded = _cli._merge_probe({"ran": True, "probes": []}, report)
     assert folded["certifies"] is False and folded["vetoed"] == "unclassified", (
         "an unaddressable hit certified the leg")
+
+
+def test_a_PROVEN_lexicon_node_explains_the_hit_or_it_is_not_a_collision(
+        monkeypatch, capsys):
+    """#11536 review round 2, P1 (second half): the benign label must be PROVED.
+
+    (1) FAILS on the shipped classifier: `lexicon` absorbed EVERY hit on a node
+        that proves the post-fix pair, so an index entry that outlived a property
+        update — the SAME node, now carrying the lexicon, still matching the
+        REMOVED prose's token — certified as a "stem collision". `_report_fts`
+        then stated, on the spot, that the node's `_searchText` accounts for the
+        hit, which nothing had checked.
+    (2) REACHABLE: a deferred index update on the record arm, which is the one arm
+        that writes a lexicon (the clear arm's shape is the `stale` bucket).
+    (3) POLARITY THAT MUST NOT GO RED: the measured `friday`/`fridays` collision,
+        whose token DOES come from the node's own lexicon, stays benign.
+    """
+    from tortoise import session_source_prose_migration as m
+
+    # `_post_fix_node()` proves the lexicon: summary prefix + `_searchText`
+    # "migration, plan, friday".
+    graph = _RecordingGraph([(_post_fix_node(),)])
+    _install_fts(monkeypatch, {"zebraquux": [("session:s-post", 2.0)]})
+
+    report = m.probe_fts(graph, ["zebraquux"], control=False)
+    assert report["probes"][0]["lexicon"] == [], (
+        "a node whose OWN lexicon cannot account for the probe token was reported "
+        "as a benign stem collision — that is the survived-index-entry leak")
+    assert report["probes"][0]["unexplained"] == ["session:s-post"]
+    assert report["stem_only"] == [], (
+        "an unexplained hit was summarised as `stem_only`")
+    folded = _cli._merge_probe(
+        {"ran": True, "probes": [{"phrase": "zebraquux", "hits": 1,
+                                   "residue": []}]},
+        dict(report, control={"mode": "probe", "ok": True, "hits": 1}))
+    assert folded["certifies"] is False and folded["vetoed"] == "unexplained", (
+        "a corroborating control certified over a hit the node's own lexicon "
+        "cannot explain")
+
+    # argv: the writing arm must not print "Repair complete." over it.
+    _export_a_record_dsn(monkeypatch)
+    _install_fts(monkeypatch, {"zebraquux": [("session:s-post", 3.0)]})
+    monkeypatch.setattr(_cli, "reconcile_session_source_prose",
+                        lambda *a, **k: {
+                            "candidates": ["session:s-post"], "repaired": [],
+                            "empty_sessions": [], "no_record": ["session:s-post"],
+                            "no_reader": [], "no_session_id": [],
+                            "unaddressable": [], "left_alone": [],
+                            "written": ["session:s-post"], "notes": {},
+                            "census_before": 1, "census_after": 0,
+                            "dry_run": False})
+    _install_cli(monkeypatch, _RecordingGraph([(_post_fix_node(),)]),
+                 ["--repair", "--clear-without-record",
+                  "--probe-phrase", "zebraquux"])
+    capsys.readouterr()
+    assert _cli.main() == 1, (
+        "the repair reported success over a hit its own lexicon cannot explain")
+    captured = capsys.readouterr()
+    assert "Repair complete." not in captured.out
+    assert "matches none of that node's OWN lexicon tokens" in captured.err
+
+    # (3) the measured stem collision still certifies: `fridays` folds to the
+    # node's own `friday`, so the benign label IS earned here.
+    _install_fts(monkeypatch, {"fridays": [("session:s-post", 2.0)]})
+    report = m.probe_fts(_RecordingGraph([(_post_fix_node(),)]), ["fridays"],
+                         control=False)
+    assert report["probes"][0]["lexicon"] == ["session:s-post"]
+    assert report["probes"][0]["unexplained"] == [], (
+        "the measured `friday`/`fridays` collision was rejected — the token is "
+        "the node's own lexicon word")
+
+
+def test_the_uncorroborated_refusal_names_only_what_the_run_measured(monkeypatch,
+                                                                    capsys):
+    """#11536 review round 2, P2: a refusal must not assert unmeasured facts.
+
+    (1) FAILS on the shipped refusal: on every documented step-3 DRY RUN it
+        asserted "it returned no PRE-FIX node BEFORE the repair either" — a
+        BEFORE reading a dry run never takes (its own report prints "—" for the
+        field two lines above) — and "no post-fix lexicon node exists", which it
+        cannot know when the control's OWN read did not run. An operator
+        debugging a real leak is sent hunting for a missing lexicon node while
+        the index was simply unreadable.
+    (2) REACHABLE: step 3 as documented IS a dry run, and a degraded control read
+        is the same circuit-breaker state the leg already separates from a clean
+        miss on the probe line.
+    """
+    from tortoise import search_engine as se
+
+    class _LexiconGraph(_RecordingGraph):
+        """Answers the CONTROL read with a lexicon, so a token exists to probe."""
+
+        def query(self, cypher, params=None, timeout=None):
+            if "STARTS WITH $prefix" in cypher:
+                return _Result([("migration, plan, friday",)])
+            return super().query(cypher, params=params, timeout=timeout)
+
+    def fake(graph, query, **kwargs):
+        # The PROBE's own read ran and found nothing; the CONTROL's read is the
+        # degraded one. Same shape the read path records on a breaker trip.
+        degraded = query == "migration"
+        if kwargs.get("leg_trace") is not None:
+            kwargs["leg_trace"].append({
+                "leg": "fts", "ran": not degraded, "degraded": degraded,
+                "reason": "breaker_open" if degraded else "empty_results"})
+        return []
+
+    monkeypatch.setattr(se, "run_fts_query", fake)
+    _export_a_record_dsn(monkeypatch)
+    _install_cli(monkeypatch, _LexiconGraph([(_post_fix_node(),)]),
+                 ["--dry-run", "--assert-clean",
+                  "--probe-phrase", "zebraquux"])
+    assert _cli.main() == 1, "an uncorroborated zero certified"
+    err = capsys.readouterr().err
+    assert "cannot be corroborated" in err
+    assert "BEFORE READING WAS TAKEN" in err, (
+        "the refusal did not say the BEFORE reading was never taken")
+    assert "returned no PRE-FIX node BEFORE the repair" not in err, (
+        "the refusal asserted a BEFORE reading this dry run never took")
+    assert "no post-fix lexicon node exists" not in err, (
+        "the refusal asserted the graph has no lexicon node while the CONTROL's "
+        "own read was the thing that failed")
+    assert "CONTROL read did not run" in err
+
+    # …and the other polarity: on the WRITING arm the BEFORE reading WAS taken,
+    # so the claim is a fact and is stated as one.
+    monkeypatch.setattr(_cli, "reconcile_session_source_prose",
+                        lambda *a, **k: {
+                            "candidates": [], "repaired": [],
+                            "empty_sessions": [], "no_record": [],
+                            "no_reader": [], "no_session_id": [],
+                            "unaddressable": [], "left_alone": [],
+                            "written": [], "notes": {},
+                            "census_before": 0, "census_after": 0,
+                            "dry_run": False})
+    _install_cli(monkeypatch, _LexiconGraph([(_post_fix_node(),)]),
+                 ["--repair", "--clear-without-record",
+                  "--probe-phrase", "zebraquux"])
+    capsys.readouterr()
+    assert _cli.main() == 1
+    err = capsys.readouterr().err
+    assert "returned no PRE-FIX node BEFORE the repair either" in err, (
+        "the writing arm took a BEFORE reading, so the claim is measured and must "
+        "be stated")
+    assert "BEFORE READING WAS TAKEN" not in err
 
 
 def test_a_BREAKER_OPEN_read_is_UNMEASURABLE_not_a_clean_zero(monkeypatch):
