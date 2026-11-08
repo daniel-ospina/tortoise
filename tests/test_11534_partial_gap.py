@@ -433,6 +433,106 @@ def test_a_partly_malformed_gap_fill_answer_still_merges_the_valid_section(
                for p in out["embed_list"]["points"])
 
 
+def test_a_wrapped_gap_fill_answer_is_recorded_malformed_not_as_no_claim(
+        monkeypatch):
+    """An UNKNOWN key carrying content is a SHAPE error, not "no claim"
+    (review round 5, P2) — the same silent-drop class as a garbage `points`,
+    reached by a shape `_s4_malformed_sections` cannot see.
+
+    `_s4_malformed_sections` classifies only `_OUTPUT_SCHEMA` keys, so
+    `{"items": [...]}` / `{"claims": [...]}` / a bare unwrapped item passed it
+    untouched; `_s4_section_is_content` then counted it as content (the gate
+    fired) and `merge_embed_lists` — which iterates a FIXED section tuple —
+    dropped it. The run recorded `added_items: 0` with NO error and NO census,
+    indistinguishable from a model that legitimately found nothing, which
+    corrupts the benefit side of the A/B whose cost side is `stats["llm"]`.
+    """
+    wrapped = _Model(gap_answer=json.dumps(
+        {"items": [{"content": _MISSING_POINT}]}))
+    out = _run(monkeypatch, wrapped)
+    stats = out["stats"]["partial_gap_fill"]
+    assert stats["malformed_sections"] == ["items"]
+    assert out["error_census"].get("gap_fill_shape_error") == 1
+    assert any("malformed section 'items'" in e for e in out["errors"])
+    assert stats["added_items"] == 0
+    assert "flagged_before" not in stats, (
+        "nothing usable arrived, so the union was never re-scored — the census "
+        "above is what distinguishes it from 'the spans state no claim'")
+    assert not any(_MISSING_POINT[:40] in (p.get("content") or "")
+                   for p in out["embed_list"]["points"]), (
+        "the dropped content must not have reached the union")
+
+    # A truthy NON-list unknown key is the same class: it carries content and
+    # the merge drops it, so it must be censused too.
+    stringy = _Model(gap_answer=json.dumps({"items": "the spans state a claim"}))
+    out2 = _run(monkeypatch, stringy)
+    assert out2["stats"]["partial_gap_fill"]["malformed_sections"] == ["items"]
+    assert out2["error_census"].get("gap_fill_shape_error") == 1
+
+    # A bare single item (`[{...}]`, which `_parse_json_robust` unwraps to the
+    # item itself) has no section keys at all — also a shape error, also lost
+    # silently before this guard.
+    bare = _Model(gap_answer=json.dumps(
+        [{"content": _MISSING_POINT, "pointKind": "statement"}]))
+    out3 = _run(monkeypatch, bare)
+    stats3 = out3["stats"]["partial_gap_fill"]
+    assert stats3["malformed_sections"], (
+        "an unwrapped item carries content under keys that are not sections")
+    assert out3["error_census"].get("gap_fill_shape_error") >= 1, (
+        "one census bump per dropped section, and a bare item has several")
+
+
+def _long_narrative_model(narrative, **kw):
+    """`_Model` with an S1 that narrates a DIFFERENT story (the fixture's
+    narrative is fixed at module level, so the >20-flag arm needs its own)."""
+
+    class _LongNarrative(_Model):
+        def complete(self, *, system, user, max_tokens=None):
+            if "STORY SUMMARIZER" in system:
+                self.last_finish_reason = "stop"
+                self.calls.append("s1")
+                return narrative
+            return super().complete(system=system, user=user,
+                                    max_tokens=max_tokens)
+
+    return _LongNarrative(**kw)
+
+
+def test_a_truncated_span_list_is_visible_in_the_record(monkeypatch):
+    """The record must say how many spans the model was SHOWN (review round 5,
+    P2). `partial_gaps` renders at most `GAP_MAX_FLAGGED` (20) spans while
+    `flagged_total`/`flagged_before` are TRUE counts, so on a long session the
+    recorded closure charges the model for spans it never saw — and nothing in
+    the record said so. The cap never binds on the measured F3 population
+    (max 10 flags/session), which is why no existing row caught it.
+    """
+    narrative = "\n".join(
+        f"The zorbix lease of sector {i} requires a distinct frobnicator {i}, "
+        f"though the quux valve {i} stays sealed against backflow {i}."
+        for i in range(30))
+    model = _long_narrative_model(
+        narrative,
+        gap_answer=json.dumps({"entities": [], "points": [], "operators": [],
+                               "events": []}))
+    out = _run(monkeypatch, model)
+    stats = out["stats"]["partial_gap_fill"]
+    assert stats["fired"] is True
+    assert stats["flagged_total"] > vet_gate.GAP_MAX_FLAGGED, (
+        "the fixture must actually overflow the cap, or this row proves nothing")
+    assert stats["spans_shown"] == vet_gate.GAP_MAX_FLAGGED
+    assert stats["spans_truncated"] is True
+
+
+def test_the_span_count_matches_the_gap_when_the_cap_does_not_bind(monkeypatch):
+    """The other half: on the ordinary fixture the two counts must AGREE, so
+    `spans_shown` cannot silently become a second, drifting denominator."""
+    out = _run(monkeypatch, _Model())
+    stats = out["stats"]["partial_gap_fill"]
+    assert stats["flagged_total"] <= vet_gate.GAP_MAX_FLAGGED
+    assert stats["spans_shown"] == stats["flagged_total"]
+    assert stats["spans_truncated"] is False
+
+
 def test_an_all_empty_s2_batch_is_skipped_without_a_model_call(monkeypatch):
     """THE ZERO-CANDIDATE POPULATION IS SKIPPED, AND THE SKIP IS RECORDED.
 

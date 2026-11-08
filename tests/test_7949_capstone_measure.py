@@ -4533,8 +4533,8 @@ def test_the_bare_continuation_cites_name_what_they_say():
         ("docs/00_index.md", "each VET pass is gated on the LIST", (
             ("13291", "if vet_enabled and embed_list:"),
             ("13292", "embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass("),
-            ("13592", "if vet_enabled and complete_list:"),
-            ("13593", "complete_list, vet_union_stats, _w, _ = _run_vet_pass("),
+            ("13623", "if vet_enabled and complete_list:"),
+            ("13624", "complete_list, vet_union_stats, _w, _ = _run_vet_pass("),
         )),
         # the VET block's start; its three lines of keys (13407-13409) close on
         # line 13410 — DERIVED by content, not by arithmetic: `result["vet"] = {`
@@ -4546,8 +4546,8 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # which is why every ASSERTED number in this table is verified by
         # content instead.
         ("docs/00_index.md", "emitted unconditionally at", (
-            ("13806", 'result["classify_later"] = {'),
-            ("13816", 'result["vet"] = {'),
+            ("13837", 'result["classify_later"] = {'),
+            ("13847", 'result["vet"] = {'),
         )),
         # ⛔ THE CLASSIFY PASS'S OWN FAIL-OPEN PAIR (#10833 review, P2). A `+33`
         # shift applied to this row moved the first member while leaving the
@@ -4571,8 +4571,8 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # this head. A comment asserts nothing, so read the anchors from the row,
         # never from this prose.
         ("docs/00_index.md", "fail-open `except` at", (
-            ("13477", "except Exception as e:  # never block capture (P1)"),
-            ("13628", "except Exception as e:  # never block capture (P1)"),
+            ("13508", "except Exception as e:  # never block capture (P1)"),
+            ("13659", "except Exception as e:  # never block capture (P1)"),
         )),
         # `_IDLE_CITES["vet"]`: the early return and the surface it emits
         ("probes/capstone_measure.py", "its vet surface", (
@@ -4588,8 +4588,8 @@ def test_the_bare_continuation_cites_name_what_they_say():
         )),
         # the S2.2/S2.3 block this probe names as the #9116 seam's subject
         ("probes/capstone_measure.py", 'result["vet"]`` at', (
-            ("13816", 'result["vet"] = {'),
-            ("13820", ("exact", "}")),
+            ("13847", 'result["vet"] = {'),
+            ("13851", ("exact", "}")),
         )),
         # The E-row audit's cites on the GATE ITSELF. `_BUNDLE_CITE` matches only
         # `sdk|edges|extractor_v2`, so a `tools/*.py` number is invisible to the
@@ -4692,13 +4692,13 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # cannot see it, and no row scoped to it — which is exactly the invisibility
         # this pin exists for. Both rows hold the CALL, not the definition.
         ("README.md", "gap filler", (
-            ("13723", "result = execute_embed(complete_list, search, "
+            ("13754", "result = execute_embed(complete_list, search, "
                       "session_id=session_id,"),
         )),
         # ...and the probe's own copy of the same number, which sits in prose a
         # reader is sent to rather than in a table.
         ("probes/capstone_run.py", "ONE cite per symbol", (
-            ("13723", "result = execute_embed(complete_list, search, "
+            ("13754", "result = execute_embed(complete_list, search, "
                       "session_id=session_id,"),
         )),
     )
@@ -5530,7 +5530,7 @@ def test_the_bare_entry_point_call_cite_resolves_to_the_call_it_names():
     called at :13334)` had exactly one checked number and one unverifiable one —
     and the unchecked half went stale TWICE on this branch, once at the commit
     that re-derived it (it was already `:13299` there). Re-staling it to a wrong
-    line reds NOTHING: measured, `:13334` → `:13399` in both documents leaves this
+    line reds NOTHING: measured, `:13334` → `:13411` in both documents leaves this
     file at 51 passed. That is the blind spot this leg closes from the other side,
     the same one `_BARE_CITE` names above for the per-surface numbers.
 
