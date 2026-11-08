@@ -163,8 +163,11 @@ measured_at:
 # (The U3 row quotes the SAME function in its pre-#10025 shape — `Reachable graphs:
 # 'default' (default).` — because that is what the 2026-10-26 run observed; the shape
 # changed in `704fd60ee`, AFTER that run's deployed build. The function now renders
-# `(id …, graph_id …)` for the DEFAULT row (a custom row renders `name (gid)`), as
-# `step11-write-half-trace.txt` block 2 shows (`'default' (id g_dfa9a45dc4234801,
+# `(id …, graph_id …)` for the DEFAULT row, and its OTHER arm — taken when the row's
+# `stable_id` is absent or equals its gid — renders the name `repr`-quoted with a bare
+# gid, i.e. `'name' (gid)`, NOT the unquoted `name (gid)` an earlier cut of this
+# paragraph printed (`mcp_auth._describe_graph`, the `return f"{name!r} ({gid})"` arm).
+# `step11-write-half-trace.txt` block 2 shows the first arm (`'default' (id g_dfa9a45dc4234801,
 # graph_id 'default')`); U1's row quotes the
 # shape-neutral prefix `Reachable graphs: 'default' ...` and deliberately does not
 # assert a tail. Two shapes, two observation dates, one function: recorded rather than
