@@ -329,7 +329,8 @@ nine added by #11337, with `main` at 122, nineteen added by `#11444`'s writer-re
 by `#11471`'s GATED-writer bypass arm, and nine by `#11492` (`122 + 9 + 19 + 1 + 9 = 160`): seven
 row-2 register tests, one from round 2 that holds the row on a census `bypass` even when the register
 RESOLVES that writer, and one that pins the LIVE reader's `stores` plumbing — the product-register →
-reader seam every injected fixture skipped) — and
+reader seam every injected fixture skipped, the PARTIAL-measurement hold, and the gated-writer /
+direct-store-shape pins — and
 reads 159 passed, 1 skipped on the docker lane. The
 skip is the `<3.12` re-derive. ⚠️ The count is bound to THIS TREE, never to a branch head: a figure
 stated as *"at #11337's head"* is stale against the same tree it sits in as soon as one more test is
