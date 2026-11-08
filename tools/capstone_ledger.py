@@ -296,6 +296,11 @@ RUNNERS: Final[frozenset[str]] = frozenset(
         "env",
         "uvx",
         "poetry",
+        # A verifier this repo actually runs, and a legitimate SECOND command in a
+        # compound record (`uv run pytest … && ruff check <path>`). Without it that
+        # tail segment is prose by the every-segment rule and the whole row is
+        # refused — a false block on a real record.
+        "ruff",
     }
 )
 
@@ -313,6 +318,46 @@ RUNNERS: Final[frozenset[str]] = frozenset(
 #: artifact exists to refuse, and that trade is not close.
 _CHAIN_WORDS: Final[frozenset[str]] = frozenset({"run", "exec", "x"})
 
+#: The ONE way a subcommand verb is admitted: **per runner**, never as a global
+#: word set. `cmd:ruff check <path>` / `cmd:ruff format --check <path>` were REFUSED
+#: (`'check' is not a file in this tree`) at `0c259a39f3` and on `origin/main` at
+#: `5ef5805f0` — exit 1, which prints no report, so a lane recording the lint gate it
+#: actually ran lost the whole uncovered list.
+#:
+#: ⛔ What this does NOT admit, stated so the next lane does not read the fix as
+#: wider than it is: `.github/workflows/main-lint.yml:215` runs a bare `ruff check .`,
+#: and `cmd:ruff check .` is STILL refused — `.` resolves to the repository root and
+#: names everything, which is the vacuity `cmd:pytest .` is refused for
+#: (`_names_artifact`, "a bare `*`/`.`/`/` is not a citation"). A lane recording that
+#: shape must spell the target as a path (`ruff check tools/`, `ruff check <file>`).
+#: Pinned as REFUSED by
+#: `test_a_subcommand_verb_is_admitted_per_runner_and_nowhere_else`. Admitting `.`
+#: under a consumed subcommand is a defensible narrowing (it would confer nothing,
+#: like `cmd:make`), but it weakens a load-bearing vacuity rule and belongs in its
+#: own change with its own measurement — not folded in here.
+#:
+#: ⛔ And it was not fixable by skipping subcommand verbs GENERALLY, which is what a
+#: GLOBAL word set does — measured under that mutant, it newly admits
+#: `cmd:make check` and `cmd:docker format` (a bare word behind ANY runner becomes
+#: skippable, i.e. the one-word claim this gate exists to refuse). Keyed by the
+#: runner ACTUALLY being invoked (the last RUNNER token in the chain, so
+#: `uv run ruff …` resolves to `ruff`), those stay refused.
+#:
+#: ⛔ SCOPED TO THE RUNNERS THIS REPO WRITES DOWN — one entry, added because a real
+#: record was refused without it. A subcommand word is a NON-ARTIFACT argument, so
+#: every entry weakens the arm slightly; extend by measurement, never by analogy.
+_RUNNER_SUBCOMMANDS: Final[dict[str, frozenset[str]]] = {
+    "ruff": frozenset({"check", "format", "rule", "config", "linter", "clean"}),
+    # `uv lock --check` is the documented lockfile-drift gate (`AGENTS.md`). With no
+    # target it is a RECORD that confers nothing — the same arm that admits
+    # `cmd:make`. Without this entry `lock` was read as an ARTIFACT and refused, a
+    # false block on a shape `AGENTS.md` hands a lane (measured by the second review
+    # cycle). It buys no strictness back: `cmd:uv lock NOT RUN` still put `NOT` in
+    # artifact position and is still REFUSED, so only the SUBCOMMAND is recognised
+    # and the argument grading after it is unchanged.
+    "uv": frozenset({"lock"}),
+}
+
 #: A runner's own non-artifact arguments, which must not be mistaken for the target:
 #: a bare duration (`timeout 300 …`) and an environment assignment (`env FOO=1 …`).
 #: Both are literal by construction, so allowing them costs no strictness.
@@ -324,20 +369,439 @@ _ENV_ASSIGNMENT: Final = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 #: from the STRING by `_command_body`, never from a token list, so the quoting of
 #: the rest of the command survives.
 _LEADING_ASSIGNMENT: Final = re.compile(
-    r"""^[A-Za-z_][A-Za-z0-9_]*=(?:'[^']*'|"[^"]*"|[^\s'"])+\s+"""
+    r"""^[A-Za-z_][A-Za-z0-9_]*=(?:'[^']*'|"[^"]*"|[^\s'"])+(?:\s+|$)"""
 )
 
 #: A `cd <dir>` WRAPPER segment (no `;`/flags — the compound-separator forms are not
 #: normalised, only the plain `cd X && …` this repo's own recipes use).
 _CD_SEGMENT: Final = re.compile(r"^cd\s+(\S[^;|&]*)$")
 
+#: The operand a shell CONTROL builtin accepts (`man bash`): one optional integer,
+#: OR the shell's own status expansion. `exit 1`, `return 0`, `shift 2`, `break`,
+#: `continue 3`, `exit $?`, and — measured, `bash -c 'shift $#'` → rc 0 — `$#`.
+#: A prose argument (`exit "I did not run this"`) does not match, which is the point:
+#: the control builtins were added to `_WRAPPER_VERBS` for `|| exit 1`, and without an
+#: argument grammar they admitted the very prose carriage that set exists to refuse.
+_CONTROL_OPERAND: Final = re.compile(r"^(?:[+-]?\d{1,10}|\$\?|\$\{\?\}|\$#|\$\{#\})$")
+
+#: The shell CONTROL builtins admitted as wrappers. Named separately because the
+#: `exit`-position rule must treat them as non-inert: they terminate rather than
+#: cite, so a later one is not evidence that the graded command ran.
+_CONTROL_BUILTINS: Final[frozenset[str]] = frozenset(
+    {"exit", "return", "shift", "break", "continue"}
+)
+#: A bare NAME — an `export`/`unset` operand that is not an assignment.
+_ENV_NAME: Final = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+#: ONE array ELEMENT of a NAME, e.g. `unset 'A[0]'`. ⛔ `unset` takes this form and
+#: bash exits 0 for it, so requiring a bare NAME refused it — a false block on a
+#: record bash accepts, and exit 1 hides the whole uncovered report. Deliberately
+#: NOT extended to `export`: `export 'A[0]'` is a real bash error ("not a valid
+#: identifier"), so admitting it there would be a false PASS. ⛔ The SUBSCRIPT is
+#: arbitrary inert data (`bash -c "unset 'A[I did not run this]'"` → rc 0) and is
+#: NOT graded — declared as an open carriage in the ledger.
+_ENV_ARRAY_ELEMENT: Final = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\[[^\]]+\]$")
+
+#: The option NAMES `set -o`/`set +o` accept — `bash -c 'set -o'` on this fleet.
+#: ⛔ VALIDATED, because an UNKNOWN name is an ERROR (`bash -c 'set -o NOTRUN'`
+#: → rc 2): the `&&` short-circuits and the graded command provably never ran, so
+#: consuming any bare word here admitted `set -o "I did not run this" && <cmd>` as
+#: CLEAN. That is a false PASS, which is worse than a false block.
+_SET_OPTION_NAMES: Final[frozenset[str]] = frozenset(
+    {
+        "allexport",
+        "braceexpand",
+        "emacs",
+        "errexit",
+        "errtrace",
+        "functrace",
+        "hashall",
+        "histexpand",
+        "history",
+        "ignoreeof",
+        "interactive-comments",
+        "keyword",
+        "monitor",
+        "noclobber",
+        "noexec",
+        "noglob",
+        "nolog",
+        "notify",
+        "nounset",
+        "onecmd",
+        "physical",
+        "pipefail",
+        "posix",
+        "privileged",
+        "verbose",
+        "vi",
+        "xtrace",
+    }
+)
+
+#: The single-letter flags `set` accepts (`man bash`:
+#: `set [-abefhkmnptuvxBCEHPT] [-o option-name] [--] [-] [arg …]`). ⛔ Validated for
+#: the same reason as `_SET_OPTION_NAMES`: `set -ZZZ` exits 2, so a record for
+#: `set -ZZZ && <cmd>` names a command that never ran. `-` and `+` alone are
+#: valid (`set -` clears -x/-v) and are handled before this set is consulted.
+#: ⛔ `o` IS in the cluster set even though `man bash`'s synopsis lists `-o`
+#: separately: bash accepts `-euo pipefail` as the cluster `-e -u -o pipefail`, so
+#: omitting `o` here false-blocked the canonical `set -euo pipefail` preamble —
+#: measured, not assumed.
+_SET_SHORT_FLAGS: Final[frozenset[str]] = frozenset("abefhkmnoptuvxBCEHPT")
+
+#: The flag LETTERS `export` and `unset` accept, MEASURED (not assumed):
+#: `export -f/-n/-p` → rc 0/0/0 while `export -e/-x/-v` → rc 2; `unset -f/-n/-v`
+#: → rc 0/0/0 while `unset -e/-p` → rc 2. ⛔ Validated for the same reason as the
+#: `set` sets: a rejected flag makes bash exit 2, so `export -e NOT RUN && <cmd>`
+#: is a record for a command that never ran.
+_ENV_FLAGS: Final[dict[str, frozenset[str]]] = {
+    "export": frozenset("fnp"),
+    "unset": frozenset("fnv"),
+}
+
+#: A `umask` mask: octal, or the symbolic form. ⛔ The symbolic form is a
+#: COMMA-SEPARATED CLAUSE LIST (`u=rwx,g=rx,o=`), and the first grammar matched only
+#: ONE clause. ⛔ The ONLY symbolic mode characters bash's `umask` accepts are
+#: `rwx` — MEASURED: `umask a+s` / `g+s` / `o+t` / `u=X` all exit 1 ("invalid
+#: symbolic mode character"), so admitting `s`/`t`/`X` here (as `chmod` allows)
+#: admitted records for a command that never ran. ⛔ Octal is up to FIVE digits:
+#: `umask 07777` exits 0, so `{1,4}` false-blocked it.
+_UMASK_ARG: Final = re.compile(r"^(?:[0-7]{1,5}|[ugoa]*[+\-=][rwx]*(?:,[ugoa]*[+\-=][rwx]*)*)$")
+
+
+def _fails_before_a_chain(head: str, args: list[str]) -> bool:
+    """Does ``head args`` FAIL at script level, so a `&&` after it short-circuits?
+
+    ⛔ MEASURED, not inferred (fifth review cycle). The previous guard asked only
+    about `exit`, and justified exempting `return` with a measurement taken using
+    the WRONG SEPARATOR: `bash -c 'return 0 ; echo RAN-AFTER'` does print
+    RAN-AFTER, because `;` continues past a failure — but a record chains with
+    `&&`, where the same failure short-circuits. Measured on this box, each
+    followed by `&& echo RAN`:
+
+        exit 0       rc 0   no RAN     (terminates — the original case)
+        return 0/1   rc 2   no RAN     !!! admitted before this function
+        shift 5      rc 1   no RAN     !!! admitted before this function
+        shift        rc 1   no RAN     (bare `shift` is `shift 1`)
+        shift 0      rc 0   RAN        (succeeds, so NOT terminating)
+        break        rc 0   RAN        (warns, then continues)
+        continue     rc 0   RAN        (warns, then continues)
+
+    So a control builtin is TERMINATING unless it can succeed at script level,
+    which for `shift` means an explicit `0` operand and for `break`/`continue` is
+    always.
+
+    ⛔ THE GUARD IS SEPARATOR-BLIND, AND THAT IS A DECLARED FALSE BLOCK (#11520).
+    Only a `&&` short-circuits a failure: measured, `bash -c 'return 0 ; echo RAN'`
+    and `bash -c 'return 0 || echo RAN'` both print RAN, rc 0. `_split_segments`
+    discards the operator it split on, so this predicate cannot see which one
+    follows, and a `;`/`||` record bash really executes with is refused too (exit 1
+    prints no report, so it loses that row's uncovered list). Telling them apart
+    needs the splitter to hand the operator through; the refusal is kept on the
+    conservative side until it does, because a fail-OPEN here is the P1 this guard
+    was written for. The message therefore names the CONDITION, not a `&&` the
+    record may not contain.
+
+    ⛔ `set -o <invalid-option>` USED to be recorded here as an open
+    residual on the grounds that refusing it needs the closed set of bash option
+    NAMES "which this module deliberately does not carry" — that is no longer true:
+    the module DOES carry `_SET_OPTION_NAMES`, and `_wrapper_argument_defect`
+    REFUSES `set -o NOTRUN` / `set -o "I did not run this"` (measured). Leaving the
+    old sentence in place told a maintainer a live guard was dead weight, which is
+    the same false-attestation class as an over-claiming ledger — corrected, not
+    deleted, so the next reader sees that the guard exists and where it lives.
+    """
+    if head in {"exit", "return"}:
+        return True
+    if head == "shift":
+        # `shift 0` is the only spelling that succeeds with no positional params.
+        return not (len(args) == 1 and args[0] == "0")
+    # `break` / `continue` warn and CONTINUE at script level (measured rc 0).
+    return False
+
+
+def _wrapper_argument_defect(head: str, args: list[str], cwd: Path, root: Path) -> str | None:
+    """Why ``head args`` is not a well-formed shell WRAPPER, or `None` if it is.
+
+    ⛔ A wrapper used to be admitted on its HEAD alone, so its arguments were never
+    read — measured on the merged tree, `cmd:export NOT RUN && uv run pytest …`,
+    `cmd:source NOT RUN && …` and `cmd:echo NOT RUN … && …` were ACCEPTED while the
+    naked `cmd:NOT RUN && …` was REFUSED: the same disclaimer, admitted by one
+    word. The wrapper runs nothing that is being cited, so admitting it is right;
+    admitting it WITHOUT READING ITS ARGUMENTS is what made it a bypass.
+
+    Each wrapper here has a grammar the shell itself enforces, so the argument is
+    checked. `export`/`unset` take NAMEs, `set` takes options, `umask` takes a
+    mask, and `source` takes a file that must EXIST (a failing `source` short-
+    circuits the `&&`, so no later segment can have run).
+
+    ⛔ A DECORATIVE PRINTER is the genuinely undecidable half — `echo` may print
+    any text and `… && echo PASS` must stay legal — so it is named as a residual at
+    `_DECORATIVE` rather than left for a reader to infer as closed.
+    """
+    # ⛔ CONTROL builtins take at most ONE optional integer operand (`man bash`:
+    # `exit [n]`, `return [n]`, `shift [n]`, `break [n]`, `continue [n]`). WITHOUT
+    # this branch they fell through to the `return None` below and their arguments
+    # were NEVER READ, so `… && exit "I did not run this"` reached `verified` /
+    # `uncovered: 0` / exit 0 behind every control head — and the ledger's own "the
+    # WRAPPER half of that root is closed" sentence became false (fifth review
+    # cycle). Measured: `export`/`unset`/`umask`/`set` refused the same carriage;
+    # only the newly-added builtins admitted it.
+    if head in _CONTROL_BUILTINS:
+        # ⛔ AT MOST ONE. `man bash` gives `exit [n]` / `return [n]` / `shift [n]` /
+        # `break [n]` / `continue [n]`, and the shell ENFORCES the arity: measured,
+        # `bash -c 'exit 0 0 && echo RAN'` prints "exit: too many arguments" and the
+        # chain status is 1, so the graded command never ran. Validating each
+        # argument without bounding the COUNT accepted `cmd:exit 0 0 && uv run
+        # pytest …` (sixth review cycle) — a record admitted for a command the shell
+        # refuses, which is the same class of false PASS this branch exists to close.
+        if len(args) > 1:
+            return f"takes at most one integer argument, got {len(args)}"
+        for arg in args:
+            if not _CONTROL_OPERAND.match(arg):
+                return f"{_short(arg)} is not a numeric argument"
+        return None
+    if head in {"export", "unset"}:
+        for arg in args:
+            if arg == "--":
+                continue
+            if arg.startswith("-") or arg.startswith("+"):
+                # ⛔ VALIDATED, not skipped. An invalid flag is an ERROR
+                # (`export -e NOTRUN` → rc 2, `unset -p X` → rc 2), so the `&&`
+                # short-circuits and the graded command PROVABLY never ran.
+                # Skipping dashed tokens admitted `export -e NOT RUN && <cmd>` as
+                # `verified` / `uncovered: 0` / CLEAN — a false PASS, not a
+                # convenience. The accepted letters are measured, not assumed.
+                # ⛔ A BARE `-`/`+` is not a flag: `export -` exits 1, so it is
+                # refused; `unset -` exits 0, so it is admitted.
+                if not arg[1:]:
+                    if head == "unset" and arg == "-":
+                        continue
+                    return f"{_short(arg)} is not a `{head}` flag"
+                if not set(arg[1:]) <= _ENV_FLAGS[head]:
+                    return f"{_short(arg)} is not a `{head}` flag"
+                continue
+            if _ENV_NAME.match(arg) or _ENV_ASSIGNMENT.match(arg):
+                continue
+            # ⛔ `unset 'A[0]'` removes ONE array ELEMENT and bash exits 0 for it;
+            # requiring a bare NAME (or `NAME=`) refused it as prose. `unset` only:
+            # see `_ENV_ARRAY_ELEMENT` for why `export` keeps the stricter rule.
+            # The SUBSCRIPT is arbitrary inert data and is NOT graded — declared as
+            # an open carriage in `docs/evidence/9664-capstone/verdict-ledger.yml`,
+            # because an unlisted carriage reads as closed.
+            if head == "unset" and _ENV_ARRAY_ELEMENT.match(arg):
+                continue
+            return f"{_short(arg)} is neither a NAME nor a NAME=value assignment"
+        return None
+    if head == "set":
+        # ⛔ `man bash`: `set [-abefhkmnptuvxBCEHPT] [-o option-name] [--] [-] [arg …]`.
+        # The option NAME after `-o`/`+o` is a BARE operand, and the whole line is the
+        # canonical bash preamble — every `.ci-checks/*.sh` in this repo opens with
+        # it. Requiring every operand to start with `-`/`+` REFUSED `set -euo
+        # pipefail` and `set -o pipefail`, i.e. a false block on the most ordinary
+        # wrapper there is (found by the second review cycle of this branch).
+        pending_name = False
+        for arg in args:
+            # ⛔ `--` ENDS option parsing: every operand after it is a POSITIONAL
+            # PARAMETER, not an option (`man bash`: `set … [--] [-] [arg …]`).
+            # Requiring each of those to start with `-`/`+` refused `set -- a b`,
+            # which bash accepts (rc 0) — a false block on a record that ran, and
+            # exit 1 hides the whole uncovered report. The parameters are inert (they
+            # are ASSIGNED, never executed), so their text is not graded — declared
+            # as an open carriage in the ledger rather than left to read as closed.
+            if arg == "--":
+                return None
+            if arg in {"-", "+"}:
+                pending_name = False
+                continue
+            is_flag = arg.startswith("-") or arg.startswith("+")
+            if pending_name and not is_flag:
+                pending_name = False
+                # ⛔ The option NAME is VALIDATED. `bash -c 'set -o NOTRUN'` exits 2,
+                # so the `&&` short-circuits and the graded command provably never
+                # ran; consuming any bare word admitted `set -o "I did not run
+                # this" && <cmd>` as CLEAN — a false PASS.
+                if arg not in _SET_OPTION_NAMES:
+                    return f"{_short(arg)} is not a shell option name"
+                continue
+            if not is_flag:
+                return f"{_short(arg)} is not a shell option"
+            # ⛔ The FLAG LETTERS are validated for the same reason as the option
+            # name: `set -ZZZ` exits 2, so a record for `set -ZZZ && <cmd>` names a
+            # command that never ran.
+            if not set(arg[1:]) <= _SET_SHORT_FLAGS:
+                return f"{_short(arg)} is not a shell option"
+            # ⛔ `o` ANYWHERE in the cluster takes the next BARE word as the option
+            # name — not only a trailing `o`. MEASURED: `set -oe pipefail`,
+            # `set -eox pipefail` and `set -ou pipefail` all exit 0, so an
+            # `endswith("o")` test false-blocked them, while `set -o -e` and
+            # `set -o --` exit 0 too and are handled by the `is_flag` / `--` arms
+            # above rather than being read as option names.
+            pending_name = "o" in arg[1:]
+        return None
+    if head == "umask":
+        # ⛔ `man bash`: `umask [-p] [-S] [mode]` — the FLAGS precede the mask, so
+        # `umask -S` was refused as "not a umask mask".
+        # ⛔ `--` ends option parsing here too (`bash -c 'umask -- 022'` → rc 0).
+        # `set` got `--` before `umask` did, so the SAME asymmetry left `umask --
+        # 022` refused while `set -- a b` was accepted — the false block halved.
+        for arg in args:
+            if arg in {"-p", "-S", "-pS", "-Sp", "--"}:
+                continue
+            if not _UMASK_ARG.match(arg):
+                return f"{_short(arg)} is not a umask mask"
+        return None
+    # ⛔ `source` is graded on EXISTENCE only, and the limit is named rather than
+    # implied closed. `is_file()` proves the target is there, NOT that sourcing it
+    # SUCCEEDS — `source tests/test_9664_capstone_verdict_ledger.py` is a real file
+    # bash refuses (exit 2), so the `&&` short-circuits and the graded command
+    # provably never ran. That residual is PINNED as OPEN
+    # (`test_source_of_an_existing_but_unsourceable_file_is_a_known_gap`).
+    #
+    # The alternative — requiring the target to be TRACKED and `bash -n` clean —
+    # closes it, but it REFUSES `source .venv/bin/activate`, which is a command a
+    # lane really records and which this branch already pins as a legitimate
+    # record. The module's own rule is that "a refusal that loses the finding is
+    # worse than the weaker arm", so non-existence is what is refused here. THIS
+    # DOES make the verdict box-dependent for `source` wrappers (`.venv` exists on
+    # the authoring box and in no clone); that is the cost of not taking a false
+    # block, it is disclosed here, and it is tracked on #11520.
+    # ⛔ `.` is the POSIX spelling of `source`, so it gets the SAME arm. Refusing it
+    # while admitting `source .venv/bin/activate` is incoherent — the module's own
+    # rationale for that admission applies verbatim to `. .venv/bin/activate`.
+    # Measured false block: `cmd:. .venv/bin/activate && uv run pytest …` was ACCEPTED
+    # on `origin/main` and REFUSED here as "neither a command nor a shell wrapper"
+    # (third review cycle).
+    if head in {"source", "."}:
+        if not args:
+            return None
+        target = args[0].strip("'\"")
+        try:
+            # ⛔ `~` MUST be expanded before the join: `cwd / "~/.bashrc"` is
+            # `<repo>/~/.bashrc`, a path that exists on NO box, so a record a lane
+            # really writes (`source ~/.bashrc && …`, `source ~/.nvm/nvm.sh && …`)
+            # was refused with "does not name a file" on every machine — not the
+            # box-dependence disclosed below, but a definite non-resolution.
+            # Measured false block; `origin/main` accepted the shape (third review
+            # cycle). An absolute expanded path wins the join, which is the intent.
+            resolved = (cwd / Path(target).expanduser()).resolve()
+        except (OSError, RuntimeError, ValueError):
+            resolved = None
+        if resolved is None or not resolved.is_file():
+            return (
+                f"{_short(target)} does not name a file, and a failing `{head}` "
+                "short-circuits the `&&` — no later segment of this record can have run"
+            )
+        return None
+    return None
+
+
+def _split_flag(token: str) -> tuple[str, str]:
+    """Split one dashed token into its FLAG and any value ATTACHED to it.
+
+    `-c` -> `('-c', '')`, `-cBODY` -> `('-c', 'BODY')`, `--eval=BODY` ->
+    `('--eval', 'BODY')`, `--check` -> `('--check', '')`. The ATTACHED form is what
+    `bash -c'…'`, `bash -e'…'` and `--eval="…"` produce, and it is the reason
+    `token in _SCRIPT_FLAGS` was not enough: shlex returns the flag and its body as
+    ONE token, so the body was never graded. See the call site for the measurement.
+
+    ⛔ A SHORT-FLAG CLUSTER is why this is not `token[:2]`. `man bash` lets the
+    operand-taking flag sit anywhere the group ends (`bash -ec CMD`, `bash -euc
+    CMD`), so taking the first two characters graded the leftover `c`/`uc` as the
+    SCRIPT BODY and refused a legitimate record with a nonsense reason — "script 'c'
+    is not a command". The split lands on the LAST script flag in the cluster and
+    the remainder after it is the body; when nothing follows it, the body is the
+    NEXT token and the caller's `consumed_script` hand-off applies.
+    """
+    if token.startswith("--"):
+        flag, sep, value = token.partition("=")
+        return flag, (value if sep else "")
+    found = None
+    for position, letter in enumerate(token[1:], start=1):
+        # ⛔ SCAN ONLY THE LEADING FLAG CLUSTER — stop where the BODY begins (review
+        # cycle 5, P1). Scanning the WHOLE token let a `-c`/`-e`-looking LETTER
+        # INSIDE THE BODY win: measured, `bash -c'uv run pytest
+        # tools/capstone_ledger.py'` set `found` on the `e` of "ledger", graded
+        # `'r.py'` as the script and REFUSED a legitimate record (a false block, and
+        # exit 1 hides the uncovered list) — and the prose spelling was refused by
+        # that same mis-split rather than by any rule. The cluster ends at the first
+        # character that is neither a shell single-letter flag NOR a script flag,
+        # which is exactly where `-cBODY`'s body starts; `-ec` / `-euc` / `-cu` stay
+        # inside the cluster, so the operand-taking flag is still found in it and the
+        # body still comes from the NEXT token.
+        if f"-{letter}" in _SCRIPT_FLAGS:
+            found = position
+            continue
+        if letter not in _SHORT_SHELL_FLAGS:
+            break
+    if found is not None:
+        remainder = token[found + 1 :]
+        # ⛔ A PURE OPTION CLUSTER IS MORE FLAGS, NOT A BODY. Measured against real
+        # bash: `bash -eu -c CMD` prints its script (it is `-e -u -c CMD`), and
+        # `bash -cu CMD` prints its script too (`-c -u CMD` — the operand-taking
+        # flag takes the NEXT token, not the rest of the group). Reading the
+        # leftover `u` as the script body refused BOTH with "script 'u' is not a
+        # command" (third review cycle): a false block, and exit 1 prints no
+        # uncovered list, so it cost the whole report. The old split only held when
+        # the operand-taking flag happened to be LAST in the group (`-ec`, `-euc`).
+        # ⛔ BUT "all lowercase letters" IS NOT "an option cluster" — `-cverified`
+        # is all lowercase and is a CLAIM, not flags (fourth review cycle: it
+        # reached `verified` / exit 0). The remainder is flags only when every
+        # character is a letter a shell actually accepts (`_SHORT_SHELL_FLAGS`).
+        # Anything else is a real attached body and is still graded as a script —
+        # that is the bypass this arm exists to close, and `bash -c'NOT RUN'`
+        # must stay refused.
+        if remainder and set(remainder) <= _SHORT_SHELL_FLAGS:
+            for letter in token[1:]:
+                if f"-{letter}" in _OPERAND_SCRIPT_FLAGS:
+                    return f"-{letter}", ""
+            return token, ""
+        return f"-{token[found]}", remainder
+    if len(token) > 2:
+        return token[:2], token[2:]
+    return token, ""
+
+
 #: A `-c`/`-e` script may itself contain a `-c`. Bounded so a crafted record cannot
 #: recurse the validator; anything past this is a refusal, not a hang.
 _MAX_SCRIPT_DEPTH: Final[int] = 3
 
 
-def _split_chains(text: str) -> list[str]:
-    """Split a command on UNQUOTED `&&` only.
+#: ⛔ EVERY shell separator splits a record, not just `&&`. Splitting only on `&&`
+#: left the whole false-PASS class reachable one separator over: measured at the
+#: round-2 head, `cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q;
+#: NOT RUN` (and the `||`, `|`, `&` and newline spellings, and the same text inside
+#: a `bash -c` body) were ACCEPTED, and a 22-row ledger relabelled that way
+#: reported `verified: 22  uncovered: 0`, `CAPSTONE-LEDGER-RESULT: CLEAN`, exit 0.
+#: Two-character operators are matched before their one-character prefixes.
+_TWO_CHAR_SEPARATORS: Final[tuple[str, ...]] = ("&&", "||")
+_ONE_CHAR_SEPARATORS: Final[frozenset[str]] = frozenset({";", "|", "&", "\n"})
+
+
+def _is_redirection(text: str, index: int) -> bool:
+    """Is the `&`/`|` at `index` part of a REDIRECTION rather than a separator?
+
+    The shell's rule is adjacency to `>`: `&>`/`&>>` put the `&` before it;
+    `2>&1`, `>&2`, `N>&M`, `N>&-` and bash's noclobber override `>|` put it after.
+    Anything else — `a & b`, `a | b`, `a |& b` — is a separator, and the empty
+    middle segment it leaves behind is skipped.
+
+    ⛔ `|&` is NOT "a pipe plus a background marker" (a false statement this
+    docstring used to make): per `man bash` §"Pipelines", it is a pipeline control
+    operator whose stderr is also piped — shorthand for `2>&1 |`. It still
+    separates, so the split is right; the justification was not, and a wrong reason
+    in a paragraph whose job is to make the next reader trust the splitter invites
+    the wrong inference (that something is backgrounded, so its status stops gating
+    the `&&` — which it does not).
+    """
+    if text[index] not in "&|":
+        return False
+    return text[index - 1 : index] == ">" or text[index + 1 : index + 2] == ">"
+
+
+def _split_segments(text: str) -> list[str]:
+    """Split a compound command line on every UNQUOTED shell separator.
 
     A plain `text.split("&&")` splits inside quotes too, so `bash -c 'a && b'` —
     the only way the docstring says a script can be recorded — came back as
@@ -345,11 +809,30 @@ def _split_chains(text: str) -> list[str]:
     entire uncovered list. Only a separator the SHELL would treat as one splits
     here.
 
-    A backslash escapes only inside DOUBLE quotes, and it must take the escaped
-    character with it — otherwise `bash -c "echo \\" && echo x"` ends the quote
-    early and the command is split at the wrong place. (Ported from the peer lane's
-    `_split_on_chain` at 35ea7658e, which handles that case; this branch's first
-    version did not.)
+    ⛔ An unquoted `#` at a WORD BOUNDARY ends the command LINE (#11506 review,
+    cycle 2). The shell starts a comment there, so no separator on that line
+    splits — but `\n` is still a separator, so the scan RESUMES after the newline
+    (cycle 3: `break` discarded the rest of the RECORD, which re-opened the
+    newline fail-open this PR had just closed). Measured, `… -q  # ran; 194 passed`
+    used to come back as the segment `194 passed`, exit 1, and NO uncovered list;
+    `origin/main` ACCEPTED it, so the every-segment rule had introduced another
+    false block, and the per-segment whitespace-preceded-hash retry further down
+    could never undo a split already taken here. `a#b` is NOT a comment (the `#`
+    must follow whitespace, start, or a separator), and a quoted `#` is not either
+    — `-k 'issue#123'` still parses.
+
+    ⛔ A backslash escapes in TWO places, not one, and the shipped code handles
+    both — the docstring said only the first for a round after the second landed,
+    which is how a maintainer deletes the branch that keeps a legitimate record
+    whole. (1) inside DOUBLE quotes it must take the escaped character with it —
+    otherwise `bash -c "echo \\" && echo x"` ends the quote early and the command
+    is split at the wrong place (ported from the peer lane's `_split_on_chain` at
+    35ea7658e, which handles that case; this branch's first version did not).
+    (2) UNQUOTED, `\\` + newline is a LINE CONTINUATION: bash joins the lines, so
+    `cmd:… -q \\` NEWLINE `  --maxfail=1` is ONE command and splitting it there is a
+    measured false block (exit 1, and exit 1 prints no uncovered list). Both are
+    pinned in `test_the_commands_agents_md_hands_a_lane_are_not_false_blocked`
+    (the `… -q \\` NEWLINE and `… && \\` NEWLINE params).
     """
     segments: list[str] = []
     current: list[str] = []
@@ -368,11 +851,77 @@ def _split_chains(text: str) -> list[str]:
         elif char in "\"'`":
             quote = char
             current.append(char)
-        elif text.startswith("&&", index):
+        elif char == "\\" and index + 1 < len(text):
+            # An UNQUOTED backslash (#11506 review, cycle 4). The shell's rule is not
+            # "only inside double quotes": an unquoted `\` escapes the next
+            # character, and `\` + NEWLINE is a LINE CONTINUATION — the shell JOINS
+            # the lines, so that newline is NOT a separator. Untreated, a record
+            # pasted from a wrapped terminal command was torn at the `\` and
+            # REFUSED: measured, `cmd:uv run pytest … -q \` NEWLINE `  --maxfail=1`
+            # exited 1 with NO uncovered list, while `origin/main` ACCEPTED it — a
+            # regression of exactly the class this ruleset exists to remove.
+            # The backslash is preserved for any OTHER escaped character, so the
+            # later `shlex.split` still sees the quoting the record was written with.
+            following = text[index + 1]
+            if following == "\n":
+                index += 2
+                continue
+            current.append(char)
+            current.append(following)
+            index += 2
+            continue
+        elif char == "#" and (index == 0 or text[index - 1] in " \t\n;&|"):
+            # A shell COMMENT starts here: the rest of the LINE is not a command, so
+            # no separator on this line may split — but `\n` is a separator, so the
+            # scan resumes AFTER the newline rather than ending the record (#11506
+            # review, cycle 3).
+            #
+            # ⛔ `break` here was a P1 FAIL-OPEN: it discarded the rest of the
+            # STRING, not the line, so a comment on line 1 made every following
+            # line invisible — and since this PR made `\n` a separator precisely to
+            # close `cmd:<cmd>` NEWLINE `NOT RUN`, a comment re-opened exactly that
+            # hole. Measured at `e7776efc7` with a `|` block scalar:
+            #
+            #   cmd:uv run pytest … -q  # ran; 194 passed
+            #   NOT RUN - I did not run this
+            #
+            # → `uncovered: 0`, `CAPSTONE-LEDGER-RESULT: CLEAN`, exit 0; the same
+            # record was INVALID at the parent commit. Flushing the pending segment
+            # and resuming after the newline keeps the cycle-2 false block closed
+            # (a comment with no newline still ends the entry) AND grades what
+            # follows it.
+            segments.append("".join(current))
+            current = []
+            newline = text.find("\n", index)
+            if newline < 0:
+                break
+            index = newline + 1
+            continue
+        elif any(text.startswith(op, index) for op in _TWO_CHAR_SEPARATORS):
             segments.append("".join(current))
             current = []
             index += 2
             continue
+        elif char in "&|" and _is_redirection(text, index):
+            # ⛔ A REDIRECTION, not a separator (#11506 review). The splitter runs
+            # over every `;` `|` `&` on the line, so an ordinary recorded command
+            # carrying a redirection was torn in two and REFUSED: measured at the
+            # pre-fix head, `… -q 2>&1 | tail -20`, `… -q > /tmp/o.txt 2>&1`,
+            # `… -q &> /tmp/o.txt`, `… -q | tee log` AND `… -q >| out.txt` all exited
+            # 1 — and exit 1 prints NO report, so the whole uncovered list vanished.
+            # Every one of them was ACCEPTED on `origin/main`, so the every-segment
+            # rule had introduced a false block of exactly the class this PR exists
+            # to remove. `>|` was the one spelling the first fix missed: the SAME
+            # defect in the SAME function, one separator over.
+            #
+            # The shell's own rule is ADJACENCY TO `>`: `&>`/`&>>` put the `&` before
+            # it; `2>&1`, `>&2`, `N>&M`, `N>&-` and bash's noclobber override `>|`
+            # put it after. A `&`/`|` that is not adjacent still separates — `a & b`
+            # backgrounds `a`, `a | b` pipes (both pinned).
+            current.append(char)
+        elif char in _ONE_CHAR_SEPARATORS:
+            segments.append("".join(current))
+            current = []
         else:
             current.append(char)
         index += 1
@@ -385,7 +934,111 @@ def _split_chains(text: str) -> list[str]:
 #: graded as a citation — it is not a path — so the entry is a RECORD and the held
 #: artifact carries the verdict. Without this, every `bash -c '…'` row is a false
 #: block, and `exit 1` computes nothing, so it would hide the uncovered list too.
+#: The single-letter options a SHELL accepts on its own command line (`man bash`:
+#: `set [-abefhkmnptuvxBCEHPT]`, plus bash's own `-i -l -r -s -D -O`). A leftover
+#: remainder is "more flags" ONLY when EVERY character is one of these.
+#: ⛔ Testing merely `isalpha() and islower()` ADMITTED `cmd:bash -cverified` and
+#: `cmd:bash -cnotrun` as "a cluster of flags" — a one-word CLAIM reaching `verified`
+#: / `uncovered: 0` / exit 0, i.e. the exact bypass `_split_flag` exists to close,
+#: re-opened by the previous cycle's own fix (fourth review cycle). `verified`
+#: carries `d`, which no shell accepts, so it is graded as a BODY again.
+_SHORT_SHELL_FLAGS: Final[frozenset[str]] = frozenset("abefhkmnptuvxBCEHPTilrsDO")
+
+#: The short/long flags that actually TAKE A SCRIPT OPERAND. Split out from
+#: `_SCRIPT_FLAGS` because the two questions are different: `_SCRIPT_FLAGS` also
+#: carries `-e`, which takes NO operand and is listed only because a shlex-attached
+#: `-eNOT RUN` was a measured bypass. Whether the CLUSTER hands the script off to the
+#: next token ("is an operand-taking flag present?") must not be answered by `-e`.
+_OPERAND_SCRIPT_FLAGS: Final[frozenset[str]] = frozenset({"-c", "--command", "--eval"})
+
 _SCRIPT_FLAGS: Final[frozenset[str]] = frozenset({"-c", "-e", "--command", "--eval"})
+
+#: ⛔ THERE IS DELIBERATELY NO "project label" ARM. An earlier revision of this
+#: branch accepted a lone bare word for `make`/`npm`/`docker` (`make test`), on the
+#: reasoning that a subcommand is not a path. Measured, that arm re-admitted exactly
+#: the one-word claim the gate exists to refuse: `cmd:make NOT-RUN`, `cmd:make
+#: failed`, `cmd:make verified`, `cmd:npm not_run` and `cmd:docker DONE` were all
+#: ACCEPTED, and a 22-row ledger using `cmd:make NOT-RUN` reported `uncovered: 0`,
+#: `CAPSTONE-LEDGER-RESULT: CLEAN`, exit 0. It also bought nothing HERE: this repo
+#: has no `Makefile` and no root `package.json` (see `AGENTS.md`), so `make test`
+#: names no artifact and no target that exists. A runner with NO argument at all
+#: (`cmd:make`) stays accepted as a record that confers nothing; a runner with a
+#: non-path argument does not.
+#: Shell WRAPPER verbs that may sit in their own `&&` segment in front of the real
+#: command. They run nothing that is being cited; they prepare the shell. Measured
+#: false blocks when they were graded as the command: `set -e && uv run pytest …`,
+#: `export FOO=1 && …`, `source .venv/bin/activate && …` were all ACCEPTED on
+#: `origin/main` and REFUSED once only `cd`/`NAME=value` were normalised.
+_WRAPPER_VERBS: Final[frozenset[str]] = frozenset(
+    {
+        "set",
+        "export",
+        "source",
+        ".",
+        "umask",
+        "unset",
+        # ⛔ Shell CONTROL builtins, admitted for the same reason as the rest: they
+        # run nothing that is being cited and they cite nothing themselves. A
+        # `|| exit 1` TAIL is this repo's OWN spelling — `AGENTS.md`:
+        # `uri="$(uv run python tools/test_lane.py uri)" || exit 1` — so refusing the
+        # tail asserted the record "may carry commands and wrappers, not prose"
+        # while refusing a COMMAND (third review cycle). Measured false block;
+        # `origin/main` accepted all three shapes, and exit 1 hid the entire
+        # uncovered list. ⛔ That AGENTS.md line is a PREAMBLE, not a record: entered
+        # on its own it is correctly refused as "names no command", because it runs
+        # no runner at all. What `exit` admission buys is the tail of a REAL record
+        # (`uv run pytest … || exit 1`).
+        # ⛔ Their ARGUMENTS are graded in `_wrapper_argument_defect` — admitting a
+        # head without reading its arguments is the exact bypass that function
+        # exists to close, and doing it here let `… && exit "I did not run this"`
+        # reach `verified` / exit 0 (fifth review cycle).
+        # `pushd`/`popd` are DELIBERATELY absent: they manipulate a directory
+        # STACK whose contents this parser cannot model, so the working directory
+        # after them is UNKNOWABLE and no later artifact can be proven to have
+        # resolved from it. (Their operand being a directory is not the reason — the
+        # `cd` arm grades a directory operand too, and carries the same disclosed
+        # box-dependence as `source`.) A record using them is refused as prose — the
+        # same known-open false block as `mkdir` (#11520), and pinned by
+        # `test_a_pushd_or_popd_segment_is_a_known_false_block`.
+        "exit",
+        "return",
+        "shift",
+        "break",
+        "continue",
+    }
+)
+
+#: DECORATIVE segments: a tail like `… && echo PASS`, or a reader that shows the run
+#: (`… | tail -20 log`, `… && grep -E "passed" out.txt`). They cite nothing; they
+#: announce or display what the real command produced. Refusing them was a measured
+#: false block — `… && tail -20 .pytest.log` and `… && cat .pytest.log` were
+#: ACCEPTED on `origin/main` and REFUSED by the every-segment rule, and exit 1
+#: computes NOTHING, so the whole uncovered list disappeared. Every name here is a
+#: read or a print; none can be read as a claim that the work was done.
+_DECORATIVE: Final[frozenset[str]] = frozenset(
+    {
+        ":",
+        "awk",
+        "cat",
+        "cut",
+        "echo",
+        "grep",
+        "head",
+        "jq",
+        "logger",
+        "ls",
+        "printf",
+        "sed",
+        "sort",
+        "tail",
+        "tee",
+        "tr",
+        "true",
+        "uniq",
+        "wait",
+        "wc",
+    }
+)
 
 _WILDCARDS: Final = "*?["
 
@@ -492,6 +1145,40 @@ def _names_artifact(token: str, cwd: Path, root: Path) -> tuple[bool, str]:
                     f"{text!r} is not TRACKED by git, so a reader's clone does not have it"
                 )
             return True, ""
+        if resolved.is_dir() and resolved.is_relative_to(root) and resolved != root:
+            # ⛔ A DIRECTORY IS A LEGITIMATE TARGET, and refusing it was a measured
+            # false block on the command this repo's own `AGENTS.md` hands a lane:
+            # `uv run pytest tests/ -v` was INVALID, so a lane recording what it
+            # actually ran lost the entire uncovered list (exit 1 computes nothing).
+            # It counts only if a reader's clone holds something under it, and the
+            # ROOT is refused above — `.` names EVERYTHING, the same vacuity as a
+            # bare `*`.
+            if resolved == cwd:
+                # ⛔ THE SAME VACUITY ONE LEVEL DOWN. `cmd:sh .` was already refused
+                # (it resolves to the root), but `cmd:cd docs && uv run pytest .`
+                # was ACCEPTED while `.` there names every file under `docs` — the
+                # claim "an artifact of the tree" with nothing in particular cited.
+                # A target that resolves to the directory the command RAN in is the
+                # working directory, not an artifact.
+                return False, (
+                    f"{text!r} resolves to the directory the command ran in, so it "
+                    "names everything under it and therefore no artifact (the same "
+                    "vacuity as a bare `*`)"
+                )
+            if not _is_tracked_dir(resolved, root):
+                return False, (
+                    f"{text!r} is a directory holding no TRACKED file, so it holds "
+                    "nothing a reader's clone has"
+                )
+            return True, ""
+        if resolved.is_dir() and resolved == root:
+            # Name the VACUITY, not "not a file": the reviewer's point is that a
+            # runner told only "not a file in this tree" cannot tell why `.` is
+            # refused while `cmd:sh tests` is accepted.
+            return False, (
+                f"{text!r} resolves to the repository root, so it names everything "
+                "and therefore no artifact (a bare `*`/`.`/`/` is not a citation)"
+            )
         return False, f"{text!r} is not a file in this tree"
     except (OSError, ValueError, NotImplementedError) as exc:
         # An entry that cannot even be RESOLVED is a defect in the RECORD, not a
@@ -501,6 +1188,51 @@ def _names_artifact(token: str, cwd: Path, root: Path) -> tuple[bool, str]:
         # ValueError out of `resolve` — both printed a traceback instead of the
         # `CAPSTONE-LEDGER: INVALID` marker a log reader or caller keys on.
         return False, f"{text!r} cannot be resolved against this tree ({type(exc).__name__}: {exc})"
+
+
+def _is_tracked_dir(resolved: Path, root: Path) -> bool:
+    """Does this in-tree DIRECTORY hold at least one TRACKED file?
+
+    A directory is a legitimate `cmd:` target — `uv run pytest tests/ -v` is the
+    command this repo's own `AGENTS.md` hands a lane — but it counts only when a
+    reader's clone actually holds something under it: an empty or untracked
+    directory names nothing. (The ROOT is refused a level up, because `.` names
+    EVERYTHING — the same vacuity as a bare `*`.)
+    """
+    try:
+        rel = resolved.relative_to(root)
+    except ValueError:
+        return False
+    try:
+        proc = subprocess.run(
+            ["git", "ls-files", "--", str(rel)],
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        # No `git` at all is the ABSTENTION case, not a refusal (see `_is_tracked`).
+        return _tracked_unprovable()
+    if proc.returncode == 0:
+        return bool(proc.stdout.strip())
+    # Git failed. `_is_tracked` distinguishes "git answered and refused" from "git
+    # cannot answer here", so this must too — otherwise a git-less build context
+    # refuses `pytest tests/` while accepting a single cited file, which is the
+    # same row judged two ways by the tool's own doctrine.
+    try:
+        probe = subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return _tracked_unprovable()
+    if probe.returncode == 0 and probe.stdout.strip() == "true":
+        return False
+    return _tracked_unprovable()
 
 
 def _commit_state(sha: str, repo_root: Path = REPO_ROOT) -> str:
@@ -593,9 +1325,30 @@ def _evidence_is_real(
     The `cmd:` arm gets the same treatment, for the same reason: accepting any
     non-empty string meant `cmd:done` — or a sentence explaining that the work
     was done — satisfied the strongest verdict in the vocabulary, so one word
-    defeated the whole record. A command entry must now be COMMAND-SHAPED (it
-    starts with a program that runs something) and NAME an artifact of this tree
-    in argument position; prose names nothing and is refused.
+    defeated the whole record. A command entry must now be COMMAND-SHAPED — its
+    first token is a program that runs something, and its FIRST ARTIFACT position
+    names a tracked artifact (a file, a directory holding tracked files, a pytest
+    node-id, or a glob over a named directory) — "first artifact position" rather
+    than "first argument position" because ONE subcommand verb immediately after a
+    NAMED runner may lead the list (`ruff check <path>` / `ruff format <path>`,
+    scoped per runner in `_RUNNER_SUBCOMMANDS`). THREE shapes are deliberately
+    admitted and confer nothing on their own: a runner with NO argument
+    (`cmd:make`), a runner followed only by its own subcommand verb
+    (`cmd:ruff check`), and a `-c` script body, which is graded as a command in its
+    own right rather than trusted. Every segment of a compound record must be a
+    shell
+    wrapper, a decorative reader/printer, or runner-headed; a segment that is none
+    of those is prose and is REFUSED, so a BARE-prose segment cannot ride on
+    either side of the command. ⛔ NOT closed, and deliberately not claimed: a
+    disclaimer carried as a TRUSTED HEAD's ARGUMENT is accepted too — a
+    decorative/wrapper segment is admitted without grading one argument, so
+    `… && echo "I did not run this"` still exits 0 (#11520 root 4; the wrapper
+    half is closed, so `export "I did not run this" && …` is refused). And a LATER
+    runner-HEADED segment is admitted without grading its argument position, so
+    `… && bash I did not run this` is still accepted (#11520). Grading every
+    runner segment the way the first is graded re-introduced a false block on
+    `… && git status --short` / `… && git log --oneline`, whose subcommand is not a
+    path — and a false block is the harm this ruleset exists to remove.
 
     ⛔ These two arms are one rule seen from two sides, and NEITHER alone is
     enough — both were measured as fail-open on their own:
@@ -633,7 +1386,9 @@ def _evidence_is_real(
         raw = entry[len(_CMD_PREFIX) :].strip()
         if not raw:
             return False, "`cmd:` evidence names no command"
-        command, cmd_cwd = _command_body(raw, base, root)
+        command, cmd_cwd, shape_problem = _command_body(raw, base, root)
+        if shape_problem:
+            return False, f"`cmd:` evidence is not a command line: {shape_problem}"
         if not command:
             return False, f"`cmd:` evidence names no command: {raw!r}"
         try:
@@ -642,7 +1397,8 @@ def _evidence_is_real(
             return False, f"`cmd:` evidence is not a parseable command: {command!r}"
         if not tokens:
             return False, f"`cmd:` evidence names no command: {raw!r}"
-        if Path(tokens[0]).name not in RUNNERS:
+        runner = Path(tokens[0]).name
+        if runner not in RUNNERS:
             # ⛔ This is the arm that kills prose, and it is the whole reason this
             # PR exists. A token scan alone does not: both `cmd:verified manually
             # by reading pyproject.toml` and `cmd:NOT RUN - see
@@ -655,6 +1411,20 @@ def _evidence_is_real(
                 f"({sorted(RUNNERS)}), got {tokens[0]!r} in {command!r}"
             )
         consumed_script = False
+        #: The runner actually being invoked: the LAST RUNNER token in the chain
+        #: (`uv run ruff check <path>` → `ruff`), because a subcommand verb belongs
+        #: to that runner and to nothing else (see `_RUNNER_SUBCOMMANDS`).
+        current_runner = Path(tokens[0]).name
+        subcommand_allowed = True
+        #: A token that is unreadable PROSE, remembered rather than refused ON THE
+        #: SPOT. A quoted flag+value (`pytest "-k not slow" <tracked path>`) is a
+        #: legitimate record whose FIRST token is prose-shaped, so refusing at the
+        #: token would be a false block on a command a lane really runs — and exit 1
+        #: prints no report. The refusal is therefore deferred to the END of the
+        #: scan, where the question "did this record name an artifact at all?" is
+        #: answerable: `pytest "-q I did not run this"` names nothing and stays
+        #: REFUSED, which is the fail-open this guard exists for.
+        unread_prose: str | None = None
         for token in tokens[1:]:
             if consumed_script:
                 # ⛔ The value of a `-c`/`-e` flag is a SCRIPT BODY. It is not a
@@ -675,12 +1445,108 @@ def _evidence_is_real(
                     return True, ""
                 return False, f"`cmd:` evidence script {token!r} is not a command: {why}"
             if token.startswith("-"):
-                # A flag (and the `--` separator). A flag's VALUE may still be the
-                # artifact; it is reached on the next iteration.
-                consumed_script = token in _SCRIPT_FLAGS
+                # ⛔ THE ATTACHED-SCRIPT ARM RUNS **FIRST**, BEFORE the whitespace
+                # deferral (review cycle 5, P1). `-c'NOT RUN - see <path>'` is ONE
+                # shlex token that CONTAINS whitespace, so the prose test below
+                # matched it and `continue`d — the arm was never reached for exactly
+                # the bodies that carry a sentence. Measured at the previous head,
+                # `cmd:bash -c'NOT RUN - see tools/capstone_ledger.py' tests/…py`
+                # reported `verified: 1 uncovered: 0` / CLEAN / exit 0, while the
+                # SAME value WITHOUT the trailing path was refused: the deferred
+                # prose was then CLEARED by the artifact token.
+                #
+                # ⛔ AND THE ARM REFUSES — it does NOT grade — because for a SHELL an
+                # ATTACHED body is a command that CANNOT EXECUTE (review cycle 6, P2;
+                # primary source, measured on this box):
+                #
+                #   bash -c'echo hi'   -> rc 1, stderr `bash: - : invalid option`,
+                #                         body never runs; STDOUT carries the 26-line
+                #                         `set -o` table, because `o` parses as `-o`
+                #   bash -c 'echo hi'  -> prints `hi`, rc 0
+                #   sh   -c'echo hi'   -> `Illegal option -h`, rc 2
+                #
+                # With no space, `-cecho hi` is ONE argv word and the shell reads what
+                # follows `-c` as MORE OPTION LETTERS. ⛔ NOT UNIVERSAL, and an earlier
+                # revision of this comment over-claimed it: for CPython and node the
+                # attached value IS the documented, runnable form (`python3 -c'print(3)'`
+                # -> `3`, rc 0; `node --eval='console.log(1)'` -> `1`). Those are still
+                # refused — the body is a python/JS PROGRAM and this arm grades a body
+                # as a SHELL command line, which it can never be — and that refusal is a
+                # declared known-open FALSE BLOCK (#11520), not a claim that the
+                # spelling is unrunnable. So for a shell, grading the body recorded a
+                # `verified` row for a command that cannot have executed (the same
+                # false-PASS class as the disclaimer it refuses); for python/node the
+                # refusal costs a record but asserts nothing false.
+                # Refusing is also what makes the verdict independent of the cluster
+                # split: `-cmake x`, `-cec x`, `-cverified` and `--eval=…` are ALL
+                # refused, so a mis-split can neither admit a body nor drop a prefix.
+                # The SPACED form (`bash -c '<script>'`, body in the NEXT token) is the
+                # spelling a shell actually runs and is graded by the `consumed_script`
+                # arm below.
+                flag, attached = _split_flag(token)
+                if flag in _SCRIPT_FLAGS and attached:
+                    # ⛔ QUOTE THE TOKEN, NOT `_split_flag`'s REMAINDER (review cycle 7,
+                    # P2). The cluster scan consumes the leading flag letters, so for
+                    # `-cec uv run pytest <path>` the remainder is `' uv run pytest
+                    # <path>'` — the `ec ` the arm exists to reject was DROPPED from the
+                    # error text itself, so the message named a different body than the
+                    # record contained. The token is what the author wrote.
+                    return False, (
+                        f"`cmd:` evidence puts a script body in the SAME token as its "
+                        f"flag ({_short(token)}). For a SHELL (`bash`/`sh`) the body "
+                        "after `-c` is read as more OPTION LETTERS, so that spelling "
+                        "cannot execute (measured: `bash -c'echo hi'` ends rc 1 with "
+                        "stderr `bash: - : invalid option` and the body never runs — "
+                        "stdout carries the `o`-table, because `o` parses as `-o`). Put "
+                        "the script in its OWN token (`bash -c '<script>'`), which is "
+                        "the spelling a shell runs. For `python`/`node` an attached "
+                        "`-cBODY` DOES run, but the body is a python/JS PROGRAM, not a "
+                        "shell command line, and this arm grades a body as a shell "
+                        "command line — so it is refused here too: a declared "
+                        "known-open FALSE BLOCK (#11520)"
+                    )
+                # ⛔ A dashed token WITHOUT a script flag is a FLAG only when it is
+                # ONE WORD. A token that CONTAINS whitespace was quoted by the
+                # author — `shlex` preserves whitespace only INSIDE a quote — so it
+                # is an argument wearing a dash, not a flag, and skipping it as one
+                # reached the runner-with-no-target arm. Measured, `cmd:uv run pytest
+                # "-q I did not run this"` reported `verified: 1 uncovered: 0` and
+                # exited 0, i.e. a record that states on its own line that the work
+                # was NOT run satisfied the strongest verdict in the vocabulary. The
+                # same shape with a real artifact after it (`pytest "-k not slow"
+                # <path>`) is a legitimate record, so the refusal is DEFERRED (see
+                # `unread_prose`) instead of taken here.
+                #
+                # ⛔ KNOWN-OPEN (#11520 root 5), pinned: a quoted disclaimer ALSO
+                # followed by a real artifact stays ACCEPTED (`pytest "-q I did not
+                # run this" <tracked path>`), because the deferral below cannot tell
+                # a quoted FLAG+VALUE from a quoted SENTENCE — `"-k not slow"` and
+                # `"-q I did not run this"` are syntactically identical, and
+                # discriminating them is a semantic judgement, not a grammar (WHICH
+                # flag takes a value). The arm keeps the weaker side on purpose: the
+                # module's own rule, recorded twice, is that "a refusal that loses the
+                # finding is worse than the weaker arm", and exit 1 prints no report.
+                # WITHOUT an artifact the same spelling is still REFUSED (the
+                # `unread_prose` arm at the end of this scan), so the naked case stays
+                # closed. Pinned by
+                # `test_the_known_residual_false_PASSes_are_pinned_as_OPEN`.
+                if any(char.isspace() for char in token):
+                    if unread_prose is None:
+                        unread_prose = token
+                    continue
+                consumed_script = flag in _SCRIPT_FLAGS
                 continue
             if token in _CHAIN_WORDS or Path(token).name in RUNNERS:
                 # Still inside the runner chain: `uv` `run` `python` `-m` `pytest`.
+                if Path(token).name in RUNNERS:
+                    current_runner = Path(token).name
+                subcommand_allowed = True
+                continue
+            if subcommand_allowed and token in _RUNNER_SUBCOMMANDS.get(current_runner, frozenset()):
+                # ⛔ PER RUNNER, never a global word set — see `_RUNNER_SUBCOMMANDS`.
+                # ONE subcommand verb, immediately after its runner: a second bare
+                # word is back in artifact position and must name something.
+                subcommand_allowed = False
                 continue
             if _NUMBER_ARG.match(token) or _ENV_ASSIGNMENT.match(token):
                 # `timeout 300 …`, `env FOO=1 …` — a runner's own literal argument.
@@ -699,8 +1565,9 @@ def _evidence_is_real(
             return False, (
                 f"`cmd:` evidence names no artifact of this tree: {command!r} — the first "
                 f"thing in argument position after the runner must NAME the artifact "
-                f"(a bare path, a pytest node-id, or a glob over a named directory), and "
-                f"{why}. A command entry must NAME an artifact; prose names nothing."
+                f"(a tracked file, a directory holding tracked files, a pytest node-id, "
+                f"or a glob over a named directory), and {why}. A command entry must "
+                "NAME an artifact; prose names nothing."
             )
         # A runner with NO target — `make`, `uv run pytest`, `npm test`. It is a
         # legitimate RECORD and it confers nothing: `validate` already requires a
@@ -709,6 +1576,18 @@ def _evidence_is_real(
         # (`cmd:make` beside a held artifact → exit 1) and exit 1 computes NOTHING,
         # so it also hid the entire uncovered list — a refusal that loses the
         # finding is worse than the weaker arm.
+        #
+        # ⛔ UNLESS the record was carrying quoted PROSE and named nothing: then the
+        # "no target" is not a runner's own bare invocation, it is a sentence that
+        # was never read — `pytest "-q I did not run this"`. That is the fail-open,
+        # and it is refused here rather than at the token so the legitimate quoted
+        # flag+value above is not caught with it.
+        if unread_prose is not None:
+            return False, (
+                f"`cmd:` evidence carries the quoted value {_short(unread_prose)} where an "
+                "artifact must be — a token containing whitespace was quoted by the author, "
+                "so it is an argument, not a flag, and prose names nothing of this tree"
+            )
         return True, ""
     candidate = Path(entry)
     try:
@@ -738,24 +1617,43 @@ def _evidence_is_real(
     return True, ""
 
 
-def _command_body(raw: str, base: Path, root: Path) -> tuple[str, Path]:
-    """The part of a `cmd:` entry that has to be a RUNNABLE command, and the
-    directory it runs in.
+def _command_body(raw: str, base: Path, root: Path) -> tuple[str, Path, str]:
+    """The command a `cmd:` entry records, the directory it ran in, and — when the
+    record is a compound line carrying something OTHER than commands — why not.
 
     A record is written by whoever ran the thing, quoting what they ran, so the
     entry routinely carries the SHELL WRAPPER around the command. Each of these
     was measured as a false block against the raw shape test, on a legitimate
-    record, and the five are the shapes this repo's own `AGENTS.md` hands a lane:
+    record:
 
         `uv run pytest tests/x.py -q`            markdown backticks around it
         TORTOISE_TEST_CARVE_OUT=1 uv run …       a leading environment assignment
         TORTOISE_DB_URI='docker://…' uv run …    same, with a quoted value
         cd tools && uv run pytest tests/x.py     a directory change first
-        make                                     a project target
+        set -e && uv run pytest …                a shell-safety preamble
+        source .venv/bin/activate && uv run …    an activation step
 
-    ⛔ Only the WRAPPER is removed. The shape test still runs on what is left,
-    which is what keeps `cmd:NOT RUN - see tools/capstone_ledger.py` refused: no
-    normalisation below can turn a sentence into a program.
+    ⛔ EVERY `&&` SEGMENT IS GRADED, on both sides of the command. That is the
+    whole rule, and it is load-bearing in two measured directions:
+
+    * skipping the segments BEFORE the command is the P1 fail-open: a 22-row
+      ledger citing the always-available tracked `docs/evidence/9664-capstone/
+      README.md` plus `cmd:NOT RUN && uv run pytest tests/…` reported
+      `uncovered: 0`, `CAPSTONE-LEDGER-RESULT: CLEAN`, exit 0;
+    * skipping the segments AFTER it is the SAME fail-open mirrored: `cmd:uv run
+      pytest tests/… && I did not run this` was ACCEPTED and produced the same
+      clean exit. A record that disclaims the work must not be gradable as having
+      done it, whichever side of the `&&` the disclaimer sits on.
+
+    A segment is therefore admissible only as one of: a WRAPPER (`cd`, a leading
+    `NAME=value`, `set`/`export`/`source`/`umask`/`unset`), a DECORATIVE printer
+    (`echo`/`printf`/`true`/`:`), or a RUNNER. Anything else is prose, and prose is
+    refused by name. `… && echo PASS` and `… && ruff check <path>` stay legal, so
+    the two measured false blocks above do not come back.
+
+    ⛔ Only WRAPPERS are removed. The shape test still runs on what is left, which
+    is what keeps `cmd:NOT RUN - see tools/capstone_ledger.py` refused: no
+    normalisation here can turn a sentence into a program.
 
     ⛔ The SECOND return value is why `cd` is normalisation and not a false block:
     dropping the `cd` and then resolving the target against the repo root refuses
@@ -772,17 +1670,87 @@ def _command_body(raw: str, base: Path, root: Path) -> tuple[str, Path]:
         if len(text) > 1 and text.startswith(quote) and text.endswith(quote):
             text = text[len(quote) : -len(quote)].strip()
             break
-    # `a && b` chains: grade the FIRST segment that starts with a program that
-    # runs something. Grading a fixed END also false-blocked a real record (a
-    # `&& echo PASS` tail), and grading the first segment false-blocked
-    # `cd tools && uv run …`; scanning for the first RUNNER-shaped segment accepts
-    # both and still refuses prose, which never contains one at all.
-    segments = [segment.strip() for segment in _split_chains(text)]
+    # `a && b` chains: the FIRST segment that is not a wrapper is THE command, and
+    # it is graded whether or not it looks like one.
+    #
+    # ⛔ NOT "scan for the first RUNNER-shaped segment". That rule silently DROPS
+    # prose, which is a measured FAIL-OPEN at this head: `cmd:NOT RUN && uv run
+    # pytest tests/test_9664_capstone_verdict_ledger.py` reported `criteria: 22
+    # verified: 22 uncovered: 0`, printed `CAPSTONE-LEDGER-RESULT: CLEAN` and exited
+    # 0, because the segment saying the work was NOT done was skipped and the real
+    # command after it was graded. The comment that used to sit here justified the
+    # skip with "prose … never contains one at all", which is false the moment prose
+    # can be chained in FRONT of a command — and it can.
+    #
+    # Prose therefore cannot be dropped, and it cannot sit on EITHER side of the
+    # command: any of those makes the record say something it did not do. A segment
+    # that is neither a wrapper, a decorative printer nor runner-headed is prose and
+    # is refused, so a BARE-prose segment after the `&&` (`… && I did not run this`)
+    # is refused exactly as one before it is, and so is the same thing spelled with
+    # `;`, `||`, `|`, `&` or a newline — those were measured ACCEPTED at the round-2
+    # head and produced the same clean 22-row exit. Wrappers and decorative
+    # segments are still admitted (`… && echo PASS`, `… | tail -20 log`).
+    # ⛔ RESIDUAL (#11520): a LATER segment that is RUNNER-HEADED skips the argument
+    # grading below, so `… && bash I did not run this` and `… && python -c 'NOT RUN'`
+    # are accepted. Closing it by grading every runner segment false-blocked
+    # `… && git status --short`, so it is tracked rather than bought at that price.
+    segments = [segment.strip() for segment in _split_segments(text)]
+
+    #: Index of the LAST segment that can actually RUN something. A TERMINATING
+    #: control builtin (`exit`) is only sound in that position — see the `exit` guard
+    #: in the loop below. ⛔ IT IS NOT THE LAST *SEGMENT*: an empty segment, a lone
+    #: `NAME=value`, and a `cd` execute nothing that is being cited, so
+    #: `cmd:uv run pytest … ; exit 0 ; A=1` — where the graded command DID run — was
+    #: refused because `A=1` counted as a later segment (tenth review cycle;
+    #: `origin/main` accepted it and bash proves the runner executed).
+    def _runs_nothing(segment: str) -> bool:
+        if not segment:
+            return True
+        if re.match(r"^cd(\s|$)", segment):
+            return True
+        match = _LEADING_ASSIGNMENT.match(segment)
+        if match and not segment[match.end() :].strip():
+            return True
+        # A WRAPPER- or DECORATIVE-headed segment runs nothing that is being cited
+        # (that is the definition of both sets), so it cannot be the segment that
+        # proves the graded command ran — `… ; exit 0 ; export FOO=1` is as inert as
+        # `… ; exit 0 ; A=1`. A RUNNER- or prose-headed segment is NOT inert and
+        # still makes the `exit` non-final, which is the false PASS the guard exists
+        # for.
+        try:
+            tokens = shlex.split(segment)
+        except ValueError:
+            return False
+        if not tokens:
+            return True
+        # ⛔ A CONTROL BUILTIN IS NOT INERT FOR THIS QUESTION. `exit` is a member of
+        # `_WRAPPER_VERBS`, so classifying wrappers as inert made `exit` itself inert
+        # and therefore never last — which refused every trailing `… || exit 1`
+        # (caught by this branch's own tests). The question here is "does a later
+        # segment RUN the cited command?", and a later control builtin is another
+        # terminator, not evidence, so it is treated as non-inert.
+        if tokens[0] in _CONTROL_BUILTINS:
+            return False
+        # ⛔ USE THE LOOP'S OWN HEAD DERIVATION (\`Path(...).name\`). Classifying on
+        # the raw token judged `/bin/echo ok` as running something while the loop
+        # below calls it DECORATIVE — the two halves disagreeing about the head of the
+        # same token list, which is what produced the previous cycle's false block
+        # (final review pass; `origin/main` accepted the record).
+        head = Path(tokens[0]).name or tokens[0]
+        if head in _WRAPPER_VERBS or head in _DECORATIVE:
+            return True
+        # A whitespace-separated ASSIGNMENT LIST (`A=1 B=2`) assigns and runs
+        # nothing; `_LEADING_ASSIGNMENT` only folds ONE, so it fell through above.
+        return all(_ENV_ASSIGNMENT.match(token) for token in tokens)
+
+    _last_used = max((i for i, seg in enumerate(segments) if not _runs_nothing(seg)), default=-1)
     # The directory the graded command runs in: `cd X && …` moves it, and a later
     # `cd` moves it again. Resolved against `root` only, so a `cd ../../..` cannot
     # walk the check out of the tree.
     cwd = base
-    for segment in segments:
+    command: str | None = None
+    command_cwd = base
+    for index, segment in enumerate(segments):
         if not segment:
             continue
         # Drop any number of leading `NAME=value` assignments ON THE STRING: they
@@ -803,41 +1771,221 @@ def _command_body(raw: str, base: Path, root: Path) -> tuple[str, Path]:
         # directory the following segment is graded in.
         cd = _CD_SEGMENT.match(body)
         if cd:
-            target = cd.group(1).strip().strip("'\"")
-            if target and not target.startswith("-"):
-                try:
-                    moved = (root / target).resolve()
-                except (OSError, ValueError):
-                    moved = None
-                if moved is not None and moved.is_relative_to(root):
-                    cwd = moved
+            target = cd.group(1).strip()
+            # ⛔ STRIP THE OPTIONS, so every spelling of one destination grades
+            # identically. `cd -P /tmp`, `cd -PL /tmp` and `cd /tmp` all mean /tmp.
+            # ⛔ `\s+` BETWEEN GROUPS IS LOAD-BEARING. Allowing a zero-width separator
+            # made `-P-L` strip as the two groups `-P` and `-L`, so
+            # `cmd:cd -P-L tests && uv run pytest test_9664_…py -q` was ACCEPTED —
+            # while bash answers `cd: --: invalid option`, rc 2, so the `&&`
+            # short-circuits and the graded command NEVER RAN (seventh review cycle:
+            # the false PASS this branch exists to close, and `origin/main` refuses
+            # it). Measured on this box: `cd -P tests`, `cd -L tests`, `cd -PL tests`,
+            # `cd -LP tests`, `cd -Pe tests` and `cd -- tests` are rc 0; `cd -P-L`,
+            # `cd -L-P`, `cd -P--`, `cd -P@`, `cd -e-L`, `cd -@` are rc 2. So a group is
+            # `-[PLe]+` or `--` and groups are SEPARATED BY WHITESPACE; anything else
+            # dashed is left in the target and refused below.
+            # ⛔ `--` ENDS OPTION PARSING, so consume option groups only UNTIL it and
+            # take the mode from the groups BEFORE it. The plain regex kept consuming
+            # option-shaped groups after `--`, which made `cd -P -- -L ""` strip to an
+            # empty target; reading the last of {L,P} across the whole prefix then
+            # treated the post-`--` `-L` as an OPTION, so `physical` came out False and
+            # the record was admitted — while bash exits 1 with "too many arguments"
+            # (`-L` is a second operand there) and the graded command never ran.
+            # ⛔ MEASURED, so the scope is not overstated: over the 584-spelling matrix
+            # (1-3 groups of `-P -L -PL -LP -Pe -Le -e --`) the PREVIOUS head admitted
+            # 128 spellings whose `cd` bash rejects, and every one of those 128 contains
+            # a `--` — they are all this class. This head admits 0 of them and agrees
+            # with bash on all 584. ⛔ The count is RE-MEASURED, not carried: this line
+            # first said "68", and re-running the identical matrix at `75d68eafca`
+            # returned 128 (all 128 containing `--`, 0 without) and 0 at this head. The
+            # qualitative claim was right and the number was not — the failure a reader
+            # cannot detect without redoing the sweep.
+            _prefix = ""
+            while True:
+                _group = re.match(r"^(?:-[PLe]+|--)(?:\s+|$)", target)
+                if not _group:
+                    break
+                _token = _group.group(0).strip()
+                _prefix += _token + " "
+                target = target[_group.end() :]
+                if _token == "--":
+                    break
+            _modes = [ch for ch in _prefix.split("--")[0] if ch in "LP"]
+            physical = bool(_modes) and _modes[-1] == "P"
+            target = target.strip()
+            try:
+                words = shlex.split(target)
+            except ValueError:
+                words = [target]
+            if words == [""]:
+                if physical:
+                    return (
+                        "",
+                        base,
+                        f"the `cd` segment {segment!r} does not name a directory, and a "
+                        "failing `cd` short-circuits the `&&` — no later segment of "
+                        "this record can have run (`-P` disables bash's null-name "
+                        'rule, so `cd -P ""` exits 1)',
+                    )
+                # ⛔ bash: "A null directory name is the same as the current
+                # directory." `cd ""` is a NO-OP, not an unknowable cwd — measured
+                # `bash -c 'cd ""; echo rc=$?'` → rc 0, cwd unchanged — so the later
+                # segment provably ran from `cwd` and the record is sound (ninth
+                # review cycle; this branch's empty-target arm refused it while
+                # `origin/main` accepted it). Deliberately distinct from `cd --`
+                # (`$HOME`) and `cd -` (`$OLDPWD`), which fall through to the refusal
+                # below.
+                continue
+            if len(words) == 1:
+                target = words[0]
+            elif len(words) > 1:
+                # An unquoted space is not a valid single `cd` operand; keep it whole
+                # so the directory test fails rather than silently taking words[0].
+                target = " ".join(words)
+            # ⛔ A target that is STILL empty or dashed has an UNKNOWABLE working
+            # directory (`cd --` is `$HOME`, `cd -` is `$OLDPWD`, and an unrecognised
+            # option is neither). Grading a later artifact from the unmoved `cwd`
+            # would admit a record for a command the shell runs somewhere else, so
+            # this is refused instead — the one case where refusing is the
+            # fail-closed answer rather than the false block.
+            if not target or target.startswith("-"):
+                return (
+                    "",
+                    base,
+                    f"the `cd` segment {segment!r} does not name a directory this "
+                    "ledger can resolve (it is `$HOME`/`$OLDPWD` or an unrecognised "
+                    "option), so no later segment can be proven to have run from it",
+                )
+            try:
+                moved = (root / target).resolve()
+            except (OSError, ValueError):
+                moved = None
+            # ⛔ THE PRECONDITION IS THE SHELL'S, NOT CONTAINMENT. `cd X` fails iff
+            # X does not exist or is not a directory; when it SUCCEEDS the later
+            # segments ran, so refusing a resolvable `cd /tmp` asserted a "failing
+            # `cd`" that did not fail and threw away the whole uncovered list
+            # (fifth review cycle; `origin/main` accepted the record). Containment
+            # needs no test here: a moved `cwd` outside the tree is still
+            # overridden by the ARTIFACT rule, which requires every named target to
+            # live inside the tree (`_names_artifact`), so `cd /tmp && pytest
+            # tests/x` is refused for naming nothing — the right reason.
+            # ⛔ `is_dir()` is load-bearing: `(root / target).resolve()` does NOT
+            # fail on a name that does not exist — it returns the joined path — so
+            # an existence test alone accepted `cd I did not run this` and graded
+            # the real command afterwards.
+            # ⛔ This DOES make the verdict box-dependent for `cd` wrappers (a
+            # `.venv` target exists on the authoring box and in no clone), the same
+            # disclosed cost `source` carries. Tracked with it on #11520.
+            # ⛔ NOT silently ignored. In the shell a FAILING `cd` short-circuits the
+            # `&&`, so no later segment can have run — and this arm used to
+            # `continue` regardless, leaving `cwd` unchanged and grading the real
+            # command anyway. Measured, `cmd:uv run pytest
+            # tests/test_9664_capstone_verdict_ledger.py -q && cd I did not run
+            # this` was ACCEPTED while the naked `… && I did not run this` was
+            # REFUSED: the same disclaimer, admitted by prefixing it with a `cd`
+            # that cannot succeed.
+            if moved is None or not moved.is_dir():
+                return (
+                    "",
+                    base,
+                    f"the `cd` segment {segment!r} does not name a directory, and a "
+                    "failing `cd` short-circuits the `&&` — no later segment of "
+                    "this record can have run",
+                )
+            cwd = moved
             continue
         try:
-            tokens = shlex.split(body)
+            _tokens = shlex.split(body)
         except ValueError:
             # ⛔ A shell-VALID record must not invalidate the ledger. `shlex` rejects
             # `pytest … -q  # don't rerun` while `bash -n` accepts it, and exit 1
             # computes NOTHING — so one apostrophe in a trailing comment hid all 13
             # uncovered rows. An unquoted `#` starts a shell comment, so retry with
             # the comment removed. If it STILL will not parse it is not a command
-            # (prose with an apostrophe is the realistic case), and a refusal that
-            # cannot be turned into a clean exit is the fail-closed answer.
+            # (prose with an apostrophe is the realistic case), and it is REFUSED
+            # rather than skipped — skipping it is the fail-open above.
             without_comment = re.sub(r"\s+#.*$", "", body).strip()
-            if without_comment == body:
+            if without_comment and without_comment != body:
+                body = without_comment
+                try:
+                    _tokens = shlex.split(body)
+                except ValueError:
+                    _tokens = []
+            else:
+                _tokens = []
+        # ⛔ EVERY segment is graded, on BOTH sides of the command. A segment that
+        # is neither a shell wrapper, a decorative printer, nor a runner is prose:
+        # refusing it is what stops `NOT RUN && <cmd>` (prose BEFORE) and
+        # `<cmd> && I did not run this` (prose AFTER) from being recorded as work.
+        # Both were measured fail-opens on the merged tree, each producing
+        # `CAPSTONE-LEDGER-RESULT: CLEAN` and exit 0 from a 22-row ledger.
+        if _tokens:
+            # ⛔ `Path(".").name` is `""`, not `"."` — so the POSIX `source` spelling
+            # never matched `_WRAPPER_VERBS` and `cmd:. .venv/bin/activate && …` was
+            # refused as prose (third review cycle). Fall back to the raw token when
+            # the path component is empty; every other head resolves as before.
+            head = Path(_tokens[0]).name or _tokens[0]
+            if head in _WRAPPER_VERBS or head in _DECORATIVE:
+                # ⛔ `exit` TERMINATES THE SHELL, so no LATER segment can have run.
+                # Admitting it as a harmless wrapper made `cmd:exit 0 ; uv run pytest
+                # …` and `cmd:exit 0 || uv run pytest …` reach `verified` /
+                # `uncovered: 0` / exit 0 while bash proves the runner was never
+                # reached (`bash -c 'exit 0 ; echo RAN-AFTER'` prints nothing) — a
+                # false PASS of exactly the class the `cd` guard beside it closes
+                # (eighth review cycle; `origin/main` refuses both). A TRAILING
+                # `… ; exit $?` / `… || exit 1` stays legal, which is the spelling
+                # this repo actually records.
+                #
+                # ⛔ `return` IS terminating HERE, and the previous measurement that
+                # said otherwise was taken with the WRONG SEPARATOR (review cycle 5,
+                # P1). `bash -c 'return 0 ; echo RAN-AFTER'` does print RAN-AFTER —
+                # a `;` continues past a failure — but a record chains with `&&`,
+                # where the SAME failure SHORT-CIRCUITS: measured, `bash -c 'return 0
+                # && echo RAN-AFTER'` prints only "return: can only `return' from a
+                # function or sourced script", rc 2, NO RAN-AFTER. Generalising a
+                # `;` measurement to `&&` admitted `cmd:return 0 && uv run pytest
+                # …`, which was measured CLEAN / exit 0 for a runner bash never
+                # reached. `shift` is the same shape (`shift 0` succeeds, bare
+                # `shift` and `shift 5` fail rc 1); `break`/`continue` genuinely do
+                # continue (rc 0) and are NOT terminating. See
+                # `_fails_before_a_chain`.
+                if index != _last_used and _fails_before_a_chain(head, _tokens[1:]):
+                    return (
+                        "",
+                        base,
+                        f"the `{head}` segment {segment!r} FAILS at script level, so no "
+                        "later segment of this record can be shown to have run — it "
+                        "may only be the LAST segment (a `&&` after a failed builtin "
+                        "short-circuits; refusing the `;`/`||` spelling too is a "
+                        "known-open false block, #11520)",
+                    )
+                # ⛔ The HEAD alone is not enough: read the wrapper's own arguments
+                # (see `_wrapper_argument_defect` for the measured bypass this
+                # closes, and for the decorative-printer residual it cannot).
+                why = _wrapper_argument_defect(head, _tokens[1:], cwd, root)
+                if why is not None:
+                    return (
+                        "",
+                        base,
+                        f"the segment {segment!r} is not a valid `{head}`: {why}",
+                    )
                 continue
-            body = without_comment
-            try:
-                tokens = shlex.split(body)
-            except ValueError:
+            if head in RUNNERS:
+                if command is None:
+                    command, command_cwd = body, cwd
                 continue
-        if tokens and Path(tokens[0]).name in RUNNERS:
-            return body, cwd
-    # No segment is runner-shaped. Return the first non-empty one so the error
-    # message quotes what was actually refused rather than a fragment.
-    for segment in segments:
-        if segment:
-            return _LEADING_ASSIGNMENT.sub("", segment).lstrip() or segment, root
-    return "", root
+        return (
+            "",
+            base,
+            f"the segment {segment!r} is neither a command nor a shell wrapper (`cd`, "
+            f"`NAME=value`, {sorted(_WRAPPER_VERBS)}) nor decorative "
+            f"({sorted(_DECORATIVE)}) — a compound `cmd:` record may carry commands and "
+            "wrappers, not prose",
+        )
+    if command is None:
+        return "", base, ""
+    return command, command_cwd, ""
 
 
 def _short(text: str, limit: int = 120) -> str:
