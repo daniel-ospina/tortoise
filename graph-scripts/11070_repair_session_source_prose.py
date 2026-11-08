@@ -745,16 +745,6 @@ def main() -> int:
                 # show the sentence LEFT, so the control alone must not certify
                 # when this run actually removed something (#11536 review, P1).
                 wrote=bool(report.get("written")))
-        elif args.repair:
-            # ⛔ STATED, not silent: a repair that certifies on the census alone
-            # leaves the FTS half of the Target unmeasured, and the operator must
-            # know the run did not look (#11161).
-            print("NOTE: no --probe-phrase was supplied, so the Source FTS index "
-                  "was NOT measured. The census reads node properties; the "
-                  "removed sentence also lives in the index, and only a probe "
-                  "can show it has left. Re-run with --repair --probe-phrase "
-                  "<a single rare token from the removed sentence> to measure "
-                  "it on the run that writes.", file=sys.stderr)
     finally:
         if proj is not None:
             proj.close()
@@ -810,6 +800,27 @@ def main() -> int:
     fts_gate = bool(fts) and not fts["certifies"]
     if fts_gate and code == 0:
         code = 1
+
+    # ⛔ WHAT WAS NOT MEASURED IS STATED BEFORE THE OUTPUT MODES DIVERGE
+    # (#11536 review round 3). `--no-fts-probe` is a legitimate by-name choice
+    # and a repair without a probe is a legitimate first run, but BOTH notices
+    # used to sit BELOW the `--json` return: a machine-readable sign-off carried
+    # no `fts_probe` key at all, so a consumer could not tell "not measured" from
+    # "measured and clean", and the skip appeared on no stream. One field (the
+    # report) plus one stderr note (stdout stays pure JSON for `--json`) makes the
+    # skipped half auditable instead of silent.
+    if not fts:
+        report["fts_probe_skipped"] = ("no_fts_probe" if args.no_fts_probe
+                                       else "no_probe_phrase")
+        if args.repair or args.assert_clean:
+            print("⚠️ the Source FTS leg was NOT measured on this run "
+                  f"({report['fts_probe_skipped']}): the census reads node "
+                  "properties, and the removed sentence also lives in the "
+                  "Source FTS index — only a probe can show it has left. This "
+                  "sign-off certifies the CENSUS only (the weaker evidence, "
+                  "taken by name). Re-run with --probe-phrase <a single rare "
+                  "token from the removed sentence> for the full verification.",
+                  file=sys.stderr)
 
     if args.json:
         print(json.dumps(report, indent=2, default=str))
@@ -899,16 +910,6 @@ def main() -> int:
             print(f"✗ {len(report['candidates'])} candidate(s) remain — the census "
                   f"has NOT reached 0", file=sys.stderr)
             return 1
-        if args.assert_clean and args.no_fts_probe:
-            # ⛔ STATED WHAT WAS NOT MEASURED. `--no-fts-probe` is a legitimate
-            # choice, and a sign-off that stays quiet about the half it skipped
-            # is how a census-only green comes to be read as a full pass
-            # (#11161).
-            print("⚠️ --no-fts-probe: this sign-off certifies the CENSUS only. "
-                  "The removed sentence also lives in the Source FTS index, and "
-                  "that index was NOT measured — pass --probe-phrase <a single "
-                  "rare token from the removed sentence> for the full "
-                  "verification.", file=sys.stderr)
     return code
 
 
