@@ -329,7 +329,7 @@ removes. ⚠️ **The window KEEPS the fulltext index in the graph** (decision i
 stays is exactly the one that record did not measure: if a kept `db.idx.fulltext` — or a range — index blocks
 a restore the way the vector index did, then the window is a feasibility question again, and that leg is
 **M4's** to settle rather than this document's to assume. The residual cost is exactly what §1.5 item 3
-already reserves: re-materialising a window still peaks at **4.9–5.9×** its resting size (the table above),
+already reserves: re-materialising a window still peaks at **4.9–5.9×** its resting size (the policy table below),
 and that peak is a graph-memory peak, not an index one.
 
 **The unit of RESIDENCY is a CLOSED component, not a node.** A pinned hub whose neighbours were evicted
