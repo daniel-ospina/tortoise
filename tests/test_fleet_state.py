@@ -1340,6 +1340,41 @@ def test_a_refused_read_carries_the_commands_own_cause(monkeypatch) -> None:
     assert "no parsable JSON" not in rows.error
 
 
+def test_a_refusal_with_empty_stderr_never_renders_stdout_chatter(monkeypatch) -> None:
+    """⛔ THE DISCRIMINATING SHAPE FOR THE STDERR-ONLY RULE (#11202 review round 8).
+
+    The refusal arm passes stderr ONLY, because a progress line on stdout is not a
+    cause. Every existing fixture gives that arm a NON-EMPTY stderr, so `_gh_said`'s
+    stream ORDER alone produced the right answer and passing `stdout` in as well was
+    undetectable: the mutation `_gh_said(err)` -> `_gh_said(err, out)` left the whole
+    suite green. This case is the one that only the rule itself can answer — empty
+    stderr WITH chatter on stdout.
+    """
+    monkeypatch.setattr(
+        fs, "_capture", lambda cmd, timeout=60: ("Fetching page 2 of 19...\n", 1, ""))
+    rows = fs.gh_json(["issue", "list"], what="gh issue list")
+
+    assert rows.measured is False
+    assert "FAILED (1 exit" in rows.error
+    # The chatter must never be rendered as the CAUSE…
+    assert "Fetching" not in rows.error, rows.error
+    # …and the empty stderr must be reported as such, not as "either stream" (the
+    # refusal arm never read stdout at all).
+    assert "it printed nothing on stderr" in rows.error
+    assert "either stream" not in rows.error
+
+
+def test_gh_said_empty_is_stream_aware() -> None:
+    """A claim about a stream nobody read is the same defect class as a wrong cause."""
+    assert fs._gh_said("") == "it printed nothing on stderr"
+    # A whitespace-only OTHER stream is what makes "either stream" TRUE. (A stream
+    # carrying text is not empty: `_gh_said("", "body")` returns that text.)
+    assert fs._gh_said("", "body") == "'body'"
+    assert fs._gh_said("", "\n  \n") == "it printed nothing on either stream"
+    # …and a non-empty stream still wins, stderr first.
+    assert "boom" in fs._gh_said("boom", "chatter")
+
+
 def test_the_timeout_retry_answers_the_measured_intermittency(monkeypatch) -> None:
     """Contention passes, so ONE retry turns a killed read into a real answer.
 

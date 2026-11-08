@@ -11171,6 +11171,42 @@ class HolderGateTests(unittest.TestCase):
         self.assertNotIn("retried once", armed)
         self.assertIn("unset it", armed)
 
+    def test_a_foreign_timed_out_phrase_is_not_mistaken_for_a_kill(self):
+        """⛔ THE MARKER MUST BE STRUCTURAL, NOT A BARE PHRASE (#11202 review round 8).
+
+        `_board_can_answer` puts a prefix in front of the read's cause, but on the
+        FAILED arm the cause EMBEDS `gh`'s own bounded stderr — so a bare
+        `"TIMED OUT after "` marker could be worn by a foreign line. Measured: a
+        proxy 504 whose text reads "upstream TIMED OUT after 60s waiting for
+        response headers" matched, and the surface was handed "KILLED AT ITS BOUND …
+        `gh auth` is FINE" — the remedy-names-a-disproved-cause defect this arm exists
+        to remove, running the other way, and it suppressed the correct auth arm.
+
+        The `(N attempt(s), X.Ys)` parenthetical is composed only by `gh_json`'s timeout
+        arm, so this test drives the SAME predicate the remedy partitions on: the real
+        kill must match, the foreign refusal must not.
+        """
+        fs = self.cp.fleet_state
+        foreign = (
+            "gh issue list FAILED (1 exit): 'proxy: HTTP 504 upstream "
+            "TIMED OUT after 60s waiting for response headers'"
+        )
+        with mock.patch.object(
+            fs, "_capture", return_value=("", fs.GH_READ_TIMEOUT_RC, ""),
+        ):
+            real_kill = fs.open_issues(SLUG).error
+        self.assertIsNotNone(
+            self.cp._BOARD_READ_KILLED_NOTE.search(real_kill), real_kill)
+        self.assertIsNone(
+            self.cp._BOARD_READ_KILLED_NOTE.search(foreign), foreign)
+
+        # …and the REMEDY the foreign refusal receives must be the truthful one, not
+        # the killed-at-its-bound sentence.
+        surface = self.cp.Surface("issue assignee/holder")
+        surface.incomplete(foreign)
+        remedy = self.cp._incomplete_remedy([surface])
+        self.assertNotIn("KILLED AT ITS BOUND", remedy)
+
     def test_every_board_read_failure_fits_the_window_its_readers_apply(self):
         """⛔ EVERY class, not only the timeout (#11202 review round 4).
 

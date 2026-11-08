@@ -9085,10 +9085,21 @@ def _assert_all_surfaces(ordered: list[Surface]) -> None:
 _LANE_ROSTER_NOTE = "the lane roster is UNKNOWN, not empty"
 
 #: The marker `tools/fleet_state.py::gh_json` writes into a READ's cause when the command
-#: was KILLED at its bound (#11202). Matched as a token in the surface note, the same way
-#: `_LANE_ROSTER_NOTE` is — the note is this module's own composition (`_board_can_answer`
-#: in front of the read's cause), not a foreign signature.
-_BOARD_READ_KILLED_NOTE = "TIMED OUT after "
+#: was KILLED at its bound (#11202).
+#: ⛔ MATCHED STRUCTURALLY, NOT BY A BARE PHRASE (#11202 review round 8). The surface note
+#: is NOT purely this module's composition: `_board_can_answer` writes a prefix in front
+#: of the read's cause, but on the FAILED arm that cause EMBEDS `gh`'s own bounded stderr
+#: (`_gh_said`), so a foreign line could wear the marker. Measured: with
+#: `github_error = "gh issue list FAILED (1 exit): 'proxy: HTTP 504 upstream TIMED OUT
+#: after 60s waiting for response headers'"` a bare `"TIMED OUT after "` token matched and
+#: the surface was handed the "KILLED AT ITS BOUND … `gh auth` is FINE" remedy — the same
+#: "remedy names a cause the report has disproved" defect this arm was added to remove,
+#: running in the other direction, and it suppressed the correct auth/network arm. The
+#: `(N attempt(s), X.Ys)` parenthetical below is composed ONLY by `gh_json`'s timeout arm,
+#: so no foreign string can carry it.
+_BOARD_READ_KILLED_NOTE = re.compile(
+    r"TIMED OUT after \d+(?:\.\d+)?s \(\d+ attempt\(s\), \d+(?:\.\d+)?s\)"
+)
 
 
 def _incomplete_remedy(incomplete: list[Surface]) -> str:
@@ -9286,7 +9297,7 @@ def _incomplete_remedy(incomplete: list[Surface]) -> str:
     # rebuild the board, which only re-runs the killed read. Partitioned here, the
     # RECURSION below is what keeps every mixed shape honest: the killed surfaces are
     # subtracted before any other arm (including the composite tails) can reach them.
-    killed = [s for s in incomplete if _BOARD_READ_KILLED_NOTE in (s.note or "")]
+    killed = [s for s in incomplete if _BOARD_READ_KILLED_NOTE.search(s.note or "")]
     if killed:
         killed_ids = {id(s) for s in killed}
         text = (

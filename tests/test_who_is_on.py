@@ -1475,6 +1475,83 @@ exec {self.gh} "$@"
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn(f"fix/{ISSUE}-strand", proc.stdout)
 
+    def _interpreter_path(self, *, uv: bool) -> str:
+        """A PATH holding a pre-3.12 `python3` shim, and optionally a `uv` stub.
+
+        ⛔ HERMETIC, AND THAT IS THE POINT (#11202 review round 8). The wrapper's
+        interpreter selection was shipped with NO test: reverting it to the old
+        `exec python3 "$here/who_is_on.py" "$@"` left the whole suite green, so the
+        measured owner-Mac failure (3.9 -> the verb exits 1) could come back silently.
+        Every entry here is a shell script needing no interpreter, and the wrapper's
+        only other external call — `dirname` — is a symlink to the real one, so the
+        result cannot depend on what this host happens to have installed.
+        """
+        d = self.tmp / "interp-bin"
+        d.mkdir(exist_ok=True)
+        self._write_exec(d / "python3", (
+            "#!/bin/bash\n"
+            "# a 3.9 interpreter: fails the >=3.12 probe, reports a version for -V\n"
+            "if [ \"$1\" = \"-V\" ]; then echo 'Python 3.9.6'; exit 0; fi\n"
+            "exit 1\n"
+        ))
+        for name in ("bash", "dirname"):
+            link = d / name
+            if not link.exists():
+                real = shutil.which(name)
+                self.assertIsNotNone(real, name)
+                link.symlink_to(real)
+        if uv:
+            self._write_exec(d / "uv", (
+                "#!/bin/bash\n"
+                "printf '%s\\n' \"$@\" > \"$UV_ARGS_FILE\"\n"
+                "exit 0\n"
+            ))
+        return str(d)
+
+    def test_the_wrapper_names_the_missing_runtime_instead_of_dying_in_the_module(self):
+        """No 3.12 interpreter and no `uv` -> rc 2 naming what is missing.
+
+        ⛔ rc 2 is this verb's "could not check" code (`rc 3` is a malformed
+        INVOCATION, and the flags here are fine — the RUNTIME is absent). Pre-change
+        the module's own guard exited 1, a code this verb documents it never returns.
+        """
+        proc = subprocess.run(
+            ["bash", str(WRAPPER), str(ISSUE), "--repo", str(self.repo)],
+            capture_output=True, text=True, timeout=120,
+            env={**self._env(), "PATH": self._interpreter_path(uv=False)},
+        )
+        self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+        self.assertIn("Python >= 3.12", proc.stderr)
+        self.assertIn("uv", proc.stderr)
+        # It must NAME the interpreter it found, not just assert one is missing.
+        self.assertIn("3.9.6", proc.stderr)
+
+    def test_the_wrapper_falls_back_to_uv_with_the_repo_project(self):
+        """`uv` is the fallback, and `--project` must select THIS repo's environment.
+
+        Without `--project`, uv resolves whatever environment the caller's cwd
+        happens to belong to — which is how a lane in another checkout gets a
+        different answer for the same verb.
+        """
+        log = self.tmp / "uv-args.txt"
+        proc = subprocess.run(
+            ["bash", str(WRAPPER), str(ISSUE)],
+            capture_output=True, text=True, timeout=120,
+            env={**self._env(), "PATH": self._interpreter_path(uv=True),
+                 "UV_ARGS_FILE": str(log)},
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        args = log.read_text().split()
+        self.assertIn("run", args)
+        self.assertIn("--project", args)
+        project = Path(args[args.index("--project") + 1]).resolve()
+        self.assertEqual(project, ROOT.resolve())
+        # argv after the project is `python <script>` — the interpreter uv owns, then
+        # the module. Assert the MODULE is ours (that is what the fallback must run).
+        self.assertEqual(args[args.index("--project") + 2], "python")
+        target = Path(args[args.index("--project") + 3])
+        self.assertEqual(target.name, "who_is_on.py")
+
     def test_the_ancestry_walk_uses_the_PS_binary_not_git(self):
         """Cycle-2 review, MEDIUM: `_ancestor_pids(ps_bin, …)` got `git_bin`.
 
