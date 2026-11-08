@@ -229,7 +229,7 @@ Ontology low · Accessibility low · Library-deps none.
 | # | previous | now | why |
 |---|---|---|---|
 | 1 | S3 = "decide V1: keep vs move, and implement" | **S3 = census the unretrievable vectors; removal carried with its surface-approval request** | V1's home is §14.3 and its architecture owner is `#4333`; the changelog records `#5090` as a **consumer**, and corrects a wrong owner. |
-| 2 | **E1** = filtered-ANN recall measurement | **removed** — parked with V1 | It is evidence *for a move*. No move is **scheduled**, so it has no consumer yet — the location is decided (2026-11-07), the implementation is not; measuring it now is work for a decision that is not being taken. |
+| 2 | **E1** = filtered-ANN recall measurement | **removed** — it moves to `#4051`, it is not parked | It is evidence *for a move*. The location is decided (2026-11-07) and the implementation is not — so the measurement leaves this epic's scope, but it is **not** consumer-less: its consumer is `SEARCH-ARCHITECTURE.md` §9 **M1** (*"whether the move ships"*), read with §6.1's shortfall assertion, which gates private-beta. |
 | 3 | Architecture **high on branch 2** | **low** | The branch is gone from scope. Flagged explicitly so `low` is not misread. |
 | 4 | Profit chain: "removable bytes ⇒ $1.32/tenant/month" | **deleted** | **Wrong model twice**: retained bytes are revenue (billing ruling), and the bill is provisioned RAM (§16.1). |
 | 5 | 6 items + 9 exclusions | **5 items + 12 exclusions** | Self-hosting, quantization, the recall measurement and V1 itself are now explicitly out, each with its home. |
@@ -241,7 +241,7 @@ Ontology low · Accessibility low · Library-deps none.
 ### 7.1 Stage 1 — align (`01-align.md`)
 
 **Cycle 1** — fresh context, `epic-align` prompt + 8 independent fact-checks with commands. **2 P0, 4 P1, 3 P2, 1 P3.** Incorporated: the `#9548` authorisation wording; the setup-time (not per-search) warning; `1 of 4` MET not 3-of-4; DoD row 2's omitted remainder; the `P0-blocker`s' matrix placement; A1's reasons; the profit recomputation; the four-vs-three label count; the `§14.3` register row; the 4-exist/6-walked surfaces.
-**Cycle 2** — corrections-only pass. **2 P1, 1 P3.** Incorporated: A1's sole surviving reason **falsified** (the doc row at `:1520` and the runtime warning both state the deferral) → **A1 re-argued on actionability and the decision changed from PROCEED to REPOINT**; the `§14.3` register correction **delivered for real** rather than pointed at a non-existent section; the `§0-preamble` mis-citation.
+**Cycle 2** — corrections-only pass. **2 P1, 1 P3.** Incorporated: A1's sole surviving reason **falsified** (the doc row at `STORAGE-ARCHITECTURE.md` §14.3 **V3** and the runtime warning both state the deferral) → **A1 re-argued on actionability and the decision changed from PROCEED to REPOINT**; the `§14.3` register correction **delivered for real** rather than pointed at a non-existent section; the `§0-preamble` mis-citation.
 
 ### 7.2 Stage 2 — research (`02-research.md`)
 
