@@ -75,6 +75,13 @@ note **or a justified skip citing the brief**. Both are **justified skips**, cit
    acceptance run through a **named transport** (see §Scope Decisions).
 9. **Reporting** — every number lands on `#7949` as evidence, with its corpus, command and head sha.
 
+9. **E6 evidence** — the **sixth** acceptance criterion, registered on this epic by **`#11083`** (2026-11-07): for
+   **each installed pack**, every declared relation whose endpoints both occur in the corpus is **materialised**, and
+   a census reports **declared → writable → written** with the delta named. ⚠️ It was **missing from this pipeline's
+   own artifacts** until 2026-11-07 (they were built on E1–E5 + A1–A5). Its *writable* column is `#11484`'s, its
+   *written* column is the **wiring residual** (`extractor_v2` → `pack_hierarchy`), and it is **RED by construction**
+   — before-arm **0 written on Object→Object** — for a wiring reason, **not** a pack-content one.
+
 ### Out of Scope
 
 1. **The mechanisms** — implementing A1's edge producer (`#11001`), A2's HOLD gate (`#10997`), A3's S5 jobs

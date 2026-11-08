@@ -83,6 +83,7 @@ composer goes to **Tier E** (the dispatch-only eval lane).
 | 8 | **A4** typed population attribution | **integration (read-only)** | **Tier E** | it is a census over a live graph | a typed share quoted without its `NULL` denominator |
 | 9 | **A5** Subjects + customer readers | **integration + e2e** | **Tier E** | needs a real capture to have any subjects | a fail-open probe reading as "no subjects" |
 | 10 | **E4** operator edges, unpatched leg | **integration** | **Tier E** | pays 7-session LLM cost; the current test patches the extractor so it cannot certify | a patched path reported as the product |
+| 10a | **E6** per-pack `declared → writable → written` census (`#11083`) | contract + census | **CI** for *declared/writable*; **Tier E** for *written* | *declared* and *writable* are file/graph facts; *written* needs a real capture — split the row where the split actually is | a delta that is named but not measured; a `writable` column silently empty because the vocabulary is static |
 | 11 | **E5** raw recovery arm | **eval** | **Tier E** | non-deterministic composer; the arm is a rate | ratio passing while the absolute floor fails |
 | 12 | pack declaration → write-path derivation (`semantics` consumer) | **contract** (unit) | **CI** | pure dict→predicate derivation; no graph | a second pack's predicate needing a code change; hard-coded predicate |
 | 13 | `create_edge` anchor boundary (`#5213` option 3) | **unit** | **CI** | already pinned, 269 lines | an implementer "fixing" the documented boundary |
