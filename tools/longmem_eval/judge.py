@@ -114,8 +114,8 @@ OFFICIAL_JUDGE_MODEL = "openai:gpt-4o-2024-08-06"
 #: configuration, and the whole point of this ruling is that the configuration a
 #: run used is READ OFF the code, not off whatever the launching shell happened
 #: to export. That sentence is the issue's **ALIGN arm** — the 2026-11-02
-#: analysis blocks and the 2026-11-07 scope comment all state the rule as *"fix
-#: as constants, not env overrides"* — not the wording of the owner's 2026-10-27
+#: analysis blocks and the 2026-11-07 scope comment state the rule as *"fix as
+#: constants, not env overrides"* — not the wording of the owner's 2026-10-27
 #: ruling, whose own words are *"pinned to an exact snapshot id — not a floating
 #: alias"*. Citing the arm for the arm's argument is the point; attributing it to
 #: the owner is not, and a lane reading the ruling must not find a sentence there
