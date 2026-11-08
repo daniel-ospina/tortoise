@@ -1341,6 +1341,35 @@ def test_a_quoted_script_body_with_a_chain_is_one_command(tmp_path):
     assert proc.returncode == cl.EXIT_CLEAN, proc.stderr
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        # The discriminating case for BOTH halves of the splitter: `cd tools` moves
+        # the effective directory, so the second segment's `../tests/...` only
+        # resolves if the chain WAS split AND the `cd` was applied. It is therefore
+        # the pin on `_split_on_chain`'s split side (a never-splitting revert
+        # refuses `cd` as a non-runner) and on `_command_body`'s `cwd` (a revert
+        # that stops `cd` moving it resolves `../tests` outside the tree and
+        # refuses a legitimate record).
+        "cmd:cd tools && uv run pytest ../tests/test_9664_capstone_verdict_ledger.py -q",
+        "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q && echo PASS",
+        "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q && uv run pytest tests/test_ci_manifest.py -q",
+    ],
+)
+def test_a_real_unquoted_chain_is_split_and_each_segment_graded(tmp_path, command):
+    """A bare `&&` IS a separator, and the chained record is the normal case.
+
+    The quoted-body test above pins the mirror-image half (`&&` inside quotes must
+    NOT split). Replacing the splitter with `return [text.strip()]` — never split
+    at all — left all 150 tests green while refusing `cd tools && uv run …` as
+    "must START with a program that runs something", which is exit 1 and prints no
+    uncovered list: the exact false block this round exists to remove. A pin in one
+    direction only is not a pin on the contract.
+    """
+    proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, command])]))
+    assert proc.returncode == cl.EXIT_CLEAN, proc.stdout + proc.stderr
+
+
 def test_a_vacuous_glob_cannot_carry_a_verified_row_BESIDE_a_held_path(tmp_path):
     """The glob-vacuity guard only ever matters on a row that ALREADY holds an artifact.
 
