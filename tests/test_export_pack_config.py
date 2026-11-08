@@ -552,8 +552,11 @@ class TestActivationParity:
         (Kept distinct from the explicit-status test above — the two paths are
         different code.)"""
         from tortoise.hosted_api import _apply_import_pack_config
+        # Premise, not an assertion: `_pack_entry` sets no `status`, so this is
+        # the pre-`status` shape the fallback exists for. Asserting it would be
+        # dead weight (agent-infra#3442 rule 3) — no mutation of the diff can
+        # change a test-local helper's output.
         entry = _pack_entry(namespace="dev", activated=False)
-        assert "status" not in entry["pack_config"]["packs"][0]
         _apply_import_pack_config(sdk, entry)
         assert _install_status(sdk, "dev") == "disabled"
 

@@ -30320,7 +30320,7 @@ def _pack_config_shape_error(pc) -> str | None:
     landing as a status no read path understands. Absent/``None`` stays legal:
     the entry predates the field and the apply path falls back to
     ``activated``. The legal set is exactly the exporter's vocabulary
-    (``active`` | ``disabled`` | ``removed``) plus its tombstone.
+    (``active`` | ``disabled`` | ``removed``).
     """
     if pc is None:
         return None  # absent/None pack_config is LEGAL (pre-v1.1 artifacts)
