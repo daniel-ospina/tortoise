@@ -1507,11 +1507,13 @@ def test_the_10852_obligation_quotes_the_authority_AS_IT_NOW_READS():
         # INSIDE it — presence anywhere in the document would certify a citation
         # to the wrong section, the same rot class #10978 corrected (§4.4 → §4.6).
         # ⚠️ The `§` belongs to the CITATION, not to the heading: NO heading in
-        # this document carries it — `## 9. What belongs where` for a section and
-        # `### 9.1 …` for a subsection — so the locator is stripped to its bare
-        # number and ranged at ANY heading level, and the `/D<n>` tag is not part
-        # of the
-        # heading either.
+        # this document NUMBERS ITSELF with it — `## 9. What belongs where` for a
+        # section and `### 9.1 …` for a subsection — and two headings mention one
+        # in passing (§5's `READ WITH §6` header and `#### 17.4.5 What §17.4 does
+        # NOT claim`), which is why the claim is "numbers itself" and not "carries
+        # the character". So the locator is stripped to its bare number and ranged
+        # at ANY heading level, and the `/D<n>` tag is not part of the heading
+        # either.
         # ⛔ `fullmatch`, NOT `search`: an unanchored classifier silently DISCARDS
         # whatever prose follows a valid-looking `§N.N`, so up to 200 characters of
         # arbitrary text could ride along in the locator and the quotation resolved
