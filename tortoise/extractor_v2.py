@@ -13156,10 +13156,10 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
             vet_warnings.append(
                 f"re-narrate retry failed ({type(e).__name__}: {e}) — the "
                 "first arm's capture is kept unchanged (fail-open)")
-            # Every sibling fail-open arm in this function records the error
-            # and its census class, not only a warning (review round 1, P3):
-            # without this a run whose retry exploded reads CLEAN on
-            # `result["errors"]` and never reaches the error census.
+            # A sibling fail-open arm here records the error AND its census
+            # class, not only a warning (round 1, P3) — else a run whose retry
+            # exploded reads CLEAN on `result["errors"]`. ⛔ NOT "every": the
+            # `route_mentions` handler below is warning-only (measured, r3).
             errors.append(
                 f"re-narrate retry failed: {type(e).__name__}: {e}")
             _bump_census(error_census, e)

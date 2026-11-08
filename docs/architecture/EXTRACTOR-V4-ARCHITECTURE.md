@@ -1080,7 +1080,11 @@ real geometry is measured, so the token-saving RATIO is undetermined in both sig
 On the frozen corpus, count the sessions
 where `_s4_merge_stats`'s `added_by_s4 > 0` **while the FIRST (pre-retry) arm's `coverage_suspect` is
 False** — **restricted to sessions where the retry did not fire**
-(`stats["renarrate"]["fired"]` is `False`). ⛔ **Whose flag, spelled out, because this PR makes it
+(`stats["renarrate"]["fired"]` is `False`). ⛔ **`fired: False` describes what shipped, not how
+many arms ran.** A retry whose tail raised publishes `fired: False` as well, with the arm-choosing
+`trigger` and a `retry_failed` string beside it, and its first arm's capture restored binding by
+binding — so such a run belongs in this population, but must be selected deliberately, by
+`retry_failed`, rather than by the flag alone. ⛔ **Whose flag, spelled out, because this PR makes it
 two arms.** A retried run reaches `check_batch` twice, and the SECOND arm is an independent S2
 run whose flag can be `True` again (measured: an empty second yield flags `coverage_suspect=True`
 on both arms) — so counting against the pipeline's published `result["vet"]["s2"]`, which is the
