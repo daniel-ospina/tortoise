@@ -2626,9 +2626,21 @@ def test_a_MULTI_token_probe_is_REFUSED_because_the_FTS_read_OR_joins_it(
                    # ACCEPTED, and the read then sends `friday .` raw, which
                    # RediSearch evaluates as an implicit AND that under-matches.
                    "friday .", "the ."):
-        assert probe_phrase_rejection(phrase), (
-            f"{phrase!r} was accepted as a probe — the FTS read OR-joins it, so "
-            f"it measures the OR of its words, not the sentence")
+        # ⛔ THE MESSAGE MUST NOT NAME A MECHANISM (#11536 review round 13, P2).
+        # It used to say "the FTS read OR-joins it", which is the reason the
+        # TOKENISER check refuses a phrase — and it is the OPPOSITE of the reason
+        # this row's new fixtures (`"friday ."`, `"the ."`) are refused: those
+        # are a single alphanumeric run, so the whitespace guard refuses them
+        # because the read sends the string RAW and RediSearch evaluates a
+        # space-separated query as an implicit AND that UNDER-matches. A failure
+        # message that misnames the mechanism sends the next debugger to the
+        # wrong guard — in the file whose whole subject is that a disclosure must
+        # not misstate its own evidence. Neutral on purpose, and the row covers
+        # phrases refused for three different reasons.
+        why = probe_phrase_rejection(phrase)
+        assert why, (
+            f"{phrase!r} was accepted as a probe — the read does not address ONE "
+            f"indexed term, so a still-findable sentence can read as absent")
     assert probe_phrase_rejection("zebraquux") is None
     assert probe_phrase_rejection("Fridays.") is None, (
         "a single token with punctuation is still ONE token — the read escapes "
