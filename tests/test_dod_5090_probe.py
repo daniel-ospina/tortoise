@@ -4584,8 +4584,8 @@ _NEGATION_GOVERNS = re.compile(
     r"(?:walk|visit|reach|report)(?:s|es|ed|ing)?\b")
 # ⛔ `_COVERAGE` is RETAINED DELIBERATELY AND IS CURRENTLY IMPLIED, and saying so
 # is the point (#11437 review, P3). Measured: `_NEGATION_GOVERNS` already requires
-# one of the same four verbs AFTER the negation, so on all 99 candidate sentences
-# (the 69 rows across the four sets, plus the 30 sentences of the real §3 under
+# one of the same four verbs AFTER the negation, so on all 101 candidate sentences
+# (the 71 rows across the four sets, plus the 30 sentences of the real §3 under
 # this predicate's own `split(". ")` segmentation) there is no case where the
 # governance test hits and this one does not — dropping the term from
 # `_residual_sentences` changes no verdict. It stays because it is the INDEPENDENT
@@ -4832,6 +4832,30 @@ def _residual_sentences(s3: str) -> list[str]:
     pair agrees, the pin reds, and the cheapest repair is to guess the phrasing
     from the test body. What is pinned instead is the ROW SET in
     `test_the_residual_pin_separates_the_claim_from_its_inverse`.
+
+    ⛔ AND THE TWO-WORD SUBJECT FILTER IS LOAD-BEARING, SO IT IS ROWED (#11437
+    review, round 10, P2). `"decorator" in sentence and "default" in sentence`
+    is the only thing that makes this reject a §3 stating HALF its subject, and
+    until now NO row exercised either conjunct: every row carries both words, so
+    deleting ` and "default" in sentence` (or the `decorator` one) left the whole
+    file GREEN while a §3 that silently dropped "and parameter defaults" became a
+    false PASS. Both halves are now `declared_blocks` rows (`false block: the
+    claim stated with only HALF its subject …`), each RED here and GREEN under
+    the matching deletion — so neither conjunct can be removed silently. That is
+    the same class as the `ing` executor one commit earlier, in the worse
+    direction: that one produced false blocks, this one produces a false PASS.
+
+    ⚠️ THE SENTENCE UNIT — `lowered.split(". ")` — IS STILL UNPINNED, and this
+    is DECLARED rather than fixed (#11437 review, round 10, P3). Measured:
+    replacing it with `lowered.split("\n")` moves 0 of the rows and reds nothing,
+    so a paragraph-sized unit would go unnoticed and weaken the same-sentence
+    property this docstring relies on. ⛔ There is NO measured leak today: the
+    real-doc deletion and reversal arms still red under the coarser unit. It is
+    left to **#11541 D**, which already owns the sentence-granularity question
+    (in the opposite direction — that finding is about the split being too FINE),
+    and pinning it here would mean extracting the unit into a seam that exists
+    only to test itself. Stated so a reader knows it is a known gap, not an
+    examined default.
     """
     lowered = s3.lower()
     return [sentence for sentence in lowered.split(". ")
@@ -5401,6 +5425,17 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
         "false block: exclusion stated as `skipped`":
             "nested def decorators and parameter defaults are skipped by this "
             "walk",
+        # ⛔ THE TWO-WORD SUBJECT FILTER'S EXECUTORS (#11437 review, round 10, P2).
+        # `"decorator" in sentence and "default" in sentence` is the only thing
+        # that rejects a claim stating HALF its subject, and 0 of the 69 rows
+        # exercised either conjunct — so deleting one left the file GREEN while a
+        # §3 that dropped "and parameter defaults" satisfied the pin. Each row
+        # below is RED here and GREEN under the matching deletion, which makes the
+        # deletion detectable.
+        "false block: the claim stated with only HALF its subject (decorators)":
+            "a nested `def`'s decorators are not reported by the walk",
+        "false block: the claim stated with only HALF its subject (defaults)":
+            "a nested `def`'s parameter defaults are not reported by the walk",
         # ⛔ The governance WINDOW's own price (#11437 review, round 6, P2), pinned
         # as rows because prose is what a maintainer deletes: both statements are
         # HONEST and use only in-vocabulary forms, and both red because `\w+`
