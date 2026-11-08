@@ -283,8 +283,18 @@ def test_h4_every_meaning_is_advertised_in_the_prompt_contract():
             "from OUTPUT_CONTRACT's semantics allowlist — the model cannot emit it")
         assert meaning in OUTPUT_CONTRACT_CORE_ONLY, (
             f"{meaning!r} missing from the DERIVED core-only contract")
-    for mechanism in SEMANTICS_MECHANISMS:
-        assert mechanism in predicates, mechanism
+    # ⛔ NOT `for mechanism in SEMANTICS_MECHANISMS`. That iterates the dict's
+    # KEY set, which is a SUBSET of `SEMANTICS_VALUES` — already asserted above,
+    # and equally satisfiable by the predicate list — so it cannot vary under any
+    # mutation of this diff (the non-vacuity rule). What a writer actually stamps
+    # is the dict's VALUES, a different surface: hold them to the contract's own
+    # `op_type` allowlist.
+    op_types = OUTPUT_CONTRACT.split('"op_type": "', 1)[1].split('"', 1)[0]
+    for meaning, mechanism in SEMANTICS_MECHANISMS.items():
+        assert mechanism in op_types, (
+            f"{meaning!r} resolves to mechanism {mechanism!r}, which is missing "
+            f"from OUTPUT_CONTRACT's op_type allowlist ({op_types!r}) — the model "
+            "can never emit the operator the registry maps this meaning to")
 
 
 # ── H5 — declarationOnly is a disposition, never a silencer ──────────────────
