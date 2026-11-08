@@ -1,0 +1,103 @@
+<!-- research-path: https://github.com/daniel-ospina/tortoise/issues/1981 (comment carrying `<!-- research: v1 -->`) -->
+<!-- plan-review: cycles=0, status=not-run-in-lane (this lane has no reviewer; the fresh-context review is the harness PR review at the pushed head) -->
+
+# #1981 — the one-free-org entitlement, atomic in the write's own transaction
+
+**Issue:** [#1981](https://github.com/daniel-ospina/tortoise/issues/1981) · **Team:** organisation-design-team
+**Complexity:** standard · **Predecessors:** #1877 → #2789 → #2810 → #1954 (this is #1954's residual)
+
+## 1. Confirmed problem
+
+`_assert_free_org_allowance` (`tortoise/hosted_api.py:24582`) is a **read-then-write**: it reads
+`owned_free_org_ids` and then the caller provisions. #1954 closed the window with a per-user
+`asyncio.Lock` (`_org_create_lock`, `tortoise/hosted_api.py:24422`) — which is **per process**.
+Every control-plane statement is its own PostgREST request = its own transaction, so no
+application-level lock can span the read and the write, and a second uvicorn worker (or a second
+app instance on the same Supabase project) has its own lock dict. Two workers can each read
+"owns 0 free orgs" and each provision → two free orgs for one person. The single-worker assumption
+is documented (`docs/capacity.md:106`, "`Dockerfile.hosted` runs a single `uvicorn` worker"), which
+is exactly why the gap is invisible until a deployment runs N workers / N replicas.
+
+**Falsifier** (the observation that would overturn the chosen approach): if a partial unique index
+could express the predicate, or if a stored-column denormalisation were acceptable, the create-path
+re-check would be the wrong seam. Both fail — see §2.
+
+## 2. Alternatives considered
+
+| # | Alternative | Why it loses |
+|---|---|---|
+| A | **Partial unique index** on `org_memberships` (the mechanism the issue names first) | The rule's inputs live on TWO tables: it counts `org_memberships` rows but decides on `organizations.subscription_status`. A PostgreSQL index predicate cannot reference another table. |
+| B | **Denormalise the rule onto a column** ("claim the free slot") + unique index on it | Contradicts a settled product decision: `create A → buy B → cancel B` legitimately ends with two free orgs (`docs/scoping/2026-09-10-2789-one-free-org.md` §2, pinned by `TestCancellationLifecycleKnownHole`). A hard unique index would make `customer.subscription.deleted` FAIL on that transition. |
+| C | **Cross-process lock only** (advisory lock, no re-check) | A lock without an in-transaction re-read is not a gate; a writer that does not take the lock (or a key-derivation drift, #1879's finding) silently loses mutual exclusion. |
+| D | **Atomic conditional provision — chosen** | The check moves INSIDE `provision_team`, which already is that one transaction: `pg_advisory_xact_lock` serialises the user's concurrent provisions across processes, then the SAME predicate the Python gate reads is re-evaluated inside the transaction, and a refusal aborts before any row is written. Transaction-scoped lock → released at COMMIT/ROLLBACK, nothing to leak or steal. |
+
+## 3. Integration surface map
+
+| Surface | Layer | Evidence |
+|---|---|---|
+| `provision_team` RPC decision matrix | SQL (PGlite harness) | `supabase/tests/0010_provisioning_rpcs.sql` §8 |
+| Refusal → structured 402, create-org lane | HTTP (FastAPI TestClient) | `TestAtomicProvisionBackstop::test_rpc_refusal_surfaces_the_structured_402` |
+| Refusal → structured 402, onboarding lane | HTTP | `…::test_onboarding_lane_maps_the_refusal_to_the_same_402` |
+| Stranded graph namespace on refusal | unit | `…::test_rpc_refusal_drops_the_eagerly_materialized_graph` |
+| Non-vacuity (a 500 stays a 500) | HTTP | `…::test_unrelated_rpc_failure_is_not_laundered_into_a_402` |
+| SQL↔Python marker lockstep | static (file read) | `…::test_the_marker_is_the_one_the_migration_raises` |
+| Existing single-process burst behaviour | unchanged | `TestConcurrentTeamCreationTOCTOU` (still green) |
+
+## 4. Wiring
+
+| Call site | What it does after this change |
+|---|---|
+| `tortoise/supabase_control.py:3823` `owned_free_org_ids` | Unchanged; **its predicate is now duplicated inside the RPC** and pinned against it by the SQL suite. Any future edit must move both. |
+| `tortoise/hosted_api.py:24881` `_create_org_supabase_lane` | Maps the RPC marker onto the same structured 402 and drops the eagerly materialized graph namespace. |
+| `tortoise/hosted_api.py:37815` `_create_onboarding_org_lane` | Maps the marker onto the same 402 instead of its generic 400. |
+| `tortoise/hosted_api.py:44989` `_provision_new_org_from_checkout` | Unaffected by construction: it passes the purchased (paid) tier, and the gate only fires for `COALESCE(p_tier,'free') = 'free'`. |
+| `/v1/register`, `/v1/agent/signup` (`provision_org`, `provision_org_with_token`) | Unaffected by construction: the identity path passes `p_user_id = NULL`. |
+| `tortoise/hosted_api.py:25077` `_create_org_registry_lane` | Unchanged: registry (selfhost) mode writes into the graph, where Postgres constraints do not exist. |
+| `tortoise/hosted_api.py:32913`, `:33045` claim lanes (`claim_membership` RPC) | **Unchanged** — the other writer that can create an owned free org. Recorded as a residual in the migration header; it is a distinct RPC and a distinct derivation site. |
+
+## 5. Implementation steps (all landed in this PR)
+
+1. Migration `20261108000001_one_free_org_atomic_provision.sql` — advisory lock + in-transaction
+   re-check inside `provision_team`, free-tier + user-path only; signature unchanged so
+   `CREATE OR REPLACE` preserves the ACL. → `supabase/tests/0010_provisioning_rpcs.sql` §8.
+2. `_ONE_FREE_ORG_RPC_MARKER` + `_one_free_org_blocker_from_rpc` in `hosted_api`. →
+   `test_marker_absent_yields_no_blocker`, `test_the_marker_is_the_one_the_migration_raises`.
+3. Create-org lane mapping (+ graph drop). → the 402 and graph-drop tests.
+4. Onboarding lane mapping. → `test_onboarding_lane_maps_the_refusal_to_the_same_402`.
+
+## 6. Review Scope Contract
+
+**Class:** gate-enforcement (a correctness guard over a write path)
+
+**Risk surface**
+
+- **R1** the backstop refuses a create the product rule ALLOWS (fails closed on legitimate use) →
+  caught by the SQL §8 matrix: paid tier, identity path, self-replay, collaborator-only,
+  paid/`pending_payment`/`past_due`/`trialing` orgs, and the `canceled` acceptance all assert
+  **allowed**; predicate parity with `owned_free_org_ids` is asserted in the same block.
+- **R2** the refusal reaches a client as a 500/400 instead of the structured 402 → caught by
+  `TestAtomicProvisionBackstop` on both Supabase lanes.
+- **R3** a non-entitlement RPC failure is laundered into a 402 (telling an uncapped user they are
+  capped) → caught by `test_unrelated_rpc_failure_is_not_laundered_into_a_402`.
+- **R4** SQL and Python drift apart on the marker → caught by
+  `test_the_marker_is_the_one_the_migration_raises`.
+- **R5** the refusal strands a materialized graph namespace → caught by
+  `test_rpc_refusal_drops_the_eagerly_materialized_graph`.
+- **R6** the ACL is lost because the function was redefined → `CREATE OR REPLACE` with an unchanged
+  signature preserves grants (no `DROP FUNCTION`); the PGlite harness runs the ACL/RLS section of
+  the 0010 suite against the new body.
+
+**Threat classes** (gate-enforcement):
+
+- `T1` a *paid* provision being refused (the #2789 exit closed by accident) → §8c asserts the paid
+  exit lands.
+- `T2` the marker matching a non-entitlement failure → non-vacuity test above.
+- `T3` the lock not taken by a second writer (`claim_membership`) → **out of scope here**, stated in
+  the migration header and filed; it is not a bypass of this diff, it is a different writer.
+
+**Out of scope — must NOT be raised:** the `claim_membership` multi-worker window (different RPC,
+its own derivation site), the registry/graph lane (no Postgres constraints), and whether the
+`create A → buy B → cancel B` hole should be closed (a settled product decision, #2789 §2).
+
+**Acceptance:** every R<n> has the named evidence green at the pushed head; `T3` is recorded, not
+chased.
