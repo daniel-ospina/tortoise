@@ -177,7 +177,7 @@ BEGIN
            AND m.role    = 'owner'
            AND m.org_id <> ''
            AND m.org_id <> p_org_id
-           AND (o.subscription_status IS NULL
+           AND (FALSE
                 OR (o.subscription_status <> 'active'
                     AND o.subscription_status <> 'past_due'
                     AND o.subscription_status <> 'trialing'
