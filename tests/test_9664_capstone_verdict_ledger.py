@@ -1650,7 +1650,11 @@ def _refusal_exit_status(exc: ast.Call) -> int | None:
         # `int.__and__`, not `&`: an int SUBCLASS can override `__and__`, and the
         # OS applies int arithmetic whatever the subclass declares.
         return int.__and__(value, 0xFF)
-    return None
+    # Any OTHER resolvable object (a float, a list, a tuple, bytes) is the `else`
+    # arm of CPython's own conversion: it prints the object and exits **1**. It is
+    # reachable, so it is NOT the UNPROVEN return — `None` here would report a shape
+    # CPython grades exactly as unproven, i.e. a red over a legal guard.
+    return 1
 
 
 @pytest.mark.parametrize(
@@ -1669,6 +1673,8 @@ def _refusal_exit_status(exc: ast.Call) -> int | None:
         ("True", 1),
         ("0 + 0", None),  # `literal_eval` folds no BinOp — UNPROVEN, not 0
         ("EXIT_INVALID", None),  # nor a bare Name
+        ("3.5", 1),  # a resolvable NON-int is CPython's `else` arm: print, exit 1
+        ("[1, 2]", 1),  # …and so is any other object literal
     ],
 )
 def test_the_refusal_status_resolver_matches_cpython(argument, expected):
@@ -1681,6 +1687,13 @@ def test_the_refusal_status_resolver_matches_cpython(argument, expected):
     left `assert status is not None` untouched, because no pinned guard can reach
     it. A table is the only way to execute those arms; the resolver's docstring
     already asserts this table, so it is now executed rather than described.
+
+    The table carries BOTH terminal arms, which is why the `3.5` / `[1, 2]` rows
+    exist: they reach the trailing `return 1` (CPython's `else` arm — print the
+    object, exit 1), which the `0 + 0` / `EXIT_INVALID` rows never touch because
+    those leave through the `except` instead. Measured: with only the unresolvable
+    rows, mutating the trailing `return 1` to `return None` left the whole table
+    GREEN — the arm was described by the docstring and exercised by nothing.
     """
     exc = ast.parse(f"raise SystemExit({argument})").body[0].exc
     assert isinstance(exc, ast.Call)
@@ -1732,10 +1745,22 @@ def _census_module():
 def _is_stderr_print(call: ast.Call) -> bool:
     """Whether a `print(...)` call writes to `sys.stderr`.
 
-    The `file=` keyword is REQUIRED, not incidental: a refusal printed to STDOUT
-    is invisible to the census, which reads `probe.stderr` — so a guard with a
-    correct message and no `file=sys.stderr` reds the census while passing a pin
-    that only looked at `print`'s argument list.
+    The census reads a refusal from TWO channels, and only ONE of them makes a
+    stdout print invisible:
+
+      * for a tool it pins a `REFUSAL_CODES` row for, it RUNS the tool and reads
+        `probe.stderr` (`test_the_refusal_exit_code_is_the_one_the_tool_can_spare`,
+        parametrized over `REFUSAL_CODES`) — a refusal printed to stdout is then
+        invisible to it;
+      * for a tool with NO row it only executes the guard node and joins BOTH
+        channels — `str(refusal.value) + captured.out + captured.err` — so a
+        stdout print IS visible there.
+
+    Demanding `file=sys.stderr` unconditionally is therefore correct for the first
+    case and an over-block for the second: measured, a `print(<message>)` +
+    `raise SystemExit(1)` in `tools/build_site_icons.py` left the whole census
+    GREEN (535 passed) while this pin reded. The requirement is asserted below
+    only where the census's stderr-only arm actually applies.
     """
     return any(
         kw.arg == "file"
@@ -1795,8 +1820,9 @@ def test_the_tool_carries_the_5128_interpreter_guard_first(tool, capsys, monkeyp
 
     That census cannot be the only pin, and the reason is a measured ASYMMETRY
     in `tools/ci_selection.py`: for a PR that touches only one tool,
-    `select(['tools/capstone_ledger.py'], 'pull_request', load_manifest())`
-    returns 82 files that INCLUDE `test_9664_capstone_verdict_ledger.py` (it is
+    `select(['tools/capstone_ledger.py'], 'pull_request', load_manifest())["test_files"]`
+    returns 82 file names (basenames, no `tests/` prefix) that INCLUDE
+    `test_9664_capstone_verdict_ledger.py` (it is
     `tier1`-registered in `config/ci-surfaces.yml` — the
     `- test_9664_capstone_verdict_ledger.py` row whose comment begins `# #9664:`,
     dual-registered with `core`; located by that quote, never by a line number,
@@ -1911,7 +1937,7 @@ def test_the_tool_carries_the_5128_interpreter_guard_first(tool, capsys, monkeyp
     shapes_ok = (len(body_nodes) == 1 and isinstance(body_nodes[0], ast.Raise)) or print_shape
     assert shapes_ok, (
         f"the guard must be exactly one of the two #5128 shapes — `raise "
-        f"SystemExit(<message>)`, or `print(<message>, file=sys.stderr)` + `raise "
+        f"SystemExit(<message>)`, or `print(<message>)` + `raise "
         f"SystemExit(<int>)`; got {[type(n).__name__ for n in body_nodes]} "
         f"(tests/test_entry_point_python_guard.py reds on any other shape)"
     )
@@ -1933,7 +1959,10 @@ def test_the_tool_carries_the_5128_interpreter_guard_first(tool, capsys, monkeyp
     assert _run_guard(guard, monkeypatch, (3, 12, 0, "final", 0)) == "", (
         "the guard must be INERT at the floor — it refused on a 3.12 interpreter"
     )
-    assert len(raises) == 1, "the guard must refuse on an old interpreter"
+    # NO separate `len(raises) == 1` assertion here: `shapes_ok` above admits
+    # exactly two bodies, each carrying exactly one `Raise`, so such an assertion
+    # is entailed and can never fire. Measured — it is the vacuous-arm class this
+    # pin's own `_refusal_exit_status` docstring removed rather than mirrored.
     raise_node = raises[0]
     exc = raise_node.exc
     assert isinstance(exc, ast.Call), (
@@ -1976,11 +2005,20 @@ def test_the_tool_carries_the_5128_interpreter_guard_first(tool, capsys, monkeyp
     )
 
     if print_shape:
-        assert _is_stderr_print(body_nodes[0].value), (
-            f"the refusal must be printed to `sys.stderr` — the census reads "
-            f"stderr, so a `print(<message>)` to stdout is a refusal the operator "
-            f"and the census both miss: {ast.dump(body_nodes[0].value)}"
-        )
+        # The channel is only a CONTRACT where the census pins one. A REFUSAL_CODES
+        # tool is refused by RUNNING it and reading `probe.stderr`, so a stdout
+        # print is a refusal the census never sees; a tool with no row is graded by
+        # executing the guard node, where the census joins stdout AND stderr, so
+        # demanding stderr there would red a census-LEGAL guard — the false-red
+        # class this pin must not add (`build_site_icons.py` has no row; measured,
+        # `print(<message>)` + `SystemExit(1)` leaves the census green at 535 passed).
+        if expected_status is not None:
+            assert _is_stderr_print(body_nodes[0].value), (
+                f"the refusal must be printed to `sys.stderr`: the census RUNS this "
+                f"tool and reads `probe.stderr` (its REFUSAL_CODES arm), so a "
+                f"`print(<message>)` to stdout is a refusal the operator and the "
+                f"census both miss: {ast.dump(body_nodes[0].value)}"
+            )
         message = body_nodes[0].value.args[0]
     else:
         message = exc.args[0]
@@ -2030,8 +2068,9 @@ def test_the_tool_carries_the_5128_interpreter_guard_first(tool, capsys, monkeyp
     # above: it greps `python3 <path>` for a tool that IS guarded, because the
     # reader copies the advertised form and meets a refusal the doc never
     # predicted. Measured on a tool-only diff —
-    # `select(['tools/capstone_ledger.py'])` returns 82 files, INCLUDING this
-    # test's file and EXCLUDING `tests/test_entry_point_python_guard.py` — so
+    # `select(['tools/capstone_ledger.py'])['test_files']` returns 82 names,
+    # INCLUDING this test's file and EXCLUDING
+    # `tests/test_entry_point_python_guard.py` — so
     # this pin is the only gate there and must not be narrower than the sweep.
     # (Not hypothetical: `tools/build_site_icons.py` merged advertising
     # `python3 tools/build_site_icons.py`, and the sweep is what caught it.)
