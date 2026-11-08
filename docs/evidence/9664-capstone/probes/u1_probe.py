@@ -3,10 +3,16 @@
 
 WHY THIS IS IN THE TREE (and not in /tmp)
 -----------------------------------------
-The measurement this script produces is cited by `verdict-ledger.yml` rows U1/U2/U4
-(they cite `../step11-write-half-trace.txt`, which is an edited excerpt of THIS
-script's output — run it and you get the same calls and the same verdicts; the
-trace wraps long lines and marks its own cuts, see its presentation note).
+The measurement this script produces is the WRITE HALF of U1, and it is cited by
+`verdict-ledger.yml` row U1. The other two rows that mention the trace — U2 and U4 —
+cite its block 5, which is NOT this script's output: a second graph is refused by
+`POST /v1/organizations/<org_id>/graphs` (HTTP 402 "Custom graphs require the Builder
+plan"), and that request is reproduced by the `curl` under "REPRODUCE THE 402" in the
+trace itself. So: blocks 1-4 = this script; block 5 = that curl.
+
+The trace (`../step11-write-half-trace.txt`) is an edited excerpt of THIS script's
+output — run it and you get the same calls and the same verdicts; the trace wraps long
+lines and marks its own cuts (see its presentation note).
 An evidence artifact whose only reproduction path is a file on the authoring box is
 not evidence — a reviewer's clone cannot run it, and `tools/capstone_ledger.py`
 refuses a `cmd:` entry naming a path outside the tree. So the script lives beside
@@ -120,6 +126,8 @@ async def main() -> int:
     # returned id to be a string AND to appear in the search results closes it.
     negative_refused = neg.startswith("No graph") and NEG_GRAPH in neg
     pos_id = None
+    # fail-closed: any response that is not a JSON object carrying a string `id` leaves
+    # pos_id None, which fails all three downstream controls rather than passing them.
     if status_pos_w == "OK" and pos.startswith("{"):
         try:
             # `raw_decode`, not `loads`: a successful create_point response is the

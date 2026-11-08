@@ -72,12 +72,14 @@ EXPECTED_IDS = [
 #: missing things — "a hosted-org credential usable from the SDK/HTTP surface"
 #: **plus a second graph to target**. A pass minted the credential
 #: (`uv run tortoise signup`) and delivered the write over `/mcp`, and graded the
-#: row `verified` off the refusal that came back. That was a FALSE PASS: `#9340`
-#: makes an explicit non-default graph the ACCEPT arm (id -> namespace -> unique
-#: name), and a refusal is only the legitimate outcome for the other three ugly
-#: cases (U3's row). The half that is still missing is the second graph, refused
-#: `402 "Custom graphs require the Builder plan"` — the same missing thing U2/U4
-#: record, so moving this row would have graded one blocker two ways. The
+#: row `verified` off the refusal that came back. That was a FALSE PASS: `#9664`'s
+#: own "ugly cases" line (which it takes from `#9340`) makes an explicit
+#: non-default graph the ACCEPT arm — the resolver's tiers are id -> namespace ->
+#: unique name (`tortoise/mcp_auth.py`) — and a refusal is only the legitimate
+#: outcome for the other three ugly cases (U3's row). The half that is still missing
+#: is the second graph, refused `402 "Custom graphs require the Builder plan"` —
+#: the same missing thing U2/U4 record, so moving this row would have graded one
+#: blocker two ways. The
 #: measurement was kept, in U1's `reason`, where a decidable half belongs.
 #:
 #: 2026-11-08: `C2` moved OUT of this list and into `verified`. That is the edit
