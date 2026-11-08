@@ -507,7 +507,7 @@ def test_edge_function_logs_the_refusal_on_the_method_gate():
 
 
 _LOCAL_SPECIFIER_RE = re.compile(
-    r"""(?:from|import)\s*\(?\s*["'`](\.{1,2}/[^"'`]+)["'`]"""
+    r"""(?:from|import)\s*\(?(?:\s|//[^\n]*\n|/\*[\s\S]*?\*/)*["'`](\.{1,2}/[^"'`]+)["'`]"""
 )
 
 
@@ -519,12 +519,23 @@ def _local_specifiers(text: str) -> list[str]:
     function's reachable code does not include it.
 
     Template literals count — `` import(`../_shared/x.ts`) `` is a specifier like
-    any other. That quote class is spelled out here, with its own snippet test,
-    because it is the part of this pattern that was WRONG twice: the first
-    revision matched only `from "../_shared/…"` (missing `./_hook.ts`, single
-    quotes and `import(`), and the second still missed the backtick — MEASURED
-    invisible (19 passed) against a full verifier in `../_shared/_hook.ts`,
-    which the wholesale directory sweep cannot reach either.
+    any other — and so does a specifier that carries a comment between the
+    keyword (or the `(`) and the literal, which is legal TypeScript:
+    `import { x } from /* lazy */ "../_shared/x.ts"`. That class is spelled out
+    here, with its own snippet test, because this pattern has now been WRONG
+    three times in the same direction — a SPELLING it did not know:
+      1. only `from "../_shared/…"` (missed `./_hook.ts`, single quotes, `import(`);
+      2. still no backtick — MEASURED invisible (whole file green) against a full
+         verifier in `../_shared/_hook.ts`, which the wholesale directory sweep
+         cannot reach either;
+      3. still no comment-interleaved spelling — MEASURED the same way (green
+         with a live verifier in `../_shared/_hook.ts`), which is why the comment
+         allowance is in the pattern rather than in a promise.
+    The general lesson, since this is the third time: the walk is only as good as
+    this pattern, so EVERY class the pattern is supposed to see has to appear in
+    `test_local_specifier_scan_reads_every_quote_style` — a claim in a comment
+    cannot fail, and each of the three rounds above was a comment that was true
+    of the pattern's intent and false of its text.
     """
     return [match.group(1) for match in _LOCAL_SPECIFIER_RE.finditer(text)]
 
@@ -533,9 +544,13 @@ def test_local_specifier_scan_reads_every_quote_style():
     """The closure walk's front door, pinned on snippets.
 
     The walk below is only as good as this pattern, and this pattern has now
-    been wrong twice in the same direction — a quote style it did not know. A
+    been wrong three times in the same direction — a SPELLING it did not know. A
     snippet test is the only place that can fail on the pattern itself rather
-    than on the function being scanned, so the quote class is asserted directly.
+    than on the function being scanned, so every class is asserted directly:
+    three quote styles, dynamic `import(`, a multi-line `from`, a re-export, and
+    a specifier that carries a `/* … */` or `// …` comment between the keyword
+    and the literal (each of those three was a measured GREEN-with-a-live-
+    verifier hole before it was added here).
     """
     text = "\n".join(
         [
@@ -545,6 +560,10 @@ def test_local_specifier_scan_reads_every_quote_style():
             'const d = await import("../_shared/d.ts");',
             'import {\n  e,\n} from "../_shared/e.ts";',
             'export * from "../_shared/f.ts";',
+            'import { g } from /* lazy */ "../_shared/g.ts";',
+            'const h = await import(/* lazy */ "../_shared/h.ts");',
+            'import {\n  i,\n} from\n  // lazy\n  "../_shared/i.ts";',
+            'const j = await import(\n  /* lazy */\n  "../_shared/j.ts"\n);',
             'import "https://esm.sh/@supabase/supabase-js@2";',
             'import { z } from "npm:zod@3";',
         ]
@@ -556,10 +575,15 @@ def test_local_specifier_scan_reads_every_quote_style():
         "../_shared/d.ts",
         "../_shared/e.ts",
         "../_shared/f.ts",
+        "../_shared/g.ts",
+        "../_shared/h.ts",
+        "../_shared/i.ts",
+        "../_shared/j.ts",
     ], (
-        "every relative specifier must be seen whatever the quote style is — a "
-        "missed specifier is a module the closure walk never reads, while the "
-        "pins still report green"
+        "every relative specifier must be seen whatever the quote style AND "
+        "whatever comment sits between the keyword and the literal — a missed "
+        "specifier is a module the closure walk never reads, while the pins "
+        "still report green"
     )
 
 
@@ -656,12 +680,14 @@ def test_edge_function_hook_path_is_gone():
     #   (c) a NEW env var name (`SUPABASE_AUTH_HOOK_SECRET`), which no name pin
     #       predicts.
     #   MEASURED at this head, all three together in a helper above
-    #   authenticateCaller: these static pins PASS (19 passed) and the runtime
-    #   harness ALSO PASSES (20/20) — because the harness configures
-    #   `AUTH_HOOK_SECRET`, so a branch keyed on a different name is inert under
-    #   test. A restore reusing the OLD env name IS caught by the Phase-2 arms
-    #   (they assert 401 and get the hook path's non-401); one that invents a name
-    #   is not caught by either side.
+    #   authenticateCaller: these static pins PASS (the WHOLE file, not a subset —
+    #   deliberately no count here, because a count that must track a growing file
+    #   is a self-inflicted staleness: this paragraph said "19 passed" and was
+    #   false one commit later) and the runtime harness ALSO PASSES (20/20) —
+    #   because the harness configures `AUTH_HOOK_SECRET`, so a branch keyed on a
+    #   different name is inert under test. A restore reusing the OLD env name IS
+    #   caught by the Phase-2 arms (they assert 401 and get the hook path's
+    #   non-401); one that invents a name is not caught by either side.
     #   THAT RESIDUAL IS BOUNDED BY A DIFFERENT SURFACE, not by a test here, and
     #   by exactly ONE surface: the branch cannot authenticate in production
     #   unless that secret is actually provisioned, and NOTHING IN THIS REPO
@@ -678,16 +704,29 @@ def test_edge_function_hook_path_is_gone():
     #       `provision_team failed` / `tenant-provision error` — a restored
     #       verifier is server-to-server and can provision successfully, so it
     #       emits none of them.
-    #   The bound that DOES hold is the first one: `supabase secrets set` is an
-    #   out-of-band operator action, so the secret is absent unless a human puts
-    #   it there, and its absence FAILS CLOSED. No test in THIS file pins the
-    #   deployment's secret inventory, and this comment claims no gate.
+    #   The bound that DOES hold is the OPERATOR one (the sentence at the end of
+    #   this paragraph — not the deploy bullet above, which is the disproof):
+    #   `supabase secrets set` is an out-of-band operator action, so the secret
+    #   is absent unless a human provisions THAT NAME, and its absence FAILS
+    #   CLOSED. Both halves of that sentence carry conditions, stated here because
+    #   an unqualified bound is the same defect one round further on:
+    #     · THAT NAME — a restore reusing `TORTOISE_SECRET_PEPPER` instead of a
+    #       new name would be handed a secret the deploy check GUARANTEES exists,
+    #       so nothing bounds it at all;
+    #     · FAILS CLOSED is a property of the code that was DELETED (its copy of
+    #       this branch returned null on an absent secret), not of whatever a
+    #       future restorer writes — a verifier that treats absence as "skip"
+    #       fails OPEN, and no test in this repo can pin code that does not exist.
+    #   No test in THIS file pins the deployment's secret inventory, and this
+    #   comment claims no gate.
     #   These pins are therefore defence in depth over the literal and idiomatic
     #   spellings of a restore — useful, cheap, and NOT claimed to be complete.
     # ⛔ AND OVER THE FUNCTION'S REACHABLE CODE, not just this file, because a
     # restore can step outside BOTH the slice and the file. MEASURED (this PR's
     # review): putting the verifier in `../_shared/<new>.ts`, importing it and
-    # calling `hookIdentity(req)` from the handler left ALL 19 static tests green
+    # calling `hookIdentity(req)` from the handler left EVERY static test in the
+    # file green at that head (19 of them then — the count is not restated as a
+    # current figure, since the file grows and this sentence measures a moment)
     # — `index.ts` then carries no banned token at all, and the helper enumerates
     # headers in the other file. The runtime harness only trips it incidentally
     # (its import-rewriting cannot resolve the new module, so it dies with
