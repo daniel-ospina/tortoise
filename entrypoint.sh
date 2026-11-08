@@ -496,6 +496,24 @@ _uvicorn_flag_option() {
     return 1
 }
 
+
+_trim_edges() {
+    # Strip surrounding whitespace from "$1" — LINE-AGNOSTIC, unlike
+    # `sed -e 's/^[[:space:]]*//'`, which is line-oriented: a value whose LEADING
+    # whitespace contains a newline is split into records, the first run is never
+    # removed, and the count then fails the digit test and normalises to 1 while
+    # Python (`str.strip`) and uvicorn (`int`) read the same value as N — measured:
+    # `WEB_CONCURRENCY=$'\n2'` -> shell 1 / Python 2, and the pre-exec gate then
+    # reads the script's own `1` and PERMITS a two-worker boot.
+    #
+    # Only bash pattern expansion is line-agnostic here; `[[:space:]]` matches a
+    # newline inside a bracket expression, which is what makes this correct.
+    local _v="$1"
+    _v="${_v#"${_v%%[![:space:]]*}"}"
+    _v="${_v%"${_v##*[![:space:]]}"}"
+    printf '%s' "$_v"
+}
+
 _resolve_raw_requested_workers() {
     # uvicorn's own precedence: `--workers N` / `--workers=N` over the argv, else
     # $UVICORN_WORKERS (click's `auto_envvar_prefix` value for that flag), else
@@ -562,7 +580,7 @@ _count_is_verifiable() {
     export LC_ALL
     local _raw
     _raw="$(_resolve_raw_requested_workers "$@")"
-    _raw="$(printf '%s' "$_raw" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+    _raw="$(_trim_edges "$(_resolve_raw_requested_workers "$@")")"
     case "$_raw" in
         +*) _raw="${_raw#+}" ;;
     esac
@@ -621,7 +639,7 @@ _resolve_requested_workers() {
     # `_AGREEMENT_TABLE` in `tests/test_worker_topology.py`, which EXECUTES both
     # this block and `worker_topology._positive_int` on the same input, so the two
     # cannot drift. Do not "simplify" one arm without the other.
-    _count="$(printf '%s' "$_count" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+    _count="$(_trim_edges "$_count")"
     case "$_count" in
         +*) _count="${_count#+}" ;;
     esac
@@ -681,10 +699,11 @@ _reload_requested=0
 # uvicorn starts NO reloader ("Current configuration will not reload …") and TWO
 # workers. A membership loop reads that as reloading and prints `workers = 1`,
 # which is the fail-open class the gate exists to close. Every long option other
-# than the FLAGS below consumes the next token as its value, so that token is
-# never re-read as a flag. The flag list is uvicorn 0.52.1's own
-# (`uvicorn.main.main.params`, `is_flag=True`) and is pinned on the Python side
-# by `test_the_uvicorn_flag_set_is_uvicorns_own`.
+# than the FLAGS consumes the next token as its value, so that token is never
+# re-read as a flag. The flag list lives in `_uvicorn_flag_option` — ONE list
+# shared with the count reader, so a flag can never be a value-taking option in
+# one loop and a flag in the other — and is pinned against
+# `uvicorn.main.main.params` by `test_the_uvicorn_flag_set_is_uvicorns_own`.
 _reload_skip=0
 for _arg in "$@"; do
     if [ "$_reload_skip" = "1" ]; then _reload_skip=0; continue; fi
@@ -698,7 +717,7 @@ for _arg in "$@"; do
             ;;
     esac
 done
-case "$(printf '%s' "${UVICORN_RELOAD:-}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]')" in
+case "$(printf '%s' "$(_trim_edges "${UVICORN_RELOAD:-}")" | tr '[:upper:]' '[:lower:]')" in
     1|true|yes|on|t|y) _reload_requested=1 ;;
 esac
 
