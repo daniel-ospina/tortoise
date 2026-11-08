@@ -32,7 +32,6 @@ from __future__ import annotations
 import ast
 import importlib.util as _ilu
 import io
-import itertools
 import json
 import os
 import re
@@ -10718,13 +10717,19 @@ def _call_sites(src: str) -> list[tuple[int, str]]:
     `# call create_operator(payload) to publish` claimed the record's "no producer"
     conclusion was false when nothing was called. `tokenize` separates NAME/OP from
     COMMENT/STRING by construction, so the arm only ever reports a real `NAME (` pair.
+
+    A `def` is NOT a call site: `def create_operator(payload)` is the same NAME/`(` PAIR, and
+    counting it told a fixer the record's conclusion was FALSE when only the function's own
+    definition was present (measured) — the wrong diagnosis, since a definition produces
+    nothing.
     """
     names = {"create_edge", "create_about_edge", "create_operator"}
     toks = list(tokenize.generate_tokens(io.StringIO(src).readline))
     return [(a_line.start[0], a_line.string)
-            for a_line, b_line in itertools.pairwise(toks)
+            for prev, a_line, b_line in zip(toks, toks[1:], toks[2:])
             if a_line.type == tokenize.NAME and a_line.string in names
-            and b_line.type == tokenize.OP and b_line.string == "("]
+            and b_line.type == tokenize.OP and b_line.string == "("
+            and not (prev.type == tokenize.NAME and prev.string == "def")]
 
 
 def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
@@ -10856,6 +10861,22 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         "any number the create_operator quote carries BESIDES the live run must be introduced "
         "by a BASE-QUALIFIED parenthetical (`(\u0060<sha>\u0060 printed …)`) — a bare second "
         f"run reads as live while it is history (got {_trailing[:70]!r})")
+    # §1 item 3's `0 hits` claim belongs to the EXCLUDED command AND to a named base. As first
+    # written it hung on the UN-excluded grep (`docs/evidence/7949-capstone/`), which at
+    # `4e6a3ce612bd^` returns this record's OWN lines (18 of them, measured) — so the claim was
+    # false as written and nothing watched it. Measured: un-excluded at `4e6a3ce612bd^` → 18,
+    # excluded there → 0/exit 1, at the record's own base `80c912244` → 0 both ways (`#10982`
+    # landed after BOTH bases).
+    _zero_at = text.find("The **0 hits**")
+    assert _zero_at > 0, (
+        "§1 item 3 must state the pre-#10982 zero, base-qualified")
+    assert ":!docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md" in text[max(0, _zero_at - 900):_zero_at], (
+        "the `0 hits` claim must hang on the EXCLUDED command — the un-excluded one returns "
+        "this record's own lines at the sha it names, so the claim would be false as written")
+    assert "4e6a3ce612bd^" in text[_zero_at:_zero_at + 260] and \
+        "80c912244" in text[_zero_at:_zero_at + 260], (
+        "the zero must name BOTH bases it was measured at — one of them is this record's own, "
+        "and `#10982` landed after both")
     live_mentions = [i for i, line in enumerate(ext, 1) if "create_operator" in line]
     assert live_mentions == [9006, 9024, 9031, 9411], (
         f"extractor_v2.py's create_operator mentions are at {live_mentions}, not the "
@@ -10963,18 +10984,23 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # historical qualifier: dropping the parenthetical wrote `:12929` correctly and was still
     # told it had quoted the WRONG live line — a message whose repair would INTRODUCE the
     # re-stale (measured).
-    # ⚠️ Checked STRUCTURALLY (which region the number sits in), never by the wording around
-    # it: the landed text says "at HEAD", the pre-#11519 wording said "here", and pinning
-    # either phrase reds on the other while the invariant holds — a message whose repair
-    # would be to re-word a CORRECT number (the failure mode the A2 parenthetical pin hit).
+    # ⚠️ The NUMBER is the claim, not the region. A region-only check passed with §1 re-staled to
+    # `:12853` while an unrelated `:12929` sat earlier in the record (measured) — the record states
+    # one number at several places, so "appears somewhere before the block" is not "§1 quotes it".
+    # Bound to the base-qualified cite instead, and left wording-free on the qualifier: the landed
+    # text says "at HEAD", the pre-#11519 wording said "here", and both are the same claim.
     _block_at = text.find("# §0/§2 — the sha-pinned cites")
-    assert _block_at > 0, (
-        "the §0/§2 sha-pinned reproduction block is GONE — it is where the record's "
-        "sha-pinned numbers are derived")
-    assert ":12929" in text[:_block_at], (
-        "the §1 prose must quote the LIVE vet_enabled line")
-    assert ":12929" in text[_block_at:], (
-        "the §5 reproduction block must quote the LIVE vet_enabled line")
+    _s1_at = text.find("## 1. A1")
+    assert _block_at > 0 and _s1_at > 0, (
+        "the record's §1 section or its §0/§2 reproduction block is GONE — both are where the "
+        "sha-pinned and live cites live")
+    for _label, _region in (("§1", text[_s1_at:_block_at]),
+                            ("the §5 reproduction block", text[_block_at:])):
+        _found = re.findall(r":(\d+)`? at (?:HEAD|here)\b", _region)
+        assert _found == ["12929"], (
+            f"{_label}'s base-qualified live cite must be the vet_enabled line (`:12929`) — it "
+            f"reads {_found}; re-derive it with `git grep -n 'vet_enabled = ' -- "
+            "tortoise/extractor_v2.py`")
     assert ext[12929 - 1].strip().startswith("vet_enabled = ("), (
         f"extractor_v2.py:12929 reads {ext[12929 - 1].strip()[:80]!r}, not the "
         "vet_enabled computation the record cites")
@@ -10988,6 +11014,14 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         assert "62248db88" in _near, (
             f"`:12779` at offset {_m.start()} does not name the base it was true at — "
             "an unqualified occurrence is a re-stale presented as live")
+    # Both SITES must still carry it — deleting either one left the suite green (measured), and
+    # the old number is exactly what a reader meets in each place. Per-REGION, never a count: one
+    # qualified mention per region is the claim.
+    for _label, _region in (("§1", text[_s1_at:_block_at]),
+                            ("the §5 reproduction block", text[_block_at:])):
+        assert re.search(r":12779`? at `?62248db88", _region), (
+            f"{_label} must carry the historical `:12779` qualified by the base it was true at — "
+            "deleting it leaves the old number unmarked where a reader meets it")
     # ⛔ No phrase pin here on purpose: the loop above is the claim (EVERY occurrence names
     # its base). Pinning "both" as two exact sentences redded on a re-worded pair that kept
     # both base-qualified — and this paragraph's own note says the invariant is never the

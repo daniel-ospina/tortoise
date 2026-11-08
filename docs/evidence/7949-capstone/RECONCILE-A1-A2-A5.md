@@ -159,19 +159,20 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
    scored census (`capstone-measured-9152448d.log:299-309`) lists 9 types — `CONTAINS` 309, `IMPL` 65,
    `INPUT` 68, `NAND` 14, `aboutObject` 248, `aboutSubject` 21, `extractedFrom` 150, `mitigated_by` 11,
    `references` 7 — with **`hasPart` absent**. Because the query is complete, absence from that list is
-   `hasPart = 0`, not "not counted". `git grep -rn -E 'hasPart|hierarchies|decomposesInto'
-   docs/evidence/7949-capstone/` → **0 hits before `#10982`** (`4e6a3ce612bd^`; the live count is the §5 note's, not a
-   second typed number here): A1's leg is not in the census at all. ⚠️ That command is **self-matching** once
-   this record lands — every hit is then this file's own lines — so re-derive it with the file
-   excluded:
+   `hasPart = 0`, not "not counted". ⚠️ The bare `git grep -rn -E
+   'hasPart|hierarchies|decomposesInto' -- 'docs/evidence/7949-capstone/'` is **self-matching** — at
+   `4e6a3ce612bd^` every one of its hits is this file's own lines — so the operand has to name the
+   bundle alone, with this file excluded:
    `git grep -rn -E 'hasPart|hierarchies|decomposesInto' -- 'docs/evidence/7949-capstone/' \
    ':!docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md'` → **all 40 hits are the bundle's own registration**
    (#10982 landed it after this record was written) — the bundle CITES the predicate, it does not
    produce it; the producer claim is the call-shaped grep above, which is still empty. The **0 hits**
-   the `exit 1` in earlier revisions of this record was taken at is the tree *before* `#10982` landed
-   (`4e6a3ce612bd^`; measured there → 0) — at this record's own base the command is no longer empty, which
-   is the live number below. A bare "pre-diff" would be false here for the record's own reason: the
-   `#10982` registration is INSIDE this record's base, so only the commit name is a stable operand.
+   the `exit 1` in earlier revisions of this record was taken at is that EXCLUDED command in the tree
+   *before* `#10982` landed (`4e6a3ce612bd^`, and at this record's own base `80c912244`; measured at
+   each → 0, exit 1): A1's leg was not in the census at all when this record was written. A bare
+   "pre-diff" would be false here for the record's own reason: `#10982` landed after BOTH of those
+   bases, so its registration is already inside the CURRENT tree — only the commit name is a stable
+   operand, never "today's tree minus a diff".
    The per-file split is stated once, in the §5 note below; the TOTAL is stated in both places, and
    the pin binds both to the same DERIVED value rather than to two typed numbers.
 4. **The rollup query does not exist.** `git grep -in 'rollup' -- '*.py' '*.md'` over the tree returns
