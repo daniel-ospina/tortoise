@@ -67,6 +67,12 @@ python -m tests.eval.retrieval.run \
     --pool-out /tmp/pool.json
 ```
 
+⚠️ That db path is FIXED, and the corpus is `MERGE`d, never cleared: re-running
+at a SMALLER `--corpus-size` leaves the previous run's tail holding the vectors
+it was written with, so the run is `unknown` (`provenance.corpus_points_unverified`
+counts it) and the gate refuses. Use a fresh db path per smoke, or keep the
+corpus size at or above what the db already holds.
+
 ## One embedding space, always
 
 The vector arm is only a measurement if the query vectors and the corpus point
@@ -100,6 +106,10 @@ unmodified code** — see
 #    without it, both sides are the oracle's synthetic space. Either way the
 #    report says which in provenance.corpus_embedding_space.
 #       pip install -e '.[embeddings]'
+#    Point it at a graph this run owns: any pre-existing point the run does NOT
+#    rewrite (an earlier, larger corpus; product points on a shared instance)
+#    makes the space `unknown` and the gate refuses — deliberately, since those
+#    vectors' space cannot be established from here.
 python -m tests.eval.retrieval.run --db docker://falkor:6379
 ```
 
