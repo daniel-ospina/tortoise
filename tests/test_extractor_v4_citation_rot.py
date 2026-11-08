@@ -261,7 +261,7 @@ FACT_STATEMENTS_IN_SIBLINGS: tuple[
     ),
     (
         STORAGE,
-        "STORAGE homes the embeddings ruling in the V1/§12.1c decision",
+        "STORAGE attributes the vector-LOCATION ruling to V1/§12.1c and the embeddings question to V3",
         "the **V1/§12.1c** decision settles where the vector index LIVES",
     ),
     (
@@ -321,6 +321,7 @@ FACT_STATEMENTS_IN_SIBLINGS: tuple[
         EVAL_SPEC,
         "the eval spec names the closed `#2421` design, not a tracker, on the Case-2 TODO",
         "the design was `#2421`, CLOSED `COMPLETED`; no open tracker",
+        "P6",
     ),
     (
         STORAGE,
@@ -1285,7 +1286,7 @@ def _changelog_entry(needle: str) -> str:
 #: ``_section_body(EVAL_SPEC, "P6")`` raise "carries no §P6" and forced every
 #: eval-spec pin to stay document-wide, i.e. a name that says P6 while the
 #: assertion cannot see P6.
-_SECTION_HEADING = re.compile(r"(?m)^(#{2,4}) (\d+(?:\.\d+)*|P\d+)[.\s—-]")
+_SECTION_HEADING = re.compile(r"(?m)^(#{2,4}) (\d+(?:\.\d+)*|P\d+)[.\s]")
 
 
 def _section_body(path: Path, number: str) -> str:
