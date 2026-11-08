@@ -160,10 +160,12 @@ measured_at:
 # second graph, U2/U4 for want of one to attempt their refusal against. Measured, not
 # assumed.
 #
-# (The U3 row quotes the SAME function in its pre-2026-11 shape — `Reachable graphs:
-# 'default' (default).` — because that is what the 2026-10-26 run observed. The function
-# now renders `(id …, graph_id …)`, as `step11-write-half-trace.txt` block 2 shows
-# (`'default' (id g_dfa9a45dc4234801, graph_id 'default')`); U1's row quotes the
+# (The U3 row quotes the SAME function in its pre-#10025 shape — `Reachable graphs:
+# 'default' (default).` — because that is what the 2026-10-26 run observed; the shape
+# changed in `704fd60ee`, AFTER that run's deployed build. The function now renders
+# `(id …, graph_id …)` for the DEFAULT row (a custom row renders `name (gid)`), as
+# `step11-write-half-trace.txt` block 2 shows (`'default' (id g_dfa9a45dc4234801,
+# graph_id 'default')`); U1's row quotes the
 # shape-neutral prefix `Reachable graphs: 'default' ...` and deliberately does not
 # assert a tail. Two shapes, two observation dates, one function: recorded rather than
 # harmonised, since rewriting an observation to match a later rendering is the
@@ -405,10 +407,12 @@ criteria:
     # and the write was delivered over `/mcp`), regraded the row `verified`, and
     # that was a FALSE PASS: the refusal it measured is indistinguishable from
     # "an unknown graph is refused", which is not this case — `#9664`'s own "ugly
-    # cases" line (taken from `#9340`) lists an explicit non-default graph as the
-    # ACCEPT arm; the id -> namespace -> unique-name tiers are this tree's
-    # `tortoise/mcp_auth.py`, not text in either issue. Only the other three ugly
-    # cases have a refusal as their outcome (which is why U3 is verified on one).
+    # cases" line (taken from `#9340`) lists the four with NO labels, and it is
+    # `#9340`'s scope-restatement comment that makes this one the case that must be
+    # ACCEPTED: the resolver's order (`id -> namespace -> unique name`, this tree's
+    # `tortoise/mcp_auth.py`) refuses only ambiguous / unknown / deleted /
+    # other-workspace. Only the other three ugly cases have a refusal as their
+    # outcome (which is why U3 is verified on one).
     # A half-measured criterion has no home in this
     # ledger's vocabulary ("there is no `partial`"), so the row stays `blocked` and
     # the measurement went into the reason instead of into a verdict.
