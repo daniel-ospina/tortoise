@@ -175,22 +175,31 @@ try {
   // "signature mismatch" → the fail-closed return), so `v1,AAAA` got 401 from
   // the OLD code too: the arm passed identically with the hook path restored,
   // i.e. a tautology against its own name. A signature the old handler would
-  // have ACCEPTED discriminates — old code → 201 (provisioned via the hook
-  // path), today → 401 (webhook headers authenticate nothing).
-  const HOOK_SECRET = "v1,whsec_tstsecret"; // what the handler read from AUTH_HOOK_SECRET
+  // have ACCEPTED is what discriminates.
+  //
+  // ⛔ THE KEY IS THE SECRET WITH THE `v1,whsec_` PREFIX STRIPPED. The deleted
+  // handler constructed the verifier as
+  //   new Webhook(hookSecret.replace(/^v1,whsec_/, ""))
+  // (origin/main:supabase/functions/tenant-provision/index.ts:183), so the HMAC
+  // key was `tstsecret`, NOT the raw env value. Signing with the raw value
+  // yields a signature the old code REJECTS — which silently restores the
+  // tautology, because the old code then answers 401 too. An earlier revision
+  // of this file made exactly that mistake by deriving the key from the STUB
+  // (which hashed with the already-stripped argument it was handed) instead of
+  // from the HANDLER's call site. Measured with the verifier's key held fixed
+  // and only the candidate varied: stripped → accepted; raw env → rejected;
+  // `v1,AAAA` → rejected. Do not "simplify" this back.
+  const HOOK_SECRET_ENV = "v1,whsec_tstsecret"; // the value AUTH_HOOK_SECRET held
+  const HOOK_KEY = HOOK_SECRET_ENV.replace(/^v1,whsec_/, ""); // what the verifier hashed with
   const hookId = "msg_1";
   const hookTs = "1700000000";
   const hookBody = JSON.stringify({ user: { id: USER_ID, email: EMAIL } });
-  // The deleted stub used the env value VERBATIM as the HMAC key
-  // (createHmac("sha256", secret) — it did NOT base64-decode the `whsec_`
-  // part), so this reproduces an accepted signature exactly. Do not
-  // "simplify" it back to a literal `v1,AAAA`.
   const hookSig =
     "v1," +
-    createHmac("sha256", HOOK_SECRET)
+    createHmac("sha256", HOOK_KEY)
       .update(`${hookId}.${hookTs}.${hookBody}`)
       .digest("base64");
-  envVars["AUTH_HOOK_SECRET"] = HOOK_SECRET;
+  envVars["AUTH_HOOK_SECRET"] = HOOK_SECRET_ENV;
   await check(
     "POST with a VALID webhook signature and no JWT → 401 (the hook path no longer exists)",
     call(
