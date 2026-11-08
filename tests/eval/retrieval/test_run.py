@@ -472,6 +472,47 @@ def test_gate_refuses_a_cross_space_comparison():
             "the refusal must name the unknown space as its reason"
 
 
+def test_gate_refuses_a_different_model_in_the_model_space():
+    """bge and arctic are different encoders, so a `--model <candidate>` run
+    gated against a baseline measured with another model would report the SWAP
+    as the delta — on unmodified code. Same space KIND, not the same space."""
+    import random
+
+    per_query = {"q1": {"fused": {"ndcg@10": 0.90, "p@5": 0.90}}}
+    baseline = {"q1": {"fused": {"ndcg@10": 0.10, "p@5": 0.10}}}
+    model, base_model = run_module.EMBED_SPACE_MODEL, run_module.EMBED_SPACE_MODEL
+
+    cross_model = run_module._gate_vs_baseline(
+        per_query, baseline, random.Random(0),
+        space=model, baseline_space=base_model,
+        model_id="Snowflake/snowflake-arctic-embed-s",
+        baseline_model_id="BAAI/bge-small-en-v1.5",
+    )
+    assert cross_model["verdict"] == "INCOMPARABLE"
+    assert "model swap" in cross_model["reason"], \
+        "the refusal must name the swap as the thing the delta would measure"
+    assert cross_model["embedding_model"] == "Snowflake/snowflake-arctic-embed-s"
+    assert cross_model["baseline_embedding_model"] == "BAAI/bge-small-en-v1.5"
+
+    same_model = run_module._gate_vs_baseline(
+        per_query, baseline, random.Random(0),
+        space=model, baseline_space=base_model,
+        model_id="BAAI/bge-small-en-v1.5",
+        baseline_model_id="BAAI/bge-small-en-v1.5",
+    )
+    assert same_model["verdict"] == "SHIP", \
+        "one model, one space: the pre-registered gate must still run"
+
+    # legacy baselines record no model id — a missing identity is not a
+    # conflict, so the comparison keeps working (fail-open on ABSENCE only)
+    legacy = run_module._gate_vs_baseline(
+        per_query, baseline, random.Random(0),
+        space=model, baseline_space=base_model,
+        model_id="BAAI/bge-small-en-v1.5",
+    )
+    assert legacy["verdict"] == "SHIP"
+
+
 def test_baseline_embedding_space_reads_legacy_baselines():
     """Baselines that predate the field; their provenance still answers — and
     a pre-fix baseline WITH an embedder is `unknown`, not `model`."""
@@ -694,4 +735,46 @@ def test_run_reusing_existing_corpus_claims_no_space(tmp_path):
         "the refusal must name the unknown space, and it holds even when BOTH "
         "sides say 'unknown' — two absences of the same fact are not the same "
         "space"
+    )
+
+
+@pytest.mark.skipif(not _has_embedded(), reason="embedded FalkorDBLite unavailable")
+def test_run_gating_another_model_refuses_instead_of_scoring(tmp_path):
+    """End-to-end: a model-space run gated against a baseline measured with a
+    DIFFERENT model is refused, not scored — otherwise the delta is the model
+    swap (the #1349 workflow), reported as a quality verdict on unmodified
+    code. The remedy is a baseline measured with the candidate."""
+    import json as _json
+
+    base = _json.loads((Path(__file__).resolve().parent / "baseline"
+                        / "baseline-embedded-model-2026-11-08.json").read_text())
+    base["provenance"]["embedding_model"] = "Snowflake/snowflake-arctic-embed-s"
+    alt_baseline = tmp_path / "baseline-other-model.json"
+    alt_baseline.write_text(_json.dumps(base))
+
+    with patch.object(run_module, "_loaded_embedding_model", return_value=_StubModel()):
+        report = run_eval(_args(str(tmp_path / "eval-model-id.db"), corpus_size=60,
+                                baseline=str(alt_baseline)))
+
+    prov = report["provenance"]
+    assert prov["corpus_embedding_space"] == run_module.EMBED_SPACE_MODEL
+    gate = report["gate_vs_baseline"]
+    assert gate is not None
+    assert gate["verdict"] == "INCOMPARABLE", (
+        "the same space KIND under two encoders is not the same space"
+    )
+    assert gate["embedding_model"] == prov["embedding_model"]
+    assert gate["baseline_embedding_model"] == "Snowflake/snowflake-arctic-embed-s"
+    assert gate["embedding_model"] != gate["baseline_embedding_model"]
+
+    # ...and the SAME model (the committed baseline, unmodified) still gates.
+    with patch.object(run_module, "_loaded_embedding_model", return_value=_StubModel()):
+        same = run_eval(_args(
+            str(tmp_path / "eval-model-same.db"), corpus_size=60,
+            baseline=str(Path(__file__).resolve().parent / "baseline"
+                         / "baseline-embedded-model-2026-11-08.json"),
+        ))
+    assert same["gate_vs_baseline"]["verdict"] in ("SHIP", "WARN", "BLOCK"), (
+        "a matching model id must reach the pre-registered gate, not a refusal: "
+        + str(same["gate_vs_baseline"])
     )

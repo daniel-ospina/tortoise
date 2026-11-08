@@ -645,6 +645,7 @@ def _baseline_embedding_space(base: dict) -> str:
 def _gate_vs_baseline(
     per_query, baseline_per_query, rng,
     *, space: str | None = None, baseline_space: str | None = None,
+    model_id: str | None = None, baseline_model_id: str | None = None,
 ) -> dict | None:
     """The pre-registered SHIP/WARN/BLOCK gate, refusing cross-space compares.
 
@@ -662,20 +663,38 @@ def _gate_vs_baseline(
     and the label cannot tell them apart). Scoring that pair as comparable is
     the false PASS this whole change exists to remove, with the added authority
     of a guard that looked at it and passed it.
+
+    Model IDENTITY is part of the instrument inside the ``model`` space: bge and
+    arctic are different encoders, so a ``--model <candidate>`` run scored
+    against a baseline measured with another model reports the SWAP as the
+    delta — on unmodified code. That is the ``#1349`` workflow the README
+    points at, and it needs its own baseline (measure the candidate on
+    unmodified code, commit that) exactly like any other instrument change, so
+    a differing model id refuses with that remedy named.
     """
     if not baseline_per_query:
         return None
     unknown = EMBED_SPACE_UNKNOWN
     if unknown in (space, baseline_space):
+        seeded_advice = (
+            "Re-run with the corpus SEEDED in one space (drop "
+            "--no-seed-corpus) so corpus_embedding_space is a fact on both "
+            "sides"
+        )
+        if space != unknown:
+            seeded_advice = (
+                "Commit a baseline whose space you know (a schema-1 baseline "
+                "with no embedding_model reads as 'oracle-synthetic'; a "
+                "pre-fix one with a real model id reads as 'unknown', because "
+                "it re-embedded nothing)"
+            )
         return {
             "verdict": "INCOMPARABLE",
             "reason": (
                 f"the embedding space could not be established for this run "
                 f"('{space}') or its baseline ('{baseline_space}') — "
                 f"'unknown' is an absence of the fact, not a space, and two "
-                f"unknowns do not make a comparable pair. Re-run with the "
-                f"corpus SEEDED in one space (drop --no-seed-corpus) so "
-                f"corpus_embedding_space is a fact on both sides."
+                f"unknowns do not make a comparable pair. {seeded_advice}."
             ),
             "space": space,
             "baseline_space": baseline_space,
@@ -692,6 +711,25 @@ def _gate_vs_baseline(
             ),
             "space": space,
             "baseline_space": baseline_space,
+        }
+    models = (model_id, baseline_model_id)
+    if (space == EMBED_SPACE_MODEL and baseline_space == EMBED_SPACE_MODEL
+            and all(models) and "unavailable" not in models
+            and model_id != baseline_model_id):
+        return {
+            "verdict": "INCOMPARABLE",
+            "reason": (
+                f"run measured the 'model' space with '{model_id}' but the "
+                f"baseline measured it with '{baseline_model_id}' — the two "
+                f"runs share a space KIND, not a space. Paired deltas would "
+                f"report the model swap, not the change. Commit a baseline "
+                f"measured with '{model_id}' on unmodified code (that is how "
+                f"an embedder swap gets gated) before comparing."
+            ),
+            "space": space,
+            "baseline_space": baseline_space,
+            "embedding_model": model_id,
+            "baseline_embedding_model": baseline_model_id,
         }
     ndcg_deltas = []
     p5_deltas = []
@@ -770,6 +808,12 @@ def _run_with_sdk(args, sdk) -> dict:
         if not args.quiet:
             print(f"[corpus] re-embedded {reembedded} points in the "
                   f"'{space}' space (queries and points share one space)")
+    elif space == EMBED_SPACE_UNKNOWN and not args.quiet:
+        print("[corpus] WARNING: the embedding space of the corpus already in "
+              "the graph cannot be established (it may be a previous eval "
+              "seed's centroids, a MODEL-space corpus, or product vectors). "
+              "The reported metrics are not a quality statement and the gate "
+              "will refuse to compare.")
     corpus_fp = corpus_fingerprint_from_graph(proj.g)
     # #1348: per-topic live counts come from the oracle generator (the hidden
     # topic key is never written to the graph — seed_corpus SET is
@@ -912,6 +956,10 @@ def _run_with_sdk(args, sdk) -> dict:
 
     paired = _paired_vs_fused(oracle_per_query, rng, strategies=tuple(active_strategies))
     rerank_verdict = _rerank_verdict(oracle_per_query, rng) if graph_ranker_arm else None
+    # The instrument's identity, resolved ONCE: provenance records it and the
+    # gate compares it (a differing model id is a different space KIND).
+    embedding_model = _resolved_embedding_model(
+        use_model, getattr(args, "model", None) is not None)
     gate = None
     if args.baseline:
         base = json.loads(Path(args.baseline).read_text())
@@ -922,6 +970,8 @@ def _run_with_sdk(args, sdk) -> dict:
         gate = _gate_vs_baseline(
             oracle_per_query, base.get("per_query", {}), rng,
             space=space, baseline_space=_baseline_embedding_space(base),
+            model_id=embedding_model,
+            baseline_model_id=(base.get("provenance") or {}).get("embedding_model"),
         )
 
     # 6. Authored pool emission (top-50/strategy/query, deduped per query).
@@ -1008,8 +1058,7 @@ def _run_with_sdk(args, sdk) -> dict:
             "synthetic_query_vectors": not use_model,
             "corpus_embedding_space": space,
             "corpus_reembedded": reembedded,
-            "embedding_model": _resolved_embedding_model(
-                use_model, getattr(args, "model", None) is not None),
+            "embedding_model": embedding_model,
             "judge_labels": args.judge_labels or "none",
         }),
         "notes": [
@@ -1033,12 +1082,18 @@ def _run_with_sdk(args, sdk) -> dict:
             "bge text vectors against centroid vectors and reported a "
             "37-point nDCG 'regression' on unmodified code. "
             "--no-seed-corpus → 'unknown': the vectors already in the graph "
-            "were not written by this run (an earlier eval seed's centroids "
-            "and product embeddings are indistinguishable here), so no space "
-            "can be claimed and the gate refuses to compare.",
+            "were not written by this run (an earlier eval seed's centroids, "
+            "a corpus an earlier MODEL-space run re-embedded, and product "
+            "embeddings are indistinguishable here), so no space can be "
+            "claimed and the gate refuses to compare — and the metrics this "
+            "run reports are not a quality statement.",
             "The gate REFUSES a cross-space comparison (verdict "
             "INCOMPARABLE) — paired deltas across two embedding spaces "
-            "measure the instrument, not the change. Baseline files carry "
+            "measure the instrument, not the change, and the model id is part "
+            "of the instrument: a --model candidate gated against a baseline "
+            "measured with another model is refused too (commit a baseline "
+            "with the candidate on unmodified code — that is how an embedder "
+            "swap is gated). Baseline files carry "
             "their own space; re-baseline in the space you measure.",
             "R@10 uses the oracle denominator = the grade-2 target set "
             "(~77-84 points at corpus 2000/24 topics) — the ceiling is "

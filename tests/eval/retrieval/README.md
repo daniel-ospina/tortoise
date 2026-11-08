@@ -72,7 +72,8 @@ python -m tests.eval.retrieval.run \
 The vector arm is only a measurement if the query vectors and the corpus point
 embeddings live in the SAME space. The seeded corpus ships the oracle's
 **synthetic** topic-centroid embeddings (`benchmarks/synthetic_corpus.py`,
-`ORACLE_EMBED_ALPHA`); nothing here ever embeds the corpus with a real model.
+`ORACLE_EMBED_ALPHA`), and a `model`-space run RE-EMBEDS it (`_reembed_corpus`)
+so both sides share one space.
 So the space is decided from the CORPUS side, once per run
 (`_corpus_embedding_space`), never from ambient model availability:
 
@@ -80,7 +81,7 @@ So the space is decided from the CORPUS side, once per run
 |---|---|---|
 | no embedder (`uv sync`, CI offline) | `oracle-synthetic` | queries = topic-centroid sums (documented degraded fallback) |
 | embedder loaded (`uv sync --extra embeddings`) | `model` | the seeded corpus is RE-EMBEDDED with that model (`corpus_reembedded` in provenance), queries too |
-| `--no-seed-corpus` (any environment) | `unknown` | the vectors already in the graph were not written by this run — an earlier eval seed's centroids and product embeddings are indistinguishable — so no space is claimed and the gate refuses (an `unknown` run is for measuring, not for gating: drop the flag to gate a cycle) |
+| `--no-seed-corpus` (any environment) | `unknown` | the vectors already in the graph were not written by this run — an earlier eval seed's centroids, a corpus an earlier MODEL-space run re-embedded, and product embeddings are indistinguishable — so no space is claimed: the reported metrics are not a quality statement and the gate refuses (drop the flag to gate a cycle) |
 
 `provenance.corpus_embedding_space` names which one a report used. **It is not
 cosmetic.** Before this rule existed the query side silently took the ambient
@@ -124,7 +125,11 @@ does not block.
 **A cross-space comparison is refused, not scored.** A run and its baseline in
 different embedding spaces differ by the INSTRUMENT, so `_gate_vs_baseline`
 returns `INCOMPARABLE` (naming the remedy: commit a run of unmodified code in
-that space) instead of a BLOCK. A baseline's space comes from its own
+that space) instead of a BLOCK. The same holds inside the `model` space for a
+different model id: `--model <candidate> --baseline <a baseline measured with
+another model>` is refused, because the delta would be the swap — gate an
+embedder change by committing a baseline measured with the candidate on
+unmodified code. A baseline's space comes from its own
 provenance — and when it declares none, `embedding_model` records what that run
 DID: absent/`unavailable` → `oracle-synthetic`; a real model id → `unknown`,
 because a pre-fix run re-embedded nothing and measured the mixed
