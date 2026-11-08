@@ -158,7 +158,7 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
    insertion then moved both; both now read `17574`.) What is missing is the *declared part-whole* edge, not every structural
    edge — and saying otherwise would send a lane off to build a writer the graph already has (the "second
    producer" the epic forbids).
-3. **The census cannot observe the edge even if it existed.** `probes/capstone_measure.py:2713-2716`
+3. **The census cannot observe the edge even if it existed.** `probes/capstone_measure.py:2724-2726`
    enumerates **every** relationship type (`MATCH ()-[r]->() RETURN type(r) …`), and the registered
    scored census (`capstone-measured-9152448d.log:299-309`) lists 9 types — `CONTAINS` 309, `IMPL` 65,
    `INPUT` 68, `NAND` 14, `aboutObject` 248, `aboutSubject` 21, `extractedFrom` 150, `mitigated_by` 11,
@@ -171,10 +171,10 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
    ':!docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md'` → **exit 1, no output** at this record's
    base. ⛔ **SUPERSEDED — read the paragraph above as the state at that base, NOT as the current
    one, and re-run the command before quoting it.** `#10982` has since given the census exactly the
-   leg gap item (b) below asks for: `probes/capstone_measure.py:2791` pins
-   `A1_RELATION_FAMILIES = ("hasPart",)`, `:2843` adds `_a1_object_edges` (the
-   `MATCH (a:Object)-[r]->(b:Object) RETURN type(r)` count), `:2879` publishes `by_pinned_family`,
-   `:3095` wires it into `result["A1"]`, and `preregistration.json` registers
+   leg gap item (b) below asks for: `probes/capstone_measure.py:2802` pins
+   `A1_RELATION_FAMILIES = ("hasPart",)`, `:2854` adds `_a1_object_edges` (the
+   `MATCH (a:Object)-[r]->(b:Object) RETURN type(r)` count), `:2890` publishes `by_pinned_family`,
+   `:3106` wires it into `result["A1"]`, and `preregistration.json` registers
    `a1_relation_families` — so *"the census cannot observe the edge"* and *"A1's leg is not in the
    census at all"* no longer hold, and that reproduce command now exits **0 with 40 lines** (10 in
    the probe, 22 in `PRE-REGISTRATION.md`, 8 in `preregistration.json`), every one of them that leg.
@@ -184,7 +184,7 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
 4. **The rollup query does not exist.** `git grep -in 'rollup' -- '*.py' '*.md'` over the tree returns
    only unrelated uses (extractor `_rollup_llm`/`_rollup_recovery` stage counters, a CI per-name rollup
    discussion, a plan doc) — plus, since `#10982`, the A-row census's own `rollup_queries` on the A1
-   row, declared `unmeasured` (`probes/capstone_measure.py:3105`): a registered placeholder is not a
+   row, declared `unmeasured` (`probes/capstone_measure.py:3116`): a registered placeholder is not a
    query. There is **no** query of the graph shape "which work items serve this goal,
    and what evidence supports them", no ground truth, and no scoring — which is the half `#10984` says
    `#11001` does **not** own and is "the half most likely to be dropped".

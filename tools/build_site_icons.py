@@ -36,12 +36,26 @@ import sys
 
 # #5128: refuse a <3.12 interpreter before the imports below — a module-level
 # 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+#
+# The message names the ONE form that always resolves. The bare path is NOT that
+# form: `--source` is `required=True`, so it exits 2 on argparse's own usage
+# error — a SECOND unattributed error — whereas `--help` needs no `--source`
+# token. A refusal that points a stranded caller at a usage error has only moved
+# the confusion.
+#
+# Exit 4, not 1: 1 is this tool's OWN failure status (`raise SystemExit(<message>)`
+# on every other refusal), `main()` returns 0 only and argparse takes 2, so an
+# environment refusal must not wear 1 or a caller cannot tell "the artwork is
+# wrong" from "the interpreter is too old". Pinned in
+# tests/test_entry_point_python_guard.py::REFUSAL_CODES.
 if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
-    raise SystemExit(
+    print(
         f"tools/build_site_icons.py requires Python >= 3.12 (got "
         f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
-        f"`uv run python tools/build_site_icons.py`"
+        f"`uv run python tools/build_site_icons.py --help`",
+        file=sys.stderr,
     )
+    raise SystemExit(4)
 
 import argparse
 import struct
