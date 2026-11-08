@@ -64,6 +64,28 @@ class ExportError(RuntimeError):
 # ── canonical serialization ──────────────────────────────────────────────────
 
 
+def _importable_pack_status(status: str | None) -> str:
+    """#1936: clamp an exported status to the set the IMPORTER accepts.
+
+    The exporter used to write ``:PackInstall.status`` verbatim while the
+    importer's shape gate accepts only ``active`` | ``disabled`` | ``removed``
+    — so a graph holding any other value produced an artifact its own importer
+    rejected pre-restore, and an artifact is sha-pinned and usually the only
+    surviving copy of a graph that is gone. "Export your graph, restore it"
+    has to be total.
+
+    No in-product writer can produce an out-of-vocabulary status (``pack_state``
+    and ``pack_manifest_store`` both validate), so this is a residual against
+    an out-of-band graph write — which is exactly the case a restore exists
+    for. Clamping to ``disabled`` rather than ``active`` keeps the record's own
+    ``activated`` boolean truthful (it is False for any non-``active`` status)
+    and never silently WIDENS a tenant's vocabulary on restore.
+    """
+    if status in ("active", "disabled", "removed"):
+        return status
+    return "disabled" if status else "active"
+
+
 def collect_pack_config(proj) -> dict:
     """#1936: the pack-config block carried INSIDE the encrypted payload.
 
@@ -76,8 +98,7 @@ def collect_pack_config(proj) -> dict:
     ``removed``), ``yaml`` is the custom manifest text or null for starter
     packs.
 
-    ``status`` is what makes restore parity (#1936 indicator 2) expressible:
-    ``activated`` alone collapses ``disabled`` and ``removed`` into one
+    ``status`` is what makes restore parity (#1936 indicator 2) expressible:    ``activated`` alone collapses ``disabled`` and ``removed`` into one
     boolean, so an importer could not tell "the tenant switched this pack
     off" (carry it, write ``disabled``) from "the tenant removed this pack"
     (its ``:PackManifest`` is gone and ``yaml`` is null — the entry must be
@@ -103,7 +124,7 @@ def collect_pack_config(proj) -> dict:
                 "namespace": ns,
                 "version": version or "0.1.0",
                 "activated": (status or "active") == "active",
-                "status": status or "active",
+                "status": _importable_pack_status(status),
                 "yaml": yaml_text,
             })
     except Exception:

@@ -511,6 +511,31 @@ class TestActivationParity:
         assert by_ns["gone-ops"]["status"] == "removed"
         assert by_ns["tenant-ops"]["status"] == "active"
 
+    def test_collect_clamps_an_out_of_vocabulary_status(self, sdk):
+        """Export → import must be TOTAL.
+
+        The exporter used to write ``:PackInstall.status`` verbatim while the
+        importer's shape gate accepts only the three vocabulary values, so a
+        graph holding any other value produced an artifact its OWN importer
+        rejected pre-restore — and an artifact is sha-pinned and usually the
+        only surviving copy of a graph that is gone. No in-product writer can
+        create such a status, so this pins the residual against an out-of-band
+        graph write: clamp, never emit an unimportable value.
+        """
+        from tortoise.export import collect_pack_config
+        from tortoise.hosted_api import _pack_config_shape_error
+        _seed_packs(sdk, custom=True)
+        sdk._get_proj().g.query(
+            "MATCH (p:PackInstall {namespace: 'tenant-ops'}) "
+            "SET p.status = 'inactive'")
+        pc = collect_pack_config(sdk._get_proj())
+        by_ns = {p["namespace"]: p for p in pc["packs"]}
+        # clamped, and never UP: `inactive` must not become `active`
+        assert by_ns["tenant-ops"]["status"] == "disabled"
+        assert by_ns["tenant-ops"]["activated"] is False
+        # the artifact the exporter just produced must pass its own gate
+        assert _pack_config_shape_error(pc) is None
+
     def test_disabled_starter_is_not_reactivated(self, sdk):
         """Explicit `status` path (the v1.1 export's own field)."""
         from tortoise.hosted_api import _apply_import_pack_config
@@ -570,6 +595,12 @@ class TestActivationParity:
             "MATCH (p:PackInstall {namespace: 'tenant-ops'}) "
             "SET p.status = 'disabled'")
         pc = collect_pack_config(sdk._get_proj())
+        # The new field must actually be CARRIED — without this, the legacy
+        # `activated` fallback alone satisfies every assertion below and the
+        # test cannot discriminate the `status` half of the change.
+        by_ns = {e["namespace"]: e for e in pc["packs"]}
+        assert by_ns["tenant-ops"]["status"] == "disabled"
+        assert by_ns["dev"]["status"] == "active"
 
         fresh = TortoiseSDK(db_path=str(tmp_path / "restored.db"))
         try:
@@ -681,18 +712,37 @@ class TestRemovedPackGranularity:
         assert _install_status(sdk, "dev") == "disabled"
 
     def test_legacy_skip_does_not_fire_on_explicit_status(self, sdk):
-        """A namespace that CARRIES a real status keeps the loud guard.
+        """A namespace the artifact wants INSTALLED keeps the loud guard.
 
-        Pins that the skip is keyed on "no status AND activated is False" and
+        Pins that the skip is keyed on the RESOLVED state (``disabled``) and
         cannot swallow an entry whose explicit status says it should be
-        installed — ``active``/``disabled`` on an unknown namespace is still an
-        error (the vocabulary would be dropped), and ``removed`` is handled by
-        the resolver above, not by this branch."""
+        installed — ``active`` on an unknown namespace is still an error (the
+        vocabulary would be dropped). ``disabled`` is deliberately NOT here:
+        it resolves to the same state as the legacy ``activated: False``
+        spelling and is skipped identically — see
+        ``test_explicit_disabled_on_unknown_namespace_is_skipped``.
+        """
         from tortoise.hosted_api import _apply_import_pack_config
         with pytest.raises(ValueError, match="unknown starter pack"):
             _apply_import_pack_config(
                 sdk, _pack_entry(namespace="not-a-real-pack", yaml=None,
-                                 activated=False, status="disabled"))
+                                 activated=False, status="active"))
+
+    def test_explicit_disabled_on_unknown_namespace_is_skipped(self, sdk):
+        """The SAME state spelled explicitly is skipped, not fatal.
+
+        ``_pack_entry_activation`` resolves both ``{"activated": False}`` and
+        ``{"activated": False, "status": "disabled"}`` to ``disabled``, so the
+        abort class #1936 exists to remove (one entry fails the whole import)
+        must not survive behind a spelling difference. The exporter can emit
+        this shape: a custom ``:PackInstall`` whose ``:PackManifest`` is
+        absent yields ``yaml: null`` regardless of status.
+        """
+        from tortoise.hosted_api import _apply_import_pack_config
+        _apply_import_pack_config(
+            sdk, _pack_entry(namespace="typo-ops", yaml=None,
+                             activated=False, status="disabled"))
+        assert _install_status(sdk, "typo-ops") is None
 
     def test_legacy_unknown_namespace_activated_still_raises(self, sdk):
         """Same legacy shape but `activated: True` — the guard still fires.
@@ -767,17 +817,24 @@ class TestStatusShapeGate:
             {"schema_version": 1, "packs": [entry]}) is None
 
     def test_vocabulary_matches_pack_state(self):
-        """Drift lock: the shape gate's literal set must be exactly
-        pack_state's PackInstall vocabulary — a new status added there
-        without this gate would 422 a legitimately-exported artifact."""
+        """Drift lock: the shape gate's set must be EXACTLY pack_state's
+        PackInstall vocabulary, derived from the module.
+
+        The expectation is computed from ``pack_state``'s own constants rather
+        than written out again: a hand-written literal set here compares the
+        three already-imported names against themselves, so it locks the
+        three VALUES and cannot detect an ADDITION — the very drift this test
+        exists to catch (a new ``PACK_STATUS_*`` added there without the gate
+        would 422 a legitimately-exported artifact).
+        """
+        from tortoise import pack_state
         from tortoise.hosted_api import _PACK_CONFIG_STATUSES
-        from tortoise.pack_state import (
-            PACK_STATUS_ACTIVE,
-            PACK_STATUS_DISABLED,
-            PACK_STATUS_REMOVED,
-        )
-        assert {
-            PACK_STATUS_ACTIVE, PACK_STATUS_DISABLED, PACK_STATUS_REMOVED} == _PACK_CONFIG_STATUSES
+        declared = {
+            value for name, value in vars(pack_state).items()
+            if name.startswith("PACK_STATUS_") and isinstance(value, str)
+        }
+        assert declared, "pack_state declares no PACK_STATUS_* constants"
+        assert declared == set(_PACK_CONFIG_STATUSES)
 
 
 class TestUpsertStatusParam:

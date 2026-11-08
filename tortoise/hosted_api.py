@@ -10461,10 +10461,11 @@ _IMPORT_ARTIFACT_VERSION = 1
 # #1936: the ``pack_config`` entry ``status`` vocabulary — the exporter's
 # ``:PackInstall`` statuses (``pack_state.PACK_STATUS_*``). Only ``removed``
 # means "skip this entry"; the other two are written verbatim on import. Kept
-# as a literal set (not a pack_state import) because this module's shape gate
-# runs on the pre-restore path, where importing the pack machinery would pull
-# the graph stack in behind it; the drift is locked by
-# tests/test_export_pack_config.py against pack_state's constants.
+# as a literal set rather than derived at import time so the shape gate has no
+# module-level dependency on the pack machinery; the drift is locked by
+# tests/test_export_pack_config.py, which derives the expected set from
+# ``pack_state``'s own ``PACK_STATUS_*`` constants — so ADDING a status there
+# fails that test instead of silently 422ing a legitimately-exported artifact.
 _PACK_CONFIG_STATUSES = frozenset({"active", "disabled", "removed"})
 # 64 MiB streaming cap — enforced WHILE reading the body, never via
 # Content-Length alone (a spoofed short Content-Length would otherwise let
@@ -30659,11 +30660,21 @@ def _apply_import_pack_config(sdk, payload: dict) -> None:
     # set the restore will leave behind rather than against install order.
     # (Before #2781 the validator's temp registry held one manifest and no
     # cross-pack reference could validate at all.)
-    sibling_yamls = {
-        p.get("namespace"): p.get("yaml") for p in packs
-        if isinstance(p, dict) and isinstance(p.get("namespace"), str)
-        and isinstance(p.get("yaml"), str) and p.get("yaml")
-    }
+    # #1936: only entries this pass will actually APPLY may seed the sibling
+    # set. A `removed` entry is skipped below and never installed, so letting
+    # its yaml into the validator would let a cross-pack reference resolve
+    # against a namespace the import deliberately does not create.
+    sibling_yamls = {}
+    for p in packs:
+        if not (isinstance(p, dict) and isinstance(p.get("namespace"), str)):
+            continue
+        _ns = p["namespace"]
+        _yaml = p.get("yaml")
+        if not (isinstance(_yaml, str) and _yaml):
+            continue
+        if _pack_entry_activation(p, _ns) is None:
+            continue
+        sibling_yamls[_ns] = _yaml
     for pack in packs:
         ns = pack.get("namespace")
         if not ns:
@@ -30724,26 +30735,37 @@ def _apply_import_pack_config(sdk, payload: dict) -> None:
                 # existing pins use) still raises, so a genuinely unknown
                 # namespace is still a loud 422. Only an entry the artifact
                 # itself marks as switched-off is skipped.
-                if pack.get("status") is None and pack.get("activated") is False:
-                    # ``status is None``, NOT ``"status" not in pack`` — the
-                    # resolver above and the shared shape gate both treat an
-                    # explicit ``status: null`` as ABSENT ("the entry predates
-                    # the field"), so keying on key PRESENCE would let the two
-                    # spellings of one artifact behave differently: key-absent
-                    # skipped, ``status: null`` still aborting the import.
+                if want_status == "disabled":
+                    # Keyed on the RESOLVED state, not on the spelling that
+                    # produced it. ``want_status`` is ``disabled`` for BOTH
+                    # ``{"activated": False}`` and ``{"activated": False,
+                    # "status": "disabled"}`` and for ``status: null`` — the
+                    # three spellings of one artifact. Keying on
+                    # ``status is None`` (a previous attempt) fixed only the
+                    # first two and left ``status: "disabled"`` aborting the
+                    # whole import, which is the #1936 indicator-3 defect this
+                    # branch exists to remove: one entry must not fail the
+                    # import at artifact granularity.
+                    #
+                    # The fail-loud guard is NOT widened: ``want_status`` is
+                    # ``active`` for every entry the artifact wanted
+                    # installed, including the truthy/absent ``activated``
+                    # shapes every existing pin uses, so an unknown namespace
+                    # the artifact wanted ACTIVE still raises. ``removed``
+                    # never reaches here (the resolver returns None above).
                     #
                     # ``warning``, not ``info``: this branch cannot tell a
                     # REMOVED pack from a DISABLED one from a typo'd
-                    # namespace, and it replaces a previous loud ValueError —
-                    # so this line is the only surviving record that the
-                    # namespace's vocabulary was dropped. Same level the
-                    # house convention uses for exactly this event
+                    # namespace, and it replaces what used to be a loud
+                    # ValueError — so this line is the only surviving record
+                    # that the namespace's vocabulary was dropped. Same level
+                    # the house convention uses for exactly this event
                     # (``pack_state``: "unknown in shared catalog — skipped",
                     # "activation of %r failed — skipped").
                     _logger.warning(
-                        "import pack_config: pack %r was disabled or removed "
-                        "on the source graph — skipped (no `status`, and "
-                        "`activated` is False)", ns)
+                        "import pack_config: pack %r resolves to %r on the "
+                        "source graph — skipped (not installed)", ns,
+                        want_status)
                     continue
                 raise ValueError(f"pack_config references unknown starter pack '{ns}'")
             from tortoise.pack_state import _pack_install_lock, _resolved_graph_name, _target_graph
