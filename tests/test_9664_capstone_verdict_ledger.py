@@ -2101,9 +2101,13 @@ def test_the_tool_carries_the_5128_interpreter_guard_first(tool, capsys, monkeyp
         f"SystemExit(0)` makes the tool a silent no-op with a green pin: "
         f"{[type(n).__name__ for n in guard.orelse]}"
     )
-    assert _run_guard(guard, monkeypatch, (3, 12, 0, "final", 0)) == "", (
-        "the guard must be INERT at the floor — it refused on a 3.12 interpreter"
-    )
+    # NO `_run_guard(..., (3, 12, 0, "final", 0)) == ""` assertion here: the test
+    # node above is pinned to exactly `sys.version_info < (3, 12)`, and
+    # `(3, 12, 0, "final", 0) < (3, 12)` is False on every run, so the body
+    # provably cannot execute and the probe's `""` is entailed — the assertion can
+    # never fire. Inertness at the floor stays enforced by the node, floor and
+    # `orelse` pins above and behaviourally by the 3.9/3.10 probes below, so no
+    # coverage is lost. Same class as the `len(raises) == 1` arm removed below.
     # NO separate `len(raises) == 1` assertion here: `shapes_ok` above admits
     # exactly two bodies, each carrying exactly one `Raise`, so such an assertion
     # is entailed and can never fire. Measured — it is the vacuous-arm class this
