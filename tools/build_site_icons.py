@@ -26,11 +26,27 @@ artwork is ever replaced, re-measure that box — the crop is derived from it.
 Uses `sips` for cropping and resampling (macOS); everything else is stdlib. Run it once
 per asset change; CI only ever reads the resulting bytes:
 
-    python3 tools/build_site_icons.py --source path/to/mark.png
-    python3 tools/build_site_icons.py --source ... --out /tmp/icons --keep /tmp/icons/crops
+    uv run python tools/build_site_icons.py --source path/to/mark.png
+    uv run python tools/build_site_icons.py --source ... --out /tmp/icons --keep /tmp/icons/crops
 """
 
 from __future__ import annotations
+
+import sys
+
+# #5128: a bare ambient `python3` (3.9 on the CLT host) would die inside the
+# stdlib calls below with an UNATTRIBUTED error, which reads as "the tool is
+# broken". The refusal names the one form that always resolves: `--help` needs no
+# `--source` token, whereas the bare path exits 2 on argparse's own usage error —
+# a SECOND unattributed error, the exact harm #5128 exists to stop.
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    print(
+        f"tools/build_site_icons.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/build_site_icons.py --help`",
+        file=sys.stderr,
+    )
+    raise SystemExit(4)
 
 import argparse
 import struct
