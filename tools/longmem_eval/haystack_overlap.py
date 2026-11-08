@@ -1,0 +1,384 @@
+"""#1779 — the cross-question haystack-overlap census, and the granularity verdict.
+
+**Why this exists.** #1779 (filed as a #1746 follow-up) asked for
+"session-dedup/caching across eval questions" and made the measurement the
+precondition: *"measure the overlap first (what fraction of sessions/prompts
+repeat across the 50/500-Q instances), then decide cache granularity
+(session-level extracted-embed reuse vs prompt-level response cache)"*. The
+"5-10× redundant encodes" that ``encode_cache.py`` / ``README.md`` /
+``run.py`` all cited as the cache's justification was never measured — it was
+asserted in ``docs/plans/2026-08-17-1349-embedder-selection.md:63`` and copied
+forward. This module is the measurement, and its ``decision`` block is the
+granularity answer the issue asks for.
+
+**What it counts** (all from the dataset + the PRODUCT's own renderers, so the
+counted unit is the encoded unit and there is no second implementation to
+drift):
+
+  * **session slots** — one haystack session per question;
+  * **session identity** — ``sha256(ingest._session_transcript(session))``,
+    the text the ingest writes (role-prefixed turns);
+  * **prompt identity** — that transcript **plus the session date**. The date
+    is prompt-visible: ``extractor_v2._date_anchor`` renders
+    "**DATE ANCHOR — today is `<session_date>`**" into the S1/S2/S4 *system*
+    prompt whenever the session is dated, and every LongMemEval haystack
+    session is dated. So a response cache keyed on prompt text reuses a
+    session only when the content **and** the date match;
+  * **encode units** — the two texts ``ingest_haystack`` /
+    ``ingest_haystack_v2`` embed per session: one turn Point per turn
+    (``ingest._turn_text``) and one raw chunk per ``chunk_turns`` window
+    (``ingest._session_chunks``).
+
+**The measured answer (S split, 500 Q, 2026-11-08):** see ``CENSUS``. In one
+pass: 23,867 session slots, 18,810 distinct session contents (1.269×),
+5,057 duplicate slots — but **0** of the repeated pairs share a session date,
+so prompt-identity reuse is exactly 1.000×: a prompt-level response cache —
+and a session-level extraction cache, which has the *same* identity condition
+— would save nothing. The text→embedding cache (already built) is the one
+realizable lever, at 1.299× / 23.0% of encode units.
+
+**What this module is NOT.** Not a run instrument and not a gate: it reads the
+dataset only (no DB, no LLM, no keys) and writes nothing unless ``--out`` is
+passed. ``CENSUS`` is the pinned record a ``@slow`` test re-derives, so a
+dataset refresh that changes the overlap reds a test instead of silently
+re-basing a published number.
+
+Usage::
+
+    python -m tools.longmem_eval.haystack_overlap              # human summary
+    python -m tools.longmem_eval.haystack_overlap --json        # census JSON
+    python -m tools.longmem_eval.haystack_overlap --limit 50 --out /tmp/c.json
+"""
+from __future__ import annotations
+
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/longmem_eval/haystack_overlap.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]})"
+    )
+
+import argparse
+import hashlib
+import json
+from collections import Counter
+from pathlib import Path
+from typing import Any
+
+from . import dataset as lme_dataset
+from .ingest import (
+    DEFAULT_CHUNK_TURNS,
+    _session_chunks,
+    _session_transcript,
+    _turn_text,
+)
+
+#: Measurement date. Any number quoted in a doc must name this census.
+FINDINGS_DATE = "2026-11-08"
+
+#: A prompt is identified by the transcript the prompts carry PLUS the session
+#: date the date anchor injects (`extractor_v2._date_anchor`) — both are
+#: inputs of `render_s2_prompt` / the S1/S4 system prompt.
+PROMPT_IDENTITY = "rendered session transcript + session_date"
+
+#: The measured S-split census (2026-11-08, 500 questions, chunk_turns=2).
+#: Pinned by `tests/test_longmem_haystack_overlap.py::test_census_on_real_s_split`
+#: (a @slow test — CI has no dataset) so the numbers in the docs cannot rot
+#: silently, and so a dataset refresh surfaces as a red pin rather than as a
+#: quietly re-based published reuse factor. The `decision` block is NOT pinned
+#: as prose: its reason is DERIVED from these numbers (`_decision`), so the
+#: verdict fields are asserted directly in the same test.
+CENSUS: dict[str, Any] = {
+    "findings_date": FINDINGS_DATE,
+    "n_instances": 500,
+    "chunk_turns": 2,
+    "sessions": {
+        "slots": 23867,
+        "distinct_ids": 19195,
+        "distinct_contents": 18464,
+        "duplicate_content_slots": 5403,
+        "duplicate_content_groups": 4375,
+        "repeated_pairs": 6660,
+        "same_date_pairs": 0,
+        "distinct_content_date": 23867,
+        "within_question_duplicate_slots": 13,
+        "questions_with_repeated_content": 500,
+        "repeat_histogram": {1: 14089, 2: 3533, 3: 688, 4: 130, 5: 18,
+                             6: 5, 8: 1},
+        "content_reuse_factor": 1.2926,
+        "prompt_reuse_factor": 1.0,
+    },
+    "encode_units": {
+        "turn": {"slots": 246750, "distinct": 189522, "hit_slots": 57228,
+                 "reuse_factor": 1.302, "hit_share": 0.2319},
+        "chunk": {"slots": 124345, "distinct": 96086, "hit_slots": 28259,
+                  "reuse_factor": 1.2941, "hit_share": 0.2273},
+        "total": {"slots": 371095, "distinct": 285608, "hit_slots": 85487,
+                  "reuse_factor": 1.2993, "hit_share": 0.2304,
+                  "chunk_share_of_units": 0.3351},
+    },
+}
+
+
+def _sha(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _leg(counter: Counter[str], **extra: Any) -> dict[str, Any]:
+    """The slots/distinct/hit/reuse shape every leg reports (one definition, so
+    the turn and chunk legs cannot disagree about what a hit is)."""
+    slots = sum(counter.values())
+    distinct = len(counter)
+    hits = slots - distinct
+    return {
+        "slots": slots,
+        "distinct": distinct,
+        "hit_slots": hits,
+        "reuse_factor": round(slots / distinct, 4) if distinct else 0.0,
+        "hit_share": round(hits / slots, 4) if slots else 0.0,
+        **extra,
+    }
+
+
+def _histogram(counts) -> dict[int, int]:
+    """How many identities repeat how many times (``{repeats: identities}``)."""
+    return dict(sorted(Counter(counts).items()))
+
+
+def census_overlap(instances: list[dict],
+                   *, chunk_turns: int = DEFAULT_CHUNK_TURNS) -> dict[str, Any]:
+    """Measure haystack overlap across ``instances`` (a loaded dataset slice).
+
+    Pure and deterministic: same instances in, same census out. Length
+    mismatches between ``haystack_sessions`` / ``haystack_session_ids`` /
+    ``haystack_dates`` are tolerated (a missing date is ``""``; a missing id is
+    ``""``) because this is a census of what the reader is HANDED — a
+    misaligned instance is a datum, not a reason to refuse. The ingest's own
+    alignment checks are `dataset_audit`'s job.
+    """
+    if chunk_turns < 1:
+        raise ValueError(f"chunk_turns must be >= 1, got {chunk_turns!r}")
+
+    id_counter: Counter[str] = Counter()
+    content_counter: Counter[str] = Counter()
+    prompt_counter: Counter[tuple[str, str]] = Counter()
+    content_dates: dict[str, Counter[str]] = {}
+    turn_units: Counter[str] = Counter()
+    chunk_units: Counter[str] = Counter()
+
+    per_question: list[set[str]] = []
+    within_question_dups = 0
+
+    for q in instances:
+        sessions = list(q.get("haystack_sessions") or [])
+        ids = list(q.get("haystack_session_ids") or [])
+        dates = list(q.get("haystack_dates") or [])
+        seen_here: set[str] = set()
+        q_contents: set[str] = set()
+
+        for i, session in enumerate(sessions):
+            transcript = _session_transcript(session)
+            digest = _sha(transcript)
+            date = str(dates[i]) if i < len(dates) else ""
+            sid = str(ids[i]) if i < len(ids) else ""
+
+            id_counter[sid] += 1
+            content_counter[digest] += 1
+            prompt_counter[(digest, date)] += 1
+            content_dates.setdefault(digest, Counter())[date] += 1
+            q_contents.add(digest)
+            if digest in seen_here:
+                within_question_dups += 1
+            seen_here.add(digest)
+
+            for turn in session:
+                turn_units[_turn_text(str(turn.get("role") or "unknown"),
+                                      str(turn.get("content") or ""))] += 1
+            for _ci, text, _idxs in _session_chunks(session, chunk_turns):
+                chunk_units[text] += 1
+
+        per_question.append(q_contents)
+
+    slots = sum(content_counter.values())
+    distinct_contents = len(content_counter)
+    duplicate_content_slots = slots - distinct_contents
+    # Any question whose sessions include a content seen more than once in the
+    # corpus — a within-question repeat counts too (it is still a repeat; the
+    # separate `within_question_duplicate_slots` readout says which kind).
+    questions_with_repeated = sum(
+        1 for contents in per_question
+        if any(content_counter[d] > 1 for d in contents))
+
+    # Repeated pairs, and how many of them share a date — the measurement the
+    # prompt-cache verdict turns on. A pair sharing (content, date) renders the
+    # SAME prompt; a pair differing only in date does not.
+    repeated_pairs = 0
+    same_date_pairs = 0
+    for digest, n in content_counter.items():
+        if n < 2:
+            continue
+        repeated_pairs += n * (n - 1) // 2
+        for date_n in content_dates[digest].values():
+            if date_n > 1:
+                same_date_pairs += date_n * (date_n - 1) // 2
+
+    turn_leg = _leg(turn_units)
+    chunk_leg = _leg(chunk_units)
+    total_leg = _leg(turn_units + chunk_units)
+    total_leg["chunk_share_of_units"] = (
+        round(chunk_leg["slots"] / total_leg["slots"], 4)
+        if total_leg["slots"] else 0.0)
+
+    prompt_slots = sum(prompt_counter.values())
+    prompt_distinct = len(prompt_counter)
+    prompt_reuse = round(prompt_slots / prompt_distinct, 4) if prompt_distinct else 0.0
+
+    decision = _decision(
+        duplicate_content_slots=duplicate_content_slots,
+        repeated_pairs=repeated_pairs,
+        same_date_pairs=same_date_pairs,
+        prompt_reuse=prompt_reuse,
+        encode_reuse=total_leg["reuse_factor"],
+    )
+
+    return {
+        "findings_date": FINDINGS_DATE,
+        "n_instances": len(instances),
+        "chunk_turns": chunk_turns,
+        "sessions": {
+            "slots": slots,
+            "distinct_ids": len(id_counter),
+            "distinct_contents": distinct_contents,
+            "duplicate_content_slots": duplicate_content_slots,
+            "duplicate_content_groups": sum(
+                1 for n in content_counter.values() if n > 1),
+            "repeated_pairs": repeated_pairs,
+            "same_date_pairs": same_date_pairs,
+            "distinct_content_date": prompt_distinct,
+            "within_question_duplicate_slots": within_question_dups,
+            "questions_with_repeated_content": questions_with_repeated,
+            "repeat_histogram": _histogram(content_counter.values()),
+            "content_reuse_factor": round(slots / distinct_contents, 4)
+            if distinct_contents else 0.0,
+            "prompt_reuse_factor": prompt_reuse,
+        },
+        "encode_units": {
+            "turn": turn_leg,
+            "chunk": chunk_leg,
+            "total": total_leg,
+        },
+        "decision": decision,
+    }
+
+
+def _decision(*, duplicate_content_slots: int, repeated_pairs: int,
+              same_date_pairs: int, prompt_reuse: float,
+              encode_reuse: float) -> dict[str, Any]:
+    """The cache-granularity verdict, DERIVED from the census numbers.
+
+    ``realizable`` is computed, never typed in: a reuse avenue is realizable
+    only when its identity actually repeats. The two session-level avenues
+    share one identity condition (the prompt), so they always agree — they
+    differ in what would be stored (the extracted payload vs the raw
+    response), not in when they could fire.
+    """
+    prompt_realizable = prompt_reuse > 1.0
+    blocked = None
+    if not prompt_realizable and duplicate_content_slots:
+        blocked = (
+            f"{duplicate_content_slots} session slots repeat another slot's "
+            f"content, but {same_date_pairs} of {repeated_pairs} repeated pairs "
+            "share a session date — and the date is prompt-visible "
+            "(extractor_v2._date_anchor injects it into the S1/S2/S4 system "
+            "prompt), so no two repeated sessions render the same prompt")
+    elif not prompt_realizable:
+        blocked = "no cross-question session repeats (nothing to reuse)"
+    return {
+        "session_level_extraction_reuse": {
+            "identity": PROMPT_IDENTITY,
+            "reuse_factor": prompt_reuse,
+            "realizable": prompt_realizable,
+            "blocked_by": blocked,
+        },
+        "prompt_level_response_cache": {
+            "identity": PROMPT_IDENTITY,
+            "reuse_factor": prompt_reuse,
+            "realizable": prompt_realizable,
+            "blocked_by": blocked,
+        },
+        "encode_cache_text_keyed": {
+            "identity": "sha256(model_id + prompt_name + text)",
+            "reuse_factor": encode_reuse,
+            "realizable": encode_reuse > 1.0,
+            "already_implemented": "tools/longmem_eval/encode_cache.py",
+        },
+    }
+
+
+def _summary(census: dict[str, Any]) -> str:
+    s, e, d = census["sessions"], census["encode_units"], census["decision"]
+    lines = [
+        f"#1779 haystack-overlap census — {census['findings_date']}"
+        f" ({census['n_instances']} questions, chunk_turns={census['chunk_turns']})",
+        f"  session slots                 : {s['slots']}",
+        f"  distinct session contents     : {s['distinct_contents']}"
+        f"  (reuse {s['content_reuse_factor']}x, "
+        f"{s['duplicate_content_slots']} duplicate slots)",
+        f"  repeated pairs / same-date    : {s['repeated_pairs']} / "
+        f"{s['same_date_pairs']}",
+        f"  questions w/ a repeat         : "
+        f"{s['questions_with_repeated_content']}/{census['n_instances']}",
+        f"  prompt identity reuse         : {s['prompt_reuse_factor']}x",
+        f"  encode units (total)          : {e['total']['slots']}"
+        f"  distinct {e['total']['distinct']}"
+        f"  reuse {e['total']['reuse_factor']}x"
+        f"  hits {e['total']['hit_share']:.1%}",
+        f"  chunk leg share of units      : {e['total']['chunk_share_of_units']:.1%}",
+        "",
+        "granularity verdict:",
+    ]
+    for name in ("session_level_extraction_reuse",
+                 "prompt_level_response_cache", "encode_cache_text_keyed"):
+        row = d[name]
+        verdict = "REALIZABLE" if row["realizable"] else "NOT realizable"
+        lines.append(f"  {name:32s} reuse {row['reuse_factor']}x — {verdict}")
+        if row.get("blocked_by"):
+            lines.append(f"      {row['blocked_by']}")
+    return "\n".join(lines)
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(
+        description="Measure cross-question haystack overlap (#1779).")
+    ap.add_argument("--split", default=lme_dataset.DEFAULT_SPLIT,
+                    help="dataset split to load (default: s)")
+    ap.add_argument("--data", default=None,
+                    help="local dataset JSON/JSONL (skips the cache/download)")
+    ap.add_argument("--limit", type=int, default=None,
+                    help="truncate the instance list (smoke runs)")
+    ap.add_argument("--chunk-turns", type=int, default=DEFAULT_CHUNK_TURNS,
+                    help=f"raw-chunk window width (default: {DEFAULT_CHUNK_TURNS})")
+    ap.add_argument("--json", action="store_true",
+                    help="print the census JSON instead of the summary")
+    ap.add_argument("--out", type=Path, default=None,
+                    help="write the census JSON here")
+    args = ap.parse_args(argv)
+
+    instances = lme_dataset.load_dataset(
+        split=args.split, limit=args.limit, data_path=args.data,
+        download=False)
+    census = census_overlap(instances, chunk_turns=args.chunk_turns)
+    payload = json.dumps(census, indent=2, sort_keys=True) + "\n"
+    if args.out:
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        args.out.write_text(payload, encoding="utf-8")
+        print(f"[haystack_overlap] census written: {args.out}", file=sys.stderr)
+    print(payload if args.json else _summary(census))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

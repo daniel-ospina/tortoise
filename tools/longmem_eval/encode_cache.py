@@ -1,9 +1,23 @@
 """tools/longmem_eval/encode_cache.py — model-keyed disk-persisted encode cache.
 
-The LongMemEval burn re-ingests overlapping haystack content per question
-(5-10× redundant encodes). This cache makes the burn feasible by memoizing
-``content → embedding`` on disk — a mid-burn crash must not lose the
-cross-question reuse the cache exists for.
+The LongMemEval burn re-ingests the SAME haystack text under different
+questions. The redundancy is **measured, not assumed** (#1779,
+``haystack_overlap.py``): one pass over the 500-Q S split emits 371,095 encode
+units of which 285,608 are distinct — a **1.299x** reuse factor, i.e. **23.0%**
+of units are cross-question cache hits (turn leg 246,750/189,522 = 1.302x;
+chunk leg 124,345/96,086 = 1.294x). This docstring previously claimed "5-10x
+redundant encodes" — that figure was never measured, and the census refuted it,
+so it is not restated anywhere in the tree.
+
+What the cache actually buys, in the measured order of magnitude: (a) ~23% of
+encode units *within one pass*; (b) the much larger share across REPEAT passes
+— the disk persistence is keyed per ``(model, prompt)``, so a second pass with
+the same config is ~all hits (the HNSW spot-check runs two full passes; a
+crashed burn resumes); (c) nothing at the LLM level: cross-question *sessions*
+do repeat (5,403 of 23,867 slots) but every repeated pair carries a different
+session date, and the date is prompt-visible (``extractor_v2._date_anchor``),
+so prompt-identity reuse is exactly 1.000x — a prompt-level response cache has
+nothing to hit (see ``haystack_overlap.CENSUS``).
 
 Keying: ``sha256(model_id + prompt_name + text)`` — the model component
 prevents cross-model contamination (a content-hash-only cache would let

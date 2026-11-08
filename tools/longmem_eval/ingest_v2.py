@@ -74,6 +74,7 @@ from .ingest import (  # noqa: E402
     UNDATED_SENTINEL,
     _existing_point_ids,
     _session_chunks,
+    _turn_text,
 )
 from .stall_guard import (  # noqa: E402
     Heartbeat,
@@ -612,7 +613,7 @@ def _write_v2_phase_a(sdk: TortoiseSDK, *, qid: str, si: int, sid: str,
         turn_id = f"lme:{qid}:s{si}:t{ti}"
         if turn_id not in existing:
             sdk.create_point(
-                "event", f"[{role}] {turn.get('content') or ''!s}",
+                "event", _turn_text(role, str(turn.get('content') or '')),
                 id=turn_id, session_id=sid, lme_question_id=qid,
                 lme_session_index=si, speaker=role,
                 is_episodic=True, status="draft",

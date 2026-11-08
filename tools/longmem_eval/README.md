@@ -402,12 +402,44 @@ count surfaced (`report['dropped']`), never silently counted as recall 0.
 
 Encode cache (`encode_cache.py`): model-keyed
 (`sha256(model_id + prompt_name + text)`), disk-persisted, namespaced per
-(model, prompt) under the cache dir — the cross-question haystack redundancy
-is 5-10×, and the cache is what makes the 12-45h burn feasible. Active when
-`--model` is set. Concurrency model: **sequential workers** (one question at
-a time) — the simplest correct choice; per-question isolated graphs + the
-shared encode cache make parallelism a coordination cost with no correctness
-benefit.
+(model, prompt) under the cache dir. The cross-question haystack redundancy is
+**measured** (#1779, `haystack_overlap.py`): **1.299×** — 371,095 encode units
+over the 500-Q S split, 285,608 distinct, i.e. **23.0%** of units are hits in
+one pass — and the cache is what makes the 12-45h burn feasible (it also serves
+REPEAT passes with the same `(model, prompt)` ~entirely, and survives a crash).
+Active when `--model` is set. Concurrency model: **sequential workers** (one
+question at a time) — the simplest correct choice; per-question isolated graphs
++ the shared encode cache make parallelism a coordination cost with no
+correctness benefit.
+
+### Cross-question overlap — measured, and what it does NOT buy (#1779)
+
+`python -m tools.longmem_eval.haystack_overlap` re-derives the census from the
+dataset alone (no DB, no LLM, no keys) and reports the granularity verdict:
+
+| avenue | reuse | realizable? |
+|---|---|---|
+| text→embedding (`encode_cache.py`, built) | **1.299×** (23.0% of units) | yes |
+| session-level extraction reuse | **1.000×** | **no** |
+| prompt-level response cache | **1.000×** | **no** |
+
+Cross-question *sessions* do repeat — 5,403 of 23,867 slots repeat another
+slot's content (1.293×, and all 500 questions hold at least one repeat) — but
+**0 of the 6,660 repeated pairs share a session date**. The date is
+prompt-visible (`extractor_v2._date_anchor` injects "today is `<session_date>`"
+into the S1/S2/S4 system prompt), so no two repeated sessions render the same
+prompt: a response cache, and a session-level extraction cache (same identity
+condition), have nothing to hit. The numbers are pinned by
+`tests/longmem_eval/test_haystack_overlap_1779.py::test_census_on_real_s_split`
+(@slow; skipped in CI, which has no dataset), so a dataset refresh reds the pin
+instead of silently re-basing them.
+
+**Recorded residual, NOT dedup:** the chunk leg is 124,345 of the 371,095 encode
+units (33.5%) and is *unreachable by any text-keyed cache* — a chunk renders
+`_session_transcript(window)` while its turn Points render `_turn_text`
+(`[role] content`), so the chunk text is a new string even though it covers the
+same turns. Reducing it is a chunking/rendering decision (retrieval semantics,
+#1540's knob), not a cache.
 
 ## Dataset
 

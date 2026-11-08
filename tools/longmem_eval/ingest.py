@@ -92,6 +92,16 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()  # noqa: UP017
 
 
+def _turn_text(role: str, content: str) -> str:
+    """The turn POINT's embedded text (``[role] content``).
+
+    One definition, because the text IS the encode-cache key and the unit any
+    dedup measurement must count (#1779): a second rendering would let a
+    census measure text the ingest never writes.
+    """
+    return f"[{role}] {content}"
+
+
 def _session_transcript(session: list[dict]) -> str:
     """Render a session's turns as verbatim text (role-prefixed lines)."""
     lines: list[str] = []
@@ -216,7 +226,7 @@ def ingest_haystack(sdk: TortoiseSDK, question: dict, *,
             content = str(turn.get("content") or "")
             is_evidence = bool(turn.get("has_answer"))
             turn_id = f"lme:{qid}:s{si}:t{ti}"
-            turn_text = f"[{role}] {content}"
+            turn_text = _turn_text(str(role), content)
 
             # Episodic turn point — create_point computes content-hash +
             # embedding (gracefully None when no embedder), accepts explicit
