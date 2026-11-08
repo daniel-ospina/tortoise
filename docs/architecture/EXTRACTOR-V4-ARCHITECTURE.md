@@ -1047,7 +1047,7 @@ New entities + connections + **metadata**. The metadata includes **lifecycle eve
 
 **What the run COMMITS is the union of both arms' items — the tie-break decides the NARRATIVE only.** The shipped list is `merge_embed_lists` over the two arms (the second wins an identity-key collision, the first arm's items are preserved), so both arms' extractions reach the graph. Only ONE narrative is recorded, because exactly one `story`/`story_arc` reaches S4's prompt and `execute_embed`; which one is what the tie-break above settles. The union is re-vetted wholesale before it ships, so a first-arm flag is re-derived rather than dropped. On the arm armed by construction (`coverage_suspect`) the first list is empty and the union IS the second arm's list; the merge is what keeps the disarmed keep-rate arm from silently dropping the losing narrative's items.
 
-> **OVERRIDES:** §4.4's earlier *"the losing arm's extraction is discarded **with** its narrative"* — **retired by the owner's ruling of 2026-11-08 on `#11002`**: *"the retry must union both attempts with the same identity-key collision rules the existing merge uses — that is what makes it a successor rather than a replacement."* E4's merges-not-replaces property (`#1536`) must survive into the successor, which is why `run_s4`'s removal is still gated on §4.4's F3 measurement.
+> **OVERRIDES:** §4.4's earlier *"the losing arm's extraction is discarded **with** its narrative"* — **retired by the owner's ruling of 2026-11-08 on `#11002`**: *"the retry must union both attempts with the same identity-key collision rules the existing merge uses — that is what makes it a successor rather than a replacement."* E4's merges-not-replaces property (`#1536`) must survive into the successor, which is why `run_s4`'s removal is gated on a successor that **preserves** that property — **a code change, tracked at `#11534`, NOT a measurement**: F3 was run on 2026-11-08 and it FIRES, so the measurement half is discharged and `run_s4` stays (see the F3 paragraph immediately below for the numbers and the two clauses that remain inferred).
 
 **The removal's falsifier — F3, defined here because two places cite it by that name.**
 `run_s4`'s removal (the `#8500` migration deliverable, executed under `#11002`) was gated on **one**
@@ -1084,9 +1084,19 @@ run whose flag can be `True` again (measured: an empty second yield flags `cover
 on both arms) — so counting against the pipeline's published `result["vet"]["s2"]`, which is the
 SECOND arm's block, attributes the wrong arm's verdict to the session. What makes the retry
 unreachable for this count is the `fired is False` RESTRICTION, not any property of the second
-arm's flag. That arm's own value is on the run's record at
-`stats["renarrate"]["first"]["coverage_suspect"]`; on a run that did not fire, the single arm's flag
-is the `vet.s2.batch` one. ⛔ **And whose BASE, which is the second half of the same trap.**
+arm's flag. ⛔ **But the record does NOT carry it on this population — which is why this clause is
+still an INFERENCE here.** `stats["renarrate"]` is `{"fired": False}` when the retry did not run
+(`extractor_v2.py`'s `renarrate_stats`, pinned in `tests/test_selection_step.py`), so the first arm's
+own `coverage_suspect` — `stats["renarrate"]["first"]["coverage_suspect"]` — exists only on a run
+that FIRED, and F3's `fired is False` restriction removes exactly those rows. The nearest substitute
+is **not** the same quantity: `vet_candidates` (`vet_gate.py`) applies `check_batch` to the list AFTER
+the `route_mentions` removal in `extractor_v2.py`, whereas the arm's flag is `check_batch` on the
+PRE-`route_mentions` S2 output — and `route_mentions` can shrink that list to zero, so a session that
+held a mention can read `False` on the arm and `True` on the substitute. Since F3 counts only
+`coverage_suspect is False` sessions, reading the substitute can only REMOVE episodes from a count
+whose `0` is the green light to delete `run_s4`. Recording the first arm's flag on the NON-FIRED
+return, so F3 reads one surface on every run, is therefore part of what **#11534** owes — and until
+it exists, this clause is quoted as an inference and never as a measurement. ⛔ **And whose BASE, which is the second half of the same trap.**
 `added_by_s4` is `merged - s2_items`, and on a retried run `s2_items` is the UNION (both arms), so
 S4's contribution would be measured against a bigger base and understated — on precisely the
 population where a retry fired for a reason other than coverage (an injected arbiter). Restricting

@@ -72,10 +72,10 @@ change that falsifies one of them reds a test instead of being discovered; the
 
 ORDERING OBLIGATION (§4.3 G5's S4 clause, tracked at **#8500**): removing
 ``run_s4`` is a v4 MIGRATION DELIVERABLE, not a cleanup — it must not leave the
-step list before its successor lands. **#8500's precedence question is settled**
-(owner, 2026-11-08, on **#11002**): build the successor, prove the property
-survives, then remove — and ``run_s4`` is what runs today, so it must not be
-deleted on the strength of the design doc alone.
+step list before its successor lands. ⛔ **#8500's precedence question is
+WITHDRAWN, NOT settled** — the owner declined to rule on it (2026-11-08, on
+**#11002**), *"the question is withdrawn"* / *"the precedence was never
+decided"*, and fixed only the WORK ORDER: successor, proof, then removal.
 ✅ THE SUCCESSOR HAS LANDED (**#11002**) — and *"S2.2 and S2.3 already exist in
 the code"* is NOT the test that it has: the test is a stage that ADDS a
 candidate a coverage check found missing, and the bounded S2.2 RE-NARRATE is it
@@ -15630,11 +15630,11 @@ def _renarrate_pick(first: dict, second: dict) -> dict:
         # re-asks the arbiter over the list that actually ships, so a first-arm
         # MERGE flag is not lost, it is re-derived. The residual is that
         # `stats["vet"]["s2"]["decisions"]` and `_merge_flagged_contents(...)`
-        # describe the second arm's candidate list even when the FIRST narrative
-        # wins the tie-break — a mismatch reachable only on the first-wins path
-        # (an arbiter batch RENARRATE, which `s2_decision_seam` never emits, or
-        # a hand-armed `TORTOISE_RENARRATE_KEEP_RATE`), never on the
-        # `coverage_suspect` path where the first arm is empty by definition.
+        # describe the second arm's candidate list on EVERY retried run whose
+        # FIRST arm produced items — `vet_stats` is taken from `second`
+        # independently of the tie-break, so a SECOND-ARM WIN still ships the
+        # union. The `coverage_suspect` arm is excluded because its first list
+        # is empty by definition, so there is nothing for the union to lose.
         "vet_stats": second["vet_stats"] or first["vet_stats"],
         "vet_pool": _merge_arm_pools(first.get("vet_pool") or {},
                                      second.get("vet_pool") or {}),

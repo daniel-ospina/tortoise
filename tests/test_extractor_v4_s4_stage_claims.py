@@ -669,31 +669,47 @@ def test_the_module_docstring_carries_the_record_the_call_site_points_at():
         "the record must state the removal-ordering obligation: `run_s4` is a "
         "v4 migration deliverable, not a cleanup."
     )
-    assert "precedence question is settled" in doc, (
-        "the record must state that #8500's precedence question is SETTLED, and "
-        "name its home. ⚠️ It must NOT answer the question itself: the ruling is "
-        "the OWNER's (2026-11-08, on #11002), so the record cites the ruling "
-        "rather than asserting an agent-authored precedence (the #8601 review "
-        "flagged the previous 'shipped code is authoritative' sentence for "
-        "exactly that)."
+    assert "precedence question is settled" not in doc, (
+        "⛔ THE RECORD MUST NOT CALL THE PRECEDENCE 'SETTLED'. The owner WITHDREW "
+        "that question rather than ruling on it (#11002, 2026-11-08): 'Nothing "
+        "here needs a ruling, and the question is withdrawn' … 'the pin landed, "
+        "the precedence was never decided'. An earlier revision of this record "
+        "attributed a SETTLEMENT to the owner — an agent-authored precedence "
+        "wearing the owner's name, the exact class the #8601 review flagged. "
+        "What the ruling fixed is the WORK ORDER, which the assertion below pins."
     )
-    # ⛔ SCOPED TO THE PARAGRAPH THAT CARRIES THE CLAIM (round-8 review, F2):
-    # `"owner" in doc and "#11002" in doc` was satisfied by unrelated lines
-    # ("owner-approved" in the S1 stage line, "#11534"'s neighbours), so the
-    # mutant that deletes the attribution — the exact regression this guard
-    # names — left the assertion GREEN. The attribution wraps onto its own line
-    # ((owner, 2026-11-08, on **#11002**)), so the scope is the PARAGRAPH, not
-    # the line. Measured: deleting that parenthetical reds this.
-    _settled_paras = [p for p in doc.split("\n\n")
-                      if "precedence question is settled" in p]
+    assert "precedence question is\nWITHDRAWN, NOT settled" in doc, (
+        "the record must state that #8500's precedence question was WITHDRAWN "
+        "(not settled), and name its home. ⚠️ It must NOT answer the question "
+        "itself: the ruling is the OWNER's (2026-11-08, on #11002), so the "
+        "record cites the ruling rather than asserting an agent-authored "
+        "precedence (the #8601 review flagged the previous 'shipped code is "
+        "authoritative' sentence for exactly that)."
+    )
+    # ⛔ SCOPED TO THE PARAGRAPH THAT CARRIES THE CLAIM (round-8 review, F2;
+    # retargeted and TIGHTENED by the fresh review at 8042fdf when the claim
+    # itself changed): `"owner" in doc and "#11002" in doc` was satisfied by
+    # unrelated lines ("owner-approved" in the S1 stage line, "#11534"'s
+    # neighbours), so the mutant that deletes the attribution — the exact
+    # regression this guard names — left the assertion GREEN. NARROWING IT TO
+    # THE PARAGRAPH WAS NOT ENOUGH: measured at 8042fdf, the withdrawal
+    # paragraph and the `✅ THE SUCCESSOR HAS LANDED (**#11002**)` block follow
+    # one another with NO blank line between them, so `split("\n\n")` returned
+    # them as ONE unit and deleting the attribution still passed on the
+    # SUCCESSOR line's `#11002`. The scope is therefore the paragraph CUT AT THE
+    # `✅` BLOCK — the withdrawal claim's own words. Measured both ways: deleting
+    # the `(on **#11002**)` parenthetical now reds this, and so does deleting
+    # `owner` from the same window.
+    _settled_paras = [p.split("✅")[0] for p in doc.split("\n\n")
+                      if "precedence question is" in p and "WITHDRAWN" in p]
     assert _settled_paras, (
-        "the record must state that #8500's precedence question is SETTLED, and "
-        "name its home."
+        "the record must state that #8500's precedence question was WITHDRAWN, "
+        "and name its home."
     )
     assert all("owner" in p and "#11002" in p for p in _settled_paras), (
-        "the settled-precedence PARAGRAPH must name WHO settled it and WHERE — "
-        "an unattributed 'settled' is an agent answering an owner-reserved "
-        "question one word at a time."
+        "the withdrawn-precedence PARAGRAPH must name WHO declined it and WHERE "
+        "— an unattributed 'withdrawn' is the same agent-authored answer as an "
+        "unattributed 'settled'."
     )
     assert "never enter this extractor at all" in doc, (
         "the record must SCOPE its bypass enumeration to the route that reaches "
