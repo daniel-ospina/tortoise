@@ -1485,13 +1485,24 @@ exec {self.gh} "$@"
         Every entry here is a shell script needing no interpreter, and the wrapper's
         only other external call — `dirname` — is a symlink to the real one, so the
         result cannot depend on what this host happens to have installed.
+
+        ⛔ AND THE PROBE PAYLOAD IS EVALUATED, NOT SWALLOWED (#11202 review round 10).
+        An `exit 1` for any `-c` pinned only the SHAPE of the fast path: the version
+        BOUND stayed unpinned, so lowering it to `>= (3, 9)` — the exact owner-Mac
+        regression, where a 3.9 `python3` wins and the module's own guard exits 1 —
+        left the suite green (measured). The real payload therefore runs under a
+        FAKED `sys.version_info`, the idiom `tests/test_collision_preflight.py` uses.
         """
         d = self.tmp / "interp-bin"
         d.mkdir(exist_ok=True)
         self._write_exec(d / "python3", (
             "#!/bin/bash\n"
-            "# a 3.9 interpreter: fails the >=3.12 probe, reports a version for -V\n"
+            "# a 3.9 interpreter: EVALUATES the real probe against a faked version\n"
             "if [ \"$1\" = \"-V\" ]; then echo 'Python 3.9.6'; exit 0; fi\n"
+            "if [ \"$1\" = \"-c\" ]; then\n"
+            f'  exec "{PYTHON}" -c \'import sys; sys.version_info = (3, 9, 6, "final", 0);'
+            ' exec(sys.argv[1])\' "$2"\n'
+            "fi\n"
             "exit 1\n"
         ))
         for name in ("bash", "dirname"):
@@ -1545,7 +1556,11 @@ exec {self.gh} "$@"
             "#!/bin/bash\n"
             f'printf \'%s\\n\' "$@" >> "{ran}"\n'
             "if [ \"$1\" = \"-V\" ]; then echo 'Python 3.12.7'; exit 0; fi\n"
-            "exit 0\n"          # the >=3.12 probe PASSES
+            # ⛔ The VERSION PROBE runs the real payload under the REAL interpreter, so a
+            # bound raised past this host's version turns this test red instead of
+            # passing on an unconditional `exit 0` (#11202 review round 10).
+            f'if [ "$1" = "-c" ]; then exec "{PYTHON}" -c "$2"; fi\n'
+            "exit 0\n"
         ))
         self._write_exec(d / "uv", (
             "#!/bin/bash\n"
