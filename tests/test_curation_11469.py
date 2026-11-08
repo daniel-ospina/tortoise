@@ -1062,12 +1062,75 @@ class _ConstantTotalDuplicateSurface:
         self.pages += 1
         if self.pages == 1:
             return {"result": [{"id": "p0", "kind": "decision", "content": "a"}], "total": 3}
-        # offset walk re-reads p0 instead of moving on
+        # the walk re-serves p0 from a LATER page instead of moving on
         return {"result": [{"id": "p0", "kind": "decision", "content": "a"},
                            {"id": "p1", "kind": "decision", "content": "b"}], "total": 3}
 
 
 def test_a_row_served_twice_is_refused_even_when_the_total_is_stable():
     mod = _tool_module()
-    with pytest.raises(RuntimeError, match=r"returned twice"):
+    with pytest.raises(RuntimeError, match=r"earlier page"):
         mod.MCPReader(_ConstantTotalDuplicateSurface(), None).read_points(page=1)
+
+
+def test_two_nodes_sharing_an_id_in_one_page_are_not_a_pagination_shift():
+    """Round-14: `create_point(id=X)` is not unique, so an id fan-out is a legal
+    graph shape — it must not be reported as a concurrency problem."""
+    mod = _tool_module()
+
+    def call(_name, args):
+        return {"result": [{"id": "rv-a", "kind": "decision", "content": "one"},
+                           {"id": "rv-a", "kind": "decision", "content": "two"}],
+                "total": 2}
+    rows, total = mod.MCPReader(call, None).read_points(page=500)
+    assert [r.content for r in rows] == ["one", "two"] and total == 2
+
+
+def test_a_truncated_last_page_whose_total_moved_is_refused():
+    """Round-14: the empty-batch `break` ran BEFORE the totals check, so a final page
+    that returned nothing with a changed total fell through as a complete census."""
+    mod = _tool_module()
+
+    def call(_name, args):
+        off = int(args.get("offset") or 0)
+        if off == 0:
+            return {"result": [{"id": f"p{i}", "kind": "decision", "content": str(i)}
+                               for i in range(4)], "total": 6}
+        # the population collapsed below the offset; total moved from 6 to 4
+        return {"result": [], "total": 4}
+    with pytest.raises(RuntimeError, match=r"shifted|incomplete|refused"):
+        mod.MCPReader(call, None).read_points(page=4)
+
+
+def test_a_refused_run_over_a_landed_plan_owes_nothing(tmp_path):
+    """Round-14: the pre-write refusal paths hard-coded 0/0 and a raw carry total, so
+    a run over a plan that had already landed still said "N pending"."""
+    plan = C.build_plan([row("p1", kind="decision", content="a"),
+                         row("p2", kind="decision", content="b")],
+                        source_graph="old", target_graph="new", packs={})
+    led = C.Ledger(tmp_path / "l.jsonl", target="new")
+    C.run_plan(plan, writer=CountingWriter(), ledger=led, apply=True, graph_rows=ROWS)
+    off = C.run_plan(plan, writer=CountingWriter(), ledger=led, apply=True, off=True,
+                     graph_rows=ROWS)
+    assert (off.pending, off.skipped_known) == (0, 2), (off.pending, off.skipped_known)
+
+
+def test_the_plan_can_emit_row_level_reasons(monkeypatch, tmp_path):
+    """Round-14: the doc claimed every row is reported with its reason, but no payload
+    carried one — the census is aggregate by design."""
+    mod = _tool_module()
+
+    def call(name, args):
+        if name == "tortoise_query":
+            return {"result": [{"id": "p1", "kind": "decision", "content": "we ship"},
+                               {"id": "p2", "kind": "statement", "content": "narration"}],
+                    "total": 2}
+        return {"result": []}
+    monkeypatch.setattr(mod, "_live_call_tool", call)
+    rows_out = tmp_path / "rows.jsonl"
+    rc = mod.main(["plan", "--graph", "org_x_g_old", "--target", "org_x_g_new",
+                   "--out", str(tmp_path / "plan.json"), "--rows", str(rows_out)])
+    assert rc == 0
+    lines = [json.loads(x) for x in rows_out.read_text().splitlines() if x.strip()]
+    assert {d["node_id"] for d in lines} == {"p1", "p2"}
+    assert all(d["reason"] and d["disposition"] for d in lines)

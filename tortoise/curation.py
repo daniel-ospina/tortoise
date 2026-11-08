@@ -1016,19 +1016,23 @@ def run_plan(
     # The census of what this plan still owes the target, computed ONCE and carried
     # by EVERY return path — including the refusals that happen before the write, or
     # a refused run reports 0/0/0 over a plan of rows.
-    carry_total = len(plan.carry_rows())
+    # It is LEDGER-DERIVED, not the raw carry count: a refused run over a plan whose
+    # rows already landed owes nothing, and saying "N pending" would be wrong.
+    _sections_all, skipped_all, dups_all = _pending_sections(plan.bundle(), ledger)
+    pending_all = sum(len(v) for v in _sections_all.values())
     try:
         assert_distinct_graphs(plan.source_graph, plan.target_graph, graph_rows=graph_rows)
     except CurationRefused as exc:
         if apply:
-            return RunResult(False, False, 0, 0, plan.target_graph, plan.digest(),
-                             refused=str(exc), pending=carry_total)
+            return RunResult(False, False, skipped_all, 0, plan.target_graph, plan.digest(),
+                             refused=str(exc), duplicate_rows=dups_all, pending=pending_all)
         # A dry run writes nothing, so an unproven identity is reported rather than
         # blocking the plan — the guard is strict exactly where a write can happen.
         identity_note = str(exc)
     if off_switch_active(off):
-        return RunResult(False, True, 0, 0, plan.target_graph, plan.digest(),
-                         refused="off-switch active", pending=carry_total)
+        return RunResult(False, True, skipped_all, 0, plan.target_graph, plan.digest(),
+                         refused="off-switch active", duplicate_rows=dups_all,
+                         pending=pending_all)
     if not apply:
         # Accounting happens BEFORE this return: a dry run over a ledger that already
         # holds rows must not report 0 written / 0 skipped, which cannot be

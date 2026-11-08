@@ -94,8 +94,6 @@ class MCPReader:
             if isinstance(res, dict) and res.get("total") is not None:
                 total = int(res["total"])
                 totals.add(total)
-            if not batch:
-                break
             if len(totals) > 1:
                 # An offset walk over a population that CHANGED between pages does
                 # not describe one graph state: a row retracted mid-walk shifts every
@@ -104,14 +102,20 @@ class MCPReader:
                 raise RuntimeError(
                     f"pagination shifted mid-walk (reported total changed {sorted(totals)}) — "
                     "refusing a census that mixes two graph states")
+            if not batch:
+                break
             for r in batch:
                 rid = str(r.get("id") or "")
-                if rid in seen:
+                if rid in seen and seen[rid] != offset:
+                    # The SAME row served by an EARLIER page: the walk repeated rather
+                    # than advanced, so it also skipped one. (Two nodes sharing an `id`
+                    # within one page is a legal graph shape — create_point(id=X) is
+                    # not unique — and must not be reported as a concurrency problem.)
                     raise RuntimeError(
-                        f"row {rid!r} returned twice (pages {seen[rid]} and offset {offset}) — "
-                        "the population shifted mid-walk; refusing a census that both skips "
-                        "and repeats rows")
-                seen[rid] = offset
+                        f"row {rid!r} returned in an earlier page (offset {seen[rid]}) and again "
+                        f"at offset {offset} — the population shifted mid-walk; refusing a census "
+                        "that both skips and repeats rows")
+                seen.setdefault(rid, offset)
                 content = str(r.get("content") or "")
                 rows.append(C.Row(
                     node_id=str(r.get("id") or ""),
@@ -397,7 +401,18 @@ def cmd_plan(args: argparse.Namespace) -> int:
     except C.CurationRefused as exc:
         print(f"REFUSED: {exc}", file=sys.stderr)
         return 3
+    if args.rows:
+        # The census is aggregate by design; the ROW-LEVEL reasons are what a review
+        # of "which 127 rows, and why" needs, so they get their own artifact rather
+        # than an implied claim that the report carries them.
+        with open(args.rows, "w", encoding="utf-8") as fh:
+            for d in plan.decisions:
+                fh.write(json.dumps(d.as_dict(), sort_keys=True) + "\n")
+        payload_rows = len(plan.decisions)
+    else:
+        payload_rows = None
     payload = {"census": plan.census(), "run": result.as_dict(),
+               "rows_written": payload_rows,
                "points_read": len(points), "points_total_reported": points_total,
                "sources_read": len(sources), "sources_total_reported": source_total,
                "source_count_gap": _source_gap(counts, len(sources)),
@@ -432,6 +447,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--graph", help="source graph (default: the credential's own graph)")
     ap.add_argument("--target", help="target graph — must differ from the source")
     ap.add_argument("--out", help="write the JSON report here")
+    ap.add_argument("--rows", help="also write the ROW-LEVEL decisions here (JSON Lines: "
+                                  "node id, disposition, the rule's reason, pack) — the artifact "
+                                  "a row-by-row review of the plan actually needs")
     ap.add_argument("--ledger", help="ledger path (default ~/.tortoise/curate-11469-ledger.jsonl)")
     ap.add_argument("--page", type=int, default=PAGE)
     ap.add_argument("--apply", action="store_true", help="actually write (default: plan only)")
