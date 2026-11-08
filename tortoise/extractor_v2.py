@@ -13412,20 +13412,20 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                 # sections still merge — no whole-reject, no silent loss.
                 bad_sections = _s4_malformed_sections(added)
                 # ⛔ AN UNKNOWN KEY CARRYING CONTENT IS MALFORMED HERE (review
-                # round 5, P2) — and it is the SAME defect class as the one the
-                # guard above closes, reached by a different shape.
-                # `_s4_malformed_sections` classifies ONLY `_OUTPUT_SCHEMA`
-                # keys (it `continue`s on anything else), while
+                # round 5, P2) — the SAME defect class as the guard above, by a
+                # different shape. `_s4_malformed_sections` classifies ONLY
+                # `_OUTPUT_SCHEMA` keys (it `continue`s on anything else), while
                 # `_s4_section_is_content` deliberately counts an invented key
-                # as content so the merge gate FIRES. But `merge_embed_lists`
-                # iterates its own fixed section tuple (`_EMBED_SECTIONS` and
-                # friends), so the key is DROPPED with no census: the run
-                # records `added_items: 0` and no `error` — byte-identical to
-                # "the spans state no claim", which is precisely the false
-                # record the block above reserves that branch for. A model that
-                # wraps its answer (`{"items": [...]}`, `{"claims": [...]}`,
-                # a one-element `[{...}]` unwrapped by `_parse_json_robust`) is
-                # a SHAPE error, not a finding of nothing.
+                # as content so the merge gate FIRES. But the merge iterates
+                # `_EMBED_SECTIONS`/its own tuple and DROPS anything outside it,
+                # so the key vanishes with no census: the run records
+                # `added_items: 0` and no `error` — byte-identical to "the spans
+                # state no claim", the false record that branch is reserved for,
+                # for a WRAPPED answer (`{"items": [...]}`, `{"claims": [...]}`,
+                # or a bare item `_parse_json_robust` unwrapped) that is a SHAPE
+                # error, not nothing: `_OUTPUT_SCHEMA` == the merge's keep-set,
+                # pinned by `test_the_census_whitelist...` (round 6), so a section
+                # added to one set and not the other reds that row.
                 if isinstance(added, dict):
                     bad_sections = bad_sections + [
                         k for k, v in added.items()

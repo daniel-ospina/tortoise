@@ -130,7 +130,14 @@ precision figure (the labels above cannot produce one):
   handed them must be free to answer "no claim here", and the prompt says so.
 * **structural fragments** — a bold label split by the sentence splitter
   (`**The problem state that triggered the redesign`), wp04's two flags are both
-  this class.
+  this class. Named precisely, the splitter's fragment classes are two and
+  neither is the data's: (a) a terminator immediately followed by MARKDOWN
+  (`.** The`), because `narrative_segments` breaks on every `.`/`;` while
+  `_SENTENCE_SPLIT` breaks only where whitespace or end-of-string follows, and
+  (b) a DECIMAL POINT (`hit 4.2 second` splits into `… hit 4` / `2 second`).
+  Both are why `flagged[].statement` is an ADDRESS and never comparable with
+  `narrative_statements`; they are disclosed as a detector limitation, not
+  repaired here, because repairing them moves every number in this record.
 
 ## 3. The detector's recall against what S4 actually added (the finding)
 

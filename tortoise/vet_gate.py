@@ -545,12 +545,12 @@ def narrative_segments(narrative: str) -> list[dict]:
     :func:`_narrative_statements` sentence index it belongs to; ``clause``
     orders the segments within that statement.
 
-    The statement index is derived from the same character class
-    :func:`_narrative_statements` splits on (``[.!?;\n\r]``), except that the
-    split runs on the heading-blanked mask so a heading's own ``.`` cannot open a
-    phantom statement — the two therefore agree only up to the headings, and this
-    function's ``statement`` is an ADDRESS, not the reported
-    ``narrative_statements`` count.
+    The statement index uses the SAME character class as
+    :func:`_narrative_statements` (``[.!?;\n\r]``) on the heading-blanked mask,
+    but the two do NOT agree in general: `_SENTENCE_SPLIT` breaks a terminator
+    only where whitespace or end-of-string follows it, while this splitter breaks
+    on EVERY ``.``/``;`` — so a decimal (``4.2``) and a ``.**`` bold boundary each
+    open an index here that `_narrative_statements` never counts — an ADDRESS, not a count.
     """
     text = str(narrative or "")
     if not text:

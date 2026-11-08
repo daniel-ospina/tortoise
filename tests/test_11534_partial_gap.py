@@ -482,6 +482,60 @@ def test_a_wrapped_gap_fill_answer_is_recorded_malformed_not_as_no_claim(
         "one census bump per dropped section, and a bare item has several")
 
 
+def test_the_statement_index_is_an_ADDRESS_not_the_statement_count():
+    """The docstring used to claim the splitter and `_narrative_statements`
+    "agree only up to the headings" — FALSE, and measured (review round 6, P2).
+
+    `_SENTENCE_SPLIT` breaks a terminator only where whitespace or end-of-string
+    follows it; `narrative_segments` breaks on EVERY `.`/`;`. So a DECIMAL POINT
+    and a terminator immediately followed by markdown (`.**`) each open a segment
+    that `_narrative_statements` does not count — which is why `flagged[].
+    statement` is an address into a different indexing, never the reported count,
+    and why the evidence record's `structural fragments` class exists.
+
+    The behaviour is pinned rather than repaired: changing it would move every
+    number the F3 measurement (#11534) and `docs/evidence/11534-partial-gap/`
+    quote, so a fix is a re-measurement, not a cleanup.
+    """
+    decimal = "The run hit 4.2 second latency. Then it settled."
+    texts = [seg["text"] for seg in vet_gate.narrative_segments(decimal)]
+    assert "The run hit 4" in texts and "2 second latency" in texts, (
+        "the splitter breaks on the decimal point — if this arm now passes as one "
+        "clause, the splitter changed and every measured number must be re-derived")
+    bold = "It works.** The next claim follows here."
+    bold_texts = [seg["text"] for seg in vet_gate.narrative_segments(bold)]
+    assert len(bold_texts) == 2 and bold_texts[0] == "It works", (
+        "`.**` opens a segment here while `_SENTENCE_SPLIT` does not break there")
+    # and the two indices really do disagree on this input
+    assert max(seg["statement"] for seg in vet_gate.narrative_segments(decimal)) + 1 \
+        != vet_gate._narrative_statements(decimal), (
+        "the docstring's invariant would be true if these agreed — it is not")
+
+
+def test_the_census_whitelist_is_the_merges_keep_set():
+    """The dropped-key census asks `_OUTPUT_SCHEMA`, so that set MUST be the set
+    `merge_embed_lists` actually keeps (review round 6, P2).
+
+    They held the same nine keys but nothing compared them. A section added to
+    `merge_embed_lists` alone would make the census classify VALID content as
+    malformed — dropping it and recording a fabricated `gap_fill_shape_error` —
+    and a section added to `_OUTPUT_SCHEMA` alone would pass the census and then
+    be dropped by the merge with no record at all: the round-5 P2 reopened.
+    Pinned here rather than by sharing a constant, because sharing one moves
+    every line in `extractor_v2.py` and re-stales the #7949 bundle's absolute
+    cites — a 311-number re-derivation for a latent hazard a pin closes.
+    """
+    for section in v2._OUTPUT_SCHEMA:
+        merged = v2.merge_embed_lists({}, {section: [{"content": "x"}]})
+        assert merged.get(section), (
+            f"`_OUTPUT_SCHEMA` names {section!r}, so the census treats it as a known "
+            "section — but merge_embed_lists DROPS it, which is exactly the silent "
+            "drop the census exists to catch")
+    assert not any(v2.merge_embed_lists({}, {"items": [{"content": "x"}]})), (
+        "a key outside `_OUTPUT_SCHEMA` is dropped by the merge — which is why the "
+        "census must classify it as malformed rather than let it vanish silently")
+
+
 def _long_narrative_model(narrative, **kw):
     """`_Model` with an S1 that narrates a DIFFERENT story (the fixture's
     narrative is fixed at module level, so the >20-flag arm needs its own)."""
