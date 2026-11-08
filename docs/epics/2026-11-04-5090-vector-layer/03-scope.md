@@ -34,7 +34,8 @@ aboutObjects: "epic #5090, embed gate, vector index, unindexed embeddings, test-
    it is **switched off** — nobody turned it on or measured the effect. **That is ours.**
 2. **Where do the numbers physically live?** **Not ours.** That is the storage architecture (`#4333`), and
    the decision's home is §14.3. Its deciding input — the fraction of a tenant's stock the cache actually
-   holds — **cannot be measured today** (hosted capture is off by your 2026-10-14 ruling). So this epic
+   holds — is **not an input** to the 2026-11-07 ruling (`docs/architecture/SEARCH-ARCHITECTURE.md` §1: no
+   decision rests on a measured proportion of our graph), so this epic
    **carries** that decision as recorded in `STORAGE-ARCHITECTURE.md` §14.3 and worked in `#4051`, and does not spend it.
 
 **What is left for this epic is small, and every item is something nobody else owns:**
@@ -70,7 +71,7 @@ self-hosting (**owner: not now**), and compression (§15: no engine to apply it 
 
 | excluded | deferred to | why |
 |---|---|---|
-| **Where the vector index lives (V1)** | **§14.3** (decision home) · **`#4333`** (architecture) | Not this epic's — the changelog records `#5090` as a **consumer**. Its deciding input (`f`) is unmeasurable today (§17.4.6). |
+| **Where the vector index lives (V1)** | **§14.3** (decision home) · **`#4333`** (architecture) | Not this epic's — the changelog records `#5090` as a **consumer**. **V1 was answered 2026-11-07** on method grounds (`docs/architecture/SEARCH-ARCHITECTURE.md` §1); the input §17.4.6 names (`f`) is **not an input** to that ruling. |
 | Self-hosting FalkorDB | **D11** (`#4333`), **deferred** — and **owner, 2026-11-05: not now** | Owner, 2026-11-05, verbatim: *"we're not self-hosting flakorDB [sic] now. we have a lot of work that needs doing first"* — relayed at [#5090 comment 6669523691](https://github.com/daniel-ospina/tortoise/issues/5090#issuecomment-6669523691). Not in this epic's option set. |
 | Embedding compression / quantization | **§15's do-not-re-invent list** | *"no engine to apply it to"* — FalkorDB's stored form is `vecf32`. |
 | Filtered-ANN recall measurement | **`#4051`'s** (`SEARCH-ARCHITECTURE.md` §9 **M1**, a private-beta gate) | It is evidence *for a move*, and the location is decided (2026-11-07) — so the measurement leaves this epic, and it is not consumer-less. Recorded in `02-research.md` so it is not lost. |

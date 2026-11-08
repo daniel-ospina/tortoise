@@ -179,11 +179,11 @@ requests; its census half is not.
 
 | not filed | because |
 |---|---|
-| **"decide where the vector index lives" (V1)** | Home is **§14.3**; architecture owner is **`#4333`**; `#5090` is a **consumer** (changelog records the wrong-owner correction). Its deciding input cannot be measured today (§17.4.6). |
+| **"decide where the vector index lives" (V1)** | Home is **§14.3**; architecture owner is **`#4333`**; `#5090` is a **consumer** (changelog records the wrong-owner correction). **V1 was answered 2026-11-07** on method grounds (`docs/architecture/SEARCH-ARCHITECTURE.md` §1 — no decision rests on a measured proportion of our graph), so the input §17.4.6 names is **not an input to it**. |
 | **create indexes for the four unindexed labels** | It **is** §14.3 **V3**'s content (V1 settled only WHERE the index lives), and it commits four further resident HNSW structures. The lane brief forbids it without a stated non-reversal; there is none. |
 | **self-host FalkorDB** | **D11 deferred it; owner, 2026-11-05: not now.** Recorded, not scoped. |
 | **embedding compression / quantization** | **§15's do-not-re-invent list** — *"no engine to apply it to"*. |
-| **filtered-ANN recall measurement** | Evidence *for a move*. No move is planned ⇒ no consumer. Parked in `02-research.md` with its numbers, so it is not lost. |
+| **filtered-ANN recall measurement** | It is `#4051`'s (`SEARCH-ARCHITECTURE.md` §9 **M1**, a private-beta gate) — **not parked**: the location is decided (2026-11-07), so it has a consumer. Recorded in `02-research.md` so it is not lost. |
 | **a "state the rule for what earns an embedding" child** | Duplicates **`#5008`** (CLOSED — the mechanism exists). Filing it is the failure the 2026-10-31 lane already refused. |
 | **a DoD-scoring child** | **`#10465`** did it (CLOSED); the instrument is re-runnable. |
 | **an economics child** | **`#4333`** (OPEN, native child) owns it. |
