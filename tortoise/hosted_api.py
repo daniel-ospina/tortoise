@@ -30595,13 +30595,14 @@ def _apply_import_pack_config(sdk, payload: dict) -> None:
       custom pack aborted the whole IMPORT — a failure that belonged to that
       entry alone.
 
-      ⛔ THE SWAP HAS ALREADY LANDED WHEN THIS RUNS (``_restore_into_temp_
-      verify_swap``), so "aborted the restore" is NOT what happened and the
-      distinction is the one an operator cares about: the dump's data is on
-      the graph, then this pass raises, the route answers 422, the ledger is
-      cleared and ``last_import_failed_sha256`` stamped — a restored graph
-      whose pack config was never applied, re-failing on every retry. Pinned
-      by ``tests/test_import_endpoint.py`` ("swap LANDED (pack failure is
+      ⛔ THE SWAP HAS ALREADY LANDED WHEN THIS RUNS
+      (``_restore_into_temp_verify_swap``), so "aborted the restore" is NOT
+      what happened and the distinction is the one an operator cares about:
+      the dump's data is on the graph, then this pass raises, the route
+      answers 422, ``last_import_sha256`` is cleared and
+      ``last_import_pack_failed_sha256`` stamped — a restored graph whose
+      pack config was never applied, re-failing on every retry. Pinned by
+      ``tests/test_import_endpoint.py`` ("swap LANDED (pack failure is
       post-swap)").
 
       ⛔ WHAT THE SKIP DOES *NOT* CLAIM (corrected in review; the earlier
