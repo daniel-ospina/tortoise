@@ -1126,6 +1126,154 @@ def test_an_unmeasurable_sha_is_a_defect(monkeypatch):
     assert "cannot be verified" in str(excinfo.value)
 
 
+# --- Ported from the peer lane's 35ea7658e (three commits on top of this same
+# rebase head, written independently against the same review findings). Kept
+# because each pins something this branch did not: the `absent` arm END TO END in
+# a real full clone, the quoted-script split, the unquoted chain, a vacuous glob
+# beside a HELD path, and the PRINTED git-unavailable abstention.
+
+
+def test_a_fabricated_sha_is_refused_end_to_end_in_a_full_clone(tmp_path):
+    """HERMETIC, and the arm the wiring pin above cannot reach by itself.
+
+    `test_a_sha_that_names_no_commit_is_invalid` pins `validate`'s DECISION with the
+    state machine stubbed, because this checkout is shallow. That leaves the real
+    path — a full clone, a forged sha, `validate` calling `_commit_state` — with no
+    end-to-end pin at all. `_commit_state` honouring `repo_root` is what makes this
+    reachable: a temp FULL clone answers `absent`, so the refusal fires for real
+    rather than by stubbing.
+
+    The cited artifact is committed in that same temp repo, so the ONLY defect is
+    the sha — otherwise this would pass on the tracked rule instead, for the wrong
+    reason.
+    """
+    import subprocess as sp
+
+    repo = tmp_path / "fullrepo"
+    repo.mkdir()
+    (repo / "held.txt").write_text("held\n", encoding="utf-8")
+    git = ["git", "-C", str(repo)]
+    sp.run([*git, "init", "-q"], check=True)
+    sp.run([*git, "add", "held.txt"], check=True)
+    sp.run(
+        [
+            *git,
+            "-c",
+            "user.email=t@example.com",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "seed",
+        ],
+        check=True,
+    )
+    assert (
+        sp.run(
+            [*git, "rev-parse", "--is-shallow-repository"], capture_output=True, text=True
+        ).stdout.strip()
+        == "false"
+    ), "this fixture must be a FULL clone, or `absent` is unreachable"
+
+    data = _ledger([_row("A", evidence=["held.txt"])])
+    data["measured_at"]["sha"] = "deadbeef" * 5
+    with pytest.raises(cl.InvalidLedger) as excinfo:
+        cl.validate(data, repo_root=repo)
+    # The refusal is the SHA, not a tracked-artifact complaint.
+    assert "names no commit" in str(excinfo.value), str(excinfo.value)
+    assert "TRACKED" not in str(excinfo.value), str(excinfo.value)
+
+
+def test_a_quoted_script_body_with_a_chain_is_one_command(tmp_path):
+    """`bash -c 'a && b'` is ONE command; splitting the raw string breaks it.
+
+    `text.split("&&")` cuts a quoted script body mid-quote, so `shlex` rejects the
+    halves and the row is refused as "not a parseable command" — exit 1, which
+    prints no uncovered list at all. Measured on a legitimate record, and it lands
+    on the exact shape `_SCRIPT_FLAGS` exists to accept (`bash -c '…'`), which
+    `origin/main` accepted before this branch added a shape gate. Reverting
+    `_split_on_chain` to `text.split("&&")` reds this and nothing else.
+    """
+    proc = _run_cli(
+        tmp_path,
+        _ledger(
+            [
+                _row(
+                    "A",
+                    evidence=[
+                        REAL_EVIDENCE,
+                        "cmd:bash -c 'uv run pytest "
+                        "tests/test_9664_capstone_verdict_ledger.py -q && echo done'",
+                    ],
+                )
+            ]
+        ),
+    )
+    assert proc.returncode == cl.EXIT_CLEAN, proc.stderr
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # The discriminating case for BOTH halves of the splitter: `cd tools` moves
+        # the effective directory, so the second segment's `../tests/...` only
+        # resolves if the chain WAS split AND the `cd` was applied.
+        "cmd:cd tools && uv run pytest ../tests/test_9664_capstone_verdict_ledger.py -q",
+        "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q && echo PASS",
+        "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q && uv run pytest tests/test_ci_manifest.py -q",
+    ],
+)
+def test_a_real_unquoted_chain_is_split_and_each_segment_graded(tmp_path, command):
+    """A bare `&&` IS a separator, and the chained record is the normal case.
+
+    The quoted-body test above pins the mirror-image half (`&&` inside quotes must
+    NOT split). Replacing the splitter with `return [text.strip()]` — never split
+    at all — left all 150 tests green while refusing `cd tools && uv run …` as
+    "must START with a program that runs something", which is exit 1 and prints no
+    uncovered list: the exact false block this round exists to remove. A pin in one
+    direction only is not a pin on the contract.
+    """
+    proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, command])]))
+    assert proc.returncode == cl.EXIT_CLEAN, proc.stdout + proc.stderr
+
+
+def test_a_vacuous_glob_cannot_carry_a_verified_row_BESIDE_a_held_path(tmp_path):
+    """The glob-vacuity guard only ever matters on a row that ALREADY holds an artifact.
+
+    Every `cmd:sh ./*` string in this file sits on a row citing no held artifact, so
+    the row rule refuses it with or without the glob arm — which left the arm
+    unpinned: `_glob_names_a_directory -> True` kept the whole suite green. Measured
+    end-to-end on that mutant, a 22-row all-`verified` ledger citing `README.md`
+    plus `cmd:sh ./*` exited **0** with an empty uncovered list — the false PASS the
+    arm was added to refuse.
+    """
+    proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, "cmd:sh ./*"])]))
+    assert proc.returncode == cl.EXIT_INVALID, proc.stdout + proc.stderr
+    assert "names no artifact" in proc.stderr, proc.stderr
+
+
+def test_a_checkout_without_git_abstains_AND_PRINTS_IT(monkeypatch, capsys):
+    """No `git` on PATH is an abstention with a NOTE, never a traceback and never a red.
+
+    Measured on the mutant that removes the `except OSError` arm: a
+    `FileNotFoundError` escaped `validate()` with no `CAPSTONE-LEDGER: INVALID`
+    marker, so a reader keying on the marker got nothing at all. And the abstention
+    must be PRINTED, because `_tracked_unprovable -> False` turns it into a false red
+    on a legitimate ledger in any git-less checkout (a tarball, a build context).
+    Both directions are asserted here, so either revert reds this test.
+    """
+    import types
+
+    def _boom(argv, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory", "git")
+
+    monkeypatch.setattr(cl, "subprocess", types.SimpleNamespace(run=_boom))
+    monkeypatch.setattr(cl, "_commit_state", lambda sha, repo_root: "exists")
+    assert [row["id"] for row in cl.validate(_ledger([_row("A")]))] == ["A"]
+    assert "git is unavailable here" in capsys.readouterr().err
+
+
 # --- Ported VERBATIM from #11476 (main) at 810eb838c, so its B-arm and forgery
 # pins are not lost in the rebase. These are not new tests: every one below is
 # byte-identical to main and pins an arm that existed on main and that THIS

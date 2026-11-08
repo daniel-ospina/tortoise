@@ -142,7 +142,7 @@ EXIT_ADVISORY: Final[int] = 4
 #: Argparse's own outcomes were colliding with two verdict codes: `--help` exits 0
 #: (indistinguishable from CLEAN) and a usage error exits 2 (indistinguishable from
 #: UNCOVERED). Both mean "no verdict was computed", so both get their own code and
-#: the other four keep one meaning each.
+#: the other five keep one meaning each.
 EXIT_USAGE: Final[int] = 5
 
 
@@ -321,36 +321,47 @@ _MAX_SCRIPT_DEPTH: Final[int] = 3
 
 
 def _split_chains(text: str) -> list[str]:
-    """Split a command on UNQUOTED `&&`  only.
+    """Split a command on UNQUOTED `&&` only.
 
     A plain `text.split("&&")` splits inside quotes too, so `bash -c 'a && b'` —
     the only way the docstring says a script can be recorded — came back as
     `bash -c 'a` and was refused as unparseable, which is exit 1, which hides the
-    entire uncovered list. Quotes are tracked here so the script survives intact.
+    entire uncovered list. Only a separator the SHELL would treat as one splits
+    here.
+
+    A backslash escapes only inside DOUBLE quotes, and it must take the escaped
+    character with it — otherwise `bash -c "echo \\" && echo x"` ends the quote
+    early and the command is split at the wrong place. (Ported from the peer lane's
+    `_split_on_chain` at 35ea7658e, which handles that case; this branch's first
+    version did not.)
     """
     segments: list[str] = []
-    buf: list[str] = []
+    current: list[str] = []
     quote: str | None = None
-    i = 0
-    while i < len(text):
-        char = text[i]
-        if quote:
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if quote is not None:
+            current.append(char)
+            if char == "\\" and quote == '"' and index + 1 < len(text):
+                current.append(text[index + 1])
+                index += 2
+                continue
             if char == quote:
                 quote = None
-            buf.append(char)
-        elif char in "'\"`":
+        elif char in "\"'`":
             quote = char
-            buf.append(char)
-        elif text.startswith("&&", i):
-            segments.append("".join(buf))
-            buf = []
-            i += 2
+            current.append(char)
+        elif text.startswith("&&", index):
+            segments.append("".join(current))
+            current = []
+            index += 2
             continue
         else:
-            buf.append(char)
-        i += 1
-    segments.append("".join(buf))
-    return segments
+            current.append(char)
+        index += 1
+    segments.append("".join(current))
+    return [segment.strip() for segment in segments]
 
 
 #: Flags whose VALUE is a SCRIPT BODY, not an artifact path: `bash -c '<script>'`,
