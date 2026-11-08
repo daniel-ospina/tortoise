@@ -1716,8 +1716,11 @@ re-cut from the resolved document (§8), and no committed verdict is re-scored.
 - **The `steps:` block's S2.3 `condition` carries this same cite, and it is re-pointed with it.**
   That block is operative text, so its CONTENT EPOCH (`_steps_block_epoch`) moves with this commit;
   what moves is a line NUMBER in the condition's provenance, not the condition, the step set, a
-  metric, a denominator or a threshold — the operative rule is unchanged, which is why this is a
-  §10.14 record rather than a `## Deviations` entry under §8.
+  metric, a denominator or a threshold — the operative rule is unchanged. It is recorded as a §10.14
+  ENTRY in §10's own deviations list (a new numbered entry, not a struck-through edit to the operative
+  rows), which is also what keeps this amendment's own epoch legible:
+  `check_steps_block_is_pre_scored` accepts a `steps` block that post-dates the last scored log only
+  when the document carries a deviations entry, and this is that entry.
 - **The union also pins one switch the base was red on.** `91dbc9a88` introduced
   `TORTOISE_STATE_VALUE_VERBATIM`, resolved `env_flag(SWITCH, True)` in
   `extractor_v2._state_value_verbatim_enforced` — the ONE module that reads it; the nine

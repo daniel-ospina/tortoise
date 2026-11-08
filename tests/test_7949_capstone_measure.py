@@ -5214,11 +5214,20 @@ def test_the_pre_registration_cites_the_classify_sites_the_tree_actually_has():
             f"(tortoise/extractor_v2.py:{collector}-{end}) — the `def` through "
             "`return items` is the claim §11's argument rests on")
         for block in ranged:
-            assert f"tortoise/extractor_v2.py:{collector}-{end}" in block, (
+            # ⛔ THE SET, NOT A MEMBERSHIP TEST (review round 3, P2). A bare
+            # `in block` is satisfied by the CORRECT range even when a STALE one
+            # sits beside it in the same sentence — measured: appending
+            # ", formerly tortoise/extractor_v2.py:11098-11120" next to the right
+            # range left this leg `1 passed`. A stale cite with a correct twin is
+            # the same defect, so the block must cite the extent ONCE and right.
+            found = set(re.findall(r"extractor_v2\.py:(\d+-\d+)", block))
+            assert found == {f"{collector}-{end}"}, (
                 f"{doc_name}: a live carrier naming `_collect_classify_items` cites "
-                f"an extent that is not tortoise/extractor_v2.py:{collector}-{end} "
-                "(the `def` through `return items`) — a range that runs past the "
-                "body names the next function's lines")
+                f"extent(s) {sorted(found) or ['<none>']} — it must cite exactly "
+                f"tortoise/extractor_v2.py:{collector}-{end} "
+                "(the `def` through `return items`). A range that runs past the "
+                "body names the next function's lines, and a STALE range left "
+                "beside the right one is the same defect with a correct twin")
         # ⛔ EVERY LIVE CARRIER MUST NAME BOTH GATES, not just one of them anywhere
         # in the file. With two live carriers (the §9 provenance row and §11.1's prose)
         # a single whole-document check is satisfied by whichever one is correct,
