@@ -256,11 +256,16 @@ def _looks_like_graph_refusal(reason: str) -> bool:
     low = (reason or "").lower()
     if any(phrase in low for phrase in _GRAPH_REFUSAL_PHRASES):
         return True
-    # A refusal that names the graph ARGUMENT itself ("unknown graph 'x'", "graph
-    # 'x' does not exist") is about the binding; a bare subject word is not enough,
-    # or "permission denied: scope graph read" would re-read another graph.
-    return ("graph" in low and ("refus" in low or "unknown" in low
-                                or "does not exist" in low or "not found" in low))
+    # Otherwise the message must QUOTE the graph argument ("unknown graph 'x'",
+    # 'graph "x" does not exist'). A bare mention of the word is not enough:
+    # "FalkorDB: graph not found" and "unknown error while reading the graph" are
+    # DB faults, and "permission denied: scope graph read" is a key restriction —
+    # none of them says the ARGUMENT was refused.
+    if "graph argument" in low or "graph-bound" in low:
+        return True
+    return ("graph '" in low or 'graph "' in low) and (
+        "refus" in low or "unknown" in low or "does not exist" in low
+        or "not found" in low or "not reachable" in low or "cannot" in low)
 
 
 def _source_gap(counts: Any, read: int) -> int | None:
@@ -347,7 +352,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
         return 2
     reader = MCPReader(_live_call_tool, args.graph)
     counts = reader.counts()
-    points, _ = reader.read_points(page=args.page)
+    points, points_total = reader.read_points(page=args.page)
     sources, source_total = reader.read_sources()
     graphs = reader.graphs()
     plan = C.build_plan(points + sources, source_graph=args.graph or "(credential-bound)",
@@ -368,6 +373,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
         print(f"REFUSED: {exc}", file=sys.stderr)
         return 3
     payload = {"census": plan.census(), "run": result.as_dict(),
+               "points_read": len(points), "points_total_reported": points_total,
                "sources_read": len(sources), "sources_total_reported": source_total,
                "source_count_gap": _source_gap(counts, len(sources)),
                # The plan is the artifact a driver writes; a census without the

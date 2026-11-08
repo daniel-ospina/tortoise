@@ -894,3 +894,40 @@ def test_a_dry_run_reports_what_the_ledger_already_holds(tmp_path):
     C.run_plan(plan, writer=CountingWriter(), ledger=led, apply=True, graph_rows=ROWS)
     dry = C.run_plan(plan, writer=CountingWriter(), ledger=led, apply=False, graph_rows=ROWS)
     assert dry.skipped_known == 1 and dry.written == 0
+
+
+# ── round-11 review findings ──────────────────────────────────────────────
+
+#: The row shape the real surface returns: NAMESPACES only (`tortoise_list_graphs()
+#: -> list[str]`), so an id-shaped spelling a row does not name is UNRESOLVED.
+NAMESPACE_ONLY_ROWS = [
+    {"namespace": "team_3326a01ea34ae595d84de5d8f9", "graph_id": "default"},
+    {"namespace": "org_3326a01ea34ae595d84de5d8f9_g_2b7e4c9d1a6f8035"},
+]
+
+
+def test_the_tenant_graphs_id_spelling_is_not_treated_as_a_distinct_graph():
+    """Round-11 BLOCKING: with namespace-only rows, `team_<org>` canonicalised to the
+    org id while `g_<tenant-gid>` fell back to its shape — so the guard PASSED, and
+    an `--apply` wrote to the SOURCE graph in place (#11469's central guarantee)."""
+    with pytest.raises(C.CurationRefused, match=r"cannot resolve|same graph"):
+        C.assert_distinct_graphs("g_0bcdb207ef7336c3",
+                                 "team_3326a01ea34ae595d84de5d8f9",
+                                 graph_rows=NAMESPACE_ONLY_ROWS)
+
+
+def test_an_id_no_row_names_is_unresolved_when_rows_are_available():
+    assert C.canonical_graph_id("g_deadbeefdeadbeef", NAMESPACE_ONLY_ROWS) is None
+    # …while the shapes the rows DO carry still resolve.
+    assert C.canonical_graph_id("team_3326a01ea34ae595d84de5d8f9", NAMESPACE_ONLY_ROWS)
+    assert C.canonical_graph_id("org_3326a01ea34ae595d84de5d8f9_g_2b7e4c9d1a6f8035",
+                                NAMESPACE_ONLY_ROWS)
+
+
+def test_the_refusal_gate_does_not_trip_on_a_db_error_that_mentions_graph():
+    """Round-11: "FalkorDB: graph not found" re-read a DIFFERENT graph under the
+    requested graph's name; only a message quoting the graph argument may fall back."""
+    mod = _tool_module()
+    assert not mod._looks_like_graph_refusal("FalkorDB: graph not found")
+    assert not mod._looks_like_graph_refusal("InternalError: unknown error while reading the graph")
+    assert mod._looks_like_graph_refusal("unknown graph 'live-v4'")

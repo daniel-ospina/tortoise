@@ -646,7 +646,17 @@ def canonical_graph_id(ref: str, graph_rows: Sequence[Mapping[str, Any]] | None)
             return _canonical_from_row(by_name[0])
         if len(by_name) > 1:
             return None
-    # Only an id-shaped spelling is resolvable without a row that names it.
+    if graph_rows:
+        # ROWS ARE THE AUTHORITY. An id-shaped spelling that no row names is
+        # UNRESOLVED, not resolved-by-shape: the surface hands out NAMESPACE strings
+        # (`tortoise_list_graphs() -> list[str]`), and `mcp_auth` accepts a
+        # `stable_id` that a namespace-only row does not expose — so
+        # `team_<org>` (the tenant graph) and `g_<tenant-gid>` are ONE graph while a
+        # shape-only tail comparison says they differ. Verified fail-open before this
+        # line: `--graph g_<tenant-gid> --target team_<org>` passed the guard, wrote
+        # to the SOURCE graph in place, and recorded the rows as migrated.
+        return None
+    # Without rows, only an id-shaped spelling is resolvable.
     if "_g_" in ref or ref.startswith("g_"):
         return _tail(ref) or None
     return None
@@ -986,15 +996,17 @@ def run_plan(
         # Accounting happens BEFORE this return: a dry run over a ledger that already
         # holds rows must not report 0 written / 0 skipped, which cannot be
         # reconciled with a census of 127 carry rows.
-        _sections, skipped, _dups = _pending_sections(plan.bundle(), ledger)
+        _sections, skipped, dups = _pending_sections(plan.bundle(), ledger)
         return RunResult(False, False, skipped, 0, plan.target_graph, plan.digest(),
-                         refused="dry run (--apply not given)", identity=identity_note)
+                         refused="dry run (--apply not given)", identity=identity_note,
+                         duplicate_rows=dups)
 
     bundle = plan.bundle()
     sections, skipped, duplicate_rows = _pending_sections(bundle, ledger)
     pending_count = sum(len(v) for v in sections.values())
     if not pending_count:
-        return RunResult(True, False, skipped, 0, plan.target_graph, plan.digest())
+        return RunResult(True, False, skipped, 0, plan.target_graph, plan.digest(),
+                         duplicate_rows=duplicate_rows)
     try:
         result = writer.write_sections(plan.target_graph, sections)
     except CurationRefused as exc:
@@ -1003,7 +1015,7 @@ def run_plan(
         accepted_partial = list(getattr(exc, "written_keys", ()) or [])
         ledger.record(accepted_partial)
         return RunResult(True, False, skipped, len(accepted_partial), plan.target_graph,
-                         plan.digest(), refused=str(exc))
+                         plan.digest(), refused=str(exc), duplicate_rows=duplicate_rows)
     accepted = [k for k in (result.get("written") or [])]
     ledger.record(accepted)
     return RunResult(True, False, skipped, len(accepted), plan.target_graph, plan.digest(),
