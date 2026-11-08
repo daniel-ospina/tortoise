@@ -1730,6 +1730,20 @@ def test_the_tool_carries_the_5128_interpreter_guard_first(tool, capsys, monkeyp
     guard checked on a tool-only diff; pinning in the census alone is not. Both
     tools this PR touches are parameterised for that reason — an unpinned second
     file is the same gap one tool over.
+
+    DECLARED BOUND — what this pin does NOT mirror, and why that is not a hole:
+    it mirrors the census's arms over the TWO TOOLS' OWN FILES (preamble order,
+    floor, guard shape, inertness at the floor, both refusal shapes, the RENDERED
+    message, the derived process status, and the advertised-invocation sweep driven
+    by the census's own `_BARE_INVOCATION` + exemption sets). It does not mirror the
+    census's `docs/` + `graph-scripts/` + sibling-`tools/` walk, nor its corpus
+    vacuity, `RUNTIME_39`/`UNGUARDABLE` accuracy, detector self-test or `-m`
+    resolution arms: reaching any of those needs an edit to `docs/`, to another
+    tool, or to the census file itself — and `tests/` edits select 787 files
+    INCLUDING the census, so the census itself would then run. This bound is
+    declared rather than implied because a pin that silently claims parity is how
+    each of six review rounds found it weaker than the census by one more
+    dimension.
     """
     tree = ast.parse(tool.read_text(encoding="utf-8"))
     body = list(tree.body)
@@ -1837,6 +1851,18 @@ def test_the_tool_carries_the_5128_interpreter_guard_first(tool, capsys, monkeyp
         "the guard must be INERT at the floor — it refused on a 3.12 interpreter"
     )
     assert len(raises) == 1, "the guard must refuse on an old interpreter"
+    # The guard must be INERT at the floor. The census re-executes this same node
+    # at `(*FLOOR, 0)` and requires it NOT to refuse; nothing above reads
+    # `orelse`, so a guard carrying `else: raise SystemExit(...)` refuses on a
+    # modern interpreter too — a working capability removed — and was pin-GREEN.
+    # Measured on the tool this module does not import (build_site_icons): the pin
+    # passed 2/2 while the census reded `SystemExit: refusing on a modern
+    # interpreter too`.
+    assert not guard.orelse, (
+        f"the guard must be INERT at the floor — an `else:` branch refuses on a "
+        f"modern interpreter, so the tool cannot run at all "
+        f"(tests/test_entry_point_python_guard.py reds on this): {ast.dump(guard)}"
+    )
     raise_node = raises[0]
     exc = raise_node.exc
     assert isinstance(exc, ast.Call), (
@@ -1953,13 +1979,22 @@ def test_the_tool_carries_the_5128_interpreter_guard_first(tool, capsys, monkeyp
     # A copied regex would drift the same way, so the predicate — not a copy of
     # it — is the single owner.
     census = _census_module()
+    rel = tool.relative_to(REPO_ROOT).as_posix()
     text = tool.read_text(encoding="utf-8")
     offenders = [
-        f"{tool.name}:{n}: {line.strip()}"
+        f"{rel}:{n}: {line.strip()}"
         for n, line in enumerate(text.splitlines(), 1)
         if (m := census._BARE_INVOCATION.search(line))
-        and m.group(1) == "tools"
-        and m.group(2) == tool.name
+        # The CENSUS'S OWN exemptions, not a re-derived filter. Filtering to
+        # `group(1) == "tools" and group(2) == tool.name` re-narrows the sweep
+        # the predicate was imported to stop narrowing: it drops the regex's
+        # ELIDED branch (`python3 ...`, groups None) and every cross-path match
+        # (`python3 graph-scripts/...`), both of which the census reds. Measured:
+        # each of those two mutants left this pin GREEN while the census reddened.
+        # A carve-out tool is never guarded, so the bare form IS its working form;
+        # `_DELIBERATE_BARE_FORM` records a verbatim quote of a real command.
+        and (m.group(1) is None or f"{m.group(1)}/{m.group(2)}" not in census._CARVE_OUTS)
+        and (rel, line.strip()) not in census._DELIBERATE_BARE_FORM
     ]
     assert not offenders, (
         f"the tool advertises `python3 tools/{tool.name}`, the form its guard "
