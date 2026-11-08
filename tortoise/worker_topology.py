@@ -127,12 +127,20 @@ RESIDUALS, NAMED RATHER THAN IMPLIED
   ``$UVICORN_LIFESPAN=off``) removes it: uvicorn starts N workers, none runs the
   gate, and on an embedded DB they open N divergent files. MEASURED on the
   pinned 0.52.1: ``UVICORN_LIFESPAN=off WEB_CONCURRENCY=2`` served two server
-  processes with the gate never entered. The SHIPPED path is closed in
-  ``entrypoint.sh`` (refuses when the count is >1 and the lifespan is off); a
-  direct ``uvicorn tortoise.hosted_api:app --lifespan off --workers N`` that
-  bypasses the boot script is NOT gated — it also disables every other startup
-  hook (backup watcher, healthz, liveness), so it is a broken deployment, but the
-  divergence would be silent rather than refused.
+  processes with the gate never entered. ``entrypoint.sh`` refuses that boot, and
+  it also refuses the two shapes where the count it measured is NOT the count
+  uvicorn will run: an ``--env-file`` / ``$UVICORN_ENV_FILE`` (uvicorn calls
+  ``load_dotenv`` BEFORE reading ``$WEB_CONCURRENCY`` — measured: four workers
+  under a banner that said one) and a raw count the shell cannot parse
+  (``int()`` accepts Unicode digits and whitespace, so ``$WEB_CONCURRENCY`` of
+  ``'\xc2\xa02'`` starts TWO while both resolvers read 1). What remains is a
+  DIRECT ``uvicorn tortoise.hosted_api:app --lifespan off --workers N`` that
+  bypasses the boot script: it is not gated, and the divergence would be silent
+  rather than refused. (It also disables every other startup hook — backup
+  watcher, healthz, liveness — so it is a broken deployment either way.) An
+  import-time gate would close it and was rejected: it turns a topology refusal
+  into an import-time side effect of a module that many test modules and several
+  in-package modules import, and it cannot be scoped to the server process.
 * **The repo ships a SECOND uvicorn app with NO gate**: ``tortoise.selfhost:app``
   (``tortoise/selfhost.py``'s own ``_lifespan``), served by
   ``Dockerfile.selfhost`` with ``ENV TORTOISE_DB_PATH=/data/tortoise.db`` — i.e.
