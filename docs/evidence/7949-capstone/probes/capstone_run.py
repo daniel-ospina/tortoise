@@ -18,7 +18,7 @@ the corrected reading:
    ``TortoiseSDK.capture_session`` → ``sdk._extract_session_v2``
    (``sdk.py:16360``, called at ``:15397``) →
    ``extractor_v2.extract_session_v2`` (``extractor_v2.py:12829``) calls
-   ``_edus_from_conversation`` (S0, ``:12947``), ``run_s1`` (S1, ``:1485``),
+   ``_edus_from_conversation`` (S0, ``:12947``), ``run_s1`` (S1, ``:15401``),
    ``run_s2`` (S2.1, ``:15433``), ``_run_vet_pass`` (S2.2, ``:15485``),
    ``kind_classifier.classify_items`` (S2.3, ``:13102``),
    ``_apply_classify_kinds`` (S2.3, ``:13103``), ``search_graph`` (S3,

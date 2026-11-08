@@ -4750,6 +4750,16 @@ def test_the_bare_continuation_cites_name_what_they_say():
             ("13356", "result = execute_embed(complete_list, search, "
                       "session_id=session_id,"),
         )),
+        # ⛔ The S1 row's CALL SITE, held on its own row (#11517 rebase review).
+        # The phrase row below cannot hold it: `run_s1`'s DEF is at a low line
+        # inside the module while its CALL is inside `_arm_extract`, so a
+        # symbol-first re-derivation lands on the `def` — which is what this
+        # branch's re-derivation did, while `README.md`'s "call site" row kept
+        # naming the call. One claim, two documents, two answers; the row pins
+        # the CALL, and the phrase is the sentence that carries it.
+        ("probes/capstone_run.py", "(S1,", (
+            ("15401", "chunk_stories.append(run_s1(model, _edus_to_text(chunk),"),
+        )),
     )
     # The SAME document states two of its claims as the RULE's own text rather than a
     # line number — a quoted rule cannot drift by an insertion above it, which is why
@@ -5356,8 +5366,8 @@ def test_the_pre_registration_cites_the_classify_sites_the_tree_actually_has():
         #      connector glyph (`:11098` and `:11120`). Declared because it CANNOT be
         #      closed by punctuation, and that was measured, not assumed (round 11):
         #      admitting `and` reds the live §9 row (`PRE-REGISTRATION.md:1121`), whose
-        #      `:13058` and `:13207` are two SINGLE cites enumerated under the extractor
-        #      owner — exactly the `at `:13058`` form this rule exempts. (The ELLIPSIS
+        #      `:13101` and `:13250` are two SINGLE cites enumerated under the extractor
+        #      owner — exactly the `at `:13101`` form this rule exempts. (The ELLIPSIS
         #      half of this residual is GONE: round 11 put `…`/`...` in the connector
         #      set, which reds the stale spelling while the live documents stay green —
         #      they contain no `:A` … `:B` at all.) Closing what is left needs the
