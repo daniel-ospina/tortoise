@@ -474,9 +474,15 @@ measured_at:
 # `(id …, graph_id …)` for the DEFAULT row, and its OTHER arm — taken when the row's
 # ⛔ WHY A MERGE-BOUNDARY COMMIT GOT CITED AT ALL, kept because the next lane on a
 # shallow checkout will reach for the same command (review round 13). An earlier cut of
-# this paragraph cited `347cf03cb8` and declared `704fd60ee` absent. This checkout is a
-# SHALLOW clone: `git rev-parse --is-shallow-repository` -> true, and `347cf03cb8` is the
-# TRUNCATION BOUNDARY, not a root. A `git merge-base --is-ancestor` in a truncated
+# this paragraph cited `347cf03cb8` and declared `704fd60ee` absent. The checkout that
+# produced that cut was a SHALLOW clone: `git rev-parse --is-shallow-repository` -> true
+# THERE, and `347cf03cb8` is that clone's TRUNCATION BOUNDARY, not a root.
+# ⛔ THE SCOPE MATTERS AND AN EARLIER CUT OF THIS SENTENCE GOT IT WRONG: it said "this
+# checkout is a SHALLOW clone", and on the hub checkout this record is maintained in the
+# SAME command prints `false` (measured 2026-11-08), so a reader running the diagnostic to
+# check the paragraph would be told it does not describe the tree in front of them. The
+# failure mode below is real and worth keeping; the claim about WHICH checkout has it is
+# what was wrong. A `git merge-base --is-ancestor` in a truncated
 # history answers "not reachable HERE", and that was read as "does not exist":
 #   $ git merge-base --is-ancestor 704fd60ee origin/main   -> non-zero
 #   $ gh api repos/daniel-ospina/tortoise/compare/704fd60ee...main
