@@ -5975,6 +5975,7 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
     for _pattern, _derived in (
             (r"`un…` list has (\w+) executors", _privative_count),
             (r"alternation's (\w+) cues", _pseudo_count),
+            (r"listed (\w+) cues", _pseudo_count),
             (r"`_AFFIRMED`'s (\w+) pseudo-negations", _pseudo_count),
             (r"the other (\w+) — are this file", _pseudo_count - 1)):
         _stated = re.findall(_pattern, _own_source)
