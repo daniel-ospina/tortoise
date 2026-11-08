@@ -10713,6 +10713,18 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     re-staling a cite in the RECORD reds it, and an insertion in the CODE above a
     cited line reds it too — every arm pins its cited line EXACTLY (a range pins
     both endpoints and its middle), never a window that a shift can slide inside.
+
+    ⛔ The `sdk.py` and probe numbers are DERIVED FROM THE RECORD, never typed here.
+    They were typed, and they rotted twice more before this comment existed: `#11237`
+    inserted nine lines above `_extract_session_v2`, 48 above the meta fold and 56
+    above the `references` writer, so a test that carried its own copy of the numbers
+    redded on a HEAD whose RECORD was stale for the same reason — and the repair is a
+    hand re-derivation either way. Reading the number FROM the record keeps every
+    arm's strength exactly (the record's number must land on the claim, so a stale
+    cite or an insertion above it still reds) while removing the second copy that
+    has to be re-derived. A1's `extractor_v2.py` cites stay typed: that file is not
+    touched by this lane and its two numbers are asserted against a token no
+    insertion can slide inside.
     """
     record = _REPO / "docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md"
     text = record.read_text(encoding="utf-8")
@@ -10735,23 +10747,39 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
 
     # A2: the capture path that writes the `references` edge — the record names it
     # TWICE (prose and the `sed -n '<n>p'` that reproduces it), so the two must agree.
-    assert "the capture path at `tortoise/sdk.py:17574`)" in text, (
-        "the record must cite the capture path by its live number")
-    assert re.findall(r"sed -n '(\d+)p' tortoise/sdk\.py", text) == ["17574"], (
+    ref_cites = re.findall(r"the capture path at `tortoise/sdk\.py:(\d+)`\)", text)
+    assert len(ref_cites) == 1, (
+        "the record must cite the capture path ONCE, by its live number; "
+        f"found {ref_cites}")
+    ref_line = int(ref_cites[0])
+    assert re.findall(r"sed -n '(\d+)p' tortoise/sdk\.py", text) == [str(ref_line)], (
         "the record's reproduction command must name the SAME line the prose does")
-    assert sdk[17574 - 1].strip() == "proj.link_source_to_event(source_key, event_id)", (
-        f"sdk.py:17574 reads {sdk[17574 - 1].strip()!r}, not the references writer")
+    assert sdk[ref_line - 1].strip() == "proj.link_source_to_event(source_key, event_id)", (
+        f"sdk.py:{ref_line} reads {sdk[ref_line - 1].strip()!r}, not the references "
+        "writer — re-derive the record's cite from the tree")
 
     # A2's Object mint: the write seam that routes creation by kind, cited THREE
     # times as a range. Both endpoints are claims — the classifier opens it, the
     # object arm's `is_episodic=False)` closes it.
-    assert len(re.findall(r"`?(?:tortoise/)?sdk\.py:16516-16530`?", text)) == 3, (
+    mint_cites = re.findall(r"`?(?:tortoise/)?sdk\.py:(\d+)-(\d+)`?", text)
+    assert len(mint_cites) == 3 and len(set(mint_cites)) == 1, (
         "the record names this seam three times — the mint, the route, and the "
-        "reproduction command — and all three must move together")
-    assert sdk[16516 - 1].strip() == "_ekind = _payload_entity_kind(e)", (
-        f"sdk.py:16516 reads {sdk[16516 - 1].strip()!r}, not the classifier call")
-    assert sdk[16530 - 1].strip() == "is_episodic=False)", (
-        f"sdk.py:16530 reads {sdk[16530 - 1].strip()!r}, not the object arm's close")
+        f"reproduction command — and all three must carry the same range: {mint_cites}")
+    mint_start, mint_end = (int(n) for n in mint_cites[0])
+    assert sdk[mint_start - 1].strip() == "_ekind = _payload_entity_kind(e)", (
+        f"sdk.py:{mint_start} reads {sdk[mint_start - 1].strip()!r}, not the "
+        "classifier call — re-derive the record's range from the tree")
+    assert sdk[mint_end - 1].strip() == "is_episodic=False)", (
+        f"sdk.py:{mint_end} reads {sdk[mint_end - 1].strip()!r}, not the object "
+        "arm's close — re-derive the record's range from the tree")
+    # The claim is the RANGE, so the range must actually SPAN the two arms it
+    # claims to cover: an endpoint that happens to sit on the right token while the
+    # middle moved out from under it would otherwise pass.
+    span = sdk[mint_start - 1:mint_end]
+    for arm in ('"subject", name,', '"object", name,'):
+        assert any(arm in line for line in span), (
+            f"the record's `sdk.py:{mint_start}-{mint_end}` does not span the {arm} "
+            "arm it claims to cover")
 
     # A5: the census query the "cannot observe the edge" gap rests on. All THREE
     # lines of the cited range are pinned, because the claim is the RANGE: the
@@ -10760,12 +10788,29 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # every endpoint and reds — a window test on the MATCH token alone did NOT
     # (measured in review: one inserted line above :2724 left this arm GREEN while
     # the record's `2724-2726` was stale at both ends).
-    assert "`probes/capstone_measure.py:2724-2726`" in text
-    assert probe[2724 - 1].strip() == "for name, count, anchored in projection.g.query(", (
-        f"capstone_measure.py:2724 reads {probe[2724 - 1].strip()!r}, not the census call")
-    assert "MATCH ()-[r]->() RETURN type(r)" in probe[2725 - 1], (
-        f"capstone_measure.py:2725 reads {probe[2725 - 1].strip()!r}, not the "
-        "relationship census query")
-    assert "count(r.sourceVersion)" in probe[2726 - 1], (
-        f"capstone_measure.py:2726 reads {probe[2726 - 1].strip()!r}, not the "
-        "anchored count that closes the query")
+    # The record cites this probe's `link_source_to_event` handler as `:275-283`
+    # too, so the census arm is selected by what the START line IS, not by being
+    # the only probe range in the document.
+    census_cites = [
+        (int(a), int(b))
+        for a, b in re.findall(r"`probes/capstone_measure\.py:(\d+)-(\d+)`", text)
+        if probe[int(a) - 1].strip()
+        == "for name, count, anchored in projection.g.query("]
+    assert len(census_cites) == 1, (
+        "the record must cite the census query ONCE, as a range whose first line "
+        f"is the `g.query(` call — found {census_cites}")
+    census_start, census_end = census_cites[0]
+    assert census_end - census_start == 2, (
+        f"the record's census cite is the THREE-line range {census_start}-"
+        f"{census_end}; the call, the MATCH and the anchored count are one claim")
+    assert probe[census_start - 1].strip() == \
+        "for name, count, anchored in projection.g.query(", (
+        f"capstone_measure.py:{census_start} reads "
+        f"{probe[census_start - 1].strip()!r}, not the census call — re-derive "
+        "the record's range from the probe")
+    assert "MATCH ()-[r]->() RETURN type(r)" in probe[census_start], (
+        f"capstone_measure.py:{census_start + 1} reads {probe[census_start].strip()!r}, "
+        "not the relationship census query")
+    assert "count(r.sourceVersion)" in probe[census_end - 1], (
+        f"capstone_measure.py:{census_end} reads {probe[census_end - 1].strip()!r}, "
+        "not the anchored count that closes the query")
