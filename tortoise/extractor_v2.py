@@ -79,16 +79,17 @@ record does state is the measured shipped state: ``run_s4`` is what runs today,
 so it must not be deleted on the strength of the design doc alone; a lane that
 needs the precedence settled asks the owner on **#8500**.
 
-⚠️ THE SUCCESSOR HAS NOT LANDED — and *"S2.2 and S2.3 already exist in the
-code"* is NOT the test that it has. §4.0 gives S2.2 VET the coverage question
-S4's removal relies on (*"did we account for everything the narrative said?"*),
-and S2.3 CLASSIFY is the fold's other half as this record counts it. Both
-stages are present in the tree (``_vet_gate.apply_vet``,
+⚠️ THE SUCCESSOR HAS NOT LANDED — it has landed for ONE of the two gap
+classes and NOT for the other, and *"S2.2 and S2.3 already exist in the code"*
+is NOT the test that it has. §4.0 gives S2.2 VET the coverage question S4's
+removal relies on (*"did we account for everything the narrative said?"*), and
+S2.3 CLASSIFY is the fold's other half as this record counts it. Both stages
+are present in the tree (``_vet_gate.apply_vet``,
 ``kind_classifier.classify_items``) and both are wired into
-``extract_session_v2`` behind flags: ``TORTOISE_CLASSIFY_LATER`` DEFAULTS OFF, and
-``TORTOISE_VET`` too — but since #10996 S2.2's mechanical half defaults ON.
-Presence is not sufficiency either: the fold's REMEDY half is unimplemented in
-both.
+``extract_session_v2`` behind flags: ``TORTOISE_CLASSIFY_LATER`` DEFAULTS OFF,
+and ``TORTOISE_VET`` too — but since #10996 S2.2's mechanical half defaults ON.
+Presence is not sufficiency either: neither folded stage can ADD a candidate,
+so neither of them satisfies the removal pre-condition stated below.
 
   * VET's coverage signal only DETECTS, and only in one degenerate case.
     ``check_batch``'s coverage signals are "reported, never acted on":
@@ -104,16 +105,38 @@ both.
     kind per EXISTING id) and ``_apply_classify_kinds`` writes that kind onto an
     item already in the list. It adds none.
 
-So **no stage the design folds S4's purpose into — and no successor stage —
-performs S4's gap review-and-fill**: ``run_s4`` is today's gap-filler, and
-deleting it loses that capability outright rather than relocating it. (The
-universal is scoped to the FOLD on purpose: ``run_s4`` itself IS a shipped
-stage and it emits exactly the candidates the folded stages cannot, so an
-unqualified "no shipped stage" denies the very capability its own next clause
-says is lost.) The removal pre-condition is a stage that can ADD a candidate a
-coverage check found missing — building it is the migration deliverable, and
-the absence of that stage is pinned by
-``tests/test_extractor_v4_s4_stage_claims.py``.
+So **no stage the design folds S4's purpose into performs S4's gap
+review-and-fill** — VET removes and CLASSIFY labels, and neither adds — so
+``run_s4`` is today's gap-filler, and deleting it loses that capability
+outright rather than relocating it. (The universal is scoped to the FOLD on
+purpose: ``run_s4`` itself IS a shipped stage and it emits exactly the
+candidates the folded stages cannot, so an unqualified "no shipped stage"
+denies the very capability its own next clause says is lost.) The removal
+pre-condition is a stage that can ADD a candidate a coverage check found
+missing.
+
+⛔ #11534 MEETS THAT PRE-CONDITION FOR ONE OF THE TWO GAP CLASSES — state both
+halves, always, because each half alone is a different wrong answer:
+
+  * #11534 adds the missing INSTRUMENT and its first CONSUMER inside S2.2: the
+    detector ``vet_gate.partial_gaps`` (reported-never-acted-on, exactly like
+    ``coverage_suspect``) plus the stage ``run_partial_gap_fill`` (S2.2b,
+    ``TORTOISE_PARTIAL_GAP_FILL``, **DEFAULT OFF**), which CAN add items for
+    the spans the detector flagged. On the F3 population the detector reaches
+    **9 of the 21 items ``run_s4`` added — 8 of the 12 ``points``, 1 of the 9
+    ``operators``**.
+  * So the pre-condition is **met for ADD-from-an-uncovered-span**, and met by
+    a TRIGGER rather than by a demonstrated stage: S2.2b's own yield is
+    **NOT measured** — it needs live sessions and a key. It is
+    **NOT met for ADD-by-generalisation**: the operator misses restate a
+    COVERED statement at a higher abstraction, so no narrative span is
+    uncovered and a coverage trigger cannot reach them by construction.
+
+``run_s4`` therefore still must not be deleted: its removal is gated on the
+generalisation half and on re-running F3. What
+``tests/test_extractor_v4_s4_stage_claims.py`` pins is THIS record — both
+halves of it — and not the absence of the stage, because this file now ships
+one.
 
 Owner confirmations honored (issue #1350): flash runs 4 prompts (S1-S4), S5
 is execution; temperature 0.0 (via tests.model_adapters MODELS); S3 reads the

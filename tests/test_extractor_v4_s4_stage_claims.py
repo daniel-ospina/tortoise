@@ -1282,16 +1282,67 @@ def test_an_else_branch_call_reds_the_off_switch_check():
 # tree (`_vet_gate.apply_vet` and `kind_classifier.classify_items`), so "the
 # fold's stages are present" reads as "the successor landed" — and a lane then
 # deletes `run_s4` believing gap-filling moved. What decides it is the REMEDY
-# half: neither stage can ADD an item a coverage check found missing. These
-# tests pin that half, so the pre-condition for removal stays measurable
+# half: neither folded stage can ADD an item a coverage check found missing.
+# These tests pin that half, so the pre-condition for removal stays measurable
 # instead of inferable from a stage list.
+#
+# ⛔ AND IT IS TWO HALVES SINCE `#11534` — a fact this guard itself missed. The
+# record said "no stage … performs S4's gap review-and-fill" in the PRESENT
+# tense while `extractor_v2.run_partial_gap_fill` (S2.2b, DEFAULT OFF) shipped
+# in the same file, and said "the absence of that stage is pinned by" this very
+# module while widening the allow-list that would have been the pin. The round-6
+# review (P2) found both at `06052ea0dd9e` with every check below GREEN — a
+# false PASS in a guard whose job is *"or `run_s4` is deleted believing
+# gap-filling moved"*. So the pins now cover both directions: the record must
+# state both halves (`SUCCESSOR_TWO_HALVES`) and must not regain the two false
+# clauses (`SUCCESSOR_REVIVED_CLAIMS`).
 
 #: §4.0's fold: the clause that gives S2.2 VET the coverage question S4's
 #: removal relies on. If the design re-assigns that purpose, the record's
 #: basis moved and this must be re-derived (not deleted).
 FOLD_STATEMENT = "did we account for everything the narrative said?"
 #: The clause that closes the "S2.2/S2.3 exist ⇒ successor landed" misreading.
+#: The literal is KEPT but the record qualifies it in its next breath ("it has
+#: landed for ONE of the two gap classes and NOT for the other") — an
+#: unqualified heading became false the moment `#11534` shipped an ADD-capable
+#: consumer, so the heading alone is no longer the claim; the two halves are
+#: (`SUCCESSOR_TWO_HALVES`).
 SUCCESSOR_ABSENT = "THE SUCCESSOR HAS NOT LANDED"
+#: The two gap classes `#11534` separates, plus the flag of the stage that meets
+#: one of them. Required as literals because EACH HALF ALONE IS A DIFFERENT
+#: WRONG ANSWER: without the solution half the record reads "no ADD-capable
+#: stage exists" (the round-6 review found exactly that), and without the unmet
+#: half a coverage TRIGGER reads as a demonstrated successor and `run_s4` is
+#: deleted on it.
+SUCCESSOR_TWO_HALVES = (
+    ("TORTOISE_PARTIAL_GAP_FILL",
+     "the record must name the `#11534` stage's own flag: without it the record "
+     "reads as 'no ADD-capable stage exists', which this file falsifies"),
+    ("ADD-from-an-uncovered-span",
+     "the pre-condition is met for ONE class of gap only; dropping the class "
+     "turns 'met' into a claim the operator measurement refutes"),
+    ("ADD-by-generalisation",
+     "and dropping the UNMET class lets a coverage trigger pass for a "
+     "demonstrated successor"),
+    ("NOT measured",
+     "S2.2b's OWN yield is unmeasured (it needs live sessions and a key); a "
+     "record that claims the stage's yield is the pre-condition met is "
+     "claiming a measurement nobody took"),
+)
+#: The two clauses the record carried BEFORE this fix, pinned as ABSENCES. A
+#: required-literal list can only demand text, never forbid it — and the review
+#: finding here was text that had to GO: the record asserted both clauses while
+#: the design doc had already been amended to the two-half statement.
+SUCCESSOR_REVIVED_CLAIMS = (
+    ("REMEDY half is unimplemented",
+     "the fold's remedy half IS implemented for the coverage class "
+     "(`run_partial_gap_fill`, DEFAULT OFF) — a record calling it unimplemented "
+     "sends a lane to build what this file ships"),
+    ("absence of that stage",
+     "the stage EXISTS in this file, and the guard that sentence pointed at can "
+     "no longer pin an absence — it pins the two-half record instead, so the "
+     "clause was false in both of its halves"),
+)
 #: The SCOPE the successor conclusion must carry. `run_s4` is itself a shipped
 #: stage that emits exactly the candidates a coverage check found missing, so an
 #: unqualified "no shipped stage can emit …" universal denies the capability its
@@ -1383,6 +1434,11 @@ def _successor_clause_violations(doc: str) -> list[str]:
     two stages, the COVERAGE half that only detects, the Rule-4 restore that
     makes an unqualified "only REMOVES" false, and the SCOPE that makes the
     conclusion's universal true of the FOLD rather than of every shipped stage.
+
+    The round-6 review added the OTHER direction: `SUCCESSOR_TWO_HALVES` (the
+    `#11534` stage exists and covers one of the two gap classes) and
+    `SUCCESSOR_REVIVED_CLAIMS` (the two false clauses this head deleted, which a
+    required-literal list structurally cannot forbid).
     """
     problems: list[str] = []
     if SUCCESSOR_ABSENT not in doc:
@@ -1423,6 +1479,15 @@ def _successor_clause_violations(doc: str) -> list[str]:
     ):
         if required not in doc:
             problems.append(f"the record lost {required!r}: {why}")
+    for required, why in SUCCESSOR_TWO_HALVES:
+        if required not in doc:
+            problems.append(f"the record lost {required!r}: {why}")
+    for forbidden, why in SUCCESSOR_REVIVED_CLAIMS:
+        if forbidden in doc:
+            problems.append(
+                f"the record states {forbidden!r} again: {why} — this is the "
+                "claim the round-6 review found FALSE at `06052ea0dd9e`, and "
+                "the guard stayed green over it")
     return problems
 
 
@@ -1784,6 +1849,41 @@ def test_the_successor_checks_red_on_the_mutations_they_exist_to_catch():
         "`run_s4` is the shipped gap-filler, so the unscoped sentence "
         "contradicts its own next clause"
     )
+
+    # ⛔ THE PRE-FIX RECORD, reproduced from `06052ea0dd9e`. The round-6 review
+    # (P2) found the record asserting these two clauses while the design doc had
+    # already been amended to the two-half statement, and EVERY check above
+    # stayed green on them — the false PASS this arm exists to prevent. Each
+    # revival replaces the sentence that superseded it, verbatim, so the arm is
+    # a reproduction and not a synthetic insert.
+    for pre_fix, superseded in (
+        ("Presence is not sufficiency either: the fold's REMEDY half is "
+         "unimplemented in\nboth.",
+         "so neither of them satisfies the removal pre-condition stated "
+         "below."),
+        ("but the absence of that stage is pinned by",
+         "and not the absence of the stage, because this file now ships"),
+    ):
+        assert superseded in doc, (
+            f"the arm's anchor moved — re-point it at the sentence that "
+            f"superseded {pre_fix!r}")
+        revived = doc.replace(superseded, pre_fix)
+        assert revived != doc, "the revival mutation did not apply"
+        assert _successor_clause_violations(revived), (
+            f"reviving the pre-fix clause {pre_fix!r} must red this check: it "
+            "is the exact claim the round-6 review found false at "
+            "`06052ea0dd9e` while the guard was green")
+
+    # And the two-half record itself: dropping either class, the stage's flag,
+    # or the unmeasured-yield hedge must red — each half alone is a different
+    # wrong answer ("no ADD stage exists" vs "the successor landed").
+    for required, _why in SUCCESSOR_TWO_HALVES:
+        dropped = doc.replace(required, "")
+        assert dropped != doc, (
+            f"the two-half pin {required!r} is not in the record — re-point it "
+            "at the sentence that carries the claim")
+        assert _successor_clause_violations(dropped), (
+            f"dropping {required!r} from the record must red this check")
 
     marker = _marker_block()
     assert not _marker_successor_violations(marker), (

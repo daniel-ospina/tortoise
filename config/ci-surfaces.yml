@@ -3971,7 +3971,13 @@ surfaces:
   # the file re-derives the detector's flag rate and its recall against S4's own
   # `added_items` from the committed receipts + `ab-*.json` artifacts, so a
   # receipt or artifact that is retargeted makes the pins measure something else
-  # and the guard test says so first. `tortoise/vet_gate.py` and
+  # and the guard test says so first. That "says so first" is a property of the
+  # SELECTOR, not of this comment: it comes from the
+  # `docs/evidence/1789-s4-reeemit-tax/` entry in `CORE_ALSO`
+  # (`tools/ci_selection.py`) — without it an artifact-only diff takes the
+  # docs-only early return — and it is pinned from this suite's side by
+  # tests/test_ci_selection.py::test_the_11534_evidence_artifacts_select_the_pins_that_read_them.
+  # `tortoise/vet_gate.py` and
   # `tortoise/extractor_v2.py` are both source entries, so this row is what makes
   # the suite run on a detector-only diff. Hermetic — a prompt-keyed stub model
   # and in-process pipeline calls through `extract_session_v2`, plus reads of the

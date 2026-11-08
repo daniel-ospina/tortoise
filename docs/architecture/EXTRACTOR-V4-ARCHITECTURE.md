@@ -715,35 +715,24 @@ unfirable (block at the top of §10).
 > the very capability the dash clause says is lost, since `run_s4` *is* a shipped stage. The
 > pre-condition for removal is a stage that can ADD; building it is the migration deliverable.
 >
-> ⛔ **WHAT `#11534` MEASURED IS THE TRIGGER, NOT THE STAGE — do not read the next number as a stage
-> yield.** The PR ships two pieces inside S2.2: the DETECTOR `vet_gate.partial_gaps`, and its consumer
-> `S2.2b` (`run_partial_gap_fill`, armed OFF). On the F3 population the **detector** flags a span
-> whose tokens overlap **8 of the 12 `points`** and **1 of the 9 `operators`** that `run_s4` adds —
-> and the operator misses are not uncovered prose: an operator addition GENERALISES an
-> already-covered statement at a higher abstraction, survives the coverage gate, and is unreachable by
-> a coverage detector by construction. So a coverage **trigger** reaches the coverage half of S4's
-> additions and structurally cannot reach the generalisation half.
-> **`S2.2b`'s own yield is NOT measured**: it depends on whether a model handed a flagged span emits
-> the right item, which needs live sessions and a key. The precondition for removing `run_s4` is
-> therefore met for the *coverage class* of gap only, by a trigger — not by a demonstrated stage. The
-> flag rate, the per-session read-through and the explicit bounds are
+> ⛔ **WHAT `#11534` MEASURED IS THE TRIGGER, NOT THE STAGE — and it covers ONE of the two gap
+> classes.** The PR ships two pieces inside S2.2: the DETECTOR `vet_gate.partial_gaps` — the
+> statement/clause coverage detector `check_batch` now reports (a char span into the narrative, so a
+> re-extraction has an address to read; it needs no `#2684` span layer) — and its consumer `S2.2b`
+> (`extractor_v2.run_partial_gap_fill`, behind `TORTOISE_PARTIAL_GAP_FILL`, **default OFF**). On the
+> F3 population (the seven recorded sessions) the **trigger** flags a span whose tokens overlap **8 of
+> the 12 `points`** and **1 of the 9 `operators`** that `run_s4` adds. The operator half is not a
+> tuning problem — an operator addition GENERALISES a claim the batch already carries ("a retry path
+> that does not re-establish ownership … defeats any downstream completion check"), so no narrative
+> span is uncovered even though the item is new, and a coverage detector cannot reach it by
+> construction. **So the pre-condition above is met for ADD-from-an-uncovered-span and is NOT met for
+> ADD-by-generalisation**, and `run_s4`'s removal therefore stays gated on the second half.
+> **`S2.2b`'s own yield is NOT measured** — it depends on whether a model handed a flagged span emits
+> the right item, which needs live sessions and a key, so the coverage half is met by a *trigger*, not
+> by a demonstrated stage. The detector's own cost is measured too — 8.3% of 844 segments flagged,
+> with non-claims (headings, date fragments, asides) the dominant class — which is why the stage is
+> armed OFF. The flag rate, the per-session read-through and the explicit bounds are
 > `docs/evidence/11534-partial-gap/README.md` §4.
->
-> ⚠️ **THAT BUILD IS `#11534`'s, AND IT COVERS ONE OF THE TWO GAP CLASSES — not both.**
-> `S2.2b` (`extractor_v2.run_partial_gap_fill`, behind `TORTOISE_PARTIAL_GAP_FILL`, **default OFF**)
-> takes its targets from `vet_gate.partial_gaps` — the statement/clause coverage detector `check_batch`
-> now reports (a char span into the narrative, so a re-extraction has an address to read; it needs no
-> `#2684` span layer). The **trigger's** reach is measured on the F3 population, and the measurement is
-> the point: against the 12 point and 9 operator additions S4 makes across the seven recorded
-> sessions, a coverage trigger reaches **8 of 12 points and 1 of 9 operators**. The operator half is not a tuning problem —
-> an operator addition GENERALISES a claim the batch already carries ("a retry path that does not
-> re-establish ownership … defeats any downstream completion check"), so no narrative span is
-> uncovered even though the item is new, and a coverage detector cannot reach it by construction.
-> **So the pre-condition above is met for ADD-from-an-uncovered-span and is NOT met for
-> ADD-by-generalisation**, and `run_s4`'s removal therefore stays gated on the second half. The
-> detector's own cost is measured too — 8.3% of 844 segments flagged, with non-claims (headings, date
-> fragments, asides) the dominant class — which is why the stage is armed OFF. Evidence and the full
-> table: `docs/evidence/11534-partial-gap/README.md`.
 > (Pinned: `tests/test_extractor_v4_s4_stage_claims.py`.)
 >
 > **On the step *names*:** the code's own stages are **S1–S5** (`[S1] STORY SUMMARY` … `[S5] EMBED`, module
