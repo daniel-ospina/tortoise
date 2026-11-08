@@ -33,9 +33,10 @@ aboutObjects: "epic #5090, embed gate, vector index, unindexed embeddings, test-
    1,536 bytes are cost with no benefit. The rule that says so **is written** (`tortoise/embed_gate.py`) and
    it is **switched off** — nobody turned it on or measured the effect. **That is ours.**
 2. **Where do the numbers physically live?** **Not ours.** That is the storage architecture (`#4333`), and
-   the decision's home is §14.3. Its deciding input — the fraction of a tenant's stock the cache actually
-   holds — **cannot be measured today** (hosted capture is off by your 2026-10-14 ruling). So this epic
-   **carries** that decision as blocked and does not spend it.
+   the decision's home is §14.3. The input §17.4.6 names (`f`, the fraction of a tenant's stock the cache
+   actually holds) is **not an input** to the 2026-11-07 ruling (`docs/architecture/SEARCH-ARCHITECTURE.md` §1:
+   no decision rests on a measured proportion of our graph), so this epic
+   **carries** that decision as recorded in `STORAGE-ARCHITECTURE.md` §14.3 and worked in `#4051`, and does not spend it.
 
 **What is left for this epic is small, and every item is something nobody else owns:**
 
@@ -70,11 +71,11 @@ self-hosting (**owner: not now**), and compression (§15: no engine to apply it 
 
 | excluded | deferred to | why |
 |---|---|---|
-| **Where the vector index lives (V1)** | **§14.3** (decision home) · **`#4333`** (architecture) | Not this epic's — the changelog records `#5090` as a **consumer**. Its deciding input (`f`) is unmeasurable today (§17.4.6). |
+| **Where the vector index lives (V1)** | **§14.3** (decision home) · **`#4333`** (architecture) | Not this epic's — the changelog records `#5090` as a **consumer**. **V1 was answered 2026-11-07** on method grounds (`docs/architecture/SEARCH-ARCHITECTURE.md` §1); the input §17.4.6 names (`f`) is **not an input** to that ruling. |
 | Self-hosting FalkorDB | **D11** (`#4333`), **deferred** — and **owner, 2026-11-05: not now** | Owner, 2026-11-05, verbatim: *"we're not self-hosting flakorDB [sic] now. we have a lot of work that needs doing first"* — relayed at [#5090 comment 6669523691](https://github.com/daniel-ospina/tortoise/issues/5090#issuecomment-6669523691). Not in this epic's option set. |
 | Embedding compression / quantization | **§15's do-not-re-invent list** | *"no engine to apply it to"* — FalkorDB's stored form is `vecf32`. |
-| Filtered-ANN recall measurement | **V1's evidence, when V1 is taken** | It is evidence *for a move*. With no move planned, measuring it now is work with no consumer. Recorded in `02-research.md` so it is not lost. |
-| Creating indexes for the four unindexed labels | **V1** | It is V1's content, and it commits four further resident HNSW structures. The brief forbids it without a stated non-reversal; there is none. |
+| Filtered-ANN recall measurement | **`#4051`'s** (`SEARCH-ARCHITECTURE.md` §9 **M1**, a private-beta gate) | It is evidence *for a move*, and the location is decided (2026-11-07) — so the measurement leaves this epic, and it is not consumer-less. Recorded in `02-research.md` so it is not lost. |
+| Creating indexes for the four unindexed labels | **§14.3 V3** | It is V3's content (V1 settled only WHERE the index lives), and it commits four further resident HNSW structures. The brief forbids it without a stated non-reversal; there is none. |
 | Nothing evicts the cache | **`#10976`** (OPEN — `#11004` is its merged census PR) | **Egress.** |
 | Raw turns + narrative in the graph | **`#10000`** (`P0-blocker`) | **Ingress**; larger than this epic. |
 | The record's authority / arming | **`#7879`** · **`#9548`** | **Authority.** |
@@ -88,7 +89,9 @@ self-hosting (**owner: not now**), and compression (§15: no engine to apply it 
 **This epic owns the vector layer's RULE and its INSTRUMENTATION. It does not own the layer's PLACEMENT.**
 That cut is not tidiness — it is what stops a consumer epic spending an architecture decision by accretion,
 which is already happening: **`#10976`'s body says the vector index *"belongs in Postgres per §12.1c
-(#5090)"* and `#7879`'s body says *"vectors out"*, while §12.1c says `NOT DECIDED — owner's call`.** Two
+(#5090)"* and `#7879`'s body says *"vectors out"*, while §12.1c said `NOT DECIDED — owner's call` (it now says
+the location is DECIDED — Postgres, 2026-11-07 — so the reconcile target is `S3-VECTOR-CENSUS.md` §6, not
+"pending V1").** Two
 issues answering a question a third calls open, and nothing errors. Reconciling that is **S3's** stated
 work; deciding it is not.
 
@@ -139,7 +142,7 @@ across 8 modules, a cross-store join, two-boundary erasure, a mandatory offline 
 **Justified skip, stated as a skip:** for V1's evidence, `02-research.md` carries the external pass (graph
 filters post-filter ⇒ recall@10 **0.942 → 0.401 at 10 % selectivity**; `iterative_scan` recovering **0.847**
 at CPU/tail-latency cost; at **0.1 %** selectivity with *correlated* filters — ours are correlated — **0 rows
-in 683 ms** against a btree's 3.6 ms; **SIFT-128, 128-dim**, ours are **384-dim** — 1,536 is the stored *byte* width). It is parked with V1,
+in 683 ms** against a btree's 3.6 ms; **SIFT-128, 128-dim**, ours are **384-dim** — 1,536 is the stored *byte* width). It goes with `#4051`,
 where it will be used.
 
 ---
@@ -227,7 +230,7 @@ Ontology low · Accessibility low · Library-deps none.
 | # | previous | now | why |
 |---|---|---|---|
 | 1 | S3 = "decide V1: keep vs move, and implement" | **S3 = census the unretrievable vectors; removal carried with its surface-approval request** | V1's home is §14.3 and its architecture owner is `#4333`; the changelog records `#5090` as a **consumer**, and corrects a wrong owner. |
-| 2 | **E1** = filtered-ANN recall measurement | **removed** — parked with V1 | It is evidence *for a move*. No move is planned, so it has no consumer; measuring it now is work for a decision that is not being taken. |
+| 2 | **E1** = filtered-ANN recall measurement | **removed** — it moves to `#4051`, it is not parked | It is evidence *for a move*. The location is decided (2026-11-07) and the implementation is not — so the measurement leaves this epic's scope, but it is **not** consumer-less: its consumer is `SEARCH-ARCHITECTURE.md` §9 **M1** (*"whether the move ships"*), read with §6.1's shortfall assertion, which gates private-beta. |
 | 3 | Architecture **high on branch 2** | **low** | The branch is gone from scope. Flagged explicitly so `low` is not misread. |
 | 4 | Profit chain: "removable bytes ⇒ $1.32/tenant/month" | **deleted** | **Wrong model twice**: retained bytes are revenue (billing ruling), and the bill is provisioned RAM (§16.1). |
 | 5 | 6 items + 9 exclusions | **5 items + 12 exclusions** | Self-hosting, quantization, the recall measurement and V1 itself are now explicitly out, each with its home. |
@@ -239,7 +242,7 @@ Ontology low · Accessibility low · Library-deps none.
 ### 7.1 Stage 1 — align (`01-align.md`)
 
 **Cycle 1** — fresh context, `epic-align` prompt + 8 independent fact-checks with commands. **2 P0, 4 P1, 3 P2, 1 P3.** Incorporated: the `#9548` authorisation wording; the setup-time (not per-search) warning; `1 of 4` MET not 3-of-4; DoD row 2's omitted remainder; the `P0-blocker`s' matrix placement; A1's reasons; the profit recomputation; the four-vs-three label count; the `§14.3` register row; the 4-exist/6-walked surfaces.
-**Cycle 2** — corrections-only pass. **2 P1, 1 P3.** Incorporated: A1's sole surviving reason **falsified** (the doc row at `:1520` and the runtime warning both state the deferral) → **A1 re-argued on actionability and the decision changed from PROCEED to REPOINT**; the `§14.3` register correction **delivered for real** rather than pointed at a non-existent section; the `§0-preamble` mis-citation.
+**Cycle 2** — corrections-only pass. **2 P1, 1 P3.** Incorporated: A1's sole surviving reason **falsified** (the doc row at `STORAGE-ARCHITECTURE.md` §14.3 **V3** and the runtime warning both state the deferral) → **A1 re-argued on actionability and the decision changed from PROCEED to REPOINT**; the `§14.3` register correction **delivered for real** rather than pointed at a non-existent section; the `§0-preamble` mis-citation.
 
 ### 7.2 Stage 2 — research (`02-research.md`)
 
