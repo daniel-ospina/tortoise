@@ -232,7 +232,7 @@ def test_g3_a_same_kind_row_gets_a_second_node_not_a_self_loop(sdk):
     import pack_relation_census as census
 
     cache: dict[str, str] = {}
-    minted: set[str] = set()
+    minted: list[str] = []  # insertion-ordered: `_delete_minted` relies on MINT order
     src = census._mint_endpoint(sdk, "pm:card", cache, minted)
     dst = census._mint_endpoint(sdk, "pm:card", cache, minted, slot="dst")
     assert src != dst, (
