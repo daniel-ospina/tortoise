@@ -4,8 +4,9 @@
 WHY THIS IS IN THE TREE (and not in /tmp)
 -----------------------------------------
 The measurement this script produces is cited by `verdict-ledger.yml` rows U1/U2/U4
-(they cite `../step11-write-half-trace.txt`, which is the transcript THIS script
-emits — run it and the blocks match line for line, request echoes included).
+(they cite `../step11-write-half-trace.txt`, which is an edited excerpt of THIS
+script's output — run it and you get the same calls and the same verdicts; the
+trace wraps long lines and marks its own cuts, see its presentation note).
 An evidence artifact whose only reproduction path is a file on the authoring box is
 not evidence — a reviewer's clone cannot run it, and `tools/capstone_ledger.py`
 refuses a `cmd:` entry naming a path outside the tree. So the script lives beside
@@ -93,9 +94,9 @@ async def main() -> int:
         print(status, neg[:900], "\n")
 
         print("== 3. POSITIVE CONTROL — write into 'default', then read it back ==")
-        status, pos = await _call(session, "tortoise_create_point",
-                                  {"kind": "statement", "content": POS_TEXT})
-        print(status, pos[:300], "\n")
+        status_pos_w, pos = await _call(session, "tortoise_create_point",
+                                        {"kind": "statement", "content": POS_TEXT})
+        print(status_pos_w, pos[:300], "\n")
         status_pos, found = await _call(session, "tortoise_search",
                                         {"query": "positive control", "limit": 5})
         print(status_pos, found[:700], "\n")
@@ -110,15 +111,39 @@ async def main() -> int:
     # make "absent" mean something. Without it, a broken search on a fresh org
     # reports REFUSED-AND-ABSENT for a fail-open half nobody measured (caught by
     # review round 2).
+    #
+    # ⚠️ The control is tied to the POINT IT CREATED, not to a shape test on the
+    # response text (review round 4): a `_safe` failure reaches the client as a
+    # dict rendered as JSON text with is_error=False, so `pos.startswith("{")`
+    # accepted `{"error": …}` while the PREVIOUS run's control point was still in
+    # `default` to satisfy the search — a control that cannot fail. Requiring the
+    # returned id to be a string AND to appear in the search results closes it.
     negative_refused = neg.startswith("No graph") and NEG_GRAPH in neg
-    positive_write_ok = pos.startswith("{")           # create_point returns the point JSON
-    positive_found = status_pos == "OK" and POS_TEXT[:40] in found
+    pos_id = None
+    if status_pos_w == "OK" and pos.startswith("{"):
+        try:
+            # `raw_decode`, not `loads`: a successful create_point response is the
+            # point JSON FOLLOWED BY an advisory line ("… is this workspace's default
+            # graph ('default'). If another graph was meant, pass `graph` …"), which
+            # makes `loads` raise "Extra data". Measured on the live service; a strict
+            # `loads` here was a control that could never pass.
+            candidate, _ = json.JSONDecoder().raw_decode(pos)
+            raw_id = candidate.get("id") if isinstance(candidate, dict) else None
+            pos_id = raw_id if isinstance(raw_id, str) and raw_id else None
+        except json.JSONDecodeError:
+            pos_id = None
+    positive_write_ok = pos_id is not None
+    positive_found = (
+        status_pos == "OK" and pos_id is not None and pos_id in found
+        # a prior run's point must not stand in for this run's write
+        and POS_TEXT[:40] in found
+    )
     negative_absent = (
         status_neg == "OK"
         and NEG_TEXT[:40] not in absent
         # the control point proves the query space is live, so an empty-looking
         # result set is a real absence rather than a dead index
-        and POS_TEXT[:40] in absent
+        and pos_id is not None and pos_id in absent
     )
     ok = negative_refused and positive_write_ok and positive_found and negative_absent
     print(f"\ncontrols: refused={negative_refused} pos_write={positive_write_ok} "
