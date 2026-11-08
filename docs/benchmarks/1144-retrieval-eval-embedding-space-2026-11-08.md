@@ -37,7 +37,7 @@ seed 42:
 | tfidf | 0.828 | 0.918 | 0.097 | 0.820 |
 | **fused** | **0.462** | **0.526** | **0.054** | **0.587** |
 
-```
+```text
 gate vs baseline: BLOCK
   ΔnDCG@10 90% CI [-42.1, -32.5] points   (block band is < -4)
   ΔP@5     90% CI [-44.0, -35.4] points
