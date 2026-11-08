@@ -341,8 +341,7 @@ def test_one_judge_spec_serves_the_preflight_and_the_judge(monkeypatch):
     needs a live key to observe.
     """
     import tools.ask_spotcheck as _mod
-    from tools.longmem_eval.judge import (
-        DEFAULT_JUDGE_MODEL, OFFICIAL_JUDGE_MODEL)
+    from tools.longmem_eval.judge import DEFAULT_JUDGE_MODEL, OFFICIAL_JUDGE_MODEL
 
     monkeypatch.delenv("TORTOISE_LME_JUDGE_MODEL", raising=False)
     assert _mod._judge_spec() == OFFICIAL_JUDGE_MODEL
@@ -409,8 +408,7 @@ def test_probe_live_path_builds_the_judge_it_preflighted(monkeypatch, capsys):
     happened to be.
     """
     import tools.ask_spotcheck_probe as _probe
-    from tools.longmem_eval.judge import (
-        OFFICIAL_JUDGE_MODEL, ScriptedSemanticJudge)
+    from tools.longmem_eval.judge import OFFICIAL_JUDGE_MODEL, ScriptedSemanticJudge
 
     monkeypatch.delenv("TORTOISE_LME_JUDGE_MODEL", raising=False)
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
