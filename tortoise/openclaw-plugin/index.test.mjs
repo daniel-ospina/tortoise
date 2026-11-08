@@ -316,12 +316,18 @@ test("runHosted: posts the documented /v1/context contract, not a bare prompt", 
     return { ok: true, json: async () => ({ block: "hosted-block", pointers: [] }) };
   };
   try {
+    // A 300-char key: the hosted model caps `session_id` at 256
+    // (`tortoise/hosted_api.py`), and an over-long one 422s EVERY turn — which
+    // `!response.ok` turns into "" for the whole session. Driven through the
+    // HOSTED body on purpose: pinning only the exported helper leaves this leg
+    // free to drop the bound with every test still green (measured, review 3).
+    const longSessionId = "k".repeat(300);
     const block = await runHosted(
       "https://api.test.example/",
       "k",
       "what do we know?",
       500,
-      { sessionId: "s1", priorContext: "prev-block" },
+      { sessionId: longSessionId, priorContext: "prev-block" },
     );
     assert.equal(block, "hosted-block");
     assert.equal(seen.url, "https://api.test.example/v1/context");
@@ -330,11 +336,16 @@ test("runHosted: posts the documented /v1/context contract, not a bare prompt", 
     // `window` is REQUIRED by VolunteerContextRequest (tortoise/hosted_api.py):
     // the old `{prompt}` body is a 422, which the fail-open catch turns into a
     // silent no-injection with no signal at all.
-    assert.deepEqual(JSON.parse(seen.options.body), {
+    const body = JSON.parse(seen.options.body);
+    assert.deepEqual(body, {
       window: [{ role: "user", content: "what do we know?" }],
-      session_id: "s1",
+      session_id: longSessionId.slice(0, 256),
       prior_context: "prev-block",
     });
+    // The literal, not the constant: this is the bound the SERVER enforces, and
+    // the Python row pins the constant to the model. Together they close the
+    // loop; either one alone lets the pair drift.
+    assert.equal(body.session_id.length, 256);
   } finally {
     globalThis.fetch = realFetch;
   }
