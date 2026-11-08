@@ -630,6 +630,42 @@ def test_a_PARTIAL_measurement_cannot_be_narrowed_by_a_declaration(monkeypatch):
         assert any("MORE THAN ONE label" in n for n in row.notes), (stores, row.notes)
 
 
+def test_a_gated_writer_with_an_UNSINGLE_label_is_NAMED_not_just_held(monkeypatch):
+    """The `unexplained` note needs its own falsifier, or a `PARTIAL` can name nobody.
+
+    ⛔ Measured by the reviewer: replacing the `if unexplained:` block with a no-op left the whole
+    probe suite green, so the note that exists so a `PARTIAL` NAMES a `gated` writer whose own
+    Cypher yielded a plain `UNKNOWN` could be deleted with nothing red — while the verdict still
+    reads `PARTIAL` (via `unknown`) and therefore names nobody. That is the round-1 defect the row's
+    own comments cite as the reason the note exists. Its sibling branch ("MORE THAN ONE label") IS
+    pinned; this pins the other half AND the distinction between them, which the comments claim.
+    """
+    writers = {
+        # The shape this note owns: a GATED writer whose own Cypher named no single label.
+        "tortoise.x::_gated_unknown": {
+            "callee": probe.SEAM_CALL, "at": "tortoise/x.py:1",
+            "kind": "gated", "label": "UNKNOWN", "callees": frozenset(),
+        },
+        # The shape it must NOT own: a two-label label is a MEASUREMENT (its own note).
+        "tortoise.y::_two_labels": {
+            "callee": probe.SEAM_CALL, "at": "tortoise/y.py:2",
+            "kind": "gated", "label": "UNKNOWN(two labels: Batch, Point)",
+            "callees": frozenset(),
+        },
+    }
+    monkeypatch.setattr(probe, "embedding_writers", lambda: writers)
+    monkeypatch.setattr(probe, "declared_writers", lambda: {})
+    row = probe.score_path_bullet()
+    assert row.verdict == "PARTIAL", row.observed
+    unexplained = [n for n in row.notes if "does not resolve from a declaration" in n]
+    assert unexplained, f"the plain-UNKNOWN gated writer must be NAMED: {row.notes}"
+    assert "tortoise.x::_gated_unknown" in unexplained[0], unexplained
+    assert "tortoise.y::_two_labels" not in unexplained[0], (
+        f"a two-label MEASUREMENT belongs to its own note, not this one: {unexplained}")
+    assert any("MORE THAN ONE label" in n and "tortoise.y::_two_labels" in n
+               for n in row.notes), row.notes
+
+
 def test_a_runtime_label_declaration_holds_row_two_without_calling_it_unresolved(monkeypatch):
     """`#11492` — `labels-at-runtime` holds the row, and it is NOT the "unresolved writers" hold.
 

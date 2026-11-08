@@ -321,18 +321,21 @@ assertion measures.
 ```text
 $ uv run python tools/test_lane.py run -- tests/test_dod_5090_probe.py -q
 121 passed, 1 skipped in 42.50s   # the #11088 transcript this row was cut from
-                                 # this tree: 162 collected, 161 passed, 1 skipped
+                                 # this tree: 163 collected, 162 passed, 1 skipped
 ```
 
-(115 collected before #11088's round 7; the file collects **162 in the tree this document sits in** —
+(115 collected before #11088's round 7; the file collects **163 in the tree this document sits in** —
 nine added by #11337, with `main` at 122, nineteen added by `#11444`'s writer-register falsifiers, one
-by `#11471`'s GATED-writer bypass arm, and ELEVEN by `#11492` (`122 + 9 + 19 + 1 + 11 = 162`):
-eight row-2 register tests, one that holds the row on a census `bypass` even when the register
-RESOLVES that writer, one that pins the LIVE reader's `stores` plumbing (the product-register →
-reader seam every injected fixture skipped), and one that holds a declaration CONTRADICTING the
-writer's own Cypher — plus the PARTIAL-measurement hold and the gated-writer / direct-store-shape
-pins — and
-reads 161 passed, 1 skipped on the docker lane. The
+by `#11471`'s GATED-writer bypass arm, and twelve by `#11492` (`122 + 9 + 19 + 1 + 12 = 163`): seven
+row-2 resolution pins (register resolves every writer; the unserved-label falsifier; the
+derived-label-wins arm; the runtime-label hold; the unreadable register holding as `UNMEASURED`; the
+malformed-`stores` hold; the register's own `bypass` hold), one that holds the row on a census
+`bypass` even when the register RESOLVES that writer, one that stops a declaration narrowing a
+`PARTIAL` two-label MEASUREMENT, one that holds a declaration CONTRADICTING the writer's own Cypher,
+one that pins the LIVE reader's `stores` plumbing (the product-register → reader seam every injected
+fixture skipped), and one that pins the `unexplained` note itself so a `PARTIAL` cannot name nobody —
+and
+reads 162 passed, 1 skipped on the docker lane. The
 skip is the `<3.12` re-derive. ⚠️ The count is bound to THIS TREE, never to a branch head: a figure
 stated as *"at #11337's head"* is stale against the same tree it sits in as soon as one more test is
 added, and `test_the_census_doc_collects_what_the_file_collects` re-derives it from the file's own
