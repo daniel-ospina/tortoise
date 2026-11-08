@@ -129,9 +129,17 @@
 #         short-circuits the `&&` so no later segment ran. A `cd` that RESOLVES is
 #         therefore admitted even outside the tree — the artifact rule still refuses
 #         anything a moved `cwd` could not resolve INSIDE it, so `cd /tmp && uv run
-#         pytest tests/x` names nothing. ALL the `cd` options (`-P`, `-L`, `-e`, `-@`,
-#         `--`, in any combination) are stripped first so every spelling of one
-#         destination grades identically; a `cd` with NO directory operand (`cd --` is
+#         pytest tests/x` names nothing. The `cd` options are stripped first so that
+#         every spelling of one destination grades identically — and the group is
+#         `-[PLe]+` or `--`, with groups SEPARATED BY WHITESPACE, because bash does
+#         not merge them: `cd -PL tests` is rc 0 but `cd -P-L tests` is rc 2
+#         (`cd: --: invalid option`), and treating a merged form as two groups
+#         ADMITTED a record for a command that never ran. ⛔ `-@` is NOT stripped: it
+#         is documented in bash's usage line but REJECTED at run time on the Linux
+#         builds this fleet runs (`cd -@ tests` → rc 2), so admitting it would be the
+#         same false PASS in the other direction; a record spelling it is refused.
+#         The target is then quote-unwrapped with `shlex`, so `cd [opts] "dir"` and
+#         `cd [opts] dir` grade alike. A `cd` with NO directory operand (`cd --` is
 #         `$HOME`, `cd -` is `$OLDPWD`) is REFUSED, because its working directory
 #         cannot be known and a later artifact graded from the unmoved directory
 #         would admit a record for a command the shell runs elsewhere.

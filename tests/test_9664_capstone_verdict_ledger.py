@@ -1939,6 +1939,64 @@ def test_a_stacked_cd_option_group_is_stripped_not_skipped(tmp_path):
         )
 
 
+def test_an_exit_that_is_not_the_last_segment_is_refused(tmp_path):
+    """`exit` TERMINATES the shell, so a later segment provably never ran.
+
+    ⛔ MEASURED false PASS (eighth review cycle): admitting `exit` as a harmless
+    wrapper let `cmd:exit 0 ; uv run pytest …` and `cmd:exit 0 || uv run pytest …`
+    reach `verified` / `uncovered: 0` / `CAPSTONE-LEDGER-RESULT: CLEAN` / exit 0,
+    while `bash -c 'exit 0 ; echo RAN-AFTER'` prints NOTHING — the runner was never
+    reached. `origin/main` refuses both. This is the unconditional form of exactly
+    what the `cd` guard beside it closes.
+
+    `return` is NOT the same: at script level bash prints an error and CONTINUES
+    (measured: `bash -c 'return 0 ; echo RAN-AFTER'` prints RAN-AFTER), so it is
+    deliberately not position-restricted.
+    """
+    for command in (
+        "cmd:exit 0 ; uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
+        "cmd:exit 0 || uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
+        "cmd:exit 1 && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
+    ):
+        proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, command])]))
+        assert proc.returncode == cl.EXIT_INVALID, (
+            f"{command!r} was ACCEPTED ({proc.returncode}) — `exit` ends the shell, so "
+            f"the runner after it never ran\n{proc.stdout}{proc.stderr}"
+        )
+    # A TRAILING `exit` is the spelling this repo actually records, and stays legal.
+    for tail in (" || exit 1", " ; exit $?", " && exit 0", " || exit"):
+        command = "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q" + tail
+        proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, command])]))
+        assert proc.returncode == cl.EXIT_CLEAN, (
+            f"{command!r} was REFUSED ({proc.returncode}) — a TRAILING exit is legal\n"
+            f"{proc.stdout}{proc.stderr}"
+        )
+
+
+def test_a_quoted_cd_target_grades_like_an_unquoted_one(tmp_path):
+    """`cd -L "tests"` is `cd tests`; quoting the path is ordinary shell.
+
+    ⛔ MEASURED false block (eighth review cycle): quote characters were stripped off
+    the WHOLE target BEFORE the options came off, so `cd -L "tests"` lost only its
+    trailing quote and kept a literal leading one, failing `is_dir()` with "does not
+    name a directory" — while `bash -c 'cd -L "tests"'` is rc 0. The target is now
+    quote-unwrapped with `shlex` AFTER the option strip. The artifact cited below is
+    one that genuinely resolves from the moved `cwd`; the cd, not the artifact, is
+    what is under test.
+    """
+    for command in (
+        'cmd:cd -L "tests" && uv run pytest test_9664_capstone_verdict_ledger.py -q',
+        "cmd:cd -P 'tests' && uv run pytest test_9664_capstone_verdict_ledger.py -q",
+        'cmd:cd -- "tests" && uv run pytest test_9664_capstone_verdict_ledger.py -q',
+        'cmd:cd -PL "tests" && uv run pytest test_9664_capstone_verdict_ledger.py -q',
+    ):
+        proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, command])]))
+        assert proc.returncode == cl.EXIT_CLEAN, (
+            f"{command!r} was REFUSED ({proc.returncode}) — a quoted target must grade "
+            f"like an unquoted one\n{proc.stdout}{proc.stderr}"
+        )
+
+
 def test_a_cd_with_no_resolvable_directory_is_refused(tmp_path):
     """`cd --` is `$HOME` and `cd -` is `$OLDPWD`: neither cwd can be known.
 

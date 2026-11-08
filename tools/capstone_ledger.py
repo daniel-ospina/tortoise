@@ -1440,13 +1440,16 @@ def _command_body(raw: str, base: Path, root: Path) -> tuple[str, Path, str]:
     # are accepted. Closing it by grading every runner segment false-blocked
     # `… && git status --short`, so it is tracked rather than bought at that price.
     segments = [segment.strip() for segment in _split_segments(text)]
+    #: Index of the LAST non-empty segment. A TERMINATING control builtin (`exit`)
+    #: is only sound in that position — see the `exit` guard in the loop below.
+    _last_used = max((i for i, seg in enumerate(segments) if seg), default=-1)
     # The directory the graded command runs in: `cd X && …` moves it, and a later
     # `cd` moves it again. Resolved against `root` only, so a `cd ../../..` cannot
     # walk the check out of the tree.
     cwd = base
     command: str | None = None
     command_cwd = base
-    for segment in segments:
+    for index, segment in enumerate(segments):
         if not segment:
             continue
         # Drop any number of leading `NAME=value` assignments ON THE STRING: they
@@ -1467,7 +1470,7 @@ def _command_body(raw: str, base: Path, root: Path) -> tuple[str, Path, str]:
         # directory the following segment is graded in.
         cd = _CD_SEGMENT.match(body)
         if cd:
-            target = cd.group(1).strip().strip("'\"")
+            target = cd.group(1).strip()
             # ⛔ STRIP THE OPTIONS, so every spelling of one destination grades
             # identically. `cd -P /tmp`, `cd -PL /tmp` and `cd /tmp` all mean /tmp.
             # ⛔ `\s+` BETWEEN GROUPS IS LOAD-BEARING. Allowing a zero-width separator
@@ -1482,6 +1485,24 @@ def _command_body(raw: str, base: Path, root: Path) -> tuple[str, Path, str]:
             # `-[PLe]+` or `--` and groups are SEPARATED BY WHITESPACE; anything else
             # dashed is left in the target and refused below.
             target = re.sub(r"^(?:(?:-[PLe]+|--)\s+)+", "", target).strip()
+            # ⛔ UNWRAP THE QUOTES AFTER the option strip, never before. Stripping
+            # quote characters off the WHOLE target first ran before the options came
+            # off, so `cd -L "tests"` lost only its TRAILING quote and kept a
+            # literal leading one, failing `is_dir()` — a false block on an ordinary
+            # record (eighth review cycle; `origin/main` accepted it and
+            # `bash -c 'cd -L "tests"'` is rc 0). `shlex` yields exactly the ONE word
+            # the shell would hand to `cd`, so `cd [opts] "dir"` and `cd [opts] dir`
+            # now grade identically.
+            try:
+                words = shlex.split(target)
+            except ValueError:
+                words = [target]
+            if len(words) == 1:
+                target = words[0]
+            elif len(words) > 1:
+                # An unquoted space is not a valid single `cd` operand; keep it whole
+                # so the directory test fails rather than silently taking words[0].
+                target = " ".join(words)
             # ⛔ A target that is STILL empty or dashed has an UNKNOWABLE working
             # directory (`cd --` is `$HOME`, `cd -` is `$OLDPWD`, and an unrecognised
             # option is neither). Grading a later artifact from the unmoved `cwd`
@@ -1566,6 +1587,25 @@ def _command_body(raw: str, base: Path, root: Path) -> tuple[str, Path, str]:
             # the path component is empty; every other head resolves as before.
             head = Path(_tokens[0]).name or _tokens[0]
             if head in _WRAPPER_VERBS or head in _DECORATIVE:
+                # ⛔ `exit` TERMINATES THE SHELL, so no LATER segment can have run.
+                # Admitting it as a harmless wrapper made `cmd:exit 0 ; uv run pytest
+                # …` and `cmd:exit 0 || uv run pytest …` reach `verified` /
+                # `uncovered: 0` / exit 0 while bash proves the runner was never
+                # reached (`bash -c 'exit 0 ; echo RAN-AFTER'` prints nothing) — a
+                # false PASS of exactly the class the `cd` guard beside it closes
+                # (eighth review cycle; `origin/main` refuses both). A TRAILING
+                # `… ; exit $?` / `… || exit 1` stays legal, which is the spelling
+                # this repo actually records. `return` is NOT terminating here: at
+                # script level bash prints an error and CONTINUES (measured:
+                # `bash -c 'return 0 ; echo RAN-AFTER'` prints RAN-AFTER).
+                if head == "exit" and index != _last_used:
+                    return (
+                        "",
+                        base,
+                        f"the `exit` segment {segment!r} TERMINATES the shell, so no "
+                        "later segment of this record can have run — `exit` may only "
+                        "be the LAST segment",
+                    )
                 # ⛔ The HEAD alone is not enough: read the wrapper's own arguments
                 # (see `_wrapper_argument_defect` for the measured bypass this
                 # closes, and for the decorative-printer residual it cannot).
