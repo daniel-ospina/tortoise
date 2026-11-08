@@ -140,9 +140,22 @@ STATED LIMITS — deliberate, and measured rather than guessed:
     landed on, one such live citation exists —
     ``docs/research/2026-09-01-gbrain-learnings/platform-seams.md`` cites
     ``platform-landscape.md:192-193``, an in-scope target, and the guard never
-    looks at it. What this instrument covers is "every pointer written in the
-    two forms above", not "every `:NN` pointer into ``docs/scoping/`` and
-    ``docs/research/``".
+    looks at it. What this instrument covers is "every pointer written ON ONE
+    LINE in the two forms above", not "every `:NN` pointer into
+    ``docs/scoping/`` and ``docs/research/``".
+  * ONE LINE is a real limit, not a formality: both regexes require the colon and
+    the digits to be contiguous, and the scan reads `text.splitlines()`, so a
+    pointer WRAPPED after its colon (``…-265-content-encryption-scoping.md:`` and
+    ``128`` on the next line) is never seen and a dead target behind a wrap stays
+    green. Measured at the head this paragraph was written on: **4** `docs/**/*.md`
+    lines end exactly at a pointer colon and in all four the next line begins with
+    prose, so **0** wrapped pointers exist in this tree today and nothing here is
+    red-adjacent. Re-derive it rather than trusting either number — scan for
+    lines whose last token is `…<name>.md:` or `(scoping|research):` and look at
+    the line that follows. Widening the scan to tolerate a wrap is a follow-up,
+    not a silent gap: it needs its own non-vacuity case, and the honest move until
+    then is to state the boundary rather than claim a coverage that a one-character
+    line break defeats.
   * The CITING side is `docs/**/*.md` only (`docs.rglob`). This instrument never
     reads a pointer written inside a `.py` docstring or comment — including one
     of the three policy quotes above, which lives in `tortoise/hosted_api.py` — so
