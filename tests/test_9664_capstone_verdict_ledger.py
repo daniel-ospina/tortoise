@@ -931,11 +931,15 @@ def test_committed_ledger_exits_uncovered():
 def test_committed_ledger_quotes_every_criterion_verbatim():
     """A paraphrased criterion drifts from the thing being accepted.
 
-    The issue body is not readable offline, so the floor is pinned in two layers:
-    a structural one (non-empty, not a shorthand label) and — the layer that
-    actually catches a defect — a distinctive fragment per row, quoted from
-    #9664's own body. A row that shortens or rewrites the cell it quotes loses
-    its needle and fails here.
+    This test is the STRUCTURAL floor only: non-empty, and not a shorthand label.
+    It catches a blank or a placeholder, nothing finer — do not read it as proof
+    that the text is verbatim. (An earlier docstring here claimed a second layer of
+    "distinctive fragment per row" inside this function; the body never had one, and
+    the assertion it does make is close to unfailable.)
+
+    The layer that actually catches a rewrite is
+    `test_committed_ledger_keeps_each_criterion_cell`, which pins a distinctive
+    fragment of every row against `EXPECTED_TEXT_NEEDLES`.
     """
     rows = cl.validate(cl.load_ledger(LEDGER))
     for row in rows:
@@ -981,24 +985,56 @@ def test_a_prose_cmd_is_refused_beside_a_held_artifact(tmp_path):
 @pytest.mark.parametrize(
     "command",
     [
-        # ⛔ These pin `_command_body`'s NORMALISATIONS, each of which was
-        # mutation-tested as UNPINNED: reverting the backtick unwrap, the leading
-        # `NAME=value` strip, or the `cd`-aware cwd each left the whole suite green
-        # while the shape gate false-blocked a real record. A false block is exit 1,
-        # and exit 1 computes NOTHING — it hides every uncovered row.
+        # ⛔ These pin `_command_body`'s NORMALISATIONS, each mutation-tested: a revert
+        # leaves the whole suite green while the shape gate false-blocks a real
+        # record, and a false block is exit 1, which computes NOTHING — it hides
+        # every uncovered row.
         "cmd:`uv run pytest tests/test_9664_capstone_verdict_ledger.py -q`",
         "cmd:TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
         "cmd:TORTOISE_DB_URI='docker://:f@localhost:6379/x' uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
+        # The strip is a LOOP, not one substitution: a record may set several
+        # variables. A single-assignment case is also satisfied by the fallback
+        # path, so it does NOT pin the loop and this one does.
+        "cmd:TORTOISE_DB_URI='docker://:f@h:1/x' TORTOISE_TEST_CARVE_OUT=1 "
+        "uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
         # `cd` moves the cwd: `../tests/...` only resolves INSIDE tools/, so a
         # validator that dropped the `cd` and resolved at the root refuses it.
         "cmd:cd tools && uv run pytest ../tests/test_9664_capstone_verdict_ledger.py -q",
         "cmd:cd tools && uv run python capstone_ledger.py check",
+        # An assignment AFTER the `cd`, which is how the recipes in `AGENTS.md`
+        # actually spell it.
+        "cmd:cd tools && FOO=1 uv run pytest ../tests/test_9664_capstone_verdict_ledger.py -q",
+        # A glob relative to the `cd` target: the prefix must be resolved where the
+        # command RAN, or a legitimate record is refused.
+        "cmd:cd docs && uv run python evidence/9664-capstone/*.md",
+        "cmd:cd tools && uv run python ../docs/evidence/*/README.md",
     ],
 )
 def test_a_wrapped_command_is_not_a_false_block(tmp_path, command):
     """The shell WRAPPER around a real command must not invalidate the record."""
     proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, command])]))
     assert proc.returncode == cl.EXIT_CLEAN, (command, proc.stdout + proc.stderr)
+
+
+def test_a_command_after_prose_is_refused(tmp_path):
+    """⛔ THE ENTRY MUST *START* WITH A RUNNER — a real command after prose is not enough.
+
+    Scanning later segments for a runner made the arm's headline claim false:
+    measured, `cmd:NOT RUN - see tools/capstone_ledger.py && uv run pytest
+    tests/x.py -q` was ACCEPTED, because segment 0 is prose and segment 1 is a real
+    command. That is the shell form this artifact exists to refuse. Only `cd …` and
+    `NAME=value` may precede the runner, and both are normalised away first, so
+    `cd tools && uv run …` and `uv run … && echo PASS` are unaffected.
+    """
+    for command in [
+        "cmd:NOT RUN - see tools/capstone_ledger.py && uv run pytest "
+        "tests/test_9664_capstone_verdict_ledger.py -q",
+        "cmd:verified manually by reading pyproject.toml && uv run pytest "
+        "tests/test_9664_capstone_verdict_ledger.py -q",
+    ]:
+        proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, command])]))
+        assert proc.returncode == cl.EXIT_INVALID, (command, proc.stdout + proc.stderr)
+        assert "must START with a program that runs something" in proc.stderr, proc.stderr
 
 
 def test_a_script_containing_a_quoted_and_channel_is_accepted(tmp_path):

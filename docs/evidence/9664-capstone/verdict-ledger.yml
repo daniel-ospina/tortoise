@@ -38,8 +38,15 @@
 #   * `verified` requires at least one evidence entry that is a file **TRACKED by
 #     git** inside the tree. Described evidence does not count, and neither does a
 #     file that exists only on the authoring box (a gitignored lane artifact).
-#   * a `cmd:` entry is a RECORD of what was run and does NOT satisfy `verified` on
-#     its own — the tool never executes it. It is kept for the reader.
+#   * a `cmd:` entry is a RECORD of what was run: the tool never executes it, so it
+#     does NOT satisfy `verified` on its own. It is NOT free text either — it must be
+#     COMMAND-SHAPED, i.e. START with a program that runs something (`uv`, `python`,
+#     `pytest`, `bash`, `make`, …; the closed set is `RUNNERS` in the tool), after
+#     these wrappers are normalised away: surrounding backticks, leading
+#     `NAME=value` assignments, a `cd <dir> &&` prefix, and a `-c`/`-e` script body
+#     (graded as a command in its own right). A prose entry is REFUSED and takes the
+#     whole ledger with it (`cmd:NOT RUN - see tools/capstone_ledger.py` is the
+#     canonical example). Write the command, not a sentence about it.
 #   * `criteria_expected` (top level, REQUIRED) pins the denominator, so dropping a
 #     row without moving the count is a refusal.
 #   * YAML merge keys (`<<`) are refused: every row states its own verdict, and a

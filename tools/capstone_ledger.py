@@ -54,7 +54,10 @@ Record format (committed at `docs/evidence/9664-capstone/verdict-ledger.yml`):
         verdict: verified            # verified | failed | blocked | not-covered
         evidence: [<tracked repo path>, "cmd:<command>"]
                                     # >=1 TRACKED PATH required when verified;
-                                    # a `cmd:` entry is a RECORD and confers nothing
+                                    # a `cmd:` entry is a RECORD, confers nothing on
+                                    # its own, and must START with a program that
+                                    # runs something — prose is refused, and exit 1
+                                    # prints no uncovered list (see the RULES block)
         evidence_kind: screenshot    # screenshot | trace | command | server-observation
         reason: "<required unless verified>"
 
@@ -259,6 +262,21 @@ def load_ledger(path: Path) -> dict[str, Any]:
 #: command SHAPE (runner first) is what separates a command from a claim.
 #: Adding a runner is a one-line change; that is deliberate — the alternative is
 #: guessing at prose.
+#:
+#: ⛔ OVERRIDES: main's recorded decision in #11476 that a `cmd:` entry is
+#: "NON-EMPTY IS THE WHOLE CHECK — no token, shape or parse rule" — this branch
+#: reinstates a shape gate, because the non-empty rule leaves the false PASS the
+#: artifact exists to refuse open: one always-available tracked path plus
+#: `cmd:NOT RUN - see tools/capstone_ledger.py` validates a 22-row ledger at
+#: `uncovered: 0`, exit 0 (measured, and re-measured on `810eb838c`). #11476's own
+#: reasoning was that shape heuristics kept being defeated by one more shell form;
+#: the answer here is narrower than a heuristic and wider than nothing — the entry
+#: must START with a program that runs something, and the wrappers a real record
+#: carries are normalised away rather than parsed. #11476's warning still binds on
+#: this arm's DESIGN: every extra parse rule is a false-block risk, each one added
+#: here is pinned by a test, and the arm's residual (it does not prove the command
+#: RAN) is stated in `_evidence_is_real`. Recorded on #9664 as a comment so the
+#: departure is findable where the decision lives.
 RUNNERS: Final[frozenset[str]] = frozenset(
     {
         "uv",
@@ -374,7 +392,7 @@ _SCRIPT_FLAGS: Final[frozenset[str]] = frozenset({"-c", "-e", "--command", "--ev
 _WILDCARDS: Final = "*?["
 
 
-def _glob_names_a_directory(text: str, root: Path) -> bool:
+def _glob_names_a_directory(text: str, cwd: Path, root: Path) -> bool:
     """A glob may only count if it names a literal DIRECTORY inside the tree.
 
     `*` and `*.yml` resolve against the repo root, so they name *everything* and
@@ -396,6 +414,12 @@ def _glob_names_a_directory(text: str, root: Path) -> bool:
     above, one wildcard deep (measured: exit 0 on a one-row `verified` ledger).
     `docs/../tests/*.py` stays legal because its `..` sits
     inside the prefix that IS resolved.
+
+    `cwd` is the directory the command RAN in. The prefix must be resolved THERE,
+    because the enumeration below is `cwd.glob(text)`: resolving the prefix at the
+    root while globbing at `cwd` refused every correct `cd`-relative glob
+    (`cd docs && … evidence/9664-capstone/*.md` — the files exist and are tracked)
+    and, because that is exit 1, hid the whole uncovered list.
     """
     parts = [part for part in text.split("/") if part not in ("", ".")]
     if len(parts) < 2:
@@ -409,7 +433,7 @@ def _glob_names_a_directory(text: str, root: Path) -> bool:
         return False
     if any(part == ".." for part in parts[len(prefix) :]):
         return False
-    base = (root / Path(*prefix)).resolve()
+    base = (cwd / Path(*prefix)).resolve()
     return base.is_relative_to(root) and base != root and base.is_dir()
 
 
@@ -440,7 +464,7 @@ def _names_artifact(token: str, cwd: Path, root: Path) -> tuple[bool, str]:
                     f"the glob {text!r} is ABSOLUTE — a citation must name a pattern "
                     "inside this tree, and an absolute glob cannot be resolved against it"
                 )
-            if not _glob_names_a_directory(text, root):
+            if not _glob_names_a_directory(text, cwd, root):
                 return False, (
                     f"the glob {text!r} names no literal directory inside the tree, so "
                     "it names everything and therefore no artifact (a bare `*`/`*.yml`/"
@@ -795,7 +819,18 @@ def _command_body(raw: str, base: Path, root: Path) -> tuple[str, Path]:
                 continue
         if tokens and Path(tokens[0]).name in RUNNERS:
             return body, cwd
-    # No segment is runner-shaped. Return the first non-empty one so the error
+        # ⛔ THE COMMAND MUST *START* WITH A RUNNER, NOT MERELY CONTAIN ONE.
+        # Only `cd …` and `NAME=value` may precede it, and both were consumed above.
+        # Scanning later segments for a runner made the arm's headline claim false:
+        # measured, `cmd:NOT RUN - see tools/capstone_ledger.py && uv run pytest
+        # tests/x.py -q` was ACCEPTED, because segment 0 is prose and segment 1 is a
+        # real command. That is the shell form this artifact exists to refuse, and
+        # the documented rule ("must START with a program that runs something") is
+        # what the code now enforces. `cd tools && uv run …` and `uv run … && echo
+        # PASS` are unaffected: for both, the first non-wrapper segment IS the
+        # runner.
+        return body, cwd
+    # No segment at all (only wrappers). Return the first non-empty one so the error
     # message quotes what was actually refused rather than a fragment.
     for segment in segments:
         if segment:
