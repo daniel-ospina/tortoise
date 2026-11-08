@@ -527,8 +527,13 @@ def test_a_carried_source_is_sent_as_a_source_not_a_point():
 
 
 def test_a_carried_source_is_reached_by_the_writer(tmp_path):
-    """Round-5 blocking finding: the bundle carried Sources but the writer only
-    ever sent `points`, so a run reported success while writing none of them."""
+    """The PLAN → writer handoff for a Source, end to end (a re-run is idempotent).
+
+    Round-30: this docstring used to claim it pinned the round-5 defect. It does not —
+    `CountingWriter` echoes whatever sections it is handed, so a writer that only sent
+    `points` would still pass. That defect is pinned by
+    `test_the_wire_carries_the_sources_section_not_only_points`; this test pins the
+    handoff and the idempotency."""
     plan = C.build_plan([row("s1", node_type="source", kind="article", content="https://x/y")],
                         source_graph="old", target_graph="new", packs={})
     w = CountingWriter()
@@ -1743,3 +1748,57 @@ def test_the_graph_name_resolves_to_the_same_canonical_as_its_namespace():
     assert by_name is not None and by_name == by_ns
     with pytest.raises(C.CurationRefused):
         C.assert_distinct_graphs("live-v4", "org_3326_g_2b7e4c9d1a6f8035", graph_rows=rows)
+
+
+# ── round-30 review findings ──────────────────────────────────────────────
+
+
+def test_the_tenants_two_rows_cannot_hide_one_graph_behind_the_name_field():
+    """Round-30 BLOCKING: `_matched_row` matched `name` first-row-wins, so it returned
+    the SAME row for both refs and `ra is not rb` short-circuited the only clause that
+    could see the contradiction — `--graph g_t… --target default --apply` exited 0 and
+    wrote in place on the tenant graph."""
+    rows = [
+        {"stable_id": "g_t0000000000000", "name": "default"},   # the tenant graph
+        {"graph_id": "default", "namespace": "team_o1"},        # the SAME graph
+        {"namespace": "org_o1_g_deadbeefdeadbeef"},             # a real distinct graph
+    ]
+    with pytest.raises(C.CurationRefused, match=r"cannot prove|same graph"):
+        C.assert_distinct_graphs("g_t0000000000000", "default", graph_rows=rows)
+    # …and the resolution the clause now keys on is the one the canonical came from
+    assert C._matched_row("g_t0000000000000", rows) is rows[0]
+    assert C._matched_row("default", rows) is rows[1]
+
+
+def test_a_totals_move_on_a_SHRINKING_population_is_refused_without_the_verification_pass():
+    """Round-30: the round-14 fix (parse `total` even on an EMPTY final page) had no
+    discriminator — on the fixture named for it the short-read guard fires too, so
+    reverting the ordering left the suite green. Here the walk sees MORE rows than the
+    reported total (short-read cannot fire), so only the totals guard can refuse."""
+    mod = _tool_module()
+
+    def call(_name, args):
+        off = int(args.get("offset") or 0)
+        if off == 0:
+            return {"result": [{"id": f"p{i}", "kind": "decision", "content": str(i)}
+                               for i in range(4)], "total": 10}
+        # the population shrank to 2 BEFORE this page was read, so the page is EMPTY and
+        # its total is 2. The message is what discriminates: with the totals parse gated
+        # on a non-empty batch (the pre-round-14 ordering) this same fixture is refused
+        # by the SHORT-READ guard instead, so asserting the CAUSE is the only way the
+        # test can tell the two mechanisms apart.
+        return {"result": [], "total": 2}
+    with pytest.raises(RuntimeError, match=r"reported total changed"):
+        mod.MCPReader(call, None).read_points(page=4, verify=False)
+    with pytest.raises(RuntimeError, match=r"reported total changed"):
+        mod.MCPReader(call, None).read_points(page=4)      # verification pass on
+
+
+def test_an_undecodable_ledger_is_a_refusal_not_a_traceback(tmp_path):
+    """Round-30: `UnicodeDecodeError` comes from ITERATING the file, so it escaped the
+    per-line handler and `main()` died with a traceback instead of the documented
+    refusal."""
+    path = tmp_path / "l.jsonl"
+    path.write_bytes(b'{"target": "new", "migrationKey": "\xff\xfe"}\n')
+    with pytest.raises(C.CurationRefused, match=r"cannot be read"):
+        C.Ledger(path, target="new")

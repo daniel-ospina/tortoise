@@ -691,13 +691,32 @@ def _namespace_shaped(value: Any) -> bool:
 
 
 def _matched_row(ref: str, graph_rows: Sequence[Mapping[str, Any]]) -> Mapping[str, Any] | None:
-    """The single row that names ``ref`` in an identity field, or None."""
+    """The row ``ref`` RESOLVES through — the same one `canonical_graph_id` uses.
+
+    ⛔ Not "the first row that names the ref in any field". That version matched the
+    `name` field first-row-wins, so a row set could hand the two checks below the SAME
+    row for two different spells of ONE graph: `g_t0000000000000` resolved through
+    `{"stable_id": "g_t0000000000000", "name": "default"}` while `default` resolved
+    through `{"graph_id": "default", "namespace": "team_o1"}` — and because
+    `_matched_row` returned row 1 for BOTH, `ra is not rb` short-circuited the only
+    clause that could see the contradiction. Measured: `plan --graph g_t…
+    --target default --apply` exited 0 and issued the ingest, in place on the tenant
+    graph. The field order here mirrors `canonical_graph_id`: the three IDENTITY fields
+    first (skipping the `default` sentinel, which identifies nothing), and `name` only
+    when no identity field matched.
+    """
     wanted = (ref or "").strip().casefold()
+    if not wanted:
+        return None
     for row in graph_rows:
-        for fname in ("graph_id", "stable_id", "namespace", "name"):
+        for fname in ("graph_id", "stable_id", "namespace"):
             val = row.get(fname)
-            if val and str(val).casefold() == wanted:
-                return row
+            if not val or str(val).casefold() != wanted:
+                continue
+            return row
+    for row in graph_rows:
+        if (row.get("name") or "").casefold() == wanted:
+            return row
     return None
 
 
@@ -1030,7 +1049,10 @@ class Ledger:
                             "file (truncate to the last complete line) before re-running") from exc
         except FileNotFoundError:
             pass
-        except OSError as exc:
+        except (OSError, UnicodeDecodeError) as exc:
+            # ⛔ `UnicodeDecodeError` comes from ITERATING an undecodable file, so it is
+            # raised outside the per-line handler above and would escape `main()` as a
+            # traceback (exit 1) instead of the documented refusal + remedy.
             # `--ledger <a directory>` / an unreadable file: a usage error on the
             # operator's own path, so it owes the same refusal + remedy as a damaged
             # line rather than an IsADirectoryError traceback out of main().
