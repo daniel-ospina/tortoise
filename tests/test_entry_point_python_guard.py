@@ -1247,3 +1247,51 @@ def test_a_named_refusal_beats_an_internal_error_under_a_real_old_interpreter():
     assert "INTERNAL ERROR" not in message
     assert "AttributeError" not in message
     assert "requires Python >= 3.12" in message
+
+
+def test_the_site_icon_guard_names_an_invocation_that_actually_resolves(
+        monkeypatch, capsys):
+    """#11507 review (round 7) — the message's INVOCATION is a claim no leg read.
+
+    The census pins that a refusal names an invocation at all
+    (`test_guard_refuses_an_old_interpreter_and_passes_the_floor` asserts the
+    `uv run python <path>` prefix is present), and that prefix is satisfied by BOTH
+    the bare path and the `--help` form. Measured: reverting this tool's message to
+    the pre-fix bare path left the whole census at `536 passed, 2 skipped` — the one
+    unpinned claim of the change, and the one whose reversion ships the exact
+    SECOND unattributed error #5128 was filed for.
+
+    So it is pinned by PROVING the claim rather than by reading the string alone:
+    the form the refusal names must resolve, and the bare path must NOT — this tool
+    takes `--source` as `required=True`, so running it bare exits 2 on argparse's
+    own usage error. A future guard whose advice is a usage error reds here.
+    """
+    path = Path(__file__).resolve().parents[1] / "tools" / "build_site_icons.py"
+    guard = _guard_or_fail(path)
+    module = ast.Module(body=[guard], type_ignores=[])
+    ast.fix_missing_locations(module)
+    code = compile(module, _rel(path), "exec")
+
+    monkeypatch.setattr(sys, "version_info", (3, 11, 9))
+    with pytest.raises(SystemExit):
+        exec(code, {"__name__": "__main__", "sys": sys})
+    captured = capsys.readouterr()
+    message = captured.out + captured.err
+
+    assert "tools/build_site_icons.py --help" in message, (
+        "the refusal must name the `--help` form, which needs no `--source` "
+        f"token: {message!r}")
+
+    # The claim, proved rather than asserted: run what the message names, and the
+    # form it deliberately does NOT name.
+    resolved = subprocess.run([sys.executable, str(path), "--help"],
+                              capture_output=True, text=True)
+    assert resolved.returncode == 0, (
+        "the invocation the refusal names must resolve; it exited "
+        f"{resolved.returncode}: {resolved.stderr[-400:]!r}")
+    bare = subprocess.run([sys.executable, str(path)],
+                          capture_output=True, text=True)
+    assert bare.returncode == 2, (
+        "the bare path must stay a USAGE error (argparse, `--source` is "
+        f"required) — if it stops being one, this guard's advice is no longer the "
+        f"only form that resolves: rc={bare.returncode}, {bare.stderr[-300:]!r}")

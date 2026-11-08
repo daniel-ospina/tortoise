@@ -10710,8 +10710,9 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     document would either red on those or need a historical marker plus its exact
     cite list, i.e. more pinned surface than the claims this PR touches. This leg
     binds only what the PR re-derived, and it is discriminating in both directions:
-    re-staling a cite in the RECORD reds it, and an insertion in the CODE above the
-    cited line reds it too.
+    re-staling a cite in the RECORD reds it, and an insertion in the CODE above a
+    cited line reds it too — every arm pins its cited line EXACTLY (a range pins
+    both endpoints and its middle), never a window that a shift can slide inside.
     """
     record = _REPO / "docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md"
     text = record.read_text(encoding="utf-8")
@@ -10752,8 +10753,19 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     assert sdk[16530 - 1].strip() == "is_episodic=False)", (
         f"sdk.py:16530 reads {sdk[16530 - 1].strip()!r}, not the object arm's close")
 
-    # A5: the census query the "cannot observe the edge" gap rests on.
+    # A5: the census query the "cannot observe the edge" gap rests on. All THREE
+    # lines of the cited range are pinned, because the claim is the RANGE: the
+    # `g.query(` call opens it, the `MATCH` enumeration is its middle, and the
+    # anchored count closes it. A one-line insertion above the call therefore moves
+    # every endpoint and reds — a window test on the MATCH token alone did NOT
+    # (measured in review: one inserted line above :2724 left this arm GREEN while
+    # the record's `2724-2726` was stale at both ends).
     assert "`probes/capstone_measure.py:2724-2726`" in text
-    span = probe[2724 - 1:2726]
-    assert any("MATCH ()-[r]->() RETURN type(r)" in ln for ln in span), (
-        f"capstone_measure.py:2724-2726 carries {span!r}, not the relationship census")
+    assert probe[2724 - 1].strip() == "for name, count, anchored in projection.g.query(", (
+        f"capstone_measure.py:2724 reads {probe[2724 - 1].strip()!r}, not the census call")
+    assert "MATCH ()-[r]->() RETURN type(r)" in probe[2725 - 1], (
+        f"capstone_measure.py:2725 reads {probe[2725 - 1].strip()!r}, not the "
+        "relationship census query")
+    assert "count(r.sourceVersion)" in probe[2726 - 1], (
+        f"capstone_measure.py:2726 reads {probe[2726 - 1].strip()!r}, not the "
+        "anchored count that closes the query")
