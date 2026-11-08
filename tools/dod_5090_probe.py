@@ -1775,7 +1775,8 @@ def score_rule_bullet() -> Row:
 #: fifteen), and a label interpolated at runtime
 #: (`restore_graph`'s `(n:{safe_labels})`) — which is why `NO_LIVE_VECTOR` / `LABELS_AT_RUNTIME`
 #: exist. The two-label pair is NOT among them: `_event_plain_merge` and
-#: `_rebuild_all_replay` keep their `MERGE`s in their own bodies, which is why they derive two.
+#: `_rebuild_all_replay` keep their `MERGE`s in their own bodies, which is why their own Cypher
+#: NAMES two.
 #:
 #: So the register now DECLARES it (`WriterClass.stores`: a label tuple, or `NO_LIVE_VECTOR` /
 #: `LABELS_AT_RUNTIME`) and this row reads that declaration. Same shape as `#11444`, not a second

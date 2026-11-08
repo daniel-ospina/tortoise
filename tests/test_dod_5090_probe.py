@@ -442,12 +442,11 @@ def test_every_embedded_label_has_a_query_path():
 #: read, a read into a dict, comment PROSE (`_compare_views`, `_graph_fingerprint`,
 #: `turn_prior_vectors`, `_index_gate_read`, `_apply_one`), or a docstring QUOTING one
 #: (`_prewipe_synthetic_write_scope`, whose whole body is a `return`; the `SET n.embedding = NULL` it
-#: quotes is `_rebuild_all_replay`'s, and that writer is NOT among these fifteen),
-#: and a runtime-interpolated label
-#: (`restore_graph`) — so no single one of them may be named as "the" reason). So the product
-#: DECLARES it
-#: (`WriterClass.stores`) and this row reads that declaration. The tests below pin the three
-#: falsifiers the issue names, and the two guards implementation made necessary.
+#: quotes is `_rebuild_all_replay`'s, and that writer is NOT among these fifteen), and a
+#: runtime-interpolated label (`restore_graph`) — so no single one of them may be named as "the"
+#: reason). So the product DECLARES it (`WriterClass.stores`) and this row reads that declaration.
+#: The tests below pin the three falsifiers the issue names, and the two guards implementation made
+#: necessary.
 def _store_declared(name: str, stores, *, cls: str = probe.CENSUS_EXEMPT) -> dict:
     """One register entry in the shape row 2 reads — with an explicit `stores`."""
     return {**_declared(name, cls), "stores": stores}

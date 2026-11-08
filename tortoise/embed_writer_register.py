@@ -86,12 +86,12 @@ writer whose body issues no store at all — a read, a read into a dict, comment
 (`_compare_views`, `_graph_fingerprint`, `turn_prior_vectors`, `_index_gate_read`, `_apply_one`), or
 a docstring QUOTING one (`_prewipe_synthetic_write_scope`, whose whole body is a `return`; the
 `SET n.embedding = NULL` it quotes is `_rebuild_all_replay`'s, and that writer is NOT among these
-fifteen because it derives two labels), and a label interpolated at
-runtime (`restore_graph`'s `(n:{safe_labels})`) — which is why the `NO_LIVE_VECTOR` /
+fifteen because its own Cypher names two labels), and a label interpolated at runtime
+(`restore_graph`'s `(n:{safe_labels})`) — which is why the `NO_LIVE_VECTOR` /
 `LABELS_AT_RUNTIME` dispositions below exist at all. Note the two-label pair is NOT in this list:
-`_event_plain_merge` and
-`_rebuild_all_replay` keep their `MERGE`s in their own bodies, which is why they derive two labels
-instead of none. A second derivation in the grader would be a second owner of one fact; the field is
+`_event_plain_merge` and `_rebuild_all_replay` keep their `MERGE`s in their own bodies, which is
+why their own Cypher NAMES two labels instead of none. A second derivation in the grader would be a
+second owner of one fact; the field is
 that fact, declared once (the policy-as-data shape `#11444` applies to row 1).
 ⚠️ **Its residual, stated rather than implied:** a `NO_LIVE_VECTOR` or label-tuple declaration is
 accepted **by name** once `load()` validates it — the instrument cannot re-derive "this writer
@@ -341,7 +341,8 @@ CLASSES: tuple[str, ...] = (RECOGNISED_PRODUCER, EXEMPT)
 #: two, and **no usable label at all for the other fifteen**. ⚠️ Those fifteen fail for SEVERAL
 #: reasons — do not name one as "the" reason, and do not cite the two-label pair among them:
 #: `_event_plain_merge` and `_rebuild_all_replay` keep their `MERGE`s in their own bodies (that is
-#: exactly why they derive TWO), while the fifteen include a label in a `MATCH` the derivation does
+#: exactly why their own Cypher NAMES TWO), while the fifteen include a label in a `MATCH` the
+#: derivation does
 #: not credit (`_embedding_repair_attempt`'s own `MATCH (e:Event {eventId:$eid})` +
 #: `set_embedding_clause("e")`), a store clause held in a module constant (`_write_capture_turns`
 #: executing `_TURN_WRITE_CYPHER`), a property-map merge over a constant tuple
