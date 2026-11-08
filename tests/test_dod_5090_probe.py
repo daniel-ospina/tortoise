@@ -4584,8 +4584,9 @@ _NEGATION_GOVERNS = re.compile(
     r"(?:walk|visit|reach|report)(?:s|es|ed|ing)?\b")
 # ⛔ `_COVERAGE` is RETAINED DELIBERATELY AND IS CURRENTLY IMPLIED, and saying so
 # is the point (#11437 review, P3). Measured: `_NEGATION_GOVERNS` already requires
-# one of the same four verbs AFTER the negation, so on all 101 candidate sentences
-# (the 71 rows across the four sets, plus the 30 sentences of the real §3 under
+# one of the same four verbs AFTER the negation, so on all 108 candidate sentences
+# (the 78 rows across the four sets — 34 / 13 / 16 / 15 — plus the 30 sentences of
+# the real §3 under
 # this predicate's own `split(". ")` segmentation) there is no case where the
 # governance test hits and this one does not — dropping the term from
 # `_residual_sentences` changes no verdict. It stays because it is the INDEPENDENT
@@ -4829,7 +4830,12 @@ def _residual_sentences(s3: str) -> list[str]:
       parenthetical for exactly this reason, and collapsing it inline — the doc's
       own style elsewhere — turns a doc+code pair that still agrees into a red.
       Declared rather than fixed: an abbreviation-aware split is a bigger change
-      than the framing it protects, and the row is in `declared_blocks` below;
+      than the framing it protects, and the row is in `declared_blocks` below.
+      ⚠️ This is the CONCRETE instance of the sentence-UNIT gap declared under
+      `_COVERAGE`'s note above ("THE SENTENCE UNIT — `lowered.split('. ')` — IS
+      STILL UNPINNED", #11541 D): that declaration covers the unit being too
+      COARSE, this row covers the same unit being too FINE on an abbreviation.
+      One gap with two measured faces — not two gaps;
     * an honest restatement that carries a DEFEATER MARKER — `"…are not visited
       if the outer method does not run"` reds through `_DEFEATED`, which is the
       price of closing the quote-and-refute/conditional class in the other
