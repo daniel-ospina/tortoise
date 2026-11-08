@@ -406,16 +406,17 @@ def _split_segments(text: str) -> list[str]:
     entire uncovered list. Only a separator the SHELL would treat as one splits
     here.
 
-    ⛔ An unquoted `#` at a WORD BOUNDARY ends the command line (#11506 review,
-    cycle 2). The shell starts a comment there, so nothing after it is a
-    separator — but the scanner used to keep splitting, so a legitimate record
-    carrying a comment was torn into prose segments and REFUSED: measured,
-    `… -q  # ran; 194 passed` came back as the segment `194 passed`, exit 1, and NO
-    uncovered list. `origin/main` ACCEPTED both of this class's spellings, so the
-    every-segment rule had introduced another false block, and the per-segment
-    whitespace-preceded-hash retry further down could never undo a split already
-    taken here. `a#b` is NOT a comment (the `#` must follow whitespace, start, or a
-    separator), and a quoted `#` is not either — `-k 'issue#123'` still parses.
+    ⛔ An unquoted `#` at a WORD BOUNDARY ends the command LINE (#11506 review,
+    cycle 2). The shell starts a comment there, so no separator on that line
+    splits — but `\n` is still a separator, so the scan RESUMES after the newline
+    (cycle 3: `break` discarded the rest of the RECORD, which re-opened the
+    newline fail-open this PR had just closed). Measured, `… -q  # ran; 194 passed`
+    used to come back as the segment `194 passed`, exit 1, and NO uncovered list;
+    `origin/main` ACCEPTED it, so the every-segment rule had introduced another
+    false block, and the per-segment whitespace-preceded-hash retry further down
+    could never undo a split already taken here. `a#b` is NOT a comment (the `#`
+    must follow whitespace, start, or a separator), and a quoted `#` is not either
+    — `-k 'issue#123'` still parses.
 
     A backslash escapes only inside DOUBLE quotes, and it must take the escaped
     character with it — otherwise `bash -c "echo \\" && echo x"` ends the quote
@@ -441,12 +442,32 @@ def _split_segments(text: str) -> list[str]:
             quote = char
             current.append(char)
         elif char == "#" and (index == 0 or text[index - 1] in " \t\n;&|"):
-            # A shell COMMENT starts here: the rest of the line is not a command,
-            # so no separator after it may split. Breaking (rather than appending
-            # the tail) keeps the comment out of the returned segments, which is
-            # what the per-segment `\s+#` retry could not do once the split had
-            # already happened (#11506 review, cycle 2).
-            break
+            # A shell COMMENT starts here: the rest of the LINE is not a command, so
+            # no separator on this line may split — but `\n` is a separator, so the
+            # scan resumes AFTER the newline rather than ending the record (#11506
+            # review, cycle 3).
+            #
+            # ⛔ `break` here was a P1 FAIL-OPEN: it discarded the rest of the
+            # STRING, not the line, so a comment on line 1 made every following
+            # line invisible — and since this PR made `\n` a separator precisely to
+            # close `cmd:<cmd>` NEWLINE `NOT RUN`, a comment re-opened exactly that
+            # hole. Measured at `e7776efc7` with a `|` block scalar:
+            #
+            #   cmd:uv run pytest … -q  # ran; 194 passed
+            #   NOT RUN - I did not run this
+            #
+            # → `uncovered: 0`, `CAPSTONE-LEDGER-RESULT: CLEAN`, exit 0; the same
+            # record was INVALID at the parent commit. Flushing the pending segment
+            # and resuming after the newline keeps the cycle-2 false block closed
+            # (a comment with no newline still ends the entry) AND grades what
+            # follows it.
+            segments.append("".join(current))
+            current = []
+            newline = text.find("\n", index)
+            if newline < 0:
+                break
+            index = newline + 1
+            continue
         elif any(text.startswith(op, index) for op in _TWO_CHAR_SEPARATORS):
             segments.append("".join(current))
             current = []
@@ -801,12 +822,17 @@ def _evidence_is_real(
     non-empty string meant `cmd:done` — or a sentence explaining that the work
     was done — satisfied the strongest verdict in the vocabulary, so one word
     defeated the whole record. A command entry must now be COMMAND-SHAPED — its
-    first token is a program that runs something, and its FIRST argument position
+    first token is a program that runs something, and its FIRST ARTIFACT position
     names a tracked artifact (a file, a directory holding tracked files, a pytest
-    node-id, or a glob over a named directory). TWO shapes are deliberately
+    node-id, or a glob over a named directory) — "first artifact position" rather
+    than "first argument position" because ONE subcommand verb immediately after a
+    NAMED runner may lead the list (`ruff check <path>` / `ruff format <path>`,
+    scoped per runner in `_RUNNER_SUBCOMMANDS`). THREE shapes are deliberately
     admitted and confer nothing on their own: a runner with NO argument
-    (`cmd:make`), and a `-c` script body, which is graded as a command in its own
-    right rather than trusted. Every segment of a compound record must be a shell
+    (`cmd:make`), a runner followed only by its own subcommand verb
+    (`cmd:ruff check`), and a `-c` script body, which is graded as a command in its
+    own right rather than trusted. Every segment of a compound record must be a
+    shell
     wrapper, a decorative reader/printer, or runner-headed; a segment that is none
     of those is prose and is REFUSED, so a bare disclaimer cannot ride on either
     side of the command. ⛔ NOT closed, and deliberately not claimed: a LATER

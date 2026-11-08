@@ -945,9 +945,32 @@ def test_a_COMMENT_cannot_smuggle_a_disclaimer(tmp_path):
     for entry in (
         "cmd:NOT RUN # && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
         "cmd:# NOT RUN - I did not run this",
+        # ⛔ A COMMENT ENDS THE LINE, NOT THE RECORD (#11506 review, cycle 3).
+        # `break` at the `#` discarded the rest of the STRING, so a comment on line
+        # 1 made every following line invisible — and because this same PR made
+        # `\n` a separator, that RE-OPENED the newline fail-open it had just
+        # closed. Measured at `e7776efc7`: the entry below printed
+        # `uncovered: 0`, `CAPSTONE-LEDGER-RESULT: CLEAN`, exit 0, while the parent
+        # commit refused it. `yaml.safe_dump` emits it as a double-quoted scalar, so
+        # the `\n` reaches the tool as a real newline.
+        "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q  # ran; "
+        "194 passed\nNOT RUN - I did not run this",
+        "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q  # ran\n; NOT RUN",
     ):
         proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, entry])]))
         assert proc.returncode == cl.EXIT_INVALID, (entry, proc.stdout + proc.stderr)
+
+    # …and the other half of the same defect: a LEADING comment is not the record,
+    # so the command on the next line must still be graded (and accepted).
+    leading = "cmd:# step 1\nuv run pytest tests/test_9664_capstone_verdict_ledger.py -q"
+    proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, leading])]))
+    assert proc.returncode == cl.EXIT_CLEAN, (
+        "a comment-only first LINE is not the record: the shell runs the command on "
+        "line 2, so this must be ACCEPTED. `break` on the `#` discarded line 2 and "
+        "refused the whole entry — the opposite defect, from the same line: "
+        + proc.stdout
+        + proc.stderr
+    )
 
 
 @pytest.mark.parametrize(
