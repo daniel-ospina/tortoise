@@ -3840,3 +3840,193 @@ def test_a_JSON_signoff_STATES_the_leg_it_did_not_measure(monkeypatch, capsys):
     assert _cli.main() in (0, 1)
     payload = json.loads(capsys.readouterr().out)
     assert payload["fts_probe_skipped"] == "no_probe_phrase"
+
+
+def test_the_documented_report_contracts_are_the_ones_the_run_RETURNS(monkeypatch):
+    """#11536 review round 3, P2: the docstring described FIVE of the SIX buckets.
+
+    (1) FAILS on the shipped contracts, both halves:
+        * `classify_fts_hits`'s ``Returns`` listed residue/lexicon/stale/foreign/
+          unread and OMITTED ``unexplained`` — the bucket the very paragraph below
+          it exists to justify, and the one that VETOES. A caller implementing the
+          fold from the docstring would have dropped the veto;
+        * `probe_fts`'s ``Returns`` listed five of the EIGHT top-level keys: it
+          omitted ``stale``/``unexplained``/``unresolved`` (the three vetoeing
+          aggregates) and the probe row's ``unresolved``, so the report's own
+          contract did not mention that a hit nothing could examine is vetoed;
+        * and ``"ran": bool  # at least one probe was measured`` was implemented
+          as ``bool(phrases)`` — MEASURED: a breaker-open leg gave
+          ``report["ran"] is True`` while ``probes[0]["ran"] is False``, i.e. the
+          report claimed the instrument answered for a run that measured nothing.
+    (2) REACHABLE: both keys are on every ``--json`` report, and the breaker case
+        is the ordinary degraded leg this leg already separates from a clean miss.
+    (3) POLARITY THAT MUST NOT GO RED: a measured leg reports ``ran`` True, and
+        every documented key is genuinely present in the returned dict.
+    """
+    from tortoise import session_source_prose_migration as m
+
+    class _LexiconGraph(_RecordingGraph):
+        def query(self, cypher, params=None, timeout=None):
+            if "STARTS WITH $prefix" in cypher:
+                return _Result([("migration, plan, friday",)])
+            return super().query(cypher, params=params, timeout=timeout)
+
+    # (3) a MEASURED leg: the documented keys are all there, and `ran` is True.
+    _install_fts(monkeypatch, {"zebraquux": [], "migration": [("session:s-post", 2.0)]})
+    report = m.probe_fts(_LexiconGraph([(_post_fix_node(),)]), ["zebraquux"],
+                         control=True)
+    assert report["ran"] is True
+    probe_doc = " ".join((m.probe_fts.__doc__ or "").split())
+    for key in report:
+        assert f'"{key}"' in probe_doc, (
+            f"`probe_fts` RETURNS {key!r} but its documented `Returns` block "
+            f"never lists it — the report's contract omits a key the run "
+            f"actually emits")
+    for key in report["probes"][0]:
+        assert key in probe_doc, (
+            f"a probe ROW carries {key!r} but the documented row shape never "
+            f"names it")
+    split = m.classify_fts_hits(_LexiconGraph([(_post_fix_node(),)]),
+                                ["session:s-post"], phrase="migration")
+    split_doc = " ".join((m.classify_fts_hits.__doc__ or "").split())
+    for key in split:
+        assert f'"{key}"' in split_doc, (
+            f"`classify_fts_hits` returns {key!r} and its `Returns` list omits "
+            f"it")
+    assert set(split) == {"residue", "lexicon", "stale", "foreign",
+                          "unexplained", "unread"}
+
+    # (1)+(2) the breaker-open leg: "measured" must not survive a read that never
+    # ran — `bool(phrases)` reported exactly that.
+    _install_fts(monkeypatch, {}, leg={"leg": "fts", "ran": False,
+                                       "degraded": True,
+                                       "reason": "breaker_open"})
+    degraded = m.probe_fts(_LexiconGraph([(_post_fix_node(),)]), ["zebraquux"],
+                           control=False)
+    assert degraded["probes"][0]["ran"] is False
+    assert degraded["ran"] is False, (
+        "`ran` documents 'at least one probe was MEASURED', but this leg "
+        "measured nothing and reported True — the report claimed an answering "
+        "instrument")
+    assert degraded["unmeasurable"] == ["zebraquux"]
+
+
+def test_a_BEFORE_reading_that_did_not_MEASURE_is_not_reported_as_a_clean_zero(
+        monkeypatch, capsys):
+    """#11536 review round 3, P2: `residue_before == 0` was three states in one.
+
+    (1) FAILS on the shipped fold: it carried only ``len(residue)`` from the
+        BEFORE leg, so a BEFORE read that never RAN (a breaker trip between the
+        two reads — ``probe_fts`` records ``ran=False``/``degraded=True`` on that
+        row and the fold discarded both) and a BEFORE read whose hits could not be
+        CLASSIFIED (``unread``/``unresolved``) both reached the refusal as "it
+        returned no PRE-FIX node BEFORE the repair either (a token that is not in
+        the corpus)" — a measurement the run never made. The verdict was already
+        fail-closed; the diagnostic sent the operator hunting for a typo that the
+        tool had not looked for (or for a corpus the breaker never read).
+    (2) REACHABLE: a degraded BEFORE read is the SAME circuit-breaker state the
+        probe line already prints as ``⚠️ UNMEASURABLE``, and an unaddressable
+        BEFORE hit is the shape the same run reports as ``unresolved``.
+    (3) POLARITY THAT MUST NOT GO RED: a BEFORE read that DID run and matched
+        nothing keeps the categorical wording — it is a fact there.
+    """
+    from tortoise import search_engine as se
+
+    class _LexiconGraph(_RecordingGraph):
+        """Answers the CONTROL read with a lexicon, so a token exists to probe."""
+
+        def query(self, cypher, params=None, timeout=None):
+            if "STARTS WITH $prefix" in cypher:
+                return _Result([("migration, plan, friday",)])
+            return super().query(cypher, params=params, timeout=timeout)
+
+    def _repair_wrote_one(monkeypatch):
+        _export_a_record_dsn(monkeypatch)
+        monkeypatch.setattr(_cli, "reconcile_session_source_prose",
+                            lambda *a, **k: {
+                                "candidates": ["session:s-post"], "repaired": [],
+                                "empty_sessions": [], "no_record": [],
+                                "no_reader": [], "no_session_id": [],
+                                "unaddressable": [], "left_alone": [],
+                                "written": ["session:s-post"], "notes": {},
+                                "census_before": 1, "census_after": 0,
+                                "dry_run": False})
+
+    # (1)+(2) the BEFORE read is the degraded one; the AFTER read is healthy.
+    first = {"done": False}
+
+    def fake_degraded_before(graph, query, **kwargs):
+        degraded = not first["done"] and query == "zebraquux"
+        if query == "zebraquux":
+            first["done"] = True
+        if kwargs.get("leg_trace") is not None:
+            kwargs["leg_trace"].append({
+                "leg": "fts", "ran": not degraded, "degraded": degraded,
+                "reason": "breaker_open" if degraded else "empty_results"})
+        return [("session:s-post", 2.0)] if query == "migration" else []
+
+    monkeypatch.setattr(se, "run_fts_query", fake_degraded_before)
+    _repair_wrote_one(monkeypatch)
+    _install_cli(monkeypatch, _LexiconGraph([(_post_fix_node(),)]),
+                 ["--repair", "--clear-without-record",
+                  "--probe-phrase", "zebraquux"])
+    capsys.readouterr()
+    assert _cli.main() == 1, "a degraded BEFORE reading certified the leg"
+    err = capsys.readouterr().err
+    assert "did NOT RUN or was DEGRADED" in err, (
+        "the refusal did not name the BEFORE read's own state: " + err)
+    assert "reason='breaker_open'" in err
+    assert "returned no PRE-FIX node BEFORE the repair" not in err, (
+        "the refusal asserted a BEFORE measurement that never ran: " + err)
+    assert "matched no pre-fix prose even BEFORE the writes" not in err, (
+        "the refusal asserted the token matched nothing before the writes, from "
+        "a read that did not run: " + err)
+
+    # (1)+(2) the BEFORE read ran, but its hit could not be classified: the urls
+    # it returned are the EMPTY STRING, i.e. `unresolved` — it established nothing.
+    first["done"] = False
+
+    def fake_unaddressable_before(graph, query, **kwargs):
+        if kwargs.get("leg_trace") is not None:
+            kwargs["leg_trace"].append({"leg": "fts", "ran": True,
+                                        "degraded": False,
+                                        "reason": "empty_results"})
+        if query == "zebraquux" and not first["done"]:
+            first["done"] = True
+            return [("", 1.0)]          # the BEFORE read's only hit, unaddressable
+        if query == "migration":
+            return [("session:s-post", 2.0)]
+        return []
+
+    monkeypatch.setattr(se, "run_fts_query", fake_unaddressable_before)
+    _install_cli(monkeypatch, _LexiconGraph([(_post_fix_node(),)]),
+                 ["--repair", "--clear-without-record",
+                  "--probe-phrase", "zebraquux"])
+    capsys.readouterr()
+    assert _cli.main() == 1
+    err = capsys.readouterr().err
+    assert "could NOT be classified" in err, (
+        "the refusal did not name the unclassified BEFORE hit: " + err)
+    assert "carried no addressable url" in err
+    assert "returned no PRE-FIX node BEFORE the repair" not in err, (
+        "the refusal called an unclassified BEFORE hit a measured zero: " + err)
+
+    # (3) a BEFORE read that ran and matched nothing IS a measured zero.
+    def fake_clean_before(graph, query, **kwargs):
+        if kwargs.get("leg_trace") is not None:
+            kwargs["leg_trace"].append({"leg": "fts", "ran": True,
+                                        "degraded": False,
+                                        "reason": "empty_results"})
+        return [("session:s-post", 2.0)] if query == "migration" else []
+
+    monkeypatch.setattr(se, "run_fts_query", fake_clean_before)
+    _install_cli(monkeypatch, _LexiconGraph([(_post_fix_node(),)]),
+                 ["--repair", "--clear-without-record",
+                  "--probe-phrase", "zebraquux"])
+    capsys.readouterr()
+    assert _cli.main() == 1
+    err = capsys.readouterr().err
+    assert "matched no pre-fix prose even BEFORE the writes" in err, (
+        "a BEFORE reading that DID run and matched nothing lost its wording: "
+        + err)
+    assert "returned no PRE-FIX node BEFORE the repair either" in err
