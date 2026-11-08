@@ -402,10 +402,11 @@ measured_at:
 #           per-file collection, summed: 295 (the six contract files: 66 / 54 / 9 / 42 / 65 / 59)
 #                                      + 255 (`test_9664_capstone_verdict_ledger.py`, the ledger pin suite)
 #                                      = 550 COLLECTED at this head.   Counted, not estimated.
-#       ⛔ DO NOT DERIVE THE SPLIT BY SUBTRACTION. `550 - 5` is not this head's pass count:
-#       the 5 are docker-lane-only (S2's ACL group) and do not reproduce on a carve-out
-#       host, so the split is HOST-DEPENDENT and must be measured, not inferred. IT WAS
-#       MEASURED at this head, twice, one run each:
+#       ⛔ THE SPLIT IS MEASURED, NOT DERIVED, AND IT DOES NOT CARRY ACROSS HOSTS.
+#       `550 - 5` happens to equal 545 on THIS host, but nothing about the split follows
+#       from the collection count: the 5 are docker-lane-only (S2's ACL group) and do not
+#       reproduce on a carve-out host, so the inference is unsound even when it happens to
+#       land. It was MEASURED at this head, twice, one run each:
 #           env -u TORTOISE_API_KEY … -q   ->  545 passed, 5 failed   (550 collected)
 #           (ambient, a key is set)        ->  544 passed, 6 failed   (550 collected)
 #       So the tally at this head is 545 + 5 = 550, and the line above (`456 passed, 5
