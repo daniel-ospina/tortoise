@@ -5022,6 +5022,75 @@ def test_an_ABSTAINING_tree_is_accepted_and_prints_the_NOTE(tmp_path, monkeypatc
     )
 
 
+def test_a_probe_that_did_NOT_answer_false_states_the_OTHER_cause(capsys):
+    """The round-4 discriminator, pinned in BOTH directions — it was pinned in one.
+
+    `_tracked_unprovable` serves TWO causes: a tree git could not answer in at all (a
+    tarball, no repository), and a tree where git **ran and answered `false`** (a bare
+    repo over `GIT_DIR`). Round 4 added the discriminator
+
+        if probe is not None and probe.returncode == 0 and probe.stdout.strip() == "false":
+
+    so each path states the cause it measured, and
+    `test_an_ABSTAINING_tree_is_accepted_and_prints_the_NOTE` asserts the SECOND one.
+    ⛔ Nothing asserted the FIRST. MEASURED at `ac896fa34f`, both simplifications of
+    that exact line left the whole suite green at **180 passed**:
+
+        if probe is not None:          -> 180 passed
+        if True:                       -> 180 passed
+
+    and the first is not cosmetic: a no-repository tree makes
+    `rev-parse --is-inside-work-tree` exit **128**, so under it a tarball renders
+    *"git is present and says this is not a work tree"* — a cause git never gave. That
+    is precisely the defect this PR removes, re-introducible by deleting one token
+    from the line this round added. `"git is unavailable here"` appeared in this file
+    only as a NEGATIVE assertion, i.e. nothing ever produced it — a renderer whose
+    cause is unpinned is a renderer free to borrow the other one.
+
+    Driven through the helper rather than end to end: the abbreise this pins is the
+    ternary on the `probe` argument, and `_tracked_unprovable` is the only place that
+    reads it.
+    """
+    import types as _types
+
+    answered_bare = _types.SimpleNamespace(returncode=0, stdout="false\n", stderr="")
+    could_not_answer = _types.SimpleNamespace(
+        returncode=128, stdout="", stderr="fatal: not a git repository"
+    )
+
+    # (1) git could NOT answer: the cause is git's absence, not a measured `false`.
+    assert cl._tracked_unprovable(could_not_answer) is True
+    err = capsys.readouterr().err
+    assert "git is unavailable here" in err, (
+        f"rc 128 is git failing to answer, so the NOTE must say git is unavailable: {err}"
+    )
+    assert "git is present and says this is not a work tree" not in err, (
+        "git exited 128 — it did NOT answer `false`, so that cause was never measured "
+        f"and may not be printed: {err}"
+    )
+
+    # (2) git RAN and answered `false`: the other cause, and only that one.
+    assert cl._tracked_unprovable(answered_bare) is True
+    err = capsys.readouterr().err
+    assert "git is present and says this is not a work tree" in err, (
+        f"rc 0 + `false` is git answering, and the NOTE must say so: {err}"
+    )
+    assert "git is unavailable here" not in err, (
+        f"git was asked and replied — it was not unavailable: {err}"
+    )
+
+    # (3) no probe at all (the direct callers keep the old arity): git's absence.
+    assert cl._tracked_unprovable() is True
+    err = capsys.readouterr().err
+    assert "git is unavailable here" in err, (
+        "a caller that measured nothing gets the unavailable cause, never the "
+        f"measured-`false` one: {err}"
+    )
+    assert "git is present and says this is not a work tree" not in err, (
+        f"no probe was measured, so that cause may not be printed: {err}"
+    )
+
+
 def test_a_git_that_COULD_NOT_ANSWER_is_not_read_as_a_measured_untracked(tmp_path, monkeypatch, capsys):
     """`git ls-files` exit 128 is a FAILURE to answer, NOT the measured `no` (exit 1).
 
