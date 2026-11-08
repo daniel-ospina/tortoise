@@ -5217,14 +5217,45 @@ def test_the_pre_registration_cites_the_classify_sites_the_tree_actually_has():
         # block naming exactly one (the `steps:` condition's folded scalar) makes
         # no extent claim and stays out.
         _extent_cite = re.compile(r"extractor_v2\.py:(\d+)(?:\s*[-\u2013\u2014]\s*(\d+))?")
+        # ⛔ THE BARE FORM IS THE ONE A RE-DERIVATION ACTUALLY WRITES (round 6, P2).
+        # This document's dominant spelling for a SECOND cite on a line is bare —
+        # "`if items:` at `:13058`" — so a stale extent appended that way carries
+        # no `extractor_v2.py:` prefix and the pattern above cannot see it: measured,
+        # "`_collect_classify_items` (`tortoise/extractor_v2.py:11174`, `:11098-11120`)"
+        # left this leg `PASS (NOT caught)`, the exact "correct twin" defect the set
+        # equality below exists to close. A bare RANGE on a line that itself carries
+        # an `extractor_v2.py:` cite is therefore an extractor cite too. The dash is
+        # required, so bare SINGLE cites (the extremely common `at `:13058`` form,
+        # which makes no extent claim) stay out, and the lookbehind keeps `log:1-2`
+        # style ranges on unrelated lines untouched.
+        _bare_range = re.compile(r"(?<![A-Za-z0-9_.]):(\d+)\s*[-\u2013\u2014]\s*(\d+)")
 
-        def _extent_numbers(block: str, _re: re.Pattern[str] = _extent_cite) -> list[int]:
+        def _extent_numbers(
+            block: str,
+            _re: re.Pattern[str] = _extent_cite,
+            _bare: re.Pattern[str] = _bare_range,
+        ) -> list[int]:
             numbers: list[int] = []
             for lo, hi in _re.findall(block):
                 numbers.append(int(lo))
                 if hi:
                     numbers.append(int(hi))
+            for line in block.splitlines():
+                if "extractor_v2.py:" in line:
+                    for lo, hi in _bare.findall(line):
+                        numbers.extend((int(lo), int(hi)))
             return numbers
+
+        def _reversed_ranges(
+            block: str,
+            _re: re.Pattern[str] = _extent_cite,
+            _bare: re.Pattern[str] = _bare_range,
+        ) -> list[str]:
+            pairs = [(lo, hi) for lo, hi in _re.findall(block) if hi]
+            for line in block.splitlines():
+                if "extractor_v2.py:" in line:
+                    pairs.extend(_bare.findall(line))
+            return [f"{lo}-{hi}" for lo, hi in pairs if int(lo) >= int(hi)]
 
         ranged = [block for block in extent_carriers if len(_extent_numbers(block)) >= 2]
         assert ranged, (
@@ -5239,6 +5270,10 @@ def test_the_pre_registration_cites_the_classify_sites_the_tree_actually_has():
             # range left this leg `1 passed`. A stale cite with a correct twin is
             # the same defect, so the block must cite the extent ONCE and right.
             found = sorted(_extent_numbers(block))
+            assert not _reversed_ranges(block), (
+                f"{doc_name}: a live carrier cites a REVERSED range "
+                f"{_reversed_ranges(block)} — a range reads low-to-high, and a set "
+                "comparison cannot tell `:11196-11174` from the extent it inverts")
             assert found == sorted({collector, end}), (
                 f"{doc_name}: a live carrier naming `_collect_classify_items` cites "
                 f"position(s) {found or ['<none>']} — it must cite exactly "
