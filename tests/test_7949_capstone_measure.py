@@ -10714,10 +10714,12 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     `sdk.py:16414-16428`->`:16516-16530` x3, `probes/capstone_measure.py:2238-2243`
     ->`:2724-2726`), `extractor_v2.py:1720` unchanged, and the `create_operator`
     reproduction quote this PR re-derived (`:8938 :8956 :8963 :9343` ->
-    `:9006 :9024 :9031 :9411`, drifted +68 unnoticed across two merges) — and,
-    measured before this pin existed, re-staling ANY of them
+    `:9006 :9024 :9031 :9411`, drifted +68 unnoticed since #11449 — the neighbouring
+    #11376 did not move these lines) — and, measured before this pin existed, re-staling ANY of them
     left every suite green: the record is in no `_BUNDLE_DOCS` entry and
-    `grep -rn RECONCILE tests/` returned nothing. A record whose whole thesis is
+    `grep -rn RECONCILE-A1-A2-A5 tests/` returned nothing (the bare `RECONCILE` token
+    matches 11 unrelated files — `_BILLING_RECONCILE_INFLIGHT` and friends — so the
+    record's NAME is the claim, and it is what was measured). A record whose whole thesis is
     that "a claim nothing re-checks can rot silently" cannot leave its own numbers
     unwatched.
 
@@ -10797,27 +10799,60 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # therefore re-derived from the tree here instead of being read out of the record:
     # a re-worded annotation cannot un-state it, and a new bundle mention forces the
     # record to be re-measured.
-    bundle = _REPO / "docs/evidence/7949-capstone"
     mention = re.compile(r"hasPart|hierarchies|decomposesInto")
-    per_file = {
-        path.name: sum(1 for line in path.read_text(
+    # Enumerated through the INDEX, not by walking the directory: the record's own command
+    # is `git grep`, which reads tracked files only. A `rglob` walk is NOT equivalent in
+    # either direction — an untracked `PRE-REGISTRATION.md~` reds the pin while the
+    # recorded command still prints 40 (a false red), and a same-named file under a
+    # subdirectory (`corpus/capstone_measure.py`) collapsed into the `probes/` entry under
+    # a BASENAME key, so the true 42 lines passed as 40 (a FALSE GREEN on exactly the
+    # number this pin exists to protect). Keys are relative paths for that reason.
+    tracked = subprocess.run(
+        ["git", "ls-files", "-z", "--", "docs/evidence/7949-capstone/"],
+        cwd=str(_REPO), capture_output=True, text=True, check=True,
+    ).stdout.split("\x00")
+    per_file = {}
+    for relpath in (p for p in tracked if p):
+        if relpath == "docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md":
+            continue
+        path = _REPO / relpath
+        if not path.is_file():
+            continue
+        n = sum(1 for line in path.read_text(
             encoding="utf-8", errors="replace").splitlines() if mention.search(line))
-        for path in sorted(bundle.rglob("*"))
-        # `__pycache__` is a BUILD artifact, not part of the bundle `git grep` reads: a
-        # stale `.pyc` of the probe carries the same bytes and would be counted as a
-        # fourth file (measured — it was, before this filter).
-        if path.is_file() and path.name != "RECONCILE-A1-A2-A5.md"
-        and "__pycache__" not in path.parts and path.suffix != ".pyc"
-    }
-    per_file = {name: n for name, n in per_file.items() if n}
+        if n:
+            per_file[relpath.removeprefix("docs/evidence/7949-capstone/")] = n
     assert per_file == {"PRE-REGISTRATION.md": 22, "preregistration.json": 8,
-                        "capstone_measure.py": 10}, (
+                        "probes/capstone_measure.py": 10}, (
         f"the bundle's hasPart/hierarchies mentions are {per_file} — the record's §5 "
         "self-matching note states them per file; re-derive the note (and this map) "
         "rather than deleting the qualifier, or it reads as 'no output' when it is not")
     assert "40 lines, exit 0 — all in the bundle" in text, (
         "the §5 note must keep the measured shape of its own reproduction — the "
         "unqualified `# exit 1 = no output` is what rotted")
+
+    # §0/§5's `vet_enabled` live-cite, in BOTH places it is quoted. This claim had already
+    # rotted +150 (`:12779` -> `:12929`) and contradicted three green surfaces that say
+    # `:12929` (`README.md:369`, `probes/capstone_measure.py:1769`/`:1807`, and this file's
+    # own `:4634` row) — a live-reproduction quote with nothing watching it, the same class
+    # as the `create_operator` quote above. Pinned live, with the old number allowed ONLY
+    # as an explicitly base-qualified historical note, so a future re-stale cannot present
+    # a dead line as the live one.
+    assert "`:12929` here; `:12779` was the number at `62248db88`" in text, (
+        "the §1 prose must quote the LIVE vet_enabled line, not the `62248db88` one")
+    assert "prints :12929 here" in text, (
+        "the §5 reproduction note must quote the LIVE vet_enabled line")
+    assert ext[12929 - 1].strip().startswith("vet_enabled = ("), (
+        f"extractor_v2.py:12929 reads {ext[12929 - 1].strip()[:80]!r}, not the "
+        "vet_enabled computation the record cites")
+    assert text.count(":12779") == 2, (
+        f"`:12779` appears {text.count(':12779')} times — it is the OLD base's number and "
+        "may appear only in the two base-qualified historical notes (`62248db88`); "
+        "an unqualified third occurrence is a re-stale presented as live")
+    assert "`:12779` was the number at `62248db88`" in text and (
+        "`:12779` at `62248db88`" in text), (
+        "both historical mentions must name the base they were true at — the record's own "
+        "rule is that a number is only as good as the base it was taken at")
 
     # A2: the capture path that writes the `references` edge — the record names it
     # THREE times: the prose cite, the amendment parenthetical that states BOTH
