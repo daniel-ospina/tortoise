@@ -113,14 +113,16 @@ STATED LIMITS — deliberate, and measured rather than guessed:
   * Line PRESENCE is the whole check. A pointer is dead only when its line is
     BLANK or past the end of the file (`_dead_reason`): one that a later insert
     SHIFTS onto a different non-blank line is reported healthy, and it silently
-    names whatever row now sits there. Measured at this head, not reasoned about:
-    inserting ONE line above the `#160 hosted embeddings` bullet in
+    names whatever row now sits there. Measured, not reasoned about: inserting ONE
+    line above the `#160 hosted embeddings` bullet in
     ``docs/scoping/2026-08-13-265-content-encryption-scoping.md``'s
-    `### Runtime prerequisites` list (its line 127) shifts the
-    ``265 scoping:128`` pointer this change writes onto that bullet — off the
-    `#317 cross-encoder reranker` row the pointer names — against the same guard
-    that reports 0 problems. (The site matters: an insert above that document's
-    WIRING TABLE, ~56 lines below, moves nothing the pointer reads.) Past-EOF is a
+    `### Runtime prerequisites` list moves the `#317 cross-encoder reranker` row
+    down one line, and a `:NN` pointer at it still reports 0 problems while it
+    names the `#160` row. (The site matters: an insert above that document's
+    WIRING TABLE, ~56 lines below, moves nothing such a pointer reads.) That is
+    why this change cites that row by NAME, and why the measurement stays here as
+    the instrument's limit rather than as an excuse to write the number. Past-EOF
+    is a
     SEPARATE arm and no insertion reaches it — only a pointer already past the end
     of the file, like the ``ONTOLOGY.md:1515`` cite from
     `docs/plans/2026-09-10-ws-c-numeric-normalization.md:501` (enumerated below, with the rest
@@ -416,7 +418,7 @@ def test_the_past_eof_arm_handles_an_inverted_range_without_crashing():
 
 
 def test_the_past_eof_arm_reports_a_zero_start():
-    """`\u200b:0` is outside the file at the START; it must name 0, not crash."""
+    """`:0` is outside the file at the START; it must name 0, not crash."""
     zero = _dead_reason(["a", "", "c"], 0, None)
     assert zero is not None and "line 0 is outside the file" in zero, zero
 
