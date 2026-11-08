@@ -10859,15 +10859,21 @@ def _cite_qualifiers(region: str) -> list[tuple[str, str]]:
     inert here" — never as "there is nothing to check".
     """
     out: list[tuple[str, str]] = []
-    # ⛔ The `at` branch and the parenthesised branch are SEPARATE captures because their
-    # terminators differ: an `at` cite's qualifier ends at a word boundary, a parenthesised one
-    # must CLOSE. Folding them into ONE capture group (as this line first did) made any
-    # parenthesised aside after a cite a "qualifier" — measured: `:9021 (see the note above)`
-    # reds as `[('9021', 'see')]` and `(line 3)` as `('9021', 'line')`, i.e. an ordinary
-    # sentence reported as "a LIVE shape came back" (#11517 review). The connector gap is
-    # `[^\S\n]*` so an aside on the NEXT line is not read as this cite's qualifier either.
+    # ⛔ The `at` branch and the parenthesised branch are SEPARATE captures because they have
+    # DIFFERENT terminators and DIFFERENT gaps:
+    #   * an `at` cite's qualifier ends at a word boundary, and the cite may be WRAPPED — the
+    #     record itself writes `` `:1154` `` at end-of-line with `` at **`80c912244`** `` on the
+    #     next (measured at `:313`), so its gap is `\s*` and CROSSES a newline;
+    #   * a parenthesised qualifier must CLOSE, and it must be on the cite's OWN line — its gap
+    #     is `[^\S\n]*`, so an ordinary aside on the next line is not read as this cite's.
+    # Folding both into one capture group (as this line first did) made any `(...)` after a cite
+    # a "qualifier": `:9021 (see the note above)` redded as `[('9021','see')]` and `(line 3)` as
+    # `('9021','line')` — an ordinary sentence reported as "a LIVE shape came back" (#11517
+    # review). ⛔ And barring the newline for BOTH branches (the first fix attempt) blinded the
+    # `at` branch on exactly the wrapped typography this record uses — measured, and it is the
+    # state the same review caught in the second round.
     for n, at_q, paren_q in re.findall(
-            r":(\d+)`?[^\S\n]*(?:\bat\b\s*([^\s,;)\]]{0,24})|\([^\S\n]*([^\s,;)\]]{0,24})\))",
+            r":(\d+)`?(?:\s*\bat\b\s*([^\s,;)\]]{0,24})|[^\S\n]*\([^\S\n]*([^\s,;)\]]{0,24})\))",
             region):
         q = (at_q or paren_q).strip("*`().,;")
         if q:
@@ -11006,7 +11012,12 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         " single-token parenthetical is a parenthesised cite (#11517 review: 'see' was read"
         " as the qualifier and reported as a live shape)")
     assert _cite_qualifiers(":9021\n(entry one) -> nothing") == [], (
-        "nor is a parenthetical on the NEXT line — the connector gap cannot cross a newline")
+        "nor is a parenthetical on the NEXT line — the PARENTHESISED branch's gap cannot "
+        "cross a newline")
+    assert _cite_qualifiers(":13011\nat HEAD") == [("13011", "HEAD")], (
+        "but the `at` branch's gap MUST cross one: the record wraps a base onto the next line "
+        "(`:313` — `` `:1154` `` then `` at **`80c912244`** ``), and a rule that bars the "
+        "newline for both branches is blind to a live shape written that way (measured)")
 
     # A1: #11205's channel is TRANSPORT ONLY — the schema line that spells the
     # predicate allowlist, and the comment saying nothing in `tortoise/` consumes it.
