@@ -422,7 +422,7 @@ every Point") is **CLOSED as COMPLETED (2026-09-25T01:23:27Z)** — but only its
 **FIELD** landed (`span_start`/`span_end` + `validate_span`, `2ff8c3c88`, §1).
 Its **widening — every committed Point carries a span, not just a value-bearing
 one — is UNSHIPPED**: `_value_verbatim_span` returns `None` before any span work
-unless `_carries_value(content, quote)` (`extractor_v2.py:5286-5287`), so no
+unless `_carries_value(content, quote)` (`extractor_v2.py:5354-5355`), so no
 value-free point can carry an address at this head (105 of the 217 committed
 points are value-free — both figures pinned by
 `test_the_census_is_a_rederivation_not_an_observation`'s `TOTAL_POINTS` /
