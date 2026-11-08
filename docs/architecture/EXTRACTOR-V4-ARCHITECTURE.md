@@ -737,7 +737,8 @@ unfirable (block at the top of §10).
 > but the flagged population is MIXED (7 genuine clause-level elisions, 4 non-claims and 3
 > structural fragments in the 14 of 35 the record enumerates), so the stage's YIELD is unmeasured;
 > that, not a claim about which class dominates, is why it is armed OFF. The flag rate, the
-> `docs/evidence/11534-partial-gap/README.md` §4.
+> per-session read-through and the explicit bounds are `docs/evidence/11534-partial-gap/README.md`
+> §4.
 > (Pinned: `tests/test_extractor_v4_s4_stage_claims.py`.)
 >
 > **On the step *names*:** the code's own stages are **S1–S5** (`[S1] STORY SUMMARY` … `[S5] EMBED`, module

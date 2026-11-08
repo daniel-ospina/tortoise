@@ -119,8 +119,8 @@ precision figure (the labels above cannot produce one):
   Friday morning…", wp07 "The on-call handoff was smooth with no pages
   overnight", wp03 "(The on-call room has been quiet lately…", wp02 "the team had
   signed off on the sketch the previous Friday (2026-10-02)". These are the
-  reason the ADD stage is armed OFF: a model handed them must be free to answer
-  "no claim here", and the stage's prompt says so explicitly.
+  reason the ADD stage stays OFF together with the unmeasured yield (§4): a model
+  handed them must be free to answer "no claim here", and the prompt says so.
 * **structural fragments** — a bold label split by the sentence splitter
   (`**The problem state that triggered the redesign`), wp04's two flags are both
   this class.
