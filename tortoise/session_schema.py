@@ -103,6 +103,14 @@ __all__ = [
 #: ``tests/test_demo_session_read_exclusion_8290.py`` pins both halves — a
 #: 1000-mint population for (1), and the door/exclusion agreement for (2) —
 #: because a vacuous prefix test would hide every leak instead of one.
+#:
+#: ⚠️ RESIDUAL, stated and not claimed closed: the reservation is NOT
+#: retroactive. A capture a caller filed under this prefix BEFORE the doors
+#: refused it (any graph written by an older tree, since the doors accepted
+#: arbitrary ids) is still hidden by the read exclusion and stays hidden — no
+#: migration un-hides it, because nothing can distinguish such a row from the
+#: sample by id alone. The repair is a re-capture under an un-reserved id, and
+#: the graph row is reachable only by id from an operator, not by the product.
 DEMO_SESSION_ID_PREFIX = "session_demo_"
 
 

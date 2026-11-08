@@ -186,7 +186,14 @@ def session_id_or_absent(value: object) -> str | None:
     writer (``__main__._spool_transcript``, ``session import``, the backlog
     replay) and the spool WIRE (``capture_spool._normalise_session_id``) — so it
     lives here rather than being re-typed at each, and it composes
-    :func:`session_id_refusal` so the BLANK half cannot drift from the doors.
+    :func:`session_id_refusal` so EVERY refusal class — blank, non-``str`` and
+    the RESERVED demo namespace of #8290 — is judged by the doors' ONE
+    predicate rather than re-derived here.
+
+    A reserved-namespace id therefore falls back (``None``) rather than being
+    put on the wire: the server mints a fresh id, so that capture is still
+    FILED and still readable, instead of being written under a prefix the read
+    surfaces exclude and then quarantined by a permanent 422.
 
     ``""`` normalises to ``None`` for the same reason ``None`` does: both are
     ABSENT to the doors, and a fallback must fire for both.
