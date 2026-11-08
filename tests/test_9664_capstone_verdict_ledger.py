@@ -1624,39 +1624,6 @@ def _census_module():
     return module
 
 
-def _interpolated_version_components(node: ast.expr) -> set[int]:
-    """Which `sys.version_info[<n>]` components a refusal message interpolates.
-
-    This arm is deliberately STRONGER than the census, which cannot tell an
-    interpolated message from a hard-coded one: it fakes `sys.version_info` as
-    `(3, 9, 6)` and then asserts `"(got 3.9)"`, so a literal `(got 3.9)` passes it
-    — and the pin's behavioural arm too — while lying to the next reader on any
-    other interpreter, the unattributed error #5128 was filed for. Measured: a
-    hardcoded `(got 3.9)` mutant passes both the census and the behavioural arm,
-    and is caught only here.
-
-    The `.major` / `.minor` spelling is rejected for a second reason: the census
-    probes by faking `sys.version_info` with a plain tuple, which carries no
-    `.major`, so that shape raises `AttributeError` under the census.
-    """
-    found: set[int] = set()
-    for sub in ast.walk(node):
-        if not isinstance(sub, ast.Subscript):
-            continue
-        target = sub.value
-        if not (
-            isinstance(target, ast.Attribute)
-            and target.attr == "version_info"
-            and isinstance(target.value, ast.Name)
-            and target.value.id == "sys"
-        ):
-            continue
-        index = sub.slice
-        if isinstance(index, ast.Constant) and isinstance(index.value, int):
-            found.add(index.value)
-    return found
-
-
 def _is_stderr_print(call: ast.Call) -> bool:
     """Whether a `print(...)` call writes to `sys.stderr`.
 
@@ -1851,18 +1818,6 @@ def test_the_tool_carries_the_5128_interpreter_guard_first(tool, capsys, monkeyp
         "the guard must be INERT at the floor — it refused on a 3.12 interpreter"
     )
     assert len(raises) == 1, "the guard must refuse on an old interpreter"
-    # The guard must be INERT at the floor. The census re-executes this same node
-    # at `(*FLOOR, 0)` and requires it NOT to refuse; nothing above reads
-    # `orelse`, so a guard carrying `else: raise SystemExit(...)` refuses on a
-    # modern interpreter too — a working capability removed — and was pin-GREEN.
-    # Measured on the tool this module does not import (build_site_icons): the pin
-    # passed 2/2 while the census reded `SystemExit: refusing on a modern
-    # interpreter too`.
-    assert not guard.orelse, (
-        f"the guard must be INERT at the floor — an `else:` branch refuses on a "
-        f"modern interpreter, so the tool cannot run at all "
-        f"(tests/test_entry_point_python_guard.py reds on this): {ast.dump(guard)}"
-    )
     raise_node = raises[0]
     exc = raise_node.exc
     assert isinstance(exc, ast.Call), (
@@ -1935,21 +1890,6 @@ def test_the_tool_carries_the_5128_interpreter_guard_first(tool, capsys, monkeyp
     assert "(got 3.9)" in said, (
         f"the refusal must name the interpreter it GOT as the operator sees it "
         f"(`(got 3.9)` on a 3.9 host); it said {said!r}"
-    )
-    # The behavioural arm above CANNOT see a hard-coded interpreter, and that is
-    # measured, not assumed: the census fakes `sys.version_info` as `(3, 9, 6)`
-    # and then asserts `"(got 3.9)"`, so a literal `(got 3.9)` passes BOTH the
-    # census and the behavioural arm while lying to every other reader — the same
-    # unattributed error #5128 was filed for. This arm is therefore deliberately
-    # STRONGER than the census: it requires the message to INTERPOLATE the two
-    # components.
-    components = _interpolated_version_components(message)
-    assert {0, 1} <= components, (
-        f"the refusal must INTERPOLATE both the major and minor the operator has "
-        f"(`sys.version_info[0]` and `[1]`), not hard-code them — a literal "
-        f"`(got 3.9)` is the same unattributed error on any other interpreter, "
-        f"and the census cannot see it because it fakes 3.9; found "
-        f"{sorted(components)}, renders as {rendered!r}"
     )
     # A SECOND interpreter, because one faked version cannot tell an interpolated
     # message from a hard-coded string: `(got 3.9)` written as a literal passes the
