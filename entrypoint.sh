@@ -615,9 +615,23 @@ export TORTOISE_WEB_WORKERS
 # `worker_topology._CLICK_TRUE`, pinned by `_AGREEMENT_TABLE`'s reload rows and
 # `test_the_shipped_block_reports_one_worker_while_reloading`.
 _reload_requested=0
+# ⛔ ARITY, not token membership. MEASURED on the pinned 0.52.1:
+# `--reload-include --reload --workers 2` makes `--reload` the INCLUDE PATTERN —
+# uvicorn starts NO reloader ("Current configuration will not reload …") and TWO
+# workers. A membership loop reads that as reloading and prints `workers = 1`,
+# which is the fail-open class the gate exists to close. Every long option other
+# than the FLAGS below consumes the next token as its value, so that token is
+# never re-read as a flag. The flag list is uvicorn 0.52.1's own
+# (`uvicorn.main.main.params`, `is_flag=True`) and is pinned on the Python side
+# by `test_the_uvicorn_flag_set_is_uvicorns_own`.
+_reload_skip=0
 for _arg in "$@"; do
+    if [ "$_reload_skip" = "1" ]; then _reload_skip=0; continue; fi
     case "$_arg" in
         --reload) _reload_requested=1 ;;
+        --*=*) : ;;
+        --access-log|--use-colors|--proxy-headers|--server-header|--date-header|--version|--reset-contextvars|--factory) : ;;
+        --*) _reload_skip=1 ;;
     esac
 done
 case "$(printf '%s' "${UVICORN_RELOAD:-}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]')" in

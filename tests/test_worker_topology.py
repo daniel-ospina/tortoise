@@ -1290,3 +1290,65 @@ def test_a_spelling_click_rejects_does_not_exempt_the_shipped_gate(spelling):
                            {wt.RELOAD_ENV: spelling})
     assert proc.returncode == 1, (spelling, proc.stdout, proc.stderr)
     assert "MULTI-WORKER" in proc.stdout, (spelling, proc.stdout)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ARITY — a value that looks like a flag is not a flag
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_the_uvicorn_flag_set_is_uvicorns_own():
+    """`UVICORN_FLAG_OPTIONS` cannot drift from uvicorn's click parser.
+
+    The reload verdict is a fail-OPEN if a value-taking option is mistaken for a
+    flag (or the reverse), so the transcribed set is asserted against
+    `uvicorn.main.main.params` — the parser that will actually read the argv. A
+    uvicorn bump that adds or removes a flag reds HERE instead of silently
+    turning `--reload-include --reload` back into a permitted N-worker boot.
+    """
+    from uvicorn.main import main as uvicorn_main
+
+    flags = set()
+    for param in uvicorn_main.params:
+        opts = [o for o in getattr(param, "opts", ()) if o.startswith("--")]
+        if not opts:
+            continue
+        if getattr(param, "is_flag", False) or getattr(param, "flag_value", None):
+            flags.update(opts)
+    assert flags == set(wt.UVICORN_FLAG_OPTIONS)
+
+
+def test_a_reload_lookalike_value_is_not_a_reloader():
+    """⛔ MEASURED fail-open (uvicorn 0.52.1): `--reload-include --reload
+    --workers 2` runs TWO workers and NO reloader, because `--reload` is the
+    INCLUDE PATTERN. Token membership read that as a reloader, so
+    `is_multi_worker` was False and the gate PERMITTED N workers on an embedded
+    database — the arm `TORTOISE_MULTI_WORKER` cannot lift.
+    """
+    argv = ["uvicorn", "app:app", "--reload-include", "--reload", "--workers", "2"]
+    assert wt.reload_is_requested(argv) is False
+
+    topology = wt.observe({}, supervised=True, argv=argv)
+    assert topology.reloading is False
+    assert topology.is_multi_worker is True
+    assert wt.refusal_reason(topology) is not None
+
+    # …while the genuine shapes still read as a reloader.
+    for real in (["uvicorn", "a:a", "--reload"],
+                 ["uvicorn", "a:a", "--host", "0.0.0.0", "--reload"],
+                 ["uvicorn", "a:a", "--factory", "--reload"]):
+        assert wt.reload_is_requested(real) is True, real
+    for fake in (["uvicorn", "a:a", "--reload-dir", "src"],
+                 ["uvicorn", "a:a", "--app-dir", "--reload", "--workers", "2"],
+                 ["uvicorn", "a:a", "--reload=1"]):
+        assert wt.reload_is_requested(fake) is False, fake
+
+
+def test_the_shipped_banner_does_not_claim_a_reloader_for_a_lookalike_value():
+    """The shipped shell half must use ARITY too, or the banner lies about it."""
+    proc = _run_gate_block(
+        ("uvicorn", "app:app", "--reload-include", "--reload", "--workers", "2"), {})
+    assert "reload" not in proc.stdout.lower(), proc.stdout
+    assert "workers = 2" in proc.stdout, proc.stdout
+    # …and the pre-exec gate refuses the boot, so the lie cannot stand alone.
+    assert proc.returncode == 1, (proc.stdout, proc.stderr)
+    assert "admission gate refused this boot" in proc.stderr

@@ -223,6 +223,35 @@ WORKERS_FLAG = "--workers"
 #: parent is the RELOADER and the worker count is 1.
 RELOAD_FLAG = "--reload"
 
+#: The long options that are BOOLEAN FLAGS in uvicorn's click parser, so they
+#: consume NO value. Every OTHER long option consumes the next token as its
+#: value — EVEN when that token looks like a flag (click's behaviour).
+#:
+#: ⛔ This table is the difference between a guard and a fail-open. MEASURED on
+#: the pinned 0.52.1: `uvicorn app:app --reload-include --reload --workers 2`
+#: makes `--reload` the INCLUDE PATTERN, starts NO reloader
+#: ("Current configuration will not reload …") and runs TWO workers. A
+#: membership test reads that as "reloading", so `is_multi_worker` returns False
+#: and the gate PERMITS N workers on an embedded database, where the
+#: acknowledgement deliberately cannot lift the refusal — N divergent copies.
+#: The shell banner agreed with the wrong verdict, so nothing reddened.
+#:
+#: Transcribed from `uvicorn.main.main.params` (0.52.1) and PINNED against that
+#: parser by
+#: `tests/test_worker_topology.py::test_the_uvicorn_flag_set_is_uvicorns_own`,
+#: so a uvicorn bump reds instead of silently re-opening the bypass.
+UVICORN_FLAG_OPTIONS: frozenset[str] = frozenset({
+    "--reload",
+    "--access-log",
+    "--use-colors",
+    "--proxy-headers",
+    "--server-header",
+    "--date-header",
+    "--version",
+    "--reset-contextvars",
+    "--factory",
+})
+
 #: click's ``context_settings={"auto_envvar_prefix": "UVICORN"}``
 #: (``uvicorn/main.py``) makes this variable a real input for ``--reload`` — so
 #: uvicorn's reloader can start with NO reload TOKEN on the command line.
@@ -447,19 +476,55 @@ def _uvicorn_workers_env_value(environ: Mapping[str, str] | None = None) -> str 
     return raw if raw else None
 
 
-def reload_is_requested(argv: Sequence[str] | None = None) -> bool:
-    """True when this process's argv carries uvicorn's ``--reload``.
+def _parsed_options(argv: Sequence[str] | None = None) -> list[tuple[str, str | None]]:
+    """``(name, value)`` pairs from a uvicorn command line, respecting ARITY.
 
-    Matched as an exact token: ``--reload-dir`` / ``--reload-include`` /
-    ``--reload-exclude`` / ``--reload-delay`` are modifiers that only mean
-    anything alongside ``--reload`` itself, so a substring test would report a
-    reload for a run that is not one.
+    ``--opt=value`` carries its value inline. Otherwise a LONG option either is
+    one of :data:`UVICORN_FLAG_OPTIONS` (consumes nothing) or consumes the NEXT
+    token as its value — **even when that token looks like a flag**, which is
+    click's behaviour and the reason a membership test is not enough.
+
+    Short options and bare positionals are ignored: the reload decision is a
+    long-option fact.
+    """
+    args = list(sys.argv if argv is None else argv)
+    parsed: list[tuple[str, str | None]] = []
+    index = 0
+    while index < len(args):
+        token = args[index]
+        if token.startswith("--") and len(token) > 2:
+            if "=" in token:
+                name, _, value = token.partition("=")
+                parsed.append((name, value))
+                index += 1
+                continue
+            if token in UVICORN_FLAG_OPTIONS:
+                parsed.append((token, None))
+                index += 1
+                continue
+            parsed.append((token, args[index + 1] if index + 1 < len(args) else None))
+            index += 2
+            continue
+        index += 1
+    return parsed
+
+
+def reload_is_requested(argv: Sequence[str] | None = None) -> bool:
+    """True when uvicorn's PARSER will read ``--reload`` as the flag here.
+
+    ⛔ Arity-aware, not membership. ``--reload-dir`` / ``--reload-include`` /
+    ``--reload-exclude`` / ``--reload-delay`` all take a VALUE, so a plain
+    ``RELOAD_FLAG in argv`` test is wrong in the DANGEROUS direction: it fires
+    when `--reload` is some OTHER option's value. MEASURED —
+    `--reload-include --reload --workers 2` runs NO reloader and TWO workers, so
+    reading it as a reloader permits N workers on an embedded database.
+    :func:`_parsed_options` applies uvicorn's own rule instead.
 
     Under spawn the child's ``sys.argv`` is the parent's command line
     (multiprocessing restores it), so this answers for the child too — measured.
     """
-    args = sys.argv if argv is None else argv
-    return RELOAD_FLAG in list(args)
+    return any(name == RELOAD_FLAG and value is None
+               for name, value in _parsed_options(argv))
 
 
 def reload_env_is_set(environ: Mapping[str, str] | None = None) -> bool:
