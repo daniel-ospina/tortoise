@@ -79,10 +79,14 @@ not a reader; the two greps in §5 print both sides. What it *does* change is th
 evidence surface: the bare token count of the three edge-creating verbs prints **4** on `origin/main`
 and **0** at the base, because #11205's own explanation names `sdk.create_operator` in four comments —
 `git grep -n 'create_operator' -- tortoise/extractor_v2.py` prints exactly four, and none of them is a
-call — but ⚠️ **those four line numbers are `origin/main`'s, not this record's base's**: they are `:8938`,
-`:8956`, `:8963` and `:9343` at `origin/main` (`62248db88`; `#11361`, `7491da3fe`, moved them), while the
+call — but ⚠️ **those four line numbers are `62248db88`'s, not this record's base's**: they are `:8938`,
+`:8956`, `:8963` and `:9343` there (`#11361`, `7491da3fe`, moved them), while the
 same grep prints **0** at this record's base `80c912244`, and four at `:8892`, `:8910`, `:8917` and
-`:9231` at `de72cfd45` (the last commit to touch THIS record, `#11326`). The conclusion that matters —
+`:9231` at `de72cfd45` (the last commit to touch THIS record, `#11326`). ⛔ They have moved a THIRD
+time since: a live read at this record's own head prints `:9006`, `:9024`, `:9031` and `:9411` — the
+`+68` insert §10.14 re-derives the §11 block around sits above all four too, so even `62248db88`'s
+numbers are stale as a live read. That is this section's lesson, not a defect in it: **a line number
+is true only at the base it was taken at.** The conclusion that matters —
 **zero calls** — holds at every one of those bases (the call-shaped grep prints nothing at all three); the
 mention count and its line numbers do not, which is this section's own lesson. §1's second reason therefore
 stands unchanged, and both §1 and §5 carry the call-shaped command, which a comment cannot satisfy. That
@@ -299,7 +303,7 @@ symbol and let the line number be a convenience printed beside it** (`git grep -
 the path matters: unscoped, both patterns also match THIS record and its quoted lines, which is the
 count-of-mentions trap §0 documents). Every number in this paragraph is re-derived at its own sha by the
 `for s in aa414b4d5 8e49ae909 80c912244 d69faaf38` sweep in §5 — a live grep cannot do it (it prints
-`:12779` here), which is the whole point. That is the class of defect §0 exists to catch: a number true at
+`:12929` here), which is the whole point. That is the class of defect §0 exists to catch: a number true at
 one base and false at the base the record claims. Which is why the 0.0 pp above is the **armed** result,
 not an unarmed one.
 
@@ -604,7 +608,7 @@ gh issue view 10997 --json state,closedAt                 # CLOSED 21:33:55Z
 gh issue view 11021 --json state,closedAt                 # CLOSED, one second after its merge
 
 # §0/§2 — the sha-pinned cites, each re-derived AT THE SHA IT NAMES (the one read that decides them;
-# a live grep cannot: `git grep -n 'vet_enabled = '` prints :12779 here, which is none of these numbers)
+# a live grep cannot: `git grep -n 'vet_enabled = '` prints :12929 here, which is none of these numbers)
 for s in aa414b4d5 8e49ae909 80c912244 d69faaf38; do echo "== $s"; \
   git show "$s":tortoise/extractor_v2.py | grep -n 'vet_enabled = (\|os.environ.get("TORTOISE_VET")\|def _hold_endpoint\|_hold_endpoint(hold_store\|def _mint_endpoint\|payload_entities.append({'; done
 # aa414b4d5 → 1153, 8784, 9401, 11351 · 8e49ae909 → 1153, 8785, 9402, 11358
@@ -614,7 +618,7 @@ for s in aa414b4d5 8e49ae909 80c912244 d69faaf38; do echo "== $s"; \
 # §0's four `create_operator` MENTIONS are base-dependent too — the CALL count is 0 either way:
 git show 80c912244:tortoise/extractor_v2.py | grep -c 'create_operator'   # 0
 git show de72cfd45:tortoise/extractor_v2.py | grep -n 'create_operator'  # :8892 :8910 :8917 :9231
-git grep -n 'create_operator' -- tortoise/extractor_v2.py                 # :8938 :8956 :8963 :9343
+git grep -n 'create_operator' -- tortoise/extractor_v2.py                 # :9006 :9024 :9031 :9411
 
 # A1 (§1) — the declaration reads, and nothing production writes it
 .venv/bin/python3 -m tortoise pack validate packs/dev      # 6 declared hierarchies, exit 0

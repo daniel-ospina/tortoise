@@ -1703,8 +1703,13 @@ re-cut from the resolved document (§8), and no committed verdict is re-scored.
   `:13071`, `:13142`+76 = `:13218`); the one pair that is NOT +76 is `:5286`/`:5287` →
   `:5354`/`:5355` (**+68**) — so the file carries THREE bands, and a cite's delta depends on
   which insert it sits under. Cites ABOVE the first insert did not move at all (`:88-89`,
-  `:296-312`, `:1154`, `:1720` are still correct), which is why the whole bundle's cites were
-  re-derived one by one rather than offset in a batch. Every number was verified by CONTENT at this head (the `def`,
+  `:296-312`, `:1154`, `:1720` are still correct), which is why the bundled cites were
+  re-derived one by one rather than offset in a batch. ⛔ **Two of them sit behind no test at
+  all**, and were re-derived by RUNNING the annotation's own command: `RECONCILE-A1-A2-A5.md`
+  prints the output of two live greps as comments, and the grading tests sweep `_BUNDLE_DOCS`,
+  which does not include that record — so §0's `create_operator` annotation moves
+  `:8938/:8956/:8963/:9343` → `:9006/:9024/:9031/:9411`, and the two "a live grep cannot do it
+  (it prints `:12779` here)" clauses → `:12929`. Every number was verified by CONTENT at this head (the `def`,
   the `return items` that ends it, the two `if items:` gates, the two `except` arms, the two
   result blocks' opening braces and their closing `}`), never by adding an offset.
 - **What moved: nothing else.** No metric, denominator, threshold, class set, corpus pin or `steps`
