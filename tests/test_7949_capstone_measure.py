@@ -4826,6 +4826,36 @@ def test_the_bare_continuation_cites_name_what_they_say():
             # the row (the row's INTENT is unchanged: pin the CALL).
             ("15456", "chunk_stories.append(run_s1(model, _edus_to_text(chunk),"),
         )),
+        # ⛔ THE FIVE REMAINING BARE STEP CITES ON THE SAME FIVE-LINE CLAIM, and
+        # the reason `test (f)` went red on this branch (#11517 review round 5,
+        # finding P2). The reviewer's remedy was not "correct the numbers" — it
+        # was "**add a `_PIN_ROWS` row per number so the next insertion reds
+        # instead of drifting**", because correcting them alone is exactly what
+        # had already happened: the F1/F2 round comment blocks inserted ~6 lines
+        # above each cited call AFTER the paragraph was written, and only the
+        # pinned numbers (`:15456`, `:13362`) were re-derived. All six were off
+        # by +6 and NOTHING read the other six — five here plus `:13108`'s
+        # sibling in `README.md`, which
+        # `test_the_readmes_line_citations_resolve_to_the_symbols_they_name`
+        # covers.
+        #
+        # A row scopes to ONE line, and this claim WRAPS (`(S2.1,` … `(S2.2,`
+        # are one line; the S2.3/S3/s4 half is two more), so the populated
+        # sentence takes three rows rather than one — the same reason the
+        # `README.md` "i.e. BEFORE the" claim above takes two.
+        ("probes/capstone_run.py", "(S2.1,", (
+            ("15488", "embed_list = run_s2(model, story, master,"),
+            ("15542", "embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass("),
+        )),
+        ("probes/capstone_run.py", "_apply_classify_kinds`` (S2.3,", (
+            ("13108", "out = kind_classifier.classify_items(items)"),
+            ("13109", '_apply_classify_kinds(embed_list, out["assignments"])'),
+        )),
+        ("probes/capstone_run.py", "(S3,", (
+            ("13125", "search = search_graph(sdk, embed_list, story, "
+                      "session_id=session_id)"),
+            ("13146", "s4 = run_s4(model, story, search, embed_list, master,"),
+        )),
     )
     # The SAME document states two of its claims as the RULE's own text rather than a
     # line number — a quoted rule cannot drift by an insertion above it, which is why
