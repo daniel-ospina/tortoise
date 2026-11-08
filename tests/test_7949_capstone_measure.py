@@ -11416,9 +11416,11 @@ def test_the_probes_cross_file_cites_resolve_to_the_symbols_they_name():
     This PR's own `DOOR_PINNED_ON` entry grew by two comment lines — moving the
     `TORTOISE_STATE_VALUE_VERBATIM` tuple `:504` → `:506` — and every line below it by
     **+2**, so three cites naming the probe from OUTSIDE this bundle moved with it. Two
-    were already stale on `main` by hundreds of lines (measured: `:519` for a value at
-    `:1001`, `:4019` for `:4046`), so the +2 was the smaller half of each defect — the
-    rot was structural, not this PR's: nothing re-checks a `file:line` string that no
+    were already stale before this PR moved anything, measured against the base it
+    merged (`f5c69f74781`): `:519` sat 480 lines above the `float(value)` it means
+    (`:999`, and `:1001` at this branch's pre-fix head) and `:4019` 25 lines above the
+    census key (`:4044`, `:4046` there), so the +2 was the smaller half of each defect —
+    the rot was structural, not this PR's: nothing re-checks a `file:line` string that no
     suite reads, and `grep` for each number finds only the cite itself, so the wrong
     number is silent in BOTH directions. That is this bundle's own thesis, found inside
     its own citations.
