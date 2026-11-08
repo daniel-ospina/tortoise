@@ -562,3 +562,45 @@ def test_the_bundle_retracts_the_claim_that_a_graph_census_adds_nothing():
     assert "0/113" in text, "the retraction must carry the measured counterexample"
     assert "graph_census" in text, (
         "the bundle must name the instrument that closes the gap (#8444)")
+
+
+def test_object_edges_is_a_MEASURED_zero_and_then_counts_what_lands(captured):
+    """#11237: the Object→Object row the E6 before-arm of 0 is read against.
+
+    Three separate ways this must fail, because three separate things could go
+    silently wrong (#11237 review P2 — before this case NOTHING asserted the
+    block, so deleting it left the whole suite green):
+
+    * the ``object_edges`` key must be PRESENT and empty on a session whose graph
+      carries no Object→Object edge — a MISSING key would read as "nothing
+      measured", and the row this issue exists to move starts at exactly 0;
+    * it must be SCOPED to this session's Objects, so an edge written between
+      two of them is what it counts;
+    * ``aggregate_graph_census`` must carry the per-type sums AND
+      ``object_edges_total`` — the single number the pre-registration reads.
+    """
+    sdk, session_id, snap = captured
+    pids = _point_ids(snap)
+    g = sdk._get_proj().g
+
+    empty = runner.graph_census(sdk, session_id, pids)
+    assert "error" not in empty, empty
+    assert empty["object_edges"] == {}, (
+        "an offline capture states no relations, so the row must be a MEASURED 0 "
+        f"(the key present and empty), not an absent key: {empty!r}")
+
+    src = g.query(
+        "MATCH (p:Point)-[:aboutObject]->(o:Object) WHERE p.id IN $pids "
+        "RETURN o.id LIMIT 1", params={"pids": pids}).result_set
+    assert src, "the capture minted no Object — guard failed"
+    target = sdk.create_entity("object", "the census target",
+                               is_episodic=False)
+    target_id = target["node"]["id"]
+    assert sdk.link_entities("related", src[0][0], target_id)
+
+    census = runner.graph_census(sdk, session_id, pids)
+    assert census["object_edges"] == {"related": 1}, census
+
+    agg = runner.aggregate_graph_census({session_id: census})
+    assert agg["object_edges"] == {"related": 1}, agg
+    assert agg["object_edges_total"] == 1, agg

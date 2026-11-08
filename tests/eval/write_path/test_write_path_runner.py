@@ -187,6 +187,80 @@ def test_receipt_rejects_partial_metrics_on_completed_run():
     assert any("missing metrics" in i for i in issues)
 
 
+# ── #11237: the relation-write block and the Object→Object census ──────────
+#
+# These two blocks are the ones the PR's own claim rests on ("the E6 number has
+# a reader"), and before these cases NOTHING asserted them: deleting the
+# `object_edges` block from `graph_census`, the `relation_write` arm from
+# `validate_receipt`, or `_aggregate_relation_write` entirely left the suite
+# green (#11237 review P2).
+
+def test_receipt_rejects_a_non_integer_relation_write_count():
+    """A string count is refused BY NAME, not coerced.
+
+    `relation_write.written` is the number the E6 row is read against, so a
+    value that is not an int is an instrument fault: `"35"` would compare and
+    sum differently from `35` in every consumer downstream.
+    """
+    receipt = runner.build_receipt(_completed_report())
+    receipt["relation_write"] = {"written": "35", "dropped": 0}
+    issues = runner.validate_receipt(receipt)
+    assert any("relation_write.written" in i for i in issues), issues
+    assert not any("relation_write.dropped" in i for i in issues), issues
+
+
+def test_receipt_accepts_a_pre_collapse_relation_write_block():
+    """`collapsed` is ADDITIVE — a receipt without it still validates.
+
+    The committed evidence receipts predate the collapse bucket; refusing them
+    would invalidate artifacts this PR does not touch (`written`/`dropped` stay
+    REQUIRED, because those two predate every receipt in the tree).
+    """
+    receipt = runner.build_receipt(_completed_report())
+    receipt["relation_write"] = {"written": 35, "dropped": 1}
+    assert not [i for i in runner.validate_receipt(receipt)
+                if "relation_write" in i]
+    receipt["relation_write"]["collapsed"] = True  # a bool is not an int here
+    assert any("relation_write.collapsed" in i
+               for i in runner.validate_receipt(receipt))
+
+
+def test_the_relation_write_aggregate_sums_the_three_buckets():
+    """Per-session receipts SUM, and the per-statement record keeps its session.
+
+    `written + dropped + collapsed` is the reconciliation the write leg promises
+    (`relation_write.apply_relation_edges`), and the run-level block is where a
+    reader checks it across the corpus — a bucket that silently stopped being
+    summed would make the corpus total understate what the leg did.
+
+    Mutation: drop `collapsed` from the sum and the totals disagree with the
+    per-session blocks.
+    """
+    runs = {
+        "s2": {"written": 3, "dropped": 1, "collapsed": 2,
+               "write_paths": {"structural": 2, "direct": 1},
+               "edges": [{"predicate": "hasPart"}],
+               "drops": [{"predicate": "transacts", "src": "a", "dst": "b",
+                          "reason": "no path"}],
+               "collapses": [{"predicate": "supports", "into": "IMPL"}]},
+        "s1": {"written": 1, "dropped": 0, "collapsed": 0,
+               "write_paths": {"direct": 1},
+               "edges": [], "drops": [], "collapses": []},
+    }
+    block = runner._aggregate_relation_write(runs)
+    assert block["written"] == 4, block
+    assert block["dropped"] == 1, block
+    assert block["collapsed"] == 2, block
+    assert block["considered"] == 7, block
+    assert block["write_paths"] == {"structural": 2, "direct": 2}, block
+    # The per-statement record keeps its SESSION, so a named refussal can be
+    # traced to the capture that made it.
+    assert [row["session_id"] for row in block["drops"]] == ["s2"], block
+    assert [row["session_id"] for row in block["collapses"]] == ["s2"], block
+    # Pure: same receipts → same block.
+    assert runner._aggregate_relation_write(runs) == block
+
+
 def test_failed_run_receipt_allows_null_pin_and_empty_metrics():
     receipt = runner.build_receipt(runner._failed_report(
         "w2b-x", "2026-09-01T00:00:00Z", "abc", "sha256:y",

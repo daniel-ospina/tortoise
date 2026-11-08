@@ -1657,7 +1657,11 @@ surfaces:
   # reaches an edge property (⛔ #10000, P0). Senses exactly the writers it
   # registers against: `tortoise/sdk.py` (api, the commit leg),
   # `tortoise/extractor_v2.py` (ep, the producer) and the new
-  # `tortoise/relation_write.py` (core fallback).
+  # `tortoise/relation_write.py` (the `core` fallback — see the `core`
+  # registration at the end of that list, which is the row that makes this
+  # sentence true). ⚠️ THIS FILE IS `on_demand` (via `eval/**`, #10194), so it
+  # runs on the manual eval lane and never on a merge: the guards that must bite
+  # a `tortoise/relation_write.py`-only diff live in `test_relation_write_11237.py`.
   - eval/write_path/test_write_path_relation_lane.py
   # #9077 (E4): the operator-receipt EVIDENCE gate — the checker that refuses a
   # numerator (`tools/operator_receipt_check.py`) plus the runner/grading
@@ -6633,6 +6637,21 @@ surfaces:
   # `select()`'s early return — the #9076 placement for `test_e1_e2_measurement.py`.
   # Hermetic: a scripted model, no DB, no graph, no network.
   - test_referentiality_11021.py
+  # #11237 review P1: `tortoise/relation_write.py` matches no `SOURCE_PATTERNS`
+  # row, so a change to it ALONE resolves through the `tortoise/` fallback to
+  # THIS surface — and the module's guards must therefore be reachable from
+  # `core`. ⛔ NOT the eval lane: `eval/**` is `on_demand` by an owner decision
+  # (#10194 decision A — "the eval subtrees do not gate a merge … they run on
+  # demand, never on a merge"), so registering
+  # `eval/write_path/test_write_path_relation_lane.py` here would be a row that
+  # can never select it (measured: `select(["tortoise/relation_write.py"])`
+  # subtracts the on-demand set, so the eval lane is in NO pre-merge leg). The
+  # pure-plan guards — the `#11235` ambiguity refusal, the `#10000` typed-only
+  # rule, the declared-hierarchy branch, the collapse accounting and the
+  # inverted-predicate refusal — live in this file instead: hermetic, no graph,
+  # no corpus, no model. The graph-level lane stays on demand. Pinned by
+  # `tests/test_ci_selection.py::test_relation_write_leg_runs_on_the_module_that_carries_it`.
+  - test_relation_write_11237.py
   ep:
   - test_stdlib_shadow_guard.py  # #10060 N1: repo-wide guard — see the note on the `api` entry
   # #7951 (remaining doors) / review P1: DUAL-REGISTERED with `core` (below)
