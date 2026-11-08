@@ -20,7 +20,7 @@ and left one statement uncovered was invisible to every instrument in the tree
 that can only count.
 
 It reports. It never acts. The **action** is a separate, flag-gated stage
-(`extractor_v2.run_partial_gap_fill`, S2.2b, `TORTOISE_PARTIAL_GAP_FILL`,
+(`extractor_v2.run_partial_gap_fill`, S2.2b-ADD, `TORTOISE_PARTIAL_GAP_FILL`,
 **default OFF**), and this record exists because that stage's value depends
 entirely on how good the detector is — a stage that "fills" a gap that was not
 a gap adds cost and noise.
@@ -82,8 +82,11 @@ not the thinnest band in the distribution at all — `[0.2, 0.3)` holds 3 and
 that was false on this very population (review round 4). Those figures are re-derived by
 `test_the_coverage_floor_is_justified_by_the_measured_distribution`, because an
 earlier draft of this paragraph carried pre-correction percentiles that nothing
-pinned (round 2's finding); `min_content_tokens = 4` drops markdown headings and
-bold labels, which are the population's dominant flag class below it.
+pinned (round 2's finding); `min_content_tokens = 4` drops `**bold label**` and
+date-fragment segments, which are the class it removes below it — measured: 68 of
+the 212 sub-floor segments carry a bold label (32.1%), a plurality rather than a
+dominant class, and headings are masked out before segmentation so they can never
+be a flag class at all (0 of 416 flagged at `min_content_tokens=1` begin with `#`).
 
 **Stemming is symmetric on purpose, and the first version was not.** Coverage
 compares *base forms*, so the stemmer must fold both sides of a pair: an

@@ -421,10 +421,10 @@ def _narrative_statements(narrative: str) -> int:
 #: measures.
 GAP_COVERAGE_FLOOR = 0.55
 
-#: Segments carrying fewer content words than this are not claims — markdown
-#: headings and bold labels (``**Root cause (preserved exactly).**``) are the
-#: population's dominant flag class without it (measured: dropping below four
-#: content words is what removes the label and date-fragment classes).
+#: Segments carrying fewer content words than this are not claims — the class
+#: this removes is `**bold label**` and date-fragment segments (measured over the
+#: 7 recorded sessions: 68 of 212 sub-floor segments carry a bold label, 32.1% —
+#: a plurality, not a dominant class; headings are masked before segmentation).
 GAP_MIN_CONTENT_TOKENS = 4
 
 #: How many flagged segments ride ``stats["batch"]``. The full count is always
