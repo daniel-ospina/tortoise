@@ -546,16 +546,14 @@ def test_validate_honours_its_repo_root_argument(tmp_path, monkeypatch):
     another tree silently validated against THIS checkout and the "not in the tree"
     assertion could never fail on the developer's box.
 
-    ⛔ This test could not fail for that property. `tmp_path/elsewhere` is not a git
-    repository, so the SHA arm answers `unmeasurable` and `validate` raises on "git
-    could not be asked" BEFORE the evidence arm decides anything. MEASURED: with
-    `_evidence_is_real(entry, repo_root)` reverted to `REPO_ROOT` at both call sites,
-    THIS test still passed — it was satisfied by an unrelated arm while being cited as
-    coverage for this one. (The mutant was not invisible overall — two glob tests
-    reddened — so the honest statement is that this test was not the one holding the
-    property it names, not that the mutant survived the suite.)
+    ⛔ This test could not fail for the property it names. `tmp_path/elsewhere` is not a
+    git repository, so the SHA arm answers `unmeasurable` — and its problem ALONE
+    satisfied `pytest.raises(InvalidLedger)`, because `validate` accumulates problems
+    rather than stopping at the first. The assertion therefore could not tell WHICH arm
+    fired, and MEASURED with `_evidence_is_real(entry, repo_root)` reverted to
+    `REPO_ROOT` at both call sites, this test still passed.
 
-    The SHA arm is stubbed to `exists` so the evidence arm is the only one that can
+    The SHA arm is stubbed to `exists` so the evidence arm is the only arm that can
     raise, and the assertion matches that arm's own message so a raise from the wrong
     arm cannot satisfy it. Same mutant now reddens this test.
     """
@@ -571,11 +569,11 @@ def test_validate_forwards_repo_root_to_the_SHA_arm(monkeypatch, tmp_path):
     """The sibling arm: `_commit_state` honours `repo_root`, but `validate` must HAND
     it one.
 
-    ⛔ Reverting `_commit_state(sha, repo_root)` to `_commit_state(sha)` does redden the
-    suite — but only through ARITY: the existing stubs take two arguments, so the
-    reverted call raises `TypeError` and no test ever observes WHICH root is handed
-    over. The forward was pinned incidentally, by a call shape, not by a measurement;
-    this pin replaces that with the property itself.
+    ⛔ That forward was pinned only INCIDENTALLY. Reverting it to `_commit_state(sha)`
+    does redden tests, but not one of them ASSERTS which root is handed over: the
+    existing stubs fail on the changed call arity, and the behavioural red is a
+    downstream difference in the answer, not a statement about the argument. A pin on
+    a call shape is not a pin on the property, so this one asserts the property.
 
     The mutant is a fail-open: a caller doing `validate(data, repo_root=<other tree>)`
     gets `exists` for a sha that exists only in THIS checkout, and `render()` prints
