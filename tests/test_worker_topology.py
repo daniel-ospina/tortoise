@@ -750,13 +750,28 @@ def _worker_block(source: str) -> str:
     return block
 
 
-def _run_worker_block(argv: tuple[str, ...], environ: dict[str, str]) -> subprocess.CompletedProcess:
+def _locale_env(locale: str | None) -> dict[str, str]:
+    """Both locale variables, or nothing.
+
+    ⛔ The helpers build the child's environment FROM SCRATCH, so without this
+    every shipped-block arm runs in the **C** locale — and the collating-range
+    defect (`[0-9]` is a RANGE, not a byte class) is invisible to all of them.
+    Both variables are set because the shipped pin is `local LC_ALL=C; export
+    LC_ALL`, whose whole purpose is the `LANG`-only shape (a developer shell and
+    many container images set no `LC_ALL` at all).
+    """
+    return {} if locale is None else {"LC_ALL": locale, "LANG": locale}
+
+
+def _run_worker_block(argv: tuple[str, ...], environ: dict[str, str],
+                      locale: str | None = None) -> subprocess.CompletedProcess:
     script = (
         "set -euo pipefail\n"
         + _worker_block(ENTRYPOINT.read_text())
         + "\nprintf 'WORKERS=%s\\n' \"$TORTOISE_WEB_WORKERS\"\n"
     )
-    env = {"PATH": os.environ.get("PATH", ""), "_IS_SERVER": "1", **environ}
+    env = {"PATH": os.environ.get("PATH", ""), "_IS_SERVER": "1",
+           **_locale_env(locale), **environ}
     return subprocess.run(["bash", "-c", script, "entrypoint", *argv],
                           env=env, capture_output=True, text=True, check=False)
 
@@ -786,8 +801,8 @@ def _gate_tail(source: str) -> str:
     return source[start:end]
 
 
-def _run_gate_block(argv: tuple[str, ...],
-                    environ: dict[str, str]) -> subprocess.CompletedProcess:
+def _run_gate_block(argv: tuple[str, ...], environ: dict[str, str],
+                    locale: str | None = None) -> subprocess.CompletedProcess:
     """Run the SHIPPED resolution+gate tail in a real shell, with a real argv.
 
     `python` is pinned to THIS interpreter's directory so the gate cannot resolve
@@ -799,6 +814,7 @@ def _run_gate_block(argv: tuple[str, ...],
         "PATH": f"{Path(sys.executable).parent}:{os.environ.get('PATH', '')}",
         "PYTHONPATH": str(REPO_ROOT),
         "_IS_SERVER": "1",
+        **_locale_env(locale),
         **environ,
     }
     return subprocess.run(["bash", "-c", script, "entrypoint", *argv],
@@ -1044,6 +1060,57 @@ def test_the_lifespan_off_refusal_covers_counts_the_shell_CANNOT_see():
     assert "UNVERIFIED" in proc.stdout, proc.stdout
 
 
+def test_the_lifespan_off_refusal_holds_under_a_COLLATING_locale():
+    """⛔ END-TO-END, in a locale where `[0-9]` is not a byte class.
+
+    The predicate arm above proves `_count_is_verifiable` answers UNREADABLE; it
+    cannot prove the SHIPPED block still refuses, because the block has two more
+    digit readers on the same value (`_resolve_requested_workers`' `case`, and
+    the `-gt 1` arithmetic test). MEASURED on the pre-fix block, this exact
+    invocation (`en_US.utf8`, `--lifespan off`, `WEB_CONCURRENCY=١٢`):
+
+        tortoise: … the count is verified as ONE worker, so there is nothing to gate
+        tortoise: uvicorn workers = 1
+        WORKERS=١٢                                        rc=0
+
+    …while uvicorn's `int("١٢")` starts TWELVE children and the lifespan-off
+    boot never installs the gate: N ungated workers on N divergent copies of one
+    embedded database. The arm is the P1's own transcript, so it cannot pass on
+    a head that reproduces it.
+    """
+    locale = _collating_utf8_locale()
+    if locale is None:
+        pytest.skip("no UTF-8 locale on this host folds decimal digits")
+
+    for count in ("١٢", "١٢ ", "١٢١"):
+        proc = _run_worker_block(
+            ("uvicorn", "app:app"),
+            {"UVICORN_LIFESPAN": "off", "WEB_CONCURRENCY": count},
+            locale=locale,
+        )
+        assert proc.returncode != 0, (count, locale, proc.stdout, proc.stderr)
+        assert "REFUSING" in proc.stderr, (count, locale, proc.stderr)
+        # …and the banner may not announce a topology nobody measured: on the
+        # pre-fix block BOTH of these lines printed, at exit 0.
+        assert "verified as ONE worker" not in proc.stdout, (count, proc.stdout)
+        assert f"WORKERS={count.strip()}" not in proc.stdout, (count, proc.stdout)
+
+    # The pin is a PIN, not a change of grammar: an ordinary count still boots,
+    # and the refusal is still attributable to the spelling (same locale, 2 is
+    # refused as N>=2 — a different reason, asserted so the arm above cannot be
+    # satisfied by a block that refuses everything).
+    proc = _run_worker_block(("uvicorn", "app:app"),
+                             {"UVICORN_LIFESPAN": "off", "WEB_CONCURRENCY": "1"},
+                             locale=locale)
+    assert proc.returncode == 0, proc.stderr
+    assert "verified as ONE worker" in proc.stdout, proc.stdout
+    proc = _run_worker_block(("uvicorn", "app:app"),
+                             {"UVICORN_LIFESPAN": "off", "WEB_CONCURRENCY": "2"},
+                             locale=locale)
+    assert proc.returncode != 0, proc.stdout
+    assert "2 uvicorn workers" in proc.stderr, proc.stderr
+
+
 #: A UTF-8 locale whose collation folds decimal digits — the only reason `[0-9]`
 #: is not a byte class in bash. Probed once, so the arm below skips on a host
 #: without it instead of failing for the wrong reason.
@@ -1107,17 +1174,26 @@ def test_the_count_predicates_are_LOCALE_PINNED():
         assert proc.returncode == 0, (count, name, proc.stderr)
         return proc.stdout
 
+    def resolved(out: str) -> str:
+        return [ln for ln in out.splitlines() if ln.startswith("RESOLVED=")][-1][9:]
+
     for count in ("١٢", "١٢ ", "١٢١"):
         out = run(("uvicorn", "app:app"), count, locale)
         assert "UNREADABLE" in out, (count, locale, out)
-        # …and the BANNER may not report a count uvicorn would serve twelve of.
-        assert "RESOLVED=12" not in out, (count, locale, out)
+        # ⛔ The RESOLVER's own pin, asserted on its VALUE, not on a spelling.
+        # `RESOLVED=12` as a substring could never fail: the unpinned resolver
+        # emits the Arabic-Indic spelling `RESOLVED=١٢`, which does not contain
+        # ASCII `12` — MUTATION-CHECKED (pin removed from that one helper only:
+        # this arm passed). The C-locale verdict for an unreadable count is 1,
+        # and that is the number the banner and `int()` must not read as twelve.
+        assert resolved(out) == "1", (count, locale, out)
 
     # The pin is a PIN, not a mutation of the grammar: under `C` the same input
     # is unreadable for the ordinary reason, and an ASCII count is read in both.
     for count in ("١٢", "2"):
         out = run(("uvicorn", "app:app"), count, "C")
         assert ("VERIFIABLE" in out) is (count == "2"), (count, out)
+        assert resolved(out) == ("2" if count == "2" else "1"), (count, out)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
