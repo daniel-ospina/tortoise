@@ -422,9 +422,9 @@ def _narrative_statements(narrative: str) -> int:
 GAP_COVERAGE_FLOOR = 0.55
 
 #: Segments carrying fewer content words than this are not claims — the class it
-#: removes is `**bold label**` and date-fragment segments: measured, 68 of the 212
-#: sub-floor segments carry a bold label (32.1%, a plurality not a dominant class);
-#: headings are masked BEFORE segmentation, so they are never flags at all.
+#: removes is `**bold label**` and date-fragment segments; headings are masked
+#: BEFORE segmentation, so they are never flags. Re-derived by
+#: ``test_the_content_floor_s_removal_class_is_measured_not_asserted``.
 GAP_MIN_CONTENT_TOKENS = 4
 
 #: How many flagged segments ride ``stats["batch"]``. The full count is always
