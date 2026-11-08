@@ -134,9 +134,9 @@ is `deepseek:deepseek-v4-flash` — #1525, with the TRANSPORT repointed off
 `OPENROUTER_API_KEY`, so the openrouter-named default raised before loading a
 question). Requires an
 `OPENROUTER_API_KEY` (the judge needs no `OPENAI_API_KEY` unless the official
-judge is named explicitly — the run default is our own pinned model since the
-#8486 ruling of 2026-10-27, see `docs/benchmarks/longmemeval-500q/run-report.md`
-§1.1);
+judge is named explicitly, because the run default is our own pinned model
+since the #8486 ruling of 2026-10-27, see
+`docs/benchmarks/longmemeval-500q/run-report.md` §1.1);
 no keys were present at record time, so this config is verified up to spec
 parse + mock-run only, not executed. Cost re-measure + provider routing for
 the ask lane (eval-only; deepseek-direct 400s on non-deepseek specs) remain the

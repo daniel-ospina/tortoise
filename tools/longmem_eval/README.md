@@ -669,8 +669,12 @@ uv run python -m tools.longmem_eval.run_protocol smoke --mock
 
 - The dataset (~tens of MB; auto-downloaded to the cache dir — needs
   network) and
-- provider keys (reader: e.g. `OPENROUTER_API_KEY`; judge: `DEEPSEEK_API_KEY`
-  for the default, or `OPENAI_API_KEY` if you name the official judge).
+- provider keys. **A default run needs `DEEPSEEK_API_KEY` and nothing else** —
+  the reader (`READER_MODEL`) and the judge (`DEFAULT_JUDGE_MODEL`) are both
+  `deepseek-v4-flash` under the #8486 ruling. An override needs its OWN
+  provider's key (`OPENROUTER_API_KEY`, `OPENAI_API_KEY`, …), and
+  `OPENAI_API_KEY` alone selects nothing: name `OFFICIAL_JUDGE_MODEL`
+  explicitly to grade with the official judge.
 
 The full 500-question run is `@pytest.mark.slow` (never in CI); the
 committed mini fixture + `--mock --skip-preflight` exercises the entire
