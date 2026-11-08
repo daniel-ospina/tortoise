@@ -1612,28 +1612,35 @@ def _refusal_exit_status(exc: ast.expr | None) -> int | None:
     return None
 
 
-def _interpolates_the_actual_interpreter(node: ast.expr) -> bool:
-    """Whether a refusal message interpolates the interpreter it GOT.
+def _interpolated_version_components(node: ast.expr) -> set[int]:
+    """Which `sys.version_info[<n>]` components a refusal message interpolates.
 
-    The census asserts this behaviourally (`"(got 3.9)"` in the real refusal);
-    structurally that is a `sys.version_info[<n>]` SUBSCRIPT. The
-    `.major` / `.minor` spelling is deliberately NOT accepted: the census fakes
-    `sys.version_info` with a plain tuple for its probe, and a tuple carries no
-    `.major`, so that shape raises `AttributeError` under the census and reds it
-    — a guard this pin passed would red a later census run instead.
+    The census asserts this behaviourally (`"(got 3.9)"` in the real refusal),
+    i.e. the MAJOR *and* MINOR the operator actually has. So both subscripts are
+    required: `(got {sys.version_info[0]})` renders `(got 3)` and reds the census,
+    and a pin that accepted any single subscript would be weaker than the census
+    on the one diff where the pin is the only gate.
+
+    The `.major` / `.minor` spelling is rejected for a second reason: the census
+    probes by faking `sys.version_info` with a plain tuple, which carries no
+    `.major`, so that shape raises `AttributeError` under the census.
     """
+    found: set[int] = set()
     for sub in ast.walk(node):
         if not isinstance(sub, ast.Subscript):
             continue
         target = sub.value
-        if (
+        if not (
             isinstance(target, ast.Attribute)
             and target.attr == "version_info"
             and isinstance(target.value, ast.Name)
             and target.value.id == "sys"
         ):
-            return True
-    return False
+            continue
+        index = sub.slice
+        if isinstance(index, ast.Constant) and isinstance(index.value, int):
+            found.add(index.value)
+    return found
 
 
 def test_the_tool_carries_the_5128_interpreter_guard_first():
@@ -1762,10 +1769,19 @@ def test_the_tool_carries_the_5128_interpreter_guard_first():
     # run on a tool-only diff, so the same per-tool contract is pinned here —
     # otherwise `raise SystemExit(3)` would pass the pin and red the census on a
     # later core-surface run instead.
-    assert status == cl.EXIT_INVALID, (
-        f"the refusal must exit {cl.EXIT_INVALID} (`EXIT_INVALID`, the tool's "
-        f"fail-closed neighbour — its 0-4 set is closed and fully spent); got "
-        f"{status}: {ast.dump(raise_node)}"
+    assert status == 1, (
+        f"the refusal must exit 1. The expected value is the LITERAL the census "
+        f"pins (`REFUSAL_CODES['tools/capstone_ledger.py'] == 1`), not "
+        f"`cl.EXIT_INVALID` read back from the module under test: measured, a "
+        f"coordinated edit (`EXIT_INVALID = 3` + `SystemExit(3)`) kept a "
+        f"self-referential assertion green while the census reded, and 3 is "
+        f"EXIT_DISABLED — a refusal indistinguishable from the off-switch. "
+        f"Got {status}: {ast.dump(raise_node)}"
+    )
+    assert cl.EXIT_INVALID == 1, (
+        f"the tool's own fail-closed neighbour must be 1 (its 0-4 set is closed "
+        f"and fully spent, so EXIT_INVALID is reused on purpose); got "
+        f"{cl.EXIT_INVALID}"
     )
     assert len(exc.args) == 1 and not exc.keywords, (
         f"`raise SystemExit(...)` must carry exactly one argument; the census "
@@ -1807,7 +1823,9 @@ def test_the_tool_carries_the_5128_interpreter_guard_first():
         f"the refusal must name the interpreter it GOT, not only the floor; "
         f"renders as {rendered!r} (message node: {ast.dump(message)})"
     )
-    assert _interpolates_the_actual_interpreter(message), (
-        f"the refusal must INTERPOLATE `sys.version_info` — a hard-coded '3.9' "
-        f"is the same unattributed error for the next reader: {ast.dump(message)}"
+    components = _interpolated_version_components(message)
+    assert {0, 1} <= components, (
+        f"the refusal must interpolate BOTH the major and minor the operator "
+        f"has (`sys.version_info[0]` and `[1]`); found {sorted(components)}, "
+        f"renders as {rendered!r} (message node: {ast.dump(message)})"
     )
