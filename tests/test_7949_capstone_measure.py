@@ -10844,6 +10844,28 @@ def _call_sites(src: str) -> list[tuple[int, str]]:
     return out
 
 
+def _cite_qualifiers(region: str) -> list[tuple[str, str]]:
+    """`(number, qualifier)` for every `:NNN` cite in `region` that CARRIES one — both spellings.
+
+    The record qualifies a cite two ways: `<n> at <base>` and, for a base it prints in
+    parentheses, `<n> (<base>)`. An arm that parses only the `at` spelling is blind to
+    `` `:13011` (HEAD) `` at all, and one that demands the qualifier be unbracketed reads the
+    PERMITTED `` :12929 at `a1dff7cec8` `` as a violation while its message names the opposite
+    defect (`[]`, "qualifier is not a base") — both measured on this block (#11519 review).
+    Backticks, bold markers and a trailing sentence period are typography, not the claim, so
+    they are stripped: the caller classifies the qualifier's VALUE, never its decoration.
+
+    A region with no qualified cite returns `[]`, which a caller MUST read as "this arm would be
+    inert here" — never as "there is nothing to check".
+    """
+    out: list[tuple[str, str]] = []
+    for n, raw in re.findall(r":(\d+)`?\s*(?:\bat\b\s*|\()\s*([^\s,;)\]]{0,24})", region):
+        q = raw.strip("*`().,;")
+        if q:
+            out.append((n, q))
+    return out
+
+
 def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     """`RECONCILE-A1-A2-A5.md`'s LIVE cites, which no sweep reads.
 
@@ -10951,6 +10973,25 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         "a COMMENT naming the verb is not a call site")
     assert _call_sites('_X = "create_operator(payload)"\n') == [], (
         "a STRING naming the verb is not a call site")
+    # ⛔ `_cite_qualifiers`' own cases, asserted rather than described — the same idiom as
+    # `_call_sites` above and for the same reason: a parser that silently stops matching is a
+    # no-op gate that still reports green. Each case is a spelling measured on this PR's record or
+    # named by its review, so the arm's coverage is a measurement and not a claim.
+    assert _cite_qualifiers("`:13011 at HEAD`") == [("13011", "HEAD")], (
+        "the `at`-word spelling, backtick-wrapped, is a qualified cite")
+    assert _cite_qualifiers(":13011 at `HEAD`") == [("13011", "HEAD")], (
+        "a BACKTICKED non-base qualifier is a qualified cite — main's `[\\w]` could not see it")
+    assert _cite_qualifiers("`:13011` (HEAD)") == [("13011", "HEAD")], (
+        "the parenthesised spelling carries no `at` at all — main's arm was blind to it")
+    assert _cite_qualifiers(":12929 at a1dff7cec8, :12779 at 62248db88") == [
+        ("12929", "a1dff7cec8"), ("12779", "62248db88")], (
+        "the §5 block's own sentence: two cites, two BASE qualifiers, both classified")
+    assert _cite_qualifiers("`:9343` (`62248db88`)") == [("9343", "62248db88")], (
+        "a base in parentheses is still a BASE — the false block main's shape produced")
+    assert _cite_qualifiers("`:12929` at\n**`a1dff7cec8`**") == [("12929", "a1dff7cec8")], (
+        "§2's own spelling wraps the base in a newline and bold — typography, not the claim")
+    assert _cite_qualifiers("the comment at :10906 and 40 lines") == [], (
+        "a BARE cite has no qualifier — it is the grammar gap stated beside the arm, not a hit")
 
     # A1: #11205's channel is TRANSPORT ONLY — the schema line that spells the
     # predicate allowlist, and the comment saying nothing in `tortoise/` consumes it.
@@ -10968,8 +11009,8 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # false-BLOCK generator: side1's literal redded on an em-dash reword of the same clause;
     # `[^.\n]{0,80}` redded on `` `hasPart`, i.e. `cite` `` and on the reversed order
     # (`` the allowlist at `cite` includes `hasPart` ``), while still passing a two-CLAUSE
-    # rewrite. `#11546` (de1e2c9b2) removed exactly this needle class by name — *"needles whose
-    # claim is a number or a token and whose tail was prose"*. main's two membership tests above
+    # rewrite. `#11546` (de1e2c9b2) removed exactly this needle class by name — *"remaining
+    # needles whose claim was a number or a token and whose tail was prose"*. main's two membership tests above
     # are that decision, this file follows it, and the claim they cannot express (mention and
     # cite about the same line) is left to a reader rather than to a predicate that misfires in
     # three of the four rewrites measured.
@@ -11291,8 +11332,9 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # to make it green would be to re-instate the rot the record exists to remove. The claim
     # asserted here is the base-qualified PAIR: a `:NNNN` with no base beside it is the shape
     # `#11555` retired, and it must not come back.
-    for _label, _region in (("§2 (A2)", text[_s2_at:_s2_end]),
-                            ("the §5 reproduction block", text[_block_at:_block_end])):
+    for _label, _region, _is_repro_block in (("§2 (A2)", text[_s2_at:_s2_end], False),
+                                             ("the §5 reproduction block",
+                                              text[_block_at:_block_end], True)):
         _found = re.findall(r":(\d+)`? at `?([0-9a-f]{7,40})`?", _region)
         assert ("12929", "a1dff7cec8") in _found, (
             f"{_label} must quote the vet_enabled line as a BASE-QUALIFIED pair "
@@ -11304,37 +11346,60 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         # things a wording cannot dodge: the LIVE number never appears in these regions at all, and
         # every `:12929` there carries the base it was true at within 60 characters — the same
         # idiom the neighbouring `:12779` arm already uses for its own number.
-        # ⛔ THE LIVE-NUMBER ARM IS DELIBERATELY ABSENT FROM THIS LOOP — and the hole is stated
-        # here because nothing else in this file catches it: a re-stale of any number OTHER than
-        # `:12929` to the live/HEAD shape (`:13011` at HEAD, in §2 or in the §5 block) reds
-        # NOTHING (measured: whole file green). Three forms were
+        # ⛔ THE LIVE-NUMBER ARM IS DELIBERATELY ABSENT FROM THE *§2* HALF OF THIS LOOP — and the
+        # hole is stated here because nothing else in this file catches it: in §2 (A2), a re-stale
+        # of any number OTHER than `:12929` to the live/HEAD shape (`:13011` at HEAD) reds NOTHING
+        # (measured: whole file green). The §5 block is NOT that hole — its qualified cites are
+        # classified below. Three forms were
         # measured and every one of them was wrong in a direction: a single-number deny-list
         # (`":12944" not in`) under-blocked every other HEAD-relative number and over-blocked a
         # sha-qualified read; a qualifier regex under-blocked a BARE `:12944` and over-blocked
         # ordinary prose (`HEAD` unanchored matches "ahead"/"header", and "in this tree" read as a
         # citation); a finite number list is a word list by another name. What DOES hold, and is
         # asserted: the cited number itself must carry its base (the loop below), so re-staling
-        # `:12929` reds, and the §5 block keeps main's own `at`-word arm (restored below, block-scoped). What does NOT
-        # exist is a general "no live number" rule for §2 (A2) — that region's mixture of
-        # base-qualified and file-qualified cites needs a citation grammar the record does not
-        # have yet, which is a separate piece of work.
+        # `:12929` reds, and the §5 block classifies every qualifier it carries (below, by
+        # identity). What does NOT exist is a general "no live number" rule for §2 (A2) — that
+        # region's mixture of base-qualified, file-qualified and git-grep-output cites needs a
+        # citation grammar the record does not have yet, which is a separate piece of work.
         for _m in re.finditer(r":12929", _region):
             _near = _region[max(0, _m.start() - 60):_m.end() + 60]
             assert "a1dff7cec8" in _near, (
                 f"{_label}: `:12929` at offset {_m.start()} does not name the base it was true at "
                 "— an unqualified occurrence is a re-stale presented as live")
-        # ⛔ main's own arm, kept where it WORKS (#11519 review). `_found == ["12929"]` was green
-        # on the §5 block and RED on §2 (main's record re-cut §2's cite, so the arm and the text
-        # disagreed there) — which is why it could not be kept verbatim. But dropping it wholesale
-        # took a WORKING, discriminating watch off the block the record calls its reproduction
-        # path: measured, `:13011 at HEAD` injected into that block left the whole file GREEN after
-        # the removal, while main's arm reds it (`['12929','13011']`). Restored block-scoped, where
-        # it is green on the record as shipped and adds no false-block class.
-        if _label == "the §5 reproduction block":
-            _at_word = re.findall(r":(\d+)`? at (?!`?\d)[\w][\w -]{0,12}", _region)
-            assert _at_word == ["12929"], (
-                f"{_label} carries a cite whose qualifier is not a base ({_at_word}) — `<n> at "
-                "HEAD` is the shape `#11555` retired")
+        # ⛔ The §5 watch, kept where main's WORKS and widened to the spellings main's cannot see
+        # (#11519 review). Main's arm was `_found == ["12929"]` over an `at`-WORD shape: green on
+        # the §5 block and RED on §2 (main's record re-cut §2's cite, so arm and text disagreed
+        # there — why it could not be kept verbatim). Dropping it wholesale took a WORKING watch off
+        # the block the record calls its reproduction path (measured: `:13011 at HEAD` injected
+        # there left the whole file GREEN), so it is block-scoped — and main's word shape is
+        # replaced by a qualifier CLASSIFIER, because that shape catches ONE spelling of three:
+        # `` `:13011` (HEAD) `` never contains `at`, and `` `:13011` at `HEAD` `` fails its `[\w]`
+        # at the backtick — both measured GREEN on main's arm. It also redded the PERMITTED
+        # `` :12929 at `a1dff7cec8` `` (a base, printed in backticks) while reporting "qualifier is
+        # not a base ([])" — naming the OPPOSITE defect — because its lookahead excludes only a
+        # base that STARTS WITH A DIGIT.
+        # ⚠️ Still not seen here: a cite with NO qualifier at all (`:13011` alone) — the block as
+        # shipped carries `:10906` that way (a live cite, correctly), so a no-bare-number rule
+        # would false-block on the record itself. That is the same grammar gap as §2, one line up.
+        if _is_repro_block:
+            _quals = _cite_qualifiers(_region)
+            # ⛔ TWO reachable diagnoses, and no third that cannot fire. `#11519`'s finding was that
+            # ONE conflated list reported "qualifier is not a base ([])" for a cite whose qualifier
+            # was a perfectly good base — the message named the opposite defect. The distinction is
+            # made by two asserts that each fire in a state a mutation can reach: the pair assert
+            # above says the base-qualified SPELLING is gone (`:12929 (a1dff7cec8)`, `@`, any
+            # non-`at` connector), and `_not_base` says a qualifier IS present and is not a base
+            # (`at HEAD`, `` at `HEAD` ``, `(HEAD)`). A third guard here — "did the classifier see
+            # anything" — would be an assert that cannot fail (the pair regex above is a subset of
+            # what the classifier reads), i.e. exactly the inert-enforcer class this file exists to
+            # keep out; the classifier's own non-inertness is pinned by the degenerate cases near
+            # `_call_sites` instead.
+            _base = {(_n, _q) for _n, _q in _quals if re.fullmatch(r"[0-9a-f]{7,40}", _q)}
+            _not_base = [(_n, _q) for _n, _q in _quals if (_n, _q) not in _base]
+            assert not _not_base, (
+                f"the §5 block qualifies a cite with something that is not a base ({_not_base}) "
+                "— `<n> at HEAD` and `<n> (HEAD)` are the LIVE shapes `#11555` retired; a cite "
+                "carries either the sha it was true at or no qualifier")
     # The SYMBOL is what the record cites, so the invariant that survives any later insertion is
     # that `vet_enabled = (` is unique IN THE FILE. A rename or a second assignment is what makes
     # the citation ambiguous; the line it happens to sit on is not the claim.
