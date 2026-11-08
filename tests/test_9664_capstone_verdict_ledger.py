@@ -1559,44 +1559,7 @@ def test_a_long_path_is_truncated_in_the_error_line(tmp_path):
 _UNRESOLVED = object()
 
 
-def _module_int_constants(body: list[ast.stmt], before_index: int) -> dict[str, int]:
-    """`NAME: Final[int] = <int literal>` values assigned BEFORE `before_index`.
-
-    A guard may spend a named constant rather than a literal — this tool defines
-    `EXIT_CLEAN: Final[int] = 0` (:137), so `raise SystemExit(EXIT_CLEAN)` is a
-    shape someone could plausibly write. But only constants assigned EARLIER IN
-    THE MODULE count: the guard is the first statement after `import sys`, so a
-    name defined below it is not bound when the guard runs and the refusal
-    becomes a `NameError` traceback instead of an attributable message. Measured:
-    `raise SystemExit(EXIT_INVALID)` (assigned at :138, guard at :101) reds the
-    census with a `NameError` traceback while a statically naive pin passes it.
-    """
-    values: dict[str, int] = {}
-    for node in body[:before_index]:
-        if not isinstance(node, ast.AnnAssign) or not isinstance(node.target, ast.Name):
-            continue
-        if node.value is None:
-            continue
-        annotation = node.annotation
-        is_int = (isinstance(annotation, ast.Name) and annotation.id == "int") or (
-            isinstance(annotation, ast.Subscript)
-            and isinstance(annotation.value, ast.Name)
-            and annotation.value.id == "Final"
-        )
-        if not is_int:
-            continue
-        try:
-            value = ast.literal_eval(node.value)
-        except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
-            continue
-        if isinstance(value, int) and not isinstance(value, bool):
-            values[node.target.id] = value
-    return values
-
-
-def _refusal_exit_status(
-    exc: ast.expr | None, module_body: list[ast.stmt], guard_index: int
-) -> int | None:
+def _refusal_exit_status(exc: ast.expr | None) -> int | None:
     """The PROCESS status a guard's `raise SystemExit(...)` leaves behind (#11342).
 
     Mirrors CPython's own conversion — `.code` becomes a status via `0 if code is
@@ -1610,8 +1573,8 @@ def _refusal_exit_status(
     does no constant folding, so `-256`, `0 + 0`, `2 ** 8` and `0 * 7` arrive as
     `UnaryOp` / `BinOp` nodes that all leave the process at **0** while a
     Constant-only check calls them "a message" and returns 1 — the same
-    fail-open, one node type over. A `Name` is resolved against the module's own
-    `Final[int]` constants.
+    fail-open, one node type over. A bare `Name` is deliberately NOT resolved
+    (see below) — the guard's position makes that shape unrepresentable.
 
     Returns ``None`` when the argument cannot be resolved statically. The CALLER
     must treat that as a FAILURE rather than as non-zero: this pin is the only
@@ -1628,8 +1591,12 @@ def _refusal_exit_status(
         value: object = ast.literal_eval(arg)
     except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
         value = _UNRESOLVED
-    if value is _UNRESOLVED and isinstance(arg, ast.Name):
-        value = _module_int_constants(module_body, guard_index).get(arg.id, _UNRESOLVED)
+    # A `Name` is NOT resolved, and must not be: this pin asserts above that the
+    # guard is the statement IMMEDIATELY after `import sys`, so nothing can be
+    # assigned before it but the docstring, `__future__` and `import sys` — a
+    # module-level `Final[int]` the guard could spend is unrepresentable in a
+    # shape the pin accepts. Measurement on this corpus: `guard_index` is 3 and
+    # the statements before it are exactly `Expr`/`ImportFrom`/`Import`.
     if value is _UNRESOLVED:
         return None
     if value is None:
@@ -1727,9 +1694,17 @@ def test_the_tool_carries_the_5128_interpreter_guard_first():
     assert len(elts) == 2, (
         f"the floor must be a 2-tuple `(major, minor)`; got {ast.dump(test.comparators[0])}"
     )
-    assert [e.value for e in elts if isinstance(e, ast.Constant)] == [3, 12], (
-        f"the floor must be (3, 12); got {ast.dump(test.comparators[0])}"
-    )
+    # `isinstance(..., int)` matters: `[3.0, 12.0] == [3, 12]` is True in Python,
+    # so a value-only comparison accepts a FLOAT floor the census's own
+    # `_floor_in_test` rejects (`isinstance(element.value, int)`) — a green pin
+    # over a census-red guard, which is the one thing this arm must never do.
+    assert [
+        e.value
+        for e in elts
+        if isinstance(e, ast.Constant)
+        and isinstance(e.value, int)
+        and not isinstance(e.value, bool)
+    ] == [3, 12], f"the floor must be (3, 12); got {ast.dump(test.comparators[0])}"
 
     # Two shapes satisfy #5128 and both give an attributable refusal; the census
     # accepts both, so this pin must too or it would reject a census-valid guard:
@@ -1770,11 +1745,11 @@ def test_the_tool_carries_the_5128_interpreter_guard_first():
         f"the guard must raise `SystemExit`; any other exception reads to the "
         f"operator as the tool being broken: {ast.dump(raise_node)}"
     )
-    status = _refusal_exit_status(exc, body, i)
+    status = _refusal_exit_status(exc)
     assert status is not None, (
         f"cannot statically resolve the refusal's exit code, so its status is "
-        f"UNPROVEN — use an int literal, a module-level `Final[int]`, or an "
-        f"f-string message; got {ast.dump(raise_node)}"
+        f"UNPROVEN — use an int literal, an arithmetic expression over ints, or "
+        f"an f-string message; got {ast.dump(raise_node)}"
     )
     assert status != 0, (
         f"the guard refused but the PROCESS exits {status} — a refusal that "
