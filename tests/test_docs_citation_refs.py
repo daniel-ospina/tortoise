@@ -135,30 +135,42 @@ STATED LIMITS — deliberate, and measured rather than guessed:
     of the three policy quotes above, which lives in `tortoise/hosted_api.py` — so
     "the citation graph" here means the graph BETWEEN documents, not every
     citation in the tree.
-  * The guard is scoped to those two directories ON PURPOSE. With `_TARGET_SCOPE`
-    widened over all of `docs/`, this tree carried **10** further dead citations
-    when the disposition was written (measured at `e66450bb`, this change's base;
-    paths below are relative to `docs/`: `ONTOLOGY.md` ×4 — three blank lines plus
-    one PAST-EOF cite, which is a different repair from a blank one —
-    `ops/registry-backup-dr.md` ×2, `infra/embedded-reaper-cron.md`,
+  * The guard is scoped to those two directories ON PURPOSE. With `_in_scope`
+    widened to accept EVERY target under `docs/`, this tree carried **10** further
+    dead citations when the disposition was written (measured at `e66450bb`, this
+    change's base; paths below are relative to `docs/`: `ONTOLOGY.md` ×4 — three
+    blank lines plus one PAST-EOF cite, which is a different repair from a blank
+    one — `ops/registry-backup-dr.md` ×2, `infra/embedded-reaper-cron.md`,
     `architecture/STORAGE-ARCHITECTURE.md`,
     `epics/2026-08-03-tortoise-hosted-platform/plans/7714-data-model.md`,
-    `epics/1402-eval-battery/01-align.md`). ⛔ THAT TEN IS A HEAD-BOUND READING,
-    NOT A STANDING FACT: `main` repaired two of them after that base — one of the
-    `ONTOLOGY.md` blanks and `architecture/STORAGE-ARCHITECTURE.md` — so the merge
-    result carries **8**: `ONTOLOGY.md` ×3 (two blanks plus the PAST-EOF cite),
-    `ops/registry-backup-dr.md` ×2, and one each in
-    `infra/embedded-reaper-cron.md`,
-    `epics/2026-08-03-tortoise-hosted-platform/plans/7714-data-model.md` and
-    `epics/1402-eval-battery/01-align.md`. Re-derive it instead of trusting either
-    number — a count in prose re-stales exactly like the line numbers this guard
-    exists to catch. All of them are pre-existing and none is a target of #1165. A
-    guard that shipped red would be disabled within a day, and repairing this
-    backlog is not this change's job — they are tracked under `#5063` ("one
-    binding from a written claim to the system it describes"), the shared root
-    this guard is a symptom of, AND enumerated row by row in `#11573` so a reader
-    can act on them rather than only read the root.
-    Widening `_TARGET_SCOPE` is the follow-up once that backlog is paid.
+    `epics/1402-eval-battery/01-align.md`). ⛔ WIDENING `_TARGET_SCOPE` ALONE CANNOT
+    REPRODUCE THAT TEN, and the recipe matters because someone will run it: that
+    constant is matched against the target's SECOND path part, so a ROOT-LEVEL
+    target (`docs/ONTOLOGY.md` → `('docs', 'ONTOLOGY.md')`) has no directory there
+    and can never be admitted by any set of directory names. Widening
+    `_TARGET_SCOPE` to every directory under `docs/` therefore returns **6**, with
+    zero `ONTOLOGY.md` rows — a reader who follows the old wording would measure 6
+    and "correct" a correct ten.
+    ⛔ AND THE TEN IS A HEAD-BOUND READING, NOT A STANDING FACT — and the two that
+    `main` moved are NOT repaired. Measured against `origin/main`: the guard stops
+    reporting `docs/plans/2026-09-22-2814-rebuild-config-durability.md:270`
+    (`ONTOLOGY.md:833` is now the `passes_frequency_gate` table row, not the
+    "Tombstone" controlled term) and
+    `docs/scoping/2026-10-13-8497-selfhost-journal.md:36`
+    (`STORAGE-ARCHITECTURE.md:365` is now the *three movements* "Write:" bullet,
+    not "a wiring gap, not a design gap"), because `main` inserted text ABOVE both
+    targets. **Both still cite content that is not there** — they are exactly the
+    "shift onto a DIFFERENT non-blank line stays green" case this docstring's
+    limits name, so a line-number citation cannot distinguish "repaired" from
+    "moved". Re-derive the number rather than trusting either one — a count in
+    prose re-stales exactly like the line numbers this guard exists to catch. All
+    of them are pre-existing and none is a target of #1165. A guard that shipped
+    red would be disabled within a day, and repairing this backlog is not this
+    change's job — they are tracked under `#5063` ("one binding from a written
+    claim to the system it describes"), the shared root this guard is a symptom of,
+    AND enumerated row by row in `#11573` so a reader can act on them rather than
+    only read the root. Widening the scope is the follow-up once that backlog is
+    paid.
 """
 from __future__ import annotations
 
