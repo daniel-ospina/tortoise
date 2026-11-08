@@ -266,12 +266,31 @@ def test_g4_the_probe_deletes_what_it_mints(sdk):
         "toKind": "pm:card",
     })
     census._sdk = lambda uri=None: sdk
-    census._run_write_probe([row], REPO_ROOT / "packs", None)
+    # ⛔ Observe the ids the PROBE actually passed: `_mint_endpoint` alone cannot
+    # answer this, because the defect would be the CALLER not asking for the
+    # second node (measured: a `_mint_endpoint`-only test stayed green with the
+    # caller's `slot=` removed).
+    seen: dict[str, tuple[str, str]] = {}
+    real_read_back = census._read_back
+
+    def _spy(s, src, dst, predicate):
+        seen["ids"] = (src, dst)
+        return real_read_back(s, src, dst, predicate)
+
+    census._read_back = _spy
+    try:
+        census._run_write_probe([row], REPO_ROOT / "packs", None)
+    finally:
+        census._read_back = real_read_back
     # The row is `blocks`, which is NOT in the structural writer's set, so its own
     # write path is the operator — and the ruled `<-` must be what is stored.
     assert row["written"] == "mediated"
     assert row["written_direction"] == "<-", (
         "the probe wrote a different sense than the declaration it measured")
+    assert seen["ids"][0] != seen["ids"][1], (
+        "the probe measured `pm:card → pm:card` as a SELF-LOOP — one node on both "
+        "sides, which is not the declared connection and reads `direct` even if "
+        "the writer refused a real two-card edge")
 
     # The probe mints 2 entities + 1 operator for this row; none may survive.
     assert _probe_residue(sdk) == 0, (

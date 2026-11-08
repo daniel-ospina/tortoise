@@ -326,6 +326,39 @@ def test_h7_hierarchy_rows_are_exactly_the_declared_hierarchy(artifact):
         "here changes the declared total and every reference to it")
 
 
+def test_h7b_the_hierarchy_sense_is_read_from_the_table_not_a_literal(
+        monkeypatch):
+    """The `sense` column is the RESOLVER's answer, for hierarchies too.
+
+    `census.py`'s own layer table says the sense column is
+    `pack_registry.effective_direction`. The hierarchy half wrote a literal —
+    `"hasPart" and "<->" if entry.predicate == "hasPart" else None` — whose
+    precedence makes it `"<->" if predicate == "hasPart" else None`, with the dead
+    `"hasPart" and` operand as the residue. Nothing could red it: H1 compares two
+    derivations that would BOTH have hard-coded it, H3c only checks the value SET
+    and H7 never looks at direction. So moving `SEMANTICS_DIRECTIONS["hasPart"]`
+    would leave the census reporting a sense the table no longer holds. This test
+    moves the table and requires the rows to move with it.
+    """
+    census = _census()
+
+    def _hier():
+        return [r for section in
+                census.build_census(REPO_ROOT / "packs")["packs"].values()
+                for r in section["hierarchies"]]
+
+    rows = _hier()
+    assert rows, "no declared hierarchies — the fixture premise is gone"
+    assert {r["effective_direction"] for r in rows} == {
+        SEMANTICS_DIRECTIONS["hasPart"]}, (
+        "a hierarchy row's sense must BE the table's value for its predicate")
+    monkeypatch.setitem(SEMANTICS_DIRECTIONS, "hasPart", "->")
+    assert {r["effective_direction"] for r in _hier()} == {"->"}, (
+        "the hierarchy sense is still a hard-coded literal — the census would "
+        "disagree with `pack_registry.effective_direction`, which this column "
+        "claims to report")
+
+
 # ── H8 — vocabulary-shaped fields warn, they never drop a pack ───────────────
 def _write_pack(tmp_path: Path, ns: str, relations: list[dict]) -> Path:
     packs = tmp_path / "packs"
