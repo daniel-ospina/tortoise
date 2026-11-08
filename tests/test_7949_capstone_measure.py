@@ -10773,8 +10773,10 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     cite list, i.e. more pinned surface than the claims this PR touches. This leg
     binds only what the PR re-derived, and it is discriminating in both directions:
     re-staling a cite in the RECORD reds it, and an insertion in the CODE above a
-    cited line reds it too — every arm pins its cited line EXACTLY (a range pins
-    both endpoints and its middle), never a window that a shift can slide inside.
+    cited line reds it too — every arm pins its cited line EXACTLY (a 3-line range pins
+    both endpoints AND its middle; a longer one pins both endpoints, which is sufficient
+    because an interior insertion moves the closing endpoint), never a window that a
+    shift can slide inside.
     """
     record = _REPO / "docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md"
     text = record.read_text(encoding="utf-8")
@@ -10922,6 +10924,25 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         f"extractor_v2.py's create_operator mentions are at {live_mentions}, not the "
         "four the record quotes — an insertion above them moves the quote; re-derive "
         "the record's block (its `create_operator` line AND this list) rather than the list")
+    # ⛔ The arm above binds the four LINE NUMBERS; the record also STATES the count in prose
+    # in four places — `prints **4** on origin/main`, `in four comments`, `prints exactly
+    # four`, and §0's `four create_operator MENTIONS`. Those were unbound: measured, editing
+    # `:81` to "prints exactly three" left the suite GREEN while `:629` still listed four
+    # numbers, i.e. the record contradicted its own pinned quote and nothing reddened. A
+    # typed count is this bundle's recurring defect (the docstring above says so), so the
+    # count is DERIVED here and every prose statement of it is bound. The `0` at
+    # `80c912244` and the `56 lines / 59 occurrences` at `62248db88` are sha-pinned readings
+    # — they read commits that already happened and cannot rot — so they are not bound.
+    _n = len(live_mentions)
+    _words = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"]
+    for _count_claim in (f"prints **{_n}** on `origin/main`",
+                         f"names `sdk.create_operator` in {_words[_n]} comments",
+                         f"prints exactly {_words[_n]}",
+                         f"# §0's {_words[_n]} `create_operator` MENTIONS"):
+        assert _count_claim in text, (
+            f"the record states the create_operator mention count as {_n}, but does not "
+            f"say {_count_claim!r} — the derived count and every prose statement of it "
+            "must agree (a typed count that nothing re-checks is what rotted here)")
 
     # A1's §5 "self-matching" note: its annotation claimed `# exit 1 = no output`, which
     # ROTTED to 40 lines once #10982 registered the A1 row into the pinned bundle — the
@@ -11029,7 +11050,11 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # one number at several places, so "appears somewhere before the block" is not "§1 quotes it".
     # Bound to the base-qualified cite instead, and left wording-free on the qualifier: the landed
     # text says "at HEAD", the pre-#11519 wording said "here", and both are the same claim.
-    _block_at = text.find("# §0/§2 — the sha-pinned cites")
+    # ⛔ The boundary is located WITHOUT the heading's typography: a literal
+    # `# §0/§2 — …` needle redded on an em-dash→hyphen reword that changed no claim,
+    # with a message asserting the block was GONE (measured).
+    _hdr = re.search(r"^# §0/§2\b[^\n]*sha-pinned", text, re.MULTILINE)
+    _block_at = _hdr.start() if _hdr else -1
     _s2_at = text.find("## 2. A2")
     assert _block_at > 0 and _s2_at > 0, (
         "the record's §2 (A2) section or its §0/§2 reproduction block is GONE — both are where "
