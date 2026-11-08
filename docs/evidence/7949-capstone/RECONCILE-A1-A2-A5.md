@@ -320,7 +320,8 @@ the path matters: unscoped, both patterns also match THIS record and its quoted 
 count-of-mentions trap §0 documents). Every number this paragraph pins to one of §5's four shas is re-derived at that sha by the
 `for s in aa414b4d5 8e49ae909 80c912244 d69faaf38` sweep in §5 — a live grep cannot do it (scoped,
 `git grep -n 'vet_enabled = ' -- tortoise/extractor_v2.py` prints
-:12929 at the tree you are reading (`:12929` at `a1dff7cec8`, `:12779` at `62248db88`), so the sweep
+one line, and its number is a convenience printed BESIDE the symbol rather than a
+`HEAD`-relative claim: `:12929` at `a1dff7cec8`, `:12779` at `62248db88` — so the sweep
 covers **none** of those three — the numbers it re-derives are pinned to the SHAS, never to a
 `HEAD`-relative delta, which is the same rot in a new coat), which is the whole point. That is the class of defect §0 exists to catch: a number true at
 one base and false at the base the record claims. Which is why the 0.0 pp above is the **armed** result,
