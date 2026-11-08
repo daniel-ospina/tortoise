@@ -230,20 +230,20 @@ Full per-`k` table + per-question digests: `w7a-500q.variants.json`
   disclosure question is the one §1's **Belief layer** row now answers per
   question.
 - **Ingest-mode note (mechanism honesty):** the pre-#8486 configuration of
-  the 2026-09-04 measurement recorded in this report used the runner's
-  `deterministic` ingest (raw-content graph: turn points + raw chunks) —
-  **superseded for step 5 by #8486**, which requires the belief layer and
-  therefore `v2` (the runner REFUSES `--activate-beliefs` on `deterministic`,
-  so §1's ingest mode and §4's command are `v2`). Step 5 itself has NOT been
-  executed: the v2 (LLM-extraction) 500-Q run is PENDING, because it requires
-  the 3-provider rotation for a ~40 h run at tens of dollars (measured: 2-Q v2
-  slice ≈ 40 min; #1509 pilot 50-Q ≈ 4.7 h at 5 workers) and was NOT within the
-  cost/time bound this machinery was approved for. There is no third
-  configuration: `deterministic` is the historical variant, `v2` is what step 5
-  runs, and the v2-vs-deterministic delta is the extraction leg itself —
-  tracked as the #1509 protocol follow-up. (This bullet described
-  `deterministic` as the CURRENT run's mode while §1 and §4 named `v2`; both
-  cannot be true once step 5 is re-pointed, so the tense is fixed here.)
+  this run used the runner's `deterministic` ingest (raw-content graph: turn
+  points + raw chunks) — **superseded for step 5 by #8486**, which requires
+  the belief layer and therefore `v2` (the runner REFUSES
+  `--activate-beliefs` on `deterministic`, so §1's ingest mode and §4's command
+  are `v2`). Step 5 itself has NOT been executed: the v2 (LLM-extraction) 500-Q
+  run is PENDING, because it requires the 3-provider rotation for a ~40 h run at
+  tens of dollars (measured: 2-Q v2 slice ≈ 40 min; #1509 pilot 50-Q ≈ 4.7 h at
+  5 workers) and was NOT within the cost/time bound this machinery was approved
+  for. There is no third configuration: `deterministic` is the historical
+  variant, `v2` is what step 5 runs, and the v2-vs-deterministic delta is the
+  extraction leg itself — tracked as the #1509 protocol follow-up. (This bullet
+  previously closed by calling the v2 baseline "pending" as though `v2` were a
+  future configuration rather than this run's mode; the closing clause now says
+  what is pending — the RUN — and not a third mode.)
 
 ## 4. Run config (exact command + resolved knobs)
 
@@ -361,7 +361,7 @@ never a silent in-place edit (publication discipline, #2106 §7):
 | 2026-11-08 | #8486, third pass (fresh-context review of the delta) — **one in-place edit**. §6's spend bullet enumerated two of the run's THREE billed lanes: `run.py` declares `stage="reader"`, `stage="judge"` and the `stage="ingest"` extractor lane to the hard stop, and the extractor's pool (`_chain("deepseek-direct", "openrouter", "venice")`) can fall off DeepSeek on a box whose only key is OpenRouter's — which the runbook's own strong-reader config requires. The bullet now names all three and the condition, and its dangling "see the receipt note" pointer is gone (no such note exists in §5). No metric, gate or receipt *value* changed — the run is still PENDING. |
 | 2026-11-08 | #8486, fourth pass (fresh-context review of the third) — **one in-place edit**. §6's three-lane bullet gave key absence as the only way the `stage="ingest"` lane leaves `DEEPSEEK_API_KEY`; two paths are not key-driven — a box holding three providers runs a WEIGHTED rotation (venice 0.50 / openrouter 0.35 / deepseek-direct 0.15, `model_adapters.py::_build_routing_model`) while `resolve_extractor_provider` still reports `deepseek-direct` as primary, and a transient failure only cools that provider for `cooldown_s` (300 s default) before it re-enters the rotation — forward-stickiness belongs to `RoutingModel`, the <3-provider path. The bullet now says the ingest delta must be summed across every key the lane touched. No metric, gate or receipt *value* changed — the run is still PENDING. |
 | 2026-11-08 | #8486, fifth pass (fresh-context review of the fourth) — **no in-place edit of the report's numbers or claims; this row records a correction to the record itself**. The fourth pass amended its own errata row rather than adding one, so the row above now reads as though the fourth pass wrote two things it did not. The fourth pass actually wrote `model_adapters.py::_build_pool` and "fails the lane over and STAYS there"; BOTH were wrong — `_build_pool` is not a symbol in `tortoise/model_adapters.py` (the 3-provider pool builder is `_build_routing_model`), and the rotating pool does not stay failed-over (a transient failure cools that provider for `cooldown_s`, 300 s by default, then re-admits it; forward stickiness is `RoutingModel`'s, the <3-provider branch). The amended facts above are correct and are kept; this row is the trace that they were CORRECTED. No metric, gate or receipt *value* changed — the run is still PENDING. |
-| 2026-11-08 | #8486, sixth pass (fresh-context review of the fifth) — **one in-place edit to §3**, logged here per the rule above. §3's ingest-mode note still said *"this run used the runner's `deterministic` ingest"* while §1's **Ingest mode** row and §4's command both say `v2` — the bullet was left in the tense of the historical 2026-09-04 measurement, so after the re-point it described a mode step 5 cannot run and left `v2` reading as a future configuration. It now scopes `deterministic` to the 2026-09-04 record, states that step 5 is PENDING under `v2`, and says there is no third configuration. The same stale clause in `docs/benchmarks/w7a-comparison-rows-for-2106.md`'s handoff row said the v2 baseline "remains pending" in a row that NOW declares v2 as this run's mechanism; it now says the run itself is PENDING. No metric, gate or receipt *value* changed — the run is still PENDING. |
+| 2026-11-08 | #8486, sixth pass (fresh-context review of the fifth) — **one in-place edit to §3** in this report, plus one clause in `docs/benchmarks/w7a-comparison-rows-for-2106.md`, both logged here per the rule above. §3's ingest-mode note already scoped `deterministic` correctly ("the pre-#8486 configuration of this run", "superseded for step 5 by #8486"), but it closed by saying *"The v2 (LLM-extraction) 500-Q baseline — `run_protocol` step 5's documented mode — remains pending"*, which left `v2` reading as future work in a report whose §1 ingest mode and §4 command are `v2`. It now states that what is pending is the RUN, that `v2` is what step 5 runs, and that there is no third configuration. The handoff row carried the same clause ("the v2 … 500-Q baseline remains pending — outside this run's bound") while declaring `v2` as this run's mechanism; it now says the run itself is PENDING. No metric, gate or receipt *value* changed — the run is still PENDING. |
 
 ## 10. Handoff to W7-b (#2106)
 
