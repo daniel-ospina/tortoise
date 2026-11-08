@@ -904,3 +904,84 @@ def test_arm_attribution_is_by_content_not_by_position(monkeypatch, tmp_path):
     assert snap.population["9500"] == REASON_CONTAINER
     assert snap.population["9501"] == REASON_DECLARED
     assert snap.population["9502"] == REASON_ASSIGNED
+
+
+# ── the last two unpinned arms of the rendering + JSON contracts ──────────
+def test_the_footer_does_not_describe_a_claimed_queue_in_population_words():
+    """TWO vocabularies, TWO sentences — and the split had no assertion.
+
+    Measured: reverting the split left the suite green while a CLAIMED-only queue
+    read "…withheld as CLAIMED (a queue whose rows are containers, declared
+    constraints or otherwise not units is an ANSWER…)" — a gloss about containers
+    over a queue that contains none.
+    """
+    snap = Snapshot(
+        repo=REPO,
+        base="main",
+        issues=[issue(9600, "fix(a): real work")],
+        pulls=[_pull(9601, [9600])],
+        claims={"refs/claims/issue-9600": {"verdict": "claim-held", "owner": "box-a:4242"}},
+        population={},
+        population_source="replay fixture",
+    )
+    text, pick = next_work.render(build_units(snap, None), None, snap, repo=REPO, top=5)
+    assert pick is None
+    assert "CLAIMED" in text
+    assert "containers, declared constraints" not in text, text
+
+
+def test_the_json_carries_the_population_provenance():
+    """`--json` is the machine surface; the provenance must reach it.
+
+    Measured: deleting `population`, `population_source` AND
+    `withheld_by_population` from the payload left the suite green, while the code
+    comment beside them says a machine consumer needs exactly this to tell a
+    measurement from OFF / UNREADABLE / ABSENT.
+    """
+    import io
+    from contextlib import redirect_stdout
+
+    snap = Snapshot(
+        repo=REPO,
+        base="main",
+        issues=[issue(9700, "epic: a container"), issue(9701, "fix(a): real work")],
+        population={"9700": REASON_CONTAINER},
+        population_source="replay fixture · POOL_JQ sha256:deadbeef",
+    )
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        next_work.render(build_units(snap, None), None, snap, repo=REPO, top=5)
+    payload = json.loads(
+        json.dumps(
+            {
+                "population_source": snap.population_source,
+                "population": snap.population,
+                "units": [
+                    {"issue": u.issue, "withheld_by_population": u.withheld_by_population}
+                    for u in build_units(snap, None)
+                ],
+            }
+        )
+    )
+    assert payload["population_source"].startswith("replay fixture")
+    assert payload["population"] == {"9700": REASON_CONTAINER}
+    withheld = next(u for u in payload["units"] if u["issue"] == 9700)
+    assert withheld["withheld_by_population"] is True
+
+    # …and the same fields really are emitted by the CLI's own payload, not only by
+    # this reconstruction: the `--json` branch is executed against a real snapshot.
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "snap.json"
+        path.write_text(json.dumps(snap.to_json()), encoding="utf-8")
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = next_work.main(["--from", str(path), "--repo", REPO, "--json"])
+        emitted = json.loads(buf.getvalue())   # the payload is indented
+    assert rc in (0, 1, 2), rc
+    assert emitted["population"] == {"9700": REASON_CONTAINER}
+    assert emitted["population_source"].startswith("replay fixture")
+    row = next(u for u in emitted["units"] if u["issue"] == 9700)
+    assert row["withheld_by_population"] is True
+    assert row["next_command"] is None

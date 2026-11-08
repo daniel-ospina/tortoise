@@ -112,6 +112,20 @@ Usage
     uv run python tools/next_work.py --from snap.json    # replay a snapshot (no network)
     uv run python tools/next_work.py --snapshot-out s.json --top 5
 
+Environment overrides — every one is PRINTED in the run's provenance, so a reader
+can always tell which lever was pulled
+    NEXT_WORK_POPULATION=0    DISARMS the fleet's work-unit rule (#10951). No
+                              population rule is consulted at all: every row is
+                              admitted on its title and labels exactly as before
+                              that issue, so an epic, a `design(…)` decision, a
+                              `measure(…)` and tortoise#10175 all get a runnable
+                              command. Reported as `OFF — …`; never passed for a
+                              measurement.
+    NEXT_WORK_POOL_JQ_SH=…    the script carrying the `POOL_JQ` assignment, when it
+                              is not this checkout's `scripts/` or $AGENT_INFRA_PATH.
+    NEXT_WORK_CLAIMS_SH=…     `claims.sh`, when it is not resolvable in-tree.
+    NEXT_WORK_PACE=…          the pacing gap between `gh` calls.
+
 Exit codes
     0  the queue was fully read and a next action was decided. When the top row has
        nothing to run — NEEDS-TEST (a runner, a merge tree that could not be measured,
@@ -122,7 +136,9 @@ Exit codes
        so and names no unit
     1  the queue was read but NO unit is pickable — every one is held, is a fold
        constituent, is a duplicate of a row already offered (a blocked row owns its
-       action target, so a duplicate can be the rank leader), or the queue is
+       action target, so a duplicate can be the rank leader), is not a unit of work
+       under the fleet's population rule (a CONTAINER, a declared
+       ``standing-constraint``, or already assigned — #10951), or the queue is
        empty. The block prints ``NONE`` and that is an answer, not an error
     2  INCOMPLETE — one of the things the decision depends on could not be read,
        OR the input contradicts itself:
@@ -134,9 +150,11 @@ Exit codes
            verdict, which is a real answer and lands the row at ``NEEDS-REVIEW``),
            the fleet's work-unit rule (``refresh-candidates.sh`` absent, carrying no
            usable ``POOL_JQ``, or that program refused by ``jq`` — #10951; on a box
-           with neither ``scripts/`` nor ``$AGENT_INFRA_PATH`` this is an ALWAYS-ON
-           exit 2, by design, because a queue whose eligibility was never measured
-           is not a queue that passed),
+           with neither ``scripts/`` nor ``$AGENT_INFRA_PATH`` this fires on EVERY
+           run unless ``NEXT_WORK_POPULATION=0`` disarms the rule, by design,
+           because a queue whose eligibility was never measured is not a queue that
+           passed. ⛔ THAT SWITCH IS THE ONE DOCUMENTED LEVER THAT RESTORES THE
+           PRE-#10951 BEHAVIOUR; it is listed under ``Usage`` above),
            the issue search, or the PR list;
          · a SHAPE the door refuses — a decision input, a pull field, an issue
            element, an element of a list, or a value that is the wrong type for
@@ -702,9 +720,12 @@ def _normalise_shapes(raw: dict[str, Any], snap: Snapshot) -> None:
                 bad_issue_fields.append(f"#{number}.{key} elements")
                 row[key] = []
             else:
-                row[key] = [
-                    {"name": v} if isinstance(v, str) else v for v in row[key]
-                ]
+                # GitHub's shapes: labels are `{name}`, assignees are `{login}`.
+                # Using the LABEL shape for both was inert (the shipped arm reads
+                # only `.assignees|length`) but it is the wrong object, and an
+                # inert wrong shape is exactly what a later reader trusts.
+                shape = "name" if key == "labels" else "login"
+                row[key] = [{shape: v} if isinstance(v, str) else v for v in row[key]]
         # ⛔ AND A LABEL DICT WITH NO USABLE `name` KILLS THE WHOLE RULE, not just
         # its own row: measured, `{"labels": [{"id": 1}]}` makes the shipped jq
         # arm die with `explode input must be a string`, which would surface as an
@@ -1686,6 +1707,19 @@ def next_action(unit: Unit, repo: str) -> str | None:
 #: malformed knob. Measured:
 #:
 #:     NEXT_WORK_PACE=0.2s uv run python tools/next_work.py
+#:
+#: Environment overrides (every one of them is PRINTED in the run's provenance, so
+#: a reader can always tell which lever was pulled):
+#:     NEXT_WORK_POPULATION=0    DISARMS the fleet's work-unit rule (#10951). No
+#:                               population rule is consulted at all: every row is
+#:                               admitted on its title and labels, exactly as before
+#:                               that issue — an epic, a `design(…)` decision, a
+#:                               `measure(…)` and #10175 all get a runnable command.
+#:                               Reported as `OFF — …`; never passed for a measurement.
+#:     NEXT_WORK_POOL_JQ_SH=…    the script carrying the `POOL_JQ` assignment, when it
+#:                               is not this checkout's `scripts/` or $AGENT_INFRA_PATH.
+#:     NEXT_WORK_CLAIMS_SH=…     `claims.sh`, when it is not resolvable in-tree.
+#:     NEXT_WORK_PACE=…          the pacing gap between `gh` calls.
 #:       -> ValueError: could not convert string to float: '0.2s'
 #:       -> exit 1 with no snapshot read at all
 #:
@@ -2256,11 +2290,17 @@ def _population_verdicts(repo_root: Path, snap: Snapshot) -> None:
         # Even an EMPTY queue names the rule it would have used: "the source is
         # printed, ALWAYS" is a property of the render, not of a non-empty run.
         script = _population_script(repo_root)
-        if script:
-            prog = _pool_jq(script)
-            if prog:
-                digest = hashlib.sha256(prog.encode()).hexdigest()[:12]
-                snap.population_source = f"{script} · POOL_JQ sha256:{digest} (no rows)"
+        prog = _pool_jq(script) if script else ""
+        if prog:
+            digest = hashlib.sha256(prog.encode()).hexdigest()[:12]
+            snap.population_source = f"{script} · POOL_JQ sha256:{digest} (no rows)"
+        else:
+            # ⛔ THE CLAIM IS "THE SOURCE IS PRINTED", NOT "THE SOURCE IS FOUND"
+            # (#10951 review, round 6). With no rule and no rows the old branch
+            # printed NOTHING, so "ALWAYS" was not what the code did. Zero rows
+            # cannot be withheld either way, so this is a report — but a silent
+            # report is the one thing this seam must never be.
+            snap.population_source = "UNREADABLE — no work-unit rule resolvable (no rows)"
         return
 
     script = _population_script(repo_root)
