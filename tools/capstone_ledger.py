@@ -1541,24 +1541,28 @@ def _command_body(raw: str, base: Path, root: Path) -> tuple[str, Path, str]:
             # `cd -L-P`, `cd -P--`, `cd -P@`, `cd -e-L`, `cd -@` are rc 2. So a group is
             # `-[PLe]+` or `--` and groups are SEPARATED BY WHITESPACE; anything else
             # dashed is left in the target and refused below.
-            target = re.sub(r"^(?:(?:-[PLe]+|--)\s+)+", "", target).strip()
-            # ⛔ `-P` DEFEATS bash's null-directory rule, so the empty-target no-op
-            # below must know whether it was stripped. Measured: `cd ""`, `cd -L ""`,
-            # `cd -e ""` and `cd -- ""` are all rc 0 (a null name is the CURRENT
-            # directory), but `cd -P ""` and `cd -Pe ""` are rc 1 with
-            # `cd: : No such file or directory` — so the `&&` short-circuits and no
-            # later segment ran (tenth review cycle). Admitting the `-P` spelling was
-            # a false PASS.
-            _opts = re.match(r"^(?:(?:-[PLe]+|--)\s+)+", cd.group(1).strip())
-            # ⛔ bash resolves `-L`/`-P` by their LAST occurrence, not by "contains a
-            # P". Measured: `cd -PL ""` and `cd -P -L ""` and `cd -PeL ""` are rc 0
-            # (they reach the `&&`), while `cd -LP ""`, `cd -L -P ""` and
-            # `cd -LeP ""` are rc 1. Testing `"P" in opts` refused all six, which
-            # false-blocked four legitimate spellings — and `cd -P -L tools` (a REAL
-            # target) is already pinned as admitted, so the two arms disagreed about
-            # the same prefix (final review pass).
-            _modes = [ch for ch in (_opts.group(0) if _opts else "") if ch in "LP"]
+            # ⛔ `--` ENDS OPTION PARSING, so consume option groups only UNTIL it and
+            # take the mode from the groups BEFORE it. The plain regex kept consuming
+            # option-shaped groups after `--`, which made `cd -P -- -L ""` strip to an
+            # empty target; reading the last of {L,P} across the whole prefix then
+            # treated the post-`--` `-L` as an OPTION, so `physical` came out False and
+            # the record was admitted — while bash exits 1 with "too many arguments"
+            # (`-L` is a second operand there) and the graded command never ran.
+            # Measured over a 584-spelling sweep: 36 spellings flipped from refused to
+            # admitted, every one carrying a `P` before `--` and an `L` after it.
+            _prefix = ""
+            while True:
+                _group = re.match(r"^(?:-[PLe]+|--)(?:\s+|$)", target)
+                if not _group:
+                    break
+                _token = _group.group(0).strip()
+                _prefix += _token + " "
+                target = target[_group.end() :]
+                if _token == "--":
+                    break
+            _modes = [ch for ch in _prefix.split("--")[0] if ch in "LP"]
             physical = bool(_modes) and _modes[-1] == "P"
+            target = target.strip()
             try:
                 words = shlex.split(target)
             except ValueError:

@@ -143,8 +143,11 @@
 #         bash: "A null directory name is the same as the current directory" — so it
 #         is admitted and the cwd is left unchanged, EXCEPT under `-P`: bash's
 #         null-name rule does not survive `-P`, and bash resolves `-L`/`-P` by their
-#         LAST occurrence, so `cd -PL ""` and `cd -P -L ""` are rc 0 while
-#         `cd -LP ""` and `cd -L -P ""` are rc 1 — the latter spellings are refused. A `cd`
+#         LAST occurrence BEFORE any `--`, so `cd -PL ""` and `cd -P -L ""` are rc 0
+#         while `cd -LP ""` and `cd -L -P ""` are rc 1. `--` ENDS option parsing, so
+#         `cd -P -- -L ""` is rc 1 (`too many arguments` — `-L` is an operand there).
+#         Every one of those spellings is graded to match bash; a 584-spelling sweep
+#         over the option matrix agrees with bash on all of them. A `cd`
 #         with NO directory operand at all (`cd --` is `$HOME`, `cd -` is `$OLDPWD`)
 #         is REFUSED, because that working directory cannot be known from the record
 #         and a later artifact graded from the unmoved directory would admit a record

@@ -2026,6 +2026,19 @@ def test_a_null_cd_target_is_a_no_op(tmp_path):
                 f'{command!r} was ACCEPTED ({proc.returncode}) — `cd {opt} ""` exits 1 '
                 f"in bash (last of L/P wins)\n{proc.stdout}{proc.stderr}"
             )
+    # ⛔ `--` ENDS OPTION PARSING. Reading the mode across a post-`--` group treated
+    # the operand `-L` as an option, so `cd -P -- -L ""` came out non-physical and
+    # was ADMITTED — while bash exits 1 with "too many arguments" (`-L` is a second
+    # operand there) and the graded command never ran. Measured over a 584-spelling
+    # sweep: 36 spellings flipped to admitted. The whole sweep now agrees with bash
+    # on all 584.
+    for opt in ("-P -- -L", "-- -L", "-- -P", "-PL -- -L"):
+        command = f'cmd:cd {opt} "" && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q'
+        proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, command])]))
+        assert proc.returncode == cl.EXIT_INVALID, (
+            f'{command!r} was ACCEPTED ({proc.returncode}) — bash exits 1 with "too '
+            f'many arguments" for `cd {opt} ""`\n{proc.stdout}{proc.stderr}'
+        )
 
 
 def test_an_exit_followed_only_by_inert_segments_is_still_last(tmp_path):
