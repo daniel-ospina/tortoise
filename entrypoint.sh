@@ -492,6 +492,11 @@ _resolve_requested_workers() {
     if [ -z "$_count" ]; then
         _count="${WEB_CONCURRENCY:-1}"
     fi
+    # Strip whitespace BEFORE the digit test: uvicorn parses `$WEB_CONCURRENCY`
+    # with `int(...)`, which tolerates it, so `WEB_CONCURRENCY=' 2 '` really does
+    # start 2 workers. Without this the measured value would be 1 while uvicorn
+    # ran 2 — the measurement lying about the thing it exists to measure.
+    _count="$(printf '%s' "$_count" | tr -d '[:space:]')"
     # `0` and a non-numeric value are not ours to reinterpret: uvicorn treats
     # `workers > 1` as the supervisor's switch (so `0` runs in-process) and would
     # raise on garbage. Normalise both to 1, so this measurement can never
@@ -499,6 +504,8 @@ _resolve_requested_workers() {
     case "$_count" in
         ''|0|*[!0-9]*) _count=1 ;;
     esac
+    # `00`-style zero is still zero.
+    if [ "$_count" -eq 0 ] 2>/dev/null; then _count=1; fi
     printf '%s' "$_count"
 }
 

@@ -291,8 +291,18 @@ def refusal_reason(topology: Topology) -> str | None:
             f"{WEB_CONCURRENCY_ENV} / drop --workers)."
         )
     if not topology.acknowledged:
+        # `spawned` can be true while the count resolves to 1 — that is the
+        # `WEB_CONCURRENCY`-is-not-an-identity-signal case, and the message must
+        # not claim a worker count it never observed.
+        if topology.workers > 1:
+            observed = f"N>={topology.workers} "
+        else:
+            observed = (
+                "a uvicorn supervisor parent (the SERVED count was not readable "
+                "here — only that this process is one of several) "
+            )
         return (
-            f"Refusing to run N>={topology.workers} uvicorn workers: this "
+            f"Refusing to run {observed}uvicorn workers: this "
             "topology is not supported yet and its guards are unlanded (#1677).\n"
             f"{_guard_list()}\n"
             f"Set {ACK_ENV}=1 to acknowledge these residuals and run anyway "

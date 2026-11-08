@@ -181,6 +181,10 @@ def test_a_spawned_worker_refuses_even_when_the_count_reads_one():
     reason = wt.refusal_reason(wt.Topology(workers=1, spawned=True,
                                            shared_db=True, acknowledged=False))
     assert reason is not None, "a spawned worker with count=1 must still be gated"
+    # …and it must not claim a worker count it never observed. "N>=1" would be a
+    # refusal that misdescribes its own evidence.
+    assert "N>=1" not in reason
+    assert "supervisor parent" in reason
 
 
 def test_acknowledgement_is_read_through_the_one_truthy_contract():
@@ -290,6 +294,12 @@ def _exported_workers(argv: tuple[str, ...], environ: dict[str, str]) -> int:
         # measurement must never DISAGREE with the server that starts.
         (("uvicorn", "app:app"), {"WEB_CONCURRENCY": "oops"}, 1),
         (("uvicorn", "app:app", "--workers", "0"), {}, 1),
+        (("uvicorn", "app:app", "--workers", "00"), {}, 1),
+        # Whitespace around the count is TOLERATED by uvicorn (`int(' 2 ')` is 2),
+        # so the measurement must tolerate it too — otherwise it reports 1 while
+        # two workers start, and reports it on the very line an operator reads to
+        # decide whether the topology is what they think it is.
+        (("uvicorn", "app:app"), {"WEB_CONCURRENCY": " 2 "}, 2),
     ],
 )
 def test_the_shipped_block_resolves_the_count_exactly_as_uvicorn_will(argv, environ, expected):
