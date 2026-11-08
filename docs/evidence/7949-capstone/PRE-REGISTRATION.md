@@ -1373,8 +1373,8 @@ place a machine reads it.
   be either observed or witnessed **idle** with a basis. The conditional set is read from this record
   at the pre-registration commit; a run log may not declare it.
 - **Why it is not a relaxation**: `S2.3` structurally cannot run on a corpus whose S2 map types every
-  candidate — `_collect_classify_items` (`tortoise/extractor_v2.py:11098-11120`) collects only
-  kind-missing/`unclassified` candidates and both passes sit behind `if items:` (`:12982`, `:13131`).
+  candidate — `_collect_classify_items` (`tortoise/extractor_v2.py:11174-11196`) collects only
+  kind-missing/`unclassified` candidates and both passes sit behind `if items:` (`:13058`, `:13207`).
   The old rule therefore could not be satisfied by **any** legitimate run of the registered corpus,
   so the gate could not return a verdict at all (§11.2's four ordered refusals). Every one of the
   eight still has to be accounted for, and an idle claim needs the run's own four facts — flag ON,
