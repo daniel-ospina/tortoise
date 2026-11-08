@@ -7,14 +7,17 @@
     "declared": "the pack's own declaration (relations[] + hierarchies[])",
     "writable": "pack_registry.relation_write_verdict \u2014 the ONE resolver (#2766)",
     "sense": "pack_registry.effective_direction \u2014 per-row, declared direction first",
-    "written": "write probe: one endpoint pair minted per row on a throwaway graph, the row's own write path invoked, the graph read back (direct | mediated | none)",
+    "written": "write probe: ONE endpoint per declared KIND (cached; a same-kind row's second side gets its own node, so no self-loop), the row's own write path invoked, the graph read back (direct | mediated | none). The store is the one TORTOISE_DB_URI names when set (on a cell: the lane's own container), else a throwaway embedded store; every id the probe minted is DELETED before it returns, and a failed delete is reported, never swallowed",
     "pipeline": "UNMEASURED \u2014 no producer emits declared relations yet"
   },
   "population": {
     "packs": 7,
     "relations": 36,
     "hierarchies": 6,
-    "declared": 42
+    "declared": 42,
+    "restated_hierarchy_rows": 4,
+    "distinct_connections": 38,
+    "note": "`declared` counts ROWS over both surfaces (the #11083 denominator); `distinct_connections` removes the hierarchy rows that restate a relations[] row of the same pack and pair (`restates_relation`, from pack_hierarchy's own `_matching_row`). A relations-only census misses every hierarchies[] row: 6 rows, of which 2 are connections no relations[] row declares."
   },
   "verdicts": {
     "writable": 35,
@@ -312,6 +315,7 @@
           "effective_direction": "<->",
           "declaration_only": false,
           "declaration_only_reason": null,
+          "restates_relation": "hasPart",
           "path_disagreement": false,
           "written": "direct",
           "written_direction": null
@@ -337,6 +341,7 @@
           "effective_direction": "<->",
           "declaration_only": false,
           "declaration_only_reason": null,
+          "restates_relation": "decomposesInto",
           "path_disagreement": false,
           "written": "direct",
           "written_direction": null
@@ -469,6 +474,7 @@
           "effective_direction": "<->",
           "declaration_only": false,
           "declaration_only_reason": null,
+          "restates_relation": "contains",
           "path_disagreement": false,
           "written": "direct",
           "written_direction": null
@@ -886,6 +892,7 @@
           "effective_direction": "<->",
           "declaration_only": false,
           "declaration_only_reason": null,
+          "restates_relation": "contains",
           "path_disagreement": false,
           "written": "direct",
           "written_direction": null
@@ -1093,6 +1100,7 @@
           "effective_direction": "<->",
           "declaration_only": false,
           "declaration_only_reason": null,
+          "restates_relation": null,
           "path_disagreement": false,
           "written": "direct",
           "written_direction": null
@@ -1118,6 +1126,7 @@
           "effective_direction": "<->",
           "declaration_only": false,
           "declaration_only_reason": null,
+          "restates_relation": null,
           "path_disagreement": false,
           "written": "direct",
           "written_direction": null
@@ -1211,7 +1220,7 @@
     "relations_channel": {
       "status": "UNMEASURED",
       "owner": "#11237",
-      "why": "`result[\"relations\"]` (#10999's channel) has no consumer in tortoise/: the code itself says so at extractor_v2.py:10815. An unmeasured column reads UNMEASURED, never 0 (#10995)."
+      "why": "`result[\"relations\"]` (#10999's channel) has no consumer in tortoise/: the code itself says so in `extractor_v2.py`'s S5 Job 1 block \u2014 \"nothing in this tree consumes `result[\\\"relations\\\"]`\". Cited by its own SENTENCE, not by a line number: a line cite re-stales on every edit above it, and a census that quotes a drifted number is the defect it exists to end. An unmeasured column reads UNMEASURED, never 0 (#10995)."
     },
     "hierarchy_invocation": {
       "status": "UNMEASURED",

@@ -10387,13 +10387,13 @@ durations:
   test_pack_content_v3.py: 0.1  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 0.3
   test_pack_registry_gaps.py: 0.6  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 0.4 — ci-timing junit-census+top-15 2026-11-02 (run 41375596528): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (0.5s) is a LOWER bound; kept 0.6
   # #11083: hermetic (manifest YAML + pack_registry + the census tool), measured
-  # locally at 3.0s for 16 tests. `uv run python tools/ci_timing.py
+  # locally at 3.0s for 20 tests. `uv run python tools/ci_timing.py
   # --refresh-durations` replaces this from junit once a push-to-main sweep
   # includes it.
   test_pack_logic_census_11083.py: 3.0
   # #11083: the graph half. The reading is dominated by one-time embedded-store
   # warmup on its first `create_entity` (~124s measured locally on the whole
-  # file, 5 tests); the probe itself adds ~2s over 42 rows. Carve-out leg.
+  # file, 7 tests); the probe itself adds ~2s over 42 rows. Carve-out leg.
   test_pack_logic_writeprobe_11083.py: 130.0
   test_provisioning_edge_function.py: 0.1  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 0.2
   test_reader.py: 0.7  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (0.3s) is a LOWER bound; kept 0.7

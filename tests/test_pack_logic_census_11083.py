@@ -456,6 +456,29 @@ def test_h8c_an_orphan_declaration_only_reason_warns(tmp_path, caplog):
 
 
 # ── H9 — the union-verdict vs writer disagreement is FLAGGED ─────────────────
+def test_h8d_the_two_surfaces_overlap_and_the_overlap_is_disclosed(artifact):
+    """`hierarchies[]` and `relations[]` can be ONE declaration spelled twice.
+
+    `pack_hierarchy` says so and joins them in `_matching_row`. 4 of the 6 shipped
+    hierarchy rows restate a `relations[]` row of the same pack and pair, so the
+    42-row denominator is 38 DISTINCT connections. The denominator stays (it is
+    the issue's own); the overlap is stated, because a total a reader takes as 42
+    distinct assertions is the quiet mis-count this census exists to end.
+    """
+    pop = artifact["population"]
+    assert pop["restated_hierarchy_rows"] == 4, pop
+    assert pop["distinct_connections"] == pop["declared"] - 4, pop
+    restated = [
+        (ns, r["from_kind"], r["to_kind"], r["restates_relation"])
+        for ns, section in artifact["packs"].items()
+        for r in section["hierarchies"] if r.get("restates_relation")
+    ]
+    assert len(restated) == 4, restated
+    # The two venture rows are the connections a relations-only census misses.
+    assert all(not r.get("restates_relation")
+               for r in artifact["packs"]["venture"]["hierarchies"])
+
+
 def test_h9_a_union_only_structural_predicate_is_flagged(tmp_path):
     """`relation_write_verdict`'s structural path is the UNION of three writers'
     sets; `create_edge` accepts a narrower one. A row in the union but not in the

@@ -85,7 +85,6 @@ from tortoise.pack_registry import (  # noqa: E402
     RELATION_DECLARATION_ONLY,
     RELATION_PREDICATE_NOT_IN_ALLOWLIST,
     RELATION_WRITABLE,
-    SEMANTICS_DIRECTIONS,
     PackRegistry,
     effective_direction,
     relation_write_verdict,
@@ -192,11 +191,25 @@ def _relation_row(pack: str, rel: dict) -> dict:
 
 def _hierarchy_rows(packs_dir: Path) -> tuple[dict[str, list[dict]], list[dict]]:
     """The `hierarchies[]` surface, via the module that owns the join."""
-    from tortoise.pack_hierarchy import declared_hierarchy, hierarchy_diagnostics
+    from tortoise.pack_hierarchy import (
+        _matching_row,
+        declared_hierarchy,
+        hierarchy_diagnostics,
+    )
 
     reg = _load_registry(packs_dir)
     rows: dict[str, list[dict]] = {}
     for entry in declared_hierarchy(reg):
+        # ⛔ Is this hierarchy entry the SAME declaration as a `relations[]` row?
+        # `pack_hierarchy`'s own docstring calls that pair "one declaration spelled
+        # twice" and `_matching_row` IS its join — so this is the module's answer,
+        # not a second parser. Without it the declared population reads as N
+        # distinct connections when 4 of the 6 shipped hierarchy rows restate a
+        # relation, i.e. a total a reader would take as distinct (#11543 review).
+        restates = (
+            _matching_row(reg.packs[entry.pack], entry.predicate,
+                          entry.from_kind, entry.to_kind) or {}
+        ).get("predicate")
         rows.setdefault(entry.pack, []).append({
             "surface": "hierarchies",
             "pack": entry.pack,
@@ -223,9 +236,17 @@ def _hierarchy_rows(packs_dir: Path) -> tuple[dict[str, list[dict]], list[dict]]
             # disagree with `pack_registry.effective_direction` the moment the
             # table moved (nothing reds on that — H1 compares two derivations that
             # would both have hard-coded it).
-            "effective_direction": SEMANTICS_DIRECTIONS.get(entry.predicate),
+            # ⛔ Through the RESOLVER, not the table: `effective_direction` also
+            # applies `SEMANTICS_TRANSITION`, and a hierarchy may declare a
+            # retired spelling (`type: holds`) that the writer resolves to `->`.
+            # Reading the table directly reported NO sense for a row the writer
+            # records directionally — the census/writer split this column exists
+            # to end, one surface over.
+            "effective_direction": effective_direction({"semantics": entry.predicate}),
             "declaration_only": False,
             "declaration_only_reason": None,
+            # The `relations[]` predicate this hierarchy row RESTATES, or None.
+            "restates_relation": restates,
             "path_disagreement": False,
             "written": "UNMEASURED (write probe not run)",
             "written_direction": None,
@@ -335,6 +356,8 @@ def build_census(packs_dir: Path | str = REPO_ROOT / "packs", *,
 
     relations_total = sum(len(v) for v in relations_by_pack.values())
     hierarchies_total = sum(len(v) for v in hier_by_pack.values())
+    restated_total = sum(
+        1 for rows in hier_by_pack.values() for r in rows if r.get("restates_relation"))
     return {
         "issue": 11083,
         "epic": 5087,
@@ -349,9 +372,13 @@ def build_census(packs_dir: Path | str = REPO_ROOT / "packs", *,
             "writable": "pack_registry.relation_write_verdict — the ONE resolver (#2766)",
             "sense": "pack_registry.effective_direction — per-row, declared direction first",
             "written": (
-                "write probe: one endpoint pair minted per row on a throwaway "
-                "graph, the row's own write path invoked, the graph read back "
-                "(direct | mediated | none)"
+                "write probe: ONE endpoint per declared KIND (cached; a same-kind "
+                "row's second side gets its own node, so no self-loop), the row's "
+                "own write path invoked, the graph read back (direct | mediated | "
+                "none). The store is the one TORTOISE_DB_URI names when set (on a "
+                "cell: the lane's own container), else a throwaway embedded store; "
+                "every id the probe minted is DELETED before it returns, and a "
+                "failed delete is reported, never swallowed"
                 if write_probe else
                 "UNMEASURED — run with --write-probe"
             ),
@@ -362,6 +389,23 @@ def build_census(packs_dir: Path | str = REPO_ROOT / "packs", *,
             "relations": relations_total,
             "hierarchies": hierarchies_total,
             "declared": relations_total + hierarchies_total,
+            # ⛔ `declared` counts ROWS over both surfaces (the #11083
+            # denominator). 4 of the shipped hierarchy rows are the SAME
+            # declaration as a `relations[]` row, so `distinct_connections` is
+            # stated beside it — a total nobody can mistake for N distinct
+            # assertions is the whole point of this artifact.
+            "restated_hierarchy_rows": restated_total,
+            "distinct_connections": relations_total + hierarchies_total - restated_total,
+            "note": (
+                "`declared` counts ROWS over both surfaces (the #11083 "
+                "denominator); `distinct_connections` removes the hierarchy rows "
+                "that restate a relations[] row of the same pack and pair "
+                "(`restates_relation`, from pack_hierarchy's own `_matching_row`). "
+                "A relations-only census misses every hierarchies[] row: "
+                f"{hierarchies_total} rows, of which "
+                f"{hierarchies_total - restated_total} are connections no "
+                "relations[] row declares."
+            ),
         },
         "verdicts": {
             "writable": verdicts.get(RELATION_WRITABLE, 0),
@@ -397,7 +441,12 @@ def build_census(packs_dir: Path | str = REPO_ROOT / "packs", *,
                 "owner": PIPELINE_OWNER,
                 "why": (
                     "`result[\"relations\"]` (#10999's channel) has no consumer in "
-                    "tortoise/: the code itself says so at extractor_v2.py:10815. "
+                    "tortoise/: the code itself says so in `extractor_v2.py`'s S5 "
+                    "Job 1 block — \"nothing in this tree consumes "
+                    "`result[\\\"relations\\\"]`\". Cited by its own SENTENCE, not by a "
+                    "line number: a line cite re-stales on every edit above it, and "
+                    "a census that quotes a drifted number is the defect it exists "
+                    "to end. "
                     "An unmeasured column reads UNMEASURED, never 0 (#10995)."
                 ),
             },
@@ -475,10 +524,15 @@ def _mint_endpoint(sdk, kind_ref: str | None, cache: dict,
     mints that side its own node (keyed `kind#slot`).
     """
     label = (kind_ref or "Object").split(":", 1)[-1]
-    key = f"{label.lower()}#{slot}" if slot else label.lower()
+    # ⛔ Keyed on the FULL namespaced kind. `dev:issue` and `pm:issue` are two
+    # declared kinds; keying on the bare label handed both the SAME node, so a
+    # `dev:issue → pm:issue` row would read back with `s == d` — the self-loop
+    # false-positive this function was rewritten to close, one namespace over.
+    full = (kind_ref or "Object").lower()
+    key = f"{full}#{slot}" if slot else full
     if key in cache:
         return cache[key]
-    name = f"census-probe-{label.lower()}" + (f"-{slot}" if slot else "")
+    name = f"census-probe-{full.replace(':', '-')}" + (f"-{slot}" if slot else "")
     if label.lower() == "subject":
         node_id = sdk.create_entity("subject", name)["node"]["id"]
     else:
@@ -519,11 +573,15 @@ def _delete_minted(sdk, minted: set[str]) -> list[str]:
     and ~N operator Points into whatever graph it was pointed at. A claim about
     cleanup is only true if the cleanup is here, and a FAILED cleanup must be
     loud — a silent leftover is the residue class #5084 exists to stop.
-    Operators are deleted first (reverse mint order): their `INPUT`/`IMPL` edges
-    detach with them, so the entities have nothing left pointing at them.
+
+    ⛔ NO ordering is claimed: `minted` is a SET, so its iteration order is hash
+    order and "operators first" never held. It does not need to — `delete_entity`
+    is a DETACH DELETE (tortoise/sdk.py), so a node's edges go with it whatever
+    the order. An earlier revision of this docstring asserted a reverse-mint
+    order; the claim was the thing that was wrong, not the work.
     """
     leftovers: list[str] = []
-    for node_id in reversed(list(minted)):
+    for node_id in list(minted):
         try:
             if not sdk.delete_entity(node_id):
                 leftovers.append(node_id)
