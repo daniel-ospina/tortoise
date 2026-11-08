@@ -1780,6 +1780,32 @@ def test_the_glob_arm_does_not_read_an_UNRUNNABLE_probe_as_a_held_match(monkeypa
     assert "untracked" not in why, why
 
 
+def test_the_bare_path_arm_does_not_read_an_UNRUNNABLE_probe_as_a_held_match(monkeypatch):
+    """`None` is not a match on the BARE-PATH arm either — and nothing pinned it.
+
+    The glob arm's `is True` is pinned above and `_evidence_is_real` has its own
+    `None` pin, but `_names_artifact`'s bare-path arm is a THIRD call site of the
+    tri-state and it carried no assertion at all. MEASURED at this head: reverting
+    `if tracked is None:` to `if False:` left the whole suite green at 172 passed,
+    while `_names_artifact(<bare path>)` answered `(True, '')` — a `cmd:` target
+    whose TRACKED probe never ran, accepted as a held artifact of the tree. That is
+    the same fail-open this change closes at the other two sites, one arm over.
+
+    ⛔ IT CANNOT BE PINNED END TO END, which is why this one drives the seam. A
+    `cmd:` entry reaches `_names_artifact` AND `_evidence_is_real`, and only the
+    latter has to refuse for the CLI to exit INVALID — so a ledger-level assertion
+    stays green under the mutant and would have read as coverage that is not there.
+    """
+    monkeypatch.setattr(cl, "_is_tracked", lambda resolved, root: None)
+    ok, why = cl._names_artifact(REAL_EVIDENCE, REPO_ROOT, REPO_ROOT)
+    assert ok is False, f"an UNRUNNABLE probe must not count as a held match: {why}"
+    # ⛔ And it must name the UNMEASURED cause: `not TRACKED` is the sentence for
+    # git's MEASURED "no" (the `False` arm owns it), and collapsing the two is the
+    # guess-the-cause defect this function exists to remove.
+    assert "could not be run here" in why, why
+    assert "not TRACKED" not in why, why
+
+
 def test_a_glob_mixing_untracked_and_unrunnable_reports_the_measured_refusal(monkeypatch):
     """A mixed glob names BOTH causes; it may not speak for the file it never asked about.
 
