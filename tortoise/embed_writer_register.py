@@ -547,7 +547,7 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
             "vector back from (`#8488`'s enriched text rides the same snapshot), not a store "
             "reached around the gate",
             "#5008",
-            stores=NO_LIVE_VECTOR,  # the vector lands in `_turn_snapshot`, never on a node
+            stores=("Point",),  # `_TURN_WRITE_CYPHER`: `MERGE (t:Point …)` + `t.embedding=vecf32(turn.emb)`
         ),
     ),
     # ── The one writer that was exempt only in the instrument's PROSE ─────────────────────────
@@ -703,9 +703,13 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
             "already-computed `embedding` into `query_params` and executes inside "
             "`_live_write_scope` (the §17.1 sanctioned live-write lane); it never computes one",
             "#10541",
-            # The label is its CALLER's — `tortoise.session_indexer::main`, declared here —
-            # so this door stores no vector of its own and names no label of its own.
-            stores=NO_LIVE_VECTOR,
+            # The label is its CALLER's: the door EXECUTES the caller's statement
+            # (`proj.g.query(statement, params={"embedding": …})`), so the store is real and the
+            # label is not the door's to name. ⛔ `no-live-vector` would be false — that is the exact
+            # mistake `#11492`'s review caught in this entry. The four call sites today pass an
+            # `(e:Event …)` clause (`tortoise.session_indexer::main`, `ingest_corpus`), but a label
+            # tuple here would be a claim about CALLERS, which nothing in this field re-derives.
+            stores=LABELS_AT_RUNTIME,
         ),
     ),
     (

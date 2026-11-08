@@ -855,38 +855,65 @@ def test_a_stores_declaration_that_does_not_answer_is_refused():
         if isinstance(entry.stores, str):
             assert entry.stores in STORES_DISPOSITIONS, (key, entry.stores)
         else:
-            assert entry.stores and all(register._LABEL.match(l) for l in entry.stores), (
+            assert entry.stores and all(register._LABEL.match(label) for label in entry.stores), (
                 key, entry.stores)
 
 
-#: `#11492` — WHERE each declared vector lands, as re-derivable evidence: `(rel_path, symbol,
-#: needle)`. The needle is the store clause itself (or the label constant the clause is built
-#: from), so a writer whose store MOVES to another label must be re-declared or this reds.
-#: ⛔ Only writers declared with a label tuple appear here: a `NO_LIVE_VECTOR` entry cannot be
-#: proven by a needle (that is a claim about ABSENCE, and data flow — `UNDECIDABLE_WRITE_SHAPES`),
-#: and `LABELS_AT_RUNTIME` is precisely the entry with no static label to point at. Both are
-#: product judgements that the register itself owns; the `stores` field is where a reader reviews
-#: them.
-LABEL_EVIDENCE: dict[str, tuple[str, str, str]] = {
-    # The BATCHED clauses: the label is in the MERGE/MATCH, the vector in the clause call.
+#: `#11492` — WHERE each declared vector lands, as re-derivable evidence:
+#: `(rel_path, symbol, needle, labels)`. The needle is the store clause itself (or the label constant
+#: the clause is built from) and `labels` is the SET OF LABELS THAT CLAUSE NAMES, so the declaration
+#: is compared against the evidence rather than against a second copy of itself: ⛔ `#11492`'s review
+#: proved the first version — needles with no label set — PASSED with a declaration mutated to
+#: `("Batch",)`, i.e. it checked that the store still existed and never that the declaration still
+#: described it. A declaration edited to an unserved label would have read `MET` while the vector
+#: landed elsewhere, which is #5090 row 2's falsifier inverted.
+#:
+#: ⛔ Only writers declared with a label tuple appear here: a `NO_LIVE_VECTOR` entry cannot be proven
+#: by a needle (that is a claim about ABSENCE, and data flow — `UNDECIDABLE_WRITE_SHAPES`), and
+#: `LABELS_AT_RUNTIME` is precisely the entry with no static label to point at. Both are product
+#: judgements the register owns; the `stores` field is where a reviewer reads them.
+LABEL_EVIDENCE: dict[str, tuple[str, str, str, frozenset[str]]] = {
+    # The label and the vector clause in ONE statement.
     "tortoise.projection.entities::_event_plain_merge": (
-        "tortoise/projection/entities.py", "_event_plain_merge", 'MERGE (e:Event {eventId: $eid})'),
-    "tortoise.sdk::_session_event_write": (
-        "tortoise/sdk.py", "_session_event_write", 'set_embedding_clause("e")'),
-    "tortoise.sdk::ingest_corpus": (
-        "tortoise/sdk.py", "ingest_corpus", 'set_embedding_clause("e")'),
+        "tortoise/projection/entities.py", "_event_plain_merge",
+        'MERGE (e:Event {eventId: $eid})', frozenset({"Event"})),
     "tortoise.sdk::_embedding_repair_attempt": (
-        "tortoise/sdk.py", "_embedding_repair_attempt", 'MATCH (e:Event {eventId:$eid})'),
+        "tortoise/sdk.py", "_embedding_repair_attempt",
+        'MATCH (e:Event {eventId:$eid})', frozenset({"Event"})),
+    "tortoise.sdk::_write_capture_turns": (
+        "tortoise/sdk.py", "_write_capture_turns",
+        "t.embedding=CASE WHEN turn.emb IS NOT NULL THEN vecf32(turn.emb)",
+        frozenset({"Point"})),
+    # The label is in the enclosing statement, the vector in the shared clause: the needle is the
+    # STORE STATEMENT, and the alias letter it passes is what ties the two together.
+    "tortoise.sdk::_session_event_write": (
+        "tortoise/sdk.py", "_session_event_write",
+        '"MERGE (e:Event {eventId:$eid}) "', frozenset({"Event"})),
+    "tortoise.sdk::ingest_corpus": (
+        "tortoise/sdk.py", "ingest_corpus",
+        '"SET e += $props, " + set_embedding_clause("e")', frozenset({"Event"})),
     "tortoise.session_indexer::main": (
-        "tortoise/session_indexer.py", "main", '"SET e += $props, " + set_embedding_clause("e")'),
+        "tortoise/session_indexer.py", "main",
+        '"SET e += $props, " + set_embedding_clause("e")', frozenset({"Event"})),
     # The two where the label is NOT the enclosing word: `Point` in the MATCH of the restore
     # (`:Batch`/`:Session` appear in the same body but carry no vector — the pre-wipe snapshot),
-    # and the canonical-label loop for the generic update door.
+    # and the canonical-label constant for the generic update door (five labels, one tuple).
     "tortoise.projection::_rebuild_all_replay": (
         "tortoise/projection/__init__.py", "_rebuild_all_replay",
-        '"MATCH (n:Point {id:$pid}) " + restore_guard'),
+        '"MATCH (n:Point {id:$pid}) " + restore_guard', frozenset({"Point"})),
     "tortoise.sdk::_update_entity": (
-        "tortoise/sdk.py", "_update_entity", "for label, prop in _CANONICAL_ENTITY_ID_PROPS:"),
+        "tortoise/sdk.py", "_update_entity",
+        "for label, prop in _CANONICAL_ENTITY_ID_PROPS:",
+        frozenset({"Point", "Subject", "Object", "Source", "Event"})),
+}
+
+#: The label sets the two label CONSTANTS name, cited by the entries that store through them.
+#: `(rel_path, symbol, labels)` — re-derived like `CENSUS_EVIDENCE`, so a canonical label added to
+#: `_CANONICAL_ENTITY_ID_PROPS` reds instead of silently widening what `_update_entity` declares.
+LABEL_CONSTANTS: dict[str, tuple[str, str, frozenset[str]]] = {
+    "tortoise.sdk::_update_entity": (
+        "tortoise/projection/__init__.py", "_CANONICAL_ENTITY_ID_PROPS",
+        frozenset({"Point", "Subject", "Object", "Source", "Event"})),
 }
 
 
@@ -894,10 +921,11 @@ def test_every_declared_label_re_derives_at_this_head() -> None:
     """`#11492`: a declared LABEL is re-derived at HEAD — the `CENSUS_EVIDENCE` discipline.
 
     The `stores` field is what `#5090` DoD row 2 is scored on, so it must rot loudly: a writer
-    re-targeted to another label, or a store clause that stopped being inside the named symbol,
-    reds here instead of silently leaving the declaration answering about the old label. The two
-    populations are pinned in BOTH directions — a label-tuple entry with no evidence, and evidence
-    for an entry that no longer declares labels.
+    re-targeted to another label, a store clause that stopped being inside the named symbol, or a
+    DECLARATION that drifts off the label its own store names — all three red here. ⛔ The third is
+    the one `#11492`'s review caught missing: the first version asserted only that the needle was
+    still in the body, so a declaration mutated to `("Batch",)` passed. The label set is now part of
+    the evidence, compared against the declaration in both directions.
     """
     labelled = {key for key, entry in EMBED_WRITER_CLASSES.items()
                 if not isinstance(entry.stores, str)}
@@ -907,20 +935,59 @@ def test_every_declared_label_re_derives_at_this_head() -> None:
         f"that no longer names labels is stale: missing={sorted(labelled - set(LABEL_EVIDENCE))} "
         f"stale={sorted(set(LABEL_EVIDENCE) - labelled)}"
     )
-    for key, (rel, symbol, needle) in sorted(LABEL_EVIDENCE.items()):
+    for key, (rel, symbol, needle, evidence_labels) in sorted(LABEL_EVIDENCE.items()):
+        declared = EMBED_WRITER_CLASSES[key].stores
+        assert set(declared) == set(evidence_labels), (
+            f"{key} declares stores={declared} while its evidence names {sorted(evidence_labels)} "
+            "— a declaration that disagrees with its own store clause is what row 2 is scored on"
+        )
         path = REPO_ROOT / rel
         assert path.is_file(), (key, rel)
         source = path.read_text(encoding="utf-8")
         lines = source.splitlines()
-        bodies = ["\n".join(lines[node.lineno - 1:node.end_lineno])
-                  for node in ast.walk(ast.parse(source))
-                  if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-                  and node.name == symbol]
+        tree = ast.parse(source)
+        # A store clause can live in a module-level CONSTANT the writer executes
+        # (`_TURN_WRITE_CYPHER`), so a cited body is the writer's own source PLUS every module-level
+        # constant it names — one hop, which is what a reader following the clause does.
+        constants: dict[str, str] = {}
+        for node in tree.body:
+            if isinstance(node, ast.Assign):
+                text = "\n".join(lines[node.lineno - 1:node.end_lineno])
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        constants[target.id] = text
+            elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+                constants[node.target.id] = "\n".join(
+                    lines[node.lineno - 1:node.end_lineno])
+        bodies: list[str] = []
+        for node in ast.walk(tree):
+            if (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and node.name == symbol):
+                own = "\n".join(lines[node.lineno - 1:node.end_lineno])
+                bodies.append(own + "\n" + "\n".join(
+                    text for name, text in constants.items() if name in own
+                ))
         assert bodies, f"{key} cites {rel}::{symbol}, which that file does not define"
         assert any(needle in body for body in bodies), (
-            f"{key} declares stores={EMBED_WRITER_CLASSES[key].stores} but {rel}::{symbol} no "
-            f"longer carries {needle!r} — the store moved, so the declaration is stale"
+            f"{key} declares stores={declared} but {rel}::{symbol} no longer carries {needle!r} — "
+            "the store moved, so the declaration is stale"
         )
+    # …and the label CONSTANTS those clauses are built from must still name the same labels.
+    for key, (rel, symbol, labels) in sorted(LABEL_CONSTANTS.items()):
+        source = (REPO_ROOT / rel).read_text(encoding="utf-8")
+        lines = source.splitlines()
+        defined = "\n".join(
+            "\n".join(lines[node.lineno - 1:node.end_lineno])
+            for node in ast.parse(source).body
+            if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
+            and node.target.id == symbol
+        )
+        assert defined, f"{key} cites {rel}::{symbol}, which that file does not define at module level"
+        assert set(EMBED_WRITER_CLASSES[key].stores) == set(labels), key
+        for label in labels:
+            assert f'"{label}"' in defined, (
+                f"{rel}::{symbol} no longer names {label!r}, so {key}'s declaration is stale"
+            )
 
 
 def test_a_runtime_label_declaration_is_named_not_guessed() -> None:
@@ -941,6 +1008,37 @@ def test_a_runtime_label_declaration_is_named_not_guessed() -> None:
     assert 'CREATE (n:{safe_labels})' in body, (
         "the runtime-label reading rests on the dump's own labels; if the restore stops creating "
         "from `safe_labels`, re-read this declaration rather than deleting the assertion"
+    )
+
+
+def test_a_writer_that_EXECUTES_a_store_is_never_declared_no_live_vector() -> None:
+    """`#11492`'s review finding, pinned: the class is not the answer to WHERE.
+
+    The first revision of this field filled two entries from the writer's CLASS instead of from its
+    STORE: `tortoise.sdk::_write_capture_turns` was declared `no-live-vector` while executing
+    `_TURN_WRITE_CYPHER`, whose `MERGE (t:Point …)` carries
+    `t.embedding=CASE WHEN turn.emb IS NOT NULL THEN vecf32(turn.emb) …`, and
+    `tortoise.sdk::_event_raw_write_door` was declared the same while executing a CALLER's
+    `proj.g.query(statement, params={"embedding": …})`. Both are live graph vector stores, so both
+    declarations were false — and `no-live-vector` is not a harmless label: row 2 REMOVES such a
+    writer from the map it audits, so the row would print `stored-without-a-query-path: none` even
+    if that store moved to a label `run_vector_query` does not serve.
+
+    This is the class of mistake `#11492` exists to prevent, so it is pinned on the two writers it
+    was made on: `no-live-vector` may only be declared where no store statement exists.
+    """
+    turns = EMBED_WRITER_CLASSES["tortoise.sdk::_write_capture_turns"]
+    assert turns.stores == ("Point",), turns.stores
+    turn_cypher = (REPO_ROOT / "tortoise/sdk.py").read_text(encoding="utf-8")
+    assert 'MERGE (t:Point {id: turn.id})' in turn_cypher
+    assert "t.embedding=CASE WHEN turn.emb IS NOT NULL THEN vecf32(turn.emb) " in turn_cypher, (
+        "`_TURN_WRITE_CYPHER` stopped writing a vector — re-read this declaration"
+    )
+    door = EMBED_WRITER_CLASSES["tortoise.sdk::_event_raw_write_door"]
+    assert door.stores == LABELS_AT_RUNTIME, door.stores
+    door_body = (REPO_ROOT / "tortoise/sdk.py").read_text(encoding="utf-8")
+    assert 'proj.g.query(statement, params=query_params)' in door_body, (
+        "the door no longer EXECUTES the caller's statement — re-read this declaration"
     )
 
 

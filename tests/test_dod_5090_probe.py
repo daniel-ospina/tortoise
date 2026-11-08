@@ -412,14 +412,21 @@ def test_every_embedded_label_has_a_query_path():
     The assertions below are an IMPLICATION, never this head's classification:
     the row can only be `PARTIAL` while a write path's label is unresolved, and
     resolving them all (`#5090`) turns it `MET` without reddening this test.
+
+    ⛔ `#11492`: read the map the row SCORES (`probe.scored_labels()`), never
+    `written_labels()`. The latter is the pure MEASUREMENT — it does not read the
+    product register — so on the tree this row is aiming at (every writer resolved,
+    row `MET`) it would still hand back `UNKNOWN` for the register-declared writers
+    and this pin would red on a CORRECT change. Resolving in two places is how a row
+    and its own pin disagree; there is one combinator and this test comes through it.
     """
     row = probe.score_path_bullet()
     assert row.verdict in ("MET", "PARTIAL"), row.observed
-    resolved = {v for v in probe.written_labels().values()
-                if not v.startswith("UNKNOWN")}
-    assert resolved <= probe.served_labels(), resolved - probe.served_labels()
-    if any(v.startswith("UNKNOWN") for v in probe.written_labels().values()):
-        assert row.verdict == "PARTIAL", row.verdict
+    scored = probe.scored_labels()
+    assert scored["labels"] <= probe.served_labels(), (
+        scored["labels"] - probe.served_labels())
+    if scored["unresolved"]:
+        assert row.verdict in ("PARTIAL", "NOT MET"), row.verdict
 
 
 #: ── `#11492`: row 2 resolves labels from the SAME product register row 1 reads ──────────────
