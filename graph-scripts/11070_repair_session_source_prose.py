@@ -50,7 +50,18 @@ Usage:
   # 3) verify: the census must be 0 — `--assert-clean` is what can FAIL
   #    (same `--graph` as the repair, or it verifies a DIFFERENT graph)
   uv run python graph-scripts/11070_repair_session_source_prose.py \\
-      --graph org_acme_tortoise --dry-run --assert-clean || exit 1
+      --graph org_acme_tortoise --dry-run --assert-clean \\
+      --probe-phrase <a-token-from-the-removed-sentence> || exit 1
+
+  #    ⛔ A CENSUS IS NOT THE TARGET. The removed sentence is ALSO in the Source
+  #    FTS index, so `--assert-clean` will not certify on the census alone: pass
+  #    `--probe-phrase` (a SINGLE RARE token that appears only in the pre-fix
+  #    summary — the index read OR-joins multi-term input, so a phrase or a
+  #    common word measures nothing), or accept the weaker evidence BY NAME with
+  #    `--no-fts-probe`. A probe that still hits exits 1; so does a probe whose
+  #    zero cannot be corroborated (the FTS read did not run, or no post-fix
+  #    lexicon node exists to prove the index answers at all) — a zero from a
+  #    dead instrument is not a zero (#11161).
 
 ⚠️ THE RECORD SCOPE IS NEVER GUESSED. ``--record-dsn`` on the WRITING arm
 (``--repair``) requires ``--org-id`` and ``--graph-id``: a wrong (or defaulted)
@@ -120,6 +131,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 from tortoise.projection import FalkorProjection  # noqa: E402, RUF100
 from tortoise.session_source_prose_migration import (  # noqa: E402, RUF100
     find_session_sources_carrying_prose,
+    probe_fts,
+    probe_phrase_rejection,
     reconcile_session_source_prose,
     record_turn_reader,
 )
@@ -153,6 +166,121 @@ def open_projection(uri: str, graph_name: str):
         return FalkorProjection(uri, graph_name=graph_name or "tortoise",
                                 allow_nonstandard_path=True)
     return FalkorProjection.from_uri(uri, graph_name=graph_name)
+
+
+def _merge_probe(before: dict | None, after: dict) -> dict:
+    """Fold the BEFORE and AFTER Source-FTS measurements into ONE verdict.
+
+    ⛔ ``certifies`` IS NOT "no leak". A zero from an instrument that measured
+    nothing is not a zero (#11161), so the leg certifies only when EITHER
+
+    * **(a) a probe HIT BEFORE and reads 0 AFTER** — the same run watched the
+      sentence leave the index. This is the strongest evidence available and it
+      needs no operator memory: ``--repair --probe-phrase X`` takes the before
+      reading before the writes and the after reading after them; or
+    * **(b) a KNOWN-PRESENT token is still findable after the repair** — one
+      token of a post-fix lexicon node's own ``_searchText``. That is the
+      positive control: it proves the Source FTS read ANSWERS on this graph, so
+      the probes' zero means "absent" rather than "the read is dead".
+
+    Neither holds ⇒ the zero is UNCORROBORATED and the run must not certify:
+    a probe that reads 0 both before and after is a phrase that was never in the
+    corpus, and its 0 proves nothing about the repair.
+    """
+    probes = []
+    for index, got in enumerate(after["probes"]):
+        row = dict(got)
+        prior = None
+        if before is not None and index < len(before["probes"]):
+            prior = len(before["probes"][index]["residue"])
+        row["residue_before"] = prior
+        # ⛔ RESIDUE, not raw hits: the index STEMS, so a repaired node's lexicon
+        # can still answer a probe token (measured: `fridays` matches the lexicon
+        # `friday`). "Discriminating" therefore means "matched a node that was
+        # still pre-fix prose before, and matches none now".
+        row["discriminating"] = bool(prior) and not got["residue"]
+        probes.append(row)
+    out = dict(after)
+    out["probes"] = probes
+    control_ok = bool((after.get("control") or {}).get("ok"))
+    discriminating = any(p["discriminating"] for p in probes)
+    if out["leaked"]:
+        out["certifies"], out["vetoed"] = False, "leaked"
+    elif out["unmeasurable"]:
+        out["certifies"], out["vetoed"] = False, "unmeasurable"
+    elif out["truncated"]:
+        out["certifies"], out["vetoed"] = False, "truncated"
+    elif discriminating or control_ok:
+        out["certifies"], out["vetoed"] = True, None
+    else:
+        out["certifies"], out["vetoed"] = False, "uncorroborated"
+    return out
+
+
+def _report_fts(fts: dict) -> None:
+    """Print the FTS leg, and REFUSE on stderr when it did not certify."""
+    print(f"Source FTS probe (entity_type={fts['entity_type']}):")
+    for probe in fts["probes"]:
+        residue_before = probe.get("residue_before")
+        before = ("—" if residue_before is None
+                  else f"{residue_before} residue before")
+        print(f"          {probe['phrase']!r}: {before} -> "
+              f"{len(probe['residue'])} residue after, {probe['hits']} hit(s)"
+              + ("" if probe["ran"] and not probe["degraded"]
+                 else f"   ⚠️ UNMEASURABLE ({probe['reason']})"))
+        if probe.get("lexicon"):
+            # ⛔ NOT A LEAK, AND SAID SO ON THE SPOT: the index stems, so these
+            # hits are REPAIRED nodes whose `_searchText` is the topic lexicon.
+            # Reporting them as a leak would read as "the repair failed" and
+            # invite an operator to clear the descriptor #3518 exists to provide.
+            print(f"            (stem collision — {len(probe['lexicon'])} hit(s) on "
+                  f"nodes whose `_searchText` is already the post-fix lexicon)")
+        if probe.get("unread"):
+            print(f"            ⚠️ {len(probe['unread'])} hit(s) could not be "
+                  f"classified, so they are not evidence either way")
+    control = fts.get("control")
+    if control is not None:
+        if control.get("hits") is None:
+            print("          control: not available — "
+                  f"{control.get('note')}")
+        else:
+            # ⛔ THE CONTROL TOKEN IS NOT PRINTED: it is a transcript-derived
+            # lexicon word, and this report is redacted by whitelist so no piece
+            # of the utterance reaches stdout. The count is what the verdict
+            # needs.
+            print(f"          control (one post-fix lexicon token): "
+                  f"{control['hits']} hit(s)")
+    if fts["certifies"]:
+        print("          ✓ no node still carrying the pre-fix prose is findable "
+              "through the Source FTS index")
+        return
+    if fts["vetoed"] == "leaked":
+        print(f"✗ {len(fts['leaked'])} probe(s) still return a node that CARRIES "
+              f"THE PRE-FIX PROSE {fts['leaked']!r}: the sentence is still "
+              f"findable, whatever the census reads. The pair was cleared on "
+              f"the node but the index entry survives — do NOT report the "
+              f"repair as done (#11161).", file=sys.stderr)
+    elif fts["vetoed"] == "unmeasurable":
+        print(f"✗ the Source FTS leg did not RUN for {fts['unmeasurable']!r} "
+              f"(the read path's own reason is on the probe line). A leg that "
+              f"did not run returns no hits, exactly as a clean miss does, so "
+              f"its 0 is NOT evidence — fix the read (the index, or the circuit "
+              f"breaker) and re-measure.", file=sys.stderr)
+    elif fts["vetoed"] == "truncated":
+        print(f"✗ the probe filled the read's window for {fts['truncated']!r} "
+              f"({fts['limit']} hits), so its count is a FLOOR and any residue "
+              f"past the window was never classified. That token is too common "
+              f"to be a probe — pass one that appears only in the removed "
+              f"sentence.", file=sys.stderr)
+    else:
+        print("✗ the probe's 0 cannot be corroborated, so it is NOT evidence "
+              "of a repair: it returned no PRE-FIX node BEFORE the repair "
+              "either (a token that is not in the corpus), and no post-fix "
+              "lexicon node exists to prove the Source FTS index answers at "
+              "all.\n"
+              "  Measure it on the run that writes — `--repair --probe-phrase "
+              "<token>` takes the BEFORE reading itself — or pass `--no-fts-probe` "
+              "to accept the census-only sign-off by name.", file=sys.stderr)
 
 
 def main() -> int:
@@ -198,12 +326,55 @@ def main() -> int:
                          "writes.")
     ap.add_argument("--assert-clean", action="store_true",
                     help="exit 1 if any candidate remains (dry run only) — the "
-                         "step-3 verification; without it a dry run always exits 0")
+                         "step-3 verification; without it a dry run always exits 0. "
+                         "REQUIRES --probe-phrase or --no-fts-probe: the census "
+                         "is one artifact and the Source FTS index is another")
+    ap.add_argument("--probe-phrase", action="append", default=None,
+                    metavar="TOKEN",
+                    help="a SINGLE RARE token from a pre-fix `summary`, measured "
+                         "against the Source FTS index. Repeatable. On "
+                         "--repair it is measured BEFORE and AFTER the writes "
+                         "(so the run itself shows the sentence leaving the "
+                         "index); on a dry run it is measured once. A leak "
+                         "exits 1. ⛔ Multi-term input is REFUSED (the FTS read "
+                         "OR-joins it, so it would match on any word, and a "
+                         "post-fix lexicon's words are ordinary words)")
+    ap.add_argument("--no-fts-probe", action="store_true",
+                    help="accept the CENSUS-ONLY sign-off: `--assert-clean` "
+                         "certifies without a probe. The run says so on stderr; "
+                         "this is the weaker evidence, not the default")
     ap.add_argument("--json", action="store_true",
                     help="emit the machine-readable report on stdout")
     args = ap.parse_args()
     if args.repair and args.dry_run:
         ap.error("--repair and --dry-run are mutually exclusive")
+    probes = list(args.probe_phrase or [])
+    if probes and args.no_fts_probe:
+        ap.error("--probe-phrase and --no-fts-probe are contradictory: one asks "
+                 "for the FTS leg, the other disclaims it")
+    for phrase in probes:
+        why = probe_phrase_rejection(phrase)
+        if why:
+            print(f"ERROR: --probe-phrase {phrase!r} cannot serve as an FTS "
+                  f"probe: {why}.\n"
+                  f"       A probe measures whether the REMOVED SENTENCE is "
+                  f"still findable; anything broader reports a correct repair "
+                  f"as a leak.", file=sys.stderr)
+            return 2
+    if args.assert_clean and not probes and not args.no_fts_probe:
+        # ⛔ NOT A CEREMONY. The census reads a NODE PROPERTY; the sentence also
+        # lives in the Source FTS index, which is a different artifact — so a
+        # census-only exit 0 certifies the half of #11070's Target that cannot
+        # be broken independently (#11161). The sign-off must NAME its evidence:
+        # a probe, or the explicit acceptance of the weaker one.
+        print("ERROR: --assert-clean does not certify on the census alone — the "
+              "removed sentence is ALSO in the Source FTS index, and a census "
+              "reads node properties.\n"
+              "       Pass --probe-phrase <a single rare token from the removed "
+              "sentence> to prove the sentence stops being findable, OR pass "
+              "--no-fts-probe to accept the census-only sign-off explicitly "
+              "(the run will say the FTS leg did not run).", file=sys.stderr)
+        return 2
 
     uri = args.db or os.environ.get("TORTOISE_DB_URI", "")
     if not uri:
@@ -336,6 +507,13 @@ def main() -> int:
     try:
         proj = open_projection(uri, graph_name)
         actual_graph = getattr(proj, "graph_name", None) or graph_name
+        fts_before = None
+        if args.repair and probes:
+            # ⛔ THE "BEFORE" IS TAKEN ON THE SAME RUN AS THE WRITES, on purpose.
+            # It is the only measurement that can say a probe DISCRIMINATED: after
+            # a repair the prose is gone, so a later run cannot tell "the sentence
+            # left the index" from "that token was never in it" (#11161).
+            fts_before = probe_fts(proj.g, probes, control=False)
         if args.repair:
             report = reconcile_session_source_prose(
                 proj.g, read_transcript=read_transcript, dry_run=False,
@@ -366,6 +544,19 @@ def main() -> int:
                     "summary_bytes", "search_text_bytes",
                     "duplicate_session_rows")}
                 for node in found]
+        if probes:
+            fts_after = probe_fts(proj.g, probes, control=True)
+            report["fts_probe"] = _merge_probe(fts_before, fts_after)
+        elif args.repair:
+            # ⛔ STATED, not silent: a repair that certifies on the census alone
+            # leaves the FTS half of the Target unmeasured, and the operator must
+            # know the run did not look (#11161).
+            print("NOTE: no --probe-phrase was supplied, so the Source FTS index "
+                  "was NOT measured. The census reads node properties; the "
+                  "removed sentence also lives in the index, and only a probe "
+                  "can show it has left. Re-run with --repair --probe-phrase "
+                  "<a single rare token from the removed sentence> to measure "
+                  "it on the run that writes.", file=sys.stderr)
     finally:
         if proj is not None:
             proj.close()
@@ -412,6 +603,14 @@ def main() -> int:
     elif args.repair and report["census_after"]:
         code = 1
     if not args.repair and args.assert_clean and report["candidates"]:
+        code = 1
+    # ⛔ THE FTS GATE, and it is not folded into the census: a probe that still
+    # hits means the sentence is STILL FINDABLE while the census reads 0, which
+    # is precisely the false PASS #11161 was filed about. It also refuses to
+    # CERTIFY an uncorroborated zero — see `_merge_probe`.
+    fts = report.get("fts_probe") or None
+    fts_gate = bool(fts) and not fts["certifies"]
+    if fts_gate and code == 0:
         code = 1
 
     if args.json:
@@ -480,12 +679,18 @@ def main() -> int:
               f"{extra}")
     for url, note in (report.get("notes") or {}).items():
         print(f"          ⚠️ {url}: {note}")
+    if fts:
+        _report_fts(fts)
     if args.repair:
         print(f"census AFTER:  {report['census_after']}")
         if report["census_after"]:
             print("⚠️ the census did not reach 0 — re-run --dry-run and read the "
                   "report before reporting the repair as done", file=sys.stderr)
             return 1
+        if fts_gate:
+            # ⛔ NOT "Repair complete." — the census reached 0 and the sentence is
+            # still findable. The refusal above says which half failed (#11161).
+            return code
         print("\nRepair complete. Re-run --dry-run to confirm 0 candidates.")
     else:
         print("\nDry run — nothing written. Re-run with --repair to repair.")
@@ -496,6 +701,16 @@ def main() -> int:
             print(f"✗ {len(report['candidates'])} candidate(s) remain — the census "
                   f"has NOT reached 0", file=sys.stderr)
             return 1
+        if args.assert_clean and args.no_fts_probe:
+            # ⛔ STATED WHAT WAS NOT MEASURED. `--no-fts-probe` is a legitimate
+            # choice, and a sign-off that stays quiet about the half it skipped
+            # is how a census-only green comes to be read as a full pass
+            # (#11161).
+            print("⚠️ --no-fts-probe: this sign-off certifies the CENSUS only. "
+                  "The removed sentence also lives in the Source FTS index, and "
+                  "that index was NOT measured — pass --probe-phrase <a single "
+                  "rare token from the removed sentence> for the full "
+                  "verification.", file=sys.stderr)
     return code
 
 
