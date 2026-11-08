@@ -1653,6 +1653,63 @@ def _refusal_exit_status(exc: ast.Call) -> int | None:
     return None
 
 
+@pytest.mark.parametrize(
+    "argument,expected",
+    [
+        ('f"msg"', 1),  # an f-string IS a message: CPython prints it and exits 1
+        ('"EXIT_INVALID"', 1),  # so is a str literal
+        ("0", 0),
+        ("1", 1),
+        ("2", 2),
+        ("256", 0),  # the OS keeps only the low 8 bits
+        ("-256", 0),
+        ("768", 0),
+        ("None", 0),
+        ("False", 0),
+        ("True", 1),
+        ("0 + 0", None),  # `literal_eval` folds no BinOp — UNPROVEN, not 0
+        ("EXIT_INVALID", None),  # nor a bare Name
+    ],
+)
+def test_the_refusal_status_resolver_matches_cpython(argument, expected):
+    """The resolver's OWN table, executed.
+
+    Without this row set the resolver was covered only by the two pinned guards,
+    and BOTH are f-string shaped — so everything after the `ast.JoinedStr` early
+    return had no coverage at all, and the fail-closed `None` (UNPROVEN) return
+    could be mutated to `1` with the whole file GREEN. Measured: that mutation
+    left `assert status is not None` untouched, because no pinned guard can reach
+    it. A table is the only way to execute those arms; the resolver's docstring
+    already asserts this table, so it is now executed rather than described.
+    """
+    exc = ast.parse(f"raise SystemExit({argument})").body[0].exc
+    assert isinstance(exc, ast.Call)
+    assert _refusal_exit_status(exc) == expected, (argument, expected)
+
+
+@pytest.mark.parametrize(
+    "source,expected",
+    [
+        ('print("m", file=sys.stderr)', True),
+        ('print("m")', False),
+        ('print("m", file=sys.stdout)', False),
+        ('print("m", file=stderr)', False),
+        ('print("m", flush=True)', False),
+    ],
+)
+def test_the_stderr_print_detector_requires_the_file_keyword(source, expected):
+    """The print-shape detector on its own, because no pinned guard reaches it.
+
+    Both tools this pin covers refuse with `raise SystemExit(f"…")`, so the
+    print+stderr branch is never taken for either — mutating `_is_stderr_print`
+    to `return True` left the file GREEN. The arm was not wrong, it was
+    UNEXERCISED, which makes a future mistake in it invisible; this executes it.
+    """
+    call = ast.parse(source).body[0].value
+    assert isinstance(call, ast.Call)
+    assert _is_stderr_print(call) is expected, source
+
+
 def _census_module():
     """The entry-point census, loaded by path — the SINGLE OWNER of its predicates.
 
@@ -1740,7 +1797,7 @@ def test_the_tool_carries_the_5128_interpreter_guard_first(tool, capsys, monkeyp
     in `tools/ci_selection.py`: for a PR that touches only one tool,
     `select(['tools/capstone_ledger.py'], 'pull_request', load_manifest())`
     returns 82 files that INCLUDE `test_9664_capstone_verdict_ledger.py` (it is
-    `tier1`-registered, `config/ci-surfaces.yml:8082`) and EXCLUDE
+    `tier1`-registered, `config/ci-surfaces.yml:8096`) and EXCLUDE
     `tests/test_entry_point_python_guard.py`. So pinning here is what makes the
     guard checked on a tool-only diff; pinning in the census alone is not. Both
     tools this PR touches are parameterised for that reason — an unpinned second
@@ -1754,7 +1811,7 @@ def test_the_tool_carries_the_5128_interpreter_guard_first(tool, capsys, monkeyp
     census's `docs/` + `graph-scripts/` + sibling-`tools/` walk, nor its corpus
     vacuity, `RUNTIME_39`/`UNGUARDABLE` accuracy, detector self-test or `-m`
     resolution arms: reaching any of those needs an edit to `docs/`, to another
-    tool, or to the census file itself — and `tests/` edits select 787 files
+    tool, or to the census file itself — and `tests/` edits select 788 files
     INCLUDING the census, so the census itself would then run. This bound is
     declared rather than implied because a pin that silently claims parity is how
     each of six review rounds found it weaker than the census by one more
@@ -1762,10 +1819,13 @@ def test_the_tool_carries_the_5128_interpreter_guard_first(tool, capsys, monkeyp
     """
     tree = ast.parse(tool.read_text(encoding="utf-8"))
     body = list(tree.body)
-    # Skip EXACTLY ONE module docstring — not every leading `ast.Expr`, which is
-    # what the census's `_guard_index` anchors on. Measured: a second bare string
-    # literal before the `__future__` import passed a skip-all-Expr loop and reded
-    # the census.
+    # Skip EXACTLY ONE module docstring, then ZERO OR MORE `__future__` imports —
+    # which is what the census's `_guard_index` does (one `_is_docstring` check,
+    # then `while _is_future_import(...)`). Requiring a `__future__` import would
+    # red a census-LEGAL tool: measured, 3 of 185 tracked `tools/*.py` carry none
+    # as their first post-docstring statement. Skipping every leading `ast.Expr`
+    # is still wrong and measurably so: a second bare string literal before the
+    # guard passed a skip-all-Expr loop and reded the census.
     i = 0
     if (
         i < len(body)
@@ -1774,12 +1834,17 @@ def test_the_tool_carries_the_5128_interpreter_guard_first(tool, capsys, monkeyp
         and isinstance(body[i].value.value, str)
     ):
         i += 1
-    assert i < len(body) and isinstance(body[i], ast.ImportFrom), "no __future__ import"
-    assert body[i].module == "__future__", body[i].module
-    i += 1
+    while (
+        i < len(body)
+        and isinstance(body[i], ast.ImportFrom)
+        and body[i].module == "__future__"
+    ):
+        i += 1
     # Bounds-checked before each access: a truncated preamble must fail with the
     # reason below, not an IndexError the reader has to decode.
-    assert i < len(body), "`import sys` must follow __future__ (file ends too early)"
+    assert i < len(body), (
+        "`import sys` must follow the docstring / any __future__ import (file ends too early)"
+    )
     assert isinstance(body[i], ast.Import)
     # `asname is None` matters: `import sys as _sys` binds no `sys` at all, so the
     # guard below becomes a NameError at runtime while a name-only comparison
@@ -1890,13 +1955,21 @@ def test_the_tool_carries_the_5128_interpreter_guard_first(tool, capsys, monkeyp
         f"UNPROVEN — use an int literal or an f-string message (arithmetic over "
         f"literals and bare names are NOT resolved): got {ast.dump(raise_node)}"
     )
-    assert status == 1, (
-        f"the refusal must exit 1. The expected value is the LITERAL the census "
-        f"pins (`REFUSAL_CODES`), not a constant read back from the module under "
-        f"test: measured, a coordinated edit (`EXIT_INVALID = 3` + "
-        f"`SystemExit(3)`) kept a self-referential assertion green while the "
-        f"census reded, and 3 is `EXIT_DISABLED` — a refusal indistinguishable "
-        f"from the off-switch. Got {status}: {ast.dump(raise_node)}"
+    # The expected status is the CENSUS's own pin, not a constant read back from
+    # the module under test: measured, a coordinated edit (`EXIT_INVALID = 3` +
+    # `SystemExit(3)`) kept a self-referential assertion green while the census
+    # reded, and 3 is `EXIT_DISABLED` — a refusal indistinguishable from the
+    # off-switch. Where the census pins NO code for this tool it accepts any
+    # NON-ZERO refusal, so demanding 1 unconditionally would red a census-legal
+    # tool — the false-red class this pin must not add.
+    expected_status = _census_module().REFUSAL_CODES.get(f"tools/{tool.name}")
+    assert (
+        status == expected_status if expected_status is not None else status != 0
+    ), (
+        f"the refusal must exit the status the census pins for this tool "
+        f"({expected_status!r}; None means the census accepts any non-zero "
+        f"status), and a coordinated edit of the module's own constant is exactly "
+        f"what this compares against. Got {status}: {ast.dump(raise_node)}"
     )
 
     if print_shape:
@@ -2005,3 +2078,12 @@ def test_capstone_ledgers_refusal_code_is_the_one_the_census_pins():
     catches.
     """
     assert cl.EXIT_INVALID == 1
+    # The row the sentence above is about, asserted against the census ITSELF: a
+    # census edit that moved the pin would otherwise leave this test green while
+    # its own name became false (measured by mutating the row to 2 — only the
+    # parametrised status arm reded).
+    census = _census_module()
+    assert census.REFUSAL_CODES["tools/capstone_ledger.py"] == 1, (
+        f"the census's own row for this tool must be 1; got "
+        f"{census.REFUSAL_CODES['tools/capstone_ledger.py']!r}"
+    )
