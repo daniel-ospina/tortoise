@@ -682,7 +682,7 @@ ABSENT_ROSTER = (
 
 
 def _fleet_board_state(*, issues=None, lanes=None, registry_measured=True,
-                       registry_error="", github_measured=True,
+                       registry_error="", github_measured=True, github_error="",
                        reconciliation=True,
                        registry_rows=None, workspaces_count=None,
                        workspaces_measured=True,
@@ -740,6 +740,10 @@ def _fleet_board_state(*, issues=None, lanes=None, registry_measured=True,
             # recorded" could be reverted with every test still green.
             "registry_error": "" if registry_error is None else registry_error,
             "github_measured": bool(github_measured),
+            # The cause the GITHUB read recorded (#11202). It travels into the
+            # refusal the operator reads, so a test can pin that a TIMEOUT is
+            # named as a timeout instead of as a corrupt payload.
+            "github_error": "" if github_error is None else github_error,
             # #8175: was the OPEN-ISSUE window wide enough to prove a negative?
             "open_issues_truncated": bool(open_issues_truncated),
             "open_issues_read": 989,
@@ -11074,6 +11078,136 @@ class HolderGateTests(unittest.TestCase):
         # that no write-back crept back in.
         self.assertNotEqual(json.loads(self.board.read_text())["generated_at"],
                             fresh["generated_at"])
+
+    def test_a_readable_board_answers_a_REAL_verdict_and_an_unreadable_one_still_blocks(self):
+        """⛔ #11202: a real verdict when the board is readable — still fail-CLOSED.
+
+        Two halves, one test, because the defect is the RELATION between them: the
+        gate must be able to ANSWER (CLEAN/COLLISION) from a readable board, and must
+        still refuse — never answer — when the board's GitHub read did not happen.
+        Suppressing the INCOMPLETE is the one change that would be worse than the bug,
+        so both polarities are pinned here.
+        """
+        # (a) READABLE and nobody attributed -> a measured "nobody" (CLEAN-able).
+        _write_board(self.board, _fleet_board_state())
+        read = self.cp.read_holders(ISSUE, slug=SLUG, repo_root=str(self.tmp))
+        self.assertTrue(read.measured, read.unanswerable)
+        self.assertEqual(read.holders, ())
+
+        # (b) READABLE and a live lane attributed -> a COLLISION, not an abstention.
+        _write_board(self.board, _fleet_board_state(
+            issues={ISSUE: [("lane-live", "branch slug")]},
+            lanes=[{"label": "lane-live", "live": True}],
+        ))
+        read = self.cp.read_holders(ISSUE, slug=SLUG, repo_root=str(self.tmp))
+        self.assertTrue(read.measured, read.unanswerable)
+        self.assertEqual([h.verdict for h in read.holders], ["live"])
+
+        # (c) UNREADABLE (the open-issue read timed out) -> INCOMPLETE, and the note
+        # names the TIMEOUT. Before #11202 the same board read "returned no parsable
+        # JSON" — the string a corrupt payload produces — so the operator was sent to
+        # check auth for a read that was merely slow. The cause is DERIVED from the
+        # module under test (stub `_capture` at the kill), so this fixture cannot drift
+        # from the wording the code actually emits.
+        with mock.patch.object(
+            self.cp.fleet_state, "_capture",
+            return_value=("", self.cp.fleet_state.GH_READ_TIMEOUT_RC, ""),
+        ):
+            timed_out = self.cp.fleet_state.open_issues(SLUG).error
+        self.assertIn("TIMED OUT", timed_out)
+        _write_board(self.board,
+                     _fleet_board_state(github_measured=False, github_error=timed_out))
+        with mock.patch.object(
+            self.cp.fleet_state, "build_state",
+            return_value=_fleet_board_state(github_measured=False,
+                                            github_error=timed_out),
+        ):
+            read = self.cp.read_holders(ISSUE, slug=SLUG, repo_root=str(self.tmp))
+        self.assertFalse(read.measured)
+        note = self.cp._holder_gate_note(read)
+        self.assertIn("TIMED OUT", note)
+        self.assertIn("slow, not malformed", note)
+        self.assertNotIn("no parsable JSON", note)
+        # ⛔ AND IT MUST STILL FIT (#11202 review round 3). The gate prefixes ~180
+        # characters of its own prose and the harness cuts the composed cause at 320,
+        # so a cause that is merely CORRECT truncates mid-word and drops what is
+        # unknown. Pinned on the composed note, not on the cause alone.
+        self.assertLessEqual(len(note), 320, note)
+        self.assertIn("attribution filters against is unknown", note[:320])
+        # ⛔ AND THE REMEDY AT THE BOTTOM OF THE SAME REPORT MUST NOT CONTRADICT IT
+        # (#11202 review round 4). Before the cause named the kill, every board-read
+        # failure looked like auth/network, so the generic "fix gh auth/network (or
+        # rebuild the fleet board)" was merely vague. It now contradicts the note, and
+        # rebuilding the board only re-runs the read that was just killed.
+        surface = self.cp.Surface("issue assignee/holder")
+        surface.incomplete(note)
+        remedy = self.cp._incomplete_remedy([surface])
+        self.assertNotIn("gh auth/network", remedy)
+        self.assertIn("KILLED AT ITS BOUND", remedy)
+        # ⛔ AND THE MIXED SHAPE MUST NOT REINTRODUCE IT (#11202 review round 5). The
+        # first placement of this arm sat inside `not both and not exhausted and not
+        # truncated`, so a run whose board read was killed AND whose PR list was
+        # TRUNCATED fell through to the composite arms, whose `remaining` tail applied
+        # the generic sentence to the killed surface — the row said "killed for being
+        # slow" and the remedy said to re-authenticate and rebuild the board.
+        killed_surface = self.cp.Surface("issue assignee/holder")
+        killed_surface.incomplete(note)
+        capped = self.cp.Surface("open PRs")
+        capped.mark_truncated("the PR list hit --pr-limit")
+        mixed = self.cp._incomplete_remedy([killed_surface, capped])
+        self.assertIn("KILLED AT ITS BOUND", mixed)
+        # `open PRs` is the surface that carries a real cause; the killed one must not be
+        # handed the generic sentence by the `remaining` tail.
+        self.assertNotIn(
+            "(issue assignee/holder) need fix gh auth/network", mixed, mixed
+        )
+        # ⛔ AND THE REMEDY MUST BE TRUE UNDER THE SEAM (#11202 review round 6): with
+        # `fixed` armed there is no derived bound and no retry, so promising either tells
+        # the operator to re-run into a byte-identical kill.
+        with mock.patch.dict(os.environ,
+                             {self.cp.fleet_state.GH_READ_BOUND_ENV: "fixed"}):
+            armed = self.cp._incomplete_remedy([killed_surface])
+        self.assertIn("KILLED AT ITS BOUND", armed)
+        self.assertNotIn("retried once", armed)
+        self.assertIn("unset it", armed)
+
+    def test_every_board_read_failure_fits_the_window_its_readers_apply(self):
+        """⛔ EVERY class, not only the timeout (#11202 review round 4).
+
+        The gate composes ~180 characters of its own prose in front of the read's cause
+        and its readers cut the result at 320 (`test_the_gap_fits_the_bound_its_readers_apply`
+        pins that budget for the live-process arm). Round 3 fitted the timeout arm only,
+        so a 403 — one of the three classes this issue exists for — still composed to 367
+        and was cut mid-word, losing the clause that says WHAT is unknown.
+
+        The causes are DERIVED from the module under test (stub `_capture` at each
+        failure class), so this cannot drift from the wording the code emits.
+        """
+        fs = self.cp.fleet_state
+        cases = {
+            "timeout (armed)": ("", fs.GH_READ_TIMEOUT_RC, ""),
+            "refused (403)": (
+                "Fetching page 2 of 19...\n", 1,
+                "API rate limit exceeded for user ID 1. " + "x" * 400,
+            ),
+            "unparsable body": ("<html>nope</html>", 0, ""),
+        }
+        for label, reply in cases.items():
+            with self.subTest(case=label), mock.patch.object(
+                fs, "_capture", return_value=reply,
+            ):
+                cause = fs.open_issues(SLUG).error
+            with mock.patch.object(
+                fs, "build_state",
+                return_value=_fleet_board_state(github_measured=False,
+                                                github_error=cause),
+            ), mock.patch.object(fs, "DEFAULT_OUT",
+                                 self.tmp / "no-board-here.json"):
+                read = self.cp.read_holders(ISSUE, slug=SLUG, repo_root=str(self.tmp))
+                self.assertFalse(read.measured)
+                note = self.cp._holder_gate_note(read)
+            self.assertLessEqual(len(note), 320, f"{label}: {note}")
+            self.assertIn("attribution filters against is unknown", note[:320], label)
 
     def test_a_fresh_but_unanswerable_board_is_rebuilt_not_believed(self):
         # Freshness is not the same fact as answerability. An unread registry
