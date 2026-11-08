@@ -15894,6 +15894,15 @@ class TortoiseSDK:
         # whose recorded read version is no longer current (shared with the
         # hosted receipt via the ONE home, so the two cannot drift).
         _attach_source_change_notices(resp, meta)
+        # #11237: what the S5 Job 1 relation write leg did — per-edge +
+        # counts. Additive and ALWAYS present when the leg ran, because the
+        # E4/E6 readings must read a WRITTEN number from the capture receipt
+        # rather than infer one: "the channel arrived" and "the edge landed"
+        # are different claims, and this key is the difference. Absent (not
+        # zeroed) on a capture with no relations at all, so a reader cannot
+        # confuse "nothing was stated" with "nothing was written".
+        if isinstance(meta.get("relation_write"), dict):
+            resp["relation_write"] = meta["relation_write"]
         # W5 Phase C (#2104, indicator 3): EP-on-ingest — at the END of the
         # capture write path (after provenance stamp + operators wired) the
         # extracted claims are promoted draft→live and the BOUNDED ingest EP
@@ -16506,6 +16515,10 @@ class TortoiseSDK:
         # name only case-insensitively matches a subject name, while the
         # `MATCH (o:Object {name:$n})` resolution below is case-SENSITIVE.
         subject_entity_names: set[str] = set()
+        # #11237: `{name: [(graph_id, kind), …]}` — every entity THIS capture
+        # wrote, so the S5 Job 1 relation leg can resolve a stated endpoint
+        # name to the node it denotes (see the write leg below).
+        entity_index: dict[str, list[tuple[str, str | None]]] = {}
         for e in payload.get("entities", []) or []:
             name = str(e.get("name", "")).strip()
             if not name:
@@ -16519,15 +16532,25 @@ class TortoiseSDK:
                 subject_entity_names.add(name)
             try:
                 if _is_subject:
-                    self.create_entity(
+                    _written = self.create_entity(
                         "subject", name,
                         **({"subjectKind": _ekind} if _ekind is not None else {}),
                         is_episodic=False)
                 else:
-                    self.create_entity(
+                    _written = self.create_entity(
                         "object", name,
                         **({"objectKind": _ekind} if _ekind is not None else {}),
                         is_episodic=False)
+                # #11237: the S5 Job 1 relation write leg needs the GRAPH id
+                # each emitted entity resolved to — a relation names two
+                # entity NAMES, and an edge needs two nodes. Captured here,
+                # at the only call site that knows both, and keyed by name so
+                # the leg can also see a name this capture wrote TWICE under
+                # different kinds (an ambiguity it must refuse, not resolve —
+                # Layer-1 identity is `(name, kind)`, #11235).
+                _node_id = str((_written or {}).get("node", {}).get("id") or "")
+                if _node_id:
+                    entity_index.setdefault(name, []).append((_node_id, _ekind))
             except Exception as exc:  # noqa: BLE001, RUF100 — #2164: the
                 # old `except: pass` was indicator-4 hygiene — a swallowed
                 # create_entity failure silently stranding an Object a
@@ -17153,6 +17176,31 @@ class TortoiseSDK:
                 session_id=session_id, warn=warnings.append)
         except Exception as exc:  # pragma: no cover - defensive outer bound
             _logger.warning("supersession apply failed: %s", exc, exc_info=True)
+        # ── S5 Job 1 remainder (#11237): the narrative's entity↔entity
+        #    relations land as Object→Object edges ──
+        # `#10999` made the channel TRANSPORT ONLY — `result["relations"]`
+        # reached the caller and nothing consumed it, so a story that states
+        # "A changed because of B" produced two Objects and no edge between
+        # them. This is the consumer. It runs LAST, after every entity the
+        # relation can name has been written (a relation names entity NAMES;
+        # an edge needs graph ids), and it consumes ONLY the typed record —
+        # never the story's text, `summary` or `_searchText` (⛔ #10000, P0).
+        # Best-effort like the sibling legs: a write-path refusal is counted
+        # and named, never a capture failure.
+        relation_write: dict | None = None
+        if out.get("relations"):
+            try:
+                from tortoise.relation_write import apply_relation_edges
+                relation_write = apply_relation_edges(
+                    self, out.get("relations") or [], entity_index,
+                    warn=warnings.append)
+            except Exception as exc:  # pragma: no cover - defensive outer bound
+                _logger.warning("relation write leg failed: %s", exc,
+                                exc_info=True)
+                warnings.append(
+                    "narrative relation write leg failed "
+                    f"({type(exc).__name__}: {exc}) — the stated relations "
+                    "stay uncommitted (#11237)")
         # P1 #1529 (D6): completed-but-empty v2 output (no errors, no points)
         # is an additive warning — nothing extractable is not a failure and
         # never a silent extracted: 0.
@@ -17193,6 +17241,14 @@ class TortoiseSDK:
             # #5516: this capture's write-time source-change notices — the
             # capture RECEIPT is the write result its caller sees.
             "source_change_notices": source_change_notices,
+            # #11237: what the S5 Job 1 write leg did with the narrative's
+            # relations — the per-edge record plus the counts, so the E4/E6
+            # readings and the eval receipt read a WRITTEN number instead of
+            # "the channel arrived". ADDITIVE (absent, not zeroed, when the
+            # extractor stated no relations) so a reader cannot confuse
+            # "nothing was stated" with "nothing was written".
+            **({"relation_write": relation_write}
+               if relation_write is not None else {}),
         }
         return extracted, meta
 

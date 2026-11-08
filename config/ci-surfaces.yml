@@ -1649,6 +1649,16 @@ surfaces:
   # operator topology losing its eventId / dropping back out of the
   # retrievable memory layer) + the cross-session CORRECTS audit leg.
   - eval/write_path/test_write_path_operator_lane.py
+  # #11237 (S5 Job 1 remainder): the narrative relation WRITE lane — the
+  # channel #10999 left as transport only. Pins that a stated entity↔entity
+  # relation lands as an Object→Object edge through the REAL capture commit
+  # (resolved names → ids, the registry's own write-path verdict, idempotent
+  # re-finalise), that a refused relation is NAMED, and that no narrative text
+  # reaches an edge property (⛔ #10000, P0). Senses exactly the writers it
+  # registers against: `tortoise/sdk.py` (api, the commit leg),
+  # `tortoise/extractor_v2.py` (ep, the producer) and the new
+  # `tortoise/relation_write.py` (core fallback).
+  - eval/write_path/test_write_path_relation_lane.py
   # #9077 (E4): the operator-receipt EVIDENCE gate — the checker that refuses a
   # numerator (`tools/operator_receipt_check.py`) plus the runner/grading
   # emission it reads. It pins that a receipt names the extractor that RAN (so
@@ -6695,6 +6705,10 @@ surfaces:
   # once the fix-wave creates headroom.
   - eval/write_path/test_write_path_benchmark.py
   - eval/write_path/test_write_path_operator_lane.py
+  # #11237: see the `api` registration above — the relation WRITE lane also
+  # grades `extractor_v2.py`'s producer half (the `_assemble_relations` record
+  # the leg consumes), which is this surface's source.
+  - eval/write_path/test_write_path_relation_lane.py
   # #9077 (E4): the operator-receipt EVIDENCE gate — the checker that refuses a
   # numerator (`tools/operator_receipt_check.py`) plus the runner/grading
   # emission it reads. It pins that a receipt names the extractor that RAN (so
@@ -8007,6 +8021,9 @@ surfaces:
   - eval/write_path/test_write_path_prescreen.py
   - eval/write_path/test_write_path_benchmark.py
   - eval/write_path/test_write_path_operator_lane.py
+  # #11237: see the `api` registration above — the relation WRITE lane lives in
+  # `tests/eval/write_path/`, which is this surface's own tree.
+  - eval/write_path/test_write_path_relation_lane.py
   # #9077 (E4): the operator-receipt EVIDENCE gate — the checker that refuses a
   # numerator (`tools/operator_receipt_check.py`) plus the runner/grading
   # emission it reads. It pins that a receipt names the extractor that RAN (so
@@ -9127,6 +9144,7 @@ durations_floors:
   test_calibration.py: {value: 355.0, pinned: true}
   eval/write_path/test_write_path_operator_lane.py: {value: 355.0, pinned: true}
 durations:
+  eval/write_path/test_write_path_relation_lane.py: 2.0  # new in #11237 — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT this host's local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `api`/`ep`/`eval` registrations above put it in `fast_pool()`. ⚠️ Its absence would red nothing on its own — `duration_coverage_issues()` is a ratio with headroom, so the row is written by hand rather than discovered by a red; `tools/ci_selection.py --integrity` is the authority. ⚠️ MEASURED LOCALLY as context for a human, NOT as the weight: 7 passed in ~140 s whole-file on a shared lane box — each case builds its own throwaway embedded FalkorDB (`TortoiseSDK(db_path=…)`), which is the cost, and a fixer-box wall reading is exactly the input #2818/#3419 forbids. So the flat 2.0 UNDERSTATES it until a sweep replaces the row; the point of the row is existence + coverage, not an accurate shard weight. What the weight covers: hermetic otherwise — the eval corpus's own fixtures, a monkeypatched `extract_session_v2` seam (the WIRE half) and the REAL `execute_embed` (the fold half); no docker, no network, no model call, no `gh`. ⛔ The CASE COUNT is deliberately NOT quoted: a hand-written count re-stales on every case a later round adds (`test_10360`/`test_10513` each record that), and this row is refreshed from junit by `tools/ci_timing.py`.
   test_s4_reeemit_tax.py: 2.0  # new in #11385 (review P1) — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT this host's local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `core` registration above puts it in `fast_pool()`. What the weight covers: hermetic — a `_FakeModel` returning canned JSON and `tmp_path` receipt files, driven through `run_s4`/`render_s4_prompt`/`merge_embed_lists` in process, plus reads of the two committed `ab-*.json` evidence artifacts; no DB, no graph, no network, no model call, no `gh`. ⛔ NOT a local reading, deliberately: a host measurement on a contended review box was ~18 s whole-file, which is a HOST reading and not a shard-layout input. ⛔ The CASE COUNT is deliberately not quoted: the file has gained cases in every review round, which is exactly how a hand-written count re-stales. `tools/ci_selection.py --integrity` is the authority; `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
   test_evidence_assembly_wiring_2683.py: 2.0  # new in #11448 — the #3400/#4348 trap: a file a PR ADDS cannot carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419). The row must EXIST, not merely default ("a default is not a reading"): the `core`/`sdk`/`eval` registrations above put it in `fast_pool()`, and `--integrity` stays green either way (a 0.90 ratio floor with headroom), so nothing but this row records the weight. ⚠️ MEASURED LOCALLY as context, NOT as the weight: ~5 s for this file alone through `tools/test_lane.py` on a contended lane box (docker lane: one throwaway FalkorDB graph per test + a private lane container), so the flat 2.0 UNDERSTATES it until a refresh replaces the row — the same understatement every `sdk`-fixture file carries. What the weight covers: three tests, each seeding a dedicated graph (four Points — three `statement` Points and one `session-transcript` chunk) and driving the REAL `tools.longmem_eval.retrieve.retrieve_for_question` with a stubbed `hybrid_search`; no reader, no judge, no network, no model (the embedder is pinned out). ⛔ The case count is deliberately not quoted as a weight input — `tools/ci_selection.py --integrity` is the authority, and `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
   test_embed_writer_register.py: 2.0  # new in #11085 — the #3400/#4348 trap: a file a PR ADDS cannot carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419). The row must EXIST, not merely default ("a default is not a reading"): the `core` registration above puts it in `fast_pool()`, and `--integrity` stays green either way (the floor is a 0.90 ratio with headroom), so nothing but this row records the weight. ⚠️ MEASURED LOCALLY as context, NOT as the weight: ~12 s for this file alone on a contended lane box, so the flat 2.0 UNDERSTATES it until a refresh replaces the row. What the weight covers: hermetic — the register is imported in-process and once in a child interpreter (asserting `tortoise.projection`/`pack_state`/`sdk` absent from `sys.modules`), plus an AST walk of `tortoise/**` and one `tmp_path` scratch root per pinned shape and per positive control for the discovery blind spot; no DB, no graph, no network, no model. ⛔ The CASE COUNT is deliberately not quoted (it moves with every review round). `tools/ci_selection.py --integrity` is the authority; `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.

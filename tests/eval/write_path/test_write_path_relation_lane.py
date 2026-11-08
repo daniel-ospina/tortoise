@@ -1,0 +1,327 @@
+"""#11237 — the S5 Job 1 relation WRITE lane (Object→Object edges).
+
+WHAT THIS LANE IS
+-----------------
+`#10999` delivered the narrative's entity↔entity relations as **transport**:
+``execute_embed`` validates them into ``result["relations"]`` and nothing
+consumed them. `#11237` owns the remaining leg — the WRITE path — and this
+module pins it end to end, at the layer that can actually lose an edge: the
+**capture commit** (``sdk.capture_session`` → ``_extract_session_v2``).
+
+⛔ TWO LEGS, AND THE DIFFERENCE MATTERS (the #9077 lesson)
+---------------------------------------------------------
+* ``test_relation_leg_writes_object_object_edges`` and its siblings
+  **monkeypatch ``extract_session_v2``** with a hand-built emission. They grade
+  the **WIRE** — resolution, write-path verdict, writer, idempotence — and say
+  **nothing** about whether a real model states such a relation. That
+  monkeypatch is the eval lane's DELIBERATE deterministic seam and must not be
+  deleted: the product number comes from a ``real: true`` receipt, never from
+  here.
+* ``test_fold_lane_relations_reach_the_commit_leg`` runs the REAL
+  ``execute_embed`` (no monkeypatch below the capture seam) and hands its own
+  ``result["relations"]`` to the REAL commit — the fold + commit legs together.
+
+⛔ #10000 (P0) is asserted, not assumed: the write path consumes the TYPED
+relation (two ids, a verb, a closed-vocabulary meaning) and nothing else — no
+transcript, no ``summary``, no ``_searchText``. A test here reds if the leg
+starts carrying prose into FalkorDB.
+"""
+from __future__ import annotations
+
+import contextlib
+import sys
+import uuid
+from pathlib import Path
+
+import pytest
+
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from tests.eval.write_path import corpus, runner  # noqa: E402
+
+pytestmark = pytest.mark.timeout(900)
+
+SESSION = "wp01_quarry_debug"
+
+
+def _emission(entities: list[dict], relations: list[dict],
+              points: list[dict] | None = None) -> dict:
+    """A `extract_session_v2`-shaped result: the WIRE's own seam.
+
+    Shaped exactly like the shipped function's return so
+    ``sdk._extract_session_v2`` consumes it unchanged — the operator lane's
+    ``_extractor`` idiom (#2552), reused rather than re-invented.
+    """
+    payload = {
+        "session_id": SESSION, "story_arc": "", "entities": entities,
+        "points": points or [], "events": [], "operators": [],
+        "supersessions": [], "client_commit_id": f"ccid-{SESSION}",
+    }
+    return {
+        "session_id": SESSION, "story_arc": "", "embed_list": {},
+        "search": {"mode": "embedded", "degraded": True},
+        "payload": payload, "chain_notes": [], "link_before_create": [],
+        "supersessions": [], "warnings": [], "minted_kinds": [],
+        "stats": {}, "errors": [], "relations": relations,
+    }
+
+
+def _extractor(result: dict):
+    def _run(_model, _conversation=None, *, session_id=None, **_kw):
+        return result
+    return _run
+
+
+@pytest.fixture()
+def _lane(monkeypatch, tmp_path):
+    """A hermetic SDK — embedded graph, a unique namespace, no LLM."""
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    monkeypatch.delenv("TORTOISE_SESSION_EXTRACTOR", raising=False)
+    from tortoise.sdk import TortoiseSDK
+
+    workdir = tmp_path / "graph"
+    workdir.mkdir()
+    sdk = TortoiseSDK(db_path=str(workdir / "lane.db"),
+                      namespace=f"w11237lane_{uuid.uuid4().hex[:8]}")
+    with contextlib.suppress(Exception):
+        sdk._get_proj().g.query("MATCH (n) DETACH DELETE n")
+    yield {"sdk": sdk, "workdir": workdir}
+    with contextlib.suppress(Exception):
+        sdk._get_proj().g.query("MATCH (n) DETACH DELETE n")
+    with contextlib.suppress(Exception):
+        sdk.close()
+
+
+def _capture(lane, monkeypatch, result: dict) -> dict:
+    import tortoise.extractor_v2 as ev2
+
+    monkeypatch.setattr(ev2, "extract_session_v2", _extractor(result))
+    fixture = corpus.load_fixture(SESSION)
+    conv = runner.parse_roundtrip(
+        SESSION, fixture["conversation"], fixture["harness"],
+        workdir=lane["workdir"])
+    cap = lane["sdk"].capture_session(
+        conv, session_id=SESSION, harness=fixture["harness"])
+    assert cap.get("ok") is True, cap
+    return cap
+
+
+def _edges(sdk) -> set[tuple[str, str, str, str]]:
+    """``{(edge_type, src_name, dst_name, label)}`` for every Object→Object edge."""
+    rows = sdk._get_proj().g.query(
+        "MATCH (a:Object)-[e]->(b:Object) "
+        "WHERE type(e) IN ['hasPart','dependsOn','related','ownedBy',"
+        "'managedBy','IMPL','NAND','references','wasDerivedFrom'] "
+        "RETURN type(e), a.name, b.name, "
+        "coalesce(e.label, '')").result_set
+    return {(str(t), str(a), str(b), str(lbl)) for t, a, b, lbl in rows}
+
+
+_ENTITIES = [
+    {"name": "retry storm", "kind": "occurrence", "lifecycle": "created"},
+    {"name": "deadline slip", "kind": "occurrence", "lifecycle": "created"},
+    {"name": "retry budget", "kind": "occurrence", "lifecycle": "created"},
+]
+
+
+def test_relation_leg_writes_object_object_edges(_lane, monkeypatch):
+    """A stated relation LANDS as an edge between the two resolved Objects.
+
+    Pre-#11237 (measured on main at ``f76b74c3e``: ``git grep -n
+    'result\\["relations"\\]' tortoise/`` finds no consumer outside the
+    extractor) the two Objects are written and the assertion between them is
+    lost. Three verb families are pinned at once because they take three
+    DIFFERENT routes through the registry's verdict:
+
+      * ``causes`` — a Layer-2 meaning whose mechanism is IMPL → the
+        operator-less direct edge, the meaning riding ``label``;
+      * ``hasPart`` — a structural predicate → ``create_edge``;
+      * ``supports`` → IMPL direct edge labelled with the meaning.
+    """
+    result = _emission(_ENTITIES, [
+        {"src": "retry storm", "dst": "deadline slip", "predicate": "causes"},
+        {"src": "retry budget", "dst": "retry storm", "predicate": "hasPart"},
+        {"src": "retry storm", "dst": "deadline slip", "predicate": "supports"},
+    ])
+    cap = _capture(_lane, monkeypatch, result)
+    written = cap["relation_write"]
+    assert written["written"] >= 2, written
+
+    edges = _edges(_lane["sdk"])
+    # `causes` (IMPL, labelled) and `supports` collapse onto ONE IMPL edge
+    # between the same two Objects — the plan dedups on the RESOLVED
+    # (predicate, src, dst) triple, which is the writers' own edge identity.
+    assert ("IMPL", "retry storm", "deadline slip", "causes") in edges, edges
+    assert ("hasPart", "retry budget", "retry storm", "") in edges, edges
+    assert len([e for e in edges if e[0] == "IMPL"
+                and e[1] == "retry storm" and e[2] == "deadline slip"]) == 1, edges
+
+
+def test_relation_leg_is_idempotent_across_a_re_finalise(_lane, monkeypatch):
+    """Re-finalising the same batch does not duplicate the edge (#11237 target).
+
+    The producer's half is the plan's ``(predicate, src, dst)`` key; the
+    writers' half is ``MERGE``. Both are exercised: the same capture is
+    committed twice through the REAL capture path.
+    """
+    result = _emission(_ENTITIES, [
+        {"src": "retry storm", "dst": "deadline slip", "predicate": "causes"},
+        {"src": "retry budget", "dst": "retry storm", "predicate": "hasPart"},
+    ])
+    _capture(_lane, monkeypatch, result)
+    first = _edges(_lane["sdk"])
+    assert first
+    _capture(_lane, monkeypatch, result)
+    assert _edges(_lane["sdk"]) == first
+
+
+def test_relation_leg_names_what_it_refused(_lane, monkeypatch):
+    """A relation the registry binds to no path is DROPPED AND NAMED.
+
+    ``transacts`` is in the emission's allowlist but neither in
+    ``_VALID_EDGE_PREDICATES`` nor in ``SEMANTICS_MECHANISMS`` — so
+    ``relation_write_paths()`` answers ``()`` and nothing may be invented in
+    its place. An endpoint that resolves to NO entity this capture wrote, and
+    a name this capture wrote TWICE under different kinds (``#11235``: Layer-1
+    identity is ``(name, kind)``), are refused on the same rule — never
+    guessed through.
+    """
+    ambiguous = [
+        {"name": "quarry", "kind": "theme", "lifecycle": "created"},
+        {"name": "quarry", "kind": "epic", "lifecycle": "created"},
+    ]
+    result = _emission(_ENTITIES + ambiguous, [
+        {"src": "retry storm", "dst": "deadline slip", "predicate": "transacts"},
+        {"src": "ghost entity", "dst": "deadline slip", "predicate": "related"},
+    ])
+    cap = _capture(_lane, monkeypatch, result)
+    report = cap["relation_write"]
+    assert report["written"] == 0, report
+    assert report["dropped"] == 2, report
+    reasons = " | ".join(d["reason"] for d in report["drops"])
+    assert "binds no declared write path" in reasons, reasons
+    assert "names no entity this capture wrote" in reasons, reasons
+    assert _edges(_lane["sdk"]) == set()
+
+
+def test_ambiguous_endpoint_is_refused_not_guessed():
+    """⛔ ``#11235``: identity is ``(name, kind)`` — a collision is NOT resolved.
+
+    Plan-level because the GRAPH cannot express this collision: ``create_entity``
+    keys an Object by ``(name, label)``, so two OBJECT kinds under one name
+    collapse onto one node. The ambiguity that survives a capture is a name
+    written to TWO DIFFERENT LABELS (an Object and a Subject), and the leg must
+    decline it rather than pick the one it happens to see — ``extractor_v2``
+    already warns that such an endpoint is ambiguous; this is the write-side
+    half that refuses to settle it by accident.
+    """
+    from tortoise.relation_write import plan_relation_edges
+
+    index = {
+        "lumen auth": [("obj-1", "organization"), ("subj-1", "organization")],
+        "deadline slip": [("obj-2", "occurrence")],
+    }
+    edges, drops = plan_relation_edges(
+        [{"src": "lumen auth", "dst": "deadline slip",
+          "predicate": "related"}], index)
+    assert edges == [], edges
+    assert len(drops) == 1
+    assert "#11235" in drops[0].reason, drops[0].reason
+
+
+def test_relation_leg_carries_no_narrative_text(_lane, monkeypatch):
+    """⛔ #10000 (P0): the edge carries the TYPED relation, never the story.
+
+    The channel's record was already stripped to ``{src, dst, predicate,
+    semantics}`` by ``_assemble_relations``; this asserts the write leg adds no
+    prose either — every edge property is a short typed token, and no
+    transcript/summary text reaches a property. (The entity NAMES are node
+    identity, not narrative: they are what the edge's endpoints are.)
+    """
+    story = ("the retry storm causes the deadline slip because the retry "
+             "budget was consumed by the failover storm again")
+    result = _emission(_ENTITIES, [
+        {"src": "retry storm", "dst": "deadline slip", "predicate": "causes"},
+    ])
+    result["summary"] = story
+    result["embed_list"] = {"summary": story}
+    _capture(_lane, monkeypatch, result)
+    rows = _lane["sdk"]._get_proj().g.query(
+        "MATCH (a:Object)-[e]->(b:Object) RETURN properties(e)").result_set
+    assert rows
+    for (props,) in rows:
+        for key, value in (props or {}).items():
+            assert key not in {"summary", "_searchText", "content",
+                               "transcript", "raw"}, (key, props)
+            if isinstance(value, str):
+                assert story not in value, (key, value)
+                assert value != story, (key, value)
+                assert len(value) <= 64, (key, value)
+
+
+def test_fold_lane_relations_reach_the_commit_leg(_lane, monkeypatch):
+    """The REAL ``execute_embed`` output commits its own relations.
+
+    No monkeypatch below the capture seam: ``execute_embed`` validates the
+    emission's ``relations`` section (``_assemble_relations``) and the REAL
+    commit writes the edges from ``result["relations"]`` — the two legs `#10999`
+    and `#11237` split between them.
+    """
+    import tortoise.extractor_v2 as ev2
+
+    embed = {
+        "entities": _ENTITIES, "events": [], "points": [], "operators": [],
+        "relations": [
+            {"src": "retry storm", "dst": "deadline slip",
+             "predicate": "causes"},
+            {"src": "retry budget", "dst": "retry storm",
+             "predicate": "related"},
+        ],
+        "chain_notes": [], "link_before_create": [],
+    }
+    folded = ev2.execute_embed(embed, {"points": []}, session_id=SESSION,
+                               story_arc="", summary="")
+    assert [r["predicate"] for r in folded["relations"]] == \
+        ["causes", "related"], folded["relations"]
+    cap = _capture(_lane, monkeypatch, folded)
+    assert cap["relation_write"]["written"] == 2, \
+        cap["relation_write"]
+    edges = _edges(_lane["sdk"])
+    assert ("IMPL", "retry storm", "deadline slip", "causes") in edges, edges
+    assert ("related", "retry budget", "retry storm", "") in edges, edges
+
+
+def test_a_declared_hierarchy_fixes_the_predicate():
+    """The DECLARED pair wins over the verb the story used (consumed, not inferred).
+
+    ``#11001`` built ``pack_hierarchy.plan_hierarchy_edges`` for exactly this
+    pairing and recorded that nothing called it. The relation leg is that call
+    site: when the pack declares ``theme → epic`` on ``hasPart``, a story that
+    merely says the two are ``related`` must land the DECLARED predicate — the
+    declaration is the pack's own claim about how its levels relate.
+
+    Pure plan-level assertion (no graph): the oracle is the unit under test, and
+    ``apply_hierarchy_edges`` already has its own suite.
+    """
+    from tortoise.pack_hierarchy import DeclaredHierarchy
+    from tortoise.relation_write import plan_relation_edges
+
+    declared = (DeclaredHierarchy(
+        pack="dev", path="Theme \u2192 Epic", predicate="hasPart",
+        from_kind="dev:theme", to_kind="dev:epic",
+        write_path="structural"),)
+    index = {
+        "quarry": [("obj-theme", "dev:theme")],
+        "auth table": [("obj-epic", "dev:epic")],
+    }
+    edges, drops = plan_relation_edges(
+        [{"src": "quarry", "dst": "auth table", "predicate": "related"}],
+        index, declared=declared)
+    assert not drops, drops
+    assert len(edges) == 1
+    assert edges[0].predicate == "hasPart"
+    assert edges[0].declared_by == "dev"
+    assert edges[0].stated_predicate == "related"
+    assert edges[0].write_path == "structural"
