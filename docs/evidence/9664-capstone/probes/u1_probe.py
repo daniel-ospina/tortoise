@@ -45,8 +45,13 @@ USAGE
     uv run tortoise signup                            # once per box (2/IP/24h)
     uv run python docs/evidence/9664-capstone/probes/u1_probe.py
 
-Read-only with respect to every shared graph: the only write it performs is into
-the caller's own `default`, and it deletes nothing.
+Read-only ONLY for a FRESHLY MINTED org — the one AUTH above describes: the single
+write goes into whatever graph the credential's workspace resolves as `default`, and
+it deletes nothing. ⛔ `_creds()` checks that the file EXISTS, never that the org is
+fresh: if `~/.tortoise/credentials.json` already names a team workspace, then that
+workspace's `default` IS a shared graph and the positive control writes the probe
+string into it. Mint the org (`uv run tortoise signup`) — or move the existing
+credentials aside — before running this against anything shared.
 """
 from __future__ import annotations
 

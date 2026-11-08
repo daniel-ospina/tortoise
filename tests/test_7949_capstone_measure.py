@@ -11431,8 +11431,12 @@ def test_the_probes_cross_file_cites_resolve_to_the_symbols_they_name():
     Non-vacuity, measured at the pre-fix head: every arm reds there — `:519` is a
     `TORTOISE_VALUE_GATE` comment (the value is at `:1001`), `:4019` is the
     `"probe": "docs/…/capstone_measure.py",` key (the census key is at `:4046`), and
-    `:4164`/`:4299` are a `REFUSED` f-string and `"verdict": verdict_word(...)` (the pair
-    the entry means is `:4191`/`:4326`). Re-staling any one of them reds this arm again.
+    the `door` entry's `:4164`/`:4299` name NEITHER half of any pair: at this branch's
+    pre-fix head `:4164` is the frozen-sessions GUARD (the `REFUSED` f-string is one line
+    below, at `:4166`) and `:4299` is `"verdict": verdict_word(e5_result),`; on
+    `origin/main` the f-string is at `:4164` and `:4299` is
+    `"denominator": e5["raw_n"],`. No single tree makes both halves true. Re-staling any
+    one of them reds this arm again.
 
     ⛔ The pair is TWO CALL SITES on purpose. An earlier cut of this pin bound ``:3782`` —
     ``def render_log(``, a DEFINITION — against the ``require_door_entered(runs)`` call,
@@ -11459,11 +11463,13 @@ def test_the_probes_cross_file_cites_resolve_to_the_symbols_they_name():
                 f"{rel} cites capstone_measure.py:{num} — {claim} — but that line reads "
                 f"{line!r}, which does not contain {symbol!r}. Re-derive the number from the "
                 "tree (grep the symbol); do NOT move the symbol to fit the cite")
-            # A cite that lands on the DEFINITION satisfies `symbol in line` too —
-            # `:899` reads `def require_door_entered(runs) -> dict:`, and that is the
-            # function, not the call the entry argues about. The shape is asserted
-            # alongside the token so the pair cannot silently become def-vs-def.
+            # A cite that lands on the DEFINITION would satisfy `symbol in line` too —
+            # `:899` reads `def require_door_entered(runs) -> dict:`, and `:3782` reads
+            # `def render_log(`, but neither proves ORDER: the `door` entry argues that
+            # `main` reaches the gate BEFORE the renderer, so what it must name is the two
+            # CALLS in `main` (`:4191`, `:4326`). The shape is asserted alongside the token
+            # so the pair cannot silently slide onto a definition and lose the argument.
             assert line.startswith("def ") == symbol.startswith("def "), (
                 f"capstone_measure.py:{num} is cited for {symbol!r}, but that line is "
                 f"{'a definition' if line.startswith('def ') else 'not a definition'} — the "
-                "entry names the renderer's DEFINITION against the gate's CALL")
+                "entry names the two CALLS whose order it argues from, never a definition")
