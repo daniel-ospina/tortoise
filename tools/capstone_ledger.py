@@ -482,7 +482,7 @@ def _names_artifact(token: str, cwd: Path, root: Path) -> tuple[bool, str]:
                 # guess-the-cause defect this change removes from the other two call
                 # sites. A measured "no match is tracked" is still reported as that.
                 verdict = _is_tracked(resolved_match, root)
-                if verdict is True:
+                if verdict is not False:
                     return True, ""
                 if verdict is None:
                     unrunnable_seen = True
