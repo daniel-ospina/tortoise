@@ -61,15 +61,19 @@ that §7's value-gate row names the SHIPPED symbols (`value_gate._REFERENCE` /
 a markdown-to-markdown line pointer, and neither covers `docs/scoping/` or
 `docs/research/`, so the regression above was invisible to both. This file is the
 same INSTRUMENT over the missing subject, not a second implementation of theirs.
-⛔ `citation_rot`'s constants are cited here by NAME, never by line number: `origin/main`
-added `SEARCH` and shifted every one of them after this sentence was first
-written — the same rot this file exists to catch, and one it is blind to inside a
-`.py` docstring (see STATED LIMITS). An earlier cut of this paragraph cited them
-as `:76-81` / `:248-249`, which were correct at its own head and dead at the
-merge result.
+⛔ `citation_rot`'s constants are cited here by NAME, never by line number:
+`origin/main` added `SEARCH` below `ONTOLOGY` and shifted **the three constants
+declared after it** (`ONTOLOGY_CHANGELOG`, `INGEST`, `EVAL_SPEC` each moved down
+4 lines; `DOC`, `STORAGE` and `ONTOLOGY` did not move at all) — the same rot this
+file exists to catch, and one it is blind to inside a `.py` docstring (see STATED
+LIMITS). An earlier cut of this paragraph cited the ranges `:76-81` and `:248-249`.
+Both are dead at the merge result, and `:76-81` was **already off by one at the
+head that wrote it**: the range ended at `INGEST` while the sentence listed
+`EVAL_SPEC`, which sat at `:82`.
 
 `tests/test_s2_decision_record_5087.py` (#10072) is the closest precedent for the
-policy side: it pins that a document "must cite siblings by name, not ordinal".
+policy side: its §8 pin reads "§8's rows must cite a sibling mutant or test by
+NAME, never by ordinal".
 Like both citation guards, this file is DUAL-REGISTERED (`core` + `tier1`) because
 a docs-only diff runs `tier1` only — and a docs-only diff is exactly the change
 that can move the line numbers a citation depends on.
