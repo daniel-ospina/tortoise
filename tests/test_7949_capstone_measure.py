@@ -11404,8 +11404,8 @@ _CROSS_FILE_PROBE_CITES = (
         re.compile(
             r"``require_door_entered\(runs\)`` BEFORE it reaches ``render_log``\s*\n"
             r"#: \(``capstone_measure\.py:(\d+)`` vs ``:(\d+)``\)"),
-        ("def render_log(", "require_door_entered(runs)"),
-        "#11298/#11331's `door` entry names the two calls whose ORDER it argues from",
+        ("require_door_entered(runs)", "text = render_log("),
+        "#11298/#11331's `door` entry names the two CALLS whose ORDER it argues from",
     ),
 )
 
@@ -11432,7 +11432,14 @@ def test_the_probes_cross_file_cites_resolve_to_the_symbols_they_name():
     `TORTOISE_VALUE_GATE` comment (the value is at `:1001`), `:4019` is the
     `"probe": "docs/…/capstone_measure.py",` key (the census key is at `:4046`), and
     `:4164`/`:4299` are a `REFUSED` f-string and `"verdict": verdict_word(...)` (the pair
-    the entry means is `:3782`/`:4191`). Re-staling any one of them reds this arm again.
+    the entry means is `:4191`/`:4326`). Re-staling any one of them reds this arm again.
+
+    ⛔ The pair is TWO CALL SITES on purpose. An earlier cut of this pin bound ``:3782`` —
+    ``def render_log(``, a DEFINITION — against the ``require_door_entered(runs)`` call,
+    which cannot evidence an execution ORDER at all: a function body is not a call, and
+    the pair read ascending (``3782 < 4191``), so a checking reader concluded the
+    OPPOSITE of the sentence's "BEFORE". The shape assertion below (``def`` on neither
+    side, and matching) is what keeps a definition from silently returning.
     """
     probe = PROBE.read_text(encoding="utf-8").splitlines()
     for rel, pattern, symbols, claim in _CROSS_FILE_PROBE_CITES:

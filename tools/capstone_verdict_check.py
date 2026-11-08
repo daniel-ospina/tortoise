@@ -218,7 +218,7 @@ _MEASUREMENT_RUN_KEYS = (
 #: one counted cell, ``door.captures`` (``door_witness()``'s ``entered``/``bypassed``),
 #: is a ROUTING witness and NO RECORD CAN VARY IT: ``main`` calls
 #: ``require_door_entered(runs)`` BEFORE it reaches ``render_log``
-#: (``capstone_measure.py:3782`` vs ``:4191``), and that function raises on any bypass,
+#: (``capstone_measure.py:4191`` vs ``:4326``), and that function raises on any bypass,
 #: so ``bypassed`` is always ``[]`` and ``entered`` is always ``sessions`` re-counted.
 #: A constant carries no number of its own — ⛔ and NOT for the reason a witness like
 #: ``steps_observed`` would give: that key is itself a MEASUREMENT member of the set

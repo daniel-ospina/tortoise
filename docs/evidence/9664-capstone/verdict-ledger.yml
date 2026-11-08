@@ -440,9 +440,10 @@ measured_at:
 #       it is the one the contract-layer claim rests on.
 #       the 5 are 5 of the 8 `TestCreateGraphWithPacks` tests, refused by the PRIVATE lane container's ACL layer — see S2.
 #       $ TORTOISE_TEST_CARVE_OUT=1 uv run python -m pytest tests/test_7949_c2_door.py tests/test_7949_capstone_measure.py -q
-#       303 passed                                 # 24 (the door census, its pinned-ON/refusal arms
-#                                                  # and the one-hop ledger pins) + 279 (the #7949
-#                                                  # cite, idle and registration pins) = 303. These
+#       304 passed                                 # 24 (the door census, its pinned-ON/refusal arms
+#                                                  # and the one-hop ledger pins) + 280 (the #7949
+#                                                  # cite, idle and registration and cross-file pins)
+#                                                  # = 304. These
 #                                                  # are the two files this change EDITS, so the
 #                                                  # contract-layer claim above is not carried by
 #                                                  # the seven-file run alone.
