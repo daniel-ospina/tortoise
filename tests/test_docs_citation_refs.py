@@ -90,8 +90,9 @@ STATED LIMITS — deliberate, and measured rather than guessed:
     `epics/1402-eval-battery/01-align.md`), all pre-existing and none of them a
     target of #1165. A guard that shipped red would be disabled within a day, and
     repairing ten unrelated pointers is not this change's job — they are tracked
-    in their own issue. Widening `_TARGET_SCOPE` is the follow-up once that
-    backlog is paid.
+    under `#5063` ("one binding from a written claim to the system it describes"),
+    the shared root this guard is a symptom of, so a reader can follow the
+    pointer. Widening `_TARGET_SCOPE` is the follow-up once that backlog is paid.
 """
 from __future__ import annotations
 
