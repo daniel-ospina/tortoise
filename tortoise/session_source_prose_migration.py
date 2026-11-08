@@ -138,6 +138,7 @@ __all__ = [
     "reconcile_session_source_prose",
     "record_turn_reader",
     "source_fts_probe",
+    "source_index_is_empty",
 ]
 
 #: Wall-clock bound on the cache-wide Source read. Bounded, never truncated —
@@ -1199,6 +1200,18 @@ _CONTROL_LEXICON_ROWS = (
     "RETURN s._searchText LIMIT 1"
 )
 
+#: The SECOND control: does the index's field hold ANY entry at all, over the
+#: SAME population ``run_fts_query(entity_type="source")`` reads (a document IS a
+#: ``:Source``, so ``documentKind IS NULL`` must be repeated or a document-only
+#: graph would read as "the index has entries" while the probe's own read sees
+#: none — a false UNMEASURABLE).
+_SOURCE_INDEX_ENTRIES = (
+    "MATCH (s:Source) "
+    "WHERE s.documentKind IS NULL "
+    "AND coalesce(s._searchText, '') <> '' "
+    "RETURN count(s)"
+)
+
 
 def probe_phrase_rejection(phrase: str) -> str | None:
     """Why *phrase* cannot serve as an FTS probe, or ``None`` when it can.
@@ -1325,6 +1338,38 @@ def classify_fts_hits(g, urls, *,
     return out
 
 
+def source_index_is_empty(g, *,
+                          timeout_ms: int = CACHE_READ_TIMEOUT_MS) -> bool | None:
+    """True when NO Source over the probe's own population carries ``_searchText``.
+
+    ⛔ THE SECOND CORROBORATION, AND THE ONE THAT MAKES THE VERIFY STEP USABLE
+    ON A CLEAR-ONLY GRAPH (#11161 review, P2). The positive control needs a
+    POST-fix lexicon node, and a graph that has only ever been CLEARED has none
+    — so a correctly repaired clear-arm population had no way to certify: the
+    probe read 0, nothing corroborated it, and the run exited 1. The documented
+    remedy then pointed the operator at ``--no-fts-probe``, i.e. at the weaker
+    evidence this leg exists to stop certifying.
+
+    And the zero on such a graph is NOT vacuous, which is what makes certifying it
+    honest rather than an exception: a stale index entry is exactly what would
+    make the index NON-empty, so "the field holds nothing over this population,
+    and the read ran" is positive evidence for the state the repair is supposed
+    to produce. ``None`` means the read itself failed — unreadable is not empty.
+    """
+    try:
+        rows = g.query(_SOURCE_INDEX_ENTRIES,
+                       timeout=_effective_timeout_ms(g, timeout_ms)).result_set
+    except Exception:  # noqa: BLE001, RUF100 — see the `None` contract above
+        logger.debug("#11070: the Source index-entry read failed", exc_info=True)
+        return None
+    for row in rows or ():
+        count = row[0] if row else None
+        if isinstance(count, int) and not isinstance(count, bool):
+            return count == 0
+    # A row that does not carry an integer count is NOT a measured zero.
+    return None
+
+
 def lexicon_control_token(g, *,
                           timeout_ms: int = CACHE_READ_TIMEOUT_MS) -> str | None:
     """One token from a POST-fix lexicon node, or ``None`` when there is none.
@@ -1395,22 +1440,50 @@ def probe_fts(g, phrases, *, control: bool = True,
     }
     if control:
         token = lexicon_control_token(g, timeout_ms=timeout_ms)
-        if token is None:
-            report["control"] = {
-                "ok": False, "hits": None,
-                "note": "no POST-fix lexicon node on this graph, so the index "
-                        "read cannot be corroborated by a known-present token "
-                        "(a graph that has only ever been CLEARED has none)"}
-        else:
+        if token is not None:
             # ⛔ The TOKEN IS NOT ECHOED. It is a transcript-derived word (the
             # capture's own topic lexicon), and the dry run's report is
             # deliberately redacted by whitelist so no piece of the utterance
             # reaches stdout or `--json`; only the measured COUNT is reported.
             got = source_fts_probe(g, token, timeout_ms=timeout_ms)
             report["control"] = {
+                "mode": "probe",
                 "ok": bool(got["hits"]), "hits": got["hits"],
                 "ran": got["ran"], "degraded": got["degraded"],
                 "reason": got["reason"],
                 "note": "one token of a post-fix lexicon node's `_searchText`",
             }
+        else:
+            empty = source_index_is_empty(g, timeout_ms=timeout_ms)
+            if empty is True:
+                # A graph whose Source population carries no `_searchText` at all
+                # (a clear-only repair): the probe's zero is structurally
+                # consistent, and a stale entry would have made this non-empty —
+                # so the zero IS evidence, and no weaker a one than the token.
+                report["control"] = {
+                    "mode": "empty-index", "ok": True, "hits": 0,
+                    "ran": True, "degraded": False,
+                    "reason": "no_source_search_text",
+                    "note": "no SOURCE on this graph carries `_searchText` (the "
+                            "field the index is declared on), so the index has "
+                            "nothing to return and the probe's 0 is consistent "
+                            "with a repaired graph — a stale entry is exactly "
+                            "what would make it non-empty",
+                }
+            elif empty is None:
+                report["control"] = {
+                    "mode": "unavailable", "ok": False, "hits": None,
+                    "note": "no POST-fix lexicon node to control with, and the "
+                            "Source index-entry read FAILED — an unreadable "
+                            "instrument is not an empty one"}
+            else:
+                report["control"] = {
+                    "mode": "unavailable", "ok": False, "hits": None,
+                    "note": "no POST-fix lexicon node to control with, and the "
+                            "Source index DOES hold entries — so its silence on "
+                            "the probe cannot be corroborated (the index is "
+                            "answering, but nothing here proves it would answer "
+                            "for a known-present token). Run the measurement on "
+                            "the writing arm (`--repair --probe-phrase …`), which "
+                            "takes its own BEFORE reading."}
     return report

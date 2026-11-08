@@ -198,18 +198,28 @@ def _merge_probe(before: dict | None, after: dict) -> dict:
         # can still answer a probe token (measured: `fridays` matches the lexicon
         # `friday`). "Discriminating" therefore means "matched a node that was
         # still pre-fix prose before, and matches none now".
-        row["discriminating"] = bool(prior) and not got["residue"]
+        # ⛔ AND AN UNCLASSIFIED HIT IS NOT EVIDENCE EITHER (#11161 review, P1).
+        # `classify_fts_hits` puts a hit it could not resolve in `unread` — a
+        # failed second read, or an index entry pointing at a url no node holds —
+        # and certifying over it printed "Repair complete." while a hit nothing
+        # had examined sat in the result.
+        row["discriminating"] = (bool(prior) and not got["residue"]
+                                 and not got.get("unread"))
         probes.append(row)
     out = dict(after)
     out["probes"] = probes
     control_ok = bool((after.get("control") or {}).get("ok"))
     discriminating = any(p["discriminating"] for p in probes)
+    unclassified = [p["phrase"] for p in probes if p.get("unread")]
+    out["unclassified"] = unclassified
     if out["leaked"]:
         out["certifies"], out["vetoed"] = False, "leaked"
     elif out["unmeasurable"]:
         out["certifies"], out["vetoed"] = False, "unmeasurable"
     elif out["truncated"]:
         out["certifies"], out["vetoed"] = False, "truncated"
+    elif unclassified:
+        out["certifies"], out["vetoed"] = False, "unclassified"
     elif discriminating or control_ok:
         out["certifies"], out["vetoed"] = True, None
     else:
@@ -240,14 +250,20 @@ def _report_fts(fts: dict) -> None:
                   f"classified, so they are not evidence either way")
     control = fts.get("control")
     if control is not None:
-        if control.get("hits") is None:
+        if control.get("mode") == "empty-index":
+            print("          control: EMPTY Source index — no Source carries "
+                  "`_searchText` on this graph, so the probe's 0 is consistent "
+                  "(a stale index entry is what would make it non-empty)")
+        elif control.get("hits") is None:
             print("          control: not available — "
                   f"{control.get('note')}")
         else:
             # ⛔ THE CONTROL TOKEN IS NOT PRINTED: it is a transcript-derived
             # lexicon word, and this report is redacted by whitelist so no piece
             # of the utterance reaches stdout. The count is what the verdict
-            # needs.
+            # needs. (The PROBE phrases above ARE printed — the operator typed
+            # them on this command line, so they are their own input, not text
+            # this tool derived from the record.)
             print(f"          control (one post-fix lexicon token): "
                   f"{control['hits']} hit(s)")
     if fts["certifies"]:
@@ -274,6 +290,13 @@ def _report_fts(fts: dict) -> None:
               f"past the window was never classified. That token is too common "
               f"to be a probe — pass one that appears only in the removed "
               f"sentence.", file=sys.stderr)
+    elif fts["vetoed"] == "unclassified":
+        print(f"✗ the probe returned a hit that could NOT BE CLASSIFIED for "
+              f"{fts['unclassified']!r} — the hit-classification read failed, or "
+              f"the index entry points at a url no `:Source` holds. A hit that "
+              f"nothing examined is NOT evidence the sentence is gone: re-measure "
+              f"(the read may be under load), or repair the stale index entry.",
+              file=sys.stderr)
     else:
         print("✗ the probe's 0 cannot be corroborated, so it is NOT evidence "
               "of a repair: it returned no PRE-FIX node BEFORE the repair "
