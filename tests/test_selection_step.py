@@ -1488,6 +1488,24 @@ def test_a_retry_that_raises_after_the_re_bind_keeps_the_first_arms_capture(
         "a restore that skips `mention_s2_stats` leaves the retry's "
         f"`{{first, second}}` arm pair behind: {result['mentions']['stats']!r}"
     )
+    # ⛔ AND THE ARM-A HALF, not only the `second: None` that clears arm B
+    # (review round 5, P3). `mention_s2_stats` is a PAIR — the record's own
+    # contract (`extractor_v2.py:13009-13016`) is "ONE SHAPE ALWAYS:
+    # `{first, second}` on BOTH returns" — and the assertion above is satisfied
+    # by a PARTIAL restore that drops arm A's half entirely (measured: replacing
+    # the handler's dict with `{"second": None}` left 464 tests green). That is
+    # the same half-restore this PR exists to forbid, one level down: the
+    # shipped arm's mention stats vanish while `second: None` still reads right.
+    assert set(result["mentions"]["stats"]) == {"first", "second"}, (
+        "`{first, second}` is the contract on BOTH returns — a restore that "
+        "keeps only `second: None` silently drops ARM A's statistics: "
+        f"{result['mentions']['stats']!r}"
+    )
+    assert result["mentions"]["stats"]["first"] == {}, (
+        "arm A shipped nothing, so its mention stats are the empty dict — an "
+        "absent or arm-B value here means the restore read the wrong arm: "
+        f"{result['mentions']['stats']!r}"
+    )
     # ⛔ `vet_s2_stats` (the `batch` block) AND `vet_s2_pool` (the removal pool
     # the union pass prunes against) are two different bindings, and this
     # assertion pins the first. `vet_s2_stats` is arm-dependent even for an
@@ -1565,8 +1583,19 @@ def test_arm_bs_vet_warnings_do_not_survive_a_failed_retry(monkeypatch):
     ⛔ NON-VACUITY: the marker is injected through `_renarrate_pick`, i.e. it
     enters the run the same way a real arm-B warning does (the pick's own
     `warnings` list), so deleting the handler's truncation line reds here.
+
+    ⛔ AND ARM A MUST OWN A WARNING TOO (review round 5, P3). The truncation's
+    POSITION was unpinned: `_vet_mark = len(vet_warnings)` sits after arm A's
+    `extend` so the mark is A's line count, but BOTH fail-open fixtures observed
+    `_vet_mark == 0`, where "truncate from the mark" and "clear everything" are
+    indistinguishable. Replacing the mark with `0` therefore left 464 tests green
+    while it would `del` the SHIPPED arm's warnings on every fail-open run. Arm
+    A now carries a marker of its own, injected where arm A's warnings really
+    come from (its `_arm_extract` bundle), and it must SURVIVE.
     """
     real_pick = extractor_v2._renarrate_pick
+    real_arm = extractor_v2._arm_extract
+    arm_calls = {"n": 0}
 
     def _pick_marked(first, second):
         picked = real_pick(first, second)
@@ -1574,10 +1603,19 @@ def test_arm_bs_vet_warnings_do_not_survive_a_failed_retry(monkeypatch):
                                "SECOND-ARM-ONLY: vet discarded entities 'SecondOnly'"]
         return picked
 
+    def _arm_marked(*args, **kwargs):
+        bundle = real_arm(*args, **kwargs)
+        arm_calls["n"] += 1
+        if arm_calls["n"] == 1:  # arm A — the capture that SHIPS
+            bundle["warnings"] = [*bundle["warnings"],
+                                  "FIRST-ARM-ONLY: arm A's own line"]
+        return bundle
+
     def _boom(_metrics):
         raise RuntimeError("the retry's tail exploded")
 
     monkeypatch.setattr(extractor_v2, "_renarrate_pick", _pick_marked)
+    monkeypatch.setattr(extractor_v2, "_arm_extract", _arm_marked)
     monkeypatch.setattr(extractor_v2, "_rate_text", _boom)
     result = extract_session_v2(
         _Scripted(["Alice set a budget. Bob ships Friday.",
@@ -1586,8 +1624,16 @@ def test_arm_bs_vet_warnings_do_not_survive_a_failed_retry(monkeypatch):
         list(CONVERSATION), sdk=None, session_id="11002-test",
         session_date="2026-11-08")
     warnings = result.get("warnings") or []
+    assert arm_calls["n"] == 2, f"both arms ran: {arm_calls}"
     assert not any("SECOND-ARM-ONLY" in w for w in warnings), (
         "a run that ships arm A must not publish arm B's per-item verdicts: "
+        f"{warnings}"
+    )
+    # ⛔ THE MARK'S POSITION: arm A's line sits BELOW `_vet_mark`, so it must
+    # survive. A mark taken before arm A's own extend deletes it (measured).
+    assert any("FIRST-ARM-ONLY" in w for w in warnings), (
+        "truncation must remove ARM B's lines only, never the SHIPPED arm's — "
+        "a `_vet_mark` taken before arm A's warnings deletes them: "
         f"{warnings}"
     )
     assert any("re-narrate retry failed" in w for w in warnings), (
