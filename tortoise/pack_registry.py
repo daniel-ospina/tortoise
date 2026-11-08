@@ -997,9 +997,16 @@ def declared_meanings(
     Matched on the PREDICATE only, deliberately and for the same reason
     :func:`declared_mechanisms` is: the pack's declaration is the authority on
     what its own verb means, and a row that merely shares a meaning with it is a
-    DIFFERENT relation. It takes no kinds because the declaration does not: the
-    shipped catalog declares ``assignedTo`` once with ``managedBy`` and once with
-    no meaning at all, and neither row's endpoints change what the verb means.
+    DIFFERENT relation. ⛔ A kind-keyed lookup was considered and REJECTED, and
+    the reason is a failure mode, not convenience: pack kinds are spelled through
+    their own resolvers (``core:`` prefixes, cross-pack references), so an exact
+    ``(fromKind, toKind)`` match that misses an alias would find no declaration
+    and silently fall back to the one-way default — trading a hypothetical
+    ambiguity for a real wrong direction. Measured on the shipped catalog, the
+    ambiguity it would prevent does not exist: one predicate is declared more
+    than once (``assignedTo`` — ``managedBy`` in venture, and no semantics and no
+    mechanism in project-management, so that row can never reach the direct
+    writer).
 
     The row walk, its degradation arms and their logging are SHARED with
     :func:`declared_mechanisms` (:func:`_declared_relation_rows`), and so is the

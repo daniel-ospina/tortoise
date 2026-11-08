@@ -706,6 +706,15 @@ def test_a_pack_declared_meaning_fixes_the_direction_the_leg_writes():
     assert by_stated["settlesInto"].direction == "-", by_stated["settlesInto"]
     assert by_stated["tradesFor"].direction == "-", by_stated["tradesFor"]
 
+    # …and the token is what the EP reader makes of it: `-` is NO belief
+    # transfer in either direction, which is the property the one-way fallback
+    # destroyed for every `related`/`transacts` verb the catalog declares.
+    from tortoise.live import direction_flows
+
+    assert direction_flows(by_stated["splitsInto"].direction) == (True, True)
+    assert direction_flows(by_stated["settlesInto"].direction) == (False, False)
+    assert direction_flows(by_stated["tradesFor"].direction) == (False, False)
+
     # The gloss is NOT the authority for a declared verb: restating `supports`
     # on a verb its row declares `hasPart` must not change the stored direction
     # (the non-determinism the pre-fix lookup produced).
