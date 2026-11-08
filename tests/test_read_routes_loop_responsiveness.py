@@ -3146,6 +3146,92 @@ def test_the_anchored_point_read_serves_on_the_read_lane_in_off_mode(client):
         f"OFF mode no longer attaches before its query (events: {events!r})")
 
 
+#: Poll interval for the warm-up's cold-phase-aware wait. The same 50 ms
+#: ``mcp_auth._COLD_SETUP_POLL_S`` uses, because the rule below is that seam's
+#: rule applied at this bound.
+_WARM_UP_POLL_S = 0.05
+
+
+def _one_time_embedder_load_in_progress() -> bool:
+    """Is a one-time embedder load running right now?
+
+    Never raises: the embedder is OPTIONAL (the ``embeddings`` extra may be
+    absent), and a wait bound must not fail because a probe's import did — the
+    same fail-closed-not-fail-open shape ``mcp_auth._cold_setup_ran_during``
+    documents one seam over.
+    """
+    try:
+        from tortoise.embeddings import EmbeddingModel
+    except Exception:  # noqa: BLE001, RUF100 — the embedder is optional
+        return False
+    return EmbeddingModel.one_time_setup_in_progress()
+
+
+async def _warm_up_paying_the_cold_phases(ac, label: str, handler: str,
+                                          request_kwargs: dict,
+                                          bound: float):
+    """One warm-up request, bounded by ``bound`` — except inside a COLD LOAD.
+
+    ⛔ TWO cold phases can ride a route's FIRST request, and this bound must
+    judge NEITHER. That is the whole point of paying them OUTSIDE the
+    measurement:
+
+    * the **projection cold open** (connect, version probe, ``_ensure_indexes()``
+      and, on a restored/DR graph, the index BUILD) — declared budget
+      ``probe_setup_timeout()``, which is ``bound``;
+    * **``/v1/search``'s one-time embedder load** (#4055). ``sdk.tortoise_fts_query``
+      calls ``EmbeddingModel.get()`` synchronously ON THE READ WORKER, so the
+      ``attach_projection`` bundling that assigns the cold open to the
+      construction lane says NOTHING about it, and its ``huggingface_hub``
+      resolve alone can burn a 15 s retry backoff (the hermetic egress guard
+      blocks the HEAD; retries at 1/2/4/8 s) BEFORE the cold bge-small load,
+      which is measured at ~57 s and budgeted by
+      ``EmbeddingModel._LOAD_TIMEOUT_S`` (90 s on a device; 270 s in the test
+      lane, #6960).
+
+    A load is SETUP, not the work this test's bounds measure. The read seam
+    already says so one layer down — ``hosted_api._read_offload`` drains a
+    request-owned in-flight load and RE-ARMS its bound instead of refusing the
+    read as a capacity failure — and this waits on the same clock
+    (``EmbeddingModel.one_time_setup_in_progress()``, a lock-free flag read)
+    instead of re-deriving the rule, so the two bounds cannot disagree about
+    what "setup" means.
+
+    Measured, and why this exists: a fresh-context review at ``e26d9890``
+    redded the WARM-UP itself here —
+    ``[search] the WARM-UP search request did not answer within 20.0s`` — and
+    the bound's own message reported it as *"a broken read route or a
+    cold-open regression"*, which it was not: the route was healthy and the
+    cold phase was the embedder's. A bound that does not cover its callee's
+    cold phase is the exact class the seam above already fixed twice.
+
+    ``bound`` stays the cold open's declared budget, so a route that is
+    genuinely wedged still breaches it and says so; the load cannot make this
+    wait forever either — ``_LOAD_TIMEOUT_S`` is its OWN join timeout.
+    """
+    task = asyncio.create_task(ac.request(**request_kwargs))
+    budget = time.monotonic() + bound
+    try:
+        while True:
+            await asyncio.wait({task}, timeout=_WARM_UP_POLL_S)
+            if task.done():
+                return task.result()
+            if _one_time_embedder_load_in_progress():
+                # The cold phase is SETUP: re-arm rather than judge it by a
+                # bound that was never meant to cover it.
+                budget = time.monotonic() + bound
+            elif time.monotonic() >= budget:
+                raise AssertionError(
+                    f"[{label}] the WARM-UP {handler} request did not answer "
+                    f"within {bound}s with the shared pool FREE and no one-time "
+                    f"embedder load in flight — so this is a broken read route "
+                    f"or a cold-open regression, NOT the pool (#10602)")
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
 @pytest.mark.parametrize("label,handler,request_kwargs", _PROJECTION_READ_CASES)
 def test_the_cold_projection_open_rides_the_construction_lane(
         client, monkeypatch, label, handler, request_kwargs):
@@ -3304,13 +3390,18 @@ def test_the_read_path_answers_while_the_default_executor_is_stalled(client):
       `EmbeddingModel._LOAD_TIMEOUT_S`, 90 s and 270 s in the test lane,
       #6960).
 
-    ⚠️ RECORDED RESIDUAL, not claimed as covered: `warm_up_bound` is the COLD
-    OPEN's budget and sits BELOW that second load's budget, so a cold embedder
-    reds in the warm-up instead of in the measurement — a false red on an
-    environment condition, whose message names the route rather than the
-    embedder. It fails SAFE (the pin is never weakened and no run passes
-    vacuously), and the load is still kept out of the measurement, which is
-    what the queueing assertion below needs.
+    ⚠️ AND THAT SECOND LOAD IS NOT LEFT AS A RESIDUAL HERE. `warm_up_bound` is
+    the COLD OPEN's budget, so it sits BELOW that load's budget — which means
+    the bound must not JUDGE that load, and `_warm_up_paying_the_cold_phases`
+    does not: it stops counting the wait while a one-time embedder load is in
+    flight, reading the same lock-free flag `hosted_api._read_offload` drains
+    and re-arms on, so the two bounds cannot disagree about what "setup" means.
+    A WEDGED route still breaches `warm_up_bound` and still says so; a COLD one
+    no longer reds it. Measured before this, on a healthy route: `[search] the
+    WARM-UP search request did not answer within 20.0s` — reachable because the
+    load's `huggingface_hub` resolve alone can burn a 15 s retry backoff (the
+    suite's hermetic egress guard blocks the HEAD; retries at 1/2/4/8 s) before
+    the cold bge-small load proper.
 
     It cannot mask the defect it pins: on the pre-#10602 shape the warm-up
     succeeds too (the shared pool is free), and the MEASURED request still has to
@@ -3329,11 +3420,15 @@ def test_the_read_path_answers_while_the_default_executor_is_stalled(client):
         f"{sorted(_READ_LANE_CASES - {c[0] for c in _READ_CASES})}")
 
     width = _default_executor_width()
-    #: The warm-up's OWN bound: the cold open's declared budget
+    #: The warm-up's OWN bound, and the bound of the COLD OPEN only
     #: (`probe_setup_timeout()`, 20 s by default). Without it a hung cold open
     #: spins until the repo-wide ``pytest-timeout`` (300 s) kills the ITEM with a
     #: message about a timeout instead of about the route — the same rule the
-    #: occupancy wait below follows.
+    #: occupancy wait below follows. The OTHER cold phase on this path
+    #: (`/v1/search`'s one-time embedder load) is not covered by a larger
+    #: constant here: `_warm_up_paying_the_cold_phases` stops judging the wait
+    #: while that load is in flight, because it is setup and its own
+    #: ``_LOAD_TIMEOUT_S`` is its budget — the same rule `_read_offload` applies.
     warm_up_bound = monitoring.probe_setup_timeout()
     assert warm_up_bound > READ_ANSWER_BOUND_S, (
         f"the cold open's declared budget ({warm_up_bound}s) no longer exceeds "
@@ -3349,23 +3444,15 @@ def test_the_read_path_answers_while_the_default_executor_is_stalled(client):
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport,
                                      base_url="http://test") as ac:
-            # COLD-OPEN WARM-UP, with the pool still free and OUTSIDE the
+            # COLD-WARM-UP, with the pool still free and OUTSIDE the
             # measurement (see the docstring). Each route's first request pays
             # the projection cold open, which belongs to the construction lane's
-            # `probe_setup_timeout()` budget — not to the read-lane bound below.
+            # `probe_setup_timeout()` budget — not to the read-lane bound below;
+            # `/v1/search` additionally pays a one-time embedder load, which the
+            # helper stops judging while it is in flight.
             for label, handler, request_kwargs in cases:
-                try:
-                    warm = await asyncio.wait_for(ac.request(**request_kwargs()),
-                                                  timeout=warm_up_bound)
-                except TimeoutError:
-                    raise AssertionError(
-                        f"[{label}] the WARM-UP {handler} request did not answer "
-                        f"within {warm_up_bound}s — the cold open's own declared "
-                        f"budget (`probe_setup_timeout()`) — with the shared pool "
-                        f"FREE, so this is a broken read route, a cold-open "
-                        f"regression, or a COLD EMBEDDER load (this bound does "
-                        f"not cover `/v1/search`'s one-time "
-                        f"`EmbeddingModel.get()`), NOT the pool (#10602)") from None
+                warm = await _warm_up_paying_the_cold_phases(
+                    ac, label, handler, request_kwargs(), warm_up_bound)
                 assert warm.status_code == 200, (
                     f"[{label}] the WARM-UP {handler} request answered "
                     f"{warm.status_code}: {warm.text[:200]} — the read route is "
