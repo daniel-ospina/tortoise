@@ -236,10 +236,40 @@ def test_uvicorn_reload_envvar_is_its_other_input_for_the_reloader():
     sensitive to the ambient one.
     """
     assert wt.reload_env_is_set({wt.RELOAD_ENV: "true"}) is True
-    for not_truthy in ("0", "false", "off", "", "   ", "enabled", "y"):
-        # A typo must read OFF, so the child stays REFUSED (fail-closed).
-        assert wt.reload_env_is_set({wt.RELOAD_ENV: not_truthy}) is False
+    # ⛔ ``y`` and ``t`` are NOT typos: click's ``BoolParamType`` accepts them
+    # (``bool_states``), and that is the type uvicorn parses this variable with.
+    # Reading them here as OFF refused a one-worker reloader on the EMBEDDED arm,
+    # which has no escape hatch — measured: ``UVICORN_RELOAD=y`` really does start
+    # the reloader ("Started reloader process … using WatchFiles").
+    for is_true in ("1", "true", "t", "y", "TRUE", " y ", "Yes", "ON"):
+        assert wt.reload_env_is_set({wt.RELOAD_ENV: is_true}) is True, is_true
+    for not_truthy in ("0", "false", "off", "n", "f", "", "   ", "enabled", "yess"):
+        # A value click REJECTS leaves the child REFUSED (fail-closed).
+        assert wt.reload_env_is_set({wt.RELOAD_ENV: not_truthy}) is False, not_truthy
     assert wt.reload_env_is_set({}) is False
+
+
+def test_the_reload_grammar_is_clicks_own():
+    """The transcribed ``_CLICK_TRUE`` cannot drift from click's real vocabulary.
+
+    ``$UVICORN_RELOAD`` is converted by ``BoolParamType``, so the module's frozen
+    set must equal the TRUE half of click's own ``bool_states``. If a click bump
+    adds or drops a spelling, this arm reds instead of the gate silently
+    mis-classifying a reloader — the failure mode that is unstartable and has no
+    escape hatch on an embedded DB.
+    """
+    from click.types import BoolParamType
+
+    true_half = {
+        state
+        for state in BoolParamType.bool_states
+        if BoolParamType().convert(state, None, None)
+    }
+    assert true_half == wt._CLICK_TRUE
+    # …and the widening did NOT leak into the repo's shared contract.
+    from tortoise.env_truthy import TRUTHY
+
+    assert frozenset({"1", "true", "yes", "on"}) == TRUTHY
 
 
 def test_a_supervised_child_asked_for_reload_by_env_is_one_worker():
@@ -703,6 +733,16 @@ _AGREEMENT_TABLE: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
     (("uvicorn", "app:app"), {"UVICORN_WORKERS": "0", "WEB_CONCURRENCY": "4"}),
     (("uvicorn", "app:app"), {"UVICORN_WORKERS": "", "WEB_CONCURRENCY": "4"}),
     (("uvicorn", "app:app"), {"UVICORN_WORKERS": "+2"}),
+    # ⛔ ``int()``'s grammar is WIDER than the shipped block's (which is
+    # ``[+]?[0-9]+`` after trimming ends). ``int('1_0') == 10`` and
+    # ``int('\u0661\u0662') == 12``, so a Python resolver that kept ``int()`` reported 10/12
+    # while the block reported 1 — and the app reads the block's value FIRST, so
+    # the boot line lied about the topology. Both resolvers now share ONE grammar
+    # and both say 1; the divergence from uvicorn is fail-closed (a real N>1 still
+    # runs under the supervisor, which ``has_supervisor_parent()`` refuses).
+    (("uvicorn", "app:app"), {"WEB_CONCURRENCY": "1_0"}),
+    (("uvicorn", "app:app"), {"WEB_CONCURRENCY": "\u0661\u0662"}),
+    (("uvicorn", "app:app", "--workers", "1_0"), {}),
 )
 
 

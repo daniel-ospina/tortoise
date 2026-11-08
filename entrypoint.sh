@@ -515,6 +515,17 @@ _resolve_requested_workers() {
     # TWO children and `WEB_CONCURRENCY=' 2 '` starts two as well. A digit-only
     # test rejected both and reported 1 — the measurement lying about the very
     # topology it exists to report, in the direction that reads as "safe".
+    #
+    # ⛔ The grammar below is the INTERSECTION with `int()`, not `int()` itself:
+    # `int()` also accepts `_` separators (`1_0` -> 10) and non-ASCII decimal
+    # digits (`١٢` -> 12), which POSIX sh cannot reproduce portably. Those read
+    # as 1 HERE and in `worker_topology._positive_int`, so the two resolvers
+    # agree; the divergence from uvicorn is fail-closed, because a real N>1 from
+    # such a value still runs under the supervisor and the app's
+    # `has_supervisor_parent()` arm refuses it whatever the count says. Do not
+    # "fix" this by widening the shell alone — that re-opens the disagreement
+    # this comment exists to close (see `_AGREEMENT_TABLE` in
+    # `tests/test_worker_topology.py`, which executes both resolvers).
     _count="$(printf '%s' "$_count" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
     case "$_count" in
         +*) _count="${_count#+}" ;;

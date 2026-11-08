@@ -176,6 +176,22 @@ RELOAD_FLAG = "--reload"
 #: uvicorn's reloader can start with NO reload TOKEN on the command line.
 RELOAD_ENV = "UVICORN_RELOAD"
 
+#: click's TRUE vocabulary for a BOOLEAN flag, transcribed from ``BoolParamType``
+#: (click 8.4.2 — the pinned version, ``uv.lock``; ``click/types.py:761-779``,
+#: ``str_to_bool`` at ``:797-810`` strips and lowercases). `--reload` is
+#: ``@click.option(..., is_flag=True)`` (``uvicorn/main.py``), so ``$UVICORN_RELOAD``
+#: is converted by exactly this type — ``y`` and ``t`` included.
+#:
+#: ⛔ This is uvicorn's grammar for uvicorn's flag, NOT the repo's
+#: :data:`tortoise.env_truthy.TRUTHY` contract. That contract is frozen by
+#: ``tests/test_env_truthy.py`` and is deliberately narrower
+#: (``{"1","true","yes","on"}``); widening it to reach these spellings would
+#: silently change every other flag in the tree. The flag uvicorn actually parses
+#: gets uvicorn's vocabulary, locally — and
+#: ``tests/test_worker_topology.py::test_the_reload_grammar_is_clicks_own`` pins
+#: this set against click's ``bool_states`` so the two cannot drift apart.
+_CLICK_TRUE: frozenset[str] = frozenset({"1", "true", "t", "yes", "y", "on"})
+
 #: The SAME click mechanism, for ``--workers``: this variable is the flag's
 #: value whenever the flag is not given on the command line, which means uvicorn
 #: never consults ``$WEB_CONCURRENCY`` (``config.py:352`` reads it only ``if
@@ -211,20 +227,38 @@ class MultiWorkerRefused(RuntimeError):
 def _positive_int(raw: object) -> int | None:
     """``raw`` as a positive int, or None when it does not parse as one.
 
-    Deliberately ``int()``'s own grammar (leading/trailing whitespace and an
-    optional ``+`` sign are accepted) because that is EXACTLY what uvicorn does
-    with ``$WEB_CONCURRENCY`` — ``int(' 2 ')`` and ``int('+2')`` both start two
-    workers, so a resolver that rejected them would report a topology nobody is
-    running. None — never a default — so a malformed value cannot be silently
-    read as 1; callers fall through to the next source only on None.
+    The grammar is the SHIPPED shell block's, not ``int()``'s: surrounding ASCII
+    whitespace, an optional single leading ``+``, then ASCII digits only
+    (``entrypoint.sh``'s ``_resolve_requested_workers`` — it trims ends, drops a
+    leading ``+``, and normalises ``''|*[!0-9]*`` to 1). ``int(' 2 ')`` and
+    ``int('+2')`` are accepted because they really do start two workers, so a
+    resolver that rejected them would report a topology nobody is running.
+
+    ⛔ ``int()``'s grammar is WIDER than this in two directions — underscore
+    separators (``int('1_0') == 10``) and non-ASCII decimal digits
+    (``int('١٢') == 12``) — and POSIX shell cannot reproduce them portably. The
+    two resolvers therefore agree by construction on the intersection, and both
+    report **1** for those spellings. That is deliberately the conservative
+    direction and it is NOT a bypass: a real ``N > 1`` produced by such a value
+    still runs under uvicorn's supervisor, so ``has_supervisor_parent()`` refuses
+    it regardless of the count this function reports. Reporting a count the
+    shell and the app agree on is what stops the boot line lying; the gate does
+    not rest on the count.
+
+    None — never a default — so a malformed value cannot be silently read as 1;
+    callers fall through to the next source only on None.
     """
     if raw is None:
         return None
-    try:
-        value = int(str(raw))
-    except (TypeError, ValueError):
+    value = str(raw).strip(" \t\n\r\v\f")
+    if value.startswith("+"):
+        value = value[1:]
+    # ``str.isdigit`` accepts Unicode decimals (``'١'``), so ``isascii`` is the
+    # arm that keeps this equal to the shell's ``[!0-9]``.
+    if not value or not value.isascii() or not value.isdigit():
         return None
-    return value if value > 0 else None
+    count = int(value)
+    return count if count > 0 else None
 
 
 def _workers_flag_value(argv: Sequence[str] | None = None) -> str | None:
@@ -364,12 +398,22 @@ def reload_env_is_set(environ: Mapping[str, str] | None = None) -> bool:
     same unstartable-dev-topology defect this module already fixed for the token
     form, by a narrower route.
 
-    ``is_truthy`` is the repo's declared contract, so a typo reads OFF and the
-    child stays REFUSED (fail-closed): only an explicit acknowledgment of the
-    reloader changes the verdict.
+    The vocabulary is click's own :data:`_CLICK_TRUE`, because that is the type
+    uvicorn parses this variable with. ⛔ Reading it through the repo's narrower
+    ``is_truthy`` — the obvious-looking choice, and this branch's behaviour
+    before the fix — refused a one-worker reloader started with
+    ``UVICORN_RELOAD=y`` (click accepts ``y`` and ``t``; ``is_truthy`` does not),
+    which is an unstartable dev topology on the embedded arm where the
+    acknowledgement does not lift the refusal: the exact defect this module
+    already fixed twice, reached through the vocabulary instead of the source.
+
+    A value OUTSIDE click's vocabulary (``enabled``, ``yess``) is a value uvicorn
+    rejects outright, so it reads OFF and the child stays REFUSED (fail-closed):
+    only an explicit acknowledgement of the reloader changes the verdict.
     """
     env = os.environ if environ is None else environ
-    return is_truthy(env.get(RELOAD_ENV))
+    raw = env.get(RELOAD_ENV)
+    return ("" if raw is None else str(raw)).strip().lower() in _CLICK_TRUE
 
 
 def has_supervisor_parent() -> bool:
