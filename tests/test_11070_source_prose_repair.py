@@ -3727,8 +3727,21 @@ def test_an_UNMEASURABLE_probe_VETOES_even_when_the_CONTROL_answers(monkeypatch)
         "the fixture did not degrade the PROBE's read: "
         + repr(report["probes"][0]))
     assert (report["control"] or {}).get("ok") is True, (
-        "the fixture did not make the CONTROL answer, so the fold would fall "
-        "through to `uncorroborated` and never reach the veto under test: "
+        # ⛔ THE REASON IS NOT "uncorroborated" (cycle-6 review, P2, MEASURED):
+        # the `unmeasurable` arm sits ABOVE every control arm, so the veto is the
+        # same whatever the control reports (`ok=True`, `ok=False` and `None` all
+        # fold to `vetoed="unmeasurable"`). This premise matters for a different
+        # reason: with a NON-answering control arm (b) could not fire, so with the
+        # veto deleted the fold would refuse as `uncorroborated` and
+        # `certifies is False` would stay GREEN — only the `vetoed` label would
+        # red. The premise is what makes the CERTIFICATION assertion the one that
+        # catches the deletion (verified: veto deleted + control ok=False ->
+        # `certifies=False vetoed="uncorroborated"`).
+        "the fixture did not make the CONTROL answer — with a non-answering "
+        "control arm (b) could not fire, so with the veto deleted the fold would "
+        "refuse as `uncorroborated` and `certifies is False` would stay GREEN; "
+        "only the `vetoed` label would red. This premise is what makes the "
+        "CERTIFICATION assertion the one that catches the deletion: "
         + repr(report["control"]))
     assert report["leaked"] == [] and report["stale"] == [], (
         "the fixture is meant to reach the `unmeasurable` arm alone, not an "
