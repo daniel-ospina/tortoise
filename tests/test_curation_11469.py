@@ -1833,14 +1833,32 @@ def test_the_cli_exit_codes_pin_every_failure_arm(monkeypatch, tmp_path, capsys)
             exc.written_keys = []
             raise exc
 
-    # 2. a MID-RUN stop, 2b. a stop that landed NOTHING, 2c. a no-op success, and
-    #    3. a MID-RUN refusal are all failures. 2b is the regression an honest
-    #    `applied` introduces (the stop arm must be keyed on `stopped`); 2c is the
-    #    state an honest `applied` makes reachable but no arm owned.
+    class PartialRefuseWriter:
+        """Accepts the FIRST batch, then refuses a later one.
+
+        This is the arm `IngestWriter` really reaches on a two-batch run whose second
+        call is refused (it raises with the accumulated `written`), and the documented
+        carry set is 127 rows against a default `batch_size=100`, so points DO span two
+        batches on a first real apply. It is also the worst row in the table: a
+        HALF-migrated target. Deleting the `applied and refused` arm left the suite
+        green and flipped this run's rc 3 -> 0 (measured), so it needs its own witness.
+        """
+
+        def write_sections(self, target_graph, sections):
+            exc = C.CurationRefused("target refused the batch: 429")
+            exc.written_keys = [p["migrationKey"] for p in sections["points"]][:1]
+            raise exc
+
+    # 2. a MID-RUN stop, 2b. a stop that landed NOTHING, 2c. a no-op success,
+    #    3. a fully-refused write, and 3b. a PARTIAL refusal (some of it landed) are
+    #    all failures. 2b is the regression an honest `applied` introduces (the stop
+    #    arm must be keyed on `stopped`); 2c is the state an honest `applied` makes
+    #    reachable but no arm owned; 3b is the arm whose absence changes the EXIT CODE.
     for i, (writer, needle) in enumerate(((StopWriter(), "STOPPED"),
                                          (StopBeforeFirstBatchWriter(), "STOPPED"),
                                          (NoOpWriter(), "NO-OP"),
-                                         (RefuseWriter(), "REFUSED"))):
+                                         (RefuseWriter(), "REFUSED"),
+                                         (PartialRefuseWriter(), "REFUSED mid-run"))):
         state["graphs"] = ROWS          # resolvable identity, so the run reaches the write
         monkeypatch.setattr(mod.C, "IngestWriter", lambda *a, _w=writer, **k: _w)
         # a FRESH ledger per arm: reusing one makes the second arm a no-op
@@ -2146,8 +2164,9 @@ def test_a_refusal_on_a_later_page_is_never_a_complete_census():
     mod = _tool_module()
     with pytest.raises(RuntimeError, match=r"429|refused"):
         mod.MCPReader(_RefusalOnALaterPage(), None).read_points(page=2, verify=False)
-    # …and the DEFAULT (verification-pass) path is not a second chance: the second walk
-    # sees the same refusal and agrees with the first.
+    # …and the DEFAULT (verification-pass) path reaches the SAME page gate and raises
+    # there — it is not a second chance that "agrees with the first": both arms fail at
+    # the refusal, before any verification walk is started.
     with pytest.raises(RuntimeError, match=r"429|refused"):
         mod.MCPReader(_RefusalOnALaterPage(), None).read_points(page=2)
 
@@ -2181,7 +2200,16 @@ def test_a_stale_hash_never_claims_a_row_of_record_for_another_text():
         source_graph="old", target_graph="new", packs={},
     )
     folded = {d.node_id: d for d in same.decisions}
-    assert folded["k2"].disposition != C.CARRY and "duplicate" in folded["k2"].reason
+    folded = {d.node_id: d for d in same.decisions}
+    # NON-VACUITY, and it has to be the SPECIFIC claim: a blanket "withhold every
+    # duplicate" mutant (`content_mismatch` dropped from the branch condition) also
+    # satisfies `disposition != CARRY and "duplicate" in reason`, because the
+    # UNDECIDABLE reason mentions a duplicate too. Pinning "exact content duplicate"
+    # makes that mutant red THIS row (measured).
+    assert folded["k2"].disposition != C.CARRY
+    assert "exact content duplicate" in folded["k2"].reason, (
+        f"the honest same-text pair must still fold as a duplicate, not be withheld: "
+        f"{folded['k2'].reason!r}")
 
 
 def test_two_rows_sharing_an_id_and_a_hash_cannot_hide_the_second_text(tmp_path):
