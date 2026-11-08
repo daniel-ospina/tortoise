@@ -550,8 +550,10 @@ def test_validate_honours_its_repo_root_argument(tmp_path, monkeypatch):
     repository, so the SHA arm answers `unmeasurable` and `validate` raises on "git
     could not be asked" BEFORE the evidence arm decides anything. MEASURED: with
     `_evidence_is_real(entry, repo_root)` reverted to `REPO_ROOT` at both call sites,
-    the whole file still passed and this test was among the passes — it was satisfied
-    by an unrelated arm while being cited as coverage for this one.
+    THIS test still passed — it was satisfied by an unrelated arm while being cited as
+    coverage for this one. (The mutant was not invisible overall — two glob tests
+    reddened — so the honest statement is that this test was not the one holding the
+    property it names, not that the mutant survived the suite.)
 
     The SHA arm is stubbed to `exists` so the evidence arm is the only one that can
     raise, and the assertion matches that arm's own message so a raise from the wrong
@@ -567,11 +569,15 @@ def test_validate_honours_its_repo_root_argument(tmp_path, monkeypatch):
 
 def test_validate_forwards_repo_root_to_the_SHA_arm(monkeypatch, tmp_path):
     """The sibling arm: `_commit_state` honours `repo_root`, but `validate` must HAND
-    it one. Reverting `_commit_state(sha, repo_root)` to `_commit_state(sha)` at the
-    call site left the suite green, so the forward — the half that makes `repo_root`
-    reach git at all — was pinned by nothing.
+    it one.
 
-    That mutant is a fail-open: a caller doing `validate(data, repo_root=<other tree>)`
+    ⛔ Reverting `_commit_state(sha, repo_root)` to `_commit_state(sha)` does redden the
+    suite — but only through ARITY: the existing stubs take two arguments, so the
+    reverted call raises `TypeError` and no test ever observes WHICH root is handed
+    over. The forward was pinned incidentally, by a call shape, not by a measurement;
+    this pin replaces that with the property itself.
+
+    The mutant is a fail-open: a caller doing `validate(data, repo_root=<other tree>)`
     gets `exists` for a sha that exists only in THIS checkout, and `render()` prints
     `measured at origin/main@<sha>` as provenance for a tree that does not contain it.
     """
