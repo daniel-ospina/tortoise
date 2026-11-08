@@ -28,17 +28,40 @@ from tortoise.ingest import _PROVIDERS
 
 
 def test_reader_model_is_pinned_constant():
-    assert READER_MODEL == "openrouter:deepseek/deepseek-v4-flash"
+    # #8486 (2026-11-07): the pin names the transport the ruling names. The model
+    # is unchanged (deepseek-v4-flash); the OPENROUTER transport the pin used to
+    # name was absent on the box the 2026-11-02 credential audit measured (not a
+    # fleet census), so the DEFAULT raised at the named-provider check before a
+    # question loaded there, and a run on that box needed an override that
+    # recorded `reader_pinned: false`.
+    assert READER_MODEL == "deepseek:deepseek-v4-flash"
 
 
 def test_default_build_resolves_to_pin(monkeypatch):
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
     r = build_reader()
     assert isinstance(r, LLMReader)
     assert r.model_spec == READER_MODEL
-    assert r.model_id == "deepseek/deepseek-v4-flash"
-    assert r.provider == "openrouter"
+    assert r.model_id == "deepseek-v4-flash"
+    assert r.provider == "deepseek"
     assert r.pinned is True
+
+
+def test_default_build_fails_closed_when_the_pinned_transport_key_is_absent(
+        monkeypatch):
+    """The pin is a claim about the endpoint, so it fails closed.
+
+    A box holding only a DIFFERENT provider's key does not silently serve the
+    pinned model through that other endpoint: the named provider is
+    authoritative (the #8486 endpoint-truth rule), so this raises and names the
+    key. Serving the same model elsewhere is the documented override
+    (`TORTOISE_LME_READER_MODEL=openrouter:deepseek/deepseek-v4-flash`), which
+    records itself as NOT pinned.
+    """
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    with pytest.raises(ValueError, match="DEEPSEEK_API_KEY"):
+        build_reader()
 
 
 def test_override_is_not_pinned_and_warns(monkeypatch, capsys):

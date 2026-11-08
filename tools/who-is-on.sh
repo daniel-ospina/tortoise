@@ -32,4 +32,33 @@
 # enumeration — the gate's behaviour is unchanged and it is not replaced.
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-exec python3 "$here/who_is_on.py" "$@"
+
+# ⛔ THE INTERPRETER IS CHOSEN, NOT ASSUMED (#11202). `who_is_on.py` refuses a
+# pre-3.12 interpreter (`from datetime import UTC` needs one), and this wrapper used
+# to hand it whatever `python3` happened to be first on PATH — measured 2026-11-07 on
+# the owner's Mac, where `python3` is 3.9:
+#
+#     $ tools/who-is-on.sh 11477 --repo daniel-ospina/tortoise
+#     tools/who_is_on.py requires Python >= 3.12 (got 3.9) — run it as `uv run python …`
+#     exit 1
+#
+# so the verb AGENTS.md documents returned an error where it owed an answer — the same
+# "the gate cannot answer" consequence as the claim gate itself, one verb over. The
+# interpreter that satisfies the module's own guard wins; `uv` (which owns the repo's
+# pinned >= 3.12 environment) is the fallback, and `--project` selects THAT environment
+# rather than whatever the caller's cwd happens to be.
+if python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)' \
+        2>/dev/null; then
+    exec python3 "$here/who_is_on.py" "$@"
+fi
+if command -v uv >/dev/null 2>&1; then
+    exec uv run --quiet --project "$here/.." python "$here/who_is_on.py" "$@"
+fi
+# NEITHER. Say which one is missing, and use rc 2 — "could not check", which is this
+# verb's class for a surface it could not read (an incomplete answer is never "nobody",
+# and this one cannot even start). rc 3 is reserved for a malformed INVOCATION, and the
+# flags here were fine: the RUNTIME is absent. (Pre-change the module's own guard exited
+# 1, a code this verb documents it never returns, so that shape was wrong too.)
+echo "who-is-on: needs Python >= 3.12 and neither a 3.12+ 'python3' nor 'uv' is on" \
+     "PATH (python3 is $(python3 -V 2>&1 || echo 'absent')) — install uv." >&2
+exit 2
