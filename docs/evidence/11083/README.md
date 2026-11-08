@@ -33,7 +33,17 @@ is a GRAPH fact, so it is compared by `tests/test_pack_logic_writeprobe_11083.py
 instead — a check that needs a database is run rarely, and that is how an
 artifact rots.
 
-## Baseline at this stamp — 7 packs, 42 declared (36 relations + 6 hierarchies), 0 load errors
+## Baseline at this stamp — 7 packs, 42 declared (36 relations + 6 hierarchies), 38 distinct connections, 0 load errors
+
+⚠️ **Rows ≠ connections.** `pack_hierarchy` calls a `hierarchies[]` entry and a
+`relations[]` row over the same pack + pair + meaning *"one declaration spelled
+twice"*, and **4 of the 6 hierarchy rows are exactly that** (`dev` theme→epic,
+`dev` epic→issue, `marketing` campaign→content, `product-strategy`
+product→feature). The artifact derives both numbers from each hierarchy row's own
+`restates_relation` (`population.declared` / `population.restated_hierarchy_rows`
+/ `population.distinct_connections`) rather than leaving the subtraction to a
+paragraph: 42 rows are 38 distinct connections, and the 2 that no `relations[]`
+row declares are venture's.
 
 | | before #11083 | after #11083 |
 |---|---|---|
@@ -42,8 +52,10 @@ artifact rots.
 | `predicate-not-in-allowlist` | 4 (all `pm`) | **0** |
 | declared population | 42 | 42 — **nothing was deleted to make a count green** |
 
-`written`, measured by the write probe (an endpoint pair per declared row on a
-throwaway store, the row's own write path invoked, the graph read back):
+`written`, measured by the write probe (one node per declared KIND, cached and
+reused; a row whose `from_kind` and `to_kind` are the same kind mints its
+destination its own node — so a same-kind row is measured between TWO nodes —
+the row's own write path invoked, the graph read back):
 
 | shape | rows | what it means |
 |---|---|---|
@@ -64,11 +76,29 @@ measurement being honest, not a regression: the same two declarations, written
 through the writer their own vocabulary selects.
 
 ⚠️ **A `from_kind == to_kind` row is measured between TWO nodes.** The probe
-caches one node per kind, so `pm:blocks` (`pm:card → pm:card`) used to hand the
+caches one node per KIND, so `pm:blocks` (`pm:card → pm:card`) used to hand the
 same id to both sides and measure a **self-loop** — a real edge, but not the
 declared connection, and a false-positive pathway (the read-back matches
 `(a {id:$s})-[r]->(b {id:$d})` with `s == d`, so a refused two-card edge would
-still read `direct`).
+still read `direct`). The cache is keyed on the **namespaced** kind for the same
+reason: `dev:issue` and `pm:issue` are different kinds that share a label, and a
+label-keyed cache handed both the same node.
+
+⚠️ **`written_direction` has three readings, not two.** A `mediated` row carries
+the direction the graph recorded (`<-` for `venture:holds`); a `direct` row reads
+`n/a: direct edge …` because a plain `(a)-[:p]->(b)` has no direction attribute —
+the predicate is the sense; and `written: "none"` is the only state that leaves
+the cell empty, because nothing was written to read. A `None` in that column
+would otherwise be indistinguishable from "not measured" (#10995's rule, applied
+to a column).
+
+### The probe's cleanup contract is a CELL, not a claim
+
+`probe` in the artifact records the store, the endpoint rule, how many ids were
+minted, how many were deleted, and `probe.leftovers` — the ids a delete FAILED on.
+The committed artifact's `leftovers` is `[]`, which is what an operator pointing
+`--uri` at a real graph needs to check before trusting the run. It is a graph
+fact, so `--check` does not compare it (like the `written` cells).
 
 ## `pm`'s four rows — resolved, not silenced (#2766's three-layer convention)
 

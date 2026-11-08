@@ -86,7 +86,6 @@ from tortoise.pack_registry import (  # noqa: E402
     RELATION_DECLARATION_ONLY,
     RELATION_PREDICATE_NOT_IN_ALLOWLIST,
     RELATION_WRITABLE,
-    SEMANTICS_DIRECTIONS,
     PackRegistry,
     effective_direction,
     relation_write_verdict,
@@ -100,6 +99,13 @@ ARTIFACT_REL = "docs/evidence/11083/pack-relation-census.json"
 #: reported as unowned rather than attributed to a closed issue.
 PIPELINE_OWNER = "#11237"
 HIERARCHY_INVOCATION_OWNER = None  # no open issue owns it — #11083 scoping §2
+
+#: What `written_direction` records when the write path produced a DIRECT edge.
+#: A plain `(a)-[:p]->(b)` carries no direction attribute — the predicate IS the
+#: sense — so the cell must say so instead of reading `None`, which is what
+#: "this row was never measured" reads as. #10995's rule (an unmeasured door reads
+#: UNMEASURED, never 0) applied to a column: three states, three readings.
+DIRECT_EDGE_DIRECTION = "n/a: direct edge (the predicate carries the sense)"
 
 #: ONTOLOGY §5's commitment-state object kinds — the family a declared relation
 #: has to reach for the business spine (company → goal → initiative → work) to
@@ -218,13 +224,20 @@ def _hierarchy_rows(packs_dir: Path) -> tuple[dict[str, list[dict]], list[dict]]
             ),
             "declared_direction": None,
             # A declared hierarchy path carries no per-edge direction, so the sense
-            # is the MEANING's, read from the one table that holds it. ⛔ Not a
-            # literal: the layer description above says this column is the
-            # resolver's answer, and a hard-coded `"<->"` here would silently
-            # disagree with `pack_registry.effective_direction` the moment the
-            # table moved (nothing reds on that — H1 compares two derivations that
-            # would both have hard-coded it).
-            "effective_direction": SEMANTICS_DIRECTIONS.get(entry.predicate),
+            # is the MEANING's — resolved through `effective_direction`, the same
+            # resolver the relations column names, NOT through the raw table. The
+            # resolver also applies `SEMANTICS_TRANSITION`, so a hierarchy
+            # declaring a retired spelling (`type: holds`) reports the `->` the
+            # writer records instead of a blank the reader has to interpret.
+            # ⛔ Not a literal either: a hard-coded `"<->"` disagreed with the
+            # resolver silently (H7b moves the table and requires these rows to
+            # move with it).
+            "effective_direction": effective_direction({"semantics": entry.predicate}),
+            # Whether a `relations[]` row of this pack declares the same pair —
+            # read from `pack_hierarchy`, which owns that join, so the distinct
+            # denominator below is MEASURED rather than asserted in prose.
+            "restates_relation": bool(
+                getattr(entry, "restates_relation", False)),
             "declaration_only": False,
             "declaration_only_reason": None,
             "path_disagreement": False,
@@ -314,6 +327,13 @@ def build_census(packs_dir: Path | str = REPO_ROOT / "packs", *,
         all_rows.extend(rows)
     hier_by_pack, hier_diagnostics = _hierarchy_rows(packs_dir)
     all_rows.extend(r for rows in hier_by_pack.values() for r in rows)
+    # ROWS are not CONNECTIONS. `pack_hierarchy` calls a `hierarchies[]` entry and
+    # a `relations[]` row over the same pack + pair + meaning "one declaration
+    # spelled twice", so `declared` counts those twice. Derived from each row's
+    # own `restates_relation` — the join `pack_hierarchy._matching_row` owns — and
+    # never remembered: the number moves the moment a pack declares or drops one.
+    restated = sum(
+        1 for rows in hier_by_pack.values() for r in rows if r["restates_relation"])
 
     pack_sections: dict[str, dict] = {}
     for ns in sorted(reg.packs):
@@ -328,8 +348,9 @@ def build_census(packs_dir: Path | str = REPO_ROOT / "packs", *,
 
     verdicts = Counter(r["verdict"] for r in all_rows if r["surface"] == "relations")
     written = Counter()
+    probe: dict | None = None
     if write_probe:
-        _run_write_probe(all_rows, packs_dir, probe_uri)
+        probe = _run_write_probe(all_rows, packs_dir, probe_uri)
 
     for row in all_rows:
         written[row.get("written") or "none"] += 1
@@ -350,9 +371,16 @@ def build_census(packs_dir: Path | str = REPO_ROOT / "packs", *,
             "writable": "pack_registry.relation_write_verdict — the ONE resolver (#2766)",
             "sense": "pack_registry.effective_direction — per-row, declared direction first",
             "written": (
-                "write probe: one endpoint pair minted per row on a throwaway "
-                "graph, the row's own write path invoked, the graph read back "
-                "(direct | mediated | none)"
+                "write probe: one node per declared KIND (cached and reused; a "
+                "row whose from_kind and to_kind are the same kind mints its "
+                "destination its OWN node, so a same-kind row is measured "
+                "between two nodes), the row's own write path invoked, the graph "
+                "read back (direct | mediated | none). The store is a throwaway "
+                "embedded one unless `--uri` names a graph — `TORTOISE_DB_URI` is "
+                "deliberately NOT read — and EVERY minted id is DELETED before "
+                "the probe returns, with a failed delete reported in "
+                "`probe.leftovers` rather than swallowed; the measured counts "
+                "are in `probe`"
                 if write_probe else
                 "UNMEASURED — run with --write-probe"
             ),
@@ -363,7 +391,17 @@ def build_census(packs_dir: Path | str = REPO_ROOT / "packs", *,
             "relations": relations_total,
             "hierarchies": hierarchies_total,
             "declared": relations_total + hierarchies_total,
+            # The DENOMINATOR the prose is allowed to quote. `declared` is the
+            # number of ROWS; a hierarchy that restates a `relations[]` row is
+            # the same connection declared twice, so it is named here rather than
+            # subtracted in a paragraph a reader cannot check.
+            "restated_hierarchy_rows": restated,
+            "distinct_connections": relations_total + hierarchies_total - restated,
         },
+        # `None` on a hermetic re-derivation (no graph was touched); the measured
+        # cleanup contract when `--write-probe` ran. Never compared by `--check`:
+        # it is a GRAPH fact, like the `written` cells.
+        "probe": probe,
         "verdicts": {
             "writable": verdicts.get(RELATION_WRITABLE, 0),
             "declaration-only": verdicts.get(RELATION_DECLARATION_ONLY, 0),
@@ -398,8 +436,16 @@ def build_census(packs_dir: Path | str = REPO_ROOT / "packs", *,
                 "owner": PIPELINE_OWNER,
                 "why": (
                     "`result[\"relations\"]` (#10999's channel) has no consumer in "
-                    "tortoise/: the code itself says so at extractor_v2.py:10815. "
-                    "An unmeasured column reads UNMEASURED, never 0 (#10995)."
+                    "tortoise/: the code says so itself in `extractor_v2.py`'s S5 "
+                    "Job 1 block — \"nothing in this tree consumes "
+                    "`result[\"relations\"]`\" — and that block is the ONLY "
+                    "support for this UNMEASURED cell, so it is cited by its "
+                    "SENTENCE. ⛔ Not by a line number: this string carried "
+                    "`:10815`, which is inside the MITIGATES-strength warning "
+                    "block, not the S5 Job 1 block — a line cite re-stales on "
+                    "every edit above it and `--write-probe` would reproduce the "
+                    "stale pointer forever. An unmeasured column reads "
+                    "UNMEASURED, never 0 (#10995)."
                 ),
             },
             "hierarchy_invocation": {
@@ -501,10 +547,21 @@ def _mint_endpoint(sdk, kind_ref: str | None, cache: dict,
     mints that side its own node (keyed `kind#slot`).
     """
     label = (kind_ref or "Object").split(":", 1)[-1]
-    key = f"{label.lower()}#{slot}" if slot else label.lower()
+    # ⛔ Keyed on the NAMESPACED kind, not the bare label. `dev:issue` and
+    # `pm:issue` are different declared kinds that merely share a label, and a
+    # label-keyed cache handed both the same node — so a row declaring
+    # `dev:issue → pm:issue` read back with `s == d`, i.e. the EXACT self-loop
+    # false-positive the `slot` above closes for `pm:card → pm:card`, one
+    # namespace over: a writer that refused a genuine two-issue edge would still
+    # read `direct`. Latent in the shipped catalog (no row is cross-namespace
+    # same-label today), which is why it is a correctness fix and not a finding
+    # about a current cell.
+    kind = (kind_ref or "Object").strip()
+    key = f"{kind.lower()}#{slot}" if slot else kind.lower()
     if key in cache:
         return cache[key]
-    name = f"census-probe-{label.lower()}" + (f"-{slot}" if slot else "")
+    slug = kind.lower().replace(":", "-")
+    name = f"census-probe-{slug}" + (f"-{slot}" if slot else "")
     if label.lower() == "subject":
         node_id = sdk.create_entity("subject", name)["node"]["id"]
     else:
@@ -525,7 +582,11 @@ def _read_back(sdk, src: str, dst: str, predicate: str) -> tuple[str, str | None
         params={"s": src, "d": dst, "p": predicate},
     ).result_set
     if direct and direct[0][0]:
-        return "direct", None
+        # ⛔ NOT `None`. A plain `(a)-[:p]->(b)` carries no direction attribute —
+        # its sense IS the predicate — but `None` is also what "this row was
+        # never measured" reads as, and the whole point of a three-valued cell
+        # (#10995) is that a reader can tell the two apart.
+        return "direct", DIRECT_EDGE_DIRECTION
     bridged = g.query(
         "MATCH (a {id:$s})-[:INPUT]->(o:Point)-[r]->(b {id:$d}) "
         "WHERE o.label = $p AND type(r) IN ['IMPL','NAND'] "
@@ -547,12 +608,12 @@ def _delete_minted(sdk, minted: list[str]) -> list[str]:
     loud — a silent leftover is the residue class #5084 exists to stop.
 
     `minted` is an INSERTION-ORDERED `list`, not a set — that is what makes the
-    next sentence true rather than a claim about hash order: operators are minted
-    after the endpoints they bridge, so `reversed(minted)` deletes the operator
-    Points first and their `INPUT`/`IMPL` edges detach with them, leaving the
-    entities with nothing pointing at them. (Today `delete_entity` issues
-    `DETACH DELETE`, so the order cannot matter yet; it would the moment a
-    non-`DETACH` delete is added, and a comment is not where that gets decided.)
+    next sentence about MINT order rather than hash order. ⚠️ The order is NOT
+    load-bearing today: `delete_entity` issues `DETACH DELETE`, which removes a
+    node and every relationship attached to it in any direction (Cypher's own
+    semantics), so deleting an operator first or last detaches the same edges.
+    The list stays ordered because mint order is the only thing that could ever
+    make the order meaningful, and a comment is not where that gets decided.
     """
     leftovers: list[str] = []
     for node_id in reversed(list(minted)):
@@ -565,7 +626,7 @@ def _delete_minted(sdk, minted: list[str]) -> list[str]:
 
 
 def _run_write_probe(rows: list[dict], packs_dir: Path,
-                     uri: str | None = None) -> None:
+                     uri: str | None = None) -> dict:
     """Invoke each row's OWN write path and record what the graph says.
 
     ⛔ `direction=` is not optional. `create_operator`'s signature default is
@@ -578,6 +639,11 @@ def _run_write_probe(rows: list[dict], packs_dir: Path,
     ⛔ `uri` is explicit. `TORTOISE_DB_URI` is not consulted (see `_sdk`), and
     every node this function mints is deleted before it returns — the store is
     throwaway, and so is everything put in it.
+
+    Returns the MEASURED probe contract for the artifact's `probe` section. The
+    cleanup half belongs there rather than in a docstring, because it is the one
+    property an operator pointing `--uri` at a real graph needs to verify and the
+    one that was previously asserted in prose while no delete existed at all.
     """
     sdk = _sdk(uri)
     cache: dict[str, str] = {}
@@ -631,6 +697,21 @@ def _run_write_probe(rows: list[dict], packs_dir: Path,
             f"{sorted(leftovers)}",
             file=sys.stderr,
         )
+    return {
+        "store": (
+            "the graph `--uri` named" if uri else
+            "a throwaway embedded store (`TORTOISE_DB_URI` is deliberately NOT read)"),
+        "endpoints": (
+            "one node per declared KIND, cached and reused; a row whose from_kind "
+            "and to_kind are the same kind mints its destination its own node"
+        ),
+        "minted": len(minted),
+        "deleted": len(minted) - len(leftovers),
+        # ⛔ The cell an operator checks before trusting a `--uri` run: empty
+        # means the cleanup happened. A non-empty list is a REPORTED residue, not
+        # a swallowed one.
+        "leftovers": leftovers,
+    }
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
@@ -681,7 +762,9 @@ def _main(argv: list[str] | None = None) -> int:
 
     pop = census["population"]
     print(f"{pop['packs']} packs · {pop['declared']} declared "
-          f"({pop['relations']} relations + {pop['hierarchies']} hierarchies)")
+          f"({pop['relations']} relations + {pop['hierarchies']} hierarchies) · "
+          f"{pop['distinct_connections']} distinct connections "
+          f"({pop['restated_hierarchy_rows']} hierarchy row(s) restate a relation)")
     print(f"verdicts: {census['verdicts']}")
     print(f"written : {census['written_counts']}")
     for ns, section in census["packs"].items():
