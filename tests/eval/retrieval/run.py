@@ -529,39 +529,30 @@ def _query_vecs(oracle, queries, seed: int, space: str | None = None):
 
     When ``--model`` was passed, ``_inject_probe_model`` already loaded the
     candidate, so the loaded singleton IS the candidate.
+
+    There is no partial fallback. ``_reembed_corpus`` runs BEFORE this, so in
+    the model space the corpus is already model-embedded: a query-encode
+    failure that degraded to oracle vectors would rebuild the exact two-space
+    arm this function exists to prevent, while provenance still reported
+    ``corpus_embedding_space: model`` and the gate compared it as sound. A
+    failure therefore propagates. (Nothing to degrade anyway: the synthetic
+    space has no model to encode with, so the branch that used to "degrade the
+    whole arm" was unreachable — a dead path, and its test could not fail.)
     """
     if space is None:
         space, _ = _corpus_embedding_space(seeded_synthetic=True)
-    if space == EMBED_SPACE_MODEL:
-        model = _loaded_embedding_model()
-        if model is None:
-            raise RuntimeError(
-                "embedding space is 'model' but no model is loaded — the "
-                "corpus would be model-embedded and the queries synthetic"
-            )
-    else:
-        model = None
+    model = _loaded_embedding_model() if space == EMBED_SPACE_MODEL else None
+    if space == EMBED_SPACE_MODEL and model is None:
+        raise RuntimeError(
+            "embedding space is 'model' but no model is loaded — the "
+            "corpus would be model-embedded and the queries synthetic"
+        )
     vecs: dict[str, list[float]] = {}
     for q in queries:
-        if model is not None:
-            try:
-                vecs[q["id"]] = [float(x) for x in model.encode([q["query"]])[0]]
-                continue
-            except Exception:
-                if vecs or space == EMBED_SPACE_MODEL:
-                    # A mid-run failure would leave the arm half in each space.
-                    # And in the MODEL space the corpus is ALREADY model-encoded
-                    # (`_reembed_corpus` runs before this), so falling back to
-                    # oracle query vectors here would rebuild the exact
-                    # two-space defect this function exists to prevent — while
-                    # provenance still reported `corpus_embedding_space: model`
-                    # and the gate compared it as sound (measured shape: BLOCK
-                    # on unmodified code, plus a false one-space claim).
-                    raise
-                # first query failed in the SYNTHETIC space: degrade the WHOLE
-                # arm, never per-query
-                model = None
-        vecs[q["id"]] = oracle.query_vector_for(q["query"], seed)
+        if model is None:
+            vecs[q["id"]] = oracle.query_vector_for(q["query"], seed)
+        else:
+            vecs[q["id"]] = [float(x) for x in model.encode([q["query"]])[0]]
     return vecs, model is not None
 
 
@@ -663,9 +654,32 @@ def _gate_vs_baseline(
     regression that no code produced (measured 2026-11-08: BLOCK, ΔnDCG −37.3
     points, on an unmodified tree). Cross-space returns ``INCOMPARABLE`` — a
     refusal that names the remedy (re-baseline in this space), never a BLOCK.
+
+    ``unknown`` on EITHER side refuses too, even when both sides say
+    ``unknown``: two unknown labels are not the same space, they are two
+    absences of the same fact (``--no-seed-corpus`` reuses whatever vectors the
+    db holds — a centroid corpus on one db, a model-embedded one on another —
+    and the label cannot tell them apart). Scoring that pair as comparable is
+    the false PASS this whole change exists to remove, with the added authority
+    of a guard that looked at it and passed it.
     """
     if not baseline_per_query:
         return None
+    unknown = EMBED_SPACE_UNKNOWN
+    if unknown in (space, baseline_space):
+        return {
+            "verdict": "INCOMPARABLE",
+            "reason": (
+                f"the embedding space could not be established for this run "
+                f"('{space}') or its baseline ('{baseline_space}') — "
+                f"'unknown' is an absence of the fact, not a space, and two "
+                f"unknowns do not make a comparable pair. Re-run with the "
+                f"corpus SEEDED in one space (drop --no-seed-corpus) so "
+                f"corpus_embedding_space is a fact on both sides."
+            ),
+            "space": space,
+            "baseline_space": baseline_space,
+        }
     if space is not None and baseline_space is not None and space != baseline_space:
         return {
             "verdict": "INCOMPARABLE",

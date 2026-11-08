@@ -452,6 +452,25 @@ def test_gate_refuses_a_cross_space_comparison():
     blind = run_module._gate_vs_baseline(per_query, baseline, random.Random(0))
     assert blind["verdict"] == "SHIP"
 
+    # `unknown` on EITHER side refuses, including unknown-vs-unknown: two
+    # absences of the same fact are not the same space. Without this, a
+    # --no-seed-corpus run on a centroid db gated against a --no-seed-corpus
+    # run on a model-embedded db scores as a comparable pair (false PASS).
+    for space, base_space in ((run_module.EMBED_SPACE_UNKNOWN,
+                               run_module.EMBED_SPACE_UNKNOWN),
+                              (run_module.EMBED_SPACE_UNKNOWN,
+                               run_module.EMBED_SPACE_MODEL),
+                              (run_module.EMBED_SPACE_SYNTHETIC,
+                               run_module.EMBED_SPACE_UNKNOWN)):
+        refusal = run_module._gate_vs_baseline(
+            per_query, baseline, random.Random(0),
+            space=space, baseline_space=base_space,
+        )
+        assert refusal["verdict"] == "INCOMPARABLE", \
+            f"{space} vs {base_space} must refuse, not score"
+        assert "could not be established" in refusal["reason"], \
+            "the refusal must name the unknown space as its reason"
+
 
 def test_baseline_embedding_space_reads_legacy_baselines():
     """Baselines that predate the field; their provenance still answers — and
@@ -534,10 +553,11 @@ def test_corpus_embedding_space_follows_the_corpus_not_the_environment():
             "an ambient model must not launder an unverified corpus's space"
 
 
-def test_query_vecs_refuse_to_degrade_the_queries_in_the_model_space():
-    """In the model space the corpus is ALREADY re-embedded, so a query-encode
-    failure must raise: falling back to oracle vectors here rebuilds the
-    two-space arm while provenance still says 'model'."""
+def test_query_vecs_propagate_a_model_encode_failure():
+    """In the model space the corpus is ALREADY re-embedded (`_reembed_corpus`
+    runs first), so a query-encode failure must propagate: falling back to
+    oracle vectors here rebuilds the two-space arm while provenance still says
+    'model' (and a half-encoded arm is worse than no verdict)."""
     oracle = run_module.build_topic_oracle(42)
     queries = [{"id": "q001", "query": "pricing tiers enterprise"},
                {"id": "q002", "query": "pricing tiers team"}]
@@ -554,23 +574,28 @@ def test_query_vecs_refuse_to_degrade_the_queries_in_the_model_space():
         )
 
 
-def test_query_vecs_degrade_the_whole_arm_in_the_synthetic_space():
-    """The documented fallback survives where it is sound: no corpus has been
-    model-embedded, so ALL queries take the oracle's vectors."""
+def test_query_vecs_encode_nothing_in_the_synthetic_space():
+    """The synthetic space has no model to encode with — the queries come from
+    the oracle, and no encode is attempted at all (the old "degrade the whole
+    arm on the first failure" branch was unreachable and is gone)."""
     oracle = run_module.build_topic_oracle(42)
     queries = [{"id": "q001", "query": "pricing tiers enterprise"}]
 
-    class _FailingModel:
+    class _ExplodingModel:
+        calls = 0
+
         def encode(self, texts):
-            raise RuntimeError("model call stalled")
+            type(self).calls += 1
+            raise AssertionError("encode must never be attempted here")
 
     with patch.object(run_module, "_loaded_embedding_model",
-                      return_value=_FailingModel()):
+                      return_value=_ExplodingModel()):
         vecs, use_model = run_module._query_vecs(
             oracle, queries, 42, space=run_module.EMBED_SPACE_SYNTHETIC,
         )
 
     assert use_model is False
+    assert _ExplodingModel.calls == 0
     assert vecs["q001"] == oracle.query_vector_for("pricing tiers enterprise", 42)
 
 
@@ -665,3 +690,8 @@ def test_run_reusing_existing_corpus_claims_no_space(tmp_path):
         "model-space baseline"
     )
     assert gate["space"] == run_module.EMBED_SPACE_UNKNOWN
+    assert "could not be established" in gate["reason"], (
+        "the refusal must name the unknown space, and it holds even when BOTH "
+        "sides say 'unknown' — two absences of the same fact are not the same "
+        "space"
+    )

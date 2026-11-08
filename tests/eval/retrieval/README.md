@@ -80,7 +80,7 @@ So the space is decided from the CORPUS side, once per run
 |---|---|---|
 | no embedder (`uv sync`, CI offline) | `oracle-synthetic` | queries = topic-centroid sums (documented degraded fallback) |
 | embedder loaded (`uv sync --extra embeddings`) | `model` | the seeded corpus is RE-EMBEDDED with that model (`corpus_reembedded` in provenance), queries too |
-| `--no-seed-corpus` (any environment) | `unknown` | the vectors already in the graph were not written by this run — an earlier eval seed's centroids and product embeddings are indistinguishable — so no space is claimed and the gate refuses |
+| `--no-seed-corpus` (any environment) | `unknown` | the vectors already in the graph were not written by this run — an earlier eval seed's centroids and product embeddings are indistinguishable — so no space is claimed and the gate refuses (an `unknown` run is for measuring, not for gating: drop the flag to gate a cycle) |
 
 `provenance.corpus_embedding_space` names which one a report used. **It is not
 cosmetic.** Before this rule existed the query side silently took the ambient
@@ -107,6 +107,10 @@ python -m tests.eval.retrieval.run --db docker://falkor:6379
 # baseline = the committed "where we stand" run, in YOUR embedding space:
 #   baseline-embedded-model-2026-11-08.json       → corpus_embedding_space: model
 #   baseline-embedded-2026-08-17.json (schema 1)  → oracle-synthetic
+# The space must MATCH or the gate returns INCOMPARABLE (it names which two it
+# saw). Pair the model baseline with a host that has the embedder installed
+# (`pip install -e '.[embeddings]'`); without it the run is oracle-synthetic
+# and belongs against the schema-1 baseline.
 python -m tests.eval.retrieval.run --db /tmp/new.db \
     --baseline tests/eval/retrieval/baseline/baseline-embedded-model-2026-11-08.json
 ```
