@@ -43,7 +43,17 @@ product→feature). The artifact derives both numbers from each hierarchy row's 
 `restates_relation` (`population.declared` / `population.restated_hierarchy_rows`
 / `population.distinct_connections`) rather than leaving the subtraction to a
 paragraph: 42 rows are 38 distinct connections, and the 2 that no `relations[]`
-row declares are venture's.
+row declares **in the same direction** are venture's.
+
+⚠️ **The join is ORDERED** — `pack_hierarchy._matching_row` matches the same
+`(fromKind, toKind)` in that order, plus the same predicate or the same semantics
+— and the order is load-bearing rather than incidental: venture's
+`Investment → Program` (`hasPart`) states the same FACT as its `relations[]`
+`partOf` (`program → investment`, `semantics: hasPart`) in the **inverse**
+direction, so the ordered join does not count it. Counting inverse-named ranks
+would read 37; that needs a predicate-inversion table, i.e. a second parser this
+artifact deliberately does not have, so the rule is STATED (here and in
+`population.note`) instead of the number being widened.
 
 | | before #11083 | after #11083 |
 |---|---|---|

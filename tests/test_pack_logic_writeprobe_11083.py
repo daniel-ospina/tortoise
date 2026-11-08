@@ -99,7 +99,23 @@ def test_g1_write_probe_reproduces_the_committed_written_column(sdk):
     # deliberate and carries no `noqa`: `SLF001` is not an enabled rule here, and
     # RUF100 reds an unused directive (ruff's own lint job caught it).
     census._sdk = lambda uri=None: sdk
-    census._run_write_probe(rows, REPO_ROOT / "packs", None)
+    probe = census._run_write_probe(rows, REPO_ROOT / "packs", None)
+
+    # ⛔ The artifact's `probe` block is a MEASURED cell, so it is compared to the
+    # probe that just ran — nothing else re-derives it: `_diff_hermetic` cannot
+    # (a hermetic build has `probe: None`), and without this assertion an edited
+    # `minted`/`deleted` pair left the whole suite AND `--check` green (measured:
+    # `minted: 71 / deleted: 71` passed 27 + 8 tests and `--check`).
+    assert probe["minted"] == committed["probe"]["minted"], (
+        f"the artifact claims {committed['probe']['minted']} mints; this probe "
+        f"minted {probe['minted']} — the `probe` cell is a transcription, not a "
+        "measurement")
+    assert probe["deleted"] == probe["minted"], (
+        f"{probe['minted'] - probe['deleted']} minted node(s) survived the "
+        f"cleanup: {probe['leftovers']}")
+    assert probe["leftovers"] == committed["probe"]["leftovers"] == [], (
+        f"a residue was reported ({probe['leftovers']}) — the artifact must carry "
+        "the same reading, and an empty list is the only clean one")
 
     committed_rows = {
         (r["pack"], r["surface"], r["predicate"], r["from_kind"], r["to_kind"]): r

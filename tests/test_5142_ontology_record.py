@@ -92,14 +92,25 @@ def _changelog() -> str:
     The entries live in `docs/ONTOLOGY-CHANGELOG.md` since #8745 moved them out
     of the model.
     """
+    # ⛔ EVERY entry, not the first blockquote run. The premise above ("the run
+    # ends at the first non-`>` line") died the moment a newest-first entry was
+    # PREPENDED above the older build records: the first run then holds only the
+    # newest entry, and the #5142 per-field record below it became invisible to
+    # this guard — measured: `test_changelog_records_the_format_move` reddened at
+    # a head whose changelog still carried the record verbatim, and :156 reported
+    # the NEW entry's text as the offender.
     doc = _changelog_doc()
-    start = doc.index("> **Changelog")
-    out: list[str] = []
-    for line in doc[start:].splitlines():
-        if not line.startswith(">"):
-            break
-        out.append(line)
-    return "\n".join(out)
+    blocks: list[list[str]] = []
+    current: list[str] = []
+    for line in doc.splitlines():
+        if line.startswith(">"):
+            current.append(line)
+        elif current:
+            blocks.append(current)
+            current = []
+    if current:
+        blocks.append(current)
+    return "\n".join(line for block in blocks for line in block)
 
 
 # --------------------------------------------------------------------------

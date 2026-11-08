@@ -38,6 +38,19 @@ What is pinned, and the failure each pin catches:
       the only door it counts — its first positional parameter is the embedded
       store's file path) and the probe collects its mints in MINT ORDER, so the
       cleanup's "operators first" is an order and not hash order.
+  H11 the distinct-connection denominator is MEASURED (`restates_relation` per
+      hierarchy row), not subtracted in prose — a total a reader takes as N
+      distinct assertions is the quiet mis-count this census exists to end.
+  H12 the cleanup contract is a MEASURED cell (`probe.leftovers` /
+      `minted` / `deleted`), not a docstring claim — twice before this PR a
+      docstring asserted a delete that did not exist in the file.
+  H13 the hierarchy sense goes through `effective_direction` (so a retired
+      spelling reports the sense the WRITER records, not `None` from the table);
+      H13b `written_direction` distinguishes NOT-APPLICABLE (`n/a`) from
+      NOT-MEASURED (empty), so "no operator direction" cannot hide "never ran".
+  H14 the `pipeline` UNMEASURED cell cites the SENTENCE, not a line number —
+      a line cite re-stales on every edit above it and `--write-probe` would
+      reproduce the stale pointer forever.
 
 Hermetic by construction: this file imports no SDK and touches no graph.
 """
