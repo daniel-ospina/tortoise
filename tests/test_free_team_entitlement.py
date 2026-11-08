@@ -480,7 +480,7 @@ class TestCrossLaneFreeOrgInvariant:
     invariant-preserving in #2789 and are pinned here rather than merely
     believed: `POST /v1/register` (idempotent on email — this file) and
     `supabase/functions/tenant-provision` (deterministic per-user org id —
-    pinned at runtime in `tests/test_tenant_provision_cors.mjs`).
+    pinned at runtime in `tests/test_tenant_provision_server_only.mjs`).
     """
 
     def test_register_twice_with_the_same_email_mints_one_org(self, client,

@@ -193,16 +193,30 @@ try {
   envVars["SUPABASE_URL"] = "https://x.supabase.co";
   envVars["SUPABASE_ANON_KEY"] = "anon";
   envVars["SUPABASE_SERVICE_ROLE_KEY"] = "service";
+  // Set the pepper BEFORE the FASTAPI_URL row: otherwise the 500 could come from
+  // `hashApiKey` throwing "TORTOISE_SECRET_PEPPER is not set" instead of from the
+  // guard being tested, and the row would print ✓ for a fail-closed arm that had
+  // been deleted (review finding F2 — the ordering was carried over from the old
+  // CORS harness, where it was already unearned).
+  envVars["TORTOISE_SECRET_PEPPER"] = "pepper";
 
-  await check(
-    "POST authenticated but FASTAPI_URL missing → 500 (fail closed, named cause)",
+  const noFastapi = await check(
+    "POST authenticated but FASTAPI_URL missing → 500 naming the cause",
     call("POST", jwtHeaders, BODY),
     500
+  );
+  // The status alone is NOT the assertion: any throw in the handler reaches the
+  // outer catch as 500. The row's own label promises a NAMED cause, so pin the
+  // message the guard writes.
+  assert.match(
+    await noFastapi.text(),
+    /FASTAPI_URL missing/,
+    "the 500 must name FASTAPI_URL — a bare 500 is also what a pepper/RPC throw "
+      + "produces, so status alone would keep this row green with the guard deleted"
   );
 
   envVars["FASTAPI_URL"] = "http://fastapi.test";
   envVars["FASTAPI_INTERNAL_KEY"] = "key";
-  envVars["TORTOISE_SECRET_PEPPER"] = "pepper";
 
   __setRpcResult({ error: new Error("rpc down") });
   await check(
