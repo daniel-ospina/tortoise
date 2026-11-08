@@ -369,7 +369,7 @@ _ENV_ASSIGNMENT: Final = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 #: from the STRING by `_command_body`, never from a token list, so the quoting of
 #: the rest of the command survives.
 _LEADING_ASSIGNMENT: Final = re.compile(
-    r"""^[A-Za-z_][A-Za-z0-9_]*=(?:'[^']*'|"[^"]*"|[^\s'"])+\s+"""
+    r"""^[A-Za-z_][A-Za-z0-9_]*=(?:'[^']*'|"[^"]*"|[^\s'"])+(?:\s+|$)"""
 )
 
 #: A `cd <dir>` WRAPPER segment (no `;`/flags — the compound-separator forms are not
@@ -783,12 +783,16 @@ _WRAPPER_VERBS: Final[frozenset[str]] = frozenset(
         "umask",
         "unset",
         # ⛔ Shell CONTROL builtins, admitted for the same reason as the rest: they
-        # run nothing that is being cited and they cite nothing themselves. `|| exit
-        # 1` is this repo's OWN recipe — `AGENTS.md`: `uri="$(uv run python
-        # tools/test_lane.py uri)" || exit 1` — so refusing it asserted the record
-        # "may carry commands and wrappers, not prose" while refusing a COMMAND
-        # (third review cycle). Measured false block; `origin/main` accepted all
-        # three shapes, and exit 1 hid the entire uncovered list.
+        # run nothing that is being cited and they cite nothing themselves. A
+        # `|| exit 1` TAIL is this repo's OWN spelling — `AGENTS.md`:
+        # `uri="$(uv run python tools/test_lane.py uri)" || exit 1` — so refusing the
+        # tail asserted the record "may carry commands and wrappers, not prose"
+        # while refusing a COMMAND (third review cycle). Measured false block;
+        # `origin/main` accepted all three shapes, and exit 1 hid the entire
+        # uncovered list. ⛔ That AGENTS.md line is a PREAMBLE, not a record: entered
+        # on its own it is correctly refused as "names no command", because it runs
+        # no runner at all. What `exit` admission buys is the tail of a REAL record
+        # (`uv run pytest … || exit 1`).
         # ⛔ Their ARGUMENTS are graded in `_wrapper_argument_defect` — admitting a
         # head without reading its arguments is the exact bypass that function
         # exists to close, and doing it here let `… && exit "I did not run this"`
@@ -1497,6 +1501,16 @@ def _command_body(raw: str, base: Path, root: Path) -> tuple[str, Path, str]:
                 words = shlex.split(target)
             except ValueError:
                 words = [target]
+            if words == [""]:
+                # ⛔ bash: "A null directory name is the same as the current
+                # directory." `cd ""` is a NO-OP, not an unknowable cwd — measured
+                # `bash -c 'cd ""; echo rc=$?'` → rc 0, cwd unchanged — so the later
+                # segment provably ran from `cwd` and the record is sound (ninth
+                # review cycle; this branch's empty-target arm refused it while
+                # `origin/main` accepted it). Deliberately distinct from `cd --`
+                # (`$HOME`) and `cd -` (`$OLDPWD`), which fall through to the refusal
+                # below.
+                continue
             if len(words) == 1:
                 target = words[0]
             elif len(words) > 1:

@@ -1939,6 +1939,60 @@ def test_a_stacked_cd_option_group_is_stripped_not_skipped(tmp_path):
         )
 
 
+def test_a_lone_assignment_segment_is_a_wrapper_not_prose(tmp_path):
+    """`FOO=1 && <cmd>` is legal shell that really runs the cmd.
+
+    ⛔ MEASURED false block (ninth review cycle): `_LEADING_ASSIGNMENT` ended in
+    `\\s+`, so a segment consisting ONLY of `NAME=value` — with nothing after it in
+    that segment, the ordinary `FOO=1 && …` spelling — never matched and fell through
+    to the prose refusal, while the refusal message itself listed `NAME=value` among
+    the admissible wrappers. `origin/main` accepted the record and
+    `bash -c 'FOO=1 && echo RAN=$FOO'` prints RAN=1. Exit 1 also hides the whole
+    uncovered list, so the cost is the entire report.
+    """
+    for command in (
+        "cmd:FOO=1 && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
+        "cmd:FOO=1 BAR=2 && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
+        "cmd:TORTOISE_DB_URI='docker://u:p@h:6379/g' && uv run pytest "
+        "tests/test_9664_capstone_verdict_ledger.py -q",
+    ):
+        proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, command])]))
+        assert proc.returncode == cl.EXIT_CLEAN, (
+            f"{command!r} was REFUSED ({proc.returncode}) — a lone NAME=value segment "
+            f"is a wrapper, and the refusal message says so\n{proc.stdout}{proc.stderr}"
+        )
+
+
+def test_a_null_cd_target_is_a_no_op(tmp_path):
+    """bash: "A null directory name is the same as the current directory."
+
+    ⛔ MEASURED false block (ninth review cycle): `cd ""` was lumped in with the
+    "working directory cannot be known" refusal (`cd --` is `$HOME`, `cd -` is
+    `$OLDPWD`), but a null target CHANGES NOTHING — `bash -c 'cd ""; echo rc=$?'` is
+    rc 0 with the cwd unchanged — so the later segment provably ran from `cwd`.
+    `origin/main` accepted the record. The two genuinely-unknowable spellings are
+    still refused, pinned below.
+    """
+    for command in (
+        'cmd:cd "" && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q',
+        "cmd:cd '' && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
+    ):
+        proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, command])]))
+        assert proc.returncode == cl.EXIT_CLEAN, (
+            f"{command!r} was REFUSED ({proc.returncode}) — a null directory name is "
+            f"the current directory\n{proc.stdout}{proc.stderr}"
+        )
+    for command in (
+        "cmd:cd -- && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
+        "cmd:cd - && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
+    ):
+        proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, command])]))
+        assert proc.returncode == cl.EXIT_INVALID, (
+            f"{command!r} was ACCEPTED ({proc.returncode}) — `$HOME`/`$OLDPWD` cannot "
+            f"be known from the record\n{proc.stdout}{proc.stderr}"
+        )
+
+
 def test_an_exit_that_is_not_the_last_segment_is_refused(tmp_path):
     """`exit` TERMINATES the shell, so a later segment provably never ran.
 
