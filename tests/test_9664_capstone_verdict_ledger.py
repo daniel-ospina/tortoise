@@ -1921,19 +1921,21 @@ def test_the_tool_carries_the_5128_interpreter_guard_first(tool, capsys, monkeyp
     census = _census_module()
     rel = tool.relative_to(REPO_ROOT).as_posix()
     text = tool.read_text(encoding="utf-8")
+    # EVERY match on EVERY line, with the census's own exemptions — `finditer`,
+    # not `search`. One match per line is a hole the census does not have: a line
+    # whose FIRST match is a carve-out hides a real offender later on it. Measured
+    # (review round 7):
+    #   `# historical: python3 tools/tmpdir_sweep.py --help; python3 tools/capstone_ledger.py check`
+    # left this pin GREEN (2 passed) while the census reddened. The exemptions are
+    # the census's data, not a re-derived filter: filtering on
+    # `group(1) == "tools" and group(2) == tool.name` also re-narrows the regex's
+    # ELIDED branch (`python3 ...`, groups None) and its cross-path matches
+    # (`python3 graph-scripts/...`), both of which the census reds too.
     offenders = [
         f"{rel}:{n}: {line.strip()}"
         for n, line in enumerate(text.splitlines(), 1)
-        if (m := census._BARE_INVOCATION.search(line))
-        # The CENSUS'S OWN exemptions, not a re-derived filter. Filtering to
-        # `group(1) == "tools" and group(2) == tool.name` re-narrows the sweep
-        # the predicate was imported to stop narrowing: it drops the regex's
-        # ELIDED branch (`python3 ...`, groups None) and every cross-path match
-        # (`python3 graph-scripts/...`), both of which the census reds. Measured:
-        # each of those two mutants left this pin GREEN while the census reddened.
-        # A carve-out tool is never guarded, so the bare form IS its working form;
-        # `_DELIBERATE_BARE_FORM` records a verbatim quote of a real command.
-        and (m.group(1) is None or f"{m.group(1)}/{m.group(2)}" not in census._CARVE_OUTS)
+        for m in census._BARE_INVOCATION.finditer(line)
+        if (m.group(1) is None or f"{m.group(1)}/{m.group(2)}" not in census._CARVE_OUTS)
         and (rel, line.strip()) not in census._DELIBERATE_BARE_FORM
     ]
     assert not offenders, (
