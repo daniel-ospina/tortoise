@@ -89,10 +89,54 @@ _RELOAD_ARGV = ["uvicorn", "tortoise.hosted_api:app", "--host", "0.0.0.0", "--re
         ({"WEB_CONCURRENCY": "0"}, [], 1),
         ({"WEB_CONCURRENCY": "-2"}, [], 1),
         ({}, ["uvicorn", "a:a", "--workers", "-2"], 1),
+        # ⛔ A GIVEN `--workers` is FINAL, even non-positive: `$WEB_CONCURRENCY` is
+        # the flag's DEFAULT (uvicorn reads it only `if workers is None`), never
+        # its fallback — so a non-positive flag does NOT inherit the env var.
+        ({"WEB_CONCURRENCY": "4"}, ["uvicorn", "a:a", "--workers", "0"], 1),
+        ({"WEB_CONCURRENCY": "4"}, ["uvicorn", "a:a", "--workers", "-2"], 1),
+        ({"WEB_CONCURRENCY": "4"}, ["uvicorn", "a:a", "--workers=0"], 1),
+        # …while an EMPTY value is not "given" at all (the shell's `-z`), so the
+        # env var still answers. The boundary of the rule above.
+        ({"WEB_CONCURRENCY": "4"}, ["uvicorn", "a:a", "--workers="], 4),
     ],
 )
 def test_resolve_effective_workers_follows_uvicorns_precedence(environ, argv, expected):
     assert wt.resolve_effective_workers(environ, argv) == expected
+
+
+def test_an_explicitly_given_workers_flag_is_final_even_when_non_positive():
+    """⛔ `--workers 0` does NOT fall through to `$WEB_CONCURRENCY`, and uvicorn agrees.
+
+    `workers_from_argv` returns None both when the flag is ABSENT and when it is
+    present but not a positive int, so a resolver that treats its None as "not
+    requested" lets the env var answer for a flag that already overruled it.
+    Measured on the pinned uvicorn 0.52.1 with `WEB_CONCURRENCY=4` exported:
+
+        Config(workers=None).workers == 4      # env IS the flag's default
+        Config(workers=0).workers    == 1      # `workers or 1`, env NOT read
+        Config(workers=-2).workers   == -2     # env NOT read; `> 1` false -> one
+
+    i.e. `--workers 0` / `--workers -2` each serve exactly ONE in-process worker.
+    Answering 4 for them (which this resolver did) produced a refusal reading
+    "N>=4 uvicorn workers" about a machine that was about to run one.
+    """
+    for token in ("0", "-2"):
+        argv = ["uvicorn", "tortoise.hosted_api:app", "--workers", token]
+        assert wt.resolve_effective_workers({"WEB_CONCURRENCY": "4"}, argv) == 1, (
+            "a non-positive --workers is FINAL in uvicorn — the env var is only the "
+            "flag's default, so it must not answer for a flag that was given"
+        )
+        # The flag's raw presence is what decides; the count it names is just 1.
+        assert wt.workers_from_argv(argv) is None
+
+    # An EMPTY value is not "given" (the shell's `-z` case), so the env answers —
+    # the boundary that keeps this fix from swallowing a real fall-through.
+    assert wt.resolve_effective_workers(
+        {"WEB_CONCURRENCY": "4"}, ["uvicorn", "a:a", "--workers="]) == 4
+
+    # …and a positive flag still beats the env, so this is not "the flag is ignored".
+    assert wt.resolve_effective_workers(
+        {"WEB_CONCURRENCY": "4"}, ["uvicorn", "a:a", "--workers", "2"]) == 2
 
 
 def test_an_absent_workers_flag_is_not_a_request_for_one():
@@ -536,6 +580,15 @@ _AGREEMENT_TABLE: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
     (("uvicorn", "app:app", "--workers", "0"), {}),
     (("uvicorn", "app:app", "--workers", "-2"), {}),
     (("uvicorn", "app:app", "--reload"), {}),                   # always one worker
+    # ⛔ The flag is FINAL even when non-positive: `$WEB_CONCURRENCY` is its
+    # DEFAULT, not its fallback (uvicorn `config.py:352` reads it only
+    # `if workers is None`). Without these rows the two resolvers disagreed here
+    # — shell 1, Python 4 — and the app reads the shell's value first.
+    (("uvicorn", "app:app", "--workers", "0"), {"WEB_CONCURRENCY": "4"}),
+    (("uvicorn", "app:app", "--workers", "-2"), {"WEB_CONCURRENCY": "4"}),
+    (("uvicorn", "app:app", "--workers=0"), {"WEB_CONCURRENCY": "4"}),
+    # …and an EMPTY value is not "given", so the env var answers (the `-z` case).
+    (("uvicorn", "app:app", "--workers="), {"WEB_CONCURRENCY": "4"}),
 )
 
 

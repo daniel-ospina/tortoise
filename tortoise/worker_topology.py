@@ -48,6 +48,16 @@ under each shape.
    which beats 1. Measured: ``--workers 2`` -> 2; ``--workers=5`` -> 5;
    ``--workers +2`` -> 2; ``WEB_CONCURRENCY=3`` -> 3; both together -> the CLI.
 
+   ⛔ And ``$WEB_CONCURRENCY`` is only the flag's **DEFAULT**, not its fallback:
+   ``config.py:352`` reads it under ``if workers is None`` — the *parameter* — so
+   a ``--workers`` that IS given is FINAL even when it is non-positive. Measured
+   on the pinned 0.52.1 with ``WEB_CONCURRENCY=4`` exported:
+   ``Config(workers=None).workers == 4``, ``Config(workers=0).workers == 1``,
+   ``Config(workers=-2).workers == -2`` (``> 1`` false, so ``main.py:617`` takes
+   the in-process branch — one worker). Treating "present but non-positive" as
+   "absent" therefore let ``$WEB_CONCURRENCY`` answer for a flag that had already
+   overruled it.
+
 2. **Whether this process is SUPERVISED — and, separately, how.** Under spawn,
    ``multiprocessing`` restores the parent's ``sys.argv`` in the child (measured:
    the child's ``sys.argv`` is the full uvicorn command line, ``--workers 2`` and
@@ -194,13 +204,24 @@ def _positive_int(raw: object) -> int | None:
     return value if value > 0 else None
 
 
-def workers_from_argv(argv: Sequence[str] | None = None) -> int | None:
-    """The ``--workers`` value on a uvicorn command line, or None if absent.
+def _workers_flag_value(argv: Sequence[str] | None = None) -> str | None:
+    """The RAW ``--workers`` value given on a uvicorn command line, or None.
 
     Handles both token forms (``--workers N`` and ``--workers=N``) and tolerates
-    a repeated flag the way a CLI last-wins parse does. Returns None — not 1 —
-    when the flag is absent, so a caller can tell "not requested" from
-    "requested 1".
+    a repeated flag the way a CLI last-wins parse does.
+
+    ⛔ None means the flag was **not given a value** — absent entirely, or
+    present with an empty one (``--workers=``, or a trailing ``--workers``).
+    That is deliberately NOT the same as "given a value that is not a positive
+    int": ``--workers 0`` and ``--workers -2`` ARE given, and uvicorn treats them
+    as final (see :func:`resolve_effective_workers`). This raw form exists so the
+    resolver can tell those two apart; :func:`workers_from_argv` folds both into
+    None for callers that only want the count.
+
+    Empty counts as absent because that is what ``entrypoint.sh`` does (its
+    ``[ -z "$_count" ]`` falls through to ``$WEB_CONCURRENCY``), and the two
+    resolvers must agree. uvicorn itself errors out on an empty ``--workers``
+    (click ``type=int``), so no running topology is described either way.
     """
     args = list(sys.argv if argv is None else argv)
     found: str | None = None
@@ -210,7 +231,20 @@ def workers_from_argv(argv: Sequence[str] | None = None) -> int | None:
                 found = args[index + 1]
         elif token.startswith(WORKERS_FLAG + "="):
             found = token[len(WORKERS_FLAG) + 1:]
-    return None if found is None else _positive_int(found)
+    return found if found else None
+
+
+def workers_from_argv(argv: Sequence[str] | None = None) -> int | None:
+    """The ``--workers`` value on a uvicorn command line, or None if not given.
+
+    Returns None — not 1 — when the flag is absent, so a caller can tell "not
+    requested" from "requested 1". It also returns None when the flag IS given
+    but its value is not a positive int (``--workers 0`` / ``--workers -2`` /
+    ``--workers oops``), which is why :func:`resolve_effective_workers` does NOT
+    use it to decide the env fall-through — do not read this None as "absent".
+    """
+    raw = _workers_flag_value(argv)
+    return None if raw is None else _positive_int(raw)
 
 
 def resolve_effective_workers(environ: Mapping[str, str] | None = None,
@@ -222,6 +256,21 @@ def resolve_effective_workers(environ: Mapping[str, str] | None = None,
     on this process's own argv; then ``$WEB_CONCURRENCY`` (uvicorn's default
     source); then 1.
 
+    ⛔ A GIVEN ``--workers`` is FINAL — including ``--workers 0`` and
+    ``--workers -2``, which uvicorn resolves to ONE in-process worker and does
+    NOT resolve against ``$WEB_CONCURRENCY`` (``config.py:352`` reads the env var
+    only ``if workers is None``, i.e. only when the flag's *parameter* was not
+    supplied). This resolver previously fell through to ``$WEB_CONCURRENCY`` for
+    those values, because the value and the absence were both ``None`` — so
+    ``--workers 0`` with ``WEB_CONCURRENCY=4`` exported answered 4 here while
+    ``entrypoint.sh`` (correctly), uvicorn, and the machine all answered 1: a
+    false refusal that misdescribed the topology it observed. The flag's RAW
+    presence decides, its value only names the count.
+
+    A non-positive or unparseable value is normalised to 1 — uvicorn runs one
+    process for ``0``/``-N`` and rejects anything else outright, and 1 is what
+    the shipped shell block reports, so the two resolvers cannot disagree.
+
     ⚠️ Returns a **recognition** of the topology, not an authorisation: see
     :func:`refusal_reason` for the policy.
     """
@@ -229,9 +278,9 @@ def resolve_effective_workers(environ: Mapping[str, str] | None = None,
     declared = _positive_int(env.get(WORKERS_ENV))
     if declared is not None:
         return declared
-    from_argv = workers_from_argv(argv)
-    if from_argv is not None:
-        return from_argv
+    flag_value = _workers_flag_value(argv)
+    if flag_value is not None:
+        return _positive_int(flag_value) or 1
     return _positive_int(env.get(WEB_CONCURRENCY_ENV)) or 1
 
 
@@ -493,6 +542,18 @@ if __name__ == "__main__":
     assert resolve_effective_workers({}, ["uvicorn", "a:a", "--workers", "+2"]) == 2
     assert resolve_effective_workers({"WEB_CONCURRENCY": " 2 "}, []) == 2
     assert workers_from_argv(["uvicorn", "a:a"]) is None
+
+    # A GIVEN --workers is final, even non-positive: $WEB_CONCURRENCY is only the
+    # flag's default, so it must not answer for a flag that already overruled it
+    # (measured: Config(workers=0).workers == 1 and Config(workers=-2).workers ==
+    # -2 with WEB_CONCURRENCY=4 exported — one in-process worker either way).
+    assert resolve_effective_workers(
+        {"WEB_CONCURRENCY": "4"}, ["uvicorn", "a:a", "--workers", "0"]) == 1
+    assert resolve_effective_workers(
+        {"WEB_CONCURRENCY": "4"}, ["uvicorn", "a:a", "--workers", "-2"]) == 1
+    # …but an EMPTY value is the shell's `-z` case, so the env still answers.
+    assert resolve_effective_workers(
+        {"WEB_CONCURRENCY": "4"}, ["uvicorn", "a:a", "--workers="]) == 4
 
     # reload is ONE worker even though it is supervised.
     assert reload_is_requested(["uvicorn", "a:a", "--reload"])
