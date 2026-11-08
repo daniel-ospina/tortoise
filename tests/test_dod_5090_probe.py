@@ -4529,12 +4529,12 @@ def _doc_section(text: str, start: str, end: str) -> str:
 # Window measured at THIS head over all 29 `must_red` rows: 0 and 2 leave the
 # must_red set fully RED (0/29 leak) and keep the real doc a HIT; **3 opens 2 of
 # 29**, starting with "are not missed by the walk". ⛔ Window 0 is not free
-# either, one set over: it wrongly REDS **9** of the 15 `declared_open` rows.
+# either, one set over: it wrongly REDS **10** of the 16 `declared_open` rows.
 # And since #11437's round-6 clause-scope rows landed, **window 1 is no longer
-# clean at all** — it wrongly REDS 3 of them: the two PSEUDO-CLEFT rows (`walk` is
+# clean at all** — it wrongly REDS 4 of them: the two PSEUDO-CLEFT rows (`walk` is
 # itself a coverage word, so the cleft's own SUBJECT satisfies the window and the
-# predicate needs the second word to find the real verb) and the `only ever`
-# ADVERB row. ⚠️ The double-negation and `without`-framed rows are GREEN at window
+# predicate needs the second word to find the real verb), the `only ever` ADVERB
+# row, and the NOUN complement (`not only the walk's business`). ⚠️ The double-negation and `without`-framed rows are GREEN at window
 # 1 AND at window 0 — their coverage verb sits adjacent to a negation (`not
 # visit`, `not true … not visit`), so they never depended on the extra word; an
 # earlier wording named them and was WRONG, which is why it is corrected here with
@@ -4584,8 +4584,8 @@ _NEGATION_GOVERNS = re.compile(
     r"(?:walk|visit|reach|report)(?:s|es|ed|ing)?\b")
 # ⛔ `_COVERAGE` is RETAINED DELIBERATELY AND IS CURRENTLY IMPLIED, and saying so
 # is the point (#11437 review, P3). Measured: `_NEGATION_GOVERNS` already requires
-# one of the same four verbs AFTER the negation, so on all 95 candidate sentences
-# (the 65 rows across the four sets, plus the 30 sentences of the real §3 under
+# one of the same four verbs AFTER the negation, so on all 99 candidate sentences
+# (the 69 rows across the four sets, plus the 30 sentences of the real §3 under
 # this predicate's own `split(". ")` segmentation) there is no case where the
 # governance test hits and this one does not — dropping the term from
 # `_residual_sentences` changes no verdict. It stays because it is the INDEPENDENT
@@ -4690,7 +4690,7 @@ _AFFIRMED = re.compile(
     #     "…are not merely outside the walk; the walk reports them"
     #     "the walk does not only ever visit …; it also reports them"
     #     "…are not simply outside the walk — the walk visits them"
-    #     -> the four `declared_open` rows labelled `open concessive: …`
+    #     -> the five `declared_open` rows labelled `open concessive: …`
     #   RED, the claim stated honestly — the false blocks this arm DOES buy:
     #     "…are never merely visited: they are never visited at all"
     #     "the gap is not merely walked past: … are not reported"
@@ -5244,6 +5244,24 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
             "it never reaches a nested `def`'s decorators and parameter defaults",
         "honest, third person of `report`":
             "the scan never reports a nested `def`'s decorators or defaults",
+        # ⛔ THE `ing` INFLECTION'S EXECUTOR (#11437 review, round 9, P2). The
+        # comment on the alternation quotes these three as measured RED under
+        # `(?:s|es|ed)?` and GREEN with `ing` — and until now that was the whole
+        # pin, so reverting ONE TOKEN reinstated three false blocks and the file
+        # stayed green (measured: the mutant passes 151/1 exactly like the head).
+        # `es` got exactly this treatment one inflection earlier (the `reach`
+        # row above); `ing` did not, and that asymmetry is the tell. Each row is
+        # GREEN here and RED under the `ing`-reverted mutant, so the revert now
+        # reds the row-set test.
+        "honest, present continuous: is not visiting":
+            "the walk is not visiting a nested `def`'s decorators and parameter "
+            "defaults",
+        "honest, present continuous: is not reporting":
+            "the walk is not reporting a nested `def`'s decorators and parameter "
+            "defaults",
+        "honest, present continuous: is not reaching":
+            "the walk is not reaching a nested `def`'s decorators and parameter "
+            "defaults",
     }
     for label, sentence in must_stay_green.items():
         assert sentence != original, f"green row {label!r} merely restates the claim"
@@ -5340,6 +5358,9 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
         "open concessive: reverser complement, privative second clause":
             "a nested `def`'s decorators and parameter defaults are not simply "
             "outside the walk — the walk visits them",
+        "open concessive: a NOUN complement (`not only the walk's business`)":
+            "a nested `def`'s decorators and parameter defaults are not only the "
+            "walk's business — the walk visits them",
     }
     for label, sentence in declared_open.items():
         assert sentence != original, f"decoy row {label!r} merely restates the claim"
