@@ -5360,6 +5360,22 @@ surfaces:
   - test_pack_hierarchy_11001.py
   - test_pack_kinds.py
   - test_pack_registry_gaps.py
+  # #11083: the per-pack relation census — HERMETIC half. Holds the committed
+  # artifact to a live re-derivation (declared / writable / effective_direction /
+  # written_label / declaration_only_reason / dangling), the derived denominator,
+  # and the vocabulary rulings (`produces` is a MEANING; `funds` stays a LABEL
+  # per #7848's correction). No DB, no graph, no network, no model. Registered at
+  # all because an unlisted file is a `manifest-integrity` red (#1262) AND runs
+  # in no leg (#1349/#2938).
+  - test_pack_logic_census_11083.py
+  # #11083: the GRAPH half — the census's `written` column over a real store,
+  # plus `produces` storing `<-` on the write leg. Its `sdk` fixture builds
+  # `TortoiseSDK(<tmpfile>)`, so a URI lane would redirect the construction and
+  # the assertions would be gone: it is a `carve_out:` member below and its stem
+  # is mirrored in `tests/_embedded.TEST_NO_REDIRECT_STEMS` (pinned by
+  # `test_ci_selection.py::test_carve_out_mirrors_test_no_redirect_stems`). This
+  # row is the `--integrity` CLASSIFICATION; `carve_out:` is what RUNS it.
+  - test_pack_logic_writeprobe_11083.py
   # #2818: the per-kind VALUE-FIELD declaration surface — `values` in
   # `pack_registry.VALID_KINDDEF_KEYS` with its closed vocabulary and
   # shape rules (`tortoise/pack_values.py`), threaded to the S2/S4 prompt
@@ -7492,6 +7508,11 @@ surfaces:
   # sdk.py diff selects the full matrix) plus the `tortoise_create_operator`
   # MCP declaration. Embedded-only (the fixture builds `TortoiseSDK(<tmpfile>)`
   # and replays the journal), so it is ALSO registered in `carve_out` below.
+  # #11083: the census's `written` column over a real store, and `produces`
+  # storing `<-` on the write leg (`tortoise/sdk.py`'s semantics→direction
+  # chain is the surface this pins). Embedded-only — the fixture builds
+  # `TortoiseSDK(<tmpfile>)` — so it is ALSO registered in `carve_out` below.
+  - test_pack_logic_writeprobe_11083.py
   - test_semantics_write_path_7852.py
   # #7852 v3.25: the four-value direction STORAGE vocabulary — every write path
   # accepts `->` / `<-` / `<->` / `-` and every reader normalizes through
@@ -8868,6 +8889,12 @@ carve_out:
 # fixture builds `TortoiseSDK(<tmpfile>)` and drives the real `rebuild_all`
 # replay, so the carve-out is load-bearing (a URI-set lane would redirect it).
 # Also in the `sdk` surface above, which is where the diff selects it.
+# #11083: the census's `written` column, over a real graph. The fixture builds
+# `TortoiseSDK(<tmpfile>)` and reads state back off that store, so a URI-set lane
+# would redirect the construction and the assertions would be gone. Mirrored in
+# tests/_embedded.TEST_NO_REDIRECT_STEMS (the pin is
+# test_ci_selection.py::test_carve_out_mirrors_test_no_redirect_stems).
+- test_pack_logic_writeprobe_11083.py
 - test_semantics_write_path_7852.py
 # #7852 v3.25: the four-value direction storage vocabulary is embedded-only —
 # the fixture builds `TortoiseSDK(<tmpfile>)` and reads EP message state off the
@@ -10361,6 +10388,22 @@ durations:
   test_onboarding_state.py: 0.1  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 0.3
   test_pack_content_v3.py: 0.1  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 0.3
   test_pack_registry_gaps.py: 0.6  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 0.4 — ci-timing junit-census+top-15 2026-11-02 (run 41375596528): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (0.5s) is a LOWER bound; kept 0.6
+  # #11083: hermetic (manifest YAML + pack_registry + the census tool). MEASURED
+  # locally at the review-fix head: whole file 6.06s. ⛔ The CASE COUNT lives in
+  # the row's own tail, not in a block above it: `_durations_row_comments` reads a
+  # row's tail plus the indented lines BELOW it, so a count cited in a comment
+  # above the row is invisible to `test_no_durations_row_states_a_stale_case_count`
+  # — measured: editing the count here left that pin green. `uv run python
+  # tools/ci_timing.py --refresh-durations` replaces this from junit once a
+  # push-to-main sweep includes it.
+  test_pack_logic_census_11083.py: 6.1  # #11083: 28 cases (`grep -c '^def test_'` -> 28; pytest collects 28). Stale-count guard applies through THIS row tail.
+  # #11083: the graph half. The reading is dominated by one-time embedded-store
+  # warmup on its first `create_entity` (~124s measured locally on the whole
+  # file); the probe itself adds ~2s over 42 rows. The WEIGHT is the higher of
+  # the readings measured at the two heads (132.9s before the review fixes,
+  # 131.89s after) rather than the tighter one, because a weight is the shard
+  # packer's input. Carve-out leg.
+  test_pack_logic_writeprobe_11083.py: 133.0  # #11083: 8 cases (`grep -c '^def test_'` -> 8; pytest collects 8).
   test_provisioning_edge_function.py: 0.1  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 0.2
   test_reader.py: 0.7  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (0.3s) is a LOWER bound; kept 0.7
   test_run_protocol.py: 0.2  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 0.3
