@@ -5756,7 +5756,7 @@ def test_a_DIRECTORY_in_the_ABSTAINING_tree_gets_the_FILE_arms_answer(
 
 
 def test_a_FAILED_ls_files_on_a_DIRECTORY_is_not_the_measured_no(monkeypatch, capsys):
-    """`ls-files` exit 128 is a FAILURE to answer, NOT the measured `no` (exit 1).
+    """Any non-zero `ls-files` on a directory is a FAILURE to answer, NOT the measured `no`.
 
     ⛔ THE CAUSE HALF of the finding, measured shape: with a corrupt `GIT_INDEX_FILE`,
     `git ls-files -- tests/` exits 128 while `rev-parse --is-inside-work-tree` still
@@ -5765,9 +5765,21 @@ def test_a_FAILED_ls_files_on_a_DIRECTORY_is_not_the_measured_no(monkeypatch, ca
     has"*, a cause git never gave. Same third collapsed cause `_tracked_unanswered`
     exists for, one probe over.
 
-    ⛔ AND rc 1 STAYS AN ANSWER. `git ls-files`' documented "nothing matched" exit is 1,
-    so routing it to the unanswered renderer would refuse a directory git had in fact
-    answered about — the false block this arm exists not to reintroduce.
+    ⛔ **rc 1 IS NOT AN ANSWER EITHER, AND THIS PIN USED TO CLAIM IT WAS (#11474
+    review).** It asserted `rc 1 -> measured False` on the strength of *"`git ls-files`'
+    documented 'nothing matched' exit is 1"*. The manual does not say that, and this was
+    verified against the primary source before the pin was changed:
+
+        $ man git-ls-files | grep -n 'return 1'
+        111:         (return 1).          # and line 109 puts it under --error-unmatch
+
+    `--error-unmatch` is the FILE arm's form (`_is_tracked`), not this one. MEASURED on
+    git 2.43.0 against a temp repo: this form (`git ls-files -- ':(literal)nope'`, no
+    `--error-unmatch`) exits **0** with empty stdout, while the same pathspec under
+    `--error-unmatch` exits 1. So rc 1 carries no documented meaning here and blaming
+    it as "holds no TRACKED file" prints a cause git never gave. Both exits still
+    REFUSE the row (fail-closed either way) — what changes is the sentence, which now
+    names the measurement instead of an inference.
     """
     import types
 
@@ -5799,11 +5811,16 @@ def test_a_FAILED_ls_files_on_a_DIRECTORY_is_not_the_measured_no(monkeypatch, ca
     err = capsys.readouterr().err
     assert "exited 128" in err, f"the per-path line must name the measurement it took: {err}"
 
-    # --- exit 1: the other MEASURED answer, and it may not become a refusal ---
+    # --- exit 1: NOT a documented answer for this form, so it may not borrow the
+    # measured sentence either (measured 2026-11-08, git 2.43.0: this form's miss is
+    # rc 0; the ONLY documented `return 1` belongs to `--error-unmatch`).
     monkeypatch.setattr(cl, "subprocess", types.SimpleNamespace(run=run_with(1)))
-    assert cl._is_tracked_dir(REPO_ROOT / "tests", REPO_ROOT) is False
+    assert cl._is_tracked_dir(REPO_ROOT / "tests", REPO_ROOT) is None
     ok, why = cl._names_artifact("tests", REPO_ROOT, REPO_ROOT)
-    assert ok is False and "holding no TRACKED file" in why, why
+    assert ok is False and "did not answer here" in why, why
+    assert "holding no TRACKED file" not in why, why
+    err = capsys.readouterr().err
+    assert "exited 1" in err, f"the per-path line must name the measurement it took: {err}"
 
     # --- exit 129 (a usage error, e.g. pre-2.11 `:(literal)`): unanswered, not `no`
     monkeypatch.setattr(cl, "subprocess", types.SimpleNamespace(run=run_with(129)))

@@ -1314,14 +1314,13 @@ def _is_tracked_dir(resolved: Path, root: Path) -> bool | None:
     so `_commit_state` answers `exists`, the row counts, and nothing was measured. A
     spawn failure is a REFUSAL (`_tracked_dir_unrunnable`), never an abstention.
 
-    ⛔ `returncode == 0` WITH OUTPUT IS THE MEASUREMENT. The two "no" answers — **rc 0
-    with empty stdout** (measured on git 2.43.0 against an empty directory and an
-    untracked one; this form passes no `--error-unmatch`, so a miss is rc 0, not 1) and
-    **rc 1** (`git ls-files`' documented "nothing matched") — are measurements **only
+    ⛔ `returncode == 0` WITH OUTPUT IS THE MEASUREMENT. This form's ONE "no" answer is
+    **rc 0 with empty stdout** (measured on git 2.43.0 against an empty directory and an
+    untracked one), and it is a measurement **only
     once git is shown to be answering for a WORK TREE**, and the gate on that is the
     same `rev-parse --is-inside-work-tree` probe the file arm uses. ⛔ THAT GATE WAS
     MISSING (#11474 round-3 review, the parity this docstring claimed but the code did
-    not deliver): it answered both from the exit code alone, so in the tree this file's
+    not deliver): it answered from the exit code alone, so in the tree this file's
     own ABSTAINING pin describes the two probes judged ONE tree TWO WAYS. MEASURED on
     git 2.43.0 over a bare repo reached by `GIT_DIR` (the pin's own fixture):
 
@@ -1334,15 +1333,29 @@ def _is_tracked_dir(resolved: Path, root: Path) -> bool | None:
     MEASURED "holds no TRACKED file" and REFUSED the row — with a cause git never gave:
     git could not answer about a work tree at all, and a reader's clone does hold those
     files. Fail-closed, so not a fail-open, but it is exactly the fork the `pytest tests/`
-    paragraph below forbids, produced by this probe. Both no-answers now route through
+    paragraph below forbids, produced by this probe. The no-answer now routes through
     the probe: `true` -> measured `False` (today's behaviour, preserved), anything else
     -> `_tracked_unprovable(probe)`, so the verdict follows the recorded decision
-    instead of this arm inventing its own. Every other non-zero (128/129: an unreadable
-    index, a bad repo, a usage error) is routed to `_tracked_dir_unanswered` — ⛔ NOT to
-    the measured sentence: with a corrupt `GIT_INDEX_FILE`, `ls-files -- tests/` exits
-    128 while `rev-parse --is-inside-work-tree` still answers `true` rc 0, so reading
-    that non-zero as "holds no TRACKED file" tells the reader a cause git never gave —
-    the third collapsed cause this PR removes, one probe over.
+    instead of this arm inventing its own.
+
+    ⛔ **rc 1 IS NOT A MEASURED "no" FOR THIS FORM, AND AN EARLIER REVISION OF THIS
+    FUNCTION SAID IT WAS (#11474 review).** That revision read `proc.returncode in (0,
+    1)` and justified rc 1 as *"`git ls-files`' documented 'nothing matched'"*. The
+    manual does not say that: `man git-ls-files` on git 2.43.0 carries exactly ONE
+    `return 1`, and it is **`--error-unmatch`'s** ("If any `<file>` does not appear in
+    the index, treat this as an error (return 1)") — the form the FILE arm passes, not
+    this one. MEASURED against a temp repo: this form (`git ls-files -- ':(literal)nope'`,
+    no `--error-unmatch`) exits **0** with empty stdout; the same pathspec under
+    `--error-unmatch` exits 1. So rc 1 carries no documented meaning here, and blaming
+    it as "holds no TRACKED file" prints a cause git never gave — the exact defect this
+    PR removes, one exit code over. `returncode == 0` is now the ONLY measured miss;
+    every other non-zero (1, 128, 129 — an unreadable index, a bad repo, a usage error)
+    is routed to `_tracked_dir_unanswered`, which prints the measured exit code and
+    refuses the row. ⛔ NOT to the measured sentence: with a corrupt `GIT_INDEX_FILE`,
+    `ls-files -- tests/` exits 128 while `rev-parse --is-inside-work-tree` still answers
+    `true` rc 0, so reading a non-zero as "holds no TRACKED file" tells the reader a
+    cause git never gave. The verdict is fail-closed either way — only the sentence it
+    prints changes, and it now names the measurement instead of an inference.
 
     ⛔ `-- <rel>` IS A PATHSPEC HERE TOO, AND THAT DIRECTION WAS LIVE (#11474 review,
     the same defect the file probe's `:(literal)` closes). MEASURED on git 2.43.0: with
@@ -1400,13 +1413,15 @@ def _is_tracked_dir(resolved: Path, root: Path) -> bool | None:
     except OSError as exc:
         return _tracked_dir_unrunnable(exc, rel)
     if probe.returncode == 0 and probe.stdout.strip() == "true":
-        if proc.returncode in (0, 1):
-            # Git IS here, it ran, and it ANSWERED "nothing matched" — rc 0 with empty
-            # stdout is this form's miss, rc 1 is `ls-files`' documented one. Blame it.
+        if proc.returncode == 0:
+            # Git IS here, it ran, and it ANSWERED "nothing matched": for this form
+            # (no `--error-unmatch`) the miss is rc 0 with empty stdout, and it is the
+            # ONLY exit the manual documents as an answer here. Blame it.
             return False
-        # Git IS here but failed to answer for this directory (128/129). Nothing was
-        # measured, and the row may not borrow the measured-"holds no TRACKED file"
-        # sentence for it.
+        # Git IS here but exited non-zero for this directory. Nothing was measured, and
+        # the row may not borrow the measured-"holds no TRACKED file" sentence: rc 1
+        # carries no documented meaning for this form (measured 2026-11-08, git
+        # 2.43.0: a miss is rc 0), and 128/129 are failures to answer at all.
         return _tracked_dir_unanswered(proc.returncode, rel)
     # Hand the probe to the renderer so the NOTE names the cause THAT WAS MEASURED.
     return _tracked_unprovable(probe)
