@@ -481,18 +481,11 @@ DOOR_PINNED_OFF = ("TORTOISE_SESSION_EXTRACTOR", "TORTOISE_EXTRACTOR",
 #: ``=0`` silently swaps S4's output contract for the legacy complete-list one,
 #: which changes the embed list a run measures without changing the arm.
 #:
-#: ``TORTOISE_STATE_VALUE_VERBATIM`` (#10360) is the same class and was the ONE
-#: read on the capture path the closure had not classified — it is read PER POINT
-#: at the emit site (``extractor_v2._state_value_verbatim_enforced``, through the
-#: ``env_truthy`` contract, so unset/blank/unparseable resolves **ON**) and it
-#: decides whether a REWRITTEN value is WITHHELD. An ambient ``=0`` disarms the
-#: refusal, so the value is written instead and the graph the run measures gains
-#: content the shipped default refuses — a population that moved for a reason the
-#: ``door:`` line would not show. Pinned to the SHIPPED default rather than off,
-#: for the same reason as ``TORTOISE_S4_DELTA``: here the NON-neutral state is
-#: ``0``. (Found by
-#: ``tests/test_7949_c2_door.py::test_every_env_var_the_capture_path_reads_is_accounted_for``,
-#: which reds until every read is classified — pin, ledger, or named input.)
+#: ``TORTOISE_STATE_VALUE_VERBATIM`` (#10360) is the same class, and the one read
+#: the closure had left unclassified: read PER POINT at the emit site
+#: (``extractor_v2._state_value_verbatim_enforced``, ``env_truthy``, so absent
+#: resolves ON), it decides whether a REWRITTEN value is WITHHELD — ``=0`` writes
+#: what the default withholds. Pinned to the SHIPPED default, not off.
 DOOR_PINNED_ON = (("TORTOISE_S4_DELTA", "1"), ("TORTOISE_JSON_MODE", "1"),
                   ("TORTOISE_STATE_VALUE_VERBATIM", "1"),
                   # cycle 9 (#10983): `sparse.py:226` `env_flag(IDENTIFIER_ENV,
