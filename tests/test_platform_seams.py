@@ -679,12 +679,104 @@ def test_install_cline_refuses_when_clinerules_is_a_rules_file(tmp_path):
     for r in (dry, real):
         assert r.returncode == 1, (r.returncode, r.stdout, r.stderr)
         assert "Install failed:" in r.stderr
-        assert "regular file" in r.stderr
+        assert "not a directory" in r.stderr
         assert "Traceback" not in r.stderr
     assert "would write" not in dry.stdout
     # Nothing was created, and the user's rules file is untouched.
     assert rules.is_file()
     assert rules.read_text() == "Always use TypeScript."
+
+
+def test_install_cline_refuses_a_dangling_clinerules_symlink(tmp_path):
+    """An IN-ROOT DANGLING `.clinerules` symlink: the symlink-escape guard
+    lets it through (its target resolves inside the root), `exists()` reports
+    it ABSENT, and `mkdir` still refuses to create a directory over the link.
+
+    So the existence-only check was a FALSE PASS for this shape — `--dry-run`
+    printed `would write` and exited 0 while the real run died on
+    `FileExistsError` (measured, #11588 review cycle 2). ``is_symlink()``
+    closes it, which is what makes R7's "prediction and real run agree"
+    invariant true for every shape and not just regular files.
+    """
+    (tmp_path / ".clinerules").symlink_to("nope")
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+    dry = _run(["install", "cline", "--dir", str(tmp_path), "--dry-run"], env)
+    real = _run(["install", "cline", "--dir", str(tmp_path)], env)
+    for r in (dry, real):
+        assert r.returncode == 1, (r.returncode, r.stdout, r.stderr)
+        assert "Install failed:" in r.stderr
+        assert "not a directory" in r.stderr
+        assert "Traceback" not in r.stderr
+    assert "would write" not in dry.stdout
+
+
+def test_install_cline_migrates_a_legacy_registration_whose_script_path_lives(
+        tmp_path):
+    """A pre-#2124 registration names the script path of the release that
+    wrote it — and that path still EXISTS whenever the old install does (an
+    upgrade that recreates the venv, a second checkout, a retained `uv tool`
+    environment).
+
+    The sibling tests all use `/nonexistent/volunteer-turn.sh` (a DEAD path),
+    where identity and provenance agree. For a LIVE old path they disagree,
+    and the strict rule reads OUR OWN file as foreign: install leaves BOTH
+    hooks live — the SDK/CLI reads both dirs, so the reflex injects twice —
+    and `--uninstall` exits 0 over a hook that still fires. The legacy path is
+    judged by PROVENANCE for exactly this reason; the LIVE target keeps the
+    strict rule, which `test_install_cline_refuses_overwrite_of_foreign_hook`
+    pins.
+
+    MUTATION: judge the legacy path by identity → RED on both assertions.
+    """
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+    old_install = tmp_path / "old-install"
+    old_install.mkdir()
+    old_script = old_install / "volunteer-turn.sh"
+    old_script.write_text(_HOOK.read_text())
+    os.chmod(old_script, 0o755)
+    marker = f"#!/usr/bin/env bash\nexec {old_script} cline\n"
+    legacy = tmp_path / ".cline" / "hooks" / "UserPromptSubmit"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text(marker)
+    os.chmod(legacy, 0o755)
+
+    r = _run(["install", "cline", "--dir", str(tmp_path)], env)
+    assert r.returncode == 0, r.stderr
+    assert (tmp_path / ".clinerules" / "hooks" / "UserPromptSubmit").is_file()
+    assert not legacy.exists(), (
+        "our own legacy registration (its script path still on disk) was left "
+        "live alongside the new one — the reflex would inject twice")
+
+    # …and an uninstall must not report success over it either.
+    legacy.write_text(marker)
+    os.chmod(legacy, 0o755)
+    u = _run(["install", "cline", "--dir", str(tmp_path), "--uninstall"], env)
+    assert u.returncode == 0, u.stderr
+    assert not legacy.exists(), "uninstall leaked a live-path legacy marker"
+
+
+def test_install_cline_ignores_a_directory_at_the_legacy_path(tmp_path):
+    """A DIRECTORY at the LEGACY path is only reported by an install (which
+    never unlinks it), so it must not refuse an install that does not touch
+    it — before #2124 the legacy path was not an install input at all.
+
+    MUTATION: guard `cline_paths` (target AND legacy) → RED: an otherwise
+    perfect install refuses with "is a directory" (measured rc=1).
+    """
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+    legacy = tmp_path / ".cline" / "hooks" / "UserPromptSubmit"
+    legacy.mkdir(parents=True)
+
+    r = _run(["install", "cline", "--dir", str(tmp_path)], env)
+    assert r.returncode == 0, r.stderr
+    assert (tmp_path / ".clinerules" / "hooks" / "UserPromptSubmit").is_file()
+    assert legacy.is_dir(), "a directory at the legacy path was not left alone"
+
+    # …while an UNINSTALL still refuses: `.unlink()` on a directory raises.
+    u = _run(["install", "cline", "--dir", str(tmp_path), "--uninstall"], env)
+    assert u.returncode == 1, (u.returncode, u.stdout, u.stderr)
+    assert "is a directory" in u.stderr
+    assert "Traceback" not in u.stderr
 
 
 def test_volunteer_turn_hook_no_interpreter_fails_open(tmp_path):
@@ -1260,7 +1352,7 @@ _BOUNDARY_CASES = [
     # report, so the prediction never promises a write that cannot happen.
     ("cline-clinerules-as-rules-file", "cline",
      lambda r: (r / ".clinerules").write_text("x"),
-     ["Install failed:", "regular file"]),
+     ["Install failed:", "not a directory"]),
 ]
 
 

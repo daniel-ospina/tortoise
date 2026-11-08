@@ -6136,7 +6136,7 @@ def _install_read_hook_impl(args) -> int:
         print(f"No {harness} registration at {target} — nothing to remove.")
         return 0
 
-    def _cline_marker_owns(text: str) -> bool:
+    def _cline_marker_owns(text: str, *, relocated_ok: bool = False) -> bool:
         """True iff ``text`` carries OUR registration LINE — ``exec
         <…volunteer-turn.sh> cline`` — not merely a mention of the script.
 
@@ -6145,6 +6145,19 @@ def _install_read_hook_impl(args) -> int:
         exact shipped path OR a DEAD path (a stale marker from a relocated
         install — cline's self-heal rewrites it). A comment/echo mention, a
         different product's LIVE hook, and malformed lines are NOT ours.
+
+        ``relocated_ok`` loosens ONLY the liveness clause, and ONLY for the
+        LEGACY path (#11588 review cycle 2). A pre-#2124 registration names the
+        script path of the release that wrote it, and that path still EXISTS
+        whenever the old install does (an upgrade that recreates the venv, a
+        second checkout, a retained `uv tool` environment). Strict identity
+        then reads OUR OWN old file as foreign, which leaves it live ALONGSIDE
+        the new one — the SDK/CLI reads both dirs, so the reflex injects twice
+        — and lets ``--uninstall`` exit 0 over a hook that still fires. For a
+        path we are RETIRING the right question is provenance, not identity:
+        any ``…/volunteer-turn.sh <harness>`` invocation is this installer's
+        registration, wherever it points. The LIVE target keeps the strict
+        rule, because there a user's own wrapper must never be overwritten.
         """
         for raw_line in text.splitlines():
             line = raw_line.strip()
@@ -6156,10 +6169,13 @@ def _install_read_hook_impl(args) -> int:
                 continue
             if toks and toks[0] == "exec":
                 toks = toks[1:]
-            if (len(toks) == 2 and toks[1] == harness
-                    and toks[0].endswith("volunteer-turn.sh")
-                    and (toks[0] == str(script)
-                         or not Path(toks[0]).exists())):
+            if not (len(toks) == 2 and toks[1] == harness
+                    and toks[0].endswith("volunteer-turn.sh")):
+                continue
+            if relocated_ok or toks[0] == str(script):
+                return True
+            # A DEAD path: a stale marker from a relocated install.
+            if not Path(toks[0]).exists():
                 return True
         return False
 
@@ -6172,7 +6188,15 @@ def _install_read_hook_impl(args) -> int:
         # Hooks must also be enabled in Cline settings.
         marker_content = f"#!/usr/bin/env bash\nexec {quoted_script} cline\n"
         cline_paths = [p for p in (target, legacy_target) if p is not None]
-        for p in cline_paths:
+        # A directory where the REGISTRATION belongs is a refusal for a path
+        # this operation WRITES or UNLINKS — not for one it merely inspects.
+        # The legacy path is unlinked by an uninstall and only REPORTED by an
+        # install, so a directory there must not block an install that never
+        # touches it; before #2124 the legacy path was not an install input at
+        # all, and refusing over it regressed such a project (#11588 review
+        # cycle 2 — measured: rc=1 with a directory at `.cline/hooks/
+        # UserPromptSubmit` and an otherwise perfect `.clinerules/hooks`).
+        for p in ([target] + ([legacy_target] if uninstall else [])):
             if p.exists() and p.is_dir():
                 print(f"{p} is a directory — refusing to touch it.",
                       file=_sys.stderr)
@@ -6198,37 +6222,50 @@ def _install_read_hook_impl(args) -> int:
                 return 1
 
         def _cline_owns_path(p: Path) -> bool:
-            """Ownership of the registration at ``p`` (unreadable → not ours)."""
+            """Ownership of the registration at ``p`` (unreadable → not ours).
+
+            The LIVE target is judged strictly (identity, or a dead path); the
+            LEGACY path by PROVENANCE, so a registration written by an older
+            release whose script path still exists is still OURS (#11588 review
+            cycle 2 — otherwise the migration skips it, both files stay live
+            and the reflex injects twice).
+            """
             try:
                 return _cline_marker_owns(
-                    p.read_text(encoding="utf-8", errors="replace"))
+                    p.read_text(encoding="utf-8", errors="replace"),
+                    relocated_ok=(p == legacy_target))
             except OSError:
                 return False
 
         # `.clinerules` is ALSO Cline's rules-FILE convention (the single-file
         # form predates the `.clinerules/` directory its docs prescribe today),
-        # so a project can already hold a REGULAR FILE at that name. Then
-        # `<dir>/.clinerules/hooks` is unrepresentable and the write below can
-        # only die on ``NotADirectoryError`` — an errno that names neither the
-        # cause nor the remedy. It also made ``--dry-run`` a FALSE PASS: it
-        # printed `would write` and exited 0 for an install that cannot happen
+        # so a project can already hold a REGULAR FILE at that name — or a
+        # DANGLING symlink, which `exists()` reports as absent while `mkdir`
+        # below still refuses it. Then `<dir>/.clinerules/hooks` is
+        # unrepresentable and the write can only die on ``NotADirectoryError``
+        # / ``FileExistsError`` — errnos naming neither the cause nor the
+        # remedy. It also made ``--dry-run`` a FALSE PASS: it printed
+        # `would write` and exited 0 for an install that cannot happen
         # (measured: `.clinerules` as a file → dry-run exit 0, real run
-        # NotADirectoryError). Refuse up front, before the dry-run report, so
-        # the prediction and the real run agree. A silent fall back to the
-        # SDK/CLI-only legacy path is the very defect #2124 repairs, so the
-        # refusal says what to do instead. Uninstall is unaffected: it never
-        # creates a directory, and a legacy registration must still be
+        # NotADirectoryError; the dangling-symlink shape → dry-run exit 0,
+        # real run FileExistsError). Refuse up front, before the dry-run
+        # report, so the prediction and the real run agree. A silent fall back
+        # to the SDK/CLI-only legacy path is the very defect #2124 repairs, so
+        # the refusal says what to do instead. Uninstall is unaffected: it
+        # never creates a directory, and a legacy registration must still be
         # removable from such a project.
         clinerules = root / ".clinerules"
-        if not uninstall and clinerules.exists() and not clinerules.is_dir():
-            print(f"Install failed: {clinerules} is a regular file, so Cline's "
-                  "hooks directory "
-                  f"{target.parent} cannot be created. Cline reads hooks only "
-                  "from a .clinerules/ DIRECTORY — and that same name is also "
-                  "where its rules live (as markdown files inside the "
-                  "directory). Move the file's contents to "
-                  f"{clinerules}/rules.md, or point --dir at a project whose "
-                  ".clinerules is a directory.", file=_sys.stderr)
+        if (not uninstall
+                and (clinerules.exists() or clinerules.is_symlink())
+                and not clinerules.is_dir()):
+            print(f"Install failed: {clinerules} is not a directory, so "
+                  f"Cline's hooks directory {target.parent} cannot be created. "
+                  "Cline reads hooks only from a .clinerules/ DIRECTORY, and "
+                  "its rules live there as markdown files — so a REGULAR FILE "
+                  "at that name (Cline's other rules convention) must be moved "
+                  f"to {clinerules}/rules.md, and a symlink must resolve to a "
+                  "directory. Or point --dir at a project whose .clinerules "
+                  "is a directory.", file=_sys.stderr)
             return 1
 
         if dry:

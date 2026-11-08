@@ -82,7 +82,11 @@ hook script as a module. No MCP tool or public SDK method is touched.
    Test: install writes the new path; a foreign hook there is still refused.
 4. **Legacy migration.** On install, remove our own `.cline/hooks/UserPromptSubmit` (ownership-checked
    via the existing `_cline_marker_owns`); on uninstall, remove it too. A *foreign* file at either path
-   is never deleted. Test: migration removes ours and leaves a foreign one.
+   is never deleted. The LEGACY path is judged by **provenance** — any `…/volunteer-turn.sh cline`
+   invocation, wherever it points — because a pre-#2124 marker names the script path of the release
+   that wrote it and that path still exists when the old install does; identity there reads our own
+   file as foreign and leaves both hooks live. The LIVE target keeps the strict identity rule.
+   Test: migration removes ours (dead **and** live script path) and leaves a foreign one.
 5. **Docs.** Correct the `#2124 Cline` matrix row and add a correction-log entry for this pass.
 6. **Suites.** `.venv/bin/python -m pytest tests/test_platform_seams.py` plus the installer suites that
    reference the hook.
@@ -101,13 +105,22 @@ hook script as a module. No MCP tool or public SDK method is touched.
 - R3 `install cline` writes where no Cline surface reads → caught by asserting the install target is
   `<dir>/.clinerules/hooks/UserPromptSubmit`.
 - R4 Migration deletes a user's own hook → caught by the foreign-hook refusal test at the legacy path.
-- R5 Uninstall leaves our file behind at either path → caught by uninstall assertions on both paths.
+- R5 Uninstall leaves our file behind at either path → caught by the uninstall assertions on both
+  paths **including a live old script path** (`test_install_cline_migrates_a_legacy_registration_whose_script_path_lives`,
+  which also pins the install-side migration for that shape — the dead-path form alone let a live one
+  slip through and leave both hooks injecting twice).
 - R6 A regression in the other harness arms (`claude|codex|devin` share one arm) → caught by their
   unchanged contract tests in the same file.
 - R7 A project whose `.clinerules` is a rules FILE (Cline's other rules convention) gets an install
   that dies on `NotADirectoryError` — or a `--dry-run` that promises a write it cannot perform →
   caught by `test_install_cline_refuses_when_clinerules_is_a_rules_file`, which asserts BOTH runs
-  refuse with the actionable message and that the dry run prints no `would write`.
+  refuse with the actionable message and that the dry run prints no `would write`. The DANGLING-symlink
+  form of the same false pass (a link `exists()` reports absent but `mkdir` still refuses) is caught by
+  `test_install_cline_refuses_a_dangling_clinerules_symlink` — that one makes the prediction/real-run
+  agreement hold for every shape, not just regular files.
+- R8 A DIRECTORY at the LEGACY path refuses an install that never touches it → caught by
+  `test_install_cline_ignores_a_directory_at_the_legacy_path` (install succeeds, directory untouched;
+  `--uninstall` still refuses, because `unlink` on a directory raises).
 
 **Threat classes:** (not adversarial) — not gate/enforcement code.
 
