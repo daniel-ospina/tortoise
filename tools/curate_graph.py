@@ -84,8 +84,12 @@ def _is_row_listing(res: Any) -> bool:
         return False
     if any(isinstance(res.get(k), list) for k in _ROW_KEYS):
         return True
-    return any(isinstance(res.get(k), int) and not isinstance(res.get(k), bool)
-               for k in ("total", "count", "totalSources"))
+    # A COUNT-ONLY payload is readable only when it says ZERO. `{"total": 1578}` with
+    # no rows means the LISTING did not arrive, and accepting it reported
+    # `sources_read: 0` with exit 0 and only a gap to notice — the shape this guard
+    # exists for (round-37 review, P3-3).
+    counts = [res.get(k) for k in ("total", "count", "totalSources")]
+    return any(isinstance(c, int) and not isinstance(c, bool) and c == 0 for c in counts)
 
 
 class MCPReader:
@@ -538,9 +542,15 @@ def cmd_plan(args: argparse.Namespace) -> int:
     sources, source_total = reader.read_sources()
     gap = _source_gap(counts, len(sources))
     unreconciled = _unreconciled_sources(len(sources), gap)
-    if unreconciled:
+    if unreconciled and not C.off_switch_active(args.off):
         print(f"REFUSED: {unreconciled}", file=sys.stderr)
         return 3
+    if unreconciled:
+        # ⛔ A DISARMED run stays a success (exit 0): the operator asked for nothing to
+        # be written, and reporting a REFUSAL for it is the round-22 defect (a driver
+        # pages on a run that did exactly what it was told). The unmeasurable census
+        # still travels on the artifact rather than being swallowed.
+        reader._note(unreconciled)
     graphs = reader.graphs()
     plan = C.build_plan(points + sources, source_graph=args.graph or "(credential-bound)",
                         target_graph=args.target)

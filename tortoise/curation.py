@@ -1218,43 +1218,72 @@ class IngestWriter:
             raise CurationRefused(refused, written_keys=written)
         return res
 
+#: The fields a row exposes as REFS that `mcp_auth.resolve_graph_target` accepts for
+#: the graph that row describes. Used verbatim (never `_tail`-derived): see
+#: `ledger_scopes` for why an id-space value must never enter a match set.
+_IDENTITY_REF_FIELDS = ("graph_id", "stable_id", "namespace", "name")
+
+
 def ledger_scope(
     target_graph: str,
     graph_rows: Sequence[Mapping[str, Any]] | None = None,
 ) -> str:
-    """The canonical key a ledger record is WRITTEN under for ``target_graph``.
+    """The value a ledger record is WRITTEN under for ``target_graph``.
 
     Scoping the ledger by the LITERAL spelling the operator typed let one graph have
     several scopes: ``--target org_x_g_new`` on day one and ``--target g_new`` on day
     two read as two different targets, so every row was re-sent and the half of
     idempotency that "skips a migrated key before it reaches the wire" was gone (the
     guarantee then rested entirely on target-side dedup, and ``tortoise_ingest`` is
-    explicitly NOT declared idempotent). Resolving to the canonical id closes that.
+    explicitly NOT declared idempotent).
 
-    Falls back to the spelling when the identity cannot be established — an
-    unresolvable ref must not silently inherit another graph's ledger, and
-    ``assert_distinct_graphs`` is what refuses an unproven identity before any write.
+    The recorded key is the resolved ROW's own ``graph_id`` (else ``stable_id``, else
+    ``namespace``) — a REF, never `_tail`'s derived identity. ⛔ An id-space value in
+    this position is a fail-OPEN: `mcp_auth` resolves a bare token by graph NAME, so
+    recording graph A under its tail ``x`` made a later ``--target x`` (which resolves
+    to a DIFFERENT graph named `x`) share A's scope and skip every row into it.
+
+    Falls back to the spelling when no row resolves it — an unresolvable ref must not
+    silently inherit another graph's ledger, and ``assert_distinct_graphs`` is what
+    refuses an unproven identity before any write.
     """
-    return canonical_graph_id(target_graph, graph_rows) or target_graph
+    row = _matched_row(target_graph, graph_rows) if graph_rows else None
+    if row is not None:
+        for field in ("graph_id", "stable_id", "namespace"):
+            val = row.get(field)
+            if val and str(val).strip():
+                return str(val)
+    return target_graph
 
 
 def ledger_scopes(
     target_graph: str,
     graph_rows: Sequence[Mapping[str, Any]] | None = None,
 ) -> frozenset[str]:
-    """Every spelling a ledger must MATCH for ``target_graph`` — the spelling itself
-    plus its canonical id when that is resolvable.
+    """Every spelling a ledger must MATCH for ``target_graph``.
 
     Matching is a set intersection, not equality, on purpose: one side of a comparison
     may carry ``graph_rows`` and the other may not (a `Ledger` built directly in a
     test, a run whose `graphs` section was unreadable), and equality on a single
     computed key would then refuse a ledger that is in fact this graph's — a false
     block on the one guard that protects the "skipped before the wire" half of R3.
-    Records are WRITTEN under ``ledger_scope`` (the canonical form), and any spelling
-    resolves back to it.
+
+    ⛔ THE SET IS REFS, NOT IDENTITIES. It is the literal spelling plus the spelling
+    fields of the row that spelling RESOLVES THROUGH (`_matched_row`) — the refs
+    `mcp_auth.resolve_graph_target` accepts for that one graph, and nothing derived.
+    Putting `_tail`'s identity in the set inverted this guard's error direction: a bare
+    tail is id-SHAPED but is resolved by the real path as a NAME, so graph A's tail
+    ``x`` matched a request for the different graph NAMED ``x`` and the run reported
+    `applied: True, written: 0` over a target that owed every row (round-37 review,
+    P2). Row fields cannot do that: two different rows have different
+    ``graph_id``/``stable_id``/``namespace``, so their sets are disjoint.
     """
-    canon = canonical_graph_id(target_graph, graph_rows)
-    return frozenset({target_graph, canon} if canon else {target_graph})
+    refs = {target_graph}
+    row = _matched_row(target_graph, graph_rows) if graph_rows else None
+    if row is not None:
+        refs.update(str(row[f]).strip() for f in _IDENTITY_REF_FIELDS
+                    if row.get(f) and str(row[f]).strip())
+    return frozenset(refs)
 
 
 class Ledger:

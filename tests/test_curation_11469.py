@@ -2494,3 +2494,109 @@ def test_a_ledger_scoped_to_another_graph_is_still_refused(tmp_path):
                         source_graph="org_x_g_b", target_graph="org_x_g_b")
     with pytest.raises(C.CurationRefused, match=r"scoped to"):
         C.run_plan(plan, writer=CountingWriter(), ledger=led, apply=True, graph_rows=rows)
+
+
+def test_a_count_only_source_listing_with_no_rows_is_refused():
+    """Round-37 P3-3 — `{"total": 1578}` with no rows is a listing that did not arrive.
+
+    The count-only arm accepted ANY integer, so this payload passed the shape gate,
+    read 0 rows and exited 0 with only `source_count_gap: 1578` to notice — the
+    drifted-listing shape the gate exists for.
+    """
+    mod = _tool_module()
+    reader = mod.MCPReader(lambda name, args: {"total": 1578}, None)
+    with pytest.raises(RuntimeError, match="unrecognised shape"):
+        reader.read_sources()
+
+
+def test_a_count_only_listing_that_says_zero_is_a_readable_empty_listing():
+    """The same arm's honest case: a count of 0 IS consistent with no rows."""
+    mod = _tool_module()
+    reader = mod.MCPReader(lambda name, args: {"total": 0}, None)
+    rows, total = reader.read_sources()
+    assert rows == [] and total == 0
+
+
+def test_a_disarmed_run_over_an_unmeasurable_census_still_exits_zero(monkeypatch, tmp_path,
+                                                                     capsys):
+    """Round-37 P3-2 — precedence between the off switch and the census refusal.
+
+    A disarmed run is a SUCCESS (exit 0) — the round-22 contract — so the zero-source
+    refusal must not fire ahead of it. The unmeasurable census is not swallowed: it
+    travels on the artifact as a read note.
+    """
+    mod = _tool_module()
+
+    def call(name, args):
+        if name == "tortoise_query":
+            return {"result": [{"id": "p1", "kind": "decision", "content": "c"}], "total": 1}
+        if args.get("section") == "sources":
+            return {"result": []}
+        if args.get("section") == "status":
+            return {"unexpected": "shape"}          # nothing to reconcile the empty listing
+        return {"result": []}
+    monkeypatch.setattr(mod, "_live_call_tool", call)
+    rc = mod.main(["plan", "--graph", "org_x_g_old", "--target", "org_x_g_new",
+                   "--apply", "--off", "--no-verify-read",
+                   "--ledger", str(tmp_path / "l.jsonl"), "--out", str(tmp_path / "p.json")])
+    assert rc == 0, capsys.readouterr()
+    assert "disarmed" in capsys.readouterr().err
+    note = json.loads((tmp_path / "p.json").read_text())["read_note"]
+    assert note and "cannot be told from an unread one" in note, note
+
+
+def test_the_cli_hands_the_graph_rows_to_the_ledger_scope(monkeypatch, tmp_path):
+    """Round-37 P3-4 — P3-5's pin sits one layer BELOW the shipped path.
+
+    Both unit arms build `C.Ledger(..., graph_rows=…)` themselves, so deleting the
+    `graph_rows=graphs` wiring in `tools/curate_graph.py` left them green while the
+    shipped CLI recorded under the literal spelling and re-sent every row on the next
+    run under another spelling. This drives `mod.main` twice over ONE ledger.
+    """
+    mod = _tool_module()
+    rows = [{"graph_id": "g_old", "stable_id": "g_old", "namespace": "org_x_g_old"},
+            {"graph_id": "g_new", "stable_id": "g_new", "namespace": "org_x_g_new"}]
+    wire: list[str] = []
+
+    def call(name, args):
+        if name == "tortoise_graph_overview" and args.get("section") == "graphs":
+            return {"result": rows}
+        if name == "tortoise_graph_overview" and args.get("section") == "status":
+            return {"counts": {"Source": 0}}
+        if name == "tortoise_query":
+            return {"result": [{"id": "p1", "kind": "decision",
+                                "content": "a durable claim"}], "total": 1}
+        if name == "tortoise_ingest":
+            wire.append(args["graph"])
+            return {"created": len(args["bundle"]["points"])}
+        return {"result": []}
+    monkeypatch.setattr(mod, "_live_call_tool", call)
+    base = ["plan", "--graph", "org_x_g_old", "--ledger", str(tmp_path / "l.jsonl"),
+            "--out", str(tmp_path / "p.json"), "--no-verify-read", "--apply"]
+    assert mod.main([*base, "--target", "org_x_g_new"]) == 0
+    assert wire == ["org_x_g_new"], wire
+
+    # the same graph, spelled the way a shorter ref resolves the next day
+    assert mod.main([*base, "--target", "g_new"]) == 0
+    assert wire == ["org_x_g_new"], f"the re-run re-sent the row: {wire}"
+    run = json.loads((tmp_path / "p.json").read_text())["run"]
+    assert (run["written"], run["skipped_known"]) == (0, 1), run
+
+
+def test_the_ledger_never_matches_a_different_graph_by_a_bare_tail():
+    """Round-37 P2 — an id-space value in the match set is a fail-OPEN.
+
+    `mcp_auth` resolves a bare token by graph NAME, so recording graph A under its
+    `_tail` identity `x` made a later `--target x` — which resolves to a DIFFERENT
+    graph NAMED `x` — share A's scope and skip every row into a target that owed all
+    of them (`applied: True, written: 0`, exit 0).
+    """
+    rows = [{"graph_id": "g_x", "stable_id": "g_x", "namespace": "org_o1_g_x",
+             "name": "alpha"},
+            {"graph_id": "g_b", "stable_id": "g_b", "namespace": "org_o1_g_b",
+             "name": "x"}]
+    # graph A records under its own id field, never under the derived tail
+    assert C.ledger_scope("org_o1_g_x", rows) == "g_x"
+    # and its scope set is REFS of its own row — a different row shares none of them
+    assert C.ledger_scopes("org_o1_g_x", rows).isdisjoint(C.ledger_scopes("x", rows)), (
+        C.ledger_scopes("org_o1_g_x", rows), C.ledger_scopes("x", rows))
