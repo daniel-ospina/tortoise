@@ -2110,15 +2110,20 @@ def test_the_real_machine_record_agrees_with_the_pins():
     # itself a prose pin (`cites` redded with every number intact), so the live slot is
     # `count >= 2`: the move supplies one mention and the live cite must supply the other,
     # so deleting or re-staling the live one leaves 1 and reds.
-    assert re.search(r":2713-2715\s*(?:->|→|to)\s*:2724-2726\b", read_back), (
-        "the record must attribute the FIRST move to a1dff7cec8, at the intermediate "
-        "position it actually reached")
+    # ⛔ The SHA is BOUND, not merely mentioned: the previous pattern asserted only the numeric
+    # adjacency, so the record could credit any other commit with the move and this arm stayed
+    # green while its message promised the attribution (measured: swapping `a1dff7cec8` for
+    # `704fd60ee` in the same clause left the row passing). The `[^:]` gap keeps the sha and the
+    # ranges in ONE clause, so a sha elsewhere in the field cannot satisfy it.
+    assert re.search(r"a1dff7cec8[^:]{0,40}:2713-2715\s*(?:->|→|to)\s*:2724-2726\b", read_back), (
+        "the record must attribute the FIRST move to a1dff7cec8 — the SHA in the same clause "
+        "as the ranges — at the intermediate position it actually reached")
     assert read_back.count(":2726-2728") >= 2, (
         f"the record states :2726-2728 {read_back.count(':2726-2728')} time(s): the last "
         "move supplies one mention and the LIVE cite must supply the other")
     assert re.search(r":2724-2726\s*(?:->|→|to)\s*:2726-2728\b", read_back), (
-        "the record must attribute the LAST move of that window to this branch, which "
-        "is the half its own +2 comment lines are responsible for")
+        "the record must place the LAST move of that window at its final position "
+        "(:2724-2726 -> :2726-2728); WHO moved it is the record's prose, not asserted here")
     # ⛔ No separate `":2713-2715" in read_back` arm: the SET pin above already requires
     # that literal, and it is evaluated first, so the smaller arm was UNREACHABLE — a
     # mutant that removed the window reddened the set row (`missing=['2713-2715']`) and
