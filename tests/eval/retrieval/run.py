@@ -44,6 +44,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as _dt
 import json
 import os
@@ -486,22 +487,73 @@ def _corpus_embedding_space(*, seeded_synthetic: bool):
     return EMBED_SPACE_SYNTHETIC, None
 
 
+@contextlib.contextmanager
+def _documents_are_encoded_like_the_product(model):
+    """Context manager: encode DOCUMENTS the way the product's writer does.
+
+    ``--query-prompt`` is threaded as the candidate's CONSTRUCTOR
+    ``default_prompt_name`` (``tools/embedder_probe.py`` `_CandidateFactory`),
+    and sentence-transformers applies a constructor-level default prompt to
+    *every* ``encode()`` call unless the call overrides it — document text
+    included (sbert ``SentenceTransformer`` model reference: the default "is
+    applied to all `encode()` calls"; only ``prompt``/``prompt_name`` at the
+    call site replaces it). So a ``--model arctic-s --query-prompt query``
+    corpus would carry the vendor's *query* instruction, a vector shape the
+    product never stores: ``embeddings.compute_embeddings`` encodes with no
+    prompt at all (its singleton is built without one).
+
+    ``prompt_name=None`` does NOT disable it — omitting both arguments is
+    exactly what re-applies the default — so the only version-portable disable
+    (pin is ``sentence-transformers>=3,<6``, whose encode APIs differ and whose
+    v5 documents ``{"document": ""}`` for this) is the default itself: clear
+    it for the document encode and restore it afterwards, in a ``finally``, so
+    the query side keeps the instruction it was injected for.
+    """
+    attrs = [a for a in ("default_prompt_name", "default_prompt")
+             if hasattr(model, a)]
+    saved = {a: getattr(model, a) for a in attrs}
+    try:
+        for a in attrs:
+            setattr(model, a, None)
+        yield
+    finally:
+        for a, value in saved.items():
+            setattr(model, a, value)
+
+
 def _reembed_corpus(graph, points: list[dict], model, *, batch_size: int = 200) -> int:
     """Re-encode the seeded corpus into ``model``'s space (batched, vecf32).
 
-    Mirrors ``seed_corpus``'s write path exactly (clear-then-set guard +
-    ``vecf32``) so the stored vectors keep the production shape on embedded
-    and docker alike. Labels are untouched — the oracle grades from HIDDEN
-    topics, never from embeddings, so re-encoding cannot move a relevance
-    judgment. Returns points re-encoded.
+    Mirrors the product's write path so the stored vectors keep the production
+    SHAPE on embedded and docker alike, in both halves of what `encode`
+    composes:
+
+    * the store side is ``seed_corpus``'s (clear-then-set guard + ``vecf32``,
+      ``preserve_on_null=False``), and
+    * the ENCODING side is ``embeddings.compute_embeddings``'s — its
+      ``_truncate_for_embedding`` text composition (512-word cap) and **no
+      prompt**: a corpus re-encoded under the ``--query-prompt`` instruction
+      would not be the vector the product stores for the same text, so the
+      candidate comparison (#1349) would be measured in a shape production
+      never uses (see `_documents_are_encoded_like_the_product`).
+
+    Width is the encoder's own, exactly as ``compute_embeddings`` documents
+    (the store's width constraint belongs to its write path, ``encode_for_store``).
+    Labels are untouched — the oracle grades from HIDDEN topics, never from
+    embeddings, so re-encoding cannot move a relevance judgment. Returns
+    points re-encoded.
     """
-    from tortoise.vector_write import (  # noqa: I001
-        clear_then_set_prefix, set_embedding_clause,
+    from tortoise.embeddings import _truncate_for_embedding
+    from tortoise.vector_write import (
+        clear_then_set_prefix,
+        set_embedding_clause,
     )
     written = 0
     for start in range(0, len(points), batch_size):
         batch = points[start:start + batch_size]
-        encoded = model.encode([p["content"] for p in batch])
+        with _documents_are_encoded_like_the_product(model):
+            encoded = model.encode(
+                [_truncate_for_embedding(p["content"], 512) for p in batch])
         rows = graph.query(
             "UNWIND $batch AS row "
             "MERGE (n:Point {id: row.id}) "

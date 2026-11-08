@@ -640,6 +640,85 @@ def test_query_vecs_encode_nothing_in_the_synthetic_space():
     assert vecs["q001"] == oracle.query_vector_for("pricing tiers enterprise", 42)
 
 
+class _PromptAwareStub(_StubModel):
+    """A stand-in embedder that models sentence-transformers' PROMPT rules.
+
+    ST applies a CONSTRUCTOR-level ``default_prompt_name`` to every
+    ``encode()`` call whose caller passes neither ``prompt`` nor
+    ``prompt_name`` — document text included. That inheritance is the whole of
+    F4, so a stub that ignored it would make the assertion vacuous.
+    """
+
+    def __init__(self, default_prompt_name: str | None = "query"):
+        super().__init__()
+        self.default_prompt_name = default_prompt_name
+        self.default_prompt = None
+        self.applied: list[str | None] = []   # prompt actually applied, per encode
+
+    def encode(self, texts, prompt_name=None, prompt=None):
+        if prompt is None and prompt_name is None:
+            prompt = self.default_prompt
+            prompt_name = self.default_prompt_name
+        applied = prompt if prompt is not None else (
+            f"<{prompt_name}>" if prompt_name is not None else None)
+        self.applied.append(applied)
+        return super().encode(texts)
+
+
+class _RecordingGraph:
+    """Minimal graph double: records the Cypher params, reports rows written."""
+
+    def __init__(self):
+        self.rows: list[list[dict]] = []
+
+    def query(self, _cypher, params=None):
+        self.rows.append(params["batch"])
+
+        class _Result:
+            def __init__(self, n):
+                self.result_set = [[n]]
+        return _Result(len(params["batch"]))
+
+
+def test_reembed_corpus_encodes_documents_without_the_query_prompt():
+    """F4: the corpus is DOCUMENTS, so it must be encoded the way the product's
+    writer encodes documents — with no prompt — even though the injected
+    candidate carries the vendor's query instruction as its constructor
+    default (which EVERY encode() would otherwise inherit)."""
+    stub = _PromptAwareStub(default_prompt_name="query")
+    points = [{"id": "p001", "content": "alpha beta gamma"},
+              {"id": "p002", "content": "delta epsilon"}]
+
+    written = run_module._reembed_corpus(_RecordingGraph(), points, stub)
+
+    assert written == 2
+    assert stub.applied == [None], (
+        "the corpus is document text: inheriting the constructor's query prompt "
+        f"would store a vector shape the product never writes (applied={stub.applied})"
+    )
+    assert stub.default_prompt_name == "query", \
+        "the query side must keep the instruction it was injected for"
+
+
+def test_reembed_corpus_uses_the_production_text_composition():
+    """F4 (second half): production encodes `_truncate_for_embedding(content, 512)`, so
+    the corpus re-embed must compose the SAME text — a 600-word document encoded
+    whole is a different vector from the one the product stores."""
+    from tortoise.embeddings import _truncate_for_embedding
+
+    long_content = " ".join(f"w{i}" for i in range(600))
+    points = [{"id": "p001", "content": long_content},
+              {"id": "p002", "content": "short document"}]
+    stub = _PromptAwareStub(default_prompt_name=None)
+
+    run_module._reembed_corpus(_RecordingGraph(), points, stub)
+
+    assert stub.calls == [_truncate_for_embedding(long_content, 512),
+                          "short document"], \
+        "the corpus must be encoded through the product's text composition"
+    assert len(stub.calls[0].split()) == 512, "the 512-word cap must apply"
+
+
 @pytest.mark.skipif(not _has_embedded(), reason="embedded FalkorDBLite unavailable")
 def test_run_reembeds_the_seeded_corpus_into_the_query_space(tmp_path):
     """Whole-run: model space ⇒ the corpus is re-encoded, and provenance
@@ -654,10 +733,11 @@ def test_run_reembeds_the_seeded_corpus_into_the_query_space(tmp_path):
     assert prov["corpus_reembedded"] == report["seeded_points"] > 0, \
         "every seeded point must be re-encoded, or the corpus stays in the old space"
     assert stub.calls, "the model must actually encode the corpus"
-    # the corpus fingerprint must be taken AFTER the re-embed (it hashes the
-    # stored vectors), or provenance would describe a corpus nobody measured
-    assert prov["corpus"]["embeddings_hash"], \
-        "embeddings_hash must be present so the space change is detectable"
+    # ⛔ No `assert prov["corpus"]["embeddings_hash"]` here: the field is
+    # present whether or not the fingerprint was taken before the re-embed, so
+    # it stays green under the ordering mutant its comment claimed to catch.
+    # The ordering is asserted where it can fail —
+    # `test_the_fingerprint_is_taken_after_the_reembed` (F5).
 
 
 @pytest.mark.skipif(not _has_embedded(), reason="embedded FalkorDBLite unavailable")
