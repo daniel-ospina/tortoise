@@ -1700,16 +1700,22 @@ re-cut from the resolved document (§8), and no committed verdict is re-scored.
   moves — unlike §10.10, where the collector sat ABOVE the insert and stayed put. Each cite in the
   §11 block moved **+76** (`:11098`+76 = `:11174`, the `return items`
   that ends the extent at `:11196`, `:12982`+76 = `:13058`, `:13131`+76 = `:13207`, `:12995`+76 =
-  `:13071`, `:13142`+76 = `:13218`); the one pair that is NOT +76 is `:5286`/`:5287` →
-  `:5354`/`:5355` (**+68**) — so the file carries THREE bands, and a cite's delta depends on
-  which insert it sits under. Cites ABOVE the first insert did not move at all (`:88-89`,
+  `:13071`, `:13142`+76 = `:13218`) — every cite in §11 itself is +76. ⛔ The one pair this entry
+  re-pointed that is NOT +76 lives in a DIFFERENT document: `docs/00_index.md`'s `#2684` row
+  carries `extractor_v2.py:5286`/`:5287` → `:5354`/`:5355` (**+68**), so the file carries THREE
+  bands, a cite's delta depends on which insert it sits under, and a row's delta must be read
+  from the document that row lives in. Cites ABOVE the first insert did not move at all (`:88-89`,
   `:296-312`, `:1154`, `:1720` are still correct), which is why the bundled cites were
-  re-derived one by one rather than offset in a batch. ⛔ **Two of them sit behind no test at
-  all**, and were re-derived by RUNNING the annotation's own command: `RECONCILE-A1-A2-A5.md`
-  prints the output of two live greps as comments, and the grading tests sweep `_BUNDLE_DOCS`,
-  which does not include that record — so §0's `create_operator` annotation moves
-  `:8938/:8956/:8963/:9343` → `:9006/:9024/:9031/:9411`, and the two "a live grep cannot do it
-  (it prints `:12779` here)" clauses → `:12929`. Every number was verified by CONTENT at this head (the `def`,
+  re-derived one by one rather than offset in a batch. ⛔ **`RECONCILE-A1-A2-A5.md` sits behind
+  NO test at all** — the grading tests sweep `_BUNDLE_DOCS` (README, E1-E5-PROOFS, both probes,
+  `docs/00_index.md`, the architecture doc) and `_PREREG_STEP_CITE_DOCS`, and neither names that
+  record — so every head-relative cite in it was re-derived by RUNNING its own command, not by
+  arithmetic: `extractor_v2.py:10815`→`:10891` (twice: the prose and the grep annotation beside
+  it), the payload-entity write seam in `tortoise/sdk.py` (`_payload_entity_kind`→`create_entity`)
+  `:16414-16428`→`:16516-16530` (three times: the mint sentence, the routing sentence
+  and the `-A 14` annotation), §0's `create_operator` annotation
+  `:8938/:8956/:8963/:9343`→`:9006/:9024/:9031/:9411`, and the two "a live grep cannot do it
+  (it prints `:12779` here)" clauses→`:12929`. Every number was verified by CONTENT at this head (the `def`,
   the `return items` that ends it, the two `if items:` gates, the two `except` arms, the two
   result blocks' opening braces and their closing `}`), never by adding an offset.
 - **What moved: nothing else.** No metric, denominator, threshold, class set, corpus pin or `steps`
