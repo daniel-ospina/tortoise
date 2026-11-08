@@ -204,6 +204,7 @@ def _merge_probe(before: dict | None, after: dict) -> dict:
         # and certifying over it printed "Repair complete." while a hit nothing
         # had examined sat in the result.
         row["discriminating"] = (bool(prior) and not got["residue"]
+                                 and not got.get("stale")
                                  and not got.get("unread"))
         probes.append(row)
     out = dict(after)
@@ -214,11 +215,16 @@ def _merge_probe(before: dict | None, after: dict) -> dict:
     out["unclassified"] = unclassified
     if out["leaked"]:
         out["certifies"], out["vetoed"] = False, "leaked"
+    elif out.get("stale"):
+        # ⛔ ITS OWN VETO AND ITS OWN WORDING: the pair is GONE from the node and
+        # the index still answered — a stale entry, which is precisely the leak
+        # #11536's review round 2 caught `lexicon` absorbing.
+        out["certifies"], out["vetoed"] = False, "stale-index"
     elif out["unmeasurable"]:
         out["certifies"], out["vetoed"] = False, "unmeasurable"
     elif out["truncated"]:
         out["certifies"], out["vetoed"] = False, "truncated"
-    elif unclassified:
+    elif unclassified or out.get("unresolved"):
         out["certifies"], out["vetoed"] = False, "unclassified"
     elif discriminating or control_ok:
         out["certifies"], out["vetoed"] = True, None
@@ -244,7 +250,14 @@ def _report_fts(fts: dict) -> None:
             # Reporting them as a leak would read as "the repair failed" and
             # invite an operator to clear the descriptor #3518 exists to provide.
             print(f"            (stem collision — {len(probe['lexicon'])} hit(s) on "
-                  f"nodes whose `_searchText` is already the post-fix lexicon)")
+                  f"nodes whose `_searchText` is the post-fix lexicon)")
+        if probe.get("stale"):
+            print(f"            ⛔ {len(probe['stale'])} hit(s) on an episodic session "
+                  f"`:Source` that carries NO text at all — a STALE index entry")
+        if probe.get("foreign"):
+            print(f"            ({len(probe['foreign'])} hit(s) on Sources outside "
+                  f"this population, whose own `_searchText` legitimately "
+                  f"matched)")
         if probe.get("unread"):
             print(f"            ⚠️ {len(probe['unread'])} hit(s) could not be "
                   f"classified, so they are not evidence either way")
@@ -278,6 +291,13 @@ def _report_fts(fts: dict) -> None:
               f"repair it means the pair was cleared on the node while the "
               f"indexed tokens survived — do NOT report the repair as done "
               f"(#11161).", file=sys.stderr)
+    elif fts["vetoed"] == "stale-index":
+        print(f"✗ {len(fts['stale'])} probe(s) still return an episodic session "
+              f"`:Source` that carries NO TEXT AT ALL {fts['stale']!r}: the pair "
+              f"is gone from the node and the INDEX ENTRY SURVIVED, so the "
+              f"sentence is still findable — this is the exact leak #11161 names, "
+              f"not a stem collision. Re-index the Source label (or delete the "
+              f"stale entry) and re-measure.", file=sys.stderr)
     elif fts["vetoed"] == "unmeasurable":
         print(f"✗ the Source FTS leg did not RUN for {fts['unmeasurable']!r} "
               f"(the read path's own reason is on the probe line). A leg that "
@@ -292,7 +312,8 @@ def _report_fts(fts: dict) -> None:
               f"sentence.", file=sys.stderr)
     elif fts["vetoed"] == "unclassified":
         print(f"✗ the probe returned a hit that could NOT BE CLASSIFIED for "
-              f"{fts['unclassified']!r} — the hit-classification read failed, or "
+              f"{fts['unclassified']!r} ({fts.get('unresolved') or 0} hit(s) also "
+              f"carried no usable url) — the hit-classification read failed, or "
               f"the index entry points at a url no `:Source` holds. A hit that "
               f"nothing examined is NOT evidence the sentence is gone: re-measure "
               f"(the read may be under load), or repair the stale index entry.",

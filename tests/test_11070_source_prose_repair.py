@@ -2563,6 +2563,111 @@ def test_a_hit_on_a_PRE_FIX_node_IS_a_leak(monkeypatch):
     assert report["probes"][0]["residue"] == ["session:pre-fix"]
 
 
+def test_a_hit_on_a_CLEARED_node_is_a_STALE_INDEX_LEAK_not_a_stem_collision(monkeypatch):
+    """#11161 review round 2, P1 (fail-open): "not residue" is NOT "lexicon".
+
+    (1) FAILS on a two-way split: `carries_pre_lexicon_prose` is False for a node
+        whose two text columns are EMPTY, so the shape the leg exists for — the
+        pair CLEARED on the node while the index entry survived (#11161's own
+        words) — landed in `lexicon`, which never vetoes. `_merge_probe` then saw
+        `residue=[]`, `unread=[]` and an answering control, and certified: exit 0
+        and "Repair complete." over the exact leak, while `_report_fts` printed
+        "stem collision — 1 hit(s) on nodes whose `_searchText` is already the
+        post-fix lexicon" about a node with no `_searchText` at all.
+    (2) REACHABLE: it is the issue's stated failure mode. Measured on FalkorDB
+        4.20.6 the entry DOES go away with the property, which is why the live
+        leg reads 0 — so this arm is fail-closed rather than a live population,
+        and it is exactly why the fold must not depend on the engine agreeing.
+    (3) AND THE OTHER POLARITY: a `record-restore`d node (no `summary`, lexicon
+        `_searchText`) is PROVEN by `topics`, stays a stem collision, and the
+        measured `friday`/`fridays` collision does not turn red.
+    """
+    from tortoise import session_source_prose_migration as m
+
+    cleared = _session_node(url="session:cleared", sessionId="cleared",
+                            summary="", _searchText=None,
+                            topics=["friday", "rebuild"])
+    graph = _RecordingGraph([(cleared,)])
+    _install_fts(monkeypatch, {"zebraquux": [("session:cleared", 1.0)]})
+
+    split = m.classify_fts_hits(graph, ["session:cleared"])
+    assert split == {"residue": [], "lexicon": [], "stale": ["session:cleared"],
+                     "foreign": [], "unread": []}, (
+        "a CLEARED node's surviving index entry was classified as the post-fix "
+        "lexicon — that is the #11161 leak reported as a stem collision")
+
+    report = m.probe_fts(graph, ["zebraquux"], control=False)
+    assert report["leaked"] == [] and report["stale"] == ["zebraquux"]
+    folded = _cli._merge_probe({"ran": True, "probes": [{"phrase": "zebraquux",
+                                                          "hits": 1,
+                                                          "residue": []}]},
+                              report)
+    assert folded["certifies"] is False and folded["vetoed"] == "stale-index", (
+        "the stale-index leak certified")
+
+    # …and it is not corroborated away by a control or a BEFORE reading: this is
+    # the writing arm, which had residue before the repair — the worst case.
+    folded = _cli._merge_probe(
+        {"ran": True, "probes": [{"phrase": "zebraquux", "hits": 1,
+                                   "urls": ["session:cleared"],
+                                   "residue": ["session:cleared"]}]},
+        dict(report, control={"mode": "probe", "ok": True, "hits": 1}))
+    assert folded["certifies"] is False and folded["vetoed"] == "stale-index"
+
+    # (3) the proof-backed post-fix node is still a stem collision, not a leak.
+    _install_fts(monkeypatch, {"friday": [("session:restored", 2.0)]})
+    restored = _session_node(url="session:restored", sessionId="restored",
+                             summary="", _searchText="friday, rebuild",
+                             topics=["friday", "rebuild"])
+    split = m.classify_fts_hits(_RecordingGraph([(restored,)]),
+                               ["session:restored"])
+    assert split["lexicon"] == ["session:restored"] and split["stale"] == [], (
+        "a record-restored node PROVES the lexicon through `topics` — calling it "
+        "stale would red a correct repair")
+
+
+def test_a_hit_with_no_addressable_url_cannot_certify(monkeypatch):
+    """#11161 review round 2, P2 (fail-open): a hit can vanish between the reads.
+
+    (1) FAILS on the shipped probe: `urls` keeps only str rows while `hits` counts
+        every row, so a hit whose ``node.url`` is not a string is in neither
+        bucket — not residue, not lexicon, not stale, not unread — and the run
+        certifies with `hits=1` and empty classifications. That is the previous
+        round's doctrine ("a hit nothing examined is not evidence") reached
+        through a different door.
+    (2) REACHABLE: this module already has a first-class `unaddressable` bucket
+        for a `:Source` without a usable url, and an index entry can outlive the
+        node it points at.
+    """
+    from tortoise import session_source_prose_migration as m
+
+    graph = _RecordingGraph([(_post_fix_node(),)])
+    _install_fts(monkeypatch, {"zebraquux": [(None, 1.0)],
+                              "migration": [("session:s-post", 2.0)]})
+
+    class _ControlGraph(_RecordingGraph):
+        """A lexicon node the CONTROL can read, so the zero is corroborated."""
+
+        def query(self, cypher, params=None, timeout=None):
+            if "STARTS WITH $prefix" in cypher:
+                return _Result([("migration, plan, friday",)])
+            return super().query(cypher, params=params, timeout=timeout)
+
+    graph = _ControlGraph([(_post_fix_node(),)])
+    report = m.probe_fts(graph, ["zebraquux"], control=True)
+    assert report["probes"][0]["hits"] == 1
+    assert report["probes"][0]["urls"] == []
+    assert report["unresolved"] == 1, (
+        "a hit with no usable url disappeared: it is in `hits` and in no bucket")
+    assert report["control"]["ok"] is True, (
+        "the control answers here on purpose — a corroborating zero must not "
+        "certify around a hit that nothing examined")
+
+    folded = _cli._merge_probe({"ran": True, "probes": []}, report)
+    assert folded["certifies"] is False and folded["vetoed"] == "unclassified", (
+        "an unaddressable hit certified the leg")
+
+
 def test_a_BREAKER_OPEN_read_is_UNMEASURABLE_not_a_clean_zero(monkeypatch):
     """A leg that did not run returns `[]` — exactly as a clean miss does.
 
@@ -2709,8 +2814,11 @@ def test_a_LEAK_reds_a_repair_that_the_census_calls_complete(monkeypatch,
         "Repair complete." and exited 0 while the Source FTS index still
         returned a node carrying the prose — the sentence is still retrievable,
         which is the only way a user experiences the leak.
-    (2) REACHABLE: the pair cleared on the node with a stale index entry behind
-        it, which is exactly what #11161 measured is NOT covered by any check.
+    (2) REACHABLE: a node that still carries the prose (this fixture) — and, one
+        rung further out, a node CLEARED while its index entry survived, which is
+        `test_a_hit_on_a_CLEARED_node_is_a_STALE_INDEX_LEAK_not_a_stem_collision`
+        (#11536 review round 2, P1: this fixture is the first shape, not the
+        second — the earlier rationale here overstated what it built).
     """
     _export_a_record_dsn(monkeypatch)
     graph = _RecordingGraph([(_session_node(url="session:stale",
@@ -2858,6 +2966,17 @@ def test_the_sentence_LEAVES_the_Source_FTS_index_on_a_REAL_graph():
         assert after["probes"][0]["residue"] == [], (
             "the sentence is STILL findable through the Source FTS index after "
             "the pair was cleared (#11161)")
+        # ⛔ AND THE RAW COUNT, not only the classification (#11536 review round 2):
+        # `residue == []` is a statement about a node the index RETURNED. This row
+        # is the one that says the ENGINE dropped the entry with the property, which
+        # is what makes the `stale` bucket fail-closed rather than live here — and
+        # if a future engine kept the entry, the node would be `stale` and the fold
+        # would veto it, so this assertion reds instead of the leak shipping.
+        assert after["probes"][0]["hits"] == 0, (
+            "the probe still returns a node after the clear — inspect whether it "
+            "is a stale index entry, which is the #11161 leak")
+        assert after["stale"] == [], (
+            "a cleared node is still indexed: the leak the repair exists for")
         assert after["leaked"] == []
 
         # ── the RECORD arm: the lexicon must be findable, and not by the
