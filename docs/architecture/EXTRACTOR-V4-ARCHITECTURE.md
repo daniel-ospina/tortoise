@@ -115,7 +115,7 @@ Production graph: **~25,000 quota nodes in 3–4 active days** (~27 per emitting
 | **v3** | did we extract it **correctly**? (dates, verbatim state values, atomic points, supersession) | ⬆️ **increases it** — E2 preserves more, E3 splits into more |
 | **v4** (this document) | should we have extracted it **at all**? | ⬇️ **reduces it** |
 
-**v3 has no discard, trim or gate anywhere.** It is a fidelity workstream. **v4 is a selection workstream.** ⚠️ **v3 is not absent from the tree: E2's carve-out (`STATE_VALUE_CARVE_OUT`, `#1534`) and E4 (`merge_embed_lists`, `:4845`) are load-bearing, and this document depends on them** (see §1, "v2 → v3 → v4").
+**v3 has no discard, trim or gate anywhere.** It is a fidelity workstream. **v4 is a selection workstream.** ⚠️ **v3 is not absent from the tree: E2's carve-out (`STATE_VALUE_CARVE_OUT`, `#1534`) and E4 (`merge_embed_lists`, `:5057`) are load-bearing, and this document depends on them** (see §1, "v2 → v3 → v4").
 
 ⚠️ **v3's E4 rule is load-bearing:** `"S4 merges, not replaces"` — `merge_embed_lists(embed_list, s4)` runs at `extractor_v2.py:4845` and S2 is preserved.
 
@@ -621,7 +621,7 @@ Normalises the shape **and applies the declared field→type mapping** (§3). Pa
 
 This is v2's S2, with priors in hand. Still proposes only; decides nothing.
 
-**✅ FINDING (2026-09-23) — the code hands extraction the raw alongside the story.** The call is `run_s2(model, story, master, session_date=…, edus=edus, …)` (`extractor_v2.py:13314-13317`) — ⚠️ **this row is the one passage cited HEAD-relative, not at a pin**; `tests/test_7949_capstone_measure.py` resolves it against the tree, so it moves with the code. **`edus` is the raw segmented input, passed together with the computed story.** **⇒ D3-Option 4 holds: the narrative is a **focus**, and the raw is present too.**
+**✅ FINDING (2026-09-23) — the code hands extraction the raw alongside the story.** The call is `run_s2(model, story, master, session_date=…, edus=edus, …)` (`extractor_v2.py:16112-16115`) — ⚠️ **this row is the one passage cited HEAD-relative, not at a pin**; `tests/test_7949_capstone_measure.py` resolves it against the tree, so it moves with the code. **`edus` is the raw segmented input, passed together with the computed story.** **⇒ D3-Option 4 holds: the narrative is a **focus**, and the raw is present too.**
 
 > ⚠️ **What this does to D3.** The open question is not *"may extraction consult the raw?"* — it does. It is the much smaller **"what does the narrative add that the raw does not?"** The measurement (§10) compares **narrative + raw** against **raw alone** — ⛔ **and that shape cannot test loss-by-replacement**, so the D3 question is now two: *what the narrative ADDS* (measured, §10) and *what it LOSES when it replaces the raw* (**not yet measured**). §10's verdict says so. **This paragraph named the ADD question correctly; the error was downstream** — the
 registration then fixed the contrast with *"the same `edus`"* for both arms, which is what makes the falsifier
@@ -639,7 +639,7 @@ unfirable (block at the top of §10).
 2. **Atomicity:** is this ONE claim, or several fused together? *(Atomicity is a property of the item — this is where it belongs, not on the narrative.)*
 3. **Worth keeping — judged against THE PACK (`#1026`'s `valueGate`).** Not a generic value judgment: **is this durable, per the pack's own declaration?**
 
-> **This is where the pack stops being prose.** `packs/dev/manifest.yaml` already declares `memory_granularity` — *"Durable: problem-family reasoning … Ephemeral: issue/PR numbers, CI status, test counts, commit hashes, tool workarounds, sprint mechanics."* That string is **rendered into the S1 prompt and not enforced** (`_granularity_text()`). **S2.2 is the step where the declaration becomes a gate** — the `valueGate` slot `#1026` declared (`packs/_template/manifest.yaml:260`), realised as an adversarial question. ⚠️ **The mechanical half is `tortoise/value_gate.py` (`#4899`), and it must default ON and stay subordinate to VET** (`TORTOISE_VALUE_GATE` unset must not mean *"the predicate never runs"*). So the work is a **default and a subordination, not a missing slot**.
+> **This is where the pack stops being prose.** `packs/dev/manifest.yaml` already declares `memory_granularity` — *"Durable: problem-family reasoning … Ephemeral: issue/PR numbers, CI status, test counts, commit hashes, tool workarounds, sprint mechanics."* That string is **rendered into the S1 prompt and not enforced** (`_granularity_text()`). **S2.2 is the step where the declaration becomes a gate** — the `valueGate` slot `#1026` declared (`packs/_template/manifest.yaml:288`), realised as an adversarial question. ⚠️ **The mechanical half is `tortoise/value_gate.py` (`#4899`), and it must default ON and stay subordinate to VET** (`TORTOISE_VALUE_GATE` unset must not mean *"the predicate never runs"*). So the work is a **default and a subordination, not a missing slot**.
 
 #### Level 2 — per-batch: did this batch come out right? (a batch verdict, not a per-item one)
 
@@ -700,20 +700,43 @@ unfirable (block at the top of §10).
 > (`TORTOISE_VALUE_GATE`) defaults **ON**, so the VET pass — and `apply_vet` — DOES run on the
 > default arm, keeping everything the `#4899` identifier-only predicate does not fire on (measured:
 > 0 drops of 61 Objects). Judge the fold by that, not by "the flags default OFF"; and presence is not
-> sufficiency: the fold's **remedy** half IS implemented for ONE class and NOT for another (the two halves are stated in the S2.2b-ADD note below). VET's **coverage signal**
-> only **detects** (`check_batch`'s `coverage_suspect` — *"reported, never acted on"*, and only for a
+> sufficiency: the fold's own **remedy** half has no implementation in either folded stage, and
+> `#11534` meets the pre-condition for ONE gap class and not for the other (both halves are stated in
+> the S2.2b-ADD note below). VET's **coverage signal**
+> only **detects** (`check_batch`'s `coverage_suspect` — reported by the gate, **acted on by the
+> PIPELINE** since `#11002` (which is what `in v1` used to defer), and only for a
 > narrative that produced **zero** candidates). `apply_vet` only **removes** — **except** the Layer-1
 > entity RESTORE from `prior` (`vet_gate.py` **Rule 4**), which re-emits an entity an EARLIER pass
 > discarded, needs a surviving candidate to reference it, and never sources a new candidate from the
 > narrative (`OUTCOMES` = KEEP/NOOP/DISCARD/MERGE; `MERGE` is a verdict VET records and S3 applies —
 > `#5006`). CLASSIFY
 > only **labels** (`classify_items` returns a kind per **existing** id; `_apply_classify_kinds` adds no
-> item). So, **before `#11534`, no stage the design folds S4's purpose into could emit a candidate a
-> coverage check found missing** (`run_s4` is today's gap-filler and does exactly that) — removing
-> `run_s4` today DELETES gap-filling instead of relocating it. The universal is written in the PAST
-> tense and scoped to the FOLD on purpose: an unqualified present-tense "no shipped stage" would deny
-> the very capability the dash clause says is lost, since `run_s4` *is* a shipped stage. The
-> pre-condition for removal is a stage that can ADD; building it is the migration deliverable.
+> item). So **no stage the design folds S4's purpose into can emit a candidate a coverage check found
+> missing** — the fold's **remedy** half has no implementation in either folded stage. ✅ **The
+> successor is the bounded S2.2 re-narrate (§4.4, `#11002`)** — `_renarrate_trigger` → `_arm_extract`,
+> the `emphasis` seam in
+> `run_s1`: it fires **once**, re-extracts, and **unions both arms** with `merge_embed_lists` under
+> E4's identity-key rules, so it CAN add a candidate the coverage check found missing and it preserves
+> both arms' items (merges-not-replaces — the owner's ruling on `#11002`). The universal is scoped to the
+> FOLD on purpose: an unqualified "no shipped stage" would deny the very capability the dash clause
+> says is lost, since `run_s4` *is* a shipped stage. The pre-condition for removal is a stage
+> that can ADD; the successor above is that stage (`tests/test_selection_step.py` pins the ADD proof
+> and the union), and what still stood between it and the deletion was §4.4's **F3** measurement —
+> `_s4_merge_stats`'s `added_by_s4 > 0` **while** the FIRST (pre-retry) arm's `coverage_suspect` is
+> False **and no retry fired** (one arm, one flag, one base — see §4.4), i.e. an episode the retry
+> cannot reach. **It has been MEASURED (2026-11-08) and it FIRES** — 4/7 sessions on the
+> **`legacy` arm** (`TORTOISE_S4_DELTA=0`) in `docs/evidence/1789-s4-reeemit-tax/ab-20261107T023958Z.json`,
+> 3/7 on that arm in the re-run, 5/7 across their union — **and 2/7 on either run of the
+> `delta` arm, which is DEFAULT-ON** (`_s4_delta_enabled` resolves `env_flag(…, True)`), so
+> `run_s4` **stays** on both readings and the removal (and the partial-gap stage it needs)
+> moved to **#11534**. ⛔ **The arm must be named, because the number is arm-specific:** the
+> two artifacts are one replay holding both arms, and the arms are different CONTRACTS (`legacy`
+> re-emits, `delta` emits only what is missing), so their `added_by_s4` counts are not the same
+> quantity. `docs/evidence/1789-s4-reeemit-tax/README.md` compares them as evidence about the gap
+> channel (12/9 legacy vs 6/6 delta gap additions) and states that **neither arm's sensitivity to
+> the real geometry is measured, so the token-saving RATIO — which is the saving — is undetermined
+> in both signs**. A count without its arm is therefore a claim about neither.
+> Not satisfiable by reasoning about the code: the artifacts are the instrument.
 >
 > ⛔ **WHAT `#11534` MEASURED IS THE TRIGGER, NOT THE STAGE — and it covers ONE of the two gap
 > classes.** The PR ships two pieces inside S2.2: the DETECTOR `vet_gate.partial_gaps` — the
@@ -739,7 +762,7 @@ unfirable (block at the top of §10).
 > that, not a claim about which class dominates, is why it is armed OFF. The flag rate, the
 > per-session read-through and the explicit bounds are `docs/evidence/11534-partial-gap/README.md`
 > §4.
-> (Pinned: `tests/test_extractor_v4_s4_stage_claims.py`.)
+> (Pinned: `tests/test_extractor_v4_s4_stage_claims.py`, `tests/test_selection_step.py`.)
 >
 > **On the step *names*:** the code's own stages are **S1–S5** (`[S1] STORY SUMMARY` … `[S5] EMBED`, module
 > docstring), with `S2.2 VET` present in the production path. **`S0` and `S6` have no code
@@ -770,12 +793,12 @@ unfirable (block at the top of §10).
 | **A closed vocabulary** — the stats counter `closed_vocab_rejects` exists | `kind_classifier.py:200` |
 | **A mechanical kNN fast path** → margin gate → `nearMisses` rerank → **batched LLM only for the low-margin tail** | `#1695` |
 | **The deferred pass** — `_collect_classify_items(embed_list)` → `classify_items` → `_apply_classify_kinds` | `extractor_v2.py:4467` / `:4492`, called at `:4803` and `:4888` |
-| **The flag** — `TORTOISE_CLASSIFY_LATER`, unset today = *"the LEGACY pipeline"* | `extractor_v2.py:513`, `:4656` |
-| **Jev requires an adapter, a prompt and a parser** — `llm_tail` is a **boolean** switch (`kind_classifier.py:93`), and the ambiguity tail is resolved by a hardcoded prompt plus a JSON parser — ✅ **now built, OFF by default: `s2_decision_seam.classify_decider` replaces the tail's DECISION SOURCE via `KindClassifier(tail_decider=…)`** | `kind_classifier.py:93`, `:309`; `s2_decision_seam.py` (`#5087`) |
+| **The flag** — `TORTOISE_CLASSIFY_LATER`, unset today = *"the LEGACY pipeline"* | `extractor_v2.py:541`, `:4868` |
+| **Jev requires an adapter, a prompt and a parser** — `llm_tail` is a **boolean** switch (`kind_classifier.py:93`), and the ambiguity tail is resolved by a hardcoded prompt plus a JSON parser — ✅ **now built, OFF by default: `s2_decision_seam.classify_decider` replaces the tail's DECISION SOURCE via `KindClassifier(tail_decider=…)`** | `kind_classifier.py:93`, `:337`; `s2_decision_seam.py` (`#5087`) |
 
 **⇒ The step is `TORTOISE_CLASSIFY_LATER=1`, off by default.** Three things are wrong with its current placement, and they are the actual work:
 
-**1. Classification happens INLINE — inside S2.1's big call.** When the flag is on, `core_only=classify_later` is passed to S2 (`:4782`) so the extractor **only assigns core kinds and leaves domain kinds `unclassified`**, and the separate pass fills them in. When it is off, the extraction LLM emits kinds as part of its prose output. **That is the wrong place for them** — see below.
+**1. Classification happens INLINE — inside S2.1's big call.** When the flag is on, `core_only=classify_later` is passed to S2 (`:4994`) so the extractor **only assigns core kinds and leaves domain kinds `unclassified`**, and the separate pass fills them in. When it is off, the extraction LLM emits kinds as part of its prose output. **That is the wrong place for them** — see below.
 
 **2. It must run on SURVIVORS.** ⚠️ `_collect_classify_items` collects from **`embed_list`** — the whole candidate set — and **`classify_consolidation` does not remove items from `embed_list`; it decides a write operation per point** (`:3994`). **So a `DISCARD` (`#4899`) would currently be classified anyway.** *Classifying a row you are about to throw away is wasted work **and** it is worse than wasted: **the discards are exactly the rows whose kind is least meaningful**, so they pollute the classifier's own signals.*
 > **⇒ The wiring requirement: a discarded candidate must be removed from (or marked in) `embed_list`, or `_collect_classify_items` must skip it.** Without that, `#4899` and S2.3 ship in the wrong order and S2.3 pays for `#4899`'s savings.
@@ -815,8 +838,8 @@ Resolved by call graph:
 
 | runs | where | what |
 |---|---|---|
-| 1st | `:4803` | classify pass on `embed_list` |
-| 2nd | `:4888` | classify pass on `complete_list` (after S4's merge) |
+| 1st | `:5015` | classify pass on `embed_list` |
+| 2nd | `:5100` | classify pass on `complete_list` (after S4's merge) |
 | **last** | **`:4995`** | **`execute_embed(...)` — which contains `classify_consolidation` (`:3994`), i.e. the dedup/consolidation gate** |
 
 **⇒ Today we classify the whole set TWICE and then dedup it.** The mechanical, free, set-reducing operation runs **dead last**, after the two most expensive passes. **Every ordering principle says the opposite.**
@@ -844,7 +867,7 @@ A four-way audit of the write path found **FOUR distinct dedups at FOUR differen
 |---|---|---|---|
 | **D-a** | **source** | **URL only** | ⚠️ **URL-keyed only** — a content-hash is a provenance anchor (`#4005`), **not a dedup key** |
 | **D-b** | **within-batch exact** | `execute_embed` (`extractor_v2.py:3967-3969`) — the `_norm(content)`-keyed `point_ids` map, first wins | ✅ <!-- v4-mechanism: exact_dedup state: implemented --> |
-| **D-c** | **vs store, raw content hash** | `sdk.py:12412` (`_find_point_by_content`; the shared predicate builder is `_dedup_match_clauses`, `:12364`) | ✅ |
+| **D-c** | **vs store, raw content hash** | `sdk.py:12419` (`_find_point_by_content`; the shared predicate builder is `_dedup_match_clauses`, `:12371`) | ✅ |
 | **D-d** | **semantic** | `classify_consolidation` (`extractor_v2.py:3021+`) — the paraphrase NOOP arm | ✅ <!-- v4-mechanism: against_priors_consolidation state: implemented --> |
 
 **⇒ `S0a NORMALIZE + HASH → S0b SOURCE DEDUP` is the largest single volume lever available, and it is mechanical and free: `tortoise/source_identity.py` is its implementation (`normalize_source_url`, `resolve_source_key`), wired in `projection/entities.py` and acceptance-tested by `tests/test_source_dedup_registration.py`, which is why `config/v4-mechanisms.yml` carries it as `implemented`.** Catching the same conversation firehose twice is a **whole-narrative** save, not a claim-level one. What stays absent is narrower than the step: **D-a above is still URL-keyed**, and resolving a spelling to the `:Source` that owns its identity is not hashing the narrative. <!-- v4-mechanism: source_dedup state: implemented -->
@@ -869,7 +892,7 @@ A four-way audit of the write path found **FOUR distinct dedups at FOUR differen
 
 The fusion cannot precede the gate: §S2.2 reserves new-vs-existing to S3, and the against-store leg needs the lookup anyway (constraint 5) — the fusion needs a *destination*, which only S3 has. **So no operation has two homes, and no passage in this document places a fusion before the gate.** ⚠️ **The flagged verdict's consumer is #5006's union-merge.** `tortoise/near_dup_merge.py` is the FUSION — `classify_consolidation` returns `MERGE` for a candidate S2.2b recorded a `MERGE` verdict for, `extract_session_v2` routes that verdict set from the VET stats into the consolidation pass, and the write path unions both sides' attachments onto the ONE survivor. The mechanical ladder (the never-across guard, the ~0.95 bar, a readable union) is re-checked inside the mechanism, so the verdict is necessary and never sufficient; with no arbiter injected there are no verdicts and the mechanism is inert, exactly like VET itself.
 
-**⚠️ Constraint 4 stands, and it is the basis of the S2.3-before-S3 order.** **CLASSIFY runs after the gate** (so only survivors are classified) **and BEFORE S3** — because `_find_existing_entity` (`:2705`) uses `kind` as its exact-match discriminator, so a lookup that runs before classification cannot exact-match and degrades to the ambiguous bare-form path. ⚠️ **Moving it after S3 manufactures duplicates — the exact failure this document exists to prevent.**
+**⚠️ Constraint 4 stands, and it is the basis of the S2.3-before-S3 order.** **CLASSIFY runs after the gate** (so only survivors are classified) **and BEFORE S3** — because `_find_existing_entity` (`:2733`) uses `kind` as its exact-match discriminator, so a lookup that runs before classification cannot exact-match and degrades to the ambiguous bare-form path. ⚠️ **Moving it after S3 manufactures duplicates — the exact failure this document exists to prevent.**
 
 #### The resulting order
 
@@ -903,7 +926,7 @@ S6  COMMIT
 - **Source-level and within-batch exact dedup** — need no graph, **belong first.** They shrink the set for the gate, the classifier and the lookup.
 - **Against-priors consolidation** (`classify_consolidation`) — needs the S3 lookup, so it **stays after S3.** Its docstring step 1 is *"NOOP (identical) — normalized content equals **a prior**"* — **a prior is a lookup result.**
 
-**And the doc's "classify once" also fixes a double-classification**: today `:4803` and `:4888` both run, because the set is re-classified after S4's merge. **One pass, after the gate, on survivors.**
+**And the doc's "classify once" also fixes a double-classification**: today `:5015` and `:5100` both run, because the set is re-classified after S4's merge. **One pass, after the gate, on survivors.**
 
 #### ✅ Jev for classification is cheap — but ⚠️ `llm_tail` is not the seam
 
@@ -925,7 +948,7 @@ S6  COMMIT
 **⚠️ But the bigger saving is that most items never reach Jev at all.** The kNN + margin fast path covers the easy majority with **no model call**; only the **low-margin tail** is batched. So Jev's cost is bounded by the **tail size, not the item count**:
 > **25k items/month at a ~20% tail → ~5,000 calls → ~$0.72/month.**
 
-**And ⚠️ `llm_tail` is NOT a ready-made Jev seam.** It is a **BOOLEAN** (`kind_classifier.py:93`); the line cited as a seam is `:522`, the **offline-eval CLI disabling it**. The tail is a **hardcoded prompt + a JSON parser**, so **swapping Jev in requires an adapter, a prompt, and a parser** — it is a *small* piece of work, but it is work, not a config flag.
+**And ⚠️ `llm_tail` is NOT a ready-made Jev seam.** It is a **BOOLEAN** (`kind_classifier.py:93`); the line cited as a seam is `:550`, the **offline-eval CLI disabling it**. The tail is a **hardcoded prompt + a JSON parser**, so **swapping Jev in requires an adapter, a prompt, and a parser** — it is a *small* piece of work, but it is work, not a config flag.
 
 **⚠️ The "structural enforcement" argument is narrower than it appears.** `closed_vocab_rejects` **already exists** (the closed vocabulary is enforced), so Jev's `Choice` does not add a new guarantee the pipeline lacks — it removes a class of **malformed / off-vocabulary** emission. And a repo-wide search for `entityCues` returns **no READER** — `#1026` made the slot declarable, but nothing consumes it, so it is not an implemented classifier surface.
 
@@ -961,7 +984,7 @@ S6  COMMIT
 
 | arm | what it expresses | where |
 |---|---|---|
-| **generic status write** — the arm a relocation would use | `update_entity(<object>, status=…)` journals `EntityMutated`; the op classifier labels a status write `restatus` and the record carries the **applied** map. Replay is the **same** `SET n += $s` the live write ran, on the canonical label — Objects included | producer `sdk.py:33029` (`classify_entity_mutation_op`); fold `projection/__init__.py:18664` over `_ENTITY_MUTATION_STATE_OPS` (`:7383`) |
+| **generic status write** — the arm a relocation would use | `update_entity(<object>, status=…)` journals `EntityMutated`; the op classifier labels a status write `restatus` and the record carries the **applied** map. Replay is the **same** `SET n += $s` the live write ran, on the canonical label — Objects included | producer `sdk.py:33036` (`classify_entity_mutation_op`); fold `projection/__init__.py:18664` over `_ENTITY_MUTATION_STATE_OPS` (`:7383`) |
 | **`ObjectSuperseded`** — the successor form, which does **NOT** fit a relocation | live CAS fold + rebuild pass-1b sweep | `projection/entities.py:4059`; `projection/__init__.py:14280`; producer `commit_ops.apply_supersessions` |
 
 ⚠️ **The second arm is unusable here by construction:** `apply_supersessions` only folds a live target onto a **visible, distinct successor** (`commit_ops.py:1408`), and a bare description has none — *"supersede it with nothing"* is not expressible. The relocation target is therefore `archived` **by generic status write**, never by `ObjectSuperseded`.
@@ -1048,7 +1071,75 @@ New entities + connections + **metadata**. The metadata includes **lifecycle eve
 
 > **Keep the FIRST narrative unless the second is STRICTLY better on the SAME metric that triggered the retry** — the keep-rate, computed the same way. **A tie keeps the FIRST.** Both rates are recorded, so the choice is inspectable.
 
-**Why this direction:** the retry exists because the first narrative produced a poor *yield*, and *"a retry, not a loop"* means the replacement must **earn** acceptance. A tie is not an improvement, and a rule that kept the second on a tie would let the accepted keep-rate fall on a coin flip. **Invariant:** the metric and the comparison are fixed **before** the retry fires, and a re-narrate can never lower the accepted keep-rate. The losing arm's extraction is discarded **with** its narrative — the re-extraction supersedes it **inside the same run and the same transaction** (I3), so no run ever commits a mixture of the two narratives' items.
+**Why this direction:** the retry exists because the first narrative produced a poor *yield*, and *"a retry, not a loop"* means the replacement must **earn** acceptance. A tie is not an improvement, and a rule that kept the second on a tie would let the accepted keep-rate fall on a coin flip. **Invariant:** the metric and the comparison are fixed **before** the retry fires, and a re-narrate can never lower the accepted keep-rate.
+
+**The trigger, and the ONE knob that arms it.** `extractor_v2._renarrate_trigger` reads three signals, in order: `coverage_suspect` on the S2 batch (*prose in, zero candidates out* — armed by construction and, **crucially, refused when S2 raised**, because a failed call's empty list is byte-identical to a genuinely empty one and is a transport failure the stage already retried); a batch-level `RENARRATE` from an injected arbiter (the token `vet_gate.BATCH_OUTCOMES` has always carried); and a keep-rate below a hand-set threshold. That third arm is armed **only** by **`TORTOISE_RENARRATE_KEEP_RATE`** — accepted when `0.0 < v <= 1.0`, and any other spelling (unset, empty, `0`, `-1`, `1.5`, `banana`) leaves it **DISARMED**. The knob is named here because §4.2 makes that threshold a HUMAN calibration over tens of real sessions, and a switch no document declares cannot be set by the operator it is written for. What a retried run decided rides `stats["renarrate"]`: `trigger`, the pick (`items` / `narrative`), `merged` (the union's accounting — `kept_from_first` / `added_by_second` / `corrected_by_second`), `decisions` (each arm's per-item verdicts, which have no other home — see the DISCARD half of §4.4's union rule below), `emphasis`, both arms' `chunks`, and each arm's `candidates` / `discarded` / `kept` / `keep_rate` / `coverage_suspect` / `s2_failed` — ⛔ where `coverage_suspect` is **three-state**: `True`/`False` are `check_batch`'s verdict on a call that answered, and **`None` means there is no verdict because S2 raised**. A reader counting `coverage_suspect is False` (F3, below) therefore cannot count a batch that never existed — the fail-closed direction for a count whose `0` is a deletion's green light.
+
+**What the run COMMITS is the union of both arms' items — the tie-break decides the NARRATIVE only.** The shipped list is `merge_embed_lists` over the two arms (the second wins an identity-key collision, the first arm's items are preserved), so both arms' extractions reach the graph. Only ONE narrative is recorded, because exactly one `story`/`story_arc` reaches S4's prompt and `execute_embed`; which one is what the tie-break above settles. The union is re-vetted wholesale before it ships, so a first-arm **MERGE** flag on an item that SHIPS is re-derived rather than dropped — but a first-arm **DISCARD** is not: the item it removed is absent from the union, so the re-vet pass never judges it, and its verdict rides `stats["renarrate"]["decisions"]`. ⛔ Do not read the re-vet as a substitute for those verdicts; that is the `#5005` silent-discard reopened on the retried path. On the arm armed by construction (`coverage_suspect`) the first list is empty and the union IS the second arm's list; the merge is what keeps the disarmed keep-rate arm from silently dropping the losing narrative's items.
+
+> **OVERRIDES:** §4.4's earlier *"the losing arm's extraction is discarded **with** its narrative"* — **retired by the owner's ruling of 2026-11-08 on `#11002`**: *"the retry must union both attempts with the same identity-key collision rules the existing merge uses — that is what makes it a successor rather than a replacement."* E4's merges-not-replaces property (`#1536`) must survive into the successor, which is why `run_s4`'s removal is gated on a successor that **preserves** that property — **a code change, tracked at `#11534`, NOT a measurement**: F3 was run on 2026-11-08 and it FIRES, so the measurement half is discharged and `run_s4` stays (see the F3 paragraph immediately below for the numbers and the two clauses that remain inferred).
+
+**The removal's falsifier — F3, defined here because two places cite it by that name.**
+`run_s4`'s removal (the `#8500` migration deliverable, executed under `#11002`) was gated on **one**
+measurement — an eval-lane run, not a code change. **WHAT THAT INSTRUMENT ACTUALLY MEASURES, and
+what it does not** — stated because the gap matters for an irreversible deletion. The two committed
+`docs/evidence/1789-s4-reeemit-tax/` artifacts (7 real sessions each) record, per arm and per
+session, `s2_items` / `s4_items` / `merged_items` / `added_by_s4` / `corrected_by_s4` and the
+added/corrected item lists. They record **no `check_batch` block and no `stats["renarrate"]`**, and
+that is structural rather than an omission: the instrument (`tools/s4_reeemit_tax.py`) replays
+`run_s4` directly over each session's recorded S2 list and never calls `extract_session_v2`, so the
+pipeline's coverage flag and its retry counter do not exist on those rows. So of F3's three clauses
+**one is measured and two are not:** `added_by_s4 > 0` is measured — **4/7 primary, 3/7 re-run,
+5/7 across the union on the `legacy` arm** (`TORTOISE_S4_DELTA=0`), and **2/7 on either run of the
+`delta` arm**, which is DEFAULT-ON — while the flag clause is an INFERENCE from the artifacts'
+own S2 item counts (29–49 in every one of the 28 session-runs) and the retry clause is a property
+of the instrument's construction (no pipeline run ⇒ no retry). ⚠️ The inference is not free: the
+artifact stores COUNTS, and `check_batch`'s `candidates` applies a stricter predicate (a `Mapping`
+item with non-empty `name or content`), so the counts do not by themselves pin the flag. Both
+readings being above zero is what the decision rests on, so `run_s4` **stays** and the removal
+moved to **#11534** — where the pipeline-level half (`stats["renarrate"]["first"]
+["coverage_suspect"]` and `fired` over a real `extract_session_v2` run) is recorded as the
+measurement a successor owes. ⛔ **Name the arm whenever this number is quoted:** the two arms are
+DIFFERENT CONTRACTS (`legacy` re-emits, `delta` emits only what is missing), so their `added_by_s4`
+counts are not the same quantity — the evidence README compares them as evidence about the gap
+channel (12/9 legacy vs 6/6 delta gap additions) and states that **neither arm's sensitivity to the
+real geometry is measured, so the token-saving RATIO is undetermined in both signs**.
+
+On the frozen corpus, count the sessions
+where `_s4_merge_stats`'s `added_by_s4 > 0` **while the FIRST (pre-retry) arm's `coverage_suspect` is
+False** — **restricted to sessions where the retry did not fire**
+(`stats["renarrate"]["fired"]` is `False`). ⛔ **Whose flag, spelled out, because this PR makes it
+two arms.** A retried run reaches `check_batch` twice, and the SECOND arm is an independent S2
+run whose flag can be `True` again (measured: an empty second yield flags `coverage_suspect=True`
+on both arms) — so counting against the pipeline's published `result["vet"]["s2"]`, which is the
+SECOND arm's block, attributes the wrong arm's verdict to the session. What makes the retry
+unreachable for this count is the `fired is False` RESTRICTION, not any property of the second
+arm's flag. ⛔ **But the record does NOT carry it on this population — which is why this clause is
+still an INFERENCE here.** `stats["renarrate"]` is `{"fired": False}` when the retry did not run
+(`extractor_v2.py`'s `renarrate_stats`, pinned in `tests/test_selection_step.py`), so the first arm's
+own `coverage_suspect` — `stats["renarrate"]["first"]["coverage_suspect"]` — exists only on a run
+that FIRED, and F3's `fired is False` restriction removes exactly those rows. The nearest substitute
+is **not** the same quantity: `vet_candidates` (`vet_gate.py`) applies `check_batch` to the list AFTER
+the `route_mentions` removal in `extractor_v2.py`, whereas the arm's flag is `check_batch` on the
+PRE-`route_mentions` S2 output — and `route_mentions` can shrink that list to zero, so a session that
+held a mention can read `False` on the arm and `True` on the substitute. Since F3 counts only
+`coverage_suspect is False` sessions, reading the substitute can only REMOVE episodes from a count
+whose `0` is the green light to delete `run_s4`. Recording the first arm's flag on the NON-FIRED
+return, so F3 reads one surface on every run, is therefore part of what **#11534** owes — and until
+it exists, this clause is quoted as an inference and never as a measurement. ⛔ **And whose BASE, which is the second half of the same trap.**
+`added_by_s4` is `merged - s2_items`, and on a retried run `s2_items` is the UNION (both arms), so
+S4's contribution would be measured against a bigger base and understated — on precisely the
+population where a retry fired for a reason other than coverage (an injected arbiter). Restricting
+the count to non-retried sessions makes both halves unambiguous: one arm, one flag, one base. The
+population is therefore "S4 added items, the coverage check did not flag the batch, and no retry ran".
+That is an episode where S4 ADDED items in a case the coverage check could not flag — so the bounded
+re-narrate above cannot reach it, because the retry's armed-by-construction arm is exactly
+`coverage_suspect`. `> 0` means **do not delete `run_s4`**: the retry is a successor for the
+total-loss case only, and the removal's pre-condition is a stage that can ADD in the cases S4
+currently rescues. `0` over the corpus is the removal's green light. ⛔ It is not satisfiable by
+reasoning about the code — the count comes from a run — so no lane may delete `run_s4` on the
+strength of this section alone. (The label **F3** is the one the `#11002` issue's risk table and the
+drift marker over the step list already use; this paragraph is its definition of record.)
 
 **⚠️ This section is a SPEC, not a description of what runs — and `#5095` closed HALF of the gap.** The load-bearing instance is S3. `search_graph` degrades instead of raising (correct, `#3679`), and its renderer used to tell the model *"no existing items available; assume everything is new"* (`_render_search_results`, `extractor_v2.py:2353` at `7d348d351` — the revision this citation has always been pinned to) — the inverse of I1, and the duplication-manufacturing direction G3 names.
 
@@ -1188,9 +1279,9 @@ A carve-out scoped only to **user-personal state** (personal bests, schedules, p
 | **Personal state** | *"personal best 5K = 27:12"* | retained (E2 carve-out — **`#1534`**) | retained |
 | **Operational / decision values** | *"p99 latency 480 ms at 3k rps"* | **RETAINED** | retained |
 
-**Operational values are DURABLE.** `STATE_VALUE_CARVE_OUT` (`extractor_v2.py:320-336`) carries an operational-value paragraph — *"a concrete value that is the SUBJECT of a decision, observation, or plan is DURABLE too… Measurements, deadlines/freezes, thresholds/TTLs, versions, and counts are carried VERBATIM"* — covering *"the p95 hit 4.2 seconds"* and *"a ten minute TTL"*. The rule reaches the model: a `VALUE_FIDELITY_RULE` (`:425`) goes into the S2/S4 `{anti_routine}` slot via `_s2s4_rules()` (`:526`), and `_granularity_text()` (`:1414`) appends `STATE_VALUE_CARVE_OUT` to S1.
+**Operational values are DURABLE.** `STATE_VALUE_CARVE_OUT` (`extractor_v2.py:324-340`) carries an operational-value paragraph — *"a concrete value that is the SUBJECT of a decision, observation, or plan is DURABLE too… Measurements, deadlines/freezes, thresholds/TTLs, versions, and counts are carried VERBATIM"* — covering *"the p95 hit 4.2 seconds"* and *"a ten minute TTL"*. The rule reaches the model: a `VALUE_FIDELITY_RULE` (`:429`) goes into the S2/S4 `{anti_routine}` slot via `_s2s4_rules()` (`:530`), and `_granularity_text()` (`:1418`) appends `STATE_VALUE_CARVE_OUT` to S1.
 
-**⇒ The design requires ENFORCEMENT BY DEFAULT — the mechanism is not the gap.** The **S2.2b** identifier-only predicate is the rule in `tortoise/value_gate.py`: `value_gate._REFERENCE` (`#\d{1,6}(?!\d)`) with `identifier_only()` as a whole-residue test, imported by `extractor_v2.py:72`, toggle `_value_gate_enabled()` (`:724`). ⛔ **THE GATE SITE IS `S2.2b`, NOT `E7`** — the `^#\d{3,}$`-style anchored pattern is not the rule. **Enforcement by default is required**, and the predicate is **subordinate to VET** (`_value_gate_enabled()` folds into `vet_enabled`). ⛔ **This is a default and a subordination — not a missing mechanism. Do not build `valueGate`.**
+**⇒ The design requires ENFORCEMENT BY DEFAULT — the mechanism is not the gap.** The **S2.2b** identifier-only predicate is the rule in `tortoise/value_gate.py`: `value_gate._REFERENCE` (`#\d{1,6}(?!\d)`) with `identifier_only()` as a whole-residue test, imported by `extractor_v2.py:72`, toggle `_value_gate_enabled()` (`:752`). ⛔ **THE GATE SITE IS `S2.2b`, NOT `E7`** — the `^#\d{3,}$`-style anchored pattern is not the rule. **Enforcement by default is required**, and the predicate is **subordinate to VET** (`_value_gate_enabled()` folds into `vet_enabled`). ⛔ **This is a default and a subordination — not a missing mechanism. Do not build `valueGate`.**
 
 **⚠️ The mechanical DISCARD (§16 — `value_gate.py`) must be defined against the two-class table above, not against the prompt string alone** — otherwise it discards operational values harder. The carve-out protects them, so **the gap is enforcement-by-default, not policy.**
 
@@ -1294,7 +1385,7 @@ first run. This block governs how every number below may be read.
 `_render_source_transcript(edus)` to the S2 prompt **whenever the transcript is under
 `_SOURCE_TRANSCRIPT_CAP` (8,000 chars — these blocks are 3,801–5,311, well under it)**, and both arms
 pass the same `edus` (`tortoise/extractor_v2.py:1755`, the `+ ("\n\n" + transcript)` tail at `:1775`).
-⚠️ **Above the cap the block is omitted entirely** (`:1738`, the `return ""` under the `:1737` `_SOURCE_TRANSCRIPT_CAP` guard), and the arms would then differ by the whole
+⚠️ **Above the cap the block is omitted entirely** (`:1766`, the `return ""` under the `:1765` `_SOURCE_TRANSCRIPT_CAP` guard), and the arms would then differ by the whole
 transcript — i.e. a long session would land in exactly the replace-configuration this section says was never
 run. None of these seven does. So the
 prompts differ **only in the `story` slot**: arm A is *raw story + raw transcript*, arm B is *narrative story +
@@ -1890,7 +1981,7 @@ reached, and of the review cycles that followed, is in
 | # | ✅ ANSWER | what changes in THIS document |
 |---|---|---|
 | **O1** | **Durability and rebuildability are two different questions and both hold: DURABILITY = the store's backup; REBUILDABILITY = the journal.** | *The journal is the derived layer's rebuild source; it is not a durability mechanism.* ⚠️ **`rebuild_all` treats an incomplete log as the authority — that is a defect.** |
-| **O2** | ⛔ **No volume target.** *"we're not optimising stupidly for a number… this is not a corporate OKR setting exercise. We need to balance multiple things at each step of the pipeline and on each architecture decision."* | **No volume target, no recall floor, no node budget anywhere in this document.** The objective is **great recall and reasoning at an affordable cost**; the method is **manual, step-by-step review** until a calibration set exists. ⚠️ **This constrains *volume targets* only, not §4.2's ordering objective.** §4.2 states its own objective at `:706`: *"The rule is NOT 'cheapest first' — it is **cost per unit of SAFE rejection**"* (§4.2 heading, `:688`). |
+| **O2** | ⛔ **No volume target.** *"we're not optimising stupidly for a number… this is not a corporate OKR setting exercise. We need to balance multiple things at each step of the pipeline and on each architecture decision."* | **No volume target, no recall floor, no node budget anywhere in this document.** The objective is **great recall and reasoning at an affordable cost**; the method is **manual, step-by-step review** until a calibration set exists. ⚠️ **This constrains *volume targets* only, not §4.2's ordering objective.** §4.2 states its own objective at `:734`: *"The rule is NOT 'cheapest first' — it is **cost per unit of SAFE rejection**"* (§4.2 heading, `:716`). |
 | **O3** | ✅ **Emit the DECLARED outcome word (`DISCARD`), matching the engine's existing classifier.** | S2.2's outputs use the declared vocabulary. |
 | **O4** | ✅ **Merge IS authorised — with Jev as arbiter over the claim plus narrative/raw data.** *This supersedes the `OVERRIDES:` ruling on `#4899` ("never merging two claims into one"); the later owner ruling replaces the earlier one, which is the only valid way to reverse a recorded decision.* | The admissible set is **`KEEP` / `NOOP` / `DISCARD` / `MERGE`** (MERGE bounded below). ⚠️ **`FUSE` — combining two distinct claims into one new claim — is FORBIDDEN.** |
 | **O5** | ✅ **Draft and iterate:** *"we draft something (a prompt, a step of the extraction workflow, etc) and run it and see the result then refine and run again, until good."* | **The working method for every step in §4.1: draft → run → look → refine → repeat.** |

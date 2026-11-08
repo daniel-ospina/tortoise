@@ -5214,8 +5214,10 @@ def test_a_LANDED_update_still_runs_the_ep_side_effects(tmp_path):
 # says so in comments; so do the promote notes beside it and the `sourceVersion`
 # anchor in `_write_relation`. Every one of those references used to be a
 # `file:line` cite — and NOTHING resolves a `projection/` or `record_projection.py`
-# line cite: the bundle's `_BUNDLE_CITE` sweep matches `sdk|edges|extractor_v2`
-# only and reads DOCUMENTS (not `sdk.py`), and `_PREREG_STEP_CITE_DOCS` reads the
+# line cite written in CODE: the bundle's `_BUNDLE_CITE` sweep matches
+# `sdk|edges|extractor_v2` only and reads DOCUMENTS (not `sdk.py`); its sibling
+# pattern resolves `projection/__init__.py`/`entities.py` cites in those same
+# DOCUMENTS, not a cite in this file; and `_PREREG_STEP_CITE_DOCS` reads the
 # extractor's own cites. So those numbers re-staled in silence, and all five had
 # drifted by PR #10543's head (measured, each target read back):
 #

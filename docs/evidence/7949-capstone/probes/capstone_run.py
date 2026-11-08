@@ -17,16 +17,18 @@ the corrected reading:
    entry point … can drive all eight in one pass"* is an open question. It can:
    ``TortoiseSDK.capture_session`` → ``sdk._extract_session_v2``
    (``sdk.py:16367``, called at ``:15404``) →
-   ``extractor_v2.extract_session_v2`` (``extractor_v2.py:13128``) calls
-   ``_edus_from_conversation`` (S0, ``:13246``), ``run_s1`` (S1, ``:13290``),
-   ``run_s2`` (S2.1, ``:13314``), ``_run_vet_pass`` (S2.2, ``:13369``),
-   ``kind_classifier.classify_items`` (S2.3, ``:13595``),
-   ``_apply_classify_kinds`` (S2.3, ``:13596``), ``search_graph`` (S3,
-   ``:13612``), ``run_s4`` (the gap filler, ``:13633``), and ``execute_embed``
-   (S5+S6, ``:13853``). ONE cite per symbol, on the line that symbol is on:
+   ``extractor_v2.extract_session_v2`` (``extractor_v2.py:13147``) calls
+   ``_edus_from_conversation`` (S0, ``:13265``) and then ``_arm_extract`` — the
+   S1→S2→S2.2 prefix, which it calls twice since `#11002`: the first arm and the
+   retry — and that one function drives ``run_s1`` (S1, ``:16080``), ``run_s2``
+   (S2.1, ``:16112``) and ``_run_vet_pass`` (S2.2, ``:16166``).
+   ``extract_session_v2`` itself calls ``kind_classifier.classify_items`` (S2.3,
+   ``:13637``), ``_apply_classify_kinds`` (S2.3, ``:13638``), ``search_graph``
+   (S3, ``:13654``), ``run_s4`` (the gap filler, ``:13675``), and
+   ``execute_embed`` (S5+S6, ``:13895``). ONE cite per symbol, on the line that symbol is on:
    S2.3 makes TWO calls two lines apart, and the single ``:NNNN`` a
    ``a``/``b`` pair cite could carry is only ever checkable for one of them —
-   that pair form is how ``_apply_classify_kinds`` sat on ``:9210`` (naming
+   that pair form is how ``_apply_classify_kinds`` sat on ``:9422`` (naming
    ``classify_items``' line) while the README's one-symbol row was right. The
    SYMBOL is authoritative and the line is a convenience — the three
    FILE-NAMED cites above are resolved against the tree by the bundle's pin,
@@ -272,7 +274,7 @@ def _step_cause(witness: dict, step: str) -> str:
     block = witness.get(STEP_WITNESS_BLOCK.get(step, "")) or {}
     rendered = json.dumps(block, sort_keys=True, default=str)
     if len(rendered) > 240:
-        rendered = rendered[:237] + "..."
+        rendered = rendered[:265] + "..."
     return rendered
 
 

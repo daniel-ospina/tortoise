@@ -54,8 +54,12 @@ item below implying either has found a defect in this document, not a proposal.
 > *"the narrative is not something we're suggesting to store in the graph (same as raw) but store in
 > supabase."*
 >
-> **§12.1c — the vector question is OPEN, and it is the owner's.**
-> *"⚠️ NOT DECIDED — owner's call."* (§14.3 **V1**.)
+> **§12.1c — the vector question is DECIDED (2026-11-07), not open.**
+> *"✅ DECIDED 2026-11-07 — the vector index does NOT live in FalkorDB. Vectors and their payload move to
+> Postgres (`pgvector`); traversal, writes and EP stay in the graph."* (parenthetical elided: `#4997`;
+> `docs/architecture/SEARCH-ARCHITECTURE.md`; §14.3 **V1**.) ⚠️ The `⚠️ NOT DECIDED — owner's call` wording this block used
+> to quote is **SUPERSEDED, kept as the record** — it is what the question said *before* the ruling, and a lane
+> quoting it today would conclude the opposite of the decision.
 >
 > **§14 — vendor.**
 > *"The vendor — **Supabase Postgres** is the owner's recorded choice for the system of record (local
@@ -63,13 +67,14 @@ item below implying either has found a defect in this document, not a proposal.
 
 ### 0.1 Contradiction test — run first, and its result
 
-Three items a naive prerequisite list would contain **would each reverse a recorded decision**, so
-they are excluded as prerequisites and recorded as such:
+Two of the three items a naive prerequisite list would contain **would each reverse a recorded decision**, and the
+third was **a decision rather than a prerequisite** — which §12.1c now ADOPTS (2026-11-07). All three are therefore
+excluded as prerequisites, and recorded as such:
 
 | candidate prerequisite | the decision it would contradict | verdict |
 |---|---|---|
-| **"serve reads from Postgres / cut over the read path"** | §2.0, verbatim: *"we keep the limit in falkor high so we don't need to rush with enabling our queries to parse both falkor and postgres."* | **Deferred by the ruling** — `#7970` is OPEN and *"DEFERRED by §2.0"*. Not a first-customer gate. |
-| **"put embeddings in pgvector"** | §12.1c: *"⚠️ NOT DECIDED — owner's call."* §14.3 V1. | **A decision, not a prerequisite.** Embeddings are already durable without it (item A5). |
+| **"serve reads from Postgres / cut over the read path"** | §2.0, verbatim: *"we keep the limit in falkor high so we don't need to rush with enabling our queries to parse both falkor and postgres."* | **Deferred by the ruling** — `#7970` is **CLOSED COMPLETED (2026-10-25)** and its *CUTOVER* is what stays *"DEFERRED by §2.0"*. Not a first-customer gate. |
+| **"put embeddings in pgvector"** | §12.1c **ADOPTS it** (decided 2026-11-07: *"the vector index does NOT live in FalkorDB"*) — so there is no contradiction left; what remains is **sequencing**, not a reversed decision. | **A decision, not a prerequisite — and now DECIDED, in favour.** It is off this epic's critical path (N2), and embeddings are already durable without it (item A5). |
 | **"backfill the existing FalkorDB graph into Postgres"** | Owner scope ruling 2026-10-10: *"there are no existing customers. No migration-safety apparatus is designed or claimed here."* | **Not designed, on purpose.** The dual-write already exists by construction (§3/§17.1; item R1 arms it); a backfill is not it. |
 
 ---
@@ -165,9 +170,11 @@ raised) and §17.1-correct (record after the append, before the cache fold).
 
 `embedding jsonb` on `source` (`…01:175`), `event` (`…01:233`), `point` (`…03:66`). **No migration and no module uses `pgvector`** — `grep -riE 'pgvector|vector\('` over all 79
 migrations returns **0**, and `git grep -il pgvector -- 'tortoise/*'` is **0**. The word itself
-appears in prose only — e.g. this document, §12.1c's open question, this epic's
-`03-schema.md`, and the competitor notes. So the record is a **durability carrier** for vectors, not a retrieval index — which is
-exactly right while §2.0 keeps the cache fully populated and **V1 is undecided** (§12.1c/§14.3).
+appears in prose only — e.g. this document, §12.1c's decided record, this epic's
+`03-schema.md`, and the competitor notes. So the record is a **durability carrier** for vectors, not a retrieval index — which was
+exactly right while §2.0 kept the cache fully populated, and **V1 is now DECIDED** (§12.1c/§14.3, 2026-11-07):
+the retrieval index and the embedding payload move to Postgres, so this row's *reason for being a carrier only*
+is gone — the record becomes the home of the index, not just of the bytes, **once the migration lands**.
 
 ### A6. Metering / billing — **EXISTS and is live, org-scoped**
 
@@ -932,8 +939,8 @@ calibrates after beta from measured consumption.
 
 | # | what | why it is not on the list |
 |---|---|---|
-| **N1** | **The read path and its cutover** (`#7970`, **OPEN**) | §2.0 defers it in the owner's own words (§0.1). The instruments exist and are off. |
-| **N2** | **`pgvector` / moving the vector index into Postgres** (`#4997`, **CLOSED 2026-10-05** — its analysis is what this item rests on; §12.1c **V1**, §14.3) | **NOT DECIDED — owner's call.** Embeddings are already durable as `jsonb` (A5). Note the settled blocker if it is decided: **`pgvectorscale` is unavailable on Supabase** (§14), so it would be `pgvector` proper. |
+| **N1** | **The read path and its cutover** (`#7970` — **CLOSED COMPLETED 2026-10-25**; the *cutover* is what is deferred) | §2.0 defers the cutover in the owner's own words (§0.1). The instruments exist and are off (`TORTOISE_RECORD_SERVE` unset). |
+| **N2** | **`pgvector` / moving the vector index into Postgres** (`#4997`, **CLOSED 2026-10-05** — its analysis is what this item rests on; §12.1c **V1**, §14.3) | **DECIDED 2026-11-07 — ADOPTED** (`docs/architecture/SEARCH-ARCHITECTURE.md`): the vector index and its payload move to Postgres (`pgvector`). What is not decided is WHEN — not on this epic's critical path. Embeddings are already durable as `jsonb` (A5). Note the settled blocker now that it is decided: **`pgvectorscale` is unavailable on Supabase** (§14), so it would be `pgvector` proper. |
 | **N3** | **A FalkorDB → Postgres backfill / migration-safety apparatus** | Owner scope ruling 2026-10-10: no customers, no apparatus designed. The dual-write is journal-first by construction (§3/§17.1). |
 | **N4** | **Journal completeness** (`#5089`) | A **precondition owned by another epic** (this epic's *blocked-by (soft)*) — ⚠️ **and that epic CLOSED COMPLETED on 2026-10-12**, so the soft block is discharged *as a ticket*. What is not discharged is the measurement: §17.1's surface (**387 mutating sites / 211 functions / 32 files**) is quoted here, not re-verified by this lane. Named, not re-filed: a projection replayed from an unfaithful journal is faithfully wrong. |
 | **N5** | **The record's failure counter has no alert** | Real (§A3: fail-soft, counted only on `monitoring.metrics()`), but **not** a gate while the cache is fully populated — a lost record is healed by replay. Becomes a gate if the cache is ever allowed to go partial. |
@@ -951,10 +958,10 @@ measured them, plus that section's date where it pins one. **`MEASURED` means a 
 |---|---|---|---|
 | resident nodes (dogfood/prod graph) | **89,701** | `MATCH (n)`, 2026-09-25 (§17.4.2) | **MEASURED** |
 | quota-counted nodes | **24,978** | the quota predicate; `§17.4.2`, 2026-09-25 | **MEASURED** |
-| `GRAPH.MEMORY USAGE` | **143 MiB** (indices 46 MiB) | sampling estimate, `SAMPLES`=100; **blind to the HNSW index** (§2.1, dated 2026-09-24, carries the earlier ~140 MB reading with those caveats; the 143 figure is the top ruling block of 2026-09-25 (`STORAGE-ARCHITECTURE.md:63`, which writes it in **MB**; §17.4.2 restates it in MiB at `:1693`; §1 itself is a different section)) | **MEASURED (estimate by construction)** |
+| `GRAPH.MEMORY USAGE` | **143 MiB** (indices 46 MiB) | sampling estimate, `SAMPLES`=100; **blind to the HNSW index** (§2.1, dated 2026-09-24, carries the earlier ~140 MB reading with those caveats; the 143 figure is the top ruling block of 2026-09-25 (`STORAGE-ARCHITECTURE.md`, the unnumbered block at the top of the document, which writes it in **MB**; §17.4.2 restates it in MiB in its measured-inputs table)) | **MEASURED (estimate by construction)** |
 | bytes per resident node | **1,672 B** | 143 MiB ÷ 89,701 | **MEASURED** |
 | in-graph text | **16 MB** | §2.2 breakdown | **MEASURED** |
-| in-graph vectors + indices | **51.6 MB** stored vectors; **45 MB** of indices — the **total** index footprint, of which only the `Point.embedding` HNSW index is vector-driven (§12.1b: exactly one vector index in the graph). ⚠️ These belong to §2.2's ~141 MB reading; the ruling block gives this pair as **143 MB with 46 MB of indices** (`STORAGE-ARCHITECTURE.md:63`) and §17.4.2 restates it in MiB (`:1693`), and the instruction to use that pair sits at `:460` (**§7**'s state-value entry, where it contrasts the two readings) — so quote 143/46, not 141/45 | §2.2 / §12.1b (2026-09-24) | **MEASURED** |
+| in-graph vectors + indices | **51.6 MB** stored vectors; **45 MB** of indices — the **total** index footprint, of which only the `Point.embedding` HNSW index is vector-driven (§12.1b: exactly one vector index in the graph). ⚠️ These belong to §2.2's ~141 MB reading; the ruling block gives this pair as **143 MB with 46 MB of indices** (`STORAGE-ARCHITECTURE.md`, the same unnumbered block) and §17.4.2 restates it in MiB — the two readings are contrasted in that block, in its *"Per-node figures carry different denominators"* paragraph — so quote 143/46, not 141/45 | §2.2 / §12.1b (2026-09-24) | **MEASURED** |
 | stored vectors, by label | **12,657** (`:Object` 7,859 + `:Event` 4,798, ≈19 MB) — and only `Point.embedding` is indexed | `CALL db.indexes()`, §13 | **MEASURED** |
 | Points carrying any content | **49.0%**; **1,121.4 B** mean over those, **549.1 B** over all (5,696,946 B over 10,374) | `§17.4.6` / `graph-content-census.json`, 2026-10-17 | **MEASURED** |
 | Points carrying a vector | **39.96%** (4,145 / 10,374) | same census; `§17.4.6`, 2026-10-17 | **MEASURED** |
@@ -997,7 +1004,7 @@ so a record-sourced rebuild loses the narrative, not the text*
 
 **What can wait:** **R10** (pooling — gated on a captured tenant write volume, not a date), **R11** (the byte gate and the
 meter → allowance wiring — gates the first *allowance*, not the first customer), **N1** (the read path, by
-§2.0), **N2** (`pgvector`, by open decision V1), **N5** (the failure alert, while the cache is full).
+§2.0), **N2** (`pgvector`, decided 2026-11-07 — the move is not on this epic's critical path), **N5** (the failure alert, while the cache is full).
 
 **Does this agree with the document's own order?** **Partly — and the gap is instructive.**
 
@@ -1030,7 +1037,8 @@ meter → allowance wiring — gates the first *allowance*, not the first custom
   repo. The questions the external leg would have asked, left unasked and unanswered: Supabase's
   pooler connection limits and their interaction with session-level `SET` (R6 makes the GUC
   session-scoped, and a transaction-mode pooler is where that breaks), PITR retention by plan tier
-  (R9), and `pgvector` index-build behaviour at our size (**only if V1 is decided**).
+  (R9), and `pgvector` index-build behaviour at our size (**now owed unconditionally — V1 was DECIDED on
+  2026-11-07**, so this is no longer conditional on it).
 - **No product code changed.** No migration, no module, no test. The **three runs in §G** (two pytest runs plus the
   PGlite validation) were run and reported; none of their files was modified.
 - **No issue filed.** An item that names an issue **as its home** gives that issue's state and its

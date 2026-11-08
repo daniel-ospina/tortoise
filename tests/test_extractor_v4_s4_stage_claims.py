@@ -682,12 +682,47 @@ def test_the_module_docstring_carries_the_record_the_call_site_points_at():
         "the record must state the removal-ordering obligation: `run_s4` is a "
         "v4 migration deliverable, not a cleanup."
     )
-    assert "OPEN QUESTION" in doc, (
-        "the record must leave #8500's precedence question OPEN — which side is "
-        "authoritative until the migration lands is the OWNER's ruling, not an "
-        "agent-authored claim (the #8601 review flagged the previous 'shipped "
-        "code is authoritative' sentence as answering a question #8500 reserves "
-        "to the owner)."
+    assert "precedence question is settled" not in doc, (
+        "⛔ THE RECORD MUST NOT CALL THE PRECEDENCE 'SETTLED'. The owner WITHDREW "
+        "that question rather than ruling on it (#11002, 2026-11-08): 'Nothing "
+        "here needs a ruling, and the question is withdrawn' … 'the pin landed, "
+        "the precedence was never decided'. An earlier revision of this record "
+        "attributed a SETTLEMENT to the owner — an agent-authored precedence "
+        "wearing the owner's name, the exact class the #8601 review flagged. "
+        "What the ruling fixed is the WORK ORDER, which the assertion below pins."
+    )
+    assert "precedence question is\nWITHDRAWN, NOT settled" in doc, (
+        "the record must state that #8500's precedence question was WITHDRAWN "
+        "(not settled), and name its home. ⚠️ It must NOT answer the question "
+        "itself: the ruling is the OWNER's (2026-11-08, on #11002), so the "
+        "record cites the ruling rather than asserting an agent-authored "
+        "precedence (the #8601 review flagged the previous 'shipped code is "
+        "authoritative' sentence for exactly that)."
+    )
+    # ⛔ SCOPED TO THE PARAGRAPH THAT CARRIES THE CLAIM (round-8 review, F2;
+    # retargeted and TIGHTENED by the fresh review at 8042fdf when the claim
+    # itself changed): `"owner" in doc and "#11002" in doc` was satisfied by
+    # unrelated lines ("owner-approved" in the S1 stage line, "#11534"'s
+    # neighbours), so the mutant that deletes the attribution — the exact
+    # regression this guard names — left the assertion GREEN. NARROWING IT TO
+    # THE PARAGRAPH WAS NOT ENOUGH: measured at 8042fdf, the withdrawal
+    # paragraph and the `✅ THE SUCCESSOR HAS LANDED (**#11002**)` block follow
+    # one another with NO blank line between them, so `split("\n\n")` returned
+    # them as ONE unit and deleting the attribution still passed on the
+    # SUCCESSOR line's `#11002`. The scope is therefore the paragraph CUT AT THE
+    # `✅` BLOCK — the withdrawal claim's own words. Measured both ways: deleting
+    # the `(on **#11002**)` parenthetical now reds this, and so does deleting
+    # `owner` from the same window.
+    _settled_paras = [p.split("✅")[0] for p in doc.split("\n\n")
+                      if "precedence question is" in p and "WITHDRAWN" in p]
+    assert _settled_paras, (
+        "the record must state that #8500's precedence question was WITHDRAWN, "
+        "and name its home."
+    )
+    assert all("owner" in p and "#11002" in p for p in _settled_paras), (
+        "the withdrawn-precedence PARAGRAPH must name WHO declined it and WHERE "
+        "— an unattributed 'withdrawn' is the same agent-authored answer as an "
+        "unattributed 'settled'."
     )
     assert "never enter this extractor at all" in doc, (
         "the record must SCOPE its bypass enumeration to the route that reaches "
@@ -1271,43 +1306,63 @@ def test_an_else_branch_call_reds_the_off_switch_check():
     )
 
 
-# ── the fold's successor is ABSENT ─────────────────────────────────────────
+# ── the fold's successor: LANDED (#11002) ──────────────────────────────────
 #
 # #8500's question (3) is the migration ORDER — *"S4 cannot leave the step list
 # before its successor lands"* — and question (1) is whether the §4.0 purpose
 # test's fold is correct. Both turn on a fact the record above did not state:
 # has the successor the design promises actually LANDED?
 #
-# It has not, and the trap is that the fold's two stages DO exist in the shipped
+# It had not — and the trap was that the fold's two stages DID exist in the shipped
 # tree (`_vet_gate.apply_vet` and `kind_classifier.classify_items`), so "the
 # fold's stages are present" reads as "the successor landed" — and a lane then
-# deletes `run_s4` believing gap-filling moved. What decides it is the REMEDY
-# half: neither folded stage can ADD an item a coverage check found missing.
-# These tests pin that half, so the pre-condition for removal stays measurable
-# instead of inferable from a stage list.
+# deletes `run_s4` believing gap-filling moved. What decided it WAS the REMEDY
+# half: neither fold stage could ADD an item a coverage check had found missing.
+# ⛔ #11002 resolved that half — the bounded re-narrate can ADD — so the record's
+# verdict is now "the successor HAS landed" and the ordering obligation's
+# pre-condition is MET. ⛔ §4.4's F3 was MEASURED on 2026-11-08 and it FIRES
+# (`added_by_s4 > 0` above zero on BOTH arms: legacy 4/7 primary, 3/7 re-run,
+# 5/7 across the union; delta 2/7 on either run), so `run_s4` STAYS — the
+# MEASUREMENT half is discharged and what remains before it leaves is a CODE
+# change, tracked at #11534. The earlier wording here said the removal was
+# "still gated on §4.4's F3 measurement (S4's `added_by_s4 > 0` while
+# `coverage_suspect` is False), not a code change", i.e. the false "blocked on an
+# eval nobody has run yet" reading — which is also what made "F3 is the ONLY
+# gate" sound plausible to a lane that re-measured `added_by_s4 > 0` on another
+# population and then deleted `run_s4`. These tests pin both halves: the LANDED
+# verdict with its ADD proof, and the FOLD stages' unchanged inability to produce
+# candidates — so a future lane cannot read a stage list as "gap-filling moved" a
+# second time.
 #
-# ⛔ AND IT IS TWO HALVES SINCE `#11534` — a fact this guard itself missed. The
-# record said "no stage … performs S4's gap review-and-fill" in the PRESENT
-# tense while `extractor_v2.run_partial_gap_fill` (S2.2b-ADD, DEFAULT OFF) shipped
-# in the same file, and said "the absence of that stage is pinned by" this very
-# module while widening the allow-list that would have been the pin. The round-6
-# review (P2) found both at `06052ea0dd9e` with every check below GREEN — a
-# false PASS in a guard whose job is *"or `run_s4` is deleted believing
-# gap-filling moved"*. So the pins now cover both directions: the record must
-# state both halves (`SUCCESSOR_TWO_HALVES`) and must not regain the two false
-# clauses (`SUCCESSOR_REVIVED_CLAIMS`).
+# ⛔ AND `#11534` ADDS A SECOND, NARROWER ADD-CAPABLE STAGE — a fact this guard
+# itself missed. The record said "no stage … performs S4's gap review-and-fill"
+# in the PRESENT tense while `extractor_v2.run_partial_gap_fill` (S2.2b-ADD,
+# DEFAULT OFF) shipped in the same file, and said "the absence of that stage is
+# pinned by" this very module while widening the allow-list that would have been
+# the pin. The round-6 review (P2) found both at `06052ea0dd9e` with every check
+# below GREEN — a false PASS in a guard whose job is *"or `run_s4` is deleted
+# believing gap-filling moved"* — and the LANDED verdict above is not a licence
+# to drop them: #11534's stage reaches ONE of the two gap classes, and the record
+# must say so. So the pins cover every direction: the LANDED verdict
+# (`SUCCESSOR_LANDED`), the two halves (`SUCCESSOR_TWO_HALVES`), and the two
+# false clauses the record must never regain (`SUCCESSOR_REVIVED_CLAIMS`).
 
 #: §4.0's fold: the clause that gives S2.2 VET the coverage question S4's
 #: removal relies on. If the design re-assigns that purpose, the record's
 #: basis moved and this must be re-derived (not deleted).
 FOLD_STATEMENT = "did we account for everything the narrative said?"
 #: The clause that closes the "S2.2/S2.3 exist ⇒ successor landed" misreading.
-#: The literal is KEPT but the record qualifies it in its next breath ("it has
-#: landed for ONE of the two gap classes and NOT for the other") — an
-#: unqualified heading became false the moment `#11534` shipped an ADD-capable
-#: consumer, so the heading alone is no longer the claim; the two halves are
-#: (`SUCCESSOR_TWO_HALVES`).
-SUCCESSOR_ABSENT = "THE SUCCESSOR HAS NOT LANDED"
+#: ⛔ RETARGETED at #11002, not deleted: the record's verdict flipped from "the
+#: successor is ABSENT" to "the successor HAS LANDED", because the bounded
+#: re-narrate is the ADD-capable stage the removal pre-condition names. The
+#: TRAP half is unchanged and still required — the fold's stages existing is
+#: still not the test; the test is that a `coverage_suspect` arm's missing
+#: candidate reaches the payload through a stage the pipeline runs.
+#: ⛔ AND `#11534`'s narrower stage is the SECOND half: the LANDED verdict is not
+#: a licence to drop the two-half record, so `SUCCESSOR_TWO_HALVES` is still
+#: required and `SUCCESSOR_REVIVED_CLAIMS` still forbids the two clauses the
+#: round-6 review found false.
+SUCCESSOR_LANDED = "THE SUCCESSOR HAS LANDED"
 #: The two gap classes `#11534` separates, plus the flag of the stage that meets
 #: one of them. Required as literals because EACH HALF ALONE IS A DIFFERENT
 #: WRONG ANSWER: without the solution half the record reads "no ADD-capable
@@ -1335,7 +1390,7 @@ SUCCESSOR_TWO_HALVES = (
 #: the design doc had already been amended to the two-half statement.
 SUCCESSOR_REVIVED_CLAIMS = (
     ("REMEDY half is unimplemented",
-     "the fold's remedy half IS implemented for the coverage class "
+     "the fold's remedy half HAS a shipped implementation for the coverage class "
      "(`run_partial_gap_fill`, DEFAULT OFF) — a record calling it unimplemented "
      "sends a lane to build what this file ships"),
     ("absence of that stage",
@@ -1441,11 +1496,13 @@ def _successor_clause_violations(doc: str) -> list[str]:
     required-literal list structurally cannot forbid).
     """
     problems: list[str] = []
-    if SUCCESSOR_ABSENT not in doc:
+    if SUCCESSOR_LANDED not in doc:
         problems.append(
-            "the G5 record no longer states that the successor has NOT landed; "
-            "the ordering obligation then reads as satisfiable by S2.2/S2.3 "
-            "merely existing, and `run_s4` is deleted believing gap-filling moved")
+            "the G5 record no longer states that the successor HAS landed; the "
+            "record then reads as if the ADD-capable stage were still missing "
+            "(#11002 landed it — `_renarrate_trigger`/`_arm_extract`), and either "
+            "the removal pre-condition looks unsatisfiable or the ordering "
+            "obligation looks satisfiable by S2.2/S2.3 merely existing")
     for required, why in (
         ("is NOT the test that it has",
          "the record must name the trap: the fold's stages EXIST, which is not "
@@ -1800,7 +1857,10 @@ def test_classify_labels_and_never_adds_items():
     )
 
 
-def test_the_record_states_the_successor_has_not_landed():
+def test_the_record_states_the_successor_has_landed():
+    """#11002 retargeted this from "has NOT landed": the bounded re-narrate is
+    the ADD-capable stage the ordering obligation was waiting for, so a record
+    still claiming its absence would contradict the code and the ADD proof."""
     doc = _module_docstring(EXTRACTOR.read_text(encoding="utf-8"))
     problems = _successor_clause_violations(doc)
     assert not problems, "; ".join(problems)
@@ -1823,7 +1883,7 @@ def test_the_successor_checks_red_on_the_mutations_they_exist_to_catch():
     )
     # The whole clause cut, and — separately — the trap sentence reworded away
     # while the heading survives (a heading-only membership check stays green).
-    cut = source.replace(SUCCESSOR_ABSENT, "")
+    cut = source.replace(SUCCESSOR_LANDED, "")
     assert _successor_clause_violations(_module_docstring(cut)), (
         "removing the successor clause must red the check — otherwise the "
         "ordering obligation can be left reading as satisfiable again"

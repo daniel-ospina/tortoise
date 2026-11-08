@@ -67,8 +67,8 @@ claim nothing supports. **The seam has since LANDED (#9116), so this module no
 longer reports them as unobservable-by-construction.** Pre-seam, ``capture_session``'s
 receipt could not carry them and the failure was ONE LAYER UP from where it was
 first attributed: ``extract_session_v2`` built the surfaces
-(``result["classify_later"]`` at ``tortoise/extractor_v2.py:13936-13942`` and
-``result["vet"]`` at ``:13946-13950``) while the meta fold dropped them with
+(``result["classify_later"]`` at ``tortoise/extractor_v2.py:13978-13984`` and
+``result["vet"]`` at ``:13988-13992``) while the meta fold dropped them with
 ``"stats": out.get("stats") or {}``. The fold now calls
 ``_capture_stats_with_step_witness`` (``tortoise/sdk.py:17195``), which copies each
 stage's own counts onto ``stats["step_witness"]`` and drops no candidate text — so
@@ -161,8 +161,8 @@ def _sdk_line(code: str) -> int:
     A line cite is the one number in this bundle no reader can keep true by hand:
     any commit that inserts a line above the site moves it, and the meta fold has
     moved on this branch's own history and again on ``main``'s ``#9964``. Typed,
-    the CAUSE re-stales SILENTLY — a shipped cause once named ``:13723`` for a fold
-    that had moved to ``:13642``, and the only thing that caught it was
+    the CAUSE re-stales SILENTLY — a shipped cause once named ``:13730`` for a fold
+    that had moved to ``:13649``, and the only thing that caught it was
     ``tests/test_7949_capstone_measure.py``, which derives the line in the PIN and
     compares. Deriving it here too means the cause a reader (and #9116's fixer)
     actually reads cannot re-stale on a merge that touched nothing this bundle
@@ -474,7 +474,25 @@ DOOR_PINNED_OFF = ("TORTOISE_SESSION_EXTRACTOR", "TORTOISE_EXTRACTOR",
                    # (measured: 0.90 -> bound at the defaults, suspected with
                    # TORTOISE_SUBJECT_TAU_HI=0.99). Absent is the shipped
                    # default, so pinning them UNSET matches today's behaviour.
-                   "TORTOISE_SUBJECT_TAU_HI", "TORTOISE_SUBJECT_TAU_LO", "TORTOISE_PARTIAL_GAP_FILL")
+                   "TORTOISE_SUBJECT_TAU_HI", "TORTOISE_SUBJECT_TAU_LO",
+                   # `#11002`: the bounded re-narrate's KEEP-RATE arm
+                   # (`extractor_v2._renarrate_threshold`). UNSET is the shipped
+                   # default and the only state the registered corpus was scored
+                   # under: unset/blank/non-numeric/out-of-range all read as
+                   # DISARMED by construction, while an armed value (0 < v <= 1)
+                   # fires the retry — an EXTRA S1+S2 band whose union can add
+                   # candidates — on any session whose batch keep-rate falls under
+                   # it. So an ambient value changes both the population and the
+                   # cost of what a run measures, under a header that would still
+                   # claim the door held. The other trigger arm
+                   # (`coverage_suspect`) needs no threshold and is not a switch.
+                   "TORTOISE_RENARRATE_KEEP_RATE",
+                   # `#11534`: S2.2b-ADD's own switch. Absent is the shipped
+                   # default (DEFAULT OFF); an ambient `=1` spends a billed model
+                   # call on the flagged spans and unions its answer into the
+                   # embed list, so the population would change under a header
+                   # that still claimed the door held.
+                   "TORTOISE_PARTIAL_GAP_FILL")
 
 #: Seams pinned to an EXPLICIT value because their ABSENT state is not neutral.
 #: ``TORTOISE_S4_DELTA`` is DEFAULT-ON (``env_flag(..., True)``); an ambient
@@ -1766,27 +1784,27 @@ _IDLE_CITES: dict[str, str] = {
         "The extractor emits exactly this shape when the flag is ON and the list "
         "the VET pass would have worked on is empty: `vet_enabled` is computed "
         "BEFORE the `if not edus:` early return that emits {'enabled': "
-        "vet_enabled, 's2': {}, 'union': {}} (tortoise/extractor_v2.py:13243, the "
-        "flag; :13247, the early return; :13267, its vet surface), and each VET "
-        "pass is gated on the LIST — `if vet_enabled and embed_list:` (:13368), "
-        "`if vet_enabled and complete_list:` (:13722) — so "
+        "vet_enabled, 's2': {}, 'union': {}} (tortoise/extractor_v2.py:13262, the "
+        "flag; :13266, the early return; :13297, its vet surface), and each VET "
+        "pass is gated on the LIST — `if vet_enabled and embed_list:` (:16165), "
+        "`if vet_enabled and complete_list:` (:13764) — so "
         "a block that says enabled=true proves the FLAG, never that the pass "
         "ran. A FAILED vet pass leaves the same empty stats (`_run_vet_pass` "
-        "returns {} on its fail-open path, :13016-13019)."
+        "returns {} on its fail-open path, :13035-13038)."
     ),
     "classify_later": (
         "The extractor emits exactly this shape when the flag is ON and the "
         "CLASSIFY pass had nothing to work on: `classify_later` is computed at "
-        "tortoise/extractor_v2.py:13212 (and set False when its classifier cannot "
-        "be constructed, :13237), the `if not edus:` early return emits "
+        "tortoise/extractor_v2.py:13231 (and set False when its classifier cannot "
+        "be constructed, :13256), the `if not edus:` early return emits "
         "{'enabled': classify_later, 's2': {}, 'union': {}, "
-        "'restamp_overrides': 0, 'slot_rekeys': 0} (:13263-13266), and each "
+        "'restamp_overrides': 0, 'slot_rekeys': 0} (:13293-13296), and each "
         "classify pass is gated on the LIST and then on a NON-EMPTY item set — "
-        "`if classify_later and embed_list:` (:13591) around `if items:` "
-        "(:13594), `if classify_later and complete_list:` (:13737) around "
-        "`if items:` (:13747) — so a block that says enabled=true proves the "
+        "`if classify_later and embed_list:` (:13633) around `if items:` "
+        "(:13636), `if classify_later and complete_list:` (:13779) around "
+        "`if items:` (:13789) — so a block that says enabled=true proves the "
         "FLAG, never that the pass ran. A FAILED classify pass leaves the same "
-        "empty stats (its fail-open `except` at :13607 / :13758)."
+        "empty stats (its fail-open `except` at :13649 / :13800)."
     ),
 }
 
@@ -1798,26 +1816,26 @@ def _pass_ran(block: dict) -> bool | None:
     where the two were confused. ``extract_session_v2`` emits ``result["vet"]``
     and ``result["classify_later"]`` UNCONDITIONALLY — on the flag-OFF arm and on
     the early-return path the block is ``{"enabled": False, "s2": {}, "union":
-    {}}`` (:13263-13266, :13267, :13936-13950) — so an acceptance test of "a non-empty dict"
+    {}}`` (:13293-13296, :13297, :13978-13984, :13988-13992) — so an acceptance test of "a non-empty dict"
     reports S2.2/S2.3 WITNESSED on a run measured with the flags OFF, printing
     ``enabled=false, s2={}`` beside the word WITNESSED.
 
     ⛔ AND THE FLAG ALONE IS NOT ACTIVITY, which is the sharper half and the one
     this rule got wrong first. ``enabled`` is the FLAG value, computed BEFORE the
-    pass is reached: ``vet_enabled`` is set at ``extractor_v2.py:13243`` and
-    ``edus = _edus_from_conversation(...)`` follows at ``:13246``, whose
-    ``if not edus:`` early return (``:13247``) emits literally ``"vet": {"enabled":
-    vet_enabled, "s2": {}, "union": {}}`` (``:13267``) — with the flag ON. The
+    pass is reached: ``vet_enabled`` is set at ``extractor_v2.py:13262`` and
+    ``edus = _edus_from_conversation(...)`` follows at ``:13265``, whose
+    ``if not edus:`` early return (``:13266``) emits literally ``"vet": {"enabled":
+    vet_enabled, "s2": {}, "union": {}}`` (``:13297``) — with the flag ON. The
     passes themselves are gated on the LIST, not the flag: ``if vet_enabled and
-    embed_list:`` (``:13368``) and ``if vet_enabled and complete_list:``
-    (``:13722``). So a session whose conversation produced no list emits
+    embed_list:`` (``:16165``) and ``if vet_enabled and complete_list:``
+    (``:13764``). So a session whose conversation produced no list emits
     ``enabled: True`` with empty counters and no pass ever ran; so does a pass
     that FAILED, because ``_run_vet_pass`` returns ``{}`` stats on its fail-open
-    exception path (``extractor_v2.py:13016-13019``). ``enabled: true`` therefore
+    exception path (``extractor_v2.py:13035-13038``). ``enabled: true`` therefore
     proves the flag was read, never that the pass did anything.
 
     ⛔ The VET lines above are the VET pass's, not the rule's: the CLASSIFY pass
-    is different code (``classify_later`` at `:13212`, its own early-return
+    is different code (``classify_later`` at `:13231`, its own early-return
     block, its ``if classify_later and …`` gates around ``if items:``, its own
     fail-open ``except``), so the rule is stated pass-agnostically here and the
     CITES a reader gets are raised per surface from ``_IDLE_CITES`` — never one
@@ -1945,9 +1963,9 @@ def _summary(block: dict) -> str:
             value = block[key]
             rendered = json.dumps(value, sort_keys=True, default=str)
             if len(rendered) > 160:
-                rendered = rendered[:157] + "..."
+                rendered = rendered[:185] + "..."
             parts.append(f"{key}={rendered}")
-    return ", ".join(parts) or json.dumps(block, sort_keys=True, default=str)[:201]
+    return ", ".join(parts) or json.dumps(block, sort_keys=True, default=str)[:229]
 
 
 def anchor_census_cypher(label: str) -> str:
@@ -2835,7 +2853,7 @@ def census_reason(exc: BaseException) -> str:
     """A caught exception rendered for a COMMITTED artefact (`#10982` review, F1).
 
     ⛔ The log this block travels in is committed to a public repository, and
-    ``TORTOISE_DB_URI`` is a credential-bearing string — ``docker://:pw@host:6379/g``,
+    ``TORTOISE_DB_URI`` is a credential-bearing string — ``docker://:pw@host:6591/g``,
     and for the hosted ``live-v4`` graph the URI carries host, port, user and
     password (``from_uri`` semantics). An exception raised by a driver or a
     projection routinely echoes the URI it failed to reach, so ``f"{exc}"`` is a
@@ -2963,7 +2981,7 @@ def _a4_pointkind(projection) -> dict:
 
     ⛔ Two further folds that would have manufactured that same win (#10982 review, finding 4):
     a **blank** `pointKind` (`''` is what the #548 rebuild SNAPSHOT synthesis writes for an operator
-    with no kind — `tortoise/projection/__init__.py:13622-13624`, `# Ensure pointKind is present
+    with no kind — `tortoise/projection/__init__.py:13600-13602`, `# Ensure pointKind is present
     (operators often lack it)` / `clean["pointKind"] = ""`; the live write is
     `projection/entities.py:2602`, which leaves the property ABSENT instead) is ABSENT, not typed;
     and **capture rows** are

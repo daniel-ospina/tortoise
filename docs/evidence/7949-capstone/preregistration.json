@@ -3,7 +3,7 @@
   "issue": 9075,
   "epic": 7949,
   "document": "docs/evidence/7949-capstone/PRE-REGISTRATION.md",
-  "document_sha256": "sha256:5143b6ee07760ac7ad2c7142f1fb32a6321f084e2bcc1bfd2890e1cb462427a4",
+  "document_sha256": "sha256:adda6e82f2137b6d81395278b941aaf3af352ae20c875aae921f252209fa6184",
   "written_before_any_scored_run": true,
   "written_before_any_scored_run_basis": "No SCORED run exists at this commit. docs/evidence/7949-capstone/e1-e2.log predates this record and is UNPREREGISTERED by its own lines (prereg=UNPREREGISTERED, every criterion verdict=UNPREREGISTERED, result=UNPREREGISTERED, exit=3), so it was never compared against a bar and can never be scored against these thresholds. See PRE-REGISTRATION.md section 0 for the disclosed cost: the author of the E1 bar had seen the unscored 60.0%.",
   "unscored_runs_before_this_registration": [
@@ -233,7 +233,7 @@
     "conditional": [
       {
         "step": "S2.3",
-        "condition": "the S2 map left at least one candidate's kind missing or `unclassified`, so `_collect_classify_items` (tortoise/extractor_v2.py:11382, `def _collect_classify_items`) had an item to hand the classifier; when the map types every candidate the pass has no work and neither classify pass runs",
+        "condition": "the S2 map left at least one candidate's kind missing or `unclassified`, so `_collect_classify_items` (tortoise/extractor_v2.py:11401, `def _collect_classify_items`) had an item to hand the classifier; when the map types every candidate the pass has no work and neither classify pass runs",
         "idle_evidence": "the run's own classify surface reads enabled=true with empty s2/union, the receipt's error/warning surfaces carry no `classify(S2) failed` / `classify(union) failed` / `classify-later init failed` — the fail-open path leaves the SAME empty counters, so the absence of a failure marker is what separates 'nothing to do' from 'crashed' — AND the receipt's `step_witness` carries a POSITIVE candidate count for the map: an absent or zero count is the shape an EMPTY item set leaves when it skips the pass's `try`, so it cannot support an idle claim (#10215 review r2 P2)",
         "evidence_issue": 10215
       }
@@ -348,6 +348,7 @@
         "TORTOISE_LABEL_ORDER_SEED",
         "TORTOISE_PARTIAL_GAP_FILL",
         "TORTOISE_REFERENTIALITY",
+        "TORTOISE_RENARRATE_KEEP_RATE",
         "TORTOISE_S2_DECISION_SEAM",
         "TORTOISE_SESSION_EXTRACTOR",
         "TORTOISE_SESSION_LLM_MOCK",
