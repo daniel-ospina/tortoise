@@ -629,7 +629,7 @@ def _local_specifiers(text: str) -> list[str]:
          allowance is in the pattern rather than in a promise.
 
     ⛔ The comment branch is written in the CANONICAL LINEAR form
-    (`/\*[^*]*\*+(?:[^/*][^*]*\*+)*/`), not as a lazy `[\s\S]*?` inside the
+    (`/\\*[^*]*\\*+(?:[^/*][^*]*\\*+)*/`), not as a lazy `[\\s\\S]*?` inside the
     repetition: the lazy form is ambiguous — a comment's `*/` can either close
     the current comment or the outer `*` can end here and let the next `/*` start
     a new one — so a run of empty comments with no trailing literal exhausts the
@@ -697,7 +697,7 @@ def test_local_specifier_scan_reads_every_quote_style():
 def test_the_specifier_pattern_cannot_backtrack_exponentially():
     """The pattern must be LINEAR in the comment gap, not merely correct.
 
-    A lazy `[\s\S]*?` inside the repetition is ambiguous — the same `*/` can close
+    A lazy `[\\s\\S]*?` inside the repetition is ambiguous — the same `*/` can close
     a comment or terminate the gap so the next `/*` opens one — so a run of empty
     comments with NO trailing literal makes the engine try every split. Measured
     on that form: 0.012 s at 16 repeats, 0.221 s at 20, 3.4 s at 24 (×4 per two).
