@@ -2442,3 +2442,444 @@ def test_the_off_switch_never_reports_an_UNMEASURED_zero(monkeypatch, capsys):
     row = m.find_session_sources_carrying_prose(
         _RecordingGraph(_two_rows_one_node()))[0]
     assert row["duplicate_session_rows"] == 1
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#
+# THE FTS LEG (#11161) — the repair's SECOND verification surface.
+#
+# #11070's own indicator: "the whole point is that the sentence is also in the
+# FTS index, so the verification is a search that stops finding it". The census
+# reads NODE PROPERTIES; the Source FULLTEXT index on `_searchText` is a
+# different artifact, so a census-only green certifies the half that cannot break
+# independently. The legs below pin the three ways a naive probe misleads, and
+# each is a MEASURED shape, not a hypothetical:
+#
+# * a hit is not a leak — FalkorDB stems, so `fridays` still returns a node whose
+#   `_searchText` is already the post-fix lexicon `migration, plan, friday`;
+# * a zero from a dead read is not a zero — an open breaker / a dropped index
+#   returns `[]` exactly as a clean miss does;
+# * a multi-token probe is not a probe — the read OR-joins it, so it matches on
+#   any of its words and a CORRECT repair would read as leaked.
+
+#: A pre-fix node's prose, with a token that appears nowhere else.
+FTS_PROSE = "We decided the weekly zebraquux rebuild happens on Fridays."
+
+
+def _install_fts(monkeypatch, mapping, *, leg=None):
+    """Replace the product's one source-FTS read; keep the leg_trace contract.
+
+    ``mapping`` is ``{query: [(url, score), ...]}``. ``leg`` overrides the trace
+    entry so a breaker-open / index-missing read can be simulated — the shapes
+    that return ``[]`` while measuring NOTHING.
+    """
+    from tortoise import search_engine as se
+
+    calls: list[dict] = []
+
+    def fake(graph, query, entity_type="point", limit=20, timeout_ms=500,
+             excluded_statuses=None, leg_trace=None, keep_numeric=False,
+             expansion_terms=None):
+        rows = [tuple(r) for r in mapping.get(query, [])]
+        calls.append({"query": query, "entity_type": entity_type,
+                      "limit": limit})
+        if leg_trace is not None:
+            leg_trace.append(dict(
+                leg or {"leg": "fts", "ran": True, "degraded": False,
+                        "reason": "ok" if rows else "empty_results"},
+                count=len(rows)))
+        return rows
+
+    monkeypatch.setattr(se, "run_fts_query", fake)
+    return calls
+
+
+def test_a_MULTI_token_probe_is_REFUSED_because_the_FTS_read_OR_joins_it():
+    """A phrase is not a probe — the read turns it into an OR of its words.
+
+    (1) FAILS on a naive probe: `build_or_query('the second-latest PR comment')`
+        → `comment|second|latest|pr`, so the read returns rows for ANY of those
+        words. Measured on the live hosted graph, the single token `the` returns
+        the pre-fix fixture at rank 1 — a CORRECT repair would read as "leaked",
+        and the way an operator silences that is by clearing the post-fix lexicon
+        (the #3518 descriptor this repair must not destroy).
+    (2) REACHABLE: both inputs are ordinary operator guesses, and `the` is the
+        most likely first guess of all.
+    """
+    from tortoise.session_source_prose_migration import probe_phrase_rejection
+
+    for phrase in ("the second-latest PR comment", "the", "zx-99", "   "):
+        assert probe_phrase_rejection(phrase), (
+            f"{phrase!r} was accepted as a probe — the FTS read OR-joins it, so "
+            f"it measures the OR of its words, not the sentence")
+    assert probe_phrase_rejection("zebraquux") is None
+    assert probe_phrase_rejection("Fridays.") is None, (
+        "a single token with punctuation is still ONE token — the read escapes "
+        "it and it matches")
+
+
+def test_a_hit_on_a_REPAIRED_node_is_a_STEM_COLLISION_not_a_leak(monkeypatch):
+    """The index STEMS, so a repaired node can answer a probe token.
+
+    (1) FAILS without the classifier: `run_fts_query` returns the url of a node
+        whose `_searchText` is the post-fix lexicon and the naive reading calls
+        that "the sentence is still findable" — reported against a repair that
+        worked (measured: the probe `fridays` matches the lexicon token `friday`).
+    (2) REACHABLE: the lexicon's words come from the transcript's own word
+        frequencies, so a probe token from the prose collides with them whenever
+        they share a stem.
+    """
+    from tortoise import session_source_prose_migration as m
+
+    graph = _RecordingGraph([(_post_fix_node(),)])
+    _install_fts(monkeypatch, {"friday": [("session:s-post", 2.0)]})
+
+    report = m.probe_fts(graph, ["friday"], control=False)
+    assert report["leaked"] == [], (
+        "a repaired node's own lexicon entry was reported as a LEAK — that "
+        "invites clearing the #3518 descriptor")
+    assert report["stem_only"] == ["friday"]
+    assert report["probes"][0]["lexicon"] == ["session:s-post"]
+    assert report["probes"][0]["residue"] == []
+
+
+def test_a_hit_on_a_PRE_FIX_node_IS_a_leak(monkeypatch):
+    """The other polarity, and it is the one that must RED.
+
+    (1) FAILS on any census-only verification: the census sees a node whose
+        properties still carry the prose and the FTS read still returns it.
+    (2) REACHABLE: the pre-fix population, which is the state the repair exists
+        for.
+    """
+    from tortoise import session_source_prose_migration as m
+
+    graph = _RecordingGraph([(_session_node(url="session:pre-fix",
+                                            summary=FTS_PROSE,
+                                            _searchText=FTS_PROSE),)])
+    _install_fts(monkeypatch, {"zebraquux": [("session:pre-fix", 3.0)]})
+
+    report = m.probe_fts(graph, ["zebraquux"], control=False)
+    assert report["leaked"] == ["zebraquux"]
+    assert report["probes"][0]["residue"] == ["session:pre-fix"]
+
+
+def test_a_BREAKER_OPEN_read_is_UNMEASURABLE_not_a_clean_zero(monkeypatch):
+    """A leg that did not run returns `[]` — exactly as a clean miss does.
+
+    (1) FAILS on a leg that reads `hits` alone: an open circuit breaker (or a
+        dropped index) yields 0 hits and the run certifies a leak as repaired.
+    (2) REACHABLE: `run_fts_query` short-circuits to `[]` on a breaker that is
+        open, and returns `[]` with `reason="index_missing"` when the index is
+        gone — both are recorded in `leg_trace`, which is the only signal that
+        separates them from a genuine zero.
+    """
+    from tortoise import session_source_prose_migration as m
+
+    graph = _RecordingGraph([(_post_fix_node(),)])
+    _install_fts(monkeypatch, {}, leg={"leg": "fts", "ran": False,
+                                       "degraded": True, "reason": "breaker_open"})
+
+    report = m.probe_fts(graph, ["zebraquux"], control=True)
+    assert report["probes"][0]["hits"] == 0
+    assert report["unmeasurable"] == ["zebraquux"], (
+        "a probe whose read never ran was reported as a clean zero")
+    assert report["leaked"] == []
+
+
+def test_a_probe_that_FILLS_the_window_is_TRUNCATED_not_certified(monkeypatch):
+    """A count that reaches the LIMIT is a FLOOR: residue could hide past it.
+
+    (1) FAILS on a leg that reads only `hits`: 50 hits classified cleanly says
+        nothing about hit 51, so a common token certifies a leaked graph.
+    (2) REACHABLE: any token common enough to fill 50 rows — the same class the
+        OR-union pathology comes from.
+    """
+    from tortoise import session_source_prose_migration as m
+
+    node = _post_fix_node()
+    rows = [(f"session:s-{i}", 1.0) for i in range(m._FTS_PROBE_LIMIT)]
+    graph = _RecordingGraph([(node,)])
+    _install_fts(monkeypatch, {"plan": rows})
+
+    report = m.probe_fts(graph, ["plan"], control=False)
+    assert report["probes"][0]["truncated"] is True
+    assert report["truncated"] == ["plan"]
+
+
+def test_the_control_TOKEN_is_measured_and_never_ECHOED(monkeypatch, capsys):
+    """The positive control proves the read ANSWERS — without leaking a word.
+
+    (1) FAILS without a control: a probe that reads 0 on a graph whose index is
+        empty (or unreadable) is indistinguishable from a probe that reads 0
+        because the sentence left.
+    (2) REACHABLE: a post-fix lexicon node, whose `_searchText` is exactly what
+        the index is declared on.
+
+    ⛔ AND THE TOKEN STAYS OUT OF THE REPORT: it is a transcript-derived word,
+    and `candidate_detail` is redacted by WHITELIST precisely so no piece of the
+    utterance reaches stdout or `--json`.
+    """
+    from tortoise import session_source_prose_migration as m
+
+    class _LexiconGraph(_RecordingGraph):
+        """Answers the CONTROL read with a lexicon, as a real Source would.
+
+        The base fake projects every read through `COLUMNS` (the census layout),
+        so it cannot answer a one-column read with ONE column — and the control's
+        token is exactly what this test is about.
+        """
+
+        def query(self, cypher, params=None, timeout=None):
+            if "STARTS WITH $prefix" in cypher:
+                return _Result([("migration, plan, friday",)])
+            return super().query(cypher, params=params, timeout=timeout)
+
+    graph = _LexiconGraph([(_post_fix_node(),)])
+    _install_fts(monkeypatch, {"migration": [("session:s-post", 2.0)]})
+
+    report = m.probe_fts(graph, ["zebraquux"], control=True)
+    control = report["control"]
+    assert control["ok"] is True and control["hits"] == 1
+    assert "migration" not in json.dumps(report), (
+        "the control's lexicon token reached the report — it is transcript text")
+
+    # …and the CLI prints the COUNT, not the token.
+    clean = _LexiconGraph([(_post_fix_node(),)])
+    _install_cli(monkeypatch, clean, ["--dry-run", "--assert-clean",
+                                      "--probe-phrase", "zebraquux"])
+    capsys.readouterr()
+    assert _cli.main() == 0
+    out = capsys.readouterr().out
+    assert "control" in out
+    assert "migration" not in out, (
+        "the CLI echoed the control's lexicon token")
+
+
+def test_a_census_only_signoff_is_REFUSED_and_no_fts_probe_is_the_escape(
+        monkeypatch, capsys):
+    """`--assert-clean` must NAME its evidence.
+
+    (1) FAILS on the shipped CLI: `--dry-run --assert-clean` certified on the
+        census alone, i.e. on the half of the Target that cannot break
+        independently of the properties it reads.
+    (2) REACHABLE: the runbook's own step-3 command, unextended.
+
+    The escape is BY NAME (`--no-fts-probe`), the same doctrine the destructive
+    arm uses (`--clear-without-record`): the weaker evidence is available, and it
+    cannot be taken by omission.
+    """
+    _export_a_record_dsn(monkeypatch)
+    graph = _RecordingGraph([(_post_fix_node(),)])
+    _install_fts(monkeypatch, {})
+    _install_cli(monkeypatch, graph, ["--dry-run", "--assert-clean"])
+    assert _cli.main() == 2
+    err = capsys.readouterr().err
+    assert "--probe-phrase" in err and "--no-fts-probe" in err
+
+    _install_cli(monkeypatch, graph, ["--dry-run", "--assert-clean",
+                                      "--no-fts-probe"])
+    assert _cli.main() == 0
+    err = capsys.readouterr().err
+    assert "CENSUS only" in err, (
+        "the sign-off did not say which half it skipped")
+
+
+def test_probe_phrase_and_no_fts_probe_together_are_REFUSED(monkeypatch,
+                                                            capsys):
+    """Contradictory asks are a usage error, never a silent pick.
+
+    (1) FAILS on a CLI that lets one flag win: "measure the index" and "do not
+        measure the index" is not a preference, and whichever loses reads as an
+        unexamined default.
+    (2) REACHABLE: both flags are one keystroke apart in the help.
+    """
+    _export_a_record_dsn(monkeypatch)
+    _install_cli(monkeypatch, _RecordingGraph([(_post_fix_node(),)]),
+                 ["--dry-run", "--assert-clean", "--probe-phrase", "zebraquux",
+                  "--no-fts-probe"])
+    assert _cli.main() == 2
+    assert "contradictory" in capsys.readouterr().err
+
+
+def test_a_LEAK_reds_a_repair_that_the_census_calls_complete(monkeypatch,
+                                                             capsys):
+    """The false PASS this issue exists for, at argv level.
+
+    (1) FAILS on the shipped CLI: the census reached 0, so the run printed
+        "Repair complete." and exited 0 while the Source FTS index still
+        returned a node carrying the prose — the sentence is still retrievable,
+        which is the only way a user experiences the leak.
+    (2) REACHABLE: the pair cleared on the node with a stale index entry behind
+        it, which is exactly what #11161 measured is NOT covered by any check.
+    """
+    _export_a_record_dsn(monkeypatch)
+    graph = _RecordingGraph([(_session_node(url="session:stale",
+                                            summary=FTS_PROSE,
+                                            _searchText=FTS_PROSE),)])
+    _install_fts(monkeypatch, {"zebraquux": [("session:stale", 3.0)]})
+    monkeypatch.setattr(_cli, "reconcile_session_source_prose",
+                        lambda *a, **k: {
+                            "candidates": ["session:stale"], "repaired": [],
+                            "empty_sessions": [], "no_record": ["session:stale"],
+                            "no_reader": [], "no_session_id": [],
+                            "unaddressable": [], "left_alone": [],
+                            "written": ["session:stale"], "notes": {},
+                            "census_before": 1, "census_after": 0,
+                            "dry_run": False})
+    _install_cli(monkeypatch, graph, ["--repair", "--clear-without-record",
+                                      "--probe-phrase", "zebraquux"])
+
+    assert _cli.main() == 1, (
+        "the repair reported success while the sentence was still findable")
+    captured = capsys.readouterr()
+    assert "Repair complete." not in captured.out
+    assert "still findable" in captured.err
+
+
+def test_the_repair_arm_takes_the_BEFORE_reading_itself(monkeypatch, capsys):
+    """`--repair --probe-phrase` proves the sentence LEFT, in one run.
+
+    (1) FAILS on a leg that only measures AFTER: on a repaired graph a 0 cannot
+        be told apart from a token that was never in the corpus, so the
+        verification would pass on any invented word.
+    (2) REACHABLE: the run that writes is the only moment the BEFORE state still
+        exists.
+    """
+    _export_a_record_dsn(monkeypatch)
+    graph = _RecordingGraph([(_session_node(url="session:pre", summary=FTS_PROSE,
+                                            _searchText=FTS_PROSE),)])
+    reads = {"n": 0}
+
+    def fake(graph_, query, **kwargs):
+        # FIRST call = the BEFORE reading (the node is still prose); everything
+        # after = the repaired graph.
+        reads["n"] += 1
+        rows = [("session:pre", 3.0)] if reads["n"] == 1 else []
+        if kwargs.get("leg_trace") is not None:
+            kwargs["leg_trace"].append({"leg": "fts", "ran": True,
+                                        "degraded": False,
+                                        "reason": "ok" if rows else
+                                        "empty_results", "count": len(rows)})
+        return rows
+
+    from tortoise import search_engine as se
+    monkeypatch.setattr(se, "run_fts_query", fake)
+    monkeypatch.setattr(_cli, "reconcile_session_source_prose",
+                        lambda *a, **k: {
+                            "candidates": ["session:pre"], "repaired": [],
+                            "empty_sessions": [], "no_record": ["session:pre"],
+                            "no_reader": [], "no_session_id": [],
+                            "unaddressable": [], "left_alone": [],
+                            "written": ["session:pre"], "notes": {},
+                            "census_before": 1, "census_after": 0,
+                            "dry_run": False})
+    _install_cli(monkeypatch, graph, ["--repair", "--clear-without-record",
+                                      "--probe-phrase", "zebraquux"])
+
+    assert _cli.main() == 0
+    captured = capsys.readouterr()
+    assert "Repair complete." in captured.out
+    assert "1 residue before" in captured.out and "0 residue after" in captured.out
+
+
+def test_an_UNCORROBORATED_zero_does_not_certify(monkeypatch, capsys):
+    """A probe that hit nothing before AND has no control proves nothing.
+
+    (1) FAILS on a leg that equates "0 hits" with "verified": an operator-typed
+        token that is not in the corpus reads 0 on an unrepaired graph and on a
+        repaired one alike.
+    (2) REACHABLE: the documented usage makes the operator invent the token, and
+        a typo is the ordinary case.
+    """
+    _export_a_record_dsn(monkeypatch)
+    graph = _RecordingGraph([(_post_fix_node(),)])   # no lexicon node ⇒ no control
+    _install_fts(monkeypatch, {"zebraquux": []})
+    _install_cli(monkeypatch, graph, ["--dry-run", "--assert-clean",
+                                      "--probe-phrase", "zebraquux"])
+    monkeypatch.setattr(
+        "tortoise.session_source_prose_migration.lexicon_control_token",
+        lambda g, **k: None)
+
+    assert _cli.main() == 1, (
+        "an uncorroborated zero certified the verification")
+    assert "cannot be corroborated" in capsys.readouterr().err
+
+
+def test_the_sentence_LEAVES_the_Source_FTS_index_on_a_REAL_graph():
+    """Both arms against a real FalkorDB and the real Source FULLTEXT index.
+
+    (1) FAILS on any census-only verification: the pre-fix node is findable by a
+        token only its prose carries, and after the clear arm it must not be.
+    (2) REACHABLE: the pre-fix population, and the record arm's post-fix lexicon
+        (which must remain findable — a repair that un-indexes the session is the
+        #3518 regression, not a fix).
+
+    `tests/test_11070_source_prose_repair.py` runs on a `_RecordingGraph`
+    everywhere else, so no Cypher in it is ever parsed by FalkorDB. This leg is
+    the one that puts the repair's OUTPUT in front of the ENGINE: a stale-index
+    leak, a stemming collision and a dead read are all invisible to a fake.
+    """
+    from tests import _live_utils
+
+    _live_utils._skip_unless_live_uri()
+
+    from tortoise import session_source_prose_migration as m
+    from tortoise.projection import FalkorProjection
+
+    graph_name = f"test_11070_fts_{__import__('os').urandom(4).hex()}"
+    # `FalkorProjection.from_uri` journals the graph in a test frame, and it
+    # creates the FULLTEXT indexes this leg needs (a raw client would have none —
+    # and an FTS query against a missing index returns [] exactly like a clean
+    # miss; that is the instrument this leg exists to exercise).
+    proj = FalkorProjection.from_uri(__import__("os").environ["TORTOISE_DB_URI"],
+                                     graph_name=graph_name)
+    g = proj.g
+    url = "session:fts-11161"
+
+    def seed():
+        g.query("MATCH (n) DETACH DELETE n")
+        g.query(
+            "CREATE (:Source {url:$u, sourceKind:'agentSession', sessionId:'fts',"
+            " summary:$p, _searchText:$p, topics:['friday','rebuild']})",
+            {"u": url, "p": FTS_PROSE})
+
+    try:
+        # ── the CLEAR arm ────────────────────────────────────────────────
+        seed()
+        before = m.probe_fts(g, ["zebraquux"], control=False)
+        assert before["probes"][0]["residue"] == [url], (
+            "the fixture is not findable through the Source FTS index, so this "
+            "test could not tell a repair from a dead read")
+        assert before["probes"][0]["ran"] is True
+        report = m.reconcile_session_source_prose(
+            g, dry_run=False, clear_without_record=True)
+        assert report["written"] == [url]
+        after = m.probe_fts(g, ["zebraquux"], control=True)
+        assert after["probes"][0]["residue"] == [], (
+            "the sentence is STILL findable through the Source FTS index after "
+            "the pair was cleared (#11161)")
+        assert after["leaked"] == []
+
+        # ── the RECORD arm: the lexicon must be findable, and not by the
+        #    prose's token ────────────────────────────────────────────────
+        seed()
+        transcript = "the migration plan for the invoice service is ready"
+        report = m.reconcile_session_source_prose(
+            g, dry_run=False,
+            read_transcript=lambda sid, mark=None: transcript)
+        assert report["repaired"] == [url]
+        node = g.query("MATCH (s:Source {url:$u}) RETURN s.summary, s._searchText",
+                       {"u": url}).result_set[0]
+        assert node[0].startswith(SESSION_SOURCE_SUMMARY_PREFIX), (
+            "the record arm did not write the post-fix lexicon")
+        stems = {w.strip() for w in (node[1] or "").split(",")}
+        assert stems, "the re-derived lexicon is empty"
+        control = m.lexicon_control_token(g)
+        assert control is not None
+        assert m.source_fts_probe(g, control)["hits"] > 0, (
+            "the re-derived lexicon is NOT findable — the session was "
+            "un-indexed (#3518)")
+        assert m.probe_fts(g, ["zebraquux"], control=True)["leaked"] == [], (
+            "the prose's token still returns a node after the record arm")
+    finally:
+        _live_utils.drop_test_graph(proj)
