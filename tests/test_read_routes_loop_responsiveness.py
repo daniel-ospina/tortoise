@@ -3499,7 +3499,7 @@ def test_the_cold_projection_open_rides_the_construction_lane(
         f"[{label}] {handler} submitted its read BEFORE attaching the "
         f"projection (events: {events!r}) — the cold open rides the read lane's "
         f"8 s bound instead of the construction lane's "
-        f"probe_setup_timeout() allowance (#10602 cycle-2 P1)")
+        f"graph_offload_timeout_s() allowance (#10602 cycle-2 P1)")
 
 
 def test_the_read_path_answers_while_the_default_executor_is_stalled(client):
