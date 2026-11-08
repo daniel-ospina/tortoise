@@ -1784,7 +1784,12 @@ def test_a_ledger_path_that_cannot_be_read_is_a_refusal_not_a_traceback(tmp_path
 
 
 def test_the_cli_exit_codes_pin_every_failure_arm(monkeypatch, tmp_path, capsys):
-    """Round-26: returning 0 from any of the three failure arms left the suite green."""
+    """Round-26: returning 0 from ANY failure arm left the suite green.
+
+    The loop below now covers five arms (two stops, the no-op, and the fully- and
+    partially-refused writes), and each one also asserts its OWN stderr needle — the
+    exit code alone cannot tell the arms apart once a later arm can also return 3.
+    """
     mod = _tool_module()
     state = {"graphs": [{"graph_id": "g_a", "stable_id": "g_a", "namespace": "org_x_g_a"}]}
 
@@ -2140,10 +2145,13 @@ def test_a_case_varied_ref_cannot_be_one_rows_id_and_anothers_name():
 class _RefusalOnALaterPage:
     """A walk whose SECOND page is a refusal envelope, on a surface with no `total`.
 
-    Neither existing guard can see this: the shortfall check has no total to compare
-    against, and both the page re-check and the verification pass re-read the last
-    page that SUCCEEDED (a refusal returns no rows, so the loop breaks before the
-    fingerprint is updated), so they compare like with like and agree.
+    On the `verify=False` path neither existing guard can see it: the shortfall check has
+    no total to compare against, and the page re-check re-reads the last page that
+    SUCCEEDED (a refusal returns no rows, so the loop breaks before the fingerprint is
+    updated), so they compare like with like and agree. The DEFAULT path is caught by a
+    DIFFERENT guard — `_fingerprint_walk` starts at offset 0 and raises on its own
+    refusal — so the two paths are distinct witnesses, not one guarantee seen twice
+    (measured; a previous revision of this docstring said they "agree", which was false).
     """
 
     def __init__(self):
@@ -2223,8 +2231,13 @@ def test_two_rows_sharing_an_id_and_a_hash_cannot_hide_the_second_text(tmp_path)
     a unique text that had simply been left behind.
     """
     plan = C.build_plan(
-        [row("dup", content="text one", content_hash="H"),
-         row("dup", content="text two", content_hash="H")],
+        # `kind="decision"` is LOAD-BEARING, not decoration: with the default kind both
+        # rows classify UNDECIDABLE, the bundle carries nothing, and the `duplicates == 0`
+        # assertion below then holds under EVERY mutant — a dead assertion (round-36
+        # review, mutation rule 3: measured 0 both pre- and post-fix). A carried pair is
+        # what makes `duplicate_rows` able to move: measured 1 on the pre-fix code.
+        [row("dup", kind="decision", content="text one", content_hash="H"),
+         row("dup", kind="decision", content="text two", content_hash="H")],
         source_graph="old", target_graph="new", packs={},
     )
     assert len(plan.decisions) == 2, [d.node_id for d in plan.decisions]
