@@ -397,25 +397,47 @@ def test_an_unknown_version_is_invalid(tmp_path):
 def test_a_sha_that_names_no_commit_is_invalid(tmp_path):
     """Shape is not existence: a fabricated 40-hex sha rendered as provenance.
 
-    ⛔ A SHALLOW checkout cannot answer this question at all (#11217): `actions/checkout@v4`
-    defaults to `fetch-depth: 1`, so a recorded ANCESTOR is absent by construction and
-    "absent" is indistinguishable from "fabricated". The tool abstains there rather than
-    reporting a false RED — which is what red the 22 committed-ledger rows in every CI
-    shard. Both arms are asserted so neither can rot: the RESIDUAL is stated, not hidden —
-    in a shallow checkout a genuinely fabricated sha is not caught, and the refusal arm
-    runs in any full clone (and in the merge rail).
+    ⛔ Exercised IN-PROCESS with the shallow probe forced OFF, because a depth-1
+    checkout — the CI `test` job (`python-ci.yml:489`) and this box — cannot tell a
+    fabricated sha from an ancestor the clone does not hold. Forcing the arm is what
+    keeps it REACHABLE from every checkout instead of silently never running on the
+    boxes that matter (agent-infra#3442 rule 3; #11217).
     """
     data = _ledger([_row("A")])
     data["measured_at"]["sha"] = "deadbeef" * 5
-    proc = _run_cli(tmp_path, data)
-    if cl._is_shallow():
-        assert "names no commit" not in proc.stderr, (
-            "a shallow checkout must ABSTAIN, not red the record for history it does not hold: "
-            + proc.stderr
-        )
-    else:
-        assert proc.returncode == cl.EXIT_INVALID, proc.stdout + proc.stderr
-        assert "names no commit" in proc.stderr
+    original = cl._is_shallow
+    cl._is_shallow = lambda: False
+    try:
+        with pytest.raises(cl.InvalidLedger) as excinfo:
+            cl.validate(data)
+    finally:
+        cl._is_shallow = original
+    assert "names no commit" in str(excinfo.value)
+
+
+def test_a_shallow_checkout_ABSTAINS_on_a_sha_it_cannot_resolve(tmp_path):
+    """A shallow clone holds no ancestor, so absence is NOT evidence — abstain.
+
+    The counterpart of the arm above, and why 22 committed-ledger rows stopped going
+    red on every CI shard: the shape of the CLONE is not a defect in the record. The
+    residual is stated rather than hidden — in a shallow checkout a genuinely
+    fabricated sha is not caught, which is the trade `python-ci.yml:489` already made
+    for the gate it describes as reporting UNPROVABLE.
+    """
+    data = _ledger([_row("A")])
+    data["measured_at"]["sha"] = "deadbeef" * 5
+    original = cl._is_shallow
+    cl._is_shallow = lambda: True
+    try:
+        try:
+            cl.validate(data)
+        except cl.InvalidLedger as exc:
+            assert "names no commit" not in str(exc), (
+                "a shallow checkout must ABSTAIN rather than red the record for "
+                "history it does not hold: " + str(exc)
+            )
+    finally:
+        cl._is_shallow = original
 
 
 # ── the REAL committed ledger ──────────────────────────────────────────────
