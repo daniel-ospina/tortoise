@@ -5388,6 +5388,19 @@ def test_a_git_that_COULD_NOT_ANSWER_is_not_read_as_a_measured_untracked(
     assert "not TRACKED" not in err, (
         f"git never answered for this path, so that sentence is a cause nobody measured: {err}"
     )
+    # ⛔ AND THIS RENDERER'S MARKER AND QUESTION WERE UNPINNED (#11474 review).
+    # MEASURED at the head that renamed the marker to `UNMEASURED` "on all four
+    # renderers": reverting THIS one to `REFUSED`, and separately swapping its sentence
+    # for the directory arm's, each left the suite at 320 passed. Every assertion here
+    # described the sentence's subject; none described the word a reader greps for, or
+    # which of the two probes this line belongs to. The claim is load-bearing because
+    # this renderer CAN fire on a row that is then ACCEPTED (a later glob match), so a
+    # verdict marker here prints `REFUSED` on a CLEAN run.
+    assert "UNMEASURED" in err, f"the marker names the measurement, not a fate: {err}"
+    assert "REFUSED" not in err, f"no per-path line may announce a verdict: {err}"
+    assert "about what" not in err, (
+        f"this renderer asks about a FILE, not what a directory holds: {err}"
+    )
 
     # And the CALLER's row-level sentence must not pick one of `_is_tracked`'s two
     # `None` causes either — "could not be RUN" is false here, the check DID run.
@@ -5485,8 +5498,20 @@ def test_a_PATTERN_shaped_filename_does_not_inherit_its_tracked_SIBLING(tmp_path
         # git never measured. The guard is applied at all three sites or the counter
         # is wrong about what it counts.
         ("glob", lambda: cl._names_artifact(_GLOB_EVIDENCE, REPO_ROOT, REPO_ROOT)),
+        # ⛔ The DIRECTORY arm's fourth-answer guard, the one site this row set did not
+        # cover (#11474 review). MEASURED: replacing `if dir_tracked is not True:` with
+        # `if False:` left the suite at 320 passed, so deleting that guard — which
+        # falls through to `return True, ""`, i.e. ACCEPTS the directory — was
+        # invisible. The file arm's three sites were pinned; the sibling probe's was
+        # not, which is the same one-probe-over gap the fall-open pin closed.
+        ("dir", lambda: cl._names_artifact("tests", REPO_ROOT, REPO_ROOT)),
     ],
-    ids=["_evidence_is_real", "_names_artifact_bare_path", "_names_artifact_glob"],
+    ids=[
+        "_evidence_is_real",
+        "_names_artifact_bare_path",
+        "_names_artifact_glob",
+        "_names_artifact_directory_arm",
+    ],
 )
 def test_a_truthy_non_True_TRACKED_answer_is_not_read_as_tracked(site, call, monkeypatch):
     """The FOURTH answer: `is False … is None … return True` ACCEPTED everything else.
@@ -5509,6 +5534,9 @@ def test_a_truthy_non_True_TRACKED_answer_is_not_read_as_tracked(site, call, mon
     measurement" in why`), not on an exit code, and it is fail-closed either way.
     """
     monkeypatch.setattr(cl, "_is_tracked", lambda resolved, root: 1)
+    if site == "dir":
+        # The DIRECTORY arm reads its own probe; the file one is irrelevant there.
+        monkeypatch.setattr(cl, "_is_tracked_dir", lambda resolved, root: 1)
     ok, why = call()
     assert ok is False, f"a truthy non-True answer is not 'tracked' on the {site} arm"
     assert "not a measurement" in why, why
