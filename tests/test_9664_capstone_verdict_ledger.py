@@ -4840,3 +4840,36 @@ def test_a_glob_mixing_untracked_and_unrunnable_reports_the_measured_refusal(mon
         "a mixed glob must not claim EVERY match is untracked: one of them was never "
         f"measured, and that is the guess-the-cause defect this branch removes: {why}"
     )
+
+
+def test_a_glob_accepted_by_a_later_match_does_not_announce_the_rows_fate(monkeypatch, capsys):
+    """A PER-PATH refusal is not a row verdict — the glob can accept on a later match.
+
+    Measured shape that made this a defect rather than a wording nit: one `ls-files`
+    fork raising `OSError(24)` under load and the next answering normally. The probe
+    printed "the row does not count" for the unmeasured match, the tracked match then
+    satisfied the glob, and the ledger exited **0 CLEAN** — a printed refusal on a
+    passing row, which is the legibility failure `_tracked_unrunnable` exists to
+    remove. The row-level sentence belongs to the caller, which knows the verdict.
+    """
+    calls: list[str] = []
+
+    def first_unrunnable_then_tracked(resolved, root):
+        calls.append(resolved.name)
+        if len(calls) == 1:
+            cl._tracked_unrunnable(OSError(24, "Too many open files"), resolved)
+            return None
+        return True
+
+    monkeypatch.setattr(cl, "_is_tracked", first_unrunnable_then_tracked)
+    ok, why = cl._evidence_is_real(
+        "cmd:uv run python docs/evidence/9664-capstone/run-2026-10-26/*.txt", REPO_ROOT
+    )
+    assert len(calls) >= 2, f"needs a later match to accept, saw {calls}"
+    assert ok is True, why
+    err = capsys.readouterr().err
+    assert "REFUSED" in err, "the per-path refusal must still be PRINTED, not silent"
+    assert "the row does not count" not in err, (
+        "the probe cannot know the row's fate — a later tracked match accepted it, so "
+        f"the per-path line must not claim the row was refused: {err}"
+    )

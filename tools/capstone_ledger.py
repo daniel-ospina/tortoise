@@ -2096,16 +2096,25 @@ def _is_tracked(resolved: Path, root: Path) -> bool | None:
 
 
 def _tracked_unrunnable(exc: OSError, rel: Path) -> None:
-    """The probe could not RUN. Nothing was measured, so the row is REFUSED.
+    """The probe could not RUN for `rel`. Nothing was measured, so that path is refused.
 
     ⛔ NOT `_tracked_unprovable()`: that one is for a MEASURED "git says this is not
     a work tree", where the record is not blamed. A spawn failure is the opposite
     fact — nothing was answered — and abstaining on it is a measured fail-open.
+
+    ⛔ AND IT MAY NOT ANNOUNCE THE ROW'S FATE (#11474 reviews). This is a PER-PATH
+    fact, and the caller decides what it does to the row: `_names_artifact`'s glob
+    arm accepts as soon as ANY match is tracked, so a line claiming "the row does
+    not count" printed for an earlier, unmeasured match would be true of nothing
+    while the ledger exits CLEAN — a printed refusal on a passing row, which is the
+    legibility failure this function exists to remove, one layer down. The row-level
+    consequence is the CALLER's sentence to write (the criteria line refuses); this
+    one states only what was measured, and about which path.
     """
     print(
         "CAPSTONE-LEDGER: REFUSED — the TRACKED check could not be RUN here "
-        f"({exc.__class__.__name__}: {exc}), so {rel} is not shown to be in the tree "
-        "and the row does not count",
+        f"({exc.__class__.__name__}: {exc}), so nothing was measured about {rel}: it "
+        "is not shown to be in the tree",
         file=sys.stderr,
     )
     return None
