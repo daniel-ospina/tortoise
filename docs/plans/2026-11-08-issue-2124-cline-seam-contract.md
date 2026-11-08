@@ -104,7 +104,11 @@ hook script as a module. No MCP tool or public SDK method is touched.
   `isinstance(out["contextModification"], str)` (the exact predicate `hook-factory.ts:75` applies).
 - R3 `install cline` writes where no Cline surface reads → caught by asserting the install target is
   `<dir>/.clinerules/hooks/UserPromptSubmit`.
-- R4 Migration deletes a user's own hook → caught by the foreign-hook refusal test at the legacy path.
+- R4 Migration or uninstall deletes a user's own hook → caught by the foreign-hook refusal tests at
+  the legacy path **and at the LIVE target**
+  (`test_install_cline_refuses_a_FOREIGN_live_hook_at_the_live_target`, which is the only case that
+  distinguishes the live target's STRICT identity rule from the legacy path's provenance rule — the
+  other two foreign-hook tests use text that fails the 2-token predicate under either rule).
 - R5 Uninstall leaves our file behind at either path → caught by the uninstall assertions on both
   paths **including a live old script path** (`test_install_cline_migrates_a_legacy_registration_whose_script_path_lives`,
   which also pins the install-side migration for that shape — the dead-path form alone let a live one
@@ -120,7 +124,17 @@ hook script as a module. No MCP tool or public SDK method is touched.
   agreement hold for every shape, not just regular files.
 - R8 A DIRECTORY at the LEGACY path refuses an install that never touches it → caught by
   `test_install_cline_ignores_a_directory_at_the_legacy_path` (install succeeds, directory untouched;
-  `--uninstall` still refuses, because `unlink` on a directory raises).
+  `--uninstall` still refuses via the explicit `is_dir` guard, which returns before any `unlink` —
+  `unlink` on a directory would raise, but the guard is what actually refuses).
+- R9 `.cline` and `.clinerules` are the SAME path (a symlink either way), so "retiring the legacy
+  registration" deletes the file the run just wrote — exit 0, `Installed` + `Removed the legacy
+  registration` printed, and NO hook on any path → caught by
+  `test_install_cline_does_not_retire_the_registration_it_just_wrote`.
+- R10 A cleanup that cannot complete either reports the whole run as `Install failed:` (false red,
+  naming nothing left behind) or claims "nothing to remove" over our surviving hook (false green) →
+  caught by `test_install_cline_reports_a_failed_legacy_cleanup_as_a_note` (install side) and
+  `test_install_cline_reports_a_failed_legacy_cleanup_on_uninstall_as_a_note` (uninstall side, which
+  also pins that the summary keys on ownership rather than on what was removed).
 
 **Threat classes:** (not adversarial) — not gate/enforcement code.
 

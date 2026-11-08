@@ -5875,6 +5875,16 @@ def _install_read_hook_impl(args) -> int:
       mention, another product's LIVE volunteer-turn.sh at a different path,
       and malformed commands are NOT ours and are left untouched: an
       uninstall must never delete config it cannot prove it created (#2383).
+      THE ONE EXCEPTION is cline's LEGACY path
+      (``<dir>/.cline/hooks/UserPromptSubmit``), which is judged by
+      PROVENANCE: any ``…/volunteer-turn.sh <harness>`` invocation there is
+      ours whether its script path is live or dead, because a pre-#2124
+      marker names the script path of the release that wrote it and that path
+      still exists whenever the old install does. Strict identity there read
+      our OWN old file as foreign, left two hooks live — Cline's SDK/CLI
+      reads BOTH dirs, so the reflex injected twice — and let ``--uninstall``
+      exit 0 over a survivor (#11588 review cycle 2). The LIVE target keeps
+      the strict rule above, so a user's own wrapper is never overwritten.
     - Symlinked targets that resolve OUTSIDE the install dir are refused
       (a repo .codex/.claude/.cline symlink must not write through to
       ~/.claude/settings.json or any other real file).
@@ -6237,6 +6247,22 @@ def _install_read_hook_impl(args) -> int:
             except OSError:
                 return False
 
+        def _legacy_is_live_target() -> bool:
+            """True when ``.cline`` and ``.clinerules`` are the SAME path.
+
+            A user may symlink one to the other — the natural workaround for
+            the old ``.cline/hooks`` blindness, since it gives both Cline
+            surfaces one hooks dir. Then ``legacy_target`` IS ``target``, and
+            "retiring" it deletes the registration this very run wrote: a
+            FALSE PASS that prints ``Installed`` AND ``Removed the legacy
+            registration``, exits 0, and leaves NO hook on any path (#11588
+            review cycle 3, measured with ``.cline -> .clinerules``: rc 0,
+            ``.clinerules/hooks/`` empty). Nothing is retired in that shape —
+            the one file IS the live registration.
+            """
+            return (legacy_target is not None
+                    and legacy_target.resolve() == target.resolve())
+
         # `.clinerules` is ALSO Cline's rules-FILE convention (the single-file
         # form predates the `.clinerules/` directory its docs prescribe today),
         # so a project can already hold a REGULAR FILE at that name — or a
@@ -6271,18 +6297,20 @@ def _install_read_hook_impl(args) -> int:
         if dry:
             print(f"[dry-run] would write {target}:")
             print(marker_content.rstrip())
-            if (legacy_target is not None and legacy_target.exists()
+            if (legacy_target is not None and not _legacy_is_live_target()
+                    and legacy_target.exists()
                     and _cline_owns_path(legacy_target)):
                 print(f"[dry-run] would remove the legacy registration at "
                       f"{legacy_target}")
         elif uninstall:
-            removed, skipped = [], []
+            removed, skipped, owned = [], [], []
             for p in cline_paths:
                 if not p.exists():
                     continue
                 if not _cline_owns_path(p):
                     skipped.append(p)
                     continue
+                owned.append(p)
                 # #2124 review P2: a delete is BEST-EFFORT, exactly like the
                 # ownership READ above (`_cline_owns_path` returns False on
                 # OSError). An unlink that cannot complete (a root-owned
@@ -6297,7 +6325,11 @@ def _install_read_hook_impl(args) -> int:
                           "manually.", file=_sys.stderr)
                     continue
                 removed.append(p)
-            if not removed:
+            # The summary keys on OWNERSHIP, never on `removed` (#11588 review
+            # cycle 3): an unlink that failed above left OUR OWN hook in place,
+            # and "nothing to remove" over a survivor is the same false
+            # success as reporting a failed cleanup as `Install failed:`.
+            if not owned:
                 print(f"No {harness} registration of ours at {target} — "
                       "nothing to remove.")
             for p in removed:
@@ -6322,7 +6354,7 @@ def _install_read_hook_impl(args) -> int:
             # unlink that cannot complete must not turn a working install into
             # `Install failed:` + exit 1 while the stale file it meant to retire
             # keeps double-injecting. Same reasoning as the ownership read above.
-            if legacy_target is not None and legacy_target.exists():
+            if legacy_target is not None and not _legacy_is_live_target() and legacy_target.exists():
                 if _cline_owns_path(legacy_target):
                     try:
                         legacy_target.unlink()
@@ -6342,6 +6374,12 @@ def _install_read_hook_impl(args) -> int:
             print("Then enable hooks in Cline settings (Hook feature) — "
                   "Cline reads <dir>/.clinerules/hooks (the legacy "
                   "<dir>/.cline/hooks is read by its SDK/CLI only).")
+            if _legacy_is_live_target():
+                print(f"Note: {legacy_target} and {target} are the SAME file "
+                      "(one is a symlink to the other), so the registration "
+                      "just installed is the one both Cline surfaces read — "
+                      "there is no separate legacy file to retire.",
+                      file=_sys.stderr)
         return 0
 
     # ── hermes: a directory PLUGIN (plugin.yaml + __init__.py), not a

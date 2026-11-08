@@ -409,6 +409,119 @@ def test_install_cline_reports_a_failed_legacy_cleanup_as_a_note(tmp_path,
     assert legacy.exists(), "the unremovable path must be named, not dropped"
 
 
+def test_install_cline_reports_a_failed_legacy_cleanup_on_uninstall_as_a_note(
+        tmp_path, monkeypatch, capsys):
+    """The uninstall half of the best-effort delete (#11588 review cycle 3).
+
+    The install-side test covers the migration; this covers the uninstall loop,
+    where the same `except OSError` exists for the same reason — and where its
+    ABSENCE used to escape to the catch-all as
+    `Install failed: PermissionError` (exit 1) after the other path had already
+    been removed.
+
+    The summary must key on OWNERSHIP, not on `removed`: with the only
+    registration unremovable, `removed` is empty, and the old summary then said
+    "No cline registration of ours … — nothing to remove" over our SURVIVING
+    hook — the same false success in a different message.
+
+    MUTATION: drop the `except OSError` → RED on `Install failed`; restore a
+    `if not removed:` summary → RED on the "nothing to remove" assertion.
+    """
+    import tortoise.__main__ as tmain
+
+    root = tmp_path / "proj"
+    legacy = root / ".cline" / "hooks" / "UserPromptSubmit"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("#!/usr/bin/env bash\n"
+                      "exec /nonexistent/volunteer-turn.sh cline\n")
+
+    real_unlink = Path.unlink
+
+    def _refuse(path, *a, **kw):
+        if path == legacy:
+            raise PermissionError(13, "Permission denied", str(path))
+        return real_unlink(path, *a, **kw)
+
+    monkeypatch.setattr(Path, "unlink", _refuse)
+    rc = tmain._install_read_hook_impl(
+        _read_hook_args(root, harness="cline", uninstall=True))
+    out, err = capsys.readouterr()
+
+    assert rc == 0, f"a best-effort cleanup was reported as a failure: {err}"
+    assert "Install failed" not in err
+    assert legacy.exists(), "the unremovable path must be named, not dropped"
+    assert "could not remove" in err
+    assert "nothing to remove" not in out, (
+        "the summary claimed there was nothing of OURS to remove while our own "
+        "hook survived the failed unlink")
+
+
+def test_install_cline_does_not_retire_the_registration_it_just_wrote(tmp_path):
+    """When `.cline` and `.clinerules` are the SAME path (a symlink either
+    way — the natural way to give both Cline surfaces one hooks dir), the
+    legacy migration must not run: it would delete the file this run wrote.
+
+    Measured before the fix (#11588 review cycle 3), with `.cline ->
+    .clinerules`: rc 0, `Installed …` AND `Removed the legacy registration …`,
+    and `.clinerules/hooks/` EMPTY — a false PASS that left NO hook on any
+    path, so the reflex silently never fired.
+
+    MUTATION: drop the same-file guard → RED on `live.is_file()`.
+    """
+    root = tmp_path / "proj"
+    root.mkdir()
+    (root / ".cline").symlink_to(".clinerules")
+    live = root / ".clinerules" / "hooks" / "UserPromptSubmit"
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+
+    r = _run(["install", "cline", "--dir", str(root)], env)
+    assert r.returncode == 0, r.stderr
+    assert live.is_file(), (
+        "the registration was written and then retired through the symlink — "
+        "no hook exists on any path")
+    assert "Removed the legacy registration" not in r.stdout
+    assert "SAME file" in r.stderr
+
+
+def test_install_cline_refuses_a_FOREIGN_live_hook_at_the_live_target(
+        tmp_path):
+    """The LIVE target keeps STRICT identity (#11588 review cycle 3).
+
+    The LEGACY path is judged by provenance (see its test); the live path must
+    not be, or a user's own `.clinerules/hooks/UserPromptSubmit` invoking a
+    DIFFERENT, still-existing `volunteer-turn.sh` would be overwritten on
+    install and deleted on uninstall. Both sibling foreign-hook tests use text
+    that fails the 2-token predicate under EITHER rule, so this is the only
+    case that distinguishes them — and it pins the distinction.
+
+    MUTATION: pass `relocated_ok=True` for every path → RED (install would
+    succeed and clobber the user's file).
+    """
+    root = tmp_path / "proj"
+    other = tmp_path / "other-install"
+    other.mkdir()
+    other_script = other / "volunteer-turn.sh"
+    other_script.write_text(_HOOK.read_text())
+    os.chmod(other_script, 0o755)
+    user_text = ("#!/usr/bin/env bash\n"
+                 f"exec {other_script} cline\n")
+    live = root / ".clinerules" / "hooks" / "UserPromptSubmit"
+    live.parent.mkdir(parents=True)
+    live.write_text(user_text)
+    os.chmod(live, 0o755)
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+
+    r = _run(["install", "cline", "--dir", str(root)], env)
+    assert r.returncode == 1, (r.returncode, r.stdout, r.stderr)
+    assert "already exists and is not our" in r.stderr
+    assert live.read_text() == user_text, "the user's live hook was overwritten"
+
+    u = _run(["install", "cline", "--dir", str(root), "--uninstall"], env)
+    assert u.returncode == 1, (u.returncode, u.stdout, u.stderr)
+    assert "refusing to delete it" in u.stderr
+    assert live.read_text() == user_text, "the user's live hook was deleted"
+
+
 def test_install_cline_uninstall_removes_a_legacy_only_registration(tmp_path):
     """A user whose only registration is the legacy one can still uninstall —
     the `no registration → clean no-op` guard must not fire over a legacy
