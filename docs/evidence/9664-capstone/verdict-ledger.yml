@@ -39,7 +39,241 @@
 #     git** inside the tree. Described evidence does not count, and neither does a
 #     file that exists only on the authoring box (a gitignored lane artifact).
 #   * a `cmd:` entry is a RECORD of what was run and does NOT satisfy `verified` on
-#     its own — the tool never executes it. It is kept for the reader.
+#     its own — the tool never executes it. It is kept for the reader. It is still
+#     SHAPE-CHECKED, because a record that is prose was a measured false PASS:
+#       - the entry must START with a program that runs something (`RUNNERS`);
+#       - its first artifact position must NAME an artifact of this tree — a
+#         TRACKED file, a directory holding tracked files, a pytest node-id, or a
+#         glob over a named directory (a bare `*` names everything, so nothing).
+#         "First artifact position" rather than "first argument position" because
+#         ONE subcommand verb immediately after a NAMED runner is allowed first —
+#         `ruff check <path>` / `ruff format <path>`, scoped per runner in
+#         `_RUNNER_SUBCOMMANDS` in `tools/capstone_ledger.py`;
+#       - EVERY shell separator splits the record — `&&`, `||`, `;`, `|`, `&`,
+#         newline — and EVERY segment must be a shell WRAPPER, a DECORATIVE
+#         reader/printer, or RUNNER-headed. A segment that is none of those is
+#         prose and is refused, so a BARE-prose segment cannot ride along on
+#         either side of the command (`NOT RUN && uv run pytest …` and
+#         `uv run pytest … && I did not run this` are both refused);
+#         ⛔ WHAT IS *NOT* CLOSED, stated because the previous wording claimed it
+#         was: a LATER segment that is RUNNER-HEADED is admitted without grading
+#         its argument position, so `uv run pytest … && bash I did not run this`
+#         and `… && python -c 'NOT RUN'` are still ACCEPTED (measured; open as
+#         #11520). Grading every runner-headed segment the way the FIRST is graded
+#         was measured to re-introduce the false block this ruleset exists to
+#         remove (`… && git status --short`, `… && git log --oneline`: a
+#         subcommand is not a path), so the gap is documented and tracked rather
+#         than closed at that price. Prose appended INSIDE the graded command's own
+#         segment, after its artifact token, is likewise unread; and prose carried
+#         in a `#` COMMENT is ungraded too — the identical words outside a comment
+#         are refused, but `… -q  # NOT RUN` is ACCEPTED (#11520 root 3), because
+#         grading comment content is the prose scan this module deliberately
+#         rejects. ⛔ And a disclaimer carried as a TRUSTED HEAD's ARGUMENT is
+#         accepted too (#11520 root 4): a segment headed by a wrapper verb or a
+#         decorative reader is admitted without grading one argument, so
+#         `… && echo "I did not run this"` and `… && printf "%s" "NOT RUN"` yield a
+#         `verified` row and `uncovered: 0`. The WRAPPER half of that root is
+#         closed ONLY where the wrapper has a grammar the shell ENFORCES and
+#         REJECTS a bad argument for: `set -o <name>` (`set -o NOTRUN` → rc 2),
+#         `set` short flags (`set -ZZZ` → rc 2), `export`/`unset` flags
+#         (`export -e`, `unset -p` → rc 2), `umask` masks, and the control
+#         builtins' operands. In each of those an invalid argument makes bash FAIL,
+#         the `&&` short-circuits, and the graded command provably never ran — so
+#         admitting it would be a false PASS. They are validated, and
+#         `export "I did not run this" && …` / `… && exit "I did not run this"`
+#         are refused.
+#         ⛔ WHERE THAT CLOSURE STOPS, stated because the previous wording claimed
+#         it was total and the claim was FALSE — this artifact is validated by the
+#         tool itself, so an over-claim here is a false attestation, not a typo. A
+#         wrapper argument is NOT graded. SIX carriages are enumerated below,
+#         (1)-(6). Five of them, (1)-(5), are INERT DATA: each is measured against
+#         bash and each is admitted DELIBERATELY, because bash executes nothing in
+#         that position and refusing the record would be a false block. The sixth,
+#         (6), sits in the same ungraded ARGUMENT POSITION but carries the OPPOSITE
+#         harm — a measured FALSE PASS — so it is declared and pinned rather than
+#         closed. All six are tracked on #11520, and every one is pinned by a test
+#         that reds if it changes state:
+#           (1) a later RUNNER-HEADED segment (root 4 above);
+#           (2) prose INSIDE the graded command's own segment;
+#           (3) a `#` COMMENT;
+#           (4) a TRUSTED HEAD's decorative ARGUMENT — `… && echo "I did not run this"`;
+#               ⛔ ONLY FOR A PRINTER, and the reason is NOT that "bash executes
+#               nothing here": bash executes `echo`/`printf` fine and they succeed,
+#               which is exactly why that operand cannot short-circuit the `&&`.
+#               The same carriage for a READER/SINK is a FALSE PASS, not inert data
+#               — see carriage (6).
+#           (5) `NAME=value` is the FIFTH carriage: the leading assignment is
+#               stripped and nothing after the `=` is graded, so
+#               `A="I did not run this" && uv run pytest …` yields a `verified` row
+#               and `uncovered: 0` (measured). Two more inert DATA positions sit
+#               inside the SAME fifth class and are declared with it: `set --`
+#               POSITIONAL PARAMETERS (`set -- "I did not run this"` → rc 0; they
+#               are ASSIGNED, never executed) and an `unset` array SUBSCRIPT
+#               (`unset 'A[I did not run this]'` → rc 0; the subscript is a lookup
+#               key). The defect this enumeration fixes was never the admission —
+#               it was that these went UNLISTED while the surrounding text claimed
+#               the wrapper half was closed, so an unlisted carriage read as
+#               closed. Tracked in #11520 and pinned by
+#               `test_the_assignment_carriage_is_open_and_declared`, which READS this
+#               file and by `test_wrapper_flags_and_option_names_the_shell_REJECTS_are_refused`
+#               for the enforced half — so neither declaration can be deleted
+#               while the tests stay green.
+#           (6) ⛔ A SIXTH CARRIAGE, and unlike (1)-(5) it is a FALSE PASS rather
+#               than inert data: a READER/SINK head `: {cat,grep,wait,tee,ls,sed,
+#               jq,sort,wc,head,tail,cut,tr,uniq}` placed BEFORE the graded
+#               command is admitted with ANY operand, and those heads FAIL on an
+#               operand that does not resolve, so the `&&` short-circuits exactly as
+#               the wrapper family does. Measured at `22668a11` and re-measured at this
+#               head, each reaching `uncovered: 0` / CLEAN / exit 0 in the examples
+#               below. ⛔ WHAT IS PINNED, exactly: the DECLARATION of this set is
+#               pinned by `test_the_reader_head_carriage_enumerates_every_decorative_head`
+#               (it must equal `_DECORATIVE` minus the measured-inert six), and THREE
+#               of the fourteen — `cat`, `grep`, `cut` — are pinned BEHAVIOURALLY by
+#               `test_a_reader_head_before_the_command_is_a_known_false_PASS`. The other
+#               eleven are declared and derived from the same code branch
+#               (`_wrapper_argument_defect` returns None for any `_DECORATIVE` head,
+#               measured in-process for all twenty); they are NOT individually
+#               probe-pinned, and this list must not be read as fourteen behavioural
+#               pins:
+#                 ⛔ `cut`, `tr` and `uniq` were MISSING from this set while
+#                 `_DECORATIVE` admitted them too — measured, `cut "I did not run
+#                 this" && …` graded CLEAN while bash exited 1, so an enumeration
+#                 that claims to BE the family was narrower than the code and read as
+#                 closed. The FOURTEEN above are every `_DECORATIVE` head that CAN fail
+#                 on an operand — and that is MEASURED rather than asserted, because
+#                 this sentence has already been wrong twice by asserting it: each of
+#                 the twenty is run with two operand shapes (a bare word and a path
+#                 that does not exist) and a head belongs here iff it exits non-zero on
+#                 at least one. The other SIX (`: awk echo printf logger true`) exit 0
+#                 on BOTH, so their operand is inert data (carriage (4)) and never a
+#                 false PASS — `awk` parses its operand as a PROGRAM, and a bare word
+#                 or a path is a valid one. Both halves are derived from that
+#                 MEASUREMENT by
+#                 `test_the_reader_head_carriage_enumerates_every_decorative_head`, so
+#                 a misclassified head reds the suite instead of shipping:
+#                 cmd:cat "I did not run this" && uv run pytest …   (bash rc 1:
+#                     `cat: 'I did not run this': No such file or directory`)
+#                 cmd:grep "I did not run this" /nonexistent && …   (bash rc 2)
+#                 cmd:export -f FOO && …                            (bash rc 1:
+#                     `export: FOO: not a function` — the `export`/`unset` branch
+#                     skips flag-prefixed operands, so `-f`'s NAME is never read)
+#               It is listed here so it cannot read as closed, and it is tracked on
+#               #11520 with the two structural exits (grade a non-runner head's
+#               operative operand the way `source` already is, or declare the family
+#               per head with the before/after distinction). It is NOT claimed
+#               closed: closing it is a grammar decision, not another spelling.
+#               Pinned OPEN by `test_a_reader_head_before_the_command_is_a_known_false_PASS`.
+#         ⛔ ONE KNOWN-OPEN FALSE BLOCK in the same arm, declared rather than
+#         implied closed: a BARE word to `set` (`set I did not run this`) is
+#         shell-valid (rc 0 — it sets positional parameters) and is REFUSED. It is
+#         the same inert position as `set --`'s operands reached without `--`, and
+#         closing it means admitting ANY bare word to `set`, which re-opens the
+#         bare-prose carriage this arm exists to refuse. The price is not paid until
+#         a spelling that separates the two is measured; it is filed on #11520 with
+#         root 5's class (that root numbers the FALSE BLOCKS, a DIFFERENT axis from
+#         this list's carriages (1)-(6)).
+#         A control builtin takes AT MOST ONE operand, and that
+#         operand may be the shell's own status expansion (`exit $?`, the idiom this
+#         repo's install scripts use) — refusing that was a measured false block.
+#         `pushd`/`popd` are deliberately NOT wrappers: they
+#         manipulate a directory STACK this parser cannot model, so the working
+#         directory after them is unknowable and no later artifact can be proven to
+#         have resolved from it; a record using them is refused as prose, on the
+#         same known-open false block as `mkdir` (#11520 root 5), and pinned. The
+#         DECORATIVE half is open
+#         because requiring shell-shaped arguments from
+#         `echo`/`printf`/… must first be measured against the accepted
+#         `… && echo PASS`. SIX carriages are enumerated above — this list's own
+#         numbering (1)–(6), i.e. the five inert-data positions plus (6)'s FALSE
+#         PASS — all tracked in #11520 and all pinned, the list being enumerated
+#         because an unlisted carriage reads as closed. ⛔ The FIVE in the pin's
+#         docstring (`test_the_known_residual_false_PASSes_are_pinned_as_OPEN`,
+#         "FIVE carriages remain open") is a DIFFERENT axis, not a disagreement: it
+#         numbers by ROOT, and its root 6 (`set -o <invalid>`) is CLOSED, whereas
+#         root 6 of THIS list is the reader/sink head declared above;
+#       - a `-c`/`-e` script body is never TRUSTED, and the ATTACHED spelling is
+#         REFUSED: `bash -c'uv run pytest tools/x.py'` AND
+#         `bash -c'NOT RUN - see tools/x.py'` are both invalid, with or without an
+#         artifact token after them. For a SHELL the reason is that the spelling
+#         cannot run at all — `-cBODY` in one word makes the shell read the body as
+#         more OPTION LETTERS, measured as `bash -c'echo hi'` -> rc 1, stderr
+#         `bash: - : invalid option`, the body never runs (stdout carries the `set -o`
+#         table, because `o` parses as `-o`), while `bash -c 'echo hi'` prints `hi`.
+#         Grading such a body would record `verified` for a command that cannot have
+#         executed. The SPACED form (`bash -c '<script>'`) is the spelling a shell
+#         runs and IS graded. ⛔ NOT UNIVERSAL: for `python`/`node` the attached value
+#         IS runnable (`python3 -c'print(3)'` prints `3`), but the body is a python/JS
+#         PROGRAM and this arm grades a body as a shell command line — so those are
+#         refused as a declared known-open FALSE BLOCK (#11520), not as a
+#         non-runnability claim. An earlier head deferred the whitespace form as prose
+#         and let a later artifact token clear it, so `bash -c'NOT RUN - see
+#         tools/capstone_ledger.py' <tracked path>` exited 0 — fixed and pinned.
+#       - a control builtin that FAILS at script level (`return 0`, `shift 5`) is
+#         refused anywhere but last, because a `&&` after it short-circuits. The
+#         guard is SEPARATOR-BLIND, so the `;`/`||` spelling — which bash really
+#         executes past — is refused too. That is a known-open FALSE BLOCK (#11520),
+#         declared rather than silent, and kept on the conservative side because a
+#         fail-OPEN there is the class the guard exists to close;
+#       - a NON-RUNNER program heading a segment (`mkdir -p out && …`, `rm -rf
+#         .pytest_cache && …`, `sleep 2 && …`) is REFUSED as prose, although the
+#         record is shell-valid and `origin/main` accepted it. This is a known-open
+#         FALSE BLOCK (#11520 root 5), listed here because an unlisted refusal reads
+#         as closed. Admitting it on "the head is a bare program name" re-opens the
+#         prose-after carriage (`… && I did not run this`); admitting it on "the
+#         segment looks shell-shaped" re-opens `… && I did not run this -q`. Neither
+#         price is paid until a carriage that separates the two is measured;
+#       - a runner with NO target at all (`cmd:make`) is a record and confers
+#         nothing; a runner with a NON-PATH argument is refused, because a bare
+#         word (`make test`, `make NOT-RUN`) is a claim and not an artifact. The
+#         ONE exception is a subcommand verb listed for that runner in
+#         `_RUNNER_SUBCOMMANDS` (`ruff check`, `ruff format`, …). It may LEAD the
+#         argument list but does not itself cite anything: the artifact rule then
+#         applies to what follows, and `cmd:ruff check` with nothing after it is a
+#         record that confers nothing — exactly like `cmd:make`. `cmd:ruff check .`
+#         is still refused, because `.` names everything and therefore nothing;
+#       - a REDIRECTION is not a separator: `2>&1`, `>&2`, `&>file`, `&>>file`
+#         stay inside their command. Splitting on every `&` refused ordinary
+#         recorded commands (`… -q 2>&1 | tail -20`) that `origin/main` accepted —
+#         and exit 1 prints no report, so it hid the whole uncovered list;
+#       - shell WRAPPERS (`cd`, `NAME=value`, `set`/`export`/`source`/`.`, `umask`,
+#         `unset`, and the control builtins `exit`/`return`/`shift`/`break`/
+#         `continue`) and DECORATIVE segments (a printer, a reader, or a sink:
+#         `echo`, `tail`, `cat`, `grep`, `tee`, `logger`) are allowed and cite
+#         nothing. A record whose ONLY segments are wrappers is still refused as
+#         "names no command", so a wrapper can never be a one-word verdict.
+#       - a `cd` segment is graded on the SHELL's precondition, not on containment:
+#         `cd X` fails iff X does not exist or is not a directory, and a failing `cd`
+#         short-circuits the `&&` so no later segment ran. A `cd` that RESOLVES is
+#         therefore admitted even outside the tree — the artifact rule still refuses
+#         anything a moved `cwd` could not resolve INSIDE it, so `cd /tmp && uv run
+#         pytest tests/x` names nothing. The `cd` options are stripped first so that
+#         every spelling of one destination grades identically — and the group is
+#         `-[PLe]+` or `--`, with groups SEPARATED BY WHITESPACE, because bash does
+#         not merge them: `cd -PL tests` is rc 0 but `cd -P-L tests` is rc 2
+#         (`cd: --: invalid option`), and treating a merged form as two groups
+#         ADMITTED a record for a command that never ran. ⛔ `-@` is NOT stripped: it
+#         is documented in bash's usage line but REJECTED at run time on the Linux
+#         builds this fleet runs (`cd -@ tests` → rc 2), so admitting it would be the
+#         same false PASS in the other direction; a record spelling it is refused.
+#         The target is then quote-unwrapped with `shlex`, so `cd [opts] "dir"` and
+#         `cd [opts] dir` grade alike. ⛔ `cd ""` is a NO-OP, not an unknown cwd —
+#         bash: "A null directory name is the same as the current directory" — so it
+#         is admitted and the cwd is left unchanged, EXCEPT under `-P`: bash's
+#         null-name rule does not survive `-P`, and bash resolves `-L`/`-P` by their
+#         LAST occurrence BEFORE any `--`, so `cd -PL ""` and `cd -P -L ""` are rc 0
+#         while `cd -LP ""` and `cd -L -P ""` are rc 1. `--` ENDS option parsing, so
+#         `cd -P -- -L ""` is rc 1 (`too many arguments` — `-L` is an operand there).
+#         Every one of those spellings is graded to match bash; a 584-spelling sweep
+#         over the option matrix agrees with bash on all of them. A `cd`
+#         with NO directory operand at all (`cd --` is `$HOME`, `cd -` is `$OLDPWD`)
+#         is REFUSED, because that working directory cannot be known from the record
+#         and a later artifact graded from the unmoved directory would admit a record
+#         for a command the shell runs elsewhere.
+#         ⛔ This makes the verdict BOX-DEPENDENT for `cd` targets, exactly as it is
+#         for `source`: `cd .venv && …` is `verified` on the authoring box and refuses
+#         in a clone without `.venv`, which flips the ledger to exit 1 and hides the
+#         whole uncovered report. Both costs are disclosed rather than hidden, and both
+#         are tracked on #11520.
 #   * `criteria_expected` (top level, REQUIRED) pins the denominator, so dropping a
 #     row without moving the count is a refusal.
 #   * YAML merge keys (`<<`) are refused: every row states its own verdict, and a
@@ -49,6 +283,10 @@
 #   * `evidence_kind` is checked for membership in a closed vocabulary ONLY; no
 #     kind grants a waiver. `server-observation` marks S5's shape for the reader,
 #     and S5 still needs a tracked artifact to be `verified`.
+#
+# EXIT CODES are a closed set: 0 CLEAN, 1 INVALID, 2 UNCOVERED, 3 DISABLED,
+# 4 ADVISORY (rendered, not enforced), 5 USAGE (`--help`/bad invocation — never a
+# verdict code).
 #
 # A MECHANICAL RE-RUN OF THE `cmd:` EVIDENCE:
 #   uv run python tools/capstone_ledger.py check
@@ -145,27 +383,30 @@ measured_at:
 #         runs (a `pytest`/script invocation whose own output is quoted, not a report).
 #
 #       $ env -u TORTOISE_API_KEY uv run python tools/test_lane.py run -- tests/test_9664_capstone_verdict_ledger.py tests/test_9340_graph_tool_argument.py tests/test_pack_selection_by_graph.py tests/test_cross_tenant_read_isolation.py tests/test_onboarding_auto_complete.py tests/test_oauth_consent_page_step4.py tests/test_oauth_consent_bff_routes.py -q
-#       456 passed, 5 failed                       # 461 collected, RE-MEASURED at the head that
+#       545 passed, 5 failed                       # 550 collected, RE-MEASURED at the head that
 #                                                   # carries this text. Run THROUGH
 #                                                   # `tools/worktree_report.py run`, so the counts are
 #                                                   # parsed from the real log rather than typed.
 #       per-file collection, summed: 295 (the six contract files: 66 / 54 / 9 / 42 / 65 / 59)
-#                                  + 166 (`test_9664_capstone_verdict_ledger.py`, the ledger pin suite)
-#                                  = 461 = 456 passed + 5 failed.   Counted, not estimated.
-#       ⛔ THE PIN SUITE COLLECTS 166 BECAUSE THE PAIRED C2/E3 TEST IS GONE (2026-11-08 review).
-#       An interim head carried `test_c2_and_e3_cannot_be_graded_differenty`, which made it 167
-#       and the seven-file run 457/462; that test was DELETED because it rested on a false
-#       premise (C2 does not subsume E3 — see C2's own comment) and forbade a legitimate
-#       future state. So the counts here are the ones this head actually prints, and a
-#       reader coming from the PR body should expect 166 rather than 167.
+#                                  + 255 (`test_9664_capstone_verdict_ledger.py`, the ledger pin suite)
+#                                  = 550 = 545 passed + 5 failed.   Counted, not estimated.
+#       ⛔ THREE COUNTS THIS BLOCK HAS CARRIED, and why the number keeps moving (#3442's
+#       lesson at the level of arithmetic: a count is only true of the tree it was taken
+#       on). 166 was the pin suite at this branch's pre-merge head; 167 while an interim
+#       head carried `test_c2_and_e3_cannot_be_graded_differently`, which review round 12
+#       DELETED because it rested on a false premise (C2 does not subsume E3 - see C2's
+#       own comment) and forbade a legitimate future state; and 255 here, because main's
+#       merged ledger-gate work (#11506) adds 89 tests to that same file. The paired test's
+#       deletion is why it is 255 and not 256. Do not read any of these as a trend — read
+#       the four numbers above, which were measured together in ONE run at THIS head.
 #       ⛔ `env -u TORTOISE_API_KEY` IS PART OF THE COMMAND, not noise: with a key in the
 #       environment the MCP stdio transport refuses BY DESIGN (it cannot carry the token),
 #       so `test_cross_tenant_read_isolation.py::test_negative_control_graph_listing_scoping_is_detected`
 #       errors `Authentication required. The MCP stdio transport cannot carry auth tokens…`
-#       and the SAME command measures **455 passed, 6 failed**. Both readings are true of
-#       their environment, so the environment is named rather than left to the reader; the
-#       `9 passed` this file records for that unit is the keyless reading, and it is the
-#       one the contract-layer claim rests on.
+#       and the SAME command measures **544 passed, 6 failed** at this head. Both readings
+#       are true of their environment, so the environment is named rather than left to the
+#       reader; the `9 passed` this file records for that unit is the keyless reading, and
+#       it is the one the contract-layer claim rests on.
 #       the 5 are `TestCreateGraphWithPacks`, refused by the PRIVATE lane container's ACL layer — see S2.
 #       $ TORTOISE_TEST_CARVE_OUT=1 uv run python -m pytest tests/test_7949_c2_door.py tests/test_7949_capstone_measure.py -q
 #       302 passed                                 # 24 (the door census, its pinned-ON/refusal arms
@@ -356,7 +597,7 @@ criteria:
     reason: >-
       Server half is green at this head, measured in this pass: the two consent
       files collect 65 + 59 = **124** tests and all 124 passed (within this pass's
-      seven-file run, `456 passed / 5 failed`; the 5 being S2's ACL group, and none
+      seven-file run, `545 passed / 5 failed`; the 5 being S2's ACL group, and none
       of them in these two files) - a previous draft of this row claimed "190 passed"
       for these two files, which their collection denies. Live `/auth` serves the
       `/api/consent/start` return route, matching main's public/signup.html.
@@ -504,6 +745,9 @@ criteria:
     # ledger's vocabulary ("there is no `partial`"), so the row stays `blocked` and
     # the measurement went into the reason instead of into a verdict.
     verdict: blocked
+    evidence:
+      - docs/evidence/9664-capstone/step11-write-half-trace.txt
+    evidence_kind: trace
     reason: >-
       Contract green at this head (tests/test_9340_graph_tool_argument.py, 66
       passed). The journey case has never run. TWO things are missing, and this
@@ -527,6 +771,9 @@ criteria:
   - id: U2
     text: "a duplicate graph name"
     verdict: blocked
+    evidence:
+      - docs/evidence/9664-capstone/step11-write-half-trace.txt
+    evidence_kind: trace
     reason: >-
       Contract green (test_a_duplicate_name_is_refused_with_the_candidates, 66
       passed). Never attempted in a run, and not replayable from a minted org: a
@@ -557,6 +804,9 @@ criteria:
   - id: U4
     text: "a soft-deleted graph"
     verdict: blocked
+    evidence:
+      - docs/evidence/9664-capstone/step11-write-half-trace.txt
+    evidence_kind: trace
     reason: >-
       Contract green (test_a_soft_deleted_graph_stops_resolving_on_the_next_call,
       66 passed). Never attempted in a run: it needs a graph that can be created
