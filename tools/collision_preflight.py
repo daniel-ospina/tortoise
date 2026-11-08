@@ -473,7 +473,10 @@ Exit codes
                         from the FILE itself; `fleet_state.py build` cannot
                         create or repair it), or the board is unreadable / the
                         attribution is ambiguous (remedy: rebuild the board,
-                        `uv run python tools/fleet_state.py build`). A surface
+                        `uv run python tools/fleet_state.py build`), or the board's
+                        GitHub read was KILLED at its bound because it is SLOW, not
+                        unauthorised (remedy: re-run the pre-flight — `gh auth` is
+                        fine and a rebuild only re-runs the killed read; #11202). A surface
                         that can never
                         produce a blocking hit is EXEMPT and its failure is only
                         REPORTED: it has no ability to prevent a duplicate, so its
@@ -530,6 +533,18 @@ Env seams (tests point these at stubs; production defaults are the real tools)
                                           (default: 300, clamped to
                                           fleet_state.STATE_FRESH_S; <= 0
                                           disables the cache)
+    FLEET_STATE_GH_READ_BOUND            read by `tools/fleet_state.py`, NOT here,
+                                          because it governs the OPEN-ISSUE read
+                                          this gate's board rebuild pays for
+                                          (#11202): unset => the bound is DERIVED
+                                          from the read's declared row count
+                                          (100 s at 2000 rows) and a timeout is
+                                          retried once; `fixed` => the
+                                          pre-#11202 path — flat 60 s, one
+                                          attempt, so a read that contention slowed
+                                          past 60 s is killed and the board answers
+                                          INCOMPLETE (fail-closed). It selects no
+                                          path and no target.
 The claim gate reads the fleet board at ``fleet_state.DEFAULT_OUT``, the user's
 state dir (``$HOME/.pi/agent/state/fleet-state.json``). The gate adds NO override
 of its own: no flag selects the board, no environment variable names it, and it
@@ -9069,6 +9084,23 @@ def _assert_all_surfaces(ordered: list[Surface]) -> None:
 #: are asserted to agree by `test_the_roster_marker_is_the_note_the_gate_emits`.
 _LANE_ROSTER_NOTE = "the lane roster is UNKNOWN, not empty"
 
+#: The marker `tools/fleet_state.py::gh_json` writes into a READ's cause when the command
+#: was KILLED at its bound (#11202).
+#: ⛔ MATCHED STRUCTURALLY, NOT BY A BARE PHRASE (#11202 review round 8). The surface note
+#: is NOT purely this module's composition: `_board_can_answer` writes a prefix in front
+#: of the read's cause, but on the FAILED arm that cause EMBEDS `gh`'s own bounded stderr
+#: (`_gh_said`), so a foreign line could wear the marker. Measured: with
+#: `github_error = "gh issue list FAILED (1 exit): 'proxy: HTTP 504 upstream TIMED OUT
+#: after 60s waiting for response headers'"` a bare `"TIMED OUT after "` token matched and
+#: the surface was handed the "KILLED AT ITS BOUND … `gh auth` is FINE" remedy — the same
+#: "remedy names a cause the report has disproved" defect this arm was added to remove,
+#: running in the other direction, and it suppressed the correct auth/network arm. The
+#: `(N attempt(s), X.Ys)` parenthetical below is composed ONLY by `gh_json`'s timeout arm,
+#: so no foreign string can carry it.
+_BOARD_READ_KILLED_NOTE = re.compile(
+    r"TIMED OUT after \d+(?:\.\d+)?s \(\d+ attempt\(s\), \d+(?:\.\d+)?s\)"
+)
+
 
 def _incomplete_remedy(incomplete: list[Surface]) -> str:
     """The remedy for an INCOMPLETE run, keyed on its CAUSE (#9402).
@@ -9247,6 +9279,51 @@ def _incomplete_remedy(incomplete: list[Surface]) -> str:
             return text
         tail_cause = _incomplete_remedy(
             [s for s in incomplete if id(s) not in roster_ids]
+        )
+        return f"PART of this is {text}; PART is: {tail_cause}"
+    # ⛔ A READ KILLED AT ITS BOUND IS NOT A CREDENTIAL PROBLEM, AND IT IS PARTITIONED
+    # AT THE TOP LEVEL (#11202 review rounds 4-5). The generic sentence below is
+    # pre-existing, but BEFORE this change every failure the board read could produce
+    # looked like auth/network (they all read "returned no parsable JSON"), so it was
+    # merely vague. The read now NAMES the timeout, which makes the generic remedy a
+    # cause this same report has DISPROVED — the class this function's own docstring
+    # forbids ("a remedy that names a cause the report has disproved is the same defect
+    # class as a wrong verdict reason").
+    # ⛔ AND IT CANNOT LIVE INSIDE THE `not both and not exhausted and not truncated`
+    # BLOCK (review round 5): a run whose board read was killed AND whose PR list was
+    # truncated fell through to the composite arms, where the `remaining` tail applied
+    # `generic` to the killed surface — the row said "killed for being slow, not
+    # malformed" while the verdict remedy one line below said to re-authenticate and
+    # rebuild the board, which only re-runs the killed read. Partitioned here, the
+    # RECURSION below is what keeps every mixed shape honest: the killed surfaces are
+    # subtracted before any other arm (including the composite tails) can reach them.
+    killed = [s for s in incomplete if _BOARD_READ_KILLED_NOTE.search(s.note or "")]
+    if killed:
+        killed_ids = {id(s) for s in killed}
+        text = (
+            "the FLEET BOARD's GitHub read was KILLED AT ITS BOUND (a slow read, "
+            "not a broken credential) — `gh auth` is FINE and rebuilding the board "
+            "only re-runs the read that just timed out; re-run the pre-flight"
+            # ⛔ AND THE PARENTHETICAL IS SEAM-AWARE (#11202 review round 6). Stated
+            # unconditionally it promised a derived bound and a retry in the ONE state
+            # where neither is armed — the operator who set `fixed` to cap the wall clock
+            # is killed at the flat 60 s and then told to re-run, which is guaranteed to
+            # be killed again with byte-identical output. The remedy and the cause are
+            # composed from the SAME seam predicate, so they cannot disagree in either
+            # state (the rule this function's docstring states).
+            + (
+                " (a timeout is retried once and the bound is derived from the "
+                "read's row count, so a contended read usually succeeds on re-run)"
+                if fleet_state.gh_read_bound_enabled()
+                else f" (the bound is a flat 60 s with one attempt — "
+                f"{fleet_state.GH_READ_BOUND_ENV} is set to `fixed`; unset it to "
+                "restore the derived bound and the retry)"
+            )
+        )
+        if len(killed) == len(incomplete):
+            return text
+        tail_cause = _incomplete_remedy(
+            [s for s in incomplete if id(s) not in killed_ids]
         )
         return f"PART of this is {text}; PART is: {tail_cause}"
     if not both and not exhausted and not truncated:

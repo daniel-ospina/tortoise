@@ -488,15 +488,27 @@ def test_partial_receipt_naming_no_judge_cannot_carry_a_pin(judge_pin):
 
 def test_official_judge_model_id_matches_the_judge_module():
     """``OFFICIAL_JUDGE_MODEL_ID`` is a second copy of the identity
-    ``judge.DEFAULT_JUDGE_MODEL`` owns (that module is not imported here: it
+    ``judge.OFFICIAL_JUDGE_MODEL`` owns (that module is not imported here: it
     pulls ``tortoise.ingest``/``reader``, ~2.5 s, into a publication tool).
     This test is what stops the copy drifting: a judge-model bump applied to
     one file only would otherwise refuse the NEW official judge while still
-    minting ``JUDGE_PIN`` for the OLD one."""
-    from tools.longmem_eval.judge import DEFAULT_JUDGE_MODEL
+    minting ``JUDGE_PIN`` for the OLD one.
 
-    assert OFFICIAL_JUDGE_MODEL_ID in DEFAULT_JUDGE_MODEL
-    assert judge_pin_for(DEFAULT_JUDGE_MODEL) == JUDGE_PIN
+    It is pinned to the OFFICIAL constant, not to ``DEFAULT_JUDGE_MODEL``
+    (#8486, 2026-11-07). The run's default judge was re-pinned to DeepSeek by
+    the owner ruling of 2026-10-27, so binding the anti-drift check to the
+    default would have made it either fail on every tree or, worse, tempt a
+    reader into pointing ``JUDGE_PIN`` at whatever the default happens to be —
+    which is the R12 fail-open ``#9992`` closed.
+    """
+    from tools.longmem_eval.judge import DEFAULT_JUDGE_MODEL, OFFICIAL_JUDGE_MODEL
+
+    assert OFFICIAL_JUDGE_MODEL_ID in OFFICIAL_JUDGE_MODEL
+    assert judge_pin_for(OFFICIAL_JUDGE_MODEL) == JUDGE_PIN
+
+    # …and the re-pinned RUN default never collects the official pin.
+    assert judge_pin_for(DEFAULT_JUDGE_MODEL) == "unpinned:deepseek-v4-flash"
+    assert judge_pin_for(DEFAULT_JUDGE_MODEL) != JUDGE_PIN
 
 
 def test_cli_keeps_the_official_pin_for_the_official_judge(tmp_path):

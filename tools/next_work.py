@@ -26,6 +26,15 @@ WHAT IS A WORK UNIT (mechanically, from records that already exist)
                second copy of the gate), plus a head-bound review attestation
                (``record-review.sh --check-carry``) and a real merge test
                (``git merge-tree --write-tree``, never the ``mergeable`` flag).
+    population  the fleet's ONE work-unit rule: the ``POOL_JQ`` assignment in
+               agent-infra's ``scripts/orchestrator-harness/refresh-candidates.sh``
+               (#10951). It is EXTRACTED and DRIVEN with ``jq``, never restated —
+               a second copy of this predicate is the defect the issue removes. A
+               row it withholds is not a unit of work whatever else is true of it:
+               assigned to a human, DECLARING ``standing-constraint``, or a
+               CONTAINER by title kind (an epic/decision/design/coord/measure/…
+               is where work is TRACKED). An unreadable rule withholds EVERY row
+               and refuses the run — an unmeasured eligibility is not a pass.
     claimable  ``refs/claims/*`` — the holder-authored cross-box registry that
                #8175 established as the answer to "who holds this?" — plus the
                LOCAL branches and worktrees whose slug names the issue, which
@@ -103,6 +112,21 @@ Usage
     uv run python tools/next_work.py --from snap.json    # replay a snapshot (no network)
     uv run python tools/next_work.py --snapshot-out s.json --top 5
 
+Environment overrides. The two POPULATION levers are PRINTED in the run's
+provenance, so a reader can always tell which one was pulled; the other two are
+resolved paths/pacing and are not rendered
+    NEXT_WORK_POPULATION=0    DISARMS the fleet's work-unit rule (#10951). No
+                              population rule is consulted at all: every row is
+                              admitted on its title and labels exactly as before
+                              that issue, so an epic, a `design(…)` decision, a
+                              `measure(…)` and tortoise#10175 all get a runnable
+                              command. Reported as `OFF — …`; never passed for a
+                              measurement.
+    NEXT_WORK_POOL_JQ_SH=…    the script carrying the `POOL_JQ` assignment, when it
+                              is not this checkout's `scripts/` or $AGENT_INFRA_PATH.
+    NEXT_WORK_CLAIMS_SH=…     `claims.sh`, when it is not resolvable in-tree.
+    NEXT_WORK_PACE=…          the pacing gap between `gh` calls.
+
 Exit codes
     0  the queue was fully read and a next action was decided. When the top row has
        nothing to run — NEEDS-TEST (a runner, a merge tree that could not be measured,
@@ -113,7 +137,10 @@ Exit codes
        so and names no unit
     1  the queue was read but NO unit is pickable — every one is held, is a fold
        constituent, is a duplicate of a row already offered (a blocked row owns its
-       action target, so a duplicate can be the rank leader), or the queue is
+       action target, so a duplicate can be the rank leader), is not a unit of work
+       under the fleet's population rule (a CONTAINER, a declared
+       ``standing-constraint``, already assigned, or unattributable because the
+       shipped program's arm shape changed — #10951), or the queue is
        empty. The block prints ``NONE`` and that is an answer, not an error
     2  INCOMPLETE — one of the things the decision depends on could not be read,
        OR the input contradicts itself:
@@ -123,6 +150,15 @@ Exit codes
            per-key abstention, not a note beside a pick), the attestation TOOL
            (``record-review.sh`` absent — not a per-PR ``norecord``/``unreadable``
            verdict, which is a real answer and lands the row at ``NEEDS-REVIEW``),
+           the fleet's work-unit rule (``refresh-candidates.sh`` absent, carrying no
+           usable ``POOL_JQ``, or that program refused by ``jq`` — #10951; on a box
+           with neither ``scripts/`` nor ``$AGENT_INFRA_PATH`` this fires on every
+           run that has at least one candidate row — a zero-row run reports
+           ``UNREADABLE — …(no rows)`` and exits 1, because there is nothing to
+           withhold — unless ``NEXT_WORK_POPULATION=0`` disarms the rule, by design,
+           because a queue whose eligibility was never measured is not a queue that
+           passed. ⛔ THAT SWITCH IS THE ONE DOCUMENTED LEVER THAT RESTORES THE
+           PRE-#10951 BEHAVIOUR; it is listed under ``Usage`` above),
            the issue search, or the PR list;
          · a SHAPE the door refuses — a decision input, a pull field, an issue
            element, an element of a list, or a value that is the wrong type for
@@ -146,6 +182,7 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
 
 import argparse
 import contextlib
+import hashlib
 import json
 import math
 import os
@@ -203,6 +240,36 @@ POSITION_RANK = {name: i for i, name in enumerate(POSITIONS)}
 #: answers about the unit, not stages of it.
 REASON_CLAIMED = "CLAIMED"
 REASON_SUPERSEDED = "SUPERSEDED-BY-FOLD"
+
+#: ── THE POPULATION VERDICT (#10951) ─────────────────────────────────────────
+#: A row the fleet's own population rule (``POOL_JQ`` in
+#: ``refresh-candidates.sh``, in agent-infra) does not count as a unit of work.
+#: The three arm names are the SHIPPED program's three top-level ``select``
+#: stages, in order; ``POPULATION_ARMS`` is that mapping and nothing else — the
+#: PREDICATE is never restated here (see ``_population_verdicts``).
+REASON_ASSIGNED = "ASSIGNED"
+REASON_DECLARED = "DECLARED-CONSTRAINT"
+REASON_CONTAINER = "CONTAINER"
+#: The rule withheld the row but its arms could not be ATTRIBUTED (the shipped
+#: program's shape changed under us). Withheld, because an unattributable arm is
+#: still a withheld row; named, so an internal change cannot pass silently.
+REASON_NOT_A_UNIT = "NOT-A-UNIT"
+#: The rule could not be READ at all. Every row carries it, because a population
+#: that was never measured is not a population that passed — the same
+#: ``UNMEASURED`` polarity the merge tree uses, pointed at eligibility.
+REASON_POP_UNMEASURED = "POP-UNMEASURED"
+
+#: The reasons `pickable` refuses. ONE tuple, so a new withheld class cannot be
+#: added to the picker while its reason is left out of the refusal.
+REASONS_WITHHELD = (
+    REASON_CLAIMED,
+    REASON_SUPERSEDED,
+    REASON_ASSIGNED,
+    REASON_DECLARED,
+    REASON_CONTAINER,
+    REASON_NOT_A_UNIT,
+    REASON_POP_UNMEASURED,
+)
 
 #: The constituent label `.mergify.yml` names in `-label=superseded-by-fold`, and
 #: the fold label `priority_rules` reads. Both are the config's own vocabulary —
@@ -283,6 +350,21 @@ class Snapshot:
     merge_tree: dict[str, dict[str, Any]] = field(default_factory=dict)
     #: local branches/worktrees whose slug names an issue: "issue:<n>" -> [descriptions]
     local_holders: dict[str, list[str]] = field(default_factory=dict)
+    #: issue number (as str) -> the population reason that withholds it (#10951).
+    #: ABSENT means the shipped rule KEPT the row; a replay carries the verdicts so
+    #: a decision is still a pure function of its snapshot.
+    population: dict[str, str] = field(default_factory=dict)
+    #: Where that verdict came from — the script path and the ``POOL_JQ`` digest,
+    #: or the off-switch. Printed so a reader can tell a DEPLOYED copy from a stale
+    #: one; the issue's own closure note asks for exactly that before closing.
+    population_source: str = ""
+    #: TRUE only on a REPLAY of a snapshot that carries no eligibility verdicts at
+    #: all (#10951). Distinct from an empty `population` map, which is a real
+    #: measurement that withheld nothing. Directly-constructed snapshots (the test
+    #: fixtures) leave it False: their author chose the verdicts, and an old
+    #: snapshot FILE is the only input that was measured by a version that had no
+    #: rule to measure with.
+    population_absent: bool = False
     #: surfaces that could not be read. A non-empty list makes the run INCOMPLETE
     #: (exit 2). There is no override: an unreadable surface is never a pick.
     unreadable: list[str] = field(default_factory=list)
@@ -303,6 +385,8 @@ class Snapshot:
             "claims": self.claims,
             "merge_tree": self.merge_tree,
             "local_holders": self.local_holders,
+            "population": self.population,
+            "population_source": self.population_source,
             "unreadable": self.unreadable,
         }
 
@@ -337,6 +421,7 @@ class Snapshot:
             "repo", "base", "config_source", "gate", "gate_text", "claim_ns", "collected_at",
             "issues", "pulls",
             "check_runs", "attestation", "claims", "merge_tree", "local_holders",
+            "population", "population_source",
             "unreadable",
         }
         snap = cls(**{k: v for k, v in raw.items() if k in known})
@@ -353,6 +438,55 @@ class Snapshot:
         # anyway, but normalise so a hand-written snapshot behaves identically.
         snap.attestation = {str(k): v for k, v in snap.attestation.items()}
         snap.merge_tree = {str(k): v for k, v in snap.merge_tree.items()}
+        # ⛔ JUDGED AT THE DOOR, LIKE EVERY OTHER FIELD (#10951 review, follow-up).
+        # `"population": null` used to reach `snap.population.items()` and surface as
+        # a raw AttributeError inside INCOMPLETE — fail-closed, but as the diagnostic
+        # class this door exists to turn into a NAMED refusal.
+        raw_population = raw.get("population")
+        if "population" not in raw:
+            # ABSENT is the separate INCOMPLETE case below — not a wrong type.
+            snap.population = {}
+        elif not isinstance(raw_population, dict):
+            snap.unreadable.append(
+                f"population: the snapshot's population is "
+                f"{type(raw_population).__name__}, not a map — no row's eligibility is provable"
+            )
+            snap.population = {}
+        else:
+            snap.population = {str(k): str(v) for k, v in raw_population.items()}
+        # ⛔ A REPLAY MAY NOT FALL OPEN ON A FIELD IT CANNOT PROVE (#10951). The
+        # population verdicts are DERIVED data (`collect` fills them by driving the
+        # shipped `POOL_JQ`), so a snapshot written before this change carries none
+        # — and an empty map would then read as "the rule measured every row and
+        # kept all of them", which is the fail-OPEN resolution of an UNMEASURED
+        # surface. That is the same defect one level up: an absent measurement
+        # granted as a pass. ABSENT is INCOMPLETE (exit 2); an EMPTY map is a real
+        # answer from a real measurement and is honoured.
+        # …and the field beside it, so `population_source: 5` is a NAMED refusal
+        # rather than an AttributeError raised from inside INCOMPLETE.
+        if not isinstance(snap.population_source, str):
+            snap.unreadable.append(
+                f"population_source: the snapshot's population_source is "
+                f"{type(snap.population_source).__name__}, not a string"
+            )
+            snap.population_source = ""
+        # ⛔ THE REPLAY SOURCE BELONGS TO A MAP THAT WAS ACTUALLY USABLE (#10951
+        # review, F4). Set unconditionally it claimed "verdicts from the snapshot's
+        # own map" about a map the door had just REFUSED, and the render's ⚠️ marker
+        # only fires for OFF/UNREADABLE/ABSENT — so the text path printed an
+        # unwarned provenance line asserting a measurement that did not happen.
+        usable_map = "population" in raw and isinstance(raw_population, dict)
+        if usable_map and not (snap.population_source or "").strip():
+            snap.population_source = "REPLAY — verdicts from the snapshot's own map"
+        if "population" not in raw:
+            snap.population_absent = True
+            snap.population_source = (
+                "ABSENT — this snapshot carries no eligibility verdicts; it predates #10951"
+            )
+            snap.unreadable.append(
+                "population: this snapshot carries no eligibility verdicts — a replay cannot "
+                "prove any row IS a work unit, so none is offered (re-collect to measure it)"
+            )
         # Labels arrive as `[{"name": "x"}]` from GitHub and as `["x"]` from a hand
         # written snapshot. The imported gate (`queue_resweep.unmet_conditions`)
         # reads `.get("name")`, so the coercion has to happen HERE, at the one point
@@ -398,6 +532,13 @@ class Unit:
     #: PR is worked twice — the duplicate pick this tool exists to prevent, one
     #: level below `pick`. The row stays, with the reason, and carries no command.
     duplicate_of: str | None = None
+    #: TRUE when the fleet's population rule WITHHELD this row (#10951). The
+    #: REFUSAL IS BY PRESENCE, not by looking the reason string up in a tuple: the
+    #: tuple can only refuse the literals the version that wrote it knew, so a
+    #: snapshot carrying a verdict from a NEWER vocabulary (`STANDING-CONSTRAINT-V2`)
+    #: would be labelled withheld and handed a runnable command at the same time —
+    #: measured. The reason is kept for the reader; the flag is what decides.
+    withheld_by_population: bool = False
 
     @property
     def sort_key(self) -> tuple[int, int, tuple[int, int]]:
@@ -428,7 +569,17 @@ class Unit:
     def pickable(self) -> bool:
         if self.duplicate_of:
             return False
-        return self.reason not in (REASON_CLAIMED, REASON_SUPERSEDED)
+        # ⛔ A WITHHELD ROW IS REFUSED BY PRESENCE, NOT BY ITS SPELLING (#10951). A
+        # withheld row that `pickable` still admits is a row `render` offers a
+        # COMMAND for while its own REASON column says it is not a unit — the
+        # command-XOR-action invariant this file keeps breaking. And the refusal
+        # cannot be a lookup in `REASONS_WITHHELD`: that tuple only knows the
+        # literals this version writes, so a replay carrying a verdict from a newer
+        # vocabulary was labelled withheld AND handed a command (measured). The
+        # tuple stays for the reasons this file itself writes.
+        if self.withheld_by_population:
+            return False
+        return self.reason not in REASONS_WITHHELD
 
     @property
     def executable(self) -> bool:
@@ -486,8 +637,12 @@ def _normalise_shapes(raw: dict[str, Any], snap: Snapshot) -> None:
     `local_holders`; `claim_ns`; `repo`/`base`/`config_source`/`collected_at`; each
     pull's `number`, `labels`, `closing_issues`, `refs_issues`, `draft`, `base`,
     `head`, `head_ref`, `title`, `fold_line`; the ELEMENTS of a pull's three list
-    fields; and each ISSUE element — its `number` (a non-bool positive int),
-    `priority` and `title`. Judged by their READERS instead: `gate_text`, and the
+    fields; each ISSUE element — its `number` (a non-bool positive int),
+    `priority` and `title` — and, since #10951, its `labels` and `assignees` plus
+    their ELEMENTS (a nameless label is normalised to the empty name and RECORDED,
+    so one malformed element cannot kill the rule but does refuse the run).
+    `population` and `population_source` are judged in `from_json`, not here: they
+    exist only on a REPLAY. Judged by their READERS instead: `gate_text`, and the
     entry VALUES of `attestation`/`merge_tree`/`check_runs` — one that reads as an
     abstention becomes a POSITION (NEEDS-REVIEW / NEEDS-TEST at exit 0/1, never a
     command), and one the reader cannot handle at all exits 2 through the outer frame
@@ -552,6 +707,51 @@ def _normalise_shapes(raw: dict[str, Any], snap: Snapshot) -> None:
         if not isinstance(row.get("title"), str):
             bad_issue_fields.append(f"#{number}.title")
             row["title"] = ""
+        # ⛔ THE POPULATION RULE READS `labels` AND `assignees`, SO THEIR SHAPE IS A
+        # DECISION INPUT, NOT DECORATION (#10951). Two ways this bites, both
+        # measured against the shipped predicate:
+        #   · `labels: ["standing-constraint"]` (the natural hand-written form this
+        #     file ALREADY tolerates for PRs, see `_labels`) makes the shipped jq
+        #     arm die with `Cannot index string with string "name"` — so it is
+        #     coerced here to GitHub's `[{"name": …}]`, at the one point every
+        #     snapshot passes through, exactly as the PR labels are;
+        #   · a present-but-wrong TYPE (`labels: "x"`, `assignees: 3`) is an
+        #     element that cannot be read, and a field that cannot be read is not
+        #     an absent one — it is recorded and emptied, never silently trusted.
+        for key in ("labels", "assignees"):
+            if key not in row:
+                continue
+            if not isinstance(row[key], list):
+                bad_issue_fields.append(f"#{number}.{key}")
+                row[key] = []
+            elif not all(isinstance(v, (str, dict)) for v in row[key]):
+                bad_issue_fields.append(f"#{number}.{key} elements")
+                row[key] = []
+            else:
+                # GitHub's shapes: labels are `{name}`, assignees are `{login}`.
+                # Using the LABEL shape for both was inert (the shipped arm reads
+                # only `.assignees|length`) but it is the wrong object, and an
+                # inert wrong shape is exactly what a later reader trusts.
+                shape = "name" if key == "labels" else "login"
+                row[key] = [{shape: v} if isinstance(v, str) else v for v in row[key]]
+        # ⛔ AND A LABEL DICT WITH NO USABLE `name` KILLS THE WHOLE RULE, not just
+        # its own row: measured, `{"labels": [{"id": 1}]}` makes the shipped jq
+        # arm die with `explode input must be a string`, which would surface as an
+        # UNREADABLE population and withhold the ENTIRE queue for one malformed
+        # element — a false block. A nameless label declares nothing, so it
+        # normalises to the empty name (matched by no arm) and is RECORDED: the rule
+        # survives, but the run is INCOMPLETE (exit 2), because a field that cannot
+        # be read is not an absent one. Two different promises — "the rule does not
+        # die" and "the run is clean" — and this makes the first without the second.
+        if isinstance(row.get("labels"), list):
+            names: list[dict[str, Any]] = []
+            for label in row["labels"]:
+                if isinstance(label.get("name"), str):
+                    names.append(label)
+                else:
+                    bad_issue_fields.append(f"#{number}.labels element has no name")
+                    names.append({"name": ""})
+            row["labels"] = names
         kept_issues.append(row)
     if bad_issue_fields:
         snap.unreadable.append(
@@ -1129,6 +1329,18 @@ def build_units(snap: Snapshot, cfg: QueueConfig | None) -> list[Unit]:
     for iss in snap.issues:
         number = int(iss["number"])
         priority = str(iss.get("priority") or "")
+        # ⛔ THE POPULATION VERDICT IS A PROPERTY OF THE ISSUE, NOT OF ITS PR STATE
+        # (#10951). It is read once, from the snapshot the collector filled by
+        # DRIVING the fleet's own rule, and it is applied on BOTH branches below:
+        # the rule withholds a container whether or not something is attached to
+        # it, which is exactly what the board does. It sits AFTER `superseded`
+        # (a fold constituent's reason is the relationship, not the container) and
+        # BEFORE `claimed` (a lane holding a non-unit is the less useful fact; the
+        # holder is kept in `detail` either way).
+        population = (
+            REASON_POP_UNMEASURED if snap.population_absent
+            else str((snap.population or {}).get(str(number)) or "")
+        )
         pulls = _open_pulls_for_issue(snap, number)
         pr = pulls[0] if pulls else None
         if pr is None:
@@ -1137,10 +1349,18 @@ def build_units(snap: Snapshot, cfg: QueueConfig | None) -> list[Unit]:
                 key=str(number), kind="issue", issue=number, fold_pr=None,
                 priority=priority, title=str(iss.get("title") or ""),
                 pr=None, head=None, position="NO-PR",
-                reason=REASON_CLAIMED if holder else "NO-PR",
+                reason=population or (REASON_CLAIMED if holder else "NO-PR"),
+                withheld_by_population=bool(population),
                 detail=[f"no open PR closes or references #{number}"],
                 holder=holder,
             )
+            if population:
+                u.detail.append(_population_note(population, snap))
+                if holder:
+                    u.detail.append(
+                        f"…and a lane holds it ({holder}) — the population verdict is the "
+                        "stronger fact: this is not a unit of work to dispatch at all"
+                    )
             if not readable:
                 u.detail.append("claim registry UNREADABLE for this unit")
             units.append(u)
@@ -1172,12 +1392,25 @@ def build_units(snap: Snapshot, cfg: QueueConfig | None) -> list[Unit]:
             )
         holder, readable = _claim_of(snap, issue=number, pr=pr_number, head=str(pr.get("head") or ""))
         superseded = bool(folds) or CONSTITUENT_LABEL in _labels(pr)
+        # The flag mirrors the REASON that actually won (`superseded` outranks the
+        # population verdict), so `--json` never reports `withheld_by_population:
+        # true` beside `reason: SUPERSEDED-BY-FOLD` — and a superseded row keeps
+        # registering its action target, which is the pre-existing behaviour.
+        withheld_by_population = bool(population) and not superseded
         if superseded:
             reason = REASON_SUPERSEDED
             if folds:
                 detail.append(f"constituent of open fold #{folds[0]} — the fold is the unit")
             else:
                 detail.append(f"carries `{CONSTITUENT_LABEL}` with no open fold — the fold is missing")
+        elif population:
+            reason = population
+            detail.append(_population_note(population, snap))
+            if holder:
+                detail.append(
+                    f"…and a lane holds it ({holder}) — the population verdict is the "
+                    "stronger fact: this is not a unit of work to dispatch at all"
+                )
         elif holder:
             reason = REASON_CLAIMED
         else:
@@ -1189,6 +1422,7 @@ def build_units(snap: Snapshot, cfg: QueueConfig | None) -> list[Unit]:
             position=position, reason=reason, detail=detail, holder=holder,
             head_ref=str(pr.get("head_ref") or "") or None,
             draft=bool(pr.get("draft")),
+            withheld_by_population=withheld_by_population,
         )
         if not readable:
             u.detail.append("claim registry UNREADABLE — this row's freedom is not provable")
@@ -1256,9 +1490,16 @@ def build_units(snap: Snapshot, cfg: QueueConfig | None) -> list[Unit]:
     # here. Blocked rows are registered FIRST and they block unconditionally: a
     # CLAIMED or SUPERSEDED row's target is not free just because another row
     # closing it looks ready.
+    # ⛔ …BUT A POPULATION-WITHHELD ROW OWNS NOTHING (#10951 review, P2). It is not
+    # a unit of work, so the artifact it happens to point at is not "held" by it —
+    # and registering its target made a fully merge-ready REAL unit unofferable:
+    # measured, one PR closing both `design(extractor):` #5333 and `feat(…)` #8488
+    # produced `8488 … duplicate of 5333` with NO command anywhere, while the footer
+    # said "every measured one is held, superseded, or a duplicate" — none of which
+    # the target owner was. Containers commonly share a PR with a closing issue.
     seen_targets: dict[str, str] = {}
     for u in units:
-        if u.pickable:
+        if u.pickable or u.withheld_by_population:
             continue
         seen_targets.setdefault(u.action_target, u.key)
     for u in units:
@@ -1474,6 +1715,20 @@ def next_action(unit: Unit, repo: str) -> str | None:
 #: malformed knob. Measured:
 #:
 #:     NEXT_WORK_PACE=0.2s uv run python tools/next_work.py
+#:
+#: Environment overrides. The two POPULATION levers are PRINTED in the run's
+#: provenance (see the module docstring's ``Usage`` block); the other two are a
+#: resolved path and a pacing number and are NOT rendered:
+#:     NEXT_WORK_POPULATION=0    DISARMS the fleet's work-unit rule (#10951). No
+#:                               population rule is consulted at all: every row is
+#:                               admitted on its title and labels, exactly as before
+#:                               that issue — an epic, a `design(…)` decision, a
+#:                               `measure(…)` and #10175 all get a runnable command.
+#:                               Reported as `OFF — …`; never passed for a measurement.
+#:     NEXT_WORK_POOL_JQ_SH=…    the script carrying the `POOL_JQ` assignment, when it
+#:                               is not this checkout's `scripts/` or $AGENT_INFRA_PATH.
+#:     NEXT_WORK_CLAIMS_SH=…     `claims.sh`, when it is not resolvable in-tree.
+#:     NEXT_WORK_PACE=…          the pacing gap between `gh` calls.
 #:       -> ValueError: could not convert string to float: '0.2s'
 #:       -> exit 1 with no snapshot read at all
 #:
@@ -1548,13 +1803,18 @@ def _unreadable(snap: Snapshot, what: str, detail: object) -> None:
 
 # ── collection (the only part that touches the network) ─────────────────────
 def _run(
-    args: Sequence[str], *, timeout: float = GH_TIMEOUT, cwd: Path | None = None
+    args: Sequence[str],
+    *,
+    timeout: float = GH_TIMEOUT,
+    cwd: Path | None = None,
+    stdin_text: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Every git call is pinned to the checkout being judged, never the process cwd."""
     try:
         return subprocess.run(
             list(args), capture_output=True, text=True, timeout=timeout,
             cwd=str(cwd) if cwd else None,
+            input=stdin_text,
         )
     except (OSError, subprocess.SubprocessError) as exc:  # pragma: no cover - environment
         return subprocess.CompletedProcess(list(args), 127, "", str(exc))
@@ -1642,6 +1902,14 @@ def _search_issues(client: GhCli, repo: str, label: str, snap: Snapshot) -> list
                     "number": int(it["number"]),
                     "title": str(it.get("title") or ""),
                     "priority": label,
+                    # ⛔ CARRIED, NOT DISCARDED (#10951). This projection used to
+                    # keep three keys, so the population rule's two INPUT FIELDS
+                    # never reached the reader that must consult it — the field
+                    # erasure #10902 records for PRs, on the issue side. The data
+                    # was always in `it` (24/24 live rows carried both); only the
+                    # projection threw it away.
+                    "labels": it.get("labels") or [],
+                    "assignees": it.get("assignees") or [],
                 }
             )
         if not items or len(rows) >= total or page >= 10:
@@ -1810,6 +2078,331 @@ def _local_holders(repo_root: Path, snap: Snapshot | None = None) -> dict[str, l
     for path, branch in worktrees:
         note(path, ahead_of.get(branch, 1 if branch else -1))
     return {k: sorted(set(v)) for k, v in holders.items()}
+
+
+# ── the population rule (#10951) ─────────────────────────────────────────────
+#: THE POPULATION RULE IS NOT DEFINED IN THIS FILE. It is the fleet's own
+#: `POOL_JQ` in agent-infra's `refresh-candidates.sh`, EXTRACTED and EXECUTED by
+#: `jq` — the same bytes the controller drives over the same population.
+#:
+#: ⛔ WHY EXECUTED AND NOT RESTATED. #10951 is what happens to a second copy: the
+#: rule existed four times inline with two meanings, the P1 tier's copy excluded
+#: two container kinds and the P0 tier's six, and the tier that decided a lane's
+#: next unit was the WIDE one. A Python restatement here would mint a third
+#: definition — and it would drift the moment either side is edited, which is the
+#: defect, not a risk of it. The issue's own acceptance clause is *"used by both
+#: surfaces"*, and "both surfaces run one program" is the only mechanical reading
+#: of that.
+#:
+#: ⛔ AND IT IS FAIL-CLOSED BY OMISSION. If the script, the assignment or `jq`
+#: cannot be read, every row is withheld as POP-UNMEASURED and the reason is named
+#: in `unreadable` (exit 2). A rule that cannot be read must never resolve to
+#: "every row is a unit": that resolution IS the defect being fixed.
+POPULATION_SCRIPT_ENVS = ("NEXT_WORK_POOL_JQ_SH",)
+#: `POOL_JQ='…'` is a SINGLE-QUOTED assignment on ONE line — the shipped script
+#: says so in its own comment, because `pool-filter.test.sh` extracts it the same
+#: way. `[^']*`, not `.*`: a line that ever gains a second quote yields NOTHING (a
+#: named failure) instead of a silently truncated program, which would withhold
+#: or admit rows for reasons nobody can see.
+_POOL_JQ_RE = re.compile(r"^POOL_JQ='([^']*)'[ \t]*$", re.M)
+#: The shipped program's three top-level `select` stages, IN ORDER. This is an
+#: IDENTITY mapping — which stage means what for the reader — never a predicate:
+#: the predicate is the bytes. If the program stops being exactly these three
+#: stages, the attribution is dropped and withheld rows are reported as
+#: NOT-A-UNIT (named, still withheld) rather than mislabelled.
+POPULATION_ARMS = (REASON_ASSIGNED, REASON_DECLARED, REASON_CONTAINER)
+
+#: What each arm must MENTION for the name to be assigned to it. Positional
+#: attribution was measured to be unsafe: joining the same three stages in another
+#: order keeps `len == 3` and the rejoin identity, so a reordered upstream program
+#: made the CONTAINER arm read "its labels DECLARE `standing-constraint`" and the
+#: ASSIGNED arm read "its title kind is a CONTAINER" — confidently, with a normal
+#: provenance line, and `test_the_fixture_rule_mirrors_the_shipped_one` cannot see
+#: it on a runner (that tie is the one test that skips when `scripts/` is absent).
+#: The withhold is unaffected either way; the LABEL must not lie.
+POPULATION_ARM_MARKERS = (".assignees", ".labels", ".title")
+
+
+def _population_script(repo_root: Path) -> str:
+    """Where the shipped rule lives — env override, then this checkout, then the tree.
+
+    Mirrors `_claim_verdicts`, the file's established resolution order, with one
+    correction: the `AGENT_INFRA_PATH` candidate is only consulted when that
+    variable is NON-EMPTY. `Path("") / "scripts" / …` is a RELATIVE path, so on a
+    box that does not export it the lookup would silently resolve against the
+    process CWD — some other checkout's copy, or none, and either way a different
+    answer than the caller intended.
+    """
+    for env in POPULATION_SCRIPT_ENVS:
+        explicit = os.environ.get(env)
+        if explicit:
+            return explicit
+    candidates = [repo_root / "scripts" / "orchestrator-harness" / "refresh-candidates.sh"]
+    infra = os.environ.get("AGENT_INFRA_PATH")
+    if infra:
+        candidates.append(
+            Path(infra) / "scripts" / "orchestrator-harness" / "refresh-candidates.sh"
+        )
+    for cand in candidates:
+        if cand.is_file():
+            return str(cand)
+    return ""
+
+
+def _label_objects(values: Any) -> list[dict[str, Any]]:
+    """Labels in GitHub's `[{"name": …}]` shape — the ONLY shape the shipped arm reads.
+
+    `["x"]` is the natural hand-written spelling (this file already tolerates it for
+    PRs, see `_labels`) and it is FATAL to the rule: measured, the shipped label arm
+    dies with `Cannot index string with string "name"`, which takes the WHOLE
+    population with it rather than one row. A nameless element is normalised to the
+    empty name — matched by no arm, so it can never withhold work — instead of
+    killing the run.
+    """
+    out: list[dict[str, Any]] = []
+    for value in values or []:
+        if isinstance(value, str):
+            out.append({"name": value})
+        elif isinstance(value, dict):
+            out.append(value if isinstance(value.get("name"), str) else {"name": ""})
+    return out
+
+
+def _pool_jq(script: str) -> str:
+    """The `POOL_JQ` assignment's VALUE, byte for byte (it is single-quoted)."""
+    try:
+        text = Path(script).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    match = _POOL_JQ_RE.search(text)
+    return match.group(1) if match else ""
+
+
+def _top_level_stages(prog: str) -> list[str]:
+    """Split a jq program at top-level `|` — never inside a string, `(…)` or `[…]`.
+
+    ⛔ A PLAIN `prog.split("|")` IS WRONG HERE, measured: the shipped label arm
+    contains a NESTED pipe inside `[$L[]|. as $n|select(…)]`, so a naive split
+    yields four fragments and mis-attributes every row. The scanner tracks string
+    literals (with backslash escapes) and bracket depth; the caller RE-CHECKS the
+    split by rejoining it, so a scanner bug cannot silently mislabel — it can only
+    lose the attribution.
+    """
+    stages: list[str] = []
+    current: list[str] = []
+    depth = 0
+    in_string = False
+    escaped = False
+    for char in prog:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            current.append(char)
+            continue
+        if char == '"':
+            in_string = True
+        elif char in "([":
+            depth += 1
+        elif char in ")]":
+            depth -= 1
+        elif char == "|" and depth == 0:
+            stages.append("".join(current))
+            current = []
+            continue
+        current.append(char)
+    stages.append("".join(current))
+    return stages
+
+
+def _arm_indexes(stages: list[str]) -> dict[str, int] | None:
+    """Map each REASON to the stage index that PROVES it is that arm — by content.
+
+    Positional attribution was measured to be unsafe: joining the same three stages
+    in another order keeps `len == 3` and the rejoin identity, so a reordered
+    upstream program made the CONTAINER arm read "its labels DECLARE
+    `standing-constraint`" and the ASSIGNED arm read "its title kind is a
+    CONTAINER" — confidently, with a normal provenance line. Each marker must
+    appear in exactly one stage; two stages mentioning `.labels` (or none) is not an
+    attribution but a guess, so it returns None and the rows fall back to
+    NOT-A-UNIT. The withhold is unaffected either way; the LABEL must not lie.
+    """
+    found: dict[str, int] = {}
+    for reason, marker in zip(POPULATION_ARMS, POPULATION_ARM_MARKERS, strict=True):
+        owners = [i for i, stage in enumerate(stages) if marker in stage]
+        if len(owners) != 1:
+            return None
+        found[reason] = owners[0]
+    if len(set(found.values())) != len(POPULATION_ARMS):
+        return None
+    return found
+
+
+def _population_program(prog: str) -> tuple[str, bool]:
+    """One jq invocation for every row: what the rule KEEPS, and which arm withheld."""
+    stages = _top_level_stages(prog)
+    attributable = (
+        len(stages) == len(POPULATION_ARMS)
+        and "|".join(stages) == prog
+        and _arm_indexes(stages) is not None
+    )
+    body = "reduce .[] as $r ([]; . + [{n: $r.number, kept: ([$r | " + prog + "]|length)"
+    if attributable:
+        body += "".join(
+            f", a{index}: ([$r | {stage}]|length)" for index, stage in enumerate(stages)
+        )
+    body += "}])"
+    return body, attributable
+
+
+def _withhold_all(snap: Snapshot) -> None:
+    """A rule that could not be read withholds EVERY row — never none of them.
+
+    The polarity is the whole point: an unmeasured eligibility that resolves to
+    "every row is a unit" is exactly the state #10951 was filed about, arrived at
+    by accident instead of by omission. Rows keep their place in the report so the
+    queue is not silently empty; they carry POP-UNMEASURED and no command.
+    """
+    for row in snap.issues:
+        snap.population[str(row["number"])] = REASON_POP_UNMEASURED
+
+
+def _population_verdicts(repo_root: Path, snap: Snapshot) -> None:
+    """Fill `snap.population` by DRIVING the fleet's own predicate over our own rows.
+
+    One `jq` call for the whole population (not one per row), because the arm is a
+    property of the ROW and not of the run.
+    """
+    # ⛔ THE SWITCH IS DECIDED BEFORE ANYTHING ELSE (#10951 review, P3). It used to
+    # sit AFTER the zero-row early return, so an empty queue with the rule DISARMED
+    # printed the rule's path and digest — no ⚠️ marker, because the marker keys on
+    # `OFF` — i.e. the one artifact a closer audits said the deployed rule had
+    # decided the population, which is the opposite of the switch state. (Same
+    # defect class as the refused-map provenance line.)
+    # ⛔ THE OFF-SWITCH IS NAMED AND LOUD (#10951). When it is off, this tool
+    # consults NO population rule at all: every collected row is admitted on its
+    # title and labels exactly as it was before this change — the pre-#10951
+    # behaviour, in which an epic, a `design(…)` decision, a `measure(…)` and
+    # tortoise#10175 ("the cap is HELD deliberately — never override it") all
+    # receive a runnable dispatch command. It exists so the change can be reverted
+    # at runtime by a box that cannot carry it, and it is REPORTED, never silent.
+    if os.environ.get("NEXT_WORK_POPULATION", "1").strip().lower() in (
+        "0", "off", "no", "false",
+    ):
+        snap.population_source = "OFF — NEXT_WORK_POPULATION disabled; no row was checked"
+        return
+
+    if not snap.issues:
+        # Even an EMPTY queue names the rule it would have used: "the source is
+        # printed, ALWAYS" is a property of the render, not of a non-empty run.
+        script = _population_script(repo_root)
+        prog = _pool_jq(script) if script else ""
+        if prog:
+            digest = hashlib.sha256(prog.encode()).hexdigest()[:12]
+            snap.population_source = f"{script} · POOL_JQ sha256:{digest} (no rows)"
+        else:
+            # ⛔ THE CLAIM IS "THE SOURCE IS PRINTED", NOT "THE SOURCE IS FOUND"
+            # (#10951 review, round 6). With no rule and no rows the old branch
+            # printed NOTHING, so "ALWAYS" was not what the code did. Zero rows
+            # cannot be withheld either way, so this is a report — but a silent
+            # report is the one thing this seam must never be.
+            snap.population_source = "UNREADABLE — no work-unit rule resolvable (no rows)"
+        return
+
+    script = _population_script(repo_root)
+    if not script:
+        _withhold_all(snap)
+        snap.unreadable.append(
+            "population: refresh-candidates.sh was not found (tried this checkout's "
+            "scripts/orchestrator-harness/, then $AGENT_INFRA_PATH) — the fleet's own "
+            "work-unit rule cannot be driven, so no row's eligibility is provable"
+        )
+        snap.population_source = "UNREADABLE — no refresh-candidates.sh"
+        return
+    prog = _pool_jq(script)
+    if not prog:
+        _withhold_all(snap)
+        snap.unreadable.append(
+            f"population: {script} carries no usable `POOL_JQ='…'` assignment — the "
+            "work-unit rule cannot be driven"
+        )
+        snap.population_source = f"UNREADABLE — no POOL_JQ in {script}"
+        return
+
+    program, attributable = _population_program(prog)
+    payload = [
+        {
+            "number": int(row["number"]),
+            "title": str(row.get("title") or ""),
+            "labels": _label_objects(row.get("labels")),
+            "assignees": row.get("assignees") or [],
+        }
+        for row in snap.issues
+    ]
+    proc = _run(["jq", "-c", program], stdin_text=json.dumps(payload), timeout=GIT_TIMEOUT)
+    if proc.returncode != 0:
+        _withhold_all(snap)
+        # A `jq` that refuses is not a population that passed. `pool-filter.test.sh`
+        # runs a MUTATION arm for the same reason: a predicate that fails OPEN while
+        # looking stricter is the failure mode this whole rule is exposed to.
+        snap.unreadable.append(
+            "population: the shipped POOL_JQ could not be driven over "
+            f"{len(payload)} row(s) ({proc.stderr.strip()[:160] or 'no stderr'}) — "
+            "eligibility is UNMEASURED, not granted"
+        )
+        snap.population_source = f"UNREADABLE — jq refused {Path(script).name}"
+        return
+    try:
+        verdicts = json.loads(proc.stdout or "[]")
+    except json.JSONDecodeError as exc:
+        _withhold_all(snap)
+        snap.unreadable.append(f"population: jq emitted non-JSON ({exc})")
+        snap.population_source = "UNREADABLE — jq emitted non-JSON"
+        return
+
+    stages = _top_level_stages(prog)
+    by_reason = _arm_indexes(stages) if attributable else None
+    for row in verdicts:
+        if int(row.get("kept") or 0):
+            continue
+        reason = REASON_NOT_A_UNIT
+        if by_reason:
+            # The row's FIRST failing stage identifies the arm — but the NAME comes
+            # from that stage's content (`by_reason`), never from its position.
+            for index in range(len(stages)):
+                if int(row.get(f"a{index}") or 0):
+                    continue
+                reason = next(
+                    (r for r, i in by_reason.items() if i == index), REASON_NOT_A_UNIT
+                )
+                break
+        snap.population[str(row.get("n"))] = reason
+    digest = hashlib.sha256(prog.encode()).hexdigest()[:12]
+    snap.population_source = f"{script} · POOL_JQ sha256:{digest}"
+
+
+def _population_note(reason: str, snap: Snapshot) -> str:
+    """One sentence a reader can act on, for a row the population rule withheld."""
+    why = {
+        REASON_ASSIGNED: "it is already assigned to a human",
+        REASON_DECLARED: (
+            "its labels DECLARE `standing-constraint` — a standing constraint is not work, "
+            "and the declaration is the only honest marker (the title cannot carry it)"
+        ),
+        REASON_CONTAINER: (
+            "its title kind is a CONTAINER — the kinds are enumerated in the shipped rule "
+            "itself, never here, so this note cannot drift from the verdict"
+        ),
+        REASON_POP_UNMEASURED: (
+            "the population rule could not be READ, so its eligibility is UNMEASURED — "
+            "not granted"
+        ),
+    }.get(reason, "the fleet's work-unit rule withholds it")
+    source = f" [{snap.population_source}]" if snap.population_source else ""
+    return f"withheld by the fleet's population rule ({reason}): {why}{source}"
 
 
 def _claim_verdicts(repo_root: Path, refs: Iterable[str], snap: Snapshot) -> None:
@@ -2123,6 +2716,11 @@ def collect(repo: str, repo_root: Path, *, base: str = "main") -> tuple[Snapshot
 
     snap.local_holders = _local_holders(repo_root, snap)
 
+    # The population rule, DRIVEN (not restated) over the rows just collected. It
+    # runs before `build_units`, which is a pure function of the snapshot, and it
+    # is what withholds a row on BOTH branches of `build_units`.
+    _population_verdicts(repo_root, snap)
+
     # Claims: every key the decision could ask about, in one snapshot fetch.
     refs: list[str] = []
     for iss in snap.issues:
@@ -2181,6 +2779,15 @@ def render(
     if snap.unreadable:
         for u in snap.unreadable:
             out.append(f"  ⚠️ UNREADABLE: {u}")
+    # ⛔ THE POPULATION SOURCE IS PRINTED, ALWAYS (#10951). The issue's own closure
+    # note asks a closer to verify that the DEPLOYED copy carries the merged rule
+    # before recording anything — and a run that cannot name WHICH bytes decided
+    # its population (or that no bytes did) is a run whose refusal/consent cannot
+    # be audited. `OFF` is called out separately because it is a deliberate return
+    # to the pre-#10951 behaviour, not a measurement.
+    if snap.population_source:
+        marker = "⚠️ " if snap.population_source.startswith(("OFF", "UNREADABLE", "ABSENT")) else ""
+        out.append(f"  {marker}population: {snap.population_source}")
     out.append("")
 
     header = f"{'#':<6} {'PRI':<11} {'REASON':<19} {'PR':<7} {'POSITION':<14} TITLE"
@@ -2206,11 +2813,43 @@ def render(
             + "\n  A surface the decision depends on could not be read, so no unit's freedom is provable."
         )
     elif pick is None:
-        out.append(
-            "  NONE — no unit is pickable: every measured one is held, superseded, or a "
-            "duplicate of a row already offered (or the queue is empty). That is an "
-            "answer, not an error."
+        # ⛔ NAME THE CLASS THAT ACTUALLY WITHHELD (#10951 review, follow-up). The
+        # sentence listed "held, superseded, or a duplicate" — so a queue whose whole
+        # population was withheld by the work-unit rule was described by three causes,
+        # none of which applied, which is the same misdescription the stolen-target
+        # finding was filed for.
+        # ⛔ BY PRESENCE, LIKE THE REFUSAL ITSELF (#10951 review, P3). Selecting on
+        # the tuple re-created the misdescription on exactly the input the presence
+        # flag exists for: a replay carrying a NEWER verdict string was refused
+        # correctly and then reported as "held, superseded, or a duplicate".
+        withholds = sorted(
+            {u.reason for u in units if u.withheld_by_population or u.reason in REASONS_WITHHELD}
         )
+        # ⛔ TWO VOCABULARIES, TWO SENTENCES (#10951 review, F3). A CLAIMED or
+        # SUPERSEDED row is described by the sentence that belongs to it; putting it
+        # in the population sentence made a fold-only queue read "a queue whose rows
+        # are containers, declared constraints, assigned…", which is not why IT is
+        # not pickable. Only the population reasons get the population parenthetical.
+        population_reasons = {u.reason for u in units if u.withheld_by_population}
+        if withholds and population_reasons:
+            out.append(
+                "  NONE — no unit is pickable: every measured one is withheld as "
+                + ", ".join(withholds)
+                + " (a queue whose rows are containers, declared constraints or otherwise "
+                "not units is an ANSWER, not an error)."
+            )
+        elif withholds:
+            out.append(
+                "  NONE — no unit is pickable: every measured one is withheld as "
+                + ", ".join(withholds)
+                + ". That is an answer, not an error."
+            )
+        else:
+            out.append(
+                "  NONE — no unit is pickable: every measured one is held, superseded, or a "
+                "duplicate of a row already offered (or the queue is empty). That is an "
+                "answer, not an error."
+            )
     else:
         out.append(f"  TOP       {_label(pick)}  ({pick.priority}, {pick.reason}, position {pick.position})")
         cmd = next_command(pick, repo)
@@ -2416,7 +3055,10 @@ def _main(argv: Sequence[str] | None = None) -> int:
             "decision: a claim lease's polarity is decided by claims.sh "
             "when the snapshot is collected and recorded in it, so a replay is exact with no clock "
             "seam to forget.\n\n"
-            "Reads: label listing via search/issues (paginated, never page-capped), the repo's own "
+            "Reads: label listing via search/issues (paginated, never page-capped), the fleet's "
+            "work-unit rule (the POOL_JQ assignment in agent-infra's "
+            "scripts/orchestrator-harness/refresh-candidates.sh, driven through `jq` — the "
+            "`jq` binary is a RUNTIME DEPENDENCY of this tool), the repo's own "
             "queue gate from .mergify.yml (via tools/queue_resweep.py), refs/claims (via "
             "scripts/orchestrator-harness/claims.sh), record-review.sh --check-carry, and "
             "git merge-tree --write-tree (which fetches a PR head it does not have locally into "
@@ -2553,6 +3195,13 @@ def _main(argv: Sequence[str] | None = None) -> int:
                     "repo": repo,
                     "base": snap.base,
                     "gate": snap.config_source,
+                    # ⛔ THE MACHINE CONSUMER NEEDS THE PROVENANCE TOO (#10951 review,
+                    # follow-up). Without it `--json` could not distinguish a real
+                    # measurement from the OFF switch, an UNREADABLE rule or an ABSENT
+                    # replay — the refusal/consent decision was readable only in the
+                    # human render.
+                    "population_source": snap.population_source,
+                    "population": snap.population,
                     "unreadable": snap.unreadable,
                     "refused": refused,
                     "units": [
@@ -2566,6 +3215,7 @@ def _main(argv: Sequence[str] | None = None) -> int:
                             "head": u.head,
                             "position": u.position,
                             "reason": u.reason,
+                            "withheld_by_population": u.withheld_by_population,
                             "holder": u.holder,
                             "detail": u.detail,
                             "pickable": False if refused else u.pickable,

@@ -44,7 +44,7 @@ from tests.eval.ask import corpus as ask_corpus
 from tests.eval.ask import generate_corpus
 from tools.longmem_eval import measure_ask_distilled as m
 from tools.longmem_eval import w7_publish
-from tools.longmem_eval.judge import MockJudge
+from tools.longmem_eval.judge import DEFAULT_JUDGE_MODEL, MockJudge
 from tortoise.ask_lane import _reset_ask_reader_cache_for_tests
 
 # ── stubs ─────────────────────────────────────────────────────────────────
@@ -532,7 +532,7 @@ def test_the_committed_protocol_is_registered_to_the_owner_ruled_judge(
     committed = m.load_preregistration()
     spec = m.PREREGISTERED_JUDGE_SPEC
     assert committed["judge"]["model_spec"] == spec
-    assert committed["judge"]["model_spec"] != m.DEFAULT_JUDGE_MODEL
+    assert committed["judge"]["model_spec"] != DEFAULT_JUDGE_MODEL
     # the pin travels WITH the spec — a DeepSeek run can never claim the
     # official label (the OVERRIDES line on #2281/#11460) …
     assert committed["judge"]["pin"] == f"unpinned:{spec}"
@@ -689,11 +689,14 @@ def test_the_scorer_BUILDS_the_judge_it_records(tmp_path, monkeypatch):
     """#11460 review P1-1 — the recorded spec and the judge that GRADES must be
     the same spec.
 
-    ``build_judge`` has its own fallback (the official LongMemEval judge).
-    Resolving only the RECORDED spec let a run with no ``--judge`` be graded by
-    gpt-4o while the record — and therefore the bar's config check — named
-    DeepSeek: a false PASS on the one clause that exists to prove who graded the
-    numbers. This pins that ``score`` builds from the resolved spec.
+    ``build_judge`` has its own fallback, and since #8486 that fallback is the
+    owner-ruled DeepSeek default (``deepseek:deepseek-v4-flash``) rather than
+    the official LongMemEval judge — which is exactly why this ordering matters
+    MORE now, not less: the two fallbacks disagree on purpose. Resolving only
+    the RECORDED spec let a run with no ``--judge`` be graded by one judge while
+    the record — and therefore the bar's config check — named another: a false
+    PASS on the one clause that exists to prove who graded the numbers. This
+    pins that ``score`` builds from the resolved spec.
     """
     root = _small_corpus(tmp_path)
     run = m.run_sealed(corpus_root=root,
@@ -1383,7 +1386,15 @@ def test_a_mock_judge_can_never_carry_the_official_pin(tmp_path):
     assert m.judge_pin_for("mock-judge") == "unpinned:mock-judge"
     assert m.judge_pin_for("some-other-judge") == "unpinned:some-other-judge"
     assert m.judge_pin_for(m.MOCK_JUDGE_SPEC) == m.MOCK_JUDGE_PIN
-    assert m.judge_pin_for(m.DEFAULT_JUDGE_MODEL) == m.JUDGE_PIN
+    # The official judge is named EXPLICITLY, never derived from the run default
+    # (#8486, 2026-11-07): the run default was re-pinned to DeepSeek by the owner
+    # ruling of 2026-10-27, and deriving "official" from it would have handed
+    # `JUDGE_PIN` to a DeepSeek-graded run — the R12 fail-open #9992 closed.
+    from tools.longmem_eval.judge import DEFAULT_JUDGE_MODEL, OFFICIAL_JUDGE_MODEL
+    assert m.judge_pin_for(OFFICIAL_JUDGE_MODEL) == m.JUDGE_PIN
+    assert m.judge_pin_for(DEFAULT_JUDGE_MODEL) == (
+        f"unpinned:{DEFAULT_JUDGE_MODEL}")
+    assert m.judge_pin_for(DEFAULT_JUDGE_MODEL) != m.JUDGE_PIN
     # the official judge is the MODEL, not the transport
     assert m.judge_pin_for("openrouter:openai/gpt-4o-2024-08-06") == m.JUDGE_PIN
 

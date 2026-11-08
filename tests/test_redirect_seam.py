@@ -532,10 +532,14 @@ def _delegation_path(start) -> list:
     once so ``_stamp_links`` still sees a self-cycle's stamp, and a stride that
     comes back on itself cannot loop forever. Truncation is LOAD-BEARING, not
     merely defensive: ``importlib.reload`` re-executes the module body in the
-    SAME module ``__dict__``, so ``_ORIG_THREAD_START = Thread.start`` rewrites
-    the ALREADY-INSTALLED stamp's delegate pointer to itself — a self-revisit a
-    plain reload reaches, which is exactly the state in which ``Thread.start()``
-    recurses and every chain-length check still passes.
+    SAME module ``__dict__``, so an UNGUARDED ``_ORIG_THREAD_START =
+    Thread.start`` rewrites the ALREADY-INSTALLED stamp's delegate pointer to
+    itself — a self-revisit, which is exactly the state in which
+    ``Thread.start()`` recurses and every chain-length check still passes. The
+    module body now GUARDS that assignment and keeps the captured original
+    (#11217), so a real reload no longer produces this; the shape stays
+    reachable — and stays this walker's subject — by synthesising the module
+    dict in tests.
     """
     frames, seen, fn = [], set(), start
     while fn is not None:
@@ -565,18 +569,22 @@ def _stamp_problems(start) -> list[str]:
        ran; two means one execution of the module stacked its stamp on
        another's.
     2. a stamp's ``_ORIG_THREAD_START`` does not reach ANOTHER stamp — the
-       SELF-revisit a plain ``importlib.reload`` creates is the state fact 2
-       alone can see (a two-stamp stack already trips fact 1). This is
-       the genuine double wrap the class marker exists to prevent: after a
-       module reload the reloaded module captures
-       ``_ORIG_THREAD_START = Thread.start`` — the PREVIOUS stamp, either
-       directly or under a vendor ``@wraps`` wrapper — so a re-install wraps a
-       wrapper, or, on a PLAIN reload (no re-install at all), the assignment
-       rewrites the ALREADY-INSTALLED stamp's delegate to itself, because the
-       module body re-executes in the same ``__dict__``. The marker prevents a
-       re-install; it cannot prevent that rewrite. Fact 1 sees the re-install
-       shape (two stamps — measured count 2, path
-       ``[stamp2, old_stamp, old_stamp]``); the PLAIN-RELOAD shape is the one
+       SELF-revisit an UNGUARDED module body produced on a plain
+       ``importlib.reload`` is the state fact 2 alone can see (a two-stamp
+       stack already trips fact 1). This is
+       the genuine double wrap the class marker exists to prevent: a module
+       body that captures ``_ORIG_THREAD_START = Thread.start``
+       UNCONDITIONALLY takes the PREVIOUS stamp on a reload — directly or
+       under a vendor ``@wraps`` wrapper — so a re-install wraps a wrapper, or,
+       on a PLAIN reload (no re-install at all), the assignment rewrites the
+       ALREADY-INSTALLED stamp's delegate to itself, because the module body
+       re-executes in the same ``__dict__``. The marker prevents a re-install;
+       it cannot prevent that rewrite — which is why the body itself now keeps
+       the captured original (#11217,
+       `test_a_RELOAD_keeps_the_REAL_Thread_start`), and why this arm must
+       still catch the shape if that guard is ever removed. Fact 1 sees the
+       re-install shape (two stamps — measured count 2, path
+       ``[stamp2, old_stamp, old_stamp]``); the self-revisit shape is the one
        only fact 2 can see (count stays 1, path ``[s, s]``). One-hop fails for
        both whenever the delegate is a WRAPPER whose inner frame is the previous
        stamp — which is why fact 2 is checked by REACHABILITY.
@@ -726,14 +734,17 @@ def _thread_start_stamp_violations() -> list[str]:
         third-party layer — an earlier draft of this docstring claimed it was,
         and that claim was false.
 
-    (b) A REAL blind spot: `_ORIG_THREAD_START` is NEVER inspected. The walk
-        follows `__wrapped__` only, and this wrapper is a plain `def` that
-        publishes none, so the chain stops at it. That global is captured at
-        import and re-captured on `importlib.reload`, so after a reload it names
-        a stale copy of this wrapper (measured: `_ORIG_THREAD_START is <the
-        pre-reload wrapper>`). That particular reload state is still caught by
-        (a), because `Thread.start` holds the pre-reload object too. What
-        nothing here can see is a state where `Thread.start` is the CURRENT
+    (b) A blind spot of THIS walk: `_ORIG_THREAD_START` is never inspected
+        here. The walk follows `__wrapped__` only, and this wrapper is a plain
+        `def` that publishes none, so the chain stops at it. An UNGUARDED
+        module body re-captured that global on `importlib.reload` and so named
+        a stale copy of this wrapper (measured before #11217:
+        `_ORIG_THREAD_START is <the pre-reload wrapper>`); the body now keeps
+        the captured original (#11217), and the property is asserted OUTSIDE
+        this walk by `test_a_RELOAD_keeps_the_REAL_Thread_start`, which checks
+        it directly in a subprocess (`_ORIG_THREAD_START` IS the real
+        `Thread.start`) across a real reload.
+        What no arm here can see is a state where `Thread.start` is the CURRENT
         wrapper while `_ORIG_THREAD_START` holds a stale copy.
 
     (c) A FALSE POSITIVE, fail-closed: a layer ABOVE ours that publishes no
@@ -943,18 +954,24 @@ def test_the_double_wrap_verdict_reads_the_CHAIN_not_the_identity():
         128410663087), reproduced by running
         `tests/test_11092_sentry_loop_stall.py tests/test_redirect_seam.py` in
         ONE pytest process.
-    (2) FALSE GREEN — a genuine double wrap. After a module reload the reloaded
-        module captures ``_ORIG_THREAD_START = Thread.start`` (the PREVIOUS
-        stamp). The reload alone cannot stack anything: it also resets
+    (2) FALSE GREEN — a genuine double wrap. A module body that captures
+        ``_ORIG_THREAD_START = Thread.start`` UNCONDITIONALLY takes the PREVIOUS
+        stamp on a reload; the body now guards that assignment (#11217), so
+        this shape is synthesised below rather than produced by a real reload.
+        The reload alone cannot stack anything: it also resets
         ``_TEST_SESSION_ACTIVE`` and the class marker survives, so the installer
-        is a no-op for two reasons. Clearing the marker AND re-arming the flag
-        (what a test must do to reach it) then installs the reloaded module's
-        stamp ON the old one — ``Thread.start`` is that new function, so
-        identity is TRUE and the check the message promised cannot see it; a
-        chain-length check does. A PLAIN reload with no re-install is worse
-        still — it rewrites the installed stamp's delegate to ITSELF, so the
-        count stays 1, only reachability sees it, and ``Thread.start()``
-        recurses.
+        is a no-op for two reasons. With an UNGUARDED body, clearing the marker
+        AND re-arming the flag (what a test had to do to reach it) then
+        installed the reloaded module's stamp ON the old one — ``Thread.start``
+        was that new function, so identity was TRUE and the check the message
+        promised could not see it, while a chain-length check saw two stamps.
+        With the guard in place that path no longer reaches the state at all
+        (measured: after a reload + re-install ``_ORIG_THREAD_START`` is still
+        the REAL ``Thread.start``, so the new stamp is the only layer), which is
+        why this shape is synthesised below instead. An unguarded PLAIN reload
+        with no re-install was worse still: it rewrote the installed stamp's
+        delegate to ITSELF, so the count stayed 1, only reachability saw it, and
+        ``Thread.start()`` recursed.
     """
     links = _stamp_links(threading.Thread.start)
     assert len(links) == 1, links
@@ -974,7 +991,9 @@ def test_the_double_wrap_verdict_reads_the_CHAIN_not_the_identity():
         f"a vendor wrapper over a healthy stamp is not a double wrap: {vendor_problems}"
 
     # (2) the GENUINE double wrap: a stamp whose `_ORIG_THREAD_START` is the
-    # previous stamp — the state a reload + re-install creates.
+    # previous stamp — the state an UNGUARDED reload + re-install created
+    # (before #11217; the guard keeps the real original, so it is synthesised
+    # here rather than reached).
     reloaded = types.FunctionType(
         stamp.__code__,
         {"__name__": "tortoise.projection", "_ORIG_THREAD_START": stamp},
@@ -994,8 +1013,10 @@ def test_the_stamp_delegate_graph_is_checked_by_REACHABILITY(shape):
     that DOES call our stamp: the one-hop walk saw no stamp and reported "never
     installed", a FALSE RED. It is a legitimate wrapper and must be tolerated.
 
-    ``wrapped_delegate`` — the reload-in-vendor-order state: a stamp whose
-    ``_ORIG_THREAD_START`` is a ``@wraps`` wrapper *over* the previous stamp.
+    ``wrapped_delegate`` — the reload-in-vendor-order state an UNGUARDED module
+    body produced (before #11217; synthesised here, since the guard keeps the
+    captured original): a stamp whose ``_ORIG_THREAD_START`` is a ``@wraps``
+    wrapper *over* the previous stamp.
     The one-hop arm tested only the immediate delegate, found the vendor wrapper
     (not a stamp) and reported nothing while ``Thread.start()`` recursed. The
     stamp must be found by REACHABILITY.
@@ -1022,8 +1043,10 @@ def test_the_stamp_delegate_graph_is_checked_by_REACHABILITY(shape):
         def vendor_start(self, *a, **k):  # pragma: no cover - shape, never called
             return stamp(self, *a, **k)
 
-        # The reloaded module captures `Thread.start` — here the vendor wrapper
-        # over the previous stamp — as its delegate, then installs on top.
+        # An unguarded reloaded module captured `Thread.start` — here the vendor
+        # wrapper over the previous stamp — as its delegate, then installed on
+        # top. #11217's guard keeps the real original across a reload, so this
+        # shape is synthesised rather than reached.
         reloaded = types.FunctionType(
             stamp.__code__,
             {"__name__": "tortoise.projection", "_ORIG_THREAD_START": vendor_start},
@@ -1033,9 +1056,12 @@ def test_the_stamp_delegate_graph_is_checked_by_REACHABILITY(shape):
         assert any("double wrap" in p for p in problems), problems
         return
 
-    # self-revisit: the state a PLAIN `importlib.reload` creates. The module
-    # body re-executes in the SAME `__dict__`, so `_ORIG_THREAD_START =
-    # Thread.start` rewrites the already-installed stamp's delegate to ITSELF.
+    # self-revisit: the state an UNGUARDED module body produced on a PLAIN
+    # `importlib.reload`. The body now keeps the captured original, so this is
+    # synthesised here (see `test_a_RELOAD_keeps_the_REAL_Thread_start` for the
+    # real-reload arm). The module body re-executes in the SAME `__dict__`, so a
+    # bare `_ORIG_THREAD_START = Thread.start` rewrites the already-installed
+    # stamp's delegate to ITSELF.
     # This is fact 2's unique domain — the stamp count stays 1, so the length
     # arm is silent and only reachability can see it.
     own = {"__name__": "tortoise.projection"}
@@ -1208,3 +1234,51 @@ def test_the_installer_guard_clauses_each_decline_by_effect(monkeypatch):
         'guard must compare against the literal `"1"`, not test truthiness')
     assert not getattr(threading.Thread, "_tortoise_stamp_installed", False), (
         'the installer recorded the marker for `TORTOISE_TEST_MODE="0"`')
+
+
+def test_a_RELOAD_keeps_the_REAL_Thread_start():
+    """#11217 round-4 review P2: the reload arm must be OBSERVED, not asserted.
+
+    `importlib.reload` re-executes the module body into its EXISTING dict. If the
+    body captures `_ORIG_THREAD_START = threading.Thread.start` unconditionally,
+    then on a reload that name is rebound to the STAMP — which the stamp reads at
+    CALL time, so it calls itself and every `Thread.start()` raises
+    `RecursionError`. The module captures once (`globals().get(...) or …`).
+
+    Nothing else in the tree reloads `tortoise.projection`, so without this test
+    reverting the guard leaves the ENTIRE suite green while reload breaks all
+    thread creation — measured (#11217 round-4 review: an import hook that
+    restored the bare assignment passed every assertion in this file).
+
+    Runs in a SUBPROCESS on purpose: a reload resets `_TEST_SESSION_ACTIVE` and
+    re-executes module state, which must not leak into the parent session.
+    """
+    script = (
+        "import importlib, os, threading\n"
+        "os.environ['TORTOISE_TEST_MODE'] = '1'\n"
+        "import tortoise.projection as proj\n"
+        "real = threading.Thread.start\n"
+        "proj._TEST_SESSION_ACTIVE = True\n"
+        "proj.install_thread_stamp()\n"
+        "assert threading.Thread.start is not real, 'installer did not run'\n"
+        "importlib.reload(proj)\n"
+        "if proj._ORIG_THREAD_START is not real:\n"
+        "    raise SystemExit('RELOAD_REBOUND_THE_ORIGINAL')\n"
+        "t = threading.Thread(target=lambda: None)\n"
+        "t.start(); t.join()\n"
+        "print('RELOAD_OK')\n"
+    )
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env = dict(os.environ)
+    env.pop("TORTOISE_TEST_DB", None)
+    env.pop("TORTOISE_DB_URI", None)
+    proc = subprocess.run(
+        [sys.executable, "-c", script], cwd=root, env=env,
+        capture_output=True, text=True, timeout=180)
+    assert proc.returncode == 0, (
+        "a reload of tortoise.projection broke thread creation — the module body "
+        "must KEEP the captured original, not rebind it to the stamp. "
+        f"stdout={proc.stdout!r} stderr={proc.stderr[-800:]!r}")
+    assert "RELOAD_OK" in proc.stdout, (
+        f"the reload probe did not reach its assertion: {proc.stdout!r} "
+        f"{proc.stderr[-800:]!r}")
