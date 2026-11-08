@@ -10926,20 +10926,27 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         f"extractor_v2.py's create_operator mentions are at {live_mentions}, not the "
         "four the record quotes — an insertion above them moves the quote; re-derive "
         "the record's block (its `create_operator` line AND this list) rather than the list")
-    # ⛔ The arm above binds the four LINE NUMBERS; the record also STATES the count in prose,
-    # SIX times across FIVE spellings — `prints **4** on origin/main` (x2), `in four comments`
-    # (x2), `prints exactly four`, `# §0's four create_operator MENTIONS`, and
-    # `(four COMMENTS naming`. Those were unbound: measured, editing `:81` to "prints exactly
-    # three" left the suite GREEN while `:629` still listed four numbers, i.e. the record
-    # contradicted its own pinned quote and nothing reddened. A typed count is this bundle's
-    # recurring defect (the docstring above says so), so the count is DERIVED here and every
-    # prose statement of it is bound.
+    # ⛔ The arm above binds the four LINE NUMBERS; the record also STATES the count in prose.
+    # EIGHT statements across SIX spellings — `prints **4** on origin/main` (x2), `in four
+    # comments` (x2), `prints exactly four`, `# §0's four create_operator MENTIONS`,
+    # `(four COMMENTS naming`, and the §5 numeral `that is 4 on … origin/main` — so SEVEN
+    # words/numbers are graded by the patterns below plus the numeral. Those were unbound:
+    # measured, editing `:81` to "prints exactly three" left the suite GREEN while `:629`
+    # still listed four numbers, i.e. the record contradicted its own pinned quote and
+    # nothing reddened. A typed count is this bundle's recurring defect (the docstring above
+    # says so), so the count is DERIVED here and every prose statement of it is bound.
     #
     # ⛔ Graded PER OCCURRENCE (`re.findall` + `all`), not with `in text`: two of the
     # spellings appear TWICE, so a bare membership test is satisfied by the SURVIVOR and one
     # edited copy passed with the suite green (measured — the same false PASS this assertion
     # exists to close, one level down). A spelling that stops appearing entirely also reds,
     # via the `_found` emptiness check.
+    #
+    # ⛔ `re.IGNORECASE`, because the claim is the NUMBER: `MENTIONS` -> `mentions` is an
+    # editorial reword that moves no number, and a case-sensitive pattern redded on it with a
+    # misleading `yields []` diagnostic (measured) — the same false-block this PR removed for
+    # the `# §0/§2` heading and the `both now read` parenthetical. Every other token in these
+    # patterns is already lower-case, so the tolerance cannot admit a wrong value.
     #
     # The `0` at `80c912244` and the `56 lines / 59 occurrences` at `62248db88` are sha-pinned
     # readings — they read commits that already happened and cannot rot — so they are not bound.
@@ -10949,8 +10956,12 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
                        r"names `sdk\.create_operator` in (\w+) comments",
                        r"prints exactly (\w+)",
                        r"§0's (\w+) `create_operator` MENTIONS",
-                       r"\((\w+) COMMENTS naming"):
-        _found = re.findall(_count_pat, text)
+                       r"\((\w+) COMMENTS naming",
+                       # the §5 numeral, which the record wraps across a COMMENT COLUMN
+                       # (`that is 4 on` / newline + ~57 spaces + `# origin/main`) — a
+                       # plain `\s+` cannot cross the `# `, so the continuation is named.
+                       r"that is (\d+) on\s+#\s+origin/main"):
+        _found = re.findall(_count_pat, text, re.IGNORECASE)
         assert _found and all(_v in (str(_n), _words[_n]) for _v in _found), (
             f"the record states the create_operator mention count as {_n}, but "
             f"{_count_pat!r} yields {_found} — EVERY occurrence must agree with the derived "
@@ -11149,10 +11160,15 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # window is the proven-rotten one: the record says this very cite was stale-corrected
     # once and moved again by `#11459`'s +102 insertion.
     #
-    # The window is pinned by the TWO facts it asserts, not its prose: it must still name
-    # `link_source_to_event` and it must still carry the `sdk.py:17574` cite INSIDE it
-    # (that nested cite is the same number the prose above pins, so the two cannot drift
-    # apart silently).
+    # ⛔ Pinned at BOTH ENDPOINTS, exactly as the 2724-2726 arm above pins its three lines:
+    # a substring test over the 9-line slice was GREEN against a 1-2 line insertion above the
+    # window (measured) — the content simply slid along inside the shifted slice, so the arm
+    # added BECAUSE this cite rots by insertion did not detect an insertion. The two content
+    # facts below then hold the window's MEANING, and the record-side assert holds its number.
+    assert probe[275 - 1].strip() == 'ANCHOR_OUT = ("extractedFrom",)', (
+        f"capstone_measure.py:275 reads {probe[275 - 1].strip()!r}, not the window's opening line")
+    assert probe[283 - 1].strip() == "#: is on the same link, but the DERIVED node is its TARGET.", (
+        f"capstone_measure.py:283 reads {probe[283 - 1].strip()!r}, not the window's closing line")
     _probe_win = "\n".join(probe[275 - 1:283])
     assert "link_source_to_event" in _probe_win, (
         "probes/capstone_measure.py:275-283 no longer names `link_source_to_event` — the "
@@ -11169,6 +11185,18 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     assert value_gate[81 - 1].strip() == 'return is_truthy(os.environ.get(ENV_FLAG, "1"))', (
         f"tortoise/value_gate.py:81 reads {value_gate[81 - 1].strip()!r}, not the default-ON "
         "the record cites")
+    # ⛔ The RECORD side of all four, so a re-stale in the record reds too: every other cite
+    # arm in this leg is two-directional (it pins the code line AND the record's citation of
+    # it), and these four were code-side only — a record re-stale passed (measured), which
+    # contradicts the docstring's "re-staling a cite in the RECORD reds it". The window's
+    # RANGE is asserted as the range its endpoints were just verified at, so the record cannot
+    # name a different window than the one pinned above.
+    for _cite in ("`pack_hierarchy.py:419`", "`probes/capstone_measure.py:275-283`",
+                  "`identity_hold.py:125`", "`tortoise/value_gate.py:81`"):
+        assert _cite in text, (
+            f"the record must still cite {_cite} — the arm below pins the line it names, "
+            "so deleting the citation would leave the pin asserting something no reader is "
+            "sent to")
 
     # A2's Object mint: the write seam that routes creation by kind, cited THREE
     # times as a range. Both endpoints are claims — the classifier opens it, the
