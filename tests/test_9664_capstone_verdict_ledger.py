@@ -4857,7 +4857,7 @@ def test_a_cmd_target_behind_an_UNRUNNABLE_probe_is_REFUSED_end_to_end(monkeypat
     arm reverted (`if tracked is None:` -> `if False:`) the row is **still INVALID**
     — the fourth-answer guard later in the SAME arm refuses it with "the TRACKED
     check answered None, which is not a measurement that it is in the tree" — so
-    this test reddens on its message assertion (`"TRACKED check could not be run
+    this test reddens on its message assertion (`"TRACKED check did not answer
     here" in message`), NOT on an accepted row. An earlier revision of this
     docstring claimed the row was ACCEPTED: that was true before the fourth-answer
     guard landed in the same change, and is false at this head.

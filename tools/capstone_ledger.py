@@ -2101,11 +2101,14 @@ def _is_tracked(resolved: Path, root: Path) -> bool | None:
     ⛔ `False` covers TWO measured facts, and only the first is git's own answer: git
     said "no", OR the path is not under `root` at all (the `ValueError` arm below) —
     a structural fact about this repo, true of every clone, and therefore not a claim
-    about what git measured. It is not spelled `None` because `None` renders as "the
-    TRACKED check did not answer here", which would be FALSE about a path we simply
-    declined to ask about, and it is not raised because `_evidence_is_real` calls this
-    outside its `try` — the arm is unreachable by construction anyway, since all three
-    call sites pre-check `is_relative_to(root)` (#11474 review).
+    about what git measured. It is not spelled `None` because `None` reports a
+    MEASUREMENT FAILURE — nothing could be answered — and no probe failed here: git was
+    never asked, because the path is outside this repo and the question does not apply.
+    The `False` sentence ("is not TRACKED by git, so a reader's clone does not have
+    it") is TRUE of an outside-`root` path, so it is the honest rendering; `None` would
+    invent a malfunction. It is not raised because `_evidence_is_real` calls this
+    outside its `try`, and the arm is unreachable by construction anyway, since all
+    three call sites pre-check `is_relative_to(root)` (#11474 review).
 
     The third value exists so the CALLER can tell the two refusals apart in the message
     it prints: `False` is a measurement ("not TRACKED by git"), `None` is the absence of
