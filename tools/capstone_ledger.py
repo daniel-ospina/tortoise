@@ -1994,11 +1994,26 @@ def _short(text: str, limit: int = 120) -> str:
 
 
 def _is_tracked(resolved: Path, root: Path) -> bool:
-    """Is `resolved` tracked? `unprovable` (no git) does not blame the record.
+    """Is `resolved` tracked? An UNRUNNABLE probe REFUSES; it does not abstain.
 
     The abstention is PRINTED rather than silent, because a CLEAN verdict
     byte-identical to one where the rule ran is how a check quietly stops
     checking.
+
+    ⛔ `subprocess.run` raises `OSError` for exactly one reason — the probe could not
+    be SPAWNED (`git` absent from PATH, or EMFILE/ENOMEM/EAGAIN under load). Nothing
+    was measured, so no verdict may be given and the row is REFUSED. Folding it into
+    `_tracked_unprovable()` is a measured FAIL-OPEN and it shipped: with only the
+    `ls-files` probe raising `OSError(EMFILE)`, a `.gitignore`d `WORKTREE-REPORT.md`
+    answered `(True, '')` and the record exited **0 CLEAN** — the precise inverse of
+    the rule this function exists to enforce, reached through the guard meant to make
+    it safe. "git answered NO" is the `returncode != 0` path below and never raises.
+
+    ⛔ WHAT IT MEASURES: `git ls-files` reads the INDEX, so a staged-but-uncommitted
+    file, an intent-to-add file, and a symlink RESOLVED to a tracked target all answer
+    "tracked" while a reader's clone has none of them — and `-- <rel>` is a PATHSPEC,
+    so a cited name that prefix-matches a tracked path is answered TRACKED too.
+    Pre-existing, unchanged here, filed as #11499.
     """
     try:
         rel = resolved.relative_to(root)
@@ -2012,14 +2027,8 @@ def _is_tracked(resolved: Path, root: Path) -> bool:
             text=True,
             check=False,
         )
-    except OSError:
-        # ⛔ NO `git` ON PATH AT ALL is a different thing from "git is present and
-        # refused this path", and folding it into the refusal turned a clean
-        # abstention into a traceback out of `validate()` — no
-        # `CAPSTONE-LEDGER: INVALID` marker, so a reader keying on the marker got
-        # nothing. Measured with `env PATH=/nonexistent`. The rule cannot be
-        # evaluated, so the record is not blamed (and says so).
-        return _tracked_unprovable()
+    except OSError as exc:
+        return _tracked_unrunnable(exc, rel)
     if proc.returncode == 0:
         return True
     try:
@@ -2030,12 +2039,28 @@ def _is_tracked(resolved: Path, root: Path) -> bool:
             text=True,
             check=False,
         )
-    except OSError:
-        return _tracked_unprovable()
+    except OSError as exc:
+        return _tracked_unrunnable(exc, rel)
     if probe.returncode == 0 and probe.stdout.strip() == "true":
         # Git IS here and it refused this path: the file is untracked. Blame it.
         return False
     return _tracked_unprovable()
+
+
+def _tracked_unrunnable(exc: OSError, rel: Path) -> bool:
+    """The probe could not RUN. Nothing was measured, so the row is REFUSED.
+
+    ⛔ NOT `_tracked_unprovable()`: that one is for a MEASURED "git says this is not
+    a work tree", where the record is not blamed. A spawn failure is the opposite
+    fact — nothing was answered — and abstaining on it is a measured fail-open.
+    """
+    print(
+        "CAPSTONE-LEDGER: REFUSED — the TRACKED check could not be RUN here "
+        f"({exc.__class__.__name__}: {exc}), so {rel} is not shown to be in the tree "
+        "and the row does not count",
+        file=sys.stderr,
+    )
+    return False
 
 
 def _tracked_unprovable() -> bool:
