@@ -26,16 +26,32 @@ artwork is ever replaced, re-measure that box — the crop is derived from it.
 Uses `sips` for cropping and resampling (macOS); everything else is stdlib. Run it once
 per asset change; CI only ever reads the resulting bytes:
 
-    python3 tools/build_site_icons.py --source path/to/mark.png
-    python3 tools/build_site_icons.py --source ... --out /tmp/icons --keep /tmp/icons/crops
+    uv run python tools/build_site_icons.py --source path/to/mark.png
+    uv run python tools/build_site_icons.py --source ... --out /tmp/icons --keep /tmp/icons/crops
 """
 
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — an environment
+# refusal must not be unattributable. Nothing below fails at IMPORT time on an
+# older interpreter today, so the guard is here for the reason the census gives
+# every runnable entry point: a tool that dies on an old interpreter must say
+# which file needs what, not raise a bare SyntaxError or ImportError from a
+# later edit. The status is 1 and that is DELIBERATE — the set 0-4 is CLOSED and
+# fully spent, so there is no spare code, and `EXIT_INVALID`'s fail-closed
+# neighbour is what a refusal can share.
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/build_site_icons.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/build_site_icons.py --source <artwork.png>`"
+    )
+
 import argparse
 import struct
 import subprocess
-import sys
 import tempfile
 import zlib
 from pathlib import Path
