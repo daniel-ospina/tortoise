@@ -489,9 +489,22 @@ _uvicorn_flag_option() {
     # `--reload --workers 4` read as "no workers value" (the reloader swallowed
     # it) and the exported count fell through to `$WEB_CONCURRENCY` — caught by
     # `_AGREEMENT_TABLE`, which is exactly why both arms run one table.
+    #
+    # ⛔ PRIMARY **AND** SECONDARY opts. Five of uvicorn's options are `--x/--no-x`
+    # PAIRS, and click files the negative half in `param.secondary_opts`, not
+    # `param.opts` — so a list carrying only the primary half is short by five,
+    # and each `--no-*` fell through to "consumes the NEXT token":
+    #   uvicorn app:app --no-server-header --app-dir --reload --workers 2
+    # MEASURED (click's parser, pinned 0.52.1): reload=False, workers=2,
+    # app_dir="--reload" — NO reloader, TWO workers, which this walk read as
+    # "reloading" and the gate PERMITTED. Mirror shape
+    # (`--no-access-log --reload --workers 4`) was refused although uvicorn
+    # serves one reloader child. Same list, same pin, as the Python twin.
     case "$1" in
-        --reload|--access-log|--use-colors|--proxy-headers|--server-header\
-        |--date-header|--version|--reset-contextvars|--factory) return 0 ;;
+        --reload|--access-log|--no-access-log|--use-colors|--no-use-colors\
+        |--proxy-headers|--no-proxy-headers|--server-header|--no-server-header\
+        |--date-header|--no-date-header|--version|--reset-contextvars\
+        |--factory) return 0 ;;
     esac
     return 1
 }
@@ -703,7 +716,8 @@ _reload_requested=0
 # re-read as a flag. The flag list lives in `_uvicorn_flag_option` — ONE list
 # shared with the count reader, so a flag can never be a value-taking option in
 # one loop and a flag in the other — and is pinned against
-# `uvicorn.main.main.params` by `test_the_uvicorn_flag_set_is_uvicorns_own`.
+# `uvicorn.main.main.params` (primary AND secondary opts — the `--no-*` halves
+# live in `secondary_opts`) by `test_the_uvicorn_flag_set_is_uvicorns_own`.
 _reload_skip=0
 for _arg in "$@"; do
     if [ "$_reload_skip" = "1" ]; then _reload_skip=0; continue; fi

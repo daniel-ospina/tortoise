@@ -244,17 +244,41 @@ RELOAD_FLAG = "--reload"
 #: acknowledgement deliberately cannot lift the refusal — N divergent copies.
 #: The shell banner agreed with the wrong verdict, so nothing reddened.
 #:
-#: Transcribed from `uvicorn.main.main.params` (0.52.1) and PINNED against that
-#: parser by
+#: ⛔ PRIMARY **AND** SECONDARY spellings. Five of uvicorn's options are
+#: ``--x/--no-x`` PAIRS (``main.py``: ``--access-log/--no-access-log``,
+#: ``--use-colors/--no-use-colors``, ``--proxy-headers/--no-proxy-headers``,
+#: ``--server-header/--no-server-header``, ``--date-header/--no-date-header``),
+#: and click files the negative half in ``param.secondary_opts``, NOT
+#: ``param.opts`` (``click/core.py`` ``_parse_decls``). A table holding only the
+#: primary half is short by five, so each ``--no-*`` fell through to "consumes
+#: the NEXT token" and the arity walk shifted by one:
+#:
+#:   uvicorn app:app --no-server-header --app-dir --reload --workers 2
+#:
+#: MEASURED (click's own parser, pinned 0.52.1): ``reload=False``,
+#: ``workers=2``, ``app_dir="--reload"`` — NO reloader, TWO workers. This
+#: reader called it "reloading" and ``is_multi_worker`` answered False, so the
+#: gate PERMITTED two divergent embedded copies. The mirror shape
+#: (``--no-access-log --reload --workers 4``) was refused although uvicorn
+#: serves one reloader child.
+#:
+#: Transcribed from `uvicorn.main.main.params` (0.52.1) — ``opts`` and
+#: ``secondary_opts`` of every ``is_flag``/``flag_value`` param — and PINNED
+#: against that parser (both lists) by
 #: `tests/test_worker_topology.py::test_the_uvicorn_flag_set_is_uvicorns_own`,
 #: so a uvicorn bump reds instead of silently re-opening the bypass.
 UVICORN_FLAG_OPTIONS: frozenset[str] = frozenset({
     "--reload",
     "--access-log",
+    "--no-access-log",
     "--use-colors",
+    "--no-use-colors",
     "--proxy-headers",
+    "--no-proxy-headers",
     "--server-header",
+    "--no-server-header",
     "--date-header",
+    "--no-date-header",
     "--version",
     "--reset-contextvars",
     "--factory",

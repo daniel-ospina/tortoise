@@ -933,6 +933,12 @@ _AGREEMENT_TABLE: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
      {"WEB_CONCURRENCY": "4"}),
     # …and the control: the value given BEFORE the flag is still a real flag.
     (("uvicorn", "app:app", "--host", "0.0.0.0", "--workers=2"), {}),
+    # …and the SPACE form of the same shape, which the `--app-dir --workers=1`
+    # row above does not reach: `--app-dir --workers 2` makes `--workers` the
+    # app_dir VALUE and leaves `2` a positional, so uvicorn runs ONE worker while
+    # a membership scan reads 2 — and the pre-exec gate then refuses a
+    # one-worker boot (over-block, unescapable on the embedded arm).
+    (("uvicorn", "app:app", "--app-dir", "--workers", "2"), {}),
 )
 
 
@@ -1530,12 +1536,25 @@ def test_the_uvicorn_flag_set_is_uvicorns_own():
     `uvicorn.main.main.params` — the parser that will actually read the argv. A
     uvicorn bump that adds or removes a flag reds HERE instead of silently
     turning `--reload-include --reload` back into a permitted N-worker boot.
+
+    ⛔ BOTH halves of every option. click files the negative half of an
+    `--x/--no-x` pair in `param.secondary_opts`, NOT `param.opts`, so a pin that
+    read `opts` alone could not see a missing `--no-*` at all: it was green on a
+    table that was short by five, while `--no-server-header --app-dir --reload
+    --workers 2` read as "reloading" and the gate PERMITTED two workers on an
+    embedded database (measured: click parses `reload=False`, `workers=2`,
+    `app_dir="--reload"`).
     """
     from uvicorn.main import main as uvicorn_main
 
     flags = set()
     for param in uvicorn_main.params:
-        opts = [o for o in getattr(param, "opts", ()) if o.startswith("--")]
+        opts = [
+            o
+            for o in (*getattr(param, "opts", ()),
+                      *getattr(param, "secondary_opts", ()))
+            if o.startswith("--")
+        ]
         if not opts:
             continue
         if getattr(param, "is_flag", False) or getattr(param, "flag_value", None):
@@ -1569,6 +1588,50 @@ def test_a_reload_lookalike_value_is_not_a_reloader():
         assert wt.reload_is_requested(fake) is False, fake
 
 
+def test_a_no_star_flag_does_not_swallow_the_next_token():
+    """⛔ MEASURED fail-open: uvicorn's five `--x/--no-x` pairs are FLAGS, and a
+    table holding only the primary half shifted the arity walk by one.
+
+    `uvicorn app:app --no-server-header --app-dir --reload --workers 2`, read by
+    click (pinned 0.52.1), is `reload=False`, `workers=2`,
+    `app_dir="--reload"` — NO reloader and TWO workers. A table without
+    `--no-server-header` made that token consume `--app-dir`, so `--reload` was
+    read as the flag: `reloading=True` → `is_multi_worker` False → the gate
+    PERMITTED two DIVERGENT embedded copies, the exact bypass this branch closed
+    for `--reload-include --reload`.
+
+    The mirror shape is the over-block the same bug produced: with
+    `--no-access-log --reload --workers 4` the negative flag ate `--reload`, so
+    the count read 4 with no reload exemption and a ONE-child reloader boot was
+    refused with no escape hatch on the embedded arm.
+    """
+    # Shape A — fail-open: reload must NOT be read, and the gate must REFUSE.
+    swallow = ["uvicorn", "app:app", "--no-server-header", "--app-dir",
+               "--reload", "--workers", "2"]
+    assert wt.reload_is_requested(swallow) is False
+    topology = wt.observe({}, supervised=False, argv=swallow)
+    assert topology.reloading is False
+    assert topology.workers == 2
+    assert topology.is_multi_worker is True
+    assert wt.refusal_reason(topology) is not None
+
+    # Shape B — over-block: the same flag in VALUE position, then a real reload.
+    permit = ["uvicorn", "app:app", "--no-access-log", "--reload", "--workers", "4"]
+    assert wt.reload_is_requested(permit) is True
+    topology = wt.observe({}, supervised=False, argv=permit)
+    assert topology.reloading is True
+    assert topology.is_multi_worker is False
+    assert wt.refusal_reason(topology) is None
+
+    # Every one of the five pairs, both halves, must consume nothing: a flag in
+    # flag position leaves the following `--reload` a TOKEN, so it is read.
+    for name in ("access-log", "use-colors", "proxy-headers",
+                 "server-header", "date-header"):
+        for spelling in (f"--{name}", f"--no-{name}"):
+            argv = ["uvicorn", "a:a", spelling, "--reload", "--workers", "4"]
+            assert wt.reload_is_requested(argv) is True, spelling
+
+
 def test_the_shipped_banner_does_not_claim_a_reloader_for_a_lookalike_value():
     """The shipped shell half must use ARITY too, or the banner lies about it."""
     proc = _run_gate_block(
@@ -1578,6 +1641,32 @@ def test_the_shipped_banner_does_not_claim_a_reloader_for_a_lookalike_value():
     # …and the pre-exec gate refuses the boot, so the lie cannot stand alone.
     assert proc.returncode == 1, (proc.stdout, proc.stderr)
     assert "admission gate refused this boot" in proc.stderr
+
+
+def test_the_shipped_half_reads_a_no_star_flag_as_a_no_value_FLAG():
+    """⛔ The SHIPPED shell list must carry the `--no-*` halves as well.
+
+    Measured on the pre-fix block: `--no-server-header` was not in
+    `_uvicorn_flag_option`, so the reload scan consumed `--app-dir` and then read
+    `--reload` as the flag — the block printed
+    `workers = 1 (reload; --workers is ignored while reloading)` and exited 0
+    for a boot uvicorn serves as TWO workers with NO reloader (click: `reload`
+    False, `workers` 2, `app_dir` "--reload"). The mirror shape
+    (`--no-access-log --reload --workers 4`) was refused although uvicorn serves
+    one reloader child.
+    """
+    swallow = _run_gate_block(
+        ("uvicorn", "app:app", "--no-server-header", "--app-dir",
+         "--reload", "--workers", "2"), {})
+    assert "reload" not in swallow.stdout.lower(), swallow.stdout
+    assert "workers = 2" in swallow.stdout, swallow.stdout
+    assert swallow.returncode == 1, (swallow.stdout, swallow.stderr)
+    assert "admission gate refused this boot" in swallow.stderr
+
+    permit = _run_gate_block(
+        ("uvicorn", "app:app", "--no-access-log", "--reload", "--workers", "4"), {})
+    assert permit.returncode == 0, (permit.stdout, permit.stderr)
+    assert "workers = 1 (reload" in permit.stdout, permit.stdout
 
 
 def test_the_shipped_flag_case_is_uvicorns_own():
