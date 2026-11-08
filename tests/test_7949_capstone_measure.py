@@ -32,6 +32,7 @@ from __future__ import annotations
 import ast
 import importlib.util as _ilu
 import io
+import itertools
 import json
 import os
 import re
@@ -10726,7 +10727,7 @@ def _call_sites(src: str) -> list[tuple[int, str]]:
     names = {"create_edge", "create_about_edge", "create_operator"}
     toks = list(tokenize.generate_tokens(io.StringIO(src).readline))
     out: list[tuple[int, str]] = []
-    for i, (a_line, b_line) in enumerate(zip(toks, toks[1:])):
+    for i, (a_line, b_line) in enumerate(itertools.pairwise(toks)):
         if not (a_line.type == tokenize.NAME and a_line.string in names
                 and b_line.type == tokenize.OP and b_line.string == "("):
             continue
