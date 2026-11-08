@@ -4601,10 +4601,11 @@ _NEGATION_GOVERNS = re.compile(
 # ⚠️ WHAT IS THE STANDARD'S AND WHAT IS OURS, measured on the source rather than
 # assumed (#11437 review, P3): of this alternation's nine cues, **exactly one**
 # (`not necessarily`) is in that termset. `not sure`, `not always`, `not certain`,
-# `not clear`, `definitely`, `conclusively` and `guaranteed` are this file's own
-# EXTENSION of the class — NegEx's own terms are `not certain if` / `not
-# certain whether`, not `not certain`. So this is a NegEx-STYLE list, not a copy
-# of it; call it "the STANDARD's answer, not an invention here" and the claim is
+# `not certainly`, `not clear`, `definitely`, `conclusively` and `guaranteed` —
+# the other eight — are this file's own EXTENSION of the class; NegEx's own terms
+# are `not certain if` / `not certain whether`, not `not certain`. So this is a
+# NegEx-STYLE list, not a copy of it; call it "the STANDARD's answer, not an
+# invention here" and the claim is
 # the opposite of what the source measures. (Source read for #11437:
 # `negspacy==1.1.0`, `negspacy/termsets.py`; the pypi page documents the class
 # and the default, not the membership.)
@@ -5218,10 +5219,19 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
 
     # …and the three alternatives this test claims an executor for are asserted to
     # HAVE one: with that alternative removed from `_AFFIRMED`, at least one
-    # `must_red` row must go back to GREEN. The other five negated-reverser
-    # branches are deliberately NOT asserted here — they are inert today and
-    # retained as belt (disclosed beside `_AFFIRMED`), so demanding an executor
-    # for them would demand a row nobody has measured.
+    # `must_red` row must go back to GREEN. `_AFFIRMED` carries SEVEN top-level
+    # alternatives and this loop asserts three, so FOUR are unasserted — and they
+    # are not one class: `inside the walk`, `except that`, the negated-reverser
+    # class and the pseudo-negation class. Three of those four are load-bearing
+    # today (branch ablation across the `must_red` set: the concessive row at
+    # :4947 reds through `except that`; the reverser class carries
+    # `does not fail to report`, measured beside that row; the three hedges red
+    # through the pseudo-negation class), and `inside the walk` is the one that is
+    # inert. ⚠️ An earlier wording here said "the other five negated-reverser
+    # branches are deliberately NOT asserted … they are inert today": the count
+    # (five, for four) and the class label were both wrong, and telling a reader
+    # the hedge arm is unmeasured belt invites exactly the deletion this PR exists
+    # to prevent (#11437 review, P3).
     _this_module = sys.modules[__name__]
     _pinned_affirmed = _AFFIRMED
     for _arm_name, _arm in (

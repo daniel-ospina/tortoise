@@ -39,9 +39,13 @@ import sys
 # older interpreter today, so the guard is here for the reason the census gives
 # every runnable entry point: a tool that dies on an old interpreter must say
 # which file needs what, not raise a bare SyntaxError or ImportError from a
-# later edit. The status is 1 and that is DELIBERATE — the set 0-4 is CLOSED and
-# fully spent, so there is no spare code, and `EXIT_INVALID`'s fail-closed
-# neighbour is what a refusal can share.
+# later edit. The status is 1 because `SystemExit(<str>)` is the shape
+# `tests/test_entry_point_python_guard.py` accepts and always exits 1, and because
+# every refusal in this file already exits 1 the same way (`raise SystemExit(<msg>)`)
+# — there is no status vocabulary here to add a code to. (An earlier wording
+# borrowed `tools/capstone_ledger.py`'s "the set 0-4 is CLOSED and fully spent …
+# `EXIT_INVALID`'s fail-closed neighbour" justification, which is true there and
+# false here: this file defines no `EXIT_*` constant at all. #11437 review, P3.)
 if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     raise SystemExit(
         f"tools/build_site_icons.py requires Python >= 3.12 (got "
