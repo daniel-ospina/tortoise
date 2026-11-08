@@ -545,8 +545,9 @@ def test_a_failing_gap_fill_keeps_the_s2_output(monkeypatch):
 
 def test_an_empty_answer_is_a_valid_answer(monkeypatch):
     """"The spans state no claim" is the CORRECT answer for a label/date/aside
-    span, and the dominant one on the recorded population. It must be recorded
-    as fired-with-zero-additions, never as an error and never as a retry."""
+    span. How much of the population is that class is NOT measured (evidence
+    record §2/§4). It must be recorded as fired-with-zero-additions, never as
+    an error and never as a retry."""
     model = _Model(gap_answer=json.dumps(
         {"entities": [], "events": [], "operators": [], "points": []}))
     out = _run(monkeypatch, model)
