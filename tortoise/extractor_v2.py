@@ -111,9 +111,9 @@ candidates the folded stages cannot, so an unqualified "no shipped stage"
 denies the very capability its own next clause says is lost. The removal
 pre-condition is a stage that can ADD a candidate a coverage check found
 missing; since #11002 that stage exists (`tests/test_selection_step.py`), and
-what still stands between the pre-condition and the deletion is the §4.4 F3
-measurement — S4 added items in a case `coverage_suspect` cannot flag — which
-is an eval-lane run, not a code change.
+what stood between the pre-condition and the deletion was the §4.4 F3
+measurement — MEASURED on 2026-11-08, and it FIRES (4/7 primary, 3/7 re-run,
+5/7 union of sessions): `run_s4` STAYS, and the removal moved to #11534.
 
 Owner confirmations honored (issue #1350): flash runs 4 prompts (S1-S4), S5
 is execution; temperature 0.0 (via tests.model_adapters MODELS); S3 reads the

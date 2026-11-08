@@ -721,7 +721,10 @@ unfirable (block at the top of §10).
 > and the union), and what still stands between it and the deletion is §4.4's **F3** measurement —
 > `_s4_merge_stats`'s `added_by_s4 > 0` **while** the FIRST (pre-retry) arm's `coverage_suspect` is
 > False **and no retry fired** (one arm, one flag, one base — see §4.4), i.e. an episode the retry
-> cannot reach — which is an eval-lane run, not a code change.
+> cannot reach. **It has been MEASURED (2026-11-08) and it FIRES** — 4/7 sessions in
+> `docs/evidence/1789-s4-reeemit-tax/ab-20261107T023958Z.json`, 3/7 in the re-run, 5/7 across the
+> union — so `run_s4` **stays**, and the removal (and the partial-gap stage it needs) moved to
+> **#11534**. Not satisfiable by reasoning about the code: the artifacts are the instrument.
 > (Pinned: `tests/test_extractor_v4_s4_stage_claims.py`, `tests/test_selection_step.py`.)
 >
 > **On the step *names*:** the code's own stages are **S1–S5** (`[S1] STORY SUMMARY` … `[S5] EMBED`, module
@@ -1038,8 +1041,13 @@ New entities + connections + **metadata**. The metadata includes **lifecycle eve
 > **OVERRIDES:** §4.4's earlier *"the losing arm's extraction is discarded **with** its narrative"* — **retired by the owner's ruling of 2026-11-08 on `#11002`**: *"the retry must union both attempts with the same identity-key collision rules the existing merge uses — that is what makes it a successor rather than a replacement."* E4's merges-not-replaces property (`#1536`) must survive into the successor, which is why `run_s4`'s removal is still gated on §4.4's F3 measurement.
 
 **The removal's falsifier — F3, defined here because two places cite it by that name.**
-`run_s4`'s removal (the `#8500` migration deliverable, executed under `#11002`) is gated on **one**
-measurement, and it is an eval-lane run, not a code change. On the frozen corpus, count the sessions
+`run_s4`'s removal (the `#8500` migration deliverable, executed under `#11002`) was gated on **one**
+measurement — an eval-lane run, not a code change. It was run on 2026-11-08 over the two committed
+`docs/evidence/1789-s4-reeemit-tax/` artifacts (7 real sessions each) and it **FIRES**: 4/7 primary,
+3/7 re-run, 5/7 across the union. So `run_s4` **stays** and the removal moved to **#11534**; the
+definition below is kept as the instrument that decided it and the one a successor must re-run.
+
+On the frozen corpus, count the sessions
 where `_s4_merge_stats`'s `added_by_s4 > 0` **while the FIRST (pre-retry) arm's `coverage_suspect` is
 False** — **restricted to sessions where the retry did not fire**
 (`stats["renarrate"]["fired"]` is `False`). ⛔ **Whose flag, spelled out, because this PR makes it
