@@ -1711,12 +1711,15 @@ def test_the_refusal_status_resolver_matches_cpython(argument, expected):
     ],
 )
 def test_the_stderr_print_detector_requires_the_file_keyword(source, expected):
-    """The print-shape detector on its own, because no pinned guard reaches it.
+    """The print-shape detector on its own, executed in both directions.
 
-    Both tools this pin covers refuse with `raise SystemExit(f"…")`, so the
-    print+stderr branch is never taken for either — mutating `_is_stderr_print`
-    to `return True` left the file GREEN. The arm was not wrong, it was
-    UNEXERCISED, which makes a future mistake in it invisible; this executes it.
+    `tools/build_site_icons.py` DOES take this branch — it refuses with
+    `print(…, file=sys.stderr)` then `raise SystemExit(4)` — so the detector is
+    reached from a pinned tool. What no pinned tool reaches is its FALSE side: the
+    row that says a print WITHOUT `file=sys.stderr` is wrong, which is the arm a
+    future edit can silently invert. Mutating `_is_stderr_print` to `return True`
+    was GREEN in both cases before these rows existed, which is why the table tests
+    both directions rather than only the shape a live guard happens to have.
     """
     call = ast.parse(source).body[0].value
     assert isinstance(call, ast.Call)
@@ -1761,9 +1764,13 @@ def _is_stderr_print(call: ast.Call) -> bool:
     must red; the same shape for a tool with NO row is legal, and demanding stderr
     there would red a census-LEGAL guard — the false-red class this pin must not
     add. Both tools carry a row TODAY (main's #11507 added
-    `tools/build_site_icons.py: 4`), which is why the gate below is a real branch
-    (`_channel_is_wrong`) rather than an inline conditional whose false arm could
-    be inverted with the suite green: it exists for the tool that has no row.
+    `tools/build_site_icons.py: 4`), and the caller now REFUSES a pinned tool whose
+    row is missing (`assert expected_status is not None`), so from any pinned tool
+    the `None` arm below is UNREACHABLE by construction: it is kept executable only
+    by `test_the_stderr_requirement_is_gated_on_the_census_pinning`, whose job is to
+    pin the DECISION rather than the state of today's census. Production is
+    row-required; the arm exists so the rule "a row is a contract, no row is not"
+    is a decision with a test, not an inline conditional nobody can mutate safely.
     """
     return any(
         kw.arg == "file"
@@ -1999,9 +2006,17 @@ def test_the_tool_carries_the_5128_interpreter_guard_first(tool, capsys, monkeyp
     DECLARED BOUND — what this pin does NOT mirror, and why that is not a hole:
     it mirrors the census's arms over the TWO TOOLS' OWN FILES (preamble order,
     floor, guard shape, inertness at the floor, both refusal shapes, the RENDERED
-    message, the derived process status, the census row that status must match, the
-    invocation the refusal names RESOLVING, and the advertised-invocation sweep
-    driven by the census's own `_BARE_INVOCATION` + exemption sets). It does not mirror the
+    message, the derived process status, the census row that status must match, and
+    the advertised-invocation sweep driven by the census's own `_BARE_INVOCATION` +
+    exemption sets), PLUS one arm the census does carry but this pin can only carry
+    for one tool: the invocation the `tools/build_site_icons.py` refusal names
+    RESOLVING (its `--source` is `required=True`, so only the `--help` form it names
+    resolves). ⛔ NOTHING here grades what `tools/capstone_ledger.py`'s refusal
+    NAMES — the census has no such arm for it either, so that dimension is ungraded
+    for that tool on a tool-only diff; measured: mutating its message to name
+    `--help` (exit 5, no verdict) or `--ledger NONEXISTENT` leaves this file
+    completely GREEN — no arm notices. (Deliberately no count: a number here went
+    stale three rounds running as arms were added.) It does not mirror the
     census's `docs/` + `graph-scripts/` + sibling-`tools/` walk, nor its corpus
     vacuity, `RUNTIME_39`/`UNGUARDABLE` accuracy, detector self-test or `-m`
     resolution arms: reaching any of those needs an edit to `docs/`, to another
@@ -2175,12 +2190,17 @@ def test_the_tool_carries_the_5128_interpreter_guard_first(tool, capsys, monkeyp
         if isinstance(n, ast.Constant) and isinstance(n.value, str)
     )
     # The message must name the floor, the file, and an invocation at all. ⛔ This
-    # clause is a PREFIX test only — `uv run python tools/<name>` is satisfied by
-    # BOTH the form that resolves and the bare path that does not — so the claim
-    # that the named invocation WORKS is proved separately, by executing it, in
+    # clause is a PREFIX test only — `uv run python tools/<name>` is a prefix of
+    # BOTH forms — so it cannot distinguish the form that resolves from one that
+    # does not. The polarity differs per tool and is stated rather than generalised:
+    # `tools/build_site_icons.py`'s bare path is argparse's usage error (exit 2) and
+    # its `--help` form resolves (exit 0); `tools/capstone_ledger.py`'s NAMED form
+    # IS the bare path, which resolves to a computed verdict (exit 2 =
+    # `EXIT_UNCOVERED`), while its `--help` exits 5 with no verdict. The WORKING
+    # claim is proved by executing it, in
     # `test_the_site_icon_refusal_names_the_form_that_actually_RESOLVES`. Measured:
-    # reverting that tool's message to the bare path left this file GREEN while the
-    # census reded, which is why the proof lives in its own arm and not here.
+    # reverting the site-icon message to the bare path left this file GREEN while
+    # the census reded, which is why the proof lives in its own arm and not here.
     #
     # The subject is asserted as ONE clause, not as a bare `"<tool name>" in
     # rendered` substring: the invocation clause below already contains that
@@ -2191,7 +2211,10 @@ def test_the_tool_carries_the_5128_interpreter_guard_first(tool, capsys, monkeyp
         f"{rendered!r} (message node: {ast.dump(message)})"
     )
     assert f"uv run python tools/{tool.name}" in rendered, (
-        f"the refusal must name an invocation that WORKS; renders as {rendered!r} "
+        f"the refusal must name an invocation at all (PREFIX only — whether it "
+        f"RESOLVES is proved in "
+        f"test_the_site_icon_refusal_names_the_form_that_actually_RESOLVES, and "
+        f"only for tools/build_site_icons.py); renders as {rendered!r} "
         f"(message node: {ast.dump(message)})"
     )
 
