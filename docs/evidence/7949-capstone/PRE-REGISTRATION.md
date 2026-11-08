@@ -1701,14 +1701,18 @@ re-cut from the resolved document (§8), and no committed verdict is re-scored.
   §11 block moved **+76** (`:11098`+76 = `:11174`, the `return items`
   that ends the extent at `:11196`, `:12982`+76 = `:13058`, `:13131`+76 = `:13207`, `:12995`+76 =
   `:13071`, `:13142`+76 = `:13218`) — every cite in §11 itself is +76. ⛔ The block is NOT the
-  bundle: the re-points this entry made outside §11 sit in two OTHER bands — the `#2684` row in
-  `docs/00_index.md` carries `extractor_v2.py:5286`/`:5287` → `:5354`/`:5355` (**+68**), and the
-  sdk.py sites in the inventory below move **+102**. So the file carries THREE bands, a cite's
-  delta depends on which insert it sits under — and ⛔ ONE cite sits under TWO of them, so its
-  delta is COMPOSED rather than banded: the `vet_enabled = (` line the record reads live as
-  `:12779` is `:12929` at this head (**+150** = `#11368`'s +74 and then this PR's +76). A row's
-  delta must therefore be read from the document — AND the band — that row lives in. Cites ABOVE
-  the first insert did not move at all (`:88-89`,
+  bundle: the re-points this entry made outside §11 carry delta values of their own — the `#2684`
+  row in `docs/00_index.md` carries `extractor_v2.py:5286`/`:5287` → `:5354`/`:5355` (**+68**), and
+  the sdk.py sites in the inventory below move **+102**. ⛔ Nor is "three" enough: FOUR inserts sit
+  above this file's cites — `#11368`'s **+74** (the declared-span refactor; above `:12779`, below
+  `:11098`, which is why §11 never sees it), `#11449`'s **+68** (its hunks at `:5187` and `:5217`),
+  that same PR's remaining hunks above `:9920` taking it to **+76**, and the sdk **+102**. And the
+  `vet_enabled = (` line the record reads live as `:12779` sits under TWO of them: it is `:12929`
+  at this head, **+150** COMPOSED of +74 then +76. ⚠️ None of those inserts is this PR's — this
+  change moves no code, it re-derives the cites they invalidated, which is why every delta here is
+  read off the tree and none is carried forward. A row's delta must therefore be read from the
+  document — AND the band — that row lives in. Cites
+  ABOVE the first insert did not move at all (`:88-89`,
   `:296-312`, `:1154`, `:1720` are still correct), which is why the bundled cites were
   re-derived one by one rather than offset in a batch. ⛔ **`RECONCILE-A1-A2-A5.md` sits behind
   NO test at all** — the grading tests sweep `_BUNDLE_DOCS` (README, E1-E5-PROOFS, both probes,
