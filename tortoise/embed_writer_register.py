@@ -41,16 +41,19 @@ rule exists to close.
   `tortoise.session_indexer::main` is the one entry with no census row (it is the instrument's ONE
   `ungated` write path, carried in the census's row-1 prose), so its citation is re-derived by the
   symbol test alone. A reader who wants "re-derivable by `CENSUS_EVIDENCE`" to cover 100% of this
-  file should read it as "by the tests named here and in the `stores` section below" — `reason` by
-  `tests/test_embed_writer_register.py::test_every_declaration_cites_a_seam_and_an_owning_issue`
-  (and `owner_issue` by `load()`'s `_OWNER_ISSUE` format check — an ATTRIBUTION, not a
-  re-derivation: the only test assertion on it is `entry.owner_issue.startswith("#")`), the class
-  AGREEMENT half by
-  `::test_the_instrument_and_the_product_declare_the_same_writers`, the label half of `stores` by
-  `::test_every_declared_label_re_derives_at_this_head`, its `NO_LIVE_VECTOR` half by
-  `::test_a_no_live_vector_declaration_executes_no_store_clause`, and its `LABELS_AT_RUNTIME` half
-  by `::test_a_runtime_label_declaration_is_named_not_guessed` — rather than as a fixed number of
-  tests covering it in equal halves.
+  file should read it as "by the several tests that re-derive it — one per HALF of a declaration,
+  not one per field" rather than as a fixed number, because the count moves as fields are added.
+  The authoritative list is the test map in `tests/test_embed_writer_register.py`, which is itself
+  reviewed; the halves are the cited seams and `reason`
+  (`::test_every_declaration_cites_a_seam_and_an_owning_issue`), the class AGREEMENT
+  (`::test_the_instrument_and_the_product_declare_the_same_writers`), and the three `stores`
+  shapes — a label tuple (`::test_every_declared_label_re_derives_at_this_head`), `NO_LIVE_VECTOR`
+  (`::test_a_no_live_vector_declaration_executes_no_store_clause`) and `LABELS_AT_RUNTIME`
+  (`::test_a_runtime_label_declaration_is_named_not_guessed` for the dump importer,
+  `::test_a_writer_that_EXECUTES_a_store_is_never_declared_no_live_vector` for the
+  caller's-statement door — the two live entries, one pin each). `owner_issue` is deliberately NOT
+  in that list: it is an ATTRIBUTION, asserted as a FORMAT (`startswith("#")`) in the symbol test
+  and as fixed VALUES elsewhere, never derived from evidence.
 
 **A SECOND question, answered here since `#11492`: WHERE the vector lands.** `#5090` DoD row 2
 asks *"is every stored vector on a label the query leg can serve?"* — a fact about a writer that

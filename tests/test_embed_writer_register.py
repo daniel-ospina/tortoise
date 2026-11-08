@@ -1152,6 +1152,9 @@ def _declared_symbol_bodies(key: str) -> list[str]:
     boundary, stated rather than implied: DOCSTRINGS and TRAILING comments are NOT stripped, so a
     clause quoted in either still satisfies a needle. Closing that needs AST-range blanking of
     `STRING`/trailing-`COMMENT` tokens, not a line filter; it is a residual, not a claim of coverage.
+    (⚠️ Scope that precisely: the DOCSTRING `STRING` and the trailing `COMMENT` token. Blanking every
+    `STRING` would erase the Cypher held in string CONSTANTS — `_TURN_WRITE_CYPHER` — which is the
+    very text a positive needle must still find.)
     """
     module, symbol = key.split("::", 1)
     if "/" in module or module.endswith(".py"):
