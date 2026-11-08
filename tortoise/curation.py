@@ -510,15 +510,23 @@ class Plan:
         out with ``pack: None`` and the census was byte-identical to a healthy
         run's (round-29 review finding 3).
 
-        ``rows_without_pack`` counts **CARRIED** rows only, and that population is
-        the whole point: it is the set that will actually be WRITTEN, so it is the
-        set a pack loss can damage. Counting every decision made the field a
-        function of the population that is deliberately left behind instead —
-        measured against the real catalog, a HEALTHY plan over the documented
-        carry set reported 125 unfiled of 127 (only the strategy kinds resolve to
-        ``product-strategy``), so "the catalog is gone" and "the catalog is fine"
-        differed by 1.6% and the field reported nothing (round-30 review finding
-        1).
+        ``rows_without_pack`` counts **CARRIED** rows only, because that is the
+        population a pack loss can damage — the set that will actually be WRITTEN.
+        It is a COVERAGE fact, and it is **not** the catalog-health signal: even with
+        a perfectly healthy catalog only the strategy kinds resolve (measured:
+        ``pack_for`` returns None for ``decision``, ``option``, ``finding`` and
+        ``evidence``), so 125 of the documented 127-row carry set is legitimately
+        unfiled and waiting on pack kind coverage, not on the catalog.
+
+        ⛔ The HEALTH signal is ``pack_catalog_note``, which is non-null exactly when
+        the catalog could not be read. Do not read catalog loss out of
+        ``rows_without_pack``: the two states differ there only by the handful of
+        rows whose kinds a healthy catalog DOES file, which is a fact about kind
+        coverage. (Round-30 review finding 1 fixed the DENOMINATOR — counting every
+        decision made the field a function of the population deliberately left
+        behind; round-33 finding 1 corrected this docstring's claim that the field
+        reports catalog loss at all, which would have sent an operator to compare two
+        numbers that barely move.)
         """
         by: dict[str, dict[str, int]] = {}
         for d in self.decisions:
@@ -795,6 +803,24 @@ def _namespace_shaped(value: Any) -> bool:
     return any(low.startswith(p) and len(low) > len(p) for p in ("org_", "team_", "g_"))
 
 
+def _is_default_spelling(ref: Any) -> bool:
+    """True when ``ref`` is the workspace-default MARKER in any accepted spelling.
+
+    Mirrors ``mcp_auth._is_default_graph_ref`` (stripped, case-insensitive) because
+    ``mcp_auth.plan_graph_target`` **short-circuits** such a ref BEFORE any row or
+    name lookup — ``"Default"``, ``"DEFAULT"`` and ``" default "`` all mean "the
+    graph the untouched path already opens".
+
+    ⛔ The guard must not resolve this spelling as a row NAME instead. It did, and
+    the two paths then disagreed for ONE graph: `canonical_graph_id("Default")`
+    matched the row named ``default`` (``deadbeef…``) while
+    ``tortoise_ingest(graph="Default")`` landed on the workspace default
+    (``t0000…``, the capped source) — so `assert_distinct_graphs` PASSED an in-place
+    run. Round-33 review finding 2.
+    """
+    return isinstance(ref, str) and ref.strip().casefold() == _DEFAULT_SENTINEL
+
+
 def _matched_row(ref: str, graph_rows: Sequence[Mapping[str, Any]]) -> Mapping[str, Any] | None:
     """The row ``ref`` RESOLVES through — the same one `canonical_graph_id` uses.
 
@@ -817,6 +843,11 @@ def _matched_row(ref: str, graph_rows: Sequence[Mapping[str, Any]]) -> Mapping[s
     wanted = (ref or "").strip()
     if not wanted:
         return None
+    # A default spelling is the workspace-default MARKER, never a name: the write
+    # path short-circuits it before any lookup (`mcp_auth.plan_graph_target`).
+    as_default = _is_default_spelling(wanted)
+    if as_default:
+        wanted = _DEFAULT_SENTINEL
     for row in graph_rows:
         for fname in ("graph_id", "stable_id", "namespace"):
             val = row.get(fname)
@@ -826,6 +857,10 @@ def _matched_row(ref: str, graph_rows: Sequence[Mapping[str, Any]]) -> Mapping[s
             if not val or str(val).strip() != wanted:
                 continue
             return row
+    if as_default:
+        # The sentinel is an identity MARKER, not a name: matching it against `name`
+        # is the round-33 fail-open (a custom graph NAMED "default").
+        return None
     for row in graph_rows:
         if (row.get("name") or "").casefold() == wanted.casefold():
             return row
@@ -854,6 +889,12 @@ def canonical_graph_id(ref: str, graph_rows: Sequence[Mapping[str, Any]] | None)
         # `resolve_graph_target` read it as the NAME of the `g_deadbeef…` row, so the
         # guard's two canonicals differed for ONE graph and the run wrote in place.
         wanted = ref.casefold()
+        as_default = _is_default_spelling(ref)
+        if as_default:
+            # Same short-circuit as the write path: this spelling is the workspace
+            # default MARKER, so it is resolved through the row that CARRIES the
+            # sentinel (below) and is never matched as a row NAME.
+            ref = _DEFAULT_SENTINEL
         hits: list[str] = []
         for row in graph_rows:
             for field in ("graph_id", "stable_id", "namespace"):
@@ -871,8 +912,11 @@ def canonical_graph_id(ref: str, graph_rows: Sequence[Mapping[str, Any]] | None)
             return None
         # Names are matched SEPARATELY so an ambiguous name is a refusal, not a
         # first-match: two graphs with one name must never resolve to whichever
-        # row happened to come first.
-        by_name = [r for r in graph_rows if (r.get("name") or "").casefold() == wanted]
+        # row happened to come first. A default spelling is never a name (round-33
+        # review finding 2) — the write path treats it as the workspace default.
+        by_name = [] if as_default else [
+            r for r in graph_rows if (r.get("name") or "").casefold() == wanted
+        ]
         if len(by_name) == 1:
             return _canonical_from_row(by_name[0])
         if len(by_name) > 1:

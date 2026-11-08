@@ -1085,8 +1085,11 @@ def test_a_total_pack_catalog_failure_is_visible_in_the_census(monkeypatch):
     assert healthy.pack_catalog_note is None
     assert healthy_census["carried_rows"] == 1
     assert healthy_census["rows_without_pack"] == 0, (
-        "a healthy catalog files every CARRIED row; non-carried rows must not be counted, "
-        f"or the field tracks the population left behind: {healthy_census}")
+        "in THIS fixture the carried row's kind (jobToBeDone) resolves, so coverage is "
+        "complete — that is a fixture property, NOT a general claim: over the real "
+        "catalog only 2 of 127 carried rows resolve. The catalog-health signal is "
+        "pack_catalog_note, which the assertions below pin directly. "
+        f"{healthy_census}")
 
     # ── now make the catalog unreadable, and require the reported state to CHANGE ──
     import tortoise.pack_registry as reg
@@ -1984,22 +1987,43 @@ def test_an_undecodable_ledger_is_a_refusal_not_a_traceback(tmp_path):
 
 
 def test_a_case_varied_ref_cannot_be_one_rows_id_and_anothers_name():
-    """Round-31 BLOCKING: identity fields were casefolded, while `mcp_auth` matches ids
-    with `==` and casefolds ONLY the name — so `--graph Default` casefolded onto the
-    tenant row's `graph_id: default` in the guard, while the write path read it as the
-    NAME of the `g_deadbeef…` row. The guard's two canonicals differed for ONE graph and
-    the run wrote in place."""
+    """Round-31 BLOCKING, plus the round-33 correction that round-31 got wrong.
+
+    Round-31 made identity fields exact because `mcp_auth` matches ids with `==` and
+    casefolds ONLY the name. Correct — but it modelled that matching and NOT
+    `mcp_auth`'s `_is_default_graph_ref` SHORT-CIRCUIT: `plan_graph_target` answers any
+    case/whitespace variant of `default` with the workspace DEFAULT graph, BEFORE any
+    row or name lookup. So `Default` is never a row NAME on the write path, and the
+    guard resolving it as one was the SAME divergence one spelling over — measured at
+    the round-31 head: `canonical_graph_id("Default")` gave `deadbeef…` (the row NAMED
+    `default`) while `tortoise_ingest(graph="Default")` opened the workspace default
+    (`t0000…`, the capped source), and `assert_distinct_graphs` PASSED the in-place
+    run. This test used to assert that divergent resolution as the CORRECT model.
+    """
+    from tortoise import mcp_auth as A
+
     rows = [
         {"graph_id": "default", "stable_id": "g_t0000000000000",
          "namespace": "team_o1", "name": "house"},                       # the tenant graph
         {"graph_id": "g_deadbeefdeadbeef", "stable_id": "g_deadbeefdeadbeef",
          "namespace": "org_o1_g_deadbeefdeadbeef", "name": "default"},   # a graph NAMED "default"
     ]
-    # the identity match is exact: `Default` is NOT the tenant row's graph id
-    assert C._matched_row("Default", rows) is rows[1]
-    assert C.canonical_graph_id("Default", rows) == C.canonical_graph_id(
+    source = C.canonical_graph_id("g_t0000000000000", rows)
+    # Every spelling the WRITE PATH treats as the workspace default must resolve the
+    # same way here, and must never reach the row that is merely NAMED "default".
+    for spelling in ("Default", "DEFAULT", "default", " default "):
+        assert A._is_default_graph_ref(spelling), (
+            f"fixture drift: the write path no longer treats {spelling!r} as the default")
+        assert C._is_default_spelling(spelling)
+        assert C.canonical_graph_id(spelling, rows) == source, (
+            f"{spelling!r} must resolve to the graph the write path opens, not to a row "
+            f"named 'default'")
+        assert C._matched_row(spelling, rows) is rows[0]
+        with pytest.raises(C.CurationRefused):
+            C.assert_distinct_graphs("g_t0000000000000", spelling, graph_rows=rows)
+    # The custom graph NAMED "default" is therefore NOT reachable by a default
+    # spelling — only by a spelling that actually names it.
+    assert C.canonical_graph_id("Default", rows) != C.canonical_graph_id(
         "org_o1_g_deadbeefdeadbeef", rows)
-    with pytest.raises(C.CurationRefused):
-        C.assert_distinct_graphs("Default", "org_o1_g_deadbeefdeadbeef", graph_rows=rows)
     # …and a NAME is still case-insensitive, as the surface documents
-    assert C.canonical_graph_id("HOUSE", rows) == C.canonical_graph_id("g_t0000000000000", rows)
+    assert C.canonical_graph_id("HOUSE", rows) == source
