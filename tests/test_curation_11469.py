@@ -58,11 +58,11 @@ def test_second_run_writes_nothing(ledger):
                       for d in plan.decisions]
     writer = CountingWriter()
 
-    first = C.run_plan(plan, writer=writer, ledger=ledger, apply=True)
+    first = C.run_plan(plan, writer=writer, ledger=ledger, apply=True, graph_rows=ROWS)
     assert first.written == 2
     assert len(writer.calls) == 1
 
-    second = C.run_plan(plan, writer=writer, ledger=ledger, apply=True)
+    second = C.run_plan(plan, writer=writer, ledger=ledger, apply=True, graph_rows=ROWS)
     assert second.written == 0
     assert second.skipped_known == 2
     assert len(writer.calls) == 1, "the second run must not reach the wire at all"
@@ -108,7 +108,7 @@ def test_duplicate_of_an_undecidable_keeper_stays_undecidable():
 def test_dry_run_writes_nothing(ledger):
     plan = C.build_plan([row()], source_graph="old", target_graph="new", packs={})
     writer = CountingWriter()
-    res = C.run_plan(plan, writer=writer, ledger=ledger, apply=False)
+    res = C.run_plan(plan, writer=writer, ledger=ledger, apply=False, graph_rows=ROWS)
     assert res.written == 0 and not res.applied
     assert writer.calls == []
     assert "dry run" in (res.refused or "")
@@ -117,7 +117,7 @@ def test_dry_run_writes_nothing(ledger):
 def test_explicit_off_switch_writes_nothing(ledger):
     plan = C.build_plan([row()], source_graph="old", target_graph="new", packs={})
     writer = CountingWriter()
-    res = C.run_plan(plan, writer=writer, ledger=ledger, apply=True, off=True)
+    res = C.run_plan(plan, writer=writer, ledger=ledger, apply=True, off=True, graph_rows=ROWS)
     assert res.off and not res.applied and writer.calls == []
 
 
@@ -125,7 +125,7 @@ def test_env_off_switch_writes_nothing(ledger, monkeypatch):
     monkeypatch.setenv(C.OFF_SWITCH_ENV, "1")
     plan = C.build_plan([row()], source_graph="old", target_graph="new", packs={})
     writer = CountingWriter()
-    res = C.run_plan(plan, writer=writer, ledger=ledger, apply=True)
+    res = C.run_plan(plan, writer=writer, ledger=ledger, apply=True, graph_rows=ROWS)
     assert res.off and writer.calls == []
 
 
@@ -140,6 +140,16 @@ def test_source_equals_target_refused_across_spellings():
     with pytest.raises(C.CurationRefused):
         C.assert_distinct_graphs("org_abc_g_2b7e4c9d1a6f8035", "g_2b7e4c9d1a6f8035")
 
+
+def gr(name: str) -> dict:
+    """A graph row for an arbitrary name — the shape a surface exposing identities
+    returns. The id is derived so every named graph is distinct."""
+    gid = "g_" + __import__("hashlib").sha256(name.encode()).hexdigest()[:16]
+    return {"graph_id": gid, "stable_id": gid, "name": name,
+            "namespace": f"org_x_{gid}"}
+
+
+ROWS = [gr(n) for n in ("old", "new", "A", "B")]
 
 GRAPH_ROWS = [
     {"graph_id": "default", "stable_id": "g_0bcdb207ef7336c3", "name": "default",
@@ -186,6 +196,20 @@ def test_namespace_only_identity_is_enough_to_tell_graphs_apart():
                              graph_rows=NAMESPACE_ROWS)
 
 
+def test_namespace_and_gid_spellings_of_one_graph_are_refused():
+    """The surface returns namespaces; `g_<id>` is the other accepted spelling. They
+    are the SAME graph and the guard must not let an in-place run through."""
+    with pytest.raises(C.CurationRefused):
+        C.assert_distinct_graphs("org_x_g_2b7e4c9d1a6f8035", "g_2b7e4c9d1a6f8035",
+                                 graph_rows=NAMESPACE_ROWS)
+
+
+def test_no_rows_does_not_fail_open():
+    """With no identity rows, cross-spelling must NOT pass on a string compare."""
+    with pytest.raises(C.CurationRefused):
+        C.assert_distinct_graphs("live-v4", "g_2b7e4c9d1a6f8035")
+
+
 def test_a_name_the_surface_cannot_resolve_is_refused():
     """`live-v4` cannot be resolved from namespace-only rows — refusing is the only
     safe answer, because the alternative is assuming it is not the archive."""
@@ -221,7 +245,7 @@ def test_a_refused_write_is_never_recorded(tmp_path):
                         target_graph="new", packs={})
     plan.decisions = [C.Decision(d.node_id, d.node_type, d.kind, C.CARRY, "test", d.pack,
                                  d.stable_key, d.content) for d in plan.decisions]
-    res = C.run_plan(plan, writer=RefusingWriter(), ledger=led, apply=True)
+    res = C.run_plan(plan, writer=RefusingWriter(), ledger=led, apply=True, graph_rows=ROWS)
     assert res.written == 0
     assert res.refused and "refused" in res.refused
     assert len(led) == 0
@@ -235,10 +259,10 @@ def test_ledger_is_scoped_to_its_target(tmp_path):
     plan.decisions = [C.Decision(d.node_id, d.node_type, d.kind, C.CARRY, "test", d.pack,
                                  d.stable_key, d.content) for d in plan.decisions]
     w = CountingWriter()
-    C.run_plan(plan, writer=w, ledger=C.Ledger(path, target="A"), apply=True)
+    C.run_plan(plan, writer=w, ledger=C.Ledger(path, target="A"), apply=True, graph_rows=ROWS)
 
     plan_b = C.Plan(source_graph="old", target_graph="B", decisions=plan.decisions)
-    res = C.run_plan(plan_b, writer=w, ledger=C.Ledger(path, target="B"), apply=True)
+    res = C.run_plan(plan_b, writer=w, ledger=C.Ledger(path, target="B"), apply=True, graph_rows=ROWS)
     assert res.written == 1, "the second target must receive the row"
     assert [t for t, _ in w.calls] == ["A", "B"]
 
@@ -266,6 +290,49 @@ def test_off_switch_stops_a_run_between_batches():
     assert len(out["written"]) == 1
     assert out["stopped"] == "off-switch engaged"
     assert len(calls) == 1
+
+
+class FakeCallToolResult:
+    """The REAL shape `mcp_client.call_tool` returns: an object, not a dict."""
+
+    def __init__(self, payload, is_error=False):
+        self.structuredContent = None
+        self.isError = is_error
+        self.content = [type("T", (), {"text": json.dumps(payload)})()]
+
+
+def test_a_calltoolresult_object_is_unwrapped_and_a_refusal_refuses():
+    """`call_tool` hands back a CallToolResult, so a dict-only check never sees the
+    refusal — and the batch gets ledgered as migrated."""
+    def call_tool(tool, args):
+        return FakeCallToolResult({"error": "ERR_QUOTA", "violations": [{"section": "points"}]})
+
+    writer = C.IngestWriter(call_tool)
+    with pytest.raises(C.CurationRefused):
+        writer.write_points("new", [{"migrationKey": "k", "content": "c"}])
+
+
+def test_a_refused_second_batch_keeps_the_first_batch_and_reports_zero_then_records_it(tmp_path):
+    """A partial run must not claim it wrote nothing, and must not lose the batch
+    that DID land."""
+    calls = {"n": 0}
+
+    def call_tool(tool, args):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return FakeCallToolResult({"created": 1})
+        return FakeCallToolResult({"error": "ERR_QUOTA"})
+
+    led = C.Ledger(tmp_path / "l.jsonl", target="new")
+    plan = C.build_plan([row("a", content="Let me look."), row("b", content="Let me look again.")],
+                        source_graph="old", target_graph="new", packs={})
+    plan.decisions = [C.Decision(d.node_id, d.node_type, d.kind, C.CARRY, "test", d.pack,
+                                 d.stable_key, d.content) for d in plan.decisions]
+    res = C.run_plan(plan, writer=C.IngestWriter(call_tool, batch_size=1), ledger=led,
+                     apply=True, graph_rows=ROWS)
+    assert res.written == 1, "the accepted batch is reported"
+    assert res.refused and "ERR_QUOTA" in res.refused
+    assert len(led) == 1, "only the accepted batch is recorded"
 
 
 def test_ingest_refusal_envelope_is_not_a_success():
@@ -315,6 +382,12 @@ def test_session_provenance_does_not_make_a_claim_noise():
 def test_operator_is_carried_as_reasoning():
     d = C.classify(row(node_type="operator", kind=None, content=""), {})
     assert d.disposition == C.CARRY and "reasoning" in d.reason
+
+
+def test_empty_evidence_is_not_carried():
+    """An empty evidence row would otherwise be carried as an empty point."""
+    d = C.classify(row(kind="evidence", content="   "), {})
+    assert d.disposition == C.NOT_CARRIED and "empty" in d.reason
 
 
 def test_namespaced_signal_kind_is_still_signal():

@@ -30,31 +30,6 @@ from tortoise import curation as C
 PAGE = 500
 
 
-def _normalise(res: Any) -> Any:
-    """Turn an MCP tool result into plain JSON.
-
-    The client hands back a ``CallToolResult``; reading only ``dict``/``list``
-    made an ERROR look like an empty graph (0 rows, 0 census) — the silent-zero
-    shape this repo refuses. So: unwrap, and treat ``isError`` as a failure.
-    """
-    if isinstance(res, (dict, list)):
-        return res
-    is_err = getattr(res, "isError", None)
-    sc = getattr(res, "structuredContent", None)
-    if sc:
-        payload: Any = sc.get("result", sc) if isinstance(sc, dict) else sc
-    else:
-        parts = getattr(res, "content", None) or []
-        text = "".join(getattr(p, "text", "") for p in parts)
-        try:
-            payload = json.loads(text)
-        except json.JSONDecodeError:
-            payload = text
-    if is_err:
-        raise RuntimeError(f"MCP tool error: {str(payload)[:400]}")
-    return payload
-
-
 def _error_of(res: Any) -> str | None:
     """The reason a tool payload is a REFUSAL, or None when it is data."""
     if isinstance(res, dict):
@@ -66,7 +41,7 @@ def _error_of(res: Any) -> str | None:
 
 
 def _rows_from_tool(res: Any) -> list[dict[str, Any]]:
-    res = _normalise(res)
+    res = C.normalise_tool_result(res)
     if isinstance(res, dict):
         for k in ("results", "result", "points"):
             v = res.get(k)
@@ -93,7 +68,7 @@ class MCPReader:
         offset = 0
         total = None
         while True:
-            res = _normalise(self._q(offset=offset, limit=page))
+            res = C.normalise_tool_result(self._q(offset=offset, limit=page))
             batch = _rows_from_tool(res)
             if isinstance(res, dict) and res.get("total") is not None:
                 total = int(res["total"])
@@ -139,22 +114,22 @@ class MCPReader:
         args = {"section": section}
         if self.graph:
             try:
-                res = _normalise(self._call("tortoise_graph_overview", {**args, "graph": self.graph}))
+                res = C.normalise_tool_result(self._call("tortoise_graph_overview", {**args, "graph": self.graph}))
             except Exception as exc:  # a refusal, not an empty section
                 self.note = (f"credential-bound read for {section!r}: the explicit graph argument "
                              f"was refused ({str(exc)[:160]}); used the credential's own graph")
-                return _normalise(self._call("tortoise_graph_overview", args))
+                return C.normalise_tool_result(self._call("tortoise_graph_overview", args))
             err = _error_of(res)
             if err:
                 # An error envelope is truthy and does NOT raise; returning it as a
                 # section would present a refusal as census data.
                 self.note = (f"credential-bound read for {section!r}: the explicit graph argument "
                              f"was refused ({err[:160]}); used the credential's own graph")
-                return _normalise(self._call("tortoise_graph_overview", args))
+                return C.normalise_tool_result(self._call("tortoise_graph_overview", args))
             # An EMPTY result is a legitimate answer (a graph with no sources), so it
             # is returned as-is rather than re-read from a different graph.
             return res
-        return _normalise(self._call("tortoise_graph_overview", args))
+        return C.normalise_tool_result(self._call("tortoise_graph_overview", args))
 
     def read_sources(self) -> list[C.Row]:
         res = self._section("sources")

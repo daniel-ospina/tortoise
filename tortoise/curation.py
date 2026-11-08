@@ -98,7 +98,42 @@ NARRATIVE_MARKERS = (
 
 
 class CurationRefused(RuntimeError):
-    """A guard refused the run, or the target refused a write. Never swallowed."""
+    """A guard refused the run, or the target refused a write. Never swallowed.
+
+    ``written_keys`` carries the keys a writer had already had ACCEPTED when the
+    refusal happened, so a partial run reports what landed instead of zero.
+    """
+
+    def __init__(self, message: str, *, written_keys: Iterable[str] = ()) -> None:
+        super().__init__(message)
+        self.written_keys = list(written_keys)
+
+
+def normalise_tool_result(res: Any) -> Any:
+    """Unwrap an MCP tool result (fastmcp ``CallToolResult``) into plain JSON.
+
+    The client returns an OBJECT (``content`` / ``structuredContent`` /
+    ``isError``), not a dict, so a refusal delivered as an error envelope inside a
+    successful result is invisible to any code that only reads dicts — and that is
+    exactly how a refused batch gets recorded as a migration. Every consumer of a
+    tool result in this change goes through here.
+    """
+    if isinstance(res, (dict, list, str, int, float)) or res is None:
+        return res
+    is_err = getattr(res, "isError", None)
+    sc = getattr(res, "structuredContent", None)
+    if sc:
+        payload: Any = sc.get("result", sc) if isinstance(sc, dict) else sc
+    else:
+        parts = getattr(res, "content", None) or []
+        text = "".join(getattr(p, "text", "") for p in parts)
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            payload = text
+    if is_err:
+        raise CurationRefused(f"MCP tool error: {str(payload)[:400]}")
+    return payload
 
 
 # ── the normalised row ────────────────────────────────────────────────────
@@ -280,6 +315,11 @@ def classify_point(row: Row, packs: Mapping[tuple[str, str], str], *, duplicate_
                         "agent diary — narration shaped like a narrative, but it is an authored "
                         "artifact, so neither rule decides it", pack, key, row.content)
 
+    if not (row.content or "").strip():
+        return Decision(row.node_id, row.node_type, row.kind, NOT_CARRIED,
+                        "empty content — nothing to carry (checked before every kind rule: an "
+                        "empty row would otherwise be carried as an empty point)", pack, key, row.content)
+
     if row.bare_kind == "evidence":
         return Decision(row.node_id, row.node_type, row.kind, CARRY,
                         "evidence — carried; its Source tier must be resolved at ingest "
@@ -291,10 +331,6 @@ def classify_point(row: Row, packs: Mapping[tuple[str, str], str], *, duplicate_
         return Decision(row.node_id, row.node_type, row.kind, NOT_CARRIED,
                         f"turn narration, not a claim (matched marker {marker!r})",
                         pack, key, row.content)
-
-    if not (row.content or "").strip():
-        return Decision(row.node_id, row.node_type, row.kind, NOT_CARRIED,
-                        "empty content — nothing to carry", pack, key, row.content)
 
     return Decision(row.node_id, row.node_type, row.kind, UNDECIDABLE,
                     "statement with no deciding rule: carrying it is a per-row judgement "
@@ -485,6 +521,17 @@ def _tail(g: str) -> str:
     return t
 
 
+def _canonical_from_row(row: Mapping[str, Any]) -> str | None:
+    ident = (row.get("graph_id") or row.get("stable_id") or row.get("namespace")
+             or row.get("name"))
+    if not ident:
+        return None
+    # EVERY row collapses to its id tail. Returning the namespace string itself
+    # (while `g_<id>` returns the bare id) made two spellings of one graph compare
+    # UNEQUAL — a fail-open on the exact guard that exists to stop an in-place run.
+    return _tail(str(ident)) or str(ident).strip().casefold() or None
+
+
 def canonical_graph_id(ref: str, graph_rows: Sequence[Mapping[str, Any]] | None) -> str | None:
     """Resolve any accepted spelling of a graph to one canonical id.
 
@@ -504,17 +551,17 @@ def canonical_graph_id(ref: str, graph_rows: Sequence[Mapping[str, Any]] | None)
             for field in ("graph_id", "stable_id", "namespace"):
                 val = row.get(field)
                 if val and str(val).casefold() == wanted:
-                    return str(row.get("graph_id") or row.get("stable_id") or val)
-        by_name = [r for r in graph_rows
-                   if (r.get("name") or "").casefold() == wanted]
+                    return _canonical_from_row(row)
+        # Names are matched SEPARATELY so an ambiguous name is a refusal, not a
+        # first-match: two graphs with one name must never resolve to whichever
+        # row happened to come first.
+        by_name = [r for r in graph_rows if (r.get("name") or "").casefold() == wanted]
         if len(by_name) == 1:
-            return str(by_name[0].get("graph_id") or by_name[0].get("stable_id")
-                       or by_name[0].get("namespace") or ref)
+            return _canonical_from_row(by_name[0])
         if len(by_name) > 1:
-            return None  # ambiguous name: refuse rather than guess
+            return None
+    # Only an id-shaped spelling is resolvable without a row that names it.
     if "_g_" in ref or ref.startswith("g_"):
-        return _tail(ref) or None
-    if graph_rows is None:
         return _tail(ref) or None
     return None
 
@@ -543,26 +590,24 @@ def assert_distinct_graphs(
     """
     if not target_graph:
         raise CurationRefused("no target graph named: a curation pass needs a distinct target")
-    if graph_rows is not None:
-        ca = canonical_graph_id(source_graph, graph_rows)
-        cb = canonical_graph_id(target_graph, graph_rows)
-        if ca is None:
-            raise CurationRefused(
-                f"cannot resolve the source graph {source_graph!r} to a known graph id — "
-                "refusing to run a migration whose source identity is unproven")
-        if cb is None:
-            raise CurationRefused(
-                f"cannot resolve the target graph {target_graph!r} to a known graph id — "
-                "refusing to run: an unproven target could be the archive itself")
-        if ca == cb:
-            raise CurationRefused(
-                f"source and target are the same graph ({ca!r}); the old graph is a "
-                "read-only historic artifact (#11469)")
-        return
-    if _same_graph(source_graph, target_graph):
+    if (source_graph or "").strip().casefold() == (target_graph or "").strip().casefold():
         raise CurationRefused(
-            f"source and target resolve to the same graph ({source_graph!r} vs "
-            f"{target_graph!r}); the old graph is a read-only historic artifact (#11469)")
+            f"source and target are the same graph ({source_graph!r}); the old graph is a "
+            "read-only historic artifact (#11469)")
+    ca = canonical_graph_id(source_graph, graph_rows)
+    cb = canonical_graph_id(target_graph, graph_rows)
+    if ca is None:
+        raise CurationRefused(
+            f"cannot resolve the source graph {source_graph!r} to a graph id — refusing to run "
+            "a migration whose source identity is unproven (pass the graph id or namespace)")
+    if cb is None:
+        raise CurationRefused(
+            f"cannot resolve the target graph {target_graph!r} to a graph id — refusing to run: "
+            "an unproven target could be the archive itself (pass the graph id or namespace)")
+    if ca == cb:
+        raise CurationRefused(
+            f"source and target are the same graph ({ca!r}); the old graph is a "
+            "read-only historic artifact (#11469)")
 
 
 def off_switch_active(explicit: bool = False) -> bool:
@@ -636,15 +681,17 @@ class IngestWriter:
                 # the rest is simply not attempted.
                 return {"written": written, "stopped": "off-switch engaged"}
             batch = list(points[i:i + self._batch])
-            res = self._call(self.TOOL, {
+            res = normalise_tool_result(self._call(self.TOOL, {
                 "graph": target_graph,
                 "promotion_policy": "auto",
                 "granularity": "bulk",
                 "bundle": {"points": batch},
-            })
+            }))
             refused = _ingest_refused(res)
             if refused:
-                raise CurationRefused(refused)
+                # The earlier batches were accepted, so they are reported — a
+                # partial run must not claim it wrote nothing.
+                raise CurationRefused(refused, written_keys=written)
             written.extend(p["migrationKey"] for p in batch)
         return {"written": written}
 
@@ -752,9 +799,12 @@ def run_plan(
     try:
         result = writer.write_points(plan.target_graph, pending)
     except CurationRefused as exc:
-        # Nothing is recorded: an attempt is not a migration.
-        return RunResult(True, False, skipped, 0, plan.target_graph, plan.digest(),
-                         refused=str(exc))
+        # Only the batches the target actually ACCEPTED are recorded; the refused
+        # attempt is not. A partial run reports what landed.
+        accepted_partial = list(getattr(exc, "written_keys", ()) or [])
+        ledger.record(accepted_partial)
+        return RunResult(True, False, skipped, len(accepted_partial), plan.target_graph,
+                         plan.digest(), refused=str(exc))
     accepted = [k for k in (result.get("written") or [])]
     ledger.record(accepted)
     return RunResult(True, False, skipped, len(accepted), plan.target_graph, plan.digest(),

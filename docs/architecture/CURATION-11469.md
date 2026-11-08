@@ -25,7 +25,7 @@ Two measured facts govern the risk:
   a migration here is moving the only copy of a tenant's data.
 
 Code: `tortoise/curation.py` (classification + guards + additive writer) and
-`tools/curate_graph.py` (the CLI). Tests: `tests/test_curation_11469.py` (31 tests).
+`tools/curate_graph.py` (the CLI). Tests: `tests/test_curation_11469.py` (38 tests).
 
 ## The inventory — measured 2026-11-08 against `live-v4`
 
@@ -60,7 +60,7 @@ report, and a row that no rule decides is `undecidable` rather than guessed.
 | `point:finding` | 1 | **carry** | durable finding |
 | `point:jobToBeDone` | 1 | **carry** | strategy artifact |
 | `point:useCase` | 1 | **carry** | strategy artifact |
-| `point:evidence` | 120 | **carry** (115) / not-carried (5) | evidence is signal; the 5 are empty or duplicates of a non-carried row |
+| `point:evidence` | 120 | **carry** (115) / not-carried (5) | evidence is signal; the 5 are exact duplicates of a carried evidence row (the keeper carries it) |
 | `point:diary` | 2 | **undecidable** | agent diary: authored, but narrative-shaped |
 | `point:statement` | 15,708 | **not-carried 0 / undecidable 15,708** | **not one** matches a turn-narration marker; every one is a claim this rule set cannot judge |
 | `source:agentSession` | 1,578 | **undecidable** | §9.1/D1 (`#10000`) says the raw tier lives in Postgres — but this tenant's record holds **0 rows**, so "do not carry it" would leave the transcript with no home |
@@ -107,11 +107,11 @@ flagged *not enumerated* rather than presented as measure-and-classify results.
 |---|---|---|
 | the old graph is only read | the module has no destructive call at all; the reader exposes no write verb | `test_bundle_carries_no_deletion`, `test_writer_protocol_declares_no_destructive_verb` |
 | the target is only added to | `PlanWriter` is a **single-verb** protocol (`write_points`) — additivity is a property of the type, not of the caller's discipline | `test_writer_protocol_declares_no_destructive_verb` |
-| **idempotent** | stable `migrationKey` per content hash → target-side dedup (`ingest` folds by content hash + kind) **and** a local ledger that skips a migrated key before it reaches the wire | `test_second_run_writes_nothing`, `test_duplicate_content_folds_onto_one_keeper` |
+| **idempotent** | stable `migrationKey` per content hash → target-side dedup (`ingest` folds by content hash + kind) **and** a local ledger that skips a migrated key before it reaches the wire | `test_second_run_writes_nothing`, `test_duplicate_follows_its_keeper` |
 | **off-switch** | `TORTOISE_CURATE_OFF=1` / `--off`, checked before the run **and before each write batch** | `test_explicit_off_switch_writes_nothing`, `test_env_off_switch_writes_nothing` |
-| **source ≠ target** | compared on the CANONICAL graph id resolved from the workspace's graph rows — graph id, `stable_id`, namespace and the case-insensitive NAME (`live-v4`) all collapse to one identity; an unresolvable or ambiguous ref is a REFUSAL (fail closed) | `test_source_equals_target_refused`, `…_across_spellings`, `test_the_graph_name_is_the_same_graph_as_its_namespace`, `test_unresolvable_target_is_refused_fail_closed`, `test_ambiguous_name_is_refused` |
+| **source ≠ target** | compared on the CANONICAL id, where every accepted spelling (graph id, `stable_id`, namespace, case-insensitive NAME) collapses to that graph's id tail — measured against the row shape this server actually returns (namespace strings); a spelling the surface cannot resolve, or an ambiguous name, is a REFUSAL (fail closed) | `test_source_equals_target_refused`, `test_source_equals_target_refused_across_spellings`, `test_the_graph_name_is_the_same_graph_as_its_namespace`, `test_namespace_and_gid_spellings_of_one_graph_are_refused`, `test_no_rows_does_not_fail_open`, `test_unresolvable_target_is_refused_fail_closed`, `test_ambiguous_name_is_refused`, `test_a_name_the_surface_cannot_resolve_is_refused` |
 | dry by default | `--apply` is required; the default run writes nothing | `test_dry_run_writes_nothing` |
-| a refusal is never recorded as a write | the writer raises on a refusal envelope; the ledger is written from the ACCEPTED keys only, and the ledger is scoped per target graph | `test_a_refused_write_is_never_recorded`, `test_ingest_refusal_envelope_is_not_a_success`, `test_ledger_is_scoped_to_its_target` |
+| a refusal is never recorded as a write | the writer unwraps the tool result (a `CallToolResult` OBJECT, not a dict — a dict-only check never sees a refusal), raises on a refusal envelope, and the ledger is written from the ACCEPTED keys only, scoped per target graph; a partial run reports what already landed | `test_a_refused_write_is_never_recorded`, `test_ingest_refusal_envelope_is_not_a_success`, `test_a_calltoolresult_object_is_unwrapped_and_a_refusal_refuses`, `test_a_refused_second_batch_keeps_the_first_batch_and_reports_zero_then_records_it`, `test_ledger_is_scoped_to_its_target` |
 | the bundle is ingest-valid | every point item carries `content` (ingest Phase-1 refuses a bundle otherwise) | `test_bundle_items_carry_content` |
 | no silent zero | a read that returns 0 rows, or fewer than the reported total, **fails** — an empty census must never look like "nothing to migrate" | `MCPReader.read_points` raises |
 
@@ -122,10 +122,14 @@ flagged *not enumerated* rather than presented as measure-and-classify results.
 uv run python tools/curate_graph.py inventory --graph live-v4 --out /tmp/inventory.json
 
 # plan against a target (writes nothing without --apply)
-uv run python tools/curate_graph.py plan --graph live-v4 --target <clean-graph> --out /tmp/plan.json
+uv run python tools/curate_graph.py plan --graph live-v4 \
+    --target org_<org>_g_<clean-graph-id> --out /tmp/plan.json
 
-# apply (additive, idempotent, off-switchable)
-uv run python tools/curate_graph.py plan --graph live-v4 --target <clean-graph> --apply
+# apply (additive, idempotent, off-switchable) — the SOURCE and TARGET must be given
+# as a graph id or namespace: a bare name is refused unless the surface exposes name
+# rows, because the identity guard must not guess which graph a name means
+uv run python tools/curate_graph.py plan --graph live-v4 \
+    --target org_<org>_g_<clean-graph-id> --apply
 ```
 
 Environment: `TORTOISE_MCP_URL` + `TORTOISE_MCP_API_KEY`; `TORTOISE_CURATE_OFF=1` disarms writes.
