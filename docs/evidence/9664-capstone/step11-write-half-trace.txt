@@ -56,10 +56,11 @@ One graph: the default, addressable by its namespace.
 (EVERY `name {json}` line is the script's REQUEST ECHO; every `OK`/`ERROR` line is the
 tool's response. PRESENTATION, so nothing here reads as a byte-exact capture when it is
 not: the script prints each echo on ONE line and this file WRAPS it at ~100 columns; the
-script prints responses as hard prefixes (`pos[:300]`, `found[:700]`, `repr(absent[:400])`),
-so a response ends where the SCRIPT cut it — this file elides nothing inside a response and
-adds no closing bracket a prefix does not contain. To see the untruncated response, run the
-command above.)
+script prints responses as hard prefixes (`neg[:900]`, `pos[:300]`, `found[:700]`,
+`repr(absent[:400])`). Where a response below shows LESS than its prefix, the gap is
+marked `…` inline and the bracketed note names BOTH the script's cut and this file's
+elision — no closing bracket appears here that a prefix does not contain. The untruncated
+response is whatever the command above prints.)
 
 MEASUREMENT — 2. NEGATIVE CONTROL: the write, with an EXPLICIT NON-DEFAULT graph (U1's case)
 -------------------------------------------------------------------------------------------
@@ -84,12 +85,12 @@ Without this, "the probe string is absent" could mean "search returns nothing on
         string MUST be findable"}
     OK {"id":"1a1b99d2bfc-1ceb72af6103","content":"capstone-9664 positive control: this string
         MUST be findable","pointKind":"statement","is_operator":false,"status":"live","createdAt":"2026-11-08T05:24:07.799623+00:00","updatedAt":"2026-11-08T05:24:07.799623+00:00","ep_dirty":true,"ep_dirty_at":1,"content 
-        [line and response both cut by the script's 300-char prefix]
+        [script prefix `pos[:300]` — the line is also wrapped by this file]
 
     tortoise_search {"query": "positive control", "limit": 5}
     OK [{"id":"1a1b99d2bfc-1ceb72af6103","content":"capstone-9664 positive control: this string
         MUST be findable","point_kind":"statement","match_source":"rrf", …
-        [cut by the script's 700-char prefix; `…` marks one field skipped here for width]
+        [this file elides ~540 more chars of a `found[:700]` prefix; `…` marks the elision]
 
 The write path is live and retrieval finds what landed.
 
@@ -105,7 +106,7 @@ MEASUREMENT — 4. the fail-open half: nothing landed from the refused write
     tortoise_search {"query": "capstone-9664 U1 probe", "limit": 5}
     OK '[{"id":"1a1b99d2bfc-1ceb72af6103","content":"capstone-9664 positive control: this string
         MUST be findable","point_kind":"statement","match_source":"rrf", …
-        [cut by the script's repr(absent[:400]); `…` marks one field skipped here for width]
+        [this file elides ~240 more chars of a `repr(absent[:400])` prefix; `…` marks the elision]
 
     controls: refused=True pos_write=True pos_found=True neg_absent=True
     PROBE-RESULT: REFUSED-AND-ABSENT
@@ -128,8 +129,8 @@ MEASUREMENT — 5. why U1's accept arm / U2 / U4 still cannot be measured (the 4
 U1's accept arm, U2 (a duplicate graph NAME) and U4 (a soft-deleted graph) each need a SECOND
 graph, and a minted free org cannot hold one. Measured, not inferred:
 
-    $ POST https://api.premiselabs.co/v1/organizations/<org_id>/graphs  {"name":"capstone-u2-dup"}
-    402 {"detail":"Custom graphs require the Builder plan. Upgrade to create multiple graphs.
+POST /v1/organizations/<org_id>/graphs  {"name":"capstone-u2-dup"}
+    -> 402 {"detail":"Custom graphs require the Builder plan. Upgrade to create multiple graphs.
     [wrapped here for width; the payload has no newline] Need more? Contact support@premiselabs.co."}
 
 So the missing thing on those rows is named exactly: a paid tier that permits a second graph

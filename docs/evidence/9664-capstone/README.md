@@ -46,6 +46,7 @@ tree that a re-run must re-verify). A step with no measurement is `NOT COVERED` 
 | `03-onboarding-closure-tests.log` | steps 5/8/9's server-side closure contract, MEASURED by running its pins (`tests/test_onboarding_auto_complete.py`, 42 passed). |
 | `04-graph-scoping-tests.log` | step 7 — `tortoise_list_graphs` returns only the entitled graph (`tests/test_cross_tenant_read_isolation.py`, 9 passed, seeded present/absent pairs + negative controls). |
 | `05-dashboard-copy-tests.log` | steps 3/10's copy constants (`node --test` over the pure modules; no `node_modules` needed, 38 passed). |
+| `step11-write-half-trace.txt` | the **write half** of the `#9340` ugly cases, which the 2026-10-26 run could not deliver (OpenAI stopped both its writes, `#10084`): `probes/u1_probe.py` drives the served `/mcp` surface with a minted `tt_` key and shows the resolver refusing an explicit non-default graph, with a positive control proving the search space is live and the probe string absent afterwards. Also measures why the ACCEPT arm / U2 / U4 still cannot run: creating a second graph is refused `402 "Custom graphs require the Builder plan"`. |
 
 Measured at `git HEAD 653980445f` (2026-10-22), with the census (`02`) re-run at
 `b39c70d8c` after its rows were made to measure the clause they print, and again at
@@ -226,6 +227,7 @@ remains is **two product blockers**, not two missing artifacts: `#8617` (step 2a
 ```bash
 uv sync --extra embeddings --extra parity
 .venv/bin/python docs/evidence/9664-capstone/probes/step_premise_census.py
+.venv/bin/python docs/evidence/9664-capstone/probes/u1_probe.py   # needs `uv run tortoise signup` once (2/IP/24h); writes only into the caller's own `default`
 uri="$(.venv/bin/python tools/test_lane.py uri)"; eval "$uri"       # a private container — never the canonical store
 .venv/bin/python -m pytest tests/test_9664_premise_census.py -q -p no:cacheprovider   # the census's own guards
 .venv/bin/python -m pytest tests/test_onboarding_auto_complete.py -q -p no:cacheprovider

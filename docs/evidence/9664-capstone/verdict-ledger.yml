@@ -148,14 +148,17 @@ measured_at:
 #     ChatGPT Plus/Pro session where a HUMAN completes the OAuth consent — which is
 #     #9664's own step-4 text ("human does the Pro auth");
 #   * THREE of the four #9340 ugly cases (U1's accept arm, U2, U4) need, beyond a
-#     credential, a SECOND graph — a minted free org may hold one, measured 402
-#     "Custom graphs require the Builder plan" (step11-write-half-trace.txt).
+#     credential, a SECOND graph — a minted free org holds only one (its default),
+#     measured 402 "Custom graphs require the Builder plan"
+#     (step11-write-half-trace.txt).
 #     U3 is the exception and is `verified`: its outcome IS a refusal, which the
 #     2026-10-26 run obtained, so it needs neither a credential nor a second graph.
 # A credential WAS minted on 2026-11-08 (`uv run tortoise signup`) and it did not
 # unblock those rows: U1's write half was DELIVERED with it (refused by our resolver,
-# no silent fallback), U2/U4 were not attempted at all, and all three ACCEPT halves
-# stayed unreachable for the tier reason above — measured, not assumed.
+# no silent fallback), U2/U4 were not attempted at all, and all three rows stayed
+# unreachable for the tier reason above — U1's ACCEPT arm for want of an existing
+# second graph, U2/U4 for want of one to attempt their refusal against. Measured, not
+# assumed.
 #
 # (The U3 row quotes the SAME function in its pre-2026-11 shape — `Reachable graphs:
 # 'default' (default).` — because that is what the 2026-10-26 run observed; the function
@@ -437,7 +440,9 @@ criteria:
       multiple graphs. Need more? Contact support@premiselabs.co."}`
       (step11-write-half-trace.txt). Missing by name: a paid
       tier that permits a second graph, or an owner-provided org that already has
-      two. This supersedes "no `tt_` key on this box" — a key exists and was used;
+      two. This supersedes THIS row's previous reason — "a hosted-org credential on
+      a client that is not ChatGPT, plus two graphs sharing a name" — since a key
+      exists and was used (the `tt_`-key wording belonged to U1's row, not this one);
       the wrong reason left on a row is how a blocker reads as unfixable.
 
   - id: U3
