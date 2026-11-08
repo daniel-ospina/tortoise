@@ -38,6 +38,15 @@ governingAgreement: "epic #2281; docs/ONTOLOGY.md v3.31; STORAGE-ARCHITECTURE.md
 > historical. §7 re-measures the **decisions**, not these citations; measured on this head,
 > `_validity_marker` is `retrieval.py:1289` (not `:398`) and `invalidate_point` is `sdk.py:20126`
 > (not `:3458`).
+>
+> ⚠️ **The ISSUE and PR states in §1–§6 are as-of 2026-09-05 too**, and they are the part a reader is
+> most likely to act on, so they are re-measured here rather than left to drift. Changed since the
+> durable copy, each checked against GitHub on this head: **#2134 is CLOSED** (2026-09-06; §7 D5 records
+> it, so §1.6's "the binding write-side blocker" is historical), **#2293 is MERGED**
+> (2026-09-05T15:53:42Z, `feat/2080-w5-phase-f`), **#2136 is MERGED** (2026-09-05T13:37:29Z,
+> `fix/2134-reader-none-guard` — its branch is **deleted**, so §5's "merge its PR" is already spent),
+> and **#2009 is CLOSED** (2026-09-28; §7 D6 records it). Those sentences are left verbatim above,
+> because what the scope stage said is the record; read them against this list.
 
 # Scope research — Epic #2281
 
