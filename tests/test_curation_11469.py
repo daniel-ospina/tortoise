@@ -787,12 +787,13 @@ def test_an_iserror_result_without_an_error_key_is_a_refusal():
     """The dangerous sub-case: `isError` says refused, the payload has no `error`
     key — counting it as a write is how a ledger claims rows that do not exist."""
     class Result:
-        is_error = True
-        isError = True
+        """SNAKE_CASE ONLY, like the live client (#4292): a fixture that sets both
+        spellings cannot detect a regression to camelCase-only reads."""
+
         def __init__(self):
+            self.is_error = True           # snake_case only (live client, #4292)
             self.content = [{"type": "text", "text": '{"created": 3}'}]
             self.structured_content = {"result": {"created": 3}}
-            self.structuredContent = {"result": {"created": 3}}
     with pytest.raises(C.CurationRefused):
         C.normalise_tool_result(Result())
 
@@ -1244,3 +1245,41 @@ def test_one_graph_split_across_two_rows_with_different_fields_is_refused():
     with pytest.raises(C.CurationRefused, match=r"cannot prove"):
         C.assert_distinct_graphs("g_0bcdb207ef7336c3", "team_3326a01ea34ae595d84de5d8f9",
                                  graph_rows=rows)
+
+
+class _EqualSizeChurnSurface:
+    """Retract one row and append another between pages: the total never moves and no
+    row is served twice, so neither the total guard nor the repeat guard can see it."""
+
+    def __init__(self):
+        self.population = [{"id": f"p{i}", "kind": "decision", "content": f"c{i}"}
+                           for i in range(6)]
+        self.pages = 0
+
+    def __call__(self, _name, args):
+        self.pages += 1
+        if self.pages == 2:            # p1 retracted, p6 appended — same size
+            self.population.pop(1)
+            self.population.append({"id": "p6", "kind": "decision", "content": "c6"})
+        off = int(args.get("offset") or 0)
+        lim = int(args.get("limit") or 2)
+        return {"result": self.population[off:off + lim], "total": len(self.population)}
+
+
+def test_a_same_size_churn_mid_walk_is_refused():
+    """Round-19: a retraction plus an addition keeps the total stable and repeats no
+    row, so the census held a tombstone and omitted a live row while looking complete."""
+    mod = _tool_module()
+    with pytest.raises(RuntimeError, match=r"changed during the walk"):
+        mod.MCPReader(_EqualSizeChurnSurface(), None).read_points(page=2)
+
+
+def test_the_iserror_fixture_sets_only_the_live_clients_spelling():
+    """Round-19: the fixture set BOTH `is_error` and `isError`, so a regression to
+    camelCase-only reads (the measured #4292 defect) left the suite green."""
+    import inspect
+    src = inspect.getsource(test_an_iserror_result_without_an_error_key_is_a_refusal)
+    # no camelCase ATTRIBUTE ASSIGNMENT anywhere in the fixture (the docstring may say
+    # the word: it is describing the property, not setting it)
+    assert not [ln for ln in src.splitlines()
+                if ln.strip().startswith(("self.isError", "isError"))]

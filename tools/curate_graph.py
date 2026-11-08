@@ -84,6 +84,9 @@ class MCPReader:
         # id -> (first offset, content fingerprint). Point ids are NOT unique (colliding
         # ids are a tested, legal shape), so an id alone cannot tell "the same node
         # served twice" from "two nodes sharing an id" — the CONTENT can.
+        first_page_fp: tuple[str, ...] | None = None
+        last_page_fp: tuple[str, ...] | None = None
+        last_offsets: tuple[int, int] | None = None
         seen: dict[str, tuple[int, str]] = {}
         totals: set[int] = set()
         while True:
@@ -134,6 +137,10 @@ class MCPReader:
                     content_hash=r.get("content_hash"),
                     props={k: v for k, v in r.items() if k not in ("embedding",)},
                 ))
+            fp = tuple(f"{r.get('id') or ''}\x00{r.get('content') or ''}" for r in batch)
+            if first_page_fp is None:
+                first_page_fp = fp
+            last_page_fp, last_offsets = fp, (offset, len(batch))
             offset += len(batch)
             if total is not None and offset >= total:
                 break
@@ -151,6 +158,24 @@ class MCPReader:
             )
         if total is not None and len(rows) < total:
             raise RuntimeError(f"incomplete read: {len(rows)} of {total} points — refusing a partial census")
+        # A mid-walk mutation that keeps the TOTAL stable and repeats no row (one
+        # retracted, one appended) is invisible to both guards above: the census then
+        # contains a tombstone and omits a live row while looking complete. Re-read the
+        # first and last pages and require them to be unchanged — 2 extra calls, and
+        # it is the only way to see a same-size churn.
+        if first_page_fp is not None:
+            for label, want, args in (
+                ("first", first_page_fp, {"offset": 0, "limit": page}),
+                ("last", last_page_fp, {"offset": last_offsets[0], "limit": last_offsets[1]}),
+            ):
+                res2 = C.normalise_tool_result(self._q(**args))
+                got = tuple(f"{r.get('id') or ''}\x00{r.get('content') or ''}"
+                            for r in _rows_from_tool(res2))
+                if got != want:
+                    raise RuntimeError(
+                        f"the {label} page changed during the walk — the population was mutated "
+                        "mid-read (a retraction and an addition of equal size look identical to "
+                        "the totals); refusing a census that may hold a tombstone and omit a row")
         return rows, (total if total is not None else len(rows))
 
     def _section(self, section: str) -> Any:
