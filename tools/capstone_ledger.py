@@ -348,6 +348,14 @@ _CHAIN_WORDS: Final[frozenset[str]] = frozenset({"run", "exec", "x"})
 #: every entry weakens the arm slightly; extend by measurement, never by analogy.
 _RUNNER_SUBCOMMANDS: Final[dict[str, frozenset[str]]] = {
     "ruff": frozenset({"check", "format", "rule", "config", "linter", "clean"}),
+    # `uv lock --check` is the documented lockfile-drift gate (`AGENTS.md`). With no
+    # target it is a RECORD that confers nothing — the same arm that admits
+    # `cmd:make`. Without this entry `lock` was read as an ARTIFACT and refused, a
+    # false block on a shape `AGENTS.md` hands a lane (measured by the second review
+    # cycle). It buys no strictness back: `cmd:uv lock NOT RUN` still put `NOT` in
+    # artifact position and is still REFUSED, so only the SUBCOMMAND is recognised
+    # and the argument grading after it is unchanged.
+    "uv": frozenset({"lock"}),
 }
 
 #: A runner's own non-artifact arguments, which must not be mistaken for the target:
@@ -402,29 +410,47 @@ def _wrapper_argument_defect(head: str, args: list[str], cwd: Path, root: Path) 
                 return f"{_short(arg)} is neither a NAME nor a NAME=value assignment"
         return None
     if head == "set":
+        # ⛔ `man bash`: `set [-abefhkmnptuvxBCEHPT] [-o option-name] [--] [-] [arg …]`.
+        # The option NAME after `-o`/`+o` is a BARE operand, and the whole line is the
+        # canonical bash preamble — every `.ci-checks/*.sh` in this repo opens with
+        # it. Requiring every operand to start with `-`/`+` REFUSED `set -euo
+        # pipefail` and `set -o pipefail`, i.e. a false block on the most ordinary
+        # wrapper there is (found by the second review cycle of this branch).
+        expect_option_name = False
         for arg in args:
+            if expect_option_name:
+                expect_option_name = False
+                continue
             if not (arg.startswith("-") or arg.startswith("+")):
                 return f"{_short(arg)} is not a shell option"
+            # ⛔ A CLUSTER ENDING IN `o` takes the NEXT bare word as its option
+            # name: `-euo pipefail` is `-e -u -o pipefail`, which is the spelling
+            # every `.ci-checks/*.sh` in this repo actually uses. Recognising only
+            # a bare `-o` refused it a second time (the second review cycle's
+            # finding caught `-o pipefail` and missed the cluster one word over).
+            expect_option_name = arg.endswith("o")
         return None
     if head == "umask":
+        # ⛔ `man bash`: `umask [-p] [-S] [mode]` — the FLAGS precede the mask, so
+        # `umask -S` was refused as "not a umask mask".
         for arg in args:
+            if arg in {"-p", "-S", "-pS", "-Sp", "--symbolic"}:
+                continue
             if not _UMASK_ARG.match(arg):
                 return f"{_short(arg)} is not a umask mask"
         return None
-    if head == "source":
-        if not args:
-            return None
-        target = args[0].strip("'\"")
-        try:
-            resolved = (cwd / target).resolve()
-        except (OSError, ValueError):
-            resolved = None
-        if resolved is None or not resolved.is_file():
-            return (
-                f"{_short(target)} does not name a file, and a failing `source` "
-                "short-circuits the `&&` — no later segment of this record can have run"
-            )
-        return None
+    # ⛔ `source` is NOT graded here, and that is deliberate. `is_file()` proves the
+    # target EXISTS, not that sourcing it SUCCEEDS — measured, `source
+    # tests/test_9664_capstone_verdict_ledger.py` is a real file that bash refuses
+    # (exit 2), so the `&&` short-circuits and the graded command provably never
+    # ran, yet the record was ACCEPTED. Grading it tightly is also BOX-DEPENDENT:
+    # `source .venv/bin/activate` resolves here and nowhere in a clone, because
+    # `.venv` is gitignored — the "validates on the authoring box, INVALID for every
+    # reader" defect `_is_tracked` exists to prevent. Deciding it needs a runtime
+    # judgement this arm must not make, so it is admitted as a wrapper that cites
+    # nothing and the residual is PINNED as OPEN beside the decorative printers
+    # (`test_the_deployed_wrapper_head_residual_is_pinned`) rather than left for a
+    # reader to infer as closed. Same root as the printers: #11520.
     return None
 
 
@@ -436,10 +462,24 @@ def _split_flag(token: str) -> tuple[str, str]:
     `bash -c'…'`, `bash -e'…'` and `--eval="…"` produce, and it is the reason
     `token in _SCRIPT_FLAGS` was not enough: shlex returns the flag and its body as
     ONE token, so the body was never graded. See the call site for the measurement.
+
+    ⛔ A SHORT-FLAG CLUSTER is why this is not `token[:2]`. `man bash` lets the
+    operand-taking flag sit anywhere the group ends (`bash -ec CMD`, `bash -euc
+    CMD`), so taking the first two characters graded the leftover `c`/`uc` as the
+    SCRIPT BODY and refused a legitimate record with a nonsense reason — "script 'c'
+    is not a command". The split lands on the LAST script flag in the cluster and
+    the remainder after it is the body; when nothing follows it, the body is the
+    NEXT token and the caller's `consumed_script` hand-off applies.
     """
     if token.startswith("--"):
         flag, sep, value = token.partition("=")
         return flag, (value if sep else "")
+    found = None
+    for position, letter in enumerate(token[1:], start=1):
+        if f"-{letter}" in _SCRIPT_FLAGS:
+            found = position
+    if found is not None:
+        return f"-{token[found]}", token[found + 1 :]
     if len(token) > 2:
         return token[:2], token[2:]
     return token, ""
@@ -1023,6 +1063,15 @@ def _evidence_is_real(
         #: to that runner and to nothing else (see `_RUNNER_SUBCOMMANDS`).
         current_runner = Path(tokens[0]).name
         subcommand_allowed = True
+        #: A token that is unreadable PROSE, remembered rather than refused ON THE
+        #: SPOT. A quoted flag+value (`pytest "-k not slow" <tracked path>`) is a
+        #: legitimate record whose FIRST token is prose-shaped, so refusing at the
+        #: token would be a false block on a command a lane really runs — and exit 1
+        #: prints no report. The refusal is therefore deferred to the END of the
+        #: scan, where the question "did this record name an artifact at all?" is
+        #: answerable: `pytest "-q I did not run this"` names nothing and stays
+        #: REFUSED, which is the fail-open this guard exists for.
+        unread_prose: str | None = None
         for token in tokens[1:]:
             if consumed_script:
                 # ⛔ The value of a `-c`/`-e` flag is a SCRIPT BODY. It is not a
@@ -1047,16 +1096,17 @@ def _evidence_is_real(
                 # CONTAINS whitespace was quoted by the author — `shlex` preserves
                 # whitespace only INSIDE a quote — so it is an argument wearing a
                 # dash, not a flag, and skipping it as one reached the
-                # runner-with-no-target arm: measured, `cmd:uv run pytest "-q I did
+                # runner-with-no-target arm. Measured, `cmd:uv run pytest "-q I did
                 # not run this"` reported `verified: 1 uncovered: 0` and exited 0,
                 # i.e. a record that states on its own line that the work was NOT
-                # run satisfied the strongest verdict in the vocabulary.
+                # run satisfied the strongest verdict in the vocabulary. The same
+                # shape with a real artifact after it (`pytest "-k not slow" <path>`)
+                # is a legitimate record, so the refusal is DEFERRED (see
+                # `unread_prose`) instead of taken here.
                 if any(char.isspace() for char in token):
-                    return False, (
-                        f"`cmd:` evidence carries the quoted value {_short(token)} where an "
-                        "artifact must be — a token containing whitespace was quoted by the "
-                        "author, so it is an argument, not a flag, and prose names nothing"
-                    )
+                    if unread_prose is None:
+                        unread_prose = token
+                    continue
                 # ⛔ `-cBODY` / `--eval=BODY` is ONE shlex token, so
                 # `token in _SCRIPT_FLAGS` was False and the body was skipped as a
                 # plain flag — the one-word bypass the `-c` arm exists to close,
@@ -1117,6 +1167,18 @@ def _evidence_is_real(
         # (`cmd:make` beside a held artifact → exit 1) and exit 1 computes NOTHING,
         # so it also hid the entire uncovered list — a refusal that loses the
         # finding is worse than the weaker arm.
+        #
+        # ⛔ UNLESS the record was carrying quoted PROSE and named nothing: then the
+        # "no target" is not a runner's own bare invocation, it is a sentence that
+        # was never read — `pytest "-q I did not run this"`. That is the fail-open,
+        # and it is refused here rather than at the token so the legitimate quoted
+        # flag+value above is not caught with it.
+        if unread_prose is not None:
+            return False, (
+                f"`cmd:` evidence carries the quoted value {_short(unread_prose)} where an "
+                "artifact must be — a token containing whitespace was quoted by the author, "
+                "so it is an argument, not a flag, and prose names nothing of this tree"
+            )
         return True, ""
     candidate = Path(entry)
     try:

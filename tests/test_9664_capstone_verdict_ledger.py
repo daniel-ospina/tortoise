@@ -861,31 +861,33 @@ def test_the_commands_agents_md_hands_a_lane_are_not_false_blocked(tmp_path, com
 
 
 def test_the_agents_md_shapes_this_arm_still_refuses_are_pinned(tmp_path):
-    """KNOWN-OPEN: four `AGENTS.md` commands are still REFUSED, and that is disclosed.
+    """KNOWN-OPEN: three `AGENTS.md` commands are still REFUSED, and that is disclosed.
 
     Measured at this head (each `EXIT_INVALID`, and exit 1 prints NO uncovered list,
     so a lane recording what it actually ran loses the whole report):
 
         cmd:uv sync --extra embeddings --extra parity
-        cmd:uv lock --check
         cmd:git fetch origin main && git rev-parse origin/main
         cmd:git ls-files --others --exclude-standard
 
-    ⛔ WHY THIS IS PINNED AND NOT FIXED. Every one of them needs the arm to know
-    that a flag or a subcommand TAKES A VALUE (`--extra <name>`, `fetch <remote>`),
-    which is the same mechanism that would let `--anything NOT RUN` skip the token
-    saying the work was not run — it would re-open the fail-opens this very review
-    closed (`-cBODY`, the quoted dashed value, and the wrapper head). Trading a
-    disclosed false block for a silent false PASS is the wrong direction for a
+    ⛔ WHY THESE THREE AND NOT `uv lock --check`. `uv lock --check` was in this list
+    until the second review cycle measured that it needs NO new mechanism at all —
+    only a `_RUNNER_SUBCOMMANDS` entry (`"uv": frozenset({"lock"})`), the arm the
+    file already has for `ruff check`. It is now ACCEPTED, and
+    `cmd:uv lock NOT RUN` is still REFUSED, so nothing was bought by widening.
+
+    The three below DO need the arm to know that a flag or a subcommand TAKES A
+    VALUE (`--extra <name>`, `fetch <remote>`, `ls-files --others`), which is the
+    same mechanism that would let `--anything NOT RUN` skip the token saying the
+    work was not run — it would re-open the fail-opens this review closed. Trading
+    a disclosed false block for a silent false PASS is the wrong direction for a
     gate, so the gap is recorded here and on #11520 instead.
 
-    Flipping any of these to ACCEPTED is the deliberate act: move the entry into
-    `test_the_commands_agents_md_hands_a_lane_are_not_false_blocked` in the same
-    commit, and prove the fail-open half still refuses.
+    ⛔ ASSERT THE REASON, not only the code (second review cycle): an exit-code-only
+    pin would still pass if one of these began refusing for an UNRELATED cause.
     """
     for command in (
         "cmd:uv sync --extra embeddings --extra parity",
-        "cmd:uv lock --check",
         "cmd:git fetch origin main && git rev-parse origin/main",
         "cmd:git ls-files --others --exclude-standard",
     ):
@@ -894,6 +896,11 @@ def test_the_agents_md_shapes_this_arm_still_refuses_are_pinned(tmp_path):
             f"{command!r} is now ACCEPTED — if `_RUNNER_SUBCOMMANDS`/flag-value "
             f"handling was added, move this entry to the false-block test and prove "
             f"`--anything NOT RUN` still refuses.\n{proc.stdout}{proc.stderr}"
+        )
+        assert "argument position" in proc.stderr, (
+            f"{command!r} was refused for a reason OTHER than its argument position "
+            f"— this pin exists to track THAT gap, not to freeze any refusal:\n"
+            f"{proc.stderr}"
         )
 
 
@@ -1591,25 +1598,72 @@ def test_a_cd_that_cannot_succeed_is_refused_not_silently_ignored(tmp_path):
     assert "short-circuits" in proc.stderr, proc.stderr
 
 
-def test_a_source_that_names_no_file_is_refused(tmp_path):
-    """A `source` of a non-existent file short-circuits the `&&` too."""
-    proc = _run_cli(
-        tmp_path,
-        _ledger(
-            [
-                _row(
-                    "A",
-                    evidence=[
-                        REAL_EVIDENCE,
-                        "cmd:source NOT RUN && uv run pytest "
-                        "tests/test_9664_capstone_verdict_ledger.py",
-                    ],
-                )
-            ]
-        ),
-    )
-    assert proc.returncode == cl.EXIT_INVALID, proc.stdout + proc.stderr
-    assert "does not name a file" in proc.stderr, proc.stderr
+def test_set_and_umask_accept_their_own_option_operands(tmp_path):
+    """A canonical bash preamble must not invalidate the ledger.
+
+    ⛔ MEASURED REGRESSION, caught by the second review cycle of this branch. The
+    wrapper-argument grammar first required EVERY `set` operand to start with
+    `-`/`+`, which refused `set -euo pipefail` — the line every `.ci-checks/*.sh`
+    in this repo opens with — and the first fix recognised only a bare `-o`,
+    missing the CLUSTER one word over (`-euo pipefail` is `-e -u -o pipefail`).
+    `umask -S` had the same shape: `man bash` gives `umask [-p] [-S] [mode]`.
+
+    Both are `EXIT_INVALID`, and exit 1 prints no report, so this class of false
+    block costs the whole uncovered list — the harm the arm's own comment ranks as
+    worse than the weaker verdict.
+    """
+    for command in (
+        "cmd:set -euo pipefail && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
+        "cmd:set -o pipefail && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
+        "cmd:set -eu -o pipefail && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
+        "cmd:umask -S && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
+        "cmd:umask -p 022 && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
+    ):
+        proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, command])]))
+        assert proc.returncode == cl.EXIT_CLEAN, (
+            f"{command!r} was REFUSED ({proc.returncode}) — a false block on a "
+            f"legitimate wrapper\n{proc.stdout}{proc.stderr}"
+        )
+
+
+def test_a_quoted_flag_and_value_together_is_not_prose(tmp_path):
+    """`pytest "-k not slow" <tracked path>` is a real record, not a disclaimer.
+
+    ⛔ MEASURED FALSE BLOCK, caught by the second review cycle: the whitespace
+    refusal was taken AT THE TOKEN, so a quoted FLAG+VALUE — a legitimate spelling
+    a lane really types — was refused while the artifact after it was never reached.
+    The refusal is now deferred to the end of the scan, which keeps the fail-open
+    closed (`"-q I did not run this"` still names no artifact and is still refused,
+    pinned by `_UNREAD_TOKEN_BYPASSES`) without catching this shape with it.
+    """
+    for command in (
+        'cmd:uv run pytest "-k not slow" tests/test_9664_capstone_verdict_ledger.py',
+        'cmd:uv run pytest "-q -x" tests/test_9664_capstone_verdict_ledger.py',
+    ):
+        proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, command])]))
+        assert proc.returncode == cl.EXIT_CLEAN, (
+            f"{command!r} was REFUSED ({proc.returncode}) — a quoted flag+value is "
+            f"a legitimate record when an artifact follows it\n{proc.stdout}{proc.stderr}"
+        )
+
+
+def test_a_clustered_short_flag_takes_its_body_from_the_next_token(tmp_path):
+    """`bash -ec "<script>"` is `-e -c <script>`, not `-e` with body `c`.
+
+    ⛔ `man bash` allows the operand-taking flag anywhere the group ENDS, so
+    `_split_flag`'s first-two-characters rule graded the leftover `c`/`uc` as the
+    script body and refused a legitimate record with the nonsense reason
+    "script 'c' is not a command" (second review cycle).
+    """
+    for command in (
+        'cmd:bash -ec "uv run pytest tests/test_9664_capstone_verdict_ledger.py"',
+        'cmd:bash -euc "uv run pytest tests/test_9664_capstone_verdict_ledger.py"',
+    ):
+        proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, command])]))
+        assert proc.returncode == cl.EXIT_CLEAN, (
+            f"{command!r} was REFUSED ({proc.returncode}) — a clustered short flag "
+            f"takes its body from the NEXT token\n{proc.stdout}{proc.stderr}"
+        )
 
 
 #: ⛔ SCRIPT-FLAG and QUOTED-VALUE bypasses, each measured ACCEPTED at the head this
@@ -1638,12 +1692,16 @@ def test_a_token_the_loop_never_reads_cannot_carry_the_verdict(tmp_path, entry):
 
 
 def test_a_deciding_wrapper_argument_is_read_not_skipped(tmp_path):
-    """The wrapper's ARGUMENT is read where the shell's own grammar decides it.
+    """A wrapper's argument is checked where the SHELL's grammar decides it.
 
-    `export NOT RUN` splits into two VALID shell names, so it is indistinguishable
-    from a legitimate export and stays a deployed residual (see
-    `test_the_deployed_wrapper_head_residual_is_pinned`). `source` does not have
-    that ambiguity, so it is closed here.
+    ⛔ `source` was tried here and WITHDRAWN (second review cycle). `is_file()`
+    proves the target EXISTS, not that sourcing it SUCCEEDS: measured,
+    `source tests/test_9664_capstone_verdict_ledger.py` is a real file that bash
+    refuses (exit 2), so the `&&` short-circuits — and grading it tightly is also
+    BOX-DEPENDENT, because `source .venv/bin/activate` resolves on the authoring box
+    and nowhere in a clone (`.venv` is gitignored). A wrapper that cannot be
+    decided by grammar is admitted as a wrapper that cites nothing, and the
+    residual is pinned (`test_the_deployed_wrapper_head_residual_is_pinned`).
     """
     proc = _run_cli(
         tmp_path,
@@ -1653,7 +1711,7 @@ def test_a_deciding_wrapper_argument_is_read_not_skipped(tmp_path):
                     "A",
                     evidence=[
                         REAL_EVIDENCE,
-                        "cmd:source NOT RUN && uv run pytest "
+                        "cmd:set NOT-RUN && uv run pytest "
                         "tests/test_9664_capstone_verdict_ledger.py",
                     ],
                 )
@@ -1664,15 +1722,20 @@ def test_a_deciding_wrapper_argument_is_read_not_skipped(tmp_path):
 
 
 #: ⛔ DEPLOYED RESIDUAL, pinned as OPEN rather than left for a reader to infer as
-#: closed. A decorative PRINTER (and `export`, whose arguments are valid NAMEs) can
-#: carry the disclaimer verbatim, because `echo` may legitimately print any text and
-#: `… && echo PASS` must stay legal. Closing it needs a semantic judgement, not a
-#: grammar — so it is recorded, on #11520 (the open root for `cmd:` disclaimers that
-#: the arm does not grade), and pinned here so a future fix is a DELIBERATE change.
+#: closed. Three wrapper heads cannot be decided without a runtime judgement:
+#: * a decorative PRINTER — `echo` may legitimately print any text, and
+#:   `… && echo PASS` must stay legal;
+#: * `export` — `export NOT RUN` splits into two VALID shell names;
+#: * `source` — see `test_a_deciding_wrapper_argument_is_read_not_skipped`:
+#:   existence does not prove it succeeds, and a strict rule is box-dependent.
+#: Closing any of them needs a semantic judgement, not a grammar — so it is
+#: recorded, on #11520 (the open root for `cmd:` disclaimers the arm does not
+#: grade), and pinned here so a future fix is a DELIBERATE change.
 _DEPLOYED_WRAPPER_HEAD_RESIDUALS = [
     "cmd:echo NOT RUN - I did not run this && uv run pytest "
     "tests/test_9664_capstone_verdict_ledger.py -q",
     "cmd:export NOT RUN && uv run pytest tests/test_9664_capstone_verdict_ledger.py",
+    "cmd:source NOT RUN && uv run pytest tests/test_9664_capstone_verdict_ledger.py",
 ]
 
 
@@ -1683,12 +1746,18 @@ def test_the_deployed_wrapper_head_residual_is_pinned(tmp_path, entry):
     This asserts the CURRENT behaviour so the residual cannot rot into an
     undocumented state. When #11520 is closed, THIS test is the one that flips —
     and flipping it is the deliberate act, not an accident.
+
+    ⛔ `EXIT_CLEAN` exactly (second review cycle): `!= EXIT_INVALID` was satisfied by
+    0, 2, 3 AND 4, so the pin said "not refused" rather than "admitted as a record"
+    and would have passed if the row became UNCOVERED or the mode changed.
     """
     proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, entry])]))
-    assert proc.returncode != cl.EXIT_INVALID, (
-        f"{entry!r} is now REFUSED — #11520 may have been closed; if so, delete this "
-        f"pin and move the entry to `_UNREAD_TOKEN_BYPASSES`.\n{proc.stdout}{proc.stderr}"
+    assert proc.returncode == cl.EXIT_CLEAN, (
+        f"{entry!r} did not reach the admitted-as-a-record arm ({proc.returncode}). "
+        f"If it is now REFUSED, #11520 may have been closed — delete this pin and "
+        f"move the entry to `_UNREAD_TOKEN_BYPASSES`.\n{proc.stdout}{proc.stderr}"
     )
+    assert "CAPSTONE-LEDGER-RESULT: CLEAN" in proc.stdout, proc.stdout
 
 
 def test_a_cmd_target_that_is_not_tracked_is_refused(monkeypatch):
