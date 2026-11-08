@@ -144,18 +144,31 @@ def test_edge_function_parses():
         the .ts bytes as JavaScript. Reproduced in this repo's tree (exit 1),
         which made the guard red on a healthy tree and therefore
         indistinguishable from version noise.
-      * **not a guard on 24.21.0 in ANY location** — measured, and the reason
-        the one-step form cannot be trusted: a CLEAN file exits 1 ("Unexpected
-        strict mode reserved word" at the first `interface`) and so does a
-        BROKEN one (`const oops: number = ;` appended), in the checkout and in
-        a temp dir alike — the location does NOT change the answer on this
-        host, so the flag separates neither good from bad input nor version
-        noise from a real defect. Reproduce:
-        `cp supabase/functions/tenant-provision/index.ts /tmp/x/index.ts &&
-        node --experimental-strip-types --check /tmp/x/index.ts` (exit 1).
-        (An earlier draft of this note claimed a LOCATION-dependent false
-        GREEN on 24.21.0 — that does not reproduce on v24.21.0; recorded here
-        because the repro command is the thing a maintainer will run.)
+      * **it never DISCRIMINATES — it answers on 24.21.0 with a constant per
+        FILE SCOPE, not per input.** Measured, both directions, clean file vs
+        the same file with `const oops: number = ;` appended:
+        - under a `package.json` whose `"type"` is `"commonjs"` → **exit 0 for
+          both**, i.e. it does not parse at all (a silent no-op that would pass
+          a syntax error);
+        - with no `package.json` in scope (this repo's tree, `/var/tmp`, a fresh
+          `$HOME` dir) → **exit 1 for both**, the false RED above.
+        Reproduce both, self-contained — NOTE the scope-sensitive `mktemp`:
+        `d=$(mktemp -d "$HOME/.tmpcheck.XXXXXX")` (a bare `mktemp -d` lands in
+        `/tmp`, which may itself be a commonjs scope — see below — and the
+        repro then silently shows only the second mode); `cp
+        supabase/functions/tenant-provision/index.ts "$d/index.ts"; node
+        --experimental-strip-types --check "$d/index.ts"` → exit **1**, then
+        `printf '{"type":"commonjs"}' > "$d/package.json"` and re-run → exit
+        **0**, broken input included.
+        Either constant is useless to a guard, so the one-step form cannot be
+        trusted on ANY host; that is the conclusion this bullet exists for.
+        (Two earlier drafts of this note got the CAUSE wrong in opposite
+        directions — one called it a location rule, one denied the location
+        difference — and both were reading the same real effect: `/tmp` on a
+        shared box carried `agent-infra`'s `package.json` (`"type":
+        "commonjs"`), so a `/tmp` repro landed in the silent-no-op scope while
+        the checkout landed in the false-RED one. Pinning the SCOPE, not the
+        location, is what makes the claim reproducible.)
       * **false GREEN on 22.10.0, 22.13.0 and 23.1.x** — the same clean file
         exits 0, and still exits 0 after appending `const oops: number = ;`. A
         broken function would have merged green.
@@ -445,7 +458,11 @@ def test_the_log_monitor_counts_only_literals_the_function_emits():
     markers = re.findall(r'^\s+-e "([^"]+)"', monitor, re.MULTILINE)
     assert counted, "the monitor must count at least one literal (a count of nothing is not a guard)"
     assert markers, "the monitor must list at least one single-line marker"
-    src = EDGE_FN.read_text()
+    # CODE, not text: the function DOCUMENTS the counted literal in prose (it names
+    # the monitor's grep in a comment), so a raw `in src` is satisfied with every
+    # emit site deleted (review F2). `_strip_ts_comments` is this module's own
+    # helper for exactly this hazard — the same reason the allowlist sweep uses it.
+    src = _strip_ts_comments(EDGE_FN.read_text())
     for lit in counted + markers:
         assert lit in src, (
             f"the monitor greps for {lit!r} but tenant-provision never logs it — "
@@ -464,7 +481,17 @@ def test_edge_function_logs_the_refusal_on_the_method_gate():
     fire for the class it names ("a client regressed to calling from a page").
     """
     src = EDGE_FN.read_text()
-    gate = src[src.index('req.method !== "POST"') : src.index("authenticateCaller(req)")]
+    # BOUND THE SLICE AT THE METHOD GATE'S OWN BODY. Slicing to
+    # `authenticateCaller(req)` also spans the ORIGIN GATE's log line, so the
+    # assertion stayed GREEN with the method-gate log deleted — the exact
+    # regression its docstring says it prevents (review F1). `res.headers.set(
+    # "Allow", "POST")` is the last statement of the method-gate branch and occurs
+    # exactly once in the file, so this endpoint includes the method-gate log and
+    # excludes the origin gate's.
+    gate = src[
+        src.index('req.method !== "POST"')
+        : src.index('res.headers.set("Allow", "POST")')
+    ]
     assert "refused a browser-origin call" in gate, (
         "the method gate must log the browser-origin refusal (the monitor counts "
         "that literal, and a preflighted browser call never gets past this gate)"
