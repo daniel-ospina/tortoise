@@ -132,8 +132,8 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
    `tortoise/pack_hierarchy.py` (re-running it after this record lands also matches this file and its
    index row — the count here is the pre-diff one, which is the one that decides the claim).
    `plan_hierarchy_edges` → **9 hits, all in the same test file**, plus four references in
-   `tortoise/pack_hierarchy.py` (`:59` the module docstring, `:78` `__all__`, `:353` the definition,
-   `:447` one internal call) — **no caller anywhere else in the tree**, `__main__.py` included (its
+   `tortoise/pack_hierarchy.py` (`:59` the module docstring, `:78` `__all__`, `:365` the definition,
+   `:459` one internal call) — **no caller anywhere else in the tree**, `__main__.py` included (its
    `pack validate` reads `declared_hierarchy`/`hierarchy_diagnostics`, not the planner). The producer is
    a **planner/oracle**; `#11213`'s own body says so and routes instance pairing to `#10999` (now
    **CLOSED**; its remainder is **`#11237`**, OPEN).

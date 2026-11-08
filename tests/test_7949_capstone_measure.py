@@ -10986,7 +10986,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
 
     ⛔ SCOPE, stated so this docstring does not claim more than the arms bind: the record
     carries FURTHER live cites this leg does NOT pin — among them
-    `pack_hierarchy.py:59`/`:78`/`:353`/`:447` and `extractor_v2.py:1154`, each stated once
+    `pack_hierarchy.py:59`/`:78`/`:365`/`:459` and `extractor_v2.py:1154`, each stated once
     or twice and watched by nothing (measured: re-staling any of them leaves this file
     green). They are recorded on #11173, the open root for capstone cite drift, whose
     durable fix is putting RECONCILE in a sweep (`_BUNDLE_DOCS`) rather than growing this
