@@ -48,7 +48,14 @@ double answers ``[]``, and the props arrive through stubbed annotators. No DB,
 no embedder, no reader, no judge.
 
 Run: TORTOISE_TEST_CARVE_OUT=1 uv run pytest \\
-       tests/longmem_eval/test_temporal_leg_non_eviction_receipt_11494.py -q
+       tests/test_temporal_leg_non_eviction_receipt_11494.py -q
+
+⛔ THIS FILE LIVES AT `tests/`, NOT `tests/longmem_eval/` (#10194, owner decision
+2026-10-27). The `eval/` and `longmem_eval/` subtrees are subtracted from every
+GATING leg, so a pin placed there never runs on a PR: a mutant it kills still
+merges green, which is the exact defect #11494 exists to remove. Relocated
+here and registered in `config/ci-surfaces.yml` under `eval:` (the `#10538`
+sibling pins are the precedent).
 """
 from __future__ import annotations
 
@@ -77,6 +84,12 @@ from tools.longmem_eval import retrieve as R
 #: than claimed.
 GEOMETRY = {"tr_top_k": 12, "temporal_leg_limit": 2, "temporal_leg_weight": 1.0,
             "temporal_leg_placement": "tail"}
+
+#: The reader window every slice below indexes, DERIVED from the geometry above
+#: rather than restated as a literal: a `tr_top_k` edit then moves one row, not
+#: seven. A geometry change still reddens loudly (`ceiling == 10`, and the
+#: `base_sessions` fixture self-check), so deriving cannot hide a bad geometry.
+WINDOW = GEOMETRY["tr_top_k"]
 
 CLUSTERED = (
     [{"id": f"a{i}", "session_id": "sA", "idx": 0, "content": "alpha"}
@@ -324,10 +337,11 @@ def test_the_receipt_reports_the_guard_run_and_its_exact_refusals(monkeypatch):
     # every session it started with (the union GREW by nothing and LOST
     # nothing — c1/sC is still visible).
     hit_ids = [h["id"] for h in ret["hits"]]
-    assert "d1" not in hit_ids[:12] and "e1" not in hit_ids[:12], (
-        f"a refused pick reached the reader window: {hit_ids[:12]}")
-    assert "c1" in hit_ids[:12], (
-        f"the session the pick would have cost is still visible: {hit_ids[:12]}")
+    assert "d1" not in hit_ids[:WINDOW] and "e1" not in hit_ids[:WINDOW], (
+        f"a refused pick reached the reader window: {hit_ids[:WINDOW]}")
+    assert "c1" in hit_ids[:WINDOW], (
+        f"the session the pick would have cost is still visible: "
+        f"{hit_ids[:WINDOW]}")
 
 
 # ── (2) the off-switch reaches the ARM, not just the resolver ──
@@ -373,10 +387,10 @@ def test_the_off_switch_reaches_the_arm_end_to_end(monkeypatch):
     # of them. `assert promoted` (any one) would stay green on a regression
     # that promoted d1 and dropped e1 while reading as though both landed.
     off_ids = [h["id"] for h in off_ret["hits"]]
-    promoted = {pid for pid in ("d1", "e1") if pid in off_ids[:12]}
+    promoted = {pid for pid in ("d1", "e1") if pid in off_ids[:WINDOW]}
     assert promoted == {"d1", "e1"}, (
         f"the waived arm must promote BOTH refused picks: {sorted(promoted)} "
-        f"of the window {off_ids[:12]}")
+        f"of the window {off_ids[:WINDOW]}")
 
 
 # ── (3) "the rule is ON" and "the rule RAN" are different facts ──
@@ -444,12 +458,12 @@ def test_the_wired_arm_never_admits_a_session_deleting_pick(monkeypatch):
     evidence and trades real base evidence for it. The guarded arm must keep
     the base set whole and promote nothing.
     """
-    base_sessions = {c["session_id"] for c in CLUSTERED[:12]}
+    base_sessions = {c["session_id"] for c in CLUSTERED[:WINDOW]}
     assert base_sessions == {"sA", "sB", "sC"}, base_sessions
 
     # ── the defect the ruling forbids, measured on the wired path ──
     unguarded_ret = _read(monkeypatch, enved="0")
-    unguarded_ids = [h["id"] for h in unguarded_ret["hits"][:12]]
+    unguarded_ids = [h["id"] for h in unguarded_ret["hits"][:WINDOW]]
     unguarded_sessions = {c["session_id"] for c in CLUSTERED
                           if c["id"] in unguarded_ids}
     lost = base_sessions - unguarded_sessions
@@ -463,7 +477,7 @@ def test_the_wired_arm_never_admits_a_session_deleting_pick(monkeypatch):
 
     # ── the guarded arm keeps every base evidence session ──
     guarded_ret = _read(monkeypatch)
-    guarded_ids = [h["id"] for h in guarded_ret["hits"][:12]]
+    guarded_ids = [h["id"] for h in guarded_ret["hits"][:WINDOW]]
     guarded_sessions = {c["session_id"] for c in CLUSTERED
                         if c["id"] in guarded_ids}
     assert base_sessions <= guarded_sessions, (
