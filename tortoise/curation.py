@@ -938,7 +938,22 @@ def canonical_graph_id(ref: str, graph_rows: Sequence[Mapping[str, Any]] | None)
                 val = row.get(field)
                 if val and str(val).strip() == ref.strip():
                     canon = _canonical_from_row(row)
-                    if canon and canon not in hits:
+                    if canon is None:
+                        # ⛔ A row that MATCHES the ref but cannot be identified does
+                        # NOT contribute a canonical, and it must not be silently
+                        # skipped either: skipping let a SECOND row resolve the same
+                        # ref through its own spelling, so the guard's canonical for a
+                        # ref could diverge from the row `mcp_auth` actually resolves
+                        # it to. The reviewer's measured input: rows
+                        # `{graph_id: b, name: default}`, `{stable_id: default,
+                        # namespace: org_o1_g_, name: a}`, `{stable_id: g_x_g_a,
+                        # namespace: org_o1_g_}` pass the guard for
+                        # (`default`, `org_o1_g_`) — two canonicals `b` and `a` — while
+                        # the write path resolves BOTH refs to the MIDDLE row, i.e.
+                        # an in-place write. Unprovable is a refusal, like everywhere
+                        # else in this function.
+                        return None
+                    if canon not in hits:
                         hits.append(canon)
                     break
         if len(hits) == 1:

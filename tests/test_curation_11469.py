@@ -1988,6 +1988,31 @@ def test_a_self_contradictory_row_set_cannot_prove_two_graphs_distinct():
     C.assert_distinct_graphs("na", "nb", graph_rows=ok)
 
 
+def test_a_matching_row_with_no_establishable_canonical_is_a_refusal_not_a_skip():
+    """A ref that matches a row whose canonical cannot be established used to be
+    SKIPPED (`if canon and canon not in hits`), so a *second* row resolved the same
+    ref through its own spelling and the guard's canonical for that ref could diverge
+    from the row `mcp_auth` resolves it to. Measured on this exact row set: the guard
+    passed with canonicals `b` != `a` while the write path resolved BOTH refs to the
+    MIDDLE row — an in-place write behind a guard that said the graphs were distinct.
+
+    Reverified here end to end rather than asserted: the middle row matches
+    `stable_id == "default"` and canonicalises through a namespace with an EMPTY tail
+    (`org_o1_g_`), which is not a spelling of anything."""
+    rows = [
+        {"graph_id": "b", "name": "default"},
+        {"stable_id": "default", "namespace": "org_o1_g_", "name": "a"},
+        {"stable_id": "g_x_g_a", "namespace": "org_o1_g_"},
+    ]
+    # Precondition the defect rests on: the middle row MATCHES the ref…
+    assert any((r.get("stable_id") or "").strip() == "default" for r in rows)
+    # …and cannot be identified, so it must refuse instead of being skipped.
+    assert C._canonical_from_row(rows[1]) is None
+    assert C.canonical_graph_id("default", rows) is None
+    with pytest.raises(C.CurationRefused, match=r"cannot resolve|cannot prove"):
+        C.assert_distinct_graphs("default", "org_o1_g_", graph_rows=rows)
+
+
 def test_the_wire_carries_the_sources_section_not_only_points(tmp_path):
     """Round-27: the round-5 test could not fail for its stated reason — its writer
     echoed every key back and ignored `sections`. This one drives the REAL
