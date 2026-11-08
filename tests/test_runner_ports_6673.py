@@ -464,20 +464,21 @@ def test_provision_logging_never_corrupts_the_captured_port():
 # its *consumer* on the dead literal makes the probe pass and the client dial
 # nothing, which is worse than not migrating at all. Entries are (path, the
 # literal substring), each a shape fixture that never dials.
+#
+# ⛔ An entry only means anything while its file is in the POPULATION
+# (`_imports_the_seam`). When a file leaves the population its entry exempts a
+# literal in a file this guard never reads — dead weight that looks like a
+# live remedy — and NOTHING reds either way, because `test (e)` is green with
+# the entry and green without it. `test_every_seam_exemption_is_consulted` is
+# the instrument: add an entry for an unselected file and it reds.
+#
+# `tests/test_cache_eviction_evictor_pins.py` was retired on #11437. Its row
+# existed because the SUBSTRING population charged it with `docker_port=lambda:
+# 6379` on a comment; the import-edge population does not select it at all, so
+# the row could never be consulted again. The mechanism its reason described is
+# pinned instead by
+# `test_the_mocked_seam_is_excluded_by_the_population_predicate`.
 SEAM_FILES_WITH_ALLOWED_LITERALS = {
-    "tests/test_cache_eviction_evictor_pins.py": [
-        # a MOCKED seam, and this reason states the mechanism that actually
-        # neutralises it: the probe body this file `exec`s DOES carry
-        # `from tests import _live_utils` — binding the REAL helper — and the
-        # name is rebound to a `SimpleNamespace` stub before `lane()` is ever
-        # called, so the stub's `docker_port` is the only thing read and nothing
-        # dials. (The text this guard selects on is a COMMENT — the log line
-        # explaining that stubbing — #11085's fixture.) Declared rather than
-        # migrated because there is no live site here to migrate: only a
-        # fixture's deterministic stub value. Pinned by
-        # `test_the_mocked_seam_declaration_describes_the_import_it_really_does`.
-        "docker_port=lambda: 6379",
-    ],
     "tests/test_search_engine_gaps.py": [
         # a MOCKED non-local host (the probe is stubbed)
         "docker://:falkordb@test-host:6379/tortoise_test",
@@ -642,24 +643,52 @@ def _imports_the_seam(path: Path) -> bool:
       them. Both are clean today, which is why this is a widening that reds
       nothing.
 
-    ⛔ Scope still stops at the forms above. A `from tests._live_utils import …`
-    submodule import was never in scope and is not added: doing so would put 18
-    further files under a guard that has never judged them, inside a fix whose
-    reason is a false positive (#11437).
+    ⛔ The false positive above is not historical, it is the reason this
+    predicate exists — and it redded `test (e)` until #11485 (`c60b9153ad0`)
+    declared the file in `SEAM_FILES_WITH_ALLOWED_LITERALS`. That exemption is
+    now DEAD: this predicate is what excludes the file, so no row of the
+    allow-list can ever be consulted for it. Retiring the row would have been
+    invisible — `test (e)` is green with the row and green without it — so
+    `test_every_seam_exemption_is_consulted` is the instrument that reds on any
+    exemption no population file can reach. A recorded remedy outliving its
+    reason with nothing able to see it is the exact class this guard refuses,
+    one level up.
+
+    ⛔ SCOPE — this is the NARROW half of #11516, which stays OPEN. #11516
+    measured the same defect (66 substring-selected / 83 ast-selected) and
+    prescribes the full switch PLUS triage of the three sites an AST switch
+    newly reds. This predicate deliberately stops at `Import` and at an
+    `ImportFrom` that NAMES `_live_utils`: a `from tests._live_utils import …`
+    SUBMODULE import remains out of scope, so those **16** files are still
+    unchecked — #11516's primary false PASS. Adding them here would put 16
+    files under a guard that has never judged them and red the three sites
+    #11516 names, inside a PR whose reason is a false positive. What this
+    closes is the false-POSITIVE half and 2 of #11516's 18 false negatives;
+    the other 16 belong to #11516, and nothing in this file should be read as
+    though #11516 were done.
 
     ⛔ The name test is a NECESSARY CONDITION, not a verdict. An `import`
     statement must spell `_live_utils` in the source, so a file that never
     mentions the name cannot import it — which makes the string test a sound
-    cheap pre-filter in front of the parse (91 of `tests/`'s 1437 files instead
+    cheap pre-filter in front of the parse (91 of `tests/`'s 1440 files instead
     of all of them: the parse-everything draft cost 12.2 s and surfaced
     `SyntaxWarning` noise from unrelated files). The DECISION is still the
     `Import`/`ImportFrom` node below — the pre-filter can only ever skip a
     file, never accuse one.
+
+    A candidate that names the seam and then fails to PARSE answers True
+    (fail-closed, #11516's own prescribed posture): a file the guard could not
+    read must not go quiet, and `_port_literals_in_code` then reds loudly on it
+    rather than the guard silently skipping it.
     """
     src = path.read_text()
     if "_live_utils" not in src:
         return False
-    for node in ast.walk(ast.parse(src)):
+    try:
+        tree = ast.parse(src)
+    except SyntaxError:
+        return True
+    for node in ast.walk(tree):
         if isinstance(node, ast.Import) and any(
                 a.name.split(".")[-1] == "_live_utils" for a in node.names):
             return True
@@ -675,7 +704,9 @@ def test_a_comment_that_names_the_seam_is_not_a_seam_file(tmp_path):
     The false positive this pins was measured, not hypothesised: a comment
     quoting `from tests import _live_utils` put a file that only STUBS the seam
     into the scan, and the stub's own `docker_port=lambda: 6379` was then
-    reported as a dial site — redding `test (e)` on `main` itself.
+    reported as a dial site. That red is also why #11485 landed an exemption
+    for the real instance of it — an exemption this predicate makes dead, which
+    `test_every_seam_exemption_is_consulted` now reds on.
     """
     mention = tmp_path / "test_mentions_only.py"
     mention.write_text(
@@ -703,6 +734,44 @@ def test_a_comment_that_names_the_seam_is_not_a_seam_file(tmp_path):
         )
 
 
+def test_a_seam_file_that_cannot_be_parsed_stays_in_the_population(tmp_path):
+    """#11516's fail-closed posture, now that the predicate PARSES candidates.
+
+    The old substring population never parsed, so it could not go quiet on a
+    file it failed to read. The import-edge population does parse — and
+    `ast.parse` raises on syntax this interpreter does not know (a
+    py3.14-only form, a template, a truncated file). A guard that skipped what
+    it could not read would be a false PASS, so an unparseable candidate
+    answers True and `_port_literals_in_code` then reds loudly on it.
+    """
+    broken = tmp_path / "test_unparseable.py"
+    broken.write_text("import _live_utils\ndef oops(:\n", encoding="utf-8")
+    assert _imports_the_seam(broken), (
+        "a file that names the seam but cannot be parsed must stay in the "
+        "population — skipping it turns an unreadable file into a green guard")
+
+    unrelated = tmp_path / "test_unrelated_broken.py"
+    unrelated.write_text("def oops(:\n", encoding="utf-8")
+    assert not _imports_the_seam(unrelated), (
+        "the pre-filter still decides first: a file that never mentions the "
+        "seam is skipped without a parse, so unrelated syntax cannot red the guard")
+
+
+def _seam_population() -> set[str]:
+    """The files `test (e)` examines, as repo-relative posix paths.
+
+    ONE definition, used by the guard and by
+    `test_every_seam_exemption_is_consulted`: an allow-list row means nothing
+    unless its file is in HERE, so the two must never compute the population
+    differently.
+    """
+    return {
+        p.relative_to(ROOT).as_posix()
+        for p in (ROOT / "tests").rglob("*.py")
+        if _imports_the_seam(p)
+    }
+
+
 def test_no_migrated_file_still_hardcodes_a_lane_port():
     """A file that reads the #6673 seam must not ALSO hardcode a docker-lane
     port wherever the code can use it.
@@ -711,10 +780,7 @@ def test_no_migrated_file_still_hardcodes_a_lane_port():
     *consumer* on the dead literal makes the probe pass and the client dial
     nothing — the failure mode this change exists to remove, one level up.
     """
-    seam_files = sorted(
-        p for p in (ROOT / "tests").rglob("*.py")
-        if _imports_the_seam(p)
-    )
+    seam_files = sorted(ROOT / rel for rel in _seam_population())
     assert seam_files, "the seam must be imported somewhere"
 
     offenders: dict[str, list[str]] = {}
@@ -737,6 +803,60 @@ def test_no_migrated_file_still_hardcodes_a_lane_port():
         + "\n".join(f"  {k}:\n    " + "\n    ".join(v)
                     for k, v in sorted(offenders.items()))
     )
+
+
+def _exemptions_no_file_can_consult(
+        allow: dict[str, list[str]], population: set[str]) -> list[str]:
+    """Allow-list keys that are not in `population` (#11437 review).
+
+    An exemption is consulted only when `test (e)` selected the file, so a key
+    outside the population exempts a literal in a file the guard never reads.
+    Every ecosystem that ships a suppression store has this instrument — `ruff`
+    RUF100 (`unused-noqa`), ESLint `--report-unused-disable-directives`, and
+    Rust's move from `#[allow]` to `#[expect]` with
+    `unfulfilled_lint_expectations`, which makes an unearned suppression a
+    diagnostic at every compile (external rung: `web_search` `sonar` +
+    `docs.astral.sh/ruff/rules/unused-noqa`, `doc.rust-lang.org/reference/`
+    `attributes/diagnostics.html`). The reason all three exist is the one that
+    bites here: by READING, a dead suppression is indistinguishable from one
+    that is silently disabling the guard.
+    """
+    return sorted(set(allow) - population)
+
+
+def test_every_seam_exemption_is_consulted():
+    """#11437 review — a dead exemption is invisible, so it gets an instrument.
+
+    `SEAM_FILES_WITH_ALLOWED_LITERALS` docs an entry as "declare it with its
+    reason". A row whose file has left the population declares nothing: the
+    guard does not select the file, so the row can never be read again, and
+    `test (e)` is GREEN with the row and GREEN without it. Measured at this
+    head before the retirement: 8 rows, 7 live, and
+    `tests/test_cache_eviction_evictor_pins.py` the one dead — pinned as a
+    REASON by `test_the_mocked_seam_declaration_describes_the_import_it_really_does`,
+    never as a consultation, so both tests that mentioned it were green.
+
+    The executor is the point. The first two assertions fail the PREDICATE in
+    both directions, so this test cannot be satisfied by "nothing ever reds":
+    without them, deleting the entries would be a fix and adding a dead one
+    would stay green.
+    """
+    live = {"tests/test_live_seam.py"}
+    allow = {"tests/test_live_seam.py": ["6379"]}
+    assert _exemptions_no_file_can_consult(allow, live) == [], (
+        "a row whose file IS in the population is consulted — it must not red")
+    assert _exemptions_no_file_can_consult(allow, set()) == [
+        "tests/test_live_seam.py"], (
+        "a row whose file no population contains is dead and MUST red — "
+        "otherwise this instrument is vacuous")
+
+    dead = _exemptions_no_file_can_consult(
+        SEAM_FILES_WITH_ALLOWED_LITERALS, _seam_population())
+    assert not dead, (
+        "these exemptions are DEAD — no file `test (e)` selects, so nothing "
+        "can consult them, and the guard is green either way. Delete the row "
+        "(state its measured reason in `_imports_the_seam`'s docstring) or "
+        "re-derive why its file is still selected:\n  " + "\n  ".join(dead))
 
 
 def test_a_quoted_program_is_not_a_dial_site(tmp_path):
@@ -771,53 +891,65 @@ def test_a_quoted_program_is_not_a_dial_site(tmp_path):
         f"the same literal as a REAL constant must still red, got {hits}")
 
 
-def test_the_mocked_seam_declaration_describes_the_import_it_really_does():
-    """#11518 review — an exemption's REASON is what disables a guard.
+def test_the_mocked_seam_is_excluded_by_the_population_predicate():
+    """#11437 review — the exemption is RETIRED because the selector excludes it.
 
-    The reason is the sentence the next auditor trusts, so it may not assert a
-    fact the file contradicts. This entry's first draft read *"the file never
-    imports `_live_utils` for real … the real helper is deliberately absent"*,
-    and both clauses are false: `tests/test_cache_eviction_evictor_pins.py`
-    compiles the live fixture's own body (`ImportFrom` nodes included) and
-    `exec`s it, which BINDS the real helper, then rebinds the name to a stub
-    (`:1218-1221`). Nothing dials either way — the harm is the claim, because a
-    reason that overstates its own facts is how a REAL dial site is later
-    waved through by a reader who believed it.
+    #10951 review established the rule this test now keeps in its retired form:
+    an exemption's REASON is what disables a guard, so the reason may not assert
+    a fact the file contradicts. Here the row itself is gone, so the fact that
+    has to hold is the one that made it redundant — `tests/
+    test_cache_eviction_evictor_pins.py` carries a `docker_port=lambda: 6379`
+    stub AND is not selected, so no row can be consulted for it and keeping one
+    would exempt a literal in a file the guard never reads.
+
+    Both halves are re-derived rather than trusted, and so is the mechanism the
+    old reason described: the live fixture imports the real seam, the pins file
+    `exec`s a module carrying that import (BINDING the real helper) and rebinds
+    the name to a stub afterwards, which is why nothing in it can dial. If any
+    of that changes — or the file comes back into the population — this reds and
+    the decision has to be re-derived instead of inherited.
     """
     rel = "tests/test_cache_eviction_evictor_pins.py"
-    # The REASON lives in the entry's comment block (the dict value is only the
-    # literal), so the reason is read off this file's OWN source between the key
-    # and its literal — asserting on the dict value would pin the literal and
-    # read nothing of the prose, which is exactly how the false claim survived.
-    source = Path(__file__).read_text(encoding="utf-8")
-    key_at = source.index(f'"{rel}": [')
-    reason = source[key_at:source.index("docker_port=lambda: 6379", key_at)]
+    pins = (ROOT / rel).read_text(encoding="utf-8")
 
-    # The FACT the reason must describe, re-derived here rather than trusted:
-    # the live fixture imports the real seam (`test_cache_eviction_evictor.py:30`),
-    # the pins file `exec`s a module carrying that import, and the stub is
-    # installed AFTER that exec and BEFORE `lane()` is driven.
+    # The reason the row existed at all: the literal IS there.
+    assert "docker_port=lambda: 6379" in pins, (
+        f"{rel} no longer carries the stub literal — re-derive whether this "
+        "decision is still about anything before deleting this test")
+
+    # …and it is inert, for the reason the old row stated.
     live = (ROOT / "tests/test_cache_eviction_evictor.py").read_text(encoding="utf-8")
     assert "from tests import _live_utils" in live, (
         "the mocked-seam reason rests on the fixture importing the real helper — "
         "if it stops importing it, re-derive the reason instead of this pin")
-    pins = (ROOT / rel).read_text(encoding="utf-8")
     exec_at = pins.index("exec(compile(probe_module")
     rebind_at = pins.index('namespace["_live_utils"] = live_utils_stub')
     assert exec_at < rebind_at, (
         f"{rel}: the stub must be installed AFTER the exec that binds the real "
         "helper, or the fixture would dial a live service")
 
-    for false_claim in ("never imports", "deliberately absent"):
-        assert false_claim not in reason, (
-            f"{rel}'s exemption claims {false_claim!r}, which the file contradicts: "
-            "its exec'd probe body carries `from tests import _live_utils` (binding "
-            "the REAL helper) and the stub is installed afterwards. Say that — the "
-            "reason is what the next auditor reads before trusting this literal.")
-    assert "rebound" in reason, (
-        f"{rel}'s exemption must name the mechanism that makes the literal inert "
-        f"(the stub is rebound over the real helper before any call), not just "
-        f"assert that it is: measured reason: {reason!r}")
+    # …and it is not SELECTED, which is what makes an exemption unnecessary
+    # rather than merely harmless. A row for this file can never be consulted.
+    assert rel not in _seam_population(), (
+        f"{rel} is back in the population — the guard now reads it, so the "
+        "literal needs a declared exemption (with its reason) or a migration")
+    assert rel not in SEAM_FILES_WITH_ALLOWED_LITERALS, (
+        f"{rel}'s exemption was retired on #11437 because the population "
+        "excludes the file; a row here is dead weight that reads as a live "
+        "remedy")
+
+    # The mentions that fooled the substring test are comments and one string
+    # key — never an `import` node — so the exclusion cannot have come from a
+    # rewritten file that now really imports the helper.
+    mentions = [ln.strip() for ln in pins.splitlines() if "_live_utils" in ln]
+    assert len(mentions) == 3, (
+        f"{rel} mentions `_live_utils` on {len(mentions)} lines, not 3 — the "
+        "exclusion argument is about two comments and the stub key; a fourth "
+        "mention may be an import, which would put the file back in scope")
+    assert all(ln.startswith("#") or 'namespace["_live_utils"]' in ln
+               for ln in mentions), (
+        f"{rel} has a `_live_utils` mention that is neither a comment nor the "
+        f"stub key: {mentions}")
 
 
 def test_action_inputs_are_declared():
