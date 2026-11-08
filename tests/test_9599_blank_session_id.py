@@ -200,7 +200,9 @@ def test_the_fold_gate_and_the_door_gate_are_one_rule():
       * BLANK is the shared rule — both layers refuse it;
       * a PADDED-but-real id and an ordinary id are admitted by both;
       * ABSENT (``None``/``""``) is the ONE intentional asymmetry — a DOOR
-        mints for it, a FOLD has nothing to mint with and refuses it; and
+        mints for it, a FOLD has nothing to mint with and refuses it;
+      * the RESERVED demo/sample namespace (#8290) is the OTHER intentional
+        asymmetry — the DOOR refuses it, the FOLD must admit it (see below); and
       * a non-``str`` is refused by both, with the door naming the SHAPE (the
         fold has no caller and says nothing).
 
@@ -231,6 +233,24 @@ def test_the_fold_gate_and_the_door_gate_are_one_rule():
     # refused by the fold's `_writable_id` and is NOT the blank rule.
     assert _writable_container_id("a\x00b") is False
     assert ids_mod.session_id_refusal("a\x00b") is None
+
+    # ⚠️ #8290 — the SECOND intentional asymmetry, pinned in BOTH directions so
+    # neither half can be "fixed" silently:
+    #   * the DOOR refuses the reserved demo namespace (a capture filed there
+    #     would be invisible on every session read surface), and
+    #   * the FOLD must ADMIT it, because a replay has to reproduce every row an
+    #     older tree legitimately wrote — refusing it there LOSES those rows
+    #     (#9594 / #9553 govern the replay half).
+    # Widening the fold, or narrowing the door, reds on the next two lines.
+    reserved = "session_demo_x"
+    assert ids_mod.session_id_refusal(reserved) is not None, (
+        "the door must refuse the RESERVED demo namespace (#8290) — a capture "
+        "filed under it would be written and then invisible on every read")
+    assert "RESERVED demo/sample namespace" in ids_mod.session_id_refusal(reserved)
+    assert _writable_container_id(reserved) is True, (
+        "the REPLAY fold must ADMIT a reserved-prefix id: an older tree "
+        "legitimately wrote them, and refusing the fold loses those rows "
+        "(#9594/#9553). The reservation is door-only BY DECISION.")
 
 
 @pytest.mark.parametrize("value", (0, False, 123, b"  "))

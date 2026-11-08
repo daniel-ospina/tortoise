@@ -113,8 +113,18 @@ def session_id_refusal(session_id: object) -> str | None:
       This branch extends that predicate to the ``SessionRecorded`` carrier
       rather than stacking a second predicate in front of it.
 
-    The two are pinned equal on every non-empty string by
-    ``tests/test_9599_blank_session_id.py::test_the_fold_gate_and_the_door_gate_are_one_rule``.
+    The two halves agree on ABSENT / BLANK / non-``str`` — pinned class by
+    class in
+    ``tests/test_9599_blank_session_id.py::test_the_fold_gate_and_the_door_gate_are_one_rule``
+    — and they DELIBERATELY disagree on the RESERVED demo/sample namespace
+    (#8290), which this predicate now refuses and the fold must still ADMIT.
+    ⛔ That asymmetry is not drift to be "fixed": the reservation belongs on the
+    LIVE WRITE path, where a caller can be told and can re-file under a minted
+    id, while a REPLAY must accept every id an older tree legitimately wrote or
+    it loses those rows (#9594 / #9553 govern the replay half). Widening
+    ``_writable_container_id`` to the reserved class is therefore a data-loss
+    change, and the same test asserts BOTH halves of the asymmetry so either
+    direction reds there instead of being read as prose.
 
     ABSENT (``None`` or ``""``) is not a refusal — the host named no session,
     and every door mints one (``mint_session_id``). That is today's contract
