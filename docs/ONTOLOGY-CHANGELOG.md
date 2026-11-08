@@ -33,6 +33,31 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 
 ---
 
+> **Changelog v3.32 (2026-11-08 — issue #11083 — `ownedBy`'s range opens, and `produces` becomes a Layer-2 meaning):**
+>
+> **Owner approval of the exact changes** is on record on #11083 (comment 6667121779, 2026-11-05, "Approval
+> record for the ontology edits"), with the provenance corrections relayed in comments 6714848519 and
+> 6715090436 (2026-11-08). The change was landed by PR #11543; this entry records it, and bumps
+> **v3.31 → v3.32** because a model change moves the version.
+>
+> **Two model statements move.** (1) §3.6's `ownedBy` range widens from `Entity → Subject` to
+> `Entity → (Subject | Object)`. Ruling (c) makes the target deliberately open so one predicate covers both
+> *the fund owns the investment* and *the investment is a stake in the fund*; the sense is then carried
+> per row by a `direction` on the declared relation, never inferred from the endpoints. (2) §8 gains
+> **`produces` as a Layer-2 meaning** with mechanism `IMPL` and direction `<-` (target → source):
+> production is not causation, and the pre-existing mapping of `produces` onto `causes` both changed the
+> meaning and inverted the direction (the shipped declaration is `asset → program`, i.e. product →
+> producer). `produces` therefore **leaves** `SEMANTICS_TRANSITION` and stops being a "retired spelling" —
+> §3.9's declaredness paragraph is corrected accordingly, because it still listed `produces` as retired and
+> would have told the next reader that `semantics="produces"` must warn. It does not.
+>
+> **`funds` is NOT part of this change.** The 2026-11-05 note promoted both `funds` and `produces`; #7848's
+> correction of 2026-11-08 **withdrew `funds`** on #2766's *"does the machine have to ACT on it?"* test —
+> `funds` is a Layer-3 label, it stays a key of `SEMANTICS_TRANSITION`, and the durable `funds` relation
+> rides an existing meaning with `funds` as its predicate. Do not promote it on the strength of this entry.
+
+---
+
 > **Build record for v3.31 (2026-11-02 — #9974 R1 / PR #10524 — `ONTOLOGY.md` is NOT modified; two texts are PARKED awaiting the owner's approval):**
 >
 > **What the code now does (build record, no model change).** #9974 R1 (PR #10524) moved the status fold so a

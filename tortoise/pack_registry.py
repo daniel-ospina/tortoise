@@ -20,10 +20,19 @@ from typing import Any, TypeGuard
 
 import yaml
 
-# The model's four-value direction vocabulary — the ONE home (#11083 reads it to
-# accept a relation row's declared per-edge `direction`). `live.py` is the LEAF
-# module (no imports of its own), so this costs the extraction path nothing.
-from .live import DIRECTION_VALUES as _DIRECTION_VALUES
+# The direction vocabulary — the ONE home (#11083 reads it to accept a relation
+# row's declared per-edge `direction`). `live.py` is the LEAF module (no imports
+# of its own), so this costs the extraction path nothing.
+#
+# ⛔ `canonical_direction` is imported too, and `effective_direction` MUST resolve
+# a declared token through it rather than testing membership itself: the write
+# path accepts SIX tokens (`ACCEPTED_DIRECTION_VALUES` = the four model values +
+# the two legacy aliases), so a reader that tested against `DIRECTION_VALUES`
+# alone warned-and-ignored `unidirectional` while `create_operator` honoured it
+# as `->` — the census and the writer disagreeing about one row, which is the
+# divergence `live.py`'s one-normalizer invariant exists to prevent (#7852).
+from .live import ACCEPTED_DIRECTION_VALUES as _ACCEPTED_DIRECTION_VALUES
+from .live import canonical_direction
 from .source_credibility import SOURCE_KIND_DEFAULTS
 from .status_folds import (
     StatusFoldIndex,
@@ -495,9 +504,15 @@ SEMANTICS_TRANSITION: dict[str, str] = {
 # to `SEMANTICS_VALUES` or `CORE_PREDICATES` (and to §8's table, which the
 # guard pins) — not a quiet addition here.
 #
-# A RETIRED spelling (`opposes` / `produces` / `holds` / `funds`, see
-# `SEMANTICS_TRANSITION`) is deliberately ABSENT: it must keep warning so the
-# caller learns the canonical word.
+# A RETIRED spelling (`opposes` / `holds` / `funds`, see `SEMANTICS_TRANSITION`)
+# is deliberately ABSENT: it must keep warning so the caller learns the canonical
+# word.
+#
+# ⛔ NOT `produces`. `produces` LEFT `SEMANTICS_TRANSITION` when it became a
+# Layer-2 meaning (#11083; `SEMANTICS_VALUES` above carries the reasoning), so it
+# is in this derived union via `SEMANTICS_VALUES` and is DECLARED — it does not
+# warn. A comment that still listed it as retired survived the change and told
+# the next reader the opposite of what the code does.
 #
 # Declaredness is not shape. §8's reification table governs which edges ought
 # to carry an operator; a `label` outside that shape is odd but still
@@ -650,12 +665,23 @@ def effective_direction(rel: dict) -> str | None:
 
     Two inputs, and the order between them is the whole point:
 
-    1. the row's own ``direction`` when it is a valid model token
-       (:data:`tortoise.live.DIRECTION_VALUES`). This is ruling (c)'s carrier:
-       ``ownedBy``'s target is deliberately open (Subject **or** Object), so the
-       predicate alone can no longer say whether ``investment --ownedBy--> fund``
-       means *the fund owns the investment* (`->`) or *the investment is a stake
-       in it* (`<-`). The per-edge direction carries that sense.
+    1. the row's own ``direction``, resolved through
+       :func:`tortoise.live.canonical_direction` — the ONE normalizer the write
+       path also uses, so the six tokens a write accepts (the four model values
+       plus the legacy ``unidirectional``/``bidirectional`` aliases) are ALL
+       honoured here and normalized to the model's four. This is ruling (c)'s
+       carrier: ``ownedBy``'s target is deliberately open (Subject **or**
+       Object), so the predicate alone can no longer say whether
+       ``investment --ownedBy--> fund`` means *the fund owns the investment*
+       (`->`) or *the investment is a stake in it* (`<-`).
+
+       ⛔ A membership test against ``live.DIRECTION_VALUES`` here would be a
+       RE-SPELLING of the vocabulary at a call site — which ``live.py`` forbids
+       — and it made the census and the writer disagree: a row declaring
+       ``direction: unidirectional`` is warned-and-ignored here (so the meaning's
+       ``<-`` is reported) while ``create_operator`` honours it as ``->``
+       (``is_default_direction("unidirectional") is False`` → basis ``explicit``).
+       One wrong sign, which is exactly the hazard the load-time warn exists for.
     2. otherwise the Layer-2 meaning's direction through the SAME chain the write
        path uses: ``SEMANTICS_TRANSITION`` then ``SEMANTICS_DIRECTIONS``. A
        retired spelling is resolved here exactly as `sdk.create_operator`
@@ -673,8 +699,9 @@ def effective_direction(rel: dict) -> str | None:
     per-row override that function has no input for.
     """
     declared = rel.get("direction")
-    if isinstance(declared, str) and declared in _DIRECTION_VALUES:
-        return declared
+    canonical = canonical_direction(declared)
+    if canonical is not None:
+        return canonical
     semantics = rel.get("semantics")
     if not isinstance(semantics, str) or not semantics:
         return None
@@ -1857,18 +1884,21 @@ class PackRegistry:
                 # (`ownedBy`'s target is open, so the direction says which end
                 # owns which). A typo must NOT read as "no direction" — that is
                 # a plausible wrong sign in the census — so it is named.
+                # ⛔ The test is `canonical_direction`, not membership in the four
+                # model values: the write path also accepts the two legacy
+                # aliases, and warning those off as "IGNORED" would be false
+                # (the writer honours them). Only junk returns `None` here.
                 if "direction" in rel:
                     direction_value = rel.get("direction")
-                    if not isinstance(direction_value, str) \
-                            or direction_value not in _DIRECTION_VALUES:
+                    if canonical_direction(direction_value) is None:
                         _warn_packs_once(
                             ("relation-direction-invalid", ns, pred),
-                            "relation '%s': 'direction' %r is not one of the "
-                            "model's four values (%s) — it will be IGNORED and "
+                            "relation '%s': 'direction' %r is not a recognised "
+                            "direction token (%s) — it will be IGNORED and "
                             "the direction read from the declared semantics "
                             "instead (#11083)",
                             pred, direction_value,
-                            ", ".join(sorted(_DIRECTION_VALUES)),
+                            ", ".join(sorted(_ACCEPTED_DIRECTION_VALUES)),
                         )
 
                 # `declarationOnlyReason`: `declarationOnly: true` is an AUTHOR

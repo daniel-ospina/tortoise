@@ -27,7 +27,11 @@ packs, and it is why the pipeline section cannot silently look like a failure.
 
 The relation IS persisted and the two Objects ARE connected — through an
 operator Point. A census that asks only "written?" reports a bridge as an edge
-and hides that the Object→Object class is 2 of 36.
+and hides that the Object→Object class is a small minority of the declared
+population. ⛔ The count is NOT restated here: `written_counts` in the artifact is
+where it lives, and a header that quotes its own metric drifts the moment a
+declaration moves (this one did — a header still saying `2 of 36` outlived the
+population by two revisions).
 
 TWO SURFACES, ONE POPULATION
 ----------------------------
@@ -46,9 +50,12 @@ WHAT THIS TOOL DOES NOT DO
 * It does not report `producedBy` + the `Program → Asset` `hasPart` path as a
   duplicate. The owner ruled (2026-11-05) that production and containment are
   different assertions and both are written.
-* `--write-probe` mints ONE endpoint pair per declared row on a THROWAWAY graph
-  and deletes them; it is not a corpus measurement and it never touches a
-  production graph.
+* `--write-probe` mints endpoint pairs on a THROWAWAY graph and deletes them. It
+  is not a corpus measurement, and it does NOT reach a real graph unless you name
+  one with `--uri`: `TORTOISE_DB_URI` is deliberately NOT read (that variable is
+  this repo's documented graph setting and in the fleet it routinely names the
+  SHARED docker container — an implicit read is a write into an unspecified
+  target with no confirmation, the residue class #5084 exists to stop).
 
 USAGE
 -----
@@ -56,15 +63,15 @@ USAGE
     uv run python tools/pack_relation_census.py --write-probe --json
     uv run python tools/pack_relation_census.py --check           # artifact == re-derivation
 
-`--write-probe` needs a reachable graph (`TORTOISE_DB_URI`, or an embedded
-store). The committed artifact at `docs/evidence/11083/pack-relation-census.json`
+`--write-probe` needs a graph, and it MINTS ONE unless `--uri` names a real one
+(embedded tempfile is the default; `TORTOISE_DB_URI` is ignored on purpose). The
+committed artifact at `docs/evidence/11083/pack-relation-census.json`
 is produced with it; the hermetic half re-derives without one.
 """
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from collections import Counter
 from pathlib import Path
@@ -78,6 +85,7 @@ from tortoise.pack_registry import (  # noqa: E402
     RELATION_DECLARATION_ONLY,
     RELATION_PREDICATE_NOT_IN_ALLOWLIST,
     RELATION_WRITABLE,
+    SEMANTICS_DIRECTIONS,
     PackRegistry,
     effective_direction,
     relation_write_verdict,
@@ -208,10 +216,14 @@ def _hierarchy_rows(packs_dir: Path) -> tuple[dict[str, list[dict]], list[dict]]
                 if entry.write_path == "structural" else None
             ),
             "declared_direction": None,
-            # A declared hierarchy path carries no per-edge direction and no
-            # meaning: `hasPart` is `<->`, read from the table, and the census
-            # says so rather than leaving a blank a reader could fill in.
-            "effective_direction": "hasPart" and "<->" if entry.predicate == "hasPart" else None,
+            # A declared hierarchy path carries no per-edge direction, so the sense
+            # is the MEANING's, read from the one table that holds it. ⛔ Not a
+            # literal: the layer description above says this column is the
+            # resolver's answer, and a hard-coded `"<->"` here would silently
+            # disagree with `pack_registry.effective_direction` the moment the
+            # table moved (nothing reds on that — H1 compares two derivations that
+            # would both have hard-coded it).
+            "effective_direction": SEMANTICS_DIRECTIONS.get(entry.predicate),
             "declaration_only": False,
             "declaration_only_reason": None,
             "path_disagreement": False,
@@ -288,7 +300,8 @@ def _dangling(packs_dir: Path, all_rows: list[dict]) -> list[dict]:
 
 
 def build_census(packs_dir: Path | str = REPO_ROOT / "packs", *,
-                 write_probe: bool = False) -> dict:
+                 write_probe: bool = False,
+                 probe_uri: str | None = None) -> dict:
     packs_dir = Path(packs_dir)
     reg = _load_registry(packs_dir)
     relations_by_pack: dict[str, list[dict]] = {}
@@ -315,7 +328,7 @@ def build_census(packs_dir: Path | str = REPO_ROOT / "packs", *,
     verdicts = Counter(r["verdict"] for r in all_rows if r["surface"] == "relations")
     written = Counter()
     if write_probe:
-        _run_write_probe(all_rows, packs_dir)
+        _run_write_probe(all_rows, packs_dir, probe_uri)
 
     for row in all_rows:
         written[row.get("written") or "none"] += 1
@@ -413,27 +426,36 @@ def build_census(packs_dir: Path | str = REPO_ROOT / "packs", *,
 
 
 # ── the write probe ──────────────────────────────────────────────────────────
-def _sdk():
-    """A THROWAWAY SDK: embedded store unless a URI is supplied.
+def _sdk(uri: str | None = None):
+    """A THROWAWAY SDK: an embedded tempfile store unless `uri` names a graph.
 
-    The probe deletes what it mints. It never runs against a production URI —
-    `TORTOISE_DB_URI` is honoured only because a lane container IS the
-    throwaway, and the probe names its own nodes with a `census-probe-` prefix
-    so a leftover is identifiable.
+    ⛔ `TORTOISE_DB_URI` is deliberately NOT read. It is this repo's documented
+    graph setting (`AGENTS.md` → Environment) and in the fleet it routinely names
+    the SHARED docker container (#5084's residue class), so an implicit read made
+    `--write-probe` write into an unspecified target with no confirmation — while
+    two docstrings claimed the opposite. Reaching a real graph now takes an
+    explicit `--uri`; the default mints its own store and removes it on close.
     """
     from tortoise.sdk import TortoiseSDK
 
-    uri = os.environ.get("TORTOISE_DB_URI")
     if uri:
         return TortoiseSDK(uri)
+    import atexit
+    import shutil
     import tempfile
 
     tmp = tempfile.mkdtemp(prefix="pack-census-probe-")
+    # The store itself is throwaway, so its DIRECTORY is too: a probe that leaves
+    # both a graph and a directory behind is not "throwaway" in either sense.
+    atexit.register(shutil.rmtree, tmp, True)
     return TortoiseSDK(str(Path(tmp) / "probe.db"))
 
 
-def _mint_endpoint(sdk, kind_ref: str | None, cache: dict) -> str:
-    """One endpoint per declared KIND, minted once and reused.
+def _mint_endpoint(sdk, kind_ref: str | None, cache: dict,
+                   minted: set[str] | None = None,
+                   *, slot: str = "") -> str:
+    """One endpoint per declared KIND, minted once and reused — but never the same
+    NODE on both sides of one row.
 
     ⛔ Not one per row. `create_entity` runs the nudge/embedding path (measured
     0.957 s/call on an embedded store; a write is 0.015 s), so minting a fresh
@@ -441,18 +463,30 @@ def _mint_endpoint(sdk, kind_ref: str | None, cache: dict) -> str:
     no extra information. Rows that share a kind pair share the node — their
     read-back stays distinguishable because it is keyed on the PREDICATE, and two
     rows with the same predicate over the same kinds are the same question.
+
+    ⛔ EXCEPT when a row's `from_kind` and `to_kind` are the same kind: a per-kind
+    cache then hands the SAME id to both sides, so `pm:dependsOn`
+    (`pm:card → pm:card`) measured a `(card)-->(card)` SELF-LOOP. That is a real
+    edge and it is NOT the declared connection — the declaration is between two
+    cards — and worse, it made the `written` cell a false-positive pathway: the
+    read-back matches `(a {id:$s})-[r]->(b {id:$d})` with `s == d`, so a writer
+    that refused a genuine two-card edge would still read `direct`. The caller
+    therefore passes a non-empty `slot` for the second side of such a row, which
+    mints that side its own node (keyed `kind#slot`).
     """
     label = (kind_ref or "Object").split(":", 1)[-1]
-    key = label.lower()
+    key = f"{label.lower()}#{slot}" if slot else label.lower()
     if key in cache:
         return cache[key]
-    if key == "subject":
-        node_id = sdk.create_entity(
-            "subject", f"census-probe-{key}")["node"]["id"]
+    name = f"census-probe-{label.lower()}" + (f"-{slot}" if slot else "")
+    if label.lower() == "subject":
+        node_id = sdk.create_entity("subject", name)["node"]["id"]
     else:
         node_id = sdk.create_entity(
-            "object", f"census-probe-{key}", objectKind=label)["node"]["id"]
+            "object", name, objectKind=label)["node"]["id"]
     cache[key] = node_id
+    if minted is not None:
+        minted.add(node_id)
     return node_id
 
 
@@ -477,7 +511,29 @@ def _read_back(sdk, src: str, dst: str, predicate: str) -> tuple[str, str | None
     return "none", None
 
 
-def _run_write_probe(rows: list[dict], packs_dir: Path) -> None:
+def _delete_minted(sdk, minted: set[str]) -> list[str]:
+    """Delete what the probe minted. Returns the ids it could NOT remove.
+
+    ⛔ This exists because two docstrings claimed it without it existing: there
+    was no `delete` anywhere in this file while `--write-probe` wrote ~N entities
+    and ~N operator Points into whatever graph it was pointed at. A claim about
+    cleanup is only true if the cleanup is here, and a FAILED cleanup must be
+    loud — a silent leftover is the residue class #5084 exists to stop.
+    Operators are deleted first (reverse mint order): their `INPUT`/`IMPL` edges
+    detach with them, so the entities have nothing left pointing at them.
+    """
+    leftovers: list[str] = []
+    for node_id in reversed(list(minted)):
+        try:
+            if not sdk.delete_entity(node_id):
+                leftovers.append(node_id)
+        except Exception:  # a cleanup failure is REPORTED below, never a crash
+            leftovers.append(node_id)
+    return leftovers
+
+
+def _run_write_probe(rows: list[dict], packs_dir: Path,
+                     uri: str | None = None) -> None:
     """Invoke each row's OWN write path and record what the graph says.
 
     ⛔ `direction=` is not optional. `create_operator`'s signature default is
@@ -486,21 +542,33 @@ def _run_write_probe(rows: list[dict], packs_dir: Path) -> None:
     `venture:holds` while the census reported `<-`, i.e. a cell measuring
     nothing. The read-back direction is recorded next to the cell so the
     graph test can assert they agree.
+
+    ⛔ `uri` is explicit. `TORTOISE_DB_URI` is not consulted (see `_sdk`), and
+    every node this function mints is deleted before it returns — the store is
+    throwaway, and so is everything put in it.
     """
-    sdk = _sdk()
+    sdk = _sdk(uri)
     cache: dict[str, str] = {}
+    minted: set[str] = set()
     try:
         for row in rows:
             if row["write_path"] is None:
                 row["written"] = "none"
                 continue
-            src = _mint_endpoint(sdk, row.get("from_kind"), cache)
-            dst = _mint_endpoint(sdk, row.get("to_kind"), cache)
+            src = _mint_endpoint(sdk, row.get("from_kind"), cache, minted)
+            # A same-kind row (`pm:card → pm:card`) must NOT resolve both sides
+            # to one node: that measured a self-loop, not the declared
+            # connection, and it let a refused two-entity write still read
+            # `direct`. Same kind ⇒ the destination gets its own node.
+            same_kind = (row.get("from_kind") or "Object") == \
+                (row.get("to_kind") or "Object")
+            dst = _mint_endpoint(sdk, row.get("to_kind"), cache, minted,
+                                 slot="dst" if same_kind else "")
             try:
                 if row["write_path"] == "structural":
                     sdk.create_edge(row["predicate"], src, dst)
                 else:
-                    sdk.create_operator(
+                    written_op = sdk.create_operator(
                         row.get("mechanism") or "IMPL",
                         src,
                         [dst],
@@ -508,6 +576,9 @@ def _run_write_probe(rows: list[dict], packs_dir: Path) -> None:
                         semantics=row.get("semantics") or row["predicate"],
                         direction=row.get("effective_direction"),
                     )
+                    op_id = (written_op or {}).get("id")
+                    if op_id:
+                        minted.add(op_id)
             except Exception as exc:  # a refusal is a RESULT, not a crash
                 row["written"] = "none"
                 row["written_error"] = f"{type(exc).__name__}: {exc}"[:300]
@@ -519,7 +590,15 @@ def _run_write_probe(rows: list[dict], packs_dir: Path) -> None:
             row["written"] = written
             row["written_direction"] = direction
     finally:
+        leftovers = _delete_minted(sdk, minted)
         sdk.close()
+    if leftovers:
+        print(
+            f"WARN: the probe could not delete {len(leftovers)} node(s) it minted "
+            f"— they carry the `census-probe-` prefix and are safe to remove: "
+            f"{sorted(leftovers)}",
+            file=sys.stderr,
+        )
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
@@ -530,13 +609,19 @@ def _main(argv: list[str] | None = None) -> int:
                     help="print the census as JSON (default: a short table)")
     ap.add_argument("--write-probe", action="store_true",
                     help="invoke each row's write path on a throwaway graph")
+    ap.add_argument("--uri", default=None,
+                    help="a real graph URI for --write-probe (default: mint a "
+                         "throwaway embedded store). `TORTOISE_DB_URI` is "
+                         "deliberately NOT read — a probe that writes to an "
+                         "implicit target is the #5084 residue class")
     ap.add_argument("--out", default=None,
                     help=f"write the JSON here (the committed artifact is {ARTIFACT_REL})")
     ap.add_argument("--check", action="store_true",
                     help="compare the committed artifact to a live re-derivation")
     args = ap.parse_args(argv)
 
-    census = build_census(args.packs_dir, write_probe=args.write_probe)
+    census = build_census(args.packs_dir, write_probe=args.write_probe,
+                          probe_uri=args.uri)
 
     if args.check:
         artifact = REPO_ROOT / ARTIFACT_REL

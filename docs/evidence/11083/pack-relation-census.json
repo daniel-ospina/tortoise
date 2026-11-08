@@ -22,8 +22,8 @@
     "predicate-not-in-allowlist": 0
   },
   "written_counts": {
-    "mediated": 31,
-    "direct": 10,
+    "mediated": 33,
+    "direct": 8,
     "none": 1
   },
   "load_errors": {},
@@ -481,7 +481,7 @@
         {
           "surface": "relations",
           "pack": "pm",
-          "predicate": "dependsOn",
+          "predicate": "blocks",
           "from_kind": "pm:card",
           "to_kind": "pm:card",
           "cardinality": "many_to_many",
@@ -489,25 +489,24 @@
           "semantics": "dependsOn",
           "verdict": "writable",
           "write_paths": [
-            "operator",
-            "structural"
+            "operator"
           ],
-          "write_path": "structural",
-          "declared_direction": null,
-          "effective_direction": "->",
+          "write_path": "operator",
+          "declared_direction": "<-",
+          "effective_direction": "<-",
           "declaration_only": false,
           "declaration_only_reason": null,
-          "written_label": "dependsOn",
-          "written_edge_type": "dependsOn",
-          "structural_writer_accepts": true,
+          "written_label": "blocks",
+          "written_edge_type": "IMPL",
+          "structural_writer_accepts": null,
           "path_disagreement": false,
-          "written": "direct",
-          "written_direction": null
+          "written": "mediated",
+          "written_direction": "<-"
         },
         {
           "surface": "relations",
           "pack": "pm",
-          "predicate": "hasPart",
+          "predicate": "partOfSprint",
           "from_kind": "pm:sprint",
           "to_kind": "pm:card",
           "cardinality": "one_to_many",
@@ -515,20 +514,19 @@
           "semantics": "hasPart",
           "verdict": "writable",
           "write_paths": [
-            "operator",
-            "structural"
+            "operator"
           ],
-          "write_path": "structural",
+          "write_path": "operator",
           "declared_direction": null,
           "effective_direction": "<->",
           "declaration_only": false,
           "declaration_only_reason": null,
-          "written_label": "hasPart",
-          "written_edge_type": "hasPart",
-          "structural_writer_accepts": true,
+          "written_label": "partOfSprint",
+          "written_edge_type": "IMPL",
+          "structural_writer_accepts": null,
           "path_disagreement": false,
-          "written": "direct",
-          "written_direction": null
+          "written": "mediated",
+          "written_direction": "<->"
         },
         {
           "surface": "relations",

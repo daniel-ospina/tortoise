@@ -1,9 +1,8 @@
 """#11083 — the census's `written` column, over a real graph (the graph-DB gate).
 
 The hermetic half compares the artifact to DECLARATIONS. This half is the only
-assertion that can catch a LIE ABOUT THE GRAPH: it mints one endpoint pair per
-declared row on a throwaway store, invokes the row's own write path, and reads
-the graph back.
+assertion that can catch a LIE ABOUT THE GRAPH: it mints endpoints on a throwaway
+store, invokes the row's own write path, and reads the graph back.
 
   G1  the probe reproduces the committed artifact's `written` column exactly
       (`direct | mediated | none`), and the direction read back from the graph
@@ -99,8 +98,8 @@ def test_g1_write_probe_reproduces_the_committed_written_column(sdk):
     # `_sdk` is the probe's ONE injection point, so the private-name touch is
     # deliberate and carries no `noqa`: `SLF001` is not an enabled rule here, and
     # RUF100 reds an unused directive (ruff's own lint job caught it).
-    census._sdk = lambda: sdk
-    census._run_write_probe(rows, REPO_ROOT / "packs")
+    census._sdk = lambda uri=None: sdk
+    census._run_write_probe(rows, REPO_ROOT / "packs", None)
 
     committed_rows = {
         (r["pack"], r["surface"], r["predicate"], r["from_kind"], r["to_kind"]): r
@@ -165,8 +164,8 @@ def test_g1c_the_written_column_distinguishes_a_bridge_from_an_edge():
     """
     committed = json.loads(ARTIFACT.read_text())
     counts = committed["written_counts"]
-    assert counts["direct"] == 10, counts
-    assert counts["mediated"] == 31, counts
+    assert counts["direct"] == 8, counts
+    assert counts["mediated"] == 33, counts
     assert counts["none"] == 1, counts
     assert sum(v for k, v in counts.items() if not k.startswith("UNMEASURED")) == \
         committed["population"]["declared"], (
@@ -198,3 +197,83 @@ def test_g2b_the_direction_survives_a_rebuild(sdk, events_dir):
     sdk._get_proj().rebuild_all(str(events_dir), confirm_destructive=True)
     direction, _basis = _stored(sdk, op["id"])
     assert direction == "<-"
+
+
+# ── G3 — a same-kind row is measured between TWO nodes ───────────────────────
+_PROBE_RESIDUE_Q = (
+    "MATCH (n) WHERE (n.name IS NOT NULL AND n.name STARTS WITH 'census-probe-')"
+    " OR (n:Point AND n.is_operator = true) RETURN count(n)"
+)
+
+
+def _probe_residue(sdk) -> int:
+    """Nodes the PROBE could have minted — not the SDK's own bootstrap metadata.
+
+    ⛔ A whole-graph node count cannot answer this question across a close/reopen:
+    the SDK's `Meta`/`GraphEventMeta`/`GraphEvent`/`EpMeta` bootstrap nodes appear
+    as the store is opened (MEASURED: 1 before, 4 after, with zero probe nodes
+    left). The question is narrower than "are there nodes", and a count that wide
+    would red on the runtime's own bookkeeping while missing nothing.
+    """
+    return sdk._get_proj().g.query(_PROBE_RESIDUE_Q).result_set[0][0]
+
+
+def test_g3_a_same_kind_row_gets_a_second_node_not_a_self_loop(sdk):
+    """`pm:blocks` is `pm:card → pm:card`, and the endpoint cache is per KIND.
+
+    With one cached node the probe handed the SAME id to both sides, so the cell
+    measured a `(card)-->(card)` SELF-LOOP — a real edge, but not the declared
+    connection — and it made the `written` cell a false-positive pathway: the
+    read-back matches `(a {id:$s})-[r]->(b {id:$d})` with `s == d`, so a writer
+    that refused a genuine two-card edge would still read `direct`.
+    """
+    import pack_relation_census as census
+
+    cache: dict[str, str] = {}
+    minted: set[str] = set()
+    src = census._mint_endpoint(sdk, "pm:card", cache, minted)
+    dst = census._mint_endpoint(sdk, "pm:card", cache, minted, slot="dst")
+    assert src != dst, (
+        "the destination side resolved to the SAME node — a same-kind row is "
+        "being measured as a self-loop")
+    # …while the shared path still REUSES: that is the cost bound the per-kind
+    # cache exists for (create_entity ≈1 s/call, a write ≈0.015 s).
+    assert census._mint_endpoint(sdk, "pm:card", cache, minted) == src
+    assert len(minted) == 2
+
+
+def test_g4_the_probe_deletes_what_it_mints(sdk):
+    """Two docstrings claimed `--write-probe` deletes what it mints. It did not.
+
+    There was no `delete` anywhere in the census, `_sdk` honoured
+    `TORTOISE_DB_URI`, and the README's regeneration command is the documented
+    path — so the probe wrote entities and operator Points into whatever graph the
+    environment named (in the fleet: the SHARED docker container, #5084's residue
+    class) while the file's two contracts said it cleaned up and never touched a
+    real graph. This asserts the cleanup on the store, closing and re-opening it
+    so a residue that only lives in the cache cannot hide.
+    """
+    import pack_relation_census as census
+
+    before = _probe_residue(sdk)
+    assert before == 0
+    row = census._relation_row("pm", {
+        "predicate": "blocks",
+        "mechanism": "IMPL",
+        "semantics": "dependsOn",
+        "direction": "<-",
+        "fromKind": "pm:card",
+        "toKind": "pm:card",
+    })
+    census._sdk = lambda uri=None: sdk
+    census._run_write_probe([row], REPO_ROOT / "packs", None)
+    # The row is `blocks`, which is NOT in the structural writer's set, so its own
+    # write path is the operator — and the ruled `<-` must be what is stored.
+    assert row["written"] == "mediated"
+    assert row["written_direction"] == "<-", (
+        "the probe wrote a different sense than the declaration it measured")
+
+    # The probe mints 2 entities + 1 operator for this row; none may survive.
+    assert _probe_residue(sdk) == 0, (
+        "the probe left the nodes it minted in the store — the cleanup its "
+        "docstrings promise did not happen")

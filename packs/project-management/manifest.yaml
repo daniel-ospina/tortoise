@@ -55,14 +55,26 @@ ontology:
   # semantics (the small closed set the machine acts on), label (the domain's own
   # word). The population stays FOUR: nothing was deleted to make a count green.
   #
-  # The predicate keeps the domain word unless its own reading cannot carry the
-  # meaning's direction, or §3.7 forbids a second spelling of the meaning:
-  #   * `blocks` → `dependsOn`, written from the DEPENDENT side. "A blocks B"
-  #     means B depends on A, so a `blocks` row carrying `dependsOn`'s `->` would
-  #     transfer confidence blocker→blocked — the inverse of the truth.
-  #   * `partOfSprint` → `hasPart` (`sprint --hasPart--> card`). ONTOLOGY §3.7:
-  #     "Inverse traversal (`<-[:hasPart]-`) covers 'part of' — no separate
-  #     `partOf` edge".
+  # The predicate KEEPS the domain word — that is the ruling, not a preference.
+  # Owner ruling 2026-11-08 (#11083 comment 6714848519), on #2766's three-layer
+  # convention: *"keep each domain word as the **label**, give it the canonical
+  # layer-2 meaning, and it becomes writable."* So every row below is an
+  # un-migrated declaration resolved by giving it a layer-2 meaning while its own
+  # word stays in the vocabulary. A rename to the meaning's own name would DELETE
+  # a domain word: `CORE_OPERATOR_LABELS` unions `SEMANTICS_VALUES` with each
+  # pack's `relations[].predicate`, so a caller (or the extractor) emitting the
+  # retired word would hit `undeclared_relation` and be told to use a different
+  # word — the drift §3.9's declaredness note exists to prevent. ONTOLOGY §8: "Same
+  # semantics + different predicates is correct."
+  #
+  #   * `blocks` + `semantics: dependsOn` + `direction: "<-"`. "A blocks B" means
+  #     B depends on A, so `dependsOn`'s `->` would transfer confidence
+  #     blocker→blocked — the inverse of the truth. Ruling: "`dependsOn`,
+  #     direction flipped".
+  #   * `partOfSprint` + `semantics: hasPart` (`sprint --hasPart--> card`). The
+  #     label stays; §3.7's "no separate `partOf` edge" is about the STRUCTURAL
+  #     edge type, and `venture:partOf` already ships this exact shape
+  #     (`partOf` riding `hasPart` on the operator path).
   #   * `assignedTo` KEEPS its label with `semantics: managedBy` — the same
   #     three-layer shape `venture` already ships (`assignedTo`/`managedBy`,
   #     `partOf`/`hasPart`, `gatedBy`/`dependsOn`). §3.6: `managedBy` is
@@ -74,9 +86,12 @@ ontology:
   #     in the vocabulary and the census PRINTS why it binds no write path
   #     instead of a silent deletion shrinking the declared population.
   relations:
-  - predicate: dependsOn
+  - predicate: blocks
     mechanism: IMPL
     semantics: dependsOn
+    # The ruled carrier for "B depends on A": the row's own sense, so the
+    # confidence runs blocked→blocker instead of `dependsOn`'s `->`.
+    direction: "<-"
     fromKind: pm:card
     toKind: pm:card
     cardinality: many_to_many
@@ -84,7 +99,7 @@ ontology:
     nearMisses:
     - causes
     - related
-  - predicate: hasPart
+  - predicate: partOfSprint
     mechanism: IMPL
     semantics: hasPart
     fromKind: pm:sprint

@@ -1,17 +1,17 @@
 ---
-title: "Tortoise — Canonical Ontology v3.31"
+title: "Tortoise — Canonical Ontology v3.32"
 type: data
 domain: data
 status: live
 created: 2026-08-05
-updated: 2026-10-26
+updated: 2026-11-08
 ownedBy: epistemic-team
 aboutSubjects: epistemic-team
 aboutObjects: tortoise
 doc_status: live
 ---
 
-# Tortoise — Canonical Ontology v3.31
+# Tortoise — Canonical Ontology v3.32
 
 > **Status:** LIVE — canonical. Co-located with the code it governs (tortoise repo).
 > **Supersedes:** ONTOLOGY_v2.5.md (eldato repo, deprecated).
@@ -349,8 +349,11 @@ Epistemic edges (operators): `IMPL`, `NAND` (+ semantic label).
 > re-transcribed, so it cannot drift from §8's table. **Declaredness is not shape:** the §8
 > reification table governs which edges *ought* to carry an operator, and an undeclared label
 > still warns without blocking (warn-not-block, #1934). A **retired** spelling (`opposes`,
-> `produces`, `holds`, `funds` — the transition map) is deliberately **not** declared, so it
-> keeps warning and the caller learns the canonical word. `measures` is declared nowhere and
+> `holds`, `funds` — the transition map) is deliberately **not** declared, so it keeps warning and
+> the caller learns the canonical word. **`produces` is NOT one of them since v3.32**: it is a
+> Layer-2 meaning (§8), so it is declared and does not warn — the transition map is the authority
+> for that list, and `produces` left it when it became a meaning (#11083). `measures` is declared
+> nowhere and
 > was never a §8 meaning — it was invented by a lane that could find no reachable declared
 > predicate, which is what this statement exists to prevent.
 

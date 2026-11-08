@@ -102,6 +102,35 @@ def test_h1b_the_artifact_records_its_own_provenance(artifact):
     )
 
 
+def test_h1c_the_check_cli_reports_drift_and_agreement(monkeypatch, tmp_path, capsys):
+    """`--check`'s EXIT CODE is the contract the README tells readers to rely on.
+
+    Nothing invoked `_main(["--check"])` before: `test_h1` calls `_diff_hermetic`
+    directly, so making the `--check` branch `return 0` unconditionally kept the
+    whole suite green while `DRIFT: n cell(s)` could never be reported. All three
+    exits are asserted here, so neither an always-0 nor an always-1 branch
+    survives.
+    """
+    census = _census()
+    # 0 — the committed artifact agrees with a live re-derivation.
+    assert census._main(["--check"]) == 0, capsys.readouterr()
+
+    # 1 — a doctored copy differs, and the drift is NAMED.
+    doctored = json.loads(ARTIFACT.read_text())
+    doctored["population"]["declared"] = doctored["population"]["declared"] + 1
+    target = tmp_path / "doctored.json"
+    target.write_text(json.dumps(doctored))
+    monkeypatch.setattr(census, "ARTIFACT_REL", str(target))
+    assert census._main(["--check"]) == 1, (
+        "`--check` returned success on an artifact that disagrees with the packs "
+        "— the DRIFT contract has no reddening row")
+    assert "DRIFT: 1 cell" in capsys.readouterr().err
+
+    # 2 — a missing artifact is its own exit, not a silent pass.
+    monkeypatch.setattr(census, "ARTIFACT_REL", str(tmp_path / "absent.json"))
+    assert census._main(["--check"]) == 2
+
+
 # ── H2 — the population is derived, and both surfaces are present ────────────
 def test_h2_population_is_derived_not_remembered(artifact):
     """A hard-coded 42 becomes a FALSE denominator the moment a disposition
@@ -192,6 +221,28 @@ def test_h3d_the_effective_direction_of_a_row_reports_the_DECLARATION():
     assert effective_direction({"direction": "sideways"}) is None, (
         "an invalid token is not a direction — it falls through to the meaning, "
         "and with no meaning it is None, never a plausible `->`")
+
+
+def test_h3e_a_LEGACY_token_is_honoured_exactly_as_the_writer_honours_it():
+    """The one-normalizer rule (#7852) inside the declaration-side reader.
+
+    `create_operator` accepts SIX direction tokens — the four model values plus
+    the legacy `unidirectional`/`bidirectional` aliases — and `live.py` forbids
+    re-spelling that set at a call site. A reader that tested membership in the
+    four model values alone therefore WARNED-AND-IGNORED `unidirectional` while
+    the writer honoured it as `->`: for a row whose meaning is `produces` (table
+    `<-`), the census reported `<-` and the graph stored `->`. One wrong sign on
+    the very cell this PR exists to make trustworthy.
+    """
+    assert effective_direction(
+        {"semantics": "produces", "direction": "unidirectional"}) == "->", (
+        "`unidirectional` IS `->`; reporting the meaning's `<-` here would put the "
+        "census and `create_operator` on opposite sides of one row")
+    assert effective_direction(
+        {"semantics": "produces", "direction": "bidirectional"}) == "<->"
+    # The four model values are unaffected, and a declared token still outranks
+    # the meaning (H3d's rule) — the normalizer must not widen what is honoured.
+    assert effective_direction({"semantics": "produces", "direction": "<-"}) == "<-"
 
 
 # ── H4 — every accepted meaning is ADVERTISED ────────────────────────────────
@@ -296,10 +347,16 @@ def _write_pack(tmp_path: Path, ns: str, relations: list[dict]) -> Path:
     return packs
 
 
-def test_h8_a_bad_direction_warns_and_does_not_drop_the_pack(tmp_path):
+def test_h8_a_bad_direction_warns_and_does_not_drop_the_pack(tmp_path, caplog):
     """A `direction` typo must not read as "no direction", and must not be in the
     pack-DROPPING error class: `_load_one` raises on any `_validate` error and
-    `load_all` then deletes the whole pack (`pack_registry.py` load_all)."""
+    `load_all` then deletes the whole pack (`pack_registry.py` load_all).
+
+    ⛔ The WARN half is asserted, not just the survival half. Asserting survival
+    alone left the arm deletable: remove the `_warn_packs_once` call and this test
+    stayed green, so the message — the only thing that tells an author why their
+    token was ignored — had no reddening row anywhere.
+    """
     packs = _write_pack(tmp_path, "fixture", [{
         "predicate": "widgetLink",
         "mechanism": "IMPL",
@@ -308,17 +365,23 @@ def test_h8_a_bad_direction_warns_and_does_not_drop_the_pack(tmp_path):
         "toKind": "fixture:widget",
         "direction": "sideways",
     }])
-    reg = pack_registry.PackRegistry(packs)
-    reg.load_all()
+    with caplog.at_level("WARNING"):
+        reg = pack_registry.PackRegistry(packs)
+        reg.load_all()
     assert "fixture" in reg.packs, (
         "a vocabulary-shaped field dropped the pack — the direction check must "
         "be warn-class, not errors.append")
+    assert "'sideways'" in caplog.text and (
+        "is not a recognised direction token" in caplog.text), (
+        "the invalid token was ignored SILENTLY — the author is never told which "
+        "value was rejected or that the meaning resolved it instead")
     row = reg.packs["fixture"].relations[0]
     assert effective_direction(row) == "->", (
         "an invalid token is ignored and the meaning resolves the direction")
 
 
-def test_h8b_an_empty_declaration_only_reason_warns_and_does_not_drop(tmp_path):
+def test_h8b_an_empty_declaration_only_reason_warns_and_does_not_drop(
+        tmp_path, caplog):
     packs = _write_pack(tmp_path, "fixture2", [{
         "predicate": "widgetView",
         "from": "Object",
@@ -326,9 +389,37 @@ def test_h8b_an_empty_declaration_only_reason_warns_and_does_not_drop(tmp_path):
         "declarationOnly": True,
         "declarationOnlyReason": "",
     }])
-    reg = pack_registry.PackRegistry(packs)
-    reg.load_all()
+    with caplog.at_level("WARNING"):
+        reg = pack_registry.PackRegistry(packs)
+        reg.load_all()
     assert "fixture2" in reg.packs
+    assert "'declarationOnlyReason' must be a non-empty string" in caplog.text, (
+        "`declarationOnly: true` with an empty reason is a SILENCER — the warning "
+        "is the only thing that surfaces it (#11083 R7)")
+
+
+def test_h8c_an_orphan_declaration_only_reason_warns(tmp_path, caplog):
+    """The third arm: a reason with no `declarationOnly: true` above it.
+
+    It is a distinct failure (a reason explaining a disposition the row does not
+    claim) with its own key and its own message, and it had no reddening row at
+    all — the census would print a reason for a row it calls writable.
+    """
+    packs = _write_pack(tmp_path, "fixture4", [{
+        "predicate": "widgetPanel",
+        "mechanism": "IMPL",
+        "semantics": "hasPart",
+        "fromKind": "fixture:widget",
+        "toKind": "fixture:widget",
+        "declarationOnlyReason": "a panel is a view",
+    }])
+    with caplog.at_level("WARNING"):
+        reg = pack_registry.PackRegistry(packs)
+        reg.load_all()
+    assert "fixture4" in reg.packs
+    assert "is recorded but 'declarationOnly' is not true" in caplog.text, (
+        "an orphaned reason must be named — otherwise a row reads as having a "
+        "disposition it never claimed")
 
 
 # ── H9 — the union-verdict vs writer disagreement is FLAGGED ─────────────────
@@ -350,21 +441,30 @@ def test_h9_a_union_only_structural_predicate_is_flagged(tmp_path):
         "the fixture relies on the divergence being real — if the two sets "
         "converge, this control should be replaced with a synthetic predicate")
 
+    # ⛔ The fixture is LOAD-BEARING. It was dead setup before: the row was built
+    # from a hand-written dict and the test closed with `assert packs.exists()` —
+    # true because `_write_pack` created it two statements earlier, so the
+    # assertion could not vary under ANY mutation. The pack is now LOADED and the
+    # flagged row comes out of `PackRegistry`, which is what the docstring says.
     packs = _write_pack(tmp_path, "fixture3", [{
         "predicate": union_only,
+        "mechanism": "IMPL",
+        "semantics": "related",
         "fromKind": "fixture:widget",
         "toKind": "fixture:widget",
     }])
-    row = _census()._relation_row("fixture3", {
-        "predicate": union_only,
-        "fromKind": "fixture3:widget",
-        "toKind": "fixture3:widget",
-    })
+    census = _census()
+    fresh = census.build_census(packs)
+    rows = [r for r in fresh["packs"]["fixture3"]["relations"]
+            if r["predicate"] == union_only]
+    assert len(rows) == 1, (
+        "the fixture's declared row did not survive pack load — the assertion "
+        "below would then be about a row built by hand, not by the registry")
+    row = rows[0]
     assert row["write_path"] == "structural"
     assert row["path_disagreement"] is True, (
         "`pack validate` would call this writable while create_edge refuses it — "
         "the disagreement must be a printed cell, not an invisible optimism")
-    assert packs.exists()
 
 
 def test_h9b_no_shipped_row_hits_the_latent_class(artifact):
