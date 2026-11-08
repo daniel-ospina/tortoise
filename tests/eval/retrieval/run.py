@@ -159,6 +159,7 @@ def _capture_provenance(proj, is_embedded: bool, extras: dict) -> dict:
         "synthetic_query_vectors": extras.get("synthetic_query_vectors", False),
         "corpus_embedding_space": extras.get("corpus_embedding_space", EMBED_SPACE_UNKNOWN),
         "corpus_reembedded": extras.get("corpus_reembedded", 0),
+        "corpus_points_unverified": extras.get("corpus_points_unverified", 0),
         "judge_labels": extras.get("judge_labels", "none"),
     }
     if is_embedded:
@@ -478,6 +479,13 @@ def _corpus_embedding_space(*, seeded_synthetic: bool):
       the gate must refuse to compare: assuming ``model`` there re-creates the
       two-space arm on the first ``--no-seed-corpus`` reuse of an eval db,
       labelled as sound.
+
+    This decides the space of the rows this run WRITES. It cannot decide the
+    space of the whole index on its own — seeding and the re-embed are
+    idempotent ``MERGE``s over the ids this run generated and nothing deletes
+    the rest — so ``run_eval`` completes the rule after the write with
+    ``_uncovered_corpus_points``: a leftover population with vectors of its own
+    makes the run's space ``unknown`` even here.
     """
     model = _loaded_embedding_model()
     if not seeded_synthetic:
@@ -569,6 +577,40 @@ def _reembed_corpus(graph, points: list[dict], model, *, batch_size: int = 200) 
         if rows:
             written += int(rows[0][0])
     return written
+
+
+def _uncovered_corpus_points(graph, covered_ids, *, chunk_size: int = 500) -> int:
+    """Points the graph holds vectors for that this run did NOT write.
+
+    The one-space invariant (`_corpus_embedding_space`) is a statement about the
+    whole INDEX, not about the rows one run happened to rewrite. Seeding and the
+    re-embed are both ``UNWIND … MERGE`` — nothing deletes — and point ids are a
+    POSITIONAL prefix (``p-{i:07d}``), so a run over an existing db re-writes
+    ``p-0..p-(n-1)`` and leaves the tail of any earlier, larger population
+    (a previous eval seed, or product points on a shared docker graph) holding
+    whatever vectors it was written with. Retrieval is graph-wide
+    (`degradation_chain` has no id filter), so those points are still
+    candidates: their space is part of the arm's space.
+
+    Counts nodes that carry an ``embedding`` and whose ``id`` is NOT in this
+    run's written set (chunked ``IN`` sum against one total — a single
+    ``NOT IN`` list would carry every id in one parameter). A point without an
+    embedding cannot reach the vector arm and is not counted.
+    """
+    rows = graph.query(
+        "MATCH (n:Point) WHERE n.embedding IS NOT NULL RETURN count(n)"
+    ).result_set
+    total = int(rows[0][0]) if rows and rows[0] else 0
+    ids = list(covered_ids)
+    covered = 0
+    for start in range(0, len(ids), chunk_size):
+        chunk = graph.query(
+            "MATCH (n:Point) WHERE n.embedding IS NOT NULL AND n.id IN $ids "
+            "RETURN count(n)",
+            params={"ids": ids[start:start + chunk_size]},
+        ).result_set
+        covered += int(chunk[0][0]) if chunk and chunk[0] else 0
+    return max(total - covered, 0)
 
 
 def _query_vecs(oracle, queries, seed: int, space: str | None = None):
@@ -855,12 +897,30 @@ def _run_with_sdk(args, sdk) -> dict:
     # the change it exists to detect).
     space, model = _corpus_embedding_space(seeded_synthetic=not args.no_seed_corpus)
     reembedded = 0
-    if space == EMBED_SPACE_MODEL:  # never --no-seed-corpus: that is `unknown`
-        reembedded = _reembed_corpus(proj.g, points, model)
-        if not args.quiet:
-            print(f"[corpus] re-embedded {reembedded} points in the "
-                  f"'{space}' space (queries and points share one space)")
-    elif space == EMBED_SPACE_UNKNOWN and not args.quiet:
+    unverified = 0
+    if space != EMBED_SPACE_UNKNOWN:  # `unknown` is already --no-seed-corpus
+        if space == EMBED_SPACE_MODEL:
+            reembedded = _reembed_corpus(proj.g, points, model)
+            if not args.quiet:
+                print(f"[corpus] re-embedded {reembedded} points in the "
+                      f"'{space}' space (queries and points share one space)")
+        # …but the ONE space is a claim about the WHOLE index: seeding and the
+        # re-embed only rewrite the ids this run generated, and nothing deletes
+        # the rest (`_uncovered_corpus_points`). A leftover tail keeps the space
+        # it was written in, and retrieval is graph-wide — so a run that covered
+        # only part of the population cannot claim either arm's space.
+        unverified = _uncovered_corpus_points(proj.g, [p["id"] for p in points])
+        if unverified:
+            space = EMBED_SPACE_UNKNOWN
+            if not args.quiet:
+                print(f"[corpus] WARNING: {unverified} point(s) in the graph "
+                      f"carry embeddings this run did NOT write (survivors of "
+                      f"an earlier, larger corpus, or product points on this "
+                      f"db). Their space cannot be established, and retrieval "
+                      f"is graph-wide, so this run cannot claim ONE space: it "
+                      f"is 'unknown', the metrics are not a quality "
+                      f"statement, and the gate will refuse to compare.")
+    elif not args.quiet:
         print("[corpus] WARNING: the embedding space of the corpus already in "
               "the graph cannot be established (it may be a previous eval "
               "seed's centroids, a MODEL-space corpus, or product vectors). "
@@ -1110,6 +1170,7 @@ def _run_with_sdk(args, sdk) -> dict:
             "synthetic_query_vectors": not use_model,
             "corpus_embedding_space": space,
             "corpus_reembedded": reembedded,
+            "corpus_points_unverified": unverified,
             "embedding_model": embedding_model,
             "judge_labels": args.judge_labels or "none",
         }),
@@ -1133,6 +1194,14 @@ def _run_with_sdk(args, sdk) -> dict:
             "is real semantic retrieval. Never one side each: that compared "
             "bge text vectors against centroid vectors and reported a "
             "37-point nDCG 'regression' on unmodified code. "
+            "The space is a claim about the WHOLE index, not about the rows "
+            "this run rewrote: seeding and the re-embed are MERGEs over the "
+            "ids this run generated (p-{i:07d}, positional) and nothing "
+            "deletes the rest, so a smaller --corpus-size over an existing db "
+            "(or product points on a shared graph) leaves a tail in the space "
+            "it was written in — and retrieval is graph-wide. That run is "
+            "'unknown' too, with provenance.corpus_points_unverified "
+            "counting the population it could not vouch for. "
             "--no-seed-corpus → 'unknown': the vectors already in the graph "
             "were not written by this run (an earlier eval seed's centroids, "
             "a corpus an earlier MODEL-space run re-embedded, and product "

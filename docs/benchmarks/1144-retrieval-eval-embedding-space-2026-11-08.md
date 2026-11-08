@@ -91,10 +91,12 @@ measured, and never from ambient availability:
 | a model is loaded, this run seeded the synthetic corpus | `model` | `_reembed_corpus()` re-encodes every seeded point with that same model (production write shape: clear-then-set guard + `vecf32`); queries encode with it too |
 | no model | `oracle-synthetic` | the documented degraded fallback on BOTH sides |
 | `--no-seed-corpus` (any environment) | `unknown` | the vectors already in the graph were not written by this run (an earlier eval seed's centroids, a corpus an earlier MODEL-space run re-embedded, and product embeddings are indistinguishable); no space can be claimed, a loaded model does not launder one, the reported metrics are not a quality statement, and the gate refuses — `unknown` twice is still not the same space |
+| the run rewrote only PART of the graph's vectors (a smaller `--corpus-size` over an existing db, or product points on a shared docker graph) | `unknown` | seeding and the re-embed are `MERGE`s over the ids this run generated (`p-{i:07d}`, positional) and nothing deletes the rest, so a leftover tail keeps the space it was written in — while retrieval is graph-wide, so the arm's space is the whole index's. `provenance.corpus_points_unverified` counts the population the run could not vouch for and the gate refuses |
 
 Labels are untouched: the oracle grades from HIDDEN topics and per-topic live
 ids, never from embeddings, so re-encoding cannot move a relevance judgment.
-`provenance.corpus_embedding_space` and `provenance.corpus_reembedded` state
+`provenance.corpus_embedding_space`, `provenance.corpus_reembedded` and
+`provenance.corpus_points_unverified` state
 which space a report measured, and the corpus fingerprint (`embeddings_hash`)
 is taken AFTER the re-embed — a fingerprint taken before it reads identically
 in both spaces, so it could not detect the change it exists to detect.

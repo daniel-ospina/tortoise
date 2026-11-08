@@ -819,6 +819,72 @@ def test_run_reusing_existing_corpus_claims_no_space(tmp_path):
 
 
 @pytest.mark.skipif(not _has_embedded(), reason="embedded FalkorDBLite unavailable")
+def test_run_does_not_claim_a_space_over_corpus_points_it_did_not_rewrite(tmp_path):
+    """The one-space rule covers the WHOLE index, not only the ids this run
+    rewrote (review F1 at c2748ad48fb1).
+
+    Seeding is `UNWIND … MERGE` and the re-embed overwrites only the ids this
+    run generated, so point ids are a POSITIONAL prefix: a smaller run over an
+    existing db re-embeds `p-0..p-(n-1)` and leaves the tail of the previous,
+    larger corpus in its OLD space — while provenance said ``model`` and the
+    gate scored the mixed index against a clean model-space baseline. That is
+    the exact failure this PR exists to remove, wearing the authority of the
+    fix that declares the invariant (reproduced here via the README's fixed
+    quickstart db path, scaled down after a larger run).
+    """
+    db = str(tmp_path / "eval-partial.db")
+    with patch.object(run_module, "_loaded_embedding_model", return_value=None):
+        full = run_eval(_args(db, corpus_size=60))
+    assert full["provenance"]["corpus_embedding_space"] == run_module.EMBED_SPACE_SYNTHETIC
+
+    stub = _StubModel()
+    with patch.object(run_module, "_loaded_embedding_model", return_value=stub):
+        partial = run_eval(_args(db, corpus_size=40))
+
+    prov = partial["provenance"]
+    assert prov["corpus_reembedded"] == partial["seeded_points"] == 40
+    assert prov["corpus"]["n_points"] > prov["corpus_reembedded"], (
+        "the fixture must leave points in the graph that this run did NOT rewrite "
+        "— otherwise there is no uncovered population to detect"
+    )
+    assert prov["corpus_embedding_space"] == run_module.EMBED_SPACE_UNKNOWN, (
+        "20 leftover points keep their centroid vectors while this run "
+        "re-embedded 40 into the model space — the index is MIXED, so no single "
+        "space can be claimed for it"
+    )
+    assert prov["corpus_points_unverified"] == (
+        prov["corpus"]["n_points"] - prov["corpus_reembedded"]
+    ), "provenance must carry the size of the population it could not vouch for"
+
+    # ...and the gate must REFUSE the mixed index instead of scoring it as a
+    # comparable model-space run (INCOMPARABLE, naming the space).
+    baseline_path = (Path(__file__).resolve().parent / "baseline"
+                     / "baseline-embedded-model-2026-11-08.json")
+    with patch.object(run_module, "_loaded_embedding_model", return_value=stub):
+        gated = run_eval(_args(db, corpus_size=40, baseline=str(baseline_path)))
+    gate = gated["gate_vs_baseline"]
+    assert gate is not None, "the baseline must reach the gate"
+    assert gate["verdict"] == "INCOMPARABLE", (
+        "a mixed index must never be scored against a clean model-space "
+        "baseline: the delta would be the un-rewritten tail, reported as a "
+        "quality statement"
+    )
+    assert gate["space"] == run_module.EMBED_SPACE_UNKNOWN
+
+    # Positive control: a run that DOES cover the whole graph still claims the
+    # space — otherwise "unknown whenever the db is not empty" would pass this
+    # test while making every reused eval db useless.
+    with patch.object(run_module, "_loaded_embedding_model", return_value=_StubModel()):
+        covering = run_eval(_args(db, corpus_size=60))
+    covering_prov = covering["provenance"]
+    assert covering_prov["corpus_points_unverified"] == 0
+    assert covering_prov["corpus_embedding_space"] == run_module.EMBED_SPACE_MODEL, (
+        "re-running at a corpus size that covers the whole existing population "
+        "rewrites every vector into one space, so `model` is a fact"
+    )
+
+
+@pytest.mark.skipif(not _has_embedded(), reason="embedded FalkorDBLite unavailable")
 def test_run_gating_another_model_refuses_instead_of_scoring(tmp_path):
     """End-to-end: a model-space run gated against a baseline measured with a
     DIFFERENT model is refused, not scored — otherwise the delta is the model

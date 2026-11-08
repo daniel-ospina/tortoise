@@ -82,6 +82,7 @@ So the space is decided from the CORPUS side, once per run
 | no embedder (`uv sync`, CI offline) | `oracle-synthetic` | queries = topic-centroid sums (documented degraded fallback) |
 | embedder loaded (`uv sync --extra embeddings`) | `model` | the seeded corpus is RE-EMBEDDED with that model (`corpus_reembedded` in provenance), queries too |
 | `--no-seed-corpus` (any environment) | `unknown` | the vectors already in the graph were not written by this run — an earlier eval seed's centroids, a corpus an earlier MODEL-space run re-embedded, and product embeddings are indistinguishable — so no space is claimed: the reported metrics are not a quality statement and the gate refuses (drop the flag to gate a cycle) |
+| this run rewrote only PART of the graph's vectors (a smaller `--corpus-size` over an existing db, or product points on a shared docker graph) | `unknown` | seeding and the re-embed only touch the ids this run generated (`p-{i:07d}`, positional) and nothing deletes the rest, so a leftover tail keeps the space it was written in — while retrieval is graph-wide, so the arm's space IS the whole index's. `provenance.corpus_points_unverified` counts that population and the gate refuses |
 
 `provenance.corpus_embedding_space` names which one a report used. **It is not
 cosmetic.** Before this rule existed the query side silently took the ambient
