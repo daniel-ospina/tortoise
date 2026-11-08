@@ -1743,6 +1743,47 @@ re-cut from the resolved document (§8), and no committed verdict is re-scored.
 - **What moved: nothing else.** No metric, denominator, threshold, class set or corpus pin is
   touched: the values this record freezes are unchanged and only line citations move.
   `document_sha256` is re-cut in this same commit, per §8's rule for *any* edit to this file.
+### 10.15 — the door's pin set gains `TORTOISE_STATE_VALUE_VERBATIM` (`#10360`, 2026-11-08)
+
+⛔ **Scope, because §10.14 records the same PIN from the other direction.** `#11449`'s lane
+(`91dbc9a88`, landed as `827141f19`) independently added this switch to the probe's `DOOR_PINNED_ON`
+and to `acceptance_arm.pinned_to`, and §10.14 records it as a bullet. What THIS entry records is the
+part that lane did not make: the **§1.6.2 prose** sentence, and the roll-call restated
+**positionally** instead of counted. Both are in the document below; the merged pin set is one entry,
+not two.
+
+**Old value (verbatim).** §1.6.2's pin sentence ended at `TORTOISE_IDENTIFIER_TOKENS`, and its
+roll-call read:
+
+> The last five are the cycle-7 to
+> cycle-10 review findings (`TORTOISE_CONTEXT_ENRICH`/`TORTOISE_JSON_MODE`, then `TORTOISE_CHANGE_FEED`,
+> then `TORTOISE_IDENTIFIER_TOKENS`, then `TORTOISE_SUBJECT_TAU_HI`/`_LO`): each sits on the acceptance
+> path and was in no pin, no ledger row and no closure.
+
+`preregistration.json`'s `acceptance_arm.pinned_to` agreed, carrying exactly the three `"1"` pins
+(`TORTOISE_S4_DELTA`, `TORTOISE_JSON_MODE`, `TORTOISE_IDENTIFIER_TOKENS`).
+
+**New value.** One pin is added — `TORTOISE_STATE_VALUE_VERBATIM: "1"` — to both published copies
+(§1.6.2 and `acceptance_arm.pinned_to`), and the roll-call is restated **positionally** rather than
+counted ("the cycle-7 to cycle-11 review findings are …"), because the count in that paragraph had
+gone stale three rounds running: it said "last five" over a list of six.
+
+**Why.** `#10360`'s write-path guard landed **inside** `path_modules` — `TORTOISE_STATE_VALUE_VERBATIM`,
+read by `extractor_v2._state_value_verbatim_enforced` as `env_flag(..., True)` — so the door's census
+red on `main` (`tests/test_7949_c2_door.py::test_every_env_var_the_capture_path_reads_is_accounted_for`):
+the switch was in no pin, no ledger row and no closure. It is a **pin and not an acknowledged
+non-seam**, because its absent state is already ON and its only non-neutral state is an inherited
+`=0`: OFF disarms `_refuse_rewritten_value`, so a point whose value the model **rewrote** is written
+into the graph the run writes instead of withheld — the pre-`#10513` semantics, already pinned by
+`tests/test_state_value_verbatim_10360.py::test_the_off_switch_defaults_ON_and_restores_the_pre_10513_write`.
+Pinning it to its shipped default **equals today's behaviour on a clean shell** and closes only the
+inherited-`=0` hole, which is the `TORTOISE_IDENTIFIER_TOKENS` precedent (§10, cycle 9).
+
+⛔ **No value moves.** No metric, denominator, threshold, bar, floor or split changes, and no
+committed verdict is re-scored: the pin makes the measured population **shell-insensitive** and the
+registered corpus's numbers are untouched. `document_sha256` is re-cut from the resolved document in
+the same commit (§8).
+
 
 ## 11. The step set V5 gates over — seven unconditional, one conditional (`#10215`)
 
