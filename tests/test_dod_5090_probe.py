@@ -434,9 +434,12 @@ def test_every_embedded_label_has_a_query_path():
 #: ── `#11492`: row 2 resolves labels from the SAME product register row 1 reads ──────────────
 #: The issue required the reading to be DECIDED, not assumed: the register classified writers but
 #: carried NO label (Case B), and the label is not derivable per writer either (15 of the 20
-#: outside-gate writers name none in their own Cypher — it lives in the caller's `MATCH`). So the
-#: product DECLARES it (`WriterClass.stores`) and this row reads that declaration. The tests below
-#: pin the three falsifiers the issue names, and the two guards implementation made necessary.
+#: outside-gate writers name none in their own Cypher, and they fail for SEVERAL different reasons
+#: — a `MATCH` the derivation does not credit, a module constant, a property-map merge over a
+#: constant tuple, a delegated store, a clause builder, or ONE carrying the caller's statement — so
+#: no single one of them may be named as "the" reason). So the product DECLARES it
+#: (`WriterClass.stores`) and this row reads that declaration. The tests below pin the three
+#: falsifiers the issue names, and the two guards implementation made necessary.
 def _store_declared(name: str, stores, *, cls: str = probe.CENSUS_EXEMPT) -> dict:
     """One register entry in the shape row 2 reads — with an explicit `stores`."""
     return {**_declared(name, cls), "stores": stores}
