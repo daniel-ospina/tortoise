@@ -72,8 +72,8 @@ someone else's row. Each of these is named so a later reader does not read its a
 | excluded | owner | why not here |
 |---|---|---|
 | the read path's assembly / traversal / rerank | `#5009` | This epic adds no retrieval mechanism. SF12 pins the trace it inherits, nothing more. |
-| **where** the vectors live (V1) | `STORAGE-ARCHITECTURE.md` §14.3 · architecture `#4333` | `#5090` is a **consumer** of the vector layer, not its owner; the deciding input cannot be measured today (§17.4.6). |
-| creating indexes for `Object` / `Event` / `Source` / `Subject` | **V1** | It commits four resident HNSW structures and is exactly V1's content. **No child in this epic creates one.** |
+| **where** the vectors live (V1) | `STORAGE-ARCHITECTURE.md` §14.3 · architecture `#4333` | `#5090` is a **consumer** of the vector layer, not its owner; V1 was answered 2026-11-07 on method grounds (`docs/architecture/SEARCH-ARCHITECTURE.md` §1 — no decision rests on a measured proportion of our graph), and the input §17.4.6 names is not an input to it. |
+| creating indexes for `Object` / `Event` / `Source` / `Subject` | **§14.3 V3** | It is §14.3 **V3**'s content (V1 settled only WHERE the index lives) and it commits four resident HNSW structures. **No child in this epic creates one.** |
 | eviction / egress of the cache | `#10976` (`#11004` merged) | its own rule: a pass that cannot answer must refuse, never sweep. |
 | raw turns / narrative ingress | `#10000` | larger than this epic; `P0-blocker`. |
 | record authority / arming | `#7879` · `#9548` | authority, not the vector contract. |
