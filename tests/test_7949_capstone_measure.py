@@ -10806,8 +10806,11 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
 
     # A1: #11205's channel is TRANSPORT ONLY — the schema line that spells the
     # predicate allowlist, and the comment saying nothing in `tortoise/` consumes it.
-    assert "`hasPart`" in text and "`tortoise/extractor_v2.py:1720`" in text, (
-        "the record must cite the relations schema where `hasPart` is spelled")
+    assert re.search(r"`?hasPart`?", text) and re.search(
+        r"`?tortoise/extractor_v2\.py:1720`?", text), (
+        "the record must cite the relations schema where `hasPart` is spelled — the code span "
+        "is Markdown styling, so the needle takes the tokens, not the backticks (an unstyled "
+        "citation is the same claim and redded once, measured)")
     # The A1 proof command must match BOTH shapes its sentence covers, and must stay on ONE line WITH
     # its pathspec. Two measured ways to pin the COMPLEMENT instead: a dot-ANCHORED `'\.(verb)\('`
     # exits 1 on an unqualified `return create_operator(payload)`, and a `[^[:alnum:]_.]` class
@@ -10827,16 +10830,6 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     assert "[^[:alnum:]_]" in _a1 and "[^[:alnum:]_.]" not in _a1, (
         f"the A1 proof command's class reads {_a1!r} — a dot-EXCLUDING class is blind to a "
         "receiver-qualified call, which is the false reading the tokenized arm exists to catch")
-    # …and BEHAVIOUR, through `grep -E` itself: `re` does not speak POSIX classes, so proving this
-    # pattern with `re` would prove nothing about the command the record hands the reader.
-    _probe = Path(tempfile.mkdtemp()) / "a1_probe.py"
-    _probe.write_text(
-        "return create_operator(payload)\nsdk.create_edge(payload)\n", encoding="utf-8")
-    _hit = subprocess.run(["grep", "-nE", _a1, str(_probe)], capture_output=True, text=True)
-    assert _hit.returncode == 0 and len(_hit.stdout.splitlines()) == 2, (
-        f"the A1 proof command matches {len(_hit.stdout.splitlines())} of the two call shapes (an "
-        "UNQUALIFIED and a RECEIVER-qualified call) — it must match both, or it certifies a tree "
-        f"that calls the verb; grep said {_hit.stdout!r} exit {_hit.returncode}")
     # ⛔ …and so is the §5 statement of the SAME command. The record prints it TWICE (its §1
     # item-2 quote and the §5 reproduction block), and the `re.search` above reads one of them —
     # so restoring the dot-excluding class in the OTHER copy left the pin GREEN (measured on the
@@ -10849,6 +10842,27 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     assert all("[^[:alnum:]_]" in _c and "[^[:alnum:]_.]" not in _c for _c in _all_a1), (
         "EVERY statement of the A1 proof command must use the non-dot-excluding class — a "
         f"`[^[:alnum:]_.]` copy is blind to a receiver-qualified call (found {_all_a1})")
+    # …and BEHAVIOUR, through `grep -E` itself: `re` does not speak POSIX classes, so proving this
+    # pattern with `re` would prove nothing about the command the record hands the reader.
+    #
+    # ⛔ ONE PROBE LINE PER VERB the sentence claims ("calls none of the three edge-creating
+    # verbs"): with only `create_operator`/`create_edge` sampled, dropping `create_about_edge`
+    # from the pattern left BOTH the two-line count and the class arm GREEN (measured) — the same
+    # blindness this arm was written to close, one level over.
+    _probe = Path(tempfile.mkdtemp()) / "a1_probe.py"
+    _probe.write_text(
+        "return create_operator(payload)\nsdk.create_edge(payload)\n"
+        "sdk.create_about_edge(payload)\n", encoding="utf-8")
+    _probe_lines = 3
+    # Run it over EVERY statement of the command, not just the one the `re.search` reached: the
+    # §5 copy was graded only on its CLASS before, so it could lose a verb and stay green.
+    for _stm in _all_a1:
+        _hit = subprocess.run(["grep", "-nE", _stm, str(_probe)], capture_output=True, text=True)
+        assert _hit.returncode == 0 and len(_hit.stdout.splitlines()) == _probe_lines, (
+            f"the A1 proof command matches {len(_hit.stdout.splitlines())} of the {_probe_lines} "
+            "call shapes (unqualified + receiver-qualified, one per edge-creating verb) — it must "
+            "match all of them, or it certifies a tree that calls a verb it claims is uncalled; "
+            f"grep said {_hit.stdout!r} exit {_hit.returncode} for {_stm!r}")
     assert "hasPart" in ext[1720 - 1] and '"predicate":' in ext[1720 - 1], (
         f"extractor_v2.py:1720 reads {ext[1720 - 1].strip()[:90]!r}, not the schema "
         "line that spells the predicate allowlist")
@@ -10959,9 +10973,24 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # excluded there → 0/exit 1, at the record's own base `80c912244` → 0 both ways (`#10982`
     # landed after BOTH bases).
     # ⛔ Located by the NUMBER TOKEN alone, not by the sentence's leading word: `The **0
-    # hits**` redded on `Its **0 hits**` — a reword that keeps the number and the emphasis —
-    # with a diagnostic asserting the zero was not stated at all (measured, and false).
-    _zero_at = text.find("**0 hits**")
+    # ⛔ Located by the NUMBER TOKEN with optional emphasis, not by the sentence: `The **0 hits**`
+    # redded on `Its **0 hits**` AND on `0 hits` (emphasis dropped, number and bases intact) —
+    # rewords that keep the claim — with a diagnostic asserting the zero was not stated at all
+    # (measured, and false both times).
+    _zeros = list(re.finditer(r"\*{0,2}0 hits\*{0,2}", text))
+    assert _zeros, (
+        "§1 item 3 must state the pre-#10982 zero, base-qualified")
+    # ⛔ The claim is that SOME statement of the zero is base-qualified AND hangs on the EXCLUDED
+    # command. Asserting that over every occurrence — rather than locating one sentence by its
+    # leading word and trusting it — keeps the arm wording-free without losing what it binds:
+    # measured, the first `0 hits` in the document is a DIFFERENT claim (the §5 note's), so a
+    # `text.find` for the token alone binds the wrong paragraph.
+    _zero_at = next(
+        (m.start() for m in _zeros
+         if "4e6a3ce612bd^" in text[m.start():m.start() + 260]
+         and "80c912244" in text[m.start():m.start() + 260]
+         and ":!docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md"
+         in text[max(0, m.start() - 900):m.start()]), -1)
     assert _zero_at > 0, (
         "§1 item 3 must state the pre-#10982 zero, base-qualified")
     assert ":!docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md" in text[max(0, _zero_at - 900):_zero_at], (
@@ -11156,7 +11185,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         "label true cannot be found, so re-derive these two bounds")
     for _label, _region in (("§2 (A2)", text[_s2_at:_s2_end]),
                             ("the §5 reproduction block", text[_block_at:_block_end])):
-        _found = re.findall(r":(\d+)`? at (?!`?\d)[\w][\w -]{0,12}", _region)
+        _found = re.findall(r":(\d+)`? at (?!`?[0-9a-f]{7,}\b)[\w][\w -]{0,12}", _region)
         assert _found == ["12929"], (
             f"{_label}'s base-qualified live cite must be the vet_enabled line (`:12929`) — it "
             f"reads {_found}; re-derive it with `git grep -n 'vet_enabled = ' -- "
