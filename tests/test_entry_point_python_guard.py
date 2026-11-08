@@ -1039,6 +1039,7 @@ REFUSAL_CODES: dict[str, int] = {
     "tools/cache_evict.py": 1,
     "tools/ci_runner_topology.py": 4,
     "tools/capstone_ledger.py": 1,
+    "tools/build_site_icons.py": 4,
 }
 
 #: Why THAT code is the right one for THAT file — quoted in the failure message, so
@@ -1073,6 +1074,13 @@ REFUSAL_WHY: dict[str, str] = {
         "— it is the fail-closed neighbour, and closing a row is not reaching a "
         "verdict. Adding 5 to the tool's set would change a documented public "
         "contract to satisfy a lint, which is the wrong trade"
+    ),
+    "tools/build_site_icons.py": (
+        "1 is this tool's OWN failure status — every refusal is `raise "
+        "SystemExit(<message>)` at seven sites (76/83/95/133/204/225/243), so an "
+        "environment refusal must not wear it, or a caller cannot tell 'the tool "
+        "refused' from 'the interpreter is too old'; 2 is argparse's, and main() "
+        "returns 0 only, so 4 is never returned by anything but the guard"
     ),
 }
 
