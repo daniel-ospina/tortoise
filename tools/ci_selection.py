@@ -3101,7 +3101,26 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # here: the `core` row is CLASSIFICATION only, so a name in a surface's test_files runs
              # only when that surface is ALREADY selected. CORE_ALSO (not TOOL_CARVEOUTS) because
              # the suite is hermetic (stdlib-only, injected clock and reader, temp dirs).
-             "tools/gh_read_cache.py")
+             "tools/gh_read_cache.py",
+             # #11469 review: `tools/curate_graph.py` owns `tests/test_curation_11469.py`
+             # (registered `core`), and it is the WRITE half of the migration harness — the
+             # only code that can call `tortoise_ingest` at all, and the code that decides
+             # which graph is the source, which is the target, and whether `--apply` was
+             # given. `tools/` is a flat NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row
+             # matches it, so a CLI-only diff filtered to `changed == []` and took the
+             # docs-only early return. MEASURED at this head:
+             # `select(["tools/curate_graph.py"])` -> `surfaces: []`, 82 tier-1 files, and
+             # `test_curation_11469.py` ABSENT from `test_files`. The consequence is the
+             # #1349/#3332/#3616 silent-drop class pointing the wrong way: the PR added a
+             # `core` row for the test file (#4348 — CLASSIFICATION only), which makes the
+             # pins run when `tortoise/curation.py` moves, and leaves them asleep on the one
+             # diff that can weaken the guards they pin — `--apply` gating, the
+             # `--graph`-mandatory-for-apply refusal, the identity guard's exit code, and
+             # the off-switch/disarm exit split. CORE_ALSO (not TOOL_CARVEOUTS) because the
+             # suite is hermetic (no DB, no URI, no network; every surface is a fake or a
+             # replayed snapshot) and `core` is where it is registered. Pinned by
+             # tests/test_ci_selection.py::test_curate_graph_tool_change_selects_core_not_tier1.
+             "tools/curate_graph.py")
 NON_PYTHON_PREFIXES = (
     "docs/", "website/", "product/", "legal/", "growth/", "engineering/",
     "finance-accounting/", "menu-bar/", "ux/", "data/", "operations/",

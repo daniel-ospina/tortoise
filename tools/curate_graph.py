@@ -1,0 +1,820 @@
+#!/usr/bin/env python3
+"""Curation pass for our own (dogfood) memory — `#11469`.
+
+    uv run python tools/curate_graph.py inventory --out /tmp/inventory.json
+    uv run python tools/curate_graph.py plan --target <graph> --out /tmp/plan.json
+    uv run python tools/curate_graph.py plan --target <graph> --apply        # writes
+
+Reads the OLD graph through the MCP surface it is bound to and never writes to
+it; `--apply` is refused until a distinct target graph exists (the old graph is
+at its node cap and is the only copy of that tenant's data — see #11469,
+#10175 and the ruling recorded there).
+
+Env:
+    TORTOISE_MCP_URL / TORTOISE_MCP_API_KEY   the MCP endpoint + credential
+    TORTOISE_CURATE_OFF=1                     disarm every write
+"""
+
+from __future__ import annotations
+
+import sys
+
+# #5128: refuse a <3.12 interpreter BEFORE the imports below — a module-level
+# 3.12-only import would fail first, and the failure would not say what to do.
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    print(
+        f"curate-graph: requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/curate_graph.py`",
+        file=sys.stderr,
+    )
+    raise SystemExit(3)  # usage, not a data error
+
+import argparse
+import json
+import os
+from typing import Any
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from tortoise import curation as C
+
+PAGE = 500
+
+
+def _error_of(res: Any) -> str | None:
+    """The reason a tool payload is a REFUSAL, or None when it is data."""
+    if isinstance(res, dict):
+        for key in ("error", "detail", "violations"):
+            val = res.get(key)
+            if val:
+                return str(val)
+    return None
+
+
+def _rows_from_tool(res: Any) -> list[dict[str, Any]]:
+    res = C.normalise_tool_result(res)
+    if isinstance(res, dict):
+        for k in _ROW_KEYS:
+            v = res.get(k)
+            if isinstance(v, list):
+                return v
+    return res if isinstance(res, list) else []
+
+
+#: The keys a row LISTING may arrive under. `_rows_from_tool` reads only these, so a
+#: payload carrying none of them answered in a shape this reader does not understand.
+_ROW_KEYS = ("results", "result", "points")
+
+
+def _is_row_listing(res: Any) -> bool:
+    """Did this payload arrive in a shape that can be READ as a row listing?
+
+    The difference that matters is `[]` vs `unreadable`: an empty list (or an empty
+    `result` key, or an explicit `total: 0`) is a graph with no rows, while a dict
+    whose keys the reader does not recognise is a surface that drifted. Both go to
+    `[]` through `_rows_from_tool`, and only this predicate can tell them apart —
+    which is what makes "no silent zero" enforceable for the source section, not
+    just for points.
+    """
+    res = C.normalise_tool_result(res)
+    if isinstance(res, list):
+        return True
+    if not isinstance(res, dict):
+        return False
+    if any(isinstance(res.get(k), list) for k in _ROW_KEYS):
+        return True
+    # A COUNT-ONLY payload is readable only when it says ZERO. `{"total": 1578}` with
+    # no rows means the LISTING did not arrive, and accepting it reported
+    # `sources_read: 0` with exit 0 and only a gap to notice — the shape this guard
+    # exists for (round-37 review, P3-3).
+    counts = [res.get(k) for k in ("total", "count", "totalSources")]
+    return any(isinstance(c, int) and not isinstance(c, bool) and c == 0 for c in counts)
+
+
+class MCPReader:
+    """Paginated reads of one graph, read-only by construction (no write verb)."""
+
+    def __init__(self, call_tool, graph: str | None = None):
+        self._call = call_tool
+        self.graph = graph
+        self.note: str | None = None
+        self.notes: list[str] = []
+
+    def _q(self, **args: Any) -> dict[str, Any]:
+        if self.graph:
+            args["graph"] = self.graph
+        return self._call("tortoise_query", args)
+
+    def _fingerprint_walk(self, *, page: int = PAGE) -> list[str]:
+        """The id+content sequence of one full walk — used to VERIFY a census.
+
+        Deliberately minimal (no Row construction, no guards): its job is to be the
+        cheapest possible second opinion on "did the population hold still".
+        """
+        out: list[str] = []
+        offset = 0
+        while True:
+            res = C.normalise_tool_result(self._q(offset=offset, limit=page))
+            err = _error_of(res)
+            if err:
+                raise RuntimeError(f"verification pass was refused: {err[:300]}")
+            batch = _rows_from_tool(res)
+            if not batch:
+                break
+            out.extend(f"{r.get('id') or ''}\x00{r.get('content') or ''}" for r in batch)
+            offset += len(batch)
+            if len(batch) < page:
+                break
+        return out
+
+    def read_points(self, *, page: int = PAGE, verify: bool = True) -> tuple[list[C.Row], int]:
+        rows: list[C.Row] = []
+        offset = 0
+        total = None
+        # id -> (first offset, content fingerprint). Point ids are NOT unique (colliding
+        # ids are a tested, legal shape), so an id alone cannot tell "the same node
+        # served twice" from "two nodes sharing an id" — the CONTENT can.
+        first_page_fp: tuple[str, ...] | None = None
+        last_page_fp: tuple[str, ...] | None = None
+        last_offsets: tuple[int, int] | None = None
+        seen: dict[str, tuple[int, str]] = {}
+        totals: set[int] = set()
+        while True:
+            res = C.normalise_tool_result(self._q(offset=offset, limit=page))
+            # A refusal on this surface is a `_safe`-answered payload with
+            # `is_error=False`, so `normalise_tool_result` does NOT raise for it and it
+            # would read as "0 rows". It is TERMINAL wherever it lands: on a LATER page
+            # it used to reach `if not batch: break` with rows already collected, and
+            # when the surface reports no `total` the short walk was then returned as a
+            # complete census — the shortfall guard has no total to compare against and
+            # the page re-check re-reads the last SUCCESSFUL page, so neither can see it.
+            # That is the silent partial census R7 forbids (round-34 finding 1).
+            page_refusal = _error_of(res)
+            if page_refusal:
+                raise RuntimeError(
+                    f"read refused at offset {offset} after {len(rows)} rows: "
+                    f"{page_refusal[:300]} — refusing a partial census")
+            batch = _rows_from_tool(res)
+            if isinstance(res, dict) and res.get("total") is not None:
+                total = int(res["total"])
+                totals.add(total)
+            if len(totals) > 1:
+                # An offset walk over a population that CHANGED between pages does
+                # not describe one graph state: a row retracted mid-walk shifts every
+                # later row up, so one row is skipped and a tombstone is re-read, and
+                # the counts still match.
+                raise RuntimeError(
+                    f"pagination shifted mid-walk (reported total changed {sorted(totals)}) — "
+                    "refusing a census that mixes two graph states")
+            if not batch:
+                break
+            for r in batch:
+                rid = str(r.get("id") or "")
+                content = str(r.get("content") or "")
+                fingerprint = f"{r.get('kind') or r.get('pointKind') or ''}\x00{content}"
+                prior = seen.get(rid)
+                if prior is not None:
+                    first_offset, first_fp = prior
+                    if first_offset != offset and first_fp == fingerprint:
+                        # The SAME node, with the SAME content, served by an EARLIER
+                        # page: the walk repeated rather than advanced, so it also
+                        # skipped one. Two DIFFERENT nodes that merely share an id are
+                        # a legal shape (create_point(id=X) is not unique) and repeat
+                        # the id with different content.
+                        raise RuntimeError(
+                            f"row {rid!r} returned in an earlier page (offset {first_offset}) with "
+                            f"identical content and again at offset {offset} — the population "
+                            "shifted mid-walk; refusing a census that both skips and repeats rows")
+                else:
+                    seen[rid] = (offset, fingerprint)
+                rows.append(C.Row(
+                    node_id=str(r.get("id") or ""),
+                    node_type="operator" if r.get("is_operator") else "point",
+                    kind=r.get("kind") or r.get("pointKind"),
+                    content=content,
+                    content_hash=r.get("content_hash"),
+                    props={k: v for k, v in r.items() if k not in ("embedding",)},
+                ))
+            fp = tuple(f"{r.get('id') or ''}\x00{r.get('content') or ''}" for r in batch)
+            if first_page_fp is None:
+                first_page_fp = fp
+            last_page_fp, last_offsets = fp, (offset, len(batch))
+            offset += len(batch)
+            if total is not None and offset >= total:
+                break
+            if len(batch) < page:
+                break
+        if not rows:
+            # An empty read is a FAILURE, not an empty graph: the source is known
+            # to hold thousands of nodes, so 0 rows means the read was refused or
+            # mis-targeted — and a silent zero would produce a clean-looking
+            # census that claims there is nothing to migrate.
+            raise RuntimeError(
+                f"read returned 0 points (reported total={total}); refusing to report an "
+                "empty graph — check the credential/graph binding"
+            )
+        if total is not None and len(rows) < total:
+            # `total` is not `structure.total`, and it does not count tombstones: the
+            # paginated read answers it from `sdk.paginated_query`, which computes
+            # `count(n)` with the SAME WHERE clause (same terminal-status exclusion,
+            # #1391) as the page it serves. So a correct full walk cannot red here
+            # because of retracted rows — the two numbers describe ONE population,
+            # which is what makes a shortfall a failed read rather than a filter
+            # disagreement between two surfaces.
+            raise RuntimeError(f"incomplete read: {len(rows)} of {total} points — refusing a partial census")
+        # A mid-walk mutation that keeps the TOTAL stable and repeats no row (one
+        # retracted, one appended) is invisible to the guards above; the census then
+        # contains a tombstone and omits a live row while looking complete. Re-reading
+        # the LAST page at the end does not help (its snapshot is taken after the
+        # churn), so a SECOND FULL WALK is the only sound check: it costs a second pass
+        # (~2x calls) and is on by default, because a wrong census is worse than a slow
+        # one. `--no-verify-read` opts out.
+        if first_page_fp is not None:
+            for label, want, args in (
+                ("first", first_page_fp, {"offset": 0, "limit": page}),
+                ("last", last_page_fp, {"offset": last_offsets[0], "limit": last_offsets[1]}),
+            ):
+                res2 = C.normalise_tool_result(self._q(**args))
+                err2 = _error_of(res2)
+                if err2:
+                    raise RuntimeError(f"verification read of the {label} page was refused: "
+                                       f"{err2[:300]}")
+                got = tuple(f"{r.get('id') or ''}\x00{r.get('content') or ''}"
+                            for r in _rows_from_tool(res2))
+                if got != want:
+                    raise RuntimeError(
+                        f"the {label} page changed during the walk — the population was mutated "
+                        "mid-read (a retraction and an addition of equal size look identical to "
+                        "the totals); refusing a census that may hold a tombstone and omit a row")
+        if verify:
+            second = tuple(self._fingerprint_walk(page=page))
+            # `rows` are C.Row dataclasses, not dicts — reading them with `.get`
+            # raised AttributeError on EVERY successful walk, so the second pass
+            # aborted every run instead of comparing anything.
+            first = tuple(f"{r.node_id}\x00{r.content}" for r in rows)
+            if second != first:
+                raise RuntimeError(
+                    "a second read of the same graph returned a DIFFERENT row sequence — the "
+                    "population was mutated mid-walk (a retraction plus an addition leaves the "
+                    "total unchanged and repeats no row, so only a full second pass can see it); "
+                    "refusing a census that may hold a tombstone and omit a live row")
+        return rows, (total if total is not None else len(rows))
+
+    def _section(self, section: str) -> Any:
+        """A graph_overview section, with the credential's binding made explicit.
+
+        A graph-bound credential cannot be re-targeted by a `graph` argument; when
+        it refuses, the retry is WITHOUT the argument (omission means "this
+        credential's own graph" — a documented, legal read) and the fact that the
+        read used the credential's binding is recorded on the report rather than
+        silently absorbed.
+        """
+        args = {"section": section}
+        if not self.graph:
+            return self._checked(self._call("tortoise_graph_overview", args), section)
+        try:
+            res = C.normalise_tool_result(self._call("tortoise_graph_overview", {**args, "graph": self.graph}))
+        except Exception as exc:
+            # ONLY a recognised graph-refusal may fall back. A timeout/429 says
+            # nothing about the binding, and re-reading a DIFFERENT graph under the
+            # requested graph's identity is how a census mixes two graphs.
+            reason = str(exc) or type(exc).__name__
+            if not _looks_like_graph_refusal(reason):
+                raise
+            res, reason = None, reason
+        else:
+            reason = _error_of(res)
+            if reason and not _looks_like_graph_refusal(reason):
+                # An error envelope is the NORMAL delivery shape on this surface, so
+                # the gate has to be here too: a quota/DB error must not re-read a
+                # different graph and label the artifact with the requested one.
+                raise RuntimeError(f"read of section {section!r} failed: {reason[:300]}")
+        if reason:
+            self._note(f"section {section!r}: the explicit graph argument was refused "
+                       f"({reason[:160]}); read from the credential's own graph instead")
+            return self._checked(self._call("tortoise_graph_overview", args), section)
+        # An EMPTY result is a legitimate answer (a graph with no sources), so it is
+        # returned as-is rather than re-read from a different graph.
+        return res
+
+    def _note(self, text: str) -> None:
+        """Notes ACCUMULATE: a single slot kept only the last falling section, so a
+        report could carry one fallback while another section silently used it."""
+        if text not in self.notes:
+            self.notes.append(text)
+        self.note = "; ".join(self.notes)
+
+    @staticmethod
+    def _checked(raw: Any, section: str) -> Any:
+        """Unwrap, then FAIL CLOSED on an error envelope.
+
+        A retry can refuse too, and an envelope falling through to `_rows_from_tool`
+        reads as "0 rows" — a refusal presented as a census. Points fail closed for
+        this reason; every section does.
+        """
+        res = C.normalise_tool_result(raw)
+        err = _error_of(res)
+        if err:
+            raise RuntimeError(f"read of section {section!r} was refused: {err[:300]}")
+        return res
+
+    def read_sources(self) -> tuple[list[C.Row], int | None]:
+        """Sources, plus the total the surface reported (None when it reports none).
+
+        The surface's source listing matches `documentKind IS NULL`, so it is a
+        SUBSET of `counts.Source`; the caller reconciles against that and names the
+        gap (NOT_ENUMERABLE["source"]) rather than reporting a complete census. A
+        row SECTION carries no `total` key, so None is the honest answer here — the
+        previous code returned `len(out)`, which could never disagree with
+        `sources_read` and so reconciled nothing.
+        """
+        res = self._section("sources")
+        if not _is_row_listing(res):
+            # R7's other half. `_section` fails closed on an error ENVELOPE, but a
+            # refusal that arrives as an unrecognised DATA shape (`{"unexpected": "shape"}`)
+            # carries no `error` key and unwrapped to `[]` — reported as a graph with no
+            # sources, which on this tenant silently dropped 1,578 of 17,420 rows.
+            raise RuntimeError(
+                "read of section 'sources' answered in an unrecognised shape "
+                f"({type(res).__name__} with keys "
+                f"{sorted(res)[:6] if isinstance(res, dict) else 'n/a'}) — refusing to "
+                "report an unreadable source listing as an empty one")
+        raw = _rows_from_tool(res)
+        total = None
+        if isinstance(res, dict):
+            for key in ("total", "count", "totalSources"):
+                if isinstance(res.get(key), int):
+                    total = res[key]
+                    break
+        out = []
+        for s in raw:
+            url = str(s.get("url") or "")
+            out.append(C.Row(
+                node_id=url, node_type="source", kind=s.get("sourceKind"),
+                content=url, content_hash=None, props=s,
+            ))
+        return out, total
+
+    def counts(self) -> dict[str, Any]:
+        res = self._section("status")
+        return res if isinstance(res, dict) else {}
+
+    def structure(self) -> dict[str, Any]:
+        res = self._section("structure")
+        return res if isinstance(res, dict) else {}
+
+    def graphs(self) -> list[dict[str, Any]]:
+        """The workspace's graph identities, in whatever shape this server offers.
+
+        The tool set exposes NAMESPACES (``org_…_g_<id>``) here, and a namespace
+        encodes its graph id — enough to tell two graphs apart. A graph NAME
+        (``live-v4``) is not resolvable from this surface at all, which is why an
+        unresolvable ref is a refusal in the guard rather than a pass.
+        """
+        out: list[dict[str, Any]] = []
+        for row in _rows_from_tool(self._section("graphs")):
+            if isinstance(row, dict):
+                out.append(dict(row))
+            elif isinstance(row, str) and row:
+                out.append({"namespace": row})
+        return out
+
+    def audit(self) -> dict[str, Any]:
+        res = self._section("audit")
+        return res if isinstance(res, dict) else {}
+
+
+def _live_call_tool(name: str, args: dict[str, Any] | None = None) -> Any:
+    from tortoise import mcp_client
+
+    return mcp_client.call_tool(name, args or {})
+
+
+#: A fallback to the credential's own graph is only legitimate when the refusal is
+#: ABOUT the graph argument. The vocabulary is DERIVED from the producers, not
+#: invented: `tortoise/mcp_auth.py::_retarget_refusal` ("This credential is bound to
+#: one graph and cannot be re-targeted by a `graph` argument (requested …)") and
+#: `tortoise/mcp_server.py` ("A graph-bound credential cannot be re-targeted"), plus
+#: the resolver's "No graph '…' is reachable from this workspace". A quota/budget/DB
+#: error matches none of these and RAISES instead of reading a different graph under
+#: the requested graph's identity.
+_GRAPH_REFUSAL_PHRASES = (
+    "cannot be re-targeted",
+    "cannot be retargeted",
+    "bound to one graph",
+    "is reachable from this workspace",
+    "graph-bound credential",
+)
+
+
+def _looks_like_graph_refusal(reason: str) -> bool:
+    low = (reason or "").lower()
+    if any(phrase in low for phrase in _GRAPH_REFUSAL_PHRASES):
+        return True
+    # Otherwise the message must QUOTE the graph argument ("unknown graph 'x'",
+    # 'graph "x" does not exist'). A bare mention of the word is not enough:
+    # "FalkorDB: graph not found" and "unknown error while reading the graph" are
+    # DB faults, and "permission denied: scope graph read" is a key restriction —
+    # none of them says the ARGUMENT was refused.
+    if "graph argument" in low or "graph-bound" in low:
+        return True
+    return ("graph '" in low or 'graph "' in low) and (
+        "refus" in low or "unknown" in low or "does not exist" in low
+        or "not found" in low or "not reachable" in low or "cannot" in low)
+
+
+def _source_gap(counts: Any, read: int) -> int | None:
+    """`counts.Source` minus what this read path enumerated (None if unreported).
+
+    Non-zero is EXPECTED: `sdk.list_sources` matches `documentKind IS NULL`, so a
+    Document-kind Source is never listed. Reported rather than explained away.
+    """
+    if not isinstance(counts, dict):
+        return None
+    node_counts = counts.get("counts") if isinstance(counts.get("counts"), dict) else counts
+    total = node_counts.get("Source") if isinstance(node_counts, dict) else None
+    return (total - read) if isinstance(total, int) else None
+
+
+def _unreconciled_sources(read: int, gap: int | None) -> str | None:
+    """The refusal for a ZERO-source census that nothing can reconcile, else None.
+
+    A non-zero gap is EXPECTED and named (`list_sources` filters `documentKind IS NULL`),
+    so it is not a refusal. The refusal is the other case: 0 sources read AND no
+    `counts.Source` to compare against, where "this graph has no sources" and "the
+    listing was not read" are indistinguishable — the silent-zero R7 forbids, which
+    for points is already a hard raise (`read_points`). A genuine empty listing still
+    passes: the surface reports `counts.Source == 0`, so the gap is 0, not None.
+    """
+    if read or gap is not None:
+        return None
+    return ("read 0 sources and the status section reported no `Source` count, so an empty "
+            "listing cannot be told from an unread one — refusing a census that would report "
+            "the source population as empty with nothing to reconcile it against")
+
+
+NOT_ENUMERABLE = {
+    "operator": "tortoise_query excludes operator Points unless an operator kind is "
+                "requested (sdk._operator_scope_clauses, #7108) — count from structure.operators",
+    "object": "no listing surface on the MCP tool set — count from counts.Object",
+    "event": "no listing surface on the MCP tool set — count from counts.Event",
+    "subject": "no listing surface on the MCP tool set — count from counts.Subject",
+    "source": "tortoise_list_sources matches `documentKind IS NULL` (sdk.list_sources), "
+              "so a Document-kind Source is NOT listed — reconcile sources_read against "
+              "counts.Source rather than reading the source count as complete",
+}
+
+
+def cmd_inventory(args: argparse.Namespace) -> int:
+    reader = MCPReader(_live_call_tool, args.graph)
+    counts = reader.counts()
+    structure = reader.structure()
+    graphs = reader.graphs()
+    points, total = reader.read_points(page=args.page, verify=args.verify_read)
+    sources, source_total = reader.read_sources()
+    gap = _source_gap(counts, len(sources))
+    unreconciled = _unreconciled_sources(len(sources), gap)
+    if unreconciled:
+        print(f"REFUSED: {unreconciled}", file=sys.stderr)
+        return 3
+    audit = reader.audit()
+    plan = C.build_plan(points + sources, source_graph=args.graph or "(credential-bound)",
+                        target_graph=args.target or "(none: inventory only)")
+    if args.rows:
+        # inventory builds the plan (it IS the census), so the row artifact is
+        # available here too — silently dropping the flag is how an operator reviews
+        # a STALE file believing it is this run's.
+        with open(args.rows, "w", encoding="utf-8") as fh:
+            for d in plan.decisions:
+                fh.write(json.dumps(d.as_dict(), sort_keys=True) + "\n")
+    report = {
+        # NEVER "default": an omitted `graph` reads the CREDENTIAL's own graph
+        # (#10084), so a field saying "default" would state the opposite.
+        "graph": args.graph or "(credential-bound)",
+        "node_counts": counts.get("counts") if isinstance(counts.get("counts"), dict) else counts,
+        "points_read": len(points),
+        "points_total_reported": total,
+        "sources_read": len(sources),
+        "sources_total_reported": source_total,
+        "source_count_gap": gap,
+        "structure": structure,
+        "graphs": graphs,
+        "not_enumerable_by_this_read_path": dict(NOT_ENUMERABLE),
+        "read_note": reader.note,
+        "audit": {
+            "node_count": audit.get("node_count"),
+            "edge_count": audit.get("edge_count"),
+            "summary": audit.get("summary"),
+            "checks": [
+                {"id": c.get("id"), "severity": c.get("severity"), "count": c.get("count")}
+                for c in (audit.get("checks") or [])
+            ],
+        },
+        "census": plan.census(),
+        # Uniform with `plan`'s payload: this report's census is measured too.
+        "census_measured": True,
+        "rows_written": (len(plan.decisions) if args.rows else None),
+    }
+    text = json.dumps(report, indent=2, sort_keys=True)
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as fh:
+            fh.write(text + "\n")
+        print(f"inventory: {len(points)} points + {len(sources)} sources -> {args.out}")
+        print(json.dumps(report["census"]["totals"], indent=1))
+    else:
+        print(text)
+    return 0
+
+
+def _disarmed_artifact(
+    args: argparse.Namespace,
+    reason: str,
+    *,
+    census: Any = None,
+    read_failure: str | None = None,
+    pending: int = 0,
+    refused: str = "off-switch active",
+    census_measured: bool | None = None,
+    read_note: str | None = None,
+) -> int:
+    """A DISARMED run that stopped early: exit 0, the reason on the artifact.
+
+    The off switch exists to make pipeline noise stop during an incident — exactly when
+    the reads are failing — so a disarmed run must not become a non-zero exit just
+    because the census it was not going to write from could not be read (round-22
+    contract: "a driver paged on a run that did exactly what it was told"). It must not
+    SWALLOW the failure either.
+
+    ⛔ `census_measured` is present on BOTH arms of THIS helper, so a driver answers
+    "was it measured?" uniformly instead of inferring it from a missing key (round-38
+    P3 — and the claim is scoped to this helper on purpose: a FULL disarmed run never
+    reaches here and carries the same KEY from `cmd_plan`'s plan payload, where it is
+    `unreconciled is None` and not a blanket `True` — an unreconcilable source listing
+    travels through that arm, so the source population was not measured (round-40).
+    The key is therefore on every disarmed artifact; its VALUE is the honest one). When
+    `census` is given it is the census that WAS read, stopped by the ledger, and it
+    travels here in full: a disarmed run over a damaged LEDGER still read the graph
+    successfully, so the two losses are not the same fact and must not be reported as
+    one — `census_measured` still says whether its SOURCE population could be
+    reconciled, which is a different fact again.
+
+    ⛔ `census_measured` IS NOT `census is not None`, and the LABEL at the end of this
+    helper was the last place that still derived it from presence (round-42 review). A
+    caller that knows the source population was unreconcilable passes
+    `census_measured=False` while still handing over the census it did measure, because
+    "the points were read" and "the census is complete" are different facts — and the
+    operator-facing line must agree with the artifact it accompanies, or the incident
+    log and the JSON tell two stories about one run.
+
+    ⛔ `pending` is the plan's CARRY COUNT on that second arm, not a hardcoded 0: with
+    the census measured and a carry set on the artifact, `pending: 0` says "nothing is
+    owed" about a run whose ledger is UNREADABLE — a driver's `pending == 0 ⇒ done`
+    check would read a refused migration as finished (round-38 review P2). The ledger
+    could not be read, so the split is unknown and `pending` is the upper bound: the
+    three counters still SPAN the carry set (`0 + 0 + carried == carried`), the
+    documented invariant, and nothing was written.
+    """
+    # Resolved ONCE: the artifact and the operator-facing line must not disagree.
+    measured = (census is not None) if census_measured is None else census_measured
+    payload = {
+        # `null` when the census could not be measured — never a zeroed census, which
+        # is indistinguishable from "the graph is empty" (the silent-zero class R7
+        # forbids). When `census` is given it is the census that WAS read, stopped by
+        # the ledger; `census_measured` says whether its SOURCE population could be
+        # reconciled, which is a different fact.
+        "census": census,
+        # The CALLER supplies the fact where it knows better than `census is not None`:
+        # a measured-but-unreconciled census exists AND has an unmeasured source
+        # population, and deriving the flag from presence alone reported it as measured
+        # (round-41 review). `read_note` carries the reason when it is not in
+        # `read_failure` (that field is for the read that RAISED).
+        "census_measured": measured,
+        "disarmed_reason": reason,
+        "read_failure": read_failure,
+        "read_note": read_note,
+        "run": {
+            "applied": False, "off": True, "skipped_known": 0, "written": 0,
+            "target_graph": args.target, "digest": None, "refused": refused,
+            "stopped": None, "identity": None, "duplicate_rows": 0, "pending": pending,
+        },
+        "rows_written": None,
+        "not_enumerable_by_this_read_path": dict(NOT_ENUMERABLE),
+    }
+    text = json.dumps(payload, indent=2, sort_keys=True)
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as fh:
+            fh.write(text + "\n")
+    print(text)
+    label = "census measured" if measured else "census NOT measured"
+    print(f"disarmed ({label}: {reason[:200]}): nothing written, nothing attempted",
+          file=sys.stderr)
+    return 0
+
+
+def cmd_plan(args: argparse.Namespace) -> int:
+    if not args.target:
+        print("plan: --target <graph> is required (the clean, pack-filed graph)", file=sys.stderr)
+        return 2
+    if args.apply and not args.graph:
+        # A write must name the graph that was READ. Omitting --graph reads the
+        # credential's own graph, and fabricating a name for it would have the
+        # identity guard compare a graph nobody read.
+        print("plan --apply: --graph <source graph id or namespace> is required — the source "
+              "identity must be the graph that was actually read", file=sys.stderr)
+        return 2
+    reader = MCPReader(_live_call_tool, args.graph)
+    disarmed = C.off_switch_active(args.off)
+    try:
+        counts = reader.counts()
+        points, points_total = reader.read_points(page=args.page, verify=args.verify_read)
+        sources, source_total = reader.read_sources()
+        # INSIDE the guard too: `graphs()` feeds the identity guard and the ledger
+        # scope, so a failure there is the same census class.
+        graphs = reader.graphs()
+    except Exception as exc:
+        # ⛔ THE SWITCH IS RESOLVED BEFORE THE CENSUS, for EVERY read — not only the
+        # source section. An armed run still raises (a failed read must be loud); a
+        # disarmed run reports the failure on the artifact and exits 0 (round-37 P3).
+        if not disarmed:
+            raise
+        return _disarmed_artifact(args, f"{type(exc).__name__}: {exc}",
+                                  read_failure=f"{type(exc).__name__}: {exc}")
+    gap = _source_gap(counts, len(sources))
+    unreconciled = _unreconciled_sources(len(sources), gap)
+    if unreconciled and not C.off_switch_active(args.off):
+        print(f"REFUSED: {unreconciled}", file=sys.stderr)
+        return 3
+    if unreconciled:
+        # ⛔ A DISARMED run stays a success (exit 0): the operator asked for nothing to
+        # be written, and reporting a REFUSAL for it is the round-22 defect (a driver
+        # pages on a run that did exactly what it was told). The unmeasurable census
+        # still travels on the artifact rather than being swallowed.
+        reader._note(unreconciled)
+    if args.apply and not graphs and not disarmed:
+        # ⛔ An EMPTY `graphs` section silently disabled the rows-authority guard: with no
+        # identity rows the guard falls back to shape, which accepts any id-shaped ref, so
+        # `--target g_new` was written while the ledger filed the key under a SECOND scope
+        # for one graph (round-38 P3). An apply with no identity rows is an unproven
+        # target, and that is a refusal — the same answer as any other unproven identity.
+        # A disarmed apply writes nothing, so it is not refused (the switch wins).
+        print("REFUSED: the `graphs` section returned no identity rows, so the graph "
+              "`--target` names cannot be proven — an applying run is refused rather "
+              "than resolved by shape", file=sys.stderr)
+        return 3
+    plan = C.build_plan(points + sources, source_graph=args.graph or "(credential-bound)",
+                        target_graph=args.target)
+    try:
+        result = C.run_plan(
+            plan,
+            writer=C.IngestWriter(_live_call_tool),
+            ledger=C.Ledger(
+                args.ledger or os.path.expanduser("~/.tortoise/curate-11469-ledger.jsonl"),
+                target=args.target,
+                # CANONICAL scope: `--target g_new` today and `--target org_x_g_new`
+                # yesterday are ONE graph, and a spelling-keyed ledger re-sent every
+                # row into it (round-36 review, P3-5).
+                graph_rows=graphs,
+            ),
+            apply=args.apply,
+            off=args.off,
+            graph_rows=graphs,
+        )
+    except C.CurationRefused as exc:
+        if disarmed:
+            # ⛔ The switch is TOTAL: a disarmed run over a damaged/unscopable LEDGER is
+            # still exit 0 (nothing was going to be written), and the census it DID
+            # measure travels on the artifact. Pre-fix this arm exited 3 while the failed
+            # -read arm exited 0 — two disarmed runs in one incident, opposite contracts
+            # (round-38 P3). ⛔ `pending` is the carry count, NOT 0: the ledger is what
+            # could not be read, so its holdings are unknown and the rows it might have
+            # held are still owed (round-38 review P2). ⛔ `census_measured` is the
+            # CALLER's fact, not `census is not None`: this arm can ALSO carry an
+            # unreconcilable source listing, so the points were measured and the source
+            # population was not — presence alone reported that as measured, and dropped
+            # the reason entirely (round-41 review P3).
+            return _disarmed_artifact(args, str(exc), census=plan.census(),
+                                      pending=len(plan.carry_rows()), refused=str(exc),
+                                      census_measured=unreconciled is None,
+                                      read_note=reader.note)
+        print(f"REFUSED: {exc}", file=sys.stderr)
+        return 3
+    if args.rows:
+        # The census is aggregate by design; the ROW-LEVEL reasons are what a review
+        # of "which 127 rows, and why" needs, so they get their own artifact rather
+        # than an implied claim that the report carries them.
+        with open(args.rows, "w", encoding="utf-8") as fh:
+            for d in plan.decisions:
+                fh.write(json.dumps(d.as_dict(), sort_keys=True) + "\n")
+        payload_rows = len(plan.decisions)
+    else:
+        payload_rows = None
+    payload = {"census": plan.census(), "run": result.as_dict(),
+               # ⛔ PRESENT ON EVERY PATH, so `payload["census_measured"]` answers "was the
+               # census measured?" instead of KeyError-ing on the most common disarmed run
+               # (the healthy one) — the field was added for that uniformity and only the
+               # two failure arms carried it (round-39 P3).
+               # NOT unconditionally True: the disarmed arm carries an
+               # UNRECONCILABLE source listing through to here (the armed one returns 3
+               # above), and on that arm the source population was not measured — the
+               # driver must be able to read that from this field alone, with the reason
+               # in `read_note` (round-40 review, P3-2).
+               "census_measured": unreconciled is None,
+               "rows_written": payload_rows,
+               "points_read": len(points), "points_total_reported": points_total,
+               "sources_read": len(sources), "sources_total_reported": source_total,
+               "source_count_gap": gap,
+               # The plan is the artifact a driver writes; a census without the
+               # classes this read path cannot enumerate reads as complete.
+               "not_enumerable_by_this_read_path": dict(NOT_ENUMERABLE),
+               # A credential-bound fallback read means the rows came from the
+               # credential's own graph, not the one asked for — never silent.
+               "read_note": reader.note}
+    text = json.dumps(payload, indent=2, sort_keys=True)
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as fh:
+            fh.write(text + "\n")
+    print(text)
+    if result.off and not result.applied:
+        # The operator ASKED for this (`--off` / TORTOISE_CURATE_OFF): nothing was
+        # written because nothing was meant to be. Checked BEFORE the generic refusal
+        # branch, which would otherwise read the off-switch as a failure and exit 3.
+        print(f"disarmed ({result.refused}): nothing written, nothing attempted", file=sys.stderr)
+        return 0
+    if result.refused and not result.applied and args.apply:
+        # A refused WRITE (or a refused identity) is a failure, not a successful
+        # plan: a scripted driver must not read exit 0 as "migrated".
+        print(f"REFUSED: {result.refused}", file=sys.stderr)
+        return 3
+    # Keyed on `stopped`, NOT on `applied`. A run stopped before its first batch
+    # accepted anything reports `applied: False` (nothing landed) — an `applied and
+    # stopped` test would fall straight through to exit 0, reading a stopped migration
+    # as a finished one. `stopped` is the fact; `applied` is a derived field.
+    if result.stopped:
+        print(f"STOPPED mid-run: {result.stopped} (accepted={result.written})", file=sys.stderr)
+        return 3
+    if result.applied and result.refused:
+        print(f"REFUSED mid-run: {result.refused} (accepted={result.written})", file=sys.stderr)
+        return 3
+    if args.apply and not result.applied:
+        # The apply leg ran, nothing was accepted, and the writer neither refused nor
+        # stopped. `IngestWriter` cannot produce this (it stops or refuses rather than
+        # reporting a success that accepted nothing), so a CUSTOM `PlanWriter` is the
+        # only source — but `applied: false` over a plan that still owes rows must not
+        # exit 0, or a driver reads a migration that moved nothing as finished.
+        print(f"NO-OP: nothing accepted, {result.pending} row(s) still owed", file=sys.stderr)
+        return 3
+    return 0
+
+
+def _page_size(text: str) -> int:
+    """`--page-size` must be a USAGE error when it is not a legal size.
+
+    Unvalidated, `--page-size 0` reached the surface, came back as
+    `{"error": "limit must be >= 1"}`, and surfaced as "refusing to report an empty
+    graph" with a traceback (exit 1) — a usage mistake reported as a data verdict.
+    """
+    import argparse as _argparse
+    try:
+        val = int(text)
+    except ValueError as exc:
+        raise _argparse.ArgumentTypeError(f"not an integer: {text!r}") from exc
+    if val < 1:
+        raise _argparse.ArgumentTypeError(f"must be >= 1 (got {val})")
+    return val
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description="Curation pass for our own memory (#11469)")
+    ap.add_argument("action", choices=["inventory", "plan"])
+    ap.add_argument("--graph", help="source graph (default: the credential's own graph)")
+    ap.add_argument("--target", help="target graph — must differ from the source")
+    ap.add_argument("--out", help="write the JSON report here")
+    ap.add_argument("--rows", help="also write the ROW-LEVEL decisions here (JSON Lines: "
+                                  "node id, disposition, the rule's reason, pack) — the artifact "
+                                  "a row-by-row review of the plan actually needs")
+    ap.add_argument("--ledger", help="ledger path (default ~/.tortoise/curate-11469-ledger.jsonl)")
+    ap.add_argument("--page-size", "--page", dest="page", type=_page_size, default=PAGE,
+                    help=f"rows per read (default {PAGE}). This is a page SIZE, not a "
+                         "1-based page number: a small value makes the read take many calls")
+    ap.add_argument("--apply", action="store_true", help="actually write (default: plan only)")
+    ap.add_argument("--off", action="store_true", help="off-switch: write nothing")
+    ap.add_argument("--no-verify-read", dest="verify_read", action="store_false",
+                    help="skip the second verification walk. The walk assumes an unchanging "
+                         "population; a same-size churn (one retraction + one addition) is "
+                         "invisible without the second pass, so skipping it is a speed trade")
+    args = ap.parse_args(argv)
+    if args.action == "inventory":
+        ignored = [f for f, v in (("--apply", args.apply), ("--ledger", args.ledger),
+                                  ("--target", args.target), ("--off", args.off))
+                   if v]
+        if ignored:
+            # Silently ignoring a flag is how an operator believes an artifact exists.
+            print(f"inventory does not write: {', '.join(ignored)} apply only to `plan`",
+                  file=sys.stderr)
+            return 2
+    return cmd_inventory(args) if args.action == "inventory" else cmd_plan(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
