@@ -841,14 +841,18 @@ def test_a_stores_declaration_that_does_not_answer_is_refused():
     """`#11492`: every declaration answers row 2's question, and `load()` refuses a shrug.
 
     Row 2 is *"is every stored vector on a label the query leg can serve?"*, and the one fact it
-    needs — WHERE the vector lands — cannot be derived for most writers (their label lives in the
-    CALLER's `MATCH`), so it is DECLARED. The refusals below are what keeps that declaration from
+    needs — WHERE the vector lands — cannot be derived for most writers (the store is not a
+    `MERGE|CREATE (:Label` in the writer's own body: for five it is a `MATCH` the derivation does not
+    credit, for nine there is no label statement in the writer at all, and for one the statement is
+    its caller's), so it is DECLARED. The refusals below are what keeps that declaration from
     degrading into a default: an empty tuple ("unspecified") and a missing field would both read to
     the grader as *nothing to compare*, i.e. a silent pass for the one writer nobody checked.
 
-    ⛔ The directions are not symmetric and the message says so: an empty tuple or an
-    out-of-vocabulary string would be compared as a LABEL and land outside the served set — a
-    `NOT MET` on a tree where nothing is wrong, the false-hold direction.
+    ⛔ The directions are not symmetric and the message says so: a label that is not a Cypher label
+    can never match the served set (the false-hold direction), while an empty tuple or a non-tuple
+    is a declaration that does not answer (the false-pass direction). An out-of-vocabulary string is
+    neither: `tools/dod_5090_probe.py::_store_reading` refuses it independently and records it in
+    `violations`, so row 2 holds at `PARTIAL` and names it — not a `NOT MET`.
     """
     # ⛔ No default: the field is REQUIRED, so a new declaration cannot inherit a safe-looking
     # answer. This is the same pin `test_the_DECLARATIONS_tuple_…` puts on the frozen map.
@@ -919,7 +923,7 @@ LABEL_EVIDENCE: dict[str, tuple[str, str, str, frozenset[str]]] = {
         frozenset({"Point", "Subject", "Object", "Source", "Event"})),
 }
 
-#: The label sets the two label CONSTANTS name, cited by the entries that store through them.
+#: The label sets the label CONSTANT names, cited by the entries that store through them.
 #: `(rel_path, symbol, labels)` — re-derived like `CENSUS_EVIDENCE`, so a canonical label added to
 #: `_CANONICAL_ENTITY_ID_PROPS` reds instead of silently widening what `_update_entity` declares.
 LABEL_CONSTANTS: dict[str, tuple[str, str, frozenset[str]]] = {

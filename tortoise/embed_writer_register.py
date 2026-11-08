@@ -71,10 +71,14 @@ needs the difference must carry it"*). Each declaration therefore also carries `
 labels the writer's vector is stored on, or :data:`NO_LIVE_VECTOR` / :data:`LABELS_AT_RUNTIME`.
 ⛔ It is declared here rather than derived by the instrument because the derivation cannot reach it:
 of the twenty outside-gate writers, the writer's own Cypher names a single label for three, two
-conflicting labels for two, and NO label for fifteen — the label usually lives in the caller's
-`MATCH` (`_embedding_repair_attempt` writes `set_embedding_clause("e")` inside
-`MATCH (e:Event {eventId:$eid})`). A second derivation in the grader would be a second owner of one
-fact; the field is that fact, declared once (the policy-as-data shape `#11444` applies to row 1).
+conflicting labels for two, and NO `MERGE|CREATE (:Label` for fifteen. ⚠️ Of those fifteen the label
+is in the writer's OWN `MATCH` for five (`_embedding_repair_attempt` writes
+`set_embedding_clause("e")` inside its own `MATCH (e:Event {eventId:$eid})` — the derivation credits
+`MERGE|CREATE` only, because a `MATCH` is a read); nine name no label statement in their own body at
+all (a journal entry, a read, a delegated store, a clause builder, an interpolated label); and one —
+the caller's-statement door — has its store written by whoever calls it. A second derivation in the
+grader would be a second owner of one fact; the field is that fact, declared once (the
+policy-as-data shape `#11444` applies to row 1).
 ⚠️ **Its residual, stated rather than implied:** a `NO_LIVE_VECTOR` or label-tuple declaration is
 accepted **by name** once `load()` validates it — the instrument cannot re-derive "this writer
 stores nothing" (that is `UNDECIDABLE_WRITE_SHAPES`, data flow, the same limit `exempt` has on row
@@ -318,16 +322,20 @@ CLASSES: tuple[str, ...] = (RECOGNISED_PRODUCER, EXEMPT)
 #: `#11492`'s first review round closed.
 #:
 #: ⛔ Why this belongs in the declaration and NOT in a derivation inside the instrument: of the
-#: twenty outside-gate writers, the instrument's own label derivation (the `MERGE|CREATE (:Label`
-#: literal in the writer's body) resolves a single label for three, two conflicting labels for two,
-#: and **no label at all for fifteen** — because the label usually lives in the *caller's*
-#: `MATCH`, not in the writer. `_embedding_repair_attempt` writes
-#: `set_embedding_clause("e")` inside `MATCH (e:Event {eventId:$eid})`; `_rebuild_all_replay`'s
-#: vector write is `MATCH (n:Point {id:$pid})` + `set_embedding_clause("n", "$emb")`. A second
-#: derivation in the grading instrument would be a second owner of the same fact; the field below
-#: makes the fact ONE declaration that every consumer reads (the policy-as-data shape `#11444`
-#: already applies to row 1, and the shape OPA's *Philosophy* states: policy is decoupled from the
-#: service so those responsible can read, write, version and distribute it).
+#: twenty outside-gate writers, the instrument's own label derivation (a `MERGE|CREATE (:Label`
+#: literal in the writer's own body) resolves a single label for three, two conflicting labels for
+#: two, and **no label at all for fifteen**. ⚠️ Not "because the label lives in the caller" — that is
+#: true of ONE of them (`_event_raw_write_door`, which executes its caller's statement). Five name it
+#: in their OWN `MATCH`, which the derivation deliberately does not credit because a `MATCH` is a
+#: read: `_embedding_repair_attempt` writes `set_embedding_clause("e")` inside its own
+#: `MATCH (e:Event {eventId:$eid})`, and `_rebuild_all_replay`'s vector write is
+#: `MATCH (n:Point {id:$pid})` + `set_embedding_clause("n", "$emb")`. The other nine name no label
+#: statement in their own body at all — a journal entry, a read, a delegated store, a clause
+#: builder, an interpolated label. A second derivation in the grading instrument would be a second
+#: owner of the same fact; the field below makes the fact ONE declaration that every consumer reads
+#: (the policy-as-data shape `#11444` already applies to row 1, and the shape OPA's *Philosophy*
+#: states: policy is decoupled from the service so those responsible can read, write, version and
+#: distribute it).
 #: ⛔ It is still NOT a rule set: a label is a fact about a writer, not a predicate about what
 #: earns a vector — `value_gate.RULES` stays the one rule set (§12.2a).
 NO_LIVE_VECTOR = "no-live-vector"
@@ -428,13 +436,17 @@ class WriterClass:
 def _check_stores(key: str, stores: tuple[str, ...] | str) -> None:
     """Refuse a ``stores`` that does not answer row 2's question.
 
-    ⛔ Two directions, and the refusals below serve one each — do not read them as one:
+    ⛔ Three classes, and they are not one direction — do not read them as one:
 
     * **false PASS** (an unanswerable declaration read as "nothing to compare") — an empty tuple
       (a shrug), a mutable list or any non-tuple (a frozen declaration must not be editable in
       place by a consumer).
     * **false HOLD** (a value that can never match the served set) — a label that is not a Cypher
-      label, and a label declared twice.
+      label, so the membership test can never name it.
+    * **not well-formed at all** — the same label declared twice. It holds nothing in row 2 (a set
+      comparison cannot see it and `_store_reading` has no duplicate branch), and the refusal exists
+      because `#11086`'s consumer will interpolate this field into a query, where a doubled label is
+      a malformed pattern rather than a harmless redundancy.
 
     A bare string outside :data:`STORES_DISPOSITIONS` is refused so that no consumer can read a
     typo'd disposition as a LABEL named ``"no-vector"``. ⛔ NOT because that would read `NOT MET`

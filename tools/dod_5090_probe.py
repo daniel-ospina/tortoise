@@ -1760,9 +1760,11 @@ def score_rule_bullet() -> Row:
 #: argument against the DERIVATION, not a claim that either writer is held — both are
 #: `unresolved_write`, so `written_labels` flattens their label to the unresolved sentinel before
 #: the hold set is computed and their DECLARATION is the reading this row scores), and NO label for
-#: fifteen, because
-#: the label lives in the caller's `MATCH` (`_embedding_repair_attempt` writes
-#: `set_embedding_clause("e")` inside `MATCH (e:Event {eventId:$eid})`).
+#: fifteen. ⚠️ Of those fifteen, FIVE name the label in their OWN `MATCH` (the derivation credits
+#: `MERGE|CREATE` only, because a `MATCH` is a read — `_embedding_repair_attempt` writes
+#: `set_embedding_clause("e")` inside its own `MATCH (e:Event {eventId:$eid})`), NINE name no label
+#: statement in their own body at all (a journal entry, a read, a delegated store, a clause builder,
+#: an interpolated label), and ONE — `_event_raw_write_door` — executes its CALLER's statement.
 #:
 #: So the register now DECLARES it (`WriterClass.stores`: a label tuple, or `NO_LIVE_VECTOR` /
 #: `LABELS_AT_RUNTIME`) and this row reads that declaration. Same shape as `#11444`, not a second
