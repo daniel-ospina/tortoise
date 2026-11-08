@@ -1444,6 +1444,15 @@ def test_the_10852_obligation_quotes_the_authority_AS_IT_NOW_READS():
         "`cache_projection` — only the FIRST is used, so a second one silently "
         "becomes the narrowing's citation. Leave exactly one, or re-point the "
         "anchor at phrasing that is unique")
+    # ⛔ AND IT MUST BE IN THE MODULE DOCSTRING, not merely in the module: a count
+    # of one is satisfied by a `#` COMMENT that carries the phrase plus its own
+    # valid citation, which resolves while the narrowing's real citation is broken
+    # (#11481 review round 5, measured: relocate the phrase into a line-1 comment,
+    # reword the narrowing to "Its authority is", break its locator → GREEN).
+    assert ANCHOR in (cp.__doc__ or ""), (
+        f"the pin's ANCHOR {ANCHOR!r} is not in `cache_projection`'s MODULE "
+        "DOCSTRING — the narrowing is prose, so its anchor must be too; a comment "
+        "carrying the phrase is a different paragraph and must not stand in")
     anchor = source.find(ANCHOR)
     WINDOW = 600
     window = source[anchor:anchor + WINDOW]
@@ -1453,10 +1462,13 @@ def test_the_10852_obligation_quotes_the_authority_AS_IT_NOW_READS():
     # Without it the span could start at an earlier mention and yield a locator of
     # "`STORAGE-ARCHITECTURE.md` §9.1", which the classifier would then report as a
     # PARSER gap — fail-closed, but a wrong diagnosis (#11481 review round 4).
+    # ⚠️ The quote group admits an ESCAPED `\"` (`(?:\\.|[^"\\])+`): with a plain
+    # `[^"]+`, a quoted sentence containing an escaped quote matched nothing and
+    # the pin reported a MISSING QUOTATION for a parser gap (#11481 review round 5).
     cands = list(re.finditer(
         r'STORAGE-ARCHITECTURE\.md'
         r'(?P<loc>(?:(?!STORAGE-ARCHITECTURE\.md)[\s\S]){0,200}?)'
-        r':\s*\*"(?P<quote>[^"]+)"\*',
+        r':\s*\*"(?P<quote>(?:\\.|[^"\\])+)"\*',
         window))
     # ⚠️ EXACTLY ONE, because two is AMBIGUOUS and ambiguity must be loud: nothing
     # here can tell which of two citations the narrowing rests on, so resolving
@@ -1465,8 +1477,11 @@ def test_the_10852_obligation_quotes_the_authority_AS_IT_NOW_READS():
         "the narrowing's authority is not a SINGLE citation in the "
         f"{WINDOW}-character window after its anchor {ANCHOR!r}: found "
         f"{len(cands)} — {[' '.join(m.group('loc').split()) for m in cands]}. "
-        "This pin cannot tell which one the narrowing rests on; leave exactly one "
-        "(and restore the quotation if the list is empty)")
+        "The citation shape this pin looks for is `<doc>.md <locator>: *\"…\"*` "
+        "(the quote grammar admits an escaped quote). This pin cannot tell which "
+        "one the narrowing rests on; leave exactly one — and if the list is EMPTY, "
+        "restore the quotation unless the shape itself changed, in which case widen "
+        "the grammar rather than the prose")
     # The quotation wraps across lines in the docstring; the document states it
     # as one sentence, so compare on normalised whitespace, and normalise the
     # locator the same way before stripping its backticks.
@@ -1483,16 +1498,19 @@ def test_the_10852_obligation_quotes_the_authority_AS_IT_NOW_READS():
             "SECTION (`§9.1`) instead, which does not rot")
         assert quote in " ".join(lines[lineno - 1].split()), (
             f"`cache_projection` cites `STORAGE-ARCHITECTURE.md{loc}` but line "
-            f"{lineno} no longer contains the quotation {quote!r} — the sentence "
-            "moved, so the line number addresses the wrong text. Cite the "
-            "SECTION instead (`§9.1`), as the rest of the tree does")
+            f"{lineno} does not hold the whole quotation {quote!r} — either the "
+            "sentence moved, or it now WRAPS across lines (this arm compares a "
+            "single line, so a reflow is enough to red it). Cite the SECTION "
+            "instead (`§9.1`), which cannot rot that way")
     else:
         # A SECTION locator must still NAME a section, and the sentence must live
         # INSIDE it — presence anywhere in the document would certify a citation
         # to the wrong section, the same rot class #10978 corrected (§4.4 → §4.6).
-        # ⚠️ The `§` belongs to the CITATION, not to the heading: every heading in
-        # this document reads `### 9.1 …`, so the locator is stripped to its number
-        # before it is ranged against one, and the `/D<n>` tag is not part of the
+        # ⚠️ The `§` belongs to the CITATION, not to the heading: NO heading in
+        # this document carries it — `## 9. What belongs where` for a section and
+        # `### 9.1 …` for a subsection — so the locator is stripped to its bare
+        # number and ranged at ANY heading level, and the `/D<n>` tag is not part
+        # of the
         # heading either.
         # ⛔ `fullmatch`, NOT `search`: an unanchored classifier silently DISCARDS
         # whatever prose follows a valid-looking `§N.N`, so up to 200 characters of
@@ -1539,10 +1557,15 @@ def test_the_10852_obligation_quotes_the_authority_AS_IT_NOW_READS():
         # that the decision id itself is well-formed (the tree has no decision
         # register to resolve it against).
         if tag:
-            assert tag in body, (
-                f"`cache_projection` cites `{cited}`, but `{tag}` does not appear "
-                "in that section — the decision tag is part of the citation, and "
-                "a wrong one names a decision this section does not carry")
+            # ⛔ BOUNDED ON BOTH SIDES, not `tag in body`: §9.1's body names `D30`,
+            # so a bare substring check certified `§9.1/D3` — a decision the section
+            # does not carry (#11481 review round 5, measured). The lookarounds make
+            # `D3` fail against `D30` while `D1`/`D2`/`D30` still pass.
+            assert re.search(
+                rf"(?<![0-9A-Za-z]){re.escape(tag)}(?![0-9])", body), (
+                f"`cache_projection` cites `{cited}`, but `{tag}` is not named in "
+                "that section — the decision tag is part of the citation, and a "
+                "wrong one names a decision this section does not carry")
     # ⚠️ THERE IS NO THIRD, `quote in authority` ARM. Both arms above assert the
     # quotation against a SLICE of `authority`, so each already implies presence
     # in the whole document; a third assertion could never fire, and carrying it
