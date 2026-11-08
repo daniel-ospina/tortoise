@@ -70,9 +70,20 @@ def collect_pack_config(proj) -> dict:
     Reads the graph's ``PackInstall`` activation records (namespace, version,
     source) plus the ``:PackManifest`` nodes' YAML (custom packs only —
     starter packs live in the shared catalog, yaml=null). Shape (v1):
-    ``{schema_version: 1, packs: [{namespace, version, activated, yaml}]}``
-    — ``activated`` mirrors the record's status/active, ``yaml`` is the
-    custom manifest text or null for starter packs.
+    ``{schema_version: 1, packs: [{namespace, version, activated, status,
+    yaml}]}`` — ``activated`` mirrors the record's status/active, ``status``
+    carries the FULL activation state (``active`` | ``disabled`` |
+    ``removed``), ``yaml`` is the custom manifest text or null for starter
+    packs.
+
+    ``status`` is what makes restore parity (#1936 indicator 2) expressible:
+    ``activated`` alone collapses ``disabled`` and ``removed`` into one
+    boolean, so an importer could not tell "the tenant switched this pack
+    off" (carry it, write ``disabled``) from "the tenant removed this pack"
+    (its ``:PackManifest`` is gone and ``yaml`` is null — the entry must be
+    skipped, NOT fail as an unknown starter). Additive within v1: the shape
+    validator leaves unknown keys unconstrained, so a pre-``status``
+    importer ignores it.
     """
     records = []
     try:
@@ -92,6 +103,7 @@ def collect_pack_config(proj) -> dict:
                 "namespace": ns,
                 "version": version or "0.1.0",
                 "activated": (status or "active") == "active",
+                "status": status or "active",
                 "yaml": yaml_text,
             })
     except Exception:

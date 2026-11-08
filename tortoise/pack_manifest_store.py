@@ -47,6 +47,7 @@ import yaml
 
 from tortoise.pack_state import (
     PACK_INSTALL_LABEL,
+    _CONFIGURABLE_STATUSES,
     _pack_install_lock,
     _resolved_graph_name,
     _target_graph,
@@ -393,12 +394,26 @@ def validate_manifest_for_tenant(
 def upsert_tenant_manifest(
     sdk, manifest_yaml: str, *,
     extra_manifests: Mapping[str, str] | None = None,
+    status: str = "active",
 ) -> dict:
     """Validate + store + activate a tenant manifest. Returns the record.
 
     Raises ValueError on validation failure (caller maps to 422) — the
     graph is never touched on a failed validation.
+
+    ``status`` (#1936) is the ``:PackInstall`` activation state to write, and
+    defaults to ``active`` — the upload/provision routes' behaviour, unchanged.
+    The import/restore path passes the artifact's own state so a tenant who had
+    switched a custom pack OFF gets it back off: hard-coding ``active`` made
+    every restore silently re-activate the whole custom vocabulary (the
+    widening class #8648 fixed on the seed side). Restricted to the settable
+    vocabulary — ``removed`` is a tombstone expressed by omission, never a
+    status a writer accepts.
     """
+    if status not in _CONFIGURABLE_STATUSES:
+        raise ValueError(
+            f"invalid pack status {status!r} (expected one of "
+            f"{sorted(_CONFIGURABLE_STATUSES)})")
     result = validate_manifest_for_tenant(
         sdk, manifest_yaml, extra_manifests=extra_manifests)
     if not result.ok:
@@ -425,17 +440,21 @@ def upsert_tenant_manifest(
             },
         )
         # Activate (PackInstall source='custom') — idempotent additive MERGE.
+        # The manifest node itself stays status='active': it records that the
+        # manifest is INSTALLED, while :PackInstall carries the activation
+        # state (the same split set_graph_packs relies on).
         g.query(
             f"MERGE (p:{PACK_INSTALL_LABEL} {{namespace: $ns}}) "
-            "SET p.version = $version, p.status = 'active', "
+            "SET p.version = $version, p.status = $status, "
             "    p.source = 'custom', p.installed_at = coalesce(p.installed_at, $now)",
-            params={"ns": ns, "version": str(raw.get("version", "0.1.0")), "now": now},
+            params={"ns": ns, "version": str(raw.get("version", "0.1.0")),
+                    "status": status, "now": now},
         )
     # Invalidate the tenant-view memo (#1154/#1350).
     with _TENANT_VIEWS_GUARD:
         _TENANT_VIEW_DIRTY.add(_graph_identity(sdk))
     return {"namespace": ns, "version": str(raw.get("version", "0.1.0")),
-            "status": "active", "source": "custom"}
+            "status": status, "source": "custom"}
 
 
 def _graph_identity(sdk) -> str:

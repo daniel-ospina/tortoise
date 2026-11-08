@@ -10458,6 +10458,14 @@ _REGISTER_MAX_PER_HOUR = 3
 # hosted_backup.encrypt_backup layout).
 _IMPORT_FORMAT = "tortoise-export-v1"
 _IMPORT_ARTIFACT_VERSION = 1
+# #1936: the ``pack_config`` entry ``status`` vocabulary — the exporter's
+# ``:PackInstall`` statuses (``pack_state.PACK_STATUS_*``). Only ``removed``
+# means "skip this entry"; the other two are written verbatim on import. Kept
+# as a literal set (not a pack_state import) because this module's shape gate
+# runs on the pre-restore path, where importing the pack machinery would pull
+# the graph stack in behind it; the drift is locked by
+# tests/test_export_pack_config.py against pack_state's constants.
+_PACK_CONFIG_STATUSES = frozenset({"active", "disabled", "removed"})
 # 64 MiB streaming cap — enforced WHILE reading the body, never via
 # Content-Length alone (a spoofed short Content-Length would otherwise let
 # an unbounded body through to buffering/decrypt; #1230 plan S4).
@@ -30304,6 +30312,14 @@ def _pack_config_shape_error(pc) -> str | None:
     ``version``, ``activated: "anything"``, unknown keys, and yaml
     absent/``None``. ``version``/``activated``/unknown keys are unconstrained;
     entry-level messages interpolate the concrete index + offending type.
+
+    #1936: ``status`` IS constrained — it is written to ``:PackInstall.status``
+    by the import path, so an out-of-vocabulary value is a crafted artifact and
+    must be refused here (pre-restore, live graph untouched) rather than
+    landing as a status no read path understands. Absent/``None`` stays legal:
+    the entry predates the field and the apply path falls back to
+    ``activated``. The legal set is exactly the exporter's vocabulary
+    (``active`` | ``disabled`` | ``removed``) plus its tombstone.
     """
     if pc is None:
         return None  # absent/None pack_config is LEGAL (pre-v1.1 artifacts)
@@ -30333,6 +30349,13 @@ def _pack_config_shape_error(pc) -> str | None:
                         "string or null")
             return (f"pack_config packs[{i}] yaml must be a non-empty string "
                     f"or null (got {type(yaml_text).__name__})")
+        # #1936: status legality — the apply path writes it verbatim onto
+        # :PackInstall, so an unknown value must fail here, pre-restore.
+        status = pack.get("status")
+        if status is not None and status not in _PACK_CONFIG_STATUSES:
+            return (f"pack_config packs[{i}] status must be one of "
+                    f"{sorted(_PACK_CONFIG_STATUSES)} or absent "
+                    f"(got {status!r})")
     return None
 
 
@@ -30516,13 +30539,53 @@ async def _quarantine_import(
         _logger.warning("quarantine stamp failed for team %s", org_id)
 
 
+def _pack_entry_activation(pack: dict, ns: str) -> str | None:
+    """#1936: resolve one ``pack_config`` entry's target activation state.
+
+    Returns the ``:PackInstall`` status to write, or ``None`` when the entry
+    must be SKIPPED because the pack was removed on the source graph.
+
+    Precedence: an explicit ``status`` (v1.1 export, above) wins; otherwise
+    fall back to the ``activated`` boolean the v1.1 contract has always
+    carried, so an artifact written before ``status`` existed still honours
+    its own activation. ``activated`` is deliberately compared with ``is
+    False`` rather than truthiness — the shape gate leaves it unconstrained
+    (``activated: "anything"`` is legal), and a non-empty string or ``0`` must
+    not be read as "the tenant switched this pack off".
+    """
+    status = pack.get("status")
+    if status is not None:
+        # Legality is the shared shape gate's job (_pack_config_shape_error);
+        # a direct caller that bypassed it fails closed here too.
+        if status not in _PACK_CONFIG_STATUSES:
+            raise ValueError(
+                f"pack_config pack {ns!r} has invalid status {status!r} "
+                f"(expected one of {sorted(_PACK_CONFIG_STATUSES)})")
+        if status == "removed":
+            return None
+        return status
+    return "disabled" if pack.get("activated") is False else "active"
+
+
 def _apply_import_pack_config(sdk, payload: dict) -> None:
     """#1936: apply the payload's pack config after a successful restore.
 
     - ``pack_config`` present: for each pack with a custom manifest ``yaml``,
       upsert the tenant manifest (validated — a failure raises ValueError,
-      quarantining the import: fail-loudly, never silent partial). Starter
-      packs (yaml null) get their activation record ensured.
+      quarantining the import: fail-loudly, never silent partial) WITH the
+      artifact's own activation state. Starter packs (yaml null) get their
+      activation record written at the artifact's state, not force-activated.
+    - A pack the source graph had REMOVED (``status: removed`` — its
+      ``:PackManifest`` is already gone, so ``yaml`` is null) is SKIPPED with a
+      logged warning and no install record. Before #1936 it fell through to
+      the starter branch and raised ``unknown starter pack``, so ONE
+      uninstalled custom pack aborted the whole graph restore — the failure
+      belonged to that entry, not to the restore. Skipping (rather than
+      writing a ``removed`` tombstone) is deliberate: on the
+      no-marker-with-records arm of ``pack_state.resolved_pack_set`` every
+      record counts regardless of status, so a tombstone would put a removed
+      pack's namespace back INTO the graph's approval set — resurrecting the
+      vocabulary this path exists to leave alone.
     - ``pack_config`` ABSENT (pre-v1.1 artifact): loud-mismatch guard — if
       the dump references namespaced kinds NOT in the shared catalog or
       starter set, the vocabulary would be silently dropped → raise. This
@@ -30570,6 +30633,16 @@ def _apply_import_pack_config(sdk, payload: dict) -> None:
         ns = pack.get("namespace")
         if not ns:
             continue
+        want_status = _pack_entry_activation(pack, ns)
+        if want_status is None:
+            # Removed on the source graph: nothing to restore, nothing to
+            # activate. Logged (never silent) so an operator can see the
+            # entry was carried and deliberately skipped at pack granularity
+            # rather than aborting the restore.
+            _logger.info(
+                "import pack_config: pack %r was removed on the source graph "
+                "— skipped (no install record, no activation)", ns)
+            continue
         yaml_text = pack.get("yaml")
         if yaml_text:
             # #2040 pre-write ns↔yaml guard: validate first and compare the
@@ -30587,10 +30660,14 @@ def _apply_import_pack_config(sdk, payload: dict) -> None:
             # #2781: pass the restore's sibling set so a cross-referencing
             # pack_config validates as the SET it will become, not in install
             # order (the sibling may appear later in this same list).
+            # #1936: carry the artifact's activation state — hard-coding
+            # 'active' here is what resurrected every disabled custom pack.
             upsert_tenant_manifest(
-                sdk, yaml_text, extra_manifests=sibling_yamls)
+                sdk, yaml_text, extra_manifests=sibling_yamls,
+                status=want_status)
         else:
-            # Starter-pack activation record (idempotent MERGE).
+            # Starter-pack (or manifest-less) activation record, written at
+            # the artifact's own state (idempotent MERGE).
             reg = _get_registry()
             meta = reg.pack_summaries().get(ns) if reg is not None else None
             if meta is None and ns not in DEFAULT_STARTER_PACKS:
@@ -30602,10 +30679,10 @@ def _apply_import_pack_config(sdk, payload: dict) -> None:
             with _pack_install_lock(lock_graph, ns):
                 g.query(
                     "MERGE (p:PackInstall {namespace: $ns}) "
-                    "SET p.version = $version, p.status = 'active', "
+                    "SET p.version = $version, p.status = $status, "
                     "    p.installed_at = coalesce(p.installed_at, $now)",
                     params={"ns": ns, "version": str(pack.get("version", "0.1.0")),
-                            "now": now},
+                            "status": want_status, "now": now},
                 )
 
 

@@ -470,8 +470,8 @@ so a re-run cannot resurrect a pack the user removed or disabled.
   ⚠️ **Still open — out-of-band writers change the configurable set WITHOUT
   moving the marker.** `POST /v1/packs/manifests`
   (`pack_manifest_store.upsert_tenant_manifest`, widens) and
-  `hosted_api._apply_import_pack_config` (re-activates on restore — the
-export/import gap the PR body names) write `:PackInstall` directly. On a graph
+  `hosted_api._apply_import_pack_config` (writes `:PackInstall` directly on
+  restore) write `:PackInstall` directly. On a graph
 that has both a `:PackSelection` marker and one of these writers, a `PUT`
 holding revision `N` can therefore still return `200` while erasing a
 namespace added after its read. Until they route through `set_graph_packs` (or
@@ -481,6 +481,14 @@ moving the marker"* is the target these paths must meet — not a property that
 holds today. (`pack_manifest_store.delete_tenant_manifest` narrows the set the
 same way, but it currently has NO caller and no route — a latent writer to bind
 when a delete surface is added, not a live gap.)
+  ✅ **Restore no longer WIDENS (#1936).** The marker gap above is about
+  `revision` completeness, not about what a restore activates: the export now
+  carries each pack's full `status`, and `_apply_import_pack_config` writes
+  that state instead of forcing `active` — a pack the tenant had `disabled`
+  comes back `disabled`, and one they had `removed` is skipped per entry (it
+  used to fall through to the starter branch and abort the whole restore with
+  `unknown starter pack`). An artifact predating the `status` field still
+  falls back to its `activated` boolean, so old exports keep their intent.
 - **Concurrency:** both the first configuration and every later one move the
 marker with a conditional compare-and-swap (`_cas_first_selection` /
 `_bump_selection`) *before* any install record is written, so a worker that

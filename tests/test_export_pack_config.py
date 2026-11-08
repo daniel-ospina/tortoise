@@ -9,7 +9,9 @@ Covers:
 - _check_foreign_kinds: pre-v1.1 artifact referencing unknown pack kinds →
   loud ValueError (422 quarantine); clean artifact passes
 - _apply_import_pack_config: custom manifest upsert + starter activation
-  records after a restore
+  records after a restore, AT the artifact's own activation state (#1936
+  parity: `disabled` stays disabled; a `removed` pack is skipped per entry
+  instead of aborting the whole restore)
 
 Docker lane (default): TORTOISE_DB_URI must be set (epic #1647 P4).
 """
@@ -463,3 +465,224 @@ class TestApplyImportPackConfig:
         ]}}
         _apply_import_pack_config(sdk, payload)
         assert any(m["namespace"] == "tenant-ops" for m in get_tenant_manifests(sdk))
+
+
+# ── #1936: activation parity on restore (indicator 2) + removed-pack
+#    granularity (indicator 3). The export `activated` boolean was written but
+#    never read, so every import force-set `status='active'` — a pack the
+#    tenant had switched off came back ON (a silent widening of the tenant's
+#    vocabulary, the same class #8648 fixed on the seed side). And a pack the
+#    tenant had REMOVED exported as `yaml: null`, fell through to the starter
+#    branch and raised `unknown starter pack` — one uninstalled custom pack
+#    aborted the whole graph restore, at the wrong granularity.
+
+def _install_status(sdk, ns):
+    """The graph's raw ``:PackInstall`` status for ``ns`` (None = no record)."""
+    rows = sdk._get_proj().g.query(
+        "MATCH (p:PackInstall {namespace: $ns}) RETURN p.status",
+        params={"ns": ns},
+    ).result_set
+    return rows[0][0] if rows else None
+
+
+def _pack_entry(**kw):
+    entry = {"namespace": "dev", "version": "0.2.0", "activated": True,
+             "yaml": None}
+    entry.update(kw)
+    return {"pack_config": {"schema_version": 1, "packs": [entry]}}
+
+
+class TestActivationParity:
+    def test_collect_exports_status(self, sdk):
+        """The artifact must carry the FULL status, not just the boolean —
+        `activated: False` alone cannot tell `disabled` from `removed`."""
+        from tortoise.export import collect_pack_config
+        _seed_packs(sdk, custom=True)
+        g = sdk._get_proj().g
+        g.query("MATCH (p:PackInstall {namespace: 'dev'}) "
+                "SET p.status = 'disabled'")
+        g.query("MERGE (p:PackInstall {namespace: 'gone-ops'}) "
+                "SET p.status = 'removed', p.source = 'custom'")
+        by_ns = {p["namespace"]: p
+                 for p in collect_pack_config(sdk._get_proj())["packs"]}
+        assert by_ns["dev"]["status"] == "disabled"
+        assert by_ns["dev"]["activated"] is False
+        assert by_ns["gone-ops"]["status"] == "removed"
+        assert by_ns["tenant-ops"]["status"] == "active"
+
+    def test_disabled_starter_is_not_reactivated(self, sdk):
+        from tortoise.hosted_api import _apply_import_pack_config
+        _apply_import_pack_config(sdk, _pack_entry(namespace="dev",
+                                                   activated=False))
+        assert _install_status(sdk, "dev") == "disabled"
+
+    def test_disabled_custom_pack_is_not_reactivated(self, sdk):
+        """The custom branch hard-coded `status='active'` in
+        upsert_tenant_manifest — a disabled custom pack came back ON."""
+        from tortoise.hosted_api import _apply_import_pack_config
+        from tortoise.pack_manifest_store import get_tenant_manifests
+        _apply_import_pack_config(sdk, _pack_entry(
+            namespace="tenant-ops", activated=False, status="disabled",
+            yaml=CUSTOM_MANIFEST))
+        assert _install_status(sdk, "tenant-ops") == "disabled"
+        # the manifest itself is restored (installed, just not activated)
+        assert any(m["namespace"] == "tenant-ops" for m in get_tenant_manifests(sdk))
+
+    def test_active_stays_active(self, sdk):
+        from tortoise.hosted_api import _apply_import_pack_config
+        _apply_import_pack_config(sdk, _pack_entry(namespace="dev"))
+        assert _install_status(sdk, "dev") == "active"
+
+    @pytest.mark.parametrize("activated", ["anything", 0, 1, "false", []])
+    def test_non_false_activated_is_not_read_as_disabled(self, sdk, activated):
+        """The shape gate leaves `activated` unconstrained (it is documented
+        legal), so only a literal ``False`` may mean "switched off" — a
+        truthiness read would disable packs on a hand-built artifact."""
+        from tortoise.hosted_api import _apply_import_pack_config
+        _apply_import_pack_config(sdk, _pack_entry(namespace="dev",
+                                                   activated=activated))
+        assert _install_status(sdk, "dev") == "active"
+
+    def test_legacy_artifact_without_status_honours_activated(self, sdk):
+        """An artifact written before `status` existed still carries intent."""
+        from tortoise.hosted_api import _apply_import_pack_config
+        _apply_import_pack_config(sdk, _pack_entry(namespace="dev",
+                                                   activated=False))
+        assert _install_status(sdk, "dev") == "disabled"
+
+    def test_round_trip_preserves_activation(self, sdk, tmp_path):
+        """Export → import into a FRESH graph reproduces the activation state
+        (indicator 2: structure parity incl. activation)."""
+        from tortoise.export import collect_pack_config
+        from tortoise.hosted_api import _apply_import_pack_config
+        _seed_packs(sdk, custom=True)
+        sdk._get_proj().g.query(
+            "MATCH (p:PackInstall {namespace: 'tenant-ops'}) "
+            "SET p.status = 'disabled'")
+        pc = collect_pack_config(sdk._get_proj())
+
+        fresh = TortoiseSDK(db_path=str(tmp_path / "restored.db"))
+        try:
+            _apply_import_pack_config(fresh, {"pack_config": pc})
+            assert _install_status(fresh, "dev") == "active"
+            assert _install_status(fresh, "tenant-ops") == "disabled"
+        finally:
+            fresh.close()
+
+
+class TestRemovedPackGranularity:
+    """A removed pack is a per-entry SKIP, never an aborted restore."""
+
+    def test_removed_custom_pack_does_not_abort_restore(self, sdk):
+        from tortoise.hosted_api import _apply_import_pack_config
+        payload = {"pack_config": {"schema_version": 1, "packs": [
+            {"namespace": "gone-ops", "version": "0.1.0", "activated": False,
+             "status": "removed", "yaml": None},
+            {"namespace": "dev", "version": "0.2.0", "activated": True,
+             "status": "active", "yaml": None},
+        ]}}
+        # pre-#1936 this raised `unknown starter pack 'gone-ops'`
+        _apply_import_pack_config(sdk, payload)
+        assert _install_status(sdk, "dev") == "active"
+        # and the healthy entry really did apply (no abort short-circuit)
+        assert _install_status(sdk, "gone-ops") is None
+
+    def test_removed_pack_writes_no_tombstone(self, sdk):
+        """Deliberate: on the no-marker-with-records arm of
+        ``resolved_pack_set`` EVERY record counts regardless of status, so a
+        `removed` tombstone would put the namespace back INTO the approval set
+        — resurrecting the vocabulary the skip exists to leave alone."""
+        from tortoise.hosted_api import _apply_import_pack_config
+        from tortoise.pack_state import resolved_pack_set
+        _apply_import_pack_config(sdk, _pack_entry(
+            namespace="gone-ops", activated=False, status="removed"))
+        assert _install_status(sdk, "gone-ops") is None
+        assert "gone-ops" not in (resolved_pack_set(sdk).namespaces or frozenset())
+
+    def test_removed_starter_pack_also_skipped(self, sdk):
+        from tortoise.hosted_api import _apply_import_pack_config
+        _apply_import_pack_config(sdk, _pack_entry(namespace="dev", activated=False,
+                                                  status="removed"))
+        assert _install_status(sdk, "dev") is None
+
+    def test_genuinely_unknown_namespace_still_raises(self, sdk):
+        """The fail-loud guard must NOT be weakened into a silent skip: a
+        namespace that is neither removed nor a known starter is still an
+        error (the vocabulary would be silently dropped)."""
+        from tortoise.hosted_api import _apply_import_pack_config
+        with pytest.raises(ValueError, match="unknown starter pack"):
+            _apply_import_pack_config(
+                sdk, _pack_entry(namespace="not-a-real-pack", yaml=None))
+
+
+class TestStatusShapeGate:
+    """`status` is written verbatim onto :PackInstall, so it is constrained
+    by the SHARED shape gate — pre-restore, live graph untouched (#2040)."""
+
+    def test_crafted_status_rejected_pre_restore(self):
+        from tortoise.hosted_api import _pack_config_shape_error
+        err = _pack_config_shape_error(
+            {"schema_version": 1,
+             "packs": [{"namespace": "dev", "status": "bogus"}]})
+        assert err is not None and "status must be one of" in err
+
+    def test_apply_path_fails_closed_on_direct_call(self, sdk):
+        """A direct caller bypassing the envelope gate cannot write an
+        out-of-vocabulary status either — the SHARED shape gate runs first
+        (single source of truth), so the message is the shape message."""
+        from tortoise.hosted_api import _apply_import_pack_config
+        with pytest.raises(ValueError, match="status must be one of"):
+            _apply_import_pack_config(sdk, _pack_entry(namespace="dev",
+                                                       status="bogus"))
+        assert _install_status(sdk, "dev") is None  # zero residue
+
+    def test_entry_activation_guard_is_defence_in_depth(self):
+        """The per-entry resolver carries its OWN check for a caller that
+        never ran the shape gate — it must fail closed, not write."""
+        from tortoise.hosted_api import _pack_entry_activation
+        with pytest.raises(ValueError, match="invalid status"):
+            _pack_entry_activation({"namespace": "dev", "status": "bogus"},
+                                   "dev")
+
+    @pytest.mark.parametrize("status", ["active", "disabled", "removed", None])
+    def test_vocabulary_is_legal(self, status):
+        from tortoise.hosted_api import _pack_config_shape_error
+        entry = {"namespace": "dev"}
+        if status is not None:
+            entry["status"] = status
+        assert _pack_config_shape_error(
+            {"schema_version": 1, "packs": [entry]}) is None
+
+    def test_vocabulary_matches_pack_state(self):
+        """Drift lock: the shape gate's literal set must be exactly
+        pack_state's PackInstall vocabulary — a new status added there
+        without this gate would 422 a legitimately-exported artifact."""
+        from tortoise.hosted_api import _PACK_CONFIG_STATUSES
+        from tortoise.pack_state import (
+            PACK_STATUS_ACTIVE,
+            PACK_STATUS_DISABLED,
+            PACK_STATUS_REMOVED,
+        )
+        assert _PACK_CONFIG_STATUSES == {
+            PACK_STATUS_ACTIVE, PACK_STATUS_DISABLED, PACK_STATUS_REMOVED}
+
+
+class TestUpsertStatusParam:
+    def test_default_stays_active(self, sdk):
+        """Upload/provision routes pass no status — unchanged behaviour."""
+        from tortoise.pack_manifest_store import (
+            get_tenant_manifests,
+            upsert_tenant_manifest,
+        )
+        rec = upsert_tenant_manifest(sdk, CUSTOM_MANIFEST)
+        assert rec["status"] == "active"
+        assert _install_status(sdk, "tenant-ops") == "active"
+        assert any(m["namespace"] == "tenant-ops" for m in get_tenant_manifests(sdk))
+
+    def test_removed_is_not_a_settable_status(self, sdk):
+        """`removed` is a tombstone expressed by omission, never a status a
+        writer accepts (mirrors set_graph_packs' vocabulary)."""
+        from tortoise.pack_manifest_store import upsert_tenant_manifest
+        with pytest.raises(ValueError, match="invalid pack status"):
+            upsert_tenant_manifest(sdk, CUSTOM_MANIFEST, status="removed")
+        assert _install_status(sdk, "tenant-ops") is None
