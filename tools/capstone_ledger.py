@@ -518,10 +518,14 @@ def _split_flag(token: str) -> tuple[str, str]:
         # command" (third review cycle): a false block, and exit 1 prints no
         # uncovered list, so it cost the whole report. The old split only held when
         # the operand-taking flag happened to be LAST in the group (`-ec`, `-euc`).
-        # A remainder that is anything OTHER than a lowercase option cluster is a
-        # real attached body and is still graded — that is the bypass this arm
-        # exists to close, and `bash -c'NOT RUN'` must stay refused.
-        if remainder and remainder.isalpha() and remainder.islower():
+        # ⛔ BUT "all lowercase letters" IS NOT "an option cluster" — `-cverified`
+        # is all lowercase and is a CLAIM, not flags (fourth review cycle: it
+        # reached `verified` / exit 0). The remainder is flags only when every
+        # character is a letter a shell actually accepts (`_SHORT_SHELL_FLAGS`).
+        # Anything else is a real attached body and is still graded as a script —
+        # that is the bypass this arm exists to close, and `bash -c'NOT RUN'`
+        # must stay refused.
+        if remainder and set(remainder) <= _SHORT_SHELL_FLAGS:
             for letter in token[1:]:
                 if f"-{letter}" in _OPERAND_SCRIPT_FLAGS:
                     return f"-{letter}", ""
@@ -703,6 +707,16 @@ def _split_segments(text: str) -> list[str]:
 #: graded as a citation — it is not a path — so the entry is a RECORD and the held
 #: artifact carries the verdict. Without this, every `bash -c '…'` row is a false
 #: block, and `exit 1` computes nothing, so it would hide the uncovered list too.
+#: The single-letter options a SHELL accepts on its own command line (`man bash`:
+#: `set [-abefhkmnptuvxBCEHPT]`, plus bash's own `-i -l -r -s -D -O`). A leftover
+#: remainder is "more flags" ONLY when EVERY character is one of these.
+#: ⛔ Testing merely `isalpha() and islower()` ADMITTED `cmd:bash -cverified` and
+#: `cmd:bash -cnotrun` as "a cluster of flags" — a one-word CLAIM reaching `verified`
+#: / `uncovered: 0` / exit 0, i.e. the exact bypass `_split_flag` exists to close,
+#: re-opened by the previous cycle's own fix (fourth review cycle). `verified`
+#: carries `d`, which no shell accepts, so it is graded as a BODY again.
+_SHORT_SHELL_FLAGS: Final[frozenset[str]] = frozenset("abefhkmnptuvxBCEHPTilrsDO")
+
 #: The short/long flags that actually TAKE A SCRIPT OPERAND. Split out from
 #: `_SCRIPT_FLAGS` because the two questions are different: `_SCRIPT_FLAGS` also
 #: carries `-e`, which takes NO operand and is listed only because a shlex-attached

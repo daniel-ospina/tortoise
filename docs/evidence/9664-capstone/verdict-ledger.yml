@@ -79,8 +79,21 @@
 #         `echo`/`printf`/… must first be measured against the accepted
 #         `… && echo PASS`. Four carriages, all tracked in #11520 and all pinned —
 #         the list is enumerated because an unlisted carriage reads as closed;
-#       - a `-c`/`-e` script body is graded as a command in its own right, never
-#         trusted;
+#       - a `-c`/`-e` script body is never TRUSTED, and the two spellings differ.
+#         An attached body with NO whitespace (`bash -cNOTRUNx`) is graded as a
+#         command in its own right. One that CONTAINS whitespace is refused as an
+#         unread quoted token — that is the spelling real bash parses as an invalid
+#         option cluster (`bash -c'echo F'` exits with "invalid option"), so the
+#         command cannot have run; `origin/main` accepted it, and grading the body
+#         instead would ACCEPT a record for a command bash refuses;
+#       - a NON-RUNNER program heading a segment (`mkdir -p out && …`, `rm -rf
+#         .pytest_cache && …`, `sleep 2 && …`) is REFUSED as prose, although the
+#         record is shell-valid and `origin/main` accepted it. This is a known-open
+#         FALSE BLOCK (#11520 root 5), listed here because an unlisted refusal reads
+#         as closed. Admitting it on "the head is a bare program name" re-opens the
+#         prose-after carriage (`… && I did not run this`); admitting it on "the
+#         segment looks shell-shaped" re-opens `… && I did not run this -q`. Neither
+#         price is paid until a carriage that separates the two is measured;
 #       - a runner with NO target at all (`cmd:make`) is a record and confers
 #         nothing; a runner with a NON-PATH argument is refused, because a bare
 #         word (`make test`, `make NOT-RUN`) is a claim and not an artifact. The
@@ -94,9 +107,12 @@
 #         stay inside their command. Splitting on every `&` refused ordinary
 #         recorded commands (`… -q 2>&1 | tail -20`) that `origin/main` accepted —
 #         and exit 1 prints no report, so it hid the whole uncovered list;
-#       - shell WRAPPERS (`cd`, `NAME=value`, `set`/`export`/`source`) and
-#         DECORATIVE segments (a printer, a reader, or a sink: `echo`, `tail`,
-#         `cat`, `grep`, `tee`, `logger`) are allowed and cite nothing.
+#       - shell WRAPPERS (`cd`, `NAME=value`, `set`/`export`/`source`/`.`, `umask`,
+#         `unset`, and the control builtins `exit`/`return`/`shift`/`break`/
+#         `continue`/`pushd`/`popd`) and DECORATIVE segments (a printer, a reader, or
+#         a sink: `echo`, `tail`, `cat`, `grep`, `tee`, `logger`) are allowed and
+#         cite nothing. A record whose ONLY segments are wrappers is still refused
+#         as "names no command", so a wrapper can never be a one-word verdict.
 #   * `criteria_expected` (top level, REQUIRED) pins the denominator, so dropping a
 #     row without moving the count is a refusal.
 #   * YAML merge keys (`<<`) are refused: every row states its own verdict, and a

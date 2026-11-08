@@ -1764,17 +1764,32 @@ def test_a_flag_cluster_before_a_separate_script_token_is_not_a_body(tmp_path):
         )
 
 
-def test_an_attached_script_body_is_still_graded(tmp_path):
+def test_an_attached_script_body_is_never_trusted(tmp_path):
     """The cluster fix must NOT re-open the `-cBODY` prose bypass it sits beside.
 
     ⛔ The reason `_split_flag` exists at all is that `bash -c'NOT RUN'` is ONE
     shlex token. Treating every remainder as "more flags" would restore exactly the
-    fail-open `_UNREAD_TOKEN_BYPASSES` closes, so the two arms are pinned together.
+    fail-open `_UNREAD_TOKEN_BYPASSES` closes.
+
+    ⛔ CORRECTED CLAIM (fourth review cycle): these are REFUSED, and for TWO
+    different reasons that must not be conflated. A body containing whitespace is
+    caught as an unread quoted token BEFORE `_split_flag` runs, and refusing it is
+    right — real bash parses `bash -c'echo F'` as an invalid option cluster and
+    "echo F" never runs, so grading the body would ACCEPT a record for a command
+    that cannot have executed. An attached body with NO whitespace is graded as a
+    script. Both end in a refusal for prose, which is the property that matters.
+
+    The lowercase cases are the regression pin: "all lowercase" is NOT "an option
+    cluster", and treating it as one admitted `cmd:bash -cverified` to `verified` /
+    `uncovered: 0` / exit 0 — a one-word CLAIM satisfying the strongest verdict.
     """
     for command in (
         "cmd:bash -c'NOT RUN - see tools/capstone_ledger.py'",
         'cmd:bash -e"NOT RUN"',
         "cmd:bash -cNOTRUNx",
+        "cmd:bash -cnotrun",
+        "cmd:bash -cverified",
+        "cmd:sh -cdidnotrun",
     ):
         proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, command])]))
         assert proc.returncode == cl.EXIT_INVALID, (
@@ -1857,6 +1872,39 @@ def test_a_tilde_in_a_source_wrapper_is_expanded(tmp_path):
         f"`source ~/.bashrc` was REFUSED ({proc.returncode}) with HOME={home} — the "
         f"`~` is not expanded before the join\n{proc.stdout}{proc.stderr}"
     )
+
+
+def test_a_non_runner_prep_segment_is_a_known_false_block(tmp_path):
+    """KNOWN-OPEN (#11520 root 5): a non-runner program heading a segment is REFUSED.
+
+    ⛔ This is a FALSE BLOCK, pinned rather than fixed. `mkdir -p out && uv run
+    pytest …` is shell-valid and `origin/main` accepted it, so the refusal (and the
+    `exit 1` that hides the whole uncovered list) costs a real finding. It stays
+    open because both obvious repairs were measured to re-open a prose carriage:
+
+      * admit the segment when its HEAD is a bare program name → re-opens
+        `… && I did not run this` (head `I`);
+      * admit it when it LOOKS shell-shaped (has a `-`-flag or a numeric arg) →
+        re-opens `… && I did not run this -q`.
+
+    ⛔ IF THIS TEST STARTS FAILING, the arm learned to admit prep segments — that is
+    a CLOSURE, not a regression: invert this pin (assert `EXIT_CLEAN`), re-check that
+    `… && I did not run this` and `… && I did not run this -q` are still refused,
+    and drop the corresponding paragraph from the ledger's NOT-CLOSED block.
+    """
+    for command in (
+        "cmd:mkdir -p /tmp/capstone-out && uv run pytest "
+        "tests/test_9664_capstone_verdict_ledger.py -q",
+        "cmd:rm -rf .pytest_cache && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
+        "cmd:sleep 2 && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
+    ):
+        proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, command])]))
+        assert proc.returncode == cl.EXIT_INVALID, (
+            f"{command!r} is no longer refused ({proc.returncode}) — the prep-segment "
+            f"arm CLOSED. Invert this pin and drop the NOT-CLOSED paragraph, after "
+            f"re-checking `… && I did not run this` is still refused\n"
+            f"{proc.stdout}{proc.stderr}"
+        )
 
 
 def test_a_deciding_wrapper_argument_is_read_not_skipped(tmp_path):
