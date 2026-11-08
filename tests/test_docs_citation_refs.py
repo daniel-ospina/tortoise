@@ -49,12 +49,16 @@ WHY THIS IS NOT A DUPLICATE OF THE EXISTING CITATION GUARDS
 
 `tests/test_extractor_v4_citation_rot.py` (#8506) and
 `tests/test_extractor_v4_doc_citations.py` (#8498) already hold this instrument,
-but each is scoped to ONE document (`docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md`)
-and resolves a different relation: a quoted `sym` against a `file.py:NNNN` whose
-symbol must still exist in that source file. Neither reads a markdown-to-markdown
-line pointer, and neither covers `docs/scoping/` or `docs/research/`, so the
-regression above was invisible to both. This file is the same INSTRUMENT over the
-missing subject, not a second implementation of theirs.
+but neither reads this relation. `citation_rot` resolves a quoted `sym` against a
+`file.py:NNNN` whose symbol must still exist in that source file, and it scans SIX
+design documents for the same claim rather than one (`DOC`, `STORAGE`, `ONTOLOGY`,
+`ONTOLOGY_CHANGELOG`, `INGEST`, `EVAL_SPEC` — see its `:76-81`, asserted across
+them at `:248-249`). `doc_citations` does not use `file.py:NNNN` at all: it pins
+that §7's value-gate row names the SHIPPED symbols (`value_gate._REFERENCE` /
+`identifier_only()`) and that those symbols behave as the row says. Neither reads
+a markdown-to-markdown line pointer, and neither covers `docs/scoping/` or
+`docs/research/`, so the regression above was invisible to both. This file is the
+same INSTRUMENT over the missing subject, not a second implementation of theirs.
 
 `tests/test_s2_decision_record_5087.py` (#10072) is the closest precedent for the
 policy side: it pins that a document "must cite siblings by name, not ordinal".
