@@ -13925,8 +13925,11 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
         # ``partial_gaps`` unconditionally (it is a detector, additive by
         # contract), so ``result["vet"]["s2"|"union"]["batch"]`` carries the new
         # key on BOTH arms whenever the S2.2 mechanical half runs — which is the
-        # DEFAULT arm (#10996). Pinned by
-        # ``test_the_detector_reports_on_the_unarmed_arm`` (review round 2, P2).
+        # DEFAULT arm (#10996). Pinned by ``test_the_stage_is_off_by_default``,
+        # which is the row that RUNS the unarmed pipeline and asserts the key
+        # arrives at ``result["vet"]["s2"]["batch"]`` — not by
+        # ``test_the_detector_reports_on_the_unarmed_arm``, which calls
+        # ``check_batch`` directly and never builds a result (review round 5).
         result["stats"]["partial_gap_fill"] = gap_fill_stats
     if s4_delta_empty:
         result["stats"]["s4_delta_empty"] = s4_delta_empty

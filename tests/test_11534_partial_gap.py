@@ -60,6 +60,21 @@ COVERED_ITEMS = {
     "operators": [],
 }
 
+#: The SAME narrative with a point for EVERY statement — the false-positive
+#: direction. ``COVERED_ITEMS`` above is the *partial-gap* fixture (two of three
+#: statements covered), so a row named "fully covered is not flagged" cannot use
+#: it: at this head ``partial_gaps(COVERED_ITEMS, NARRATIVE)["flagged_total"]``
+#: is **1**, which is the point of that fixture (review round 5).
+FULLY_COVERED_ITEMS = {
+    "entities": COVERED_ITEMS["entities"],
+    "events": [],
+    "points": [*COVERED_ITEMS["points"],
+               {"content": "The hydrate stage shares the same code as the wire "
+                           "stage but was audited and found clean.",
+                "pointKind": "statement"}],
+    "operators": [],
+}
+
 #: The same session with the covering lease point REMOVED — the non-vacuity
 #: control. A detector that flags nothing here is measuring nothing.
 GAPPED_ITEMS = {
@@ -119,15 +134,35 @@ def test_the_span_address_indexes_the_original_narrative():
 
 
 def test_a_fully_covered_narrative_is_not_flagged():
-    """The false-positive direction: coverage must not be reported as a gap."""
+    """The false-positive direction: coverage must not be reported as a gap.
+
+    ⛔ THIS ROW'S NAME WAS FALSE UNTIL ROUND 5 and the shape is worth keeping
+    visible: it asserted `flagged_total == 1` on `COVERED_ITEMS`, a fixture whose
+    third statement has no covering item — so it pinned "the covered statement is
+    not flagged" (a real thing, and its own second assertion) while carrying the
+    name and the `#11534` checklist row for the OPPOSITE claim. The last line
+    below is the property the name claims, and nothing asserted it: reverting the
+    behaviour moved this quantity from 0 to a positive number with every row
+    still green — a surviving mutant, not an equivalent one.
+    """
+    assert vet_gate.partial_gaps(FULLY_COVERED_ITEMS, NARRATIVE)[
+        "flagged_total"] == 0, "a narrative every statement of which is covered is clean"
+    # ... and the partial-gap fixture is what its name says it is: one statement
+    # uncovered, and exactly that one is flagged.
     gaps = vet_gate.partial_gaps(COVERED_ITEMS, NARRATIVE)
-    assert gaps["flagged_total"] == 1        # only the hydrate statement
+    assert gaps["flagged_total"] == 1
+    assert "hydrate stage" in gaps["flagged"][0]["text"]
     assert not any("lease is keyed" in text for text in _flagged_texts(gaps))
 
 
 def test_the_gapped_fixture_is_the_same_fixture_minus_one_item():
-    """Non-vacuity, stated as a property: the SAME narrative with the covering
-    item present is clean, and with it removed is flagged. Without this pair the
+    """Non-vacuity, stated as the property this row actually asserts: removing a
+    covering item from the SAME narrative RAISES the flag count (`2 > 1`).
+
+    ⚠️ Not "and is clean when present" (round 5): `COVERED_ITEMS` still leaves the
+    third statement uncovered, so the absolute count is 1 → 2. The clean-vs-absent
+    property lives in `test_a_fully_covered_narrative_is_not_flagged`, on
+    `FULLY_COVERED_ITEMS`. Without this pair the
     other tests could pass on a detector that flags everything."""
     with_item = vet_gate.partial_gaps(COVERED_ITEMS, NARRATIVE)
     without = vet_gate.partial_gaps(GAPPED_ITEMS, NARRATIVE)
@@ -342,6 +377,13 @@ def test_the_stage_is_off_by_default(monkeypatch):
     out = v2.extract_session_v2(model, _conv())
     assert "gap_fill" not in model.calls
     assert "partial_gap_fill" not in out["stats"]
+    # ⛔ THE THREADING IS PINNED HERE, not by `test_the_detector_reports_on_the_
+    # unarmed_arm` — that row calls `check_batch` directly and never builds a
+    # `result`, so a narrowing of the `_run_vet_pass` → `stats["batch"]` copy
+    # would have left every row green while the key stopped reaching
+    # `result["vet"]` (review round 5, P3). This is the row that runs the unarmed
+    # pipeline, so it is the row that must assert the key arrives.
+    assert out["vet"]["s2"]["batch"]["partial_gaps"]["segments"] > 0
 
 
 def test_a_malformed_gap_fill_answer_is_not_scored_as_no_claim(monkeypatch):
