@@ -4546,17 +4546,23 @@ def test_the_bare_continuation_cites_name_what_they_say():
             ("13396", 'result["classify_later"] = {'),
             ("13406", 'result["vet"] = {'),
         )),
-        # ⛔ THE CLASSIFY PASS'S OWN FAIL-OPEN PAIR (#10833 review, P2). The
-        # `+33` shift the fold applied to this row moved the first member to
-        # `:10490` and left the second at its PRE-shift value, so `:10453` —
-        # `vet_warnings.extend(_w)` inside the VET block — was printed as the
-        # classify pass's second fail-open `except`. The same sentence one
-        # clause earlier condemns exactly that defect ("a cause citing
-        # `vet_enabled`/`_run_vet_pass` for S2.3 sent the reader to code that
-        # pass never runs"). The two `except` lines are byte-identical, so the
-        # anchors are the pair's own gate lines' company rather than the text:
-        # a reader following `:10620` must land in the `classify_later and
-        # complete_list` block, which the row below holds at `:10599`.
+        # ⛔ THE CLASSIFY PASS'S OWN FAIL-OPEN PAIR (#10833 review, P2). A `+33`
+        # shift applied to this row moved the first member while leaving the
+        # second at its PRE-shift value, so `vet_warnings.extend(_w)` — inside
+        # the VET block — was printed as the classify pass's second fail-open
+        # `except`. The same sentence one clause earlier condemns exactly that
+        # defect ("a cause citing `vet_enabled`/`_run_vet_pass` for S2.3 sent the
+        # reader to code that pass never runs"). The two `except` lines are
+        # byte-identical, so what distinguishes the pair is STRUCTURE, not text:
+        # the row's members must be the fail-opens of `if classify_later and
+        # embed_list:` / `if classify_later and complete_list:` — their next line
+        # appends `classify(S2) failed` / `classify(union) failed` — and NOT the
+        # referentiality-selection fail-opens, which carry the
+        # `# noqa: BLE001, RUF100` suffix and warn `referentiality selection …
+        # candidates kept (fail-open)`. ⛔ The line numbers this comment used to
+        # quote (`10490`/`10453`/`10620`/`10599`) were stale at that head and are
+        # stale here: a comment asserts nothing, so read the anchors from the row,
+        # never from this prose.
         ("docs/00_index.md", "fail-open `except` at", (
             ("13071", "except Exception as e:  # never block capture (P1)"),
             ("13218", "except Exception as e:  # never block capture (P1)"),
