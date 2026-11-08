@@ -5616,6 +5616,55 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
         f"added freely, but a row that disappears takes its measured shape's "
         f"falsifier with it")
 
+    # ⛔ THE STATED DENOMINATORS GET AN EXECUTOR (#11437 review, round 11, P3).
+    # The floor above says adding rows is free — and that is exactly why the
+    # PROSE'S figures drift: rounds 9-11 added rows and the paragraph that says
+    # "measured at THIS head over all 29 rows of `must_red`" kept its denominator,
+    # so one file carried TWO sizes for one set (34 here, 29 there) and the
+    # verdicts it reports looked calibrated when they were not. A stated figure
+    # whose only executor is a reader is the false-PASS shape this whole file is
+    # about, so the two sentences are pinned against the artifact itself: the
+    # figures are read out of THIS FILE's own text and compared to the real set
+    # sizes. Adding a row therefore costs one re-measurement of the window sweep
+    # and the figures — not nothing, which is the point (#11437 review, P3: the
+    # same input was corrected one round earlier and drifted again).
+    # ⚠️ The pin reads ONE spelling of the live claim — the figure immediately
+    # before `` `must_red` rows ``. History that QUOTES an old figure must write it
+    # the other way round (`N rows of `must_red``), as this comment does; otherwise
+    # a quotation would be read as a claim. That keeps the failure loud and cheap:
+    # the pin never guesses which occurrence is the live one.
+    _own_source = Path(__file__).read_text(encoding="utf-8")
+    _sizes = (len(must_red), len(must_stay_green),
+              len(declared_open), len(declared_blocks))
+    _stated_sizes = re.findall(
+        r"the (\d+) rows across the four sets — "
+        r"(\d+) / (\d+) / (\d+) / (\d+)", _own_source)
+    assert _stated_sizes, (
+        "the row-set census sentence ('the N rows across the four sets — a / b "
+        "/ c / d') is gone from this file, so the pin below checks nothing. "
+        "That sentence is the one place the four sizes are stated; restore it "
+        "or retire this pin deliberately")
+    for _total, _a, _b, _c, _d in _stated_sizes:
+        assert (int(_total), int(_a), int(_b), int(_c), int(_d)) == \
+            (sum(_sizes), *_sizes), (
+            f"the census sentence states {_total} rows ({_a}/{_b}/{_c}/{_d}) "
+            f"and the artifact holds {sum(_sizes)} ({'/'.join(map(str, _sizes))}). "
+            f"Re-derive the figure — and, because the governance-window "
+            f"paragraph quotes the same set, re-measure that sweep too "
+            f"(`{{0,2}}?` -> `{{0,N}}?` on `_NEGATION_GOVERNS`, ALL FOUR sets)")
+    _stated_must_red = re.findall(r"(\d+) `must_red` rows", _own_source)
+    assert _stated_must_red, (
+        "no sentence in this file states 'N `must_red` rows', so the "
+        "governance-window paragraph's denominator is unpinned — restore the "
+        "figure or retire this pin deliberately")
+    for _figure in _stated_must_red:
+        assert int(_figure) == len(must_red), (
+            f"a sentence in this file states {_figure} `must_red` rows and the "
+            f"set holds {len(must_red)}. The window sweep's denominators and "
+            f"its verdicts ('3 opens 2 of N', '0/N leak') are read off this "
+            f"count, so re-measure the sweep at {len(must_red)} before "
+            f"restating it")
+
     # …and the FIVE alternatives this test claims an executor for are asserted to
     # HAVE one: with that alternative removed from `_AFFIRMED`, at least one
     # `must_red` row must go back to GREEN. `_AFFIRMED` carries NINE top-level
@@ -5633,8 +5682,15 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
     # same four names — which is why the error was invisible: a count can be wrong
     # on both sides and still subtract to the right answer. Hand-counting an
     # alternation is exactly the operation this file reds elsewhere, so the INPUTS
-    # are now re-derived rather than eyeballed: count the top-level `|` in
-    # `_AFFIRMED.pattern` (respecting `[`/`(` nesting) and `len()` the tuple below.
+    # are now DERIVED BY THE ASSERTIONS BELOW rather than eyeballed:
+    # `_top_level_alternatives` counts the top-level `|` in `_AFFIRMED.pattern`
+    # (respecting `\\`-escapes and `[`/`(` nesting) and `len()` reads the ablation
+    # tuple, so a hand-count that drifts reds instead of misreporting coverage —
+    # and the four unasserted names are pinned by their PATTERNS, not their
+    # labels, so a fifth ablation cannot quietly close one of them. The two
+    # numbers AS WRITTEN ("carries NINE … asserts FIVE") are pinned against the
+    # same derivation, so the sentence itself is now a test result — reverting it
+    # to the pre-round-11 EIGHT/four reds.
     # ⚠️ NONE of those four is "inert belt". Measured by ablating each arm to
     # `\bZZZNEVERMATCH\b` and re-evaluating ALL FOUR row sets (not just
     # `must_red`): the concessive row (label `inverse: except that they are not
@@ -5655,9 +5711,42 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
     # belt invites exactly the deletion this PR exists to prevent (#11437 review,
     # P3 — corrected twice, because the first correction kept the scoped ablation
     # but dropped its scope).
+    def _top_level_alternatives(pattern: str) -> int:
+        """Top-level alternatives in a regex source — `|` at nesting depth 0.
+
+        Counted rather than eyeballed because the count IS the derived claim:
+        `_AFFIRMED`'s arm tally minus the ablation tuple's length is the number
+        of unasserted arms, and both inputs have now been wrong once (#11437
+        review, round 11, P3). A `\\`-escape consumes the next character (so
+        `\\|` is a literal pipe, not an alternation) and `[...]` is a character
+        class, where `|` is literal too.
+        """
+        depth = 0
+        in_class = False
+        count = 1
+        i = 0
+        while i < len(pattern):
+            ch = pattern[i]
+            if ch == "\\":
+                i += 2
+                continue
+            if in_class:
+                if ch == "]":
+                    in_class = False
+            elif ch == "[":
+                in_class = True
+            elif ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+            elif ch == "|" and depth == 0:
+                count += 1
+            i += 1
+        return count
+
     _this_module = sys.modules[__name__]
     _pinned_affirmed = _AFFIRMED
-    for _arm_name, _arm in (
+    _affirmed_ablations = (
             ("therefore reported", r"\btherefore reported\b"),
             ("skipped", r"\bskipped\b"),
             ("concessive-scope",
@@ -5671,7 +5760,75 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
             # (#11437 review, P3). Measured: ablating it re-GREENs the
             # `hedge: `might not`` row.
             ("`might not` (pseudo-negation)",
-             r"\bmight\s+not\s+(?:walk|visit|reach|report)(?:s|es|ed|ing)?\b")):
+             r"\bmight\s+not\s+(?:walk|visit|reach|report)(?:s|es|ed|ing)?\b"))
+
+    # ⛔ THE TWO INPUTS DERIVED, AND THE FOUR UNASSERTED ARMS NAMED BY PATTERN.
+    # 9 - 5 = 4 held even while both inputs were wrong, which is why subtraction
+    # never caught it; the assertions below pin each input AND the identity of
+    # the four, so a fifth ablation (or a new arm) cannot pass as the same claim.
+    _unasserted_arms = (
+        r"\binside the walk\b",
+        r"\bexcept that\b",
+        r"\bnot\s+(?:outside|exempt|excluded|omitted|left|out\s+of\s+scope|fail)",
+        r"\b(?:not|never)\s+(?:always|necessarily|certain|certainly|sure|clear"
+        r"|definitely|conclusively|guaranteed)\b")
+    assert _top_level_alternatives(_pinned_affirmed.pattern) == 9, (
+        f"`_AFFIRMED` now carries "
+        f"{_top_level_alternatives(_pinned_affirmed.pattern)} top-level "
+        f"alternatives, not the 9 the tally above states — re-derive BOTH inputs "
+        f"(this count and the ablation tuple's length) and re-derive the "
+        f"derived figure `9 - 5 = 4`. A stale input misreports coverage even "
+        f"when the verdicts are right (#11437 review, round 11, P3)")
+    assert len(_affirmed_ablations) == 5, (
+        f"the `_AFFIRMED` ablation loop has {len(_affirmed_ablations)} entries, "
+        f"not the 5 the tally above states — the stated inputs are `NINE` "
+        f"alternatives and `FIVE` asserted, so both must be re-derived together")
+    assert (_top_level_alternatives(_pinned_affirmed.pattern)
+            - len(_affirmed_ablations)) == len(_unasserted_arms), (
+        "the unasserted-arm count no longer equals `9 - 5 = 4`: the derived "
+        "claim and the four patterns below have diverged")
+    for _arm in _unasserted_arms:
+        assert _arm in _pinned_affirmed.pattern, (
+            f"the unasserted arm `{_arm}` has left `_AFFIRMED`, so the tally "
+            f"above now names an arm that does not exist")
+        assert not any(_arm in _ablated for _, _ablated in _affirmed_ablations), (
+            f"`{_arm}` is listed above as UNASSERTED but an ablation entry now "
+            f"covers it — the prose and the loop disagree about which four "
+            f"arms have no executor")
+    # ⛔ AND THE TWO FIGURES AS WRITTEN — the ones a reader actually reads. The
+    # derivation above pins the ARTIFACT; without this the SENTENCE could still
+    # say EIGHT/four over a nine/five artifact, which is precisely the round-11
+    # finding (the counts were fixed in the code two rounds earlier, in prose
+    # never). Both word-forms are read out of this file and mapped back to
+    # integers, so a wording change the pin cannot parse reds instead of passing.
+    # ⚠️ History that QUOTES an old pair writes it as `SEVEN→EIGHT` (arrow) or
+    # omits `carries`/`this loop asserts`, so only the live sentence matches.
+    _word_numbers = {4: "FOUR", 5: "FIVE", 6: "SIX", 7: "SEVEN", 8: "EIGHT",
+                     9: "NINE", 10: "TEN", 11: "ELEVEN", 12: "TWELVE"}
+    _number_words = {word: value for value, word in _word_numbers.items()}
+    _stated_carries = re.findall(r"`_AFFIRMED` carries (\w+) top-level",
+                                 _own_source)
+    _stated_asserts = re.findall(r"this loop asserts (\w+)", _own_source)
+    assert _stated_carries and _stated_asserts, (
+        "the sentence stating `_AFFIRMED`'s arm tally ('`_AFFIRMED` carries "
+        "NINE top-level alternatives and this loop asserts FIVE') is gone, so "
+        "the two figures a reader reads are unpinned — restore it or retire "
+        "this pin deliberately")
+    for _figure in _stated_carries:
+        assert _number_words.get(_figure.upper()) == \
+            _top_level_alternatives(_pinned_affirmed.pattern), (
+            f"the tally says `_AFFIRMED` carries {_figure} top-level "
+            f"alternatives and the pattern carries "
+            f"{_top_level_alternatives(_pinned_affirmed.pattern)} — the count "
+            f"and the artifact must be re-derived together")
+    for _figure in _stated_asserts:
+        assert _number_words.get(_figure.upper()) == len(_affirmed_ablations), (
+            f"the tally says this loop asserts {_figure} alternatives and it "
+            f"asserts {len(_affirmed_ablations)} — re-derive the pair, not just "
+            f"the wrong side (#11437 review, round 11, P3: a count can be wrong "
+            f"on BOTH sides and still subtract to the right answer)")
+
+    for _arm_name, _arm in _affirmed_ablations:
         assert _arm in _pinned_affirmed.pattern, (
             f"the `{_arm_name}` alternative has left `_AFFIRMED`, so the guard "
             f"below would silently check nothing")
