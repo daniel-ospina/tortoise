@@ -251,7 +251,11 @@ the `:aboutSubject`/`:aboutObject` edge is written at all), plus `TORTOISE_LABEL
 `TORTOISE_LABEL_ORDER` is off, pinned so the pair cannot be split), `TORTOISE_CONTEXT_ENRICH` (the per-turn REWRITE of the text each turn embeds, gated in `context_enrich.enrich_enabled` and reached from `sdk.capture_session` as `enrich_fn=_capture_enriched_texts`; fail-safe OFF) — all pinned **unset** — and `TORTOISE_JSON_MODE`, pinned to **`1`** because its absent state is already ON and it is read PER CALL to flip the request's `response_format` (`model_adapters`), and `TORTOISE_IDENTIFIER_TOKENS`, pinned to **`1`** because its absent state is already ON (`sparse.py:226`, `env_flag(IDENTIFIER_ENV, True)`) and it rewrites `search_keys` on every `:Point` the run writes (`projection/entities.py:1208`, reached from `create_point`); the registered corpus yields no aliases either way, measured. The last five are the cycle-7 to
 cycle-10 review findings (`TORTOISE_CONTEXT_ENRICH`/`TORTOISE_JSON_MODE`, then `TORTOISE_CHANGE_FEED`,
 then `TORTOISE_IDENTIFIER_TOKENS`, then `TORTOISE_SUBJECT_TAU_HI`/`_LO`): each sits on the acceptance
-path and was in no pin, no ledger row and no closure; cycle 11 added `TORTOISE_STATE_VALUE_VERBATIM` (the #10360 carve-out's write-path off-switch, `extractor_v2._state_value_verbatim_enforced`) pinned to **`1`**, because it too is default-ON and with it off a rewritten value is WRITTEN, which grows the measured population under a door that still claims the pin held. The authoritative list is
+path and was in no pin, no ledger row and no closure. Cycle 11 added
+`TORTOISE_STATE_VALUE_VERBATIM` (the `#10360` carve-out's write-path off-switch,
+`extractor_v2._state_value_verbatim_enforced`), pinned to **`1`**, because it is default-ON and with
+it off the emit site takes no judgment at all — a rewritten value is WRITTEN, which grows the measured
+population under a door that still claims the pin held. The authoritative list is
 `capstone_measure.DOOR_PINNED_OFF` / `DOOR_PINNED_ON`, which `tests/test_7949_c2_door.py` resolves
 against the tree — this sentence is the reader's map, not the control. The set
 is CLOSED over the **measurement modules the path renders with**, and what
@@ -1373,8 +1377,8 @@ place a machine reads it.
   be either observed or witnessed **idle** with a basis. The conditional set is read from this record
   at the pre-registration commit; a run log may not declare it.
 - **Why it is not a relaxation**: `S2.3` structurally cannot run on a corpus whose S2 map types every
-  candidate — `_collect_classify_items` (`tortoise/extractor_v2.py:11174-11196`) collects only
-  kind-missing/`unclassified` candidates and both passes sit behind `if items:` (`:13058`, `:13207`).
+  candidate — `_collect_classify_items` (`tortoise/extractor_v2.py:11098-11120`) collects only
+  kind-missing/`unclassified` candidates and both passes sit behind `if items:` (`:12982`, `:13131`).
   The old rule therefore could not be satisfied by **any** legitimate run of the registered corpus,
   so the gate could not return a verdict at all (§11.2's four ordered refusals). Every one of the
   eight still has to be accounted for, and an idle claim needs the run's own four facts — flag ON,
@@ -1443,11 +1447,9 @@ place a machine reads it.
   CONTENT at the merged head (`_collect_classify_items` at `:10169`, its `return items` at `:10191`,
   the two `if items:` gates at `:10736`/`:10868`, the two fail-open `except` arms at
   `:10749`/`:11973`), never by adding an offset.
-- **What moved: nothing but line-cites.** No metric, denominator, threshold, class set, corpus pin or
-  step declaration changes; the only text change inside the `steps` block is the same line-cite in
-  `steps.conditional[0].condition` (`:9767` → `:9934`), which names no metric. The numbers this
-  record exists to freeze are byte-identical. `document_sha256` is re-cut in this same commit, per
-  §8's rule for *any* edit to this file.
+- **What moved: nothing else.** No metric, denominator, threshold, class set, corpus pin or `steps`
+  block is touched; the numbers this record exists to freeze are byte-identical. `document_sha256`
+  is re-cut in this same commit, per §8's rule for *any* edit to this file.
 
 ### 10.8 — the §11 cite block re-pointed again after `#10997`'s hold/reclaim insert (2026-11-06, `#10997`)
 
@@ -1462,11 +1464,9 @@ place a machine reads it.
   Each number was verified by CONTENT at this head (the `def`, the `return items` that ends it,
   the two `if items:` gates, the two `except` arms), never by adding an offset — the failure this
   section has already recorded twice.
-- **What moved: nothing but line-cites.** No metric, denominator, threshold, class set, corpus pin or
-  step declaration changes; the only text change inside the `steps` block is the same line-cite in
-  `steps.conditional[0].condition` (`:9934` → `:10397`), which names no metric. The numbers this
-  record exists to freeze are byte-identical. `document_sha256` is re-cut in this same commit, per
-  §8's rule for *any* edit to this file.
+- **What moved: nothing else.** No metric, denominator, threshold, class set, corpus pin or `steps`
+  block is touched; the numbers this record exists to freeze are byte-identical. `document_sha256`
+  is re-cut in this same commit, per §8's rule for *any* edit to this file.
 
 ### 10.9 — the §11 cite block re-pointed after `main`'s S5 inserts moved `extractor_v2.py` (2026-11-07, `#11205`/`#11242`/`#11288` then `#11264`/`#11361`)
 
@@ -1503,11 +1503,9 @@ place a machine reads it.
   gates, the two `except` arms), never by adding an offset — the failure this section has already
   recorded twice, and this round it was the whole bundle's cites (README, both probes, the E-row
   audit, `docs/00_index.md` and the architecture doc) that had to be re-derived the same way.
-- **What moved: nothing but line-cites.** No metric, denominator, threshold, class set, corpus pin or
-  step declaration changes; the only text change inside the `steps` block is the same line-cite in
-  `steps.conditional[0].condition` (`:10397` → `:11098`), which names no metric. The numbers this
-  record exists to freeze are byte-identical. `document_sha256` is re-cut in this same commit, per
-  §8's rule for *any* edit to this file.
+- **What moved: nothing else.** No metric, denominator, threshold, class set, corpus pin or `steps`
+  block is touched; the numbers this record exists to freeze are byte-identical. `document_sha256`
+  is re-cut in this same commit, per §8's rule for *any* edit to this file.
 
 ### 10.10 — the §11 cite block re-pointed after `#11368`'s mention-builder consolidation (2026-11-07, `#11368`)
 
@@ -1525,11 +1523,9 @@ place a machine reads it.
   while `_collect_classify_items` (`:11098`), which sits **above** it, does not move at all. The
   `+0` on the collector and the `+74` on the four cites below it are one measurement, and quoting
   only one of them is how the next re-derivation anchors on the wrong number.
-- **What moved: nothing but line-cites.** No metric, denominator, threshold, class set, corpus pin or
-  step declaration changes; this entry makes **no** `steps`-block change — the condition line-cite
-  stays at `:11098` here and is re-derived in §10.14. The numbers this record exists to freeze are
-  byte-identical. `document_sha256` is re-cut in this same commit, per §8's rule for *any* edit to
-  this file.
+- **What moved: nothing else.** No metric, denominator, threshold, class set, corpus pin or `steps`
+  block is touched; the numbers this record exists to freeze are byte-identical. `document_sha256`
+  is re-cut in this same commit, per §8's rule for *any* edit to this file.
 
 ⚠️ §10.8's own **New value** is deliberately left at `:10397`/`:11849`/`:11862` — the state
 `#10997` left — because it is the ANCHOR §10.9 re-derives from ("must anchor on the measured
