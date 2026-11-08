@@ -2003,3 +2003,81 @@ def test_a_case_varied_ref_cannot_be_one_rows_id_and_anothers_name():
         C.assert_distinct_graphs("Default", "org_o1_g_deadbeefdeadbeef", graph_rows=rows)
     # …and a NAME is still case-insensitive, as the surface documents
     assert C.canonical_graph_id("HOUSE", rows) == C.canonical_graph_id("g_t0000000000000", rows)
+
+
+# ── round-34 review findings ──────────────────────────────────────────────
+
+
+class _RefusalOnALaterPage:
+    """A walk whose SECOND page is a refusal envelope, on a surface with no `total`.
+
+    The hole is exactly the `--no-verify-read` path. The shortfall check has no total
+    to compare against, and the page re-check re-reads the last page that SUCCEEDED (a
+    refusal returns no rows, so the loop breaks before the fingerprint is updated), so
+    it compares like with like. The verification pass does NOT agree with the first
+    walk — it is a full second walk that raises on the refusal independently — so with
+    it on, a refusal is already fatal; it is off in the arm that used to return a short
+    census as complete.
+    """
+
+    def __init__(self):
+        self.calls = 0
+
+    def __call__(self, _name, args):
+        self.calls += 1
+        if int(args.get("offset") or 0) == 0:
+            return {"result": [{"id": "p1", "kind": "decision", "content": "one"},
+                               {"id": "p2", "kind": "decision", "content": "two"}]}
+        return {"error": "429 Too Many Requests — quota exceeded", "code": 429}
+
+
+def test_a_refusal_on_a_later_page_is_never_a_complete_census():
+    """Round-34 finding 1: `refusal` was captured for the remedy message and then only
+    consulted in the `not rows` arm, so a mid-walk refusal left a SHORT walk behind
+    that the caller returned as a complete census (`total` fell back to `len(rows)`)."""
+    mod = _tool_module()
+    with pytest.raises(RuntimeError, match=r"429|refused"):
+        mod.MCPReader(_RefusalOnALaterPage(), None).read_points(page=2, verify=False)
+    # The default path also refuses, but through a DIFFERENT mechanism — the verification
+    # walk raises on the refusal itself — so this arm is supplementary: the discriminator
+    # for the fix is the `--no-verify-read` arm above.
+    with pytest.raises(RuntimeError, match=r"429|refused"):
+        mod.MCPReader(_RefusalOnALaterPage(), None).read_points(page=2)
+
+
+def test_a_stale_hash_never_claims_a_row_of_record_for_another_text():
+    """Round-34 finding 2: rows are folded by content hash alone, so two rows sharing a
+    hash whose CONTENT differs made the second text an "exact content duplicate" of the
+    first, with the reason asserting the keeper was "the row of record for this
+    content" — a false claim over a unique text the carry set then left behind.
+
+    The hash agreeing while the text disagrees is exactly the stale-hash shape this
+    file already builds (`test_duplicate_follows_its_keeper`), one content over.
+    """
+    plan = C.build_plan(
+        [row("narr", content="Let me check the CI config first.", content_hash="H"),
+         row("unique", content="The venue refuses writes at its node cap.", content_hash="H")],
+        source_graph="old", target_graph="new", packs={},
+    )
+    by_id = {d.node_id: d for d in plan.decisions}
+    assert by_id["unique"].disposition == C.UNDECIDABLE, (
+        "a hash that disagrees with the text proves no duplicate, so the row is a "
+        f"per-row decision: {by_id['unique']!r}")
+    assert "is the row of record" not in by_id["unique"].reason, (
+        f"the keeper must not be presented as this text's row of record: "
+        f"{by_id['unique'].reason!r}")
+    # Non-vacuity: the honest pair (SAME text, same hash) is still folded — and folded
+    # the way a CARRIED keeper folds it, so a blanket refusal to detect duplicates (the
+    # mutation that fires the branch without checking the content) reds here. A
+    # `statement` keeper cannot prove this: "duplicate of a row that is itself
+    # undecidable" also contains "duplicate" and is also not `CARRY`.
+    same = C.build_plan(
+        [row("k1", kind="decision", content="A durable claim", content_hash="H"),
+         row("k2", kind="decision", content="A durable claim", content_hash="H")],
+        source_graph="old", target_graph="new", packs={},
+    )
+    folded = {d.node_id: d for d in same.decisions}
+    assert folded["k1"].disposition == C.CARRY
+    assert folded["k2"].disposition == C.NOT_CARRIED, (
+        f"the duplicate follows a CARRIED keeper: {folded['k2']!r}")
+    assert "duplicate of a carried row" in folded["k2"].reason, folded["k2"].reason

@@ -100,7 +100,6 @@ class MCPReader:
 
     def read_points(self, *, page: int = PAGE, verify: bool = True) -> tuple[list[C.Row], int]:
         rows: list[C.Row] = []
-        refusal: str | None = None
         offset = 0
         total = None
         # id -> (first offset, content fingerprint). Point ids are NOT unique (colliding
@@ -115,9 +114,17 @@ class MCPReader:
             res = C.normalise_tool_result(self._q(offset=offset, limit=page))
             # A refusal on this surface is a `_safe`-answered payload with
             # `is_error=False`, so `normalise_tool_result` does NOT raise for it and it
-            # would read as "0 rows". Capture it: "check the credential/graph binding"
-            # sends an operator to the wrong remedy for a quota failure.
-            refusal = _error_of(res) or refusal
+            # would read as "0 rows". It is TERMINAL wherever it lands: on a LATER page
+            # it used to reach `if not batch: break` with rows already collected, and
+            # when the surface reports no `total` the short walk was then returned as a
+            # complete census — the shortfall guard has no total to compare against and
+            # the page re-check re-reads the last SUCCESSFUL page, so neither can see it.
+            # That is the silent partial census R7 forbids (round-34 finding 1).
+            page_refusal = _error_of(res)
+            if page_refusal:
+                raise RuntimeError(
+                    f"read refused at offset {offset} after {len(rows)} rows: "
+                    f"{page_refusal[:300]} — refusing a partial census")
             batch = _rows_from_tool(res)
             if isinstance(res, dict) and res.get("total") is not None:
                 total = int(res["total"])
@@ -175,8 +182,7 @@ class MCPReader:
             # census that claims there is nothing to migrate.
             raise RuntimeError(
                 f"read returned 0 points (reported total={total}); refusing to report an "
-                "empty graph" + (f" — the read was refused: {refusal[:300]}" if refusal
-                                 else " — check the credential/graph binding")
+                "empty graph — check the credential/graph binding"
             )
         if total is not None and len(rows) < total:
             # `total` is not `structure.total`, and it does not count tombstones: the
