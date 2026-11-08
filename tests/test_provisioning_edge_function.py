@@ -536,11 +536,36 @@ def test_edge_function_hook_path_is_gone():
     auth_body = src.split("async function authenticateCaller", 1)[1].split(
         "Deno.serve", 1
     )[0]
+    # Pin the SHAPE of a header/body read, not one call spelling. The deleted
+    # hook path gathered headers with `req.headers.forEach((v, k) => …)` and the
+    # raw body with `req.clone().text()` — neither is a `req.headers.get(` call:
+    #
+    #   // Headers → plain object (webhook-signature / webhook-id / ...)
+    #   const headers: Record<string, string> = {};
+    #   req.headers.forEach((v, k) => { headers[k] = v; });
+    #   const payload = webhook.verify(rawBody, headers) as HookPayload;
+    #
+    # (origin/main:supabase/functions/tenant-provision/index.ts:186-190).
+    # MEASURED: re-inserting exactly that branch into authenticateCaller — with
+    # a plain `Deno.env.get("AUTH_HOOK_SECRET")` literal, so the name pins stay
+    # green — kept every other static test AND the runtime harness passing while
+    # the branch was live and would authenticate a real `v1,whsec_…` secret.
     assert auth_body.count("req.headers.get(") == 1, (
         "authenticateCaller must read exactly ONE request header (Authorization): "
         "a second header read is an auth path beside the user JWT — e.g. the "
         "deleted Standard-Webhooks `webhook-signature` path, which a "
         "plain-literal re-add reintroduces while the name pins above stay green:"
+        f"\n{auth_body}"
+    )
+    assert "req.headers.forEach" not in auth_body, (
+        "authenticateCaller must not ENUMERATE request headers: gathering them is "
+        "how the deleted hook path collected `webhook-signature` without ever "
+        "calling req.headers.get(, so the count above cannot see it:"
+        f"\n{auth_body}"
+    )
+    assert "req.clone" not in auth_body, (
+        "authenticateCaller must not clone the request: a signature-verifying "
+        "hook path needs the RAW BODY, so a clone here is that path's fingerprint:"
         f"\n{auth_body}"
     )
     assert 'req.headers.get("authorization")' in auth_body, (

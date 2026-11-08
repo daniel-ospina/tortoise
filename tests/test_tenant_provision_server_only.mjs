@@ -213,49 +213,56 @@ try {
   // `after_user_created` is not a supported Supabase auth hook, so the
   // AUTH_HOOK_SECRET / Standard-Webhooks path was deleted (#1120).
   //
-  // This arm sends a CRYPTOGRAPHICALLY CORRECT Standard-Webhooks signature,
-  // not a literal, and that is what makes the arm able to FAIL. The deleted
-  // handler returned 401 for an UNVERIFIABLE signature anyway (its stub threw
-  // "signature mismatch" → the fail-closed return), so `v1,AAAA` got 401 from
-  // the OLD code too: the arm passed identically with the hook path restored,
-  // i.e. a tautology against its own name. A signature the old handler would
-  // have ACCEPTED is what discriminates.
+  // A literal `v1,AAAA` made this arm tautological: the deleted handler
+  // returned 401 for an UNVERIFIABLE signature anyway (its stub threw
+  // "signature mismatch" → the fail-closed return), so the arm passed
+  // IDENTICALLY whether or not the hook path existed. Only a signature the
+  // deleted code would have ACCEPTED can fail when that path returns.
   //
-  // ⛔ THE KEY IS THE SECRET WITH THE `v1,whsec_` PREFIX STRIPPED. The deleted
-  // handler constructed the verifier as
-  //   new Webhook(hookSecret.replace(/^v1,whsec_/, ""))
-  // (origin/main:supabase/functions/tenant-provision/index.ts:183), so the HMAC
-  // key was `tstsecret`, NOT the raw env value. Signing with the raw value
-  // yields a signature the old code REJECTS — which silently restores the
-  // tautology, because the old code then answers 401 too. An earlier revision
-  // of this file made exactly that mistake by deriving the key from the STUB
-  // (which hashed with the already-stripped argument it was handed) instead of
-  // from the HANDLER's call site. Measured with the verifier's key held fixed
-  // and only the candidate varied: stripped → accepted; raw env → rejected;
-  // `v1,AAAA` → rejected. Do not "simplify" this back.
-  const HOOK_SECRET_ENV = "v1,whsec_tstsecret"; // the value AUTH_HOOK_SECRET held
-  const HOOK_KEY = HOOK_SECRET_ENV.replace(/^v1,whsec_/, ""); // what the verifier hashed with
+  // ⛔ THERE ARE TWO SUCH SIGNATURES, because there are two key semantics. The
+  // handler's ARGUMENT is the same either way
+  // (origin/main:supabase/functions/tenant-provision/index.ts:183:
+  //   new Webhook(hookSecret.replace(/^v1,whsec_/, ""))  → the base64 text),
+  // but the two verifiers hash that argument DIFFERENTLY:
+  //   - the deleted TEST STUB used it as ASCII
+  //     (`createHmac("sha256", this.secret)`), whereas
+  //   - the real `standardwebhooks@1.0.0` library BASE64-DECODES it
+  //     (`this.key = base64.decode(secret)` — dist/index.js:44, read from the
+  //     published package).
+  // So a restore using the real library REJECTS a stub-shaped signature and
+  // answers the same 401 — the arm stays tautological for that restore class.
+  // Both are pinned below. The secret is VALID base64 so both semantics are
+  // well-defined. Do not "simplify" this back to one arm or to a literal.
+  const HOOK_SECRET_B64 = "MDEyMzQ1Njc4OWFiY2RlZmdoaWprbG1u";
+  const HOOK_SECRET_ENV = "v1,whsec_" + HOOK_SECRET_B64; // what AUTH_HOOK_SECRET held
   const hookId = "msg_1";
   const hookTs = "1700000000";
   const hookBody = JSON.stringify({ user: { id: USER_ID, email: EMAIL } });
-  const hookSig =
+  const hookSig = (key) =>
     "v1," +
-    createHmac("sha256", HOOK_KEY)
+    createHmac("sha256", key)
       .update(`${hookId}.${hookTs}.${hookBody}`)
       .digest("base64");
-  envVars["AUTH_HOOK_SECRET"] = HOOK_SECRET_ENV;
-  await check(
-    "POST with a VALID webhook signature and no JWT → 401 (the hook path no longer exists)",
+  const hookReq = (signature) =>
     call(
       "POST",
       {
         ...JSON_HEADERS,
         "webhook-id": hookId,
         "webhook-timestamp": hookTs,
-        "webhook-signature": hookSig,
+        "webhook-signature": signature,
       },
       hookBody
-    ),
+    );
+  envVars["AUTH_HOOK_SECRET"] = HOOK_SECRET_ENV;
+  await check(
+    "POST with a webhook signature the deleted STUB would accept → 401 (hook path gone)",
+    hookReq(hookSig(HOOK_SECRET_B64)),
+    401
+  );
+  await check(
+    "POST with a webhook signature the real library would accept → 401 (hook path gone)",
+    hookReq(hookSig(Buffer.from(HOOK_SECRET_B64, "base64"))),
     401
   );
 
@@ -310,6 +317,18 @@ try {
     "201 body must include the minted api_key"
   );
   assert.ok(okBody.org_id, "201 body must include org_id");
+  // ⛔ KEEP THE ORG-NAME ASSERTION. The deleted harness pinned it
+  // (`origin/main:tests/test_tenant_provision_cors.mjs:202` —
+  // `jwtBody.org_name === "test"`, "team name derives from display_name") and
+  // this replacement dropped it, so neutering the provider-display-name lookup
+  // left the harness fully green while the org name, the starter-seed
+  // person_name and the onboarding-email greeting all silently changed
+  // (measured: setting that lookup to `undefined` kept 17/17 green).
+  assert.equal(
+    okBody.org_name,
+    "test",
+    "team name derives from the provider display_name (Test), lowercased"
+  );
   console.log(
     "      (success body: org_id=" + okBody.org_id + " api_key=" + okBody.api_key.slice(0, 10) + "…)"
   );
