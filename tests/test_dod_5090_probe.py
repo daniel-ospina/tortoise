@@ -4526,9 +4526,9 @@ def _doc_section(text: str, start: str, end: str) -> str:
 # Those need the predicate to know the sentence's SUBJECT, to read a second
 # negation, or to resolve a preposition — scope, not vocabulary — so they are
 # DECLARED and not claimed closed.
-# Window measured at THIS head over all 41 `must_red` rows: 0 and 2 leave the
-# must_red set fully RED (0/41 leak) and keep the real doc a HIT; **3 opens 2 of
-# 41**, starting with "are not missed by the walk". ⛔ Window 0 is not free
+# Window measured at THIS head over all 47 `must_red` rows: 0 and 2 leave the
+# must_red set fully RED (0/47 leak) and keep the real doc a HIT; **3 opens 2 of
+# 47**, starting with "are not missed by the walk". ⛔ Window 0 is not free
 # either, one set over: it wrongly REDS **10** of the 16 `declared_open` rows.
 # And since #11437's round-6 clause-scope rows landed, **window 1 is no longer
 # clean at all** — it wrongly REDS 4 of them: the two PSEUDO-CLEFT rows (`walk` is
@@ -4549,17 +4549,19 @@ def _doc_section(text: str, start: str, end: str) -> str:
 # ⛔ EVERY figure in this paragraph was re-derived by MEASUREMENT at the head that
 # added the round-9/10/11 rows, because the counts above are inputs and a stale
 # input misreports coverage even when the verdict is right (#11437 review, P3).
-# The `must_red` set is **41** at this head, not the 29 those rounds inherited: the
-# four verdicts reproduced unchanged at 41/16/15 — window 0 leaks 0/41 and reds
+# The `must_red` set is **47** at this head, not the 29 those rounds inherited: the
+# four verdicts reproduced unchanged at 47/16/15 — window 0 leaks 0/47 and reds
 # 10/16 `declared_open`; window 1 reds 4/16 (the same four identities named
 # above); window 3 opens exactly the two rows named and wrongly GREENs exactly
 # 1/15 `declared_blocks` (`coverage verb outside the walk/visit/reach/report`).
 # ⛔ Round 12 added SEVEN rows (the six cue-only pseudo-negations and `_DEFEATED`'s
-# `incorrect`, each previously pinned by pattern text alone — see `must_red`) and
-# the sweep was RE-RUN over all four sets at 41/13/16/15: every verdict above is
-# byte-for-byte the same, only the denominators moved (0/34 -> 0/41, 2 of 34 -> 2
-# of 41). Stated because "the rows grew and the verdicts did not" is exactly the
-# kind of claim this paragraph exists to have measured rather than assumed.
+# `incorrect`) and round 13 SIX more (the `un…` privative alternation's unrowed
+# words), each previously pinned by pattern text alone — see `must_red` — and the
+# sweep was RE-RUN over all four sets at BOTH 41/13/16/15 and 47/13/16/15: every
+# verdict above is byte-for-byte the same, only the denominators moved
+# (0/34 -> 0/41 -> 0/47, 2 of 34 -> 2 of 41 -> 2 of 47). Stated because "the rows
+# grew and the verdicts did not" is exactly the kind of claim this paragraph
+# exists to have measured rather than assumed.
 # Re-derive with the substring substitution on `_NEGATION_GOVERNS`'s window
 # (`{0,2}?` -> `{0,N}?`), re-evaluating ALL FOUR sets — never `must_red` alone.
 # ⛔ COST, taken deliberately: window 2 makes "…are never TOUCHED by the walk"
@@ -4600,8 +4602,8 @@ _NEGATION_GOVERNS = re.compile(
     r"(?:walk|visit|reach|report)(?:s|es|ed|ing)?\b")
 # ⛔ `_COVERAGE` is RETAINED DELIBERATELY AND IS CURRENTLY IMPLIED, and saying so
 # is the point (#11437 review, P3). Measured: `_NEGATION_GOVERNS` already requires
-# one of the same four verbs AFTER the negation, so on all 115 candidate sentences
-# (the 85 rows across the four sets — 41 / 13 / 16 / 15 — plus the 30 sentences of
+# one of the same four verbs AFTER the negation, so on all 121 candidate sentences
+# (the 91 rows across the four sets — 47 / 13 / 16 / 15 — plus the 30 sentences of
 # the real §3 under
 # this predicate's own `split(". ")` segmentation) there is no case where the
 # governance test hits and this one does not — dropping the term from
@@ -4637,10 +4639,14 @@ _NEGATION_GOVERNS = re.compile(
 # P3, the same correction made beside the rows): the privative is not a coverage
 # word, so the negation governs nothing and the sentence is refused BEFORE
 # `_AFFIRMED` is consulted — measured, `_NEGATION_GOVERNS.search` is None on both.
-# The `un…` list's own executor is the dedicated
-# "inverse: privative after a governing negation" row, which goes GREEN when that
-# alternation is ablated. Saying the list "closes them" was a causal claim the
-# artifact did not verify.
+# The `un…` list has SEVEN executors, one per word — the dedicated
+# "inverse: privative after a governing negation" row (`unreported`) plus the six
+# `inverse: privative `un…`` rows added in round 13 — each of which goes GREEN when
+# ITS word is ablated from both alternations (#11437 review, round 13, P3:
+# `unvisited` had no row, so deleting it from `_AFFIRMED` and from the ablation
+# entry left the whole file GREEN while "…, which are never unvisited" became an
+# accepted residual). Saying the list "closes them" was a causal claim the
+# artifact did not verify; saying it with SEVEN rows is one it does.
 # ⛔ And a HEDGE is not a negation of the CLAIM, which is the same shape one step
 # out from finding 2's stray `not` (#11437 review, round 2, P2's class, measured
 # again here): a pseudo-negation governs a coverage verb while asserting NEITHER
@@ -4862,7 +4868,7 @@ def _residual_sentences(s3: str) -> list[str]:
       visited"` and `"the walk does not, as an earlier draft said, visit …"` both
       red (#11437 review, round 6, P2). Both are ROWS in `declared_blocks` below.
       ⛔ This is the price of the window itself, and widening it to 3 is measured
-      to open 2 of the 41 `must_red` rows (`not` + a non-coverage verb, and `not`
+      to open 2 of the 47 `must_red` rows (`not` + a non-coverage verb, and `not`
       governing an adjective) and to wrongly GREEN 1 `declared_blocks` row, so it
       is declared rather than paid for in the other direction;
     * an HONEST statement stated inside a CONCESSIVE whose cue happens to sit next
@@ -5250,6 +5256,37 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
         "inverse: privative after a governing negation":
             "the body walk does not report a nested `def`'s decorators and "
             "parameter defaults, which are not unreported by it",
+        # ⛔ THE OTHER SIX PRIVATIVE WORDS, EACH GIVEN A ROW (#11437 review,
+        # round 13, P3). The `un\u2026` arm lists SEVEN words and only
+        # `unreported` was exercised by the row above \u2014 the other six were held
+        # up by the pattern text alone, so the same two-place edit round 12 found
+        # for `clear` was still silent here. Measured at the head that reported it:
+        # deleting `visited` from `_AFFIRMED` AND from its ablation entry left the
+        # whole file `151 passed, 1 skipped, rc=0`, byte-identical to baseline,
+        # while "\u2026, which are never unvisited" moved from REFUSED to ACCEPTED as
+        # a valid residual \u2014 a false PASS, the direction this file says matters.
+        # The row must be the COMPOUND shape: a bare "never unvisited" does not
+        # exercise the arm (`_NEGATION_GOVERNS` is None on it, as the docstring
+        # says), so each row below carries a governing `does not visit` clause as
+        # well. Each dies on ITS word's removal and no other's.
+        "inverse: privative `unvisited`":
+            "the walk does not visit a nested `def`'s decorators and parameter "
+            "defaults, which are never unvisited",
+        "inverse: privative `unreached`":
+            "the walk does not visit a nested `def`'s decorators and parameter "
+            "defaults, which are never unreached",
+        "inverse: privative `unwalked`":
+            "the walk does not visit a nested `def`'s decorators and parameter "
+            "defaults, which are never unwalked",
+        "inverse: privative `uncovered`":
+            "the walk does not visit a nested `def`'s decorators and parameter "
+            "defaults, which are never uncovered",
+        "inverse: privative `unmentioned`":
+            "the walk does not visit a nested `def`'s decorators and parameter "
+            "defaults, which are never unmentioned",
+        "inverse: privative `unseen`":
+            "the walk does not visit a nested `def`'s decorators and parameter "
+            "defaults, which are never unseen",
         # ⛔ And the STRAY-NEGATION class (#11437 review, round 3, P1): the
         # negation only has to OCCUR under the old `_NEGATION.search`, so an
         # inverse passed on the strength of a `not` that governed nothing. All
