@@ -1606,6 +1606,58 @@ def _refusal_exit_status(exc: ast.expr | None) -> int | None:
     return None
 
 
+def _census_module():
+    """The entry-point census, loaded by path — the SINGLE OWNER of its predicates.
+
+    A copy of the census's `_BARE_INVOCATION` regex inside this file would drift
+    narrower again (that is how the advertised-form arm ended up weaker than the
+    census it mirrors: a docstring-only substring misses a COMMENT, a `USAGE`
+    constant and the `python3 ./tools/...` spelling, all measured), so the
+    pattern is imported, not restated. Loaded by path with `importlib` — the same
+    mechanism this file already uses for the tools under test — so it cannot
+    depend on pytest's `sys.path` layout.
+    """
+    path = REPO_ROOT / "tests" / "test_entry_point_python_guard.py"
+    spec = importlib.util.spec_from_file_location("_entry_point_python_guard_census", path)
+    assert spec is not None and spec.loader is not None, path
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _interpolated_version_components(node: ast.expr) -> set[int]:
+    """Which `sys.version_info[<n>]` components a refusal message interpolates.
+
+    This arm is deliberately STRONGER than the census, which cannot tell an
+    interpolated message from a hard-coded one: it fakes `sys.version_info` as
+    `(3, 9, 6)` and then asserts `"(got 3.9)"`, so a literal `(got 3.9)` passes it
+    — and the pin's behavioural arm too — while lying to the next reader on any
+    other interpreter, the unattributed error #5128 was filed for. Measured: a
+    hardcoded `(got 3.9)` mutant passes both the census and the behavioural arm,
+    and is caught only here.
+
+    The `.major` / `.minor` spelling is rejected for a second reason: the census
+    probes by faking `sys.version_info` with a plain tuple, which carries no
+    `.major`, so that shape raises `AttributeError` under the census.
+    """
+    found: set[int] = set()
+    for sub in ast.walk(node):
+        if not isinstance(sub, ast.Subscript):
+            continue
+        target = sub.value
+        if not (
+            isinstance(target, ast.Attribute)
+            and target.attr == "version_info"
+            and isinstance(target.value, ast.Name)
+            and target.value.id == "sys"
+        ):
+            continue
+        index = sub.slice
+        if isinstance(index, ast.Constant) and isinstance(index.value, int):
+            found.add(index.value)
+    return found
+
+
 def _is_stderr_print(call: ast.Call) -> bool:
     """Whether a `print(...)` call writes to `sys.stderr`.
 
@@ -1818,6 +1870,21 @@ def test_the_tool_carries_the_5128_interpreter_guard_first(tool, capsys, monkeyp
         f"the refusal must name the interpreter it GOT as the operator sees it "
         f"(`(got 3.9)` on a 3.9 host); it said {said!r}"
     )
+    # The behavioural arm above CANNOT see a hard-coded interpreter, and that is
+    # measured, not assumed: the census fakes `sys.version_info` as `(3, 9, 6)`
+    # and then asserts `"(got 3.9)"`, so a literal `(got 3.9)` passes BOTH the
+    # census and the behavioural arm while lying to every other reader — the same
+    # unattributed error #5128 was filed for. This arm is therefore deliberately
+    # STRONGER than the census: it requires the message to INTERPOLATE the two
+    # components.
+    components = _interpolated_version_components(message)
+    assert {0, 1} <= components, (
+        f"the refusal must INTERPOLATE both the major and minor the operator has "
+        f"(`sys.version_info[0]` and `[1]`), not hard-code them — a literal "
+        f"`(got 3.9)` is the same unattributed error on any other interpreter, "
+        f"and the census cannot see it because it fakes 3.9; found "
+        f"{sorted(components)}, renders as {rendered!r}"
+    )
 
     # The census's `test_no_doc_or_usage_advertises_the_form_the_guard_refuses`
     # sweeps THIS tool's docstring too, and it is the same gate-class as the pin
@@ -1829,12 +1896,27 @@ def test_the_tool_carries_the_5128_interpreter_guard_first(tool, capsys, monkeyp
     # this pin is the only gate there and must not be narrower than the sweep.
     # (Not hypothetical: `tools/build_site_icons.py` merged advertising
     # `python3 tools/build_site_icons.py`, and the sweep is what caught it.)
-    doc = ast.get_docstring(tree) or ""
-    assert f"python3 tools/{tool.name}" not in doc, (
-        f"the tool's own docstring advertises `python3 tools/{tool.name}`, the "
-        f"form its guard REFUSES; the census's "
+    #
+    # Driven by the CENSUS'S OWN PATTERN over the tool's WHOLE TEXT, not a
+    # substring over `ast.get_docstring`: measured, a `# (an older revision was
+    # invoked as python3 tools/<name> check)` COMMENT and the `python3 ./tools/...`
+    # spelling both left a docstring-substring pin GREEN while the census reded.
+    # A copied regex would drift the same way, so the predicate — not a copy of
+    # it — is the single owner.
+    census = _census_module()
+    text = tool.read_text(encoding="utf-8")
+    offenders = [
+        f"{tool.name}:{n}: {line.strip()}"
+        for n, line in enumerate(text.splitlines(), 1)
+        if (m := census._BARE_INVOCATION.search(line))
+        and m.group(1) == "tools"
+        and m.group(2) == tool.name
+    ]
+    assert not offenders, (
+        f"the tool advertises `python3 tools/{tool.name}`, the form its guard "
+        f"REFUSES; the census's "
         f"`test_no_doc_or_usage_advertises_the_form_the_guard_refuses` reds on "
-        f"it, and that test does not run on a tool-only diff"
+        f"it, and that test does not run on a tool-only diff: {offenders}"
     )
 
 
