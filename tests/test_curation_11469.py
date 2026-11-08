@@ -1463,6 +1463,11 @@ def test_the_plan_can_emit_row_level_reasons(monkeypatch, tmp_path):
             return {"result": [{"id": "p1", "kind": "decision", "content": "we ship"},
                                {"id": "p2", "kind": "statement", "content": "narration"}],
                     "total": 2}
+        if args.get("section") == "status":
+            # The real status section REPORTS counts; a fixture answering it with an
+            # empty `result` models a surface that says nothing about the source
+            # population — the state the unreconciled-zero refusal exists for.
+            return {"counts": {"Source": 0}}
         return {"result": []}
     monkeypatch.setattr(mod, "_live_call_tool", call)
     rows_out = tmp_path / "rows.jsonl"
@@ -1474,6 +1479,9 @@ def test_the_plan_can_emit_row_level_reasons(monkeypatch, tmp_path):
     lines = [json.loads(x) for x in rows_out.read_text().splitlines() if x.strip()]
     assert {d["node_id"] for d in lines} == {"p1", "p2"}
     assert all(d["reason"] and d["disposition"] for d in lines)
+    # The TEXT the reason is about travels with it, so the report alone re-derives
+    # the decision (round-36 review, P3-4: `as_dict` carried neither content nor props).
+    assert {d["content"] for d in lines} == {"we ship", "narration"}
 
 
 def test_two_nodes_sharing_an_id_across_pages_are_not_a_pagination_shift():
@@ -1519,7 +1527,8 @@ def test_a_write_flag_on_inventory_is_refused_not_ignored(monkeypatch, capsys, t
     assert mod.main(["inventory", "--apply"]) == 2
     assert "apply only to `plan`" in capsys.readouterr().err
     # EVERY write flag, not just the one that happened to be checked first
-    for flag in (["--ledger", str(tmp_path / "x.jsonl")], ["--target", "org_x_g_new"]):
+    for flag in (["--ledger", str(tmp_path / "x.jsonl")], ["--target", "org_x_g_new"],
+                 ["--off"]):
         assert mod.main(["inventory", *flag]) == 2
         assert "apply only to `plan`" in capsys.readouterr().err
 
@@ -1531,6 +1540,8 @@ def test_inventory_writes_the_row_artifact_it_advertises(monkeypatch, tmp_path):
         if name == "tortoise_query":
             return {"result": [{"id": "p1", "kind": "decision", "content": "we ship"}],
                     "total": 1}
+        if args.get("section") == "status":
+            return {"counts": {"Source": 0}}
         return {"result": []}
     monkeypatch.setattr(mod, "_live_call_tool", call)
     rows_out = tmp_path / "inv.jsonl"
@@ -1745,6 +1756,8 @@ def test_a_disarmed_run_is_not_reported_as_a_failure(monkeypatch, tmp_path, caps
     def call(name, args):
         if name == "tortoise_query":
             return {"result": [{"id": "p1", "kind": "decision", "content": "c"}], "total": 1}
+        if args.get("section") == "status":
+            return {"counts": {"Source": 0}}
         return {"result": []}
     monkeypatch.setattr(mod, "_live_call_tool", call)
     rc = mod.main(["plan", "--graph", "org_x_g_old", "--target", "org_x_g_new",
@@ -1853,6 +1866,8 @@ def test_the_cli_exit_codes_pin_every_failure_arm(monkeypatch, tmp_path, capsys)
     def call(name, args):
         if name == "tortoise_graph_overview" and args.get("section") == "graphs":
             return {"result": state["graphs"]}       # the identity rows the guard reads
+        if name == "tortoise_graph_overview" and args.get("section") == "status":
+            return {"counts": {"Source": 0}}
         if name == "tortoise_query":
             return {"result": [{"id": "p1", "kind": "decision", "content": "c"}], "total": 1}
         return {"result": []}
@@ -2345,3 +2360,137 @@ def test_two_rows_sharing_an_id_and_a_hash_cannot_hide_the_second_text(tmp_path)
         f"arms are separate `if`s and this pin is what tells them apart: {same.decisions[1]!r}")
     assert "exact content duplicate" in same.decisions[1].reason, (
         f"a real duplicate must still be detected: {same.decisions[1]!r}")
+
+
+# ── round-36 (merge-gate review) findings ─────────────────────────────────
+#
+# Five P3s from the review at 919de3c428: no wrong outcome in shipped code, but each
+# was a property the PR advertised that nothing asserted. Fixed rather than
+# re-recorded, and each is pinned here against the mutant it now kills.
+
+
+def test_the_shipped_off_switch_watch_disarms_a_live_run(monkeypatch):
+    """P3-1 — R4's mid-run leg through the SHIPPED `armed` default.
+
+    Every other mid-run disarm in this suite injects its own `armed=` callable, and
+    `run_plan` consults the switch BEFORE the writer is built — so replacing
+    `IngestWriter`'s default with a constant (or resolving it once in `__init__`)
+    left all 143 tests green while `TORTOISE_CURATE_OFF` stopped disarming a live
+    write. This arm passes NO `armed`, flips the env from inside the first target
+    call, and requires the second batch to be refused.
+    """
+    monkeypatch.delenv(C.OFF_SWITCH_ENV, raising=False)
+    calls: list[dict] = []
+
+    def call_tool(tool, args):
+        calls.append(args)
+        if len(calls) == 1:
+            monkeypatch.setenv(C.OFF_SWITCH_ENV, "1")   # the operator flips it mid-run
+        return {"created": len(args["bundle"]["points"])}
+
+    points = [{"migrationKey": f"k{i}", "content": "c"} for i in range(3)]
+    writer = C.IngestWriter(call_tool, batch_size=1)          # ⛔ NO `armed=`
+    out = writer.write_sections("new", {"points": points})
+    assert len(calls) == 1, f"the second batch reached the wire after the switch: {calls}"
+    assert out["written"] == ["k0"], out
+    assert out["stopped"] == "off-switch engaged", out
+
+
+def test_an_unreadable_source_listing_is_a_refusal_not_an_empty_census():
+    """P3-2 — R7's other half: the source section.
+
+    `_section` fails closed on an error ENVELOPE, but a refusal arriving as an
+    unrecognised DATA shape carries no `error` key and unwrapped to `[]`. On this
+    tenant that silently reported a graph with no sources — 1,578 of 17,420 rows
+    gone from the census with nothing failing.
+    """
+    mod = _tool_module()
+    reader = mod.MCPReader(lambda name, args: {"unexpected": "shape"}, None)
+    with pytest.raises(RuntimeError, match="unrecognised shape"):
+        reader.read_sources()
+
+
+def test_a_zero_source_census_with_nothing_to_reconcile_it_is_refused(monkeypatch, capsys,
+                                                                     tmp_path):
+    """P3-2 — the caller half: 0 sources AND no `counts.Source` is unmeasurable.
+
+    An empty listing is only distinguishable from an unread one by the status
+    section's own count. With neither, `source_count_gap` was null and the run
+    exited 0 over a census that had dropped the whole source population.
+    """
+    mod = _tool_module()
+
+    def call(name, args):
+        if name == "tortoise_query":
+            return {"result": [{"id": "p1", "kind": "decision", "content": "c"}], "total": 1}
+        if args.get("section") == "sources":
+            return {"result": []}                     # an empty, perfectly readable listing
+        if args.get("section") == "status":
+            return {"unexpected": "shape"}            # ...with nothing to reconcile it
+        return {"result": []}
+    monkeypatch.setattr(mod, "_live_call_tool", call)
+    rc = mod.main(["inventory", "--out", str(tmp_path / "inv.json"), "--no-verify-read"])
+    assert rc == 3, capsys.readouterr()
+    assert "REFUSED" in capsys.readouterr().err
+
+
+def test_a_genuinely_empty_source_population_still_passes(monkeypatch, tmp_path):
+    """P3-2's counter-arm — the refusal must not block a graph that really has none.
+
+    `counts.Source == 0` reconciles the empty listing (gap 0, not None), so the census
+    is measurable and the run succeeds.
+    """
+    mod = _tool_module()
+
+    def call(name, args):
+        if name == "tortoise_query":
+            return {"result": [{"id": "p1", "kind": "decision", "content": "c"}], "total": 1}
+        if args.get("section") == "status":
+            return {"counts": {"Source": 0}}
+        return {"result": []}
+    monkeypatch.setattr(mod, "_live_call_tool", call)
+    assert mod.main(["inventory", "--out", str(tmp_path / "inv.json"),
+                     "--no-verify-read"]) == 0
+    report = json.loads((tmp_path / "inv.json").read_text())
+    assert report["sources_read"] == 0 and report["source_count_gap"] == 0
+
+
+def test_a_re_run_under_another_spelling_of_the_target_still_skips(tmp_path):
+    """P3-5 — R3's "skips a migrated key BEFORE it reaches the wire".
+
+    The ledger was keyed by the literal `--target` string, so the SAME graph spelled
+    `org_x_g_new` on day one and `g_new` on day two read as two targets: every row was
+    re-sent, and idempotency rested entirely on target-side dedup (which
+    `tortoise_ingest` does not promise). The scope is now the canonical identity.
+    """
+    rows = [{"graph_id": "g_old", "stable_id": "g_old", "namespace": "org_x_g_old"},
+            {"graph_id": "g_new", "stable_id": "g_new", "namespace": "org_x_g_new"}]
+    led = C.Ledger(tmp_path / "l.jsonl", target="org_x_g_new", graph_rows=rows)
+    w = CountingWriter()
+
+    first = C.build_plan([row("p1", kind="decision", content="a durable claim")],
+                         source_graph="org_x_g_old", target_graph="org_x_g_new")
+    got = C.run_plan(first, writer=w, ledger=led, apply=True, graph_rows=rows)
+    assert got.written == 1, got
+
+    # the same graph, spelled the way a shorter ref resolves on the next day
+    again = C.build_plan([row("p1", kind="decision", content="a durable claim")],
+                         source_graph="org_x_g_old", target_graph="g_new")
+    res = C.run_plan(again, writer=w, ledger=led, apply=True, graph_rows=rows)
+    assert (res.written, res.skipped_known) == (0, 1), (res.written, res.skipped_known)
+    assert len(w.calls) == 1, w.calls
+
+
+def test_a_ledger_scoped_to_another_graph_is_still_refused(tmp_path):
+    """P3-5's counter-arm — canonicalisation must not turn the guard into a pass.
+
+    Two DIFFERENT graphs whose refs both resolve share nothing, so the refusal
+    survives: only spellings of the SAME canonical identity intersect.
+    """
+    rows = [{"graph_id": "g_a", "stable_id": "g_a", "namespace": "org_x_g_a"},
+            {"graph_id": "g_b", "stable_id": "g_b", "namespace": "org_x_g_b"}]
+    led = C.Ledger(tmp_path / "l.jsonl", target="org_x_g_a", graph_rows=rows)
+    plan = C.build_plan([row("p1", kind="decision", content="c")],
+                        source_graph="org_x_g_b", target_graph="org_x_g_b")
+    with pytest.raises(C.CurationRefused, match=r"scoped to"):
+        C.run_plan(plan, writer=CountingWriter(), ledger=led, apply=True, graph_rows=rows)

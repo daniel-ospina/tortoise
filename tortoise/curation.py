@@ -167,10 +167,14 @@ def normalise_tool_result(res: Any) -> Any:
 class Row:
     """One node as a read surface returned it, normalised to what curation needs.
 
-    ``props`` keeps the source row (minus the embedding vectors) so a decision can
-    be re-derived from the report alone, and so a carried row can be re-assembled
-    into a valid ingest item — ingest REQUIRES ``content`` on every point item
-    (``sdk._check_item_shape``), and a bundle without it is refused wholesale.
+    ``props`` is the source row MINUS the embedding vectors, carried unchanged. No
+    classification rule reads it today (a grep for ``props`` in this module finds the
+    field and nothing else), so it is NOT what makes a decision re-derivable — that
+    is ``content`` + ``stable_key``, both of which ``Decision.as_dict`` emits. It is
+    kept as the read-surface record a later rule (or an audit of "what did the source
+    actually say") would need, and re-assembly into a valid ingest item uses
+    ``content``, which ingest REQUIRES on every point item (``sdk._check_item_shape``)
+    and which a bundle without is refused wholesale for.
     """
 
     node_id: str
@@ -297,6 +301,11 @@ class Decision:
             "reason": self.reason,
             "pack": self.pack,
             "stable_key": self.stable_key,
+            # The TEXT the reason is about. Without it `plan --rows` reports a
+            # disposition and a reason over a row the reviewer cannot look up, so
+            # "the decision can be re-derived from the report alone" was a claim the
+            # artifact did not support (round-36 review, P3-4).
+            "content": self.content,
         }
 
 
@@ -1209,6 +1218,45 @@ class IngestWriter:
             raise CurationRefused(refused, written_keys=written)
         return res
 
+def ledger_scope(
+    target_graph: str,
+    graph_rows: Sequence[Mapping[str, Any]] | None = None,
+) -> str:
+    """The canonical key a ledger record is WRITTEN under for ``target_graph``.
+
+    Scoping the ledger by the LITERAL spelling the operator typed let one graph have
+    several scopes: ``--target org_x_g_new`` on day one and ``--target g_new`` on day
+    two read as two different targets, so every row was re-sent and the half of
+    idempotency that "skips a migrated key before it reaches the wire" was gone (the
+    guarantee then rested entirely on target-side dedup, and ``tortoise_ingest`` is
+    explicitly NOT declared idempotent). Resolving to the canonical id closes that.
+
+    Falls back to the spelling when the identity cannot be established — an
+    unresolvable ref must not silently inherit another graph's ledger, and
+    ``assert_distinct_graphs`` is what refuses an unproven identity before any write.
+    """
+    return canonical_graph_id(target_graph, graph_rows) or target_graph
+
+
+def ledger_scopes(
+    target_graph: str,
+    graph_rows: Sequence[Mapping[str, Any]] | None = None,
+) -> frozenset[str]:
+    """Every spelling a ledger must MATCH for ``target_graph`` — the spelling itself
+    plus its canonical id when that is resolvable.
+
+    Matching is a set intersection, not equality, on purpose: one side of a comparison
+    may carry ``graph_rows`` and the other may not (a `Ledger` built directly in a
+    test, a run whose `graphs` section was unreadable), and equality on a single
+    computed key would then refuse a ledger that is in fact this graph's — a false
+    block on the one guard that protects the "skipped before the wire" half of R3.
+    Records are WRITTEN under ``ledger_scope`` (the canonical form), and any spelling
+    resolves back to it.
+    """
+    canon = canonical_graph_id(target_graph, graph_rows)
+    return frozenset({target_graph, canon} if canon else {target_graph})
+
+
 class Ledger:
     """Local record of what this pass already migrated **into this target**.
 
@@ -1217,11 +1265,23 @@ class Ledger:
     it. It is scoped by target graph — the same row migrated into graph A has not
     been migrated into graph B — append-only, and fsynced, because a ledger that
     can be lost (or that answers for the wrong graph) is worse than none.
+
+    The scope MATCHES any accepted spelling of the target (``ledger_scopes``) and
+    RECORDS under the canonical one, so a re-run under a different spelling still
+    skips the rows the first run landed.
     """
 
-    def __init__(self, path: str | os.PathLike[str], target: str):
+    def __init__(
+        self,
+        path: str | os.PathLike[str],
+        target: str,
+        *,
+        graph_rows: Sequence[Mapping[str, Any]] | None = None,
+    ):
         self.path = str(path)
         self.target = target
+        self.scopes = ledger_scopes(target, graph_rows)
+        self.write_scope = ledger_scope(target, graph_rows)
         self._keys: set[tuple[str, str]] = set()
         self._load()
 
@@ -1261,10 +1321,10 @@ class Ledger:
             ) from exc
 
     def __contains__(self, key: object) -> bool:
-        return (self.target, key) in self._keys
+        return any((scope, key) in self._keys for scope in self.scopes)
 
     def __len__(self) -> int:
-        return sum(1 for t, _ in self._keys if t == self.target)
+        return sum(1 for t, _ in self._keys if t in self.scopes)
 
     def record(self, keys: Iterable[str]) -> None:
         keys = list(keys)
@@ -1283,8 +1343,8 @@ class Ledger:
             if needs_nl:
                 fh.write("\n")
             for k in keys:
-                fh.write(json.dumps({"target": self.target, "migrationKey": k}) + "\n")
-                self._keys.add((self.target, k))
+                fh.write(json.dumps({"target": self.write_scope, "migrationKey": k}) + "\n")
+                self._keys.add((self.write_scope, k))
             fh.flush()
             os.fsync(fh.fileno())
 
@@ -1415,7 +1475,12 @@ def run_plan(
     touches nothing — that is the mode to use against a target that does not
     exist yet.
     """
-    if ledger.target != plan.target_graph:
+    # Compare SCOPE SETS, so the same graph under two accepted spellings
+    # (``org_x_g_new`` / ``g_new`` / a ``stable_id``) shares one ledger instead of
+    # re-sending every row into it. A refusal only when the two sets are disjoint:
+    # one side may legitimately lack the `graph_rows` the other used.
+    plan_scopes = ledger_scopes(plan.target_graph, graph_rows)
+    if ledger.scopes.isdisjoint(plan_scopes):
         raise CurationRefused(
             f"ledger is scoped to {ledger.target!r} but the plan targets "
             f"{plan.target_graph!r} — a ledger answering for another graph would skip rows "

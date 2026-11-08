@@ -55,11 +55,37 @@ def _error_of(res: Any) -> str | None:
 def _rows_from_tool(res: Any) -> list[dict[str, Any]]:
     res = C.normalise_tool_result(res)
     if isinstance(res, dict):
-        for k in ("results", "result", "points"):
+        for k in _ROW_KEYS:
             v = res.get(k)
             if isinstance(v, list):
                 return v
     return res if isinstance(res, list) else []
+
+
+#: The keys a row LISTING may arrive under. `_rows_from_tool` reads only these, so a
+#: payload carrying none of them answered in a shape this reader does not understand.
+_ROW_KEYS = ("results", "result", "points")
+
+
+def _is_row_listing(res: Any) -> bool:
+    """Did this payload arrive in a shape that can be READ as a row listing?
+
+    The difference that matters is `[]` vs `unreadable`: an empty list (or an empty
+    `result` key, or an explicit `total: 0`) is a graph with no rows, while a dict
+    whose keys the reader does not recognise is a surface that drifted. Both go to
+    `[]` through `_rows_from_tool`, and only this predicate can tell them apart —
+    which is what makes "no silent zero" enforceable for the source section, not
+    just for points.
+    """
+    res = C.normalise_tool_result(res)
+    if isinstance(res, list):
+        return True
+    if not isinstance(res, dict):
+        return False
+    if any(isinstance(res.get(k), list) for k in _ROW_KEYS):
+        return True
+    return any(isinstance(res.get(k), int) and not isinstance(res.get(k), bool)
+               for k in ("total", "count", "totalSources"))
 
 
 class MCPReader:
@@ -300,6 +326,16 @@ class MCPReader:
         `sources_read` and so reconciled nothing.
         """
         res = self._section("sources")
+        if not _is_row_listing(res):
+            # R7's other half. `_section` fails closed on an error ENVELOPE, but a
+            # refusal that arrives as an unrecognised DATA shape (`{"unexpected": "shape"}`)
+            # carries no `error` key and unwrapped to `[]` — reported as a graph with no
+            # sources, which on this tenant silently dropped 1,578 of 17,420 rows.
+            raise RuntimeError(
+                "read of section 'sources' answered in an unrecognised shape "
+                f"({type(res).__name__} with keys "
+                f"{sorted(res)[:6] if isinstance(res, dict) else 'n/a'}) — refusing to "
+                "report an unreadable source listing as an empty one")
         raw = _rows_from_tool(res)
         total = None
         if isinstance(res, dict):
@@ -397,6 +433,23 @@ def _source_gap(counts: Any, read: int) -> int | None:
     return (total - read) if isinstance(total, int) else None
 
 
+def _unreconciled_sources(read: int, gap: int | None) -> str | None:
+    """The refusal for a ZERO-source census that nothing can reconcile, else None.
+
+    A non-zero gap is EXPECTED and named (`list_sources` filters `documentKind IS NULL`),
+    so it is not a refusal. The refusal is the other case: 0 sources read AND no
+    `counts.Source` to compare against, where "this graph has no sources" and "the
+    listing was not read" are indistinguishable — the silent-zero R7 forbids, which
+    for points is already a hard raise (`read_points`). A genuine empty listing still
+    passes: the surface reports `counts.Source == 0`, so the gap is 0, not None.
+    """
+    if read or gap is not None:
+        return None
+    return ("read 0 sources and the status section reported no `Source` count, so an empty "
+            "listing cannot be told from an unread one — refusing a census that would report "
+            "the source population as empty with nothing to reconcile it against")
+
+
 NOT_ENUMERABLE = {
     "operator": "tortoise_query excludes operator Points unless an operator kind is "
                 "requested (sdk._operator_scope_clauses, #7108) — count from structure.operators",
@@ -416,6 +469,11 @@ def cmd_inventory(args: argparse.Namespace) -> int:
     graphs = reader.graphs()
     points, total = reader.read_points(page=args.page, verify=args.verify_read)
     sources, source_total = reader.read_sources()
+    gap = _source_gap(counts, len(sources))
+    unreconciled = _unreconciled_sources(len(sources), gap)
+    if unreconciled:
+        print(f"REFUSED: {unreconciled}", file=sys.stderr)
+        return 3
     audit = reader.audit()
     plan = C.build_plan(points + sources, source_graph=args.graph or "(credential-bound)",
                         target_graph=args.target or "(none: inventory only)")
@@ -435,7 +493,7 @@ def cmd_inventory(args: argparse.Namespace) -> int:
         "points_total_reported": total,
         "sources_read": len(sources),
         "sources_total_reported": source_total,
-        "source_count_gap": _source_gap(counts, len(sources)),
+        "source_count_gap": gap,
         "structure": structure,
         "graphs": graphs,
         "not_enumerable_by_this_read_path": dict(NOT_ENUMERABLE),
@@ -478,6 +536,11 @@ def cmd_plan(args: argparse.Namespace) -> int:
     counts = reader.counts()
     points, points_total = reader.read_points(page=args.page, verify=args.verify_read)
     sources, source_total = reader.read_sources()
+    gap = _source_gap(counts, len(sources))
+    unreconciled = _unreconciled_sources(len(sources), gap)
+    if unreconciled:
+        print(f"REFUSED: {unreconciled}", file=sys.stderr)
+        return 3
     graphs = reader.graphs()
     plan = C.build_plan(points + sources, source_graph=args.graph or "(credential-bound)",
                         target_graph=args.target)
@@ -488,6 +551,10 @@ def cmd_plan(args: argparse.Namespace) -> int:
             ledger=C.Ledger(
                 args.ledger or os.path.expanduser("~/.tortoise/curate-11469-ledger.jsonl"),
                 target=args.target,
+                # CANONICAL scope: `--target g_new` today and `--target org_x_g_new`
+                # yesterday are ONE graph, and a spelling-keyed ledger re-sent every
+                # row into it (round-36 review, P3-5).
+                graph_rows=graphs,
             ),
             apply=args.apply,
             off=args.off,
@@ -510,7 +577,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
                "rows_written": payload_rows,
                "points_read": len(points), "points_total_reported": points_total,
                "sources_read": len(sources), "sources_total_reported": source_total,
-               "source_count_gap": _source_gap(counts, len(sources)),
+               "source_count_gap": gap,
                # The plan is the artifact a driver writes; a census without the
                # classes this read path cannot enumerate reads as complete.
                "not_enumerable_by_this_read_path": dict(NOT_ENUMERABLE),
@@ -593,7 +660,7 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
     if args.action == "inventory":
         ignored = [f for f, v in (("--apply", args.apply), ("--ledger", args.ledger),
-                                  ("--target", args.target))
+                                  ("--target", args.target), ("--off", args.off))
                    if v]
         if ignored:
             # Silently ignoring a flag is how an operator believes an artifact exists.
