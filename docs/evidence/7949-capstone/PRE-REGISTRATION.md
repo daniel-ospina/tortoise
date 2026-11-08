@@ -1730,6 +1730,14 @@ re-cut from the resolved document (§8), and no committed verdict is re-scored.
   `steps.conditional[0].condition` (`:11098` → `:11174`), which names no metric. The numbers this
   record exists to freeze are byte-identical. `document_sha256` is re-cut in this same commit, per
   §8's rule for *any* edit to this file.
+- **Also amended by this same change, and stated here rather than restated silently:** §10.7, §10.8,
+  §10.9 and §10.10 each read "What moved: nothing **else**". That was untrue of the commits they
+  describe — three of the four moved `steps.conditional[0].condition` (§10.10 moved no `steps`
+  line, which its rewritten line now says explicitly) — so those four conclusions were re-stated as
+  "nothing but line-cites" with each entry's own cite named. None of the four entries' recorded
+  values changed: the rewrites correct a CONCLUSION about what moved, in the entries whose own New
+  values already recorded the move. Declared here because that is this document's rule (§10.7 does
+  the same, and §10.10's ⛔ note below refuses to correct its neighbour silently).
 
 ## 11. The step set V5 gates over — seven unconditional, one conditional (`#10215`)
 
