@@ -2145,17 +2145,19 @@ def test_a_case_varied_ref_cannot_be_one_rows_id_and_anothers_name():
 class _RefusalOnALaterPage:
     """A walk whose SECOND page is a refusal envelope, on a surface with no `total`.
 
-    On the `verify=False` path neither existing guard can see it: the shortfall check has
-    no total to compare against, and the page re-check re-reads the last page that
-    SUCCEEDED (a refusal returns no rows, so the loop breaks before the fingerprint is
-    updated), so they compare like with like and agree. At head the DEFAULT path is caught
-    by the SAME page-refusal gate, before any verification walk starts — measured: both
-    arms raise `read refused at offset 2 … refusing a partial census`. WITH THAT GATE
-    REMOVED, the default path is caught instead by `_fingerprint_walk`, which walks from
-    offset 0 and raises on its own refusal, while `verify=False` would return a short
-    census silently (also measured). So the second witness is real but it sits BEHIND the
-    gate, not beside it — do not weaken the gate on the belief that the walk covers it,
-    because on `--no-verify-read` the gate is the only guard there is.
+    In SHIPPED code BOTH entry points raise at the SAME `page_refusal` gate inside
+    `read_points`, before any verification walk starts — so this test witnesses that one
+    gate on the `verify=False` and `verify=True` paths, not two independent guards.
+
+    `_fingerprint_walk` is a SECOND, independent witness that only becomes REACHABLE once
+    the gate is gone: with the gate disabled, `verify=False` returns the short walk as a
+    complete census (the silent partial census R7 forbids) while `verify=True` still
+    raises from the verification pass — and `--no-verify-read` removes even that fallback.
+    Both halves measured. Two earlier revisions of this docstring were wrong in opposite
+    directions: the first said the verification pass re-read the last SUCCEEDED page and
+    "agreed" (it does not — it walks from offset 0), and the second called the two paths
+    "distinct witnesses" in shipped code (they are one gate; the fallback is only
+    reachable without it).
     """
 
     def __init__(self):
@@ -2212,12 +2214,10 @@ def test_a_stale_hash_never_claims_a_row_of_record_for_another_text():
         source_graph="old", target_graph="new", packs={},
     )
     folded = {d.node_id: d for d in same.decisions}
-    folded = {d.node_id: d for d in same.decisions}
-    # NON-VACUITY, and it has to be the SPECIFIC claim: a blanket "withhold every
-    # duplicate" mutant (`content_mismatch` dropped from the branch condition) also
-    # satisfies `disposition != CARRY and "duplicate" in reason`, because the
-    # UNDECIDABLE reason mentions a duplicate too. Pinning "exact content duplicate"
-    # makes that mutant red THIS row (measured).
+    # NON-VACUITY, and it has to be the SPECIFIC claim (the sibling test's form, for the
+    # same measured reason): a blanket "withhold every duplicate" mutant also satisfies
+    # `!= CARRY and "duplicate" in reason`, because the content-mismatch reason contains
+    # the word "duplicate" too. Pinning the exact phrase makes that mutant red THIS row.
     assert folded["k2"].disposition != C.CARRY
     assert "exact content duplicate" in folded["k2"].reason, (
         f"the honest same-text pair must still fold as a duplicate, not be withheld: "
@@ -2272,5 +2272,6 @@ def test_two_rows_sharing_an_id_and_a_hash_cannot_hide_the_second_text(tmp_path)
         source_graph="old", target_graph="new", packs={},
     )
     assert len(same.decisions) == 2, [d.content for d in same.decisions]
-    assert same.decisions[1].disposition != C.CARRY and "duplicate" in same.decisions[1].reason, (
+    assert same.decisions[1].disposition != C.CARRY
+    assert "exact content duplicate" in same.decisions[1].reason, (
         f"a real duplicate must still be detected: {same.decisions[1]!r}")
