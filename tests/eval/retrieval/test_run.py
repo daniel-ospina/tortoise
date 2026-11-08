@@ -534,7 +534,7 @@ def test_run_reembeds_the_seeded_corpus_into_the_query_space(tmp_path):
     assert stub.calls, "the model must actually encode the corpus"
     # the corpus fingerprint must be taken AFTER the re-embed (it hashes the
     # stored vectors), or provenance would describe a corpus nobody measured
-    assert prov["corpus_fingerprint"]["embeddings_hash"], \
+    assert prov["corpus"]["embeddings_hash"], \
         "embeddings_hash must be present so the space change is detectable"
 
 
@@ -549,3 +549,22 @@ def test_run_without_a_model_stays_in_the_synthetic_space(tmp_path):
     assert prov["corpus_embedding_space"] == run_module.EMBED_SPACE_SYNTHETIC
     assert prov["synthetic_query_vectors"] is True
     assert prov["corpus_reembedded"] == 0
+
+
+@pytest.mark.skipif(not _has_embedded(), reason="embedded FalkorDBLite unavailable")
+def test_the_fingerprint_is_taken_after_the_reembed(tmp_path):
+    """The corpus fingerprint HASHES the stored vectors, so the two spaces must
+    read differently — otherwise provenance cannot detect the space change it
+    exists to detect, and `corpus_embedding_space` is the only witness."""
+    with patch.object(run_module, "_loaded_embedding_model", return_value=None):
+        synthetic = run_eval(_args(str(tmp_path / "eval-fp-synth.db"), corpus_size=60))
+    with patch.object(run_module, "_loaded_embedding_model", return_value=_StubModel()):
+        model = run_eval(_args(str(tmp_path / "eval-fp-model.db"), corpus_size=60))
+
+    h_synth = synthetic["provenance"]["corpus"]["embeddings_hash"]
+    h_model = model["provenance"]["corpus"]["embeddings_hash"]
+    assert h_synth and h_model, "both fingerprints must hash the stored vectors"
+    assert h_synth != h_model, (
+        "identical embeddings_hash across the two spaces means the fingerprint "
+        "was taken BEFORE the re-embed"
+    )

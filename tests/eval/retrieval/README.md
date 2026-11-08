@@ -58,8 +58,7 @@ surface vocabulary mismatch — the case reranking #317 targets).
 ## Quickstart (embedded smoke)
 
 ```bash
-# embedded — fast, NOT prod-parity (no HNSW; vector runs brute-force,
-# synthetic semantic query vectors stand in for the embedding model).
+# embedded — fast, NOT prod-parity (no HNSW; vector runs brute-force).
 # NOTE: the FULLTEXT index EXISTS on embedded (indexes.fts=true; FTS
 # populated 40/100 queries in the committed baseline) — FTS/structural
 # columns are environment artifacts here, not quality statements.
@@ -68,11 +67,36 @@ python -m tests.eval.retrieval.run \
     --pool-out /tmp/pool.json
 ```
 
+## One embedding space, always
+
+The vector arm is only a measurement if the query vectors and the corpus point
+embeddings live in the SAME space. The seeded corpus ships the oracle's
+**synthetic** topic-centroid embeddings (`benchmarks/synthetic_corpus.py`,
+`ORACLE_EMBED_ALPHA`); nothing here ever embeds the corpus with a real model.
+So the space is decided from the CORPUS side, once per run
+(`_corpus_embedding_space`), never from ambient model availability:
+
+| environment | space | what runs |
+|---|---|---|
+| no embedder (`uv sync`, CI offline) | `oracle-synthetic` | queries = topic-centroid sums (documented degraded fallback) |
+| embedder loaded (`uv sync --extra embeddings`) | `model` | the seeded corpus is RE-EMBEDDED with that model (`corpus_reembedded` in provenance), queries too |
+| `--no-seed-corpus`, no embedder | `unknown` | the graph's vectors came from the product; nothing can be assumed |
+
+`provenance.corpus_embedding_space` names which one a report used. **It is not
+cosmetic.** Before this rule existed the query side silently took the ambient
+embedder while the corpus kept centroid vectors, and in the canonical dev env
+that produced vector nDCG@10 0.108 (vs 0.826 sound) and a **BLOCK verdict on
+unmodified code** — see
+`docs/benchmarks/1144-retrieval-eval-embedding-space-2026-11-08.md`.
+
 ## Full run (authoritative — Docker FalkorDB >= 4.x)
 
 ```bash
 # 1. Docker FalkorDB (HNSW + FTS indexes auto-created at boot).
-# 2. Optionally the embeddings extra so query vectors encode natively:
+# 2. The embeddings extra is OPTIONAL and does not change what is measured:
+#    with it, the corpus is re-embedded into the model's space (one space);
+#    without it, both sides are the oracle's synthetic space. Either way the
+#    report says which in provenance.corpus_embedding_space.
 #       pip install -e '.[embeddings]'
 python -m tests.eval.retrieval.run --db docker://falkor:6379
 ```
@@ -80,9 +104,11 @@ python -m tests.eval.retrieval.run --db docker://falkor:6379
 ## The gate (every optimization cycle)
 
 ```bash
-# baseline = the committed "where we stand" run
+# baseline = the committed "where we stand" run, in YOUR embedding space:
+#   baseline-embedded-model-2026-11-08.json       → corpus_embedding_space: model
+#   baseline-embedded-2026-08-17.json (schema 1)  → oracle-synthetic
 python -m tests.eval.retrieval.run --db /tmp/new.db \
-    --baseline tests/eval/retrieval/baseline/baseline-embedded-2026-08-17.json
+    --baseline tests/eval/retrieval/baseline/baseline-embedded-model-2026-11-08.json
 ```
 
 Gate (pre-registered): **SHIP** iff the paired 90% CI on ΔnDCG@10 (points,
@@ -90,6 +116,13 @@ vs baseline, paired on identical query ids) does not exclude −2; **WARN**
 −2…−4; **BLOCK** < −4 or a significant P@5 drop (paired CI below 0). The
 loop ships a change only when speed improved (the #316 arm) AND this gate
 does not block.
+
+**A cross-space comparison is refused, not scored.** A run and its baseline in
+different embedding spaces differ by the INSTRUMENT, so `_gate_vs_baseline`
+returns `INCOMPARABLE` (naming the remedy: commit a run of unmodified code in
+that space) instead of a BLOCK. A baseline's space comes from its own
+provenance — and for a schema-1 baseline, which predates the field, it is
+derived from `embedding_model` (`unavailable` → `oracle-synthetic`).
 
 ## Judges + adjudication (authored set)
 

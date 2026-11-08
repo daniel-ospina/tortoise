@@ -722,6 +722,18 @@ def _run_with_sdk(args, sdk) -> dict:
     else:
         if not args.quiet:
             print("[corpus] using existing corpus (--no-seed-corpus)")
+    # ONE-SPACE invariant (`_corpus_embedding_space`): resolved BEFORE the
+    # fingerprint, because the fingerprint HASHES the stored vectors — a
+    # fingerprint taken before the re-embed describes a corpus nothing measured
+    # (it then reads identically in both spaces, so provenance cannot detect
+    # the change it exists to detect).
+    space, model = _corpus_embedding_space(seeded_synthetic=not args.no_seed_corpus)
+    reembedded = 0
+    if space == EMBED_SPACE_MODEL and not args.no_seed_corpus:
+        reembedded = _reembed_corpus(proj.g, points, model)
+        if not args.quiet:
+            print(f"[corpus] re-embedded {reembedded} points in the "
+                  f"'{space}' space (queries and points share one space)")
     corpus_fp = corpus_fingerprint_from_graph(proj.g)
     # #1348: per-topic live counts come from the oracle generator (the hidden
     # topic key is never written to the graph — seed_corpus SET is
@@ -766,13 +778,6 @@ def _run_with_sdk(args, sdk) -> dict:
         authored_set = load_authored_queries()
 
     all_queries = oracle_set["queries"] + authored_set["queries"]
-    space, model = _corpus_embedding_space(seeded_synthetic=not args.no_seed_corpus)
-    reembedded = 0
-    if space == EMBED_SPACE_MODEL and not args.no_seed_corpus:
-        reembedded = _reembed_corpus(proj.g, points, model)
-        if not args.quiet:
-            print(f"[corpus] re-embedded {reembedded} points in the "
-                  f"'{space}' space (queries and points share one space)")
     vecs, use_model = _query_vecs(oracle, all_queries, args.seed, space=space)
     tfidf_points = _tfidf_snapshot(proj.g)
     # #1348: ACTIVE strategies tuple — fused_rerank added only when the arm is
