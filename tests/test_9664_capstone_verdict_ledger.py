@@ -1797,7 +1797,10 @@ def test_the_tool_carries_the_5128_interpreter_guard_first(tool, capsys, monkeyp
     in `tools/ci_selection.py`: for a PR that touches only one tool,
     `select(['tools/capstone_ledger.py'], 'pull_request', load_manifest())`
     returns 82 files that INCLUDE `test_9664_capstone_verdict_ledger.py` (it is
-    `tier1`-registered, `config/ci-surfaces.yml:8096`) and EXCLUDE
+    `tier1`-registered in `config/ci-surfaces.yml` — the
+    `- test_9664_capstone_verdict_ledger.py` row whose comment begins `# #9664:`,
+    dual-registered with `core`; located by that quote, never by a line number,
+    because every merge that inserts a row above it moves the number) and EXCLUDE
     `tests/test_entry_point_python_guard.py`. So pinning here is what makes the
     guard checked on a tool-only diff; pinning in the census alone is not. Both
     tools this PR touches are parameterised for that reason — an unpinned second
