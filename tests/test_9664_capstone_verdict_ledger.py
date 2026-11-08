@@ -4748,16 +4748,19 @@ def test_the_unrunnable_probe_path_is_not_the_abstention_path():
     Collapsing them is the fail-open, so this asserts they are distinct at the function
     level, not just end to end.
 
-    ⛔ `_tracked_unprovable` has TWO causes, so its pin is written for what it does,
-    not for one of them: `git is unavailable here` (no repository — the branch this
-    call exercises, since no probe is passed) and `git is present and says this is not
-    a work tree` (a bare repo over `GIT_DIR`, reached with `probe=`). It is NOT
-    "a MEASURED answer" unconditionally: on the no-repository branch git was never
-    able to ask at all. Both ABSTAIN — #11503 Option 1 — and the distinction that
-    matters here is abstention vs. no-measurement, not the sub-cause.
+    ⛔ `_tracked_unprovable` has TWO causes and BOTH are driven by a measured probe,
+    which is why its argument is required (#11474 review): `git is present and says
+    this is not a work tree` (a bare repo over `GIT_DIR`, rc 0 + `false`) and "did not
+    answer `true`" (a tarball, rc 128). It is NOT "a MEASURED answer"
+    unconditionally: on the no-repository branch git was asked and could not answer.
+    Both ABSTAIN — #11503 Option 1 — and the distinction that matters here is
+    abstention vs. no-measurement, not the sub-cause.
     """
+    import types
+
+    answered_false = types.SimpleNamespace(returncode=0, stdout="false\n", stderr="")
     assert cl._tracked_unrunnable(OSError(24, "Too many open files"), "x") is None
-    assert cl._tracked_unprovable() is True
+    assert cl._tracked_unprovable(answered_false) is True
 
 
 def test_an_EMFILE_on_the_FOLLOW_UP_probe_also_refuses():
@@ -4946,7 +4949,7 @@ def test_a_glob_accepted_by_a_later_match_does_not_announce_the_rows_fate(monkey
     assert len(calls) >= 2, f"needs a later match to accept, saw {calls}"
     assert ok is True, why
     err = capsys.readouterr().err
-    assert "REFUSED" in err, "the per-path refusal must still be PRINTED, not silent"
+    assert "UNMEASURED" in err, "the per-path refusal must still be PRINTED, not silent"
     # ⛔ THE CAUSE IS THE HALF THAT WAS UNPINNED (#11474 review). MEASURED: replacing
     # `_tracked_unrunnable`'s line with the MEASURED sentence ("… so {rel} is not
     # TRACKED by git") — the exact defect its docstring forbids — left all 179 tests
@@ -4961,6 +4964,15 @@ def test_a_glob_accepted_by_a_later_match_does_not_announce_the_rows_fate(monkey
     assert "the row does not count" not in err, (
         "the probe cannot know the row's fate — a later tracked match accepted it, so "
         f"the per-path line must not claim the row was refused: {err}"
+    )
+    # ⛔ AND THE MARKER IS NOT AN EXCEPTION TO THAT (#11474 review). This test asserts
+    # `ok is True` four lines above and a verdict word here, which is the contradiction
+    # a reader of a CLEAN run's stderr hits: 0 exit, and "REFUSED" printed. Measured
+    # shape: the marker read `REFUSED` for all four per-path renderers while this pin
+    # demanded it, so the one line that could be false on a passing row was frozen in
+    # place by its own test.
+    assert "REFUSED" not in err, (
+        f"this row PASSED (a later match was tracked) — no line may announce a refusal: {err}"
     )
 
 
@@ -5096,15 +5108,22 @@ def test_a_probe_that_did_NOT_answer_false_states_the_OTHER_cause(capsys):
         f"git was asked and replied — it was not unavailable: {err}"
     )
 
-    # (3) no probe at all (the direct callers keep the old arity): git's absence.
-    assert cl._tracked_unprovable() is True
+    # (3) rc 0 with an answer that is neither `true` nor `false` — git does not produce
+    # it, and the renderer must still name the BYTES rather than fall back to a cause
+    # no probe gave (#11474 review: that fallback was the dead "git is unavailable
+    # here" branch, and its removal is what makes the argument required).
+    answered_other = _types.SimpleNamespace(returncode=0, stdout="maybe\n", stderr="")
+    assert cl._tracked_unprovable(answered_other) is True
     err = capsys.readouterr().err
-    assert "git is unavailable here" in err, (
-        "a caller that measured nothing gets the unavailable cause, never the "
-        f"measured-`false` one: {err}"
+    assert "did not answer `true`" in err, err
+    assert "'maybe'" in err, (
+        f"the exit code is 0, so the BYTES are the measurement that must be named: {err}"
+    )
+    assert "git is unavailable here" not in err, (
+        f"the probe ran and answered — nothing may call git unavailable: {err}"
     )
     assert "git is present and says this is not a work tree" not in err, (
-        f"no probe was measured, so that cause may not be printed: {err}"
+        f"it did not answer `false` either, so neither measured cause applies: {err}"
     )
 
 
@@ -5533,7 +5552,7 @@ def _hermetic_dir_repo(tmp_path) -> Path:
     return repo
 
 
-def test_an_EMFILE_on_the_DIRECTORY_probe_cannot_manufacture_a_clean_exit(tmp_path):
+def test_an_EMFILE_on_the_DIRECTORY_probe_cannot_manufacture_a_clean_exit(tmp_path, capsys):
     """The directory fork could not RUN. The row must be REFUSED, not counted.
 
     ⛔ THE FAIL-OPEN THIS PIN EXISTS FOR, verbatim from `#11506`'s arm: `except
@@ -5578,6 +5597,19 @@ def test_an_EMFILE_on_the_DIRECTORY_probe_cannot_manufacture_a_clean_exit(tmp_pa
         mp.undo()
     assert fired == ["git ls-files"], fired
 
+    # ⛔ THE CAUSE IS PINNED TOO (#11474 review). Measured: replacing this renderer's
+    # sentence with the MEASURED one ("… is a directory holding no TRACKED file") —
+    # the exact defect its docstring forbids — left the whole suite green, because
+    # nothing asserted the text of the line this fork produces. The file arm's twin has
+    # carried this assertion since it was added; the directory arm had not.
+    err = capsys.readouterr().err
+    assert "could not be RUN" in err, (
+        f"the per-path line must name the cause it measured (the fork never ran): {err}"
+    )
+    assert "holding no TRACKED file" not in err, (
+        f"the fork never ran, so no line may borrow git's measured answer: {err}"
+    )
+
     # ⛔ OUTSIDE the patched window: with git working, the SAME directory is
     # ACCEPTED when it holds a tracked file, and refused BY THE MEASURED CAUSE when it
     # does not — so "nothing was measured" is not the answer for either normal case.
@@ -5585,6 +5617,53 @@ def test_an_EMFILE_on_the_DIRECTORY_probe_cannot_manufacture_a_clean_exit(tmp_pa
     assert ok, why
     ok, why = cl._evidence_is_real("cmd:uv run pytest empty -v", repo)
     assert not ok and "holding no TRACKED file" in why, why
+
+
+def test_an_EMFILE_on_the_DIRECTORY_FOLLOW_UP_probe_also_refuses(tmp_path):
+    """The DIRECTORY arm's SECOND `OSError` site — the twin of the file arm's pin.
+
+    `_is_tracked_dir` spawns `git ls-files`, and then — only when that answered
+    nothing — a follow-up `git rev-parse --is-inside-work-tree`. Both spawns can fail,
+    and both were folded into the abstention by `#11506`, so reverting only the
+    follow-up guard back to `return _tracked_unprovable()` (a `True`, i.e. ACCEPT the
+    directory) is a full fail-open. Measured at the head BEFORE this pin: the whole
+    suite stayed green under exactly that revert, because the sibling pin's stub keys
+    on `--error-unmatch` and therefore only ever made the FIRST fork fail.
+
+    ⛔ The stub is selective in the other direction and its firing is asserted: only
+    the `rev-parse` spawn raises, so the refusal cannot be coming from the directory
+    `ls-files` fork the sibling test covers.
+    """
+    import types
+
+    repo = _hermetic_dir_repo(tmp_path)
+    fired: list[str] = []
+
+    class _LsFilesRan:
+        returncode = 1  # the documented "nothing matched" -> the follow-up is reached
+        stdout = ""
+        stderr = ""
+
+    def boom_on_rev_parse(argv, *a, **kw):
+        if argv[:3] == ["git", "rev-parse", "--is-inside-work-tree"]:
+            fired.append(" ".join(argv[:3]))
+            raise OSError(24, "Too many open files")
+        return _LsFilesRan()
+
+    mp = pytest.MonkeyPatch()
+    mp.setattr(cl, "subprocess", types.SimpleNamespace(run=boom_on_rev_parse))
+    mp.setattr(cl, "_commit_state", lambda sha, repo_root=None: "exists")
+    try:
+        # The helper answers the tri-state directly: `None` is NOTHING measured, and
+        # `True` here would be the fail-open (the directory accepted, the row counted).
+        assert cl._is_tracked_dir(repo / "held", repo) is None
+        assert fired == ["git rev-parse --is-inside-work-tree"], fired
+        # …and end to end the row is refused, named by the cause rather than the verdict.
+        data = _ledger([_row("A", evidence=["cmd:uv run pytest held -v"])])
+        with pytest.raises(cl.InvalidLedger, match="did not answer here"):
+            cl.validate(data, repo_root=repo)
+    finally:
+        mp.undo()
 
 
 def test_a_DIRECTORY_in_the_ABSTAINING_tree_gets_the_FILE_arms_answer(

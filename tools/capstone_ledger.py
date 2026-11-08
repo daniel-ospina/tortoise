@@ -1420,9 +1420,14 @@ def _tracked_dir_unrunnable(exc: OSError, rel: Path) -> None:
     `_tracked_unrunnable` sentence either: that one says the path "is not shown to be
     in the tree", which is a claim about a FILE. What is unmeasured here is what the
     directory HOLDS, so that is what the line says.
+
+    Its marker is `UNMEASURED` like the file arm's, even though a directory refusal
+    currently always refuses the row: that is the CALLER's invariant, not this
+    renderer's, and a marker encoding it would silently become a lie the day a
+    directory-shaped glob arm lands (#11474 review). One rule, four renderers.
     """
     print(
-        "CAPSTONE-LEDGER: REFUSED — the TRACKED check could not be RUN here "
+        "CAPSTONE-LEDGER: UNMEASURED — the TRACKED check could not be RUN here "
         f"({exc.__class__.__name__}: {exc}), so nothing was measured about what {rel} "
         "holds: no TRACKED file under it is shown to be in the tree",
         file=sys.stderr,
@@ -1436,10 +1441,11 @@ def _tracked_dir_unanswered(returncode: int, rel: Path) -> None:
     The third refusal, kept distinct for the reason `_tracked_dir_unrunnable` is: the
     cause is git present, having answered for the TREE, failing to answer for this
     path — and rendering it as "holds no TRACKED file" is the guess-the-cause defect.
-    Only exit 1 is a `no`; every other non-zero is a failure to answer.
+    Only exit 1 is a `no`; every other non-zero is a failure to answer. The marker is
+    `UNMEASURED` for the reason stated on `_tracked_dir_unrunnable`.
     """
     print(
-        "CAPSTONE-LEDGER: REFUSED — the TRACKED check did not get an ANSWER here "
+        "CAPSTONE-LEDGER: UNMEASURED — the TRACKED check did not get an ANSWER here "
         f"(`git ls-files` exited {returncode}), so nothing was measured about what "
         f"{rel} holds: no TRACKED file under it is shown to be in the tree",
         file=sys.stderr,
@@ -2294,9 +2300,14 @@ def _is_tracked(resolved: Path, root: Path) -> bool | None:
     ⛔ IT DOES **NOT** CHANGE THE DIRECTORY DIRECTION, and that direction was never
     live: measured, `git ls-files --error-unmatch -- ':(literal)docs'` answers
     `docs/00_index.md` with rc 0 — byte-identical behaviour to the bare form. What
-    closes it is the `is_file()` pre-check at every call site (`:478`, `:544`, `:809`),
-    not this line, so a future caller that ever passed a DIRECTORY would need that
-    guard rather than believe this pathspec supplies it. The wildcard hazard is also
+    closes it is the `is_file()` pre-check at every call site — in
+    `_names_artifact`'s glob arm, in its bare-path arm, and in `_evidence_is_real` —
+    and NOT this line, so a future caller that ever passed a DIRECTORY would need that
+    guard rather than believe this pathspec supplies it. (Those sites are named by
+    FUNCTION, not by line number, on purpose: this paragraph cited `:478`, `:544` and
+    `:809` for three rounds and none of those lines held an `is_file()` call (#11474
+    review). A cite that is wrong is worse than one that is absent — a reader who
+    opens it concludes the guard was deleted.) The wildcard hazard is also
     cheaper to reach than "a file present but unindexed": `docs/00_inde?.md`, which
     need not exist on disk at all, answered rc 0 by borrowing a tracked
     `docs/00_index.md`.
@@ -2366,9 +2377,18 @@ def _tracked_unrunnable(exc: OSError, rel: Path) -> None:
     legibility failure this function exists to remove, one layer down. The row-level
     consequence is the CALLER's sentence to write (the criteria line refuses); this
     one states only what was measured, and about which path.
+
+    ⛔ THAT INCLUDES THE MARKER, which is why it reads `UNMEASURED` and not a verdict
+    word (#11474 review). The marker is the first and loudest token in the line, so
+    naming a fate there announces the row's outcome as surely as a sentence would —
+    and this function CAN fire on a row that still passes, because a later glob match
+    can accept it (measured: the `test_a_glob_accepted_by_a_later_match…` pin had to
+    assert `ok is True` and a refusal marker in the SAME run). A marker naming the
+    MEASUREMENT is the only one true in both outcomes. All four per-path renderers
+    carry it, so the rule cannot rot into "a verdict, except where a row survives".
     """
     print(
-        "CAPSTONE-LEDGER: REFUSED — the TRACKED check could not be RUN here "
+        "CAPSTONE-LEDGER: UNMEASURED — the TRACKED check could not be RUN here "
         f"({exc.__class__.__name__}: {exc}), so nothing was measured about {rel}: it "
         "is not shown to be in the tree",
         file=sys.stderr,
@@ -2391,9 +2411,12 @@ def _tracked_unanswered(returncode: int, rel: Path) -> None:
     Only exit 1 is a `no` ("no match"); every other non-zero is a failure to answer.
     The message names the exit code rather than pointing at an undiagnosed git error,
     because the exit code is the whole of what was measured here.
+
+    The marker is `UNMEASURED`, not a verdict word, for the reason stated on
+    `_tracked_unrunnable` (#11474 review).
     """
     print(
-        "CAPSTONE-LEDGER: REFUSED — the TRACKED check did not get an ANSWER here "
+        "CAPSTONE-LEDGER: UNMEASURED — the TRACKED check did not get an ANSWER here "
         f"(`git ls-files` exited {returncode}), so nothing was measured about {rel}: it "
         "is not shown to be in the tree",
         file=sys.stderr,
@@ -2401,7 +2424,7 @@ def _tracked_unanswered(returncode: int, rel: Path) -> None:
     return None
 
 
-def _tracked_unprovable(probe: subprocess.CompletedProcess[str] | None = None) -> bool:
+def _tracked_unprovable(probe: subprocess.CompletedProcess[str]) -> bool:
     """Git cannot answer here at all (no `.git`, a tarball, a build context).
 
     The record is not blamed — but the abstention is PRINTED, because a CLEAN
@@ -2428,8 +2451,23 @@ def _tracked_unprovable(probe: subprocess.CompletedProcess[str] | None = None) -
     git-ABSENT case now routes to `_tracked_unrunnable`, that falsified default was
     left as the SOLE production rendering of this renderer. So it is not a default any
     more: an unanswered probe states what the probe actually measured.
+
+    ⛔ `probe` IS REQUIRED, AND THAT IS THE SECOND HALF OF THE SAME FIX (#11474
+    review). The paragraph above claimed "it is not a default any more" while the
+    signature still made the argument optional and the "git is unavailable here"
+    branch still hung off it — a docstring asserting what the code no longer did,
+    which is this PR's own defect class. No production caller ever omitted it
+    (`_is_tracked` and `_is_tracked_dir` both pass what they measured), so the branch
+    was dead in production while a pin kept it alive; dropping the argument was the
+    fail-open this PR removes, one refactor away. The signature now makes that
+    omission a `TypeError` instead of a silent abstention.
+
+    The three answers it renders are total: rc 0 + `false` (git present and
+    answering), any non-zero (git ran and did not answer `true`, with git's own
+    stderr), and rc 0 with stdout that is neither — which git does not produce, but
+    which must still name the BYTES rather than borrow the unavailable sentence.
     """
-    if probe is not None and probe.returncode == 0 and probe.stdout.strip() == "false":
+    if probe.returncode == 0 and probe.stdout.strip() == "false":
         print(
             "CAPSTONE-LEDGER: NOTE — git is present and says this is not a work tree, "
             "so the TRACKED rule cannot be evaluated; cited paths were checked for "
@@ -2437,27 +2475,25 @@ def _tracked_unprovable(probe: subprocess.CompletedProcess[str] | None = None) -
             file=sys.stderr,
         )
         return True
-    if probe is not None and probe.returncode != 0:
-        # git RAN and did not answer `true`. ⛔ NAME THE MEASUREMENT, NOT AN
-        # INFERENCE FROM IT: a non-zero exit does NOT mean "there is no repository
-        # to ask" — `fatal: detected dubious ownership in repository at '<path>'`
-        # exits 128 IN a repository that plainly exists, and saying otherwise quotes
-        # git naming the repository while claiming there is none (#11474 review).
-        # git's own first stderr line is what distinguishes the tarball from the
-        # refusal, so it is carried verbatim rather than summarised.
-        first_line = (probe.stderr or "").strip().splitlines()
-        detail = f": {first_line[0]}" if first_line else ""
-        print(
-            "CAPSTONE-LEDGER: NOTE — git is present but `rev-parse "
-            f"--is-inside-work-tree` did not answer `true` (exited {probe.returncode}"
-            f"{detail}), so the TRACKED rule cannot be evaluated here; cited paths "
-            "were checked for existence only",
-            file=sys.stderr,
-        )
-        return True
+    # git RAN and did not answer `true`. ⛔ NAME THE MEASUREMENT, NOT AN
+    # INFERENCE FROM IT: a non-zero exit does NOT mean "there is no repository
+    # to ask" — `fatal: detected dubious ownership in repository at '<path>'`
+    # exits 128 IN a repository that plainly exists, and saying otherwise quotes
+    # git naming the repository while claiming there is none (#11474 review).
+    # git's own first stderr line is what distinguishes the tarball from the
+    # refusal, so it is carried verbatim rather than summarised.
+    first_line = (probe.stderr or "").strip().splitlines()
+    detail = f": {first_line[0]}" if first_line else ""
+    if probe.returncode == 0:
+        # rc 0 with an answer that is neither `true` (the caller only reaches this
+        # renderer when `true` was NOT printed) nor `false`: the exit code says
+        # nothing here, so the bytes are what is named.
+        detail = f"; it printed {(probe.stdout or '').strip()!r}"
     print(
-        "CAPSTONE-LEDGER: NOTE — git is unavailable here, so the TRACKED rule cannot "
-        "be evaluated; cited paths were checked for existence only",
+        "CAPSTONE-LEDGER: NOTE — git is present but `rev-parse "
+        f"--is-inside-work-tree` did not answer `true` (exited {probe.returncode}"
+        f"{detail}), so the TRACKED rule cannot be evaluated here; cited paths "
+        "were checked for existence only",
         file=sys.stderr,
     )
     return True
