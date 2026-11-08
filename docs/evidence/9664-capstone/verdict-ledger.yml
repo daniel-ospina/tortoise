@@ -73,13 +73,21 @@ measured_at:
 #   {"version":"0.2.0","commit_sha":"5938deafefde2a73ba105ab1384f9cff695e9e8b"}
 #   $ git merge-base --is-ancestor 5938deafefde2a73ba105ab1384f9cff695e9e8b origin/main && echo yes
 #   yes                    # the deployed sha IS an ancestor of this tree (no deploy of foreign code)
-#   $ git rev-list --count 5938deafefde2a73ba105ab1384f9cff695e9e8b..origin/main
+#   $ git rev-list --count 5938deafefde2a73ba105ab1384f9cff695e9e8b..5ef5805f0953c2cf0eb2338ca0ad0af4594ee70d
 #   60                     # deploy lag, RE-MEASURED 2026-11-08 against THIS pass's tree (5ef5805f0).
 #                          # A lag number means nothing without its endpoint, which is why the sha is
 #                          # re-read here rather than carried: the previous pass recorded 40301bfdb/8,
 #                          # and the deployment had ADVANCED since. It was not wrong, it was older —
 #                          #   $ git merge-base --is-ancestor 40301bfdb 5938deaf && echo yes   -> yes
-#   $ git diff --name-only 5938deafefde2a73ba105ab1384f9cff695e9e8b..origin/main \
+#                          # ⛔ AND THE ENDPOINT IS THE SHA, NOT `origin/main` (review finding, this
+#                          # pass). Both the count and the filter below used to read
+#                          # `..origin/main`, a ref that MOVES: re-running the recorded
+#                          # count line later the same day printed 130, seventy above the 60
+#                          # recorded beside it, and reconciling the two required knowing
+#                          # which tree this pass ran on. Pinned to `5ef5805f0` both lines
+#                          # reproduce — and the filter is still empty at the LIVE `origin/main`
+#                          # (measured), so the conclusion below is not an artifact of the pin.
+#   $ git diff --name-only 5938deafefde2a73ba105ab1384f9cff695e9e8b..5ef5805f0953c2cf0eb2338ca0ad0af4594ee70d \
 #       | rg -i 'onboarding|harness|consent|mcp_auth|sdk\.py|tool_registry|dashboard'
 #   (no output)            # nothing graded moves between the DEPLOYED tree and the graded tree, so a
 #                          # PRODUCTION observation still stands for the rows it is cited on.
@@ -114,22 +122,39 @@ measured_at:
 #     PROVENANCE, stated per number rather than as one blanket claim, because a
 #     blanket claim is what a reader cannot check:
 #       - the run below and the ledger-pin run are BOTH recorded through
-#         `tools/worktree_report.py run`, so their counts are parsed from real logs in
-#         this worktree's `.worktree-report/logs/`;
+#         `tools/worktree_report.py run`, so their counts are parsed from the real log
+#         it captures. ⛔ THAT LOG DOES NOT TRAVEL: `.worktree-report/` is gitignored,
+#         so a reader of this file cannot open it. The claim is about how the numbers
+#         were PRODUCED, not about an artifact you can fetch — the command below is
+#         the check, and re-running it is the reproduction;
 #       - the per-file collection figures come from separate `pytest --collect-only`
 #         invocations that are NOT in `.worktree-report/` (they produce no suite run),
 #         and are quoted from those invocations' own output;
 #       - `the 5 are`, the census line and the two #7949 suites are this pass's DIRECT
 #         runs (a `pytest`/script invocation whose own output is quoted, not a report).
 #
-#       $ uv run python tools/test_lane.py run -- tests/test_9664_capstone_verdict_ledger.py tests/test_9340_graph_tool_argument.py tests/test_pack_selection_by_graph.py tests/test_cross_tenant_read_isolation.py tests/test_onboarding_auto_complete.py tests/test_oauth_consent_page_step4.py tests/test_oauth_consent_bff_routes.py -q
-#       456 passed, 5 failed                       # 461 collected. Run THROUGH
-#                                                   # `tools/worktree_report.py run` (this worktree's
-#                                                   # WORKTREE-REPORT.md), so the counts are parsed from
-#                                                   # the real log rather than typed by the author.
+#       $ env -u TORTOISE_API_KEY uv run python tools/test_lane.py run -- tests/test_9664_capstone_verdict_ledger.py tests/test_9340_graph_tool_argument.py tests/test_pack_selection_by_graph.py tests/test_cross_tenant_read_isolation.py tests/test_onboarding_auto_complete.py tests/test_oauth_consent_page_step4.py tests/test_oauth_consent_bff_routes.py -q
+#       456 passed, 5 failed                       # 461 collected, RE-MEASURED at the head that
+#                                                   # carries this text. Run THROUGH
+#                                                   # `tools/worktree_report.py run`, so the counts are
+#                                                   # parsed from the real log rather than typed.
 #       per-file collection, summed: 295 (the six contract files: 66 / 54 / 9 / 42 / 65 / 59)
 #                                  + 166 (`test_9664_capstone_verdict_ledger.py`, the ledger pin suite)
 #                                  = 461 = 456 passed + 5 failed.   Counted, not estimated.
+#       ⛔ THE PIN SUITE COLLECTS 166 BECAUSE THE PAIRED C2/E3 TEST IS GONE (2026-11-08 review).
+#       An interim head carried `test_c2_and_e3_cannot_be_graded_differenty`, which made it 167
+#       and the seven-file run 457/462; that test was DELETED because it rested on a false
+#       premise (C2 does not subsume E3 — see C2's own comment) and forbade a legitimate
+#       future state. So the counts here are the ones this head actually prints, and a
+#       reader coming from the PR body should expect 166 rather than 167.
+#       ⛔ `env -u TORTOISE_API_KEY` IS PART OF THE COMMAND, not noise: with a key in the
+#       environment the MCP stdio transport refuses BY DESIGN (it cannot carry the token),
+#       so `test_cross_tenant_read_isolation.py::test_negative_control_graph_listing_scoping_is_detected`
+#       errors `Authentication required. The MCP stdio transport cannot carry auth tokens…`
+#       and the SAME command measures **455 passed, 6 failed**. Both readings are true of
+#       their environment, so the environment is named rather than left to the reader; the
+#       `9 passed` this file records for that unit is the keyless reading, and it is the
+#       one the contract-layer claim rests on.
 #       the 5 are `TestCreateGraphWithPacks`, refused by the PRIVATE lane container's ACL layer — see S2.
 #       $ TORTOISE_TEST_CARVE_OUT=1 uv run python -m pytest tests/test_7949_c2_door.py tests/test_7949_capstone_measure.py -q
 #       302 passed                                 # 24 (the door census, its pinned-ON/refusal arms
@@ -170,7 +195,13 @@ measured_at:
 #
 # (The U3 row quotes the SAME function in its pre-#10025 shape — `Reachable graphs:
 # 'default' (default).` — because that is what the 2026-10-26 run observed; the shape
-# changed in `704fd60ee`, AFTER that run's deployed build. The function now renders
+# changed in `347cf03cb8` (2026-10-27 — the commit by which #10025 reached main),
+# AFTER that run's deployed build. ⛔ NOT `704fd60ee`, which an earlier draft cited:
+# that sha is an ancestor of NEITHER `origin/main` NOR the deployed `5938deaf`
+# (review finding, this pass), so the citation sent a reader to a tree where the
+# change is absent and made a TRUE observation look unverifiable.
+# `git log -S 'id {stable_id}, graph_id' --all -- tortoise/mcp_auth.py` resolves the
+# reachable commit. The function now renders
 # `(id …, graph_id …)` for the DEFAULT row, and its OTHER arm — taken when the row's
 # `stable_id` is absent or equals its gid — renders the name `repr`-quoted with a bare
 # gid, i.e. `'name' (gid)`, NOT the unquoted `name (gid)` an earlier cut of this
@@ -202,11 +233,28 @@ criteria:
     # NEGATIVE, not caution. The criterion asks for (a) a verdict on every step,
     # (b) an EXPLICIT uncovered list, and (c) that an empty uncovered list be the
     # only clean exit. It does not ask for the list to be EMPTY. All three clauses
-    # are properties of this file that the tool enforces on every run, and E3
-    # ("a per-step verdict, never an aggregate, with the reason") states a strict
-    # SUBSET of the same requirement and IS graded `verified` — so grading C2
-    # lower made the two rows contradict each other. A ledger that grades one
-    # claim two ways is not more conservative, it is unreadable.
+    # are properties of THIS file, mechanically enforced on every run, and each is
+    # pinned by a test that ALREADY EXISTED before this pass:
+    #   (a) every step has a verdict — `§A` carries all TEN run steps (S1..S10),
+    #       each with a verdict, and `EXPECTED_IDS` pins that row set IN ORDER
+    #       (`test_committed_ledger_*` asserts it), so a dropped step reds;
+    #   (b) the uncovered list is explicit — `render()` prints every uncovered row
+    #       WITH its reason, pinned by
+    #       `test_one_uncovered_row_exits_two_and_names_the_row` and, for a row whose
+    #       reason is missing, by `test_uncovered_row_without_a_reason_is_invalid`;
+    #   (c) empty is the only clean exit — `main()` returns `EXIT_CLEAN` only when
+    #       `uncovered()` is empty, pinned by `test_all_verified_is_the_only_clean_exit`
+    #       (and the `off`/`advisory` switches return 3/4, never 0).
+    #
+    # ⛔ THE RELATION TO E3 IS OVERLAP, NOT SUBSUMPTION. An earlier draft of this
+    # comment claimed E3 "states a strict SUBSET" of C2, and that is FALSE against
+    # the two texts this same file holds. C2's clause (a) IS E3's first clause, but
+    # each row also states something the other does not: E3 requires "never an
+    # aggregate" and "with the reason"; C2 requires the explicit uncovered list and
+    # the empty-only clean exit. Neither contains the other, so C2 is NOT gradable
+    # FROM E3 and a later pass may legitimately regrade one of them alone. It is
+    # graded on its own three clauses above — the stronger argument, and the one
+    # this row stands on.
     verdict: verified
     evidence:
       - docs/evidence/9664-capstone/verdict-ledger.yml

@@ -86,11 +86,29 @@ EXPECTED_IDS = [
 #:
 #: 2026-11-08: `C2` moved OUT of this list and into `verified`. That is the edit
 #: this pin is designed to force into the open — it is not a silent shrink. C2
-#: asks for a verdict on every step plus an EXPLICIT uncovered list; it does not
-#: ask for that list to be empty. `E3` states a strict SUBSET of the same
-#: requirement and was already `verified`, so keeping C2 here graded one claim two
-#: ways. The test `test_c2_and_e3_cannot_be_graded_differently` below pins the
-#: consistency that was missing.
+#: asks for (a) a verdict on every step, (b) an EXPLICIT uncovered list and (c)
+#: that an empty list be the only clean exit; it does NOT ask for that list to be
+#: empty. All three are mechanically enforced, and each is already pinned by a
+#: test that existed before this pass — `EXPECTED_IDS` (with
+#: `test_committed_ledger_*`) for (a), `test_one_uncovered_row_exits_two_and_names_the_row`
+#: and `test_uncovered_row_without_a_reason_is_invalid` for (b),
+#: `test_all_verified_is_the_only_clean_exit` for (c). So the regrade needs no new
+#: assertion of its own; the row is argued on `verdict-ledger.yml`'s own C2
+#: comment.
+#:
+#: ⛔ THIS COMMENT ONCE CLAIMED `E3` "states a strict SUBSET" of C2 and that a
+#: `test_c2_and_e3_cannot_be_graded_differently` pinned the pair. Both were wrong
+#: and both are gone (2026-11-08 review). The texts do not stand in a containment
+#: relation: C2's clause (a) is E3's first clause, but E3 alone requires "never an
+#: aggregate" and "with the reason", and C2 alone requires the explicit uncovered
+#: list and the empty-only clean exit — so neither implies the other. An equality
+#: pin therefore FORBADE a legitimate future state (C2 downgraded alone because the
+#: uncovered list stopped being explicit, E3 untouched), and because the premise
+#: was false the assertion could only ever fail for the reason it was told about.
+#: Deleted rather than reworded: agent-infra#3442 rule 3 — an assertion whose value
+#: cannot vary under any mutation of the diff is dead weight that misleads the next
+#: reader. Nothing was lost: the shrink is forced open by
+#: `test_committed_ledger_uncovered_set_is_pinned` on `EXPECTED_UNCOVERED` below.
 EXPECTED_UNCOVERED = [
     "C1",
     "C4",
@@ -979,38 +997,6 @@ def test_committed_ledger_is_valid_and_has_the_issue_denominator():
 def test_committed_ledger_uncovered_set_is_pinned():
     rows = cl.validate(cl.load_ledger(LEDGER))
     assert [row["id"] for row in cl.uncovered(rows)] == EXPECTED_UNCOVERED
-
-
-def test_c2_and_e3_cannot_be_graded_differently():
-    """The two rows that state overlapping requirements must agree.
-
-    `C2` ("Every step has a verdict; the not covered list is explicit …") SUBSUMES
-    `E3` ("A per-step verdict, never an aggregate: verified / failed / not covered,
-    with the reason"): E3 is the per-step-verdict half, C2 adds the explicit
-    uncovered list and the empty-only-clean-exit rule. Both are claims about this
-    same artifact, and this ledger holds both.
-
-    Measured 2026-11-08: `E3` was `verified` and `C2` was `not-covered` — the weaker
-    claim graded higher than the stronger one. That is a reader trap rather than
-    caution: it invites a later pass to conclude either that the list is not
-    explicit (it is, and the tool prints it with each row's reason) or that a
-    per-step verdict is sufficient evidence when it is not.
-
-    This pin is deliberately PAIRED, not a hard-coded `verified`: if a future pass
-    downgrades BOTH rows together and says why, the pair stays consistent and this
-    test still passes. What it refuses is the divergence. It does NOT constrain
-    WHY both are verified — a `verified` row citing a tracked-but-irrelevant
-    artifact remains the validator's stated residual, not this test's subject.
-    """
-    rows = {row["id"]: row for row in cl.validate(cl.load_ledger(LEDGER))}
-    assert rows["C2"]["verdict"] == rows["E3"]["verdict"], (
-        "C2 and E3 are claims about this same ledger and C2 SUBSUMES E3, but they "
-        f"are graded differently ({rows['C2']['verdict']!r} vs {rows['E3']['verdict']!r}). "
-        "C2 is 'every step has a verdict + the uncovered list is explicit'; E3 is "
-        "'a per-step verdict, with the reason' — the weaker claim cannot be graded "
-        "higher than the stronger one. Regrade them together, with a reason, or not "
-        "at all."
-    )
 
 
 def test_committed_ledger_exits_uncovered():
