@@ -2073,16 +2073,39 @@ def test_the_real_machine_record_agrees_with_the_pins():
         "door"]["acceptance_arm"]["read_back"]
     probe = (PREREG_DIR / "probes" / "capstone_measure.py").read_text().splitlines()
 
-    assert "probes/capstone_measure.py:506" in read_back, (
-        "the record must name the line the TORTOISE_STATE_VALUE_VERBATIM entry is on")
+    # ⛔ A NEGATIVE LOOKAHEAD, not containment: `":506" in read_back` is satisfied by
+    # `:5060` — a line the 4,349-line probe does not have — so containment certified a
+    # cite pointing at nothing (measured: re-staling the field to `:5060` left this row
+    # GREEN until this regex was written).
+    assert re.search(r"probes/capstone_measure\.py:506(?!\d)", read_back), (
+        "the record must name the line the TORTOISE_STATE_VALUE_VERBATIM entry is on, "
+        "as a complete number")
     assert probe[506 - 1].strip() == '("TORTOISE_STATE_VALUE_VERBATIM", "1"))', (
         f"capstone_measure.py:506 reads {probe[506 - 1].strip()!r}, not the pinned entry")
 
-    assert ":2726-2728" in read_back, (
-        "the record must name the census range it re-pointed")
+    # ⛔ GRADED PER OCCURRENCE. The range is stated TWICE in `read_back` — the live cite,
+    # and the move that produced it (`:2724-2726 -> :2726-2728`) — so a presence test is
+    # satisfied by the survivor: measured, re-staling ONLY the second copy to `:2722-2724`
+    # left this row GREEN while a reader following that copy lands on two wrong lines.
+    # Both slots are therefore pinned as the exact statements they are, and the counts
+    # afterwards keep the field from gaining or losing one silently.
+    assert read_back.count(":2726-2728") == 2, (
+        f"the record states the live range {read_back.count(':2726-2728')} times, not 2")
+    assert "carries :2726-2728, which sits below" in read_back, (
+        "the record must name the LIVE census range it cites")
+    assert ":2724-2726 -> :2726-2728" in read_back, (
+        "the record must attribute the LAST move of that window to this branch, which "
+        "is the half its own +2 comment lines are responsible for")
+    assert read_back.count(":2724-2726") == 2 and ":2713-2715" in read_back, (
+        "the record states the window's earlier position, and the commit that moved it "
+        "there, twice each; an edited intermediate is how a fabricated middle position "
+        "reads as history")
     assert probe[2726 - 1].strip() == "for name, count, anchored in projection.g.query(", (
         f"capstone_measure.py:2726 reads {probe[2726 - 1].strip()!r}, not the census call")
-    assert "count(r.sourceVersion)" in probe[2728 - 1], (
+    # Equality, like its two siblings above: a substring let the closing line's SHAPE
+    # change while the row stayed green (measured: renaming the `AS anchored` alias broke
+    # the very unpacking this arm consumes, and nothing reddened).
+    assert probe[2728 - 1].strip() == '"count(r.sourceVersion) AS anchored ORDER BY t").result_set:', (
         f"capstone_measure.py:2728 reads {probe[2728 - 1].strip()!r}, not the "
         "anchored count that closes the query")
 
