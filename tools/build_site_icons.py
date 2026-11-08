@@ -37,11 +37,11 @@ import sys
 # #5128: refuse a <3.12 interpreter before the imports below — a module-level
 # 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
 #
-# The message names the ONE form that always resolves. A bare ambient `python3`
-# (3.9 on the CLT host) would die inside the stdlib calls below with an
-# UNATTRIBUTED error, which reads as "the tool is broken"; the bare path exits 2
-# on argparse's own usage error instead (a SECOND unattributed error), so the
-# refusal points at `--help`, which needs no `--source` token.
+# The message names the ONE form that always resolves. The bare path is NOT that
+# form: `--source` is `required=True`, so it exits 2 on argparse's own usage
+# error — a SECOND unattributed error — whereas `--help` needs no `--source`
+# token. A refusal that points a stranded caller at a usage error has only moved
+# the confusion.
 #
 # Exit 4, not 1: 1 is this tool's OWN failure status (`raise SystemExit(<message>)`
 # on every other refusal), `main()` returns 0 only and argparse takes 2, so an

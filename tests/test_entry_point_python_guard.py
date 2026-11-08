@@ -1076,7 +1076,7 @@ REFUSAL_WHY: dict[str, str] = {
         "contract to satisfy a lint, which is the wrong trade"
     ),
     "tools/build_site_icons.py": (
-        "1 is this tool's OWN failure status — every refusal is `raise "
+        "1 is this tool's OWN failure status — every OTHER refusal is `raise "
         "SystemExit(<message>)` (CPython maps that to status 1), `main()` returns 0 "
         "only and argparse takes 2, so an environment refusal must not wear 1 or a "
         "caller cannot tell 'the tool refused' from 'the interpreter is too old'; "
