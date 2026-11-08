@@ -175,7 +175,7 @@ value (`tortoise/projection/edges.py`), and no extraction path sets one
 (§6).** A4 vs **D3** (`docs/ONTOLOGY.md:975` *"extraction emits `statement` only"*, option B
 2026-08-12, `#1022` MERGED). A3 vs **D6** — *"Two distinct connection sets — within-batch and to-graph,
 both **proposed by the model**"* (`EXTRACTOR-V4-ARCHITECTURE.md:1200`, `:977`),
-with §15 (`:1840`) recording the to-graph LLM-vs-mechanical question as **OPEN** and `:1818` recording
+with §15 (`:1842`, under the heading at `:1840`) recording the to-graph LLM-vs-mechanical question as **OPEN** and `:1818` recording
 the mechanical alternative as *"a direct challenge to D6 — D6 is the decision that stands; the challenge
 is evidence for the owner, **not** a change we may make."*
 
@@ -301,9 +301,9 @@ denominator decision.**
 
 | row | owner | why it is the only home |
 |---|---|---|
-| **A1** | **C3** declarations → structural edges | E3's *new-edge* obligation cannot be folded in any more (§2 R2: `create_edge` cannot carry an anchor; `#5213` option 3 is a documented boundary) — it is **routed to `#9736`**, not carried |
+| **A1** | **C3** — the EVIDENCE that declarations became structural edges **+ the rollup answer** (producer: `#11001`) | E3's *new-edge* obligation cannot be folded in any more (§2 R2: `create_edge` cannot carry an anchor; `#5213` option 3 is a documented boundary) — it is **routed to `#9736`**, not carried. `#11001` owns edge production but **not** A1's rollup clause (its body has no `query`/`rollup`/`answers`) |
 | **A2 + E1** | **C4** attach instead of mint | E1's registered arithmetic is *what attach-instead-of-mint produces*; a second child would double-count. **C4 owns E1's movement** |
-| **A3** | **C5** batch story + cross-batch link | one stage, two jobs (§S5); splitting would let "job 1 done" report as progress on a question that needs job 2 |
+| **A3** | **C5** — the evidence that both S5 jobs reached the graph (producers: `#10999` Job 1 · `#10998` Job 2) | one stage, two jobs (§S5); splitting would let "job 1 done" report as progress on a question that needs job 2 |
 | **A5** | **C6** Subjects | the S1–S5 spine; adjudicates the `#4889` closed-vs-symptom contradiction |
 | **A4** | **C7** typing (blocked) | may not be filed as an improvement target until §6 D3 is answered |
 | **E2 (and E1 non-regression)** | **C8** the anti-"extract less" guard | the only child that can falsify C3/C4/C5, gated on the **registered** E2a/E2b |
@@ -341,14 +341,14 @@ cannot again be mistaken for proved.
 extended census can read; the negative control's measured difference; and the corpus decision recorded
 in the registration, not in prose.
 
-### C3 · A1 — the pack's declared part-whole relations become graph edges *(E3's anchor obligation ROUTED to `#9736`, not carried)*
+### C3 · A1 — the EVIDENCE that the pack's declared relations became edges, and that a rollup answers *(mechanism owned by `#11001`; E3's anchor obligation ROUTED to `#9736`, not carried)*
 **Corpus:** one whose content exercises a **named** pack's hierarchy (dev's `Theme→Epic→Issue`, whose
 predicates are `decomposesInto`/`hasPart`).
-**Produces:** the missing consumer — the extraction path emits object→object edges of the pack's declared
-types through `create_edge`, deriving the writable predicate **from the declaration** (`semantics`)
-rather than hard-coding it; and a **rollup query** that answers from the graph. Plus a
-`config/v4-mechanisms.yml` row (`not-implemented` → `implemented`, with `code:`/`tests:`/`symbols:`/
-`pins:`), because none of the owner's five assertions has one (§2 R5).
+**Produces:** the **evidence** half — the registered A1 criterion (C1), the before/after census through the
+fleet's door (C2), and the **rollup query** that answers from the graph, which `#11001` does **not** own
+(grep its body for `query|rollup|answers` → nothing). The **edge producer itself is `#11001`'s** — this
+child is `blocked-by #11001` and does not write a second one. Plus a `config/v4-mechanisms.yml` row for the
+*evidence* seam only if the registry's contract can express it; the mechanism row belongs with `#11001`.
 **Proof (before/after on the registered corpus, through C1's census):** `0 → N` edges of the declared
 types with endpoints of the declared kinds; the rollup returns a **non-empty and correct** answer against
 a hand-labelled ground truth (an edge count alone is gameable); **E1's registered arithmetic and E2a/E2b
@@ -383,11 +383,12 @@ child consumes that seam or is **blocked by id**; it does not build a second min
 lesson stands — `execute_embed({})` must not be the suppression (it is the sole carrier for retractions,
 supersessions and chain notes).
 
-### C5 · A3 — S5 emits the batch's story *and* the cross-batch link
-**Produces:** job 1 (intra-batch: the pieces S2.1 pulled out agree with the narrative) **and** job 2
-(against the stored graph), **as D6 rules** — two sets, both proposed by the model, divided as §S5
-divides them, within `PER_ENTITY_FANOUT_CAP` (200, implemented). §15's open to-graph mechanism question is
-**routed** (§6) and does not authorise pre-empting D6.
+### C5 · A3 — the EVIDENCE that both S5 jobs reached the graph *(mechanism owned by `#10998`/`#10999`)*
+**Produces:** the **measurement** of both jobs — chain-join rate before/after, each job reported
+separately, the cross-batch link observed in the graph and a dependent rollup answered — plus the registered
+A3 criterion. ⛔ **The jobs themselves are `#10999` (Job 1) and `#10998` (Job 2)**; this child implements
+neither. D6's division and `PER_ENTITY_FANOUT_CAP` are constraints its measurement reports compliance with,
+not things it builds.
 **Proof:** the chain-join rate falls on the capstone corpus; **both jobs reported separately** (a
 job-1-only result is not progress); the cross-batch link is observable and a dependent rollup answers;
 fan-out respected; C8 holds.
@@ -444,6 +445,11 @@ peer.
 
 ## 5. Integration surfaces (the Test-Design Gate's output, inline)
 
+> ⚠️ **SUPERSEDED by the Test-Design Gate's own artifact:** `03-test-design.md`, filed as **#11454** —
+> 17 surfaces each with a test layer **and a run tier** (`CI` · `Tier E` · `milestone`), a measured CI-cost
+> baseline (64.3 s of 12,734.8 s), and an existing-test audit. The table below is retained only as the
+> historical inline version; **children cite #11454**, not this section.
+
 The workflow's Test-Design Gate files a *separate* test-design issue. **Here its output is this table
 plus each child's own verification checklist** — the gate exists so child issues *carry* their
 verification, and they do (§4). An extra issue holding a table every child cites is machinery around
@@ -482,7 +488,7 @@ may reverse an earlier one (§16.3/O4) — but the reversal must be recorded whe
 `statement` and does not"* — the baseline refutes it (80 % already are).
 
 **ASK — §13.8 Q1, the to-graph connection mechanism.** Recorded **OPEN**
-(`EXTRACTOR-V4-ARCHITECTURE.md:1840`, `:1818`) while **D6 stands** (`:1200`, `:977`). C5 implements D6
+(`EXTRACTOR-V4-ARCHITECTURE.md:1842`, `:1818`) while **D6 stands** (`:1200`, `:977`). **C5 measures conformance to D6** — the two connection sets are `#10999`/`#10998`; C5 builds neither
 and reports both jobs; the answer is routed as evidence, never adopted quietly. (Distinct from `#7948`,
 which answered Q2 — `aboutObject` is a **STORED** edge — and is CLOSED.)
 
