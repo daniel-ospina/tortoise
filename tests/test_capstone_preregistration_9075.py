@@ -2056,11 +2056,15 @@ def test_the_real_machine_record_agrees_with_the_pins():
     slide inside. Kept inside THIS test rather than added as a new test in
     `tests/test_7949_capstone_measure.py`, because the thing pinned is THIS
     file's own subject (`check.check_machine_record` over the machine record),
-    and neither suite's durations row states a case count, so a new `def test_`
-    would move no shard-layout input either way. (Measured rather than assumed:
-    `config/ci-surfaces.yml` has no `cases` key at all — the file's rows carry a
-    WEIGHT and a prose comment — and this file's own row states no case count
-    either.)
+    and THIS file's durations row states no case count, so a pin here moves no
+    shard-layout input. (Measured rather than assumed: `config/ci-surfaces.yml`
+    has no `cases` key at all — its rows carry a WEIGHT and a prose comment — and
+    this file's own row states no count.) ⛔ BUT THE OTHER ROW DOES, in that
+    prose: `test_7949_capstone_measure.py`'s row states a case count, re-derived
+    there from `grep -c '^def test_'`, so adding a `def test_` THERE would
+    invalidate it. That is a SECOND and stronger reason to keep this pin here —
+    not a reason it makes no difference either way, which is what an earlier cut
+    of this sentence claimed.
     """
     pins = check.parse_pins(PREREG.read_text())
     assert check.check_machine_record(PREREG_DIR, pins) == []

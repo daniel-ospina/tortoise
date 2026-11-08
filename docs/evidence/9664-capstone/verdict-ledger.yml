@@ -499,11 +499,21 @@ measured_at:
 # which is what let the wrong half survive a round of review. A `git merge-base
 # --is-ancestor` in a truncated history answers "not reachable HERE", and that was read as
 # "does not exist":
-#   $ git merge-base --is-ancestor 704fd60ee origin/main   -> non-zero
-#   $ gh api repos/daniel-ospina/tortoise/compare/704fd60ee...main
-#   {"ahead_by":628,"behind_by":0,"status":"ahead"}     # IS an ancestor
+#   $ git merge-base --is-ancestor 704fd60ee origin/main   -> non-zero THERE
+#       (on the clone that produced the bad cut — its truncation boundary sat past
+#        `704fd60ee`. ⚠️ `is-shallow-repository` ALONE DOES NOT DECIDE THIS: measured
+#        2026-11-08, both checkouts this record is written from are shallow AND hold
+#        the commit, so the same command returns 0 there — boundaries
+#        `68ebaac634` in this worktree, `3dfd586d65`/`52fa6eb145` on the hub. Read the
+#        answer WITH the boundary line; a true `true` is not by itself the `non-zero`.)
 #   $ gh api repos/daniel-ospina/tortoise/compare/704fd60ee...5938deaf
 #   {"ahead_by":496,"behind_by":0}                        # and of the deployed tree
+# ⛔ NO `...main` COMPARE HERE EITHER (review finding, this pass). An earlier cut
+# quoted `compare/704fd60ee...main` as `{"ahead_by":628,…}`; that is a LIVE-ref
+# reading and it had already rotted — re-measured 2026-11-08 it prints **639** — in
+# the same file that rules, 180 lines up, that no `origin/main` reading belongs in a
+# provenance block. The conclusion does not need it: `--is-ancestor` on a checkout
+# holding both, plus the sha-pinned `...5938deaf` compare above, establish it.
 #   $ gh api repos/daniel-ospina/tortoise/commits/704fd60ee
 #   +        return f"{name!r} (id {stable_id}, graph_id {gid!r})"   # it INTRODUCES it
 # `git log -S … --all` then "resolved" the boundary, because a shallow `-S` credits the
@@ -881,6 +891,7 @@ criteria:
     verdict: verified
     evidence:
       - docs/evidence/9664-capstone/run-2026-10-26/step6e-full-trace.txt
+      - docs/evidence/9664-capstone/run-2026-10-26/step7-graphs-and-step5-onboarding-state.txt
       - docs/evidence/9664-capstone/run-2026-10-26/step8c-write-probe-full-trace.txt
       - docs/evidence/9664-capstone/run-2026-10-26/step9b-decide-full-trace.txt
     evidence_kind: trace
