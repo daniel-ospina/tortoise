@@ -32,12 +32,14 @@ class CountingWriter:
         self.calls: list[tuple[str, list[dict]]] = []
         self.stored: dict[str, dict] = {}
 
-    def write_points(self, target_graph, points):
-        self.calls.append((target_graph, list(points)))
+    def write_sections(self, target_graph, sections):
+        keys = [p["migrationKey"] for items in sections.values() for p in items]
+        self.calls.append((target_graph, keys))
         written = []
-        for p in points:
-            self.stored.setdefault(p["migrationKey"], p)
-            written.append(p["migrationKey"])
+        for items in sections.values():
+            for p in items:
+                self.stored.setdefault(p["migrationKey"], p)
+                written.append(p["migrationKey"])
         return {"written": written}
 
 
@@ -254,14 +256,14 @@ def test_writer_protocol_declares_no_destructive_verb():
     """Additivity is a property of the type: if someone adds a delete verb here,
     this test fails before the pass can destroy the only copy."""
     verbs = [m for m in dir(C.PlanWriter) if not m.startswith("_")]
-    assert verbs == ["write_points"], verbs
+    assert verbs == ["write_sections"], verbs
 
 
 class RefusingWriter:
     def __init__(self):
         self.calls = 0
 
-    def write_points(self, target_graph, points):
+    def write_sections(self, target_graph, sections):
         self.calls += 1
         raise C.CurationRefused("target refused the batch: {'error': 'quota'}")
 
@@ -313,7 +315,7 @@ def test_off_switch_stops_a_run_between_batches():
         return v
 
     writer = C.IngestWriter(call_tool, batch_size=1, armed=armed_then_off)
-    out = writer.write_points("new", points)
+    out = writer.write_sections("new", {"points": points})
     assert len(out["written"]) == 1
     assert out["stopped"] == "off-switch engaged"
     assert len(calls) == 1
@@ -348,7 +350,8 @@ def test_the_real_snake_case_result_shape_is_unwrapped():
     def call_tool(tool, args):
         return RealCallToolResult({"created": 1}, disclosure="This write targeted graph 'x'.")
 
-    out = C.IngestWriter(call_tool).write_points("new", [{"migrationKey": "k", "content": "c"}])
+    out = C.IngestWriter(call_tool).write_sections(
+        "new", {"points": [{"migrationKey": "k", "content": "c"}]})
     assert out["written"] == ["k"]
 
 
@@ -357,7 +360,8 @@ def test_a_refusal_in_the_real_shape_is_refused():
         return RealCallToolResult({"error": "ERR_QUOTA"}, is_error=False)
 
     with pytest.raises(C.CurationRefused):
-        C.IngestWriter(call_tool).write_points("new", [{"migrationKey": "k", "content": "c"}])
+        C.IngestWriter(call_tool).write_sections(
+            "new", {"points": [{"migrationKey": "k", "content": "c"}]})
 
 
 def test_an_unparseable_result_is_refused_not_assumed_ok():
@@ -381,7 +385,7 @@ def test_a_calltoolresult_object_is_unwrapped_and_a_refusal_refuses():
 
     writer = C.IngestWriter(call_tool)
     with pytest.raises(C.CurationRefused):
-        writer.write_points("new", [{"migrationKey": "k", "content": "c"}])
+        writer.write_sections("new", {"points": [{"migrationKey": "k", "content": "c"}]})
 
 
 def test_a_refused_second_batch_reports_the_first_batch_and_records_it(tmp_path):
@@ -433,7 +437,7 @@ def test_ingest_refusal_envelope_is_not_a_success():
 
     writer = C.IngestWriter(call_tool)
     with pytest.raises(C.CurationRefused):
-        writer.write_points("new", [{"migrationKey": "k", "content": "c"}])
+        writer.write_sections("new", {"points": [{"migrationKey": "k", "content": "c"}]})
 
 
 # ── classification rules the inventory table cites ───────────────────────
@@ -472,8 +476,15 @@ def test_session_provenance_does_not_make_a_claim_noise():
 
 
 def test_operator_is_carried_as_reasoning():
-    d = C.classify(row(node_type="operator", kind=None, content=""), {})
+    d = C.classify(row(node_type="operator", kind=None, content="claim A implies claim B"), {})
     assert d.disposition == C.CARRY and "reasoning" in d.reason
+
+
+def test_an_empty_operator_row_is_not_carried():
+    """The empty rule runs before the operator branch too, or an operator would be
+    carried as an empty Point."""
+    d = C.classify(row(node_type="operator", kind=None, content="  "), {})
+    assert d.disposition == C.NOT_CARRIED
 
 
 def test_empty_evidence_is_not_carried():
@@ -497,6 +508,23 @@ def test_a_carried_source_is_sent_as_a_source_not_a_point():
     bundle = plan.bundle()
     assert bundle["points"] == []
     assert bundle["sources"] and bundle["sources"][0]["url"] == "https://x/y"
+    assert set(bundle["sources"][0]) == {"url", "sourceKind"}, (
+        ":Source accepts only declared props (#3998 drops the rest silently)")
+
+
+def test_a_carried_source_is_reached_by_the_writer(tmp_path):
+    """Round-5 blocking finding: the bundle carried Sources but the writer only
+    ever sent `points`, so a run reported success while writing none of them."""
+    plan = C.build_plan([row("s1", node_type="source", kind="article", content="https://x/y")],
+                        source_graph="old", target_graph="new", packs={})
+    w = CountingWriter()
+    led = C.Ledger(tmp_path / "src.jsonl", target="new")
+    res = C.run_plan(plan, writer=w, ledger=led, apply=True, graph_rows=ROWS)
+    assert res.written == 1
+    assert w.calls and w.calls[0][1], "the source reached the writer"
+    # …and a re-run writes nothing
+    again = C.run_plan(plan, writer=w, ledger=led, apply=True, graph_rows=ROWS)
+    assert again.written == 0 and len(w.calls) == 1
 
 
 def test_namespaced_signal_kind_is_still_signal():

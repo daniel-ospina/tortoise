@@ -76,8 +76,11 @@ DISPOSITIONS = (CARRY, NOT_CARRIED, UNDECIDABLE)
 #: (``decision`` and ``core:decision``).
 SIGNAL_KINDS = frozenset({
     "decision", "option", "finding", "jobToBeDone", "useCase",
-    "requirement", "workflow", "userJourney",
+    "workflow", "userJourney",
 })
+#: NOT a pointKind: `requirement` is declared an **objectKind** by the
+#: product-strategy and dev manifests (#7848), so carrying it as a Point would
+#: type a claim with an object kind. Deliberately absent from SIGNAL_KINDS.
 
 #: Agent-narration markers: a transcript turn, not a claim. Deliberately narrow
 #: and quoted literally — a broad "sounds like narrative" heuristic would put
@@ -309,6 +312,11 @@ def classify_point(row: Row, packs: Mapping[tuple[str, str], str], *, duplicate_
                         f"exact content duplicate of a row that was not carried ({duplicate_of}); "
                         "the keeper is the row of record for this content", pack, key, row.content)
 
+    if not (row.content or "").strip():
+        return Decision(row.node_id, row.node_type, row.kind, NOT_CARRIED,
+                        "empty content — nothing to carry (checked before every kind rule: an "
+                        "empty row would otherwise be carried as an empty point)", pack, key, row.content)
+
     if row.node_type == "operator":
         # NOTE: the MCP read path excludes operator Points unless an operator
         # kind is requested (sdk._operator_scope_clauses, #7108), so this branch
@@ -319,11 +327,6 @@ def classify_point(row: Row, packs: Mapping[tuple[str, str], str], *, duplicate_
                         "operator (IMPL/NAND/composedOf) — the reasoning layer; the row is "
                         "carried as a claim, its edges are the ingest contract's job (#888 W4)",
                         pack, key, row.content)
-
-    if not (row.content or "").strip():
-        return Decision(row.node_id, row.node_type, row.kind, NOT_CARRIED,
-                        "empty content — nothing to carry (checked before every kind rule: an "
-                        "empty row would otherwise be carried as an empty point)", pack, key, row.content)
 
     if row.bare_kind in SIGNAL_KINDS:
         return Decision(row.node_id, row.node_type, row.kind, CARRY,
@@ -389,6 +392,10 @@ def classify_source(row: Row, packs: Mapping[tuple[str, str], str]) -> Decision:
                         "holds 0 rows (#10175), so the graph is the only copy and 'do not "
                         "carry it' would leave the transcript with no home. Needs a decision, "
                         "not a rule", pack, key, row.content)
+    if not row.kind:
+        return Decision(row.node_id, row.node_type, row.kind, UNDECIDABLE,
+                        "source with no sourceKind — a :Source requires one at ingest, so it "
+                        "cannot be carried until the kind is resolved", pack, key, row.content)
     return Decision(row.node_id, row.node_type, row.kind, CARRY,
                     "a real provenance artifact (not a session transcript)", pack, key, row.content)
 
@@ -493,13 +500,11 @@ class Plan:
                 for d in self.carry_rows()
                 if d.node_type in ("point", "operator")
             ],
+            # A :Source accepts only DECLARED props (#3998 drops undeclared ones
+            # silently), so the migration key is NOT written onto the node: the
+            # local ledger carries identity, and the target merges Sources by url.
             "sources": [
-                {
-                    "migrationKey": d.stable_key,
-                    "url": d.content,
-                    "sourceKind": d.kind,
-                    "pack": d.pack,
-                }
+                {"url": d.content, "sourceKind": d.kind}
                 for d in self.carry_rows()
                 if d.node_type == "source"
             ],
@@ -670,11 +675,15 @@ class PlanWriter(Protocol):
 
     Deliberately single-verb: there is no ``delete``, ``retract`` or ``update``
     on this protocol, so "the pass cannot destroy anything" is a property of the
-    type rather than of the caller's discipline. ``write_points`` returns ONLY the
+    type rather than of the caller's discipline. ``write_sections`` returns ONLY the
     keys the target accepted, and raises on a refusal.
     """
 
-    def write_points(self, target_graph: str, points: Sequence[Mapping[str, Any]]) -> Mapping[str, Any]:
+    def write_sections(
+        self,
+        target_graph: str,
+        sections: Mapping[str, Sequence[Mapping[str, Any]]],
+    ) -> Mapping[str, Any]:
         ...
 
 
@@ -718,38 +727,51 @@ class IngestWriter:
         self._batch = max(1, batch_size)
         self._armed = armed
 
-    def write_points(self, target_graph: str, points: Sequence[Mapping[str, Any]]) -> Mapping[str, Any]:
+    def write_sections(
+        self,
+        target_graph: str,
+        sections: Mapping[str, Sequence[Mapping[str, Any]]],
+    ) -> Mapping[str, Any]:
+        """Write each bundle SECTION in batches, reporting only accepted keys.
+
+        A Source is not a Point: sending one in the `points` section re-types it
+        (D10), and a bundle that carried Sources but only ever sent `points`
+        reported success while never writing them — the silent-no-op shape this
+        module exists to avoid.
+        """
         written: list[str] = []
-        for i in range(0, len(points), self._batch):
-            if not self._armed():
-                # Mid-run stop: what was accepted so far is reported (and ledgered),
-                # the rest is simply not attempted.
-                return {"written": written, "stopped": "off-switch engaged"}
-            batch = list(points[i:i + self._batch])
-            try:
-                raw = self._call(self.TOOL, {
-                    "graph": target_graph,
-                    "promotion_policy": "auto",
-                    "granularity": "bulk",
-                    "bundle": {"points": batch},
-                })
-                # Unwrapping is INSIDE the guard: `normalise_tool_result` raises on
-                # the `isError` path, and a refusal there must still report the
-                # batches that already landed.
-                res = normalise_tool_result(raw)
-            except CurationRefused as exc:
-                raise CurationRefused(str(exc), written_keys=written) from exc
-            except Exception as exc:  # transport/timeout AFTER earlier batches landed
-                raise CurationRefused(f"target call failed: {type(exc).__name__}: {exc}",
-                                      written_keys=written) from exc
-            refused = _ingest_refused(res)
-            if refused:
-                # The earlier batches were accepted, so they are reported — a
-                # partial run must not claim it wrote nothing.
-                raise CurationRefused(refused, written_keys=written)
-            written.extend(p["migrationKey"] for p in batch)
+        for section in ("points", "sources"):
+            items = list(sections.get(section) or [])
+            for i in range(0, len(items), self._batch):
+                if not self._armed():
+                    return {"written": written, "stopped": "off-switch engaged"}
+                batch = items[i:i + self._batch]
+                self._call_one(target_graph, section, batch, written)
+                written.extend(p["migrationKey"] for p in batch)
         return {"written": written}
 
+    def _call_one(self, target_graph: str, section: str, batch: Sequence[Mapping[str, Any]],
+                  written: list[str]) -> Any:
+        try:
+            raw = self._call(self.TOOL, {
+                "graph": target_graph,
+                "promotion_policy": "auto",
+                "granularity": "bulk",
+                "bundle": {section: list(batch)},
+            })
+            # Unwrapping is INSIDE the guard: `normalise_tool_result` raises on the
+            # `isError` path, and a refusal there must still report the batches
+            # that already landed.
+            res = normalise_tool_result(raw)
+        except CurationRefused as exc:
+            raise CurationRefused(str(exc), written_keys=written) from exc
+        except Exception as exc:  # transport/timeout AFTER earlier batches landed
+            raise CurationRefused(f"target call failed: {type(exc).__name__}: {exc}",
+                                  written_keys=written) from exc
+        refused = _ingest_refused(res)
+        if refused:
+            raise CurationRefused(refused, written_keys=written)
+        return res
 
 class Ledger:
     """Local record of what this pass already migrated **into this target**.
@@ -862,13 +884,31 @@ def run_plan(
         return RunResult(False, False, 0, 0, plan.target_graph, plan.digest(),
                          refused="dry run (--apply not given)", identity=identity_note)
 
-    points = plan.bundle()["points"]
-    pending = [p for p in points if p["migrationKey"] not in ledger]
-    skipped = len(points) - len(pending)
-    if not pending:
+    bundle = plan.bundle()
+    # BOTH sections are pending-tracked: a carried Source that never reaches the
+    # wire is exactly the silent no-op this pass must not have.
+    sections: dict[str, list[Mapping[str, Any]]] = {}
+    total = 0
+    for section in ("points", "sources"):
+        items = list(bundle.get(section) or [])
+        total += len(items)
+        keyed = []
+        for item in items:
+            key = item.get("migrationKey")
+            if key is None:
+                # Sources carry no key on the node (#3998), so their ledger key is
+                # derived from the url, which is what the target merges on.
+                key = f"{MIGRATION_KEY_PREFIX}source:-:{item.get('url')}"
+            if key in ledger:
+                continue
+            keyed.append({**item, "migrationKey": key})
+        sections[section] = keyed
+    pending_count = sum(len(v) for v in sections.values())
+    skipped = total - pending_count
+    if not pending_count:
         return RunResult(True, False, skipped, 0, plan.target_graph, plan.digest())
     try:
-        result = writer.write_points(plan.target_graph, pending)
+        result = writer.write_sections(plan.target_graph, sections)
     except CurationRefused as exc:
         # Only the batches the target actually ACCEPTED are recorded; the refused
         # attempt is not. A partial run reports what landed.

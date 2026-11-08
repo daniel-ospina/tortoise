@@ -256,7 +256,10 @@ def cmd_plan(args: argparse.Namespace) -> int:
     except C.CurationRefused as exc:
         print(f"REFUSED: {exc}", file=sys.stderr)
         return 3
-    payload = {"census": plan.census(), "run": result.as_dict()}
+    payload = {"census": plan.census(), "run": result.as_dict(),
+               # A credential-bound fallback read means the rows came from the
+               # credential's own graph, not the one asked for — never silent.
+               "read_note": reader.note}
     text = json.dumps(payload, indent=2, sort_keys=True)
     if args.out:
         with open(args.out, "w", encoding="utf-8") as fh:
@@ -266,6 +269,9 @@ def cmd_plan(args: argparse.Namespace) -> int:
         # A refused WRITE (or a refused identity) is a failure, not a successful
         # plan: a scripted driver must not read exit 0 as "migrated".
         print(f"REFUSED: {result.refused}", file=sys.stderr)
+        return 3
+    if result.applied and result.stopped:
+        print(f"STOPPED mid-run: {result.stopped} (accepted={result.written})", file=sys.stderr)
         return 3
     if result.applied and result.refused:
         print(f"REFUSED mid-run: {result.refused} (accepted={result.written})", file=sys.stderr)
