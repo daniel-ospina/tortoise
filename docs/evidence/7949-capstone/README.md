@@ -226,8 +226,8 @@ positions are the ones the step tables below print, and every one of those is re
 checked against the tree by the cite sweep.
 The `8278-8285` END was already one
 line long at that stamp (`8284` closes the block; `8285` opens the next one) and is corrected to
-the `result["classify_later"]` block at `:13445-13451` here, not in the log. The `8288-8292` cite is
-the `result["vet"]` block, and it is corrected to `:13455-13459` here — **not** to the `:8534-8538`
+the `result["classify_later"]` block at `:13515-13521` here, not in the log. The `8288-8292` cite is
+the `result["vet"]` block, and it is corrected to `:13525-13529` here — **not** to the `:8534-8538`
 this bundle's issue (#9919) predicted, because the tree moved again between that reading and this
 head; that is precisely the drift this paragraph exists to stop a reader from re-deriving by
 number. (The SYMBOL is what makes
@@ -313,8 +313,8 @@ though the receipt cannot witness them.
 | S0 READ | ✅ | `stats.edus=159`, `stats.chunks=7` across the seven sessions |
 | S1 NARRATE | ✅ | `stats.llm.by_stage.s1` calls = 7 |
 | S2.1 EXTRACT | ✅ | `stats.llm.by_stage.s2` calls = 7; `entities=77 events=38 points=141` |
-| S2.2 VET | ❌ **#9116** | measured at `e0fc940b5`, BEFORE the seam: the pass was ENABLED (`TORTOISE_VET=1`, forced in-process and read back), and its surface **exists** — `extract_session_v2` emits `result["vet"]` UNCONDITIONALLY at `tortoise/extractor_v2.py:13455-13459` — but the meta fold then forwarded `stats` alone, so whether it DID any work was not observable through the receipt (measured: 142 stats keys and 18 receipt keys inspected, `vet` in neither). The fold now COPIES the stage's own counts as `stats["step_witness"]["vet"]` (`tortoise/sdk.py:17188`), so this ❌ is the frozen run's answer, not the seam's reachability |
-| S2.3 CLASSIFY | ❌ **#9116** | same layer, same run: `result["classify_later"]` is built at `extractor_v2.py:13445-13451` and was dropped at the same fold, which now copies it as `stats["step_witness"]["classify_later"]` (`tortoise/sdk.py:17188`) |
+| S2.2 VET | ❌ **#9116** | measured at `e0fc940b5`, BEFORE the seam: the pass was ENABLED (`TORTOISE_VET=1`, forced in-process and read back), and its surface **exists** — `extract_session_v2` emits `result["vet"]` UNCONDITIONALLY at `tortoise/extractor_v2.py:13525-13529` — but the meta fold then forwarded `stats` alone, so whether it DID any work was not observable through the receipt (measured: 142 stats keys and 18 receipt keys inspected, `vet` in neither). The fold now COPIES the stage's own counts as `stats["step_witness"]["vet"]` (`tortoise/sdk.py:17188`), so this ❌ is the frozen run's answer, not the seam's reachability |
+| S2.3 CLASSIFY | ❌ **#9116** | same layer, same run: `result["classify_later"]` is built at `extractor_v2.py:13515-13521` and was dropped at the same fold, which now copies it as `stats["step_witness"]["classify_later"]` (`tortoise/sdk.py:17188`) |
 | S3 RESOLVE | ✅ | `stats.search_queries=105 > 0` and `stats.search_degraded=false` on every session (a degraded search is not S3) |
 | S5 CONNECT | ✅ | the graph write: 433 derived nodes (`Point` 338, `Object` 50, `Event` 45); `stats.operator_endpoints_minted=0`; operator-shaped relationships `IMPL=57 INPUT=58 NAND=10` |
 | S6 COMMIT | ✅ | 338 `:Point` nodes persisted, 170 carrying the commit's `eventId` stamp, 358 `:GraphEvent`s |
@@ -355,7 +355,7 @@ one that pins the wiring.
 
 ⛔ **And PRESENT is not RAN.** `extract_session_v2` emits both keys UNCONDITIONALLY — on the
 flag-OFF arm and on its early-return path the block is `{"enabled": False, "s2": {}, "union":
-{}}` (`extractor_v2.py:12975-12979` — the classify block starts at `:12975`, the vet surface at `:12979` — and `:13445-13459`, the two result blocks). An acceptance test of "a non-empty dict"
+{}}` (`extractor_v2.py:12975-12979` — the classify block starts at `:12975`, the vet surface at `:12979` — and `:13515-13529`, the two result blocks). An acceptance test of "a non-empty dict"
 therefore takes an OFF block as the witness for *the pass ran* and prints `step S2.2 WITNESSED …
 enabled=false, s2={}`: the moment `#9116` copies the sibling key — exactly what this bundle
 instructs — both steps would be WITNESSED on **every** run, including one measured with the
@@ -369,8 +369,8 @@ statement that the gate was open". It is not that: `enabled` is the FLAG, comput
 is reached. `vet_enabled` is computed at `extractor_v2.py:12944`, i.e. BEFORE the
 `if not edus:` early return (`:12948`), which emits literally
 `"vet": {"enabled": vet_enabled, "s2": {}, "union": {}}` (`:12979`), and
-each VET pass is gated on the LIST — `if vet_enabled and embed_list:` (`:15541`), `if vet_enabled and
-complete_list:` (`:13231`). So a session with the flag ON and an empty list emits `enabled: True`
+each VET pass is gated on the LIST — `if vet_enabled and embed_list:` (`:15611`), `if vet_enabled and
+complete_list:` (`:13301`). So a session with the flag ON and an empty list emits `enabled: True`
 with empty counters and no pass ran (a FAILED vet pass leaves the same shape: `_run_vet_pass` returns
 `{}` on its fail-open path, `:12823-12826`). Because `_witness_block` returns the first positive
 ANYWHERE on the run, ONE such session out of seven made S2.2/S2.3 WITNESSED (6/8 → 8/8) — and V5
@@ -383,9 +383,9 @@ to look.
 first written once and templated for the surface NAME, so the S2.3 line argued from `vet_enabled`,
 the `if vet_enabled and …` gates and `_run_vet_pass` — code the classify pass never reaches. The
 classify pass has its own flag (`classify_later`, `:12913`), its own early-return block
-(`:12975-12978`), its own gates — `if classify_later and embed_list:` (`:13104`) around `if items:`
-(`:13107`), and `if classify_later and complete_list:` (`:13246`) around `if items:` (`:13256`) — and its
-own fail-open `except` (`:13120` / `:13267`), so an idle classify block comes from no embed list **or
+(`:12975-12978`), its own gates — `if classify_later and embed_list:` (`:13174`) around `if items:`
+(`:13177`), and `if classify_later and complete_list:` (`:13316`) around `if items:` (`:13326`) — and its
+own fail-open `except` (`:13190` / `:13337`), so an idle classify block comes from no embed list **or
 no classify items**, not from a vet gate. The cites now live in ONE table keyed by the surface
 (`_IDLE_CITES`), and a surface added without its own entry fails loudly rather than borrowing
 another pass's code. Pinned by `test_the_flag_on_cause_is_per_surface_so_a_swap_cannot_pass` and by
@@ -399,7 +399,7 @@ proves the flag; a classify or vet block can legitimately carry `enabled: True, 
 list, no classify items, or a fail-open `except`) while doing nothing, and that shape is
 indistinguishable through a surface that is missing. The cause now says the pass was **ENABLED** and
 that whether it did work is not observable here; the `#9116` attribution — the surface is emitted
-unconditionally at `:13445`/`:13455` and now reaches the receipt through the seam at the meta fold
+unconditionally at `:13515`/`:13525` and now reaches the receipt through the seam at the meta fold
 `sdk.py:17188` (`"stats": _capture_stats_with_step_witness(out, len(extracted))`) — is updated
 accordingly, and the "where the fix must target" line with it.
 

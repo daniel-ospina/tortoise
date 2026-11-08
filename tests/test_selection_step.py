@@ -106,6 +106,11 @@ class _Scripted:
         self.s1_prompts: list[str] = []
         self.s2_prompts: list[str] = []
         self.other_stages: list[str] = []
+        # S4's `user` prompt carries the NARRATIVE the run shipped, so it is the
+        # one observable that separates `story` from `story_arc` (a handler that
+        # restored only one of the pair leaves the other on arm B, and only S4
+        # reads `story`).
+        self.s4_prompts: list[str] = []
 
     def complete(self, *, system, user, max_tokens=None):
         self.last_finish_reason = "stop"
@@ -117,6 +122,9 @@ class _Scripted:
             # S4 — the live gap-filler, untouched by #11002. It answers "no
             # gaps" so this file measures the E4 arm union, not S4's merge.
             self.other_stages.append("s4")
+            # The rendered S4 prompt (with the narrative block) arrives in
+            # `system`; `user` is the short instruction. Keep both.
+            self.s4_prompts.append(system + "\n" + user)
             return _EMPTY_EMBED
         self.s2_prompts.append(system)
         idx = min(len(self.s2_prompts), len(self.s2_answers)) - 1
@@ -1284,3 +1292,194 @@ def test_the_first_arms_verdicts_ride_the_renarrate_record(monkeypatch):
         "ONE shape for both arms — a reader must not have to guess which arm "
         "the block belongs to"
     )
+
+
+# ── 9. the retry is FAIL-OPEN (#11569) ────────────────────────────────────
+
+def test_a_retry_that_raises_after_the_re_bind_keeps_the_first_arms_capture(
+        monkeypatch):
+    """A raise in the retry's tail must not take a COMPLETED capture with it.
+
+    Every other stage in `extract_session_v2` fails open (`run_s1` per chunk,
+    `run_s2`, `route_mentions`, `_run_vet_pass`, the classify pass). The retry
+    did not: it runs *after* a complete first arm, and by the time its tail runs
+    it has already re-bound `story`, `embed_list` and the vet records to arm B.
+    So an exception there escaped `extract_session_v2` and destroyed a capture
+    that had already succeeded — and a PARTIAL restore is worse than the raise,
+    because it ships arm B's LIST beside arm A's NARRATIVE and reports success.
+
+    ⛔ The seam is chosen deliberately: `_rate_text` is called from exactly ONE
+    place — the retry's own final warning — and that place sits **after** every
+    re-bind. A raise planted in `_renarrate_pick` (the other candidate) fires
+    BEFORE the bindings move, so it would pass against a handler that restored
+    nothing at all. Planting it here is what makes the restore load-bearing.
+
+    ⛔ NON-VACUITY: on the pre-guard tree this test does not assert — the run
+    raises out of `extract_session_v2`. Deleting any single line of the restore
+    block reds on the assertion that names it (`story`, `embed_list`,
+    `mention_s2_stats`), which is the "restores only some bindings" mutant this
+    exists to catch.
+    """
+    def _boom(_metrics):
+        raise RuntimeError("the retry's tail exploded")
+
+    monkeypatch.setattr(extractor_v2, "_rate_text", _boom)
+    # VET is armed so `vet_s2_stats` is arm-dependent: arm A's list is empty
+    # (nothing to judge) while arm B's is not, so the restore is OBSERVABLE.
+    # With VET off both arms record `{}` and the mutation is invisible.
+    monkeypatch.setenv("TORTOISE_VET", "1")
+    model = _Scripted(
+        ["Alice set a budget. Bob ships Friday.",
+         "Carol signs the contract. Dave reviews it."],
+        # Arm A yields NOTHING (the coverage trigger), arm B yields a candidate
+        # — so `embed_list` after the run says which arm shipped.
+        [_EMPTY_EMBED, _embed("SecondOnly")],
+    )
+    result = extract_session_v2(model, list(CONVERSATION), sdk=None,
+                                session_id="11002-test",
+                                session_date="2026-11-08")
+    assert len(model.s2_prompts) == 2, "the retry really did run and pay"
+
+    renarrate = result["stats"]["renarrate"]
+    assert renarrate["fired"] is False, (
+        "`fired` describes what SHIPPED — the first arm's capture, unchanged"
+    )
+    assert renarrate["trigger"] == "coverage_suspect"
+    assert "the retry's tail exploded" in renarrate["retry_failed"], (
+        "the reason must be recorded, not swallowed"
+    )
+    assert renarrate["second"] is not None, (
+        "arm B's metrics are the only record of the spend `stats['llm']['calls']` "
+        "already counted — dropping them hides that a second band was paid"
+    )
+    # ax-principles: the failure is on the caller's surface, not only in stats.
+    assert any("re-narrate retry failed" in w
+               for w in result.get("warnings") or []), (
+        f"a fail-open path that says nothing is a silent swallow: "
+        f"{result.get('warnings')}"
+    )
+
+    # ── the restore, binding by binding ───────────────────────────────────
+    assert _entity_names(result) == set(), (
+        "arm A's list is the one that must ship — a restore that skips "
+        f"`embed_list` ships arm B's: {_entity_names(result)}"
+    )
+    story = result["story_arc"]
+    assert "Alice set a budget" in story, "arm A's narrative must survive"
+    assert "Carol signs the contract" not in story, (
+        "a restore that skips `story` ships arm B's narrative beside arm A's "
+        f"list — the half-restored shape: {story!r}"
+    )
+    # ⛔ `story` and `story_arc` are ONE line but TWO variables, and the pair is
+    # only separable through S4's prompt: `story_arc` is published on the result,
+    # `story` is what `run_s4` and `_clamped_mention(narrative=...)` actually read.
+    # Restoring one and not the other SURVIVES every assertion above (measured),
+    # so this is the leg that makes the split visible.
+    assert model.s4_prompts, "S4 ran, so it saw a narrative"
+    assert "Alice" in model.s4_prompts[0], (
+        "S4 must be handed ARM A's narrative — `story_arc` can be right while the "
+        f"`story` S4 reads is arm B's: {model.s4_prompts[0][:200]!r}"
+    )
+    assert "Carol" not in model.s4_prompts[0], (
+        "arm B's narrative must not reach S4 on a fail-open run: "
+        f"{model.s4_prompts[0][:200]!r}"
+    )
+    assert result["mentions"]["stats"]["second"] is None, (
+        "a restore that skips `mention_s2_stats` leaves the retry's "
+        f"`{{first, second}}` arm pair behind: {result['mentions']['stats']!r}"
+    )
+    # ⛔ `vet_s2_stats` is arm-dependent even for an EMPTY arm: VET records a
+    # `batch` block either way, so `candidates` is 0 for arm A and 2 for arm B.
+    assert result["vet"]["s2"]["stats"]["candidates"] == 0, (
+        "a restore that skips `vet_s2_stats`/`vet_s2_pool` publishes arm B's "
+        "judgement (2 candidates) about a list that did not ship — the vet "
+        f"surface would describe an arm nobody chose: {result['vet']['s2']!r}"
+    )
+    # The run-level chunk counters are the only observable that pins
+    # `chunks`/`failed_chunks`: both arms ran, so a restore that skips them (or
+    # doubles them) reads differently from arm A's own count.
+    assert result["stats"]["chunks"] == 1, (
+        f"arm A's chunk count must ship alone: {result['stats'].get('chunks')!r}"
+    )
+    assert result["stats"]["failed_chunks"] == 0, (
+        "arm A had no failed chunk; a mutant that keeps arm B's count would "
+        f"publish {result['stats'].get('failed_chunks')!r}"
+    )
+    # P3 (review round 1): the failure must reach the ERROR surface and the
+    # census, like every sibling fail-open arm in this function — not only the
+    # warnings list, or the run reads clean on `result["errors"]`.
+    assert any("re-narrate retry failed" in e for e in result["errors"]), (
+        f"a fail-open path that is silent on `errors` hides the failure: "
+        f"{result['errors']}"
+    )
+
+
+def test_arm_bs_vet_warnings_do_not_survive_a_failed_retry(monkeypatch):
+    """Arm B's per-item verdicts must not be published on an ARM A run.
+
+    `vet_warnings.extend(picked["warnings"])` is additive and runs BEFORE the
+    raise point, and `picked["warnings"]` is arm B's list alone. Without
+    truncation the run publishes verdicts about a list that did not ship — the
+    mirror of #5005's no-silent-discard, in the misleading direction.
+
+    ⛔ NON-VACUITY: the marker is injected through `_renarrate_pick`, i.e. it
+    enters the run the same way a real arm-B warning does (the pick's own
+    `warnings` list), so deleting the handler's truncation line reds here.
+    """
+    real_pick = extractor_v2._renarrate_pick
+
+    def _pick_marked(first, second):
+        picked = real_pick(first, second)
+        picked["warnings"] = [*picked["warnings"],
+                               "SECOND-ARM-ONLY: vet discarded entities 'SecondOnly'"]
+        return picked
+
+    def _boom(_metrics):
+        raise RuntimeError("the retry's tail exploded")
+
+    monkeypatch.setattr(extractor_v2, "_renarrate_pick", _pick_marked)
+    monkeypatch.setattr(extractor_v2, "_rate_text", _boom)
+    result = extract_session_v2(
+        _Scripted(["Alice set a budget. Bob ships Friday.",
+                   "Carol signs the contract. Dave reviews it."],
+                  [_EMPTY_EMBED, _embed("SecondOnly")]),
+        list(CONVERSATION), sdk=None, session_id="11002-test",
+        session_date="2026-11-08")
+    warnings = result.get("warnings") or []
+    assert not any("SECOND-ARM-ONLY" in w for w in warnings), (
+        "a run that ships arm A must not publish arm B's per-item verdicts: "
+        f"{warnings}"
+    )
+    assert any("re-narrate retry failed" in w for w in warnings), (
+        "the FAILURE line must still be published — truncation removes arm B's "
+        f"lines, not the record of the failure: {warnings}"
+    )
+
+
+def test_a_raise_in_the_emphasis_lookup_still_fails_open(monkeypatch):
+    """`_renarrate_emphasis` is the FIRST statement in the guarded block.
+
+    If it raises and `emphasis` is not pre-bound, the handler itself raises
+    `UnboundLocalError` and the capture is destroyed — the exact defect #11569
+    removes, reintroduced by the guard's own first line.
+
+    ⛔ NON-VACUITY: with `emphasis = None` removed, this reds with
+    `UnboundLocalError`; with it present, the run returns and records
+    `emphasis: None` (never computed).
+    """
+    def _boom(_trigger):
+        raise RuntimeError("emphasis lookup exploded")
+
+    monkeypatch.setattr(extractor_v2, "_renarrate_emphasis", _boom)
+    result = extract_session_v2(
+        _Scripted(["Alice set a budget. Bob ships Friday."],
+                  [_EMPTY_EMBED, _embed("SecondOnly")]),
+        list(CONVERSATION), sdk=None, session_id="11002-test",
+        session_date="2026-11-08")
+    renarrate = result["stats"]["renarrate"]
+    assert renarrate["fired"] is False
+    assert renarrate["emphasis"] is None, (
+        "the record must say the emphasis was never computed"
+    )
+    assert "emphasis lookup exploded" in renarrate["retry_failed"]
+    assert _entity_names(result) == set(), "arm A's capture survives"
