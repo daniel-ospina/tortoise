@@ -1772,6 +1772,26 @@ def _is_stderr_print(call: ast.Call) -> bool:
     )
 
 
+def _advertised_bare_forms(rel: str, lines, census) -> list[str]:
+    """The census's advertised-form predicate, applied to `lines` (#5128).
+
+    Factored OUT of the sweep so the predicate itself can be executed (see
+    `test_the_advertised_form_filter_is_not_deaf`). Inline, a filter that had lost
+    its condition (`if False and (…)` — the check deleted, the assertion kept) left
+    the whole suite GREEN, because the two pinned tools genuinely advertise no bare
+    form: "no offenders in this file" and "this filter flags nothing" are the same
+    observation until something feeds it a line that SHOULD be flagged, and the
+    only thing that does is a tool that already has an offender.
+    """
+    return [
+        f"{rel}:{n}: {line.strip()}"
+        for n, line in enumerate(lines, 1)
+        for m in census._BARE_INVOCATION.finditer(line)
+        if (m.group(1) is None or f"{m.group(1)}/{m.group(2)}" not in census._CARVE_OUTS)
+        and (rel, line.strip()) not in census._DELIBERATE_BARE_FORM
+    ]
+
+
 def _run_guard(guard: ast.If, monkeypatch, version: tuple[int, ...]) -> str:
     """Execute the guard ALONE with `sys.version_info` faked, return what it says.
 
@@ -2094,18 +2114,44 @@ def test_the_tool_carries_the_5128_interpreter_guard_first(tool, capsys, monkeyp
     # `group(1) == "tools" and group(2) == tool.name` also re-narrows the regex's
     # ELIDED branch (`python3 ...`, groups None) and its cross-path matches
     # (`python3 graph-scripts/...`), both of which the census reds too.
-    offenders = [
-        f"{rel}:{n}: {line.strip()}"
-        for n, line in enumerate(text.splitlines(), 1)
-        for m in census._BARE_INVOCATION.finditer(line)
-        if (m.group(1) is None or f"{m.group(1)}/{m.group(2)}" not in census._CARVE_OUTS)
-        and (rel, line.strip()) not in census._DELIBERATE_BARE_FORM
-    ]
+    offenders = _advertised_bare_forms(rel, text.splitlines(), census)
     assert not offenders, (
         f"the tool advertises `python3 tools/{tool.name}`, the form its guard "
         f"REFUSES; the census's "
         f"`test_no_doc_or_usage_advertises_the_form_the_guard_refuses` reds on "
         f"it, and that test does not run on a tool-only diff: {offenders}"
+    )
+
+
+def test_the_advertised_form_filter_is_not_deaf():
+    """The sweep's FILTER, executed on synthetic lines — not only "this file is clean".
+
+    Measured before this test existed: replacing the sweep comprehension's condition
+    with `if False and (…)` — the check deleted, the assertion kept — left the suite
+    at 724 passed, exactly as unmutated. The arm was live only for a file that
+    already had an offender, which is the one state it exists to detect, so nothing
+    executed its correctness. Each assertion below pins one side of the predicate:
+    it must flag an offender, must NOT flag a compliant invocation, must honour the
+    census's own carve-outs, and must flag the ELIDED form (whose regex branch has
+    no path, so no carve-out can exempt it).
+    """
+    census = _census_module()
+    rel = "tools/capstone_ledger.py"
+    assert _advertised_bare_forms(rel, [f"run `python3 {rel} check`"], census), (
+        "the filter flags NO offender — the sweep is deaf, and a tool advertising the "
+        "refused form would pass it"
+    )
+    assert not _advertised_bare_forms(rel, [f"run `uv run python {rel} check`"], census), (
+        "the filter flags a COMPLIANT invocation — every pinned tool would red"
+    )
+    carve = sorted(census._CARVE_OUTS)[0]
+    assert not _advertised_bare_forms(rel, [f"`python3 {carve}`"], census), (
+        f"a census carve-out ({carve}) must stay exempt — the exemptions are the "
+        f"census's data, not a re-derived filter"
+    )
+    assert _advertised_bare_forms(rel, ["`python3 ...`"], census), (
+        "the ELIDED form has no path, so no carve-out can exempt it; the census reds "
+        "it and the filter must too"
     )
 
 
