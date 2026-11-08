@@ -347,9 +347,14 @@ STORES_DISPOSITIONS: tuple[str, ...] = (NO_LIVE_VECTOR, LABELS_AT_RUNTIME)
 #: merely the one that recorded it (see the per-entry `owner_issue` notes).
 _OWNER_ISSUE = re.compile(r"^#\d+$")
 
-#: A Cypher label. A `stores` label is interpolated into a query by its consumers, so it is held to
-#: the same shape `tortoise.security.validate_entity_type` allowlists — statically, here, where the
-#: declaration is made (defence in depth: the register is a leaf and cannot import that validator).
+#: A Cypher label. A `stores` label WILL be interpolated into a query by its consumers —
+#: `#11086`'s seam, not yet built (this module's own docstring: *"Nothing consults it to decide a
+#: write yet"*) — so it is held to the same shape `tortoise.security.validate_entity_type`
+#: allowlists STATICALLY, here, where the declaration is made (defence in depth: the register is a
+#: leaf and cannot import that validator). ⛔ Stated as the seam's requirement, never as a
+#: present-tense fact about today's consumers: the one live reader
+#: (`tools/dod_5090_probe.py`) only compares the set against `served_labels()` and builds no
+#: query, and an overstated reason is how a real regression gets waved through.
 #: ⛔ `\Z`, NOT `$`: `$` also matches before a TRAILING NEWLINE, so `("Event\n",)` loaded here while
 #: `tools/dod_5090_probe.py`'s `_STORE_LABEL.fullmatch` graded the same declaration malformed — one
 #: value, two verdicts, and the register blessed what its only consumer refuses. `\Z` makes the two

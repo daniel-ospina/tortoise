@@ -334,9 +334,11 @@ malformed-`stores` hold; the register's own `bypass` hold), one that holds the r
 `bypass` even when the register RESOLVES that writer, one that stops a declaration narrowing a
 `PARTIAL` two-label MEASUREMENT, one that holds a declaration CONTRADICTING the writer's own Cypher,
 one that pins the LIVE reader's `stores` plumbing (the product-register → reader seam every injected
-fixture skipped), and one that pins the `unexplained` note itself so a `PARTIAL` cannot name nobody —
+fixture skipped), one that pins the `unexplained` note itself so a `PARTIAL` cannot name nobody,
+and one that drives row 2's `ungated` candidate arm (whether a DECLARED `ungated` writer is scored
+from its declaration or blamed as an undeclared one) —
 and
-reads 162 passed, 1 skipped on the docker lane. The
+reads 163 passed, 1 skipped on the docker lane. The
 skip is the `<3.12` re-derive. ⚠️ The count is bound to THIS TREE, never to a branch head: a figure
 stated as *"at #11337's head"* is stale against the same tree it sits in as soon as one more test is
 added, and `test_the_census_doc_collects_what_the_file_collects` re-derives it from the file's own

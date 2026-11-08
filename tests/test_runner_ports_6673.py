@@ -709,6 +709,34 @@ def test_a_quoted_program_is_not_a_dial_site(tmp_path):
         f"the same literal as a REAL constant must still red, got {hits}")
 
 
+def _membership_refusal(rel: str, members: set[str], exemptions) -> str | None:
+    """The pins file's census-membership rule, as a FUNCTION so both arms can be DRIVEN.
+
+    ⛔ Extracted because a rule whose only call site is the live tree has no falsifier —
+    `#11492`'s cycle-2 review measured that: the `or rel in SEAM_FILES_WITH_ALLOWED_LITERALS`
+    arm was added so a LEGITIMATE exemption clears the rule, but on the live tree that arm is
+    never the deciding term (the file is not a member), so reverting to a bare
+    `assert rel not in members` left this whole file at `71 passed`. The defect that
+    re-creates is cycle 1's: a pin that reds on a legitimate exemption while its message
+    offers a remedy that cannot clear it, leaving no route but deleting the pin.
+
+    Returns ``None`` when the state is admissible, else the refusal message.
+    """
+    if rel not in members or rel in exemptions:
+        return None
+    return (
+        f"{rel} is back in the scanned population. It STUBS the seam, so its `docker_port` "
+        "stub is not a split-brain offender. Two remedies actually clear this rule: keep the "
+        "prose from spelling the import statement-shaped (the state `#11492` restored), or add "
+        "a SEAM_FILES_WITH_ALLOWED_LITERALS entry with a reason that states the "
+        "exec-then-rebind mechanism — which "
+        "`test_no_declared_exemption_outlives_the_membership_that_earned_it` then requires to "
+        "stay a member. ⛔ Membership is decided by a RAW-TEXT scan, so adding the exemption "
+        "alone cannot satisfy a bare `rel not in members`: that spelling named a remedy which "
+        "left the pin red, with no route but deleting it."
+    )
+
+
 def test_the_mocked_seam_is_really_mocked_and_needs_no_exemption():
     """#11518 review, retargeted by `#11492`: this file STUBS the seam, so it needs no exemption.
 
@@ -745,16 +773,31 @@ def test_the_mocked_seam_is_really_mocked_and_needs_no_exemption():
     # census decides membership over RAW TEXT, so the pins file's own prose must not spell the
     # import as a statement-shaped substring — which is exactly what `#11492` reworded.
     members = {p.relative_to(ROOT).as_posix() for p in _seam_files()}
-    assert rel not in members or rel in SEAM_FILES_WITH_ALLOWED_LITERALS, (
-        f"{rel} is back in the scanned population. It STUBS the seam, so its `docker_port` "
-        "stub is not a split-brain offender. Two remedies actually clear this assertion: keep "
-        "the prose from spelling the import statement-shaped (the state `#11492` restored), or "
-        "add a SEAM_FILES_WITH_ALLOWED_LITERALS entry with a reason that states the "
-        "exec-then-rebind mechanism — which "
-        "`test_no_declared_exemption_outlives_the_membership_that_earned_it` then requires to "
-        "stay a member. ⛔ Membership is decided by a RAW-TEXT scan, so adding the exemption "
-        "alone cannot satisfy a bare `rel not in members`: that spelling named a remedy which "
-        "left the pin red, with no route but deleting it.")
+    refusal = _membership_refusal(rel, members, SEAM_FILES_WITH_ALLOWED_LITERALS)
+    assert refusal is None, refusal
+
+
+def test_the_exemption_remedy_actually_clears_the_membership_rule():
+    """`#11492` cycle-2 review: the exemption arm is DRIVEN, never merely published.
+
+    Three states, so neither the `or` clause nor its removal can be silent:
+
+    * member with NO exemption -> REFUSED (the split-brain guard still bites),
+    * member WITH an exemption -> admissible (the remedy the message names really clears it),
+    * non-member -> admissible (no exemption owed) — the live tree's own state.
+
+    ⛔ Deleting the `or rel in SEAM_FILES_WITH_ALLOWED_LITERALS` arm reds the second case, which
+    is the state the arm exists for and the one the live tree cannot exercise.
+    """
+    rel = "tests/fake_member_of_the_scanned_population.py"
+    assert _membership_refusal(rel, {rel}, {}) is not None, (
+        "a scanned member with NO exemption must still be refused — the split-brain guard has "
+        "to keep biting, or this rule has been relaxed into a no-op")
+    assert _membership_refusal(rel, {rel}, {rel: ["# stubbed seam"]}) is None, (
+        "a SEAM_FILES_WITH_ALLOWED_LITERALS entry must CLEAR the rule — the pin's message "
+        "names that as a remedy, and a remedy that cannot clear it is the cycle-1 defect")
+    assert _membership_refusal(rel, set(), {}) is None, (
+        "a file outside the scanned population owes no exemption")
 
 
 def test_action_inputs_are_declared():
