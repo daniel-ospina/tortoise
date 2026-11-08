@@ -338,13 +338,27 @@ def _report_fts(fts: dict) -> None:
               f"to be a probe — pass one that appears only in the removed "
               f"sentence.", file=sys.stderr)
     elif fts["vetoed"] == "unclassified":
-        print(f"✗ the probe returned a hit that could NOT BE CLASSIFIED for "
-              f"{fts['unclassified']!r} ({fts.get('unresolved') or 0} hit(s) also "
-              f"carried no usable url) — the hit-classification read failed, or "
-              f"the index entry points at a url no `:Source` holds. A hit that "
-              f"nothing examined is NOT evidence the sentence is gone: re-measure "
-              f"(the read may be under load), or repair the stale index entry.",
-              file=sys.stderr)
+        unread_n = len(fts["unclassified"])
+        unresolved_n = fts.get("unresolved") or 0
+        if not unread_n and unresolved_n:
+            # ⛔ THE ACTUAL CAUSE, NOT TWO THAT DO NOT APPLY (#11536 review round 3,
+            # P2): a hit whose url cannot be ADDRESSED renders no phrase to name, so
+            # the generic wording below printed `for []` plus a classification-read
+            # failure that did not happen.
+            print(f"✗ the probe returned {unresolved_n} hit(s) whose url could not "
+                  f"be ADDRESSED at all — a hit that nothing examined is NOT "
+                  f"evidence the sentence is gone (#11161). The index entry points "
+                  f"at a `:Source` with no usable url, or at one that no longer "
+                  f"exists: re-measure, or repair that index entry, before "
+                  f"reporting the repair as done.", file=sys.stderr)
+        else:
+            print(f"✗ the probe returned a hit that could NOT BE CLASSIFIED for "
+                  f"{fts['unclassified']!r} ({unresolved_n} hit(s) also carried no "
+                  f"usable url) — the hit-classification read failed, or the index "
+                  f"entry points at a url no `:Source` holds. A hit that nothing "
+                  f"examined is NOT evidence the sentence is gone: re-measure (the "
+                  f"read may be under load), or repair the stale index entry.",
+                  file=sys.stderr)
     elif fts["vetoed"] == "unexplained":
         print(f"✗ {len(fts['unexplained'])} probe(s) came back from a node that "
               f"PROVES it carries the post-fix lexicon, while the probe token "
