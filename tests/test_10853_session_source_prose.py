@@ -1372,12 +1372,13 @@ def test_the_10852_obligation_quotes_the_authority_AS_IT_NOW_READS():
 
     The authority is a quoted ruling in `docs/architecture/STORAGE-ARCHITECTURE.md`
     §9.1 — cited by SECTION here and in `cache_projection`, because the LINE form
-    (`:527`, which is what `#10978` left on `main`) rots the moment text is
-    inserted above it: `#4051`'s own §2.0 insertion moved the sentence to `:551`,
-    so the line number that certified it a day earlier addressed the wrong text.
+    (`:527`, the locator `03b50919dc` gave the citation) rots the moment text is
+    inserted above it: `#4051`'s own §2.0 insertion moved the sentence from `:527`
+    to `:551`, so that line number certified text that was no longer there.
     The LOCATOR RESOLUTION below is what makes both forms honest — a line has to
     still hold the sentence, a section has to still exist and still contain it.
-    That line was REWRITTEN
+
+    That sentence was REWRITTEN
     under us: `#10978` (`b748df7d`) changed it from "§4.4 metadata, not the
     prose" to "§4.6 metadata, not the S1 narrative", so the merge landed four
     citations asserting a sentence the document no longer contains — including
@@ -1405,14 +1406,30 @@ def test_the_10852_obligation_quotes_the_authority_AS_IT_NOW_READS():
     # own §2.0 insertion moved it to 551 without reddening anything, because the
     # old pin only asked whether the sentence existed SOMEWHERE in the document.
     # So the locator is matched here and ranged against the authority below.
+    # ⚠️ The SECTION form carries the tree's own `/D<n>` decision tag
+    # (`§9.1/D1`, spelled that way nine lines above), and it may sit inside the
+    # backticks or after them — all of those are ONE citation, so all of them
+    # parse. An unrecognised spelling is diagnosed as a PARSER gap, never as a
+    # missing quotation (#11481 review: the old arm sent a maintainer hunting for
+    # a mutation that never happened).
+    source = inspect.getsource(cp)
+    unparsed = re.search(r'STORAGE-ARCHITECTURE\.md.{0,24}?:\s*\*"', source)
     match = re.search(
-        r'STORAGE-ARCHITECTURE\.md(?P<loc>`? §[\d.]+|:\d+)`?: \*"(?P<quote>[^"]+)"\*',
-        inspect.getsource(cp),
+        r'STORAGE-ARCHITECTURE\.md(?P<loc>`?\s*§[\d.]+(?:/D\d+)?|:\d+)`?'
+        r'\s*: \*"(?P<quote>[^"]+)"\*',
+        source,
     )
+    assert match or unparsed is None, (
+        "the ruling is still quoted in `cache_projection`, but its LOCATOR is not "
+        f"a form this pin parses ({unparsed.group(0)!r}) — accepted forms are "
+        "`STORAGE-ARCHITECTURE.md:NNN` and `STORAGE-ARCHITECTURE.md` §N.N, either "
+        "with an optional `/DN` tag. This is a PARSER gap, not a missing "
+        "quotation: widen the grammar here rather than going looking for a "
+        "mutation that did not happen")
     assert match, (
         "the narrowing's authority is no longer quoted in the source — the pin "
-        "extracts `STORAGE-ARCHITECTURE.md:527` (or `STORAGE-ARCHITECTURE.md` "
-        "§9.1) from `cache_projection`, so restore the quotation")
+        "extracts `STORAGE-ARCHITECTURE.md:NNN` (or `STORAGE-ARCHITECTURE.md` "
+        "§N.N) from `cache_projection`, so restore the quotation")
     # The quotation wraps across lines in the docstring; the document states it
     # as one sentence, so compare on normalised whitespace.
     quote = " ".join(match.group("quote").split())
@@ -1437,26 +1454,36 @@ def test_the_10852_obligation_quotes_the_authority_AS_IT_NOW_READS():
         # to the wrong section, the same rot class #10978 corrected (§4.4 → §4.6).
         # ⚠️ The `§` belongs to the CITATION, not to the heading: every heading in
         # this document reads `### 9.1 …`, so the locator is stripped to its number
-        # before it is ranged against one.
-        section = loc.lstrip("` §")
+        # before it is ranged against one, and the `/D<n>` tag is not part of the
+        # heading either.
+        cited = loc.lstrip("` §")
+        section = cited.split("/")[0]
         heading = re.search(
-            rf"^#+ {re.escape(section)}\b", authority, re.MULTILINE)
+            rf"^(?P<hashes>#+) {re.escape(section)}\b", authority, re.MULTILINE)
         assert heading, (
-            f"`cache_projection` cites `{section}` but the authority has no such "
+            f"`cache_projection` cites `{cited}` but the authority has no such "
             "heading — a section citation to a section the document does not "
             "carry sends the reader nowhere")
+        # ⛔ THE BODY RUNS TO THE NEXT HEADING OF THE SAME OR A HIGHER LEVEL, not
+        # to the next heading of ANY level: a section OWNS its subsections, so
+        # slicing at the first `child heading` made `§9` a two-line body that
+        # excluded `§9.1`, where this quotation lives — a correct coarse citation
+        # refused, with a message saying the sentence was not in the section it is
+        # in (#11481 review; measured: `§9` → 2 lines, §9's real body runs to
+        # `§10`). Fail-closed on the wrong axis is still wrong.
+        level = len(heading.group("hashes"))
         body = authority[heading.end():]
-        following = re.search(r"^#+ ", body, re.MULTILINE)
+        following = re.search(rf"^#{{1,{level}}} ", body, re.MULTILINE)
         body = body[:following.start()] if following else body
         assert quote in " ".join(body.split()), (
-            f"`cache_projection` cites `{section}`, but the quotation is not in "
+            f"`cache_projection` cites `{cited}`, but the quotation is not in "
             f"that section: {quote!r}. It was restated or moved (#10978 is the "
             "precedent) — re-cite and re-quote where it now reads")
-    assert quote in authority, (
-        "the narrowing quotes a sentence the authority "
-        f"no longer contains: {quote!r}. The ruling was restated (#10978 is the "
-        "precedent) — re-quote the authority as it now reads rather than leaving "
-        "the citation resting on a sentence that is gone.")
+    # ⚠️ THERE IS NO THIRD, `quote in authority` ARM. Both arms above assert the
+    # quotation against a SLICE of `authority`, so each already implies presence
+    # in the whole document; a third assertion could never fire, and carrying it
+    # would describe coverage the pin does not have (#11481 review — this is a
+    # correction of an earlier claim that it covered a case the arms missed).
 
     # ⛔ THE REST OF THE SITES THAT CITE THE SAME RULING BY NUMBER, and the list
     # is the DEFINITION (#10962 review, P2 — this leg claimed "the other three

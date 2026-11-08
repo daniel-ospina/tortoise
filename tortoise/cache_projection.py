@@ -64,7 +64,7 @@ THE FOUR PROPERTIES, AND WHERE EACH LIVES
    post-#10000 row's lexicon `_searchText` IS projected — it is that §4.6
    metadata value, not the narrative — and why this test is on the row's
    PROVENANCE rather than on the column's NAME. ⛔ It does NOT sanction refusing
-   `summary`: that is a DEPARTURE from §527's own sentence, taken deliberately
+   `summary`: that is a DEPARTURE from §9.1's own sentence, taken deliberately
    and recorded at that table (#10965 — the declared set exists for the FTS
    field, and restoring a display label gains no retrieval), never something the
    authority implies.
