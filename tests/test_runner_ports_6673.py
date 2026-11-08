@@ -504,14 +504,6 @@ SEAM_FILES_WITH_ALLOWED_LITERALS = {
         # (a regex string, not a connection target)
         'from_uri\\(\\"localhost:6379',
     ],
-    "tests/test_cache_eviction_evictor_pins.py": [
-        # A STUBBED `tests._live_utils`: the fixture replaces the module with a
-        # `SimpleNamespace` so the evictor's journal/delete path can be executed
-        # offline (nothing dials), and this lambda is that stub's return value —
-        # not a connection target. Every REAL site in the file still takes its
-        # target from the seam; the literal exists so the stub is deterministic.
-        "docker_port=lambda: 6379",
-    ],
     "tests/test_pre_migration_safety.py": [
         # Every localhost literal in this file is an INPUT to
         # _docker_projection_target(), which parses the URI and refuses a
