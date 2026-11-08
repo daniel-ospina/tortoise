@@ -3262,6 +3262,29 @@ def test_the_read_path_answers_while_the_default_executor_is_stalled(client):
     here. So "the reads now answer while the shared pool is stalled" holds for
     the four cases above and for no other route, and this test must not be
     cited as a claim about the read surface as a whole.
+
+    ⛔ THE WARM-UP BELOW IS LOAD-BEARING, and it does not weaken the pin. Every
+    route in `_READ_LANE_CASES` is also in `_PROJECTION_ATTACHING_READS`, so its
+    FIRST request after `_seed_read_surface()` carries the cold open (connect,
+    version probe, `_ensure_indexes()` and, on a restored/DR graph, the index
+    BUILD) — which this module's own `_PROJECTION_ATTACHING_READS` note budgets
+    at `probe_setup_timeout()` (20 s, up to 300 s) and assigns to the `graph`
+    construction lane, explicitly "NOT inside the read lane's 8 s saturation
+    bound" (#10602 cycle-2 review P1). Measuring that request inside
+    `READ_ANSWER_BOUND_S` judged the cold open by a bound the module says it must
+    not be judged by, and it redded a green build: measured on PR #11535's
+    `test (c)` (run 42470441311, embedded lane, 4,736 tests in 944 s) the FIRST
+    case — `points-list` — exceeded 3.0 s while the other three answered in the
+    same stalled window, which is the signature of a first-touch cost and not of
+    a read queued on the shared pool (a shared-pool queue would have redded all
+    four: the blockers hold for `DEFAULT_EXECUTOR_STALL_S`). So the warm-up pays
+    the cold open ONCE, with the pool free and outside the measurement, and the
+    measured pass then exercises exactly the queueing property this test claims.
+
+    It cannot mask the defect it pins: on the pre-#10602 shape the warm-up
+    succeeds too (the shared pool is free), and the MEASURED request still has to
+    wait behind the blockers — measured `1 failed` with `_read_offload` reverted
+    to `asyncio.to_thread` (`shared-pool mutant`), warm-up in place.
     """
     from tortoise.hosted_api import app
 
@@ -3279,23 +3302,36 @@ def test_the_read_path_answers_while_the_default_executor_is_stalled(client):
 
     async def _run() -> None:
         loop = asyncio.get_running_loop()
-        blockers, occupied, release = _stall_the_default_executor(loop, width)
-        try:
-            # BOUNDED occupancy wait: a stall that is never established must
-            # FAIL here, naming its own cause — not spin until the repo-wide
-            # ``pytest-timeout`` (300 s) kills the item and the shard with a
-            # message about a timeout instead of about the premise.
-            occupied_deadline = time.monotonic() + DEFAULT_EXECUTOR_STALL_S
-            while not occupied.is_set():
-                if time.monotonic() >= occupied_deadline:
-                    raise AssertionError(
-                        f"the shared default executor never reached {width} "
-                        f"running blockers, so the pool was never full and this "
-                        f"run proves nothing about the read lane (#10602)")
-                await asyncio.sleep(0.01)
-            transport = httpx.ASGITransport(app=app)
-            async with httpx.AsyncClient(transport=transport,
-                                         base_url="http://test") as ac:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport,
+                                     base_url="http://test") as ac:
+            # COLD-OPEN WARM-UP, with the pool still free and OUTSIDE the
+            # measurement (see the docstring). Each route's first request pays
+            # the projection cold open, which belongs to the construction lane's
+            # `probe_setup_timeout()` budget — not to the read-lane bound below.
+            for label, handler, request_kwargs in cases:
+                warm = await ac.request(**request_kwargs())
+                assert warm.status_code == 200, (
+                    f"[{label}] the WARM-UP {handler} request answered "
+                    f"{warm.status_code}: {warm.text[:200]} — the read route is "
+                    f"broken before any stall, so the measurement below would "
+                    f"red for a reason that is not the pool (#10602)")
+
+            blockers, occupied, release = _stall_the_default_executor(loop, width)
+            try:
+                # BOUNDED occupancy wait: a stall that is never established must
+                # FAIL here, naming its own cause — not spin until the repo-wide
+                # ``pytest-timeout`` (300 s) kills the item and the shard with a
+                # message about a timeout instead of about the premise.
+                occupied_deadline = time.monotonic() + DEFAULT_EXECUTOR_STALL_S
+                while not occupied.is_set():
+                    if time.monotonic() >= occupied_deadline:
+                        raise AssertionError(
+                            f"the shared default executor never reached {width} "
+                            f"running blockers, so the pool was never full and "
+                            f"this run proves nothing about the read lane "
+                            f"(#10602)")
+                    await asyncio.sleep(0.01)
                 for label, handler, request_kwargs in cases:
                     started = time.monotonic()
                     try:
@@ -3307,16 +3343,19 @@ def test_the_read_path_answers_while_the_default_executor_is_stalled(client):
                             f"[{label}] {handler} did not answer within "
                             f"{READ_ANSWER_BOUND_S}s while all {width} default-"
                             f"executor slots were occupied — its blocking round "
-                            f"trip is still queued on the SHARED pool (#10602)")
+                            f"trip is still queued on the SHARED pool (#10602). "
+                            f"The warm-up above already paid this route's cold "
+                            f"open with the pool free, so a first-touch cost "
+                            f"does not explain this answer")
                         continue
                     timings[label] = time.monotonic() - started
                     if response.status_code != 200:
                         failures.append(
                             f"[{label}] {handler} answered "
                             f"{response.status_code}: {response.text[:200]}")
-        finally:
-            release.set()
-            await asyncio.gather(*blockers, return_exceptions=True)
+            finally:
+                release.set()
+                await asyncio.gather(*blockers, return_exceptions=True)
 
     asyncio.run(_run())
     assert not failures, (
