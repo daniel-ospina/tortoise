@@ -3643,8 +3643,10 @@ def test_an_UNMEASURABLE_probe_VETOES_even_when_the_CONTROL_answers(monkeypatch)
     """The fold's `unmeasurable` veto — the leg this whole file exists for.
 
     (1) FAILS on a `_merge_probe` that drops this veto: the probe's own read was
-        DEGRADED (`ran=True, degraded=True, reason="query_failed"` — the shape
-        `run_fts_query` records for a failed query and for a missing index), the
+        DEGRADED (`ran=True, degraded=True` — the shape `run_fts_query` records
+        for `query_failed` at `search_engine.py:1780`, and for a promoted
+        `index_missing` at `:1776`; the two reasons DIFFER, so this names the
+        FLAGS, not one reason), the
         CONTROL answered, and `_merge_probe(None, …)` then reached arm (b)
         `control_ok and not wrote` and returned `certifies=True, vetoed=None`, so
         `--dry-run --assert-clean` printed ✓ and exited 0 over a probe that
