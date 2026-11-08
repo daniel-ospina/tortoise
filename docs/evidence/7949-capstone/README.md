@@ -265,7 +265,7 @@ rate, owns a DIFFERENT gap, and a later correction to the note says so. The log'
 committed probe now EMITS both cells, the E4
 note sentence and the E5 tail. ⛔ It does **NOT** follow that a re-run reproduces this file: since
 `#7949`'s selector the committed probe reads the receipt ON the frozen pin, so a re-run at this tree
-scores E4 at **5/15** from `w2b-operator-2026-10-24-8503-b.json` and writes a NEW
+scores E4 at **5/15** from the NEWEST on-pin receipt — `w2b-relations-2026-11-08-11237.json` as of `#11237`, formerly `w2b-operator-2026-10-24-8503-b.json`; same `planted` 15, same `edge_correct` 5 — and writes a NEW
 `capstone-measured-<head>.log` — it SUPERSEDES this one, which is the bundle's documented rule. Two
 pins in
 `tests/test_7949_capstone_measure.py` (`…blocker_cells_are_the_emitters_own`,
