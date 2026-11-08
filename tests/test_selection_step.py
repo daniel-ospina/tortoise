@@ -40,7 +40,10 @@ WHAT THIS PINS
    tens of real sessions with the owner correcting the rule — never chosen in
    advance).
 7. **The record** — both arms' numbers ride `stats["renarrate"]`, so an action
-   never happens without a record (I2).
+   never happens without a record (I2). And both arms' VERDICTS ride
+   `stats["renarrate"]["decisions"]`: the post-S4 re-vet only re-judges items
+   that SHIP, so a first-arm discard is the one verdict nothing re-derives
+   (#5005's no-silent-discard must not lapse on the retried path).
 8. **The failure path does not spend the retry** — an S1 that failed (empty
    narrative) yields no batch to be poor about, and a **failed S2 call** is a
    transport-class failure, not a poor batch: its empty list is byte-identical
@@ -696,7 +699,7 @@ def test_the_run_records_both_arms(monkeypatch):
                      [_EMPTY_EMBED, _embed("Northwind")])
     renarrate = result["stats"]["renarrate"]
     for key in ("fired", "trigger", "items", "narrative", "emphasis", "first",
-                "second", "merged"):
+                "second", "merged", "decisions"):
         assert key in renarrate, f"the record must carry {key!r}"
     for arm in (renarrate["first"], renarrate["second"]):
         for key in ("narrative_chars", "candidates", "kept", "keep_rate"):
@@ -1122,4 +1125,112 @@ def test_each_arm_records_its_own_coverage_verdict(monkeypatch):
     assert renarrate["second"]["coverage_suspect"] is False, (
         "this fixture's second arm emitted candidates, so ITS flag is False — a "
         "fixture property, NOT a mechanism one: an empty second yield flags too"
+    )
+
+
+# ── 10. the FIRST arm's audit record survives the retry ───────────────────
+
+def _two_entities() -> str:
+    """Alpha + Beta, referenced by nothing — so a DISCARD of either is APPLIED."""
+    return json.dumps({
+        "entities": [{"name": "Alpha", "kind": "core:org",
+                      "lifecycle": "created"},
+                     {"name": "Beta", "kind": "core:org",
+                      "lifecycle": "created"}],
+        "events": [], "operators": [], "points": [],
+        "chain_notes": [], "link_before_create": [],
+    })
+
+
+def _first_arm_discard_and_renarrate(log: dict):
+    """DISCARD one unreferenced entity on the FIRST arm, and ask for the retry.
+
+    Every LATER pass (the retried arm, the post-S4 union pass) answers NO
+    verdict, so every assertion this feeds is about arm A's own decisions —
+    the ones the re-vet CANNOT re-derive, because an item arm A discarded is
+    absent from the union that re-vet judges.
+    """
+    def _arbiter(items, narrative):
+        log["passes"] = log.get("passes", 0) + 1
+        if log["passes"] > 1:
+            return {"verdicts": []}
+        victim = _entity_victim(items, "Beta")
+        return {"batch": {"outcome": "RENARRATE", "reason": "poor batch"},
+                "verdicts": ([{"id": victim, "outcome": "DISCARD",
+                               "rule_id": "test.first_arm",
+                               "reason": "poor"}] if victim else [])}
+    return _arbiter
+
+
+def _first_arm_discard_run(monkeypatch):
+    """One run whose FIRST arm discards and whose batch verdict fires the retry."""
+    log: dict = {}
+    _, result = _run(monkeypatch,
+                     ["Alice and Bob met.", "Alice met Bob about the budget."],
+                     [_two_entities(), _embed("SecondOnly")],
+                     arbiter=_first_arm_discard_and_renarrate(log))
+    assert log["passes"] >= 2, (
+        "the fixture must actually reach the retry, or it tests the non-retry "
+        "path #5005 already covered"
+    )
+    renarrate = result["stats"]["renarrate"]
+    assert renarrate["fired"] is True
+    assert renarrate["trigger"] == "arbiter_renarrate"
+    return result, renarrate
+
+
+def test_the_first_arms_discard_audit_line_survives_the_retry(monkeypatch):
+    """#5005's no-silent-discard property must not LAPSE on the retried path.
+
+    The retry composes the shipped list as the union of two arms, so a
+    candidate arm A removed is gone from the list that ships — and the
+    `prior=vet_s2_pool` re-vet re-asks the arbiter only about items that ARE
+    in that list. Arm A's removals are therefore the verdicts nothing
+    re-derives, and the run's `warnings` is where they have to survive: the
+    per-item `vet: discarded <section> '<text>'` line (and `vet: pruned N
+    operator(s)`) is the only published record of WHAT arm A dropped.
+
+    ⛔ Asserted EXACTLY ONCE, not merely present: the fix this guards is a
+    `warnings` UNION across the two arms, and the run-level list is already
+    extended with arm A's warnings at the call site before the retry is
+    considered — so a union at the pick would DUPLICATE every first-arm line
+    rather than restore it. Present-and-duplicated is the regression shape this
+    pins, and it is the one a plausible reading of the pick produces.
+    """
+    result, _ = _first_arm_discard_run(monkeypatch)
+    lines = [w for w in result["warnings"]
+             if "vet: discarded" in w and "Beta" in w]
+    assert len(lines) == 1, (
+        "arm A's discard must appear in the run's warnings exactly once — "
+        f"found {len(lines)}: {result['warnings']}"
+    )
+
+
+def test_the_first_arms_verdicts_ride_the_renarrate_record(monkeypatch):
+    """Which rule dropped arm A's item rides `stats["renarrate"]["decisions"]`.
+
+    The retry's own record carries both arms' NUMBERS (`_arm_metrics`) and the
+    union accounting, but the numbers cannot say *under which rule* an arm A
+    item was dropped — and `result["vet"]["s2"]["decisions"]` is the SECOND
+    arm's block, published independently of the tie-break. So without an arm-A
+    slot, "which rule dropped it, and what was its counterfactual" is
+    unrecoverable for the only arm whose verdicts nothing re-derives.
+
+    ⛔ NON-VACUITY: this fails on the pre-fix tree with a `KeyError` (no
+    `decisions` key at all), and it fails against a record that publishes ONLY
+    the second arm's block — the shape it exists to prevent.
+    """
+    _, renarrate = _first_arm_discard_run(monkeypatch)
+    first = renarrate["decisions"]["first"]
+    discarded = [v for v in first.values() if v.get("outcome") == "DISCARD"]
+    assert discarded, (
+        "arm A's per-item verdicts must be recoverable from the retry's own "
+        f"record — got {first!r}"
+    )
+    assert [v.get("rule_id") for v in discarded] == ["test.first_arm"], (
+        "the RULE that dropped the item is the part a bare count cannot carry"
+    )
+    assert "second" in renarrate["decisions"], (
+        "ONE shape for both arms — a reader must not have to guess which arm "
+        "the block belongs to"
     )

@@ -4588,10 +4588,10 @@ def test_the_bare_continuation_cites_name_what_they_say():
     rows = (
         # `each VET pass is gated on the LIST` — the gate AND its call, twice.
         ("docs/00_index.md", "each VET pass is gated on the LIST", (
-            ("15535", "if vet_enabled and embed_list:"),
-            ("15536", "embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass("),
-            ("13225", "if vet_enabled and complete_list:"),
-            ("13226", "complete_list, vet_union_stats, _w, _ = _run_vet_pass("),
+            ("15541", "if vet_enabled and embed_list:"),
+            ("15542", "embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass("),
+            ("13231", "if vet_enabled and complete_list:"),
+            ("13232", "complete_list, vet_union_stats, _w, _ = _run_vet_pass("),
         )),
         # the VET block's start; its lines of keys (13450-13452) close on
         # line 13453 — DERIVED by content, not by arithmetic: `result["vet"] = {`
@@ -4603,8 +4603,8 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # which is why every ASSERTED number in this table is verified by
         # content instead.
         ("docs/00_index.md", "emitted unconditionally at", (
-            ("13439", 'result["classify_later"] = {'),
-            ("13449", 'result["vet"] = {'),
+            ("13445", 'result["classify_later"] = {'),
+            ("13455", 'result["vet"] = {'),
         )),
         # ⛔ THE CLASSIFY SWITCH ITSELF (the rebase onto `a1dff7cec8` re-staled it).
         # `#11509` added this bare continuation to the probe's docstring with
@@ -4638,8 +4638,8 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # stale here: a comment asserts nothing, so read the anchors from the row,
         # never from this prose.
         ("docs/00_index.md", "fail-open `except` at", (
-            ("13114", "except Exception as e:  # never block capture (P1)"),
-            ("13261", "except Exception as e:  # never block capture (P1)"),
+            ("13120", "except Exception as e:  # never block capture (P1)"),
+            ("13267", "except Exception as e:  # never block capture (P1)"),
         )),
         # `_IDLE_CITES["vet"]`: the early return and the surface it emits
         ("probes/capstone_measure.py", "its vet surface", (
@@ -4655,8 +4655,8 @@ def test_the_bare_continuation_cites_name_what_they_say():
         )),
         # the S2.2/S2.3 block this probe names as the #9116 seam's subject
         ("probes/capstone_measure.py", 'result["vet"]`` at', (
-            ("13449", 'result["vet"] = {'),
-            ("13453", ("exact", "}")),
+            ("13455", 'result["vet"] = {'),
+            ("13459", ("exact", "}")),
         )),
         # The E-row audit's cites on the GATE ITSELF. `_BUNDLE_CITE` matches only
         # `sdk|edges|extractor_v2`, so a `tools/*.py` number is invisible to the
@@ -4769,13 +4769,13 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # cannot see it, and no row scoped to it — which is exactly the invisibility
         # this pin exists for. Both rows hold the CALL, not the definition.
         ("README.md", "gap filler", (
-            ("13356", "result = execute_embed(complete_list, search, "
+            ("13362", "result = execute_embed(complete_list, search, "
                       "session_id=session_id,"),
         )),
         # ...and the probe's own copy of the same number, which sits in prose a
         # reader is sent to rather than in a table.
         ("probes/capstone_run.py", "ONE cite per symbol", (
-            ("13356", "result = execute_embed(complete_list, search, "
+            ("13362", "result = execute_embed(complete_list, search, "
                       "session_id=session_id,"),
         )),
         # ⛔ The S1 row's CALL SITE, held on its own row (#11517 rebase review).
@@ -4791,7 +4791,7 @@ def test_the_bare_continuation_cites_name_what_they_say():
             # qualifier insert above the call, so the number is re-derived from
             # the tree each time rather than carried from the round that added
             # the row (the row's INTENT is unchanged: pin the CALL).
-            ("15450", "chunk_stories.append(run_s1(model, _edus_to_text(chunk),"),
+            ("15456", "chunk_stories.append(run_s1(model, _edus_to_text(chunk),"),
         )),
     )
     # The SAME document states two of its claims as the RULE's own text rather than a

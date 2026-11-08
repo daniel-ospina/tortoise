@@ -13079,6 +13079,12 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                            "failed": second["failed_chunks"]},
             },
             "merged": picked["merged"],
+            # The VERDICT half of the same two arms: which item each arm dropped,
+            # under which rule, with its counterfactual. Counts alone cannot
+            # answer that, and the post-S4 re-vet only re-judges items that
+            # SHIP — so a first-arm DISCARD's verdict exists nowhere else
+            # (#5005 no-silent-discard must not lapse on the retried path).
+            "decisions": picked["decisions"],
         }
         # ax-principles: an action names what it did. One line, and it carries
         # BOTH rates because "both rates are recorded" is the design's rule.
@@ -15591,6 +15597,19 @@ def _merge_arm_pools(first: dict, second: dict) -> dict:
     return {"removed_texts": texts, "removed_entities": ents}
 
 
+def _arm_decisions(arm: dict) -> dict:
+    """One arm's per-item VET verdicts, fail-open on an unreadable arm.
+
+    ⛔ Copied per item, not aliased: these entries are the audit trail for a
+    DISCARD (#5005), and an audit trail a consumer can rewrite in place is not
+    evidence.
+    """
+    block = (arm.get("vet_stats") or {}).get("decisions") or {}
+    if not isinstance(block, dict):
+        return {}
+    return {k: dict(v) if isinstance(v, dict) else v for k, v in block.items()}
+
+
 def _renarrate_pick(first: dict, second: dict) -> dict:
     """Choose what the run commits from the two arms — and prove nothing was lost.
 
@@ -15646,17 +15665,27 @@ def _renarrate_pick(first: dict, second: dict) -> dict:
         # would say "the gate did not run" about a pass that DID run and decided
         # (review round 3, P2). ⛔ Nothing is hidden by either choice: both arms'
         # full numbers ride `stats["renarrate"]`.
-        # ⛔ SCOPE OF THAT CHOICE (review note, not a finding): these are the
-        # NUMBERS only. The VERDICT half does not ride this arm — the shipped
-        # union is re-vetted wholesale in the `prior=vet_s2_pool` pass, which
-        # re-asks the arbiter over the list that actually ships, so a first-arm
-        # MERGE flag is not lost, it is re-derived. The residual is that
-        # `stats["vet"]["s2"]["decisions"]` and `_merge_flagged_contents(...)`
-        # describe the second arm's candidate list on EVERY retried run whose
-        # FIRST arm produced items — `vet_stats` is taken from `second`
-        # independently of the tie-break, so a SECOND-ARM WIN still ships the
-        # union. The `coverage_suspect` arm is excluded because its first list
-        # is empty by definition, so there is nothing for the union to lose.
+        # ⛔ SCOPE OF THAT CHOICE: these are the NUMBERS only; the per-item
+        # verdicts ride `decisions` below. Re-derivation is NOT a substitute for
+        # them. The shipped union IS re-vetted wholesale
+        # in the `prior=vet_s2_pool` pass, so a first-arm MERGE flag on an item
+        # that SHIPS is re-derived — but a first-arm DISCARD is not: the item it
+        # removed is absent from `arm["embed_list"]` (post-VET), so absent from
+        # the union, so it never appears in the list that pass judges. The
+        # removed items' verdicts are exactly the ones nothing re-derives, and
+        # leaving them unpublished is the #5005 silent discard reopened on the
+        # retried path. `stats["vet"]["s2"]["decisions"]` is no home for them
+        # either: `vet_stats` is taken from `second` independently of the
+        # tie-break, so a SECOND-ARM WIN still ships the union and that block
+        # still describes one arm. The `coverage_suspect` arm is excluded
+        # because its first list is empty by definition.
+        # ⚠️ `warnings` is deliberately NOT a union of the two arms here: the
+        # call site extends the run-level list with the FIRST arm's warnings
+        # BEFORE the retry is even considered, and with this pick's second arm's
+        # after. Unioning at this function would publish every first-arm line
+        # TWICE — the plausible-looking "fix" that a reviewer of the dropped
+        # line would otherwise apply. What was genuinely missing was the
+        # VERDICT, not the line.
         "vet_stats": second["vet_stats"] or first["vet_stats"],
         "vet_pool": _merge_arm_pools(first.get("vet_pool") or {},
                                      second.get("vet_pool") or {}),
@@ -15665,6 +15694,14 @@ def _renarrate_pick(first: dict, second: dict) -> dict:
         "mention_stats": {"first": first.get("mention_stats") or {},
                           "second": second.get("mention_stats") or {}},
         "warnings": list(second.get("warnings") or []),
+        # BOTH arms' per-item verdicts, ONE shape — the same `{first, second}`
+        # the arm keys and `mention_stats`/`chunks` use, so a reader never has
+        # to guess which arm a block belongs to. `second` duplicates
+        # `result["vet"]["s2"]["decisions"]` by construction; it is published
+        # here too so the retry's own record is self-contained and a reader need
+        # not know that the pipeline's `vet` block is one arm's.
+        "decisions": {"first": _arm_decisions(first),
+                      "second": _arm_decisions(second)},
         "merged": {
             "first_items": raw["s2_items"],
             "second_items": raw["s4_items"],
