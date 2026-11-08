@@ -118,9 +118,6 @@ def test_g1_write_probe_reproduces_the_committed_written_column(sdk, monkeypatch
     assert probe["leftovers"] == committed["probe"]["leftovers"] == [], (
         f"a residue was reported ({probe['leftovers']}) — the artifact must carry "
         "the same reading, and an empty list is the only clean one")
-    assert probe["leftovers"] == committed["probe"]["leftovers"] == [], (
-        f"a residue was reported ({probe['leftovers']}) — the artifact must carry "
-        "the same reading, and an empty list is the only clean one")
 
     committed_rows = {
         (r["pack"], r["surface"], r["predicate"], r["from_kind"], r["to_kind"]): r

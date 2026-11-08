@@ -10394,7 +10394,7 @@ durations:
   # — measured: editing the count here left that pin green. `uv run python
   # tools/ci_timing.py --refresh-durations` replaces this from junit once a
   # push-to-main sweep includes it.
-  test_pack_logic_census_11083.py: 6.1  # #11083: 27 cases (`grep -c '^def test_'` -> 27; pytest collects 27). Stale-count guard applies through THIS row tail.
+  test_pack_logic_census_11083.py: 6.1  # #11083: 28 cases (`grep -c '^def test_'` -> 28; pytest collects 28). Stale-count guard applies through THIS row tail.
   # #11083: the graph half. The reading is dominated by one-time embedded-store
   # warmup on its first `create_entity` (~124s measured locally on the whole
   # file); the probe itself adds ~2s over 42 rows. The WEIGHT is the higher of

@@ -321,7 +321,8 @@ def _dangling(packs_dir: Path, all_rows: list[dict]) -> list[dict]:
             # `fromKind` may spell a kind in any case), but emitting that key
             # named kinds no manifest declares — the artifact said
             # `marketing:competitorcontent` / `pm:kanbanboard` where the packs say
-            # `competitorContent` / `kanbanBoard`, and no test reads this cell.
+            # `competitorContent` / `kanbanBoard`, and at the time no test read this
+            # cell (H2c does now).
             # `full` is `"<ns>:<Kind>"` as declared, one line above.
             "kind": full.split(":", 1)[1],
             "namespace": full.split(":", 1)[0],
