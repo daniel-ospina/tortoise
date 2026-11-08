@@ -11471,9 +11471,12 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         # cannot fake: every `:12929` in the region carries the base it was true at within 60
         # characters — the same idiom the neighbouring `:12779` arm uses for its own number.
         # ⛔ And it is NOT a live-number deny-list. "the LIVE number never appears in these regions
-        # at all" was asserted here and is FALSE: no `:12944` rule exists in this file (measured —
-        # injecting `:12944` at `HEAD` into §2 leaves the whole leg GREEN). The hole the record's
-        # citation grammar leaves open is stated in the paragraph below.
+        # at all" was asserted here and is FALSE: no rule here refuses the number `:12944` itself,
+        # and §2 refuses nothing else (measured — injecting `:12944` at `HEAD` into §2 leaves the
+        # whole leg GREEN). The one row that reads the number holds the capstone bundle's
+        # `README.md` cite to `vet_enabled = (`, and reads THAT document — never this record
+        # (`test_the_bare_continuation_cites_name_what_they_say`). The hole the record's citation
+        # grammar leaves open is stated in the paragraph below.
         # ⛔ THE LIVE-NUMBER ARM IS DELIBERATELY ABSENT FROM THE *§2* HALF OF THIS LOOP — and the
         # hole is stated here because nothing else in this file catches it: in §2 (A2), a re-stale
         # of any number OTHER than `:12929` to the live/HEAD shape (`:13011` at HEAD) reds NOTHING
