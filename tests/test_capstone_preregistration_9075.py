@@ -2083,23 +2083,29 @@ def test_the_real_machine_record_agrees_with_the_pins():
     assert probe[506 - 1].strip() == '("TORTOISE_STATE_VALUE_VERBATIM", "1"))', (
         f"capstone_measure.py:506 reads {probe[506 - 1].strip()!r}, not the pinned entry")
 
-    # ⛔ GRADED PER OCCURRENCE. The range is stated TWICE in `read_back` — the live cite,
-    # and the move that produced it (`:2724-2726 -> :2726-2728`) — so a presence test is
-    # satisfied by the survivor: measured, re-staling ONLY the second copy to `:2722-2724`
-    # left this row GREEN while a reader following that copy lands on two wrong lines.
-    # Both slots are therefore pinned as the exact statements they are, and the counts
-    # afterwards keep the field from gaining or losing one silently.
-    assert read_back.count(":2726-2728") == 2, (
-        f"the record states the live range {read_back.count(':2726-2728')} times, not 2")
-    assert "carries :2726-2728, which sits below" in read_back, (
+    # ⛔ A SET OVER THE RANGES CITED, not a count and not a phrase. The first cut of this
+    # arm asserted `count(":2726-2728") == 2`, which false-failed a CORRECT additive edit
+    # (one more accurate mention of the same range) — a false BLOCK, the class this bundle
+    # forbids as much as a false pass — and the second cut pinned the two slots as full
+    # sentences, which false-failed on reworded connectives ("which sits below" ->
+    # "sitting below"). What the field actually claims is WHICH RANGES EXIST and where the
+    # last move went, so the set below is pinned (a fabricated intermediate like `:2722-2724`
+    # reds it) and the two slots are matched with tolerant connectives (a reword with every
+    # number intact passes). Both relaxations were measured: the additive mention and the
+    # `to` spelling each left the earlier cuts RED and this one GREEN, while a re-staled
+    # copy still reds.
+    cited_ranges = set(re.findall(r":(\d+-\d+)", read_back))
+    assert cited_ranges == {"275-283", "2713-2715", "2724-2726", "2726-2728"}, (
+        f"the record's cited ranges are {sorted(cited_ranges)}; a range outside this set is "
+        "either a fabricated position or a re-staled one")
+    assert re.search(r"carries :2726-2728\b", read_back), (
         "the record must name the LIVE census range it cites")
-    assert ":2724-2726 -> :2726-2728" in read_back, (
+    assert re.search(r":2724-2726\s*(?:->|→|to)\s*:2726-2728\b", read_back), (
         "the record must attribute the LAST move of that window to this branch, which "
         "is the half its own +2 comment lines are responsible for")
-    assert read_back.count(":2724-2726") == 2 and ":2713-2715" in read_back, (
-        "the record states the window's earlier position, and the commit that moved it "
-        "there, twice each; an edited intermediate is how a fabricated middle position "
-        "reads as history")
+    assert ":2713-2715" in read_back, (
+        "the record must name the commit that first moved the window, and the position "
+        "it moved it to")
     assert probe[2726 - 1].strip() == "for name, count, anchored in projection.g.query(", (
         f"capstone_measure.py:2726 reads {probe[2726 - 1].strip()!r}, not the census call")
     # Equality, like its two siblings above: a substring let the closing line's SHAPE
