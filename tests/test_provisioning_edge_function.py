@@ -28,6 +28,15 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 EDGE_FN = _REPO_ROOT / "supabase" / "functions" / "tenant-provision" / "index.ts"
 SHARED_LOOKUP = _REPO_ROOT / "supabase" / "functions" / "_shared" / "lookup.ts"
 
+# Functions with NO browser caller, and therefore NO origin allowlist. Module-level
+# because TWO guards read it and they must not disagree: the parity sweep compares
+# the discovered non-declaring set against it EXACTLY (so a NEW function with no
+# allowlist, and one of these re-growing a CORS surface, both red), and
+# test_edge_function_declares_no_origin_allowlist pins this function's membership
+# (so deleting a name from the set, the way a future author would "fix" the sweep,
+# reds too). `_shared` is imported, never served.
+SERVER_ONLY_FUNCTIONS = frozenset({"_shared", "tenant-provision"})
+
 # The version `module.stripTypeScriptTypes` was introduced in — a HIGHER band
 # than `NODE_FLOOR_STRIP_TYPES` (22.7, the `--experimental-strip-types` FLAG),
 # which this file no longer passes. Not used for a numeric compare (the API is
@@ -132,10 +141,17 @@ def test_edge_function_parses():
 
       * **false RED on 24.21.0** — a CLEAN file exits 1 with "Unexpected strict
         mode reserved word" at the first `interface`, because `--check` parsed
-        the .ts bytes as JavaScript. Reproduced in this repo's tree and on a
-        /tmp copy of the same file (both exit 1): the guard was red on a
-        healthy tree, which is what made it indistinguishable from version
-        noise and therefore no guard at all.
+        the .ts bytes as JavaScript. Reproduced in this repo's tree (exit 1),
+        which made the guard red on a healthy tree and therefore
+        indistinguishable from version noise.
+      * **also a false GREEN on 24.21.0, from the SAME bytes**, if the file is
+        not under the checkout: copy it to a temp dir and `--check` exits 0 on
+        the clean file AND still 0 after appending `const oops: number = ;`.
+        So `--check`'s answer depends on WHERE the file sits, not just on the
+        node version — one more reason the one-step form cannot be a guard, and
+        why "it worked on my host" is not evidence about this one. Reproduce:
+        `cp supabase/functions/tenant-provision/index.ts /tmp/x/index.ts &&
+        node --experimental-strip-types --check /tmp/x/index.ts`.
       * **false GREEN on 22.10.0, 22.13.0 and 23.1.x** — the same clean file
         exits 0, and still exits 0 after appending `const oops: number = ;`. A
         broken function would have merged green.
@@ -431,11 +447,21 @@ def test_edge_function_hook_path_is_gone():
 
 def test_edge_function_declares_no_origin_allowlist():
     """#1120: tenant-provision is the one HTTP-facing function with NO browser
-    surface, so it must declare no allowlist — and that absence must be
-    explicit, not an accident of a glob (see the sweep's SERVER_ONLY set)."""
-    src = EDGE_FN.read_text()
-    assert "ALLOWED_ORIGINS" not in src
-    assert "ORIGIN_SUFFIXES" not in src
+    surface, so its absence of an allowlist must be an EXPLICIT, CHECKED entry in
+    `SERVER_ONLY_FUNCTIONS` — not the accident of a sweep that happens to find
+    nothing.
+
+    This reads the set the parity sweep compares against, which is what stops it
+    being a restatement of `test_edge_function_has_no_cors_surface`: dropping
+    `tenant-provision` from `SERVER_ONLY_FUNCTIONS` (the way a future author would
+    "fix" the sweep) reds HERE and in the sweep, and re-growing an allowlist reds
+    the CORS test.
+    """
+    assert EDGE_FN.parent.name in SERVER_ONLY_FUNCTIONS, (
+        f"{EDGE_FN.parent.name} must be listed in SERVER_ONLY_FUNCTIONS — the "
+        "sweep's allowance for a function with no browser surface is granted "
+        "here, by name, not inferred from a missing declaration"
+    )
 
 
 def _allowlist_pattern(const: str) -> re.Pattern[str]:
@@ -700,7 +726,7 @@ def test_edge_function_allowlist_parity_with_waitlist_subscribe():
     # set RE-declaring one (it leaves `missing`, so the sets differ — a
     # server-only function carrying a CORS surface is exactly the drift #1120
     # removed). `_shared` is imported, never served.
-    SERVER_ONLY = {"_shared", "tenant-provision"}
+    SERVER_ONLY = SERVER_ONLY_FUNCTIONS
 
     decl = _allowlist_pattern("ALLOWED_ORIGINS")
     declaring: dict[str, str] = {}
