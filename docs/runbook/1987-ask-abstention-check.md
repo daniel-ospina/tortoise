@@ -321,7 +321,7 @@ the reader-model/retrieval upgrade.
 > graded eval uses); the word-overlap bar
 > (`max(2, len(gold_words)//2)` on UNIQUE words) is REMOVED from the live
 > path and demoted to the key-free CI (MockJudge) substitute only.
-
+>
 > **ERRATA (2026-11-08, #8486)** — the decision above stands; two of its
 > *statements of the code* no longer describe the code, and this block is an
 > annotation rather than a rewrite of the 2026-08-31 record:
