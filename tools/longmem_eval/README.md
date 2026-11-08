@@ -409,7 +409,7 @@ one pass — and the cache is what makes the 12-45h burn feasible (it also serve
 REPEAT passes with the same `(model, prompt)` ~entirely, and survives a crash).
 Active when `--model` is set. Concurrency model: **sequential workers** (one
 question at a time) — the simplest correct choice; per-question isolated graphs
-+ the shared encode cache make parallelism a coordination cost with no
+and the shared encode cache make parallelism a coordination cost with no
 correctness benefit.
 
 ### Cross-question overlap — measured, and what it does NOT buy (#1779)
@@ -439,7 +439,7 @@ units (33.5%) and is *unreachable by any text-keyed cache* — a chunk renders
 `_session_transcript(window)` while its turn Points render `_turn_text`
 (`[role] content`), so the chunk text is a new string even though it covers the
 same turns. Reducing it is a chunking/rendering decision (retrieval semantics,
-#1540's knob), not a cache.
+the `chunk_turns` knob of #1540), not a cache.
 
 ## Dataset
 

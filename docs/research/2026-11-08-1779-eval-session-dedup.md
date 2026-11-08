@@ -4,7 +4,7 @@
 **Tree:** `feat/1779-tm` off `origin/main` @ `d3dadd9b37` · **Measurement-only: no cache was
 built, no retrieval/parse semantics changed.**
 
-#1779 was filed as a #1746 follow-up with the measurement as its precondition: *"measure the
+The issue was filed as a #1746 follow-up with the measurement as its precondition: *"measure the
 overlap first (what fraction of sessions/prompts repeat across the 50/500-Q instances), then decide
 cache granularity (session-level extracted-embed reuse vs prompt-level response cache)"*. This
 document is that measurement. It also retracts the number the harness has been justifying the
@@ -121,8 +121,8 @@ property of the duplication, not of the date population.
 Nothing is worth building at the LLM level for *cross-question* reuse, and the alternative that is
 left — dropping or relocating the date anchor to make prompts repeat — is a **prompt-semantics**
 change that would alter extraction (dates are the anchor for `when`/`startedAt`, E1/#1533) and
-therefore the benchmark's comparability. That is out of scope for a cache, and it is out of scope for
-#1779 by its own scope guard ("Out of scope: any parse/retrieval semantics").
+therefore the benchmark's comparability. That is out of scope for a cache, and it is out of scope
+for this issue by its own scope guard ("Out of scope: any parse/retrieval semantics").
 
 ## 5. What changed in the tree (and what deliberately did not)
 
