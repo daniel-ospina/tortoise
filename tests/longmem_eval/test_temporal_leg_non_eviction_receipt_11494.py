@@ -12,17 +12,36 @@ That ceiling was measured, not assumed: five one-line edits survived every
 gate, each a *self-defeating slice inserted inside an already-pinned
 expression* —
 
-* ``list(...)[:1]``            (refusals under-reported),
+* ``list(...)[:1]``            (refusals under-reported) — **killed here**
 * ``len(...[:0])``             (every guard refusal reverts to
-                                ``no_window_candidates``),
-* ``... or "none"[:0]``        (traceless rows emit ``""``),
-* ``"accepted": accepted[:1]`` (accepted list truncated), and
-* the inert branch's ``"on": True`` (wrong only for inert + switch-OFF).
+                                ``no_window_candidates``) — **killed here**
+* ``... or "none"[:0]``        (traceless rows emit ``""``) — **NOT pinned
+                                here**: the fallback is unreachable, because
+                                ``temporal_leg_order`` stamps ``"none"`` up
+                                front. Residual on #11494.
+* ``"accepted": accepted[:1]`` (accepted list truncated) — **NOT pinned
+                                here**: ``trace["accepted"]`` is never read
+                                by ``retrieve.py``. Residual on #11494.
+* the inert branch's ``"on": True`` — **NOT pinned here**: the receipt's
+                                ``non_eviction`` reads the RESOLVED switch and
+                                ``non_eviction_applied`` reads only
+                                ``trace["applied"]``; nothing on the wired
+                                path reads ``trace["on"]``. Residual on
+                                #11494.
 
-None changes which picks ship, and none is a shape a plausible refactor
-produces — so an AST pin cannot catch them: it pins the TEXT, and the mutant
-is the text plus a slice. The only pin a slice trick cannot defeat is
-**observation**, which is what this module is.
+So this module closes TWO of the five, not all five. The other three are dead
+writes or unreachable branches on the wired path: answering them means
+widening the receipt for a diagnostic no decision asks for, and they are
+recorded on #11494 instead of being papered over with a 15th narrower AST pin
+— which is the family of pin that was defeated five times already. An AST pin
+pins the TEXT and the mutant is the text plus a slice; **observation** is the
+only pin a slice cannot defeat, and it is what kills the two receipt slices
+this module is built around.
+
+Also pinned here, because they were the two ways this module could pass
+vacuously: the stated GEOMETRY (``ceiling == 10``) is asserted from the run
+rather than in prose, and the ambient ``TORTOISE_LME_TEMPORAL_LEG_*`` seams
+are scrubbed so an exported counterfactual knob cannot red a correct arm.
 
 Hermetic: the pool arrives through a stubbed ``hybrid_search``, the graph
 double answers ``[]``, and the props arrive through stubbed annotators. No DB,
@@ -102,7 +121,12 @@ def _question() -> dict:
 
 
 class _Empty:
-    result_set: ClassVar[list] = []
+    # A TUPLE, not a list: a mutable class attribute here would be one list
+    # shared by every ``_Empty`` — and therefore by every ``_Graph``, every
+    # ``_get_proj()`` call and every read in every test — so a later edit that
+    # appended a result would leak across reads silently. This double answers
+    # nothing, so there is nothing to append to.
+    result_set: ClassVar[tuple] = ()
 
 
 class _Graph:
@@ -200,9 +224,16 @@ def _stats(ret: dict) -> dict:
     """
     stats = ret.get("temporal_leg_stats")
     assert stats, f"no temporal_leg_stats block at all: {sorted(ret)}"
-    assert stats.get("on") is True and "non_eviction" in stats, (
-        "the leg did not reach the armed block, so every assertion below would "
-        f"be vacuous — the receipt is the OFF shape: {stats}")
+    # Two INDEPENDENT conditions, two messages: collapsing them makes an
+    # armed-but-broken receipt print "the receipt is the OFF shape" next to
+    # ``on: True``, which sends the next reader hunting the resolver/wiring
+    # instead of the receipt block.
+    assert stats.get("on") is True, (
+        f"the leg never armed — this is the OFF shape, so every assertion "
+        f"below would be vacuous: {stats}")
+    assert "non_eviction" in stats, (
+        f"the armed block ran but the receipt field is missing — look at the "
+        f"receipt construction, not the wiring: {sorted(stats)}")
     return stats
 
 
