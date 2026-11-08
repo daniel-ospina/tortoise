@@ -117,7 +117,9 @@ STATED LIMITS — deliberate, and measured rather than guessed:
     that reports 0 problems. (The site matters: an insert above that document's
     WIRING TABLE, ~56 lines below, moves nothing the pointer reads.) Past-EOF is a
     SEPARATE arm and no insertion reaches it — only a pointer already past the end
-    of the file, like the ``ONTOLOGY.md:1515`` cite in the census above. Cite a row
+    of the file, like the ``ONTOLOGY.md:1515`` cite from
+    `docs/plans/2026-09-10-ws-c-numeric-normalization.md:501` (enumerated below, with the rest
+    of the out-of-scope backlog). Cite a row
     by NAME when it must survive an edit (the policy quoted above); this instrument
     catches the whitespace half of the problem, which is the half that is
     mechanically decidable without inventing a notion of what a row MEANS.
