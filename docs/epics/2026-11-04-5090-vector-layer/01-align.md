@@ -38,7 +38,7 @@ Recorded first, because the scope is wrong if they are taken on trust. Each was 
 |---|---|
 | *"the runtime warns on every search"* | **The warning is SETUP-time, not per-search.** `_record_vector_index_inventory` (`projection/__init__.py`, reached from `_ensure_indexes` via `_ensure_indexes_declared`) emits `log.warning` **once per (endpoint, graph) per process**, guarded by `_VECTOR_INDEX_GAP_WARNED`. The **query-time** fallback logs at **info/debug** (source comment cites #1359 for *"not warning"*). It *looks* per-search on any short-lived CLI process (each `goal-state.py --line` invocation is a fresh process); it is not per query. **The full-scan defect is real and is paid on every query — the warning framing is what is wrong.** |
 | *"$73/GB"* as a per-byte cost of the *whole* graph | Correct as the recorded basis (`billing.cost_basis.falkordb_per_gb = 73.0`), but it must be applied to the **removable payload**, not to 195 MB. See §3. |
-| the epic is *"3 of 4 DoD bullets met"* | **1 of 4 is MET.** `uv run python tools/dod_5090_probe.py` at this head: **`PARTIAL / PARTIAL / MET / NOT MET`**. Rows 1 and 2 are PARTIAL, row 4 NOT MET. |
+| the epic is *"3 of 4 DoD bullets met"* | **2 of 4 are MET at this head** — `uv run python tools/dod_5090_probe.py` at `01a56ff5a0` (2026-11-08): **`MET / PARTIAL / MET / PARTIAL`**. Row 2 is PARTIAL; row 4 is PARTIAL rather than `NOT MET` because V1 is **DECIDED (2026-11-07)** — `STORAGE-ARCHITECTURE.md` §12.1b now records the ruling, and the probe reads `V1 decided` as a decided marker. ⚠️ Row 4 can never reach `MET`: its `implemented` leg is `UNMEASURED` by construction, because a decision record proves a decision, not an implementation. |
 
 ---
 
@@ -223,7 +223,7 @@ Result: **2 P0, 4 P1, 3 P2, 1 P3**. All incorporated:
 |---|---|---|
 | **P0** | `#9548` was described as *"postponed by the owner"*; the owner **authorised** arming 2026-11-03T19:06Z, the DSN **is armed** (`record.armed: true`, 2026-11-05T15:07Z), and it was OPEN on the **write path** (`22P02`, `#10593` — **CLOSED COMPLETED 2026-11-06T19:51:42Z**) plus the unevidenced hosted projection — not on a credential wall | corrected in §1.2 A3, §2, §5, K4 |
 | **P0** | *"the warning fires on every search"* is false — setup-time, once per (process, graph); query fallback logs at info/debug | §0 row 1; K1 restated |
-| P1 | *"3 of 4 DoD bullets met"* is false; the probe returns **1 MET of 4** | §0 row 3, §1.1, §5 |
+| P1 | *"3 of 4 DoD bullets met"* is false; the probe returned **1 MET of 4** at the time of that review (**2 of 4 at this head**) | §0 row 3, §1.1, §5 |
 | P1 | DoD **row 2's** remainder omitted; `#10541` closed COMPLETED with both rows still PARTIAL | §1.3, K7, §5 routing |
 | P1 | `#10976`/`#10000` (both `P0-blocker`) placed in *Not Important* | §2 grid + explicit correction |
 | P1 | A1 rejected on three reasons that do not survive checking | §1.2 A1 — replaced with the `§14.3 V3` reason |

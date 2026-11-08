@@ -218,7 +218,9 @@ The epic is **not** complete when these six merge. It is complete when:
 2. the capstone (C6) passes against a running system;
 3. the surface map (C1) covers every capability, and each surface was verified through its assigned layer.
 
-Row 4 (V1 decided and implemented) **will remain `NOT MET`**, and that is the correct, recorded outcome:
+Row 4 (V1 decided and implemented) **will remain `PARTIAL`**, and that is the correct, recorded outcome —
+not `MET`: `tools/dod_5090_probe.py` scores the `implemented` leg `UNMEASURED`, because a decision record
+proves a decision, not an implementation, so `MET` is unreachable for this row by construction.
 **V1 itself was answered on 2026-11-07**, so what its remainder names is the WORK — the
 `jsonb` → `vector(384)` migration, the index build and the backfill, which are **`#4051`'s** for as long as it
 is open. **An epic may close with a row whose remainder names a live OWNER — it may not close with a row naming nothing.**
