@@ -465,6 +465,14 @@ def test_provision_logging_never_corrupts_the_captured_port():
 # nothing, which is worse than not migrating at all. Entries are (path, the
 # literal substring), each a shape fixture that never dials.
 SEAM_FILES_WITH_ALLOWED_LITERALS = {
+    "tests/test_cache_eviction_evictor_pins.py": [
+        # a MOCKED seam: the file never imports `_live_utils` for real — the
+        # `import _live_utils` text this guard selects on is a COMMENT explaining
+        # that the module was stubbed out (#11085's fixture), and the stub's
+        # `docker_port` is never dialled. Declared rather than migrated because
+        # there is nothing here to migrate: the real helper is deliberately absent.
+        "docker_port=lambda: 6379",
+    ],
     "tests/test_search_engine_gaps.py": [
         # a MOCKED non-local host (the probe is stubbed)
         "docker://:falkordb@test-host:6379/tortoise_test",
