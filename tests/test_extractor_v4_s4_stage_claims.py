@@ -1293,7 +1293,7 @@ def test_an_else_branch_call_reds_the_off_switch_check():
     )
 
 
-# ── the fold's successor is ABSENT ─────────────────────────────────────────
+# ── the fold's successor: LANDED (#11002) ──────────────────────────────────
 #
 # #8500's question (3) is the migration ORDER — *"S4 cannot leave the step list
 # before its successor lands"* — and question (1) is whether the §4.0 purpose
@@ -1307,11 +1307,19 @@ def test_an_else_branch_call_reds_the_off_switch_check():
 # half: neither fold stage can ADD an item a coverage check found missing.
 # ⛔ #11002 resolved that half — the bounded re-narrate can ADD — so the record's
 # verdict is now "the successor HAS landed" and the ordering obligation's
-# pre-condition is MET. What remains before `run_s4` leaves is §4.4's F3
-# measurement (S4's `added_by_s4 > 0` while `coverage_suspect` is False), not a
-# code change. These tests pin both halves: the LANDED verdict with its ADD
-# proof, and the FOLD stages' unchanged inability to produce candidates — so a
-# future lane cannot read a stage list as "gap-filling moved" a second time.
+# pre-condition is MET. ⛔ §4.4's F3 was MEASURED on 2026-11-08 and it FIRES
+# (`added_by_s4 > 0` above zero on BOTH arms: legacy 4/7 primary, 3/7 re-run,
+# 5/7 across the union; delta 2/7 on either run), so `run_s4` STAYS — the
+# MEASUREMENT half is discharged and what remains before it leaves is a CODE
+# change, tracked at #11534. The earlier wording here said the removal was
+# "still gated on §4.4's F3 measurement (S4's `added_by_s4 > 0` while
+# `coverage_suspect` is False), not a code change", i.e. the false "blocked on an
+# eval nobody has run yet" reading — which is also what made "F3 is the ONLY
+# gate" sound plausible to a lane that re-measured `added_by_s4 > 0` on another
+# population and then deleted `run_s4`. These tests pin both halves: the LANDED
+# verdict with its ADD proof, and the FOLD stages' unchanged inability to produce
+# candidates — so a future lane cannot read a stage list as "gap-filling moved" a
+# second time.
 
 #: §4.0's fold: the clause that gives S2.2 VET the coverage question S4's
 #: removal relies on. If the design re-assigns that purpose, the record's
