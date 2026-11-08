@@ -64,7 +64,11 @@
 #         remove (`… && git status --short`, `… && git log --oneline`: a
 #         subcommand is not a path), so the gap is documented and tracked rather
 #         than closed at that price. Prose appended INSIDE the graded command's own
-#         segment, after its artifact token, is likewise unread;
+#         segment, after its artifact token, is likewise unread; and prose carried
+#         in a `#` COMMENT is ungraded too — the identical words outside a comment
+#         are refused, but `… -q  # NOT RUN` is ACCEPTED (#11520 root 3), because
+#         grading comment content is the prose scan this module deliberately
+#         rejects;
 #       - a `-c`/`-e` script body is graded as a command in its own right, never
 #         trusted;
 #       - a runner with NO target at all (`cmd:make`) is a record and confers

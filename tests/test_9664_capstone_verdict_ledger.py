@@ -825,6 +825,13 @@ def test_a_cmd_target_that_names_no_held_artifact_is_invalid(tmp_path):
         "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q  # ran; 194 passed",
         "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q  # see PR #11506 & #11520",
         "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -k 'issue#123' -q",
+        # ⛔ A LINE CONTINUATION (`\` + newline) is not a separator — the shell
+        # JOINS the lines (#11506 review, cycle 4). Tearing at the `\` refused a
+        # record pasted from a wrapped terminal command: measured, both shapes below
+        # exited 1 with NO uncovered list, while `origin/main` ACCEPTED them.
+        "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q \\\n  --maxfail=1",
+        "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q && \\\n"
+        "  ruff check tools/capstone_ledger.py",
     ],
 )
 def test_the_commands_agents_md_hands_a_lane_are_not_false_blocked(tmp_path, command):
@@ -930,7 +937,7 @@ def test_prose_on_EITHER_side_of_a_real_command_is_refused(tmp_path):
         assert proc.returncode == cl.EXIT_CLEAN, (legitimate, proc.stdout + proc.stderr)
 
 
-def test_a_COMMENT_cannot_smuggle_a_disclaimer(tmp_path):
+def test_a_comment_ends_the_LINE_and_the_next_line_is_still_graded(tmp_path):
     """A comment ends the command, so nothing hidden in one is graded.
 
     The comment rule must not become a hiding place: `NOT RUN # && uv run pytest
@@ -984,6 +991,16 @@ def test_a_COMMENT_cannot_smuggle_a_disclaimer(tmp_path):
         "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q && python -c 'NOT RUN'",
         "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q "
         "NOT RUN - I did not run this",
+        # ⛔ A disclaimer carried in a SHELL COMMENT is ungraded (#11520 root 3).
+        # The identical words outside a comment are refused, but behind a `#` they
+        # yield a `verified` row and `uncovered: 0`. Grading comment CONTENT is a
+        # prose scan this module deliberately rejects — it re-introduces the
+        # measured false block `… -q  # ran; 194 passed` — and refusing a LEADING
+        # comment line would false-block the accepted `# step 1` NEWLINE `uv run
+        # pytest …`. So it is recorded here rather than closed at that price.
+        "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q "
+        " # NOT RUN - I did not run this",
+        "cmd:uv run pytest tests/test_9664_capstone_verdict_ledger.py -q ; # NOT RUN",
     ],
 )
 def test_the_known_residual_false_PASSes_are_pinned_as_OPEN(tmp_path, disclaimer):

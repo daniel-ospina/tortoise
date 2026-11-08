@@ -441,6 +441,25 @@ def _split_segments(text: str) -> list[str]:
         elif char in "\"'`":
             quote = char
             current.append(char)
+        elif char == "\\" and index + 1 < len(text):
+            # An UNQUOTED backslash (#11506 review, cycle 4). The shell's rule is not
+            # "only inside double quotes": an unquoted `\` escapes the next
+            # character, and `\` + NEWLINE is a LINE CONTINUATION — the shell JOINS
+            # the lines, so that newline is NOT a separator. Untreated, a record
+            # pasted from a wrapped terminal command was torn at the `\` and
+            # REFUSED: measured, `cmd:uv run pytest … -q \` NEWLINE `  --maxfail=1`
+            # exited 1 with NO uncovered list, while `origin/main` ACCEPTED it — a
+            # regression of exactly the class this ruleset exists to remove.
+            # The backslash is preserved for any OTHER escaped character, so the
+            # later `shlex.split` still sees the quoting the record was written with.
+            following = text[index + 1]
+            if following == "\n":
+                index += 2
+                continue
+            current.append(char)
+            current.append(following)
+            index += 2
+            continue
         elif char == "#" and (index == 0 or text[index - 1] in " \t\n;&|"):
             # A shell COMMENT starts here: the rest of the LINE is not a command, so
             # no separator on this line may split — but `\n` is a separator, so the
