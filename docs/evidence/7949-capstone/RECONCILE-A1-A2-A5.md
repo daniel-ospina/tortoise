@@ -297,9 +297,12 @@ one arithmetic, and an arithmetic that is right for one base is already wrong fo
 symbol and let the line number be a convenience printed beside it** (`git grep -n 'vet_enabled = '
 -- tortoise/extractor_v2.py`, `git grep -n 'payload_entities.append' -- tortoise/extractor_v2.py` —
 the path matters: unscoped, both patterns also match THIS record and its quoted lines, which is the
-count-of-mentions trap §0 documents). Every number this paragraph pins to one of §5's four shas is re-derived at that sha by the
-`for s in aa414b4d5 8e49ae909 80c912244 d69faaf38` sweep in §5 — a live grep cannot do it (scoped,
-`git grep -n 'vet_enabled = ' -- tortoise/extractor_v2.py` prints
+count-of-mentions trap §0 documents). Every **range start** and every single-line cite this paragraph
+pins to one of §5's four shas is re-derived at that sha by the
+`for s in aa414b4d5 8e49ae909 80c912244 d69faaf38` sweep in §5; the three range **ends** (`:11352`,
+`:11732`, `:12303`) are the continuation line of that same statement, which the sweep's
+`'vet_enabled = ('` pattern does not print — read them with `-A1`. A live grep cannot re-derive any of
+it (scoped, `git grep -n 'vet_enabled = ' -- tortoise/extractor_v2.py` prints
 `:12929` at HEAD and `:12779` at `62248db88`, and the sweep covers **neither** of those two bases), which is the whole point. That is the class of defect §0 exists to catch: a number true at
 one base and false at the base the record claims. Which is why the 0.0 pp above is the **armed** result,
 not an unarmed one.
