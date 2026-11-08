@@ -793,7 +793,7 @@ def test_an_all_empty_s2_batch_is_skipped_without_a_model_call(monkeypatch):
         "must not spend a call on it")
     stats = out["stats"]["partial_gap_fill"]
     assert stats["armed"] is True
-    assert stats["skipped"] == "empty embed_list"
+    assert stats["skipped"] == "no candidate the detector counts"
     assert stats["fired"] is False
     assert "llm" not in stats
 
@@ -829,7 +829,7 @@ def test_the_skip_also_fires_when_the_mention_channel_wrote_bookkeeping(
         "still S4's rescue and must not cost a model call")
     stats = out["stats"]["partial_gap_fill"]
     assert stats["armed"] is True
-    assert stats["skipped"] == "empty embed_list"
+    assert stats["skipped"] == "no candidate the detector counts"
     assert stats["fired"] is False
     assert "llm" not in stats
 
@@ -1251,6 +1251,59 @@ def test_an_operator_only_batch_is_skipped_with_no_model_call(monkeypatch):
     out = _run(monkeypatch, model)
     assert "gap_fill" not in model.calls
     stats = out["stats"]["partial_gap_fill"]
-    assert stats["skipped"] == "empty embed_list"
+    assert stats["skipped"] == "no candidate the detector counts"
     assert stats["fired"] is False
     assert "llm" not in stats
+
+
+def test_a_candidate_that_tokenises_to_nothing_does_not_arm_the_call(monkeypatch):
+    """The population the union is built from, not the item count (round 10, P2).
+
+    ``check_batch``'s ``candidates`` counts an item whenever ``_item_text`` is
+    non-empty, but ``partial_gaps`` builds its idf union from the **tokens**. An
+    item whose text carries no content token is therefore a candidate that covers
+    nothing, and asking the first number armed a billed call over a narrative the
+    detector had flagged in full — the S4-rescue population this arm excludes.
+    Measured on the code this replaces: ``candidates 1``, ``flagged_total 2``,
+    ``candidates_with_tokens 0``.
+    """
+    tokenless = {"entities": [{"name": "Done.", "kind": "core:event"}],
+                 "events": [], "points": [], "operators": []}
+    batch = v2._vet_gate.check_batch(tokenless, NARRATIVE)
+    assert batch["candidates"] == 1, (
+        "the item exists, so the item count is 1 — that is why it was trusted")
+    assert batch["candidates_with_tokens"] == 0, (
+        "…and it contributes nothing to the union, so every span is flagged")
+    assert batch["partial_gaps"]["flagged_total"] > 0
+
+    model = _Model(s2_answer=tokenless)
+    out = _run(monkeypatch, model)
+    assert "gap_fill" not in model.calls
+    stats = out["stats"]["partial_gap_fill"]
+    assert stats["skipped"] == "no candidate text tokens", (
+        "the record must name the shape it skipped — 'empty embed_list' was the "
+        "false label a review caught on a batch that is not empty")
+    assert stats["fired"] is False
+    assert "llm" not in stats
+
+
+def test_a_raising_detector_is_recorded_not_swallowed(monkeypatch):
+    """Fail-open AND loud (round 10, P3).
+
+    The stage's own contract, two lines above the call site, is that a detector
+    that raises records the reason in ``errors``/``vet_warnings``. ``except:
+    return False`` turned a crashed detector into the same silent skip as an empty
+    batch, so no record could tell them apart.
+    """
+    def _boom(*_a, **_k):
+        raise RuntimeError("detector exploded")
+
+    monkeypatch.setattr(v2._vet_gate, "check_batch", _boom)
+    model = _Model()
+    out = _run(monkeypatch, model)
+    assert "gap_fill" not in model.calls, "an unknown gap is not a licence to bill"
+    stats = out["stats"]["partial_gap_fill"]
+    assert stats["skipped"] == "detector raised: RuntimeError"
+    assert any("detector failed" in e for e in out["errors"]), (
+        "the contract is FAIL-OPEN **AND LOUD** — the reason must reach errors, "
+        f"not only the stats dict; got {out['errors']!r}")

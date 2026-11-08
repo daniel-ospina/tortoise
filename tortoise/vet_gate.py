@@ -599,6 +599,25 @@ def narrative_segments(narrative: str) -> list[dict]:
     return out
 
 
+def _candidate_token_sets(embed_list: object) -> list[set[str]]:
+    """The batch's candidate texts, tokenised, the empty ones dropped.
+
+    ⛔ ONE definition, because two call sites disagreed (review round 10, P2).
+    ``check_batch``'s ``candidates`` counts an item whenever ``_item_text`` is
+    non-empty — but ``partial_gaps`` builds its idf union from the TOKENS, so an
+    item whose text carries no content tokens (``"Done."``, ``"TODO"``) counted
+    as a candidate while contributing nothing to the union. Measured: one
+    ``{"name": "Done."}`` entity plus a two-sentence narrative gave
+    ``candidates 1``, ``flagged_total 2`` — every span flagged with a candidate
+    present — and a predicate asking the first population fired a billed call
+    over it. Both numbers now come from this one function, so the count and the
+    scan cannot describe different populations.
+    """
+    toks = [_gap_tokens(_item_text(section, item))
+            for section, _i, item in _iter_items(embed_list)]
+    return [t for t in toks if t]
+
+
 def partial_gaps(embed_list: object, narrative: str, *,
                  coverage_floor: float = GAP_COVERAGE_FLOOR,
                  min_content_tokens: int = GAP_MIN_CONTENT_TOKENS,
@@ -614,7 +633,14 @@ def partial_gaps(embed_list: object, narrative: str, *,
 
         {"segments": N, "coverage_floor": f, "min_content_tokens": k,
          "flagged_total": K, "flagged": [ {...segment, "coverage": c,
-         "missing": [tokens]} ], "truncated": bool}
+         "missing": [tokens]} ], "truncated": bool,
+         "candidates_with_tokens": n}
+
+    ``candidates_with_tokens`` is the population the union was actually built
+    from — the candidates whose text tokenises — which is NOT necessarily
+    ``check_batch``'s ``candidates`` (an item can carry text and no content
+    token). A consumer asking "does this batch have anything to dedup against?"
+    must ask THIS number; ``candidates`` answers "did the batch produce items?".
 
     ``flagged_total`` is the TRUE count; ``flagged`` holds at most
     ``max_flagged`` entries so a session's stats stay bounded. Entries are
@@ -636,13 +662,12 @@ def partial_gaps(embed_list: object, narrative: str, *,
     segments = narrative_segments(narrative)
     empty = {"segments": 0, "coverage_floor": coverage_floor,
              "min_content_tokens": min_content_tokens,
-             "flagged_total": 0, "flagged": [], "truncated": False}
+             "flagged_total": 0, "flagged": [], "truncated": False,
+             "candidates_with_tokens": 0}
     if not segments:
         return empty
 
-    candidate_tokens = [_gap_tokens(_item_text(section, item))
-                        for section, _i, item in _iter_items(embed_list)]
-    candidate_tokens = [toks for toks in candidate_tokens if toks]
+    candidate_tokens = _candidate_token_sets(embed_list)
     df: dict[str, int] = {}
     for toks in candidate_tokens:
         for token in toks:
@@ -673,7 +698,8 @@ def partial_gaps(embed_list: object, narrative: str, *,
             "min_content_tokens": min_content_tokens,
             "flagged_total": len(flagged),
             "flagged": flagged[:max_flagged],
-            "truncated": len(flagged) > max_flagged}
+            "truncated": len(flagged) > max_flagged,
+            "candidates_with_tokens": n_items}
 
 
 # ── Level 2 — the batch checks (mechanical, unique to VET) ─────────────────
@@ -711,6 +737,13 @@ def check_batch(embed_list: object, narrative: str) -> dict:
     return {
         "narrative_statements": statements,
         "candidates": total,
+        # The population ``partial_gaps`` builds its union from — the SAME
+        # ``_candidate_token_sets`` filter, so the two numbers cannot describe
+        # different populations (review round 10, P2). ``candidates`` answers
+        # "did the batch produce items?"; this answers "is there anything to
+        # dedup against?", and a consumer that wants the second must not ask the
+        # first.
+        "candidates_with_tokens": len(_candidate_token_sets(embed_list)),
         "by_section": counts,
         "coverage_ratio": (round(ratio, 3) if ratio is not None else None),
         # The ONE unambiguous coverage failure: prose in, nothing out.

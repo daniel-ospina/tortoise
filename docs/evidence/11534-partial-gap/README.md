@@ -227,15 +227,31 @@ So:
   RECORDED rather than implied.** `TORTOISE_PARTIAL_GAP_FILL` is armed only when
   a story and an S2 list exist, so `#11534`'s target (a *partial* gap) excludes
   the empty-S2 case — which is exactly the session `run_s4` rescues
-  (`s4_full_rescues`, `#2335`). The stage records `armed: true, skipped:
-  "empty embed_list"` there, so a measurement run can tell "armed and skipped"
-  from "not armed" (#9116's ambiguity), and the exclusion is visible instead of
-  being read as "the stage found nothing". The predicate is over the four
-  CANDIDATE sections (`_batch_has_candidates`), not the mapping — an armed
-  `route_mentions` pass writes `mention_stats` onto that same mapping, and a
-  truthiness test would have read such a batch as non-empty and fired a billed
-  call at the population this bullet says is excluded (pinned, armed, by
-  `test_the_skip_also_fires_when_the_mention_channel_wrote_bookkeeping`).
+  (`s4_full_rescues`, `#2335`). The stage records `armed: true, skipped: "no
+  candidate the detector counts"` there, so a measurement run can tell "armed
+  and skipped" from "not armed" (#9116's ambiguity), and the exclusion is
+  visible instead of being read as "the stage found nothing".
+* **The skip predicate is the detector's own population, and that took three
+  rounds to get right** — each round was a *different* population being counted,
+  all of them wrong in the same direction (fire over a fully-flagged narrative):
+  the mapping's truthiness (round 7 — an armed `route_mentions` pass writes
+  `mention_stats` onto it), then the four CANDIDATE sections
+  (`_batch_has_candidates`, round 9 — the detector counts three, so an
+  operator-only batch fired), then `candidates` itself (round 10 — it counts
+  items with text, while the union is built from *tokens*, so `{"name":
+  "Done."}` gave `candidates: 1` with `flagged_total` equal to every span). It
+  now asks `candidates_with_tokens`, the same `_candidate_token_sets` filter
+  `partial_gaps` builds its union from, so predicate and scan are one population
+  by construction. A batch skipped for that shape records `"no candidate text
+  tokens"` — distinct from the operator-only `"no candidate the detector
+  counts"`, because a measurement run reading both as "empty" would misattribute
+  operator-only sessions. A detector that *raises* records
+  `"detector raised: <Type>"` in `errors`; the contract is fail-open **and
+  loud**, and swallowing it made a crash indistinguishable from an empty batch.
+  Pinned by `test_the_skip_also_fires_when_the_mention_channel_wrote_bookkeeping`,
+  `test_an_operator_only_batch_is_skipped_with_no_model_call`,
+  `test_a_candidate_that_tokenises_to_nothing_does_not_arm_the_call` and
+  `test_a_raising_detector_is_recorded_not_swallowed`.
 * **The clause split is crude by design.** `,`/`:`/`—`/`but`/`so`/`though`/
   `while`/`which`/`because`/`and` — a claim split differently than that is
   judged as a larger or smaller unit, and a two-token elision is below the
