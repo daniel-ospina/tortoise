@@ -391,8 +391,11 @@ def _report_fts(fts: dict) -> None:
         residue_before = probe.get("residue_before")
         before = ("—" if residue_before is None
                   else f"{residue_before} residue before")
+        # ⛔ TWO UNITS, TWO WORDS: `residue` holds urls and `hits` counts rows, so
+        # the same line must not call both of them one thing (#11536 review round 5).
         print(f"          {probe['phrase']!r}: {before} -> "
-              f"{len(probe['residue'])} residue after, {probe['hits']} hit(s)"
+              f"{len(probe['residue'])} residue url(s) after, "
+              f"{probe['hits']} hit(s)"
               + ("" if probe["ran"] and not probe["degraded"]
                  else f"   ⚠️ UNMEASURABLE ({probe['reason']})"))
         if probe.get("lexicon"):

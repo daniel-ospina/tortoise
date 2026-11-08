@@ -131,6 +131,7 @@ __all__ = [
     "carries_pre_lexicon_prose",
     "census",
     "find_session_sources_carrying_prose",
+    "lexicon_control_read",
     "lexicon_control_token",
     "probe_fts",
     "probe_phrase_rejection",
@@ -1601,12 +1602,20 @@ def source_index_is_empty(g, *,
     return None
 
 
-def lexicon_control_token(g, *,
-                          timeout_ms: int = CACHE_READ_TIMEOUT_MS) -> str | None:
-    """One token from a POST-fix lexicon node, or ``None`` when there is none.
+def lexicon_control_read(g, *,
+                         timeout_ms: int = CACHE_READ_TIMEOUT_MS
+                         ) -> tuple[str | None, str | None]:
+    """``(token, failure)`` — one POST-fix lexicon token, or why there is none.
 
-    The positive control: a token the lexicon writer put on a node must still be
-    findable, which is what makes the probes' zero evidence that the index
+    ⛔ A FAILED READ IS NOT AN EMPTY WINDOW (#11536 review round 5). Collapsing
+    both into ``None`` let the caller report "no usable token within the window the
+    control reads" about a window the run never read — the same over-claim as its
+    two predecessors, one order smaller. The failure is returned as a reason so the
+    caller can say which of the two happened; the module's own `source_index_is_empty`
+    already distinguishes them for the other control arm.
+
+    The positive control itself: a token the lexicon writer put on a node must
+    still be findable, which is what makes the probes' zero evidence that the index
     ANSWERS rather than evidence that the read is dead.
     """
     try:
@@ -1614,10 +1623,10 @@ def lexicon_control_token(g, *,
                        params={"prefix": SESSION_SOURCE_SUMMARY_PREFIX},
                        timeout=_effective_timeout_ms(g, timeout_ms)).result_set
     except Exception:  # noqa: BLE001, RUF100 — a control that cannot be read is
-        # reported as ABSENT by the caller, never raised: the probe result is the
-        # finding, and an exception here would turn "unmeasurable" into a crash.
+        # REPORTED, never raised: the probe result is the finding, and an
+        # exception here would turn "unmeasurable" into a crash.
         logger.debug("#11070: the FTS control read failed", exc_info=True)
-        return None
+        return None, "the control's lexicon read FAILED"
     for row in rows or []:
         text = row[0] if row else None
         if not isinstance(text, str):
@@ -1625,8 +1634,18 @@ def lexicon_control_token(g, *,
         for token in text.split(","):
             candidate = token.strip()
             if candidate and probe_phrase_rejection(candidate) is None:
-                return candidate
-    return None
+                return candidate, None
+    return None, None
+
+
+def lexicon_control_token(g, *,
+                          timeout_ms: int = CACHE_READ_TIMEOUT_MS) -> str | None:
+    """One token from a POST-fix lexicon node, or ``None`` when there is none.
+
+    The token alone, discarding WHY there is none — :func:`lexicon_control_read` is
+    the verb a caller needing the distinction should use.
+    """
+    return lexicon_control_read(g, timeout_ms=timeout_ms)[0]
 
 
 def probe_fts(g, phrases, *, control: bool = True,
@@ -1715,8 +1734,17 @@ def probe_fts(g, phrases, *, control: bool = True,
         "control": None,
     }
     if control:
-        token = lexicon_control_token(g, timeout_ms=timeout_ms)
-        if token is not None:
+        token, control_failure = lexicon_control_read(g, timeout_ms=timeout_ms)
+        if control_failure is not None:
+            # ⛔ A FAILED READ IS NOT AN EMPTY WINDOW (#11536 review round 5): this
+            # arm used to fall through to "no usable token within the window",
+            # i.e. it claimed to have READ a window it never read.
+            report["control"] = {
+                "mode": "unavailable", "ok": False, "hits": None,
+                "note": f"{control_failure} — an unreadable instrument is not an "
+                        "empty one, so nothing here corroborates the probe's zero",
+            }
+        elif token is not None:
             # ⛔ The TOKEN IS NOT ECHOED. It is a transcript-derived word (the
             # capture's own topic lexicon), and the dry run's report is
             # deliberately redacted by whitelist so no piece of the utterance

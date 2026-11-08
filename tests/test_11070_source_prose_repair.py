@@ -3350,7 +3350,13 @@ def test_the_repair_arm_takes_the_BEFORE_reading_itself(monkeypatch, capsys):
     assert _cli.main() == 0
     captured = capsys.readouterr()
     assert "Repair complete." in captured.out
-    assert "1 residue before" in captured.out and "0 residue after" in captured.out
+    assert "1 residue before" in captured.out, captured.out
+    # The AFTER read here returns no rows at all, so both counts are 0 — that
+    # pins the WORDS, not the split between them (#11536 review round 5: an
+    # earlier version of this line asserted `1 hit(s)`, which this fake can never
+    # produce). The split is pinned where the two counts differ, in
+    # `test_the_report_SEPARATES_the_url_count_from_the_row_count`.
+    assert "0 residue url(s) after, 0 hit(s)" in captured.out, captured.out
 
 
 def test_an_UNCORROBORATED_zero_does_not_certify(monkeypatch, capsys):
@@ -3649,10 +3655,13 @@ def test_TWO_nodes_at_ONE_url_are_BOTH_classified_so_a_prose_twin_cannot_certify
         rows into ``props_by_url[url] = props``, so ONE url carrying TWO
         ``:Source`` nodes kept whichever node the engine returned LAST. Here the
         last row is a REPAIRED twin and the first is a prose-carrying one, so the
-        url was classified entirely from the repaired node, the prose node was
-        never examined, and ``_merge_probe`` certified while the FTS read that
-        produced the rows returned the prose node too — the sentence was still
-        retrievable. #11161's own failure mode, through a different door.
+        url was bucketed as a BENIGN stem collision (``residue`` came back empty)
+        while the FTS read that produced the rows had returned the prose node too
+        — the sentence was still retrievable. That empty ``residue`` is what this
+        row's assertion reds on; it does NOT claim ``_merge_probe`` certified here
+        (with no control and no BEFORE reading the fold vetoes `uncorroborated`
+        anyway — the CLI-level shape is the next test's). #11161's own failure
+        mode, through a different door.
     (2) REACHABLE: ``:Source`` declares NO uniqueness on ``url``
         (``find_session_sources_carrying_prose`` says so and dedupes on ``id(s)``
         for exactly this reason, #11176), so a second writer's CREATE can leave two
@@ -4092,3 +4101,71 @@ def test_a_BEFORE_reading_that_did_not_MEASURE_is_not_reported_as_a_clean_zero(
         "a BEFORE reading that DID run and matched nothing lost its wording: "
         + err)
     assert "returned no PRE-FIX node BEFORE the repair either" in err
+
+def test_the_report_SEPARATES_the_url_count_from_the_row_count(capsys):
+    """#11536 review round 5: two units on one line, and they must not merge.
+
+    ⛔ ``residue`` (and every other bucket) holds URLS while ``probe["hits"]``
+    counts ROWS, so a print that renders both with one unit is wrong for at least
+    one of them — and the twin case is where they differ (two rows, one url). It
+    is pinned HERE because the repair-arm row cannot show it: its AFTER read
+    returns no rows at all, so both counts are 0 and any unit reads as plausible.
+    """
+    folded = {
+        "entity_type": "source", "probes": [
+            {"phrase": "zebraquux", "hits": 2, "ran": True, "degraded": False,
+             "residue": ["session:dup"], "residue_before": 2,
+             "lexicon": [], "stale": [], "foreign": [], "unexplained": [],
+             "unread": [], "unresolved": 0, "truncated": False}],
+        "control": None, "certifies": False, "vetoed": "leaked",
+        "leaked": ["zebraquux"], "stale": [], "unexplained": [],
+        "unmeasurable": [], "truncated": [], "unclassified": [],
+        "unresolved": 0,
+    }
+    _cli._report_fts(folded)
+    out = capsys.readouterr().out
+    assert "1 residue url(s) after, 2 hit(s)" in out, (
+        "the line reports a URL count and a ROW count as one unit: " + out)
+
+
+def test_a_FAILED_control_read_is_not_an_EMPTY_control_window(monkeypatch):
+    """#11536 review round 5: an unreadable control is not an empty one.
+
+    (1) FAILS on the shipped control: ``lexicon_control_token`` swallowed the read
+        failure and returned ``None``, so a run whose control read RAISED reported
+        "no usable control TOKEN was found within the 8-row window the control
+        reads" — a statement about a window it never read, which is the same
+        over-claim one order smaller than the two this leg already closed. The
+        module distinguishes exactly this shape for its OTHER control arm
+        (``source_index_is_empty`` returns ``None`` for "read failed").
+    (2) REACHABLE: a breaker-open / timed-out control read on a graph that does
+        hold a usable lexicon row.
+    """
+    from tortoise import session_source_prose_migration as m
+
+    class _ControlReadRaises(_RecordingGraph):
+        """A graph with a usable lexicon row whose CONTROL read fails."""
+
+        def __init__(self):
+            super().__init__([])
+
+        def query(self, cypher, params=None, timeout=None):
+            if "STARTS WITH $prefix" in cypher:
+                raise RuntimeError("control read timed out")
+            return super().query(cypher, params=params, timeout=timeout)
+
+    _install_fts(monkeypatch, {"zebraquux": []})
+    report = m.probe_fts(_ControlReadRaises(), ["zebraquux"], control=True)
+    control = report["control"]
+    assert control["mode"] == "unavailable" and control["ok"] is False
+    assert "FAILED" in control["note"], (
+        "a control read that RAISED was reported as an empty window: "
+        + control["note"])
+    assert "window the control reads" not in control["note"], (
+        "the note claims to have read a window the run never read: "
+        + control["note"])
+
+    # …and the token-only verb still answers the old question, for callers that
+    # do not need the distinction.
+    assert m.lexicon_control_read(_ControlReadRaises())[1] is not None
+    assert m.lexicon_control_token(_ControlReadRaises()) is None
