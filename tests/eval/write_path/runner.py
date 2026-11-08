@@ -958,23 +958,28 @@ def aggregate_graph_census(per_session: dict[str, dict]) -> dict:
         # `object_edges_total` is the single number the E6 pre-registration
         # reads against its before-arm of 0, and it is the ATTRIBUTABLE count
         # (write-leg record, verified in the graph) — not the incident read.
-        # ⚠️ TWO caveats a reader must carry, neither of which is a defect:
+        # ⚠️ THREE caveats a reader must carry, none of which is a defect:
         #
         # 1. It counts WRITE CLAIMS per session, so a pair two sessions both
         #    stated adds 2 for the one graph edge: read it with
         #    `object_edges_basis` (how many sessions could answer at all) and
         #    `object_edges_missing` (claims the graph did not hold), never on
         #    its own.
-        # 2. ⛔ It is NOT the E6 row's POPULATION. The registration
-        #    (`docs/plans/2026-11-04-5087-epic-decomposition.md` §E6) defines
-        #    the before-arm as *written Object→Object edges*, while this sum
-        #    includes the Subject-targeted `ownedBy`/`managedBy` edges the same
-        #    leg writes (measured on the committed receipt: 35 recorded = 24
-        #    Object→Object + 11 Subject-targeted). The per-edge rows in
-        #    `relation_write['edges']` carry `predicate` and both ids, so the
-        #    split is a read, not a new write — but until a caller applies it,
-        #    the after-arm must not be compared to that baseline as-is
-        #    (#11548 review, context note).
+        # 2. ⛔ It is NOT "Object→Object ONLY", which is how the E6
+        #    pre-registration words its row
+        #    (`docs/plans/2026-11-04-5087-epic-decomposition.md` §E6: *written
+        #    Object→Object edges*, before-arm 0). The attributable read verifies
+        #    every edge the leg RECORDED, and the structural arm writes
+        #    `ownedBy`/`managedBy` to SUBJECTS as well — on the committed
+        #    `w2b-relations-2026-11-08-11237.json` that split is 24
+        #    Object→Object vs 11 Subject-targeted. **The widening is
+        #    deliberate**: those are edges this leg wrote, and excluding them
+        #    was the `#10000` pin's own blind spot. So the E6 after-arm must
+        #    compare a POST-DIFF `object_edges_total` against the before-arm
+        #    with that difference STATED, never treating the two as the same
+        #    population (#11548 review, context note).
+        # 3. The split needs no new write: each per-edge row of
+        #    `relation_write['edges']` carries its `predicate` and both ids.
         "object_edges": object_edges,
         "object_edges_total": sum(object_edges.values()),
         "object_edges_basis": object_edges_basis,

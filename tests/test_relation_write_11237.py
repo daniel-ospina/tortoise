@@ -427,10 +427,13 @@ def test_a_manifest_only_structural_predicate_names_the_writer_it_would_reach():
     shape) and ``"create_edge"`` disappears from the reason while
     ``"binds only the operator path"`` appears.
     """
+    # ``declared=()`` keeps this a test of the STORY's verb: a live catalog that
+    # happens to declare ``occurrence → occurrence`` must not divert the case
+    # into the hierarchy branch (the peer implementation's isolation, kept).
     for predicate in ("aboutPoint", "extractedFrom"):
         edges, drops = plan_relation_edges(
             [{"src": "retry storm", "dst": "deadline slip",
-              "predicate": predicate}], INDEX)
+              "predicate": predicate}], INDEX, declared=())
         assert edges == [], (predicate, edges)
         assert len(drops) == 1, (predicate, drops)
         reason = drops[0].reason
