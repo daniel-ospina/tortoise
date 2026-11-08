@@ -294,7 +294,11 @@ _OWNER_ISSUE = re.compile(r"^#\d+$")
 #: A Cypher label. A `stores` label is interpolated into a query by its consumers, so it is held to
 #: the same shape `tortoise.security.validate_entity_type` allowlists — statically, here, where the
 #: declaration is made (defence in depth: the register is a leaf and cannot import that validator).
-_LABEL = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+#: ⛔ `\Z`, NOT `$`: `$` also matches before a TRAILING NEWLINE, so `("Event\n",)` loaded here while
+#: `tools/dod_5090_probe.py`'s `_STORE_LABEL.fullmatch` graded the same declaration malformed — one
+#: value, two verdicts, and the register blessed what its only consumer refuses. `\Z` makes the two
+#: validators agree, which their docstrings already claim of each other.
+_LABEL = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\Z")
 
 
 class UnclassifiedWriterKey(LookupError):

@@ -972,22 +972,41 @@ def test_every_declared_label_re_derives_at_this_head() -> None:
             f"{key} declares stores={declared} but {rel}::{symbol} no longer carries {needle!r} — "
             "the store moved, so the declaration is stale"
         )
-    # …and the label CONSTANTS those clauses are built from must still name the same labels.
+    # …and the label CONSTANTS those clauses are built from must still name EXACTLY the same
+    # labels — in BOTH directions. ⛔ The one-directional form ("each declared label still
+    # appears in the constant") is NOT the property: a label ADDED to the constant widens the
+    # set of labels the writer STORES on, while the declaration keeps naming the old ones, so
+    # row 2 would never see the new label as an orphan. That is a false PASS — the exact failure
+    # `#11492` exists to remove — and the set comparison below is what closes it (mutation: adding
+    # `("Batch", "id")` to `_CANONICAL_ENTITY_ID_PROPS` left this test green before it).
     for key, (rel, symbol, labels) in sorted(LABEL_CONSTANTS.items()):
         source = (REPO_ROOT / rel).read_text(encoding="utf-8")
         lines = source.splitlines()
-        defined = "\n".join(
-            "\n".join(lines[node.lineno - 1:node.end_lineno])
-            for node in ast.parse(source).body
+        assigned = [
+            node for node in ast.parse(source).body
             if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
             and node.target.id == symbol
+        ]
+        defined = "\n".join(
+            "\n".join(lines[node.lineno - 1:node.end_lineno]) for node in assigned
         )
         assert defined, f"{key} cites {rel}::{symbol}, which that file does not define at module level"
+        # The constant is a tuple of `(label, id-prop)` pairs; each pair's FIRST element is a label.
+        identified = {
+            element.elts[0].value
+            for node in assigned
+            if isinstance(node.value, ast.Tuple)
+            for element in node.value.elts
+            if isinstance(element, ast.Tuple) and element.elts
+            and isinstance(element.elts[0], ast.Constant)
+            and isinstance(element.elts[0].value, str)
+        }
         assert set(EMBED_WRITER_CLASSES[key].stores) == set(labels), key
-        for label in labels:
-            assert f'"{label}"' in defined, (
-                f"{rel}::{symbol} no longer names {label!r}, so {key}'s declaration is stale"
-            )
+        assert identified == set(labels), (
+            f"{rel}::{symbol} names {sorted(identified)} while {key} declares "
+            f"{sorted(EMBED_WRITER_CLASSES[key].stores)} — a label added to the constant is a "
+            "label the writer STORES on, so the declaration must name it too"
+        )
 
 
 def test_a_runtime_label_declaration_is_named_not_guessed() -> None:
