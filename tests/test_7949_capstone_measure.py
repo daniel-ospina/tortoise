@@ -11401,14 +11401,23 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # qualifier it parses and refuses one that is not a base.
     # ⚠️ A SUPERSEDED arm is described by nothing here any more. An earlier revision of this
     # comment explained that the qualifier was "any word run" accepting both the live and the base
-    # spelling, because the arm then read was a `(?!`?\d)` lookahead that EXCLUDED bases — under
-    # which "the qualifier must NOT be a base" was TRUE. `#11555`/`#11002` replaced that arm with
-    # the base-qualified pair, so both the tolerance and the sentence are gone with it: keeping
-    # either would have this file grading a policy the record retired, which is the rot it exists
-    # to catch. Probed at this head, record restored after each (SERIAL — two parallel runs that
-    # both mutate this shared artifact produce a false red):
-    #   `:12929` at `HEAD`       -> RED   (the live spelling is NOT accepted)
-    #   `:12929` at `62248db88`  -> RED   (a ONE-SIDED base change is NOT green)
+    # spelling, because the arm then read was `_found == ["12929"]` over a `(?!`?\d)` lookahead.
+    # ⛔ NOT "a lookahead that excluded bases" — that misreads it in the direction this file keeps
+    # having to correct. Measured on that arm's own regex (`7dabb59e0^`): `:12929 at a1dff7cec8`
+    # MATCHES, `:12929 at 62248db88` does not, and the record's `` at `a1dff7cec8` `` does not
+    # either. It excluded a base that STARTS WITH A DIGIT and could not read a BACKTICKED one at
+    # all — which is why §2 read `[]` against a record that states the number correctly. The
+    # "qualifier must NOT be a base" prose was therefore true only of the digit-initial spelling;
+    # `#11555`/`#11002` then replaced the arm with the base-qualified pair, retiring the tolerance
+    # and that sentence together. Keeping either would have this file grading a policy the record
+    # retired, which is the rot it exists to catch.
+    # Probed at this head, record restored after each (SERIAL — two parallel runs that both mutate
+    # this shared artifact produce a false red):
+    #   `:12929` at `HEAD` REPLACING the base-qualified cite -> RED  (the PAIR is what is gone)
+    #   `:12929` at `62248db88`, one-sided                   -> RED
+    #   `:12929` at `HEAD` ADDED beside the base-qualified   -> GREEN in §2 — NOT an acceptance:
+    #       cite                                                §2 has no live-number arm by design
+    #                                                           (below), and the §5 block REDS.
     # ⚠️ WHAT THE PAIR DOES NOT DO: `a1dff7cec8` is a CONSTANT in this file, so the arm proves the
     # record agrees with that constant — never that the constant is where `vet_enabled` actually
     # sat. Re-reading `extractor_v2.py` AT that base needs history a `fetch-depth: 1` checkout does

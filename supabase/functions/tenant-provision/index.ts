@@ -18,8 +18,8 @@
 //
 // ── CALLER AUTH (#802) ─────────────────────────────────────────────────
 // The function is deployed with verify_jwt=false (--no-verify-jwt) so the
-// gateway does not pre-empt the identity/rate logic below; the caller is
-// verified HERE, and the public anon key alone is NOT sufficient to mint
+// gateway does not pre-empt the caller check below; the caller is verified
+// HERE, and the public anon key alone is NOT sufficient to mint
 // orgs/API keys:
 //
 //   A USER JWT (Authorization: Bearer) whose identity (id + email) matches
