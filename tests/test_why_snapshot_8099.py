@@ -235,6 +235,14 @@ def test_push_path_assembles_nothing_and_computes_no_beliefs(monkeypatch):
     def _boom_ep(*a, **k):
         raise AssertionError("the push path called the EP engine")
 
+    # ⛔ BOTH HOMES (#8099 review F3). The alias only intercepts callers that
+    # resolve through ``why_snapshot``'s namespace (i.e. ``precompute``, already
+    # run). The mutation this test exists to catch is a NEW
+    # ``from .why import assemble_why_blocks`` inside ``webhook_delivery`` —
+    # `_page_why_entries` already imports its sibling that way two lines up —
+    # and that resolves through ``tortoise.why`` at CALL time, so trapping the
+    # defining module is the half that can actually red for it.
+    monkeypatch.setattr("tortoise.why.assemble_why_blocks", _boom_assembly)
     monkeypatch.setattr(ws_mod, "assemble_why_blocks", _boom_assembly)
     monkeypatch.setattr(ep_mod.TortoiseEP, "compute_confidence", _boom_ep)
     transport = FakeTransport()
@@ -486,3 +494,159 @@ def test_stale_snapshots_are_purged_but_fresh_ones_survive():
     ws.precompute(proj, [planted["claim"]], purge=False)
     assert ws.purge_stale(proj) == 0          # fresh → survives
     assert _snapshot_count(sdk) == 1
+
+
+# ── §17.1: the write lane (review F1) ─────────────────────────────────────
+
+def _journal_backed_sdk():
+    """A journal-bound SDK — the configuration the hosted lane actually runs.
+
+    `_fresh_sdk` builds a journal-LESS store, where §17.1's handle guard never
+    registers the graph and therefore cannot see an undeclared writer at all.
+    That is why the census case below needs its own constructor: a suite that
+    only ever runs the unguarded shape cannot prove a lane is declared.
+    """
+    import tempfile as _tf
+
+    base = _tf.mkdtemp(prefix="tortoise_ws8099_j_")
+    db_path = os.path.join(base, "test.db")
+    return TortoiseSDK(db_path,
+                       event_log_path=os.path.join(os.path.dirname(db_path),
+                                                   "journal.jsonl"))
+
+
+def test_the_snapshot_writes_declare_their_lane():
+    """FAILING VALUE (§17.1, #8099 review F1): a `:WhySnapshot` writer that
+    reaches the guarded write handle with NO declared lane — the census that
+    #9124 part 2 exists to drive to zero gains a permanent undeclared entry, and
+    the moment the guard is ARMED the whole precompute dies silently.
+
+    MEASURED at the un-declared head on a journal-bound store: three census
+    entries (`CREATE INDEX …`, the `UNWIND … MERGE`, the retention `DELETE`).
+    """
+    import tortoise.projection as P
+
+    assert ws.WHY_SNAPSHOT_WRITE_LANE == "why.snapshot-cache", (
+        "the lane name is read back at the write handle by this pin — renaming "
+        "it silently drops the declaration")
+    sdk = _journal_backed_sdk()
+    try:
+        planted = _plant_claim(sdk, "Lane declaration is not optional")
+        proj = sdk._get_proj()
+        _subscribe(sdk)                       # so the precompute is not skipped
+        census_before = dict(P.undeclared_handle_writes())
+        summary = ws.precompute_for_dream(
+            proj, {"affected_claims": [planted["claim"]]})
+        assert summary["written"] >= 1, summary   # the pass actually wrote
+        census_after = dict(P.undeclared_handle_writes())
+        new = {k: v for k, v in census_after.items() if k not in census_before}
+        assert new == {}, f"undeclared §17.1 handle writes: {new}"
+        # …and the write is still readable, i.e. the declaration did not turn
+        # into a no-op that silently skipped the store.
+        assert ws.read_blocks(proj, [planted["claim"]])
+    finally:
+        sdk.close()
+
+
+def test_a_section_17_1_refusal_is_not_swallowed(monkeypatch):
+    """FAILING VALUE (§17.1, #8099 review F1): a `DirectCacheWriteRefused` folded
+    into `reason="write_failed"` — the statement never landed, so reporting a
+    best-effort miss makes a dead cache indistinguishable from a transient
+    graph hiccup, and the push keeps serving whatever blocks happened to exist.
+
+    This is the rule `webhook_delivery._run` states for its own writes (#9233).
+    """
+    from tortoise.projection import DirectCacheWriteRefused
+
+    sdk = _fresh_sdk()
+    planted = _plant_claim(sdk, "A refused write never landed")
+    proj = sdk._get_proj()
+
+    def _refuse(*a, **k):
+        raise DirectCacheWriteRefused("declared-and-refused (test)")
+
+    monkeypatch.setattr(ws, "_run", _refuse)
+    try:
+        with pytest.raises(DirectCacheWriteRefused):
+            ws.precompute(proj, [planted["claim"]])
+    finally:
+        monkeypatch.undo()
+    # The store was never touched, so nothing is served and nothing is stale.
+    assert _snapshot_count(sdk) == 0
+
+
+# ── the kill switch gates the READ too (review F2) ────────────────────────
+
+def test_kill_switch_stops_serving_a_pre_existing_snapshot():
+    """FAILING VALUE (#8099 review F2): a switch that stops the REFRESH but keeps
+    serving the snapshots written before it was thrown. The module's own contract
+    says a falsy switch means "a push carries no ``why``", and stopping the
+    serving of blocks an operator mistrusts is the whole point of the lever.
+
+    The case writes a snapshot FIRST, so it can red for a read-path mutation —
+    the disabled-write assertions elsewhere cannot.
+    """
+    sdk = _fresh_sdk()
+    planted = _plant_claim(sdk, "Serve nothing while the switch is off")
+    proj = sdk._get_proj()
+    _subscribe(sdk)
+    ws.precompute(proj, [planted["claim"]])
+    assert ws.read_blocks(proj, [planted["claim"]]), "precondition: it is served"
+
+    os.environ[ws.SNAPSHOT_ENV] = "0"
+    try:
+        assert ws.read_blocks(proj, [planted["claim"]]) == {}, (
+            "a pre-existing snapshot was still served with the switch off")
+        assert ws.read_why_entries(proj, [planted["claim"]]) == {}
+        transport = FakeTransport()
+        assert wd.dispatch_pending(proj, transport=transport)["delivered"] >= 1
+        bodies = _bodies(transport)
+        assert bodies
+        assert all("why" not in body for body in bodies), (
+            "the push carried a precomputed why with the switch off")
+    finally:
+        os.environ.pop(ws.SNAPSHOT_ENV, None)
+    # Turning it back on serves the SAME snapshot again — the switch gates
+    # serving, it does not destroy the cache.
+    assert ws.read_blocks(proj, [planted["claim"]])
+
+
+# ── the drop is driven by EXISTENCE, never by a missing block (review F4) ──
+
+@pytest.mark.parametrize("failure", ["empty", "raise"])
+def test_a_blockless_assembly_never_drops_a_live_points_snapshot(failure):
+    """FAILING VALUE (#8099 review F4): dropping a snapshot because the ASSEMBLY
+    produced no block. A transient assembly failure (and a partial one) is also
+    blockless, so that mutation deletes good snapshots — the exact harm
+    `_vanished` exists to prevent. Only a proven-missing Point may drop one.
+
+    The forbidden implementation (`gone = [pid for pid in ids if pid not in
+    blocks]`) passed the deleted-point case, because that case cannot tell the
+    two apart; this one can.
+    """
+    import tortoise.why_snapshot as ws_mod
+
+    sdk = _fresh_sdk()
+    planted = _plant_claim(sdk, "A live belief keeps its snapshot")
+    proj = sdk._get_proj()
+    pid = planted["claim"]
+    ws.precompute(proj, [pid])
+    assert _snapshot_count(sdk) == 1
+
+    def _no_blocks(*a, **k):
+        if failure == "raise":
+            raise RuntimeError("assembly blew up (test)")
+        return {}
+
+    original = ws_mod.assemble_why_blocks
+    ws_mod.assemble_why_blocks = _no_blocks
+    try:
+        summary = ws.precompute(proj, [pid])
+    finally:
+        ws_mod.assemble_why_blocks = original
+
+    assert summary["dropped"] == 0, (
+        "a blockless assembly dropped a live point's snapshot — the drop must "
+        f"be driven by an existence read: {summary}")
+    assert _snapshot_count(sdk) == 1, "the good snapshot was deleted"
+    assert ws.read_blocks(proj, [pid]), "the surviving snapshot is no longer served"

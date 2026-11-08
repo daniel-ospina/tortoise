@@ -4035,10 +4035,21 @@ def _precompute_why_blocks(sdk: TortoiseSDK, dream_result: dict | None) -> dict 
 
     Returns the precompute summary (for logging/tests), or None when the pass
     was skipped or failed.
+
+    ⛔ SECTION 17.1 REFUSALS ARE NOT A "BEST-EFFORT MISS". A
+    `DirectCacheWriteRefused` from `why_snapshot` means its statement never
+    reached the store, so it is logged at ERROR with a greppable marker (the
+    same posture `DreamNoOpError` gets in `_dream_worker`, and the rule
+    `webhook_delivery` states at its own `_run`). It is NOT re-raised: unlike
+    the webhook cursor (whose lost write re-delivers forever), the roots are
+    already drained by the time this runs and raising would trade a cache miss
+    for a whole discarded dream pass. The push degrades to the #8099 envelope
+    and the next enabled pass rewrites the snapshots.
     """
     import logging
 
     from tortoise import why_snapshot
+    from tortoise.projection import DirectCacheWriteRefused
     from tortoise.security import redact_error
 
     _log = logging.getLogger("tortoise.api")
@@ -4046,6 +4057,12 @@ def _precompute_why_blocks(sdk: TortoiseSDK, dream_result: dict | None) -> dict 
         if not why_snapshot.enabled():
             return None
         return why_snapshot.precompute_for_dream(sdk._get_proj(), dream_result)
+    except DirectCacheWriteRefused as e:
+        _log.error(
+            "why-block precompute REFUSED by §17.1 (the snapshot write did not "
+            "land; pushes fall back to the no-why envelope): %s",
+            redact_error(e))
+        return None
     except Exception as e:  # noqa: BLE001, RUF100 — a dream must never fail here
         _log.warning("why-block precompute failed: %s", redact_error(e))
         return None

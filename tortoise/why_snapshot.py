@@ -92,14 +92,69 @@ MAX_WHY_IDS_PER_PAGE = 200
 #: Snapshots older than this are reaped on a later pass. Not a correctness
 #: bound (a stale snapshot is overwritten by the next dream that assembles its
 #: point) — a hygiene bound, so a graph whose points churn does not accumulate
-#: orphans.
+#: orphans. Enforced only by an ENABLED pass — see :func:`enabled`.
 RETENTION_DAYS = 14
 
 _SCHEMA_ATTR = "_tortoise_why_snapshot_schema"
 
+#: §17.1: the lane this module's writes declare. A `:WhySnapshot` is a DERIVED
+#: artifact — a rebuild drops it and the next dream recreates it — so it is an
+#: UNJOURNALLED writer that must be DECLARED rather than left to the census.
+#: Read back at the write handle by the pin
+#: (`tests/test_why_snapshot_8099.py::test_the_snapshot_writes_declare_their_lane`),
+#: never rendered into a refusal.
+WHY_SNAPSHOT_WRITE_LANE = "why.snapshot-cache"
+
+
+def _run(proj, cypher: str, params: dict | None = None):
+    """This module's ONE gateway to the projection's write handle.
+
+    A MUTATING statement is DECLARED — `_cache_write_authorized(
+    WHY_SNAPSHOT_WRITE_LANE)` — so #9124 closing the third door (#9079) refuses
+    an undeclared second writer without refusing this product surface. A
+    statement the classifier can PROVE read-only runs unscoped (there is nothing
+    for the guard to refuse), which is why the read half shares this gateway.
+
+    The import is function-local for the same reason
+    `webhook_delivery._run`'s is: this module is imported by `hosted_api`, which
+    imports the projection, so a module-level import here would make the
+    dependency direction circular.
+
+    ⛔ A REFUSAL IS NEVER SWALLOWED. Every handler on this path that exists for
+    an ORDINARY failure re-raises `DirectCacheWriteRefused` ahead of its broad
+    clause — `ensure_schema` (the index DDL's "already exists"), `_drop`, the
+    purge, and `precompute`'s write arm. A refusal means the statement never
+    reached the store, which is categorically NOT the transient graph hiccup
+    those handlers absorb: treating it as one is the silent-loss shape §17.1
+    exists to prevent, and for this module it would leave the push serving
+    whichever blocks happened to land (#8099 review F1, the #9233 rule).
+    """
+    from tortoise.projection import _cache_write_authorized, _statement_writes
+
+    if _statement_writes(cypher):
+        with _cache_write_authorized(WHY_SNAPSHOT_WRITE_LANE):
+            return proj.g.query(cypher, params=params)
+    return proj.g.query(cypher, params=params)
+
 
 def enabled() -> bool:
-    """Is the dream-cycle precompute on? (kill switch; default ON)."""
+    """Is the dream-cycle precompute on? (kill switch; default ON).
+
+    ⚠️ THE SWITCH GATES BOTH HALVES — the WRITE (`precompute`,
+    `precompute_for_dream`) and the READ (`read_blocks`, and so
+    `read_why_entries` and every `why` the push carries). It has to: the
+    operator's only lever when the assembly is producing wrong blocks is to
+    stop serving them, and a switch that only stops the REFRESH keeps serving
+    exactly the blocks the operator mistrusts, at whatever age they reached
+    before the switch was thrown (#8099 review F2).
+
+    What the switch does NOT do is run hygiene: a disabled pass writes nothing
+    at all — no snapshot, no `_drop`, no `purge_stale` — so the retention bound
+    below is enforced from the first ENABLED pass after the switch returns, not
+    while the feature is off. That is deliberate (a disabled feature must leave
+    the graph byte-identical) and it is inert, because a snapshot the read path
+    refuses to serve cannot be seen by anyone.
+    """
     return env_flag(SNAPSHOT_ENV, True)
 
 
@@ -115,8 +170,14 @@ def ensure_schema(proj) -> None:
     """
     if getattr(proj, _SCHEMA_ATTR, False):
         return
+    from tortoise.projection import DirectCacheWriteRefused
+
     try:
-        proj.g.query("CREATE INDEX FOR (n:WhySnapshot) ON (n.point_id)")
+        _run(proj, "CREATE INDEX FOR (n:WhySnapshot) ON (n.point_id)")
+    except DirectCacheWriteRefused:
+        # NOT an "already exists": the statement never reached the store, so
+        # the cache flag must stay unset and the refusal must reach the caller.
+        raise
     except Exception:  # noqa: BLE001, RUF100
         logger.debug("why_snapshot: point_id index may already exist")
     setattr(proj, _SCHEMA_ATTR, True)
@@ -133,12 +194,20 @@ def read_blocks(proj, point_ids: list[str]) -> dict[str, dict]:
 
     Fail-open: any graph error returns ``{}`` (the caller degrades to "no why"
     rather than failing the delivery, contract 3).
+
+    ⚠️ The KILL SWITCH gates this read (#8099 review F2): disabled means a push
+    carries no ``why``, which is what :data:`SNAPSHOT_ENV` says it does. Serving
+    a snapshot written before the switch was thrown is exactly what an operator
+    throwing it is trying to stop.
     """
+    if not enabled():
+        return {}
     ids = [pid for pid in (point_ids or []) if pid][:MAX_WHY_IDS_PER_PAGE]
     if not ids:
         return {}
     try:
-        rows = proj.g.query(
+        rows = _run(
+            proj,
             "MATCH (w:WhySnapshot) WHERE w.point_id IN $ids "
             "RETURN w.point_id, w.block, w.assembled_at",
             params={"ids": ids},
@@ -198,12 +267,17 @@ def _drop(proj, point_ids: list[str]) -> int:
     ids = [pid for pid in point_ids if pid]
     if not ids:
         return 0
+    from tortoise.projection import DirectCacheWriteRefused
+
     try:
-        rows = proj.g.query(
+        rows = _run(
+            proj,
             "MATCH (w:WhySnapshot) WHERE w.point_id IN $ids "
             "DELETE w RETURN count(*)",
             params={"ids": ids},
         ).result_set
+    except DirectCacheWriteRefused:
+        raise                     # the delete never landed — not "dropped 0"
     except Exception as e:  # noqa: BLE001, RUF100 — hygiene, never a pass failure
         logger.warning("why_snapshot: snapshot drop failed: %s", e)
         return 0
@@ -223,7 +297,8 @@ def _vanished(proj, point_ids: list[str]) -> list[str]:
     if not ids:
         return []
     try:
-        rows = proj.g.query(
+        rows = _run(
+            proj,
             "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id",
             params={"ids": ids},
         ).result_set
@@ -239,12 +314,17 @@ def purge_stale(proj, *, now: datetime | None = None,
     """Delete snapshots older than ``retention_days``. Idempotent; bounded."""
     cutoff = ((now or datetime.now(UTC))
               - timedelta(days=int(retention_days))).isoformat()
+    from tortoise.projection import DirectCacheWriteRefused
+
     try:
-        rows = proj.g.query(
+        rows = _run(
+            proj,
             "MATCH (w:WhySnapshot) WHERE w.assembled_at < $cutoff "
             "WITH w LIMIT 5000 DELETE w RETURN count(*)",
             params={"cutoff": cutoff},
         ).result_set
+    except DirectCacheWriteRefused:
+        raise                     # the purge never landed — not "purged 0"
     except Exception as e:  # noqa: BLE001, RUF100
         logger.warning("why_snapshot: stale purge failed: %s", e)
         return 0
@@ -270,6 +350,13 @@ def precompute(proj, point_ids: list[str], *, now: datetime | None = None,
     (:func:`_vanished`), never by a missing block, because a failed assembly is
     also blockless and a transient read error must not delete a good snapshot
     set — ``purge``'s retention, not a live error, is what reaps snapshots.
+
+    ⛔ It raises ONLY for a §17.1 REFUSAL of its own write
+    (``DirectCacheWriteRefused``): that is not a transient graph error, it means
+    the statement never landed, and folding it into ``reason="write_failed"``
+    would let the push serve whichever blocks happened to land while reporting a
+    best-effort miss (#8099 review F1; the #9233 rule). Every ordinary failure
+    stays fail-open.
     """
     summary = {"enabled": enabled(), "points": 0, "written": 0, "dropped": 0,
                "purged": 0, "reason": None}
@@ -285,7 +372,18 @@ def precompute(proj, point_ids: list[str], *, now: datetime | None = None,
     if not ids:
         summary["reason"] = "no_points"
         return summary
-    blocks = assemble_why_blocks(proj, ids)
+    # `assemble_why_blocks` is internally fail-open (a graph error returns {}),
+    # but this function's own contract is "NEVER raises", so a raise from the
+    # assembly is absorbed HERE too — and, critically, an absorbed failure is
+    # NOT a reason to drop anything: `_vanished` below decides that, from the
+    # existence read, precisely because "no block" and "the assembly broke"
+    # look identical (#8099 review F4).
+    try:
+        blocks = assemble_why_blocks(proj, ids)
+    except Exception as e:  # noqa: BLE001, RUF100 — contract: never raises
+        logger.warning("why_snapshot: assembly failed: %s", e)
+        summary["reason"] = "assembly_failed"
+        return summary
     written_rows: list[dict] = []
     stamp = _iso_now(now)
     for pid in ids:
@@ -306,8 +404,11 @@ def precompute(proj, point_ids: list[str], *, now: datetime | None = None,
         })
     if written_rows:
         ensure_schema(proj)
+        from tortoise.projection import DirectCacheWriteRefused
+
         try:
-            proj.g.query(
+            _run(
+                proj,
                 "UNWIND $rows AS row "
                 "MERGE (w:WhySnapshot {point_id: row.point_id}) "
                 "SET w.block = row.block, w.assembled_at = row.ts, "
@@ -315,6 +416,8 @@ def precompute(proj, point_ids: list[str], *, now: datetime | None = None,
                 params={"rows": written_rows},
             )
             summary["written"] = len(written_rows)
+        except DirectCacheWriteRefused:
+            raise             # declared-and-refused ≠ "write_failed", see docstring
         except Exception as e:  # noqa: BLE001, RUF100 — never fail the dream
             logger.warning("why_snapshot: snapshot write failed: %s", e)
             summary["reason"] = "write_failed"
