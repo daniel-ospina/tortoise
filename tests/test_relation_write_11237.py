@@ -83,7 +83,13 @@ def test_ambiguous_endpoint_is_refused_not_guessed():
     already warns that such an endpoint is ambiguous; this is the write-side
     half that refuses to settle it by accident.
 
-    Mutation: `if len(ids) != 1` → `if not ids` guesses through the collision.
+    Mutation: delete the `len(ids) > 1` arm of `_endpoint_reason` and the name
+    collision is guessed through (executed: the plan then raises `TypeError`
+    unpacking two ids, so the row REDs). ⛔ It is NOT the `len(ids) != 1` guard
+    in `_entity_kind` — that guard could never fire, because `_endpoint_reason`
+    refuses every failing input first, and naming it certified cover the row did
+    not have (agent-infra#3442 rule 3; #11548 review F2). That dead guard is
+    gone: `_entity_kind` now states the precondition instead of re-checking it.
     """
     index = {
         "lumen auth": [("obj-1", "organization"), ("subj-1", "organization")],
@@ -398,3 +404,153 @@ def test_a_predicate_link_entities_inverts_is_refused_not_written():
     assert len(drops) == 1, drops
     assert (drops[0].src, drops[0].dst) == ("retry storm", "deadline slip")
     assert "OPPOSITE" in drops[0].reason, drops[0].reason
+
+
+def test_a_manifest_only_structural_predicate_names_the_writer_it_would_reach():
+    """⛔ The refusal must name the REAL reason — a union set is not a writer.
+
+    ``pack_registry.relation_write_paths`` answers for the **union** of three
+    structural writers (``STRUCTURAL_WRITE_PREDICATES`` = ``create_edge`` +
+    ``create_about_edge`` + ``ingest``), while this leg reaches exactly ONE of
+    them — ``create_edge``, whose own set is ``_VALID_EDGE_PREDICATES``. The two
+    sets differ by exactly ``aboutPoint`` and ``extractedFrom`` (measured), so
+    those two reached the final drop arm with ``paths = ('structural',)`` and
+    were told they bind *"only the operator path (('structural',))"* — a
+    sentence that contradicts its own parenthetical. A reader of that row goes
+    looking for an operator to mint when the actual state is "a different
+    structural writer exists, and this leg does not call it"
+    (``docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md:149`` records what a
+    wrong cause here costs: a lane sent off to build a writer the graph already
+    has).
+
+    Mutation: reuse the operator-path sentence for this state (the pre-fix
+    shape) and ``"create_edge"`` disappears from the reason while
+    ``"binds only the operator path"`` appears.
+    """
+    for predicate in ("aboutPoint", "extractedFrom"):
+        edges, drops = plan_relation_edges(
+            [{"src": "retry storm", "dst": "deadline slip",
+              "predicate": predicate}], INDEX)
+        assert edges == [], (predicate, edges)
+        assert len(drops) == 1, (predicate, drops)
+        reason = drops[0].reason
+        assert "create_edge" in reason, (predicate, reason)
+        assert "binds only the operator path" not in reason, (predicate, reason)
+        # The drop still carries the pair and the stated verb.
+        assert (drops[0].src, drops[0].dst) == (
+            "retry storm", "deadline slip"), (predicate, drops[0])
+        assert drops[0].predicate == predicate, (predicate, drops[0])
+
+
+def test_one_statement_is_never_reported_written_AND_lost():
+    """⛔ ONE statement → at most ONE accounted outcome (#11548 review F3(a)).
+
+    ``plan_hierarchy_edges`` returns one entry per DECLARATION, not one per
+    pair, so a pack that declares the same kind pair on BOTH legs planned a
+    structural edge AND an operator-path edge. The old loop landed the first
+    and appended a drop row for the second, so ONE statement was reported as
+    ``written=1, dropped=1`` — a population of 1 accounted as 2, with a drop
+    row claiming the relation was not written after its edge landed.
+
+    The operator declaration is a fact about the PACK
+    (``pack_hierarchy.hierarchy_diagnostics`` is its named home), not a loss of
+    the story's statement, so it is reported only when nothing for that
+    statement landed — the second arm below, where it IS the loss.
+
+    Mutation: append an operator-path ``RelationDrop`` per planned entry again
+    (the pre-fix shape) and the first arm reads ``written=1, dropped=1``.
+    """
+    dual = (
+        DeclaredHierarchy(
+            pack="dev", path="Theme \u2192 Epic", predicate="hasPart",
+            from_kind="dev:theme", to_kind="dev:epic",
+            write_path="structural"),
+        DeclaredHierarchy(
+            pack="dev", path="Theme \u2192 Epic", predicate="IMPL",
+            from_kind="dev:theme", to_kind="dev:epic",
+            write_path="operator"),
+    )
+    index = {"quarry": [("obj-theme", "dev:theme")],
+             "auth table": [("obj-epic", "dev:epic")]}
+    relations = [{"src": "quarry", "dst": "auth table",
+                  "predicate": "related"}]
+
+    # (a) A structural edge landed: the operator declaration is NOT a loss.
+    edges, drops = plan_relation_edges(relations, index, declared=dual)
+    assert len(edges) == 1, edges
+    assert edges[0].predicate == "hasPart", edges[0]
+    assert drops == [], drops
+    assert len(edges) + len(drops) == 1, (edges, drops)
+
+    report = apply_relation_edges(_RecordingWriter(), relations, index,
+                                 declared=dual)
+    assert (report["written"], report["dropped"],
+            report["folded"]) == (1, 0, 0), report
+
+    # (b) NOTHING landed — the operator path IS the reason, named once.
+    operator_only = (dual[1],)
+    edges, drops = plan_relation_edges(relations, index,
+                                       declared=operator_only)
+    assert edges == [], edges
+    assert len(drops) == 1, drops
+    assert "OPERATOR" in drops[0].reason, drops[0].reason
+    assert "IMPL" in drops[0].reason, drops[0].reason
+    assert len(edges) + len(drops) == 1, (edges, drops)
+
+
+def test_a_repeated_unwritable_statement_counts_once():
+    """⛔ The DROP arms dedup a repeat exactly as the LANDING arms do (F3(b)).
+
+    A literal repeat of one statement is one statement — the landing arms have
+    always counted it once (one edge, no meaning lost), and
+    ``extractor_v2._assemble_relations`` dedups it upstream. The drop arms
+    appended per repetition instead, so two identical un-writable statements
+    reported ``written=0, dropped=2`` for a population the landing arms call
+    ``1`` — the same accounting break in the opposite direction.
+
+    The identity includes the ``semantics`` gloss, because that gloss can decide
+    which mechanism BINDS: two statements that read the same but carry different
+    glosses are genuinely two statements and must still count twice (the third
+    arm below).
+
+    Mutation: append to ``drops`` unconditionally again (the pre-fix shape) and
+    the first arm reads ``dropped=2``.
+    """
+    # (a) A repeat of one un-writable statement: ONE loss.
+    for predicate in ("transacts", "wasDerivedFrom", "aboutPoint"):
+        edges, drops = plan_relation_edges(
+            [{"src": "retry storm", "dst": "deadline slip",
+              "predicate": predicate}] * 2, INDEX)
+        assert edges == [], (predicate, edges)
+        assert len(drops) == 1, (predicate, drops)
+        assert len(edges) + len(drops) == 1, (predicate, edges, drops)
+
+    report = apply_relation_edges(
+        _RecordingWriter(),
+        [{"src": "retry storm", "dst": "deadline slip",
+          "predicate": "transacts"}] * 2,
+        INDEX, warn=lambda _w: None)
+    assert report["written"] == 0, report
+    assert report["dropped"] == 1, report
+    assert (report["written"] + report["dropped"]
+            + report["folded"]) == 1, report
+
+    # (b) A repeat of a statement that LANDS still counts once (the control:
+    # this arm already behaved, and the drop dedup must not change it).
+    edges, drops = plan_relation_edges(
+        [{"src": "retry storm", "dst": "deadline slip",
+          "predicate": "causes"}] * 2, INDEX)
+    assert len(edges) == 1, edges
+    assert edges[0].folded == (), edges[0]
+    assert drops == [], drops
+
+    # (c) Two DIFFERENT glosses are two statements, not a repeat — the key is
+    # the statement's own identity, so the dedup is not over-broad.
+    edges, drops = plan_relation_edges([
+        {"src": "ghost entity", "dst": "deadline slip",
+         "predicate": "related", "semantics": "causes"},
+        {"src": "ghost entity", "dst": "deadline slip",
+         "predicate": "related", "semantics": "supports"},
+    ], INDEX)
+    assert edges == [], edges
+    assert len(drops) == 2, drops
