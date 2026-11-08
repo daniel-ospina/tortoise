@@ -517,9 +517,67 @@ def test_install_cline_refuses_a_FOREIGN_live_hook_at_the_live_target(
     assert live.read_text() == user_text, "the user's live hook was overwritten"
 
     u = _run(["install", "cline", "--dir", str(root), "--uninstall"], env)
+    # rc 1: a refusal is still a refusal (#2383). What changed in cycle 9 is
+    # that the refusal no longer SKIPS the cleanup — see the legacy test below.
     assert u.returncode == 1, (u.returncode, u.stdout, u.stderr)
     assert "refusing to delete it" in u.stderr
     assert live.read_text() == user_text, "the user's live hook was deleted"
+
+
+def test_uninstall_cline_still_removes_our_legacy_hook_past_a_FOREIGN_live_one(
+        tmp_path):
+    """A foreign file at the LIVE target must not strand OUR legacy
+    registration (#11588 review cycle 9).
+
+    The live and legacy paths became different files in #2124, so a user's own
+    `.clinerules/hooks/UserPromptSubmit` no longer implies ours at
+    `.cline/hooks/UserPromptSubmit` is absent. Returning 1 on the foreign live
+    hook skipped the uninstall loop entirely, leaving OUR file installed and
+    still fired by Cline's SDK/CLI, while the message named only the live
+    target — the R5 leak, in the one shape this change created.
+
+    Also covers the same command when the live `target` sits behind an
+    OUT-OF-ROOT `.clinerules` symlink holding a foreign hook: that path is only
+    READ (never unlinked, ownership fails), so it must not block either.
+
+    MUTATION: return 1 on a non-owned live target → RED on both rcs; guard the
+    target on `exists()` alone → RED on the symlink case.
+    """
+    outside = tmp_path / "shared-clinerules"
+    (outside / "hooks").mkdir(parents=True)
+    foreign_outside = outside / "hooks" / "UserPromptSubmit"
+    foreign_outside.write_text("#!/usr/bin/env bash\necho my own hook\n")
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+
+    # (a) an in-root foreign live target
+    proj = tmp_path / "proj"
+    (proj / ".clinerules" / "hooks").mkdir(parents=True)
+    foreign_live = proj / ".clinerules" / "hooks" / "UserPromptSubmit"
+    foreign_live.write_text("#!/usr/bin/env bash\necho my own hook\n")
+    legacy = proj / ".cline" / "hooks" / "UserPromptSubmit"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("#!/usr/bin/env bash\n"
+                      "exec /nonexistent/volunteer-turn.sh cline\n")
+
+    u = _run(["install", "cline", "--dir", str(proj), "--uninstall"], env)
+    assert u.returncode == 1, (u.returncode, u.stdout, u.stderr)
+    assert not legacy.exists(), "OUR legacy registration was stranded"
+    assert foreign_live.exists(), "a foreign live hook was deleted"
+    assert "refusing to delete it" in u.stderr
+
+    # (b) the same, with the live target behind an out-of-root symlink
+    proj2 = tmp_path / "proj2"
+    (proj2 / ".cline" / "hooks").mkdir(parents=True)
+    legacy2 = proj2 / ".cline" / "hooks" / "UserPromptSubmit"
+    legacy2.write_text("#!/usr/bin/env bash\n"
+                       "exec /nonexistent/volunteer-turn.sh cline\n")
+    (proj2 / ".clinerules").symlink_to(outside)
+
+    u2 = _run(["install", "cline", "--dir", str(proj2), "--uninstall"], env)
+    assert u2.returncode == 1, (u2.returncode, u2.stdout, u2.stderr)
+    assert not legacy2.exists(), "OUR legacy registration was stranded"
+    assert foreign_outside.exists(), "a FOREIGN file was deleted"
+
 
 
 def test_install_cline_uninstall_removes_a_legacy_only_registration(tmp_path):

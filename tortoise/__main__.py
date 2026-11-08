@@ -6148,12 +6148,18 @@ def _install_read_hook_impl(args) -> int:
                         return True
         return False
 
-    # `target` is written by an install and deleted by an uninstall that has
-    # something to delete. The LEGACY path is handled inside the cline branch,
-    # where ownership is known: it is guarded only when the run would unlink
-    # it (see the note there).
-    if _escape_refusal([target] if not uninstall else
-                       [p for p in (target,) if p.exists()]):
+    # `target` is WRITTEN by an install, so it is always guarded there. On an
+    # uninstall the JSON-seam harnesses (codex/claude/devin) REWRITE the
+    # document, so an existing target is written either way and stays guarded;
+    # cline only ever UNLINKS what is OURS, so its candidates — target AND
+    # legacy — are guarded inside the cline branch, where ownership is known
+    # (#11588 review cycles 5, 8, 9). Guarding a cline path the run only READS
+    # blocked an uninstall that removes nothing there and left our in-root
+    # registration installed.
+    if not uninstall and _escape_refusal([target]):
+        return 1
+    if (uninstall and harness != "cline"
+            and _escape_refusal([p for p in (target,) if p.exists()])):
         return 1
 
     # #2383: uninstall with NO registration present must be a clean no-op —
@@ -6236,6 +6242,7 @@ def _install_read_hook_impl(args) -> int:
                 print(f"{p} is a directory — refusing to touch it.",
                       file=_sys.stderr)
                 return 1
+        refused_live = False
         if target.exists():
             existing_text = target.read_text(
                 encoding="utf-8", errors="replace")
@@ -6245,16 +6252,28 @@ def _install_read_hook_impl(args) -> int:
             # comment or an echo — as ours, and silently OVERWROTE it on
             # install / DELETE it on uninstall. A marker-line match cannot
             # fire on a mention.
-            if not _cline_marker_owns(existing_text):
-                if uninstall:
-                    print(f"{target} is not our volunteer-turn.sh hook — "
-                          "refusing to delete it.", file=_sys.stderr)
-                else:
-                    print(f"{target} already exists and is not our "
-                          "volunteer-turn.sh hook — refusing to overwrite it. "
-                          "Remove it manually or install into another dir.",
-                          file=_sys.stderr)
+            if _cline_marker_owns(existing_text):
+                # An uninstall DELETES this file, so a delete that would land
+                # outside the root must refuse — the same rule as the legacy
+                # candidate below (#11588 review cycle 9).
+                if uninstall and _escape_refusal([target]):
+                    return 1
+            elif not uninstall:
+                print(f"{target} already exists and is not our "
+                      "volunteer-turn.sh hook — refusing to overwrite it. "
+                      "Remove it manually or install into another dir.",
+                      file=_sys.stderr)
                 return 1
+            else:
+                # NOT ours, and uninstalling: fall THROUGH so the loop below
+                # still runs, reporting the foreign live hook as SKIPPED and
+                # removing OUR legacy registration. The exit code stays 1 (a
+                # refusal is still a refusal — #2383's contract, which the
+                # pre-existing tests pin), but our file is no longer STRANDED
+                # while the message names only the live target — the one shape
+                # #2124 itself created, since the live and legacy paths are now
+                # different files (#11588 review cycle 9).
+                refused_live = True
 
         def _cline_owns_path(p: Path) -> bool:
             """Ownership of the registration at ``p`` (unreadable → not ours).
@@ -6402,6 +6421,8 @@ def _install_read_hook_impl(args) -> int:
             for p in skipped:
                 print(f"{p} is not our volunteer-turn.sh hook — "
                       "refusing to delete it.", file=_sys.stderr)
+            if refused_live:
+                return 1
         else:
             target.parent.mkdir(parents=True, exist_ok=True)
             # #3918: the exec bit goes on the TEMP, with the content — a

@@ -108,7 +108,10 @@ hook script as a module. No MCP tool or public SDK method is touched.
   the legacy path **and at the LIVE target**
   (`test_install_cline_refuses_a_FOREIGN_live_hook_at_the_live_target`, which is the only case that
   distinguishes the live target's STRICT identity rule from the legacy path's provenance rule — the
-  other two foreign-hook tests use text that fails the 2-token predicate under either rule).
+  other two foreign-hook tests use text that fails the 2-token predicate under either rule). A refusal
+  at the live target no longer SKIPS the cleanup, so our legacy registration is still removed
+  (`test_uninstall_cline_still_removes_our_legacy_hook_past_a_FOREIGN_live_one`); the exit code stays 1,
+  because #2383's contract is that a refusal is reported.
 - R5 Uninstall leaves our file behind at either path → caught by the uninstall assertions on both
   paths **including a live old script path** (`test_install_cline_migrates_a_legacy_registration_whose_script_path_lives`,
   which also pins the install-side migration for that shape — the dead-path form alone let a live one
