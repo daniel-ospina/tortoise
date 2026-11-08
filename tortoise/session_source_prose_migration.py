@@ -1457,7 +1457,11 @@ def classify_fts_hits(g, urls, *, phrase: str | None = None,
     cannot drift from the census.
 
     Returns ``{"residue": [...], "lexicon": [...], "stale": [...], "foreign": [...],
-    "unread": [...]}``. A url the read did not return is ``unread`` — a hit that
+    "unexplained": [...], "unread": [...]}`` — SIX keys, and every one of them
+    is a bucket the caller folds (#11536 review round 3, P2: this list said five
+    and omitted ``unexplained``, the very bucket the paragraph below exists to
+    justify, so a reader implementing the fold from the docstring would have
+    dropped the veto). A url the read did not return is ``unread`` — a hit that
     could not be classified is NOT evidence either way, and the caller must not
     fold it into ``lexicon``.
 
@@ -1631,15 +1635,35 @@ def probe_fts(g, phrases, *, control: bool = True,
 
     Returns::
 
-        {"ran": bool,                # at least one probe was measured
+        {"ran": bool,                # at least one probe was MEASURED — a
+                                     # breaker-open leg makes this False, exactly
+                                     # as it makes that probe's own `ran` False
          "entity_type": "source", "limit": 50,
-         "probes": [{phrase, hits, urls, truncated, ran, degraded, reason,
-                     residue, lexicon, stale, foreign, unexplained, unread}, ...],
+         "probes": [{phrase, hits, urls, unresolved, truncated, ran, degraded,
+                     reason, residue, lexicon, stale, foreign, unexplained,
+                     unread}, ...],
          "leaked": [phrase, ...],          # residue still findable — a LEAK
+         "stale": [phrase, ...],           # a hit on a CLEARED node — the index
+                                           # entry outlived the pair (vetoes)
          "stem_only": [phrase, ...],       # hits, but every one is a lexicon node
+         "unexplained": [phrase, ...],     # hits nothing could PROVE benign
+                                           # (a survived pre-fix entry, or a stem
+                                           # this check cannot fold) — vetoes
          "unmeasurable": [phrase, ...],    # the leg did not run / is degraded
          "truncated": [phrase, ...],       # the window filled — a FLOOR, not a 0
+         "unresolved": int,                # summed hits whose url was not
+                                           # ADDRESSABLE — examined by no bucket
          "control": {"ok", "hits", "note"} | None}
+
+    ⛔ EVERY KEY ABOVE IS RETURNED, and every returned key is listed here (#11536
+    review round 3, P2). This docstring used to describe five of them: it omitted
+    top-level ``stale``/``unexplained``/``unresolved`` (the three VETOING
+    aggregates) and the probe row's ``unresolved``. A consumer reading the
+    contract would not know the vetoes existed — the same class as the
+    five-key ``classify_fts_hits`` list, on the report the fold is built from.
+    ⛔ ``ran`` is ``any(probe["ran"])``, NOT ``bool(phrases)``: the old code made
+    ``report["ran"]`` True on a breaker-open leg where ``probes[0]["ran"]`` was
+    False, i.e. it reported "measured" for a run that measured nothing.
 
     ⚠️ ``control`` is only meaningful AFTER a repair has written a lexicon: on a
     graph with no post-fix node it is ``{"ok": False, "hits": None, "note": …}``
@@ -1654,7 +1678,12 @@ def probe_fts(g, phrases, *, control: bool = True,
         got.update(split)
         measured.append(got)
     report: dict = {
-        "ran": bool(measured),
+        # ⛔ THE DOCUMENTED MEANING, IMPLEMENTED (#11536 review round 3, P2):
+        # "at least one probe was measured" is `any(p["ran"])`, not "phrases were
+        # asked for". The old `bool(measured)` reported True on a breaker-open
+        # leg where every probe's own `ran` was False — a report that says the
+        # instrument answered when it never ran.
+        "ran": any(p["ran"] for p in measured),
         "entity_type": FTS_PROBE_ENTITY_TYPE,
         "limit": _FTS_PROBE_LIMIT,
         "probes": measured,

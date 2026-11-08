@@ -224,9 +224,30 @@ def _merge_probe(before: dict | None, after: dict, *,
     for index, got in enumerate(after["probes"]):
         row = dict(got)
         prior = None
+        before_row = None
         if before is not None and index < len(before["probes"]):
-            prior = len(before["probes"][index]["residue"])
+            before_row = before["probes"][index]
+            prior = len(before_row["residue"])
         row["residue_before"] = prior
+        # ⛔ CARRY THE BEFORE LEG'S OWN MEASUREMENT, NOT JUST ITS RESIDUE COUNT
+        # (#11536 review round 3, P2). `residue_before` is populated whenever a
+        # BEFORE reading exists — whether it RAN, whether it was DEGRADED (a
+        # breaker trip between the two reads), and whether its own hits could be
+        # classified at all — so `residue_before == 0` conflated "the token
+        # matched nothing before" with "nothing was measured before". The
+        # refusal below then stated as FACT a measurement that never happened.
+        # The verdict was already fail-closed (an unmeasured BEFORE is not a
+        # discriminating probe); this is what lets the refusal say which state it
+        # is in instead of asserting one.
+        row["residue_before"] = prior
+        row["before"] = None if before_row is None else {
+            "hits": before_row.get("hits"),
+            "ran": before_row.get("ran"),
+            "degraded": before_row.get("degraded"),
+            "reason": before_row.get("reason"),
+            "unread": list(before_row.get("unread") or ()),
+            "unresolved": before_row.get("unresolved") or 0,
+        }
         # ⛔ RESIDUE, not raw hits: the index STEMS, so a repaired node's lexicon
         # can still answer a probe token (measured: `fridays` matches the lexicon
         # `friday`). "Discriminating" therefore means "matched a node that was
@@ -288,6 +309,73 @@ def _merge_probe(before: dict | None, after: dict, *,
     else:
         out["certifies"], out["vetoed"] = False, "uncorroborated"
     return out
+
+
+def _before_leg_kind(probe: dict) -> str:
+    """Which of four states the BEFORE leg is in for *probe* — nothing more.
+
+    ⛔ ``residue_before == 0`` IS NOT ONE STATE (#11536 review round 3, P2). The
+    field is populated whenever a BEFORE reading exists, so it read the same when
+    (a) the read RAN and matched no pre-fix node, (b) the read never ran or was
+    DEGRADED (a breaker trip between the two reads — ``probe_fts`` records
+    ``ran``/``degraded`` on that row and the fold used to discard both), and (c)
+    hits came back but could not be CLASSIFIED (``unread``/``unresolved``). Only
+    (a) is a measurement of the token; (b) and (c) are the absence of one, and a
+    refusal that states (a) for them asserts what the run never established.
+
+    The verdict was already fail-closed in all three — an unmeasured BEFORE is
+    not a discriminating probe — so this is the DIAGNOSTIC half: the operator is
+    told which state to fix instead of being sent hunting for a typo that is not
+    there (or for a corpus the tool never looked at).
+    """
+    before = probe.get("before")
+    if before is None:
+        if probe.get("residue_before") is None:
+            return "absent"
+        # A row built by a caller that did not carry the measurement through:
+        # we know a BEFORE reading existed but not what it established.
+        return "unknown"
+    if before.get("ran") is False or before.get("degraded"):
+        return "unmeasured"
+    if before.get("unread") or before.get("unresolved"):
+        return "unclassified"
+    return "clean-zero"
+
+
+def _before_leg_state(probes) -> str:
+    """One sentence per distinct BEFORE-leg state, naming the phrases it covers."""
+    said: dict[str, list[str]] = {}
+    for probe in probes:
+        kind = _before_leg_kind(probe)
+        before = probe.get("before") or {}
+        if kind == "absent":
+            sentence = ("NO BEFORE READING WAS TAKEN — this is a DRY RUN, and "
+                        "only the run that writes takes one, so this run cannot "
+                        "tell a token that was never in the corpus from one "
+                        "that LEFT it")
+        elif kind == "unmeasured":
+            sentence = ("the BEFORE reading did NOT RUN or was DEGRADED "
+                        f"(ran={before.get('ran')!r}, "
+                        f"reason={before.get('reason')!r}), so this run holds "
+                        "NO measurement of the token's pre-repair hits")
+        elif kind == "unclassified":
+            sentence = ("the BEFORE reading returned "
+                        f"{len(before.get('unread') or ())} hit(s) that could "
+                        f"NOT be classified ({before.get('unresolved') or 0} "
+                        "carried no addressable url), so it did not establish "
+                        "that the token matched no pre-fix node")
+        elif kind == "unknown":
+            sentence = ("the BEFORE reading's own verdict was not carried "
+                        "through, so this run cannot say whether the token "
+                        "matched a pre-fix node before the repair")
+        else:
+            sentence = ("it returned no PRE-FIX node BEFORE the repair either "
+                        "(a token that is not in the corpus)")
+        said.setdefault(sentence, []).append(str(probe.get("phrase")))
+    if len(said) == 1:
+        return next(iter(said))
+    return "; ".join(f"{sentence} (for {phrases!r})"
+                     for sentence, phrases in said.items())
 
 
 def _report_fts(fts: dict) -> None:
@@ -430,12 +518,20 @@ def _report_fts(fts: dict) -> None:
               f"`_searchText` of EVERY node at that url against its index entry "
               f"before signing off.", file=sys.stderr)
     elif fts["vetoed"] == "undiscriminating-probe":
-        print(f"✗ this run WROTE, and {fts['undiscriminating']!r} matched no "
-              f"pre-fix prose even BEFORE the writes — so its zero cannot show "
-              f"the sentence LEFT the index. A token that was never in the "
-              f"corpus reads 0 on every graph, and the control only proves the "
-              f"READ answers (not that this token was ever a probe). Re-run with "
-              f"a single rare token taken from the removed sentence.",
+        # ⛔ THE SAME RULE AS THE `uncorroborated` REFUSAL (#11536 review round 3,
+        # P2): "it matched no pre-fix prose even BEFORE the writes" is a fact only
+        # when the BEFORE leg RAN, was not degraded, and could classify what it
+        # got. Otherwise state the narrower fact and name the state.
+        if all(_before_leg_kind(p) == "clean-zero" for p in fts["probes"]):
+            measured = "matched no pre-fix prose even BEFORE the writes"
+        else:
+            measured = ("did not establish that it matched the pre-fix prose "
+                        "BEFORE the writes")
+        print(f"✗ this run WROTE, and {fts['undiscriminating']!r} {measured} "
+              f"({_before_leg_state(fts['probes'])}) — so its zero cannot show "
+              f"the sentence LEFT the index. The control only proves the READ "
+              f"answers, not that this token was ever a probe. Re-run with a "
+              f"single rare token taken from the removed sentence.",
               file=sys.stderr)
     else:
         # ⛔ THE REFUSAL MUST NOT ASSERT WHAT THE RUN NEVER ESTABLISHED (#11536
@@ -446,18 +542,8 @@ def _report_fts(fts: dict) -> None:
         # post-fix lexicon node exists", which is one of several states a
         # control can be in (its own read may simply not have run). Each cause is
         # now branched on the measurement that settles it.
-        took_before = any(p.get("residue_before") is not None
-                          for p in fts["probes"])
         causes: list[str] = []
-        if took_before:
-            causes.append(
-                "it returned no PRE-FIX node BEFORE the repair either (a token "
-                "that is not in the corpus)")
-        else:
-            causes.append(
-                "NO BEFORE READING WAS TAKEN — this is a DRY RUN, and only the "
-                "run that writes takes one, so this run cannot tell a token "
-                "that was never in the corpus from one that LEFT it")
+        causes.append(_before_leg_state(fts["probes"]))
         control_state = fts.get("control") or {}
         mode = control_state.get("mode")
         if mode == "probe":
