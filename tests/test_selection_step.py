@@ -1347,6 +1347,32 @@ def test_a_retry_that_raises_after_the_re_bind_keeps_the_first_arms_capture(
     # (nothing to judge) while arm B's is not, so the restore is OBSERVABLE.
     # With VET off both arms record `{}` and the mutation is invisible.
     monkeypatch.setenv("TORTOISE_VET", "1")
+    # ⛔ `vet_s2_pool` IS observable on this fixture — the residual below said
+    # otherwise and was WRONG (measured at `a7f928cbd`: `_run_vet_pass` is called
+    # THREE times and the third, the post-S4 union pass, is reached with a
+    # non-None `prior`). What made it look unobservable is that BOTH arms'
+    # pools are empty here (`{'removed_texts': set(), 'removed_entities': {}}`),
+    # so no CONTENT can separate them — the fix is to stamp arm B's pool at the
+    # seam the retry really goes through and read what the union pass is handed.
+    # The line is load-bearing: `_run_vet_pass`'s `prior` docstring calls it
+    # "required for correctness, not cosmetic", and `apply_vet` RULE 4 can
+    # restore an entity out of the pool it is given.
+    _real_pick = extractor_v2._renarrate_pick
+    _real_vet = extractor_v2._run_vet_pass
+    priors: list[object] = []
+
+    def _pick_stamped(first, second):
+        _picked = _real_pick(first, second)
+        _picked["vet_pool"] = {"removed_texts": {"FROM-ARM-B"},
+                              "removed_entities": {}}
+        return _picked
+
+    def _vet_recording(embed_list, narrative, **kw):
+        priors.append(kw.get("prior"))
+        return _real_vet(embed_list, narrative, **kw)
+
+    monkeypatch.setattr(extractor_v2, "_renarrate_pick", _pick_stamped)
+    monkeypatch.setattr(extractor_v2, "_run_vet_pass", _vet_recording)
 
     class _SecondArmFirstChunkFails(_Scripted):
         """Arm B's first chunk raises; its second chunk still yields a story.
@@ -1403,6 +1429,22 @@ def test_a_retry_that_raises_after_the_re_bind_keeps_the_first_arms_capture(
         "arm B's metrics are the only record of the spend `stats['llm']['calls']` "
         "already counted — dropping them hides that a second band was paid"
     )
+    # ⛔ EACH ARM'S OWN NUMBERS, named separately: the record's contract is that
+    # a reader can reconcile EITHER path against `stats["llm"]["calls"]`, and
+    # deleting `"first": arm["metrics"]` left this test green (measured). Arm A
+    # is the empty, coverage-suspect arm — the trigger's own fact — and arm B is
+    # the band that judged candidates; a record with the two collapsed cannot be
+    # decomposed, and swapping them is caught here too.
+    assert renarrate["first"]["candidates"] == 0, (
+        "the record must carry ARM A's own metrics — it is the empty, "
+        f"coverage-suspect arm: {renarrate['first']!r}"
+    )
+    assert renarrate["first"]["coverage_suspect"] is True, (
+        f"arm A is the arm the trigger fired on: {renarrate['first']!r}"
+    )
+    assert renarrate["second"]["candidates"] > 0, (
+        f"and ARM B's, the band that paid: {renarrate['second']!r}"
+    )
     # ax-principles: the failure is on the caller's surface, not only in stats.
     assert any("re-narrate retry failed" in w
                for w in result.get("warnings") or []), (
@@ -1439,27 +1481,28 @@ def test_a_retry_that_raises_after_the_re_bind_keeps_the_first_arms_capture(
         "a restore that skips `mention_s2_stats` leaves the retry's "
         f"`{{first, second}}` arm pair behind: {result['mentions']['stats']!r}"
     )
-    # ⛔ `vet_s2_stats` is arm-dependent even for an EMPTY arm: VET records a
-    # `batch` block either way, so `candidates` is 0 for arm A and 2 for arm B.
-    #
-    # ⛔ THIS PINS `vet_s2_stats` ONLY, and the message must not claim otherwise
-    # (review round 2, P2 — the previous wording said "skips
-    # `vet_s2_stats`/`vet_s2_pool`" while the assertion read `stats` alone).
-    # `vet_s2_pool` is restored beside it in the handler, but it is NOT
-    # observable on this fixture: it reaches the tree through exactly one
-    # consumer, the post-S4 union pass's `prior=` argument
-    # (`extractor_v2.py:13302-13303`), which is SKIPPED here because arm A ships
-    # NOTHING (`if vet_enabled and complete_list:`) — so on this trigger no arm's
-    # pool is ever read. DECLARED RESIDUAL, not covered: deleting
-    # `vet_s2_pool = arm["vet_pool"]` from the handler leaves this suite GREEN
-    # (measured at this head — 321 passed across `test_selection_step.py` +
-    # `test_7949_capstone_measure.py`). Closing it needs a fixture whose arm A
-    # ships a list AND whose arm-B pool differs, so the union pass runs and
-    # `prior=` becomes readable; that is a separate change, not a wording fix.
+    # ⛔ `vet_s2_stats` (the `batch` block) AND `vet_s2_pool` (the removal pool
+    # the union pass prunes against) are two different bindings, and this
+    # assertion pins the first. `vet_s2_stats` is arm-dependent even for an
+    # EMPTY arm: VET records a `batch` block either way, so `candidates` is 0
+    # for arm A and 2 for arm B.
     assert result["vet"]["s2"]["stats"]["candidates"] == 0, (
         "a restore that skips `vet_s2_stats` publishes arm B's judgement "
         "(2 candidates) about a list that did not ship — the vet surface "
         f"would describe an arm nobody chose: {result['vet']['s2']!r}"
+    )
+    # ⛔ AND `vet_s2_pool`, through its ONE consumer (`prior=`), which is why the
+    # fixture stamps it. This is the gap the previous note DECLARED as an
+    # unclosable residual; it is closed, and the declaration was wrong — the
+    # union pass does run on this fixture (see the stamping block above).
+    assert priors and priors[-1] is not None, (
+        "the post-S4 union VET pass must have run and been handed a `prior` "
+        f"pool on this fixture: {priors!r}"
+    )
+    assert "FROM-ARM-B" not in json.dumps(priors[-1], default=str), (
+        "a restore that skips `vet_s2_pool` hands ARM B's removal pool to the "
+        "post-S4 union pass, which prunes and restores against discards from a "
+        f"list that did not ship: {priors[-1]!r}"
     )
     # The run-level chunk counters are the only observable that pins
     # `chunks`/`failed_chunks`: both arms ran, so a restore that skips them (or
