@@ -324,9 +324,13 @@ the `DUMP` (**0.069 s** / **69.4 ms** bystander at 20 000 nodes, against **2.955
 With the index and its payload in Postgres (§12.1c), a graph dump has **no vector index to rebuild at all**,
 so that whole class of block is gone rather than mitigated — ⚠️ measured for the VECTOR index; whether a
 fulltext or range index blocks a restore the same way is not measured in that record. **So §7's window is a
-scheduling question, not a feasibility one**, and the residual cost is exactly what §1.5 item 3 already
-reserves: re-materialising a window still peaks at **4.9–5.9×** its resting size (the table above), and that
-peak is a graph-memory peak, not an index one.
+scheduling question, not a feasibility one — *for the vector index***, which is the only index the decision
+removes. ⚠️ **The window KEEPS the fulltext index in the graph** (decision item 2, §6.2), so the index that
+stays is exactly the one that record did not measure: if a kept `db.idx.fulltext` — or a range — index blocks
+a restore the way the vector index did, then the window is a feasibility question again, and that leg is
+**M4's** to settle rather than this document's to assume. The residual cost is exactly what §1.5 item 3
+already reserves: re-materialising a window still peaks at **4.9–5.9×** its resting size (the table above),
+and that peak is a graph-memory peak, not an index one.
 
 **The unit of RESIDENCY is a CLOSED component, not a node.** A pinned hub whose neighbours were evicted
 pays for the node and still cannot complete the walk. Pinning closed neighbourhoods (1–2 hops) also
@@ -455,7 +459,7 @@ prints it.
 | **M1** | vector move: recall@10 vs exact ground truth, p95, **and the shortfall rate at 1 % / 10 % / 50 % selectivity** | whether the move ships — a recall-only test is not sufficient (§6.1) |
 | **M2** | **retrieval quality under a windowed vs complete graph**, on a fixed query set | the gate that ARMS §7 (post-measurement) — the literature has no answer |
 | **M3** | text ranking: a BM25-capable Postgres option vs the current `db.idx.fulltext` scores, **score distributions** + the `#8933` identifier fixture | whether the text index ever moves (§6.2) |
-| **M4** | rebuild peak memory and latency per tenant at the real window size | the 6× headroom (§7), the #1 risk |
+| **M4** | rebuild peak memory and latency per tenant at the real window size, **and whether a KEPT `db.idx.fulltext` or range index blocks a restore the way the removed vector index did (§7)** | the 6× headroom (§7), the #1 risk — and whether §7's window is a feasibility question after all |
 | **M5** | the **miss rate** per tenant (a DIFFERENT M5 from `STORAGE-ARCHITECTURE.md` §15's, which asks where the vector index lives and was answered 2026-11-07) | the compute/IOPS/egress tier |
 
 ---
