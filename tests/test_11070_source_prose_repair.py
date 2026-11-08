@@ -2883,3 +2883,170 @@ def test_the_sentence_LEAVES_the_Source_FTS_index_on_a_REAL_graph():
             "the prose's token still returns a node after the record arm")
     finally:
         _live_utils.drop_test_graph(proj)
+
+
+def test_an_UNCLASSIFIED_hit_does_not_certify_the_leg(monkeypatch):
+    """#11161 review, P1 (fail-open): a hit nothing examined is not evidence.
+
+    (1) FAILS on the shipped fold: `classify_fts_hits` puts a hit it could not
+        resolve in `unread` and says the caller must not fold it into `lexicon` —
+        and `_merge_probe` ignored the key, so a probe with `hits=1, urls=[<pre-fix
+        url>], unread=[<pre-fix url>]` PLUS an answering control certified. On the
+        writing arm `discriminating` was `True` too (the BEFORE reading had
+        residue), so the run printed "Repair complete." over a hit that was never
+        looked at — the exact false PASS #11161 exists to close.
+    (2) REACHABLE: the classification read is a SECOND round-trip; it fails under
+        load, and an index entry can point at a url no `:Source` holds (an index
+        is updated asynchronously, so a node can be gone before its entry is).
+    """
+    argv = ["--repair", "--clear-without-record", "--probe-phrase", "zebraquux"]
+    for unread in (["session:pre"],):
+        before = {"ran": True, "probes": [{"phrase": "zebraquux", "hits": 1,
+                                           "urls": ["session:pre"],
+                                           "residue": ["session:pre"]}]}
+        after = {"ran": True, "entity_type": "source", "limit": 50,
+                 "probes": [{"phrase": "zebraquux", "hits": 1,
+                             "urls": unread, "truncated": False, "ran": True,
+                             "degraded": False, "reason": "ok", "residue": [],
+                             "lexicon": [], "unread": unread}],
+                 "leaked": [], "stem_only": [], "unmeasurable": [],
+                 "truncated": [],
+                 # an ANSWERING control — the only thing that used to matter
+                 "control": {"mode": "probe", "ok": True, "hits": 1}}
+        folded = _cli._merge_probe(before, after)
+        assert folded["certifies"] is False, (
+            "a hit that could not be classified certified the leg")
+        assert folded["vetoed"] == "unclassified"
+        assert folded["probes"][0]["discriminating"] is False, (
+            "an unclassified hit was treated as DISCRIMINATING — on the writing "
+            "arm that is what printed 'Repair complete.'")
+    # …and the argv path refuses: the read that resolves urls must FAIL for this.
+    _export_a_record_dsn(monkeypatch)
+
+    class _UnreadableClassification(_RecordingGraph):
+        def query(self, cypher, params=None, timeout=None):
+            if "WHERE s.url IN $urls" in cypher:
+                raise RuntimeError("the classification read failed under load")
+            return super().query(cypher, params=params, timeout=timeout)
+
+    graph = _UnreadableClassification([(_post_fix_node(),)])
+    _install_fts(monkeypatch, {"zebraquux": [("session:pre", 3.0)]})
+    monkeypatch.setattr(_cli, "reconcile_session_source_prose",
+                        lambda *a, **k: {
+                            "candidates": [], "repaired": [], "empty_sessions": [],
+                            "no_record": [], "no_reader": [], "no_session_id": [],
+                            "unaddressable": [], "left_alone": [], "written": [],
+                            "notes": {}, "census_before": 0, "census_after": 0,
+                            "dry_run": False})
+    _install_cli(monkeypatch, graph, argv)
+    assert _cli.main() == 1, (
+        "the run certified over a hit whose classification read failed")
+
+
+def test_a_probe_filling_the_window_is_VETOED_by_the_fold(monkeypatch):
+    """The `truncated` veto lives in `_merge_probe`, and only `probe_fts` was pinned.
+
+    (1) FAILS on a fold without that arm: `probe_fts` sets `truncated`, nothing
+        reads it, and a probe that matched 50 nodes certifies on the 50 it
+        classified while hit 51 goes unexamined.
+    (2) REACHABLE: any token common enough to fill the window.
+    """
+    before = {"ran": True, "probes": [{"phrase": "plan", "hits": 5,
+                                       "urls": [], "residue": []}]}
+    after = {"ran": True, "entity_type": "source", "limit": 50,
+             "probes": [{"phrase": "plan", "hits": 50, "urls": [], "truncated": True,
+                         "ran": True, "degraded": False, "reason": "ok",
+                         "residue": [], "lexicon": [], "unread": []}],
+             "leaked": [], "stem_only": [], "unmeasurable": [], "truncated": ["plan"],
+             "control": {"mode": "probe", "ok": True, "hits": 1}}
+    folded = _cli._merge_probe(before, after)
+    assert folded["certifies"] is False and folded["vetoed"] == "truncated"
+
+
+def test_a_MULTI_token_probe_is_refused_at_ARGV_not_only_in_the_module(monkeypatch,
+                                                                     capsys):
+    """The module's predicate is useless if the CLI never calls it.
+
+    (1) FAILS if the per-probe validation loop is deleted: the phrase reaches the
+        OR-joining read and a correct repair reads as leaked (see the module leg).
+    (2) REACHABLE: the runbook tells the operator to type a token from the
+        removed sentence, and sentences have spaces.
+    """
+    _export_a_record_dsn(monkeypatch)
+    _install_cli(monkeypatch, _RecordingGraph([(_post_fix_node(),)]),
+                 ["--dry-run", "--assert-clean",
+                  "--probe-phrase", "the weekly rebuild"])
+    assert _cli.main() == 2
+    err = capsys.readouterr().err
+    assert "cannot serve as an FTS probe" in err
+    assert "OR-joins" in err
+
+
+def test_an_EMPTY_Source_index_corroborates_a_CLEAR_only_graph(monkeypatch,
+                                                              capsys):
+    """#11161 review, P2: the documented step 3 must be able to certify a repair.
+
+    (1) FAILS on the shipped leg: the positive control needs a POST-fix lexicon
+        node, and a graph that has only ever been CLEARED has none — so a
+        correctly repaired population read "cannot be corroborated" and exited 1,
+        and the only route to green was `--no-fts-probe`, i.e. the weaker
+        evidence the leg exists to stop certifying.
+    (2) REACHABLE: the clear arm (`--clear-without-record`), whose output is
+        `summary=''` with `_searchText` ABSENT — the very population this repair
+        exists for. And the zero is NOT vacuous: a stale index entry is exactly
+        what would make the index non-empty.
+
+    (3) AND THE GUARD SURVIVES: an index that DOES hold entries, with no lexicon
+        node to probe, still cannot corroborate — the emptiness arm is a
+        MEASUREMENT, not a default.
+    """
+    from tortoise import session_source_prose_migration as m
+
+    cleared = {"url": "session:cleared", "sourceKind": "agentSession",
+               "summary": "", "topics": ["friday", "rebuild"]}
+
+    class _IndexGraph(_RecordingGraph):
+        """Answers the index-entry read: ``empty`` as a count over the population."""
+
+        def __init__(self, rows, *, empty, **kw):
+            super().__init__(rows, **kw)
+            self._empty = empty
+
+        def query(self, cypher, params=None, timeout=None):
+            if "coalesce(s._searchText, '') <> ''" in cypher:
+                return _Result([(0 if self._empty else 1,)])
+            return super().query(cypher, params=params, timeout=timeout)
+
+    graph = _IndexGraph([(cleared,)], empty=True)
+    _install_fts(monkeypatch, {"zebraquux": []})
+    report = m.probe_fts(graph, ["zebraquux"], control=True)
+    assert report["control"]["mode"] == "empty-index"
+    assert report["control"]["ok"] is True
+    assert m.source_index_is_empty(graph) is True
+
+    _install_cli(monkeypatch, graph, ["--dry-run", "--assert-clean",
+                                      "--probe-phrase", "zebraquux"])
+    assert _cli.main() == 0, (
+        "a CORRECTLY repaired clear-only graph could not be certified")
+    out = capsys.readouterr().out
+    assert "EMPTY Source index" in out
+
+    # …and a non-empty index with no lexicon node to probe stays uncorroborated.
+    busy = _IndexGraph([(cleared,)], empty=False)
+    _install_fts(monkeypatch, {"zebraquux": []})
+    report = m.probe_fts(busy, ["zebraquux"], control=True)
+    assert report["control"]["mode"] == "unavailable"
+    assert report["control"]["ok"] is False
+
+    # …and an UNREADABLE index-entry read is not an empty one.
+    class _Unreadable(_IndexGraph):
+        def query(self, cypher, params=None, timeout=None):
+            if "coalesce(s._searchText, '') <> ''" in cypher:
+                raise RuntimeError("read failed")
+            return super().query(cypher, params=params, timeout=timeout)
+
+    unreadable = _Unreadable([(cleared,)], empty=True)
+    assert m.source_index_is_empty(unreadable) is None
+    report = m.probe_fts(unreadable, ["zebraquux"], control=True)
+    assert report["control"]["ok"] is False
+    assert "FAILED" in report["control"]["note"]
