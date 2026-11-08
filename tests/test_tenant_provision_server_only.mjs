@@ -141,6 +141,50 @@ try {
   );
   assert.equal(preflight.headers.get("allow"), "POST", "the 405 must still say which method is accepted");
 
+  // The monitor greps this literal, and a browser's PREFLIGHT is answered by the
+  // method gate, so the refusal must be LOGGED there — otherwise the count can
+  // never fire for the class it names (review finding F2). Captured, not assumed:
+  // console.error is stubbed for the call and the emitted text is inspected.
+  {
+    const capture = async (method, headers) => {
+      const logged = [];
+      const realError = console.error;
+      console.error = (...args) => { logged.push(args.map(String).join(" ")); };
+      try {
+        await call(method, headers);
+      } finally {
+        console.error = realError;
+      }
+      return logged;
+    };
+    const preflightLogged = await capture("OPTIONS", {
+      origin: PROD, "access-control-request-method": "POST",
+    });
+    const preflightHit = preflightLogged.some((l) =>
+      l.includes("refused a browser-origin call"));
+    record(
+      "an origin-bearing PREFLIGHT is logged (the monitor counts that literal)",
+      preflightHit, "logged=" + JSON.stringify(preflightLogged)
+    );
+    assert.ok(
+      preflightHit,
+      "an origin-bearing OPTIONS must log 'refused a browser-origin call' — a " +
+        "preflighted browser call never reaches the origin gate, so without this " +
+        "the monitor's count can never fire for the outage it watches"
+    );
+    // Negative control: an origin-less wrong-method call (curl, a scanner on
+    // GET) must stay UNLOGGED, or every scanner probe pages on the >=5 arm.
+    const quietLogged = await capture("GET", {});
+    record(
+      "an origin-less GET logs NOTHING (a scanner probe must not page)",
+      quietLogged.length === 0, "logged=" + JSON.stringify(quietLogged)
+    );
+    assert.equal(
+      quietLogged.length, 0,
+      "an origin-less wrong-method call must not log the browser-origin refusal"
+    );
+  }
+
   // The enforced property: an origin-bearing request is a browser call.
   await check(
     "POST carrying Origin (browser call) → 403 server-only, even unauthenticated",

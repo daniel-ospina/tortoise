@@ -59,7 +59,7 @@ interface ProvisionPayload {
   org_name?: string;
 }
 
-// Caller identity established by authentication (hook signature or JWT).
+// Caller identity established by the verified user JWT (#802).
 interface CallerIdentity {
   id: string;
   email: string;
@@ -130,11 +130,30 @@ async function authenticateCaller(
 }
 
 Deno.serve(async (req: Request) => {
+  const requestOrigin = req.headers.get("origin");
+
   // Method gate FIRST, and the only thing an OPTIONS probe ever gets: a plain
   // 405 with no `Access-Control-*` header anywhere, so a browser's CORS
   // preflight cannot succeed and the POST behind it never leaves the browser
   // (#1120 — zero CORS surface, nothing to answer a preflight with).
+  //
+  // ⛔ LOG THE REFUSAL HERE TOO. A browser client must send `Authorization` +
+  // `Content-Type: application/json` (both non-safelisted), so it PREFLIGHTS
+  // first — and the preflight is answered by THIS branch, never reaching the
+  // origin gate below. Without this line the monitor's
+  // `refused a browser-origin call` count (tenant-provision-monitor.yml) can
+  // never fire for the class it watches (#1120 review F2): a client regressing
+  // to a page-based call would produce zero log lines, and the #1110 shape — a
+  // user discovers it — would be restored. An origin-less wrong-method call
+  // (curl, a scanner on GET) stays unlogged, so it cannot page anyone.
   if (req.method !== "POST") {
+    if (requestOrigin) {
+      console.error(
+        "tenant-provision: refused a browser-origin call:",
+        requestOrigin,
+        req.method
+      );
+    }
     const res = json({ error: "Method not allowed" }, 405);
     res.headers.set("Allow", "POST");
     return res;
@@ -145,7 +164,6 @@ Deno.serve(async (req: Request) => {
   // origin-bearing request keeps "no browser caller" a property of the
   // endpoint rather than of the (now deleted) CORS headers — and it fails
   // CLOSED if a future client tries to call this from a page.
-  const requestOrigin = req.headers.get("origin");
   if (requestOrigin) {
     console.error("tenant-provision: refused a browser-origin call:", requestOrigin);
     return json({ error: "Forbidden: this endpoint is server-only" }, 403);
