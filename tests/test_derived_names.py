@@ -365,6 +365,15 @@ _ROUTED_FROM_URI_SITES: dict[str, list[str]] = {
     # NO `from_uri(` call at all — it defines a stub `_from_uri` and
     # `monkeypatch.setattr`s it, and its only mentions are in docstrings and
     # strings. A row that can never be consulted is the defect this issue closes.)
+    # Still deliberately ABSENT, now for the OTHER reason: #11495 gave the module
+    # a LIVE `from_uri(foreign_uri)` site (the foreign-thread arm of the
+    # thread-identity pin) and wrote it with an explicit
+    # `graph_name=test_pipeline_cli_foreign`. That is the same outcome this map
+    # demands — `test_from_uri_sites_resolve_test_prefixed` skips a site whose
+    # block carries `graph_name=`, so a row here would be INERT and
+    # `test_no_declared_route_or_pin_is_inert` would flag it. The site shipped
+    # without its `graph_name=` and reddened `test (c)`; the fix belonged at the
+    # CALL, not in a declaration arguing the URI is foreign.
     # #3301: module live-FalkorDB availability probe over candidate URIs
     # (construct + RETURN 1 + close, never DETACHs) — the same shape as
     # test_search_engine_gaps.py above. Every DETACH DELETE in the file

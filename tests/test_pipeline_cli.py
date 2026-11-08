@@ -170,7 +170,19 @@ def test_a_foreign_threads_construction_never_decides_this_verdict(
 
     def _route_elsewhere():
         try:
-            FalkorProjection.from_uri(foreign_uri)
+            # ⛔ The EXPLICIT `graph_name=` is load-bearing, not decoration: every live
+            # `from_uri(` site in the suite must name its own graph or be declared in
+            # `tests/test_derived_names.py::_ROUTED_FROM_URI_SITES` — an un-named site
+            # resolves to whatever the URI points at, which is how a bulk DETACH reached
+            # the shared env-URI graph (the clobber regression that census exists for).
+            # This arm needs a FOREIGN *uri* (`foreign.example.com`), not a foreign graph
+            # name, so the demanded outcome applies here unchanged; a declaration row
+            # would be the weaker answer the map's own record names as such. No `<uuid>`
+            # is needed because nothing can connect: the host is reserved
+            # (`example.com`) and `from_uri` is stubbed on the class above, so no graph
+            # is ever minted — the name only has to be unmistakably test-scoped.
+            FalkorProjection.from_uri(
+                foreign_uri, graph_name="test_pipeline_cli_foreign")
         except BaseException as exc:  # pragma: no cover - reported, not raised
             errors.append(exc)
 
