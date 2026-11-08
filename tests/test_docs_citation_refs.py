@@ -80,9 +80,10 @@ STATED LIMITS — deliberate, and measured rather than guessed:
   * A bare ``:NN`` continuation (``(`:203`)``) carries no document name, so it
     cannot be resolved in isolation and is NOT checked. A citation meant to
     survive should carry its own name instead of leaning on a preceding one —
-    which is why the one such pointer this change introduces
-    (`docs/scoping/2026-08-13-317-cross-encoder-scoping.md`, the wiring-table
-    row) is cited by the ROW's name, not by `:203`.
+    which is why this change introduces NO such pointer: the two sites it touches
+    (`docs/scoping/2026-08-13-317-cross-encoder-scoping.md` and its research
+    brief) cite the `265` scope doc's wiring table by its `#317 reranker` ROW
+    NAME instead of by `:203`.
   * The CITING side is `docs/**/*.md` only (`docs.rglob`). This instrument never
     reads a pointer written inside a `.py` docstring or comment — including one
     of the three policy quotes above, which lives in `tortoise/hosted_api.py` — so
@@ -133,11 +134,13 @@ _PATH_REF = re.compile(r"(?<![\w/])(docs/[A-Za-z0-9_./-]+\.md):(\d+)(?:-(\d+))?"
 
 #: The shorthand form: `` `317` scoping:98 ``, `317 scoping:98`, `` `265`-scoping:128 ``.
 #: ⛔ THE LEFT BOUNDARY IS LOAD-BEARING. Without it a DATE fragment matches: the
-#: words `2026-08-13 research:99` contain `13 research:99`, which resolves to every
-#: `*-13-*.md` in the tree (16 of them when this was measured) and reds a correct
-#: sentence naming 16 files. `(?<![\w-])` refuses a match starting mid-token —
-#: mid-NUMBER and mid-DATE — while leaving `` `317`-scoping:128 `` and
-#: `265 scoping:128` intact.
+#: words `2026-08-13 research:99` contain `13 research:99`, which resolves to
+#: EVERY `docs/research/` record carrying the `-13-` token — **6** at this head
+#: (`…-265-…`, `…-309-…`, `…-316-…`, `…-317-…`, `…-388-…`, `…-405-…`) — and reds a
+#: correct sentence naming six files (`scoping` holds 16 such records, one of them
+#: dated `2026-10-13`, so the count is per-kind and not a constant).
+#: `(?<![\w-])` refuses a match starting mid-token — mid-NUMBER and mid-DATE —
+#: while leaving `` `317`-scoping:128 `` and `265 scoping:128` intact.
 _SHORT_REF = re.compile(r"(?<![\w-])`?(\d+)`?[-\s](scoping|research):(\d+)(?:-(\d+))?")
 
 
@@ -297,9 +300,10 @@ def test_a_date_fragment_is_not_a_shorthand_citation(tmp_path: Path):
 
     Without the `(?<![\\w-])` boundary on `_SHORT_REF`, the prose
     `the 2026-08-13 research:99 note` matches `13 research:99`, which resolves to
-    every `*-13-*.md` in the tree (16 of them when this was measured, all
-    `2026-08-13-*` scope records) and reds a CORRECT sentence naming 16 files. The
-    guard must see no citation here at all.
+    EVERY `docs/research/` record carrying the `-13-` token — 6 at this head (and
+    16 in `docs/scoping/`, measured, one of them dated `2026-10-13` rather than
+    `2026-08-13`) — and reds a CORRECT sentence naming those files. The guard must
+    see no citation here at all.
     """
     (tmp_path / "docs" / "scoping").mkdir(parents=True)
     for name in ("2026-08-13-265-a-scoping.md", "2026-08-13-307-b-scoping.md"):
