@@ -3253,6 +3253,46 @@ def test_a_FOREIGN_only_hit_is_NOT_reported_as_a_stem_collision(monkeypatch):
         "fix for the foreign case must not swallow the benign one")
 
 
+def test_a_TRUNCATED_probe_is_not_reported_as_a_stem_collision(monkeypatch):
+    """``stem_only`` documents "hits, but every one is a lexicon node".
+
+    (1) FAILS on the shipped fold (#11536 review round 8, P2): `truncated` was
+        not excluded, so a probe whose window FILLED — its hits a FLOOR, with
+        residue possibly hiding past the window and never examined — was
+        summarised as a benign stem collision. Third instance of one defect
+        (round 3 `unresolved`, round 7 `foreign`): the predicate was being grown
+        one bucket at a time instead of stating the invariant.
+    (2) REACHABLE: `_FTS_PROBE_LIMIT` is 50 and a common token fills it on any
+        real graph, which is the exact case `truncated` exists for.
+    (3) POLARITY THAT MUST NOT GO RED: a genuine, UNTRUNCATED stem collision
+        still reports `stem_only` (asserted above in the foreign test, and here
+        on the same fixture shape with a single row).
+    """
+    from tortoise import session_source_prose_migration as m
+
+    class _ControlGraph(_RecordingGraph):
+        """A lexicon node the CONTROL can read, so the zero is corroborated."""
+
+        def query(self, cypher, params=None, timeout=None):
+            if "STARTS WITH $prefix" in cypher:
+                return _Result([("migration, plan, friday",)])
+            return super().query(cypher, params=params, timeout=timeout)
+
+    # A window-filling read: every row is the SAME lexicon node, so `hits`
+    # reaches the LIMIT while `lexicon` holds one url.
+    filling = [("session:s-post", 2.0)] * m._FTS_PROBE_LIMIT
+    _install_fts(monkeypatch, {"plan": filling,
+                              "migration": [("session:s-post", 2.0)]})
+    report = m.probe_fts(_ControlGraph([(_post_fix_node(),)]), ["plan"],
+                         control=True)
+    assert report["truncated"] == ["plan"], (
+        "the fixture did not fill the window: " + repr(report["truncated"]))
+    assert report["probes"][0]["lexicon"] == ["session:s-post"]
+    assert report["stem_only"] == [], (
+        "`stem_only` claims every hit is a lexicon node, but this probe's window "
+        "FILLED — its hits are a floor and the rest were never examined")
+
+
 def test_a_BREAKER_OPEN_read_is_UNMEASURABLE_not_a_clean_zero(monkeypatch):
     """A leg that did not run returns `[]` — exactly as a clean miss does.
 
@@ -3413,8 +3453,18 @@ def test_the_certify_line_states_ONLY_what_the_run_measured(monkeypatch, capsys)
     # ⛔ ASSERT ON THE GREEN ITSELF (#11536 review round 5, P2): a bare
     # `"0 hit(s)"` is emitted by the per-probe line on EVERY run, so it passed on
     # the pre-fix wording too. These two red on the pre-fix green AND on a revert.
-    assert "findable through the Source FTS index (0 hit(s)" in out, (
+    # ⛔ AND IT MUST NOT PIN THE OVER-CLAIM (round 8, P1): this row used to assert
+    # `"findable through the Source FTS index (0 hit(s)" in out`, which POSITIVELY
+    # required the Target's unmeasured conjunctive property in the green — so the
+    # wording fix could not land without this assertion's permission, and the
+    # absence row above was satisfiable by dropping one adverb. The count is now
+    # pinned on the counted clause, and the Target phrase is asserted ABSENT.
+    assert "(0 hit(s), across 0 url(s) whose nodes' own" in out, (
         "the green did not state the count it measured")
+    assert "through the Source FTS index" not in out, (
+        "the non-discriminating green is back to claiming the Target's "
+        "conjunctive property from a token nothing showed was ever in the "
+        "corpus")
     assert "the probe token returns NOTHING" not in out, (
         "the pre-fix green is back — it claims the probe returns nothing, which "
         "is false as soon as a hit is classified benign")

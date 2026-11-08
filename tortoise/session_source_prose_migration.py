@@ -131,6 +131,7 @@ __all__ = [
     "FTS_PROBE_ENTITY_TYPE",
     "carries_pre_lexicon_prose",
     "census",
+    "classify_fts_hits",
     "find_session_sources_carrying_prose",
     "lexicon_control_read",
     "lexicon_control_token",
@@ -1949,6 +1950,17 @@ def probe_fts(g, phrases, *, control: bool = True,
                       # an EMPTY `lexicon` bucket and still read as a benign stem
                       # collision to every `--json` consumer.
                       and not p["foreign"]
+                      # ⛔ AND NOT A TRUNCATED ONE (#11536 review round 8, P2):
+                      # the window FILLED, so the hits this probe returned are a
+                      # FLOOR — residue could be hiding past it and was never
+                      # examined. The contract is "every one is a lexicon node",
+                      # and "every one I happened to see" is not that. This is
+                      # the third instance of one defect (round 3 `unresolved`,
+                      # round 7 `foreign`): the predicate was being grown one
+                      # bucket at a time, so the term below is stated as the
+                      # INVARIANT — no other bucket populated and the window not
+                      # filled — rather than as another name on a list.
+                      and not p["truncated"]
                       and not p.get("unresolved")],
         "unexplained": [p["phrase"] for p in measured if p["unexplained"]],
         "unmeasurable": [p["phrase"] for p in measured

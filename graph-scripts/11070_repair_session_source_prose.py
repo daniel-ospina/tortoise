@@ -530,8 +530,20 @@ def _report_fts(fts: dict) -> None:
             # url's nodes DO account for the probe.
             counts = (f" ({hits} hit(s), across {benign} url(s) whose nodes' own "
                       f"lexicon accounts for the token)")
-            head = ("          ✓ no node carrying the pre-fix prose is findable "
-                    "through the Source FTS index")
+            # ⛔ THE HEAD STATES THE MEASUREMENT, NOT THE TARGET (#11536 review
+            # round 8, P1). "No node carrying the pre-fix prose is findable
+            # through the index" is the TARGET's conjunctive property, and this
+            # arm did NOT establish it — it took no BEFORE reading (or wrote
+            # nothing), so its zero cannot show the sentence LEFT. Round 7
+            # narrowed this to the arm in the SECTION HEADER and left the green
+            # itself leading with the unmeasured claim behind a ✓, with the
+            # correction in a subordinate clause; a green that leads with an
+            # unmeasured fact is the class rounds 2-7 kept closing. What WAS
+            # measured is stated here instead: the probe returned no node still
+            # carrying the pre-fix prose, and — per the arm below — the read
+            # answers.
+            head = ("          ✓ no probe token hit a node that still carries "
+                    "the pre-fix prose")
             tail = (" Re-measure with a single rare token taken from the removed "
                     "sentence.")
             if kinds and all(kind == "clean-zero" for kind in kinds):
@@ -721,7 +733,11 @@ def main() -> int:
                          "writes.")
     ap.add_argument("--assert-clean", action="store_true",
                     help="exit 1 if any candidate remains (dry run only) — the "
-                         "step-3 verification; without it a dry run always exits 0. "
+                         "step-3 verification; the FTS leg exits 1 on its own "
+                         "verdict whether or not this is passed, so a dry run "
+                         "with a leaking/unmeasurable probe is nonzero without "
+                         "it (a census against an UNREPAIRED graph is the "
+                         "pre-repair state and says so on stderr). "
                          "REQUIRES --probe-phrase or --no-fts-probe: the census "
                          "is one artifact and the Source FTS index is another")
     ap.add_argument("--probe-phrase", action="append", default=None,
