@@ -33,43 +33,78 @@ def test_edge_function_parses():
     node's type-stripping is the cheapest gate (node >= 22.7; #4916 — a
     present-but-too-old host SKIPs, it does not RED). Skips when node is absent.
 
-    WHY THE TWO STEPS: `node --experimental-strip-types --check <file>.ts` used
-    to strip types before parsing, so it was the whole check in one call. On
-    node 24 it no longer does — `--check` parses the .ts bytes as JavaScript and
-    dies on the first `interface` with "Unexpected strict mode reserved word" —
-    which made this guard a permanent false RED (and therefore no guard at all:
-    a REAL syntax error looked identical to the version noise). So the types are
-    stripped explicitly with `module.stripTypeScriptTypes` and the resulting
-    JavaScript is what `--check` sees. Measured on node v24.21.0.
+    WHY THE TWO STEPS, AND WHY THE FALLBACK: `node --experimental-strip-types
+    --check <file>.ts` was meant to strip types before parsing, so it was the
+    whole check in one call. It is not reliable, and it fails in BOTH
+    directions on node v24.21.0 (both measured):
+
+      * FALSE RED, in this repo's tree — a clean file exits **1** with
+        "Unexpected strict mode reserved word" at the first `interface`, i.e.
+        `--check` parsed the .ts bytes as JavaScript. That is what this file hit
+        on every run, and it is why the guard was red on a healthy tree.
+      * FALSE GREEN, on a copy of the same file under `/tmp` — exit **0**, and
+        still exit 0 after appending `const oops: number = ;`. A broken function
+        would have merged green.
+
+    So the types are stripped explicitly with `module.stripTypeScriptTypes` and
+    the resulting JavaScript is what `--check` sees. Measured, same node: broken
+    input exits non-zero at the strip step, clean input exits 0.
+
+    `module.stripTypeScriptTypes` only exists from node **22.13**, while this
+    guard's floor is `NODE_FLOOR_STRIP_TYPES = 22.7` (`tests/_verdict.py:462`) —
+    so the one-step form is used on 22.7–22.12, where `--check` DID strip types
+    and was the correct check. A host in that band therefore stays covered
+    instead of RED-ing on a missing API and blaming the FILE for a host gap.
     """
     require_node_floor(
         NODE_FLOOR_STRIP_TYPES,
         what="the tenant-provision edge-function parse check",
     )
     node = shutil.which("node")
-    strip = (
-        "const m=require('node:module'),fs=require('node:fs');"
-        "fs.writeFileSync(process.argv[2], "
-        "m.stripTypeScriptTypes(fs.readFileSync(process.argv[1],'utf8')));"
+    # Which mechanism this host supports — probed, never assumed (F1: the two
+    # APIs do not share a version floor).
+    probe = subprocess.run(
+        [node, "-e", "const m=require('node:module');"
+                     "process.stdout.write(typeof m.stripTypeScriptTypes)"],
+        capture_output=True,
+        text=True,
+        timeout=120,
     )
-    with tempfile.TemporaryDirectory() as tmp:
-        stripped = Path(tmp) / "tenant-provision-under-test.mjs"
-        proc = subprocess.run(
-            [node, "-e", strip, str(EDGE_FN), str(stripped)],
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        assert proc.returncode == 0, (
-            "tenant-provision/index.ts could not be type-stripped "
-            f"(exit {proc.returncode}):\n{proc.stderr}"
-        )
+    has_strip = probe.stdout.strip() == "function"
+    if not has_strip:
+        # node 22.7–22.12: `--check` strips types itself (this is the form the
+        # guard shipped with, and it is correct in this band).
         result = subprocess.run(
-            [node, "--check", str(stripped)],
+            [node, "--experimental-strip-types", "--check", str(EDGE_FN)],
             capture_output=True,
             text=True,
             timeout=120,
         )
+    else:
+        strip = (
+            "const m=require('node:module'),fs=require('node:fs');"
+            "fs.writeFileSync(process.argv[2], "
+            "m.stripTypeScriptTypes(fs.readFileSync(process.argv[1],'utf8')));"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            stripped = Path(tmp) / "tenant-provision-under-test.mjs"
+            proc = subprocess.run(
+                [node, "-e", strip, str(EDGE_FN), str(stripped)],
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            assert proc.returncode == 0, (
+                "tenant-provision/index.ts could not be type-stripped — that is "
+                "the parse verdict: the file (or its types) does not parse "
+                f"(exit {proc.returncode}):\n{proc.stderr}"
+            )
+            result = subprocess.run(
+                [node, "--check", str(stripped)],
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
     assert result.returncode == 0, (
         f"tenant-provision/index.ts does not parse (exit {result.returncode}):\n"
         f"{result.stderr}"
