@@ -146,7 +146,10 @@ hook script as a module. No MCP tool or public SDK method is touched.
 - R9 `.cline` and `.clinerules` are the SAME path (a symlink either way), so "retiring the legacy
   registration" deletes the file the run just wrote — exit 0, `Installed` + `Removed the legacy
   registration` printed, and NO hook on any path → caught by
-  `test_install_cline_does_not_retire_the_registration_it_just_wrote`.
+  `test_install_cline_does_not_retire_the_registration_it_just_wrote`. The UNINSTALL half of the same
+  alias is caught by `test_uninstall_cline_removes_an_aliased_registration_once`: the two paths are one
+  file, so they must be removed ONCE (a second `unlink` raised ENOENT and reported a success as a
+  cleanup failure, and the dry run predicted two removals).
 - R10 A cleanup that cannot complete either reports the whole run as `Install failed:` (false red,
   naming nothing left behind) or claims "nothing to remove" over our surviving hook (false green) →
   caught by `test_install_cline_reports_a_failed_legacy_cleanup_as_a_note` (install side) and
@@ -158,7 +161,10 @@ hook script as a module. No MCP tool or public SDK method is touched.
   and after the legacy line moved into the install arm it also promised a legacy removal only an
   install performs → caught by
   `test_uninstall_cline_dry_run_predicts_the_uninstall_not_a_write`, which asserts `would remove`, no
-  `would write`, and that the predicted exit code matches the real run's refusal.
+  `would write`, and that the predicted exit code matches the real run's refusal. The INSTALL dry run
+  must predict the POST-write state: a leaf symlink at the live target is REPLACED by the write, so the
+  migration does run afterwards, and a pre-write predicate under-reported that unlink → caught by
+  `test_install_cline_dry_run_declares_the_legacy_unlink_it_will_perform`.
 
 **Threat classes:** (not adversarial) — not gate/enforcement code.
 

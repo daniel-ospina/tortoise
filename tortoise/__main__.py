@@ -6305,7 +6305,7 @@ def _install_read_hook_impl(args) -> int:
             except OSError:
                 return False
 
-        def _legacy_is_live_target() -> bool:
+        def _legacy_is_live_target(after_write: bool = False) -> bool:
             """True when ``.cline`` and ``.clinerules`` are the SAME path.
 
             A user may symlink one to the other — the natural workaround for
@@ -6321,7 +6321,18 @@ def _install_read_hook_impl(args) -> int:
             if legacy_target is None:
                 return False
             try:
-                return legacy_target.resolve() == target.resolve()
+                # `after_write` is what the DRY RUN must ask: the atomic write
+                # REPLACES a leaf symlink at `target` (#3918), so afterwards
+                # `target` resolves to itself instead of through a link into
+                # the legacy file. Evaluating the pre-write state in the dry
+                # arm made it UNDER-REPORT an unlink the real run performs
+                # (#11588 review cycle 11 — measured with
+                # `.clinerules/hooks/UserPromptSubmit -> ../../.cline/hooks/
+                # UserPromptSubmit`: dry said only `would write`, the real run
+                # also removed the legacy registration).
+                live = (target.parent.resolve() / target.name
+                        if after_write else target.resolve())
+                return legacy_target.resolve() == live
             except RuntimeError:
                 # `resolve()` raises RuntimeError (NOT OSError) on a symlink
                 # LOOP, and this predicate is consulted AFTER the write. A
@@ -6420,7 +6431,24 @@ def _install_read_hook_impl(args) -> int:
             # --uninstall` is an uninstall, and it must predict the uninstall
             # (`would remove` / `would skip` / refusal), not advertise a write
             # it would never perform (#11588 review cycle 10).
-            verdicts = [(p, _uninstall_verdict(p)) for p in cline_paths]
+            # Aliased `.cline`/`.clinerules` (one symlinked to the other) put
+            # the SAME file in the list twice. Both got a `remove` verdict, so
+            # the second unlink failed with ENOENT and the run printed a
+            # cleanup failure — telling the user to remove a file it had just
+            # removed — while the dry run predicted two removals (#11588
+            # review cycle 11). De-duplicate by RESOLVED path, keeping the
+            # live target.
+            uninstall_paths, _seen = [], set()
+            for p in cline_paths:
+                try:
+                    key = p.resolve()
+                except (RuntimeError, OSError):
+                    key = p
+                if key in _seen:
+                    continue
+                _seen.add(key)
+                uninstall_paths.append(p)
+            verdicts = [(p, _uninstall_verdict(p)) for p in uninstall_paths]
             owned = [p for p, v in verdicts if v == "remove"]
             removed = []
             for p, v in verdicts:
@@ -6469,7 +6497,8 @@ def _install_read_hook_impl(args) -> int:
         if dry:
             print(f"[dry-run] would write {target}:")
             print(marker_content.rstrip())
-            if (legacy_target is not None and not _legacy_is_live_target()
+            if (legacy_target is not None
+                    and not _legacy_is_live_target(after_write=True)
                     and legacy_target.exists()
                     and _cline_owns_path(legacy_target)):
                 print(f"[dry-run] would remove the legacy registration at "

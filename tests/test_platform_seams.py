@@ -1136,6 +1136,68 @@ def test_uninstall_cline_dry_run_predicts_the_uninstall_not_a_write(tmp_path):
     assert "would write" not in fd.stdout
 
 
+def test_uninstall_cline_removes_an_aliased_registration_once(tmp_path):
+    """When `.cline` and `.clinerules` are ONE file, the uninstall must not
+    schedule two removals of it (#11588 review cycle 11).
+
+    Both paths got a `remove` verdict, so the second unlink failed with ENOENT
+    and the run told the user to manually remove a file it had just removed —
+    a success reported as a cleanup failure — while `--dry-run` predicted two
+    removals that could not both happen.
+    """
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / ".cline").symlink_to(".clinerules")
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+    r = _run(["install", "cline", "--dir", str(proj)], env)
+    assert r.returncode == 0, r.stderr
+    live = proj / ".clinerules" / "hooks" / "UserPromptSubmit"
+    assert live.is_file()
+
+    d = _run(["install", "cline", "--dir", str(proj), "--uninstall",
+              "--dry-run"], env)
+    assert d.returncode == 0, (d.returncode, d.stdout, d.stderr)
+    assert d.stdout.count("would remove") == 1, d.stdout
+
+    u = _run(["install", "cline", "--dir", str(proj), "--uninstall"], env)
+    assert u.returncode == 0, (u.returncode, u.stdout, u.stderr)
+    assert not live.exists()
+    assert "could not remove" not in u.stderr, (
+        "a successful uninstall reported a cleanup failure for a file it had "
+        "just removed")
+    assert u.stdout.count("Removed") == 1, u.stdout
+
+
+def test_install_cline_dry_run_declares_the_legacy_unlink_it_will_perform(
+        tmp_path):
+    """The dry arm must predict the POST-write state (#11588 review cycle 11).
+
+    With a leaf symlink at the live target pointing at the legacy file, the
+    atomic write REPLACES the link, so afterwards the two paths are different
+    files and the migration unlinks the legacy one. Evaluating the predicate
+    before the write made `--dry-run` print only `would write` while the real
+    run also performed an UNDECLARED delete.
+    """
+    proj = tmp_path / "proj"
+    (proj / ".cline" / "hooks").mkdir(parents=True)
+    legacy = proj / ".cline" / "hooks" / "UserPromptSubmit"
+    legacy.write_text("#!/usr/bin/env bash\n"
+                      "exec /nonexistent/volunteer-turn.sh cline\n")
+    (proj / ".clinerules" / "hooks").mkdir(parents=True)
+    (proj / ".clinerules" / "hooks" / "UserPromptSubmit").symlink_to(
+        "../../.cline/hooks/UserPromptSubmit")
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+
+    d = _run(["install", "cline", "--dir", str(proj), "--dry-run"], env)
+    assert d.returncode == 0, (d.returncode, d.stdout, d.stderr)
+    assert "would remove the legacy registration" in d.stdout, d.stdout
+    assert legacy.exists(), "the dry run deleted the legacy registration"
+
+    r = _run(["install", "cline", "--dir", str(proj)], env)
+    assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+    assert not legacy.exists(), "the real run did not perform the predicted unlink"
+
+
 def test_install_cline_refuses_directory_target(tmp_path):
     """A directory sitting at the cline hook path is a clean refusal, not a
     traceback."""
