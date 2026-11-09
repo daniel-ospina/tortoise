@@ -2625,12 +2625,24 @@ def _is_sitemap_document(path: Path) -> bool:
     not work" class #11615 exists to close. Measured before this guard: a truncated
     `website/sitemap-extra.xml` gave `2 failed` under the old filename glob and `72 passed`
     once discovery moved to root elements.
+
+    The failure is an `AssertionError` naming the file, not a bare `ParseError`: the parser
+    message ("no element found: line 1, column 0") names no path, and three walks call this
+    helper, so a raw re-raise would report the same three anonymous parse errors and leave
+    the operator to read tracebacks for the one datum they need. Pinned by
+    `test_an_unreadable_sitemap_is_not_silently_dropped`.
     """
     try:
         root_element = _sitemap_root_tag(path).rsplit("}", 1)[-1]
-    except ElementTree.ParseError:
+    except ElementTree.ParseError as exc:
         if "sitemap" in path.name.lower():
-            raise
+            raise AssertionError(
+                f"{path} is named as a sitemap but does not parse as XML ({exc}). An "
+                "unparseable sitemap is discarded WHOLE by a crawler, so every URL it "
+                "carries is invisible — even though robots.txt and the index advertise "
+                "it. Repair the file (unclosed tag, unescaped `&`, truncated merge) "
+                "rather than letting the walk drop it"
+            ) from exc
         return False
     return root_element in SITEMAP_ROOT_ELEMENTS
 
@@ -2884,6 +2896,52 @@ def test_sitemap_discovery_reads_the_root_element_not_the_filename(tmp_path: Pat
     # asserted: the glob it used cannot see the file at all.
     assert {p.name for p in tmp_path.glob("sitemap-*.xml")} == {"sitemap-company.xml"}
     assert found == {"blog-sitemap.xml", "sitemap-company.xml"}
+
+
+def test_an_unreadable_sitemap_is_not_silently_dropped(tmp_path: Path) -> None:
+    """An unreadable sitemap must FAIL the walk, not disappear from it.
+
+    Discovery by root element means "is not a sitemap" and "cannot be read as one" are the
+    SAME answer to a parser, so without the re-raise in `_is_sitemap_document` a truncated
+    or half-merged sitemap that `robots.txt` and the index both advertise drops out of the
+    population BEFORE anything parses it, and all three walks stay green. The crawler-facing
+    result is an advertised sitemap of unreadable XML, which search engines discard WHOLE
+    (sitemaps.org: a file that fails to parse yields no URLs), i.e. #11615 with the guards
+    reporting coverage that does not exist. Measured before the re-raise: a truncated
+    `website/sitemap-extra.xml` gave `2 failed` under the old filename glob and `72 passed`
+    after discovery moved to root elements.
+
+    ⛔ BOTH HALVES ARE PINNED, because the cheap repair is the wrong one: dropping the
+    `except` entirely would redden a corrupt `feed.xml`, which really is just an XML file
+    beside the sitemaps and not a sitemap at all. Only a name that CLAIMS to be a sitemap
+    is re-raised.
+    """
+    ns = SITEMAP_NS[1:-1]  # the namespace URI, without the `{…}` wrapper
+    (tmp_path / "sitemap-company.xml").write_text(
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        f'<urlset xmlns="{ns}"><url><loc>https://premiselabs.co/docs</loc></url></urlset>\n',
+        encoding="utf-8",
+    )
+    # Truncated mid-document — every parse of it raises. Pre-fix it was silently treated
+    # as "not a sitemap", so `pytest.raises` below DID NOT RAISE.
+    (tmp_path / "sitemap-blog.xml").write_text(
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        f'<urlset xmlns="{ns}"><url><loc>https://premiselabs.co/docs</loc></url>\n',
+        encoding="utf-8",
+    )
+    # Also truncated, but its name does not claim to be a sitemap.
+    (tmp_path / "feed.xml").write_text(
+        '<?xml version="1.0" encoding="UTF-8"?>\n<rss version="2.0"><channel>\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(AssertionError, match=re.escape("sitemap-blog.xml")):
+        _published_sitemaps(tmp_path)
+
+    # The swallow is SCOPED, not removed: with the broken sitemap gone, the non-sitemap XML
+    # beside it is still tolerated — so "delete the except" is not a passing repair.
+    (tmp_path / "sitemap-blog.xml").unlink()
+    assert {p.name for p in _published_sitemaps(tmp_path)} == {"sitemap-company.xml"}
 
 
 def test_no_sitemap_advertises_a_page_that_is_deleted_or_noindex() -> None:
