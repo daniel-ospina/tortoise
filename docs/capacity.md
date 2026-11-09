@@ -209,10 +209,10 @@ extractor signal-vs-noise, and hosting cost in **bytes**, never nodes (`#4051`).
 
 The storage limb is the one limb that **is** satisfied today, and it is written
 that way on purpose: a limb stated as an unowned prerequisite makes "is the
-conjunction false?" unanswerable from this page. Its owner, `#10017`, closed
-*not planned* on 2026-11-06 because the local half was "a no-op on the local
-deployment"; the hosted record it deferred to is armed and writing — `GET
-/health` reports `record.armed=true`, `record.ok=true`, `degraded=false` on
+conjunction false?" unanswerable from this page. The issue that owned it,
+`#10017`, closed *not planned* on 2026-11-06 because the local half was a no-op
+on the local deployment; the hosted record it deferred to is armed and writing —
+`GET /health` reports `record.armed=true`, `record.ok=true`, `degraded=false` on
 2026-11-07, and `record_writes_applied=3` on 2026-11-09 (up from `0`). No open
 issue owns it because none is needed: it is not a missing prerequisite.
 
