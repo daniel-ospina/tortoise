@@ -1327,14 +1327,22 @@ def test_the_pi_and_python_classifiers_agree_on_every_status_parity(tmp_path):
 
     #5051: the comparison covers BOTH declared answers — the 4-class contract
     (`capture_outcome` / `captureOutcome`) and the 2-class projection
-    (`classify_failure` / `classifyFailure`) — over the FULL status space, so a
-    leg cannot drift into a vocabulary of its own (the third one, `store-sync`'s
-    ``advance|permanent|retain``, is #5051's C4 and is not covered here yet).
+    (`classify_failure` / `classifyFailure`) — over the numeric status space,
+    DERIVED rather than enumerated, so a leg cannot drift into a vocabulary of
+    its own (the third one, `store-sync`'s ``advance|permanent|retain``, is
+    #5051's C4 and is not covered here yet).
 
-    MUTATION THAT REDS THIS: drop 402 from EITHER classifier -> the maps
-    disagree and the unrecoverable-from-one-leg case is exposed. The final 402
-    pin also catches both legs drifting the SAME way, which a pure comparison
-    cannot.
+    #11657: the rows used to be an enumerated literal list, and that list
+    omitted 408 — a status BOTH legs enumerate as a retryable row — so a
+    one-leg drift there reported green while the gate claimed "every status the
+    declared table distinguishes a class for is present". A dense derived range
+    makes that claim true BY CONSTRUCTION: there is no list to fall out of step
+    with the table, and no per-status judgement about which rows matter.
+
+    MUTATION THAT REDS THIS: drop 402 (or 408) from EITHER classifier -> the
+    maps disagree and the unrecoverable-from-one-leg case is exposed. The final
+    402/408 pins also catch both legs drifting the SAME way, which a pure
+    comparison cannot.
     """
     _assert_both_legs_carry_402()
 
@@ -1345,11 +1353,17 @@ def test_the_pi_and_python_classifiers_agree_on_every_status_parity(tmp_path):
     # `null`/`NaN` are passed THROUGH, not converted to `undefined`: the legs
     # must agree on the values a real caller can produce, and the conversion
     # hid the one genuine divergence (JS `classifyFailure(null)` was
-    # "permanent" because `null >= 300` is false). Every status the declared
-    # table distinguishes a class for is present.
+    # "permanent" because `null >= 300` is false).
+    #
+    # The numeric rows are DERIVED (#11657): 0..599 spans the whole three-digit
+    # HTTP space (100-599) and the unassigned area below it, the far-tail rows
+    # pin the `>= 500` arm past the range, and the negatives pin the `permanent`
+    # default arm below the 2xx floor. The no-status rows cannot be reached by a
+    # range, so they stay explicit.
     driver.write_text(
         f'import {{ classifyFailure, captureOutcome }} from "{ext}";\n'
-        "const matrix = [null, undefined, NaN, true, false, 0, 200, 201, 301, 400, 401, 402, 403, 404, 407, 409, 422, 425, 429, 500, 502, 503, 504];\n"
+        "const matrix = [null, undefined, NaN, true, false, -100, -1,\n"
+        "  ...Array.from({ length: 600 }, (_, i) => i), 600, 999, 1000000];\n"
         "const out = {};\n"
         "for (const s of matrix) out[String(s)] = "
         "{ f: classifyFailure(s), o: captureOutcome(s) };\n"
@@ -1373,6 +1387,16 @@ def test_the_pi_and_python_classifiers_agree_on_every_status_parity(tmp_path):
     # used to cover (Python returned "permanent" for a nan).
     python_input = {"null": None, "undefined": None, "NaN": float("nan"),
                     "true": True, "false": False}
+    # The derived range has to cover the statuses the table NAMES, or the
+    # derivation re-introduces the same hole one level up: a declared status
+    # outside 0..599 would be silently unsampled. This is the exported half of
+    # that check (the retryable family is not exported; every declared member of
+    # it is three-digit by the HTTP spec).
+    for code in POLICY_STATUSES:
+        assert 0 <= code < 600, (
+            f"declared policy status {code} is outside the derived matrix "
+            "range — widen the range, not just this assertion"
+        )
     for raw, verdicts in pi_map.items():
         status = python_input[raw] if raw in python_input else int(raw)
         assert classify_failure(status) == verdicts["f"], (
@@ -1412,8 +1436,8 @@ def test_the_pi_and_python_classifiers_agree_on_every_status_parity(tmp_path):
     assert table["200"] == table["201"] == "landed"
     assert table["403"] == table["401"] == table["407"] == "policy"
     assert table["422"] == table["400"] == table["404"] == "permanent"
-    for raw in ("null", "undefined", "NaN", "301", "402", "409", "429",
-                "500", "502", "503", "504"):
+    for raw in ("null", "undefined", "NaN", "301", "402", "408", "409",
+                "429", "500", "502", "503", "504"):
         assert table[raw] == "retryable", raw
 
 
