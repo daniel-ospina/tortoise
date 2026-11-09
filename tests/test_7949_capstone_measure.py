@@ -10922,7 +10922,7 @@ _CITE_QUALIFIER_PATTERN = (
     # `[0-9a-f]{7,40}`: at `{0,24}` a full 40-char sha in the PARENTHESISED spelling never
     # matched `\s*[,)]` and was reported UNQUALIFIED — a false block that told the author to
     # add the base they had already written in the other spelling (measured, same review).
-    r":(\d+)(?:-\d+)?`?(?:\s*\bat\b\s*([^\s,;)\]]{0,40})|[^\S\n]*\([^\S\n]*([^\s,;)\]]{0,40})\s*[,)])"
+    r":(\d+)(?:-(\d+))?`?(?:\s*\bat\b\s*([^\s,;)\]]{0,40})|[^\S\n]*\([^\S\n]*([^\s,;)\]]{0,40})\s*[,)])"
 )
 
 
@@ -10938,7 +10938,7 @@ def _cite_qualifier_matches(region: str) -> list[tuple[int, str, str]]:
     """
     out: list[tuple[int, str, str]] = []
     for m in re.finditer(_CITE_QUALIFIER_PATTERN, region):
-        n, at_q, paren_q = m.group(1), m.group(2), m.group(3)
+        lead, trail, at_q, paren_q = m.group(1), m.group(2), m.group(3), m.group(4)
         # ⛔ `or ""`, because `finditer` yields `None` for a NON-PARTICIPATING group where the
         # `findall` this replaced yielded `""`. Without it, a degenerate qualifier that leaves
         # the `at` group empty and the parenthesis group absent (`:12944 at )`) raised
@@ -10947,7 +10947,17 @@ def _cite_qualifier_matches(region: str) -> list[tuple[int, str, str]]:
         # `35a53c4ccc`, and fail-closed only by accident.
         q = (at_q or paren_q or "").strip("*`().,;")
         if q:
-            out.append((m.start(), n, q))
+            # ⛔ BOTH ENDPOINTS OF A QUALIFIED RANGE ARE QUALIFIED, and both are emitted at the
+            # SAME offset the SITES reader uses (`m.start()`, the `:`) — because that reader
+            # already counts `:M-N` as a site for M AND for N. Reporting only `lead` here made
+            # the two readers DISAGREE: `:12943-12944` at `<sha>` was counted as a site for 12944
+            # by one and as unqualified by the other, so a conformant base-qualified range whose
+            # live line is the TRAILING endpoint was reported UNQUALIFIED — the same false BLOCK
+            # the range tail removed, with a diagnostic telling the author to add a base they had
+            # already written (measured by a fresh-context review at `615bb14b31`).
+            out.append((m.start(), lead, q))
+            if trail:
+                out.append((m.start(), trail, q))
     return out
 
 
@@ -11215,6 +11225,17 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         "sites from `:number` alone made it invisible — a bare `:12943-12944` returned `[]` "
         "for 12944 while `:12944-12945` redded, i.e. the arm covered half the spelling it "
         "exists to catch (measured at `35a53c4ccc`)")
+    # ⛔ AND A QUALIFIED RANGE QUALIFIES BOTH OF ITS ENDPOINTS. The SITES reader counts both;
+    # the DISCHARGE reader reported only the leading number, so a base-qualified range whose
+    # live line is the TRAILING endpoint was reported UNQUALIFIED — a false BLOCK of an edit
+    # that already wrote the base, in the spelling §2 uses (measured at `615bb14b31`).
+    assert _unqualified_number_cites("`:12943-12944` at `b3c2b1a`", "12944") == [], (
+        "a range's base covers its TRAILING endpoint — reporting it unqualified tells the "
+        "author to add the base they already wrote")
+    assert _unqualified_number_cites("`:12943-12944` at `b3c2b1a`", "12943") == [], (
+        "and the LEADING endpoint of the same qualified range stays discharged")
+    assert _unqualified_number_cites("`:12943-12944` (`b3c2b1a`)", "12944") == [], (
+        "the parenthesised spelling of a range's base covers the trailing endpoint too")
     assert _unqualified_number_cites("`:12944-12945`", "12944") == [1], (
         "and the LEADING endpoint still reds when the range carries no base")
     assert _unqualified_number_cites(
