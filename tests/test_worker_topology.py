@@ -2024,6 +2024,16 @@ def test_a_spelling_click_rejects_does_not_exempt_the_shipped_gate(spelling):
 #: its stated version (:func:`_ahead_violations`), so a removed, renamed or
 #: retuned flag reds instead of being excused.
 #:
+#: ⛔ THE VALUE IS A MEASURED FACT, NOT A DERIVED ONE — it is a literal, never
+#: `_UVICORN_NEWEST_MEASURED`. Coupling the two made the next legitimate horizon
+#: bump silently UN-VERIFY the shipped entry in the environment that can actually
+#: verify it (MEASURED: with the shipped `since` following a horizon of
+#: `9999.0.0`, `--http2` went unverified in the 0.54.0 parser that exposes it).
+#: `--http2` was measured in the 0.53.0 tag's `uvicorn/main.py`
+#: (`@click.option("--http2", is_flag=True, …)`) and is ABSENT from 0.52.4, so
+#: 0.53.0 is when it appeared — not 0.54.0, which is merely the newest measured
+#: release.
+#:
 #: ⛔ AND `since` IS BOUNDED BY WHAT HAS BEEN MEASURED. The check above only bites
 #: once the installed version REACHES `since`, so a declaration naming a version
 #: no uvicorn ever had restores the free pass: MEASURED — `--bogus` in the table
@@ -2033,7 +2043,7 @@ def test_a_spelling_click_rejects_does_not_exempt_the_shipped_gate(spelling):
 #: (:data:`_UVICORN_NEWEST_MEASURED`; bump it deliberately when a newer uvicorn
 #: has actually been measured).
 _UVICORN_NEWEST_MEASURED = "0.54.0"
-_AHEAD_OF_THE_PIN: dict[str, str] = {"--http2": _UVICORN_NEWEST_MEASURED}
+_AHEAD_OF_THE_PIN: dict[str, str] = {"--http2": "0.53.0"}
 
 
 def _installed_version(distribution: str) -> str:
@@ -2268,6 +2278,12 @@ def test_the_ahead_of_the_pin_declaration_is_itself_verified():
     # a declaration for a name the table does not carry is dead weight -> red
     reds = _ahead_violations({"--ghost": "0.54.0"}, flags, table, "0.52.1")
     assert reds and "--ghost" in reds[0], reds
+
+    # ⛔ the shipped declaration's `since` is a MEASURED FACT (0.53.0 — present in
+    # that tag's `uvicorn/main.py`, absent from 0.52.4), NOT a derivation from
+    # `_UVICORN_NEWEST_MEASURED`: coupling them means the next legitimate horizon
+    # bump silently un-verifies `--http2` in the only parser that can verify it.
+    assert _AHEAD_OF_THE_PIN == {"--http2": "0.53.0"}
 
     # ⛔ …and a `since` PAST the measured horizon is a free pass, not a promise:
     # MEASURED on the pre-guard code, `--bogus` declared at `9999.0.0` was green
