@@ -64,15 +64,61 @@ class ExportError(RuntimeError):
 # ── canonical serialization ──────────────────────────────────────────────────
 
 
+def _importable_pack_status(status: str | None) -> str:
+    """#1936: clamp an exported status to the set the IMPORTER accepts.
+
+    The exporter used to write ``:PackInstall.status`` verbatim while the
+    importer's shape gate accepts only ``active`` | ``disabled`` | ``removed``
+    — so a graph holding any other value produced an artifact its own importer
+    rejected pre-restore, and an artifact is sha-pinned and usually the only
+    surviving copy of a graph that is gone. "Export your graph, restore it"
+    has to be total.
+
+    No in-product writer can produce an out-of-vocabulary status (``pack_state``
+    and ``pack_manifest_store`` both validate), so this is a residual against
+    an out-of-band graph write — which is exactly the case a restore exists
+    for.
+
+    A non-empty unknown status clamps to ``disabled``: it never WIDENS a
+    tenant's vocabulary on restore, and it agrees with the ``activated``
+    boolean emitted beside it, which is ``(status or "active") == "active"``
+    — False for any such value. A FALSY status (absent, ``None``, ``""``)
+    clamps to ``active`` for the same reason: it is what ``activated``
+    already says, and it is how ``pack_state`` itself normalises a missing
+    status (``status or PACK_STATUS_ACTIVE``).
+    """
+    if status in ("active", "disabled", "removed"):
+        return status
+    return "disabled" if status else "active"
+
+
 def collect_pack_config(proj) -> dict:
     """#1936: the pack-config block carried INSIDE the encrypted payload.
 
     Reads the graph's ``PackInstall`` activation records (namespace, version,
-    source) plus the ``:PackManifest`` nodes' YAML (custom packs only —
+    source, status) plus the ``:PackManifest`` nodes' YAML (custom packs only —
     starter packs live in the shared catalog, yaml=null). Shape (v1):
-    ``{schema_version: 1, packs: [{namespace, version, activated, yaml}]}``
-    — ``activated`` mirrors the record's status/active, ``yaml`` is the
-    custom manifest text or null for starter packs.
+    ``{schema_version: 1, packs: [{namespace, version, activated, status,
+    yaml}]}`` — ``activated`` mirrors the record's status/active, ``status``
+    carries the FULL activation state (``active`` | ``disabled`` |
+    ``removed``), ``yaml`` is the custom manifest text or null for starter
+    packs.
+
+    ``status`` is what makes restore parity (#1936 indicator 2) expressible:
+    ``activated`` alone collapses ``disabled`` and ``removed`` into one
+    boolean, so an importer could not tell "the tenant switched this pack
+    off" (carry it, write ``disabled``) from "the tenant removed this pack".
+
+    ⛔ A REMOVED PACK STILL CARRIES ITS MANIFEST, and the docs elsewhere say so:
+    a live graph removes through ``pack_state.set_graph_packs``, which only sets
+    ``:PackInstall.status='removed'`` and KEEPS the ``:PackManifest`` — so a real
+    export is ``status: removed`` WITH ``yaml``. The ``yaml: null`` removal shape
+    comes from the caller-less ``delete_tenant_manifest``. Either way the entry
+    must be SKIPPED on import: never re-installed ``active`` (the tombstone-
+    erasing widening this PR fixes, which is what the with-yaml shape did before
+    it), and never failed as an unknown starter (all the ``yaml: null`` shape
+    could raise). Additive within v1: the shape validator leaves unknown keys
+    unconstrained, so a pre-``status`` importer ignores it.
     """
     records = []
     try:
@@ -92,6 +138,7 @@ def collect_pack_config(proj) -> dict:
                 "namespace": ns,
                 "version": version or "0.1.0",
                 "activated": (status or "active") == "active",
+                "status": _importable_pack_status(status),
                 "yaml": yaml_text,
             })
     except Exception:
