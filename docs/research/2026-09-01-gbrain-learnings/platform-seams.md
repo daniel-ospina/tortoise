@@ -386,6 +386,28 @@ receipts, provenance and REPHRASE dedup in the one existing import pipeline.
   relays to the harness log, so a future redirect is loud at run time.
   Env alone (a bare `TORTOISE_API_KEY`) still never flips the hook to
   hosted mode (#1708 D1b).
+
+  ⚠️ **The Pi read seam does not fit this bullet's key store (#2119).** It
+  keeps its OWN key, in `~/.pi/agent/tortoise-config.json` — **never**
+  `~/.tortoise/credentials.json` — because it can satisfy the reflex
+  in-process instead of only shelling out to `tortoise volunteer`: the
+  extension POSTs the window itself (`runReflexHosted`). Rotating the
+  credentials file therefore does **not** stop it. Its consent rule is
+  otherwise the STRICTER one — a file-sourced key only, no env key, and no
+  env `TORTOISE_API_URL` override — so the "env alone never flips it" clause
+  above holds here too; see the `#2119` Pi row in the table above.
+
+  The **log-loudness** clause above also does not describe it: its hosted leg
+  emits no note at all (only a `TORTOISE_VOLUNTEER_DEBUG=1` trace), and on
+  its CLI transport the child's stderr — where `tortoise: hosted-mode note:`
+  goes — is captured and dropped on success. ⛔ That gap is **not** unique to
+  this row: #2120's OpenClaw plugin (`tortoise/openclaw-plugin/index.mjs`,
+  the `execFile` callback reading only `stdout`) and #2121's Hermes plugin
+  (`tortoise/hermes-plugin/__init__.py`, `subprocess.run(...,
+  capture_output=True)` returning only `proc.stdout`) discard the note the
+  same way. So "loud at run time" is currently true of the shell-hook family
+  only — a standing audit gap on the in-process rows, not a property of this
+  seam.
 * W4 user-exposure opt-in: per-turn injection ships behind the `install`
   command — nothing auto-registers.
 
