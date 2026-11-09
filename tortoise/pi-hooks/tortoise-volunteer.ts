@@ -1112,7 +1112,8 @@ export default function tortoiseVolunteer(
   let inertLatched = false;
 
   /** Run the reflex for one turn, fail-open in every direction. */
-  const reflex = async (prompt: string, sessionId: string): Promise<ReflexResult | null> => {    if (deps.reflexImpl) {
+  const reflex = async (prompt: string, sessionId: string): Promise<ReflexResult | null> => {
+    if (deps.reflexImpl) {
       try {
         return await deps.reflexImpl(prompt, sessionId);
       } catch {
