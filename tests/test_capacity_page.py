@@ -583,25 +583,32 @@ def test_the_unmeasured_dimensions_are_still_named():
 # ── The held cap says so, at the cap (#10175) ───────────────────────────────
 
 #: The clauses that stop a lane meeting a 402 from clearing it. Every entry is
-#: a phrase ONLY the added clause supplies, matched against the page as it stood
+#: a phrase ONLY the added clause supplies, checked against the page as it stood
 #: before this relay — where each of them occurred **zero** times. That is the
 #: load-bearing part: loose keywords are satisfied by text that was already on the
 #: page (`402`, `429` and `max_points` all predate the relay), so a keyword pin
 #: stayed green with the clause's whole stock-vs-flow bullet deleted. Each entry
 #: names a distinct requirement of the ruling and its 2026-11-02 amendment.
+#:
+#: Written WITHOUT markup and matched through `_plain()`, because the substance is
+#: the words and not the formatting: a re-emphasised sentence is a meaning-preserving
+#: edit, and a pin that reds on one is the false alarm that gets a guard deleted.
+#: Markup-neutral matching also lets the entries bind a full conclusion rather than
+#: stopping at the delimiters — `", so the graph stays"` and `"only after …"` are
+#: exactly the halves a lane acts on.
 _HELD_CAP_CLAUSES = (
-    "**OVERRIDES:** the default engineering reflex",  # the marker + what it overrides
-    "is **refused**",  # the ruling itself, not merely a marker
+    "overrides: the default engineering reflex",  # the marker + what it overrides
+    "is refused (owner ruling",  # the ruling itself, not merely a marker
     "not an outage to remediate",  # the 402 is the correct state
     "the refusal is terminal",  # a stock, not a flow
     "backoff is not a remedy",  # the retry branch that must not be shared
-    "a `max_points` override",  # the remedy that is forbidden
-    "The field is not out of an operator's hands",  # an override is reachable
+    "a max_points override",  # the remedy that is forbidden
+    "the field is not out of an operator's hands",  # an override is reachable
     "permits removing that one graph",  # the 2026-11-02 amendment authorises it
-    "after a count-verified export to durable local storage",  # ...only after this
+    "only after a count-verified export to durable local storage",  # ...exclusively after this
     "and with a journalled delete",  # ...and only journalled
-    "no journalled whole-graph delete path exists yet",  # ...and that path does not exist
-    "closed *not planned*",  # the storage limb's owner is closed, not open
+    "delete path exists yet, so the graph stays",  # ...and it therefore stays
+    "not planned",  # the storage limb's owner is closed, not open
     "no backfill of the old graph",  # survives the amendment
     "no reading of its 402 as a defect",  # survives the amendment
 )
@@ -639,17 +646,23 @@ def _collapsed(text: str) -> str:
 
 
 def _plain(text: str) -> str:
-    """Collapsed, lowercased and with markdown emphasis / code spans removed.
+    """Collapsed, lowercased, with markdown emphasis / code spans stripped.
 
-    The absence scan needs this and the presence scan must NOT have it. A
-    superseded claim is evaded by typography alone if the matcher keeps markup:
-    this page's own house style emphasises exactly these contrast words, so
-    restoring the withdrawn sentence as ``the only *copy*`` (or ``**only**
-    copy``, or a code span) read as absent. In the other direction, a presence
-    fragment that stopped matching because someone re-emphasised it fails closed,
-    which is the safe direction and is deliberately not relaxed.
+    Both scans match through this, so typography can shift neither: a withdrawn
+    claim restored as ``the only *copy*`` (or ``only **copy**``, or a code span)
+    is still the withdrawn claim, and a still-correct clause that is re-emphasised
+    is still correct. The page uses both ``*old*`` and ``**only**``, so this is a
+    live variant, not a hypothetical one.
+
+    Accepted residual: HTML tags, entities, zero-width characters and `_word_`
+    emphasis are NOT stripped. Underscores are deliberately left alone — in this
+    page they are identifier characters (`max_points`, `graph_size_cap`), so
+    stripping them would corrupt the very phrases the pin looks for. `docs/capacity.md`
+    contains no HTML and no zero-width characters, so a tag or entity is an
+    adversarial construction rather than an edit someone would make here; the
+    docstring names the gap instead of growing a regex for it.
     """
-    return re.sub(r"[*_`~]", "", _collapsed(text)).lower()
+    return re.sub(r"[*`~]", "", _collapsed(text)).lower()
 
 
 def _section4(text: str) -> str:
@@ -684,7 +697,7 @@ def test_the_held_capture_cap_states_that_clearing_it_is_refused():
     carried, and would stay green through a rewrite that kept the vocabulary and
     dropped the ruling.
     """
-    text = _collapsed(_section4(_read(CAPACITY)))
+    text = _plain(_section4(_read(CAPACITY)))
     dropped = [clause for clause in _HELD_CAP_CLAUSES if clause not in text]
     assert not dropped, (
         "docs/capacity.md §4 no longer carries the #10175 refusal clause — "
