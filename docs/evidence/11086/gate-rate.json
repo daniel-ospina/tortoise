@@ -72,7 +72,8 @@
    ],
    "rows_carrying_a_vector": 9,
    "rows_without_a_vector": 0,
-   "rows_written": 9
+   "rows_written": 9,
+   "suppressed_texts": []
   },
   "gate_on": {
    "predicate_calls": 9,
@@ -136,7 +137,13 @@
    ],
    "rows_carrying_a_vector": 5,
    "rows_without_a_vector": 4,
-   "rows_written": 9
+   "rows_written": 9,
+   "suppressed_texts": [
+    "7f3a9c2e-1b4d-4a6f-9c81-2de5b7a04f19",
+    "a41f0c9d8e2b7f6a5c4d3e2f1a0b9c8d7e6f5a4b",
+    "tortoise/projection/entities.py",
+    "#11086"
+   ]
   },
   "question": "does the written row carry a vector?"
  },
@@ -163,6 +170,7 @@
   "flag": "TORTOISE_VALUE_GATE",
   "gate_off": {
    "candidates": 9,
+   "candidates_judged": 9,
    "candidates_removed": 0,
    "candidates_still_existing": 9,
    "predicate_enabled_at_the_enforcement_point": false,
@@ -226,6 +234,7 @@
   },
   "gate_on": {
    "candidates": 9,
+   "candidates_judged": 9,
    "candidates_removed": 4,
    "candidates_still_existing": 5,
    "predicate_enabled_at_the_enforcement_point": true,

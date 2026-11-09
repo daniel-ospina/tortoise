@@ -1714,7 +1714,10 @@ S3, S5, the commit — reads that list, so a discarded candidate is never offere
 the `EMBED` flag into `vet_enabled` would arm nothing while appearing to arm the gate.
 
 **Behavioral pins.** `tests/test_embed_decision_step_11086.py` drives a `DISCARD`ed candidate through
-the S2.2b pass and through `execute_embed`'s payload and asserts it is never submitted to
-`embeddings.encode_for_row`; asserts the `VET`-wins direction with **both** gates armed; pins that
+the S2.2b pass and through `execute_embed`'s payload and asserts it is absent from **both** the
+list every later step reads and the payload the commit is handed — pinned as a **DELTA** against
+the predicate's kill-switch, where the candidate IS present in both, so the assertion measures
+the removal rather than this file's own input; asserts the `VET`-wins direction with **both**
+gates armed; pins that
 `execute_embed` calls no encoder; pins that `kind_classifier` reads a kind index rather than a stored
 row vector; and re-runs the rate measurement against its committed record.

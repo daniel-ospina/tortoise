@@ -546,22 +546,34 @@ def test_a_docs_only_edit_to_the_design_record_selects_the_step_pins():
     Pinned as a MEASUREMENT over `tools/ci_selection.py` rather than as a grep for
     a manifest string, so a later re-organisation that moves the registration
     still passes only if selection actually reaches this file.
+
+    ⚠️ **ONE subprocess, not three.** Each invocation YAML-parses the 1.2 MB
+    `config/ci-surfaces.yml`, and the CI `test` job's arm-2 invariant
+    (`docs/ops/ci-wall-clock.md` §2, pinned by
+    `test_ci_selection.py::test_the_test_job_carries_no_unbounded_cache_post_step`)
+    requires the SUM × 1.5 to clear a 90 m cap with 0.54 m of headroom — so this
+    file's declared duration is bounded by an invariant elsewhere in the repo, and
+    a pin that pays 3 parses to assert the same thing would spend that budget.
+    The selector takes a changed-file LIST, which is also the shape a real PR
+    reports.
     """
     import subprocess
 
-    tool = _ROOT / "tools" / "ci_selection.py"
-    for artifact in ("docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md",
-                     "docs/evidence/11086/gate-rate.json",
-                     "docs/evidence/11086/README.md"):
-        out = subprocess.run(
-            [sys.executable, str(tool), "--changed-files", "-",
-             "--event", "pull_request"],
-            input=artifact + "\n", capture_output=True, text=True, timeout=180,
-            cwd=str(_ROOT), check=True,
-        ).stdout
-        selected = json.loads(out)
-        assert "test_embed_decision_step_11086.py" in selected["test_files"], (
-            f"a docs-only edit to {artifact} does not select this file — the "
-            "pins on G2 and on the rate record never run on the only change that "
-            "can break them (surfaces: "
-            f"{selected.get('surfaces')!r})")
+    artifacts = ["docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md",
+                 "docs/evidence/11086/gate-rate.json",
+                 "docs/evidence/11086/README.md"]
+    out = subprocess.run(
+        [sys.executable, str(_ROOT / "tools" / "ci_selection.py"),
+         "--changed-files", "-", "--event", "pull_request"],
+        input="\n".join(artifacts) + "\n", capture_output=True, text=True,
+        timeout=240, cwd=str(_ROOT), check=True,
+    ).stdout
+    selected = json.loads(out)
+    assert selected["surfaces"] == [], (
+        "a docs-only diff must select NO surface — that is the contract "
+        "`test_ci_selection.py::test_v4_membership_gate_runs_on_both_architecture_docs` "
+        f"pins, and `tier1` is the compensating path ({selected['surfaces']!r})")
+    assert "test_embed_decision_step_11086.py" in selected["test_files"], (
+        "a docs-only edit to the design record (or to the rate record) does not "
+        "select this file — the pins on G2 and on the measurement never run on the "
+        "only change that can break them (#1349/#2938/#3616)")

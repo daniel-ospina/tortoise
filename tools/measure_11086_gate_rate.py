@@ -194,6 +194,9 @@ def _embed_arm(armed: bool) -> dict:
         "predicate_enabled_at_the_enforcement_point": bool(enabled),
         "predicate_fired": fired["refusals"],
         "predicate_calls": fired["calls"],
+        # …and the rows it suppressed, named, so "the gate refused 4" is a list of
+        # texts rather than an inference from `vec is None`.
+        "suppressed_texts": [r["text"] for r in rows if not r["carries_vector"]],
     }
 
 
@@ -231,9 +234,17 @@ def _value_arm(armed: bool) -> dict:
                      "section": row["section"],
                      "still_exists": row["text"] in kept_texts})
     mechanical = (out.get("stats") or {}).get("mechanical") or {}
+    #: The population the gate ACTUALLY judged — one decision per candidate whose
+    #: text it could read. This is the number the refusals below compare, and it is
+    #: deliberately NOT `len(CORPUS)`: a comparison of the module constant with
+    #: itself can never fire, so it would advertise a refusal the tool cannot reach
+    #: (measured against a broken `_item_text`: `decisions == {}`, every count zero,
+    #: and a plausible-looking "this gate does nothing" record instead of an error).
+    judged = len(out.get("decisions") or {})
     return {
         "rows": rows,
         "candidates": len(rows),
+        "candidates_judged": judged,
         "candidates_still_existing": sum(1 for r in rows if r["still_exists"]),
         "candidates_removed": sum(1 for r in rows if not r["still_exists"]),
         "predicate_enabled_at_the_enforcement_point": bool(mechanical.get("enabled")),
@@ -250,12 +261,35 @@ def measure() -> dict:
     on_value = _value_arm(armed=True)
     off_value = _value_arm(armed=False)
 
-    if on_embed["rows_written"] != off_embed["rows_written"]:
-        raise SystemExit("the two EMBED arms saw different populations — "
-                         "the instrument is broken, not the gate")
-    if on_value["candidates"] != off_value["candidates"]:
-        raise SystemExit("the two VALUE arms saw different populations — "
-                         "the instrument is broken, not the gate")
+    # ── the refusals ────────────────────────────────────────────────────────
+    # Each one is REACHABLE: it compares a population an arm OBSERVED, never a
+    # module constant with itself. A guard that cannot fire advertises an exit code
+    # the tool cannot produce, which is the no-op-gate shape this repo's own rules
+    # call category A.
+    if off_embed["rows_carrying_a_vector"] == 0:
+        raise SystemExit(
+            "the unobstructed EMBED arm produced no vector for ANY row — the "
+            "embedder double or the width path is broken, so a zero in the gated "
+            "arm would be indistinguishable from a dead instrument")
+    if on_embed["rows_carrying_a_vector"] > off_embed["rows_carrying_a_vector"]:
+        raise SystemExit(
+            "the gated EMBED arm carries MORE vectors than the ungated one — the "
+            "gate cannot add, so the two arms are not measuring the same seam")
+    if off_value["candidates_judged"] != off_embed["rows_written"]:
+        raise SystemExit(
+            f"the VALUE pass judged {off_value['candidates_judged']} of "
+            f"{off_embed['rows_written']} corpus rows — candidate text extraction "
+            "is dropping rows, so its delta would be measured on a different "
+            "population than the EMBED arm's")
+    if on_value["candidates_judged"] != off_value["candidates_judged"]:
+        raise SystemExit(
+            "the two VALUE arms judged different populations — the instrument is "
+            "broken, not the gate")
+    if (off_value["candidates_still_existing"]
+            != off_value["candidates_judged"]):
+        raise SystemExit(
+            "the ungated VALUE arm removed something, so it is not the "
+            "counterfactual this measurement needs")
 
     return {
         "issue": 11086,

@@ -6273,8 +6273,12 @@ surfaces:
   # `tortoise/extractor_v2.py` (the S2.2b pass and `execute_embed`'s payload) and
   # `tortoise/kind_classifier.py` match no named pattern and therefore select `core` by the
   # fallback — which is exactly why BOTH arms below are needed and neither is redundant. Also
-  # pins the v4 design document and `docs/evidence/11086/gate-rate.json`, whose selection is
-  # registered in `tools/ci_selection.py` (a docs-only diff selects `eval`; measured).
+  # pins the v4 design document and `docs/evidence/11086/gate-rate.json`. ⛔ Those two artifacts
+  # are reached by `tier1`, NOT by any SOURCE_PATTERNS row: a docs-only diff to the design record
+  # measures `surfaces: []` (`docs/` is dropped by `_keep_changed`), which is the contract
+  # `test_ci_selection.py::test_v4_membership_gate_runs_on_both_architecture_docs` pins. The
+  # `tier1` row at the bottom of this file is therefore load-bearing and must not be deleted as
+  # redundant with these two.
   # The load-bearing pin is
   # `test_a_discarded_candidate_is_never_offered_to_the_embed_seam`: it drives a DISCARD
   # through the real pass and the real payload, and is pinned as a DELTA against the
@@ -10978,7 +10982,7 @@ durations:
   test_durability_posture.py: 9.6  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 8.2
   test_embed_metering.py: 2.4  # #4488: no source leg of the sweep collected it — refresh from CI junit — ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 2.5
   test_embed_gate_5008.py: 6.0  # carried forward (not a full-file CI measurement) — #5008 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only). Locally measured this turn on the embedded lane: 37 tests in 5.6s (`TORTOISE_TEST_CARVE_OUT=1`); declared at 6.0s so a cold leg cannot under-pack. Refresh from the first post-merge run. — ci-timing junit-census+top-15 2026-11-09 (run 42546828652): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (0.8s) is a LOWER bound; kept 6.0
-  test_embed_decision_step_11086.py: 5.0  # #11086 (#3400 trap: a file ADDED BY A PR has no CI junit measurement). Locally measured this turn: 11 tests in 3.5s through `tools/test_lane.py run`; declared at 5.0s so a cold leg cannot under-pack. Refresh from the first post-merge run.
+  test_embed_decision_step_11086.py: 7.0  # #11086 (#3400 trap: a file ADDED BY A PR has no CI junit measurement). Locally measured this turn, the WHOLE file as committed: 12 tests in 3.69s under `TORTOISE_TEST_CARVE_OUT=1` (5.08s wall). Declared 7.0s — ~1.9x the measured body, so a cold leg pays interpreter start and the one 1.2 MB `config/ci-surfaces.yml` YAML parse its selection pin makes without under-packing. ⛔ The ceiling is NOT free: 7.5s and above repacks a fast shard from 28 m to 29 m and breaches `test_ci_selection.py`'s arm-2 invariant (SUM x 1.5 <= the 90 m cap, 0.54 m of headroom left). If this file grows, shrink it or earn the shard back — do not simply raise this number.
   test_embedder_provision.py: 8.6  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 6.1 — ci-timing junit-census+top-15 2026-11-09 (run 42546828652): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (7.8s) is a LOWER bound; kept 8.6
   test_entity_delete_rebuild.py: 2.2  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 1.7
   test_env_truthy.py: 22.1  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 18.8
