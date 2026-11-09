@@ -465,9 +465,17 @@ def _band(mean: float) -> str:
     return "low"
 
 
-def _assemble_entry(block: dict) -> dict:
+def why_entry(block: dict) -> dict:
     """Project one canonical §3.1.4 why-block to the §3.2.2 wire why-entry
-    (deterministic key order; empty/absent conventions §3.1.3)."""
+    (deterministic key order; empty/absent conventions §3.1.3).
+
+    PUBLIC (post-#8099) because it is the ONE wire projection: ``/v1/context``
+    and ``volunteer_context`` build their ``why`` list here, and the pushed
+    webhook envelope's ``why`` list (``why_snapshot.read_why_entries``) must be
+    the SAME shape for the same point. A second hand-written projection is how
+    the two surfaces drift — and the drift is invisible, because each side keeps
+    passing its own test.
+    """
     entry: dict = {
         "point_id": block["point_id"],
         "support_chain": block.get("support_chain") or [],
@@ -792,7 +800,7 @@ def run_volunteer_pipeline(
             surfaced.append({"label": label, "band": _band(cand["mean"])})
             flags.append(_pointer_flag(cand))
             if why:
-                why_entries.append(_assemble_entry(cand["block"]))
+                why_entries.append(why_entry(cand["block"]))
         return {
             "pointers": pointers,
             "why": why_entries,

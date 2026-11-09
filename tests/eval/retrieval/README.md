@@ -58,8 +58,7 @@ surface vocabulary mismatch — the case reranking #317 targets).
 ## Quickstart (embedded smoke)
 
 ```bash
-# embedded — fast, NOT prod-parity (no HNSW; vector runs brute-force,
-# synthetic semantic query vectors stand in for the embedding model).
+# embedded — fast, NOT prod-parity (no HNSW; vector runs brute-force).
 # NOTE: the FULLTEXT index EXISTS on embedded (indexes.fts=true; FTS
 # populated 40/100 queries in the committed baseline) — FTS/structural
 # columns are environment artifacts here, not quality statements.
@@ -68,21 +67,72 @@ python -m tests.eval.retrieval.run \
     --pool-out /tmp/pool.json
 ```
 
+⚠️ That db path is FIXED, and the corpus is `MERGE`d, never cleared: re-running
+at a SMALLER `--corpus-size` leaves the previous run's tail holding the vectors
+it was written with, so the run is `unknown` (`provenance.corpus_points_unverified`
+counts it) and the gate refuses. Use a fresh db path per smoke, or keep the
+corpus size at or above what the db already holds.
+
+## One embedding space, always
+
+The vector arm is only a measurement if the query vectors and the corpus point
+embeddings live in the SAME space. The seeded corpus ships the oracle's
+**synthetic** topic-centroid embeddings (`benchmarks/synthetic_corpus.py`,
+`ORACLE_EMBED_ALPHA`), and a `model`-space run RE-EMBEDS it (`_reembed_corpus`)
+so both sides share one space.
+So the space is decided from the CORPUS side, once per run
+(`_corpus_embedding_space`), never from ambient model availability:
+
+| environment | space | what runs |
+|---|---|---|
+| no embedder (`uv sync`, CI offline) | `oracle-synthetic` | queries = topic-centroid sums (documented degraded fallback) |
+| embedder loaded (`uv sync --extra embeddings`) | `model` | the seeded corpus is RE-EMBEDDED with that model (`corpus_reembedded` in provenance), queries too |
+| `--no-seed-corpus` (any environment) | `unknown` | the vectors already in the graph were not written by this run — an earlier eval seed's centroids, a corpus an earlier MODEL-space run re-embedded, and product embeddings are indistinguishable — so no space is claimed: the reported metrics are not a quality statement and the gate refuses (drop the flag to gate a cycle) |
+| this run rewrote only PART of the graph's vectors (a smaller `--corpus-size` over an existing db, or product points on a shared docker graph) | `unknown` | seeding and the re-embed only touch the ids this run generated (`p-{i:07d}`, positional) and nothing deletes the rest, so a leftover tail keeps the space it was written in — while retrieval is graph-wide, so the arm's space IS the whole index's. `provenance.corpus_points_unverified` counts that population and the gate refuses |
+
+`provenance.corpus_embedding_space` names which one a report used. **It is not
+cosmetic.** Before this rule existed the query side silently took the ambient
+embedder while the corpus kept centroid vectors, and in the canonical dev env
+that produced vector nDCG@10 0.108 (vs 0.826 sound) and a **BLOCK verdict on
+unmodified code** — see
+`docs/benchmarks/1144-retrieval-eval-embedding-space-2026-11-08.md`.
+
+The rule is ENFORCED, not documented: `_query_vecs()` requires `space` and has
+no ambient default, so a caller cannot acquire the two-space arm by omission.
+`task0_probe.py` (depth curve, k-sweep, ceiling — it prints fused-nDCG verdicts)
+seeds its own corpus and therefore owns the same decision: it resolves the
+space from that corpus, re-embeds when the space is the model's, reports
+`corpus_embedding_space` / `corpus_reembedded` / `corpus_points_unverified` in
+its JSON, and reads `unknown` when the index holds vectors it did not write.
+
 ## Full run (authoritative — Docker FalkorDB >= 4.x)
 
 ```bash
 # 1. Docker FalkorDB (HNSW + FTS indexes auto-created at boot).
-# 2. Optionally the embeddings extra so query vectors encode natively:
+# 2. The embeddings extra is OPTIONAL and does not change what is measured:
+#    with it, the corpus is re-embedded into the model's space (one space);
+#    without it, both sides are the oracle's synthetic space. Either way the
+#    report says which in provenance.corpus_embedding_space.
 #       pip install -e '.[embeddings]'
+#    Point it at a graph this run owns: any pre-existing point the run does NOT
+#    rewrite (an earlier, larger corpus; product points on a shared instance)
+#    makes the space `unknown` and the gate refuses — deliberately, since those
+#    vectors' space cannot be established from here.
 python -m tests.eval.retrieval.run --db docker://falkor:6379
 ```
 
 ## The gate (every optimization cycle)
 
 ```bash
-# baseline = the committed "where we stand" run
+# baseline = the committed "where we stand" run, in YOUR embedding space:
+#   baseline-embedded-model-2026-11-08.json       → corpus_embedding_space: model
+#   baseline-embedded-2026-08-17.json (schema 1)  → oracle-synthetic
+# The space must MATCH or the gate returns INCOMPARABLE (it names which two it
+# saw). Pair the model baseline with a host that has the embedder installed
+# (`pip install -e '.[embeddings]'`); without it the run is oracle-synthetic
+# and belongs against the schema-1 baseline.
 python -m tests.eval.retrieval.run --db /tmp/new.db \
-    --baseline tests/eval/retrieval/baseline/baseline-embedded-2026-08-17.json
+    --baseline tests/eval/retrieval/baseline/baseline-embedded-model-2026-11-08.json
 ```
 
 Gate (pre-registered): **SHIP** iff the paired 90% CI on ΔnDCG@10 (points,
@@ -90,6 +140,19 @@ vs baseline, paired on identical query ids) does not exclude −2; **WARN**
 −2…−4; **BLOCK** < −4 or a significant P@5 drop (paired CI below 0). The
 loop ships a change only when speed improved (the #316 arm) AND this gate
 does not block.
+
+**A cross-space comparison is refused, not scored.** A run and its baseline in
+different embedding spaces differ by the INSTRUMENT, so `_gate_vs_baseline`
+returns `INCOMPARABLE` (naming the remedy: commit a run of unmodified code in
+that space) instead of a BLOCK. The same holds inside the `model` space for a
+different model id: `--model <candidate> --baseline <a baseline measured with
+another model>` is refused, because the delta would be the swap — gate an
+embedder change by committing a baseline measured with the candidate on
+unmodified code. A baseline's space comes from its own
+provenance — and when it declares none, `embedding_model` records what that run
+DID: absent/`unavailable` → `oracle-synthetic`; a real model id → `unknown`,
+because a pre-fix run re-embedded nothing and measured the mixed
+corpus-synthetic / query-model arm (so the gate refuses instead of scoring it).
 
 ## Judges + adjudication (authored set)
 

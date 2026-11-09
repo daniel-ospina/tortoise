@@ -184,14 +184,36 @@ def test_runner_pool_emission_and_judge_labels(tmp_path):
 @pytest.mark.skipif(not _has_embedded(), reason="embedded FalkorDBLite unavailable")
 def test_runner_fused_is_not_garbage_on_embedded(tmp_path):
     """The fused arm must carry real signal even on embedded (vector is the
-    only contributing strategy there) — above the chance base rate."""
+    only contributing strategy there) — above the chance base rate.
+
+    #1144 (2026-11-08): the VECTOR column is asserted too, because it is the
+    one that silently lost its signal. Query vectors encoded with the ambient
+    embedder while the corpus kept the oracle's synthetic centroid vectors
+    scored 0.108 here, and `fused` still cleared 0.3 — so the fused floor alone
+    reported OK over a broken arm. Both sides of the cosine now come from ONE
+    space (`provenance.corpus_embedding_space`), which is what makes the two
+    columns comparable in either space.
+    """
     db = str(tmp_path / "eval-signal.db")
     report = run_eval(_args(db))
     ndcg = report["metrics"]["fused"]["ndcg@10"]["value"]
     p5 = report["metrics"]["fused"]["p@5"]["value"]
+    vec_ndcg = report["metrics"]["vector"]["ndcg@10"]["value"]
     # Chance nDCG on a 24-topic corpus is ~0.04-0.13; measured signal must
     # be far above it (the oracle separates topics).
     assert ndcg > 0.3, f"fused nDCG {ndcg:.3f} — no measurable signal"
     assert p5 > 0.3, f"fused P@5 {p5:.3f} — no measurable signal"
+    assert vec_ndcg > 0.3, (
+        f"vector nDCG {vec_ndcg:.3f} — the vector arm is at chance, which is "
+        "what a two-space comparison looks like"
+    )
     # And the oracle still bites: fused P@5 < 1.0 (hard queries pull it down).
     assert p5 < 1.0
+    # The invariant behind the two columns: one space, whichever it is.
+    prov = report["provenance"]
+    assert prov["corpus_embedding_space"] in ("model", "oracle-synthetic")
+    if prov["synthetic_query_vectors"] is False:
+        assert prov["corpus_reembedded"] > 0, (
+            "a model-encoded query side against a non-re-embedded corpus is the "
+            "two-space defect (#1144)"
+        )
