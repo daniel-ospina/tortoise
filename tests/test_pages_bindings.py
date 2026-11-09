@@ -2591,6 +2591,30 @@ def _rsync_pattern_matches(pattern: str, name: str, is_dir: bool) -> bool:
     return fnmatch.fnmatchcase(name, pat)
 
 
+def test_the_conventional_sitemap_entry_point_stays_public() -> None:
+    """#11615: `website/sitemap.xml` must stay `public`, at the upload ROOT.
+
+    `test_every_top_level_entry_under_website_is_classified` only requires the table and
+    the deploy step's `--exclude` list to AGREE, and `_expected_public` derives its
+    expectation FROM the table — so flipping `public sitemap.xml` to `excluded` and adding
+    a matching `--exclude='/sitemap.xml'` is green in every gate while the deploy stops
+    staging the file and `https://premiselabs.co/sitemap.xml` 404s again: precisely the
+    regression #11615 exists to fix. This pins the VALUE, not the agreement.
+
+    Same residual `tests/test_onboarding_variants.py` (`test_9660_…`) closed for `skills`,
+    for the same reason: a table-derived expectation cannot detect the table changing.
+    """
+    assert _WEBSITE_TOP_LEVEL_STAGED.get("sitemap.xml") is True, (
+        "website/sitemap.xml is not classified `public` — every crawler, SEO tool and "
+        "Search Console box probes /sitemap.xml first, so an excluded row IS the 404 "
+        "that opened #11615")
+    patterns = _rsync_exclude_patterns(_step_code(DEPLOY))
+    matched = [p for p in patterns if _rsync_pattern_matches(p, "sitemap.xml", False)]
+    assert not matched, (
+        f"the deploy step excludes the conventional sitemap entry point ({matched}) — "
+        "/sitemap.xml would 404 after deploy (#11615)")
+
+
 def test_every_top_level_entry_under_website_is_classified() -> None:
     """The enumeration acceptance criterion, made executable.
 

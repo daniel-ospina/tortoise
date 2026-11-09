@@ -728,7 +728,9 @@ def _main(argv: list[str] | None = None) -> None:
                    help="dataset file (answer-key seal source)")
     p.add_argument("--commit", required=True, help="exact run commit sha")
     p.add_argument("--corpus-hash", required=True,
-                   help="sha256:… corpus hash (full dataset file digest)")
+                   help="sha256:… corpus hash (full dataset file digest). "
+                        "VERIFIED against --dataset: a mismatch is refused "
+                        "before any artifact is written (#2105)")
     p.add_argument("--cost-usd", type=float, required=True,
                    help="per-run cost in USD")
     p.add_argument("--out", required=True,
@@ -737,6 +739,29 @@ def _main(argv: list[str] | None = None) -> None:
 
     report = json.loads(Path(args.report).read_text(encoding="utf-8"))
     instances = json.loads(Path(args.dataset).read_text(encoding="utf-8"))
+    # #2105 (indicator 3): the receipt NAMES the corpus the number is
+    # comparable to, and this command SEALS ``--dataset``. Nothing bound the
+    # two: ``--corpus-hash`` was an operator string that ``validate_receipt``
+    # only shape-checks (``sha256:…``), so a receipt could name a corpus that
+    # was never sealed and still print ``receipt valid: True`` — measured, on
+    # the committed mini fixture (real digest ``30d5997a…``):
+    # ``--corpus-hash sha256:aaaa…`` → ``receipt valid: True``, exit 0. The
+    # corpus identity IS the comparability claim (R12), so it is derived from
+    # the bytes this command actually sealed, and a disagreement REFUSES
+    # before any artifact is written — the same discipline
+    # ``measure_ask_distilled.py`` applies ("the scored run's corpus_hash
+    # differs from the corpus on disk").
+    sealed_corpus_hash = "sha256:" + hashlib.sha256(
+        Path(args.dataset).read_bytes()).hexdigest()
+    declared_corpus_hash = args.corpus_hash.strip()
+    if declared_corpus_hash != sealed_corpus_hash:
+        raise SystemExit(
+            "[w7_publish] REFUSED: --corpus-hash names a corpus the seal did "
+            "not read \u2014 the receipt would record a comparability claim no"
+            " artifact backs (#2105 indicator 3 / R12).\n"
+            f"  --corpus-hash: {declared_corpus_hash}\n"
+            f"  --dataset:     {sealed_corpus_hash}  ({args.dataset})\n"
+            "  Pass the digest of the file you sealed. No artifact written.")
     outcomes = report.get("outcomes", [])
 
     rows = variant_rows(outcomes)
@@ -805,7 +830,9 @@ def _main(argv: list[str] | None = None) -> None:
         date=report.get("updated_at_utc")
              or (methodology.get("run_at_utc") or ""),
         commit=args.commit,
-        corpus_hash=args.corpus_hash,
+        # Derived from the sealed bytes above, never the flag verbatim: the
+        # check passed only because the two agree (#2105).
+        corpus_hash=sealed_corpus_hash,
         # #8486: DERIVED from the judge the report recorded — never the
         # constant (a mock/substituted judge must not mint the official pin).
         judge_pin=judge_pin,
