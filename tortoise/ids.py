@@ -163,8 +163,11 @@ def session_id_refusal(session_id: object, *,
     — and they differ, DELIBERATELY and in three named classes (that same test
     asserts each one, so neither half can be "unified" silently):
 
-    * **ABSENT** (``None``/``""``) — a DOOR mints for it; a FOLD has nothing to
-      mint with and refuses it. This is the ORIGINAL asymmetry, older than
+    * **ABSENT** (``None``/``""``) — a MINT-CAPABLE door mints for it (every
+      door except ``commit_schema.CommitPayload``, whose ``session_id`` is
+      required and is refused as a 400 ``missing_required_fields`` before the
+      model validates); a FOLD has nothing to mint with and refuses it. This is
+      the ORIGINAL asymmetry, older than
       #9599's pin, and it is why the two are NOT "equal on every non-empty
       string" either.
     * **the RESERVED demo/sample namespace** (#8290) — this predicate REFUSES
@@ -179,9 +182,11 @@ def session_id_refusal(session_id: object, *,
     ⛔ Do not read those three as drift to be repaired: each is a recorded
     decision, and each reds in the cited test if either half is widened.
 
-    ABSENT (``None`` or ``""``) is not a refusal — the host named no session,
-    and every door mints one (``mint_session_id``). That is today's contract
-    and it is preserved exactly. The test is PRESENCE, not truthiness
+    ABSENT (``None`` or ``""``) is not a refusal at this PREDICATE — the host
+    named no session, and the three mint-capable doors mint one
+    (``mint_session_id``); ``commit_schema.CommitPayload`` never mints and
+    rejects an absent id one layer up (400 ``missing_required_fields``). That is
+    today's contract and it is preserved exactly. The test is PRESENCE, not truthiness
     (``identity_absent``'s rule): ``0``/``False`` are PRESENT values of the
     wrong shape and get the shape message.
 

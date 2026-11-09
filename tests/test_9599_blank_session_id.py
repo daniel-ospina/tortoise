@@ -202,8 +202,9 @@ def test_the_fold_gate_and_the_door_gate_are_one_rule():
       * BLANK is the shared rule — both layers refuse it;
       * a PADDED-but-real id and an ordinary id are admitted by both;
       * ABSENT (``None``/``""``) is the FIRST of THREE intentional asymmetries
-        (``tortoise/ids.py`` names all three) — a DOOR mints for it, a FOLD has
-        nothing to mint with and refuses it;
+        (``tortoise/ids.py`` names all three) — a MINT-CAPABLE door mints for it
+        (all but ``commit_schema.CommitPayload``), a FOLD has nothing to mint
+        with and refuses it;
       * the RESERVED demo/sample namespace (#8290) is the SECOND — the DOOR
         refuses it, the FOLD must admit it (see below); and
       * an id the ENGINE cannot parse (NUL, lone surrogate) is the THIRD — the
@@ -242,7 +243,10 @@ def test_the_fold_gate_and_the_door_gate_are_one_rule():
     # ⚠️ #8290 — the SECOND intentional asymmetry, pinned in BOTH directions so
     # neither half can be "fixed" silently:
     #   * the DOOR refuses the reserved demo namespace (a capture filed there
-    #     would be invisible on every session read surface), and
+    #     would be invisible on all three session read surfaces — the list, the
+    #     detail door and the SDK mirror — while its ``AgentSession`` Event stays
+    #     reachable through the search reads: the second residual
+    #     ``session_schema`` names), and
     #   * the FOLD must ADMIT it, because a replay has to reproduce every row an
     #     older tree legitimately wrote — refusing it there LOSES those rows
     #     (#9594 / #9553 govern the replay half).

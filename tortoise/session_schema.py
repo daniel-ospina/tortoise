@@ -68,8 +68,9 @@ __all__ = [
 #: The prefix the demo/sample seeder derives its Session id with. ONE
 #: declaration: ``hosted_api._seed_demo_graph`` writes the id through
 #: :func:`demo_session_id`, and every READ surface excludes it through
-#: :func:`is_demo_session_id` — the writer and the exclusion cannot drift
-#: because neither re-spells the prefix. ⛔ It is also a RESERVED id namespace:
+#: :func:`is_demo_session_id`, the list query by binding THIS constant as a
+#: ``$demo_prefix`` Cypher parameter — so the writer and the exclusion cannot
+#: drift because none of them re-spells the prefix. ⛔ It is also a RESERVED id namespace:
 #: the capture doors refuse a caller-supplied id carrying it
 #: (``tortoise.ids.session_id_refusal``), so no real capture can name itself into
 #: the excluded set.
@@ -152,8 +153,10 @@ def demo_session_id(org_id: str) -> str:
 
     The seeder's WRITER derives the id here, so the read-surface exclusion
     reuses this derivation instead of re-spelling the f-string and drifting.
-    Consumers: ``hosted_api._seed_demo_graph`` (write) and, via
-    :func:`is_demo_session_id`, the three session read surfaces.
+    Consumers: ``hosted_api._seed_demo_graph`` (write) and the three session
+    read surfaces — the detail door and the SDK mirror via
+    :func:`is_demo_session_id`, the list query by binding
+    :data:`DEMO_SESSION_ID_PREFIX` as a ``$demo_prefix`` parameter.
     """
     return f"{DEMO_SESSION_ID_PREFIX}{org_id[:8]}"
 
