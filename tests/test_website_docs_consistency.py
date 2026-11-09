@@ -2665,13 +2665,14 @@ def test_the_site_root_is_a_different_page_per_host() -> None:
     changes it, a stale copy here would resolve the WRONG page — and pass.
 
     ⛔ THE WORDS DO NOT PIN IT — the REWRITE does. Both document names appear in the
-    middleware's own comments (`:4-5`, `:9-10`, `:446-450`, `:483`) and in unrelated code
-    (`:153-154` the duplicate-301 guard), so a substring probe over the raw source stays
-    GREEN when the two host branches are SWAPPED — the one mutation that makes this
-    module's mapping wrong, now invisible to the guard that exists to catch it. So the
-    comments are dropped first (only lines that BEGIN with `//`, so a `//` inside a
-    string is never truncated) and the branch that actually fetches the root document
-    is required to name the document `HOST_ROOT_PAGE` claims for that host.
+    middleware's own comments (`:4-5`, `:9-10`, `:446-450`, `:483`), so a substring probe
+    over the raw source stays GREEN when the two host branches are SWAPPED — the one
+    mutation that makes this module's mapping wrong, now invisible to the guard that
+    exists to catch it. So the comments are dropped first (only lines that BEGIN with
+    `//`, so a `//` inside a string is never truncated) and the branch that actually
+    fetches the root document is required to name the document `HOST_ROOT_PAGE` claims
+    for that host. The duplicate-301 block (`:446-470`) is not this block: it only
+    redirects the raw `/product`, `/product.html` and `/index.html` duplicates.
     """
     middleware = _read(WEBSITE / "functions" / "_middleware.ts")
     code = "\n".join(
@@ -2756,13 +2757,22 @@ def test_every_advertised_sitemap_is_servable_from_this_tree() -> None:
 
 
 def test_no_sitemap_advertises_a_page_that_is_deleted_or_noindex() -> None:
-    """Every page URL in a sitemap must resolve here — and must not be noindex.
+    """Every page URL in a TOP-LEVEL `website/sitemap-*.xml` must resolve — not be noindex.
 
     Two failures in one: a `<loc>` for a page that has been deleted sends a crawler to a
     404, and a `<loc>` for a `noindex` page tells a crawler the page exists while the page
     tells it to ignore the page. `investors.html` and `design-partners-intro.html` are
     noindex and their own comments assert they are absent from the sitemap — nothing
     checked that until now.
+
+    SCOPE, stated so it cannot be mistaken for "every sitemap": the walk is
+    `website/sitemap-*.xml`, so `website/apps/dashboard/public/sitemap.xml` is NOT walked.
+    That file belongs to the app origin, which is a SEPARATE Pages project: its pages are
+    not in this tree and its root is served by that project's own default document, so
+    `_document_for_loc` cannot resolve its `<loc>`s (`HOST_ROOT_PAGE` has no app entry by
+    design). What IS asserted about it is that it is advertised and servable —
+    `test_every_advertised_sitemap_is_servable_from_this_tree` — and that a change to it
+    selects this file (tests/test_ci_selection.py).
     """
     problems: list[str] = []
     for sitemap in sorted(WEBSITE.glob("sitemap-*.xml")):
@@ -2784,6 +2794,11 @@ def test_every_in_scope_page_appears_in_a_sitemap() -> None:
     The set is DERIVED (`_in_scope_pages`: public, served, not noindex, not redirected
     away), so a page added later is held to this without editing a list — the same
     derivation the blog-link guard uses.
+
+    The advertised side is the TOP-LEVEL `website/sitemap-*.xml` walk, for the reason
+    `test_no_sitemap_advertises_a_page_that_is_deleted_or_noindex` states: the app
+    origin's pages live in a separate Pages project and are not part of
+    `_in_scope_pages`, so the two sides describe the same population.
     """
     advertised = {
         _document_for_loc(loc).resolve()
