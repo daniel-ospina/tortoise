@@ -450,20 +450,34 @@ Deno.serve(async (req: Request) => {
       // ── #1981: the one-free-org entitlement refusal is TERMINAL ──────────
       // The RPC's DB-level backstop (migration 20261108000001) raises
       // `one_free_org_limit:<org_id>` when this person ALREADY OWNS a free
-      // organization. Answering 502 + "Please try again" turns a rule the
-      // product enforces into a permanent dead end: retrying can never succeed,
-      // because the condition is the user's existing org, not a transient
-      // fault — and this function is reachable both from the
-      // `after_user_created` hook and from a direct call with the user's own
-      // JWT. Mirror the Python lanes' payload EXACTLY (#2789: the dashboard
-      // dialog is driven by `code`, never by string-matching `message`), so
-      // this lane is not the one that renders a dead end. "Exactly" includes
-      // the message: `_one_free_org_detail` builds it through
-      // `tortoise/quota.py::with_limit_contact`, so it carries the #5425
-      // contact route and that helper's punctuation. Both literals are pinned
-      // against their Python twins by
-      // `tests/test_provisioning_edge_function.py::test_entitlement_refusal_is_mapped_to_the_product_402`,
-      // which reads both sides and reddens on any drift.
+      // organization. Answering it with 502 + "Please try again" puts a rule
+      // the product enforces behind the one status a client is entitled to
+      // retry, and retrying can never succeed: the condition is the user's
+      // EXISTING org, not a transient fault. This branch makes the refusal
+      // distinguishable on the wire — 402 plus the machine-readable payload
+      // `_one_free_org_detail` builds (#2789).
+      //
+      // ⛔ RESIDUAL, stated so this is NOT read as delivered (#11604). No client
+      // reads it yet: the live consumer is a JWT call from `POST /api/provision`
+      // (the auth-hook path is inert post-#832 — see the note above
+      // ALLOWED_ORIGINS), and the dashboard's `provisionInApp` retries any
+      // non-ok once and renders "Could not create your organization — try
+      // again." without parsing the body. The envelope does not match the
+      // reader either: this function's errors are FLAT (`{error: ...}` here,
+      // `{code, ...}` below) while the dashboard's coded-detail reader lifts
+      // `body.detail.code` and every Python lane wraps in `detail`. What this
+      // branch buys is that the wire no longer reports a terminal refusal as a
+      // retryable one — a prerequisite for that client fix, not a substitute
+      // for it.
+      //
+      // The payload's inner dict matches the Python lanes, contact sentence
+      // included: `_one_free_org_detail` builds the message through
+      // `tortoise/quota.py::with_limit_contact` (#5425), so the literal below
+      // is read from Python by the test rather than restated from memory —
+      // `tests/test_provisioning_edge_function.py::test_entitlement_refusal_is_mapped_to_the_product_402`
+      // reddens on drift in the marker, the code, the message or the status, and
+      // a behavioural twin in `tests/test_tenant_provision_server_only.mjs` drives
+      // the REAL handler and would red if this branch became unreachable.
       const provisionMessage = String(provisionError.message ?? "");
       const marker = "one_free_org_limit:";
       const markerAt = provisionMessage.indexOf(marker);

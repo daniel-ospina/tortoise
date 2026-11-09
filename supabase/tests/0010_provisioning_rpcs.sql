@@ -721,6 +721,32 @@ DO $$ BEGIN
       !~ 'pg_advisory_lock\(',
     '#1981: the lock must be TRANSACTION-scoped (pg_advisory_xact_lock), not '
     'the session-scoped pg_advisory_lock');
+  -- VOLATILITY is load-bearing, and until now nothing pinned it (#1981 round-5
+  -- review). Two reasons, and the second is the MEASURED one:
+  --   * the gate's correctness assumes the re-check takes a FRESH snapshot after
+  --     `pg_advisory_xact_lock`, and Postgres gives that only to a VOLATILE
+  --     function — per the manual, "STABLE and IMMUTABLE functions use a
+  --     snapshot established as of the start of the calling query, whereas
+  --     VOLATILE functions obtain a fresh snapshot at the start of each query
+  --     they execute" (xfunc-volatility);
+  --   * ⛔ but the failure mode is LOUDER than that, and NOT a silent fail-open
+  --     (corrected here: this note first described a reopened window with every
+  --     §8 case still green — a claim that could not be produced). A relabel to
+  --     STABLE makes `provision_team` unable to write at all, so the FIRST call
+  --     raises and the suite reds: measured by mutating this migration to
+  --     `STABLE` and running `npm --prefix supabase/tests/pglite run validate`
+  --     -> exit 1, `INSERT is not allowed in a non-volatile function`.
+  --   The pin's job is therefore to NAME the property where a future editor
+  --   changes it, rather than leave the next reader decoding a plpgsql write
+  --   error — not to close a silent hole, which this one is not.
+  -- `p` is Postgres's spelling for volatile (pg_proc.provolatile).
+  PERFORM tests.assert(
+    (SELECT provolatile FROM pg_proc
+      WHERE proname='provision_team' AND pronamespace='public'::regnamespace)
+      = 'v',
+    '#1981: provision_team must stay VOLATILE — a STABLE/IMMUTABLE label makes '
+    'the post-lock re-check read a pre-lock snapshot and silently disables the '
+    'one-free-org gate');
 END $$;
 
 -- ── 8a. a user's FIRST free org provisions; the SECOND is refused ───────────
@@ -815,8 +841,12 @@ END $$;
 
 -- ── 8d. the IDENTITY path has no person to gate ────────────────────────────
 -- (Distinct identities on purpose: `uq_member_identity_active` already allows an
--- identity ONE active owner org — that anchor, not the entitlement, is what keeps
--- one person from accumulating orgs on this path.)
+-- identity ONE active owner org — that anchor bounds a stable IDENTITY, and an
+-- identity is the only unit this path can bound. It does NOT bound a PERSON on
+-- `/v1/agent/signup`, which mints a fresh `anon-{uuid4[:12]}` per request (see
+-- the corrected note in the 20261108000001 migration header): that path is
+-- closed by `/v1/claim` running the ownership gate, because an anon org is not
+-- OWNED until it is claimed.)
 SELECT public.provision_team(
     p_user_id  := NULL, p_identity := 'anon-1981-identity-a',
     p_org_id   := 'org-ident-1981', p_org_name := 'ident-1981',

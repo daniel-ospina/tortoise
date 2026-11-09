@@ -1511,6 +1511,25 @@ def test_entitlement_refusal_is_mapped_to_the_product_402():
         "the refusal silently keeps its 502"
     )
 
+    # REACHABILITY: the marker must be searched in the error's MESSAGE, which is
+    # where PostgREST carries the RAISE text. Pinning the literals alone is not
+    # enough — reading `provisionError.details` instead leaves this branch
+    # unreachable while every assertion below still passes (measured: a review of
+    # 577ed5822fe5 built that mutant and the static pin survived it). The
+    # behavioural twin in `tests/test_tenant_provision_server_only.mjs` is what
+    # reds on that mutation; this pair states the intent next to the pin.
+    assert 'const provisionMessage = String(provisionError.message ?? "");' in src, (
+        "the marker must be read from the RPC error's `message` (PostgREST puts "
+        "the RAISE text there) — reading another field makes the branch dead code"
+    )
+    assert "const markerAt = provisionMessage.indexOf(marker);" in src, (
+        "markerAt must be derived from that message, next to where the branch "
+        "tests it — a different source leaves the branch dead code"
+    )
+    assert src.index("const markerAt = provisionMessage.indexOf(marker);") < src.index(
+        "if (markerAt >= 0) {"
+    ), "markerAt must be computed BEFORE the branch that tests it"
+
     # The product payload, read from the Python builder.
     want = _one_free_org_detail("org-blocker")
     assert f'code: "{want["code"]}",' in branch, (

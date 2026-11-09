@@ -325,6 +325,42 @@ try {
     502
   );
 
+  // ── #1981: the one-free-org refusal is TERMINAL, and this is the path a
+  //    client actually reaches (the auth-hook path is inert post-#832). A 502
+  //    here is the one status a client is entitled to retry, for a condition no
+  //    retry can clear — so the RPC's marker must surface as a 402 carrying the
+  //    product payload. This case is BEHAVIOURAL on purpose: the static pin in
+  //    test_provisioning_edge_function.py cannot see where the marker is read
+  //    from, and a mutant computing `markerAt` from `provisionError.details`
+  //    instead of `.message` leaves the branch unreachable while every static
+  //    assertion still passes (measured on the review of 577ed5822fe5). Here
+  //    that mutant reds, because the response goes back to 502.
+  __setRpcResult({
+    error: { message: "Supabase control-plane RPC failed (provision_team): HTTP 402: one_free_org_limit:org-blocker" },
+  });
+  const limitedRes = await check(
+    "POST authenticated, provision_team one-free-org refusal → 402 (terminal, not a retryable 502) (#1981)",
+    call("POST", jwtHeaders, BODY),
+    402
+  );
+  const limitedBody = JSON.parse(await limitedRes.text());
+  assert.equal(limitedBody.code, "one_free_org_limit",
+    "the refusal must carry the product's machine-readable code (#2789)");
+  assert.equal(limitedBody.org_id, "org-blocker",
+    "org_id must name the blocking org the dialog's upgrade action targets");
+  assert.ok(
+    String(limitedBody.message).startsWith("You can only have one free organization"),
+    "message must be the product sentence, got: " + limitedBody.message);
+
+  // The generic lane must SURVIVE: only the marker is a 402. A bare error is
+  // still a 502 — otherwise every failure is laundered into a refusal.
+  __setRpcResult({ error: { message: "permission denied for table organizations" } });
+  await check(
+    "POST authenticated, non-marker provision_team error → 502 (not laundered into a 402) (#1981)",
+    call("POST", jwtHeaders, BODY),
+    502
+  );
+
   __setRpcResult({ error: null });
   const okRes = await check(
     "POST authenticated, target matches → 201",
