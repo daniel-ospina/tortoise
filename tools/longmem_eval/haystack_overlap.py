@@ -536,6 +536,20 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
     census = census_overlap(instances, chunk_turns=args.chunk_turns)
+    # #1779: an INSTANCE count is not a UNIT count. A `--data` file of records
+    # that carry no `haystack_sessions` (a questions-only file) passes the
+    # guard above with N instances and ZERO encode units, and would still
+    # publish a full verdict plus the same fabricated chunk-prompt explanation —
+    # inverting the built cache's `realizable` at exit 0. The invariant the
+    # module states is "a census must never report on a population it did not
+    # read", so refuse on the unit count too.
+    if census["sessions"]["slots"] == 0:
+        print(
+            "[haystack_overlap] refusing to publish a census over 0 sessions "
+            "— the read instances carry no haystack sessions to measure",
+            file=sys.stderr,
+        )
+        return 2
     payload = json.dumps(census, indent=2, sort_keys=True) + "\n"
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)

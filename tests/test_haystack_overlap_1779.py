@@ -432,6 +432,37 @@ def test_cli_refuses_an_empty_population_instead_of_publishing_a_verdict(
         f"an empty population must publish NO census body: {captured.out!r}")
 
 
+def test_cli_refuses_a_zero_UNIT_population_even_when_instances_got_read(
+    tmp_path, capsys,
+):
+    """An INSTANCE count is not a UNIT count — the second fail-open door.
+
+    A `--data` file of questions with no `haystack_sessions` passes the
+    instance guard with N >= 1 and still yields ZERO encode units, so the
+    original (instance-count) refusal let it through at exit 0 with a full
+    verdict plus the same FABRICATED chunk-prompt explanation — inverting the
+    built cache's published `realizable` on a population with no sessions at
+    all. Measured before this test existed (live head, 2 instances / 0 slots):
+    `encode_cache_text_keyed … 0.0x — NOT realizable`, EXIT=0.
+    """
+    sessions_less = tmp_path / "no_sessions.json"
+    sessions_less.write_text(
+        json.dumps([{"question_id": "q1"}, {"question_id": "q2"}]),
+        encoding="utf-8")
+
+    rc = main(["--data", str(sessions_less), "--json"])
+    captured = capsys.readouterr()
+
+    assert rc == 2, (
+        f"a 0-unit population must exit 2 even with instances read, not {rc}")
+    assert "refusing" in captured.err, (
+        f"the refusal must say what it refused: {captured.err!r}")
+    assert "0 sessions" in captured.err, (
+        f"the refusal must name the unit count: {captured.err!r}")
+    assert captured.out.strip() == "", (
+        f"a 0-unit population must publish NO census body: {captured.out!r}")
+
+
 def test_the_research_doc_publishes_this_files_REAL_test_count():
     """§5 of the research note states this suite's size, so the size is DERIVED.
 
@@ -440,7 +471,14 @@ def test_the_research_doc_publishes_this_files_REAL_test_count():
     instrument standing behind it" class this module exists to retire, and a
     number no test could red. So the count is parsed from THIS file's AST (not
     from collection, which depends on the pytest invocation) and compared to
-    the sentence §5 publishes: a new test without a §5 update reds here.
+    the sentences the live docs publish: a new test without an update reds here.
+
+    ⛔ EVERY live site is checked, not just §5. A round-4 fix published `19
+    tests: 18 hermetic` in §5 while the same commit left `17` in the manifest
+    comment, `docs/00_index.md` and §8 — one commit, two contradictory readings
+    of the same run, and a §5-only pin cannot see it. That is precisely the
+    "published number with no instrument" this pin exists to prevent, so the
+    coverage is widened to every place the count is quoted.
     """
     doc = (Path(__file__).resolve().parents[1]
            / "docs/research/2026-11-08-1779-eval-session-dedup.md")
@@ -453,10 +491,25 @@ def test_the_research_doc_publishes_this_files_REAL_test_count():
     assert len(slow) == 1, (
         f"expected exactly one @pytest.mark.slow (the real-split pin), found "
         f"{len(slow)} — §5 says the count is `N hermetic + the real-split pin`")
-    published = f"{len(tests)} tests: {len(tests) - len(slow)} hermetic"
-    assert published in doc.read_text(encoding="utf-8"), (
-        f"§5 of {doc.name} must publish `{published}` (this file defines "
-        f"{len(tests)} tests, {len(slow)} of them @slow) — the count is stale")
+    total, hermetic = len(tests), len(tests) - len(slow)
+    root = Path(__file__).resolve().parents[1]
+    # (file, the substring that must be present) — every LIVE site quoting the
+    # count. A §5-only check let this drift twice in one PR.
+    sites = [
+        (doc, f"{total} tests: {hermetic} hermetic"),
+        (doc, f"{hermetic} hermetic pass"),
+        (root / "docs" / "00_index.md", f"{hermetic} hermetic ratchets"),
+        (root / "config" / "ci-surfaces.yml",
+         f"The {hermetic} hermetic tests are therefore GATED"),
+        (root / "config" / "ci-surfaces.yml",
+         f"measured: {hermetic} passed"),
+    ]
+    stale = [(p.name, want) for p, want in sites
+             if want not in p.read_text(encoding="utf-8")]
+    assert not stale, (
+        f"these sites must publish the REAL count (this file defines {total} "
+        f"tests, {len(slow)} of them @slow → {hermetic} hermetic): "
+        f"{stale}")
 
 
 @pytest.mark.slow
