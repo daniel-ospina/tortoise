@@ -15,6 +15,10 @@ related:
     note: "The root this page belongs to: a written claim must stay bound to the system it describes. Every measured row below is pinned by tests/test_capacity_page.py."
   - issue: 6211
     note: "The measured belief-propagation failure threshold recorded in §7."
+  - issue: 10175
+    note: "The owner ruling that one tenant is deliberately HELD at this cap: the refusal is the correct state, and clearing it is refused. §4 carries the clause so the lane holding a 402 meets it here, at the cap, not only on that issue."
+  - issue: 11469
+    note: "The curation workstream for the held graph: select the signal out of the old extractor's output, re-file it through the packs into a clean graph, and retire the old one rather than carry it forward."
 ---
 
 # Capacity and limits
@@ -153,6 +157,72 @@ Two properties of the cap matter more than its value:
 
 Self-hosted and embedded deployments have **no node cap applied** — there the
 bound is the host's own FalkorDB sizing.
+
+### A held cap is not a defect — one tenant is refused on purpose
+
+⚠️ **Before clearing a 402 from this cap, read this.** At least one org is
+**deliberately held at its cap** by owner ruling: the nodes
+`count_org_usage(org_id, "points")` counts are the *old* extractor's output, and
+headroom would only accumulate more of it. The refusal is the correct state, not
+an outage to remediate.
+
+**OVERRIDES:** the default engineering reflex to treat a 402 refusal as a bug and
+clear it — a `max_points` override, a refill of the capped graph, or "unblocking"
+the tenant — is **refused** (owner ruling 2026-10-27 on `#10175`, which carries
+the full record and its amendments). Three properties bind whoever meets the
+refusal:
+
+- **It is a stock, not a flow — so the refusal is terminal.** A rate limit
+  answers `429` with a `Retry-After` and clears on its own (§3). This cap answers
+  `402` — `count + est > max_points` in
+  `tortoise/hosted_api.py::_capture_session_impl` — and the counted set only
+  grows, so backoff is not a remedy and a retry cannot succeed. The two must not
+  share a retry branch: a client that backs off on this 402 retries forever.
+- **The capped graph stays, on the ruling's own terms.** It is the only sample of
+  what the *old* extractor produced. The owner's 2026-11-02 amendment permits
+  removing that one graph **only** after a count-verified export to durable local
+  storage, and with a journalled delete; no journalled whole-graph delete path
+  exists yet, so the graph stays. What the amendment leaves unchanged is the
+  prohibition: no `max_points` override, no backfill of the old graph, and no
+  reading of its 402 as a defect. `#11469` is the workstream that curates the
+  signal out of this graph rather than carrying it forward.
+- **An override is reachable, and that is why it is refused.** The field is not
+  out of an operator's hands: a stored `max_points` override column exists
+  (migration `20260817000001`) and is honoured *with precedence over*
+  `graph_size_cap`, and `tortoise/sdk.py::org_update` accepts the field. The
+  sanctioned lever is the **plan** — `tortoise/billing.py::apply_limits` sets
+  the cap from the tier, `max_points := tier_limits(tier)["max_graph_nodes"]`,
+  or `graph_size_cap` on the Supabase control plane — and it is sanctioned only
+  on a **new org** (or the switchover's **new** graph), **never** on the held
+  one: a tier change on this org *in place* is refused for the same reason an
+  override is, because it puts the new headroom on the graph that must stay the
+  old extractor's sample (owner answer 2026-11-07 on `#10175`: raising *this*
+  org's tier in place is "the exact move the prohibition names", and a new org
+  on Pro is the recommended shape). Nothing else is sanctioned, however easy it
+  is to reach.
+
+What lifts the hold is a conjunction, not a fix: the new extractor live
+(`#5087`, `#7949`), the storage half of the switchover deployed, and a plan with
+unlimited graphs (`#9341`), after which the switchover runs as a **new graph**
+promoted to default (`#10180`, the verb now exists) and is then *measured* —
+extractor signal-vs-noise, and hosting cost in **bytes**, never nodes (`#4051`).
+
+The storage limb is the one limb that **is** satisfied today, and it is written
+that way on purpose: a limb stated as an unowned prerequisite makes "is the
+conjunction false?" unanswerable from this page. The issue that owned it,
+`#10017`, closed *not planned* on 2026-11-06 because the local half was a no-op
+on the local deployment; the hosted record it deferred to is armed and writing —
+`GET /health` reports `record.armed=true`, `record.ok=true`, `degraded=false` on
+2026-11-07, and `record_writes_applied=3` on 2026-11-09 (up from `0`). No open
+issue owns it because none is needed: it is not a missing prerequisite.
+
+The hold stands because the **other** limbs are false — today `#5087`, `#7949`,
+`#9341` and `#4051` are all open.
+
+The full record, including the 2026-11-02 amendment, stays on `#10175`, which is
+currently open. An `OVERRIDES:` line on a closed issue is invisible to the lane
+that meets the 402, so this page carries the clause wherever that record's state
+goes.
 
 ## 5. Retrieval latency
 
