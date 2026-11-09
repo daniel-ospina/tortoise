@@ -486,7 +486,16 @@ DOOR_PINNED_OFF = ("TORTOISE_SESSION_EXTRACTOR", "TORTOISE_EXTRACTOR",
                    # cost of what a run measures, under a header that would still
                    # claim the door held. The other trigger arm
                    # (`coverage_suspect`) needs no threshold and is not a switch.
-                   "TORTOISE_RENARRATE_KEEP_RATE")
+                   "TORTOISE_RENARRATE_KEEP_RATE",
+                   # `#11534`: the S2.2b-ADD gap-fill stage's own arm
+                   # (`extractor_v2._partial_gap_fill_enabled`, its one `env_flag`
+                   # read). UNSET is the shipped default and the only state the
+                   # registered corpus was scored under; an armed `=1` spends a
+                   # bounded model call ADDING items to the embed list before S3,
+                   # i.e. it moves the population this run measures under a header
+                   # that would still claim the door held. Default-OFF, so pinning
+                   # it OFF matches today's behaviour and needs no value.
+                   "TORTOISE_PARTIAL_GAP_FILL")
 
 #: Seams pinned to an EXPLICIT value because their ABSENT state is not neutral.
 #: ``TORTOISE_S4_DELTA`` is DEFAULT-ON (``env_flag(..., True)``); an ambient

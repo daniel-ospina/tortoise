@@ -11192,7 +11192,9 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     and a later drift reds the arm while leaving this sentence stale — which is the
     #11555 convention exactly (cite the number beside the symbol; let the arm derive it) —
     `probes/capstone_measure.py:2238-2243`
-    ->`:2738-2740`, which was `:2726-2728` before main's #11517 landed +12 above it;
+    ->`:2747-2749`, which was `:2738-2740` before this branch's own +9
+    `TORTOISE_PARTIAL_GAP_FILL` pin landed above it, and `:2726-2728` before main's #11517
+    landed +12 above it;
     `extractor_v2.py:1764` unchanged — the relations schema that spells the predicate
     allowlist, which `#11002`'s rebase moved `:1720` → `:1764` in THIS tree, so the
     pre-#11002 number is not a reading of this one — the `create_operator`

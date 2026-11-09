@@ -546,6 +546,31 @@ def test_an_identity_collision_is_recorded_as_a_replacement_not_a_zero(
     assert "replaced_items" not in stats
 
 
+def test_a_repeated_collision_counts_the_identity_once_not_the_rows(monkeypatch):
+    """``replaced_items`` counts IDENTITIES replaced, not rows emitted (P2).
+
+    The docstring's own sentence — "a key collision WITHIN the answer is
+    deliberately NOT counted: the claim made here is about an identity the BATCH
+    already carried, and a model repeating itself is a different fact" — was
+    FALSE of the implementation (review P2-1): it summed the ANSWER's rows, so an
+    answer that repeated one already-carried identity twice recorded
+    ``replaced_items: 2`` for ONE replaced identity, a number that cannot be
+    compared with ``added_items`` (an identity count) on the same record.
+
+    Non-vacuity, measured: against the row-summing form this arm reds ``2 != 1``.
+    """
+    existing = COVERED_ITEMS["points"][0]
+    collision = {"content": existing["content"], "pointKind": "statement"}
+    model = _Model(gap_answer=json.dumps(
+        {"entities": [], "events": [], "operators": [],
+         "points": [collision, dict(collision)]}))
+    stats = _run(monkeypatch, model)["stats"]["partial_gap_fill"]
+    assert stats["added_items"] == 0, "restatements cannot grow the section"
+    assert stats["replaced_items"] == 1, (
+        "ONE identity was replaced; the answer repeated it twice")
+    assert stats["replaced_by_section"] == {"points": 1}
+
+
 def test_coverage_suspect_is_false_on_that_fixture():
     """The precondition the whole test rests on, asserted rather than assumed:
     a batch with candidates cannot fire the old coverage signal."""

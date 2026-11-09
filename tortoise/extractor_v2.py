@@ -13181,9 +13181,9 @@ def _gap_fill_collisions(base: object, added: object) -> dict[str, int]:
                     if isinstance(item, Mapping)}
         if not existing:
             continue
-        n = sum(1 for item in _section_list(added, section)
-                if isinstance(item, Mapping)
-                and _merge_key(section, item) in existing)
+        n = len({_merge_key(section, item)
+                 for item in _section_list(added, section)
+                 if isinstance(item, Mapping)} & existing)
         if n:
             counts[section] = n
     return counts
