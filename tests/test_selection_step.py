@@ -1476,7 +1476,14 @@ def test_a_retry_that_raises_after_the_re_bind_keeps_the_first_arms_capture(
     # Restoring one and not the other SURVIVES every assertion above (measured),
     # so this is the leg that makes the split visible.
     assert model.s4_prompts, "S4 ran, so it saw a narrative"
-    assert "Alice" in model.s4_prompts[0], (
+    # ⛔ A phrase UNIQUE TO THE NARRATIVE, never the bare entity name (review round
+    # 6, P3). `run_s4` appends `_render_source_transcript(edus)` to its prompt
+    # (`extractor_v2.py:3627`, called with the run's `edus` at `:13216`), and this
+    # fixture's transcript opens "Alice decided the budget is 40k" — so
+    # `"Alice" in s4_prompts[0]` is satisfied by the TRANSCRIPT regardless of
+    # `story`, and the positive leg pinned nothing. "Alice set a budget" is arm A's
+    # own S1 answer and appears nowhere in the transcript.
+    assert "Alice set a budget" in model.s4_prompts[0], (
         "S4 must be handed ARM A's narrative — `story_arc` can be right while the "
         f"`story` S4 reads is arm B's: {model.s4_prompts[0][:200]!r}"
     )
