@@ -4909,9 +4909,12 @@ def test_the_relays_a_sibling_test_file_makes_land_on_what_they_name():
     """
     # (target file, cited line) -> a regex the CITED LINE ITSELF must match
     anchors: dict[tuple[str, int], str] = {
-        # the /docs guard's import of the schema types the citing paragraph names
-        ("tests/test_website_docs_consistency.py", 56):
-            r"from tortoise\.commit_schema import Point, point_content_id",
+        # ⛔ the /docs guard's import of the schema types the citing paragraph names USED to be
+        # here, as ("tests/test_website_docs_consistency.py", 56). It is a `symbol_citations`
+        # entry now, because the target is a file THIS BRANCH EDITS: the branch adds an import
+        # immediately above it (`from tools.ci_selection import load_manifest, select`), which
+        # moved the anchored line 56 -> 57 and redded this pin. Bumping the number would re-arm
+        # exactly the decay the doctrine above describes, so the number is gone.
         # the reference-surface relay that drifted: the runbook sentence naming the test
         # ⛔ 869, not 866: this merge took `main`'s CORRECTED prose in that bullet (#10237's
         # canary really does name the class, `ci.yml:1473 repo-harnesses`) and this branch's
@@ -4955,6 +4958,15 @@ def test_the_relays_a_sibling_test_file_makes_land_on_what_they_name():
     # Its absence loses no verdict: if that parenthetical is dropped, no relay is wrong — the
     # sentence still exists, still names the test, and the other two anchors still land.
     symbol_citations: list[tuple[str, str, str]] = [
+        (
+            # the /docs guard's import of the schema types its citing paragraph names
+            # (`test_commit_schema_change_keeps_the_core_pool_and_runs_the_docs_guard`). It was an
+            # `anchors` line number until this branch inserted an import above it and moved the
+            # line — the pin's own doctrine, applied to the entry that lacked it.
+            _CITING_TEST_FILE,
+            "tests/test_website_docs_consistency.py",
+            r"from tortoise\.commit_schema import Point, point_content_id",
+        ),
         (
             # the capstone pin's re-cut history, which advertises this test's name (#10186). Cited
             # by symbol because the line was re-derived seven times and falsified an eighth by a
