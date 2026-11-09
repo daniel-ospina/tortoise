@@ -25143,29 +25143,46 @@ async def _create_org_supabase_lane(cp, name: str, user: dict) -> dict:
         # SAME structured 402 — never a 500 and never a bare string (#2789: the
         # dashboard dialog reads `code`).
         blocking_org_id = _one_free_org_blocker_from_rpc(e)
-        # The eager default-graph init ran BEFORE the RPC, so EVERY failure
-        # branch below leaves a materialized-but-unowned namespace: the org
-        # never existed, so nothing may be left pointing at its graph. That
-        # holds for all three outcomes here, not only the entitlement 402 — a
-        # 409 (name collision) or a 500 orphans `org_{org_id}` just as surely,
-        # and a 409 retry mints a NEW org id, so the first namespace is never
-        # reclaimed. Drop it ONCE, before any raise (#1981 review, P2).
+        # The eager default-graph init ran BEFORE the RPC, so a failure leaves a
+        # materialized namespace. Whether it is safe to DROP depends on whether
+        # this provision could have COMMITTED — and the exception alone does not
+        # say that. `provision_org` raises the SAME RuntimeError for a server
+        # error RESPONSE and for a TRANSPORT failure (`supabase_control.rpc`),
+        # and the control-plane client's read timeout (5.0 s) is short enough
+        # that an RPC which COMMITTED can still surface here as a lost
+        # response. Dropping on that branch would `GRAPH.DELETE` a LIVE org's
+        # namespace — the inverse of the ordering this lane documents two
+        # functions above ("an orphaned graph namespace is harmless, an
+        # orphaned orgs row is not"), and it would leave a live org with no
+        # TeamMeta/OnboardingState. (#1981 round-2 review, P1.)
         #
-        # The #3390 write-ahead journal line is what keeps a FAILED drop
-        # attributable to a sweep (it is not rolled back).
-        # ⛔ OFF THE LOOP (#1981 review P1): `_drop_org_graph` →
-        # `_drop_org_graph_impl` opens a COLD projection for a namespace
-        # that was never provisioned (connect + version probe +
-        # `_ensure_indexes()`) and then `GRAPH.DELETE`s it — synchronous
-        # socket I/O, and this branch is a BURST path: it only fires when
-        # workers raced this create, i.e. when N workers each enter here.
-        # `asyncio.to_thread`, NOT `_graph_offload`: that seam is
-        # fail-CLOSED (#3498/#3773), and a pool-miss refusal
-        # (`_graph_unavailable`, a 503) would replace the entitlement 402
-        # this branch exists to deliver. The drop is best-effort by
-        # definition — `_drop_org_graph` already swallows its own errors —
-        # so it must not be able to fail the refusal.
-        await asyncio.to_thread(_drop_org_graph, org_id, graph_name)
+        # So the drop is gated on ATTRIBUTION:
+        #   * the 402 carries THIS PR's own marker, raised by the gate before
+        #     any write, and a 409 is PostgREST's unique-violation response —
+        #     both are SERVER responses, so the provision did not land and the
+        #     namespace is genuinely unowned: reclaim it. (This is what stops a
+        #     409 retry leaking a namespace per attempt — it mints a NEW org id
+        #     each time.)
+        #   * every OTHER failure is AMBIGUOUS and keeps the pre-#1981
+        #     behaviour: leave the namespace alone. The #3390 write-ahead
+        #     journal line is what makes a surviving namespace attributable to
+        #     a sweep — that is what the journal is for, and it is not rolled
+        #     back.
+        drop_is_safe = blocking_org_id is not None or "HTTP 409" in str(e)
+        if drop_is_safe:
+            # ⛔ OFF THE LOOP (#1981 review P1): `_drop_org_graph` →
+            # `_drop_org_graph_impl` opens a COLD projection for a namespace
+            # that was never provisioned (connect + version probe +
+            # `_ensure_indexes()`) and then `GRAPH.DELETE`s it — synchronous
+            # socket I/O, and a 402 here is a BURST path: it only fires when
+            # workers raced this create, i.e. when N workers each enter here.
+            # `asyncio.to_thread`, NOT `_graph_offload`: that seam is
+            # fail-CLOSED (#3498/#3773), and a pool-miss refusal
+            # (`_graph_unavailable`, a 503) would replace the entitlement 402
+            # this branch exists to deliver. The drop is best-effort by
+            # definition — `_drop_org_graph` already swallows its own errors —
+            # so it must not be able to fail the refusal.
+            await asyncio.to_thread(_drop_org_graph, org_id, graph_name)
         if blocking_org_id is not None:
             raise HTTPException(status_code=402,  # noqa: B904
                                 detail=_one_free_org_detail(blocking_org_id))
