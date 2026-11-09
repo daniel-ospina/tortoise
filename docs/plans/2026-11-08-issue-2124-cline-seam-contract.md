@@ -149,7 +149,12 @@ hook script as a module. No MCP tool or public SDK method is touched.
   `test_install_cline_does_not_retire_the_registration_it_just_wrote`. The UNINSTALL half of the same
   alias is caught by `test_uninstall_cline_removes_an_aliased_registration_once`: the two paths are one
   file, so they must be removed ONCE (a second `unlink` raised ENOENT and reported a success as a
-  cleanup failure, and the dry run predicted two removals).
+  cleanup failure, and the dry run predicted two removals) — while a symlink LEAF and the file it
+  points at are two entries and must BOTH go (`test_uninstall_cline_removes_a_leaf_alias_on_BOTH_entries`),
+  and a collapsed pair is judged OURS if either collapsed path's ownership rule says so
+  (`test_uninstall_cline_judges_an_aliased_registration_by_provenance`). A legacy path that is itself
+  a SYMLINK is retirable — unlinking it removes only the link — so the same-file skip must not apply
+  (`test_install_cline_retires_a_legacy_SYMLINK_into_the_live_path`).
 - R10 A cleanup that cannot complete either reports the whole run as `Install failed:` (false red,
   naming nothing left behind) or claims "nothing to remove" over our surviving hook (false green) →
   caught by `test_install_cline_reports_a_failed_legacy_cleanup_as_a_note` (install side) and

@@ -1260,6 +1260,91 @@ def test_uninstall_claude_still_refuses_to_rewrite_through_an_escaping_symlink(
         "the out-of-root settings.json was rewritten")
 
 
+def test_uninstall_cline_removes_a_leaf_alias_on_BOTH_entries(tmp_path):
+    """A symlink LEAF and the file it points at are two directory entries, so
+    an uninstall must remove BOTH (#11588 review cycle 12, P1).
+
+    De-duplicating by resolved path alone collapsed them, `unlink` removed only
+    the link, and the run printed `Removed …` and exited 0 with our
+    registration still live and still fired by Cline's SDK/CLI. `is_symlink()`
+    is part of the identity for exactly this reason.
+    """
+    proj = tmp_path / "proj"
+    (proj / ".cline" / "hooks").mkdir(parents=True)
+    legacy = proj / ".cline" / "hooks" / "UserPromptSubmit"
+    legacy.write_text("#!/usr/bin/env bash\n"
+                      "exec /nonexistent/volunteer-turn.sh cline\n")
+    (proj / ".clinerules" / "hooks").mkdir(parents=True)
+    (proj / ".clinerules" / "hooks" / "UserPromptSubmit").symlink_to(
+        "../../.cline/hooks/UserPromptSubmit")
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+
+    u = _run(["install", "cline", "--dir", str(proj), "--uninstall"], env)
+    assert u.returncode == 0, (u.returncode, u.stdout, u.stderr)
+    assert not legacy.exists(), (
+        "the file behind the leaf symlink survived an uninstall that reported "
+        "it had removed the registration")
+    assert not (proj / ".clinerules" / "hooks" / "UserPromptSubmit").is_symlink()
+
+
+def test_uninstall_cline_judges_an_aliased_registration_by_provenance(tmp_path):
+    """Two path strings that are ONE file must not change the OWNERSHIP verdict
+    (#11588 review cycle 12).
+
+    With `.cline -> .clinerules`, the live path is the representative, and its
+    STRICT identity rule declared a registration written by an older release
+    (its script path still exists) foreign — `rc 1`, "nothing to remove", hook
+    left live — while the SAME physical file at `.cline/hooks` without the
+    alias is removed by the legacy path's provenance rule. Ownership is the OR
+    of the rules across the collapsed entries.
+    """
+    old_install = tmp_path / "old-install"
+    old_install.mkdir()
+    old_script = old_install / "volunteer-turn.sh"
+    old_script.write_text(_HOOK.read_text())
+    os.chmod(old_script, 0o755)
+    proj = tmp_path / "proj"
+    (proj / ".clinerules" / "hooks").mkdir(parents=True)
+    live = proj / ".clinerules" / "hooks" / "UserPromptSubmit"
+    live.write_text(f"#!/usr/bin/env bash\nexec {old_script} cline\n")
+    (proj / ".cline").symlink_to(".clinerules")
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+
+    u = _run(["install", "cline", "--dir", str(proj), "--uninstall"], env)
+    assert u.returncode == 0, (u.returncode, u.stdout, u.stderr)
+    assert not live.exists(), (
+        "an aliased registration was declared foreign by the live path's strict "
+        "rule and left installed")
+
+
+def test_install_cline_retires_a_legacy_SYMLINK_into_the_live_path(tmp_path):
+    """A legacy path that is itself a SYMLINK is its own directory entry, so
+    retiring it removes only the link (#11588 review cycle 12).
+
+    The same-file skip was written for the DIRECTORY alias (where unlinking the
+    legacy path unlinks the registration); applied to a leaf symlink it left
+    `.cline/hooks/UserPromptSubmit` live, pointing at the registration — so
+    Cline's SDK/CLI still saw two hook paths — while the note claimed there was
+    nothing to retire. Unlinking the link cannot touch the registration.
+    """
+    proj = tmp_path / "proj"
+    (proj / ".cline" / "hooks").mkdir(parents=True)
+    link = proj / ".cline" / "hooks" / "UserPromptSubmit"
+    link.symlink_to("../../.clinerules/hooks/UserPromptSubmit")
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+
+    d = _run(["install", "cline", "--dir", str(proj), "--dry-run"], env)
+    assert d.returncode == 0, (d.returncode, d.stdout, d.stderr)
+    assert "would remove the legacy registration" in d.stdout, d.stdout
+    assert link.is_symlink(), "the dry run removed the legacy link"
+
+    r = _run(["install", "cline", "--dir", str(proj)], env)
+    assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+    assert not link.is_symlink() and not link.exists(), (
+        "the legacy symlink survived, so the SDK/CLI still sees a second hook")
+    assert (proj / ".clinerules" / "hooks" / "UserPromptSubmit").is_file()
+
+
 def test_install_cline_refuses_directory_target(tmp_path):
     """A directory sitting at the cline hook path is a clean refusal, not a
     traceback."""
