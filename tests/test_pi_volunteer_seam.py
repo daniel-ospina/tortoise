@@ -562,7 +562,7 @@ def test_uninstall_preserves_an_edit_it_cannot_prove_is_one(tmp_path, monkeypatc
     # missing path, take the "nothing to remove" branch and let this row pass
     # without exercising the backup at all (measured while proving the
     # mutation).
-    assert capture_install.PI_VOLUNTEER_EXTENSION_NAME == VOLUNTEER_EXTENSION.name
+    assert VOLUNTEER_EXTENSION.name == capture_install.PI_VOLUNTEER_EXTENSION_NAME
 
     fake_home = tmp_path / "home"
     ext_dir = fake_home / ".pi" / "agent" / "extensions"
@@ -613,8 +613,7 @@ def test_the_read_seam_export_names_the_file_the_contract_installs():
     Mutation: change the TS literal to any other name — this REDs, naming both
     values, instead of ``install pi`` copying a path that is not there.
     """
-    from tortoise.hook_install import (ARTIFACT_CONTRACTS,
-                                       PI_VOLUNTEER_EXTENSION_NAME)
+    from tortoise.hook_install import ARTIFACT_CONTRACTS, PI_VOLUNTEER_EXTENSION_NAME
 
     exported = _ts_string_constant("EXTENSION_NAME")
     assert exported == PI_VOLUNTEER_EXTENSION_NAME, (
