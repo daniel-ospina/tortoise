@@ -30,6 +30,7 @@ import contextlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -1231,12 +1232,21 @@ def test_uninstall_claude_still_refuses_to_rewrite_through_an_escaping_symlink(
         tmp_path):
     """The other half of the same rule: moving the guard must not weaken it.
 
-    A registration of OURS behind an out-of-root `settings.json` is a real
-    REWRITE through the link, so the guard still fires — before the write, and
-    with the out-of-root file untouched (#11588 review cycle 11).
+    A registration of OURS behind an out-of-root `settings.json` means the run
+    really WOULD rewrite, so the guard still fires and nothing is touched
+    (#11588 review cycles 11, 12).
+
+    ⛔ The mechanism, stated correctly: `_atomic_write_text` writes a temp in
+    `dst.parent` and `os.replace`s it onto `dst`, so for a LEAF symlink it
+    REPLACES the link rather than writing through it — the dotfiles copy is
+    safe even unguarded (the code's own note at `_install_read_hook_impl` says
+    so). What the guard protects in THIS shape is the user's symlink: unguarded,
+    the link is destroyed and a divergent in-root copy is planted. The shape
+    where an unguarded write really lands OUTSIDE the root is a symlinked
+    INTERMEDIATE DIRECTORY — pinned by the test below.
 
     MUTATION: delete the `_escape_refusal([target])` call at the write site →
-    the uninstall rewrites the dotfiles copy → RED.
+    rc 0 and the symlink is replaced by a regular in-root file → RED.
     """
     env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
     donor = tmp_path / "donor"
@@ -1250,14 +1260,96 @@ def test_uninstall_claude_still_refuses_to_rewrite_through_an_escaping_symlink(
     settings.write_text(shipped)
     proj = tmp_path / "proj"
     (proj / ".claude").mkdir(parents=True)
-    (proj / ".claude" / "settings.json").symlink_to(settings)
+    link = proj / ".claude" / "settings.json"
+    link.symlink_to(settings)
+
+    r = _run(["install", "claude", "--dir", str(proj), "--uninstall"], env)
+
+    assert r.returncode == 1, (r.returncode, r.stdout, r.stderr)
+    assert "Refusing" in r.stderr, r.stderr
+    assert link.is_symlink(), "the user's symlink was replaced by a local copy"
+    assert settings.read_text() == shipped, (
+        "the out-of-root settings.json was rewritten")
+
+
+def test_uninstall_claude_refuses_to_write_through_a_symlinked_DIR_that_escapes(
+        tmp_path):
+    """A symlinked INTERMEDIATE directory is where an unguarded uninstall really
+    writes OUTSIDE the root (#11588 review cycle 12).
+
+    `_atomic_write_text` creates its temp in `dst.parent` and `os.replace`s it
+    onto `dst`. When `.claude` itself is the symlink, `dst.parent` resolves
+    outside the root, so the temp — and the replace — land there. That is a
+    genuine out-of-root write, and the guard is the only thing that refuses it.
+
+    MUTATION: delete the `_escape_refusal([target])` call at the write site →
+    the outside `settings.json` is rewritten to the uninstalled document → RED.
+    """
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+    donor = tmp_path / "donor"
+    donor.mkdir()
+    assert _run(["install", "claude", "--dir", str(donor)], env).returncode == 0
+    shipped = (donor / ".claude" / "settings.json").read_text()
+
+    outside = tmp_path / "dotfiles" / ".claude"
+    outside.mkdir(parents=True)
+    settings = outside / "settings.json"
+    settings.write_text(shipped)
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / ".claude").symlink_to(outside)
 
     r = _run(["install", "claude", "--dir", str(proj), "--uninstall"], env)
 
     assert r.returncode == 1, (r.returncode, r.stdout, r.stderr)
     assert "Refusing" in r.stderr, r.stderr
     assert settings.read_text() == shipped, (
-        "the out-of-root settings.json was rewritten")
+        "the out-of-root settings.json was rewritten through the dir symlink")
+
+
+def test_uninstall_hermes_refuses_a_plugin_dir_that_escapes_the_root(tmp_path):
+    """⛔ REGRESSION PIN for a deleted guard (#11588 review cycle 12).
+
+    The escape guard's uninstall arm used to live in ONE shared pre-check,
+    `if uninstall and harness != "cline" and _escape_refusal(...)`, which
+    covered `hermes` as well as the JSON seams. Cycle 11 moved the guard to
+    the JSON seams' write site and to the cline branch and left HERMES with
+    none — so the branch that `unlink`s the bundled files, `rmtree`s
+    `__pycache__` and `rmdir`s the plugin directory deleted a shared plugin
+    OUTSIDE the install dir and exited 0 (measured). This pins the branch that
+    was missed, not the rule that was followed.
+
+    MUTATION: drop `if uninstall and _escape_refusal([target])` from the hermes
+    branch → rc 0 and the out-of-root plugin files are DELETED → RED.
+    """
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+    donor = tmp_path / "donor"
+    donor.mkdir()
+    assert _run(["install", "hermes", "--dir", str(donor)], env).returncode == 0
+    plugin = donor / ".hermes" / "plugins" / "tortoise-volunteer"
+    assert plugin.is_dir(), "the donor install produced no plugin dir"
+
+    outside = tmp_path / "shared" / ".hermes"
+    (outside / "plugins").mkdir(parents=True)
+    victim = outside / "plugins" / "tortoise-volunteer"
+    shutil.copytree(plugin, victim)
+
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / ".hermes").symlink_to(outside)
+
+    r = _run(["install", "hermes", "--dir", str(proj), "--uninstall"], env)
+
+    assert r.returncode == 1, (r.returncode, r.stdout, r.stderr)
+    assert "Refusing" in r.stderr, r.stderr
+    assert victim.is_dir(), "the out-of-root plugin was deleted"
+    assert (victim / "plugin.yaml").is_file(), "files were deleted outside root"
+
+    # The dry run must predict the same refusal, not a successful deletion.
+    d = _run(["install", "hermes", "--dir", str(proj), "--uninstall",
+              "--dry-run"], env)
+    assert d.returncode == r.returncode, (d.returncode, d.stdout, d.stderr)
+    assert "would uninstall" not in d.stdout, d.stdout
 
 
 def test_uninstall_cline_removes_a_leaf_alias_on_BOTH_entries(tmp_path):

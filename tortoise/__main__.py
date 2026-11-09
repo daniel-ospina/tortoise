@@ -6175,17 +6175,28 @@ def _install_read_hook_impl(args) -> int:
         return False
 
     # `target` is WRITTEN by an install, so it is always guarded there. On an
-    # uninstall it is guarded only where the run would really touch it: the
-    # JSON-seam harnesses (codex/claude/devin) guard it at the WRITE itself,
-    # inside their uninstall branch and after `deletable` is established, and
-    # cline guards target and legacy through `_uninstall_verdict`, where
-    # ownership is known (#11588 review cycles 5, 8, 9, 10, 11). A guard placed
-    # HERE cannot see whether the run will write: two reachable uninstall
-    # branches only READ `target` — `No … registration in {target} — nothing to
-    # remove` (rc 0) and `… that this installer did not write — refusing to
-    # remove them` (rc 1) — so pre-guarding it turned #2383's promised clean
-    # no-op into a misleading `Refusing: …` with rc 1 (measured, #11588 review
-    # cycle 11). Guard a path iff the run WRITES or DELETES it.
+    # uninstall it is guarded only where the run would really touch it, which
+    # means EVERY branch that deletes must carry its own call:
+    #
+    #   * codex / claude / devin — at the WRITE itself, inside their uninstall
+    #     branch and after `deletable` is established;
+    #   * cline — target and legacy through `_uninstall_verdict`, where
+    #     ownership is known;
+    #   * hermes — before its dry-run report, where it unlinks the bundled
+    #     files, `rmtree`s `__pycache__` and `rmdir`s the plugin directory.
+    #
+    # (#11588 review cycles 5, 8, 9, 10, 11, 12.) A guard placed HERE cannot see
+    # whether the run will write: two reachable uninstall branches only READ
+    # `target` — `No … registration in {target} — nothing to remove` (rc 0) and
+    # `… that this installer did not write — refusing to remove them` (rc 1) —
+    # so pre-guarding it turned #2383's promised clean no-op into a misleading
+    # `Refusing: …` with rc 1 (measured, cycle 11).
+    #
+    # ⛔ Guard a path iff the run WRITES or DELETES it — and when this call is
+    # removed from a SHARED pre-check, enumerate EVERY branch that deletes. The
+    # cycle-11 edit removed `harness != "cline"` from here and re-planted the
+    # guard in two branches only; `hermes` was silently left with none and
+    # deleted a shared plugin OUTSIDE the install dir at rc 0 (cycle 12).
     if not uninstall and _escape_refusal([target]):
         return 1
 
@@ -6633,6 +6644,23 @@ def _install_read_hook_impl(args) -> int:
                           "Move it aside or install into another dir.",
                           file=_sys.stderr)
                 return 1
+        # A delete that would land outside the root must refuse. This branch
+        # UNLINKS files, `rmtree`s `__pycache__` and `rmdir`s the plugin dir,
+        # so the guard belongs on the UNINSTALL side — and HERE, after the
+        # ownership read and before the dry-run report, so the prediction
+        # agrees with the real run (#11588 review cycle 12).
+        #
+        # ⛔ This call was load-bearing and was nearly lost: it used to live in
+        # the shared pre-check `if uninstall and harness != "cline" and …`,
+        # which covered hermes as well as the JSON seams. Moving the JSON-seam
+        # guard to its write site left HERMES with no uninstall-side guard at
+        # all, and it deleted a shared plugin outside the install dir at rc 0
+        # (measured: `proj/.hermes -> <outside>/.hermes` → the outside plugin
+        # files GONE and `Removed …` printed). The rule stated at :6177 — guard
+        # a path iff the run WRITES or DELETES it — must enumerate EVERY branch
+        # that deletes, not only the ones under review.
+        if uninstall and _escape_refusal([target]):
+            return 1
         if dry:
             verb = "uninstall from" if uninstall else "write"
             print(f"[dry-run] would {verb} {target}:")
