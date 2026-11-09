@@ -2923,7 +2923,7 @@ test("a 403 policy refusal defers and KEEPS the entry (#5051, #4895)", async () 
   // the two expressions are extensionally equal by construction.)
   const spool = tmpSpool();
   writeSpoolEntry(spool, snapshot("sess-403"));
-  const { fetchImpl, calls } = statusFetch(403, '{"detail":"Organization is suspended"}');
+  const { fetchImpl } = statusFetch(403, '{"detail":"Organization is suspended"}');
 
   const first = await flushSpool(TEST_CFG, { dir: spool, fetchImpl, now: 1_000 });
   assert.equal(first.discarded.length, 0, "a policy refusal must never terminalise");
