@@ -13031,68 +13031,138 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                                  _renarrate_threshold(),
                                  s2_failed=arm.get("s2_failed", False))
     if trigger is not None:
-        emphasis = _renarrate_emphasis(trigger)
-        second = _arm_extract(model, edus, master=master,
-                             session_date=session_date,
-                             chunk_size=chunk_size,
-                             classify_later=classify_later,
-                             vet_enabled=vet_enabled,
-                             vet_arbiter=vet_arbiter, emphasis=emphasis,
-                             llm_stats=llm_stats,
-                             recovery_stats=recovery_stats, errors=errors,
-                             error_census=error_census)
-        picked = _renarrate_pick(arm, second)
-        story = story_arc = picked["story"]
-        embed_list = picked["embed_list"]
-        vet_s2_stats = picked["vet_stats"]
-        vet_s2_pool = picked["vet_pool"]
-        mention_s2_stats = picked["mention_stats"]
-        vet_warnings.extend(picked["warnings"])
-        # BOTH S1 passes ran in this run, so the run-level chunk counters cover
-        # both — never the first arm's alone (review at `86ed2e9b7`, P2). Bound
-        # from arm A only, a retry whose SHIPPED narrative came from a second
-        # arm with a failed chunk still reported `failed_chunks == 0`: the
-        # surface said "clean" about the arm that shipped, and disagreed with
-        # `stats["llm"]["calls"]`, which counts both arms. Per-arm counts ride
-        # `stats["renarrate"]["chunks"]`, so the sum stays decomposable.
-        chunks = arm["chunks"] + second["chunks"]
-        failed_chunks = arm["failed_chunks"] + second["failed_chunks"]
-        renarrate_stats = {
-            "fired": True,
-            "trigger": trigger,
-            # The two halves of the selection, named separately because they
-            # are decided by two different recorded rules: the ITEMS are the
-            # union (the owner's 2026-11-08 ruling — E4's merges-not-replaces
-            # survives into the successor), the NARRATIVE is §4.4's tie-break
-            # (keep the first unless the second is strictly better).
-            "items": picked["items"],
-            "narrative": picked["narrative"],
-            "emphasis": emphasis,
-            "first": arm["metrics"],
-            "second": second["metrics"],
-            # The chunk halves of the same two arms — the population behind the
-            # run-level `stats["chunks"]`/`stats["failed_chunks"]` sum.
-            "chunks": {
-                "first": {"chunks": len(arm["chunks"]),
-                          "failed": arm["failed_chunks"]},
-                "second": {"chunks": len(second["chunks"]),
-                           "failed": second["failed_chunks"]},
-            },
-            "merged": picked["merged"],
-            # The VERDICT half of the same two arms: which item each arm dropped,
-            # under which rule, with its counterfactual. Counts alone cannot
-            # answer that, and the post-S4 re-vet only re-judges items that
-            # SHIP — so a first-arm DISCARD's verdict exists nowhere else
-            # (#5005 no-silent-discard must not lapse on the retried path).
-            "decisions": picked["decisions"],
-        }
-        # ax-principles: an action names what it did. One line, and it carries
-        # BOTH rates because "both rates are recorded" is the design's rule.
-        vet_warnings.append(
-            f"re-narrate fired once ({trigger}) — items kept as the "
-            f"{picked['items']}, narrative {picked['narrative']}; "
-            f"keep-rate {_rate_text(arm['metrics'])} → "
-            f"{_rate_text(second['metrics'])}")
+        # `second` and `emphasis` are bound BEFORE the guard so the handler can
+        # report "not computed" instead of raising `UnboundLocalError` from its
+        # own first statement — `emphasis` is the FIRST statement inside the
+        # `try`, so a raise in `_renarrate_emphasis` would otherwise escape
+        # `extract_session_v2` and destroy the completed capture, i.e. exactly
+        # the defect this guard exists to close (review round 1, P2).
+        second = None
+        emphasis = None
+        # Where arm B's warnings would start. `vet_warnings.extend(...)` is
+        # additive and cannot be rolled back per item, so the handler truncates
+        # back to this mark — otherwise a run that SHIPS arm A publishes arm B's
+        # per-item verdicts about a list that did not ship (review round 1, P2;
+        # the mirror of #5005's no-silent-discard, in the misleading direction).
+        _vet_mark = len(vet_warnings)
+        try:
+            emphasis = _renarrate_emphasis(trigger)
+            second = _arm_extract(model, edus, master=master,
+                                 session_date=session_date,
+                                 chunk_size=chunk_size,
+                                 classify_later=classify_later,
+                                 vet_enabled=vet_enabled,
+                                 vet_arbiter=vet_arbiter, emphasis=emphasis,
+                                 llm_stats=llm_stats,
+                                 recovery_stats=recovery_stats, errors=errors,
+                                 error_census=error_census)
+            picked = _renarrate_pick(arm, second)
+            story = story_arc = picked["story"]
+            embed_list = picked["embed_list"]
+            vet_s2_stats = picked["vet_stats"]
+            vet_s2_pool = picked["vet_pool"]
+            mention_s2_stats = picked["mention_stats"]
+            vet_warnings.extend(picked["warnings"])
+            # BOTH S1 passes ran in this run, so the run-level chunk counters cover
+            # both — never the first arm's alone (review at `86ed2e9b7`, P2). Bound
+            # from arm A only, a retry whose SHIPPED narrative came from a second
+            # arm with a failed chunk still reported `failed_chunks == 0`: the
+            # surface said "clean" about the arm that shipped, and disagreed with
+            # `stats["llm"]["calls"]`, which counts both arms. Per-arm counts ride
+            # `stats["renarrate"]["chunks"]`, so the sum stays decomposable.
+            chunks = arm["chunks"] + second["chunks"]
+            failed_chunks = arm["failed_chunks"] + second["failed_chunks"]
+            renarrate_stats = {
+                "fired": True,
+                "trigger": trigger,
+                # The two halves of the selection, named separately because they
+                # are decided by two different recorded rules: the ITEMS are the
+                # union (the owner's 2026-11-08 ruling — E4's merges-not-replaces
+                # survives into the successor), the NARRATIVE is §4.4's tie-break
+                # (keep the first unless the second is strictly better).
+                "items": picked["items"],
+                "narrative": picked["narrative"],
+                "emphasis": emphasis,
+                "first": arm["metrics"],
+                "second": second["metrics"],
+                # The chunk halves of the same two arms — the population behind the
+                # run-level `stats["chunks"]`/`stats["failed_chunks"]` sum.
+                "chunks": {
+                    "first": {"chunks": len(arm["chunks"]),
+                              "failed": arm["failed_chunks"]},
+                    "second": {"chunks": len(second["chunks"]),
+                               "failed": second["failed_chunks"]},
+                },
+                "merged": picked["merged"],
+                # The VERDICT half of the same two arms: which item each arm dropped,
+                # under which rule, with its counterfactual. Counts alone cannot
+                # answer that, and the post-S4 re-vet only re-judges items that
+                # SHIP — so a first-arm DISCARD's verdict exists nowhere else
+                # (#5005 no-silent-discard must not lapse on the retried path).
+                "decisions": picked["decisions"],
+            }
+            # ax-principles: an action names what it did. One line, and it carries
+            # BOTH rates because "both rates are recorded" is the design's rule.
+            vet_warnings.append(
+                f"re-narrate fired once ({trigger}) — items kept as the "
+                f"{picked['items']}, narrative {picked['narrative']}; "
+                f"keep-rate {_rate_text(arm['metrics'])} → "
+                f"{_rate_text(second['metrics'])}")
+        except Exception as e:  # never block capture (P1)
+            # FAIL-OPEN (#11569): EVERY binding the block set is restored, not
+            # just `story`. The raise can land AFTER `story`/`embed_list`/the
+            # vet records were re-bound to the second arm, and a partial restore
+            # would ship arm B's LIST beside arm A's NARRATIVE — a run that
+            # looks successful and is internally inconsistent. The first arm's
+            # capture is complete by construction (it returned), so it is the
+            # only state safe to leave behind.
+            story = story_arc = arm["story"]
+            embed_list = arm["embed_list"]
+            vet_s2_stats = arm["vet_stats"]
+            vet_s2_pool = arm["vet_pool"]
+            mention_s2_stats = {"first": arm["mention_stats"], "second": None}
+            # Arm B's warnings were appended before the raise; drop them.
+            del vet_warnings[_vet_mark:]
+            # The run-level counters describe the capture that SHIPPED — arm A's
+            # alone, the same statement `fired: False` makes. The second band's
+            # spend is NOT folded in here; it rides `chunks`/`second` below,
+            # where a per-arm decomposition can be read without misreporting
+            # which narrative shipped (review round 1, P2: the first draft
+            # claimed `second` carried the chunk population and it does not —
+            # `_arm_metrics` has no chunk or call counter).
+            chunks = arm["chunks"]
+            failed_chunks = arm["failed_chunks"]
+            renarrate_stats = {
+                # `fired: False` describes what SHIPPED — the first arm's
+                # capture, unchanged. The spend and the reason are named
+                # separately below, so this is not a silent swallow.
+                "fired": False,
+                "trigger": trigger,
+                "retry_failed": f"{type(e).__name__}: {e}",
+                "emphasis": emphasis,
+                "first": arm["metrics"],
+                "second": second["metrics"] if second is not None else None,
+            }
+            if second is not None:
+                # BOTH S1 passes ran, so say so per arm — the same
+                # decomposable shape the FIRED path publishes, so a reader can
+                # reconcile either path against `stats["llm"]["calls"]`.
+                renarrate_stats["chunks"] = {
+                    "first": {"chunks": len(arm["chunks"]),
+                              "failed": arm["failed_chunks"]},
+                    "second": {"chunks": len(second["chunks"]),
+                               "failed": second["failed_chunks"]},
+                }
+            vet_warnings.append(
+                f"re-narrate retry failed ({type(e).__name__}: {e}) — the "
+                "first arm's capture is kept unchanged (fail-open)")
+            # A sibling fail-open arm here records the error AND its census
+            # class, not only a warning (round 1, P3) — else a run whose retry
+            # exploded reads CLEAN on `result["errors"]`. ⛔ NOT "every": the
+            # `route_mentions` handler below is warning-only (measured, r3).
+            errors.append(
+                f"re-narrate retry failed: {type(e).__name__}: {e}")
+            _bump_census(error_census, e)
 
     # ── classify(S2) (#1695 Task 5): the first classify pass — the pack-
     # domain items the core-only S2 emitted as "unclassified" get their

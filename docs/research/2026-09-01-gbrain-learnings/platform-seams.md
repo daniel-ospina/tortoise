@@ -53,11 +53,11 @@ warns when a claude registration would make the reflex fire twice per turn.
 |---|---------|-----------|--------------------|-----------------|---------------|
 | #2126 | Claude Code / Desktop | `UserPromptSubmit` | `.claude/settings.json` `hooks` | `hookSpecificOutput.additionalContext` | shipped (`install claude`); MCP priming in `mcp_server.py` |
 | #2123 | Codex | `UserPromptSubmit` | `<repo>/.codex/hooks.json` (also `~/.codex/hooks.json`) | `hookSpecificOutput.additionalContext` (stdin JSON has `prompt`) | shipped (`install codex`) |
-| #2124* | Cline | `UserPromptSubmit` | `.cline/hooks/UserPromptSubmit` (project) or `~/.cline/hooks` (global; enable Hooks in settings) | `contextModification.context` | shipped (`install cline`) — but the contract can no longer be re-verified from Cline's docs (2026-10-18: the Hooks page is a stub, and the SDK-plugin hook list has no `UserPromptSubmit`); graded by our tests only, delivery unverified — see the correction log |
+| #2124* | Cline | `UserPromptSubmit` | `<dir>/.clinerules/hooks/UserPromptSubmit` (project — the ONE dir every Cline surface reads) or `~/Documents/Cline/Hooks` (global, extension); enable Hooks in settings | `{"cancel": false, "contextModification": "<text>"}` — **flat string**; stdin is NESTED: `{"userPromptSubmit": {"prompt": …}}` | **shipped and RE-VERIFIED 2026-11-08 against Cline's SOURCE** (indicator 2 closed): `hooks.proto` `string context_modification = 1`, `hook-factory.ts:74-84` rejects a non-string, `disk.ts` `hooksDir: ".clinerules/hooks"`. The seam was broken on three counts until #2124's repair — see the correction log |
 | #2124* | Devin | `UserPromptSubmit` | `.devin/hooks.v1.json` (also `~/.config/devin/config.json` `hooks`) | `hookSpecificOutput.additionalContext` | shipped (`install devin`); primary docs re-fetched 2026-10-11 — file IS the hooks object (no `"hooks"` wrapper), stdin carries `prompt`; `matcher` omitted (tool-events only) |
 | #2119 | Pi (pi-coding-agent) | session lifecycle only (no per-turn prompt hook in the extension API today) | `~/.pi/agent/extensions/` TS extension | n/a — per-turn injection not reachable via extension API | MCP pull + session-start digest (existing) + documented limitation |
 | #2122 | Cursor | `sessionStart` → `additional_context`; per-turn `beforeSubmitPrompt` is observe/block ONLY | `~/.cursor/hooks.json` (flat script entries, absolute command; project `.cursor/hooks.json` is workspace-trust-gated) | `{"additional_context": …}` (snake_case) on `sessionStart` | **shipped** — `tortoise install cursor` registers the `sessionStart` cold-context hook (contract v4) *plus* the `sessionEnd` capture hook; per-turn push stays Cursor-blocked (watch item) |
-| #2120 | OpenClaw | **native plugin** — per-turn hook `before_prompt_build` → `{prependContext}` (in-process; OpenClaw has NO shell-hook surface) | `~/.openclaw/extensions/tortoise/` (plugin dir; `openclaw.plugin.json` + entry `index.mjs`) → `before_prompt_build`; capture via the `llm_output` hook → `$OPENCLAW_STATE_DIR/tortoise/turns/<session>.jsonl` (one file per session) → `tortoise sessions import --harness openclaw <file>` | `PluginHookBeforePromptBuildResult.prependContext` | **shipped** — `tortoise install openclaw` writes the plugin + `plugins.entries.tortoise.enabled`; injection graded by `tortoise/openclaw-plugin/index.test.mjs`, install by `tests/test_openclaw_seam.py` |
+| #2120 | OpenClaw | **native plugin** — per-turn hook `before_prompt_build` → `{prependContext}` (in-process; OpenClaw has NO shell-hook surface) | `~/.openclaw/extensions/tortoise/` (plugin dir; `openclaw.plugin.json` + entry `index.mjs`) → `before_prompt_build`; capture via the `llm_output` hook → `$OPENCLAW_STATE_DIR/tortoise/turns/<session>.jsonl` (one file per session) → `tortoise sessions import --harness openclaw <file>` | `PluginHookBeforePromptBuildResult.prependContext` | **shipped** — `tortoise install openclaw` writes the plugin + `plugins.entries.tortoise.enabled`; injection graded by `tortoise/openclaw-plugin/index.test.mjs`, install by `tests/test_openclaw_seam.py`. Continuity: the plugin hands the reflex `prior_context` = the block it injected last turn (local: `tortoise volunteer`'s JSON contract; hosted: the documented `/v1/context` body), so the reflex's own re-mention suppression runs — see the 2026-10-13 correction below |
 | #2121 | Hermes | `pre_llm_call` (directory plugin: `register(ctx)` + `ctx.register_hook`) | `<dir>/.hermes/plugins/tortoise-volunteer/` (`plugin.yaml` + `__init__.py`, written by `tortoise install hermes`) | the callback RETURNS `{"context": "<block>"}`, injected into the current turn's user message | written by `install hermes`, but **INERT until two opt-ins** (`HERMES_ENABLE_PROJECT_PLUGINS=1` + `hermes plugins enable tortoise-volunteer`) — the installer prints both; ingestion: `tortoise sessions import --harness hermes --file <state.db>` (reads `$HERMES_HOME/state.db` read-only) |
 | #2124* | Gemini CLI | **`BeforeAgent`** ("after user submits prompt, before planning") — the model hook `BeforeModel`/`llm_request` also exists, but it fires per LLM CALL | `.gemini/settings.json` (project) > `~/.gemini/settings.json` (user) > `/etc/gemini-cli/settings.json` (system) > extensions, under `hooks` — the SAME matcher-group shape codex/claude/devin use; `timeout` is MILLISECONDS (default 60000) | `hookSpecificOutput.additionalContext` (the Claude field) | **NOT built — demand-gated.** A thin registration, not an unbuilt adapter (re-measured 2026-10-18 — see the correction log); `tortoise install gemini` does not exist yet |
 | #2124* | OpenCode | plugin `chat.message` (`output.parts` → append a Part) / `experimental.chat.system.transform` (`output.system`) | `.opencode/plugins/*.ts` (project) or `~/.config/opencode/plugins/` (global) — a TS plugin module like OpenClaw's, NOT a shell registration | none published in prose; the hook exists in the published TYPE definitions | **NOT built — demand-gated.** `chat.message` is absent from OpenCode's docs hook list and present in `@opencode-ai/plugin@1.19.3` types (measured 2026-10-18) |
@@ -104,7 +104,7 @@ claims were wrong.
 | Gemini CLI: *"`BeforeModel` mutates `llm_request.messages`"* (issue #2124 body) | **The seam is real; the CHOICE of seam was wrong.** `BeforeModel` / `llm_request` DOES exist in Gemini CLI — re-fetched 2026-10-18 from `docs/hooks/reference.md` (`google-gemini/gemini-cli` @ main), the same page `platform-landscape.md:192-193` records it from: *"Fires before sending a request to the LLM. Operates on a stable, SDK-agnostic request format"*, input `llm_request` {model, messages, config}, output `hookSpecificOutput.llm_request` *"overrides parts of the outgoing request (for example, changing models or temperature)"*. What #2124's row got wrong is the SEAM it named: `BeforeModel` is a **per-LLM-CALL model hook**, while Gemini CLI ships a first-class **per-turn AGENT hook**, `BeforeAgent` — *"Fires after a user submits a prompt, but before the agent begins planning"* — whose output carries **`hookSpecificOutput.additionalContext`**, *"Text that is appended to the prompt for this turn only"*, the same field Claude/Codex/Devin use, and no message rewriting to construct. Gemini CLI's hooks system (`docs/hooks/index.md` + `docs/hooks/reference.md`, `google-gemini/gemini-cli` @ main) is 11 events, **including BOTH** `BeforeAgent` and `BeforeModel`. `llm_request` is also Google ADK's parameter name (#2125's `before_model_callback(callback_context, llm_request)`): the name collides across two different harnesses, which is how this row was misread once already — the collision is not identity in either direction. Config layers: `.gemini/settings.json` (project) > `~/.gemini/settings.json` (user) > `/etc/gemini-cli/settings.json` (system) > extensions, in the same `{"hooks": {Event: [{matcher, hooks: [{type, command, timeout}]}]}}` matcher-group shape. Two traps for the next lane: Gemini's `timeout` is **milliseconds** (default 60000), and matchers are REGEX for tool events but EXACT STRINGS for lifecycle events. |
 | *"shared script's default emits the bare block (harmless where unsupported)"* | **Retracted for Gemini CLI — it is not an injection there.** Gemini's stdio rule is strict JSON: *"If stdout contains non-JSON text, parsing will fail. The CLI will default to 'Allow' and treat the entire output as a `systemMessage`"*, and its reference defines `systemMessage` as *"Displayed immediately to the user in the terminal"*. A bare block therefore reaches the TERMINAL, not the model's context — a silent non-injection that must not be read as the fail-open posture. The shared script's `claude` arm already emits the right FIELD; it carries `hookEventName: "UserPromptSubmit"` rather than `"BeforeAgent"`, so a `gemini` arm is a small addition once demand arrives. |
 | OpenCode: *"(`chat.message` plugin hooks)"*, session store *"`.opencode/sessions` JSONL"* | **The hook is real; the store claim is unsupported.** `@opencode-ai/plugin@1.19.3` `dist/index.d.ts` declares `"chat.message"` (`output: {message, parts}` — mutable, so a plugin can append a Part), `"experimental.chat.system.transform"` (`output.system: string[]`) and `"experimental.session.compacting"` (`output.context: string[]`). The DOCS page (`opencode.ai/docs/plugins`) documents plugin loading (`.opencode/plugins/`, `~/.config/opencode/plugins/`) and the `event` subscription list — it does NOT list `chat.message`, so the per-turn surface is TYPED but undocumented in prose. The `.opencode/sessions` JSONL store is **not verified**: nothing in this pass corroborates that path, so the parser target is left UNRECORDED rather than recorded wrong. |
-| Cline: shipped seam, *"`UserPromptSubmit` → `contextModification.context`"* | Injection seam is shipped and graded (`tests/test_platform_seams.py::test_install_cline_writes_hook_file`, `::test_volunteer_turn_hook_cline_contract`), but the CONTRACT is no longer re-verifiable from Cline's docs (2026-10-18): `docs.cline.bot/customization/hooks.md` is now a stub — *"See details under SDK Plugins page"* — and that page documents `hooks: {beforeRun, afterRun, beforeModel, afterModel, beforeTool, afterTool, onEvent}` with writing-plugins guidance to *"use lifecycle hooks for observation …, not for modifying agent behavior"*. Neither `UserPromptSubmit` nor `contextModification` appears in the current index (`docs.cline.bot/llms.txt`). The seam is graded by OUR tests only; indicator 2 of #2124 (primary-source verification) stays OPEN for Cline until the docs are re-fetched or the contract is re-grounded. |
+| Cline: shipped seam, *"`UserPromptSubmit` → `contextModification.context`"* | **RESOLVED 2026-11-08 — the recorded contract was wrong, and the seam never injected.** The docs are still a stub, so this row was re-grounded against Cline's **source**, which is stronger: the output field is a **flat string** (`hooks.proto` `string context_modification = 1`; `hook-factory.ts:74-84` returns *"Invalid hook output: 'contextModification' must be a string"* for anything else), stdin is **nested** (`hooks.proto` `UserPromptSubmitData user_prompt_submit = 12`), and the workspace hook dir the VS Code extension reads is `.clinerules/hooks` (`disk.ts` `hooksDir`), while `.cline/hooks` is read by the SDK/CLI only. All three were wrong in the shipped seam; see the 2026-11-08 subsection. **Indicator 2 is CLOSED for Cline.** |
 | Devin CLI registration, *"pending a primary-doc re-fetch"* (the wave-1 comment) | **Shipped** (#8108), re-fetched 2026-10-11. No action. |
 
 **Reconciliation with the sibling record.** This correction does not supersede
@@ -146,6 +146,44 @@ Sources (fetched 2026-10-18): `google-gemini/gemini-cli@main`
 tarball's `dist/index.d.ts`; `opencode.ai/docs/plugins`;
 `docs.cline.bot/llms.txt`, `customization/hooks.md`, `sdk/plugins.md`,
 `sdk/guides/writing-plugins.md`.
+
+### #2124's Cline seam — re-verified against Cline's SOURCE (2026-11-08)
+
+The 2026-10-18 pass could not re-verify this row from Cline's docs (the Hooks page is a stub), so
+indicator 2 of #2124 stayed OPEN and the seam was *"graded by OUR tests only"*. That was the whole
+problem: our tests graded a **fabricated** contract, so they passed on a seam that could not work.
+Re-grounded against `cline/cline` @ `main` (fetched 2026-11-08 via `gh api`), three independent
+defects, all now fixed:
+
+| Was recorded | Cline's actual contract (source of truth) |
+|---|---|
+| output `contextModification.context` (an **object**) | **flat string**: `hooks.proto:37-41` `message HookOutput { string context_modification = 1; bool cancel = 2; string error_message = 3; }`. `hook-factory.ts:74-84`: *"contextModification is optional, but if provided must be a string"* → `"Invalid hook output: 'contextModification' must be a string. … Received type: object"`. Cline's own e2e fixture (`apps/vscode/src/test/e2e/fixtures/workspace-hooks/.clinerules/hooks/UserPromptSubmit`) emits `{"cancel":false,"contextModification":"HOOK_INJECTED_FACT: …"}`. |
+| stdin carries a top-level `prompt` | **nested**: `hooks.proto:12` `UserPromptSubmitData user_prompt_submit = 12;` with `{prompt, attachments}`, and `hook-factory.ts` serialises `jsonObj.userPromptSubmit` (defaulting `.prompt` to `""`). A top-level-only reader falls back to the raw stdin blob and queries the reflex with JSON syntax. |
+| project target `.cline/hooks/UserPromptSubmit` | `.clinerules/hooks/UserPromptSubmit` is read by **every** surface: `apps/vscode/src/core/storage/disk.ts` ships `hooksDir: ".clinerules/hooks"` in `GlobalFileNames`, consumed by `getWorkspaceHooksDirs()` → `getAllHooksDirs()` → `hook-factory.ts`. The **SDK/CLI** loader reads BOTH — `sdk/packages/shared/src/storage/paths.ts` `resolveHooksConfigSearchPaths()` pushes `<ws>/.clinerules/hooks` (`DEPRECATED_CONFIG_DIR`) and `<ws>/.cline/hooks` (`CLINE_CONFIG_DIR`). So `.cline/hooks` was invisible to the VS Code extension, the surface a project install targets. |
+
+**Why our tests could not catch it.** `test_volunteer_turn_hook_cline_contract` fed
+`{"prompt": …}` and asserted `out["contextModification"]["context"]` — it graded the contract we
+invented. Worse, the *input* half is not observable from a graph-seeded test at all: the envelope
+**contains** the question text, so the retrieval leg still matches on the blob. The repair therefore
+added a **stubbed-reflex** test (`::test_volunteer_turn_hook_cline_stdin_prompt_is_extracted`) that
+asserts what the reflex RECEIVED — that one goes RED when the nested read is reverted (measured).
+
+**Trap for the next lane:** Cline's own `.clinerules/hooks/README.md` documents the workspace hooks
+dir as `.clinerules/hooks` and never mentions `.cline/hooks`, while the SDK/CLI resolver
+(`sdk/packages/shared/src/storage/paths.ts` @ main, `resolveHooksConfigSearchPaths()` lines 495-509)
+pushes `<ws>/.clinerules/hooks` **first** (`DEPRECATED_CONFIG_DIR`) and `<ws>/.cline/hooks`
+**second** (`CLINE_CONFIG_DIR`). `DEPRECATED_CONFIG_DIR` is a **naming label, not a search
+preference** — the deprecated directory is still searched AHEAD of the one that replaced it. Do not
+read that constant's name as a verdict about precedence: the VS Code extension's
+`GlobalFileNames.hooksDir` is `.clinerules/hooks` (`apps/vscode/src/core/storage/disk.ts:25`), so it
+is the ONE directory every surface reads, and it is what we install to. **Read the resolver's
+ORDER, not its constant names, and not the README.**
+
+**Sources (fetched 2026-11-08, `cline/cline` @ main):** `apps/vscode/proto/cline/hooks.proto`;
+`apps/vscode/src/core/hooks/hook-factory.ts`; `apps/vscode/src/core/storage/disk.ts`;
+`apps/vscode/src/sdk/hooks-adapter.ts`; `sdk/packages/shared/src/storage/paths.ts`;
+`sdk/packages/core/src/hooks/hook-file-config.ts`; `apps/vscode/src/core/hooks/templates.ts`;
+`.clinerules/hooks/README.md`; `CHANGELOG.md`. Cross-checked with `web_search` (model `sonar`).
 
 ### #2122's Cursor row (re-measured 2026-10-11)
 
@@ -222,9 +260,18 @@ corrected here:
 Because Hermes' read seam is a Python plugin rather than a shell command,
 the seam does NOT add a `hermes` arm to `volunteer-turn.sh` (that would be
 dead code) — the plugin invokes the SAME `tortoise volunteer` CLI the shell
-hook does, with the harness `session_id` passed through for the reflex's
-cross-turn re-mention suppression. Ingestion rides `tortoise sessions import`
+hook does. Ingestion rides `tortoise sessions import`
 as the wave-1 note on #2121 prescribes (no hook-driven live capture).
+
+> ⚠️ **Correction (2026-10-13): the continuity input is `prior_context`, not
+> `session_id`.** This paragraph previously said the harness `session_id` was
+> passed "for the reflex's cross-turn re-mention suppression". The reflex
+> validates `session_id` and never consults it for suppression — stage 5 keys
+> on `prior_context` alone (`tortoise/volunteer.py`, "Re-mention suppression
+> runs BEFORE the pointer budget"). So the Hermes plugin's `--session-id`
+> suppresses nothing and it has no other dedupe: its cross-turn dedupe is
+> unimplemented (filed as #8957). Fixed for the OpenClaw seam in the same pass
+> that gave `tortoise volunteer` a `--prior-context` input.
 
 **Activation is TWO opt-ins, and the installer names both (correction
 2026-10-12).** A `tortoise install hermes` write is not by itself a live
@@ -295,6 +342,40 @@ receipts, provenance and REPHRASE dedup in the one existing import pipeline.
   hosted mode (#1708 D1b).
 * W4 user-exposure opt-in: per-turn injection ships behind the `install`
   command — nothing auto-registers.
+
+### Correction log — #2120's injection leg, once it was executed (2026-10-13)
+
+The shipped plugin's two injection paths were graded only for the LOCAL one
+(`runCommand` over a fake `tortoise`), and the local one depended on a
+continuity input the CLI did not have. Two defects, both fixed in the same
+pass:
+
+| Claim | Re-measurement |
+|---|---|
+| The plugin's hosted leg is `POST /v1/context` (`apiKey` config, the ONLY reflex path for a user with no local CLI) | **It never worked.** `runHosted` posted `{prompt}`; `POST /v1/context` requires `window: [{role, content}]` (`VolunteerContextRequest`, `tortoise/hosted_api.py`), so every hosted turn was a 422 — and the fail-open catch turns that into an empty injection with no signal anywhere. Graded now by `tests/test_openclaw_seam.py::test_hosted_body_is_the_contract_the_server_validates`, which executes the plugin under a stubbed `fetch` and validates the emitted body with the SERVER's own model (a hand-copy of the shape would have re-encoded the bug). |
+| "Cross-turn dedupe" = the plugin's block digest | **Incomplete.** The digest only suppresses an IDENTICAL block; a block that changes by one pointer re-surfaces the rest. The reflex has a stage-5 re-mention suppression that reads `prior_context` — and no CLI seam could supply it, because `tortoise volunteer` had no `--prior-context` (only `--session-id`, which the pipeline validates and never consults). The CLI now takes `--prior-context` (and `prior_context` in its JSON contract dict), and the plugin passes the block it injected last turn. Both polarities are pinned: `tests/test_platform_seams.py::test_volunteer_cli_prior_context_suppresses_a_re_mention`. The sibling seams still do not pass it — Hermes' `--session-id` claim is the same false premise (#8957), and the one-shot shell hooks have nowhere to keep a prior block. |
+
+Note on the W3 harness row: #2120's scope item "W3 harness seam entry (ingest
+and inject graded)" is *partly* delivered. **Injection** is fully graded:
+`tests/test_openclaw_seam.py::test_real_seam_both_directions_over_a_seeded_graph`
+drives the shipped handlers through the REAL `tortoise volunteer` over a
+seeded embedded graph. **Ingest** is graded through the replay matrix's own
+renderer —
+`tests/eval/write_path/test_write_path_runner.py::test_openclaw_ingest_roundtrip_through_the_matrix_renderer`
+renders a committed corpus conversation into the OpenClaw spool shape the
+SHIPPED plugin writes and files it back with the REAL `parse_openclaw` — but it
+is **not yet a corpus ROW**: the matrix iterates committed FIXTURES and renders
+`fixture["harness"]`, and no fixture declares `openclaw`, so `run_benchmark`
+never replays one. A fixture row changes the corpus hash and therefore needs a
+justified re-bless (`schema.bless` refuses an unexplained `fixtures_hash`
+change). What was the real gate — `schema.HARNESS_VALUES` rejecting `openclaw`
+outright, so the fixture could not even be written — is removed and pinned by
+`test_harness_values_mirror_the_capture_boundary`. Nothing about this waits on
+issue 8125: the graded reflex is the harness default
+(`tests/eval/harness/corpus.py:33`, activated by `8ac79e12f1`) and the
+CI-gating echo lane's baseline carries it
+(`tests/eval/harness/baselines/m2.json:6`); only the llm product lane's
+re-bless (`baselines/main.json:6`) needs a keyed run.
 
 ## Frameworks (#2125) — SDK-level middleware, injection only
 
